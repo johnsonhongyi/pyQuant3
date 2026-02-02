@@ -5,7 +5,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 import pandas as pd
 import numpy as np
 import re
@@ -50,7 +50,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # 加载持久化配置
-        self.config_data: Dict = self._load_config()
+        self.config_data: dict[str, Any] = self._load_config()
         self._apply_config_to_engines()
 
         self._start_time: float = time.time()
@@ -1372,6 +1372,34 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             # 调用 decision engine
             result = self.decision_engine.evaluate(row, snapshot, mode="full")
             
+            # 💥 [FIX] 必须经过 Risk Engine 修正才能得到最终动作 (与实盘一致)
+            final_action = result.get('action', '持仓')
+            final_position = result.get('position', 0.0)
+            risk_reason = ""
+            
+            if self.risk_engine:
+                # 构造临时 data 供 risk engine 使用 (必须包含 trade_phase 等状态)
+                # 注意: 这里我们使用 monitors 中的原始 data 引用，或者构造一个包含必要信息的副本
+                monitor_data = monitors.get(code, {})
+                if not monitor_data:
+                     # 如果没在监控中，临时构造一个仅用于计算的 data
+                     monitor_data = {
+                         'code': code, 
+                         'name': row.get('name'), 
+                         'trade_phase': current_phase,
+                         'snapshot': snapshot,
+                         'rules': []
+                     }
+                
+                # 调整仓位与动作
+                # adjust_position(self, data, action, position)
+                r_action, r_pos = self.risk_engine.adjust_position(monitor_data, final_action, final_position)
+                
+                if r_action and r_action != final_action:
+                    risk_reason = f" -> [风控修正] {r_action}"
+                    final_action = r_action
+                    final_position = r_pos
+            
             # 美化输出
             output = f"=== 评估报告: {code} ===\n"
             output += f"时间: {datetime.now().strftime('%H:%M:%S')}\n"
@@ -1397,8 +1425,11 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                     output += f"顶部信号: {', '.join(top_info['signals'])}\n"
 
             output += "-" * 30 + "\n"
-            output += f"【阶段/决策】: {current_phase} -> {result.get('action')} ({result.get('position')})\n"
-            output += f"【理由】: {result.get('reason')}\n"
+            output += f"【阶段/决策】: {current_phase} -> {final_action} ({final_position}{risk_reason})\n"
+            output += f"【原始决策】: {result.get('action')} ({result.get('reason')})\n"
+            if self.risk_engine:
+                 # 获取风控状态原因 (如果能获取到)
+                 pass
             output += "-" * 30 + "\n"
             output += "[Debug Info]:\n"
             

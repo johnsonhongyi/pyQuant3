@@ -2413,16 +2413,24 @@ class StockLiveStrategy:
                 # }
                 # self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
 
-                if decision["action"] != "持仓":
+                if decision["action"] not in ("持仓", "观望"):
                     pos_val = decision.get("position", 0)
                     # 防止 NaN 转换为整数失败
                     if pd.isna(pos_val):
                         pos_val = 0
                     messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
 
+                # 💥 [NEW] 提取指标并增强报警消息
+                td_setup = decision["debug"].get("td_setup", 0)
+                top_score = decision["debug"].get("top_score", 0.0)
+                if td_setup >= 8:
+                    messages.append(("RULE", f"TD序列: 已达到 {td_setup} (接近见顶风险)"))
+                if top_score > 0.6:
+                    messages.append(("RISK", f"顶部风险评分: {top_score:.2f} (高位建议减仓)"))
+
                 # ---------- 风控调整仓位 ----------
                 action, ratio = self._risk_engine.adjust_position(data, decision["action"], decision["position"])
-                if action and (action != "持仓"):
+                if action and action not in ("持仓", "观望"):
                     # 防止 NaN 转换失败
                     if pd.isna(ratio):
                         ratio = 0
@@ -3174,7 +3182,7 @@ class StockLiveStrategy:
         logger.debug(f"🔔 ALERT [{resample}]: {message}")
 
         # --- [NEW] 1. 优先级与信号识别 (优先级逻辑增强) ---
-        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心"])
+        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险"])
         
         try:
             from signal_message_queue import SignalMessageQueue, SignalMessage
@@ -3248,6 +3256,8 @@ class StockLiveStrategy:
             if "连阳" in message: leading_tag = "强势连阳，"
             elif "热点" in message: leading_tag = "热点龙头，"
             elif "主升" in message: leading_tag = "主升启动，"
+            elif "TD序列" in message: leading_tag = "高位风险项，"
+            elif "顶部风险" in message: leading_tag = "顶部预警，"
 
             # 组装最终文本
             speak_text = f"注意{action}，{leading_tag}{name}，{concise_msg}"

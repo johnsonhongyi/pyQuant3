@@ -6745,8 +6745,11 @@ class MainWindow(QMainWindow, WindowMixin):
         ma10 = day_df['close'].rolling(10).mean().values
         # ma20 = day_df['close'].rolling(20).mean().values
         # ma60 = day_df['close'].rolling(60).mean().values
-        ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
-        ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
+        # ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
+        # ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
+
+        ma20 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=26)
+        ma60 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=60)
 
         # MA60 颜色：亮蓝色（深浅主题都清晰）
         # ma60_color = QColor(0, 180, 255)
@@ -8424,10 +8427,29 @@ class MainWindow(QMainWindow, WindowMixin):
                     child.setForeground(4, QBrush(QColor("green")))
 
             # --- 5. 调整列宽 ---
+            # ⭐ [OPTIMIZE] 使用 Interactive 模式并预设紧凑宽度
             header = self.filter_tree.header()
-            for col in range(self.filter_tree.columnCount()):
-                header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            header.setStretchLastSection(True)
+
+            # 定义紧凑列宽配置 (列名 -> 宽度)
+            compact_map = {
+                'Code': 60, 'Rank': 40, 'win': 35, 'Percent': 55,
+                'dff': 45, 'dff2': 45
+            }
+            
+            # 应用宽度
+            # headers are dynamic, check match
+            current_headers = [self.filter_tree.headerItem().text(i) for i in range(self.filter_tree.columnCount())]
+            
+            for i, h_text in enumerate(current_headers):
+                if h_text in compact_map:
+                    self.filter_tree.setColumnWidth(i, compact_map[h_text])
+                elif h_text == 'Name':
+                    # Name 列自适应
+                    header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+            
+            header.setStretchLastSection(True)
 
             # ⭐ 默认按Rank升序排序
             self.filter_tree.sortItems(2, Qt.SortOrder.AscendingOrder)

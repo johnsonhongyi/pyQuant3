@@ -22,7 +22,6 @@ import tushare as ts
 import pandas_ta as ta
 import talib
 from JSONData import sina_data
-# import numba as nb
 import datetime
 import random
 from collections import deque
@@ -1414,54 +1413,6 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
     return features_list
 
 
-def generate_df_vect_daily_features_noname(df, lastdays=cct.compute_lastdays):
-    """
-    df:
-        index = code
-        columns:
-            today: open/high/low/close/vol
-            history: lasto1d, lasto2d, ..., lasth1d, lastp1d ...
-    返回:
-        List[dict]，每个 dict 对应一只股票
-    """
-
-    features_list = []
-
-    # history 字段前缀
-    hist_prefixes = (
-        'lasto', 'lasth', 'lastl', 'lastp', 'lastv',
-        'upper', 'ma5', 'ma20', 'ma60',
-        'perc', 'per'
-    )
-
-    for code, row in df.iterrows():
-        feat = {'code': code}
-
-        # ========= 0️⃣ today（实时 OHLC） =========
-        for col in ('open', 'high', 'low', 'close', 'vol'):
-            feat[col] = row[col] if col in df.columns else 0
-
-        # eval / signal（若是实时）
-        for suffix in ('eval', 'signal'):
-            if suffix in df.columns:
-                feat[suffix] = row[suffix]
-            else:
-                feat[suffix] = 0
-
-        # ========= 1️⃣ history：last*1d ~ last*Nd =========
-        for d in range(1, lastdays + 1):
-            for prefix in hist_prefixes:
-                colname = f'{prefix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
-
-            for suffix in ('eval', 'signal'):
-                colname = f'{suffix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
-
-        features_list.append(feat)
-
-    return features_list
-
 
 def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
     """
@@ -2823,6 +2774,40 @@ def get_tdx_Exp_day_to_df(
 INDEX_LIST = {'sh': 'sh000001', 'sz': 'sz399001', 'hs300': 'sz399300',
               'sz50': 'sh000016', 'zxb': 'sz399005', 'cyb': 'sz399006'}
 
+# from numba import njit
+# @njit
+# def ema_tdx_numba(arr, n):
+#     alpha = 2.0 / (n + 1.0)
+#     out = np.empty_like(arr)
+#     out[0] = arr[0]
+#     for i in range(1, arr.shape[0]):
+#         out[i] = alpha * arr[i] + (1 - alpha) * out[i-1]
+#     return out
+
+# def ema_tdx_fast(series: pd.Series, n: int) -> pd.Series:
+#     arr = series.values.astype(np.float64)
+#     return pd.Series(ema_tdx_numba(arr, n), index=series.index)
+
+def ema_tdx_numpy(series: pd.Series, timeperiod: int) -> pd.Series:
+    x = series.to_numpy(dtype=float)
+    ema = np.empty_like(x)
+    ema[0] = x[0]
+    alpha = 2 / (timeperiod + 1)
+    for i in range(1, len(x)):
+        ema[i] = x[i] * alpha + ema[i-1] * (1 - alpha)
+    return pd.Series(ema, index=series.index)
+
+# def ema_tdx_numpy(series: pd.Series, timeperiod: int) -> pd.Series:
+#     x = series.to_numpy(dtype=float)
+#     ema = np.empty_like(x)
+#     ema[0] = x[0]
+#     alpha = 2 / (timeperiod + 1)
+#     for i in range(1, len(x)):
+#         ema[i] = x[i] * alpha + ema[i-1] * (1 - alpha)
+#     # 四舍五入到2位小数
+#     ema = np.round(ema, 2)
+#     return pd.Series(ema, index=series.index)
+
 
 
 def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=None, dl=None, power=True, newdays=None, write_tushare=False, writedm=False,detect_calc_support=False):
@@ -2931,8 +2916,8 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             df = df.sort_index(ascending=True)
             df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
             df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-            df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-            df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+            df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+            df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
         return get_tdx_macd(df,detect_calc_support=detect_calc_support)
@@ -2958,8 +2943,8 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 df = df.sort_index(ascending=True)
                 df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
                 df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-                df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+                df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return get_tdx_macd(df,detect_calc_support=detect_calc_support)
@@ -3006,8 +2991,8 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
 
 
         df = df.fillna(0)
@@ -3199,8 +3184,8 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         df = df.sort_index(ascending=True)
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
         return df
@@ -3237,8 +3222,8 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
                 df = df.sort_index(ascending=True)
                 df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
                 df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-                df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+                df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return df
@@ -3297,8 +3282,8 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         df = df.sort_index(ascending=True)
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
 
@@ -4070,8 +4055,8 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         df = df.sort_index(ascending=True)
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         # df['ma5d'].fillna(0)
         # df['ma10d'].fillna(0)
         # df['ma20d'].fillna(0)
@@ -5738,72 +5723,6 @@ def generate_lastN_features_dict(df, lastdays=5):
 
     return data
 
-# COL_MAPPING = {
-#     'open': 'lasto',
-#     'high': 'lasth',
-#     'low': 'lastl',
-#     'close': 'lastp',
-#     'vol': 'lastv',
-#     'perd': 'per',
-#     'upper': 'upper',
-#     'ma5d': 'ma5',
-#     'ma20d': 'ma20',
-#     'ma60d': 'ma60',
-#     'perlastp': 'perc',
-#     # 'high4': 'high4',
-#     # 'hmax': 'hmax',
-#     'EVAL_STATE': 'eval',
-#     'trade_signal': 'signal'
-# }
-
-# def generate_lastN_features(df, lastdays=6):
-#     df_temp = pd.DataFrame()
-#     for col, prefix in COL_MAPPING.items():
-#         if col in df.columns:
-#             col_values = df[col].iloc[-lastdays:]
-#             if len(col_values) < lastdays:
-#                 col_values = pd.concat([pd.Series([0]*(lastdays-len(col_values))), col_values])
-#         else:
-#             col_values = pd.Series([0]*lastdays)
-        
-#         for i in range(1, lastdays+1):
-#             df_temp[f'{prefix}{i}d'] = [col_values.iloc[-i]]
-    
-#     return df_temp
-
-# def generate_lastN_features(df, lastdays=6, feature_cols=None):
-#     """
-#     生成 df 的过去 lastdays 天的多列特征，向量化处理。
-#     df: 原始DataFrame，必须按时间升序排列
-#     lastdays: 要取的过去天数
-#     feature_cols: list, 需要生成的特征列，如果 None，使用默认列
-#     返回: df_temp，单行 DataFrame，包含 lastdays 天的所有特征
-#     """
-#     if feature_cols is None:
-#         feature_cols = [
-#             'open', 'close', 'high', 'low', 'vol', 'perd', 'upper',
-#             'ma5d', 'ma20d', 'ma60d', 'perlastp', 'high4', 'hmax',
-#             'EVAL_STATE', 'trade_signal'
-#         ]
-
-#     df_temp = pd.DataFrame()
-
-#     for c in feature_cols:
-#         if c in df.columns:
-#             col_values = df[c].iloc[-lastdays:]  # 取最后 N 行
-#             # 如果不足 lastdays，用 NaN 填充
-#             if len(col_values) < lastdays:
-#                 col_values = pd.concat([pd.Series([np.nan]*(lastdays - len(col_values))), col_values])
-#         else:
-#             # 列不存在，全用 NaN 填充
-#             col_values = pd.Series([np.nan]*lastdays)
-
-#         # 给每一天生成列名
-#         for i in range(1, lastdays+1):
-#             df_temp[f'{c}{i}d'] = [col_values.iloc[-i]]
-
-#     return df_temp
-
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,normalized=False):
 
     if df is not None and len(df) > lastdays:
@@ -5825,8 +5744,30 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
 
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        # with timed_ctx("ema_tdx_numpy", warn_ms=2):
+        df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
+        # with timed_ctx("talib.EMA", warn_ms=2):
+        #     df['ma60dEMA'] = talib.EMA(df['close'], timeperiod=60)
+        # cct.print_timing_summary()
+        
+        # 测试
+        # # df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
+        # # with timed_ctx("talib.EMA", warn_ms=2):
+        # #     df['ma60d'] = talib.EMA(df['close'], timeperiod=60)
+        # # with timed_ctx("ema_tdx_fast", warn_ms=2):
+        # #     df['ema60_tdx'] = ema_tdx_fast(df['close'], 60)
+        # # with timed_ctx("ema_tdx_numpy", warn_ms=2):
+        # #     df['ma60d'] = ema_tdx_numpy(df['close'], 60)
+
+        # # # 1️⃣ 计算 TA-Lib EMA
+        # # # 2️⃣ 修正前期初始值，使与 TDX 对齐
+        # # with timed_ctx("warmup", warn_ms=2):
+        # #     warmup = 60
+        # #     df.loc[df.index[:warmup], 'ma60d'] = df['close'].iloc[:warmup].expanding().mean()
+
+        # # cct.print_timing_summary()
+        # # import ipdb;ipdb.set_trace()
 
         # safe_SMA(df, 'close', 5,  'ma5d')
         # safe_SMA(df, 'close', 10, 'ma10d')
@@ -7625,7 +7566,7 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
 
     resample = 'd'
-    code = '002151'
+    code = '300265'
     # dm = sina_data.Sina().market('all').loc['000002']
     # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
 
@@ -7637,10 +7578,12 @@ if __name__ == '__main__':
     # code = '920091'
     # code = '920076'
     # df1 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
-    df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d' )
+    df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
+    df3d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d' )
     df1w = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w' )
     df1m = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
     print(f'df1d: {df1d.ma60d[-5:]}')
+    print(f'df3d: {df3d.ma60d[-5:]}')
     print(f'df1w: {df1w.ma60d[-5:]}')
     print(f'df1m: {df1m.ma60d[-5:]}')
     import ipdb;ipdb.set_trace()
