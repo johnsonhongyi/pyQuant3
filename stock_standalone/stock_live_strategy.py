@@ -950,8 +950,12 @@ class StockLiveStrategy:
         # 标记当前处理的周期
         self.current_resample = resample 
         
+        # [CRITICAL] 严格限制仅在交易时间段触发信号 (09:15 - 15:05)
+        now_int = cct.get_now_time_int()
+        is_trading_active = (915 <= now_int <= 1505)
+
         # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
-        if 925 <= cct.get_now_time_int() <= 1505:
+        if is_trading_active and (925 <= now_int <= 1505):
              self.executor.submit(self._scan_hot_concepts, df_all, concept_top5, resample=resample)
         
         # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
@@ -1995,11 +1999,57 @@ class StockLiveStrategy:
                     if data['below_last_close_count'] >= 2:
                         messages.append(("RISK", f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price})"))
 
+                # ---------- 上下文趋势分析 (Context Analysis) ----------
+                open_p = float(row.get('open', 0.0))
+                trend_prefix = ""
+                trend_suffix = ""
+                
+                if last_close > 0 and open_p > 0:
+                    open_ratio = (open_p - last_close) / last_close
+                    # 1. 低开走高 (价值形态)
+                    if open_ratio <= -0.01 and current_price > open_p:
+                        if current_nclose > 0 and current_price > current_nclose:
+                            trend_prefix = "【低开走高】"
+                        else:
+                            trend_prefix = "【低开反弹】"
+                    # 2. 高开低走 (风险形态)
+                    elif open_ratio >= 0.01 and current_price < open_p:
+                        trend_prefix = "【高开低走】"
+                
+                # 3. 均线状态
+                if current_nclose > 0:
+                     if current_price < current_nclose:
+                         trend_suffix += " | 均线压制"
+                     else:
+                         trend_suffix += " | 站稳均线"
+
+                # 4. 昨高突破 (关键多头信号)
+                lasthigh = float(row.get('lasthigh', 0.0))
+                if lasthigh > 0:
+                    if current_price > lasthigh:
+                        trend_suffix += " | 🚀突破昨高"
+                    elif (lasthigh - current_price) / lasthigh < 0.01:
+                        trend_suffix += " | 逼近昨高"
+
                 # ---------- 普通规则 ----------
                 for rule in data.get('rules', []):
                     rtype, rval = rule['type'], rule['value']
                     if (rtype == 'price_up' and current_price >= rval) or (rtype == 'price_down' and current_price <= rval) or (rtype == 'change_up' and current_change >= rval):
-                        msg = f"{data['name']} {('价格突破' if rtype=='price_up' else '价格跌破' if rtype=='price_down' else '涨幅达到')} {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        # [Optimization] 动态修正动作描述
+                        action_str = "价格突破"
+                        if rtype == 'price_up':
+                            if current_change < -9.5:
+                                action_str = "触及跌停" # 修正跌停附近的向上波动
+                            elif current_change < -2.0:
+                                action_str = "弱势反抽" # 修正深跌中的反弹
+                            else:
+                                action_str = "价格突破"
+                        elif rtype == 'price_down':
+                            action_str = "价格跌破"
+                        elif rtype == 'change_up':
+                            action_str = "涨幅达到"
+                        
+                        msg = f"{trend_prefix}{data['name']} {action_str} {current_price} 涨幅 {current_change}% 量能 {volume_change} 换手 {ratio_change}{trend_suffix}"
                         messages.append(("RULE", msg))
 
                 # ---------- [NEW] 起跳新星探测逻辑 (win_upper 0 -> 1) ----------
@@ -2892,6 +2942,11 @@ class StockLiveStrategy:
 
     def _on_pattern_detected(self, event: 'PatternEvent') -> None:
         """形态检测回调 - 触发语音播报 (带计数和高优先级检测)"""
+        # [CRITICAL] 严格限制仅在交易时间段触发 (09:15 - 15:05)
+        now_int = cct.get_now_time_int()
+        if not (915 <= now_int <= 1505):
+            return
+
         try:
             pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
             
@@ -3134,8 +3189,20 @@ class StockLiveStrategy:
                 reason=message,
                 score=0.0
             ))
+            
+            # [FIX] 同时持久化到 live_signal_history 表，供 LiveSignalViewer 查询历史
+            # ViewReader 读取的是 trading_logger.db 中的 live_signal_history
+            self.trading_logger.log_live_signal(
+                code=code,
+                name=name,
+                price=price,
+                action=sig_type, # 将 PATTERN/ALERT/BREAKOUT_STAR作为动作
+                reason=message,
+                resample=resample
+            )
+            
         except Exception as e:
-            logger.debug(f"Push to SignalMessageQueue failed: {e}")
+            logger.debug(f"Push to Queue/DB failed: {e}")
             
         # 1. 回调 (UI 优先，确保窗口先弹出来)
         if self.alert_callback:

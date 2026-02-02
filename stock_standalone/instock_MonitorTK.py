@@ -726,12 +726,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def _on_hotkey_open_market_pulser():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
             self.after(0, self.open_market_pulse)
-            
+        def _on_open_live_signal_viewer():
+            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
+            self.after(0, self.open_live_signal_viewer)
         # 注册系统全局快捷键
         keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
         keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
         keyboard.add_hotkey('alt+s', _on_hotkey_trategy_manager)
         keyboard.add_hotkey('alt+k', _on_hotkey_open_market_pulser)
+        keyboard.add_hotkey('alt+q', _on_open_live_signal_viewer)
         # [NEW] Alt+H to toggle Hotlist
         keyboard.add_hotkey('alt+h', lambda: self.after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
 
