@@ -1871,6 +1871,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="策略", command=lambda: self.open_strategy_manager(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -6825,6 +6826,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Voice Monitor Manager Error: {e}")
             messagebox.showerror("错误", f"打开管理窗口失败: {e}")
+
+    def open_live_signal_viewer(self):
+        """打开实时信号历史查询窗口 (PyQt6)"""
+        if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
+            try:
+                # 检查窗口是否仍然有效
+                self._live_signal_viewer.show()
+                self._live_signal_viewer.raise_()
+                self._live_signal_viewer.activateWindow()
+                self._live_signal_viewer.refresh_data() # 自动刷新
+                return
+            except Exception:
+                self._live_signal_viewer = None
+
+        try:
+            from live_signal_viewer import LiveSignalViewer
+            
+            # 回调函数：联动主界面 (采用 tree_scroll_to_code 模式，与 trading_analyzer 一致)
+            def on_select(code, name,select_win=False,vis=True):
+                try:
+                    # 使用线程安全的 tree_scroll_to_code
+                    # select_win=True 会触发 TDX 推送和手札记录
+                    # vis=True 会同步联动 K 线可视化，与用户期望的一致
+                    self.tree_scroll_to_code(code, select_win=select_win, vis=vis)
+                    logger.debug(f"LiveSignalViewer linked: {code} {name}")
+                except Exception as e:
+                    logger.error(f"LiveSignalViewer linkage error: {e}")
+
+            self._live_signal_viewer = LiveSignalViewer(on_select_callback=on_select, sender=getattr(self, 'sender', None))
+            self._live_signal_viewer.show()
+            logger.info("LiveSignalViewer opened.")
+        except Exception as e:
+            logger.error(f"Failed to open LiveSignalViewer: {e}")
+            from tkinter import messagebox
+            messagebox.showerror("错误", f"打开实时信号查询窗口失败: {e}")
 
     def open_stock_selection_window(self):
         """打开策略选股与人工复核窗口 (支持窗口复用)"""

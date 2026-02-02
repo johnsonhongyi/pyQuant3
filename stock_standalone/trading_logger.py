@@ -121,6 +121,26 @@ class TradingLogger:
                     PRIMARY KEY (code, resample)
                 )
             """)
+
+            # 5. 实时信号全量历史追踪表 (记录日内每一个探测到的信号轨迹)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS live_signal_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    code TEXT,
+                    name TEXT,
+                    price REAL,
+                    action TEXT,
+                    reason TEXT,
+                    indicators TEXT, -- JSON 存储当时的环境快照
+                    resample TEXT DEFAULT 'd',
+                    highest_after REAL DEFAULT 0.0, -- 触发后的最高价 (供后续分析)
+                    lowest_after REAL DEFAULT 0.0,
+                    status TEXT DEFAULT 'NEW'
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_live_sig_date ON live_signal_history (timestamp)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_live_sig_code ON live_signal_history (code)")
             
             # --- Schema Evolution/Migration (New) ---
             # 检查字段是否缺失 (针对已存在数据库升级)
@@ -305,6 +325,56 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error logging signal: {e}")
 
+    def log_live_signal(self, code: str, name: str, price: float, action: str, reason: str, indicators: Optional[dict[str, Any]] = None, resample: str = 'd') -> None:
+        """
+        全量记录实时发现的每一个信号轨迹（不进行去重）
+        用于盘后精细化分析
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 处理指标快照
+            indicators_json = "{}"
+            if indicators:
+                indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
+            
+            cur.execute("""
+                INSERT INTO live_signal_history (timestamp, code, name, price, action, reason, indicators, resample)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_str, code, name, price, action, reason, indicators_json, resample))
+            
+            conn.commit()
+            conn.close()
+            # logger.debug(f"LiveSignal: Recorded {code} {action} at {price}")
+        except Exception as e:
+            logger.error(f"Error in log_live_signal: {e}")
+
+    def get_live_signal_history_df(self, date: Optional[str] = None, code: Optional[str] = None, limit: int = 1000):
+        """获取实时信号历史供 UI 展示"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            query = "SELECT * FROM live_signal_history WHERE 1=1"
+            params = []
+            if date:
+                # 假设 timestamp 格式为 YYYY-MM-DD HH:MM:SS
+                query += " AND timestamp LIKE ?"
+                params.append(f"{date}%")
+            if code:
+                query += " AND code = ?"
+                params.append(code)
+            
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            
+            df = pd.read_sql_query(query, conn, params=params)
+            conn.close()
+            return df
+        except Exception as e:
+            logger.error(f"Error get_live_signal_history_df: {e}")
+            return pd.DataFrame()
+
     def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003, reason: str = "", resample: str = 'd') -> None:
         """
         记录买卖操作并计算单笔盈利
@@ -336,7 +406,9 @@ class TradingLogger:
                     conn.close()
                     return
                 if amount <= 0:
-                    logger.warning(f"TradeLogger: {code} ({name}) '买入' amount is {amount}. Skipping.")
+                    # 当买入量为 0 时（通常为模拟或追踪模式），记录为日内全量信号，不再静默跳过
+                    logger.debug(f"TradeLogger: {code} ({name}) '买入' amount is 0. Recording as discovery signal.")
+                    self.log_live_signal(code, name, price, action, f"[OBSERVE] {reason}", resample=resample)
                     conn.close()
                     return
                 # 开启新仓

@@ -7,6 +7,7 @@ from queue import PriorityQueue
 from typing import List, Optional, Dict, Any
 from threading import Lock
 import os
+from trading_logger import TradingLogger
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ class SignalMessageQueue:
         
         self._init_db()
         self._load_from_db() # 启动时从 DB 加载最近的数据
+        
+        self.trading_logger = TradingLogger() # [NEW] 用于全量历史记录
         
         self._initialized = True
         logger.info("SignalMessageQueue initialized.")
@@ -181,6 +184,18 @@ class SignalMessageQueue:
 
     def push(self, msg: SignalMessage) -> None:
         """推送新信号 (严格去重: 同股票+同策略只保留一条)"""
+        # [NEW] 记录到全量历史 (DB)
+        try:
+            self.trading_logger.log_live_signal(
+                msg.code, msg.name, 
+                price=msg.extra.get('price', 0.0), 
+                action=msg.signal_type, 
+                reason=msg.reason,
+                indicators=msg.extra
+            )
+        except Exception as e:
+            logger.error(f"Failed to log live history in push: {e}")
+
         with self._lock:
             # 1. 提取当前所有 items
             items = []
