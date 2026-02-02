@@ -404,11 +404,23 @@ class HotlistPanel(QWidget):
         
         # 表头设置 - 极致紧凑，紧贴内容
         header = self.table.horizontalHeader()
-        for i in range(self.table.columnCount()):
-            if i == 2: # 名称
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
-            else:
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # 🟢 [OPTIMIZE] 使用 Interactive 模式并预设紧凑宽度
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+
+        # 预设宽度
+        self.table.setColumnWidth(0, 35)   # 序号
+        self.table.setColumnWidth(1, 60)   # 代码
+        self.table.setColumnWidth(3, 50)   # 加入价
+        self.table.setColumnWidth(4, 50)   # 现价
+        self.table.setColumnWidth(5, 55)   # 盈亏%
+        self.table.setColumnWidth(6, 40)   # 分组
+        self.table.setColumnWidth(7, 50)   # 时间
+        self.table.setColumnWidth(8, 60)   # 信号类型
+        
+        # 名称列自适应拉伸
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         
         # 允许手动调整
         header.setStretchLastSection(False)

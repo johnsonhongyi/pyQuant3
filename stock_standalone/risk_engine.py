@@ -235,8 +235,8 @@ class RiskEngine:
             # 保证最小仓位限制
             if final_ratio < self.min_ratio:
                 final_ratio = 0
-                if final_action not in ('卖出', '止损', '止盈'):
-                    final_action = '持仓'
+                if final_action not in ('卖出', '止损', '止盈', '持仓', '观望'):
+                    final_action = '清仓'
 
             return final_action, max(0, min(1, final_ratio))
 

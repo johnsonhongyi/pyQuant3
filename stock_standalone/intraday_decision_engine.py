@@ -2016,7 +2016,7 @@ class IntradayDecisionEngine:
         """返回持仓决策"""
         # logger.debug(f"Engine HOLD: {reason}")
         return {
-            "action": "持仓",
+            "action": "持仓" if position > 0 else "观望",
             "position": position,
             "reason": reason,
             "debug": debug
@@ -2083,6 +2083,10 @@ class IntradayDecisionEngine:
         # 实时顶部信号检测
         day_df = snapshot.get('day_df', pd.DataFrame())
         top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
+        
+        # 💥 [NEW] 将指标注入 debug，映射到 live 报警
+        debug["td_setup"] = snapshot.get('td_setup', 0)
+        debug["top_score"] = top_info['score']
         
         if top_info['score'] > 0.65:
             return {
