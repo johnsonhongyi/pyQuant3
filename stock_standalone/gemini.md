@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-01-23 16:45  
+> 最后更新：2026-02-02 19:05  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 
@@ -221,6 +221,27 @@ if hasattr(self, 'pattern_detector'):
 
 ---
 
+## 🔴 当前任务: P0.9 - 主升浪持仓与顶部信号优化 (2026-02-02 19:05)
+
+**状态**: 🔴 进行中  
+**目标**: 基于 002667 案例，从发现主升浪→持有→顶部信号清仓的全流程优化。解决主升浪“拿不住”和高位“走不掉”的问题。
+
+### 核心子任务
+
+| 序号 | 任务描述 | 状态 |
+|------|----------|------|
+| 1 | **TD 序列信号检测** (P0): 实现 TD Setup/Countdown 逻辑 | ⏳ 进行中 |
+| 2 | **日线级别顶部检测器** (P0): 高位放量滞涨/顶背离判断 | ⏳ 待办 |
+| 3 | **主升浪持仓保护** (P1): 跌破 MA5 前不下车保护 | ⏳ 待办 |
+| 4 | **信号分级抑制** (P1): 主升浪中静默分时小级别信号 | ⏳ 待办 |
+| 5 | **持仓阶段状态机升级**: 蓄势→启动→主升→派发全流程映射 | ⏳ 待办 |
+
+### 变更记录与文档
+- **实施计划**: [20260202_1905_implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/fc022204-146d-4724-80ab-9a9f4caeb76a/20260202_1905_implementation_plan.md)
+- **任务清单**: [20260202_1905_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/fc022204-146d-4724-80ab-9a9f4caeb76a/20260202_1905_task.md)
+
+---
+
 ### P2: 交易闭环与报警优化 ✅ 已完成
 - [x] **Alert System Hardening**: Created `alert_manager.py` ✅ 01-23
 - [x] **Trading Analytics**: `compute_and_sync_strategy_stats` in `TradingAnalyzer` ✅ 01-23
@@ -293,6 +314,9 @@ if hasattr(self, 'pattern_detector'):
 | **信号总线** | `signal_bus.py` | ✅ |
 | **信号日志面板** | `signal_log_panel.py` | ✅ |
 | **统一数据中心** | `trading_hub.py` | ✅ |
+| **TD 序列信号** | `td_sequence.py` | ✅ |
+| **日线顶部检测** | `daily_top_detector.py` | ✅ |
+| **主升浪持仓保护** | `intraday_decision_engine.py` | ✅ |
 
 ---
 
@@ -300,6 +324,8 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期 | 内容 | 影响 |
 |------|------|------|
+| 02-02 21:00 | **主升浪持仓优化 (P0/P1) 完成**：集成 TD 序列及日线顶部信号检测，实现主升浪持仓保护逻辑，升级状态机支持主升识别 | `td_sequence.py`, `daily_top_detector.py`, `intraday_decision_engine.py`, `position_phase_engine.py` |
+| 02-02 19:05 | **启动主升浪持仓优化任务**：基于 002667 案例，规划 TD 序列、顶部检测器及主升浪保护逻辑 | `gemini.md`, `implementation_plan.md` |
 | 01-24 03:41 | **P1.5 缺口监控与自动跟单完成**：集成向量化全市场缺口扫描，支持自动加入 `TradingHub` 跟单队列，优化 K 线缺口无限带显示 | `trade_visualizer_qt6.py`, `hotlist_panel.py`, `signal_types.py` |
 | 01-23 16:45 | **P6 策略整合完成**：统一日K形态检测，标准化竞价/盘中跟单逻辑 | `stock_live_strategy.py`, `daily_pattern_detector.py`, `daily_strategy_loader.py` |
 | 01-23 12:14 | 板块联动策略优化：聚焦连阳加速+回踩MA5/10启动模式 | `stock_live_strategy.py` |

@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging
 import datetime as dt
 from typing import Any
-
+from daily_top_detector import detect_top_signals
+import pandas as pd
 logger = logging.getLogger(__name__)
 
 
@@ -108,6 +109,19 @@ class IntradayDecisionEngine:
             debug["structure"] = structure
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
+
+        # ==============================================================================
+        # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
+        # ==============================================================================
+        hold_decision = self._main_wave_hold_check(row, snapshot, debug)
+        if hold_decision:
+            # 如果主升浪逻辑接管，直接返回
+            return {
+                "action": hold_decision["action"],
+                "position": round(hold_decision["position"], 2),
+                "reason": hold_decision["reason"],
+                "debug": debug
+            }
         
         # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
         # 0. 基础过滤：时间窗口与涨跌停 (Basic Filters)
@@ -2044,6 +2058,64 @@ class IntradayDecisionEngine:
 
     # ==================== 支撑位开仓策略 (New) ====================
     
+    # ==================== 主升浪持仓保护 ====================
+
+    def _main_wave_hold_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        主升浪持仓保护逻辑 (002667 模型优化)
+        """
+        win = int(snapshot.get('win', 0))
+        red = int(snapshot.get('red', 0))
+        
+        # 定义主升浪阶段：连阳3日以上 或 站稳5日线5日以上
+        is_main_wave = win >= 3 or red >= 5
+        
+        if not is_main_wave:
+            return None
+            
+        debug["持仓阶段"] = "主升浪"
+        
+        price = float(row.get('trade', 0))
+        ma5 = float(row.get('ma5d', 0))
+        nclose = float(row.get('nclose', 0))
+        last_close = float(snapshot.get('last_close', 0))
+        
+        # 实时顶部信号检测
+        day_df = snapshot.get('day_df', pd.DataFrame())
+        top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
+        
+        if top_info['score'] > 0.65:
+            return {
+                "triggered": True,
+                "action": "卖出",
+                "position": 0.5, # 顶部信号减半仓
+                "reason": f"主升高位预警: {', '.join(top_info['signals'])}"
+            }
+            
+        # 核心保护：只要在 5 日线之上，且跌幅未破位（不破昨日收盘且不破今日均价），坚决持仓
+        # 002667 案例：在 1.30 之前虽然波动，但未破关键支撑
+        
+        # 止损熔断：跌破昨日收盘价 且 跌破今日均价 且 跌破 MA5（三合一确认清仓）
+        if last_close > 0 and price < last_close and nclose > 0 and price < nclose and ma5 > 0 and price < ma5:
+             # 这通常意味着趋势反转
+             return {
+                "triggered": True,
+                "action": "强制清仓",
+                "position": 0.0,
+                "reason": "主升浪破位: 破昨收+破均线+破MA5"
+            }
+            
+        # 回踩保护：只要高位缩量回调不破 MA5，视为买点/持有
+        if ma5 > 0 and price > ma5 * 0.99:
+            return {
+                "triggered": True,
+                "action": "持有",
+                "position": 1.0,
+                "reason": "主升浪 MA5 护航"
+            }
+            
+        return None
+
     def _support_rebound_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> tuple[float, str]:
         """
         支撑位企稳检测

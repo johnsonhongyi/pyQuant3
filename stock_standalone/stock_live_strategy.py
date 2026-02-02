@@ -29,6 +29,7 @@ from JohnsonUtil import LoggerFactory
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
 from signal_message_queue import SignalMessageQueue, SignalMessage # [NEW] Shadow Engine Support
+from td_sequence import calculate_td_sequence
 
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
@@ -1815,6 +1816,7 @@ class StockLiveStrategy:
                     try:
                         self._update_daily_history_cache(code,resample) # 尝试刷新全量缓存
                         prev_rows = self.daily_history_cache.get(f'{code}_{resample}')
+                        snap['day_df'] = prev_rows # [NEW] 供决策引擎进行顶部检测
                         det_events = self.daily_pattern_detector.update(
                             code=code,
                             name=data.get('name', ''),
@@ -3130,7 +3132,14 @@ class StockLiveStrategy:
                 if df_hist is not None and not df_hist.empty:
                     # 存入该股的历史数据 DataFrame
                     # self.daily_history_cache[code] = df_hist
-                    self.daily_history_cache[f'{code}_{resample}'] = df_hist
+                    if df_hist is not None and not df_hist.empty:
+                        # [NEW] Calculate TD Sequence
+                        try:
+                            df_hist = calculate_td_sequence(df_hist)
+                        except Exception as e:
+                            logger.error(f"TD Sequence calculation error for {code}: {e}")
+                            
+                        self.daily_history_cache[f'{code}_{resample}'] = df_hist
             self.last_daily_history_refresh = now
             logger.debug(f"Daily history cache refreshed for {len(codes)} stocks. caches: {len(self.daily_history_cache.keys())}")
         except Exception as e:
