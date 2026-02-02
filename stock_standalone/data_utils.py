@@ -2170,10 +2170,11 @@ def fetch_and_process(
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
-            elif cct.get_trade_date_status() and START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
+            elif get_status(status_callback) != last_status:
+                last_status = get_status(status_callback)
+            elif cct.get_trade_date_status() and START_INIT > 0 and cct.start_init_tdx_time <= cct.get_now_time_int() <= 915:
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
-
                 # 1️⃣ 清理（未完成 → 不允许 init）
                 # if not clean_expired_tdx_file(logger, g_values):
                 if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
@@ -2251,9 +2252,6 @@ def fetch_and_process(
                         break
                     time.sleep(1)
                 continue
-
-            elif get_status(status_callback) != last_status:
-                last_status = get_status(status_callback)
 
             elif START_INIT > 0 and (not cct.get_work_time()):
                 for _ in range(5):
@@ -2463,7 +2461,7 @@ def fetch_and_process(
             if logger.level <= LoggerFactory.INFO:
                 logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
-                logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+                logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
                 print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
                 print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
@@ -2475,7 +2473,7 @@ def fetch_and_process(
                     f"shape: {top_temp.shape}\n"
                     f"detect_calc_support: {detect_val}"
                 )
-                print(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+                print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
 
             for _ in range(int(loop_sleep_time / sleep_step)):
                 if any(cond() for cond in stop_conditions):
