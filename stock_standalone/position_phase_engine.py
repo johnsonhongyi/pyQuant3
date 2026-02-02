@@ -118,7 +118,13 @@ class PositionPhaseEngine:
                     return TradePhase.LAUNCH, "蓄势突破，涨幅 > 5%"
 
             # [LAUNCH -> SURGE]
-            # 启动加速：涨停或连板
+            # 启动加速：涨停或连板，或者达到主升浪指标 (连阳3日 或 红5日)
+            win_val = int(snap.get('win', 0))
+            red_val = int(snap.get('red', 0))
+            if current_phase in [TradePhase.LAUNCH, TradePhase.ACCUMULATE, TradePhase.SCOUT]:
+                if win_val >= 3 or red_val >= 5:
+                    return TradePhase.SURGE, f"主升浪开启: 连阳{win_val}/加速{red_val}"
+            
             if current_phase == TradePhase.LAUNCH:
                  if row.get('percent', 0) > 9.0:
                      return TradePhase.SURGE, "加速涨停"

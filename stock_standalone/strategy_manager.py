@@ -1243,6 +1243,10 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         tk.Label(f1, text="代码:").pack(side="left")
         self.entry_verify_code = tk.Entry(f1, width=10)
         self.entry_verify_code.pack(side="left", padx=5)
+        # 💥 [NEW] 绑定右键黏贴与回车触发
+        self.entry_verify_code.bind('<Button-3>', self._on_entry_rclick_paste)
+        self.entry_verify_code.bind('<Return>', lambda e: self._do_verify_stock())
+        
         tk.Button(f1, text="执行评估", command=self._do_verify_stock).pack(side="left")
         
         self.txt_verify_result = tk.Text(frame_verify, height=20, width=50, font=("Consolas", 9))
@@ -1259,6 +1263,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         tk.Label(f2, text="代码:").grid(row=0, column=0)
         self.entry_trade_code = tk.Entry(f2, width=10)
         self.entry_trade_code.grid(row=0, column=1, padx=5)
+        # 💥 [NEW] 绑定右键黏贴
+        self.entry_trade_code.bind('<Button-3>', self._on_entry_rclick_paste)
         
         tk.Label(f2, text="价格:").grid(row=1, column=0)
         self.entry_trade_price = tk.Entry(f2, width=10)
@@ -1272,6 +1278,36 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                   command=lambda: self._do_manual_trade('BUY')).pack(fill="x", pady=5)
         tk.Button(frame_trade, text="🟢 卖出记录", bg="#c8e6c9", 
                   command=lambda: self._do_manual_trade('SELL')).pack(fill="x", pady=5)
+
+    def _on_entry_rclick_paste(self, event):
+        """右键点击输入框：自动黏贴剪贴板内容"""
+        widget = event.widget
+        try:
+            # 优先尝试从系统剪贴板获取 (兼容性较好)
+            import pyperclip
+            content = pyperclip.paste()
+            if not content:
+                # 回退到 Tkinter 剪贴板
+                content = self.master.clipboard_get()
+        except Exception:
+            try:
+                content = self.master.clipboard_get()
+            except:
+                content = ""
+        
+        if content:
+            # 简单清洗代码数据 (通常为 6 位数字或带前缀)
+            code = content.strip()
+            # 过滤超长内容 (防止误贴一整段文字)
+            if len(code) > 20: 
+                return
+                
+            widget.delete(0, tk.END)
+            widget.insert(0, code)
+            
+            # 增强：如果是验证框，填入后自动触发评估
+            if widget == getattr(self, 'entry_verify_code', None):
+                self._do_verify_stock()
 
     def set_verify_code(self, code):
         """外部调用：设置验证代码"""
@@ -1311,8 +1347,27 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 # 尝试从 row 构造基础 snapshot
                 snapshot = {
                     'last_close': row.get('lastp1d', 0),
-                    'nclose': row.get('nclose', 0)
+                    'nclose': row.get('nclose', 0),
+                    'win': row.get('win', 0),
+                    'red': row.get('red', 0)
                 }
+            
+            # 💥 [NEW] 注入日线历史数据以支持 TD 序列和顶部检测
+            day_df = pd.DataFrame()
+            if hasattr(self.live_strategy, 'daily_history_cache'):
+                cache_key = f"{code}_d"
+                day_df = self.live_strategy.daily_history_cache.get(cache_key, pd.DataFrame())
+                if day_df.empty:
+                    day_df = self.live_strategy.daily_history_cache.get(code, pd.DataFrame())
+            
+            if not day_df.empty:
+                snapshot['day_df'] = day_df
+            
+            # 获取当前阶段
+            current_phase = "IDLE"
+            if code in monitors:
+                current_phase = monitors[code].get('trade_phase', "IDLE")
+            snapshot['trade_phase'] = current_phase
             
             # 调用 decision engine
             result = self.decision_engine.evaluate(row, snapshot, mode="full")
@@ -1331,8 +1386,18 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 
             output += f"价格: {row.get('trade')} (涨幅 {row.get('percent')}%) \n"
             output += f"情绪: {score:.1f} (10分变化: {diff:+.1f})\n"
+            
+            # [NEW] 展示 TD 和顶部评分
+            if not day_df.empty:
+                from daily_top_detector import detect_top_signals
+                td_setup = day_df.iloc[-1].get('td_setup', 0)
+                top_info = detect_top_signals(day_df, row)
+                output += f"TD序列: {td_setup} | 顶部评分: {top_info['score']:.2f}\n"
+                if top_info['signals']:
+                    output += f"顶部信号: {', '.join(top_info['signals'])}\n"
+
             output += "-" * 30 + "\n"
-            output += f"【决策】: {result.get('action')} (仓位 {result.get('position')})\n"
+            output += f"【阶段/决策】: {current_phase} -> {result.get('action')} ({result.get('position')})\n"
             output += f"【理由】: {result.get('reason')}\n"
             output += "-" * 30 + "\n"
             output += "[Debug Info]:\n"

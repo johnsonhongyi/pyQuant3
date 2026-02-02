@@ -3502,25 +3502,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if key in row_dict:
                         snapshot[key] = row_dict[key]
             
-            # 特殊别名映射以兼容旧代码
-            snapshot['lastv1d'] = snapshot.get('lastv1d', 0)
-            snapshot['lastv2d'] = snapshot.get('lastv2d', 0)
-            snapshot['lastv3d'] = snapshot.get('lastv3d', 0)
-            snapshot['lasth1d'] = snapshot.get('lasth1d', 0)
-            snapshot['lastl1d'] = snapshot.get('lastl1d', 0)
-            snapshot['win'] = snapshot.get('win', 0)            # 加速连阳
-            snapshot['sum_perc'] = snapshot.get('sum_perc', 0)  # 加速连阳涨幅
-            snapshot['red'] = snapshot.get('red', 0)            # 五日线上数据
-            snapshot['gren'] = snapshot.get('gren', 0)          # 弱势绿柱数据
+            snapshot['win'] = row_dict.get('win', 0)            # 加速连阳
+            snapshot['sum_perc'] = row_dict.get('sum_perc', 0)  # 加速连阳涨幅
+            snapshot['red'] = row_dict.get('red', 0)            # 五日线上数据
+            snapshot['gren'] = row_dict.get('gren', 0)          # 弱势绿柱数据
             snapshot['red'] = snapshot.get('red', 0)  #5日线上日线
             
-            # 创建决策引擎实例
-            engine = IntradayDecisionEngine()
+            # 💥 [NEW] 提取当前仓位阶段及日线数据
+            current_phase_obj = "IDLE"
+            next_phase_str = "N/A"
+            phase_reason = ""
+            day_df = pd.DataFrame()
             
-            # 执行评估
+            if hasattr(self, 'live_strategy') and self.live_strategy:
+                # 1. 获取日线缓存
+                cache_key = f"{code}_d"
+                day_df = self.live_strategy.daily_history_cache.get(cache_key, pd.DataFrame())
+                if day_df.empty:
+                    day_df = self.live_strategy.daily_history_cache.get(code, pd.DataFrame())
+                
+                # 2. 获取当前仓位状态
+                monitors = self.live_strategy.get_monitors()
+                actual_key = code
+                if code not in monitors:
+                    for k in monitors.keys():
+                        if k.startswith(code):
+                            actual_key = k
+                            break
+                if actual_key in monitors:
+                    current_phase_obj = monitors[actual_key].get('trade_phase', "IDLE")
+
+            # 3. 注入快照
+            if not day_df.empty:
+                snapshot['day_df'] = day_df
+                snapshot['td_setup'] = day_df.iloc[-1].get('td_setup', 0)
+            snapshot['trade_phase'] = current_phase_obj
+            
+            # 4. 💥 执行决策评估 (必须在状态机预览之前执行)
+            engine = IntradayDecisionEngine()
             result = engine.evaluate(row_dict, snapshot, mode="full")
             
+            # 5. 💥 评估状态机变迁预览
+            if hasattr(self, 'live_strategy') and self.live_strategy:
+                if hasattr(self.live_strategy, 'phase_engine') and self.live_strategy.phase_engine:
+                    from position_phase_engine import TradePhase
+                    try:
+                        c_p_enum = TradePhase(current_phase_obj)
+                    except:
+                        c_p_enum = TradePhase.IDLE
+                    
+                    # 模拟注入今日买入标记以便 IDLE -> SCOUT 变迁预览
+                    if result.get('action') in ['买入', 'BUY', 'ADD']:
+                        snapshot['buy_triggered_today'] = True
+                        
+                    n_p_enum, phase_reason = self.live_strategy.phase_engine.evaluate_phase(
+                        code, row_dict, snapshot, current_phase=c_p_enum
+                    )
+                    next_phase_str = n_p_enum.value
+            
             # 检测数据缺失（使用 df_all 中的正确字段名）
+            
             missing_fields = []
             critical_fields = ['trade', 'open', 'high', 'low', 'nclose', 'volume', 
                               'ratio', 'ma5d', 'ma10d', 'lastp1d', 'percent']
@@ -3528,19 +3569,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 val = row_dict.get(field, None)
                 if val is None or (isinstance(val, (int, float)) and val == 0):
                     missing_fields.append(field)
-            
+
             # 构建报告
             report_lines = [
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 f"📊 策略测试报告 - {name} ({code})",
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 "",
-                "【决策结果】",
-                f"  动作: {result['action']}",
-                f"  仓位: {result['position'] * 100:.0f}%",
-                f"  原因: {result['reason']}",
+                "【核心决策】",
+                f"  建议动作: {result['action']}",
+                f"  目标仓位: {result['position'] * 100:.0f}%",
+                f"  状态变迁: {current_phase_obj} ➔ {next_phase_str}",
+                f"  变迁原因: {phase_reason if phase_reason else '维持现状'}",
+                f"  内核理由: {result['reason']}",
                 "",
             ]
+            
+            # [NEW] 顶部信号详情 (如果主升浪逻辑返回)
+            if not day_df.empty:
+                from daily_top_detector import detect_top_signals
+                top_info = detect_top_signals(day_df, row_dict)
+                td_setup = day_df.iloc[-1].get('td_setup', 0)
+                
+                report_lines.extend([
+                    "【主升/顶部探测】",
+                    f"  TD 序列 : {td_setup} (Setup)",
+                    f"  顶部评分: {top_info['score']:.2f} ({top_info['action']})",
+                ])
+                if top_info['signals']:
+                    report_lines.append(f"  预警信号: {', '.join(top_info['signals'])}")
+                report_lines.append("")
             
             # 决策调试信息（优先显示便于分析）
             debug = result.get('debug', {})
@@ -3698,11 +3756,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 messagebox.showwarning("警告", "交易引擎未启动")
                 return
             
+            # 💥 [NEW] 构建增强理由 (包含 TD/Top 信息)
+            enriched_reason = result.get('reason', '')
+            if not day_df.empty:
+                from daily_top_detector import detect_top_signals
+                top_info = detect_top_signals(day_df, row_dict)
+                td_setup = day_df.iloc[-1].get('td_setup', 0)
+                enriched_reason = f"{enriched_reason} | TD:{td_setup} Top:{top_info['score']}"
+                if top_info['signals']:
+                    enriched_reason += f" ({'/'.join(top_info['signals'])})"
+
             # 创建模拟参数设置小窗口
             sim_win = tk.Toplevel(win)
             sim_win.title(f"模拟成交设置 - {name}")
             sim_win_id = '模拟成交设置'
-            sim_win.geometry("350x480") # 稍微调大一点适应新控件
+            sim_win.geometry("350x480") 
             sim_win.transient(win)
             sim_win.grab_set()
             self.load_window_position(sim_win, sim_win_id, default_width=350, default_height=480)
@@ -3771,7 +3839,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     confirm_msg = f"确定以价格 {s_price} {s_action} {s_amount}股 [{name}] 吗?"
                     if messagebox.askyesno("模拟交易确认", confirm_msg, parent=sim_win):
                         self.live_strategy.trading_logger.record_trade(
-                            code, name, s_action, s_price, s_amount
+                            code, name, s_action, s_price, s_amount,
+                            reason=enriched_reason
                         )
                         messagebox.showinfo("成功", f"模拟成交已记录: {s_action} {name} @ {s_price}", parent=sim_win)
                         on_close()
