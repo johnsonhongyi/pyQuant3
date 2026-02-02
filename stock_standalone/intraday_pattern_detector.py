@@ -72,6 +72,12 @@ class IntradayPatternDetector:
         'pullback_upper',       # 回踩upper
         'high_drop',            # 冲高回落
         'top_signal',           # 顶部信号
+        'master_momentum',      # 核心主升 (VWAP 支撑, 强趋势)
+        'open_low_retest',      # 开盘回踩 (开盘≈最低, 缓慢上行)
+        'high_sideways_break',  # 横盘突破 (大涨后横盘不破均线再拉升)
+        'bull_trap_exit',       # 诱多跑路 (快速拉升后跌破均线)
+        'momentum_failure',     # 主升转弱 (之前是主升，现在破位)
+        'strong_auction_open',  # 强力竞价 (高开+强结构+历史联动)
     ]
     
     # 形态中文名映射
@@ -85,6 +91,12 @@ class IntradayPatternDetector:
         'pullback_upper': '回踩上轨',
         'high_drop': '冲高回落',
         'top_signal': '顶部信号',
+        'master_momentum': '核心主升',
+        'open_low_retest': '开盘回踩',
+        'high_sideways_break': '横盘突破',
+        'bull_trap_exit': '诱多跑路',
+        'momentum_failure': '主升转弱',
+        'strong_auction_open': '强力竞价',
     }
     
     def __init__(self, cooldown: int = 60, publish_to_bus: bool = True):
@@ -114,7 +126,8 @@ class IntradayPatternDetector:
         self.enabled_patterns.discard(pattern)
     
     def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame], 
-               day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+               day_row: pd.Series, prev_close: float,
+               current_time: Optional[dt_time] = None) -> List[PatternEvent]:
         """
         每次收到新分时数据后调用
         
@@ -124,25 +137,52 @@ class IntradayPatternDetector:
             tick_df: 分时数据 (ticktime, price, volume, ...)
             day_row: 当日日K数据 (open, high, low, close, upper, ma5, ...)
             prev_close: 昨收
+            current_time: 手动指定时间 (用于测试/回检)
             
         Returns:
             检测到的形态事件列表
         """
         events: List[PatternEvent] = []
         
-        # 1. 竞价高开 / 跳空高开 (仅 9:25-9:35 判断)
-        if 'auction_high_open' in self.enabled_patterns or 'gap_up' in self.enabled_patterns:
-            events.extend(self._check_open_patterns(code, name, day_row, prev_close))
+        # 使用传入时间或当前系统时间
+        now_time = current_time if current_time else datetime.now().time()
         
+        # 1. 竞价高开 / 跳空高开 (仅 9:25-9:35 判断 - 9:25 集合竞价结束出的开盘价)
+        if 'auction_high_open' in self.enabled_patterns or 'gap_up' in self.enabled_patterns:
+            events.extend(self._check_open_patterns(code, name, day_row, prev_close, now_time))
+        
+        # --- 🕒 核心时间过滤：9:25 之前的集合竞价数据不作为分时形态判断依据 ---
+        if now_time < dt_time(9, 25):
+            return []
+
         # 2. 低开走高 / 开盘最低
         if 'low_open_high_walk' in self.enabled_patterns or 'open_is_low' in self.enabled_patterns:
             events.extend(self._check_low_open_patterns(code, name, tick_df, day_row, prev_close))
         
-        # 3. 瞬间回踩支撑线
+        # 3. 核心主升 (VWAP 核心逻辑)
+        if 'master_momentum' in self.enabled_patterns:
+            events.extend(self._check_master_momentum(code, name, tick_df, day_row, prev_close))
+            
+        # 4. 开盘回踩 nlow
+        if 'open_low_retest' in self.enabled_patterns:
+            events.extend(self._check_open_low_retest(code, name, tick_df, day_row, prev_close))
+
+        # 5. 横盘突破 (暴力拉升后横盘)
+        if 'high_sideways_break' in self.enabled_patterns:
+            events.extend(self._check_high_sideways_break(code, name, tick_df, day_row, prev_close))
+
+        # 6. 回踩支撑/上轨
         if 'instant_pullback' in self.enabled_patterns:
             events.extend(self._check_instant_pullback(code, name, tick_df, day_row))
         
-        # 4. 缩量横盘
+        if 'pullback_upper' in self.enabled_patterns:
+            events.extend(self._check_pullback_upper(code, name, day_row))
+
+        # 7. 风险跑路信号 (诱多/破位)
+        if 'bull_trap_exit' in self.enabled_patterns:
+            events.extend(self._check_bull_trap_exit(code, name, tick_df, day_row, prev_close))
+        
+        # 8. 缩量横盘 / 冲高回落 / 顶部信号
         if 'shrink_sideways' in self.enabled_patterns:
             events.extend(self._check_shrink_sideways(code, name, tick_df, day_row))
         
@@ -227,13 +267,15 @@ class IntradayPatternDetector:
     # ========== 具体形态检测方法 ==========
     
     def _check_open_patterns(self, code: str, name: str, 
-                             day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+                             day_row: pd.Series, prev_close: float,
+                             now_time: Optional[dt_time] = None) -> List[PatternEvent]:
         """竞价高开 / 跳空高开"""
         events = []
-        now = datetime.now().time()
+        if now_time is None:
+            now_time = datetime.now().time()
         
         # 仅在 9:25-9:35 判断
-        if not (dt_time(9, 25) <= now <= dt_time(9, 35)):
+        if not (dt_time(9, 25) <= now_time <= dt_time(9, 35)):
             return events
         
         open_price = float(day_row.get('open', 0))
@@ -256,6 +298,30 @@ class IntradayPatternDetector:
                 price=open_price,
                 detail=f"竞价高开 +{gap_pct:.1f}%"
             ))
+
+        # --- [NEW] 强力竞价 (strong_auction_open) ---
+        if 'strong_auction_open' in self.enabled_patterns and gap_pct >= 2.0:
+            low_p = float(day_row.get('low', 0))
+            trends = float(day_row.get('TrendS', 0))
+            win_count = int(day_row.get('win', 0))
+            
+            # 1. 结构检查: Open 近似等于 Low (无下影线或极短下影线)
+            is_open_low = low_p >= open_price * 0.998 # 0.2% 容错
+            
+            # 2. 趋势背景: 昨日 TrendS > 60 (回踩支撑后的启动)
+            is_strong_trend = trends > 60
+            
+            if is_open_low and is_strong_trend:
+                score = 80 + min(win_count * 5, 20) # 加上连板加成
+                detail = f"强力竞价: 高开{gap_pct:.1f}%+Open≈Low"
+                if win_count > 0:
+                    detail += f" (Win {win_count})"
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='strong_auction_open',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=open_price,
+                    detail=detail
+                ))
         
         return events
     
@@ -550,7 +616,267 @@ class IntradayPatternDetector:
             ))
         
         return events
-    
+
+    def _check_master_momentum(self, code: str, name: str,
+                               tick_df: Optional[pd.DataFrame],
+                               day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """
+        核心主升结构检测
+        1. 高开 (Open > Prev Close)
+        2. 昨日回踩支撑 (MA5/10/上轨) 且收盘稳住
+        3. 沿着均价线 (VWAP) 上行，绝不跌破均价线
+        """
+        events = []
+        open_p = float(day_row.get('open', 0))
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        
+        if open_p <= 0 or prev_close <= 0 or curr_p <= open_p:
+            return events
+
+        # --- A. 基础过滤：必须大于昨日收盘价 (高开或平开高走) ---
+        if open_p < prev_close and curr_p < prev_close:
+            return events
+
+        # --- B. 昨日状态分析：昨日是否回踩支撑线 ---
+        # 假设 day_row 包含昨日的一些状态或直接计算
+        # 简单判定：昨日最高点曾触及 MA5/10 附近，或昨日收盘价在支撑线上方
+        ma5 = float(day_row.get('ma5', 0))
+        ma10 = float(day_row.get('ma10', 0))
+        y_low = float(day_row.get('low', 0)) # 这个其实是今日低点，需要历史数据。
+        # 注意：day_row 通常是 snapshot，包含了很多由 strategy.py 填写的历史指标
+        # 这里的 ma5/ma10 是今日移动平均，反映了昨日的趋势强度
+        trend_raw = float(day_row.get('TrendS', 50))
+        
+        # 如果 TrendS (趋势强度) 较低，可能不是强势股回踩后上涨
+        if trend_raw < 60:
+            return events
+
+        # --- C. VWAP 核心逻辑：分时线上行且不破均线 ---
+        vwap = amount / volume if volume > 0 else 0
+        if vwap <= 0:
+            return events
+            
+        # 1. 当前必须在均线上方
+        is_above_vwap = curr_p >= vwap * 0.998 # 允许微小误差
+        
+        key = f"{code}_master_momentum_state"
+        if key not in self._cache:
+            self._cache[key] = {'ever_broken': False, 'failure_signaled': False}
+        state = self._cache[key]
+
+        # 核心逻辑：一旦跌破，标记永久失效
+        if not is_above_vwap:
+            if not state['ever_broken']:
+                state['ever_broken'] = True
+                # [NEW] 触发一次“主升转弱”信号
+                if 'momentum_failure' in self.enabled_patterns:
+                    events.append(PatternEvent(
+                        code=code, name=name, pattern='momentum_failure',
+                        timestamp=datetime.now().strftime('%H:%M:%S'),
+                        price=curr_p,
+                        detail=f"主升转弱: 跌破均线支撑({vwap:.2f}), 注意跑路!",
+                        is_high_priority=True
+                    ))
+            return events
+
+        if state['ever_broken']:
+            return events
+            
+        # 2. 判定强势结构：开盘即最低 (格外注意)
+        day_low = float(day_row.get('low', 0))
+        is_open_low = abs(open_p - day_low) / open_p < 0.001 if open_p > 0 else False
+        
+        # 3. 判定历史连板/连阳晋级 (win 计数)
+        win_count = int(day_row.get('win', 0))
+        win_msg = f" win {win_count} 进 {win_count+1}" if win_count > 0 else ""
+        
+        # 4. 判定有效主升区间 (偏离 0.5% ~ 3.5%)
+        bias = (curr_p - vwap) / vwap
+        if 0.005 < bias < 0.035:
+            detail = f"核心主升{win_msg}: 偏离均线{bias:+.1%}"
+            if is_open_low:
+                detail = f"分时强结构(开盘即最低){win_msg}, 偏离均线{bias:+.1%}"
+            
+            events.append(PatternEvent(
+                code=code, name=name, pattern='master_momentum',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=detail,
+                is_high_priority=True if is_open_low else False
+            ))
+                
+        return events
+
+    def _check_open_low_retest(self, code: str, name: str,
+                                tick_df: Optional[pd.DataFrame],
+                                day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """开盘回踩 (开盘≈最低, 缓慢上行)"""
+        events = []
+        open_p = float(day_row.get('open', 0))
+        low_p = float(day_row.get('low', 0))
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        
+        if open_p <= 0 or curr_p <= 0:
+            return events
+            
+        # 1. 判定开盘即低点 (允许 0.1% 误差)
+        is_open_is_low = abs(open_p - low_p) / open_p < 0.001 if open_p > 0 else False
+        
+        # 2. 判定上涨中
+        if is_open_is_low and curr_p > open_p * 1.01:
+            events.append(PatternEvent(
+                code=code, name=name, pattern='open_low_retest',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=f"开盘即低点, 稳步拉升至 +{(curr_p-prev_close)/prev_close:+.1%}"
+            ))
+            
+        return events
+
+    def _check_bull_trap_exit(self, code: str, name: str,
+                             tick_df: Optional[pd.DataFrame],
+                             day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """诱多破位检测 (早盘错误修正)"""
+        events = []
+        open_p = float(day_row.get('open', 0))
+        high_p = float(day_row.get('high', 0))
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        vwap = amount / volume if volume > 0 else 0
+        
+        if open_p <= 0 or curr_p <= 0 or vwap <= 0:
+            return events
+            
+        # 1. 检测是否曾经“诱多”：开盘后快速大涨 > 3%
+        rising_pct = (high_p - open_p) / open_p * 100
+        if rising_pct < 3.0:
+            return events
+            
+        # 注意：此处 state 与 master_momentum 无关，独立判断
+        key = f"{code}_bull_trap_state"
+        if key not in self._cache:
+            self._cache[key] = {'trap_triggered': False}
+        
+        state = self._cache[key]
+        if state['trap_triggered']:
+            return events
+            
+        # 2. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
+        if curr_p < vwap * 0.997 or curr_p < open_p * 0.995:
+            state['trap_triggered'] = True
+            events.append(PatternEvent(
+                code=code, name=name, pattern='bull_trap_exit',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=f"诱多破位: 早盘大涨{rising_pct:.1f}%后跌破均线, 注意跑路!",
+                is_high_priority=True
+            ))
+            
+        return events
+
+    def _check_high_sideways_break(self, code: str, name: str,
+                                   tick_df: Optional[pd.DataFrame],
+                                   day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """暴力拉升后横盘不破位再突破"""
+        events = []
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        day_high = float(day_row.get('high', 0))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        vwap = amount / volume if volume > 0 else 0
+        
+        if curr_p <= 0 or vwap <= 0:
+            return events
+            
+        # 1. 基础门槛：偏离 VWAP 且高于 VWAP
+        if curr_p < vwap: return events
+        
+        key = f"{code}_high_sideways_break"
+        if key not in self._cache:
+            self._cache[key] = {'has_rally': False, 'max_p': 0.0, 'min_since_max': 999.0}
+        
+        state = self._cache[key]
+        
+        # 2. 检测暴力拉升 (今日涨幅 > 5% 或 单次快速拉升)
+        pct = (curr_p - prev_close) / prev_close * 100
+        if pct > 4.0:
+            state['has_rally'] = True
+            
+        if not state['has_rally']:
+            return events
+            
+        # 3. 检测横盘 (最高点回落极小，且始终高于 VWAP)
+        if curr_p > state['max_p']:
+            state['max_p'] = curr_p
+            state['min_since_max'] = curr_p
+        else:
+            state['min_since_max'] = min(state['min_since_max'], curr_p)
+            
+        # 振幅统计 (从最高点至今回落幅度)
+        drop_pct = (state['max_p'] - curr_p) / state['max_p'] * 100 if state['max_p'] > 0 else 0
+        
+        # 核心逻辑：大涨后回落 < 1.5% 且高于 VWAP 0.5%+
+        if drop_pct < 1.5 and curr_p > vwap * 1.005:
+            # 再次突破前高？
+            if curr_p >= day_high * 0.998:
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='high_sideways_break',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=curr_p,
+                    detail=f"暴力拉升后横盘不破均线, 再次挑战前高",
+                    is_high_priority=True
+                ))
+        
+        if curr_p < vwap:
+            state['has_rally'] = False
+            state['max_p'] = 0
+            
+        return events
+
+    def _check_bull_trap_exit(self, code: str, name: str,
+                             tick_df: Optional[pd.DataFrame],
+                             day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """诱多破位检测 (早盘错误修正)"""
+        events = []
+        open_p = float(day_row.get('open', 0))
+        high_p = float(day_row.get('high', 0))
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        vwap = amount / volume if volume > 0 else 0
+        
+        if open_p <= 0 or curr_p <= 0 or vwap <= 0:
+            return events
+            
+        # 1. 检测是否曾经“诱多”：开盘后快速大涨 > 3%
+        rising_pct = (high_p - open_p) / open_p * 100
+        if rising_pct < 3.0:
+            return events
+            
+        key = f"{code}_bull_trap_state"
+        if key not in self._cache:
+            self._cache[key] = {'trap_triggered': False}
+        
+        state = self._cache[key]
+        if state['trap_triggered']:
+            return events
+            
+        # 2. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
+        if curr_p < vwap * 0.997 or curr_p < open_p * 0.995:
+            state['trap_triggered'] = True
+            events.append(PatternEvent(
+                code=code, name=name, pattern='bull_trap_exit',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=f"诱多破位: 早盘大涨{rising_pct:.1f}%后跌破均线, 注意跑路!",
+                is_high_priority=True
+            ))
+            
+        return events
+
     def get_stats(self) -> Dict[str, Any]:
         """获取检测器统计"""
         return {

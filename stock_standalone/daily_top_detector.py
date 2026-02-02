@@ -22,9 +22,9 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
     last_row = day_df.iloc[-1]
     
     # Use real-time data if provided, else use last_row
-    price = current_tick.get('trade', last_row['close']) if current_tick else last_row['close']
-    high = current_tick.get('high', last_row['high']) if current_tick else last_row['high']
-    volume = current_tick.get('volume', last_row['volume']) if current_tick else last_row['volume']
+    price = current_tick.get('trade', last_row['close']) if current_tick is not None else last_row['close']
+    high = current_tick.get('high', last_row['high']) if current_tick is not None else last_row['high']
+    volume = current_tick.get('volume', last_row['volume']) if current_tick is not None else last_row['volume']
     
     # 1. TD Sequence Check (Setup count)
     td_setup = last_row.get('td_setup', 0)
@@ -39,7 +39,7 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
     high_10 = day_df['high'].tail(10).max()
     
     if price > high_10 * 0.98 and volume > avg_vol_5 * 1.8:
-        pct_change = (price - last_row['close']) / last_row['close'] if current_tick else (last_row['close'] - day_df['close'].iloc[-2]) / day_df['close'].iloc[-2]
+        pct_change = (price - last_row['close']) / last_row['close'] if current_tick is not None else (last_row['close'] - day_df['close'].iloc[-2]) / day_df['close'].iloc[-2]
         if abs(pct_change) < 0.015:
             score += 0.25
             signals.append("高位放量滞涨")
