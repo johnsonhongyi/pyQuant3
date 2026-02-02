@@ -27,13 +27,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 尝试导入信号总线
+# 尝试导入信号总线与标准化信号
 try:
-    from signal_bus import get_signal_bus, publish_pattern, SignalBus
+    from signal_bus import get_signal_bus, publish_standard_signal, SignalBus
+    from signal_standard import StandardSignal
+    HAS_STANDARD_SIGNAL = True
     HAS_SIGNAL_BUS = True
 except ImportError:
+    HAS_STANDARD_SIGNAL = False
     HAS_SIGNAL_BUS = False
-    logger.warning("signal_bus not found, pattern events will not be published to bus")
+    StandardSignal = Any
+    logger.warning("signal_bus or signal_standard not found, fallback to limited functionality")
 
 
 @dataclass
@@ -48,6 +52,7 @@ class PatternEvent:
     score: float = 0.0 # 可选评分
     count: int = 1     # 触发次数（第几次触发）
     is_high_priority: bool = False  # 是否高优先级
+    signal: Optional[Any] = None # 标准化信号对象 (StandardSignal)
     
     def __repr__(self):
         count_suffix = f" (x{self.count})" if self.count > 1 else ""
@@ -67,6 +72,9 @@ class IntradayPatternDetector:
         'gap_up',               # 跳空高开
         'low_open_high_walk',   # 低开走高
         'open_is_low',          # 开盘最低
+        'open_is_low_volume',   # 开盘最低+带量 (符合用户需求的核心信号)
+        'nlow_is_low_volume',   # nlow最低价+带量 (日内新低后反转)
+        'low_open_breakout',    # 低开高走突破确认 (突破昨高/平台后二次信号)
         'instant_pullback',     # 瞬间回踩支撑线
         'shrink_sideways',      # 缩量横盘
         'pullback_upper',       # 回踩upper
@@ -86,6 +94,9 @@ class IntradayPatternDetector:
         'gap_up': '跳空高开',
         'low_open_high_walk': '低开走高',
         'open_is_low': '开盘最低',
+        'open_is_low_volume': '开盘最低带量',
+        'nlow_is_low_volume': '日低反转带量',
+        'low_open_breakout': '低开突破',
         'instant_pullback': '回踩支撑',
         'shrink_sideways': '缩量横盘',
         'pullback_upper': '回踩上轨',
@@ -155,8 +166,10 @@ class IntradayPatternDetector:
         if now_time < dt_time(9, 25):
             return []
 
-        # 2. 低开走高 / 开盘最低
-        if 'low_open_high_walk' in self.enabled_patterns or 'open_is_low' in self.enabled_patterns:
+        # 2. 低开走高 / 开盘最低 (含带量和突破确认迭代信号)
+        low_open_patterns = {'low_open_high_walk', 'open_is_low', 'open_is_low_volume', 
+                             'nlow_is_low_volume', 'low_open_breakout'}
+        if low_open_patterns & self.enabled_patterns:
             events.extend(self._check_low_open_patterns(code, name, tick_df, day_row, prev_close))
         
         # 3. 核心主升 (VWAP 核心逻辑)
@@ -166,6 +179,7 @@ class IntradayPatternDetector:
         # 4. 开盘回踩 nlow
         if 'open_low_retest' in self.enabled_patterns:
             events.extend(self._check_open_low_retest(code, name, tick_df, day_row, prev_close))
+
 
         # 5. 横盘突破 (暴力拉升后横盘)
         if 'high_sideways_break' in self.enabled_patterns:
@@ -219,14 +233,37 @@ class IntradayPatternDetector:
                 
                 # 发布到信号总线
                 if self._publish_to_bus:
-                    publish_pattern(
-                        source="IntradayPatternDetector",
-                        code=ev.code,
-                        name=ev.name,
-                        pattern=ev.pattern,
-                        price=ev.price,
-                        detail=ev.detail
-                    )
+                    if HAS_STANDARD_SIGNAL:
+                        # 转换并发布标准化信号
+                        std_signal = StandardSignal(
+                            code=ev.code,
+                            name=ev.name,
+                            type=SignalBus.EVENT_PATTERN,
+                            subtype=ev.pattern,
+                            price=ev.price,
+                            timestamp=ev.timestamp,
+                            score=ev.score,
+                            count=ev.count,
+                            detail=ev.detail,
+                            source="IntradayPatternDetector",
+                            is_high_priority=ev.is_high_priority
+                        )
+                        ev.signal = std_signal # 绑定到事件上供回调使用
+                        publish_standard_signal(std_signal)
+                    else:
+                        # 回退到原始 publish_pattern (如果在 signal_bus 中定义了且未被删除)
+                        try:
+                            from signal_bus import publish_pattern
+                            publish_pattern(
+                                source="IntradayPatternDetector",
+                                code=ev.code,
+                                name=ev.name,
+                                pattern=ev.pattern,
+                                price=ev.price,
+                                detail=ev.detail
+                            )
+                        except ImportError:
+                            pass
         
         return notified_events
     
@@ -328,7 +365,7 @@ class IntradayPatternDetector:
     def _check_low_open_patterns(self, code: str, name: str, 
                                   tick_df: Optional[pd.DataFrame],
                                   day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """低开走高 / 开盘最低 (带分级信息)"""
+        """低开走高 / 开盘最低 (带量迭代 + 突破确认)"""
         events = []
         
         open_price = float(day_row.get('open', 0))
@@ -336,33 +373,54 @@ class IntradayPatternDetector:
         day_low = float(day_row.get('low', 0))
         day_high = float(day_row.get('high', 0))
         
+        # === 量能指标 ===
+        volume = float(day_row.get('volume', 0))  # 今日成交量/昨日成交量比
+        ratio = float(day_row.get('ratio', 0))    # 换手率
+        amount = float(day_row.get('amount', 0))  # 成交额
+        nclose = amount / volume if volume > 0 else 0  # 均价 (VWAP)
+        
         if open_price <= 0 or prev_close <= 0 or current_price <= 0:
             return events
         
         open_gap = (open_price - prev_close) / prev_close * 100
+        is_volume_qualified = volume > 1.0 or ratio > 2.5  # 放量条件：量比>1 或 换手>2.5%
         
-        # 低开走高: 开盘低于昨收 1%+, 当前价高于开盘 2%+
+        # --- 状态缓存 (用于突破确认迭代) ---
+        state_key = f"{code}_low_open_state"
+        if state_key not in self._cache:
+            self._cache[state_key] = {
+                'base_triggered': False,
+                'open_price': 0,
+                'breakout_signaled': False,
+                'prev_high_break': False,
+                'retest_count': 0
+            }
+        state = self._cache[state_key]
+        
+        # === 获取历史高点数据 ===
+        ma5 = float(day_row.get('ma5d', day_row.get('ma5', 0)))
+        ma10 = float(day_row.get('ma10d', day_row.get('ma10', 0)))
+        ma20 = float(day_row.get('ma20d', day_row.get('ma20', 0)))
+        high4 = float(day_row.get('high4', 0))  # 4日最高
+        max5 = float(day_row.get('max5', day_row.get('high5', 0)))  # 5日最高
+        lasth1d = float(day_row.get('lasth1d', prev_close * 1.05))  # 昨日最高
+        
+        # ====================================================================
+        # ⭐ 1. 低开走高: 开盘低于昨收 1%+, 当前价高于开盘 2%+
+        # ====================================================================
         if open_gap <= -1.0 and current_price > open_price * 1.02:
-            # === 起点分级：从哪个 MA 附近启动 ===
-            ma5 = float(day_row.get('ma5d', day_row.get('ma5', 0)))
-            ma10 = float(day_row.get('ma10d', day_row.get('ma10', 0)))
-            ma20 = float(day_row.get('ma20d', day_row.get('ma20', 0)))
-            
+            # 起点分级
             start_level = ""
-            if ma5 > 0 and abs(open_price - ma5) / ma5 < 0.015:  # 在 MA5 ±1.5% 附近
+            if ma5 > 0 and abs(open_price - ma5) / ma5 < 0.015:
                 start_level = "MA5"
             elif ma10 > 0 and abs(open_price - ma10) / ma10 < 0.015:
                 start_level = "MA10"
             elif ma20 > 0 and abs(open_price - ma20) / ma20 < 0.02:
                 start_level = "MA20"
-            elif open_price < day_low * 1.01:  # 接近日内最低
+            elif open_price < day_low * 1.01:
                 start_level = "日低"
             
-            # === 高度分级：走到了哪里 ===
-            high4 = float(day_row.get('high4', 0))  # 4日最高
-            max5 = float(day_row.get('max5', day_row.get('high5', 0)))  # 5日最高
-            
-            height_level = ""
+            # 高度分级
             height_levels = []
             if current_price > prev_close:
                 height_levels.append("昨收")
@@ -370,41 +428,117 @@ class IntradayPatternDetector:
                 height_levels.append("4日高")
             if max5 > 0 and current_price > max5:
                 height_levels.append("5日高")
-            if ma20 > 0 and current_price > ma20:
-                height_levels.append(">MA20")
             
-            if height_levels:
-                height_level = ",".join(height_levels[-2:])  # 取最高的2个
-            else:
-                # 计算涨幅作为备选
-                rise_pct = (current_price - open_price) / open_price * 100
-                height_level = f"+{rise_pct:.1f}%"
+            height_level = ",".join(height_levels[-2:]) if height_levels else f"+{(current_price - open_price) / open_price * 100:.1f}%"
             
-            # === 构建详细描述 ===
             detail_parts = [f"低开{open_gap:.1f}%"]
             if start_level:
                 detail_parts.append(f"@{start_level}")
             detail_parts.append(f"走高至{height_level}")
             
-            detail = "".join(detail_parts)
-            
             events.append(PatternEvent(
                 code=code, name=name, pattern='low_open_high_walk',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=current_price,
-                detail=detail
+                detail="".join(detail_parts)
             ))
+            
+            # 记录触发状态 (用于后续突破确认)
+            state['base_triggered'] = True
+            state['open_price'] = open_price
         
-        # 开盘最低: 当前价等于今日最低且等于开盘价
-        if abs(day_low - open_price) < 0.01 and current_price > open_price * 1.005:
-            events.append(PatternEvent(
-                code=code, name=name, pattern='open_is_low',
-                timestamp=datetime.now().strftime('%H:%M:%S'),
-                price=current_price,
-                detail="开盘最低,持续上行"
-            ))
+        # ====================================================================
+        # ⭐ 2. 开盘最低带量 (open_is_low_volume) - 用户核心需求
+        # ====================================================================
+        is_open_is_low = abs(day_low - open_price) < 0.01 or (open_price > 0 and abs(day_low - open_price) / open_price < 0.002)
+        is_rising = current_price > open_price * 1.01
+        is_above_vwap = nclose > 0 and current_price >= nclose * 0.998  # 在均价线上方
+        
+        if 'open_is_low' in self.enabled_patterns:
+            if is_open_is_low and is_rising:
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='open_is_low',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=current_price,
+                    detail="开盘最低,持续上行"
+                ))
+        
+        if 'open_is_low_volume' in self.enabled_patterns:
+            if is_open_is_low and is_rising and is_volume_qualified and is_above_vwap:
+                vol_desc = f"量比{volume:.1f}" if volume > 0 else f"换手{ratio:.1f}%"
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='open_is_low_volume',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=current_price,
+                    detail=f"★开盘即最低+带量({vol_desc})+均线上方",
+                    is_high_priority=True  # 核心信号,高优先级
+                ))
+                state['base_triggered'] = True
+                state['open_price'] = open_price
+        
+        # ====================================================================
+        # ⭐ 3. 日内低点带量反转 (nlow_is_low_volume)
+        # ====================================================================
+        if 'nlow_is_low_volume' in self.enabled_patterns:
+            # nlow: 日内最低价 ≈ 当前价的最近最低 (已触底后反弹)
+            # 条件: 当前价已从日低反弹 1%+, 且带量, 且在均价线上方
+            if day_low > 0 and current_price > day_low * 1.01 and is_volume_qualified:
+                # 额外条件: 日低必须低于开盘价 (说明有过探底)
+                if day_low < open_price * 0.995 and is_above_vwap:
+                    rebound_pct = (current_price - day_low) / day_low * 100
+                    vol_desc = f"量比{volume:.1f}" if volume > 0 else f"换手{ratio:.1f}%"
+                    events.append(PatternEvent(
+                        code=code, name=name, pattern='nlow_is_low_volume',
+                        timestamp=datetime.now().strftime('%H:%M:%S'),
+                        price=current_price,
+                        detail=f"★日低反转+{rebound_pct:.1f}%({vol_desc})+站上均价",
+                        is_high_priority=True
+                    ))
+        
+        # ====================================================================
+        # ⭐ 4. 突破确认信号 (low_open_breakout) - 二次迭代信号
+        # ====================================================================
+        if 'low_open_breakout' in self.enabled_patterns and state.get('base_triggered', False):
+            # 4.1 突破昨日高点
+            if lasth1d > 0 and current_price > lasth1d and not state.get('prev_high_break', False):
+                state['prev_high_break'] = True
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='low_open_breakout',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=current_price,
+                    detail=f"低开高走突破昨高({lasth1d:.2f})",
+                    is_high_priority=True
+                ))
+            
+            # 4.2 突破平台高点 (5日高)
+            if max5 > 0 and current_price > max5 and not state.get('breakout_signaled', False):
+                state['breakout_signaled'] = True
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='low_open_breakout',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=current_price,
+                    detail=f"低开高走突破平台({max5:.2f})",
+                    is_high_priority=True
+                ))
+            
+            # 4.3 回踩不破开盘价后再次拉升 (迭代: 仅触发一次)
+            saved_open = state.get('open_price', 0)
+            if saved_open > 0 and state.get('retest_count', 0) == 0:
+                # 条件: 日低接近开盘价 (回踩) 但未破, 且当前已反弹
+                if day_low >= saved_open * 0.995 and current_price > saved_open * 1.02:
+                    state['retest_count'] = 1
+                    events.append(PatternEvent(
+                        code=code, name=name, pattern='low_open_breakout',
+                        timestamp=datetime.now().strftime('%H:%M:%S'),
+                        price=current_price,
+                        detail="低开回踩不破开盘价后再拉升"
+                    ))
+        
+        # 保存状态
+        self._cache[state_key] = state
         
         return events
+
     
     def _check_instant_pullback(self, code: str, name: str,
                                  tick_df: Optional[pd.DataFrame],
@@ -797,6 +931,12 @@ class IntradayPatternDetector:
         key = f"{code}_high_sideways_break"
         if key not in self._cache:
             self._cache[key] = {'has_rally': False, 'max_p': 0.0, 'min_since_max': 999.0}
+        
+        # 确保关键键存在 (防止脏数据)
+        if 'max_p' not in self._cache[key]:
+            self._cache[key]['max_p'] = 0.0
+        if 'min_since_max' not in self._cache[key]:
+            self._cache[key]['min_since_max'] = 999.0
         
         state = self._cache[key]
         

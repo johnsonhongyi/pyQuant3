@@ -755,9 +755,12 @@ class TradingGUI(QWidget, WindowMixin):
         
         try:
             from trading_hub import get_trading_hub
-            summary_df = get_trading_hub().get_strategy_performance(days=30)
+            hub = get_trading_hub()
+            summary_df = hub.get_strategy_performance(days=30)
+            slippage_summary = hub.get_slippage_summary(days=30)
         except:
             summary_df = pd.DataFrame()
+            slippage_summary = {}
         
         display_text = f"=== 账户绩效总览 (最近30日) ===\n"
         display_text += f"总盈亏: {total_pnl:.2f} | 总笔数: {total_trades} | 平均笔盈亏: {avg_pnl:.2f}\n\n"
@@ -765,12 +768,43 @@ class TradingGUI(QWidget, WindowMixin):
         display_text += "-" * 50 + "\n"
         
         if not summary_df.empty:
-            summary_df = summary_df.sort_values('pnl', ascending=False)
+            # [FIX] KeyError: 'pnl' if the column is renamed or missing
+            sort_col = 'pnl' if 'pnl' in summary_df.columns else ('profit' if 'profit' in summary_df.columns else None)
+            if sort_col:
+                summary_df = summary_df.sort_values(sort_col, ascending=False)
+            
             for _, row in summary_df.iterrows():
                 win_rate = (row['wins'] / row['entered'] * 100) if row['entered'] > 0 else 0
-                display_text += f" {row['strategy_name']:<18}: 胜率 {win_rate:>5.1f}% | 笔数 {row['entered']:>3} | 盈亏 {row['pnl']:>9.2f}\n"
+                pnl_val = row.get('pnl', row.get('profit', 0))
+                display_text += f" {row['strategy_name']:<18}: 胜率 {win_rate:>5.1f}% | 笔数 {row['entered']:>3} | 盈亏 {pnl_val:>9.2f}\n"
         else:
             display_text += " (暂无策略统计信息)\n"
+        
+        # === 入场滑点分析 ===
+        display_text += "\n" + "=" * 50 + "\n"
+        display_text += "=== 入场滑点分析 ===\n"
+        display_text += "-" * 50 + "\n"
+        
+        if slippage_summary.get('total_entries', 0) > 0:
+            total_entries = slippage_summary['total_entries']
+            avg_slip = slippage_summary['avg_slippage_pct']
+            chase_high = slippage_summary['chase_high_count']
+            accurate = slippage_summary['accurate_count']
+            catch_low = slippage_summary['catch_low_count']
+            
+            display_text += f"入场总数: {total_entries} | 平均滑点: {avg_slip:+.2f}%\n"
+            display_text += f"  追高入场: {chase_high} ({chase_high/total_entries*100:.1f}%)\n"
+            display_text += f"  准确入场: {accurate} ({accurate/total_entries*100:.1f}%)\n"
+            display_text += f"  低吸入场: {catch_low} ({catch_low/total_entries*100:.1f}%)\n"
+            
+            # 按信号类型分解
+            by_signal = slippage_summary.get('by_signal_type', {})
+            if by_signal:
+                display_text += "\n按信号类型:\n"
+                for sig_type, stats in by_signal.items():
+                    display_text += f"  {sig_type:<12}: 平均 {stats['slippage_pct']:+.2f}% ({stats['count']}笔)\n"
+        else:
+            display_text += " (暂无入场滑点数据)\n"
         
         self.report_area.setPlainText(display_text)
 

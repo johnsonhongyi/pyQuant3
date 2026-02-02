@@ -128,6 +128,7 @@ class DailyPatternEvent:
     price: float
     detail: str
     score: float = 0.0
+    signal: Optional[Any] = None # 标准化信号对象 (StandardSignal)
 
 class DailyPatternDetector:
     
@@ -205,8 +206,30 @@ class DailyPatternDetector:
                 # logger.error(f"Realtime structure check error: {e}")
                 pass
         
-        # 触发回调
+        # 触发回调并发布到信号总线
         for ev in events:
+            # 尝试生成标准化信号
+            try:
+                from signal_bus import SignalBus, publish_standard_signal
+                from signal_standard import StandardSignal
+                std_signal = StandardSignal(
+                    code=ev.code,
+                    name=ev.name,
+                    type=SignalBus.EVENT_PATTERN,
+                    subtype=ev.pattern,
+                    price=ev.price,
+                    timestamp=ev.date if ev.date else "",
+                    score=ev.score,
+                    detail=ev.detail,
+                    source="DailyPatternDetector"
+                )
+                ev.signal = std_signal
+                publish_standard_signal(std_signal)
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug(f"Failed to publish daily standard signal: {e}")
+
             if self.on_pattern:
                 try:
                     self.on_pattern(ev)

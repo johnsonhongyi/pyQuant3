@@ -29,6 +29,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QColor, QAction
 
+# [REFACTOR] WindowMixin Imports
+from tk_gui_modules.window_mixin import WindowMixin
+from dpi_utils import get_windows_dpi_scale_factor
+import os
+from PyQt6 import QtGui
+
 logger = LoggerFactory.getLogger(__name__)
 
 DB_FILE = "signal_strategy.db"
@@ -88,7 +94,7 @@ class HotlistWorker(QThread):
         self.wait()
 
 
-class HotlistPanel(QWidget):
+class HotlistPanel(QWidget, WindowMixin):
     """
     热点自选面板（浮动窗口）
     
@@ -111,6 +117,13 @@ class HotlistPanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        
+        # [REFACTOR] Mixin Init
+        self.scale_factor = get_windows_dpi_scale_factor()
+        self.initial_x = 0
+        self.initial_y = 0
+        self.initial_w = 280
+        self.initial_h = 400
         self.items: List[HotlistItem] = []
         self._drag_pos = None
         self.voice_enabled = True  # 是否启用语音通知
@@ -749,9 +762,11 @@ class HotlistPanel(QWidget):
             # 尝试通过 window() 获取顶层窗口
             from PyQt6.QtWidgets import QApplication
             for widget in QApplication.topLevelWidgets():
-                if hasattr(widget, 'df_all') and widget.__class__.__name__ == 'MainWindow':
-                    main_window = widget
-                    break
+                # 优先寻找带有 df_all 属性且看起来像 MainWindow 的窗口
+                if hasattr(widget, 'df_all'):
+                    if widget.__class__.__name__ == 'MainWindow' or "Visualizer" in str(widget.windowTitle()):
+                        main_window = widget
+                        break
         except Exception:
             pass
         
@@ -1541,66 +1556,23 @@ class HotlistPanel(QWidget):
             self._drag_pos = None
             if hasattr(self, 'header'):
                 self.header.setCursor(Qt.CursorShape.OpenHandCursor)
-            self._save_position()  # 自动保存位置
+            # self._save_position()  # Old
+            self.save_window_position_qt_visual(self, "hotlist_panel") # New Unified
         super().mouseReleaseEvent(event)
 
-    # ================== 位置保存/加载 ==================
-    def _get_config_path(self) -> str:
-        """获取配置文件路径"""
-        import os
-        return os.path.join(os.path.dirname(__file__), "hotlist_position.json")
-
-    def _save_position(self):
-        """保存窗口位置和尺寸"""
-        import json
-        try:
-            config = {
-                "x": self.x(),
-                "y": self.y(),
-                "width": self.width(),
-                "height": self.height(),
-                "visible": self.isVisible()
-            }
-            with open(self._get_config_path(), "w", encoding="utf-8") as f:
-                json.dump(config, f)
-        except Exception as e:
-            logger.debug(f"Save hotlist position error: {e}")
-
-    def _load_position(self):
-        """加载窗口位置和尺寸"""
-        import json
-        import os
-        try:
-            path = self._get_config_path()
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    self.move(config.get("x", 100), config.get("y", 100))
-                    # 恢复尺寸
-                    w = config.get("width", 280)
-                    h = config.get("height", 400)
-                    self.resize(w, h)
-                    if config.get("visible", True):
-                        self.show()
-                    return True
-        except Exception as e:
-            logger.debug(f"Load hotlist position error: {e}")
-        return False
+    # ================== 位置保存/加载 (Unified Mixin) ==================
+    # Removed custom _get_config_path, _save_position, _load_position
 
     def showEvent(self, event):
         """首次显示时加载位置"""
         if not hasattr(self, '_pos_loaded'):
             self._pos_loaded = True
-            if not self._load_position():
-                # 默认位置：主窗口右侧
-                parent = self.parent()
-                if parent:
-                    parent_geo = parent.geometry()
-                    self.move(parent_geo.right() - 290, parent_geo.top() + 50)
+            # [REFACTOR] Use Unified Loader
+            self.load_window_position_qt(self, "hotlist_panel", default_width=280, default_height=400)
         super().showEvent(event)
 
     def hideEvent(self, event):
         """隐藏时保存位置"""
-        self._save_position()
+        self.save_window_position_qt_visual(self, "hotlist_panel")
         super().hideEvent(event)
 

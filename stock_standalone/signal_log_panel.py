@@ -35,8 +35,8 @@ class SignalLogPanel(QWidget, WindowMixin):
     - 股票维度去重 (避免相同信号刷屏)
     """
     
-    # 信号: 用户点击某条日志中的代码链接时发出
-    log_clicked = pyqtSignal(str)  # code
+    # 信号: code, pattern, message
+    log_clicked = pyqtSignal(str, str, str)
     
     # 信号颜色映射
     SIGNAL_COLORS = {
@@ -54,8 +54,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         super().__init__(parent)
         self._paused: bool = False
         self._log_buffer: list[str] = []
-        self._last_messages: dict[str, str] = {}  # 记录每只股票最后一条消息，用于去重
+        # 记录每只股票最后一条信号上下文 {code: {'pattern': p, 'message': m, 'name': n}}
+        self._last_signals: dict[str, dict] = {} 
         self._max_lines: int = 500
+        
         self._drag_pos: Optional[QPoint] = None
         
         # 闪屏状态
@@ -174,27 +176,29 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.status_label = QLabel("就绪")
         self.status_label.setStyleSheet("color: #555; font-size: 8pt; padding: 2px 8px;")
         layout.addWidget(self.status_label)
-    
+
     def _on_anchor_clicked(self, url: QUrl):
         """处理点击代码链接"""
         code = url.toString()
         if code:
-            self.log_clicked.emit(code)
-            self.status_label.setText(f"已跳转: {code}")
+            # 获取上下文
+            ctx = self._last_signals.get(code, {})
+            pattern = ctx.get('pattern', 'N/A')
+            message = ctx.get('message', '')
+            
+            self.log_clicked.emit(code, pattern, message)
+            self.status_label.setText(f"已跳转: {code} ({pattern})")
 
     def _validate_data(self, code: str, pattern: str, message: str) -> bool:
-        """基础数据校验 (Data Validation)
-        确保进入数据流的代码和消息格式正确，防止非法数据污染
-        """
-        if not code or len(code) < 5:
-            logger.warning(f"[Validation] Rejected invalid code: {code}")
+        """基础数据校验"""
+        if not code or not isinstance(code, str):
             return False
-        if not message or len(message.strip()) < 3:
-            logger.warning(f"[Validation] Rejected empty/short message for {code}")
-            return False
-        if not pattern:
-            return False
+        # 允许空消息，如果为空，append_log 会处理（或者显示为空）
+        if not message:
+           return False
         return True
+
+    # ... (skip _validate_data) ...
 
     def append_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """添加日志条目，包含校验与去重"""
@@ -206,32 +210,25 @@ class SignalLogPanel(QWidget, WindowMixin):
             return
 
         # 2. 智能去重：检查该代码的最后一条消息是否相同
-        if self._last_messages.get(code) == message:
+        last_ctx = self._last_signals.get(code, {})
+        if last_ctx.get('message') == message:
             return
         
         # 更新缓存
-        self._last_messages[code] = message
+        self._last_signals[code] = {'pattern': pattern, 'message': message, 'name': name}
         
         if self._paused:
             return
-            
-        # 1. 基础校验
-        if not self._validate_data(code, pattern, message):
-            return
-
-        # 2. 智能去重：检查该代码的最后一条消息是否相同
-        if self._last_messages.get(code) == message:
-            return
-        
-        # 更新缓存
-        self._last_messages[code] = message
         
         # 3. 颜色与格式化
         color = self.SIGNAL_COLORS.get(pattern, self.SIGNAL_COLORS['default'])
         
+        # 调试: 打印正在添加的日志
+        logger.debug(f"[SignalLogPanel] Appending: {code} {pattern} {color}")
+
         # 构造可点击的 HTML 段
-        clickable_code = f'<a href="{code}">[{code}]</a>'
-        clickable_name = f'<a href="{code}">{name}</a>'
+        clickable_code = f'<a href="{code}" style="color: #4da6ff;">[{code}]</a>'
+        clickable_name = f'<a href="{code}" style="color: #4da6ff;">{name}</a>'
 
         # 尝试在消息中替换名称和代码，使整行更具交互性
         display_msg = message
@@ -244,7 +241,8 @@ class SignalLogPanel(QWidget, WindowMixin):
         if clickable_code not in display_msg:
             display_msg = f"{clickable_code} {display_msg}"
 
-        html = f'<div style="color:{color}; margin-bottom: 2px;">{display_msg}</div>'
+        # 使用 span 强制颜色
+        html = f'<div style="margin-bottom: 2px;"><span style="color:{color};">{display_msg}</span></div>'
 
         # 插入内容
         self.log_text.append(html) 
@@ -265,7 +263,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         """清空日志"""
         self.log_text.clear()
         self._log_buffer.clear()
-        self._last_messages.clear()
+        self._last_signals.clear()
         self.count_label.setText("0")
         self.status_label.setText("已清空")
     

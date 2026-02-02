@@ -201,7 +201,9 @@ class HotSpotPopup(QDialog):
         self.signal_table.setHorizontalHeaderLabels(["时间", "类型", "评分", "理由"])
         self.signal_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.signal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.signal_table.setMaximumHeight(120)
+        # self.signal_table.setMaximumHeight(120)  # Removed to allow expansion
+        self.signal_table.setMinHeight(150) # Set a reasonable minimum height
+        self.signal_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
         header = self.signal_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -266,8 +268,8 @@ class HotSpotPopup(QDialog):
                 SELECT timestamp, signal_type, score, reason 
                 FROM signal_message 
                 WHERE code = ?
-                ORDER BY id DESC
-                LIMIT 10
+                ORDER BY timestamp DESC
+                LIMIT 50
             """, (self.code,))
             rows = c.fetchall()
             conn.close()

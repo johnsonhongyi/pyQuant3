@@ -12,8 +12,15 @@ def set_process_dpi_awareness():
     try:
         if sys.platform == "win32":
             # 对 Windows 10+ 启用 Per-Monitor DPI 感知
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            logger.info("[DPI] 已启用 Per-Monitor DPI Aware")
+            # ERROR_ACCESS_DENIED (5) usually means awareness is already set (e.g. by Qt6)
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                logger.info("[DPI] 已启用 Per-Monitor DPI Aware")
+            except OSError as e:
+                if e.winerror == 5:
+                    logger.debug("[DPI] Awareness already set, skipping.")
+                else:
+                    raise
     except Exception as e:
         logger.info(f"[DPI] 启用失败: {e}")
 

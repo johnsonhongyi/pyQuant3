@@ -39,16 +39,16 @@ class SignalTestWindow(QMainWindow):
             s.connect(('127.0.0.1', 26668))
             
             json_str = json.dumps(data)
-            # CommandListenerThread 协议: b"CODE" (4 字节) + 内容 (内容开头通常是 CODE|...)
-            # process_ipc_command 期望内容以 "CODE|" 开头，或者直接处理 "SIGNAL|"
-            # 这里统一使用 "CODE|SIGNAL|{json_str}" 格式，由 CommandListenerThread 拼接 "CODE" 后发送
-            msg = f"CODE|SIGNAL|{json_str}"
+            # CommandListenerThread 协议: b"CODE" (4 字节) + 内容
+            # Visualizer 端会将接收到的内容拼接为: prefix (CODE) + remaining
+            # 因此这里只需发送 b"CODE" + b"|SIGNAL|{json}"，对方收到就是 "CODE|SIGNAL|{json}"
+            msg = f"|SIGNAL|{json_str}"
             s.send(b"CODE")
             s.send(msg.encode('utf-8'))
             s.close()
-        except Exception:
+        except Exception as e:
             # 推送失败可能是 Visualizer 没开，忽略即可
-            pass
+            self.log(f"IPC Error: Connection failed - {e}")
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -162,6 +162,30 @@ class SignalTestWindow(QMainWindow):
             base['trade'] = 10.55
             base['amount'] = 1020000.0
             base['volume'] = 100000.0 # VWAP = 10.2
+        elif pattern == 'open_is_low_volume':
+            # 开盘最低带量: Open=Low, 且 volume > 1.0 或 ratio > 2.5
+            base['open'] = 10.0
+            base['low'] = 10.0
+            base['close'] = 10.2
+            base['trade'] = 10.2
+            base['volume'] = 1.5 # 量比 > 1.0
+            base['amount'] = 1020000.0 # VWAP = 10.2, curr=10.2
+        elif pattern == 'nlow_is_low_volume':
+            # 日低反转带量: 当前从日低反弹 1%+, 且带量
+            base['open'] = 10.1
+            base['low'] = 9.9
+            base['close'] = 10.05 # rebound from 9.9
+            base['trade'] = 10.05
+            base['volume'] = 1.2
+            base['amount'] = 1000000.0 # VWAP ≈ 10.0
+        elif pattern == 'low_open_breakout':
+            # 低开突破: 已触发过 base，现在突破昨日高点
+            self.detector._cache[f"MOCK_low_open_state"] = {'base_triggered': True, 'open_price': 9.5}
+            base['open'] = 9.5
+            base['close'] = 10.5
+            base['trade'] = 10.5
+            base['lasth1d'] = 10.0 # 昨高
+            base['max5'] = 10.4 # 5日高
         elif pattern == 'strong_auction_open':
             # 强力竞价: 高开 3% + Open=Low + TrendS > 60
             base['open'] = 10.3
@@ -171,7 +195,7 @@ class SignalTestWindow(QMainWindow):
             base['TrendS'] = 75
         elif pattern == 'momentum_failure':
              # 先构造 master_momentum 状态
-             self.detector._cache["MOCK_master_momentum_state"] = {'ever_broken': True, 'failure_signaled': False}
+             self.detector._cache["MOCK_master_momentum_state"] = {'ever_broken': False, 'failure_signaled': False}
              base['close'] = 9.5
              base['amount'] = 1000000.0
              base['volume'] = 100000.0 # VWAP = 10.0
@@ -179,52 +203,101 @@ class SignalTestWindow(QMainWindow):
         return pd.Series(base), prev_close
 
     def run_logic_test(self):
-        items = self.pattern_list.selectedItems()
-        if not items:
-            self.log("请先在列表中选择要测试的形态。")
-            return
-            
-        for item in items:
-            pattern = item.text()
-            self.log(f"--- 启动逻辑模拟: {pattern} ---")
-            
-            day_row, prev_close = self.get_mock_day_row(pattern)
-            code = "MOCK" if pattern != 'momentum_failure' else "MOCK"
-            
-            # 绕过检测器内部时间限制：
-            # 如果勾选了 mock_925，则传入 09:30 作为当前时间
-            # 否则传入 09:00 (这会被逻辑拦截，仅用于测试拦截功能)
-            mock_time = dt_time(10, 0) # 默认 10:00
-            if self.cb_mock_925.isChecked():
-                mock_time = dt_time(9, 30) if pattern != 'auction_high_open' else dt_time(9, 26)
-            else:
-                mock_time = dt_time(9, 0)
+        try:
+            items = self.pattern_list.selectedItems()
+            if not items:
+                self.log("请先在列表中选择要测试的形态。")
+                return
+                
+            for item in items:
+                pattern = item.text()
+                self.log(f"--- 启动逻辑模拟: {pattern} ---")
+                
+                day_row, prev_close = self.get_mock_day_row(pattern)
+                raw_code = "000001" # 使用真实感的代码
+                name = "平安测试"   # 使用真实感的名称
+                detected = [] # Initialize detected list
+                
+                # 绕过检测器内部时间限制：
+                # 如果勾选了 mock_925，则传入 09:30 作为当前时间
+                # 否则传入 09:00 (这会被逻辑拦截，仅用于测试拦截功能)
+                if self.cb_mock_925.isChecked():
+                    mock_time = dt_time(9, 30) if pattern != 'auction_high_open' else dt_time(9, 26)
+                else:
+                    mock_time = dt_time(9, 0)
 
-            events = self.detector.update(code, "测试股", None, day_row, prev_close, current_time=mock_time)
-            
-            if not events:
-                self.log(f"结果: 未触发 {pattern}。请检查 Mock 数据生成逻辑。")
-            else:
-                for ev in events:
-                    self.log(f"🔥 触发成功: {ev.pattern} - {ev.detail}")
+                # Simulate time progression for more robust testing
+                for i in range(1, 21): # Simulate 20 minutes after 9:30
+                    t = (datetime.combine(datetime.today(), dt_time(9, 30)) + timedelta(minutes=i)).time()
                     
-                    # 将模拟信号推送到 Visualizer
-                    ipc_data = {
-                        "code": ev.code,
-                        "name": ev.name,
-                        "pattern": ev.pattern,
-                        "price": ev.price,
-                        "detail": ev.detail,
-                        "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        "source": "SIMULATOR"
-                    }
-                    self._send_signal_to_visualizer_ipc(ipc_data)
-                    self.log(f"📡 已通过 IPC 将信号推送到 Visualizer (Port: 26668)")
+                    # [DEBUG] 打印调用参数，排查崩溃点
+                    # print(f"DEBUG: Calling update with {t}")
+                    
+                    events = self.detector.update(raw_code, name, None, day_row, prev_close, current_time=t)
+                    
+                    if events:
+                        for ev in events:
+                            # 获取事件描述 (兼容原始 PatternEvent 和新的 StandardSignal)
+                            if hasattr(ev, 'signal') and ev.signal:
+                                sig = ev.signal
+                                # 确保 signal 对象有 type/subtype 属性
+                                s_type = getattr(sig, 'type', 'unknown')
+                                s_subtype = getattr(sig, 'subtype', 'unknown')
+                                s_price = getattr(sig, 'price', 0.0)
+                                desc = f"{s_type}:{s_subtype} @ {s_price}"
+                            else:
+                                # 兼容模式
+                                desc = f"{getattr(ev, 'type', 'unknown')}:{getattr(ev, 'subtype', 'unknown')}"
+                                
+                            self.log(f"  [Detected] {t} -> {desc}")
+                            detected.append(ev)
+                            
+                            # 模拟发布 StandardSignal (如果是测试环境，可能需要直接调用 publish_standard_signal)
+                            if hasattr(ev, 'signal') and ev.signal:
+                                # 假设 publish_standard_signal 已定义，或者安全调用
+                                try:
+                                    from signal_bus import publish_standard_signal
+                                    publish_standard_signal(ev.signal)
+                                except ImportError:
+                                    pass
+                            else:
+                                from signal_bus import publish_pattern
+                                publish_pattern(source="Test", code=raw_code, name=name, 
+                                                pattern=getattr(ev, 'subtype', 'unknown'), 
+                                                price=getattr(ev, 'price', 0.0))
+                            
+                            # 将模拟信号推送到 Visualizer
+                            ipc_data = {
+                                "code": ev.code if hasattr(ev, 'code') else raw_code,
+                                "name": ev.name if hasattr(ev, 'name') else name,
+                                "pattern": getattr(ev, 'subtype', 'unknown'),
+                                "price": getattr(ev, 'price', 0.0),
+                                "detail": getattr(ev, 'detail', ''),
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                "source": "SIMULATOR"
+                            }
+                            # 如果 StandardSignal 存在，优先使用其数据
+                            if hasattr(ev, 'signal') and ev.signal:
+                                sig = ev.signal
+                                ipc_data.update(sig.to_dict())
 
-                    if ev.pattern == 'strong_auction_open':
-                        self.log("提示: 系统在检查该标的 Follow Queue 时将强制要求命中此形态。")
-                    if ev.pattern in ('bull_trap_exit', 'momentum_failure'):
-                        self.log("提示: 对于 auto_followed 标的，此信号将触发“跑路”通报。")
+                            self._send_signal_to_visualizer_ipc(ipc_data)
+                            self.log(f"📡 已通过 IPC 将信号推送到 Visualizer (Port: 26668)")
+
+                            if getattr(ev, 'subtype', '') == 'strong_auction_open':
+                                self.log("提示: 系统在检查该标的 Follow Queue 时将强制要求命中此形态。")
+                            if getattr(ev, 'subtype', '') in ('bull_trap_exit', 'momentum_failure'):
+                                self.log("提示: 对于 auto_followed 标的，此信号将触发“跑路”通报。")
+
+                if not detected:
+                    self.log(f"结果: 未触发 {pattern}。请检查 Mock 数据生成逻辑。")
+
+        except Exception as e:
+            import traceback
+            err_msg = traceback.format_exc()
+            print(err_msg) # 打印到控制台以防 UI 更新失败
+            self.log(f"CRITICAL ERROR: {e}")
+            self.log(err_msg)
 
     def direct_inject_test(self):
         items = self.pattern_list.selectedItems()

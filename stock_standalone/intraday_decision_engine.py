@@ -111,6 +111,30 @@ class IntradayDecisionEngine:
             debug["analysis_skip"] = "均线数据无效"
 
         # ==============================================================================
+        # 💥 [CRITICAL] P0 风控优先级：止损/止盈信号必须优先于所有其他逻辑
+        # Fix: 在涨跌停过滤之前检查止损，避免 "跌停Hold" 覆盖 "止损EXIT" 的矛盾
+        # ==============================================================================
+        is_t1_restricted = False
+        if snapshot.get('buy_date'):
+            today_str = dt.datetime.now().strftime('%Y-%m-%d')
+            if snapshot['buy_date'].startswith(today_str):
+                is_t1_restricted = True
+        
+        # 仅在持有仓位且非T+1时执行优先止损检查
+        if mode in ("full", "sell_only") and not is_t1_restricted:
+            cost_price = float(snapshot.get("cost_price", 0))
+            if cost_price > 0:  # 有持仓才检查止损
+                early_stop_result = self._stop_check(row, snapshot, debug)
+                if early_stop_result["triggered"]:
+                    debug["early_stop_priority"] = True
+                    return {
+                        "action": early_stop_result["action"],
+                        "position": early_stop_result["position"],
+                        "reason": f"[风控优先] {early_stop_result['reason']}",
+                        "debug": debug
+                    }
+        
+        # ==============================================================================
         # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
         # ==============================================================================
         hold_decision = self._main_wave_hold_check(row, snapshot, debug)

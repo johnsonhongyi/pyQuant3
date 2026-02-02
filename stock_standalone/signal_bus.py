@@ -13,13 +13,22 @@ SignalBus - 统一信号总线
     bus.publish(SignalBus.EVENT_PATTERN, "IntradayDetector", {"code": "000001", ...})
 """
 from __future__ import annotations
-from typing import Dict, List, Callable, Any, Optional
+from typing import Dict, List, Callable, Any, Optional, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 尝试导入信号标准 (使用类型注解支持)
+try:
+    from signal_standard import StandardSignal
+    _HAS_STANDARD = True
+except ImportError:
+    StandardSignal = Any  # Fallback for type hinting
+    _HAS_STANDARD = False
+    logger.warning("signal_standard not found, StandardSignal functionality will be limited")
 
 
 @dataclass
@@ -29,6 +38,7 @@ class BusEvent:
     timestamp: datetime
     source: str
     payload: Dict[str, Any]
+    signal: Optional['StandardSignal'] = None  # 使用字符串引用避免导入期循环或缺失问题
     
     def __repr__(self):
         return f"BusEvent({self.event_type}, {self.source}, {self.timestamp.strftime('%H:%M:%S')})"
@@ -80,13 +90,7 @@ class SignalBus:
         return cls._instance
     
     def subscribe(self, event_type: str, handler: Callable[[BusEvent], None]) -> None:
-        """
-        订阅事件
-        
-        Args:
-            event_type: 事件类型（使用 SignalBus.EVENT_* 常量）
-            handler: 回调函数，签名为 func(event: BusEvent) -> None
-        """
+        """订阅事件"""
         with self._lock:
             if event_type not in self._subscribers:
                 self._subscribers[event_type] = []
@@ -95,12 +99,7 @@ class SignalBus:
                 logger.debug(f"SignalBus: {getattr(handler, '__name__', 'handler')} subscribed to {event_type}")
     
     def unsubscribe(self, event_type: str, handler: Callable) -> bool:
-        """
-        取消订阅
-        
-        Returns:
-            是否成功取消
-        """
+        """取消订阅"""
         with self._lock:
             if event_type in self._subscribers:
                 try:
@@ -110,32 +109,30 @@ class SignalBus:
                     pass
         return False
     
-    def publish(self, event_type: str, source: str, payload: Dict[str, Any]) -> BusEvent:
+    def publish(self, event_type: str, source: str, payload: Dict[str, Any], 
+                signal: Optional['StandardSignal'] = None) -> BusEvent:
         """
         发布事件
         
         Args:
             event_type: 事件类型
-            source: 事件来源（模块名）
-            payload: 事件数据
-            
-        Returns:
-            创建的事件对象
+            source: 事件来源
+            payload: 数据负载
+            signal: [Optional] 标准化信号对象
         """
         event = BusEvent(
             event_type=event_type,
             timestamp=datetime.now(),
             source=source,
-            payload=payload
+            payload=payload,
+            signal=signal
         )
         
-        # 记录历史
         with self._lock:
             self._history.append(event)
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
         
-        # 分发给订阅者
         handlers = self._subscribers.get(event_type, [])
         for handler in handlers:
             try:
@@ -145,93 +142,91 @@ class SignalBus:
         
         logger.debug(f"SignalBus: Published {event_type} from {source}")
         return event
-    
+
     def get_history(self, event_type: Optional[str] = None, 
                     limit: int = 100,
                     since: Optional[datetime] = None) -> List[BusEvent]:
-        """
-        获取事件历史
-        
-        Args:
-            event_type: 筛选特定类型，None 表示全部
-            limit: 返回条数限制
-            since: 仅返回此时间之后的事件
-        """
         with self._lock:
             result = self._history
-            
             if event_type:
                 result = [e for e in result if e.event_type == event_type]
-            
             if since:
                 result = [e for e in result if e.timestamp >= since]
-            
             return result[-limit:]
-    
+
     def get_recent_by_code(self, code: str, limit: int = 10) -> List[BusEvent]:
-        """获取指定股票代码的最近事件"""
         with self._lock:
-            result = [
-                e for e in self._history 
-                if e.payload.get('code') == code
-            ]
+            result = [e for e in self._history if e.payload.get('code') == code]
             return result[-limit:]
-    
+
     def clear_history(self) -> int:
-        """清空历史记录，返回清除的条数"""
         with self._lock:
             count = len(self._history)
             self._history.clear()
             return count
-    
-    def get_subscriber_count(self, event_type: Optional[str] = None) -> int:
-        """获取订阅者数量"""
-        with self._lock:
-            if event_type:
-                return len(self._subscribers.get(event_type, []))
-            return sum(len(handlers) for handlers in self._subscribers.values())
-    
+
     def get_stats(self) -> Dict[str, Any]:
-        """获取总线统计信息"""
         with self._lock:
             type_counts = {}
             for event in self._history:
                 type_counts[event.event_type] = type_counts.get(event.event_type, 0) + 1
-            
             return {
                 "total_events": len(self._history),
-                "subscriber_count": self.get_subscriber_count(),
-                "event_type_counts": type_counts,
-                "subscribers_by_type": {
-                    k: len(v) for k, v in self._subscribers.items()
-                }
+                "event_type_counts": type_counts
             }
 
 
-# 全局单例访问
+# 全局单例
 _bus_instance: Optional[SignalBus] = None
 
 def get_signal_bus() -> SignalBus:
-    """获取全局信号总线实例"""
     global _bus_instance
     if _bus_instance is None:
         _bus_instance = SignalBus()
     return _bus_instance
 
 
-# 便捷函数
+# ==============================================================================
+# 统一发布接口
+# ==============================================================================
+
+def publish_standard_signal(signal: 'StandardSignal') -> BusEvent:
+    """发布标准化信号"""
+    return get_signal_bus().publish(
+        event_type=signal.type,
+        source=signal.source,
+        payload=signal.to_dict(),
+        signal=signal
+    )
+
+
 def publish_pattern(source: str, code: str, name: str, pattern: str, 
-                    price: float, detail: str = "") -> BusEvent:
-    """发布形态事件的便捷函数"""
+                    price: float, detail: str = "", score: float = 0.0, 
+                    count: int = 1, is_high_priority: bool = False) -> BusEvent:
+    """发布形态事件 (自动封装)"""
+    if _HAS_STANDARD:
+        signal = StandardSignal(
+            code=code,
+            name=name,
+            type=SignalBus.EVENT_PATTERN,
+            subtype=pattern,
+            price=price,
+            timestamp=datetime.now().strftime("%H:%M:%S"),
+            score=score,
+            count=count,
+            detail=detail,
+            source=source,
+            is_high_priority=is_high_priority
+        )
+        return publish_standard_signal(signal)
+    
     return get_signal_bus().publish(
         SignalBus.EVENT_PATTERN,
         source,
         {
-            "code": code,
-            "name": name,
-            "pattern": pattern,
-            "price": price,
-            "detail": detail,
+            "code": code, "name": name, "pattern": pattern, "price": price,
+            "detail": detail, "score": score, "count": count, 
+            "is_high_priority": is_high_priority,
             "timestamp": datetime.now().strftime("%H:%M:%S")
         }
     )
@@ -240,37 +235,26 @@ def publish_pattern(source: str, code: str, name: str, pattern: str,
 def publish_phase_change(source: str, code: str, name: str,
                          old_phase: str, new_phase: str,
                          position_ratio: float, reason: str = "") -> BusEvent:
-    """发布阶段变更事件的便捷函数"""
-    return get_signal_bus().publish(
-        SignalBus.EVENT_PHASE,
-        source,
-        {
-            "code": code,
-            "name": name,
-            "old_phase": old_phase,
-            "new_phase": new_phase,
-            "position_ratio": position_ratio,
-            "reason": reason,
-            "timestamp": datetime.now().strftime("%H:%M:%S")
-        }
-    )
-
-
-if __name__ == "__main__":
-    # 简单测试
-    def test_handler(event: BusEvent):
-        print(f"Received: {event}")
+    """发布阶段变更"""
+    payload = {
+        "code": code, "name": name, "old_phase": old_phase, "new_phase": new_phase,
+        "position_ratio": position_ratio, "reason": reason,
+        "timestamp": datetime.now().strftime("%H:%M:%S")
+    }
     
-    bus = get_signal_bus()
-    bus.subscribe(SignalBus.EVENT_PATTERN, test_handler)
-    
-    publish_pattern(
-        source="test",
-        code="000001",
-        name="平安银行",
-        pattern="low_open_high_walk",
-        price=10.5,
-        detail="低开2%走高"
-    )
-    
-    print(f"Stats: {bus.get_stats()}")
+    if _HAS_STANDARD:
+        signal = StandardSignal(
+            code=code,
+            name=name,
+            type=SignalBus.EVENT_PHASE,
+            subtype=new_phase,
+            price=0.0,
+            timestamp=str(payload["timestamp"]),
+            detail=reason,
+            phase=new_phase,
+            source=source,
+            metadata=payload
+        )
+        return get_signal_bus().publish(SignalBus.EVENT_PHASE, source, payload, signal)
+        
+    return get_signal_bus().publish(SignalBus.EVENT_PHASE, source, payload)
