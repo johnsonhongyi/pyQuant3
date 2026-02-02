@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-02-02 19:05  
+> 最后更新：2026-02-03 02:20  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 
@@ -36,7 +36,29 @@
 
 ---
 
-## ✅ 最近完成任务: P0.9 - 主升浪持仓与见顶信号优化 (02-02 20:30)
+## ✅ 最近完成任务: P1.6 - 信号标准化与可视化组件修复 (02-03 02:20)
+
+**状态**: ✅ 已完成
+**目标**: 统一日内/日线信号输出标准，修复 Visualizer 的 IPC 信号接收逻辑，确保端到端信号流的可视化。
+
+### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `intraday_pattern_detector.py` | `PatternEvent` 增加 `signal` 字段，绑定 `StandardSignal` |
+| `daily_pattern_detector.py` | `DailyPatternEvent` 增加 `signal` 字段，实现标准化输出 |
+| `stock_live_strategy.py` | 重构 `_on_pattern_detected` 以适配标准化信号 |
+| `trade_visualizer_qt6.py` | 修复 `_update_signal_log_from_ipc` 兼容性，支持 `subtype` 映射 |
+| `test_signal_suite.py` | 修正语法错误，支持标准化信号测试逻辑 |
+
+### 核心产出
+- **信号标准化**: 所有形态检测器现在统一输出 `StandardSignal` 对象。
+- **IPC 链路打通**: 修复了可执行程序(Visualizer)无法正确解析推送信号的问题。
+- **UI 增强**: 系统现在能更准确地识别高优先级信号并触发对应的视觉反馈。
+
+---
+
+## ⏳ 历史完成任务: P0.9 - 主升浪持仓与见顶信号优化 (02-02 20:30)
 
 **状态**: ✅ 已完成
 **目标**: 基于 002667 案例，从发现主升浪→持有→顶部信号清仓的全流程优化。解决主升浪“拿不住”和高位“走不掉”的问题。
@@ -243,24 +265,23 @@ if hasattr(self, 'pattern_detector'):
 
 ---
 
-## 🔴 当前任务: P1 - 策略整合 (Strategy Integration)
+## 🔴 当前任务: P1 - 策略整合与系统稳健性 (Strategy & Stability)
 
 **状态**: 🔴 进行中
-**目标**: 统一日线形态检测逻辑，标准化策略入口，增强竞价/回踩/突破逻辑。
+**目标**: 进一步整合日内决策逻辑，优化跨进程数据同步，完善自动化测试套件。
 
 ### 核心子任务
 
 | 序号 | 任务描述 | 状态 |
 |------|----------|------|
-| 1 | **日K形态统一入口**: 完善 `daily_pattern_detector.py`，整合所有日线级信号 | ⏳ 待办 |
-| 2 | **策略循环重构**: 重写 `stock_live_strategy._check_strategies`，解耦具体策略逻辑 | ⏳ 待办 |
-| 3 | **竞价阶段处理**: 独立 `Call Auction` 逻辑，支持高开/低开/抢筹模式 | ⏳ 待办 |
-| 4 | **连续大阳检测**: 识别连板/趋势加速，对接 `PositionPhaseEngine` 的 `SURGE` 阶段 | ⏳ 待办 |
+| 1 | **端到端逻辑验证**: 使用 `test_signal_suite.py` 完整跑通所有形态的闭环测试 | ⏳ 待办 |
+| 2 | **策略循环解耦**: 持续优化 `stock_live_strategy._check_strategies` 的可预测性 | ⏳ 待办 |
+| 3 | **跨进程性能监控**: 优化 `trade_visualizer_qt6.py` 的 IPC 吞吐性能 | ⏳ 待办 |
 
-### 历史记录 (P0.9 主升浪优化 - 已完成)
-- **任务清单**: `20260202_task.md` (原 P0.9 任务)
-- **验收报告**: `20260202_walkthrough.md`
-- **成果**: TD 序列 + 顶部评分 + 主升保护 + 实时报警闭环。
+### 历史记录
+- **实施计划**: `20260203_0214_implementation_plan.md`
+- **任务清单**: `20260203_0214_task.md`
+- **成果**: 信号全链路标准化，Visualizer 接收能力恢复。
 
 ---
 
@@ -346,7 +367,8 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期 | 内容 | 影响 |
 |------|------|------|
-| 02-02 20:30 | **P0.9 完结**: TD/TopScore 实时报警集成 + 代码 lint 清理 | `stock_live_strategy.py`, `strategy_manager.py` |
+| 02-03 02:20 | **P1.6 信号标准化**: 统一 SignalStandard 结构，修复 Visualizer IPC 接收逻辑 | `intraday_pattern_detector.py`, `trade_visualizer_qt6.py` |
+| 02-02 20:30 | **P0.9 完结**: TD/TopScore 实时报警集 | `stock_live_strategy.py`, `strategy_manager.py` |
 | 02-02 21:00 | **主升浪持仓优化 (P0/P1) 完成**：集成 TD 序列及日线顶部信号检测，实现主升浪持仓保护逻辑，升级状态机支持主升识别 | `td_sequence.py`, `daily_top_detector.py`, `intraday_decision_engine.py`, `position_phase_engine.py` |
 | 02-02 19:05 | **启动主升浪持仓优化任务**：基于 002667 案例，规划 TD 序列、顶部检测器及主升浪保护逻辑 | `gemini.md`, `implementation_plan.md` |
 | 01-24 03:41 | **P1.5 缺口监控与自动跟单完成**：集成向量化全市场缺口扫描，支持自动加入 `TradingHub` 跟单队列，优化 K 线缺口无限带显示 | `trade_visualizer_qt6.py`, `hotlist_panel.py`, `signal_types.py` |

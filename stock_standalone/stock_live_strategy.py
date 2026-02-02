@@ -3010,16 +3010,19 @@ class StockLiveStrategy:
             return
 
         try:
-            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
+            # === 获取标准化信号信息 (增强扩展性) ===
+            sig = getattr(event, 'signal', None)
+            pattern_key = sig.subtype if sig else event.pattern
+            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(pattern_key, pattern_key)
             
             # 区分买点信号 vs 卖点信号
-            action = "风险" if event.pattern in ('high_drop', 'top_signal') else "形态"
+            action = "风险" if pattern_key in ('high_drop', 'top_signal', 'bull_trap_exit', 'momentum_failure') else "形态"
             
             # === 高优先级信号检测 ===
-            is_high_priority = False
+            is_high_priority = event.is_high_priority
             high_priority_reason = ""
             
-            if event.pattern in ('low_open_high_walk', 'pullback_upper'):
+            if pattern_key in ('low_open_high_walk', 'pullback_upper', 'open_is_low_volume', 'nlow_is_low_volume'):
                 # 尝试从实时数据中获取当前行情 (如果可用)
                 try:
                     ratio = 0.0
@@ -3028,7 +3031,6 @@ class StockLiveStrategy:
                         ratio = float(row.get('ratio', 0))  # 换手率
                     
                     # 使用 detector 生成的 detail 判断起点位置
-                    # detail 格式如: "低开-2.1%@MA10走高至4日高" 或 "低开-3.0%@日低走高至..."
                     detail = event.detail or ""
                     start_at_ma = "@MA" in detail or "@日低" in detail
                     has_volume = ratio > 3.0
@@ -3051,8 +3053,7 @@ class StockLiveStrategy:
             
             # === 构建消息 (使用 detector 生成的 detail) ===
             count_suffix = f" (第{event.count}次)" if event.count > 1 else ""
-            # 优先使用 event.detail，它包含分级信息 (如 "低开-2.1%@MA10走高至4日高")
-            detail_msg = event.detail if event.detail else pattern_cn
+            detail_msg = event.detail if event.detail else (sig.detail if sig else pattern_cn)
             msg = f"{event.name} {detail_msg}{count_suffix}"
             if high_priority_reason:
                 msg = f"{msg} {high_priority_reason}"

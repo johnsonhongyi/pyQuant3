@@ -677,17 +677,22 @@ class CommandListenerThread(QThread):
                     elif prefix == b"CODE":
                         # --- CODE 模式：短文本指令 (CODE|...) ---
                         try:
-                            # 尝试非阻塞读取剩余内容 (最多 1024 字节)
+                            # 尝试非阻塞读取剩余内容 (加大缓冲区防止JSON截断)
                             client_socket.settimeout(1.0) # 防止这里死锁
-                            remaining = client_socket.recv(1024)
+                            remaining = client_socket.recv(16384) # 1KB -> 16KB
                             full_cmd_bytes = prefix + remaining
                             cmd = full_cmd_bytes.decode("utf-8", errors='ignore')
                             
+                            # logger.info(f"[IPC DEBUG] Prefix=CODE, len={len(remaining)}, cmd[:50]={cmd[:50]}")
+
                             if "|" in cmd:
-                                logger.info(f"[IPC] Command received: {cmd}")
+                                # logger.info(f"[IPC] Command received: {cmd}")
                                 self.command_received.emit(cmd)
+                            else:
+                                logger.warning(f"[IPC] Invalid command (no pipe): {cmd}")
                         except Exception as e:
                             logger.error(f"[IPC] Command process error: {e}")
+                    
                     else:
                         # 未知协议头，可能是脏数据，直接丢弃
                         logger.warning(f"[IPC] Unknown protocol prefix: {prefix}. Discarding connection.")
@@ -1883,6 +1888,9 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1. 窗口基本设置
         self.setWindowTitle("PyQuant Stock Visualizer (Qt6 + PyQtGraph)")
         
+        # 信号上下文 (用于 K线图标注和详情弹窗)
+        self.active_signal_context = None
+
         # === Qt 版 BooleanVar 包装器，用于兼容 StockSender ===
         class QtBoolVar:
             """模拟 tk.BooleanVar 接口，用于 Qt 环境"""
@@ -2597,9 +2605,17 @@ class MainWindow(QMainWindow, WindowMixin):
         
         logger.info("✅ 热点面板和信号日志面板已初始化")
 
-    def _on_signal_log_clicked(self, code: str):
+    def _on_signal_log_clicked(self, code: str, pattern: str = '', message: str = ''):
         """处理信号日志中的代码点击：一键直达"""
         if not code: return
+        
+        # 保存信号上下文
+        self.active_signal_context = {
+            'code': code,
+            'pattern': pattern,
+            'message': message,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
         
         # 1. 联动 K 线视图与基础数据
         self.load_stock_by_code(code)
@@ -2615,7 +2631,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        logger.debug(f"[LINK] Signal Log clicked: {code}, linked to all views.")
+        logger.debug(f"[LINK] Signal Log clicked: {code}, linked to all views. Ctx: {pattern}")
     
     
     def _toggle_signal_log(self):
@@ -2703,8 +2719,21 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """信号日志回调 - 追加到日志面板并写入数据库"""
         try:
-            # 1. 显示到信号日志面板（传递高优先级标志以触发闪屏）
+            logger.info(f"⚡ [SIGNAL LOG] {code} {name} {pattern} {message}")
+            
+            # 1. 播报语音 (新增)
+            if hasattr(self, 'voice_thread') and (is_high_priority or pattern == 'ALERT' or "卖出" in message):
+                # 简化播报内容，避免太长
+                speak_msg = f"{name} {pattern}"
+                if "卖出" in message:
+                    speak_msg = f"{name} 卖出信号"
+                self.voice_thread.speak(speak_msg)
+
+            # 2. 显示到信号日志面板（传递高优先级标志以触发闪屏）
             if hasattr(self, 'signal_log_panel'):
+                if not self.signal_log_panel.isVisible():
+                    self.signal_log_panel.show()
+                    self.signal_log_panel.raise_()
                 self.signal_log_panel.append_log(code, name, pattern, message, is_high_priority=is_high_priority)
             
             # 2. 推送到 SignalMessageQueue (核心修复：确保 SignalBoxDialog 能收到)
@@ -2728,10 +2757,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.signal_box_dialog._queue_mgr.push(msg)
                     logger.debug(f"✅ Signal pushed to Queue: {code} - {pattern}")
                 
-                # 触发 UI 刷新 (如果队列管理器没有自动信号)
-                # SignalBoxDialog 通常会定时刷新，或者我们可以手动触发
-                if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog.isVisible():
-                    self.signal_box_dialog.refresh()
+                    # 触发 UI 刷新及显示
+                    if not self.signal_box_dialog.isVisible() and is_high_priority:
+                         self.signal_box_dialog.show()
+                    if self.signal_box_dialog.isVisible():
+                        self.signal_box_dialog.refresh()
+                
+                # 3. 触发 HotspotPopup (可选)
+                # if is_high_priority:
+                #    self._show_hotspot_popup(code, name, pattern, str(msg.score))
 
         except Exception as e:
             logger.error(f"Failed to process signal log: {e}")
@@ -2748,9 +2782,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 content = cmd_str
                 
             # 1. 信号推送命令: SIGNAL|{json_str}
+            logger.info(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
             if content.startswith("SIGNAL|"):
                 try:
                     json_str = content[7:]
+                    # logger.debug(f"[IPC DEBUG] Processing SIGNAL payload: {json_str[:50]}...")
                     data = json.loads(json_str)
                     # 转发给 _update_signal_log_from_ipc
                     # data 应该是 list of signals 或 single signal dict
@@ -2785,13 +2821,20 @@ class MainWindow(QMainWindow, WindowMixin):
         logger.info(f"[IPC] Processing {len(data_list)} signals from IPC")
         for data in data_list:
             try:
-                # 提取核心参数，兼容 PatternEvent 和 SignalMessage 格式
+                # 提取核心参数，兼容 PatternEvent, StandardSignal 和 SignalMessage 格式
                 code = data.get('code', '')
                 name = data.get('name', '')
-                # 兼容 pattern / signal_type
-                pattern = data.get('pattern', data.get('signal_type', 'UNKNOWN'))
-                # 兼容 detail / reason / message
+                
+                # 优先级: subtype (StandardSignal) > pattern (PatternEvent) > signal_type (SignalMessage)
+                pattern = data.get('subtype', data.get('pattern', data.get('signal_type', 'UNKNOWN')))
+                
+                # 特殊处理：如果 type 是 'pattern'，subtype 才是具体形态
+                if data.get('type') == 'pattern' and 'subtype' in data:
+                    pattern = data['subtype']
+                
+                # 兼容 detail (StandardSignal) / reason (PatternEvent) / message (SignalMessage)
                 message = data.get('detail', data.get('reason', data.get('message', '')))
+                
                 is_high_priority = data.get('is_high_priority', False)
                 
                 # 直接调用现有的信号处理逻辑
@@ -2906,6 +2949,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.td_action.setToolTip("显示/隐藏神奇九转指标")
         self.td_action.triggered.connect(self.on_toggle_td_sequential)
         self.toolbar.addAction(self.td_action)
+
+        # [RESTORE] 测试信号按钮
+        test_action = QAction("测试信号", self)
+        test_action.triggered.connect(self._test_send_signal)
+        self.toolbar.addAction(test_action)
+        
         self.toolbar.addSeparator()
 
         # 系统级全局快捷键开关
@@ -2940,6 +2989,18 @@ class MainWindow(QMainWindow, WindowMixin):
             border-radius: 3px;
         }
         """)
+
+    def _test_send_signal(self):
+        """测试发送信号 (Restored)"""
+        if hasattr(self, 'signal_log_panel'):
+            import random
+            patterns = ['上升三法', '老鸭头', '蚂蚁上树', '出水芙蓉', '均线金叉']
+            code = f"{random.randint(600000, 603000):06d}"
+            pattern = random.choice(patterns)
+            self.signal_log_panel.append_log(code, "测试股票", pattern, f"测试信号: {pattern} 出现", is_high_priority=True)
+            logger.info(f"Test signal sent: {code} - {pattern}")
+        else:
+            QMessageBox.warning(self, "错误", "信号面板未初始化")
 
     def on_toggle_simulation(self, checked):
         self.show_strategy_simulation = checked
@@ -3582,6 +3643,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
         data = self.current_supervision_data
 
+        # 优先显示点击的信号详情
+        if hasattr(self, 'active_signal_context') and self.active_signal_context:
+            ctx = self.active_signal_context
+            if ctx.get('code') == self.current_code:
+                # 覆盖或追加最近信号详情
+                data['last_action'] = "SIGNAL LOG"
+                data['last_reason'] = ctx.get('message', 'N/A')
+                data['shadow_info'] = ctx.get('pattern', 'N/A')
+
         # 构建 HTML 内容
         content = f"""
         <h3>🛡️ 实时策略监理报告</h3>
@@ -3603,10 +3673,9 @@ class MainWindow(QMainWindow, WindowMixin):
             </tr>
         </table>
         <hr>
-        <h4>🔎 最近信号详情</h4>
-        <p><b>动作:</b> {data.get('last_action', 'N/A')}</p>
-        <p><b>原因:</b> {data.get('last_reason', 'N/A')}</p>
-        <p><b>诊断:</b> {data.get('shadow_info', 'N/A')}</p>
+        <h4>🔎 信号详情 (点击来源)</h4>
+        <p><b>模式:</b> {data.get('shadow_info', 'N/A')}</p>
+        <p><b>消息:</b> {data.get('last_reason', 'N/A')}</p>
         """
 
         msg = QMessageBox(self)
@@ -4994,6 +5063,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self._table_item_map = {}  # 重置映射
             return
         
+        # ⚡ 性能优化: 预先关闭信号和排序
+        self.stock_table.blockSignals(True)
+        self.stock_table.setUpdatesEnabled(False) 
+        self.stock_table.setSortingEnabled(False) # 关键性能点
+        
         n_rows = len(df)
         
         # ⚡ [CRITICAL] 大数据量（>500行）使用异步分块更新，避免UI卡死
@@ -5161,6 +5235,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # ⚡ 恢复信号和更新
             logger.debug("[TableUpdate] Restoring updatesEnabled=True and signals...")
+            self.stock_table.setSortingEnabled(True) # Restore Sorting
             self.stock_table.setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
             
@@ -5923,6 +5998,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 QtCore.QTimer.singleShot(200, _delayed_hot_signals)
             
             # ⚡ [FIX] 热点形态检测 - 驱动信号日志面板
+            def _delayed_hotlist_check():
+                try:
+                    # 如果 self._check_hotlist_patterns 存在则调用，否则降级到 _check_hotspot_alerts
+                    if hasattr(self, '_check_hotlist_patterns'):
+                        self._check_hotlist_patterns()
+                    else:
+                        self._check_hotspot_alerts(df if df is not None else self.df_all)
+                except Exception as e:
+                    logger.error(f"[_delayed_hotlist_check] Error: {e}")
             QtCore.QTimer.singleShot(300, _delayed_hotlist_check)
             
             # ⚡ [NEW] 全市场缺口探测
@@ -6438,6 +6522,111 @@ class MainWindow(QMainWindow, WindowMixin):
                 
         except Exception as e:
             logger.debug(f"Draw hotspot marker error: {e}")
+
+    def _draw_signal_annotation(self, code, x_axis, day_df):
+        """在 K 线图上绘制被点击的信号标注"""
+        # 先清理旧标记
+        if hasattr(self, 'signal_annotation_items'):
+            for item in self.signal_annotation_items:
+                try:
+                    self.kline_plot.removeItem(item)
+                except:
+                    pass
+            self.signal_annotation_items.clear()
+        else:
+            self.signal_annotation_items = []
+        
+        # 检查是否有激活的信号上下文，并且代码匹配
+        if not hasattr(self, 'active_signal_context') or not self.active_signal_context:
+            return
+            
+        ctx = self.active_signal_context
+        if ctx.get('code') != code:
+            return
+            
+        try:
+            # 定位到最后一根 K 线 (假设是实时信号)
+            # 如果信号里有时间且能匹配到历史K线最好，但通常是 pending signal
+            idx = len(day_df) - 1
+            if idx < 0: return
+            
+            # 获取坐标
+            try:
+                x_pos = x_axis[idx]
+            except:
+                x_pos = idx
+                
+            # 获取价格 (High or Low based on pattern?)
+            row = day_df.iloc[idx]
+            high_val = row['high']
+            low_val = row['low']
+            close_val = row['close']
+            
+            pattern = ctx.get('pattern', 'SIGNAL')
+            message = ctx.get('message', '')
+            
+            # 简化消息显示 (优化重复信息)
+            # 假设消息格式: "Code Name Pattern Detail..."
+            # 我们只提取关键动作或价格
+            short_msg = pattern
+            if "卖出" in message:
+                short_msg = "卖出"
+            elif "买入" in message:
+                short_msg = "买入"
+            
+            is_sell = "卖出" in message or "高开" in pattern or "回落" in pattern
+            
+            # 绘制箭头
+            if is_sell:
+                # 绿色向下箭头，在最高价上方
+                anchor_y = high_val
+                arrow = pg.ArrowItem(angle=-90, tipAngle=30, baseAngle=20, headLen=15, tailLen=10, tailWidth=5, pen={'color': 'w', 'width': 1}, brush='g')
+                arrow.setPos(x_pos, anchor_y)
+                
+                # 文字标签
+                label_html = f'<div style="color: #00FF00; font-weight: bold; font-size: 10pt;">{short_msg}</div>'
+                label = pg.TextItem(html=label_html, anchor=(0.5, 1)) # 底部中心对齐 -> 文字在上方
+                label.setPos(x_pos, anchor_y + (high_val * 0.01)) # 稍微再高一点
+                
+            else:
+                # 红色向上箭头，在最低价下方
+                anchor_y = low_val
+                arrow = pg.ArrowItem(angle=90, tipAngle=30, baseAngle=20, headLen=15, tailLen=10, tailWidth=5, pen={'color': 'w', 'width': 1}, brush='r')
+                arrow.setPos(x_pos, anchor_y)
+                
+                # 文字标签
+                label_html = f'<div style="color: #FF0000; font-weight: bold; font-size: 10pt;">{short_msg}</div>'
+                label = pg.TextItem(html=label_html, anchor=(0.5, 0)) # 顶部中心对齐 -> 文字在下方
+                label.setPos(x_pos, anchor_y - (low_val * 0.01))
+
+            # Make items clickable
+            # Use partial to bind the slot if needed, but direct connect works for signals
+            # ArrowItem and TextItem in pyqtgraph might not have 'clicked' signal directly
+            # We can use the 'sigClicked' if available or override mousePressEvent
+            # For simplicity, we wrap them or attach mouse events if possible.
+            # Pyqtgraph items often accept mouseClickEvent.
+            
+            def on_click(event):
+                self.show_supervision_details()
+
+            arrow.mouseClickEvent = on_click
+            label.mouseClickEvent = on_click
+            
+            # Ensure they accept mouse events
+            # arrow.setAcceptedMouseButtons(Qt.MouseButton.LeftButton) # arrow inherits from QGraphicsItem? 
+            # pg items usually handle this. ArrowItem might need explicit verify.
+            
+            # Note: arrow/text items in pg might need setClickable(True) or setAcceptHoverEvents.
+            # Let's try simpler binding.
+            
+            self.kline_plot.addItem(arrow)
+            self.kline_plot.addItem(label)
+            self.signal_annotation_items.extend([arrow, label])
+            
+            logger.debug(f"[Annotation] Drew signal annotation for {code}: {short_msg}")
+            
+        except Exception as e:
+            logger.error(f"Failed to draw signal annotation: {e}")
 
     def _clear_hotspot_markers(self):
         """清理旧的热点标记"""
@@ -7517,6 +7706,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # --- 绘制热点标记 (热点自选加入点) ---
         self._draw_hotspot_markers(code, x_axis, day_df)
+        self._draw_signal_annotation(code, x_axis, day_df)
 
 
 

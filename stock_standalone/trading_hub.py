@@ -441,6 +441,89 @@ class TradingHub:
         conn.close()
         return df
     
+    def get_slippage_analysis(self, days: int = 30) -> pd.DataFrame:
+        """
+        计算入场滑点分析 (detected_price vs entry_price)
+        
+        Returns:
+            DataFrame with columns:
+            - code, name, signal_type
+            - detected_price: 信号触发价格
+            - entry_price: 实际买入价格
+            - slippage_pct: 滑点百分比 ((entry - detected) / detected * 100)
+            - slippage_direction: '追高' or '低吸' or '准确'
+        """
+        conn = sqlite3.connect(self.signal_db)
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        # Join follow_queue and positions on code
+        query = """
+            SELECT 
+                fq.code, fq.name, fq.signal_type,
+                fq.detected_price, fq.detected_date,
+                p.entry_price, p.entry_date, p.pnl_percent, p.status
+            FROM follow_queue fq
+            INNER JOIN positions p ON fq.code = p.code
+            WHERE fq.detected_date >= ?
+              AND p.entry_price > 0
+              AND fq.detected_price > 0
+            ORDER BY fq.detected_date DESC
+        """
+        
+        df = pd.read_sql_query(query, conn, params=(start_date,))
+        conn.close()
+        
+        if df.empty:
+            return df
+        
+        # Calculate slippage
+        df['slippage_pct'] = (df['entry_price'] - df['detected_price']) / df['detected_price'] * 100
+        
+        # Classify slippage direction
+        def classify_slippage(pct):
+            if pct > 1.0:
+                return '追高'
+            elif pct < -1.0:
+                return '低吸'
+            else:
+                return '准确'
+        
+        df['slippage_direction'] = df['slippage_pct'].apply(classify_slippage)
+        
+        return df
+    
+    def get_slippage_summary(self, days: int = 30) -> Dict[str, Any]:
+        """获取滑点统计摘要"""
+        df = self.get_slippage_analysis(days)
+        
+        if df.empty:
+            return {
+                'total_entries': 0,
+                'avg_slippage_pct': 0.0,
+                'chase_high_count': 0,
+                'accurate_count': 0,
+                'catch_low_count': 0,
+                'by_signal_type': {}
+            }
+        
+        summary = {
+            'total_entries': len(df),
+            'avg_slippage_pct': float(df['slippage_pct'].mean()),
+            'chase_high_count': len(df[df['slippage_direction'] == '追高']),
+            'accurate_count': len(df[df['slippage_direction'] == '准确']),
+            'catch_low_count': len(df[df['slippage_direction'] == '低吸']),
+        }
+        
+        # By signal type
+        by_signal = df.groupby('signal_type').agg({
+            'slippage_pct': 'mean',
+            'code': 'count'
+        }).rename(columns={'code': 'count'}).to_dict('index')
+        
+        summary['by_signal_type'] = by_signal
+        
+        return summary
+    
     # =========== 跨库数据访问 ===========
     
     def get_trading_history(self, days: int = 30) -> pd.DataFrame:
