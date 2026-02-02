@@ -816,28 +816,46 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # === 2. 价格列统一 ===
-    # 你的真实价格列是 close
+    # === 2. 价格列统一与 OHLC 获取 ===
+    # 优先使用官方字段 (open, high, low)，因为它们通常代表全天的累进值
+    # 如果缺失，再降级到价格列统计
     price_col = 'close'
-    if price_col not in df.columns and 'price' in df.columns:
-        price_col = 'price'
-    low_col = 'low'
-    # if low_col not in df.columns and 'close' in df.columns:
-    #     low_col = 'close'
-    high_col = 'high'
-
     if price_col not in df.columns:
-        logger.error(f"tick_to_daily_bar: Missing price column. Cols: {df.columns}")
-        return pd.DataFrame()
+        for c in ['price', 'trade']:
+            if c in df.columns:
+                price_col = c
+                break
+    
+    # 查找官方 OHLC 列
+    def get_val(df, keys, fallback_func, use_last=True):
+        for k in keys:
+            if k in df.columns:
+                valid = df[k][df[k] > 0]
+                if not valid.empty:
+                    return valid.iloc[-1] if use_last else valid.iloc[0]
+        return fallback_func()
 
     try:
+        # Open: 优先官方 open，其次第一笔价
+        open_p = get_val(df, ['open', 'nopen'], lambda: df[price_col].iloc[0], use_last=False)
+        # High: 优先官方 high，其次统计最高价
+        high_p = get_val(df, ['high', 'nhigh'], lambda: df[high_col].max() if high_col in df.columns else df[price_col].max())
+        # Low: 优先官方 low，其次统计最低价
+        low_p = get_val(df, ['low', 'nlow'], lambda: df[low_col].min() if low_col in df.columns else df[price_col].min())
+        # Close: 最后一笔价
+        close_p = df[price_col].iloc[-1]
+        
+        # 修正逻辑：High/Low 必须包络 Open/Close
+        high_p = max(high_p, open_p, close_p)
+        low_p = min(low_p, open_p, close_p)
+
         bar = pd.DataFrame(
             {
-                'open':   [df[price_col].iloc[0]],
-                'high':   [df[high_col].max()],
-                'low':    [df[low_col].min()],
-                'close':  [df[price_col].iloc[-1]],
-                'volume': [df['volume'].iloc[-1] if 'volume' in df.columns else 0],  # 注意：你的 volume 是累计量
+                'open':   [open_p],
+                'high':   [high_p],
+                'low':    [low_p],
+                'close':  [close_p],
+                'volume': [df['volume'].iloc[-1] if 'volume' in df.columns else 0],
             },
             index=[today_str],
         )
@@ -4468,6 +4486,12 @@ class MainWindow(QMainWindow, WindowMixin):
             today_row = today_bar.iloc[0]
             for col in self.day_df.columns:
                 if col in today_row.index and pd.notna(today_row[col]):
+                    # ⭐ [FIX] 如果是 open，且当前已有有效值，不轻易覆盖，防止被 segment 里的第一笔价格带歪
+                    if col == 'open' and pd.notna(self.day_df.loc[today_idx, col]) and self.day_df.loc[today_idx, col] > 0:
+                        # 只有在 today_row['open'] 看起来更像“真开盘价”时才覆盖？
+                        # 实际上 official 'open' 列应该是准的，如果是 fallback 产生的 open 则不覆盖
+                        # 简单逻辑：如果已有 open 且 > 0，则保留旧的
+                        continue
                     self.day_df.loc[today_idx, col] = today_row[col]
             logger.debug(f"[RT] Updated today's bar for {code}")
         else:
@@ -7105,42 +7129,25 @@ class MainWindow(QMainWindow, WindowMixin):
                 new_x = len(day_df)
                 
                 # [FIX] 增强实时 OHLC 字段获取，防止 T 字形 K 线 (Open=Close)
-                # 优先找 'open'/'nopen'，如果没找到则用 current_price
+                # 统一从 tick_df 获取日线级别的 OHLC（如果存在官方列）
                 
+                def get_tick_val(df, keys, fallback_func, use_last=True):
+                    for k in keys:
+                        if k in df.columns:
+                            valid = df[k][df[k] > 0]
+                            if not valid.empty:
+                                return valid.iloc[-1] if use_last else valid.iloc[0]
+                    return fallback_func()
+
                 # 1. Open
-                if 'open' in tick_df.columns:
-                    # 过滤掉 0 值
-                    opens = tick_df['open'][tick_df['open'] > 0]
-                    open_p = opens.iloc[-1] if not opens.empty else tick_df[price_col].iloc[0]
-                elif 'nopen' in tick_df.columns:
-                    opens = tick_df['nopen'][tick_df['nopen'] > 0]
-                    open_p = opens.iloc[-1] if not opens.empty else tick_df[price_col].iloc[0]
-                else:
-                    # Fallback: Use the first available price as Open
-                    open_p = tick_df[price_col].iloc[0]
-                    
+                open_p = get_tick_val(tick_df, ['open', 'nopen'], lambda: tick_df[price_col].iloc[0], use_last=False)
+                
                 # 2. High
-                if 'high' in tick_df.columns:
-                    highs = tick_df['high'][tick_df['high'] > 0]
-                    high_p = highs.max() if not highs.empty else tick_df[price_col].max()
-                elif 'nhigh' in tick_df.columns:
-                    highs = tick_df['nhigh'][tick_df['nhigh'] > 0]
-                    high_p = highs.max() if not highs.empty else tick_df[price_col].max()
-                else:
-                    # Fallback: Calculate Max from price column
-                    high_p = tick_df[price_col].max()
-
+                high_p = get_tick_val(tick_df, ['high', 'nhigh'], lambda: tick_df[price_col].max())
+                
                 # 3. Low
-                if 'low' in tick_df.columns:
-                    lows = tick_df['low'][tick_df['low'] > 0]
-                    low_p = lows.min() if not lows.empty else tick_df[price_col].min()
-                elif 'nlow' in tick_df.columns:
-                    lows = tick_df['nlow'][tick_df['nlow'] > 0]
-                    low_p = lows.min() if not lows.empty else tick_df[price_col].min()
-                else:
-                    # Fallback: Calculate Min from price column
-                    low_p = tick_df[price_col].min()
-
+                low_p = get_tick_val(tick_df, ['low', 'nlow'], lambda: tick_df[price_col].min())
+                
                 # 修正 High/Low 必须包含 Current/Open
                 high_p = max(high_p, current_price, open_p)
                 low_p = min(low_p, current_price, open_p)
