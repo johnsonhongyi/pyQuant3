@@ -38,6 +38,7 @@ class TradingLogger:
     """
     def __init__(self, db_path: str = "./trading_signals.db"):
         self.db_path = db_path
+        self._signal_cache = {} # (code, action) -> timestamp
         self._init_db()
 
     def _init_db(self) -> None:
@@ -331,6 +332,31 @@ class TradingLogger:
         用于盘后精细化分析
         """
         try:
+            # --- [Deduplication] ---
+            import time
+            now_ts = time.time()
+            cache_key = (code, action)
+            
+            # 清理过期的 cache (简单起见，每次随机清理或按阈值清理，这里每次检查当前key即可，另加定期清理)
+            # 简单清理：如果有 1000 个缓存，清除超过 600s 的 (因为最大窗口变为了 600s)
+            if len(self._signal_cache) > 1000:
+                self._signal_cache = {k: v for k, v in self._signal_cache.items() if now_ts - v[0] < 600}
+            
+            last_ts, last_price = self._signal_cache.get(cache_key, (0, 0.0))
+            
+            dt = now_ts - last_ts
+            # 计算价格变动幅度
+            price_change_pct = abs(price - last_price) / last_price if last_price > 0 else 1.0
+            
+            # 策略 A: 极速冷却 (60秒内，无论价格怎么变都屏蔽，防止高频刷屏)
+            if dt < 60:
+                return
+
+            # 策略 B: 滞涨冷却 (10分钟内，如果价格变动小于 0.5%，则视为无价值重复信号)
+            # 只有当价格出现显著波动 (>=0.5%) 或时间超过 10分钟，才记录下一次
+            if dt < 600 and price_change_pct < 0.005: 
+                return
+
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -347,11 +373,14 @@ class TradingLogger:
             
             conn.commit()
             conn.close()
+            
+            # 更新缓存: (时间, 价格)
+            self._signal_cache[cache_key] = (now_ts, price)
             # logger.debug(f"LiveSignal: Recorded {code} {action} at {price}")
         except Exception as e:
             logger.error(f"Error in log_live_signal: {e}")
 
-    def get_live_signal_history_df(self, date: Optional[str] = None, code: Optional[str] = None, limit: int = 1000):
+    def get_live_signal_history_df(self, date: Optional[str] = None, code: Optional[str] = None, action: Optional[str] = None, limit: int = 1000):
         """获取实时信号历史供 UI 展示"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -364,6 +393,10 @@ class TradingLogger:
             if code:
                 query += " AND code = ?"
                 params.append(code)
+            if action and action != "全部":
+                # 支持模糊匹配，例如 "买入" 匹配 "挂单买入", "自动买入"
+                query += " AND action LIKE ?"
+                params.append(f"%{action}%")
             
             query += " ORDER BY id DESC LIMIT ?"
             params.append(limit)

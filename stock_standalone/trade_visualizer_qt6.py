@@ -4945,6 +4945,13 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⚡ 性能优化: 禁用信号和排序
         self.stock_table.blockSignals(True)
+        # 保存状态：排序、选择、滚动位置
+        saved_v_scroll = self.stock_table.verticalScrollBar().value()
+        saved_h_scroll = self.stock_table.horizontalScrollBar().value()
+        header = self.stock_table.horizontalHeader()
+        saved_sort_col = header.sortIndicatorSection()
+        saved_sort_order = header.sortIndicatorOrder()
+
         self.stock_table.setSortingEnabled(False)
         self.stock_table.setUpdatesEnabled(False)
         
@@ -5057,17 +5064,35 @@ class MainWindow(QMainWindow, WindowMixin):
                         continue
         
         finally:
+            # ⚡ 恢复排序状态
+            self.stock_table.setSortingEnabled(True)
+            self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
+            
+            # ⚡ [CRITICAL] 排序后必须重建索引映射，否则 row_idx 是旧的/错误的
+            self._rebuild_item_map_from_table()
+            
+            # ⚡ 恢复选中项 (在排序和映射重建之后)
+            if self.current_code:
+                self.stock_table.blockSignals(True)
+                code_str = str(self.current_code)
+                if code_str in self._table_item_map:
+                    row = self._table_item_map[code_str]
+                    # logger.debug(f"[TableUpdate] Restoring selection to row {row} for {code_str}")
+                    self.stock_table.setCurrentCell(row, 0)
+                self.stock_table.blockSignals(False)
+
+            # ⚡ 恢复滚动位置
+            self.stock_table.verticalScrollBar().setValue(saved_v_scroll)
+            self.stock_table.horizontalScrollBar().setValue(saved_h_scroll)
+            
             # ⚡ 恢复信号和更新
             logger.debug("[TableUpdate] Restoring updatesEnabled=True and signals...")
             self.stock_table.setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
-            self.stock_table.setSortingEnabled(True)
             
             # ⭐ [BUGFIX] 限制过宽列，防止挤压 K 线图
-            # 在自动宽度计算后，对特定长文本列进行二次限制
             if not df.empty:
                 try:
-                    # 针对“决策理由”等可能很长的列设置上限
                     for i, h in enumerate(self.headers):
                         if h in ('last_reason', 'shadow_info'):
                             if self.stock_table.columnWidth(i) > 200:
@@ -5078,19 +5103,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⚡ 性能日志
             duration = time.time() - start_time
             n_rows = len(df) if not df.empty else 0
-            if duration > 0.5:  # 超过500ms警告
+            if duration > 0.5:
                 logger.warning(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s ⚠️")
             else:
                 logger.info(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s")
-        
-        # ⭐ [NEW] 如果当前已有加载的股票但表格中没选中，则尝试在表格中同步选中它
-        if self.current_code and self.stock_table.currentRow() == -1:
-            code_str = str(self.current_code)
-            if code_str in self._table_item_map:
-                row = self._table_item_map[code_str]
-                self.stock_table.blockSignals(True)
-                self.stock_table.setCurrentCell(row, 0)
-                self.stock_table.blockSignals(False)
     
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
@@ -6013,24 +6029,24 @@ class MainWindow(QMainWindow, WindowMixin):
             vb = self.kline_plot.getViewBox()
             
             # ========== 1. 计算图表区域的实际像素宽度 ==========
-            # ========== 1. 计算图表区域的实际像素宽度 ==========
-            # 优先使用 target_width，其次 main_splitter.sizes()[1]
+            # 优先顺序: target_width > widget.width() (最准) > splitter.sizes()[1] > ViewBox.width()
             chart_pixel_width = 800  # 默认值
+            
             sizes = []
-            if hasattr(self, 'main_splitter'):
-                try:
-                    sizes = self.main_splitter.sizes()
-                except Exception:
-                    pass
-
             if target_width is not None and isinstance(target_width, (int, float)) and target_width > 0:
                 chart_pixel_width = int(target_width)
-                logger.debug(f"[_reset_kline_view] Using forced target width: {chart_pixel_width}px (actual sizes: {sizes})")
-            elif len(sizes) >= 2:
-                chart_pixel_width = max(sizes[1], 200)  # 最小保护
-                logger.debug(f"[_reset_kline_view] Using splitter width: {chart_pixel_width}px sizes:{sizes}")
-            else:
-                # 回退方案：使用 ViewBox 宽度
+            elif hasattr(self, 'kline_widget') and self.kline_widget.width() > 100:
+                # ⭐ [OPTIMIZATION] Widget 宽度在渲染稳定后是最准确的
+                chart_pixel_width = self.kline_widget.width()
+            elif hasattr(self, 'main_splitter'):
+                try:
+                    sizes = self.main_splitter.sizes()
+                    if len(sizes) >= 2:
+                        chart_pixel_width = max(sizes[1], 200)
+                except Exception:
+                    pass
+            
+            if chart_pixel_width <= 200: # 最后的兜底
                 try:
                     vb_width = vb.width()
                     if vb_width and vb_width > 100:
@@ -6039,16 +6055,18 @@ class MainWindow(QMainWindow, WindowMixin):
                     pass
             
             # ========== 2. 计算可见 K 线数 ==========
-            # 每根 K 线约占 8-12 像素（包含间隔），这里用 10 作为平均值
-            BAR_PIXEL_WIDTH = 10
-            visible_bars = max(30, int(chart_pixel_width / BAR_PIXEL_WIDTH))
+            # ⭐ [OPTIMIZATION] 增加单根 K 线宽度，减少可见根数，使显示不那么“拥挤”
+            # 原为 10，现改为 18
+            BAR_PIXEL_WIDTH = 18
+            visible_bars = max(35, int(chart_pixel_width / BAR_PIXEL_WIDTH))
             
-            # 限制最小显示根数，防止显示过少
-            visible_bars = max(visible_bars, 60)
+            # 限制最小显示根数，防止显示过少但也不要强制太多导致拥挤
+            visible_bars = min(visible_bars, 120) 
             
             # ========== 3. 计算 X 轴范围 ==========
-            # 始终让最新数据在右侧可见，留出 2 根 K 线的右边距
-            RIGHT_MARGIN = 2
+            # 始终让最新数据在右侧可见
+            # ⭐ [FIX] 预留 2 根 K 线位置 (由 8 改回 2)
+            RIGHT_MARGIN = 2 
             x_max = total_bars + RIGHT_MARGIN
             x_min = max(-1, total_bars - visible_bars)
             
@@ -7897,6 +7915,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.toggle_filter_btn.setText(btn_text)
                 tooltip = "展开筛选面板" if is_collapsed else "收起筛选面板"
                 self.toggle_filter_btn.setToolTip(tooltip)
+
+        # ⭐ [NEW] 当拖动 Splitter 时也需要触发 K 线视图重置，以自适应新尺寸
+        if hasattr(self, 'day_df') and not self.day_df.empty:
+            # 使用频率限制/简单延迟防抖，避免拖动时过于卡顿
+            if not hasattr(self, '_splitter_reset_timer'):
+                from PyQt6.QtCore import QTimer
+                self._splitter_reset_timer = QTimer(self)
+                self._splitter_reset_timer.setSingleShot(True)
+                self._splitter_reset_timer.timeout.connect(lambda: self._reset_kline_view(force=True))
+            
+            self._splitter_reset_timer.start(50) # 50ms 防抖
     
     def _on_toggle_filter_clicked(self):
         """处理面板上的 Toggle 按钮点击"""
@@ -8005,11 +8034,15 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'day_df') and not self.day_df.empty:
             from PyQt6.QtCore import QTimer
             def _delayed_reset():
-                self._reset_kline_view(df=self.day_df, force=True)
-            # 第一次延迟：等待 splitter 布局
-            QTimer.singleShot(50, _delayed_reset)
-            # 第二次延迟：确保渲染完全稳定
-            # QTimer.singleShot(200, _delayed_reset)
+                # ⭐ 传入当前 splitter 的准确宽度，确保计算结果立即可靠
+                sizes = self.main_splitter.sizes()
+                tw = sizes[1] if len(sizes) >= 2 else None
+                self._reset_kline_view(df=self.day_df, force=True, target_width=tw)
+            
+            # 第一次延迟：等待 splitter 布局初始反应
+            QTimer.singleShot(20, _delayed_reset)
+            # 第二次延迟：确保布局完全稳定（比如动画结束或系统重排）
+            QTimer.singleShot(150, _delayed_reset)
 
 
     def open_history_manager(self):

@@ -1075,7 +1075,28 @@ class Sina:
             f"columns={list(df.columns)}"
         )
 
-    def drop_tick_all_zero(self,df: pd.DataFrame) -> pd.DataFrame:
+
+    def drop_tick_all_zero(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        删除无效 tick：
+        - close == 0
+        - volume == 0
+        保留索引结构（适用于 MultiIndex）
+        """
+        if df.empty:
+            return df
+
+        needed = {'close', 'volume'}
+        if not needed.issubset(df.columns):
+            return df
+
+        mask_valid = (df['close'] != 0) & (df['volume'] != 0)
+
+        return df.loc[mask_valid]
+
+
+
+    def drop_tick_all_zero_all_zero(self,df: pd.DataFrame) -> pd.DataFrame:
         """
         删除 tick 中 OHLC + volume 全为 0 的脏行
         - 不 reset index
@@ -1858,7 +1879,9 @@ if __name__ == "__main__":
     # df = sina.get_stock_code_data('000017')
 
     # print((sina.get_stock_code_data('300107').T))
+    code='603056'
     dd = sina.get_real_time_tick('300376')
+    # dd = sina.get_real_time_tick(code)
     tickdf = cct.tick_to_daily_bar(dd)
     import ipdb;ipdb.set_trace()
 
