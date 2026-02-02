@@ -2702,51 +2702,102 @@ class MainWindow(QMainWindow, WindowMixin):
     
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """信号日志回调 - 追加到日志面板并写入数据库"""
-        # 1. 显示到信号日志面板（传递高优先级标志以触发闪屏）
-        if hasattr(self, 'signal_log_panel'):
-            self.signal_log_panel.append_log(code, name, pattern, message, is_high_priority=is_high_priority)
-        
-        # 2. 写入数据库 signal_message 表（同日同股同信号只更新计数）
         try:
-            import sqlite3
-            from datetime import datetime
+            # 1. 显示到信号日志面板（传递高优先级标志以触发闪屏）
+            if hasattr(self, 'signal_log_panel'):
+                self.signal_log_panel.append_log(code, name, pattern, message, is_high_priority=is_high_priority)
             
-            conn = sqlite3.connect("signal_strategy.db", timeout=10)
-            c = conn.cursor()
-            
-            now_time = datetime.now().strftime('%H:%M:%S')
-            now_date = datetime.now().strftime('%Y-%m-%d')
-            priority_value = 100 if is_high_priority else 50
-            
-            # 检查是否已存在同日同股同信号类型
-            c.execute("""
-                SELECT id, count FROM signal_message 
-                WHERE code = ? AND signal_type = ? AND source = 'hotlist_panel' AND created_date = ?
-                LIMIT 1
-            """, (code, pattern, now_date))
-            existing = c.fetchone()
-            
-            if existing:
-                # 已存在：更新计数和时间戳
-                new_count = existing[1] + 1
-                c.execute("""
-                    UPDATE signal_message 
-                    SET timestamp = ?, count = ?, priority = ?, reason = ?
-                    WHERE id = ?
-                """, (now_time, new_count, priority_value, message, existing[0]))
-                logger.debug(f"✅ Signal updated in DB: {code} - {pattern} (count={new_count})")
-            else:
-                # 不存在：插入新记录
-                c.execute("""
-                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (now_time, code, name, pattern, 'hotlist_panel', priority_value, 0.0, message, 0, now_date, 1, 1))
-                logger.debug(f"✅ Signal saved to DB: {code} - {pattern}")
-            
-            conn.commit()
-            conn.close()
+            # 2. 推送到 SignalMessageQueue (核心修复：确保 SignalBoxDialog 能收到)
+            # 这会自动处理数据库写入、内存缓存更新和去重
+            if hasattr(self, '_queue_mgr') and self._queue_mgr:
+                from signal_message_queue import SignalMessage
+                from datetime import datetime
+                
+                # 构建 SignalMessage 对象
+                msg = SignalMessage(
+                    priority=100 if is_high_priority else 50,
+                    timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    code=code,
+                    name=name,
+                    signal_type=pattern,
+                    source='hotlist_panel',
+                    reason=message,
+                    score=0.0
+                )
+                if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog._queue_mgr:
+                    self.signal_box_dialog._queue_mgr.push(msg)
+                    logger.debug(f"✅ Signal pushed to Queue: {code} - {pattern}")
+                
+                # 触发 UI 刷新 (如果队列管理器没有自动信号)
+                # SignalBoxDialog 通常会定时刷新，或者我们可以手动触发
+                if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog.isVisible():
+                    self.signal_box_dialog.refresh()
+
         except Exception as e:
-            logger.error(f"Failed to save signal to DB: {e}")
+            logger.error(f"Failed to process signal log: {e}")
+
+    def process_ipc_command(self, cmd_str: str):
+        """处理 IPC 命令分发"""
+        try:
+            if not cmd_str: return
+            
+            # 移除协议前缀 "CODE|" 如果存在
+            if cmd_str.startswith("CODE|"):
+                content = cmd_str[5:]
+            else:
+                content = cmd_str
+                
+            # 1. 信号推送命令: SIGNAL|{json_str}
+            if content.startswith("SIGNAL|"):
+                try:
+                    json_str = content[7:]
+                    data = json.loads(json_str)
+                    # 转发给 _update_signal_log_from_ipc
+                    # data 应该是 list of signals 或 single signal dict
+                    if isinstance(data, dict):
+                        self._update_signal_log_from_ipc([data])
+                    elif isinstance(data, list):
+                        self._update_signal_log_from_ipc(data)
+                    logger.info(f"IPC SIGNAL processed: {len(data) if isinstance(data, list) else 1} items")
+                except Exception as e:
+                    logger.error(f"Failed to parse IPC SIGNAL: {e}")
+                    
+            # 2. 普通股票代码: 6位数字
+            elif len(content) == 6 and content.isdigit():
+                self.load_stock_by_code(content)
+                self.activateWindow() # 收到代码时激活窗口
+                
+            # 3. 带名称的股票代码: 000001,平安银行 (兼容旧格式)
+            elif "," in content:
+                parts = content.split(",")
+                if len(parts) >= 1 and len(parts[0]) == 6:
+                    self.load_stock_by_code(parts[0])
+                    self.activateWindow()
+            
+            else:
+                logger.warning(f"Unknown IPC command content: {content}")
+                
+        except Exception as e:
+            logger.error(f"Error processing IPC command: {e}")
+
+    def _update_signal_log_from_ipc(self, data_list: list):
+        """处理通过 IPC 推送的信号数据列表 (供测试套件或外部程序使用)"""
+        logger.info(f"[IPC] Processing {len(data_list)} signals from IPC")
+        for data in data_list:
+            try:
+                # 提取核心参数，兼容 PatternEvent 和 SignalMessage 格式
+                code = data.get('code', '')
+                name = data.get('name', '')
+                # 兼容 pattern / signal_type
+                pattern = data.get('pattern', data.get('signal_type', 'UNKNOWN'))
+                # 兼容 detail / reason / message
+                message = data.get('detail', data.get('reason', data.get('message', '')))
+                is_high_priority = data.get('is_high_priority', False)
+                
+                # 直接调用现有的信号处理逻辑
+                self._on_signal_log(code, name, pattern, message, is_high_priority)
+            except Exception as e:
+                logger.error(f"[IPC] Error processing signal item: {e}")
     
     def _check_hotlist_patterns(self):
         """定时检测热点股票形态"""
@@ -5027,13 +5078,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
                 logger.debug("[TableUpdate] Clearing table...")
                 self.stock_table.setRowCount(0) # 显式清空
-                # ⚡ [SAFEGUARD] 强制处理事件循环，确保旧对象被安全销毁
-                QtWidgets.QApplication.processEvents()
+                # ⚡ [UI FIX] 减少处理事件频率，仅在大规模清空时处理一次
+                if n_rows > 1000:
+                    QtGui.QGuiApplication.processEvents()
                 
-                logger.debug("[TableUpdate] Allocating rows...")
                 self.stock_table.setRowCount(n_rows)
-                # logger.debug(f"[TableUpdate] Filling {n_rows} rows...")
-                
                 self._table_item_map = {}
                 
                 for row_idx in range(n_rows):
@@ -5060,7 +5109,8 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.stock_table.removeRow(row_idx)
                     # 更新映射
                     for code in codes_to_delete:
-                        del self._table_item_map[code]
+                        if code in self._table_item_map:
+                            del self._table_item_map[code]
                     # 重新计算剩余行的索引
                     self._rebuild_item_map_from_table()
                 
@@ -5117,7 +5167,11 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⭐ [BUGFIX] 限制过宽列，防止挤压 K 线图
             if not df.empty:
                 try:
-                    for i, h in enumerate(self.headers):
+                    # 确保 i 有效，防止 headers 长度与表格列数不匹配
+                    header_count = len(self.headers)
+                    table_col_count = self.stock_table.columnCount()
+                    for i in range(min(header_count, table_col_count)):
+                        h = self.headers[i]
                         if h in ('last_reason', 'shadow_info'):
                             if self.stock_table.columnWidth(i) > 200:
                                 self.stock_table.setColumnWidth(i, 200)
@@ -5869,12 +5923,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 QtCore.QTimer.singleShot(200, _delayed_hot_signals)
             
             # ⚡ [FIX] 热点形态检测 - 驱动信号日志面板
-            def _delayed_hotlist_check():
-                try:
-                    self._check_hotlist_patterns()
-                except Exception as e:
-                    logger.debug(f"[_delayed_hotlist_check] Error: {e}")
             QtCore.QTimer.singleShot(300, _delayed_hotlist_check)
+            
+            # ⚡ [NEW] 全市场缺口探测
+            def _delayed_gap_check():
+                try:
+                    self._check_market_gaps()
+                except Exception as e:
+                    logger.debug(f"[_delayed_gap_check] Error: {e}")
+            QtCore.QTimer.singleShot(500, _delayed_gap_check)
 
             # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
             def _delayed_filter_refresh():
@@ -6511,7 +6568,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 连接一次，后续 addItem 不会破坏这个 hook
         vb.sigRangeChanged.connect(on_range_changed)
 
-    def _check_hotlist_patterns(self):
+    def _check_market_gaps(self):
         """
         全市场跳空缺口探测 (向量化优化)
         """
@@ -6609,7 +6666,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self._update_signal_badge()
 
         except Exception as e:
-            logger.error(f"[_check_hotlist_patterns] Error: {e}")
+            logger.error(f"[_check_market_gaps] Error: {e}")
 
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
@@ -9341,7 +9398,8 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     
     # ⭐ [Refactor] 将 ListenerThread 移入 window 内部管理，确保统一清理
     window.command_listener_thread = CommandListenerThread(server_socket)
-    window.command_listener_thread.command_received.connect(window.load_stock_by_code)
+    # ⭐ [FIX] 使用 process_ipc_command 处理所有 IPC 指令 (含 SIGNAL)
+    window.command_listener_thread.command_received.connect(window.process_ipc_command)
     window.command_listener_thread.dataframe_received.connect(window.on_dataframe_received)
     window.command_listener_thread.start()
 
@@ -9409,7 +9467,8 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
     start_code = initial_code
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)
-    listener.command_received.connect(window.load_stock_by_code)
+    # ⭐ [FIX] 使用 process_ipc_command 分发指令
+    listener.command_received.connect(window.process_ipc_command)
     # listener.dataframe_received.connect(window.update_df_all)
     listener.dataframe_received.connect(window.on_dataframe_received)
     # listener.command_received.connect(lambda: window.raise_())

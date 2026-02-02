@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import multiprocessing as mp
 import pandas as pd
 import re
+import socket
 from queue import Empty
 from typing import Any, Optional, Callable, Dict, List, Union
 from collections import deque
@@ -96,6 +97,27 @@ def normalize_speech_text(text: str) -> str:
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
 
     return text
+
+def send_signal_to_visualizer_ipc(data: dict):
+    """
+    发送信号到 Visualizer (IPC Socket)
+    Protocol: CODE|SIGNAL|{json}
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2) # 快速超时，避免阻塞策略
+        # Visualizer 监听端口 26668
+        s.connect(('127.0.0.1', 26668))
+        
+        json_str = json.dumps(data)
+        # CommandListenerThread 协议: b"CODE" (4 bytes) + content
+        msg = f"|SIGNAL|{json_str}"
+        s.send(b"CODE")
+        s.send(msg.encode('utf-8'))
+        s.close()
+    except Exception as e:
+        # logger.debug(f"IPC Signal Push failed (Visualizer offline?): {e}")
+        pass
 
 # _voice_process_target removed (moved to alert_manager.py)
 
@@ -1535,9 +1557,27 @@ class StockLiveStrategy:
         
         pct = (current_price - pre_close) / pre_close * 100 if pre_close > 0 else 0
         
-        # [Strategy Tuning]竞价高开 0.5% ~ 6.5%，且要求一定的成交额
-        if 0.5 <= pct <= 6.5 and volume >= 200:
-            return True, f"竞价达标: 高开{pct:.2f}% 量{int(volume)}"
+        # [Strategy Tuning] 竞价高开 0.5% ~ 7.5%，且要求一定的成交额
+        if not (0.5 <= pct <= 7.5 and volume >= 200):
+            return False, ""
+
+        # --- [NEW] 强力竞价核心过滤：高开标的必须带有“强结构” (Open=Low) ---
+        if hasattr(self, 'pattern_detector') and pct >= 2.0:
+            # 这里的 row 是当前行情快照
+            patterns = self.pattern_detector.update(
+                code=code, name=str(row.get('name','')), tick_df=None, 
+                day_row=row, prev_close=pre_close
+            )
+            has_strong = any(p.pattern == 'strong_auction_open' for p in patterns)
+            
+            if not has_strong:
+                msg = f"竞价高开{pct:.1f}%但缺乏强结构支撑 (需Open≈Low且TrendS>60)"
+                logger.debug(f"Reject follow entry for {code}: {msg}")
+                return False, msg
+            
+            return True, f"强力竞价确认: 高开{pct:.2f}% 量{int(volume)} (具备强结构)"
+
+        return True, f"竞价达标: 高开{pct:.2f}% 量{int(volume)}"
             
         # Shadow Engine record for near misses
         if 0 <= pct <= 10.0:
@@ -1722,7 +1762,10 @@ class StockLiveStrategy:
                     logger.debug(f"{code} 冷却中，跳过检查")
                     continue
 
-                row = df.loc[code]
+                # [SAFEGUARD] Ensure row is a dict and handle potential duplicate indices
+                row_raw = df.loc[code]
+                row_series = row_raw.iloc[0] if isinstance(row_raw, pd.DataFrame) else row_raw
+                row: dict[str, Any] = row_series.to_dict() # type: ignore
                 messages = []  # [Fix] 提前初始化 messages，供日/日内形态检测使用
 
                 # ---------- 安全获取行情数据 ----------
@@ -1805,7 +1848,7 @@ class StockLiveStrategy:
                             code=code,
                             name=data.get('name', ''),
                             tick_df=None,   # 暂无分时数据，使用 day_row 即可
-                            day_row=row,
+                            day_row=row_series,
                             prev_close=prev_close
                         )
                     except Exception as e:
@@ -2203,7 +2246,7 @@ class StockLiveStrategy:
                 shadow_decision = self.shadow_engine.evaluate(row, snap)
                 
                 # --- ⭐ 盈利监理重磅拦截 (Supervision Veto) ---
-                is_vetoed, veto_reason = self.supervisor.veto(code, decision, row, snap)
+                is_vetoed, veto_reason = self.supervisor.veto(code, decision, row_series, snap)
 
                 # 记录影子差异 (Inject into debug info for later analysis)
                 if shadow_decision["action"] in ("买入", "加仓", "BUY", "ADD"):
@@ -2446,6 +2489,10 @@ class StockLiveStrategy:
                     unique_msgs = {}
                     last_duplicate = {}
                     for mtype, msg in messages:
+                        if isinstance(msg, pd.Series):
+                            msg = msg.iloc[0] if not msg.empty else ""
+                        msg = str(msg)
+                        
                         if msg not in unique_msgs:
                             unique_msgs[msg] = mtype
                         else:
@@ -2455,7 +2502,10 @@ class StockLiveStrategy:
 
                     log_msg = combined_msgs.replace('\n', ' | ')
                     logger.debug(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
-                    self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price, resample=resample)
+                    # 确保 action 是字符串或 None，避免 Series 导致 trigger_alert 失败
+                    if isinstance(action, pd.Series):
+                        action = action.iloc[0] if not action.empty else "HOLD"
+                    self._trigger_alert(code, data['name'], combined_msgs, action=str(action), price=current_price, resample=resample)
                     data['last_alert'] = now
 
                     data['below_nclose_count'] = 0
@@ -2466,6 +2516,8 @@ class StockLiveStrategy:
                     logger.debug(f"{code} data: {messages}")
         except Exception as e:
             logger.error(f"Strategy Check Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def _check_strategies_simple(self, df):
         try:
@@ -3094,6 +3146,20 @@ class StockLiveStrategy:
                 conn.close()
             except Exception as db_err:
                 logger.error(f"Failed to save live signal to DB: {db_err}")
+
+            # === [NEW] 自动纠偏逻辑：针对 Follow Queue 的标的，触发风险信号时执行“跑路”通报 ===
+            if event.pattern in ('bull_trap_exit', 'momentum_failure'):
+                key = event.code
+                if key in self._monitored_stocks:
+                    data = self._monitored_stocks[key]
+                    tags = data.get('tags', '')
+                    if 'auto_followed' in tags:
+                        # 标记为危险，强化报警
+                        self.voice_announcer.announce(f"警告！{event.name} 诱多破位，建议跑路", code=event.code)
+                        # 更新备注，便于 Visualizer 展示
+                        data['snapshot']['last_reason'] = f"【跑路信号】{event.detail}"
+                        data['snapshot']['trade_phase'] = "EXIT"
+                        logger.warning(f"🚩 [Auto-Exit Signal] {event.code} {event.name} triggered {event.pattern}. Detail: {event.detail}")
                     
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
@@ -3218,8 +3284,24 @@ class StockLiveStrategy:
                 resample=resample
             )
             
+            
         except Exception as e:
             logger.debug(f"Push to Queue/DB failed: {e}")
+
+        # [NEW] ⚡ 实时推送到 Visualizer (绕过 DB 延迟)
+        try:
+             ipc_data = {
+                "code": code,
+                "name": name,
+                "pattern": sig_type if 'sig_type' in locals() else "ALERT",
+                "message": message,
+                "is_high_priority": is_priority,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "priority": 100 if is_priority else 50
+            }
+             send_signal_to_visualizer_ipc(ipc_data)
+        except Exception:
+            pass
             
         # 1. 回调 (UI 优先，确保窗口先弹出来)
         if self.alert_callback:
