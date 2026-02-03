@@ -1,4 +1,6 @@
-# -*- coding:utf-8 -*-
+import threading
+from contextlib import contextmanager
+from typing import Optional
 import sqlite3
 import json
 import traceback
@@ -12,6 +14,102 @@ from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger("instock_TK.DB")
 
 DB_PATH = "./concept_pg_data.db"
+
+class SQLiteConnectionManager:
+    """
+    Unified SQLite Connection Manager
+    - Thread-local connections to prevent locking
+    - WAL Mode for concurrency
+    - Automatic retries and timeout handling
+    """
+    _instances = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls, db_path: str):
+        with cls._lock:
+            if db_path not in cls._instances:
+                cls._instances[db_path] = cls(db_path)
+            return cls._instances[db_path]
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.local = threading.local()
+        self._init_wal()
+
+    def _init_wal(self):
+        """Enable WAL mode for better concurrency"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+            conn.close()
+            logger.info(f"DB WAL mode enabled for {self.db_path}")
+        except Exception as e:
+            logger.error(f"Failed to enable WAL mode for {self.db_path}: {e}")
+
+    def get_connection(self) -> sqlite3.Connection:
+        """Get a thread-local connection"""
+        if not hasattr(self.local, 'conn'):
+            self.local.conn = sqlite3.connect(self.db_path, timeout=30.0)
+            # Enable foreign keys by default if needed, or other pragmas
+            # self.local.conn.execute("PRAGMA foreign_keys = ON;") 
+        return self.local.conn
+
+    def close_thread_connection(self):
+        """Close current thread's connection"""
+        if hasattr(self.local, 'conn'):
+            try:
+                self.local.conn.close()
+            except:
+                pass
+            del self.local.conn
+
+    @contextmanager
+    def execute_query(self, query: str, params: tuple = ()):
+        """Context manager for read-only queries (returns cursor)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query, params)
+            yield cursor
+        except Exception as e:
+            logger.error(f"Query failed: {query} | Error: {e}")
+            raise
+        finally:
+            cursor.close()
+
+    def execute_update(self, query: str, params: tuple = ()):
+        """Execute write operation with commit"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Update failed: {query} | Error: {e}")
+            raise
+        finally:
+            cursor.close()
+
+    def executemany(self, query: str, params_list: list):
+        """Execute batch update"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.executemany(query, params_list)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Batch update failed: {query} | Error: {e}")
+            raise
+        finally:
+            cursor.close()
+
+
 
 def get_indb_df(days=10):
     """从本地数据库获取最后几天的股票数据统计"""

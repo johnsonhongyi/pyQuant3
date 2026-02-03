@@ -741,6 +741,7 @@ class GlobalConfig:
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback=300, value_type="int")
         self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
         self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=810, value_type="int")
+        self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=921, value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -987,6 +988,7 @@ loop_counter_limit: int = CFG.loop_counter_limit
 real_time_tick_limit: int = CFG.real_time_tick_limit
 real_time_cols: List[str] = CFG.real_time_cols
 start_init_tdx_time: int = CFG.start_init_tdx_time
+sina_MultiIndex_startTime: int = CFG.sina_MultiIndex_startTime
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

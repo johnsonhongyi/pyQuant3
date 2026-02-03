@@ -998,7 +998,7 @@ class Sina:
             limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
             h5_mi_table = 'all_' + str(limit_time_int)
             # 仅在交易时间内记录
-            if cct.get_work_time() and cct.get_now_time_int() > ct.sina_MultiIndex_startTime:
+            if cct.get_work_time() and cct.get_now_time_int() > cct.sina_MultiIndex_startTime:
                 # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
@@ -1377,9 +1377,7 @@ class Sina:
     def combine_lastbuy(self, h5: pd.DataFrame) -> pd.DataFrame:
         if h5 is None or h5.empty:
             return h5
-
         agg_metrics = self.agg_cache.getkey('agg_metrics')
-
         # 1. lastbuy 兜底
         if 'lastbuy' not in h5.columns or (h5['lastbuy'].fillna(0) <= 0).any():
             lastbuydf = cct.GlobalValues().getkey('lastbuydf')
@@ -1399,71 +1397,21 @@ class Sina:
 
         return self._sanitize_indicators(h5)
 
-
-    # def combine_lastbuy_old(self, h5: pd.DataFrame) -> pd.DataFrame:
-    #     """合并上次买入价格与聚合指标 (优化版：彻底移除热路径 HDF5 加载)"""
-    #     time_s = time.time()
-        
-    #     # 1. 基础预处理 (不再全局 fillna(0))
-    #     if 'lastbuy' in h5.columns:
-    #          h5.loc[:, 'lastbuy'] = h5['lastbuy'].fillna(0)
-        
-    #     # 2. 检查 lastbuy (优先使用内存中的 lastbuydf)
-    #     if 'lastbuy' not in h5.columns or (h5['lastbuy'] <= 0).any():
-    #         lastbuydf = cct.GlobalValues().getkey('lastbuydf')
-    #         if lastbuydf is not None:
-    #             # 对齐索引并合并
-    #             if isinstance(h5.index, pd.MultiIndex):
-    #                 codes = h5.index.get_level_values(0)
-    #                 h5['lastbuy'] = lastbuydf.reindex(codes).values
-    #             else:
-    #                 h5['lastbuy'] = lastbuydf.reindex(h5.index).values
-    #         else:
-    #             # 如果全局缓存也没有，则作为兜底逻辑尝试从指标缓存中提取
-    #             agg_metrics = self.agg_cache.getkey('agg_metrics')
-    #             if agg_metrics is not None and 'nclose' in agg_metrics.columns:
-    #                  if isinstance(h5.index, pd.MultiIndex):
-    #                      codes = h5.index.get_level_values(0)
-    #                      h5['lastbuy'] = agg_metrics.reindex(codes)['nclose'].values
-    #                  else:
-    #                      h5['lastbuy'] = agg_metrics.reindex(h5.index)['nclose'].values
-    #                  log.debug("lastbuy from agg_metrics")
-        
-    #     # 3. 检查聚合指标 (nclose, nstd, nlow, nhigh)
-    #     # 只要存在 0 值且缓存有数据，就进行合并更新
-    #     # if 'nclose' not in h5.columns or (h5['nclose'] <= 0).any():
-    #     #      agg_metrics = self.agg_cache.getkey('agg_metrics')
-    #     #      if agg_metrics is not None:
-    #     #          h5 = cct.combine_dataFrame(h5, agg_metrics)
-
-    #     agg_metrics = self.agg_cache.getkey('agg_metrics')
-    #     if agg_metrics is not None and 'nclose' in agg_metrics.columns:
-    #         if 'nclose' not in h5.columns:
-    #             h5['nclose'] = np.nan
-
-    #         mask_fix = h5['nclose'].fillna(0) <= 0
-    #         if mask_fix.any():
-    #             if isinstance(h5.index, pd.MultiIndex):
-    #                 codes = h5.index.get_level_values(0)
-    #                 h5.loc[mask_fix, 'nclose'] = agg_metrics.reindex(codes)['nclose'].values[mask_fix]
-    #             else:
-    #                 h5.loc[mask_fix, 'nclose'] = agg_metrics.reindex(h5.index)['nclose']
-
-                 
-    #     # 4. 强制清洗指标，杜绝 0.0
-    #     h5 = self._sanitize_indicators(h5)
-
-    #     time_use = round((time.time() - time_s), 2)
-    #     if time_use > 0.5:
-    #          log.info("combine_lastbuy (cache) time: %0.2f" % time_use)
-             
-    #     return h5
-
     def _sanitize_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """统一清洗指标列中的 0.0 或 NaN 值，确保所有返回的数据都是健康的"""
         if df is None or df.empty:
             return df
         
+        # ⚡ [FIX] 针对停牌个股 (volume == 0) 的强制对齐逻辑
+        # 防止由于 agg_metrics 或历史轨迹残留导致的 nclose 与现价偏离过大
+        if 'volume' in df.columns and 'close' in df.columns:
+            mask_suspended = (df['volume'] <= 0)
+            if mask_suspended.any():
+                for col in ['nlow', 'nhigh', 'nclose', 'lastbuy']:
+                    if col in df.columns:
+                        # 停牌个股：所有累计/对比指标均对齐至当前上报价格 (即最后收盘价)
+                        df.loc[mask_suspended, col] = df.loc[mask_suspended, 'close']
+
         # 强制索引转为字符串 (兼容 MultiIndex)
         if isinstance(df.index, pd.MultiIndex):
             for i in range(df.index.nlevels):
@@ -1880,9 +1828,10 @@ if __name__ == "__main__":
 
     # print((sina.get_stock_code_data('300107').T))
     code='603056'
-    dd = sina.get_real_time_tick('300376')
-    # dd = sina.get_real_time_tick(code)
+    # dd = sina.get_real_time_tick('300376')
+    dd = sina.get_real_time_tick(code)
     tickdf = cct.tick_to_daily_bar(dd)
+    print(f'cct.sina_MultiIndex_startTime: {cct.sina_MultiIndex_startTime}')
     import ipdb;ipdb.set_trace()
 
     df =sina.all

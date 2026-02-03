@@ -110,6 +110,34 @@ class IntradayPatternDetector:
         'strong_auction_open': '强力竞价',
     }
     
+    # ⚡ [NEW] 信号优先级映射 (数值越小优先级越高)
+    PRIORITY_MAP = {
+        # 级别 1: 极端风险 (跑路/顶部)
+        'bull_trap_exit': 10,
+        'top_signal': 15,
+        # 级别 2: 趋势转弱 (破位/风险)
+        'momentum_failure': 20,
+        'high_drop': 25,
+        # 级别 3: 核心机会 (主升/强竞价/横盘突破)
+        'master_momentum': 30,
+        'strong_auction_open': 35,
+        'high_sideways_break': 38,
+        # 级别 4: 进阶机会 (带量/突破)
+        'open_is_low_volume': 40,
+        'nlow_is_low_volume': 45,
+        'low_open_breakout': 50,
+        # 级别 5: 基础机会 (低开走高/开盘最低)
+        'low_open_high_walk': 60,
+        'open_is_low': 65,
+        'open_low_retest': 70,
+        # 级别 6: 基础事件
+        'auction_high_open': 80,
+        'gap_up': 85,
+        'instant_pullback': 90,
+        'pullback_upper': 95,
+        'shrink_sideways': 100,
+    }
+    
     def __init__(self, cooldown: int = 60, publish_to_bus: bool = True):
         """
         Args:
@@ -212,6 +240,20 @@ class IntradayPatternDetector:
         if 'top_signal' in self.enabled_patterns:
             events.extend(self._check_top_signal(code, name, tick_df, day_row, prev_close))
         
+        # ⚡ [NEW] 信号冲突抑制与优先级过滤
+        if len(events) > 1:
+            # 1. 优先级排序
+            events.sort(key=lambda x: self.PRIORITY_MAP.get(x.pattern, 999))
+            
+            # 2. 冲突抑制逻辑：如果存在级别 1-2 的风险信号，则自动抑制所有级别 >= 3 的机会信号
+            highest_p = self.PRIORITY_MAP.get(events[0].pattern, 999)
+            if highest_p <= 25: # 风险信号 (bull_trap_exit, top_signal, momentum_failure, high_drop)
+                # 仅保留风险信号，过滤掉机会信号
+                events = [ev for ev in events if self.PRIORITY_MAP.get(ev.pattern, 999) <= 25]
+            
+            # 3. 精简化：同一时刻同一股票仅保留优先级最高的一个信号 (避免播报轰炸)
+            events = events[:1]
+
         # 触发回调和发布
         notified_events: List[PatternEvent] = []
         for ev in events:
@@ -279,15 +321,16 @@ class IntradayPatternDetector:
         cached = self._cache.get(key, {})
         last_ts = cached.get('ts', 0)
         
-        # 更新今日计数
-        count = self._signal_counts.get(key, 0) + 1
-        self._signal_counts[key] = count
+        # 获取当前累计次数 (不立即累加)
+        current_count = self._signal_counts.get(key, 0)
         
         if now - last_ts < self._cooldown:
-            # 在冷却期内，只更新计数，不通知
-            return False, count
+            # ⚡ [FIX] 在冷却期内，不更新计数，不通知
+            return False, current_count
         
-        # 冷却期已过，重置缓存并通知
+        # 冷却期已过，累加次数，重置缓存并通知
+        count = current_count + 1
+        self._signal_counts[key] = count
         self._cache[key] = {'ts': now, 'count': count}
         return True, count
     
@@ -976,45 +1019,6 @@ class IntradayPatternDetector:
             
         return events
 
-    def _check_bull_trap_exit(self, code: str, name: str,
-                             tick_df: Optional[pd.DataFrame],
-                             day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """诱多破位检测 (早盘错误修正)"""
-        events = []
-        open_p = float(day_row.get('open', 0))
-        high_p = float(day_row.get('high', 0))
-        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
-        amount = float(day_row.get('amount', 0))
-        volume = float(day_row.get('volume', 0))
-        vwap = amount / volume if volume > 0 else 0
-        
-        if open_p <= 0 or curr_p <= 0 or vwap <= 0:
-            return events
-            
-        # 1. 检测是否曾经“诱多”：开盘后快速大涨 > 3%
-        rising_pct = (high_p - open_p) / open_p * 100
-        if rising_pct < 3.0:
-            return events
-            
-        key = f"{code}_bull_trap_state"
-        if key not in self._cache:
-            self._cache[key] = {'trap_triggered': False}
-        
-        state = self._cache[key]
-        if state['trap_triggered']:
-            return events
-            
-        # 2. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
-        if curr_p < vwap * 0.997 or curr_p < open_p * 0.995:
-            state['trap_triggered'] = True
-            events.append(PatternEvent(
-                code=code, name=name, pattern='bull_trap_exit',
-                timestamp=datetime.now().strftime('%H:%M:%S'),
-                price=curr_p,
-                detail=f"诱多破位: 早盘大涨{rising_pct:.1f}%后跌破均线, 注意跑路!",
-                is_high_priority=True
-            ))
-            
         return events
 
     def get_stats(self) -> Dict[str, Any]:

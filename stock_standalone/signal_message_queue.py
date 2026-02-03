@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 from threading import Lock
 import os
 from trading_logger import TradingLogger
+from db_utils import SQLiteConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,11 @@ class SignalMessageQueue:
         self._queue = PriorityQueue()
         # 内存缓存，用于快速 UI 展示 (已排序列表)
         self._cached_top: List[SignalMessage] = []
-        self._db_lock = Lock()
+        
+        # 使用统一的 DB Manager
+        self.db_manager = SQLiteConnectionManager.get_instance(DB_FILE)
+        
+        self._init_db()
         
         self._init_db()
         self._load_from_db() # 启动时从 DB 加载最近的数据
@@ -77,107 +82,110 @@ class SignalMessageQueue:
     def _init_db(self):
         """初始化独立数据库"""
         try:
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                
-                # 信号消息表
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS signal_message (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        code TEXT NOT NULL,
-                        name TEXT,
-                        signal_type TEXT NOT NULL,
-                        source TEXT,
-                        priority INTEGER DEFAULT 50,
-                        score REAL,
-                        reason TEXT,
-                        evaluated INTEGER DEFAULT 0,
-                        created_date TEXT,
-                        count INTEGER DEFAULT 1,
-                        consecutive_days INTEGER DEFAULT 1,
-                        rank INTEGER DEFAULT 0
-                    )
-                """)
-                
-                # 跟单记录表
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS follow_record (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        signal_id INTEGER,
-                        code TEXT NOT NULL,
-                        name TEXT,
-                        follow_date TEXT,
-                        follow_price REAL,
-                        stop_loss REAL,
-                        status TEXT DEFAULT 'ACTIVE',
-                        exit_date TEXT,
-                        exit_price REAL,
-                        pnl_pct REAL,
-                        feedback TEXT,
-                        FOREIGN KEY (signal_id) REFERENCES signal_message(id)
-                    )
-                """)
-                
-                # 索引
-                c.execute("CREATE INDEX IF NOT EXISTS idx_signal_date ON signal_message (created_date)")
-                c.execute("CREATE INDEX IF NOT EXISTS idx_signal_code ON signal_message (code)")
-                
-                # Migration: Ensure count column exists
-                try:
-                    c.execute("ALTER TABLE signal_message ADD COLUMN count INTEGER DEFAULT 1")
-                except sqlite3.OperationalError:
-                    pass # Column likely already exists
-                
-                # Migration: Ensure consecutive_days column exists
-                try:
-                    c.execute("ALTER TABLE signal_message ADD COLUMN consecutive_days INTEGER DEFAULT 1")
-                except sqlite3.OperationalError:
-                    pass # Column likely already exists
+            conn = self.db_manager.get_connection()
+            c = conn.cursor()
+            
+            # 信号消息表
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS signal_message (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT,
+                    signal_type TEXT NOT NULL,
+                    source TEXT,
+                    priority INTEGER DEFAULT 50,
+                    score REAL,
+                    reason TEXT,
+                    evaluated INTEGER DEFAULT 0,
+                    created_date TEXT,
+                    count INTEGER DEFAULT 1,
+                    consecutive_days INTEGER DEFAULT 1,
+                    rank INTEGER DEFAULT 0
+                )
+            """)
+            
+            # 跟单记录表
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS follow_record (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER,
+                    code TEXT NOT NULL,
+                    name TEXT,
+                    follow_date TEXT,
+                    follow_price REAL,
+                    stop_loss REAL,
+                    status TEXT DEFAULT 'ACTIVE',
+                    exit_date TEXT,
+                    exit_price REAL,
+                    pnl_pct REAL,
+                    feedback TEXT,
+                    FOREIGN KEY (signal_id) REFERENCES signal_message(id)
+                )
+            """)
+            
+            # 索引
+            c.execute("CREATE INDEX IF NOT EXISTS idx_signal_date ON signal_message (created_date)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_signal_code ON signal_message (code)")
+            
+            # Migration checks
+            try:
+                c.execute("ALTER TABLE signal_message ADD COLUMN count INTEGER DEFAULT 1")
+            except sqlite3.OperationalError: pass
+            
+            try:
+                c.execute("ALTER TABLE signal_message ADD COLUMN consecutive_days INTEGER DEFAULT 1")
+            except sqlite3.OperationalError: pass
 
-                # [NEW] Migration: Ensure rank column exists
-                try:
-                    c.execute("ALTER TABLE signal_message ADD COLUMN rank INTEGER DEFAULT 0")
-                except sqlite3.OperationalError:
-                    pass # Column likely already exists
-                
-                conn.commit()
-                conn.close()
+            try:
+                c.execute("ALTER TABLE signal_message ADD COLUMN rank INTEGER DEFAULT 0")
+            except sqlite3.OperationalError: pass
+            
+            conn.commit()
+            # Cursor closed by connection reuse or garbage collection, but explicit close is better if not using context manager everywhere
+            c.close()
+
         except Exception as e:
             logger.error(f"Failed to init signal_strategy.db: {e}")
 
     def _load_from_db(self):
         """从数据库加载最近的未评估信号到内存"""
         try:
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                conn.row_factory = sqlite3.Row
-                c = conn.cursor()
-                # 加载最近 50 条记录
-                c.execute("SELECT * FROM signal_message ORDER BY id DESC LIMIT 50")
-                rows = c.fetchall()
-                conn.close()
+            conn = self.db_manager.get_connection()
+            # conn.row_factory = sqlite3.Row # This might affect other threads if not careful, but manager uses thread-local
+            # To be safe, we can use a context manager or just set it temporarily if needed, 
+            # OR just assume standard tuple and map manually, OR use dict_factory.
+            # Let's use the execute_query context manager which returns a cursor.
+            
+            old_factory = conn.row_factory
+            conn.row_factory = sqlite3.Row
+            
+            c = conn.cursor()
+            c.execute("SELECT * FROM signal_message ORDER BY id DESC LIMIT 50")
+            rows = c.fetchall()
+            c.close()
+            
+            conn.row_factory = old_factory
                 
-                for row in rows:
-                    msg = SignalMessage(
-                        priority=row['priority'],
-                        timestamp=row['timestamp'],
-                        code=row['code'],
-                        name=row['name'],
-                        signal_type=row['signal_type'],
-                        source=row['source'],
-                        reason=row['reason'],
-                        score=row['score'],
-                        evaluated=bool(row['evaluated']),
-                        count=row['count'] if 'count' in row.keys() else 1,
-                        consecutive_days=row['consecutive_days'] if 'consecutive_days' in row.keys() else 1,
-                        rank=row['rank'] if 'rank' in row.keys() else 0
-                    )
-                    # 放入队列
-                    self._queue.put(msg) 
+            for row in rows:
+                msg = SignalMessage(
+                    priority=row['priority'],
+                    timestamp=row['timestamp'],
+                    code=row['code'],
+                    name=row['name'],
+                    signal_type=row['signal_type'],
+                    source=row['source'],
+                    reason=row['reason'],
+                    score=row['score'],
+                    evaluated=bool(row['evaluated']),
+                    count=row['count'] if 'count' in row.keys() else 1,
+                    consecutive_days=row['consecutive_days'] if 'consecutive_days' in row.keys() else 1,
+                    rank=row['rank'] if 'rank' in row.keys() else 0
+                )
+                # 放入队列
+                self._queue.put(msg) 
                 
-                self._update_cache()
+            self._update_cache()
                 
         except Exception as e:
             logger.error(f"Failed to load form db: {e}")
@@ -292,20 +300,15 @@ class SignalMessageQueue:
         """持久化到数据库 (Insert)"""
         try:
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("""
-                    INSERT INTO signal_message (
-                        timestamp, code, name, signal_type, source, 
-                        priority, score, reason, evaluated, count, consecutive_days, rank, created_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    msg.timestamp, msg.code, msg.name, msg.signal_type, msg.source,
-                    msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, created_date
-                ))
-                conn.commit()
-                conn.close()
+            self.db_manager.execute_update("""
+                INSERT INTO signal_message (
+                    timestamp, code, name, signal_type, source, 
+                    priority, score, reason, evaluated, count, consecutive_days, rank, created_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                msg.timestamp, msg.code, msg.name, msg.signal_type, msg.source,
+                msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, created_date
+            ))
         except Exception as e:
             logger.error(f"Failed to persist signal: {e}")
 
@@ -313,20 +316,14 @@ class SignalMessageQueue:
         """更新数据库中的信号 (Count, Timestamp等)"""
         try:
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                # 更新匹配记录（不限日期，按 code + signal_type）
-                c.execute("""
-                    UPDATE signal_message
-                    SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, created_date = ?
-                    WHERE code = ? AND signal_type = ?
-                """, (
-                    msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, created_date,
-                    msg.code, msg.signal_type
-                ))
-                conn.commit()
-                conn.close()
+            self.db_manager.execute_update("""
+                UPDATE signal_message
+                SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, created_date = ?
+                WHERE code = ? AND signal_type = ?
+            """, (
+                msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, created_date,
+                msg.code, msg.signal_type
+            ))
         except Exception as e:
             logger.error(f"Failed to update db signal: {e}")
 
@@ -348,16 +345,11 @@ class SignalMessageQueue:
         if updated:
             # 2. 更新数据库
             try:
-                with self._db_lock:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("""
-                        UPDATE signal_message 
-                        SET rank = ? 
-                        WHERE code = ? AND signal_type = ?
-                    """, (rank, code, signal_type))
-                    conn.commit()
-                    conn.close()
+                self.db_manager.execute_update("""
+                    UPDATE signal_message 
+                    SET rank = ? 
+                    WHERE code = ? AND signal_type = ?
+                """, (rank, code, signal_type))
             except Exception as e:
                 logger.error(f"Failed to update signal rank: {e}")
 
@@ -376,17 +368,11 @@ class SignalMessageQueue:
         if updated:
             # 更新数据库状态
             try:
-                with self._db_lock:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    # 简单处理：更新该 code 最近的一条记录
-                    c.execute("""
-                        UPDATE signal_message 
-                        SET evaluated = 1 
-                        WHERE code = ? AND id = (SELECT max(id) FROM signal_message WHERE code = ?)
-                    """, (code, code))
-                    conn.commit()
-                    conn.close()
+                self.db_manager.execute_update("""
+                    UPDATE signal_message 
+                    SET evaluated = 1 
+                    WHERE code = ? AND id = (SELECT max(id) FROM signal_message WHERE code = ?)
+                """, (code, code))
             except Exception as e:
                 logger.error(f"Failed to update evaluated status: {e}")
 
@@ -394,21 +380,21 @@ class SignalMessageQueue:
         """添加到跟单 (DB only, 内存可根据需要扩展)"""
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                # 查找对应的 signal id
-                c.execute("SELECT max(id) FROM signal_message WHERE code = ?", (msg.code,))
-                row = c.fetchone()
-                sig_id = row[0] if row else None
-                
-                c.execute("""
-                    INSERT INTO follow_record (
-                        signal_id, code, name, follow_date, follow_price, stop_loss, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
-                """, (sig_id, msg.code, msg.name, now, price, stop_loss))
-                conn.commit()
-                conn.close()
+            conn = self.db_manager.get_connection()
+            c = conn.cursor()
+            
+            # 查找对应的 signal id
+            c.execute("SELECT max(id) FROM signal_message WHERE code = ?", (msg.code,))
+            row = c.fetchone()
+            sig_id = row[0] if row else None
+            
+            c.execute("""
+                INSERT INTO follow_record (
+                    signal_id, code, name, follow_date, follow_price, stop_loss, status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+            """, (sig_id, msg.code, msg.name, now, price, stop_loss))
+            conn.commit()
+            c.close()
             msg.followed = True
         except Exception as e:
             logger.error(f"Failed to add follow record: {e}")
@@ -417,15 +403,20 @@ class SignalMessageQueue:
         """获取当前活跃跟单"""
         results = []
         try:
-            with self._db_lock:
-                conn = sqlite3.connect(DB_FILE)
-                conn.row_factory = sqlite3.Row
-                c = conn.cursor()
-                c.execute("SELECT * FROM follow_record WHERE status = 'ACTIVE' ORDER BY id DESC")
-                rows = c.fetchall()
-                conn.close()
-                for r in rows:
-                    results.append(dict(r))
+            conn = self.db_manager.get_connection()
+            # Temporary set row factory
+            old_factory = conn.row_factory
+            conn.row_factory = sqlite3.Row
+            
+            c = conn.cursor()
+            c.execute("SELECT * FROM follow_record WHERE status = 'ACTIVE' ORDER BY id DESC")
+            rows = c.fetchall()
+            c.close()
+            
+            conn.row_factory = old_factory
+            
+            for r in rows:
+                results.append(dict(r))
         except Exception as e:
             logger.error(f"Failed to get active follows: {e}")
         return results
@@ -433,19 +424,14 @@ class SignalMessageQueue:
     def clean_duplicates_in_db(self) -> int:
         """
         清理数据库中的重复信号 (同代码+同类型 全局只保留最后一条)
-        
-        ⚡ 优化：
-        1. 去重逻辑：同 code + signal_type 全局只保留 MAX(id) 那条
-        2. 使用带超时的连接，防止卡死
-        3. 分两步执行：先查找要删除的ID，再批量删除
+        Uses SQLiteConnectionManager for thread-safe access.
         """
         deleted_count = 0
         try:
-            # 使用短超时连接防止卡死
-            conn = sqlite3.connect(DB_FILE, timeout=10.0)
+            conn = self.db_manager.get_connection()
             c = conn.cursor()
             
-            # 1. 查找所有应该保留的 ID (每个 code+signal_type 组合保留 MAX(id))
+            # 1. 查找所有应该保留的 ID
             c.execute("""
                 SELECT MAX(id) as keep_id
                 FROM signal_message
@@ -461,23 +447,65 @@ class SignalMessageQueue:
                     WHERE id NOT IN ({placeholders})
                 """, keep_ids)
                 deleted_count = c.rowcount
+                conn.commit()
             
-            conn.commit()
-            conn.close()
+            c.close()
             
             if deleted_count > 0:
                 logger.info(f"[SignalQueue] 清理了 {deleted_count} 条重复信号")
-                # 重新加载缓存（不用锁，因为 _load_from_db 自己会加锁）
+                # 重新加载缓存
                 self._queue = PriorityQueue()
                 self._cached_top = []
                 self._load_from_db()
 
-        except sqlite3.OperationalError as e:
-            logger.error(f"[SignalQueue] 清理重复信号超时或锁定: {e}")
         except Exception as e:
             logger.error(f"[SignalQueue] 清理重复信号失败: {e}")
             
         return deleted_count
+
+    def log_live_signal_direct(self, code: str, name: str, pattern: str, score: float, msg: str, is_high_priority: bool):
+        """
+        直接记录实时信号到数据库，绕过队列 (供 stock_live_strategy 使用以减少延迟和锁)
+        自动处理更新计数逻辑
+        """
+        try:
+            now_time = datetime.now().strftime('%H:%M:%S')
+            now_date = datetime.now().strftime('%Y-%m-%d')
+            priority_value = 100 if is_high_priority else 50
+            
+            conn = self.db_manager.get_connection()
+            c = conn.cursor()
+            
+            # 检查是否已存在同日同股同信号类型
+            c.execute("""
+                SELECT id, count FROM signal_message 
+                WHERE code = ? AND signal_type = ? AND source = 'live_strategy' AND created_date = ?
+                LIMIT 1
+            """, (code, pattern, now_date))
+            existing = c.fetchone()
+            
+            if existing:
+                # 已存在：更新计数和时间戳
+                new_count = existing[1] + 1
+                c.execute("""
+                    UPDATE signal_message 
+                    SET timestamp = ?, count = ?, priority = ?, reason = ?
+                    WHERE id = ?
+                """, (now_time, new_count, priority_value, msg, existing[0]))
+                # logger.debug(f"✅ Live signal updated in DB: {code} - {pattern} (count={new_count})")
+            else:
+                # 不存在：插入新记录
+                c.execute("""
+                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (now_time, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1))
+                # logger.debug(f"✅ Live signal saved to DB: {code} - {pattern}")
+            
+            conn.commit()
+            c.close()
+
+        except Exception as db_err:
+            logger.error(f"Failed to log_live_signal_direct to DB: {db_err}")
 
 def pk_timestamp_desc(ts):
     """辅助排序 Key: 将 timestamp 字符串反转以实现 DESC 排序效果(针对 sort ASC)"""

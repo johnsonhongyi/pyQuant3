@@ -901,7 +901,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.viz_command_queue = None
                             if hasattr(self, 'viz_stop_flag'):
                                 self.viz_stop_flag.value = True  # Reset for next launch
-
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
                             code = obj.get("code")
                             if code:
@@ -916,6 +915,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         self._force_full_sync_pending = True
                                 except Exception as e:
                                     logger.error(f"Failed to update extra_monitor_codes: {e}")
+                        
+                        elif obj and obj.get("cmd") == "SET_VOICE_STATE":
+                            enabled = obj.get("enabled", True)
+                            logger.info(f"[Pipe] Recv SET_VOICE_STATE: {enabled} from {obj.get('source')}")
+                            # ⭐ 利用 tk_dispatch_queue 进行跨线程安全的 UI 更新
+                            def sync_voice_ui():
+                                if hasattr(self, 'voice_var'):
+                                    self.voice_var.set(enabled)
+                                    # 注意：set() 会触发 trace，但 Checkbutton 的 command 不会自动触发
+                                    # 这里显式调用 on_voice_toggle 确保业务逻辑执行
+                                    self.on_voice_toggle()
+                                    logger.info(f"✅ Main App voice state synced to: {enabled}")
+                            
+                            self.tk_dispatch_queue.put(sync_voice_ui)
 
                 except pywintypes.error as e:
                     # 正常退出错误码 → 静默退出
@@ -2325,6 +2338,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.voice_var = tk.BooleanVar(value=True) # 💥 默认开启语音
         self.realtime_var = tk.BooleanVar(value=True)
         self.vis_var = tk.BooleanVar(value=False)
+        self.alert_popup_var = tk.BooleanVar(value=True) # 💥 默认开启报警弹窗
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
@@ -2354,6 +2368,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             text="Vo",
             variable=self.voice_var,
             command=self.on_voice_toggle
+        ).pack(side=tk.LEFT, padx=1)
+
+        ttk.Checkbutton(
+            frame_right,
+            text="Pop",
+            variable=self.alert_popup_var,
+            command=self.save_ui_states # 实时保存状态
         ).pack(side=tk.LEFT, padx=1)
 
         ttk.Button(
@@ -2423,6 +2444,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 'realtime_var': ('realtime_var', bool),
                 'vis_var': ('vis_var', bool),
                 'force_d_cycle_var': ('force_d_cycle_var', bool),
+                'alert_popup_var': ('alert_popup_var', bool),
                 'search_var1': ('search_var1', str),
                 'search_var2': ('search_var2', str),
                 'st_key_sort_value': ('st_key_sort_value', str)
@@ -2461,7 +2483,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             save_list = [
                 'win_var', 'tdx_var', 'ths_var', 'dfcf_var', 
                 'tip_var', 'voice_var', 'realtime_var', 'vis_var',
-                'force_d_cycle_var', 'search_var1', 'search_var2',
+                'force_d_cycle_var', 'alert_popup_var', 'search_var1', 'search_var2',
                 'st_key_sort_value'
             ]
             
@@ -4779,7 +4801,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         pass
 
     # def on_voice_speak_start(self, code):
-    #     """语音开始播报时的回调 (在后台线程调用) - 线程安全版本"""
+    #     """语音播报开始时的回调 (在后台线程调用) - 线程安全版本"""
     #     if not code: 
     #         return
     #     # 使用线程安全的方式调度到主线程
@@ -4812,14 +4834,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         处理语音报警触发: 弹窗显示股票详情
         """
+        # 如果禁用了弹窗，则只在此处拦截 UI 创建，语音由策略端独立触发
+        if not getattr(self, 'alert_popup_var', None) or not self.alert_popup_var.get():
+            logger.info(f"Alert popup suppressed for {code} ({name}) by user setting.")
+            return
+            
         # 必须回到主线程操作 GUI
         self.after(0, lambda: self._show_alert_popup(code, name, msg))
+
+    def flash_taskbar(self):
+        """让主窗口任务栏图标闪烁，提示用户焦点"""
+        try:
+            # 仅在 Windows 有效
+            if sys.platform.startswith('win'):
+                hwnd = self.winfo_id() 
+                # FlashWindow(hwnd, bInvert) - bInvert=True 表示切换激活状态外观
+                ctypes.windll.user32.FlashWindow(hwnd, True)
+        except Exception as e:
+            pass
 
     def on_voice_speak_start(self, code):
         """语音播报开始的回调"""
         if not code: return
         # 检查程序是否正在退出
         if getattr(self, '_is_closing', False): return
+        
+        # ⭐ [FIX] 触发任务栏闪烁，帮助用户找到主窗口焦点
+        self.flash_taskbar()
+        
         # 调度到主线程执行闪烁和震动
         try:
             self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
@@ -4840,7 +4882,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _trigger_alert_visual_effects(self, code, start=True):
         """根据代码查找窗口并触发视觉效果"""
         if not hasattr(self, 'code_to_alert_win'): return
+        
+        # logger.debug(f"Trigger visual query: {code}, available: {list(self.code_to_alert_win.keys())}")
+        
+        # 尝试精确匹配
         win = self.code_to_alert_win.get(code)
+        
+        # 如果找不到，尝试作为前缀匹配 (e.g. "600519" vs "600519_d")
+        if not win:
+             for k, w in self.code_to_alert_win.items():
+                 if str(k).startswith(str(code)) or str(code).startswith(str(k)):
+                     win = w
+                     break
+                     
         if win and win.winfo_exists():
             if start:
                 if hasattr(win, 'start_visual_effects'):
@@ -5330,6 +5384,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.configure(bg="#fff")
             win.stock_code = code # ⭐ 关键：将代码绑定到窗口，确保销毁时能精准找到
             
+            # ===== [FIX] 动态绑定视觉特效方法，修复震动闪烁失效 =====
+            def start_visual_effects(w=win):
+                if not w.winfo_exists(): return
+                w.lift()
+                # 1. 震动效果
+                self._shake_window(w)
+                # 2. 背景闪烁 (Visual Cue)
+                w._original_bg = w.cget('bg')
+                
+                # [Optimization] 恢复重点信号闪烁 (低开走高 -> 强红色/高亮)
+                is_key_signal = "低开" in msg
+                flash_color = "#ff5555" if is_key_signal else "#ffcccc"
+                
+                def flash_bg(count=0):
+                    if not w.winfo_exists() or not getattr(w, 'is_shaking', False):
+                        if w.winfo_exists() and hasattr(w, '_original_bg'):
+                           w.configure(bg=w._original_bg)
+                        return
+                    new_bg = flash_color if count % 2 == 0 else w._original_bg
+                    try: w.configure(bg=new_bg)
+                    except: pass
+                    w.after(200, lambda: flash_bg(count+1))
+                flash_bg()
+            
+            def stop_visual_effects(w=win):
+                if not w.winfo_exists(): return
+                w.is_shaking = False # 停止震动循环
+                if hasattr(w, '_original_bg'):
+                    try: w.configure(bg=w._original_bg)
+                    except: pass
+
+            win.start_visual_effects = start_visual_effects
+            win.stop_visual_effects = stop_visual_effects
+            # ========================================================
+            
             # 检测是否为高优先级信号（消息中包含 [HIGH]）
             win.is_high_priority = "[HIGH]" in msg or "高优先级" in msg
             
@@ -5583,10 +5672,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.live_strategy.remove_monitor(code)
                         logger.info(f"Deleted alarm rule for {code}")
                         
-                        # 💥 同步停止当前语音播报
+                        # 💥 同步停止当前语音播报 (仅停止当前股，不要全局停止)
                         try:
                             mgr = self._get_alert_manager()
-                            if mgr: mgr.stop_current_speech()
+                            # [FIX] 传入具体 code，避免触发全局 __ALL__ 中断
+                            if mgr: mgr.stop_current_speech(key=code)
                         except:
                             pass
 
@@ -6894,6 +6984,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.test_strategy_for_stock(code, name)
 
             tk.Button(top_frame, text="🧪 模拟策略交易", command=test_selected_strategy, bg="#e3f2fd", font=("Arial", 10, "bold")).pack(side="right", padx=5)
+            
+            # [NEW] Popup Toggle in Voice Manager
+            tk.Checkbutton(
+                top_frame,
+                text="弹窗 (Pop)",
+                variable=self.alert_popup_var,
+                indicatoron=0,           # Toggle button style
+                width=10,
+                selectcolor="#ffccbc",   # Light orange when checked
+                command=self.save_ui_states # Save state immediately
+            ).pack(side="right", padx=5)
             
         except Exception as e:
             logger.error(f"Voice Monitor Manager Error: {e}")

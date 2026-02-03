@@ -126,8 +126,23 @@ class VoiceAnnouncer:
     def __init__(self) -> None:
         self.manager = get_alert_manager()
         self.manager.start()
-        self.on_speak_start = None 
-        self.on_speak_end = None
+        # Initialize manager callbacks to empty if needed, or rely on properties
+    
+    @property
+    def on_speak_start(self):
+        return self.manager.on_speak_start
+    
+    @on_speak_start.setter
+    def on_speak_start(self, callback):
+        self.manager.on_speak_start = callback
+
+    @property
+    def on_speak_end(self):
+        return self.manager.on_speak_end
+    
+    @on_speak_end.setter
+    def on_speak_end(self, callback):
+        self.manager.on_speak_end = callback
 
     def pause(self) -> None:
         """暂停语音播报"""
@@ -136,7 +151,7 @@ class VoiceAnnouncer:
     
     def resume(self) -> None:
         """恢复语音播报"""
-        self.manager.voice_enabled = True
+        self.manager.resume_voice()
         logger.debug("VoiceAnnouncer: 已恢复")
     
     @property
@@ -487,7 +502,15 @@ class StockLiveStrategy:
     def set_voice_enabled(self, enabled: bool):
         """运行时开启/关闭语音播报"""
         self.voice_enabled = bool(enabled)
-        logger.info(f"Voice announcer enabled = {self.voice_enabled}")
+        
+        # ⭐ [FIX] 同步到底层 VoiceAnnouncer/AlertManager 状态
+        if hasattr(self, '_voice') and self._voice:
+            if self.voice_enabled:
+                self._voice.resume()
+            else:
+                self._voice.pause()
+                
+        logger.info(f"Voice announcer enabled = {self.voice_enabled} (Synced to VoiceAnnouncer)")
 
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """设置报警回调函数"""
@@ -3107,44 +3130,17 @@ class StockLiveStrategy:
                     logger.debug(f"High priority callback failed: {e}")
             
             # === 直接写入数据库 (Live 信号独立记录, 同日同股同信号只更新计数) ===
+            # === 直接写入数据库 (Live 信号独立记录, 同日同股同信号只更新计数) ===
             try:
-                import sqlite3
-                from datetime import datetime
-                
-                conn = sqlite3.connect("signal_strategy.db", timeout=10)
-                c = conn.cursor()
-                
-                now_time = datetime.now().strftime('%H:%M:%S')
-                now_date = datetime.now().strftime('%Y-%m-%d')
-                priority_value = 100 if is_high_priority else 50
-                
-                # 检查是否已存在同日同股同信号类型
-                c.execute("""
-                    SELECT id, count FROM signal_message 
-                    WHERE code = ? AND signal_type = ? AND source = 'live_strategy' AND created_date = ?
-                    LIMIT 1
-                """, (event.code, event.pattern, now_date))
-                existing = c.fetchone()
-                
-                if existing:
-                    # 已存在：更新计数和时间戳
-                    new_count = existing[1] + 1
-                    c.execute("""
-                        UPDATE signal_message 
-                        SET timestamp = ?, count = ?, priority = ?, reason = ?
-                        WHERE id = ?
-                    """, (now_time, new_count, priority_value, msg, existing[0]))
-                    logger.debug(f"✅ Live signal updated in DB: {event.code} - {event.pattern} (count={new_count})")
-                else:
-                    # 不存在：插入新记录
-                    c.execute("""
-                        INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (now_time, event.code, event.name, event.pattern, 'live_strategy', priority_value, event.score, msg, 0, now_date, 1, 1))
-                    logger.debug(f"✅ Live signal saved to DB: {event.code} - {event.pattern}")
-                
-                conn.commit()
-                conn.close()
+                # [Optimization] Use centralized manager via SignalMessageQueue
+                SignalMessageQueue().log_live_signal_direct(
+                    code=event.code, 
+                    name=event.name, 
+                    pattern=event.pattern, 
+                    score=event.score, 
+                    msg=msg, 
+                    is_high_priority=is_high_priority
+                )
             except Exception as db_err:
                 logger.error(f"Failed to save live signal to DB: {db_err}")
 
@@ -3156,11 +3152,24 @@ class StockLiveStrategy:
                     tags = data.get('tags', '')
                     if 'auto_followed' in tags:
                         # 标记为危险，强化报警
-                        self.voice_announcer.announce(f"警告！{event.name} 诱多破位，建议跑路", code=event.code)
+                        self.voice_announcer.announce(
+                            f"警告！{getattr(event, 'name', event.code)} 诱多破位，建议跑路",
+                            code=event.code
+                        )
+
+                        # ⭐ 关键保护：确保 snapshot 存在
+                        if 'snapshot' not in data or not isinstance(data['snapshot'], dict):
+                            data['snapshot'] = {}
+
                         # 更新备注，便于 Visualizer 展示
-                        data['snapshot']['last_reason'] = f"【跑路信号】{event.detail}"
+                        data['snapshot']['last_reason'] = f"【跑路信号】{getattr(event, 'detail', '')}"
                         data['snapshot']['trade_phase'] = "EXIT"
-                        logger.warning(f"🚩 [Auto-Exit Signal] {event.code} {event.name} triggered {event.pattern}. Detail: {event.detail}")
+
+                        logger.warning(
+                            f"🚩 [Auto-Exit Signal] {event.code} {getattr(event,'name','')} "
+                            f"triggered {getattr(event,'pattern','')}. Detail: {getattr(event,'detail','')}"
+                        )
+
                     
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
@@ -3305,9 +3314,29 @@ class StockLiveStrategy:
             pass
             
         # 1. 回调 (UI 优先，确保窗口先弹出来)
+        # 1. 回调 (UI 优先，确保窗口先弹出来) - [OPTIMIZATION] 突发保护
+        # 如果短时间内大量回调，UI 会卡死。增加节流阀。
         if self.alert_callback:
             try:
-                self.alert_callback(code, name, message)
+                now_t = time.time()
+                # 初始化节流状态
+                if not hasattr(self, '_ui_callback_throttle'): 
+                    self._ui_callback_throttle = {'last_t': 0, 'count': 0}
+                
+                # 1秒内超过 3 次调用，则进入限流模式 (仅放行高优先级)
+                if now_t - self._ui_callback_throttle['last_t'] < 1.0:
+                    self._ui_callback_throttle['count'] += 1
+                else:
+                    self._ui_callback_throttle['last_t'] = now_t
+                    self._ui_callback_throttle['count'] = 1
+                
+                # 限流判定：如果过于频繁且不是高优先级，则跳过 UI 弹窗
+                should_skip_ui = (self._ui_callback_throttle['count'] > 3 and not is_priority)
+                
+                if not should_skip_ui:
+                    self.alert_callback(code, name, message)
+                else:
+                    logger.debug(f"UI Alert throttled for {code}")
             except Exception as e:
                 logger.error(f"Alert callback error: {e}")
 
