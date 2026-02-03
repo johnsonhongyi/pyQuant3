@@ -310,7 +310,22 @@ class WindowMixin:
             logger.error(f"[save_window_position_qt] 失败: {e}")
 
     def save_window_position_qt_visual(self, win: Any, window_name: str, file_path: Optional[str] = None) -> None:
-        """保存 PyQt 窗口 position"""
+        """保存 PyQt 窗口 position (防抖 5s)"""
+        import time
+        
+        # [NEW] 防抖逻辑
+        if not hasattr(self, "_window_save_debounce"):
+            self._window_save_debounce = {}
+            
+        current_time = time.time()
+        last_time = self._window_save_debounce.get(window_name, 0)
+        
+        if current_time - last_time < 5:
+            # logger.debug(f"[save_window_position_qt_visual] Debounced {window_name} (skipped)")
+            return
+
+        self._window_save_debounce[window_name] = current_time
+
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
         try:
