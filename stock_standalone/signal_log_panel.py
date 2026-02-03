@@ -211,6 +211,9 @@ class SignalLogPanel(QWidget, WindowMixin):
             h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)          # 内容 (自适应拉伸)
             h_header.setStretchLastSection(True) # 确保最后一列占满剩余空间
         
+        # [FIX] 全局背景深色，修复空白区域白色问题
+        self.setStyleSheet("background-color: #121212; color: #cccccc;")
+        
         self.log_table.setStyleSheet("""
             QTableWidget {
                 background-color: #121212;
@@ -225,12 +228,28 @@ class SignalLogPanel(QWidget, WindowMixin):
                 background-color: #2c5a2c;
                 color: #ffffff;
             }
+            QHeaderView {
+                background-color: #121212; /* [FIX] 整个 Header 区域背景 */
+                border: none;
+            }
             QHeaderView::section {
                 background-color: #252525;
                 color: #888;
                 padding: 4px;
                 border: 1px solid #333;
                 font-size: 8pt;
+            }
+            /* [FIX] 修复左上角空白框为白色 */
+            QTableCornerButton::section {
+                background-color: #252525;
+                border: 1px solid #333;
+            }
+            /* [FIX] 垂直表头如果显示，也应为深色 */
+            QHeaderView::section:vertical {
+                background-color: #121212;
+                color: #666;
+                padding-left: 2px;
+                border: none;
             }
         """)
         
@@ -581,7 +600,7 @@ class SignalLogPanel(QWidget, WindowMixin):
             self._drag_pos = None
             if hasattr(self, 'header'):
                 self.header.setCursor(Qt.CursorShape.OpenHandCursor)
-            self.save_window_position_qt_visual(self, "signal_log_panel")
+            # self.save_window_position_qt_visual(self, "signal_log_panel")
         super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event: Optional[QResizeEvent]):

@@ -186,6 +186,9 @@ class HotlistPanel(QWidget, WindowMixin):
             self.data_worker.start()
     
     def closeEvent(self, event):
+        # [NEW] Save position (debounced)
+        self.save_window_position_qt_visual(self, "HotlistPanel")
+        
         if self.data_worker.isRunning():
             self.data_worker.stop()
         super().closeEvent(event)
@@ -1574,7 +1577,7 @@ class HotlistPanel(QWidget, WindowMixin):
             if hasattr(self, 'header'):
                 self.header.setCursor(Qt.CursorShape.OpenHandCursor)
             # self._save_position()  # Old
-            self.save_window_position_qt_visual(self, "hotlist_panel") # New Unified
+            # self.save_window_position_qt_visual(self, "hotlist_panel") # New Unified
         super().mouseReleaseEvent(event)
 
     # ================== 位置保存/加载 (Unified Mixin) ==================
@@ -1590,6 +1593,6 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def hideEvent(self, event):
         """隐藏时保存位置"""
-        self.save_window_position_qt_visual(self, "hotlist_panel")
+        # self.save_window_position_qt_visual(self, "hotlist_panel")
         super().hideEvent(event)
 
