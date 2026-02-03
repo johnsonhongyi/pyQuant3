@@ -34,6 +34,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
 import os
 from PyQt6 import QtGui
+from db_utils import SQLiteConnectionManager
 
 logger = LoggerFactory.getLogger(__name__)
 
@@ -192,7 +193,9 @@ class HotlistPanel(QWidget, WindowMixin):
     def _init_db(self):
         """确保数据库表存在，并扩展字段"""
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            # [OPTIMIZED] Use connection manager
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
             c = conn.cursor()
             
             # 检查 follow_record 表是否存在，如不存在则创建
@@ -238,7 +241,7 @@ class HotlistPanel(QWidget, WindowMixin):
             """)
             
             conn.commit()
-            conn.close()
+            c.close()
         except Exception as e:
             logger.error(f"HotlistPanel DB init error: {e}")
     
@@ -501,8 +504,14 @@ class HotlistPanel(QWidget, WindowMixin):
         """从数据库加载热点列表"""
         self.items.clear()
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            # [OPTIMIZED] Use connection manager
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            
+            # Temporarily set row factory
+            old_factory = conn.row_factory
             conn.row_factory = sqlite3.Row
+            
             c = conn.cursor()
             c.execute("""
                 SELECT * FROM follow_record 
@@ -510,7 +519,9 @@ class HotlistPanel(QWidget, WindowMixin):
                 ORDER BY id DESC
             """)
             rows = c.fetchall()
-            conn.close()
+            c.close()
+            # Restore row factory
+            conn.row_factory = old_factory
             
             for r in rows:
                 item = HotlistItem(
@@ -648,7 +659,8 @@ class HotlistPanel(QWidget, WindowMixin):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
             c = conn.cursor()
             c.execute("""
                 INSERT INTO follow_record 
@@ -657,7 +669,7 @@ class HotlistPanel(QWidget, WindowMixin):
             """, (code, name, now, price, signal_type, group))
             new_id = c.lastrowid
             conn.commit()
-            conn.close()
+            c.close()
             
             new_item = HotlistItem(
                 id=new_id,
@@ -689,11 +701,12 @@ class HotlistPanel(QWidget, WindowMixin):
         for item in self.items:
             if item.code == code:
                 try:
-                    conn = sqlite3.connect(DB_FILE, timeout=10)
+                    mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+                    conn = mgr.get_connection()
                     c = conn.cursor()
                     c.execute("UPDATE follow_record SET status = 'REMOVED' WHERE id = ?", (item.id,))
                     conn.commit()
-                    conn.close()
+                    c.close()
                     
                     self.items.remove(item)
                     self._refresh_table()
@@ -1154,7 +1167,8 @@ class HotlistPanel(QWidget, WindowMixin):
     def _clear_exited(self):
         """清空已退出的记录"""
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
             c = conn.cursor()
             # [FIX] 先查询要删除的数量
             c.execute("SELECT COUNT(*) FROM follow_record WHERE status != 'ACTIVE'")
@@ -1162,12 +1176,12 @@ class HotlistPanel(QWidget, WindowMixin):
             
             if count == 0:
                 logger.info("ℹ️ 没有需要清理的退出记录")
-                conn.close()
+                c.close()
                 return
             
             c.execute("DELETE FROM follow_record WHERE status != 'ACTIVE'")
             conn.commit()
-            conn.close()
+            c.close()
             
             # [FIX] 重新加载列表以显示更新
             self._load_from_db()
@@ -1179,11 +1193,12 @@ class HotlistPanel(QWidget, WindowMixin):
         """从数据库加载今日信号计数"""
         try:
             today = datetime.now().strftime('%Y-%m-%d')
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
             c = conn.cursor()
             c.execute("SELECT code, pattern, count FROM signal_counts WHERE date = ?", (today,))
             rows = c.fetchall()
-            conn.close()
+            c.close()
             
             for code, pattern, count in rows:
                 self._signal_counts[(code, pattern)] = count
@@ -1197,7 +1212,8 @@ class HotlistPanel(QWidget, WindowMixin):
         """保存单个信号计数到数据库（按天）"""
         try:
             today = datetime.now().strftime('%Y-%m-%d')
-            conn = sqlite3.connect(DB_FILE, timeout=10)
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             c.execute("""
@@ -1205,7 +1221,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 VALUES (?, ?, ?, ?, ?)
             """, (code, pattern, today, count, now))
             conn.commit()
-            conn.close()
+            c.close()
         except Exception as e:
             logger.error(f"Save signal count error: {e}")
     
@@ -1351,11 +1367,12 @@ class HotlistPanel(QWidget, WindowMixin):
                 old_group = item.group
                 item.group = group
                 try:
-                    conn = sqlite3.connect(DB_FILE, timeout=10)
+                    mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+                    conn = mgr.get_connection()
                     c = conn.cursor()
                     c.execute("UPDATE follow_record SET group_tag = ? WHERE id = ?", (group, item.id))
                     conn.commit()
-                    conn.close()
+                    c.close()
                 except Exception as e:
                     logger.error(f"Set group error: {e}")
                 

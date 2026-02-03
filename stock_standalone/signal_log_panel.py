@@ -15,11 +15,11 @@ from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTextBrowser,
-    QPushButton, QLabel, QFrame
+    QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl, QPoint
-from PyQt6.QtGui import QResizeEvent, QMouseEvent
+from PyQt6.QtGui import QResizeEvent, QMouseEvent, QColor
 from tk_gui_modules.window_mixin import WindowMixin
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ class SignalLogPanel(QWidget, WindowMixin):
     
     # 信号: code, pattern, message
     log_clicked = pyqtSignal(str, str, str)
+    # 信号: code, name, pattern, message (用于同步语音播报)
+    log_added = pyqtSignal(str, str, str, str)
     
     # 信号颜色映射
     SIGNAL_COLORS = {
@@ -49,6 +51,37 @@ class SignalLogPanel(QWidget, WindowMixin):
         'breakout': '#00FF00',       # 突破 - 亮绿
         'default': '#CCCCCC',        # 默认 - 灰色
     }
+    
+    # 信号名称中文映射
+    PATTERN_NAMES = {
+        'auction_high_open': '竞价高开',
+        'gap_up': '跳空高开',
+        'low_open_high_walk': '低开走高',
+        'open_is_low': '开盘最低',
+        'open_is_low_volume': '开盘最低带量',
+        'nlow_is_low_volume': '日低反转带量',
+        'low_open_breakout': '低开突破',
+        'instant_pullback': '回踩支撑',
+        'shrink_sideways': '缩量横盘',
+        'pullback_upper': '回踩上轨',
+        'high_drop': '冲高回落',
+        'top_signal': '顶部信号',
+        'master_momentum': '核心主升',
+        'open_low_retest': '开盘回踩',
+        'high_sideways_break': '横盘突破',
+        'bull_trap_exit': '诱多跑路',
+        'momentum_failure': '主升转弱',
+        'strong_auction_open': '强力竞价',
+        # 策略信号
+        'ALERT': '报警触发',
+        'MOMENTUM': '动量信号',
+        'BUY': '买入信号',
+        'SELL': '卖出信号',
+        'HOLD': '持有',
+        'EXIT': '离场',
+    }
+
+
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -64,6 +97,9 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._flash_step: int = 0
         self._flash_timer: Optional[QTimer] = None
         self._original_border_style: str = ""
+        
+        # [NEW] 防止反向联动导致死循环的标志位
+        self._is_programmatic_selection: bool = False
         
         # 设置为浮动工具窗口
         self.setWindowFlags(
@@ -147,35 +183,145 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         layout.addWidget(self.header)
         
-        # 核心升级：QTextBrowser 以支持点击跳转
-        self.log_text = QTextBrowser()
-        self.log_text.setReadOnly(True)
-        self.log_text.setOpenLinks(False)  # 禁止系统浏览器打开
-        self.log_text.anchorClicked.connect(self._on_anchor_clicked)
-        self.log_text.setStyleSheet("""
-            QTextBrowser {
+        # 核心升级：QTableWidget 以支持精准行定位与同步高亮
+        self.log_table = QTableWidget()
+        self.log_table.setColumnCount(5)
+        self.log_table.setHorizontalHeaderLabels(["时间", "性质", "代码", "名称", "信号内容"])
+        
+        # 稳健性修正
+        v_header = self.log_table.verticalHeader()
+        if v_header: v_header.setVisible(False)
+        
+        self.log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.log_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.log_table.setAlternatingRowColors(True)
+        self.log_table.setShowGrid(False)
+        # [mFIX] 启用强焦点以支持键盘导航 (Up/Down/Enter/Esc)
+        self.log_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.log_table.setTextElideMode(Qt.TextElideMode.ElideRight) # 文本超长显示省略号
+        
+        # 列宽自适应策略
+        h_header = self.log_table.horizontalHeader()
+        if h_header:
+            h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # 时间
+            h_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # 性质
+            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # 代码
+            h_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 名称
+            h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)          # 内容 (自适应拉伸)
+            h_header.setStretchLastSection(True) # 确保最后一列占满剩余空间
+        
+        self.log_table.setStyleSheet("""
+            QTableWidget {
                 background-color: #121212;
+                alternate-background-color: #1a1a1a;
                 color: #cccccc;
                 border: none;
+                gridline-color: #333;
                 font-family: 'Consolas', 'Microsoft YaHei UI';
                 font-size: 9pt;
-                padding: 5px;
             }
-            a {
-                color: #1e90ff;
-                text-decoration: none;
-                font-weight: bold;
+            QTableWidget::item:selected {
+                background-color: #2c5a2c;
+                color: #ffffff;
             }
-            a:hover {
-                text-decoration: underline;
-                color: #00ffff;
+            QHeaderView::section {
+                background-color: #252525;
+                color: #888;
+                padding: 4px;
+                border: 1px solid #333;
+                font-size: 8pt;
             }
         """)
-        layout.addWidget(self.log_text)
+        
+        # 点击联动逻辑 (保持点击代码跳转)
+        self.log_table.cellClicked.connect(self._on_cell_clicked)
+        self.log_table.itemDoubleClicked.connect(self._on_item_double_clicked) # [NEW] 双击查看详情
+        
+        # [NEW] 键盘交互增强
+        # 1. 上下键自动联动
+        self.log_table.itemSelectionChanged.connect(self._on_selection_changed)
+        # 2. 回车/Esc 事件过滤器
+        self.log_table.installEventFilter(self)
+        
+        layout.addWidget(self.log_table)
         
         self.status_label = QLabel("就绪")
         self.status_label.setStyleSheet("color: #555; font-size: 8pt; padding: 2px 8px;")
         layout.addWidget(self.status_label)
+
+    def _on_cell_clicked(self, row, col):
+        """点击表格单元格联动"""
+        code_item = self.log_table.item(row, 2)
+        if not code_item: return
+        code = code_item.text()
+        
+        pattern_cn = self.log_table.item(row, 1).text()
+        msg = self.log_table.item(row, 4).text()
+        
+        # 寻找对应的原始 pattern
+        pattern = pattern_cn
+        for k, v in self.PATTERN_NAMES.items():
+            if v == pattern_cn:
+                pattern = k
+                break
+        
+        self.log_clicked.emit(code, pattern, msg)
+
+    def _on_selection_changed(self):
+        """
+        [NEW] 表格选择变更联动 (支持键盘上下键)
+        为了防止快速滚动时频繁触发，可以考虑加个防抖，这里暂时直接触发
+        """
+        # [mFIX] 防止反向联动死循环
+        if getattr(self, '_is_programmatic_selection', False):
+            return
+
+        items = self.log_table.selectedItems()
+        if not items: return
+        
+        # 获取当前选中的行
+        row = items[0].row()
+        # 复用点击逻辑
+        self._on_cell_clicked(row, 0)
+
+    def eventFilter(self, source, event):
+        """[NEW] 事件过滤器：处理回车和ESC"""
+        if source == self.log_table and event.type() == 6: # QEvent.KeyPress == 6
+            if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                # 回车查看详情
+                items = self.log_table.selectedItems()
+                if items:
+                    self._on_item_double_clicked(items[0])
+                return True
+            elif event.key() == Qt.Key.Key_Escape:
+                # ESC 隐藏窗口
+                self.hide()
+                return True
+        
+        return super().eventFilter(source, event)
+
+    def _on_item_double_clicked(self, item):
+        """双击查看完整信号详情"""
+        from PyQt6.QtWidgets import QMessageBox
+        row = item.row()
+        time_str = self.log_table.item(row, 0).text()
+        type_str = self.log_table.item(row, 1).text()
+        code_str = self.log_table.item(row, 2).text()
+        name_str = self.log_table.item(row, 3).text()
+        msg_str = self.log_table.item(row, 4).text()
+        
+        detail = f"<b>时间:</b> {time_str}<br>"
+        detail += f"<b>性质:</b> {type_str}<br>"
+        detail += f"<b>股票:</b> {name_str} ({code_str})<br><br>"
+        detail += f"<b>信号详情:</b><br>{msg_str}"
+        
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("🔍 信号详细信息")
+        msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setText(detail)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
 
     def _on_anchor_clicked(self, url: QUrl):
         """处理点击代码链接"""
@@ -217,55 +363,131 @@ class SignalLogPanel(QWidget, WindowMixin):
         # 更新缓存
         self._last_signals[code] = {'pattern': pattern, 'message': message, 'name': name}
         
-        if self._paused:
-            return
-        
-        # 3. 颜色与格式化
-        color = self.SIGNAL_COLORS.get(pattern, self.SIGNAL_COLORS['default'])
-        
-        # 调试: 打印正在添加的日志
-        logger.debug(f"[SignalLogPanel] Appending: {code} {pattern} {color}")
+        # 3. 翻译与配色
+        pattern_cn = self.PATTERN_NAMES.get(pattern, pattern)
+        color_hex = self.SIGNAL_COLORS.get(pattern, self.SIGNAL_COLORS['default'])
+        text_color = QColor(color_hex)
+        now_str = datetime.now().strftime("%H:%M:%S")
 
-        # 构造可点击的 HTML 段
-        clickable_code = f'<a href="{code}" style="color: #4da6ff;">[{code}]</a>'
-        clickable_name = f'<a href="{code}" style="color: #4da6ff;">{name}</a>'
-
-        # 尝试在消息中替换名称和代码，使整行更具交互性
-        display_msg = message
-        if code in display_msg:
-            display_msg = display_msg.replace(code, clickable_code)
-        if name in display_msg:
-            display_msg = display_msg.replace(name, clickable_name)
+        # 4. 内容去重处理 (移除重复的时间、名称、代码)
+        import re
+        clean_msg = message
+        # (1) 移除时间戳前缀 [HH:MM:SS]
+        clean_msg = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', clean_msg)
+        # (2) 移除名称和代码
+        if name:
+            clean_msg = clean_msg.replace(name, '').strip()
+        clean_msg = re.sub(r'\(?\[?\d{6}\]?\)?', '', clean_msg).strip()
         
-        # 如果替换后没有变化（说明消息里没这两样），则强制加个前缀
-        if clickable_code not in display_msg:
-            display_msg = f"{clickable_code} {display_msg}"
-
-        # 使用 span 强制颜色
-        html = f'<div style="margin-bottom: 2px;"><span style="color:{color};">{display_msg}</span></div>'
-
-        # 插入内容
-        self.log_text.append(html) 
+        # (3) 移除冗余的前缀 (如 "动量信号:", "报警触发:" 等)
+        # 优先移除 PATTERN_NAMES 中的中文映射
+        for pat_val in self.PATTERN_NAMES.values():
+            if clean_msg.startswith(pat_val):
+                clean_msg = clean_msg[len(pat_val):].strip()
         
-        # 更新计数 (本地 buffer 保持原始字符串，用于导出)
-        self._log_buffer.append(f"{code} [{pattern}] {message}")
+        # (4) 移除开头的多余冒号和空格
+        clean_msg = re.sub(r'^[:：\s]+', '', clean_msg).strip()
+
+        # 5. 插入表格
+        row = 0 # 始终在最上方插入最新信号
+        self.log_table.insertRow(row)
+        
+        # 单元格填充
+        items = [
+            QTableWidgetItem(now_str),
+            QTableWidgetItem(pattern_cn),
+            QTableWidgetItem(code),
+            QTableWidgetItem(name),
+            QTableWidgetItem(clean_msg) # 使用清理后的消息
+        ]
+        
+        for i, item in enumerate(items):
+            item.setForeground(text_color)
+            if i == 2 or i == 3: # 代码和名称加粗
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.log_table.setItem(row, i, item)
+        
+        # 限制行数
+        if self.log_table.rowCount() > self._max_lines:
+            self.log_table.removeRow(self.log_table.rowCount() - 1)
+        
+        # 5. 更新状态与计数
+        self._log_buffer.append(f"{code} [{pattern_cn}] {message}")
         if len(self._log_buffer) > self._max_lines:
             self._log_buffer = self._log_buffer[-self._max_lines:]
-        
+            
         self.count_label.setText(str(len(self._log_buffer)))
         self.status_label.setText(f"最新: {code}")
         
         # 高优先级信号触发闪屏
         if is_high_priority:
             self.flash_for_high_priority()
+        
+        # 发射日志已添加信号，用于同步语音播报
+        self.log_added.emit(code, name, pattern, message)
+
+    def highlight_row_by_content(self, code: str, message_snippet: str):
+        """
+        根据内容高亮并定位行 (用于语音联动)
+        [FIX] 增加防抖标记，防止反向联动导致死循环
+        [OPTIMIZATION] 使用 findItems 加速查找，支持全量搜索
+        """
+        self._is_programmatic_selection = True
+        try:
+            # 1. 快速查找所有匹配代码的项
+            # Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchCaseSensitive
+            items = self.log_table.findItems(code, Qt.MatchFlag.MatchExactly)
+            
+            if not items:
+                return False
+                
+            # 2. 筛选出位于 "代码" 列 (Col 2) 的项
+            code_items = [it for it in items if it.column() == 2]
+            if not code_items:
+                return False
+            
+            # 3. 寻找最佳匹配 (优先匹配 Row 最小的，即最新的)
+            # findItems 返回顺序不确定，先按 Row 排序
+            code_items.sort(key=lambda it: it.row())
+            
+            target_item = None
+            
+            if not message_snippet:
+                # 如果没有片段要求，直接取最新的 (Row 最小)
+                target_item = code_items[0]
+            else:
+                # 遍历查找匹配消息的
+                for it in code_items:
+                    row = it.row()
+                    msg_item = self.log_table.item(row, 4)
+                    if msg_item and (message_snippet in msg_item.text() or msg_item.text() in message_snippet):
+                        target_item = it
+                        break
+                
+                # 如果没找到匹配详细内容的，降级到最新的代码匹配
+                if not target_item:
+                    target_item = code_items[0]
+            
+            if target_item:
+                row = target_item.row()
+                self.log_table.selectRow(row)
+                self.log_table.scrollToItem(target_item)
+                return True
+
+        finally:
+            self._is_programmatic_selection = False
+        return False
 
     def clear_logs(self):
         """清空日志"""
-        self.log_text.clear()
+        # self.log_text.clear()
+        self.log_table.setRowCount(0)
         self._log_buffer.clear()
         self._last_signals.clear()
         self.count_label.setText("0")
-        self.status_label.setText("已清空")
+        self.status_label.setText("就绪")
     
     def flash_for_high_priority(self, times: int = 3, interval_ms: int = 150):
         """

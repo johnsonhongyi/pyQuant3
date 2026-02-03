@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 import threading
 import pandas as pd
 import sqlite3
@@ -362,7 +363,8 @@ class MinuteKlineCache:
                 
                 # Check for volume reset or negative delta
                 if current_cum_vol < last_k.cum_vol_start:
-                     print(f"[WARNING] Volume Reset Detected - Code: {code}, Time: {minute_ts}, Current: {current_cum_vol}, Start: {last_k.cum_vol_start}")
+                     time_str = datetime.fromtimestamp(minute_ts).strftime('%Y-%m-%d %H:%M:%S')
+                     print(f"[WARNING] Volume Reset Detected - Code: {code}, Time: {time_str}, Current: {current_cum_vol}, Start: {last_k.cum_vol_start}")
                      last_k.cum_vol_start = current_cum_vol
                      # If reset happens, we can't calculate meaningful volume for this tick relative to previous start
                      # Reset volume to 0 for this instant or keep previous? 
@@ -387,7 +389,8 @@ class MinuteKlineCache:
                 
                 # Check for reset first
                 if current_cum_vol < prev_end_cum_vol:
-                     print(f"[WARNING] Volume Reset Detected on New Bar - Code: {code}, Time: {minute_ts}, Current: {current_cum_vol}, PrevEnd: {prev_end_cum_vol}")
+                     time_str = datetime.fromtimestamp(minute_ts).strftime('%Y-%m-%d %H:%M:%S')
+                     print(f"[WARNING] Volume Reset Detected on New Bar - Code: {code}, Time: {time_str}, Current: {current_cum_vol}, PrevEnd: {prev_end_cum_vol}")
                      # Reset: Start fresh
                      klines.append(KLineItem(
                         time=minute_ts, open=price, high=price, low=price, close=price,

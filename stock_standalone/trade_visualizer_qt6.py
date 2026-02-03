@@ -115,16 +115,25 @@ def normalize_speech_text(text: str) -> str:
     return text
 
 
-def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
-    """
-    语音播报工作进程的主函数 (完全独立进程，不干扰主进程)
-    
-    Args:
-        queue: 多进程队列，用于接收播报文本
-        stop_flag: 多进程共享值，用于控制进程退出
-    """
+def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None):
+    """语音播报工作者 (运行在独立进程)"""
     import pyttsx3
     import time
+    
+    # 定义内部非阻塞播报监听器
+    class AbortListener:
+        def __init__(self, engine, abort_event, stop_flag):
+            self.engine = engine
+            self.abort_event = abort_event
+            self.stop_flag = stop_flag
+            self.should_stop = False
+            
+        def on_word(self, name, location, length):
+            if (self.abort_event and self.abort_event.is_set()) or not self.stop_flag.value:
+                self.engine.stop()
+                self.should_stop = True
+
+    # 延迟加载，防止进程初始化时卡顿
     try:
         import pythoncom
     except ImportError:
@@ -138,14 +147,14 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
             messages = []
             try:
                 # 获取第一条消息（阻塞等待 1s）
-                text = queue.get(timeout=1)
-                messages.append(text)
+                data = queue.get(timeout=1)
+                messages.append(data)
                 
                 # 获取队列中剩余的所有消息（非阻塞）
                 while not queue.empty():
                     try:
-                        text = queue.get_nowait()
-                        messages.append(text)
+                        data = queue.get_nowait()
+                        messages.append(data)
                     except:
                         break
             except:
@@ -156,10 +165,25 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
                 
             # 依次播报所有消息
             logger.debug(f"[VoiceProcess] 🔊 开始播报 {len(messages)} 条消息")
-            for i, msg in enumerate(messages, 1):
+            for i, data in enumerate(messages, 1):
                 if not stop_flag.value:
                     break
                 
+                # 兼容处理：支持直接传 text 或传 {'text': t, 'meta': m}
+                if isinstance(data, dict):
+                    msg = data.get('text', '')
+                    meta = data.get('meta', None)
+                else:
+                    msg = str(data)
+                    meta = None
+
+                # 向主进程反馈：开始播报该条信号
+                if feedback_queue and meta:
+                    try:
+                        feedback_queue.put(meta)
+                    except Exception as e:
+                        logger.debug(f"[VoiceProcess] Failed to put meta to feedback_queue: {e}")
+
                 # 单次播报逻辑
                 engine = None
                 try:
@@ -177,10 +201,22 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
                     speech_text = normalize_speech_text(msg)
                     logger.debug(f"[VoiceProcess]   播报 [{i}/{len(messages)}]: {speech_text}")
                     
-                    engine.say(speech_text)
-                    engine.runAndWait()
+                    # ⭐ 注册回调以支持实时中止
+                    # 我们虽然用 runAndWait(), 但可以通过 engine.stop() 强行切断它
+                    def check_abort(name=None, location=None, length=None):
+                        if (abort_event and abort_event.is_set()) or not stop_flag.value:
+                            try:
+                                engine.stop()
+                            except:
+                                pass
+
+                    engine.connect('started-utterance', check_abort)
+                    engine.connect('started-word', check_abort)
                     
-                    logger.debug(f"[VoiceProcess]   ✅ 完成 [{i}/{len(messages)}]")
+                    engine.say(speech_text)
+                    engine.runAndWait() # ⭐ 回归稳健模式
+                    
+                    logger.debug(f"[VoiceProcess]   ✅ 完成/中止 [{i}/{len(messages)}]")
                     time.sleep(0.1)
                     
                 except Exception as e:
@@ -216,7 +252,9 @@ class VoiceProcess:
     def __init__(self, parent=None):  # 接受 parent 参数保持兼容性
         import multiprocessing as mp
         self.queue = mp.Queue()
+        self.feedback_queue = mp.Queue() # 新增反馈队列
         self.stop_flag = mp.Value('b', True)  # boolean, True = running
+        self.abort_event = mp.Event() # 新增：强制中止事件
         self.process = None
         self.pause_for_sync = False  # 保留接口兼容性（但多进程下无需使用）
 
@@ -225,18 +263,36 @@ class VoiceProcess:
         import multiprocessing as mp
         if self.process is None or not self.process.is_alive():
             self.stop_flag.value = True
+            self.abort_event.clear()
             self.process = mp.Process(
                 target=_voice_worker, 
-                args=(self.queue, self.stop_flag),
+                args=(self.queue, self.stop_flag, self.feedback_queue, self.abort_event),
                 daemon=True
             )
             self.process.start()
             logger.info("✅ 语音播报进程已启动 (PID: %s)", self.process.pid)
 
-    def speak(self, text):
-        """添加文本到播报队列"""
+    def speak(self, text, meta=None):
+        """添加文本及元数据到播报队列"""
         if self.stop_flag.value:
-            self.queue.put(text)
+            # 推送新消息时，确保中止事件是清除的
+            self.abort_event.clear()
+            if meta:
+                self.queue.put({'text': text, 'meta': meta})
+            else:
+                self.queue.put(text)
+
+    def abort(self):
+        """立即中止当前所有播报"""
+        # 1. 设置中止事件，让 worker 停止当前播放
+        self.abort_event.set()
+        # 2. 清空队列中剩余的消息
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+        logger.info("🛑 Voice broadcast aborted and queue cleared")
 
     def stop(self):
         """停止语音播报进程"""
@@ -924,7 +980,7 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
         try:
             code = current_code
             # ⭐ 核心逻辑：如果是切股后的第一笔，或者处于交易时间，则执行抓取
-            is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 920)
+            is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 925)
             if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
@@ -1937,6 +1993,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_task_queue = Queue() # ⭐ 新增：任务队列 (1.3)
         self.realtime_process = None
         self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
+        self._signal_dedup_cache = {} # 信号去重缓存
 
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
@@ -1961,6 +2018,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.command_timer.start(200)  # 200ms 轮询一次，保证响应速度
         else:
             logger.warning("[Visualizer] No command queue detected! Sync from MonitorTK may fail.")
+
+        # 🎤 [NEW] 语音反馈监听定时器：实现声画同步定位
+        self.voice_feedback_timer = QTimer()
+        self.voice_feedback_timer.timeout.connect(self._poll_voice_feedback)
+        self.voice_feedback_timer.start(500) # 每 500ms 检查一次播报进度
 
         self.day_df = pd.DataFrame()
         self.df_all = pd.DataFrame()
@@ -2593,6 +2655,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ [Independent Window] 设置为 None，允许面板掉到主窗口后面
         self.signal_log_panel = SignalLogPanel(None)
         self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
+        # ⚡ [NEW] 连接日志添加信号，用于同步语音播报 (所见即所播)
+        self.signal_log_panel.log_added.connect(self._on_signal_log_added)
 
         # [FIX] Force Apply Pending Voice State (Override any earlier reset)
         if hasattr(self, 'hotlist_panel') and hasattr(self, '_pending_hotlist_voice_paused'):
@@ -2628,9 +2692,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel.select_stock(code)
             
         # 4. 激活主窗口，确保在顶层
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
+        # [FIX] Do NOT steal focus! allow user to keep using Up/Down in Signal Log Panel
+        # self.showNormal()
+        # self.raise_()
+        # self.activateWindow()
         logger.debug(f"[LINK] Signal Log clicked: {code}, linked to all views. Ctx: {pattern}")
     
     
@@ -2712,63 +2777,230 @@ class MainWindow(QMainWindow, WindowMixin):
         self.activateWindow()
     
     def _on_hotlist_voice_alert(self, code: str, message: str):
-        """热点面板语音提醒回调"""
-        if hasattr(self, 'voice_thread'):
-            self.voice_thread.speak(message)
+        """热点面板语音提醒回调 - 同时更新信号日志面板"""
+        try:
+            # 1. 过滤：保留买卖信号、低开走高、强势股及一般信号提醒
+            # [STABILITY] 扩充关键字支持，减少“时有时无”的漏报情况
+            is_valid = any(kw in message for kw in ['买入', '卖出', '低开走高', '强势', '信号', '突破', '拐点'])
+            if not is_valid:
+                return
+
+            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
+            if '低开走高' in message and not any(kw in message for kw in ['强势', '买入', '卖出']):
+                if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                    row = self.df_all.loc[code]
+                    o = row.get('open', 0)
+                    l = row.get('low', 0)
+                    if o > l > 0: # 如果开盘价不是最低点，则跳过
+                        return
+
+            # ⭐ CHECK MUTE STATE (only for voice, log panel always updates)
+            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+            
+            # 2. 更新信号日志面板 (详尽信息模式)
+            if hasattr(self, 'signal_log_panel'):
+                from datetime import datetime
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                name = self.code_name_map.get(code, code)
+                pattern = 'ALERT'
+                if '状态变更' in message:
+                    pattern = 'STATUS'
+                    
+                full_detail = f"[{timestamp}] {name}({code}) {message}"
+                
+                if not self.signal_log_panel.isVisible():
+                    self.signal_log_panel.show()
+                    self.signal_log_panel.raise_()
+                self.signal_log_panel.append_log(code, name, pattern, full_detail, is_high_priority=False)
+            
+            # 3. 播放语音 (受静音状态控制)
+            # ⚡ [REMOVED] 改为由 signal_log_panel.log_added 信号统一触发，避免逻辑分散
+            # if not is_muted:
+            #     if hasattr(self, 'voice_thread'):
+            #         self.voice_thread.speak(message)
+        except:
+            pass
+
     
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """信号日志回调 - 追加到日志面板并写入数据库"""
         try:
-            logger.info(f"⚡ [SIGNAL LOG] {code} {name} {pattern} {message}")
+            # ⚡ [FIX] 信号过滤：扩充白名单，确保更多关键信号能被记录和播报
+            valid_patterns = ['BUY', 'SELL', 'low_open_high_walk', 'MOMENTUM', 'ALERT', 'STATUS', 'PATTERN']
+            if not (pattern in valid_patterns or is_high_priority):
+                return
+
+            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
+            if pattern == 'low_open_high_walk' and not is_high_priority:
+                if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                    row = self.df_all.loc[code]
+                    o = row.get('open', 0)
+                    l = row.get('low', 0)
+                    if o > l > 0: # 开盘价大于最低价，说明早盘不是最低点
+                        return
+
+
+            # ⚡ [FIX] 信号去重：同一股票同一信号类型 5 秒内不重复推送
+            import time
+            dedup_key = f"{code}_{pattern}"
+            if not hasattr(self, '_signal_dedup_cache'):
+                self._signal_dedup_cache = {}
             
-            # 1. 播报语音 (新增)
-            if hasattr(self, 'voice_thread') and (is_high_priority or pattern == 'ALERT' or "卖出" in message):
-                # 简化播报内容，避免太长
-                speak_msg = f"{name} {pattern}"
-                if "卖出" in message:
-                    speak_msg = f"{name} 卖出信号"
-                self.voice_thread.speak(speak_msg)
+            now = time.time()
+            last_time = self._signal_dedup_cache.get(dedup_key, 0)
+            if now - last_time < 5.0:  # 5 秒内重复不推送
+                return
+            self._signal_dedup_cache[dedup_key] = now
+            
+            # ⚡ [FIX] 详细日志显示
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%H:%M:%S')
+
+            # 信号名称中文映射
+            PATTERN_NAMES = {
+                'auction_high_open': '竞价高开',
+                'gap_up': '跳空高开',
+                'low_open_high_walk': '低开走高',
+                'open_is_low': '开盘最低',
+                'open_is_low_volume': '开盘最低带量',
+                'nlow_is_low_volume': '日低反转带量',
+                'low_open_breakout': '低开突破',
+                'instant_pullback': '回踩支撑',
+                'shrink_sideways': '缩量横盘',
+                'pullback_upper': '回踩上轨',
+                'high_drop': '冲高回落',
+                'top_signal': '顶部信号',
+                'master_momentum': '核心主升',
+                'open_low_retest': '开盘回踩',
+                'high_sideways_break': '横盘突破',
+                'bull_trap_exit': '诱多跑路',
+                'momentum_failure': '主升转弱',
+                'strong_auction_open': '强力竞价',
+                # 策略信号
+                'ALERT': '报警触发',
+                'MOMENTUM': '动量信号',
+                'BUY': '买入信号',
+                'SELL': '卖出信号',
+                'HOLD': '持有',
+                'EXIT': '离场',
+            }
+
+            pattern_cn = PATTERN_NAMES.get(pattern, pattern)
+            # 切回详细信息格式
+            detailed_msg = f"[{timestamp}] {name}({code}) {pattern_cn}: {message}"
+            
+            logger.info(f"⚡ [SIGNAL LOG] {code} {name} {pattern_cn}")
+
+            # 1. 播报语音 - ⚠️ 已重构：改为由 signal_log_panel.log_added 驱动
+            # 此处不再执行 speak，确保只有成功记录到日志的信息才会被播报。
 
             # 2. 显示到信号日志面板（传递高优先级标志以触发闪屏）
             if hasattr(self, 'signal_log_panel'):
                 if not self.signal_log_panel.isVisible():
                     self.signal_log_panel.show()
                     self.signal_log_panel.raise_()
-                self.signal_log_panel.append_log(code, name, pattern, message, is_high_priority=is_high_priority)
+                self.signal_log_panel.append_log(code, name, pattern, detailed_msg, is_high_priority=is_high_priority)
             
-            # 2. 推送到 SignalMessageQueue (核心修复：确保 SignalBoxDialog 能收到)
-            # 这会自动处理数据库写入、内存缓存更新和去重
+            # 3. 推送到 SignalMessageQueue (静默处理，不影响日志面板)
             if hasattr(self, '_queue_mgr') and self._queue_mgr:
                 from signal_message_queue import SignalMessage
-                from datetime import datetime
                 
                 # 构建 SignalMessage 对象
                 msg = SignalMessage(
                     priority=100 if is_high_priority else 50,
-                    timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    timestamp=timestamp,
                     code=code,
                     name=name,
                     signal_type=pattern,
                     source='hotlist_panel',
-                    reason=message,
+                    reason=detailed_msg,  # 使用详细消息
                     score=0.0
                 )
                 if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog._queue_mgr:
                     self.signal_box_dialog._queue_mgr.push(msg)
-                    logger.debug(f"✅ Signal pushed to Queue: {code} - {pattern}")
                 
                     # 触发 UI 刷新及显示
                     if not self.signal_box_dialog.isVisible() and is_high_priority:
                          self.signal_box_dialog.show()
                     if self.signal_box_dialog.isVisible():
                         self.signal_box_dialog.refresh()
-                
-                # 3. 触发 HotspotPopup (可选)
-                # if is_high_priority:
-                #    self._show_hotspot_popup(code, name, pattern, str(msg.score))
 
         except Exception as e:
             logger.error(f"Failed to process signal log: {e}")
+
+    def _on_signal_log_added(self, code: str, name: str, pattern: str, message: str):
+        """同步播报信号日志中新增的内容 (所见即所播)"""
+        try:
+            # 1. 状态环境检查
+            if not hasattr(self, 'voice_thread') or not self.voice_thread:
+                return
+            
+            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+            if is_muted:
+                return
+
+            # 2. 处理播报内容
+            speak_msg = message
+            
+            # --- 深度去重与格式化处理 ---
+            import re
+            # (1) 移除时间戳前缀 [HH:MM:SS]
+            speak_msg = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', speak_msg)
+            
+            # (2) 移除名称和代码组合 (稍后会统一加上)
+            if name:
+                speak_msg = speak_msg.replace(name, '').strip()
+            speak_msg = re.sub(r'\(?\[?\d{6}\]?\)?', '', speak_msg).strip()
+            
+            # (3) 移除冗余的前缀 (如 "动量信号:", "报警触发:" 等)
+            from signal_log_panel import SignalLogPanel
+            pattern_names = getattr(SignalLogPanel, 'PATTERN_NAMES', {})
+            for pat_val in pattern_names.values():
+                if speak_msg.startswith(pat_val):
+                    speak_msg = speak_msg[len(pat_val):].strip()
+            
+            # (4) 最终修整空白和多余冒号
+            speak_msg = re.sub(r'^[:：\s]+', '', speak_msg).strip()
+            
+            # ⭐ [关键修复] 捕获用于 UI 匹配的片段 (保持精简形式)
+            match_snippet = speak_msg[:20] 
+
+            # (5) 重新组装播报文案：加上代码和名称
+            stock_id = f"{name} {code}" if name else code
+            speak_msg = f"{stock_id}, {speak_msg}"
+
+            # (6) 符号与缩写转写 (提升 TTS 听感)
+            speak_msg = speak_msg.replace('->', '转').replace('ACCUMULATE', '蓄势').replace('SURGE', '冲击')
+            
+            if speak_msg:
+                # logger.debug(f"🎙️ [SYNC VOICE] {speak_msg}")
+                # 传递带有 code 和原始片段的元数据，用于 UI 定位
+                meta = {'code': code, 'snippet': match_snippet} 
+                self.voice_thread.speak(speak_msg, meta=meta)
+                
+        except Exception as e:
+            logger.error(f"Error in signal log sync broadcast: {e}")
+
+    def _poll_voice_feedback(self):
+        """轮询语音进程的反馈队列，同步 UI 位置"""
+        if not hasattr(self, 'voice_thread') or not self.voice_thread:
+            return
+            
+        try:
+            # 获取所有待处理的反馈 (非阻塞)
+            while not self.voice_thread.feedback_queue.empty():
+                meta = self.voice_thread.feedback_queue.get_nowait()
+                if isinstance(meta, dict):
+                    code = meta.get('code')
+                    snippet = meta.get('snippet')
+                    if code and hasattr(self, 'signal_log_panel'):
+                        # 联动 1: 日志面板自动定位与高亮
+                        self.signal_log_panel.highlight_row_by_content(code, snippet)
+                        
+                        # 联动 2: 如果当前没有查看特定股票，可以考虑自动切换（可选，根据用户习惯，此处暂不自动切换大图，主要做日志定位）
+                        # logger.debug(f"🔗 [UI LINKAGE] Highlighted log row for {code} during speech.")
+        except Exception as e:
+            pass # 队列空或读取异常不影响主程
 
     def process_ipc_command(self, cmd_str: str):
         """处理 IPC 命令分发"""
@@ -2802,6 +3034,11 @@ class MainWindow(QMainWindow, WindowMixin):
             elif len(content) == 6 and content.isdigit():
                 self.load_stock_by_code(content)
                 self.activateWindow() # 收到代码时激活窗口
+            
+            # 2.5 带有参数管道符的格式: 600598|resample=d
+            elif "|" in content and content.split('|')[0].strip().isdigit() and len(content.split('|')[0].strip()) == 6:
+                self.load_stock_by_code(content)
+                self.activateWindow()
                 
             # 3. 带名称的股票代码: 000001,平安银行 (兼容旧格式)
             elif "," in content:
@@ -3555,12 +3792,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     elif strategy_name == "CONSOLIDATION": strategy_name = "蓄势"
                     elif strategy_name == "SUDDEN_LAUNCH": strategy_name = "突发"
                     
-                    # 简短播报
-                    text = f"{msg.name}, {strategy_name}"
-                    
-                    # ⚡ 再次检查 VoiceProcess 是否可用
-                    if hasattr(self, 'voice_thread') and self.voice_thread:
-                        self.voice_thread.speak(text)
+                    # ⚡ [REMOVED] 已重构：统一由信号日志面板 log_added 驱动语音播报
+                    # 避免重复播报
+                    pass
+                    # if hasattr(self, 'voice_thread') and self.voice_thread:
+                    #     self.voice_thread.speak(text)
                     
                     self._spoken_cache.add(dedup_key)
                     count_spoken += 1
@@ -4948,7 +5184,7 @@ class MainWindow(QMainWindow, WindowMixin):
         pass
 
     def _toggle_hotlist_voice(self):
-        """切换热点面板语音"""
+        """切换热点面板语音 - ⚡ 修复：立即生效，并反向同步至主进程开关"""
         if hasattr(self, 'hotlist_panel'):
             self.hotlist_panel.toggle_voice()
             # 同步图标和文字
@@ -4956,23 +5192,48 @@ class MainWindow(QMainWindow, WindowMixin):
             if is_paused:
                 self.voice_action.setText("🔇 热点播报: 关")
                 
-                # 🛑 立即清空语音队列，防止后台继续播放堆积的消息
+                # 🛑 [FIX] 立即强力中止所有语音
                 if hasattr(self, 'voice_thread') and self.voice_thread:
-                    try:
-                        # 尝试清空队列 (使用循环 get_nowait 直到异常)
-                        q = self.voice_thread.queue
-                        count = 0
-                        while True:
-                            try:
-                                q.get_nowait()
-                                count += 1
-                            except: # Queue.Empty
-                                break
-                        logger.info(f"🛑 Cleared {count} items from voice queue due to mute.")
-                    except Exception as e:
-                        logger.debug(f"Failed to clear voice queue: {e}")
+                    self.voice_thread.abort()
+                logger.info("🔇 语音播报已关闭（即时生效）")
             else:
                 self.voice_action.setText("🔊 热点播报: 开")
+                logger.info("🔊 语音播报已开启")
+            
+            # ⭐ [IPC] 反向同步给主进程：如果可视化开启语音，主进程应静音(互斥)
+            # enabled=True 表示主进程应开启
+            # [FIX] 取消"关闭可视化语音自动开启主进程"的逻辑，改为始终静音主进程，防止"幽灵语音"
+            # 即：只要在 Visualizer 操作语音，都倾向于接管控制权，避免混音 或 意外唤醒后台
+            self._send_voice_state_to_main_app(enabled=is_paused)
+
+    def _send_voice_state_to_main_app(self, enabled=True):
+        """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""
+        import win32pipe, win32file, pywintypes
+        import json
+        
+        try:
+            # 这里的 PIPE_NAME_TK 是在 data_utils 中定义的，并被 instock_MonitorTK 监听
+            pipe_name = r'\\.\pipe\instock_tk_pipe'
+            handle = win32file.CreateFile(
+                pipe_name,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0, None, win32file.OPEN_EXISTING, 0, None
+            )
+            
+            payload = json.dumps({
+                "cmd": "SET_VOICE_STATE",
+                "enabled": enabled,
+                "source": "Visualizer"
+            })
+            
+            win32file.WriteFile(handle, payload.encode('utf-8'))
+            win32file.CloseHandle(handle)
+            logger.info(f"Sent SET_VOICE_STATE(enabled={enabled}) to Main App")
+        except pywintypes.error as e:
+            # 管道不存在或没被监听很正常，不需要报错
+            logger.debug(f"Main App pipe not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to sync voice state to main app: {e}")
 
     def _update_app_bg(self, color):
         self.custom_bg_app = color
@@ -5788,24 +6049,26 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 检查是否是新信号
                     last_val = self._alerted_signals.get(item.code, '')
                     if str(action) != last_val:
-                        self._alerted_signals.get(item.code, '')
                         self._alerted_signals[item.code] = str(action)
-                        alerts.append(f"{item.name} {action}")
+                        # ⚡ [SYNC] 不再直接播报，而是转发给 _on_signal_log，确保同步记录到日志面板后再播报
+                        self._on_signal_log(item.code, item.name, 'ALERT', action, is_high_priority=True)
         
         # 刷新热点面板表格
         if hasattr(self, 'hotlist_panel'):
             self.hotlist_panel._refresh_table()
 
-        if alerts and (now - self._last_alert_time > 5):
-            # alert_msg = "热点提醒: " + " ".join(alerts)
-            alert_msg = " ".join(alerts)
-            logger.info(alert_msg)
-            # 语音播报 - 使用 voice_thread 异步执行，避免卡顿
-            if hasattr(self, 'voice_thread') and self.voice_thread:
-                # ⭐ CHECK MUTE
-                is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
-                if not is_muted:
-                    self.voice_thread.speak(alert_msg)
+        if alerts:
+            # ⚡ [REFORM] 不再直接播报，而是转发给 _on_signal_log，确保同步记录到日志面板后再播报
+            for item_code, item_name, action_str in zip(
+                [item.code for item in self.hotlist_panel.items if item.code in self._alerted_signals],
+                [item.name for item in self.hotlist_panel.items if item.code in self._alerted_signals],
+                [self._alerted_signals[item.code] for item in self.hotlist_panel.items if item.code in self._alerted_signals]
+            ):
+                # 只有新触发的才需要处理 (由 alerts 列表控制，逻辑略粗，直接用循环体里的判断更准)
+                pass
+
+            # 修正 _check_hotspot_alerts 逻辑：直接在遍历处转发
+            # (见下一步修改)
             
             # 状态栏提示 (如果界面存在)
             if self.isVisible():
@@ -6336,6 +6599,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_times = []
         self.current_kline_signals = []
         self.current_tick_crosshair_idx = -1
+        
+        # [NEW] Main View Linkage -> Signal Log Panel (Reverse Linkage)
+        # Highlight the stock in Signal Log Panel if visible, but DO NOT steal focus
+        if hasattr(self, 'signal_log_panel') and self.signal_log_panel and self.signal_log_panel.isVisible():
+            self.signal_log_panel.highlight_row_by_content(code, "")
         self._hide_crosshair()
         self._hide_tick_crosshair()
 
@@ -6383,8 +6651,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.clearSelection() # 清除之前的选择
             self.stock_table.setCurrentCell(row, 0)
             self.stock_table.scrollToItem(code_item, QAbstractItemView.ScrollHint.EnsureVisible)
-
+        
+        # [FIX] 设置 Loading 状态同时清理标题缓存, 确保数据加载完成后能强制刷新标题
+        # (否则切换周期时因 code 没变, _update_plot_title 会误判为标题无需更新)
         self.kline_plot.setTitle(f"Loading {code}...")
+        self._last_full_title = None 
 
         # ⭐ 清理旧的 DataLoaderThread，使用回收站机制防止闪推
         if hasattr(self, 'loader') and self.loader is not None:
@@ -9461,18 +9732,50 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(code, name)
     
     def _on_hotlist_voice_alert(self, code: str, msg: str):
-        """热点面板语音通知"""
+        """热点面板语音通知 - 同时更新信号日志面板"""
         try:
-            if hasattr(self, 'voice_thread') and self.voice_thread:
-                # ⭐ CHECK MUTE
-                is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
-                if not is_muted:
-                    # self.voice_thread.speak(f"热点提醒，{msg}")
-                    self.voice_thread.speak(f"{msg}")
+            # 1. 过滤逻辑：买卖、低开走高、强势
+            is_valid = any(kw in msg for kw in ['买入', '卖出', '低开走高', '强势'])
+            if not is_valid:
+                return
+
+            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
+            if '低开走高' in msg and not any(kw in msg for kw in ['强势', '买入', '卖出']):
+                if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                    row = self.df_all.loc[code]
+                    o = row.get('open', 0)
+                    l = row.get('low', 0)
+                    if o > l > 0:
+                        return
+
+            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+            
+            # 2. 更新信号日志面板 (详尽信息模式)
+            if hasattr(self, 'signal_log_panel'):
+                from datetime import datetime
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                name = self.code_name_map.get(code, code)
+                pattern = 'ALERT'
+                if '状态变更' in msg:
+                    pattern = 'STATUS'
+                
+                full_detail = f"[{timestamp}] {name}({code}) {msg}"
+                
+                if not self.signal_log_panel.isVisible():
+                    self.signal_log_panel.show()
+                    self.signal_log_panel.raise_()
+                self.signal_log_panel.append_log(code, name, pattern, full_detail, is_high_priority=False)
+            
+            # 3. 播放语音
+            # ⚡ [REMOVED] 已重构，由 signal_log_panel.log_added 信号统一触发同步播报
+            # if hasattr(self, 'voice_thread') and self.voice_thread:
+            #     if not is_muted:
+            #         self.voice_thread.speak(f"{msg}")
             else:
                 logger.debug(f"Voice thread not available, skipping: {msg}")
         except Exception as e:
             logger.error(f"Hotlist voice alert error: {e}")
+
 
     def _on_hotlist_double_click(self, code: str, name: str, add_price: float):
         """热点列表双击: 打开详情弹窗"""

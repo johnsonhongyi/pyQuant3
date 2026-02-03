@@ -40,7 +40,7 @@ def normalize_speech_text(text: str) -> str:
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
     return text
 
-def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, cancel_q: mp.Queue, current_key_arr: mp.Array, active_codes_arr: mp.Array, last_sync_time: mp.Value):
+def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, cancel_q: mp.Queue, current_key_arr: mp.Array, active_codes_arr: mp.Array, last_sync_time: mp.Value, feedback_queue: mp.Queue = None):
     """
     语音播报后台进程 - 强化版
     支持通过 cancel_q 跳过队列，并通过 current_key_arr 标记当前状态
@@ -65,13 +65,22 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             # 1. 刷新取消列表
             while not cancel_q.empty():
                 try:
-                    cancelled_set.add(cancel_q.get_nowait())
+                    token = cancel_q.get_nowait()
+                    if token == "__CLEAR__":
+                        cancelled_set.clear()
+                        worker_log("Cancelled set cleared by __CLEAR__ command")
+                    else:
+                        cancelled_set.add(token)
                 except: break
 
             # 2. 获取消息 (阻塞)
             try:
                 item = q.get(timeout=1.0)
             except: 
+                # ⚡ [FIX] 队列空闲时清除 __ALL__ 标记，允许后续新报警正常播放
+                if "__ALL__" in cancelled_set:
+                    cancelled_set.discard("__ALL__")
+                    worker_log("Cleared __ALL__ flag (queue idle)")
                 continue
 
             # Truncate debug log if too large to prevent disk issues
@@ -99,6 +108,11 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             if message == "STOP_COMMAND": break
             
             # 3. 检查是否已被取消
+            # ⚡ [FIX] 处理 __ALL__ 全局取消标记
+            if "__ALL__" in cancelled_set:
+                worker_log(f"Global cancel (__ALL__): skipping {key}")
+                # 不移除 __ALL__，保持全局取消状态直到队列清空
+                continue
             if key and key in cancelled_set:
                 worker_log(f"Skipping cancelled item: {key}")
                 cancelled_set.discard(key)
@@ -108,6 +122,10 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             while not cancel_q.empty():
                 try: cancelled_set.add(cancel_q.get_nowait())
                 except: break
+            # ⚡ [FIX] 再次检查 __ALL__
+            if "__ALL__" in cancelled_set:
+                worker_log(f"JIT Global cancel: skipping {key}")
+                continue
             if key and key in cancelled_set:
                 worker_log(f"JIT Skip: {key}")
                 cancelled_set.discard(key)
@@ -143,24 +161,12 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                     active_str = active_codes_arr.value.decode('utf-8').split('\x00')[0]
                     sync_t = last_sync_time.value
                     
-                    if active_str == "NONE":
-                        # UI 显式通知：目前没有任何报警窗口（用户已全部清除）
-                        # 只有当消息是在“清除”之前产生的，才跳过；如果是新产生的消息，放行。
-                        if msg_t < sync_t:
-                            worker_log(f"Existence Skip (Global sweep: NONE): {key}")
-                            continue
-                    elif active_str:
+                    if active_str:
                         # 屏幕上有窗口，检查当前代码是否在其中
                         active_list = [c.strip() for c in active_str.split(',') if c.strip()]
                         if key not in active_list:
-                            # 关键逻辑：如果消息是在最后一次同步之后产生的，说明是新产生的报警，
-                            # 此时对应的窗口可能还没来得及出现在 active_str 中，所以【不能跳过】。
-                            # 只有消息早于最后一次同步，才说明这确实是一个已经关闭的窗口留下的“余波”，需要跳过。
-                            if msg_t < sync_t:
-                                worker_log(f"Existence Skip (Expired alert): {key} (Active: {active_str})")
-                                continue
-                            else:
-                                worker_log(f"Existence Allowed (Fresh alert, window loading): {key}")
+                            worker_log(f"Existence Warning (Window not active yet?): {key} (Active: {active_str})")
+                            # continue # [FIX] Don't skip, assume window is creating
                 except Exception as e:
                     worker_log(f"Skip Check Error: {e}")
 
@@ -170,10 +176,18 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                     engine.setProperty('rate', 220)
                     engine.setProperty('volume', 1.0)
                     
+                    if feedback_queue and key:
+                        try: feedback_queue.put(('START', key))
+                        except: pass
+
                     engine.say(safe_msg)
                     engine.runAndWait()
                     
                     # 播放结束
+                    if feedback_queue and key:
+                        try: feedback_queue.put(('END', key))
+                        except: pass
+
                     try: engine.stop()
                     except: pass
                     del engine
@@ -215,8 +229,13 @@ class AlertManager:
         # 通信原语
         self.voice_queue: mp.Queue = mp.Queue() 
         self.cancel_queue: mp.Queue = mp.Queue() # [NEW] 用于取消排队中的
+        self.feedback_queue: mp.Queue = mp.Queue() # [NEW] 用于反馈开始/结束事件
         self.stop_event: mp.Event = mp.Event()
         self.interrupt_event: mp.Event = mp.Event()
+        
+        # Callbacks
+        self.on_speak_start = None
+        self.on_speak_end = None
         
         # [NEW] 共享状态：当前正在播报的 Key
         self.current_key = mp.Array('c', 32)
@@ -230,6 +249,7 @@ class AlertManager:
         self.global_last_alert: float = 0
         
         self.start()
+        self._start_feedback_listener()
         
     def start(self):
         """启动或重启语音线程"""
@@ -239,12 +259,38 @@ class AlertManager:
             
             self.process = mp.Process(
                 target=_voice_worker, 
-                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue, self.current_key, self.active_codes_arr, self.last_sync_time),
+                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue, self.current_key, self.active_codes_arr, self.last_sync_time, self.feedback_queue),
                 daemon=True,
                 name="AlertVoiceWorker"
             )
             logger.info("Alert voice worker (Enhanced Linkage) started.")
             self.process.start()
+
+    def _start_feedback_listener(self):
+        """启动反馈监听线程"""
+        t = threading.Thread(target=self._feedback_loop, daemon=True, name="FeedbackListener")
+        t.start()
+
+    def _feedback_loop(self):
+        """监听 worker 状态反馈"""
+        logger.info("Feedback loop started.")
+        while True:
+            try:
+                msg = self.feedback_queue.get(timeout=1.0)
+                # logger.info(f"Feedback Received: {msg}") # Debug
+                etype, key = msg
+                if etype == 'START':
+                    if self.on_speak_start:
+                        try: self.on_speak_start(key)
+                        except Exception as e: logger.error(f"Callback Start Error: {e}")
+                elif etype == 'END':
+                    if self.on_speak_end:
+                        try: self.on_speak_end(key)
+                        except Exception as e: logger.error(f"Callback End Error: {e}")
+            except Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Feedback loop error: {e}")
 
     def sync_active_codes(self, codes_list):
         """同步 UI 端的活跃窗口代码列表"""
@@ -293,6 +339,24 @@ class AlertManager:
                 self.current_key.value = b""
             except:
                 pass
+
+    def resume_voice(self):
+        """
+        恢复语音播报并清除取消标记
+        [FIX] 清空积压的旧消息，防止恢复时突然播放大量过时报警 (幽灵语音)
+        """
+        self.voice_enabled = True
+        try:
+            # 1. 清空积压队列
+            while not self.voice_queue.empty():
+                try: self.voice_queue.get_nowait()
+                except: break
+            
+            # 2. 清除 global stop 标记
+            self.cancel_queue.put("__CLEAR__")
+            logger.info("AlertManager: Voice resumed and queue flushed.")
+        except:
+            pass
 
 
     # def stop_current_speech(self, key=None):
@@ -358,25 +422,32 @@ class AlertManager:
                 return
             self.cooldowns[key] = now
             
-        # 2. 日志
+        # 2. 日志 (Throttled)
         is_high = (priority <= 1)
-        if is_high or (now - self.global_last_alert > 1.0):
+        
+        # [OPTIMIZATION] 全局报警日志流控
+        # 如果短时间内大量报警，仅记录高优先级，或每隔一定时间记录一次
+        log_allowed = True
+        if not is_high:
+            if now - self.global_last_alert < 0.1: # 100ms 内的连续低优先级报警不打印日志，防止 IO 阻塞
+                log_allowed = False
+        
+        if log_allowed or is_high:
             self.global_last_alert = now
             prefix = "🔴" if priority == 0 else "📢" if priority == 1 else "ℹ️"
             logger.info(f"{prefix} [Alert] {message}")
         
-        # 3. 语音 & BEEP
-        if winsound and is_high:
-            def _alert_beep():
-                try:
-                    winsound.Beep(1200, 150)
-                    time.sleep(0.05)
-                    winsound.Beep(1200, 150)
-                except: pass
-            threading.Thread(target=_alert_beep, daemon=True).start()
-
+        # 3. 语音 & BEEP (已禁用滴滴声)
+        
+        # [OPTIMIZATION] 队列深度保护
+        # 如果队列堆积超过 20 条，且当前不是高优先级，则丢弃，防止语音进程处理不过来导致系统卡顿
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
+                q_size = self.voice_queue.qsize()
+                if q_size > 20 and not is_high:
+                    logger.debug(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
+                    return
+
                 # [Fix] 使用字典包装，包含时间戳以支持竞态检查
                 item = {
                     'priority': priority,

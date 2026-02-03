@@ -12,7 +12,9 @@ except ImportError:
         return func
 
 import numpy as np
+import numpy as np
 from JohnsonUtil import LoggerFactory
+from db_utils import SQLiteConnectionManager
 
 # LoggerFactory.getLogger() 返回的类型通过注解明确
 logger: logging.Logger = LoggerFactory.getLogger()
@@ -39,13 +41,16 @@ class TradingLogger:
     def __init__(self, db_path: str = "./trading_signals.db"):
         self.db_path = db_path
         self._signal_cache = {} # (code, action) -> timestamp
+        # Unified DB Manager
+        self.db_manager = SQLiteConnectionManager.get_instance(db_path)
         self._init_db()
 
     def _init_db(self) -> None:
         """初始化数据库表结构"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
+            
             
             # 1. 信号记录表 (每日每只票的决策快照)
             cur.execute("""
@@ -224,7 +229,7 @@ class TradingLogger:
                 cur.execute("ALTER TABLE voice_alerts ADD COLUMN create_price REAL DEFAULT 0.0")
 
             conn.commit()
-            conn.close()
+            cur.close()
         except Exception as e:
             logger.error(f"DB Init Error: {e}")
 
@@ -236,24 +241,20 @@ class TradingLogger:
         if not records:
             return
             
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
+        if not records:
+            return
             
-            # 使用事务批量插入
-            cur.executemany("""
+        try:
+            self.db_manager.executemany("""
                 INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, ma5, ma10, category, resample)
                 VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :ma5, :ma10, :category, :resample)
             """, records)
-            
-            conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error logging selections: {e}")
 
     def get_selections_df(self, date: Optional[str] = None, resample: Optional[str] = None) -> Any:
         """获取选股历史记录"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self.db_manager.get_connection()
         query = "SELECT * FROM selection_history WHERE 1=1"
         params: list = []
         
@@ -269,16 +270,14 @@ class TradingLogger:
         
         try:
             if pd:
+                # pandas read_sql_query uses connection object
                 df = pd.read_sql_query(query, conn, params=params)
-                conn.close()
                 return df
             else:
-                cur = conn.cursor()
-                cur.execute(query, params)
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                results = [dict(zip(cols, row)) for row in rows]
-                conn.close()
+                with self.db_manager.execute_query(query, tuple(params)) as cur:
+                    rows = cur.fetchall()
+                    cols = [d[0] for d in cur.description]
+                    results = [dict(zip(cols, row)) for row in rows]
                 return results
         except Exception as e:
             logger.error(f"Error getting selections: {e}")
@@ -292,8 +291,7 @@ class TradingLogger:
         resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
+
             date_str = datetime.now().strftime('%Y-%m-%d')
             
             # 合并 debug 信息和行情数据以供后续 AI 分析优化
@@ -307,7 +305,7 @@ class TradingLogger:
             # 使用自定义 Encoder 处理 Numpy 类型
             indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
             
-            cur.execute("""
+            self.db_manager.execute_update("""
                 INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators, resample)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -321,8 +319,6 @@ class TradingLogger:
                 indicators_json,
                 resample
             ))
-            conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error logging signal: {e}")
 
@@ -357,8 +353,6 @@ class TradingLogger:
             if dt < 600 and price_change_pct < 0.005: 
                 return
 
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 处理指标快照
@@ -366,13 +360,10 @@ class TradingLogger:
             if indicators:
                 indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
             
-            cur.execute("""
+            self.db_manager.execute_update("""
                 INSERT INTO live_signal_history (timestamp, code, name, price, action, reason, indicators, resample)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (now_str, code, name, price, action, reason, indicators_json, resample))
-            
-            conn.commit()
-            conn.close()
             
             # 更新缓存: (时间, 价格)
             self._signal_cache[cache_key] = (now_ts, price)
@@ -383,7 +374,7 @@ class TradingLogger:
     def get_live_signal_history_df(self, date: Optional[str] = None, code: Optional[str] = None, action: Optional[str] = None, limit: int = 1000):
         """获取实时信号历史供 UI 展示"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             query = "SELECT * FROM live_signal_history WHERE 1=1"
             params = []
             if date:
@@ -401,8 +392,9 @@ class TradingLogger:
             query += " ORDER BY id DESC LIMIT ?"
             params.append(limit)
             
+            # Use connection from manager
+            conn = self.db_manager.get_connection()
             df = pd.read_sql_query(query, conn, params=params)
-            conn.close()
             return df
         except Exception as e:
             logger.error(f"Error get_live_signal_history_df: {e}")
@@ -415,7 +407,7 @@ class TradingLogger:
         resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
             # --- [新增] 非交易日拦截 ---
@@ -436,13 +428,14 @@ class TradingLogger:
             if action == "买入":
                 if existing_trade:
                     logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
-                    conn.close()
+                    logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
+                    cur.close()
                     return
                 if amount <= 0:
                     # 当买入量为 0 时（通常为模拟或追踪模式），记录为日内全量信号，不再静默跳过
                     logger.debug(f"TradeLogger: {code} ({name}) '买入' amount is 0. Recording as discovery signal.")
+                    cur.close()
                     self.log_live_signal(code, name, price, action, f"[OBSERVE] {reason}", resample=resample)
-                    conn.close()
                     return
                 # 开启新仓
                 fee = price * amount * fee_rate
@@ -502,8 +495,9 @@ class TradingLogger:
                 else:
                     logger.debug(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
             
+            
             conn.commit()
-            conn.close()
+            cur.close()
         except Exception as e:
             logger.error(f"Error recording trade: {e}")
 
@@ -512,7 +506,7 @@ class TradingLogger:
         强制平仓指定代码的持仓记录 (用于手动干预或状态同步)
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
             # 找到最新的 OPEN 持仓
@@ -525,7 +519,7 @@ class TradingLogger:
             
             if not existing_trade:
                 logger.warning(f"DB: Trade {code} not found or already closed.")
-                conn.close()
+                cur.close()
                 return False
                 
             t_id, b_price, b_amount, old_fee = existing_trade
@@ -548,7 +542,7 @@ class TradingLogger:
             """, (now_str, sell_price, sell_reason, total_fee, net_profit, pnl_pct, t_id))
             
             conn.commit()
-            conn.close()
+            cur.close()
             logger.info(f"DB: Closed trade {code}. Reason: {sell_reason}")
             return True
         except Exception as e:
@@ -557,7 +551,9 @@ class TradingLogger:
 
     def get_summary(self, resample: Optional[str] = None) -> Optional[tuple[float, float, int]]:
         """获取盈亏概览"""
-        conn = sqlite3.connect(self.db_path)
+    def get_summary(self, resample: Optional[str] = None) -> Optional[tuple[float, float, int]]:
+        """获取盈亏概览"""
+        conn = self.db_manager.get_connection()
         cur = conn.cursor()
         query = "SELECT SUM(profit), AVG(pnl_pct), COUNT(*) FROM trade_records WHERE status='CLOSED'"
         params = []
@@ -567,12 +563,12 @@ class TradingLogger:
             
         cur.execute(query, params)
         res = cur.fetchone()
-        conn.close()
+        cur.close()
         return res # (总利润, 平均收益率, 总笔数)
 
     def get_signals(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None) -> list[dict[str, Any]]:
         """获取记录的信号"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self.db_manager.get_connection()
         cur = conn.cursor()
         query = "SELECT * FROM signal_history WHERE 1=1"
         params = []
@@ -594,7 +590,7 @@ class TradingLogger:
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         results = [dict(zip(cols, row)) for row in rows]
-        conn.close()
+        cur.close()
         return results
 
     def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None):
@@ -604,7 +600,9 @@ class TradingLogger:
         except ImportError:
             return None
             
-        conn = sqlite3.connect(self.db_path)
+            return None
+            
+        conn = self.db_manager.get_connection()
         query = "SELECT * FROM signal_history WHERE 1=1"
         params = []
         if start_date:
@@ -627,14 +625,14 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"get_signal_history_df error: {e}")
             df = pd.DataFrame()
-        finally:
-            conn.close()
         
         return df
 
     def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
         """获取交易记录（包含持仓中和已平仓）"""
-        conn = sqlite3.connect(self.db_path)
+    def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
+        """获取交易记录（包含持仓中和已平仓）"""
+        conn = self.db_manager.get_connection()
         cur = conn.cursor()
         # 获取所有记录，优先按卖出日期（已平仓）或买入日期（持仓）排序
         query = "SELECT * FROM trade_records WHERE 1=1"
@@ -657,17 +655,16 @@ class TradingLogger:
         # 转换为列表字典
         cols = [d[0] for d in cur.description]
         results = [dict(zip(cols, row)) for row in rows]
-        conn.close()
+        # 转换为列表字典
+        cols = [d[0] for d in cur.description]
+        results = [dict(zip(cols, row)) for row in rows]
+        cur.close()
         return results
 
     def delete_trade(self, trade_id: int) -> bool:
         """删除交易记录"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM trade_records WHERE id=?", (trade_id,))
-            conn.commit()
-            conn.close()
+            self.db_manager.execute_update("DELETE FROM trade_records WHERE id=?", (trade_id,))
             return True
         except Exception as e:
             logger.error(f"delete_trade error: {e}")
@@ -676,13 +673,15 @@ class TradingLogger:
     def manual_update_trade(self, trade_id: int, buy_p: float, buy_a: float, sell_p: Optional[float] = None, fee_rate: float = 0.0003) -> bool:
         """手动更新交易数据并重算盈亏"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
             # 先获取现有状态
             cur.execute("SELECT status FROM trade_records WHERE id=?", (trade_id,))
             row = cur.fetchone()
-            if not row: return False
+            if not row: 
+                cur.close()
+                return False
             status = row[0]
 
             if status == 'OPEN':
@@ -710,7 +709,7 @@ class TradingLogger:
                 """, (buy_p, buy_a, effective_sell_p, total_fee, net_profit, pnl_pct, trade_id))
             
             conn.commit()
-            conn.close()
+            cur.close()
             return True
         except Exception as e:
             logger.error(f"manual_update_trade error: {e}")
@@ -719,11 +718,7 @@ class TradingLogger:
     def update_trade_feedback(self, trade_id: int, feedback: str) -> bool:
         """更新交易反馈，用于策略优化告知问题"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-            cur.execute("UPDATE trade_records SET feedback=? WHERE id=?", (feedback, trade_id))
-            conn.commit()
-            conn.close()
+            self.db_manager.execute_update("UPDATE trade_records SET feedback=? WHERE id=?", (feedback, trade_id))
             return True
         except Exception as e:
             logger.error(f"update_trade_feedback error: {e}")
@@ -731,7 +726,9 @@ class TradingLogger:
 
     def get_db_summary(self, days: int = 30, resample: Optional[str] = None) -> list[tuple[Any, ...]]:
         """按天统计多日收益"""
-        conn = sqlite3.connect(self.db_path)
+    def get_db_summary(self, days: int = 30, resample: Optional[str] = None) -> list[tuple[Any, ...]]:
+        """按天统计多日收益"""
+        conn = self.db_manager.get_connection()
         cur = conn.cursor()
         # 截取日期部分进行 group by
         query = """
@@ -753,29 +750,25 @@ class TradingLogger:
         
         cur.execute(query, params)
         rows = cur.fetchall()
-        conn.close()
+        cur.close()
         return rows
 
     def remove_voice_alert_config(self, code: str, resample: Optional[str] = None):
         """从数据库物理删除语音预警配置"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
             if resample is None:
-                cur.execute("DELETE FROM voice_alerts WHERE code = ?", (code,))
+                self.db_manager.execute_update("DELETE FROM voice_alerts WHERE code = ?", (code,))
                 logger.info(f"DB: Removed ALL voice alert configs for {code}")
             else:
-                cur.execute("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
+                self.db_manager.execute_update("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
                 logger.info(f"DB: Removed voice alert config for {code}_{resample}")
-            conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Failed to remove voice alert config: {e}")
 
     def log_voice_alert_config(self, code: str, resample: str, name: str, rules: str, last_alert: float, tags: str = "", rule_type_tag: str = "", create_price: float = 0.0, created_time: str = ""):
         """记录或更新语音预警配置"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             added_date = datetime.now().strftime('%Y-%m-%d')
             
@@ -798,14 +791,14 @@ class TradingLogger:
             """, (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, create_price))
             
             conn.commit()
-            conn.close()
+            cur.close()
         except Exception as e:
             logger.error(f"Failed to log voice alert config: {e}")
 
     def get_voice_alerts(self, resample: Optional[str] = None):
         """获取所有或特定周期的语音预警配置"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
             query = "SELECT * FROM voice_alerts"
@@ -821,7 +814,7 @@ class TradingLogger:
             cols = [d[0] for d in cur.description] # type: ignore
             results = [dict(zip(cols, row)) for row in rows]
             
-            conn.close()
+            cur.close()
             return results
         except Exception as e:
             logger.error(f"Failed to get voice alerts: {e}")
@@ -832,7 +825,7 @@ class TradingLogger:
         获取某只股票最近连续亏损的次数 (用于“记仇”机制)
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             # 获取最近N天的已平仓记录，按时间倒序
             cur.execute("""
@@ -841,7 +834,7 @@ class TradingLogger:
                 ORDER BY sell_date DESC
             """, (code, resample, f'-{days} days'))
             rows = cur.fetchall()
-            conn.close()
+            cur.close()
             
             loss_count = 0
             for profit, _ in rows:
@@ -861,7 +854,7 @@ class TradingLogger:
         Returns: 0.0 - 1.0
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             query = "SELECT profit FROM trade_records WHERE status='CLOSED' AND date(sell_date) >= date('now', ?)"
             params = [f'-{days} days']
@@ -871,7 +864,7 @@ class TradingLogger:
                 
             cur.execute(query, params)
             rows = cur.fetchall()
-            conn.close()
+            cur.close()
             
             if not rows:
                 return 0.5 # 无记录默认中性
@@ -894,7 +887,12 @@ class DBInspector:
         """获取所有表结构信息"""
         info = {}
         try:
-            conn = sqlite3.connect(self.db_path)
+            # Use local connection via manager if possible, but DBInspector is generic
+            # Only use manager if we are sure self.db_path is managed
+            # Here we just use standard connect for metadata inspect or use manager if we want WAL safety
+            # Safest is to use manager
+            mgr = SQLiteConnectionManager.get_instance(self.db_path)
+            conn = mgr.get_connection()
             cur = conn.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [r[0] for r in cur.fetchall()]
@@ -912,7 +910,7 @@ class DBInspector:
                         "pk": bool(col[5])
                     })
                 info[table] = columns
-            conn.close()
+            cur.close()
         except Exception as e:
             logger.error(f"DBInspector get_table_info error: {e}")
         return info
@@ -921,7 +919,8 @@ class DBInspector:
         """获取数据库基本统计"""
         stats = {}
         try:
-            conn = sqlite3.connect(self.db_path)
+            mgr = SQLiteConnectionManager.get_instance(self.db_path)
+            conn = mgr.get_connection()
             cur = conn.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [r[0] for r in cur.fetchall()]
@@ -935,8 +934,9 @@ class DBInspector:
                 except:
                     table_stats[table] = -1
             
+            
             stats['tables'] = table_stats
-            conn.close()
+            cur.close()
         except Exception as e:
             logger.error(f"DBInspector get_db_stats error: {e}")
         return stats
@@ -945,7 +945,8 @@ class DBInspector:
         """运行数据库健康检查"""
         issues = []
         try:
-            conn = sqlite3.connect(self.db_path)
+            mgr = SQLiteConnectionManager.get_instance(self.db_path)
+            conn = mgr.get_connection()
             cur = conn.cursor()
             
             # Check 1: 检查 schema 是否可读
@@ -957,7 +958,7 @@ class DBInspector:
             # Check 2: 关键表是否为空 (示例)
             # 这里做一些通用的检查，具体业务检查在子类实现
             
-            conn.close()
+            cur.close()
         except Exception as e:
             issues.append(f"Critical: Database connection failed: {e}")
         return issues
@@ -971,13 +972,14 @@ class SignalStrategyLogger(DBInspector):
     def __init__(self, db_path: str = "./signal_strategy.db"):
         super().__init__(db_path)
         self.db_path = db_path
+        self.db_manager = SQLiteConnectionManager.get_instance(db_path)
         # 确保 DB 存在（通常由产生信号的进程创建，这里主要是读取）
 
     def get_signal_messages(self, start_date: Optional[str] = None, end_date: Optional[str] = None, 
                             limit: int = 2000) -> list[dict[str, Any]]:
         """获取信号消息流"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             # row_factory 设为 Row 但我们习惯转 dict
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
@@ -999,7 +1001,7 @@ class SignalStrategyLogger(DBInspector):
             cur.execute(query, params)
             rows = cur.fetchall()
             results = [dict(row) for row in rows]
-            conn.close()
+            cur.close()
             return results
         except Exception as e:
             logger.error(f"get_signal_messages error: {e}")
@@ -1008,7 +1010,7 @@ class SignalStrategyLogger(DBInspector):
     def get_signal_counts_by_type(self, date: Optional[str] = None) -> list[tuple[str, int]]:
         """按类型统计信号数量"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             query = "SELECT signal_type, COUNT(*) as c FROM signal_message WHERE 1=1"
             params = []
@@ -1019,7 +1021,7 @@ class SignalStrategyLogger(DBInspector):
             
             cur.execute(query, params)
             rows = cur.fetchall()
-            conn.close()
+            cur.close()
             return rows
         except Exception as e:
             logger.error(f"get_signal_counts_by_type error: {e}")
@@ -1028,7 +1030,7 @@ class SignalStrategyLogger(DBInspector):
     def get_top_signal_stocks(self, date: Optional[str] = None, limit: int = 20) -> list[tuple[str, str, int]]:
         """获取产生信号最多的股票"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             query = "SELECT code, name, COUNT(*) as c FROM signal_message WHERE 1=1"
             params = []
@@ -1040,7 +1042,7 @@ class SignalStrategyLogger(DBInspector):
             
             cur.execute(query, params)
             rows = cur.fetchall()
-            conn.close()
+            cur.close()
             return rows
         except Exception as e:
             logger.error(f"get_top_signal_stocks error: {e}")
@@ -1052,7 +1054,7 @@ class SignalStrategyLogger(DBInspector):
         返回: [{code, pattern, count, last_trigger, date}, ...]
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             
@@ -1060,7 +1062,7 @@ class SignalStrategyLogger(DBInspector):
             # 检查表是否存在
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signal_counts'")
             if not cur.fetchone():
-                conn.close()
+                cur.close()
                 return []
                 
             query = "SELECT * FROM signal_counts WHERE 1=1"
@@ -1073,7 +1075,7 @@ class SignalStrategyLogger(DBInspector):
             cur.execute(query, params)
             rows = cur.fetchall()
             results = [dict(row) for row in rows]
-            conn.close()
+            cur.close()
             return results
         except Exception as e:
             logger.error(f"get_daily_signal_counts error: {e}")
@@ -1084,7 +1086,7 @@ class SignalStrategyLogger(DBInspector):
         """覆盖基类的检查，增加业务相关"""
         issues = super().run_health_check()
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
             # Check: 是否有无效的时间戳
@@ -1096,7 +1098,7 @@ class SignalStrategyLogger(DBInspector):
             except:
                 pass # 表可能不存在
 
-            conn.close()
+            cur.close()
         except Exception as e:
             issues.append(f"DB Error during check: {e}")
         return issues

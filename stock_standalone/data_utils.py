@@ -318,7 +318,6 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
 
     # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
     # top_all['ratio'] = top_all['volume']
-
     now_time = cct.get_now_time_int()
     if cct.get_trade_date_status():
         logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
