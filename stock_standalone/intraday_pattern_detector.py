@@ -24,6 +24,8 @@ from typing import Optional, Dict, List, Callable, Any
 from datetime import datetime, time as dt_time
 import pandas as pd
 import logging
+import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +151,72 @@ class IntradayPatternDetector:
         self._cooldown = cooldown
         self._publish_to_bus = publish_to_bus and HAS_SIGNAL_BUS
         
+        # 加载配置
+        self.config = self._load_config()
+        
         # 可配置的检测开关
         self.enabled_patterns = set(self.PATTERNS)
         
         # 信号计数跟踪 (key: "code_pattern" -> count for today)
         self._signal_counts: Dict[str, int] = {}
+
+    def _load_config(self) -> Dict[str, Any]:
+        """从 JSON 文件加载策略阈值配置"""
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
+        default_config = {
+            "low_open_high_walk": {
+                "gain_threshold": 3.0,
+                "open_low_tolerance": 0.002,
+                "open_low_abs_tolerance": 0.01
+            },
+            "open_patterns": {
+                "gap_up_threshold": 3.0,
+                "auction_high_threshold": 1.0,
+                "strong_auction_gap": 2.0,
+                "strong_auction_open_low": 0.998,
+                "strong_trend_score": 60
+            },
+            "sideways_patterns": {
+                "shrink_amplitude": 1.0,
+                "shrink_vol_ratio": 0.5,
+                "pullback_upper_diff": 0.01
+            },
+            "top_signals": {
+                "score_threshold": 60,
+                "high_drop_up": 3.0,
+                "high_drop_back": 2.0,
+                "divergence_vol_ratio": 0.7,
+                "divergence_gain": 3.0,
+                "doji_body_ratio": 0.2,
+                "upper_shadow_ratio": 2.0
+            },
+            "master_momentum": {
+                "trend_score": 60,
+                "vwap_tolerance": 0.998,
+                "open_low_tolerance": 0.001,
+                "bias_min": 0.005,
+                "bias_max": 0.035
+            }
+        }
+        
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    # 简单合并，确保所有键都存在
+                    for section, values in default_config.items():
+                        if section in loaded:
+                            # 只更新数值键，保持 desc 等注释信息虽然不被直接用到但存在
+                            for key, val in values.items():
+                                if key in loaded[section]:
+                                    default_config[section][key] = loaded[section][key]
+                logger.info(f"Successfully loaded pattern config from {config_path}")
+            except Exception as e:
+                logger.error(f"Failed to load pattern config from {config_path}: {e}")
+        else:
+            logger.warning(f"Config file {config_path} not found, using default values.")
+            
+        return default_config
     
     def enable_pattern(self, pattern: str) -> None:
         """启用特定形态检测"""
@@ -364,14 +427,15 @@ class IntradayPatternDetector:
         
         gap_pct = (open_price - prev_close) / prev_close * 100
         
-        if gap_pct >= 3.0 and 'gap_up' in self.enabled_patterns:
+        conf = self.config["open_patterns"]
+        if gap_pct >= conf["gap_up_threshold"] and 'gap_up' in self.enabled_patterns:
             events.append(PatternEvent(
                 code=code, name=name, pattern='gap_up',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=open_price,
                 detail=f"跳空高开 +{gap_pct:.1f}%"
             ))
-        elif gap_pct >= 1.0 and 'auction_high_open' in self.enabled_patterns:
+        elif gap_pct >= conf["auction_high_threshold"] and 'auction_high_open' in self.enabled_patterns:
             events.append(PatternEvent(
                 code=code, name=name, pattern='auction_high_open',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
@@ -380,16 +444,16 @@ class IntradayPatternDetector:
             ))
 
         # --- [NEW] 强力竞价 (strong_auction_open) ---
-        if 'strong_auction_open' in self.enabled_patterns and gap_pct >= 2.0:
+        if 'strong_auction_open' in self.enabled_patterns and gap_pct >= conf["strong_auction_gap"]:
             low_p = float(day_row.get('low', 0))
             trends = float(day_row.get('TrendS', 0))
             win_count = int(day_row.get('win', 0))
             
             # 1. 结构检查: Open 近似等于 Low (无下影线或极短下影线)
-            is_open_low = low_p >= open_price * 0.998 # 0.2% 容错
+            is_open_low = low_p >= open_price * conf["strong_auction_open_low"]
             
             # 2. 趋势背景: 昨日 TrendS > 60 (回踩支撑后的启动)
-            is_strong_trend = trends > 60
+            is_strong_trend = trends > conf["strong_trend_score"]
             
             if is_open_low and is_strong_trend:
                 score = 80 + min(win_count * 5, 20) # 加上连板加成
@@ -425,8 +489,14 @@ class IntradayPatternDetector:
         if open_price <= 0 or prev_close <= 0 or current_price <= 0:
             return events
         
+        current_percent = (current_price - prev_close) / prev_close * 100
         open_gap = (open_price - prev_close) / prev_close * 100
         is_volume_qualified = volume > 1.0 or ratio > 2.5  # 放量条件：量比>1 或 换手>2.5%
+        
+        # [NEW] 开盘即最低判定
+        conf_lw = self.config["low_open_high_walk"]
+        is_open_is_low = abs(day_low - open_price) < conf_lw["open_low_abs_tolerance"] or \
+                         (open_price > 0 and abs(day_low - open_price) / open_price < conf_lw["open_low_tolerance"])
         
         # --- 状态缓存 (用于突破确认迭代) ---
         state_key = f"{code}_low_open_state"
@@ -449,9 +519,10 @@ class IntradayPatternDetector:
         lasth1d = float(day_row.get('lasth1d', prev_close * 1.05))  # 昨日最高
         
         # ====================================================================
-        # ⭐ 1. 低开走高: 开盘低于昨收 1%+, 当前价高于开盘 2%+
-        # ====================================================================
-        if open_gap <= -1.0 and current_price > open_price * 1.02:
+        # ⭐ 1. [REFORM] 低开走高: 仅捕捉 开盘即最低 && 涨幅 > 3% (强势意图)
+        # ====================================================================        # 触发判断 (强势个股低开走高)
+        conf_lw = self.config["low_open_high_walk"]
+        if is_open_is_low and current_percent > conf_lw["gain_threshold"]:
             # 起点分级
             start_level = ""
             if ma5 > 0 and abs(open_price - ma5) / ma5 < 0.015:
@@ -465,19 +536,17 @@ class IntradayPatternDetector:
             
             # 高度分级
             height_levels = []
-            if current_price > prev_close:
-                height_levels.append("昨收")
             if high4 > 0 and current_price > high4:
                 height_levels.append("4日高")
             if max5 > 0 and current_price > max5:
                 height_levels.append("5日高")
             
-            height_level = ",".join(height_levels[-2:]) if height_levels else f"+{(current_price - open_price) / open_price * 100:.1f}%"
+            height_level = ",".join(height_levels[-2:]) if height_levels else f"+{current_percent:.1f}%"
             
-            detail_parts = [f"低开{open_gap:.1f}%"]
+            detail_parts = [f"低开走高(Open=Low)"]
             if start_level:
                 detail_parts.append(f"@{start_level}")
-            detail_parts.append(f"走高至{height_level}")
+            detail_parts.append(f" 涨幅{current_percent:.1f}%")
             
             events.append(PatternEvent(
                 code=code, name=name, pattern='low_open_high_walk',
@@ -491,9 +560,8 @@ class IntradayPatternDetector:
             state['open_price'] = open_price
         
         # ====================================================================
-        # ⭐ 2. 开盘最低带量 (open_is_low_volume) - 用户核心需求
+        # ⭐ 2. 开盘最低 (open_is_low) - 保持基础检测
         # ====================================================================
-        is_open_is_low = abs(day_low - open_price) < 0.01 or (open_price > 0 and abs(day_low - open_price) / open_price < 0.002)
         is_rising = current_price > open_price * 1.01
         is_above_vwap = nclose > 0 and current_price >= nclose * 0.998  # 在均价线上方
         
@@ -648,12 +716,15 @@ class IntradayPatternDetector:
         
         amplitude = (high - low) / avg_price * 100
         
-        # 横盘: 振幅 < 1%
-        if amplitude < 1.0:
-            # 缩量: 当前成交量 < 日均量 * 0.5
+        # 横盘与回踩配置
+        conf_sw = self.config["sideways_patterns"]
+        
+        # 横盘: 振幅符合配置
+        if amplitude < conf_sw["shrink_amplitude"]:
+            # 缩量: 当前成交量 < 日均量 * 配置比例
             vol_ma = float(day_row.get('vol_ma5', day_row.get('volume', 0)))
             current_vol = float(day_row.get('volume', 0))
-            if vol_ma > 0 and current_vol < vol_ma * 0.5:
+            if vol_ma > 0 and current_vol < vol_ma * conf_sw["shrink_vol_ratio"]:
                 events.append(PatternEvent(
                     code=code, name=name, pattern='shrink_sideways',
                     timestamp=datetime.now().strftime('%H:%M:%S'),
@@ -673,9 +744,10 @@ class IntradayPatternDetector:
         if upper <= 0 or current <= 0:
             return events
         
-        # 回踩 upper: 当前价在 upper ±1% 范围内
+        # 回踩 upper: 偏离度符合配置
         diff_pct = abs(current - upper) / upper
-        if diff_pct < 0.01:
+        conf_sw = self.config["sideways_patterns"]
+        if diff_pct < conf_sw["pullback_upper_diff"]:
             events.append(PatternEvent(
                 code=code, name=name, pattern='pullback_upper',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
@@ -703,11 +775,12 @@ class IntradayPatternDetector:
         if day_high <= 0 or open_price <= 0 or current <= 0:
             return events
         
-        # 冲高回落: 最高价较开盘涨 3%+, 但当前价回落至开盘附近
+        # 冲高回落: 符合配置要求
         up_pct = (day_high - open_price) / open_price * 100 if open_price > 0 else 0
         drop_pct = (day_high - current) / day_high * 100 if day_high > 0 else 0
         
-        if up_pct >= 3.0 and drop_pct >= 2.0:
+        conf_hd = self.config["top_signals"]
+        if up_pct >= conf_hd["high_drop_up"] and drop_pct >= conf_hd["high_drop_back"]:
             events.append(PatternEvent(
                 code=code, name=name, pattern='high_drop',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
@@ -747,31 +820,32 @@ class IntradayPatternDetector:
             return events
         
         # 1. 冲高回落 (30分)
+        conf_top = self.config["top_signals"]
         if high > 0 and open_price > 0:
             up_pct = (high - open_price) / open_price * 100
             drop_pct = (high - close) / high * 100 if high > 0 else 0
-            if up_pct >= 3.0 and drop_pct >= 2.0:
+            if up_pct >= conf_top["high_drop_up"] and drop_pct >= conf_top["high_drop_back"]:
                 score += 30
                 details.append(f"冲高回落{drop_pct:.1f}%")
         
         # 2. 量价背离 (25分) - 简化：价创新高但量萎缩
         vol_ma = float(day_row.get('vol_ma5', volume))
-        if vol_ma > 0 and volume < vol_ma * 0.7:
+        if vol_ma > 0 and volume < vol_ma * conf_top["divergence_vol_ratio"]:
             prev_high = float(day_row.get('high4', high))  # 假设有前高字段
-            if close > prev_close * 1.03:  # 涨幅较大
+            if close > prev_close * (1 + conf_top["divergence_gain"]/100):  # 涨幅较大
                 score += 25
                 details.append("量价背离")
         
         # 3. 十字星 (20分)
         body = abs(close - open_price)
         amplitude = high - low
-        if amplitude > 0 and body < amplitude * 0.2:
+        if amplitude > 0 and body < amplitude * conf_top["doji_body_ratio"]:
             score += 20
             details.append("十字星")
         
         # 4. 长上影 (15分)
         upper_shadow = high - max(open_price, close)
-        if body > 0 and upper_shadow > body * 2:
+        if body > 0 and upper_shadow > body * conf_top["upper_shadow_ratio"]:
             score += 15
             details.append("长上影")
         
@@ -782,8 +856,8 @@ class IntradayPatternDetector:
             score += 10
             details.append("均线拐头")
         
-        # ≥60分触发
-        if score >= 60:
+        # ≥Threshold触发
+        if score >= conf_top["score_threshold"]:
             events.append(PatternEvent(
                 code=code, name=name, pattern='top_signal',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
@@ -826,8 +900,10 @@ class IntradayPatternDetector:
         # 这里的 ma5/ma10 是今日移动平均，反映了昨日的趋势强度
         trend_raw = float(day_row.get('TrendS', 50))
         
+        conf_mm = self.config["master_momentum"]
+        
         # 如果 TrendS (趋势强度) 较低，可能不是强势股回踩后上涨
-        if trend_raw < 60:
+        if trend_raw < conf_mm["trend_score"]:
             return events
 
         # --- C. VWAP 核心逻辑：分时线上行且不破均线 ---
@@ -836,7 +912,7 @@ class IntradayPatternDetector:
             return events
             
         # 1. 当前必须在均线上方
-        is_above_vwap = curr_p >= vwap * 0.998 # 允许微小误差
+        is_above_vwap = curr_p >= vwap * conf_mm["vwap_tolerance"]
         
         key = f"{code}_master_momentum_state"
         if key not in self._cache:
@@ -863,15 +939,15 @@ class IntradayPatternDetector:
             
         # 2. 判定强势结构：开盘即最低 (格外注意)
         day_low = float(day_row.get('low', 0))
-        is_open_low = abs(open_p - day_low) / open_p < 0.001 if open_p > 0 else False
+        is_open_low = abs(open_p - day_low) / open_p < conf_mm["open_low_tolerance"] if open_p > 0 else False
         
         # 3. 判定历史连板/连阳晋级 (win 计数)
         win_count = int(day_row.get('win', 0))
         win_msg = f" win {win_count} 进 {win_count+1}" if win_count > 0 else ""
         
-        # 4. 判定有效主升区间 (偏离 0.5% ~ 3.5%)
+        # 4. 判定有效主升区间 (如偏离 0.5% ~ 3.5%)
         bias = (curr_p - vwap) / vwap
-        if 0.005 < bias < 0.035:
+        if conf_mm["bias_min"] < bias < conf_mm["bias_max"]:
             detail = f"核心主升{win_msg}: 偏离均线{bias:+.1%}"
             if is_open_low:
                 detail = f"分时强结构(开盘即最低){win_msg}, 偏离均线{bias:+.1%}"

@@ -79,7 +79,7 @@ day_dir_bj = os.path.join(basedir, "Vipdoc", "bj", "lday")
 exp_path = os.path.join(basedir, "T0002", "export")
 
 day_path = {'sh': day_dir_sh, 'sz': day_dir_sz ,'bj': day_dir_bj}
-resample_dtype = ['d', 'w', 'm','3d','5d']
+resample_dtype = ['d', 'w', 'm','2d','3d','5d']
 # http://www.douban.com/note/504811026/
 
 
@@ -2788,7 +2788,86 @@ INDEX_LIST = {'sh': 'sh000001', 'sz': 'sz399001', 'hs300': 'sz399300',
 #     arr = series.values.astype(np.float64)
 #     return pd.Series(ema_tdx_numba(arr, n), index=series.index)
 
+from datetime import datetime
+# import exchange_calendars as xcals
+# 使用上交所日历（A股通用）
+# XSHG = xcals.get_calendar("XSHG")
+
+# def ema_tdx_numpy_realtime(series: pd.Series, timeperiod: int) -> pd.Series:
+#     """
+#     通达信风格 EMA（支持自动补今日交易日数据）
+#     规则：
+#     - 如果今天是交易日
+#     - 且最后一条数据不是今天
+#     → 自动用最后一个 close 复制生成今天的收盘价
+#     """
+
+#     # if not isinstance(series.index, pd.DatetimeIndex):
+#     #     raise ValueError("series.index 必须是 DatetimeIndex")
+
+#     series = series.astype(float).copy()
+#     series = series.sort_index()
+
+#     last_dt = series.index[-1].normalize()
+#     # today = pd.Timestamp(datetime.now().date())
+#     today = cct.get_today()
+
+#     # === STEP 1: 判断今天是否交易日 ===
+#     # is_trading_day = XSHG.is_session(today)
+#     is_trading_day = cct.get_trade_date_status()
+
+#     # === STEP 2: 如果需要，补今天 ===
+#     if is_trading_day and last_dt < today:
+#         series.loc[today] = series.iloc[-1]
+
+#     # === STEP 3: EMA (TDX算法) ===
+#     x = series.to_numpy(dtype=float)
+#     ema = np.empty_like(x)
+#     ema[0] = x[0]
+
+#     alpha = 2 / (timeperiod + 1)
+
+#     for i in range(1, len(x)):
+#         ema[i] = x[i] * alpha + ema[i - 1] * (1 - alpha)
+
+#     return pd.Series(ema, index=series.index)
+
+
+def append_today_close_if_needed(series: pd.Series) -> pd.Series:
+    """
+    如果今天是交易日 且 最后一条数据不是今天
+    则复制最后一个 close 作为今天的收盘价（只补一天）
+    自动兼容 string / datetime 索引
+    """
+    if series.empty:
+        return series
+
+    series = series.astype(float).copy()
+
+    # ✅ 强制把 index 转成 DatetimeIndex
+    if not isinstance(series.index, pd.DatetimeIndex):
+        series.index = pd.to_datetime(series.index)
+
+    series = series.sort_index()
+
+    last_dt = series.index[-1].normalize()
+    today = pd.to_datetime(cct.get_today()).normalize()
+
+    # 今天不是交易日 → 不补
+    if not cct.get_trade_date_status():
+        return series
+
+    # 已经有今天的数据 → 不补
+    if last_dt >= today:
+        return series
+
+    # 只补今天一天
+    series.loc[today] = series.iloc[-1]
+    return series
+
+
 def ema_tdx_numpy(series: pd.Series, timeperiod: int) -> pd.Series:
+    # series = append_today_close_if_needed(series)
     x = series.to_numpy(dtype=float)
     ema = np.empty_like(x)
     ema[0] = x[0]
@@ -5025,7 +5104,7 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
 
     # 计算 ma20d_upper
     df_ma20d = dd[-20:]
-    if resample == 'd':
+    if resample in ['d','2d']:
         ma20d_upper = len(df_ma20d.query('low > ma20d'))
     elif resample in ['3d', 'w']:
         ma20d_upper = len(df_ma20d.query('low > ma10d'))
@@ -5068,6 +5147,8 @@ def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
         temp = temp[-30:]
     elif resample == 'w':
         temp = temp[-40:]
+    elif resample == '2d':
+        temp = temp[-60:]
     elif resample == '3d':
         temp = temp[-60:]
     else:
@@ -5745,10 +5826,16 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
-        # with timed_ctx("ema_tdx_numpy", warn_ms=2):
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
+        
+
+        # with timed_ctx("ema_tdx_numpy", warn_ms=2):
+        #     df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
+        # # df['ma61d'] = ema_tdx_numpy_realtime(df['close'], timeperiod=60)
+        # import ipdb;ipdb.set_trace()
+
         # with timed_ctx("talib.EMA", warn_ms=2):
-        #     df['ma60dEMA'] = talib.EMA(df['close'], timeperiod=60)
+        #     df['ma60dema'] = talib.EMA(df['close'], timeperiod=60)
         # cct.print_timing_summary()
         
         # 测试
@@ -7184,13 +7271,17 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
 
     # 3️⃣ 特殊处理 3d (3日线) - 按交易日分组
     period_day_lower = period_day.lower()
-    if period_day_lower == '3d':
+    if period_day_lower in ['2d','3d']:
         # 3日线：按交易日序号每3天分组（从最新交易日倒推）
         # 这样可以与通达信/同花顺保持一致
+        if period_day_lower == '2d':
+            day_group = 2
+        else:
+            day_group = 3
         n_rows = len(stock_data)
         # 创建分组标签：每3个交易日为一组，从最后一天开始倒推
         # 例如: [0,0,0,1,1,1,2,2,2,...] 从末尾开始
-        group_labels = np.arange(n_rows)[::-1] // 3  # 倒序分组
+        group_labels = np.arange(n_rows)[::-1] // day_group  # 倒序分组
         group_labels = group_labels[::-1]  # 恢复正序
         stock_data = stock_data.copy()
         stock_data['_group'] = group_labels
@@ -7566,7 +7657,7 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
 
     resample = 'd'
-    code = '300265'
+    code = '300063'
     # dm = sina_data.Sina().market('all').loc['000002']
     # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
 
@@ -7579,6 +7670,7 @@ if __name__ == '__main__':
     # code = '920076'
     # df1 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
     df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
+    df2d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['2d'],resample='2d' )
     df3d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d' )
     df1w = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w' )
     df1m = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )

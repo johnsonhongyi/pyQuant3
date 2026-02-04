@@ -1763,7 +1763,7 @@ def _handle_init_tdx(
             vtype=ct.json_countType
         )
 
-        resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
+        resamples = ['d','2d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
 
         for res_m in resamples:
             if res_m == resample:
@@ -2213,9 +2213,9 @@ def fetch_and_process(
                 )
 
                 if now_time <= 900:
-                    resamples = ['3d', 'w', 'm','d']
+                    resamples = ['2d','3d', 'w', 'm','d']
                 else:
-                    resamples = ['3d','d']
+                    resamples = ['2d','3d','d']
 
                 init_res_m = resample
                 for res_m in resamples:
@@ -2346,8 +2346,8 @@ def fetch_and_process(
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
             logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops']]}")
-            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
-            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
+            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
+            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
@@ -2462,8 +2462,8 @@ def fetch_and_process(
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
-                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
-                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
+                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
+                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
                 print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 print(

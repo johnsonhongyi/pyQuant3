@@ -39,6 +39,8 @@ class SignalLogPanel(QWidget, WindowMixin):
     log_clicked = pyqtSignal(str, str, str)
     # 信号: code, name, pattern, message (用于同步语音播报)
     log_added = pyqtSignal(str, str, str, str)
+    # 信号: 当点击清理按钮时发射
+    cleared = pyqtSignal()
     
     # 信号颜色映射
     SIGNAL_COLORS = {
@@ -501,12 +503,15 @@ class SignalLogPanel(QWidget, WindowMixin):
 
     def clear_logs(self):
         """清空日志"""
-        # self.log_text.clear()
+        logger.info("🗑️ Clearing signal logs and cache...")
         self.log_table.setRowCount(0)
         self._log_buffer.clear()
         self._last_signals.clear()
         self.count_label.setText("0")
         self.status_label.setText("就绪")
+        
+        # 发射清理信号，以便联动清理播报队列
+        self.cleared.emit()
     
     def flash_for_high_priority(self, times: int = 3, interval_ms: int = 150):
         """
@@ -568,15 +573,23 @@ class SignalLogPanel(QWidget, WindowMixin):
         # 首次立即执行
         do_flash()
     
+    # 信号: 暂停状态切换 (True=Paused, False=Resumed)
+    pause_toggled = pyqtSignal(bool)
+
     def _toggle_pause(self):
         """切换暂停状态"""
         self._paused = not self._paused
         if self._paused:
             self.pause_btn.setText("▶")
             self.status_label.setText("已暂停")
+            logger.info("[SignalLog] ⏸ Panel PAUSED - Log updates suspended")
         else:
             self.pause_btn.setText("⏸")
             self.status_label.setText("运行中")
+            logger.info("[SignalLog] ▶ Panel RESUMED - Log updates active")
+            
+        # 发射信号供外部联动 (e.g. 暂停语音)
+        self.pause_toggled.emit(self._paused)
     
     # ================== 窗口交互与位置持久化 (WindowMixin) ==================
     def mousePressEvent(self, event: QMouseEvent):

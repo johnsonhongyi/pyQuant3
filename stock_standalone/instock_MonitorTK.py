@@ -1715,7 +1715,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.st_key_sort_value.set(self.st_key_sort) 
         
         # --- resample 下拉框 ---
-        resampleValues = ["d",'3d', "w", "m"]
+        resampleValues = ["d",'2d','3d', "w", "m"]
         tk.Label(ctrl_frame, text="resample:").pack(side="left")
         self.resample_combo = ttk.Combobox(ctrl_frame, values=resampleValues, width=3)
         self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))

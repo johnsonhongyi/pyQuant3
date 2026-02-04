@@ -17,7 +17,7 @@ PY3 = (sys.version_info[0] >= 3)
 
 VERSION = '0.3.6'
 K_LABELS = ['D', 'W', 'M']
-Resample_LABELS=['d','3d','w','m']
+Resample_LABELS=['d','2d','3d','w','m']
 K_MIN_LABELS = ['5', '15', '30', '60']
 K_TYPE = {'D': 'akdaily', 'W': 'akweekly', 'M': 'akmonthly'}
 INDEX_LABELS = ['sh', 'sz', 'hs300', 'sz50', 'cyb', 'zxb']
@@ -33,6 +33,7 @@ DD_VOL_List = {'0': '40000', '1': '100000',
 
 # duration_date_l = 60
 duration_date_day = 70
+duration_date_2d = 200      #
 duration_date_up = 200      #
 # duration_date_up = 190
 # duration_date_up = 120
@@ -41,10 +42,10 @@ duration_date_week = 300    #3-ma60d
 duration_date_month = 550    #3-ma20d
 #m : 510 ma26
 
-Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
+Resample_LABELS_Days = {'d':duration_date_day,'2d':duration_date_2d,'3d':duration_date_up,
                       'w':duration_date_week,'m':duration_date_month}
 
-Resample_LABELS_Blk = {'d':'060.blk','3d':'061.blk',
+Resample_LABELS_Blk = {'d':'060.blk','2d':'064.blk','3d':'061.blk',
                       'w':'062.blk','m':'063.blk'}
 # duration_date_day = 60
 # duration_date_up = 120

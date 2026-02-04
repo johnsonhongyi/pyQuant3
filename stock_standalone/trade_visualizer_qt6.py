@@ -115,24 +115,11 @@ def normalize_speech_text(text: str) -> str:
     return text
 
 
-def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None):
+def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause_event=None):
     """语音播报工作者 (运行在独立进程)"""
     import pyttsx3
     import time
     
-    # 定义内部非阻塞播报监听器
-    class AbortListener:
-        def __init__(self, engine, abort_event, stop_flag):
-            self.engine = engine
-            self.abort_event = abort_event
-            self.stop_flag = stop_flag
-            self.should_stop = False
-            
-        def on_word(self, name, location, length):
-            if (self.abort_event and self.abort_event.is_set()) or not self.stop_flag.value:
-                self.engine.stop()
-                self.should_stop = True
-
     # 延迟加载，防止进程初始化时卡顿
     try:
         import pythoncom
@@ -143,101 +130,83 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None):
     
     while stop_flag.value:
         try:
-            # 批量获取队列中的所有消息
-            messages = []
+            # ⚡ [NEW] 检查暂停状态 (阻塞直到恢复)
+            if pause_event:
+                pause_event.wait()
+            
+            # 获取消息（阻塞等待 1s）
+            data = None
             try:
-                # 获取第一条消息（阻塞等待 1s）
                 data = queue.get(timeout=1)
-                messages.append(data)
-                
-                # 获取队列中剩余的所有消息（非阻塞）
-                while not queue.empty():
-                    try:
-                        data = queue.get_nowait()
-                        messages.append(data)
-                    except:
-                        break
             except:
                 continue
             
-            if not messages:
+            if not data or not stop_flag.value:
                 continue
                 
-            # 依次播报所有消息
-            logger.debug(f"[VoiceProcess] 🔊 开始播报 {len(messages)} 条消息")
-            for i, data in enumerate(messages, 1):
-                if not stop_flag.value:
-                    break
-                
-                # 兼容处理：支持直接传 text 或传 {'text': t, 'meta': m}
-                if isinstance(data, dict):
-                    msg = data.get('text', '')
-                    meta = data.get('meta', None)
-                else:
-                    msg = str(data)
-                    meta = None
+            # 兼容处理
+            if isinstance(data, dict):
+                msg = data.get('text', '')
+                meta = data.get('meta', None)
+            else:
+                msg = str(data)
+                meta = None
 
-                # 向主进程反馈：开始播报该条信号
-                if feedback_queue and meta:
-                    try:
-                        feedback_queue.put(meta)
-                    except Exception as e:
-                        logger.debug(f"[VoiceProcess] Failed to put meta to feedback_queue: {e}")
-
-                # 单次播报逻辑
-                engine = None
+            # 向主进程反馈：开始播报该条信号
+            if feedback_queue and meta:
                 try:
-                    if pythoncom:
-                        pythoncom.CoInitialize()
-                    
-                    engine = pyttsx3.init()
-                    
-                    # 语速调整
-                    rate = engine.getProperty('rate')
-                    if isinstance(rate, (int, float)):
-                        engine.setProperty('rate', rate + 40)
-                    
-                    # 规范化文本
-                    speech_text = normalize_speech_text(msg)
-                    logger.debug(f"[VoiceProcess]   播报 [{i}/{len(messages)}]: {speech_text}")
-                    
-                    # ⭐ 注册回调以支持实时中止
-                    # 我们虽然用 runAndWait(), 但可以通过 engine.stop() 强行切断它
-                    def check_abort(name=None, location=None, length=None):
-                        if (abort_event and abort_event.is_set()) or not stop_flag.value:
-                            try:
-                                engine.stop()
-                            except:
-                                pass
+                    feedback_queue.put(meta)
+                except:
+                    pass
 
-                    engine.connect('started-utterance', check_abort)
-                    engine.connect('started-word', check_abort)
+            # 执行播报
+            speech_text = normalize_speech_text(msg)
+            logger.debug(f"[VoiceProcess] 🔊 播报: {speech_text}")
+            
+            # ⚡ [STABILITY] 在每一条播报前初始化，确保 Windows 引擎状态正确
+            engine = None
+            try:
+                if pythoncom:
+                    pythoncom.CoInitialize()
+                
+                engine = pyttsx3.init()
+                rate = engine.getProperty('rate')
+                if isinstance(rate, (int, float)):
+                    engine.setProperty('rate', rate + 40)
                     
-                    engine.say(speech_text)
-                    engine.runAndWait() # ⭐ 回归稳健模式
-                    
-                    logger.debug(f"[VoiceProcess]   ✅ 完成/中止 [{i}/{len(messages)}]")
-                    time.sleep(0.1)
-                    
-                except Exception as e:
-                    logger.debug(f"[VoiceProcess]   ⚠️ 错误 [{i}/{len(messages)}]: {e}")
-                finally:
-                    if engine:
+                def check_abort(name=None, location=None, length=None):
+                    if (abort_event and abort_event.is_set()) or not stop_flag.value:
                         try:
                             engine.stop()
-                            del engine
                         except:
                             pass
-                    if pythoncom:
-                        try:
-                            pythoncom.CoUninitialize()
-                        except:
-                            pass
-            
-            logger.debug(f"[VoiceProcess] ✅ 播报处理完成")
+
+                engine.connect('started-utterance', check_abort)
+                engine.connect('started-word', check_abort)
+
+                engine.say(speech_text)
+                engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
                 
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"[VoiceProcess] Engine error: {e}")
+            finally:
+                if engine:
+                    try:
+                        engine.stop()
+                        del engine
+                    except:
+                        pass
+                if pythoncom:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+                    
         except Exception as e:
-            logger.debug(f"[VoiceProcess] Worker loop error: {e}")
+            logger.debug(f"[VoiceProcess] Loop error: {e}")
+            
+    logger.info("✅ Voice worker process exited cleanly")
     
     logger.debug("[VoiceProcess] Worker stopped")
 
@@ -255,6 +224,8 @@ class VoiceProcess:
         self.feedback_queue = mp.Queue() # 新增反馈队列
         self.stop_flag = mp.Value('b', True)  # boolean, True = running
         self.abort_event = mp.Event() # 新增：强制中止事件
+        self.pause_event = mp.Event() # [NEW] 暂停事件
+        self.pause_event.set()        # 初始为非暂停状态
         self.process = None
         self.pause_for_sync = False  # 保留接口兼容性（但多进程下无需使用）
 
@@ -264,10 +235,11 @@ class VoiceProcess:
         if self.process is None or not self.process.is_alive():
             self.stop_flag.value = True
             self.abort_event.clear()
+            self.pause_event.set() # 确保不处于暂停
             self.process = mp.Process(
                 target=_voice_worker, 
-                args=(self.queue, self.stop_flag, self.feedback_queue, self.abort_event),
-                daemon=True
+                args=(self.queue, self.stop_flag, self.feedback_queue, self.abort_event, self.pause_event),
+                daemon=False # ⚡ [STABILITY] 改为非守护进程，依靠 stop() 优雅退出，防止 COM 引起的 Access Violation
             )
             self.process.start()
             logger.info("✅ 语音播报进程已启动 (PID: %s)", self.process.pid)
@@ -292,22 +264,58 @@ class VoiceProcess:
                 self.queue.get_nowait()
             except:
                 break
+        
+        # 3. 如果处于暂停，强制恢复以便处理中止
+        self.pause_event.set()
+        
         logger.info("🛑 Voice broadcast aborted and queue cleared")
 
+    def pause(self):
+        """暂停播报"""
+        self.pause_event.clear()
+        # 同时触发 abort_event 中止当前正在说的
+        self.abort_event.set()
+        logger.info("⏸ Voice broadcast paused")
+
+    def resume(self):
+        """恢复播报"""
+        self.abort_event.clear()
+        self.pause_event.set()
+        logger.info("▶ Voice broadcast resumed")
+
     def stop(self):
-        """停止语音播报进程"""
+        """停止语音播报进程 (强化退出版)"""
+        logger.info("Stopping voice worker process...")
         self.stop_flag.value = False
-        # 清空队列
+        self.abort_event.set() # 立即中止当前播报
+        
+        # 清空队列，防止进程卡在 put/get 上
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
             except:
                 break
+                
         if self.process and self.process.is_alive():
-            self.process.join(timeout=2)
+            # ⚡ [STABILITY] 先尝试优雅关闭，给足时间以便 COM 组件释放
+            self.process.join(timeout=2.0)
             if self.process.is_alive():
-                self.process.terminate()
-        logger.info("✅ 语音播报进程已停止")
+                logger.warning("Voice worker timed out on join, terminating...")
+                try:
+                    self.process.terminate()
+                    self.process.join(timeout=1.0)
+                except:
+                    pass
+        
+        # ⚡ [NEW] 彻底关闭进程池/队列
+        try:
+            self.queue.close()
+            self.feedback_queue.close()
+        except:
+            pass
+            
+        self.process = None
+        logger.info("✅ Voice worker process shutdown complete")
 
     def wait(self, timeout_ms=2000):
         """等待进程完成（兼容旧接口）"""
@@ -779,6 +787,7 @@ class CommandListenerThread(QThread):
 
 
 duration_date_day = 120
+duration_date_2d = 250      #
 duration_date_up = 250      #
 # duration_date_up = 190
 # duration_date_up = 120
@@ -787,7 +796,7 @@ duration_date_week = 500    #3-ma60d
 duration_date_month = 1000    #3-ma20d
 #m : 510 ma26
 
-Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
+Resample_LABELS_Days = {'d':duration_date_day,'2d':duration_date_2d,'3d':duration_date_up,
                       'w':duration_date_week,'m':duration_date_month}
 
 class DataLoaderThread(QThread):
@@ -824,6 +833,7 @@ class DataLoaderThread(QThread):
                 # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
                 with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
                     day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample], resample=self.resample, fastohlc=True)
+                    logger.info(f'resample_keys: {self.resample}  dl: {Resample_LABELS_Days[self.resample]} day_df:{day_df[-5:]}')
 
                 # 2. Fetch Realtime/Tick Data (Intraday)
                 # 假设此操作不涉及 HDF5，可以在锁外执行
@@ -1994,6 +2004,17 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_process = None
         self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
         self._signal_dedup_cache = {} # 信号去重缓存
+        
+        # 加载形态检测配置
+        self.pattern_config = self._load_pattern_config()
+
+        # ⚡ [NEW] 表格更新节流器
+        self._table_refresh_timer = QTimer(self)
+        self._table_refresh_timer.setSingleShot(True)
+        self._table_refresh_timer.timeout.connect(self._flush_table_updates)
+        self._pending_changed_codes = set()
+        self._last_table_update_time = 0
+        self._table_update_interval = 1.5  # 1.5s 刷新一次界面，单位秒 (与 time.time() 对比)
 
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
@@ -2028,7 +2049,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.df_all = pd.DataFrame()
 
         # ---- resample state ----
-        self.resample_keys = ['d', '3d', 'w', 'm']
+        self.resample_keys = ['d','2d', '3d', 'w', 'm']
 
         if self.resample in self.resample_keys:
             self.current_resample_idx = self.resample_keys.index(self.resample)
@@ -2055,6 +2076,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self._cache_code_info = {}   # 标题信息缓存
         self._last_rendered_code = ""
         self._last_rendered_resample = ""
+        
+        # ⚡ [OPTIMIZATION] 图表渲染节流控制器
+        # code -> last_render_timestamp
+        self._last_kline_render_time = {}
+        # 实时数据更新时的最小渲染间隔 (秒)
+        self._render_throttle_interval = 0.2 
 
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
@@ -2402,23 +2429,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # right_splitter.setSizes([800, 150])
         right_splitter.setSizes([300, 100])  # 3:1 比例
 
-        # # splitter 行为
-        # right_splitter.setChildrenCollapsible(True)
-        # right_splitter.setStretchFactor(0, 3)
-        # right_splitter.setStretchFactor(1, 1)
-
-        # # 允许图被压缩
-        # self.kline_widget.setMinimumHeight(80)
-        # self.tick_widget.setMinimumHeight(60)
-
-        # # 防止 TextItem 抬高 bounding
-        # self.crosshair_label.setFlag(
-        #     QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
-        # )
-        # self.tick_crosshair_label.setFlag(
-        #     QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
-        # )
-
         # 3. Filter Panel (Initially Hidden)
         self.filter_panel = QWidget()
         filter_layout = QVBoxLayout(self.filter_panel)
@@ -2450,9 +2460,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.toggle_filter_btn.setToolTip("收起筛选面板")
         self.toggle_filter_btn.setMaximumWidth(30)
         self.toggle_filter_btn.setCheckable(True) # 让它可以保持按下状态? 不需要，只是触发
-        # 这里 checked 参数传递给 toggle_filter_panel，需要反转逻辑：点击时如果是折叠的->展开(checked=True)，反之亦然
-        # 但 toggle_filter_panel(checked) 的 checked 是目标状态 (True=显示, False=隐藏)
-        # 我们可以简单的连接到一个中间 slot 或者使用 lambda
         self.toggle_filter_btn.clicked.connect(self._on_toggle_filter_clicked)
         button_row.addWidget(self.toggle_filter_btn)
 
@@ -2472,10 +2479,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Filter Tree - 过滤结果
         self.filter_tree = QTreeWidget()
-        # from stock_feature_marker import StockFeatureMarker
-        # self._filter_columns = ['code', 'name', 'rank', 'percent']  # 显示列
-        # self.feature_marker = StockFeatureMarker(self.filter_tree, enable_colors=True)
-
         self.filter_tree.setHeaderLabels(["Filtered Results"])
         self.filter_tree.setColumnCount(1)
         self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
@@ -2521,11 +2524,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.addWidget(self.filter_panel)
 
         # 设置默认分割比例
-        # 股票列表:图表区域:过滤面板 = 1 : 4 : 1 (示例分配)
         self.main_splitter.setSizes([350, 800, 160])
         self.filter_panel.setMinimumWidth(150)
-        self.filter_panel.setMaximumWidth(400)  # 根据你期望的最大宽度
-        # ⭐ [LAYOUT STABILITY] 设置拉伸因子，确保 Chart (Index 1) 随窗口自动缩放，而 Table (Index 0) 保持稳定
+        self.filter_panel.setMaximumWidth(400)
         self.main_splitter.setStretchFactor(0, 0) # 左侧列表：不自动拉伸
         self.main_splitter.setStretchFactor(1, 1) # 中间图表：自动占满空间
         self.main_splitter.setStretchFactor(2, 0) # 右侧过滤：不自动拉伸
@@ -2534,10 +2535,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.splitterMoved.connect(self.on_main_splitter_moved)
 
         # 安装全局事件过滤器
-        # 安装全局事件过滤器 (安装到 QApplication 以便支持 App 级全局)
         self.input_filter = GlobalInputFilter(self)
         QApplication.instance().installEventFilter(self.input_filter)
-        # self.installEventFilter(self.input_filter)
         # Apply initial theme
         self.apply_qt_theme()
 
@@ -2546,22 +2545,36 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⭐ Load saved window position (Restores size and location)
         self._window_pos_loaded = False   # ⭐ 必须加
-        # self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
         self.load_splitter_state()
         self._init_td_text_pool()
         self._init_tick_signal_pool()
-        # self._show_filter_panel()
         
         self._init_hotlist_and_signal_log()
 
-        # # --- [NEW] 列宽自动记忆 & 防抖保存 ---
-        # self._resize_timer = QTimer(self)
-        # self._resize_timer.setSingleShot(True)
-        # self._resize_timer.timeout.connect(self._save_visualizer_config)
-        
         self.stock_table.horizontalHeader().sectionResized.connect(self._on_column_resized_debounced)
         if hasattr(self, 'filter_tree'):
             self.filter_tree.header().sectionResized.connect(self._on_column_resized_debounced)
+
+    def _load_pattern_config(self) -> Dict[str, Any]:
+        """加载形态检测配置"""
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
+        default_config = {
+            "low_open_high_walk": {
+                "gain_threshold": 3.0,
+                "open_low_tolerance": 0.002,
+                "open_low_abs_tolerance": 0.01
+            }
+        }
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if "low_open_high_walk" in loaded:
+                        default_config["low_open_high_walk"].update(loaded["low_open_high_walk"])
+                logger.info(f"Visualizer loaded pattern config from {config_path}")
+            except Exception as e:
+                logger.error(f"Visualizer failed to load pattern config: {e}")
+        return default_config
         
     def showEvent(self, event):
         super().showEvent(event)
@@ -2657,6 +2670,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
         # ⚡ [NEW] 连接日志添加信号，用于同步语音播报 (所见即所播)
         self.signal_log_panel.log_added.connect(self._on_signal_log_added)
+        # ⚡ [NEW] 连接清理信号：清理日志时同步清理播报队列
+        self.signal_log_panel.cleared.connect(self.voice_thread.abort)
+        # ⚡ [NEW] 连接暂停信号：信号日志面板的暂停按钮 -> 控制全局语音
+        self.signal_log_panel.pause_toggled.connect(
+            lambda paused: self.voice_thread.pause() if paused else self.voice_thread.resume()
+        )
 
         # [FIX] Force Apply Pending Voice State (Override any earlier reset)
         if hasattr(self, 'hotlist_panel') and hasattr(self, '_pending_hotlist_voice_paused'):
@@ -2830,13 +2849,24 @@ class MainWindow(QMainWindow, WindowMixin):
             if not (pattern in valid_patterns or is_high_priority):
                 return
 
-            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
+            # ⚡ [NEW] 细化过滤：低开走高模型 仅捕捉 开盘即最低 且 涨幅 > 3% 的个股 (强势意图)
             if pattern == 'low_open_high_walk' and not is_high_priority:
                 if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
                     row = self.df_all.loc[code]
                     o = row.get('open', 0)
                     l = row.get('low', 0)
-                    if o > l > 0: # 开盘价大于最低价，说明早盘不是最低点
+                    p = row.get('percent', 0)
+                    
+                    conf = self.pattern_config.get("low_open_high_walk", {})
+                    # 1. 开盘即最低 (使用配置的容错)
+                    tol_rel = conf.get("open_low_tolerance", 0.002)
+                    tol_abs = conf.get("open_low_abs_tolerance", 0.01)
+                    gain_thresh = conf.get("gain_threshold", 3.0)
+                    
+                    is_open_low = (o > 0 and l > 0 and (abs(o - l) < tol_abs or abs(o - l) / o < tol_rel)) or (o == l and o > 0)
+                    
+                    # 2. 涨幅条件: 使用配置的阈值
+                    if not (is_open_low and p > gain_thresh):
                         return
 
 
@@ -3033,19 +3063,19 @@ class MainWindow(QMainWindow, WindowMixin):
             # 2. 普通股票代码: 6位数字
             elif len(content) == 6 and content.isdigit():
                 self.load_stock_by_code(content)
-                self.activateWindow() # 收到代码时激活窗口
+                # self.activateWindow() # 收到代码时激活窗口 (联动时不抢焦点)
             
             # 2.5 带有参数管道符的格式: 600598|resample=d
             elif "|" in content and content.split('|')[0].strip().isdigit() and len(content.split('|')[0].strip()) == 6:
                 self.load_stock_by_code(content)
-                self.activateWindow()
+                # self.activateWindow()
                 
             # 3. 带名称的股票代码: 000001,平安银行 (兼容旧格式)
             elif "," in content:
                 parts = content.split(",")
                 if len(parts) >= 1 and len(parts[0]) == 6:
                     self.load_stock_by_code(parts[0])
-                    self.activateWindow()
+                    # self.activateWindow()
             
             else:
                 logger.warning(f"Unknown IPC command content: {content}")
@@ -3427,6 +3457,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         label_map = {
             'd': '1D',
+            '2d': '2D',
             '3d': '3D',
             'w': '1W',
             'm': '1M',
@@ -4224,8 +4255,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 except Exception as e:
                     logger.debug(f"[apply_df_diff] Column {col} update failed: {e}")
                     
-            # 用 update_df_all 来刷新界面
-            self.update_df_all(self.df_all)
+            # ⚡ [OPTIMIZATION] 记录变更代码，交给节流器异步刷新
+            changed_codes = set(df_diff.index.tolist())
+            self.update_df_all(self.df_all, changed_codes=changed_codes)
         except Exception as e:
             logger.error(f"[apply_df_diff] Error: {e}")
 
@@ -4857,9 +4889,20 @@ class MainWindow(QMainWindow, WindowMixin):
             self.day_df = pd.concat([self.day_df, today_bar_aligned])
             logger.debug(f"[RT] Appended today's bar for {code}")
 
-        # --- 5. 渲染图表 ---
+        # --- 5. 渲染图表 (节流优化) ---
+        now = time.time()
+        last_render = self._last_kline_render_time.get(code, 0)
+        
+        # ⚡ 如果距离上次渲染不足 1s，且不是由于切换股票引发的强制刷新，则跳过
+        # 注意: 手动切换股票(render_charts)会更新 _last_kline_render_time，所以这里主要限制高频 tick 带来的重绘
+        if now - last_render < self._render_throttle_interval:
+            # logger.debug(f"[Throttle] Skipping render for {code} (Interval: {now-last_render:.2f}s)")
+            return
+
         with timed_ctx("render_charts_realtime", warn_ms=100):
             self.render_charts(code, self.day_df, tick_df)
+            # 更新最后渲染时间
+            self._last_kline_render_time[code] = time.time()
 
 
 
@@ -5184,27 +5227,28 @@ class MainWindow(QMainWindow, WindowMixin):
         pass
 
     def _toggle_hotlist_voice(self):
-        """切换热点面板语音 - ⚡ 修复：立即生效，并反向同步至主进程开关"""
-        if hasattr(self, 'hotlist_panel'):
-            self.hotlist_panel.toggle_voice()
-            # 同步图标和文字
-            is_paused = self.hotlist_panel._voice_paused
-            if is_paused:
-                self.voice_action.setText("🔇 热点播报: 关")
-                
-                # 🛑 [FIX] 立即强力中止所有语音
-                if hasattr(self, 'voice_thread') and self.voice_thread:
-                    self.voice_thread.abort()
-                logger.info("🔇 语音播报已关闭（即时生效）")
-            else:
-                self.voice_action.setText("🔊 热点播报: 开")
-                logger.info("🔊 语音播报已开启")
+        """切换主语音状态 (Stop/Mute) - 原有功能不变，停止播放并清空队列"""
+        if not hasattr(self, 'voice_thread'):
+            return
+
+        # 获取当前静音状态 (这里假设我们用一个本地变量或者检查 voice_thread 状态)
+        # 为了保持 UI 同步，我们可以检查 voice_action 的文本
+        is_muted = "开" in self.voice_action.text() # 如果当前是"开"，说明点击后要关
+        
+        if is_muted:
+            # 🔇 关闭：停止当前并清空队列
+            self.voice_thread.abort()
+            self.voice_action.setText("🔇 播报: 关")
+            logger.info("🔇 语音播报已关闭 (队列已清空)")
+        else:
+            # 🔊 开启
+            self.voice_action.setText("🔊 播报: 开")
+            # 确保不处于暂停状态
+            self.voice_thread.resume()
+            logger.info("🔊 语音播报已开启")
             
-            # ⭐ [IPC] 反向同步给主进程：如果可视化开启语音，主进程应静音(互斥)
-            # enabled=True 表示主进程应开启
-            # [FIX] 取消"关闭可视化语音自动开启主进程"的逻辑，改为始终静音主进程，防止"幽灵语音"
-            # 即：只要在 Visualizer 操作语音，都倾向于接管控制权，避免混音 或 意外唤醒后台
-            self._send_voice_state_to_main_app(enabled=is_paused)
+        # ⭐ [IPC] 反向同步给主进程
+        self._send_voice_state_to_main_app(enabled=not is_muted)
 
     def _send_voice_state_to_main_app(self, enabled=True):
         """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""
@@ -5309,12 +5353,13 @@ class MainWindow(QMainWindow, WindowMixin):
                         fallback_df[col] = 0
                 self.update_stock_table(fallback_df)
 
-    def update_stock_table(self, df, force_full=False):
+    def update_stock_table(self, df, force_full=False, changed_codes=None):
         """Update table with df_all data (增量更新优化版 - 参考TK性能优化)
         
         Args:
             df: DataFrame 数据
             force_full: 是否强制全量刷新 (默认 False)
+            changed_codes: 仅更新这些代码的行 (优化点)
         """
         import time
         start_time = time.time()
@@ -5364,6 +5409,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.stock_table.setSortingEnabled(False)
         self.stock_table.setUpdatesEnabled(False)
+        self.stock_table.viewport().setUpdatesEnabled(False) # 额外锁定视口
         
         update_type = "FULL" if (force_full or not self._table_item_map) else "INCR"
         
@@ -5449,11 +5495,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 重新计算剩余行的索引
                     self._rebuild_item_map_from_table()
                 
-                # 2. 更新已存在的行
+                # 2. 更新或新增行
                 for row_idx in range(n_rows):
                     try:
                         stock_code = str(codes[row_idx])
                         
+                        # ⭐ [OPTIMIZATION] 如果提供了变更列表，且该代码未变，则跳过 UI 更新
+                        if changed_codes is not None and stock_code not in changed_codes:
+                            continue
+
                         if stock_code in self._table_item_map:
                             # 更新现有行
                             old_row_idx = self._table_item_map[stock_code]
@@ -5477,8 +5527,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.setSortingEnabled(True)
             self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
             
-            # ⚡ [CRITICAL] 排序后必须重建索引映射，否则 row_idx 是旧的/错误的
-            self._rebuild_item_map_from_table()
+            # ⚡ [OPTIMIZATION] 仅在全量刷新或行数变化时重建索引
+            if update_type == "FULL" or len(codes_to_delete) > 0 or len(codes_to_add) > 0:
+                self._rebuild_item_map_from_table()
             
             # ⚡ 恢复选中项 (在排序和映射重建之后)
             if self.current_code:
@@ -5495,9 +5546,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.horizontalScrollBar().setValue(saved_h_scroll)
             
             # ⚡ 恢复信号和更新
-            logger.debug("[TableUpdate] Restoring updatesEnabled=True and signals...")
-            self.stock_table.setSortingEnabled(True) # Restore Sorting
             self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.viewport().setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
             
             # ⭐ [BUGFIX] 限制过宽列，防止挤压 K 线图
@@ -5803,14 +5853,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.code_info_map[stock_code][col_name] = optional_data[col_name][data_idx]
     
     def _rebuild_item_map_from_table(self):
-        """从表格重建 item_map（删除行后使用）"""
+        """从表格重建 item_map（优化版：直读模型数据）"""
         self._table_item_map = {}
+        model = self.stock_table.model()
         for row_idx in range(self.stock_table.rowCount()):
-            item = self.stock_table.item(row_idx, 0)
-            if item:
-                code = item.data(Qt.ItemDataRole.UserRole)
-                if code:
-                    self._table_item_map[str(code)] = row_idx
+            # 尝试从模型索引获取数据，避开 QTableWidgetItem 对象访问
+            code_data = model.index(row_idx, 0).data(Qt.ItemDataRole.UserRole)
+            if code_data:
+                self._table_item_map[str(code_data)] = row_idx
 
     # 2️⃣ 处理右键事件
     def on_table_right_click(self, pos):
@@ -6126,8 +6176,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # ⚡ [CRITICAL] 暂停语音播报，防止 COM 冲突导致卡死
                 if hasattr(self, 'voice_thread') and self.voice_thread:
+                    # ⚡ [OPTIMIZATION] 使用真正的 pause() 挂起语音，避免 COM 冲突
+                    self.voice_thread.pause()
                     self.voice_thread.pause_for_sync = True
-                    logger.debug("[IPC] Voice thread paused for sync")
+                    logger.debug("[IPC] Voice thread PAUSED for full sync")
                 
                 def _safe_process():
                     logger.debug("[_safe_process] START")
@@ -6142,8 +6194,10 @@ class MainWindow(QMainWindow, WindowMixin):
                         self._is_processing_full_sync = False
                         # ⚡ [CRITICAL] 恢复语音播报（已弃用分块，直接恢复）
                         if hasattr(self, 'voice_thread') and self.voice_thread:
+                            # ⚡ [OPTIMIZATION] 恢复语音
                             self.voice_thread.pause_for_sync = False
-                            logger.debug("[IPC] Voice thread resumed")
+                            self.voice_thread.resume()
+                            logger.debug("[IPC] Voice thread RESUMED after full sync")
                         logger.debug("[_safe_process] END, _is_processing_full_sync reset to False")
                         
                 QtCore.QTimer.singleShot(10, _safe_process)
@@ -6153,7 +6207,26 @@ class MainWindow(QMainWindow, WindowMixin):
                 if self.expected_sync_version != -1 and ver == self.expected_sync_version + 1:
                     self.expected_sync_version = ver
                     logger.info(f"[IPC] Received DF_DIFF (ver={ver}, rows={len(payload)})")
-                    QtCore.QTimer.singleShot(0, lambda: self.apply_df_diff(payload))
+                    
+                    # ⚡ [OPTIMIZATION] 大数据量 Diff 也需要暂停语音，防止卡顿
+                    is_large_diff = len(payload) > 1000
+                    if is_large_diff:
+                        if hasattr(self, 'voice_thread') and self.voice_thread:
+                            self.voice_thread.pause()
+                            self.voice_thread.pause_for_sync = True
+                            logger.debug(f"[IPC] Voice thread PAUSED for large DIFF ({len(payload)} rows)")
+
+                    def _safe_apply_diff():
+                        try:
+                            self.apply_df_diff(payload)
+                        finally:
+                            if is_large_diff:
+                                if hasattr(self, 'voice_thread') and self.voice_thread:
+                                    self.voice_thread.pause_for_sync = False
+                                    self.voice_thread.resume()
+                                    logger.debug("[IPC] Voice thread RESUMED after large DIFF")
+
+                    QtCore.QTimer.singleShot(0, _safe_apply_diff)
                 else:
                     logger.warning(f"[IPC] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
                     self._request_full_sync()
@@ -6171,8 +6244,10 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # ⚡ [CRITICAL] 暂停语音播报
             if hasattr(self, 'voice_thread') and self.voice_thread:
+                # ⚡ [OPTIMIZATION] 同样处理 UPDATE_DF_ALL
+                self.voice_thread.pause()
                 self.voice_thread.pause_for_sync = True
-                logger.debug("[IPC] Voice thread paused for sync (UPDATE_DF_ALL)")
+                logger.debug("[IPC] Voice thread PAUSED for UPDATE_DF_ALL")
             
             def _safe_process():
                 try:
@@ -6182,7 +6257,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     # ⚡ [CRITICAL] 恢复语音播报（已弃用分块，直接恢复）
                     if hasattr(self, 'voice_thread') and self.voice_thread:
                         self.voice_thread.pause_for_sync = False
-                        logger.debug("[IPC] Voice thread resumed (UPDATE_DF_ALL)")
+                        self.voice_thread.resume()
+                        logger.debug("[IPC] Voice thread RESUMED (UPDATE_DF_ALL)")
             QtCore.QTimer.singleShot(10, _safe_process)
         elif msg_type == "UPDATE_DF_DIFF":
             # diff 更新通常较小，可以直接处理
@@ -6371,20 +6447,60 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Error processing hot signals: {e}")
 
-    def update_df_all(self, df=None):
+    def _flush_table_updates(self):
+        """节流器回调：正式执行缓存的表格更新"""
+        if self.df_all is None or self.df_all.empty:
+            return
+            
+        import time
+        now = time.time()
+        
+        # 确保最小间隔
+        if now - self._last_table_update_time < 0.8:
+            self._table_refresh_timer.start(500)
+            return
+
+        codes = self._pending_changed_codes.copy()
+        self._pending_changed_codes.clear()
+        
+        logger.debug(f"[TableThrottle] Flushing {len(codes)} updates...")
+        force_full = "ALL" in codes
+        if force_full:
+            codes.remove("ALL")
+            
+        # 如果 codes 为空且没有 ALL，说明没啥好更新的
+        if not codes and not force_full:
+            return
+            
+        self.update_stock_table(self.df_all, force_full=force_full, changed_codes=None if force_full else codes)
+        self._last_table_update_time = now
+
+    def update_df_all(self, df=None, changed_codes=None):
         """
-        更新 df_all 并刷新表格 (简化版 - 仅更新表格)
-        注意: 缓存和监理看板刷新已由 _process_df_all_update 处理
+        更新 df_all 数据并请求表格刷新 (节流)
         """
         if df is not None:
-            # 更新缓存
-            self.df_cache = df.copy() if not df.empty else pd.DataFrame()
-            self.df_all = self.df_cache
-        # ⚡ 直接更新表格，不再重复处理
-        self.update_stock_table(self.df_all)
+            self.df_all = df
+            self.df_cache = df
+            
+        self.request_table_update(changed_codes)
+
+    def request_table_update(self, changed_codes=None):
+        """请求刷新表格 (带节流)"""
+        if changed_codes:
+            self._pending_changed_codes.update(changed_codes)
+        else:
+            self._pending_changed_codes.add("ALL")
+            
+        import time
+        now = time.time()
         
-        # ⚡ [FIX] 增量更新时也触发热点形态检测
-        QtCore.QTimer.singleShot(100, self._check_hotlist_patterns)
+        # 立即更新或延迟
+        if now - self._last_table_update_time > (self._table_update_interval * 2):
+            self._flush_table_updates()
+        elif not self._table_refresh_timer.isActive():
+            delay = max(50, int((self._table_update_interval - (now - self._last_table_update_time)) * 1000))
+            self._table_refresh_timer.start(delay)
 
         # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
         sizes = self.main_splitter.sizes()
@@ -9602,15 +9718,13 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.warning(f"Error closing signal_log_panel: {e}")
         
-        # 0.1️⃣ 停止语音线程
+        # 0.1️⃣ 停止语音进程 (提前执行，并增加更高优先级的日志)
         if hasattr(self, 'voice_thread') and self.voice_thread:
-            logger.debug("Stopping VoiceThread...")
+            logger.info("Closing Voice Broadcast system...")
             try:
                 self.voice_thread.stop()
-                if hasattr(self.voice_thread, 'wait'):
-                    self.voice_thread.wait(1000)
             except Exception as e:
-                logger.warning(f"Error stopping voice_thread: {e}")
+                logger.error(f"Error stopping voice_thread: {e}")
 
         # 0.2️⃣ 停止所有定时器
         if hasattr(self, 'realtime_timer') and self.realtime_timer:
