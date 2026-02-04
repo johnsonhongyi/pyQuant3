@@ -383,20 +383,77 @@ class HotlistPanel(QWidget, WindowMixin):
         status_bar.addWidget(self.pause_voice_btn)
         
         layout.addLayout(status_bar)
+        
+        # [NEW] 定时器同步 UI 状态 (如果外部改变了语音状态)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._sync_voice_ui)
+        self._sync_timer.start(1000)
+
+    def _sync_voice_ui(self):
+        """同步语音按钮状态"""
+        main_window = self._find_main_window()
+        if main_window and hasattr(main_window, 'voice_thread'):
+            vt = main_window.voice_thread
+            # 如果处于暂停状态
+            is_paused = not vt.pause_event.is_set()
+            if self._voice_paused != is_paused:
+                self._voice_paused = is_paused
+                self._update_voice_button_style()
+
+    def _find_main_window(self):
+        """寻找主窗口实例"""
+        try:
+            from PyQt6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                if hasattr(widget, 'df_all') and (widget.__class__.__name__ == 'MainWindow' or "Visualizer" in str(widget.windowTitle())):
+                    return widget
+        except:
+            pass
+        return None
     
     def toggle_voice(self):
-        """切换语音播报开启/暂停状态"""
+        """切换语音播报：暂停/恢复 (仅 Hotlist 面板行为)"""
+        main_window = self._find_main_window()
+        if not main_window or not hasattr(main_window, 'voice_thread'):
+            return
+
         self._voice_paused = not self._voice_paused
         
-        # 更新按钮文本和样式
         if self._voice_paused:
-            self.pause_voice_btn.setText("恢复语音")
-            self.pause_voice_btn.setStyleSheet("background-color: #600; border: 1px solid #f00;")
-            logger.info(f"🔇 Hotlist Voice PAUSED (Instance {id(self)})")
+            main_window.voice_thread.pause()
+            logger.info("⏸ Voice paused via HotlistPanel")
         else:
-            self.pause_voice_btn.setText("暂停语音")
-            self.pause_voice_btn.setStyleSheet("")
-            logger.info(f"🔊 Hotlist Voice RESUMED (Instance {id(self)})")
+            main_window.voice_thread.resume()
+            logger.info("▶ Voice resumed via HotlistPanel")
+            
+        self._update_voice_button_style()
+
+    def _update_voice_button_style(self):
+        """更新语音按钮样式"""
+        if self._voice_paused:
+            self.pause_voice_btn.setText("▶")
+            self.pause_voice_btn.setToolTip("恢复播报")
+            self.pause_voice_btn.setStyleSheet("""
+                QPushButton {
+                    background: #600;
+                    border: 1px solid #f00;
+                    border-radius: 3px;
+                    color: white;
+                    font-size: 10pt;
+                }
+            """)
+        else:
+            self.pause_voice_btn.setText("⏸")
+            self.pause_voice_btn.setToolTip("暂停播报")
+            self.pause_voice_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: 1px solid #444;
+                    border-radius: 3px;
+                    color: #FFD700;
+                    font-size: 10pt;
+                }
+            """)
 
     def _init_hotlist_ui(self):
         """初始化热点列表 UI (Tab 1 content)"""
