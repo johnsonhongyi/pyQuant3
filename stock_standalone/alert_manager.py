@@ -13,7 +13,7 @@ from queue import Empty
 from typing import Optional, Any, Dict
 import re
 import os
-
+from JohnsonUtil import commonTips as cct
 # Fallback beep
 try:
     import winsound
@@ -180,8 +180,8 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             try:
                 if pyttsx3:
                     engine = pyttsx3.init()
-                    engine.setProperty('rate', 220)
-                    engine.setProperty('volume', 1.0)
+                    engine.setProperty('rate', cct.voice_rate)
+                    engine.setProperty('volume', cct.voice_volume)
                     
                     if feedback_queue and key:
                         try: feedback_queue.put(('START', key))

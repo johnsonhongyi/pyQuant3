@@ -185,8 +185,12 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 
                 engine = pyttsx3.init()
                 rate = engine.getProperty('rate')
+                logger.debug(f'rate:{rate}')
                 if isinstance(rate, (int, float)):
-                    engine.setProperty('rate', rate + 40)
+                    # engine.setProperty('rate', rate + 40)
+                    engine.setProperty('rate', cct.voice_rate)
+                    engine.setProperty('volume', cct.voice_volume)
+
                     
                 def check_abort(name=None, location=None, length=None):
                     if (abort_event and abort_event.is_set()) or not stop_flag.value:
@@ -1775,7 +1779,7 @@ class ScrollableMsgBox(QtWidgets.QDialog):
 
         self.label = QtWidgets.QLabel(content)
         self.label.setWordWrap(True)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setTextFormat(Qt.TextFormat.PlainText) # 修改为 PlainText 以支持 \n 换行
         self.label.setOpenExternalLinks(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -2036,6 +2040,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self._last_table_update_time = 0
         self._table_update_interval = 1.5  # 1.5s 刷新一次界面，单位秒 (与 time.time() 对比)
 
+        # ⚡ [NEW] 用户交互锁定计时：记录用户最后一次操作界面的时间
+        # 用于播报反馈同步时判断是否强行滚动 (避免“拉回”效应)
+        self._last_ui_interaction_time = 0
+
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
         self.command_listener_thread: Optional[CommandListenerThread] = None
@@ -2048,6 +2056,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_timer = QTimer()
         self.realtime_timer.timeout.connect(self._poll_realtime_queue)
         self.realtime_timer.start(1000)  # 1秒轮询一次，保证响应速度
+        
+        # ⚡ [NEW] 盘后策略自动分析定时器 (16:00 触发)
+        self.backtest_timer = QTimer(self)
+        self.backtest_timer.timeout.connect(self._check_and_run_backtest_analysis)
+        self.backtest_timer.start(60000) # 每分钟检查一次
+        self._last_backtest_date = None
+
         logger.info(f"[Visualizer] Realtime UI poll timer started at 1000ms")
         logger.info(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
 
@@ -2113,6 +2128,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_layout_menu()  # ⭐ 新增：布局预设菜单
         self._init_theme_menu()   # ⭐ 新增：主题背景菜单
         self._init_voice_toolbar() # ⭐ 新增：语音控制栏
+        self._init_strategy_analysis_menu() # ⭐ 新增：策略分析菜单
+
 
         # ⭐ 数据同步序列号 (用于防重发、防漏发、防乱序)
         self.expected_sync_version = -1
@@ -2697,6 +2714,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.signal_log_panel.pause_toggled.connect(
             lambda paused: self.voice_thread.pause() if paused else self.voice_thread.resume()
         )
+        # ⚡ [NEW] 交互监控：任何手动选择操作都视为用户交互，激活防夺权锁定 (5秒)
+        self.signal_log_panel.log_table.itemSelectionChanged.connect(self._on_signal_log_user_interaction)
 
         # [FIX] Force Apply Pending Voice State (Override any earlier reset)
         if hasattr(self, 'hotlist_panel') and hasattr(self, '_pending_hotlist_voice_paused'):
@@ -2712,6 +2731,10 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_signal_log_clicked(self, code: str, pattern: str = '', message: str = ''):
         """处理信号日志中的代码点击：一键直达"""
         if not code: return
+        
+        # ⚡ [NEW] 更新用户交互时间，防止语音播报立即强行滚回
+        import time as _time
+        self._last_ui_interaction_time = _time.time()
         
         # 保存信号上下文
         self.active_signal_context = {
@@ -2865,8 +2888,17 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """信号日志回调 - 追加到日志面板并写入数据库"""
         try:
-            # ⚡ [FIX] 信号过滤：扩充白名单，确保更多关键信号能被记录和播报
-            valid_patterns = ['BUY', 'SELL', 'low_open_high_walk', 'MOMENTUM', 'ALERT', 'STATUS', 'PATTERN']
+            # ⚡ [FIX] 信号过滤:扩充白名单,确保更多关键信号能被记录和播报
+            valid_patterns = [
+                'BUY', 'SELL', 'MOMENTUM', 'ALERT', 'STATUS', 'PATTERN',
+                # 形态信号 - 完整列表
+                'auction_high_open', 'gap_up', 'low_open_high_walk', 'open_is_low',
+                'open_is_low_volume', 'nlow_is_low_volume', 'low_open_breakout',
+                'instant_pullback', 'shrink_sideways', 'pullback_upper',
+                'high_drop', 'top_signal', 'master_momentum', 'open_low_retest',
+                'high_sideways_break', 'bull_trap_exit', 'momentum_failure',
+                'strong_auction_open'
+            ]
             if not (pattern in valid_patterns or is_high_priority):
                 return
 
@@ -2947,14 +2979,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 2. 显示到信号日志面板（传递高优先级标志以触发闪屏）
             if hasattr(self, 'signal_log_panel'):
-                # ⚡ [FIX] 确保信号连接已建立 (首次访问时连接)
-                if not hasattr(self, '_signal_log_voice_connected'):
-                    try:
-                        self.signal_log_panel.log_added.connect(self._on_signal_log_added)
-                        self._signal_log_voice_connected = True
-                        logger.info("✅ Signal log voice broadcast connected")
-                    except Exception as e:
-                        logger.error(f"Failed to connect signal log voice: {e}")
+                # [REFINED] 连接已在 _init_hotlist_and_signal_log 中建立，此处无需动态判断
                 
                 if not self.signal_log_panel.isVisible():
                     self.signal_log_panel.show()
@@ -2987,6 +3012,78 @@ class MainWindow(QMainWindow, WindowMixin):
 
         except Exception as e:
             logger.error(f"Failed to process signal log: {e}")
+
+    # --- ⚡ [NEW] 策略自动化分析相关方法 ---
+    def _init_strategy_analysis_menu(self):
+        """初始化策略分析菜单"""
+        strategy_menu = self.menuBar().addMenu("策略分析(&A)")
+        
+        # 1. 手动运行当日分析
+        act_run_today = strategy_menu.addAction("运行今日策略复盘评估")
+        act_run_today.triggered.connect(lambda: self.run_strategy_backtest_analysis())
+        
+        # 2. 查看历史修正建议
+        act_view_log = strategy_menu.addAction("查看策略修正日志")
+        act_view_log.triggered.connect(self._view_strategy_correction_log)
+        
+        # 3. 自动分析开关 (可选)
+        strategy_menu.addSeparator()
+        self.act_auto_analysis = strategy_menu.addAction("收盘后自动分析")
+        self.act_auto_analysis.setCheckable(True)
+        self.act_auto_analysis.setChecked(True)
+
+    def run_strategy_backtest_analysis(self, date_str=None):
+        """执行策略回测分析 (支持手动触发)"""
+        from strategy_backtest_analyzer import StrategyBacktestAnalyzer
+        analyzer = StrategyBacktestAnalyzer()
+        
+        if date_str is None:
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            
+        self.statusBar().showMessage(f"正在执行策略分析: {date_str}...")
+        try:
+            analyzer.run_daily_analysis(target_date=date_str)
+            self.statusBar().showMessage(f"策略分析完成，结果已存入修正日志。", 5000)
+            
+            # 如果是手动触发，弹窗确认
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "策略分析完成", f"{date_str} 的策略复盘已完成。\n建议已存入: strategy_self_correction.log")
+        except Exception as e:
+            logger.error(f"Strategy Analysis Failed: {e}")
+            self.statusBar().showMessage(f"策略分析失败: {e}", 5000)
+
+    def _check_and_run_backtest_analysis(self):
+        """定时检查是否需要运行盘后分析 (16:00)"""
+        if not hasattr(self, 'act_auto_analysis') or not self.act_auto_analysis.isChecked():
+            return
+            
+        now = datetime.now()
+        # 如果当前时间在 16:00 - 16:05 之间且今天还没跑过
+        if now.hour == 16 and 0 <= now.minute <= 5:
+            date_today = now.strftime('%Y-%m-%d')
+            if getattr(self, '_last_backtest_date', None) != date_today:
+                logger.info(f"Market closed. Running automated strategy backtest for {date_today}")
+                self._last_backtest_date = date_today
+                # 异步运行，避免阻塞 UI
+                QtCore.QTimer.singleShot(1000, lambda: self.run_strategy_backtest_analysis(date_today))
+
+    def _view_strategy_correction_log(self):
+        """查看策略修正日志内容"""
+        log_path = "./strategy_self_correction.log"
+        if not os.path.exists(log_path):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "尚未生成策略修正日志。")
+            return
+            
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            # 使用 ScrollableMsgBox 显示
+            msg_box = ScrollableMsgBox("策略自修正日志 (Strategy Self-Correction)", content, self)
+            msg_box.show()
+        except Exception as e:
+            logger.error(f"Failed to view correction log: {e}")
 
     def _on_signal_log_added(self, code: str, name: str, pattern: str, message: str):
         """同步播报信号日志中新增的内容 (所见即所播)"""
@@ -3055,13 +3152,22 @@ class MainWindow(QMainWindow, WindowMixin):
                     code = meta.get('code')
                     snippet = meta.get('snippet')
                     if code and hasattr(self, 'signal_log_panel'):
-                        # 联动 1: 日志面板自动定位与高亮
-                        self.signal_log_panel.highlight_row_by_content(code, snippet)
+                        # ⭐ [UI LINKAGE LOCK] 用户交互锁定：如果用户刚才点击或滚动过，暂不强行同步
+                        import time as _time
+                        man_diff = _time.time() - getattr(self, '_last_ui_interaction_time', 0)
                         
-                        # 联动 2: 如果当前没有查看特定股票，可以考虑自动切换（可选，根据用户习惯，此处暂不自动切换大图，主要做日志定位）
-                        # logger.debug(f"🔗 [UI LINKAGE] Highlighted log row for {code} during speech.")
+                        # 联动 1: 日志面板自动定位与高亮 (仅在用户超过 5 秒未交互时自动滚动)
+                        self.signal_log_panel.highlight_row_by_content(code, snippet, force_scroll=(man_diff > 5.0))
         except Exception as e:
             pass # 队列空或读取异常不影响主程
+
+    def _on_signal_log_user_interaction(self):
+        """处理信号日志面板的用户交互回调"""
+        # 仅处理非程序性选择 (即真实用户操作)
+        if hasattr(self, 'signal_log_panel') and not getattr(self.signal_log_panel, '_is_programmatic_selection', False):
+            import time as _time
+            self._last_ui_interaction_time = _time.time()
+            # logger.debug("👤 User interaction detected in signal log, locking auto-scroll for 5s")
 
     def process_ipc_command(self, cmd_str: str):
         """处理 IPC 命令分发"""

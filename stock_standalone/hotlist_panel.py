@@ -114,7 +114,7 @@ class HotlistPanel(QWidget, WindowMixin):
     stock_selected = pyqtSignal(str, str)  # code, name
     item_double_clicked = pyqtSignal(str, str, float)  # code, name, add_price
     voice_alert = pyqtSignal(str, str)  # code, message - 语音通知信号
-    signal_log = pyqtSignal(str, str, str, str)  # code, name, pattern, message - 信号日志
+    signal_log = pyqtSignal(str, str, str, str, bool)  # code, name, pattern, message, is_high_priority - 信号日志
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1580,32 +1580,14 @@ class HotlistPanel(QWidget, WindowMixin):
             
             # 发射信号日志 (仅在数据有效且由于 update 触发后产生)
             try:
-                self.signal_log.emit(event.code, event.name, event.pattern, msg)
+                # 根据信号类型判断优先级 (风险信号为高优先级)
+                is_high_priority = event.pattern in ['bull_trap_exit', 'momentum_failure', 'top_signal', 'high_drop']
+                self.signal_log.emit(event.code, event.name, event.pattern, msg, is_high_priority)
             except Exception as e_emit:
                 logger.error(f"❌ Signal emit failed: {e_emit}")
             
-            # ⭐ 语音通知优化
-            import time as _time
-            now = _time.time()
-            
-            should_play_prefix = False
-            
-            if count == 1:
-                # 首次触发：只做时间冷却检查 (60秒)
-                # 忽略BatchFlag，防止因数据刷新过快导致的重复播报
-                time_diff = now - self._last_voice_prefix_time
-                if time_diff > 60:
-                    should_play_prefix = True
-                    self._last_voice_prefix_time = now # 更新全局冷却
-                
-                prefix = "热点信息 " if should_play_prefix else ""
-                voice_msg = f"{prefix}{event.name} {pattern_cn}"
-            else:
-                # 重复触发：简短播报
-                voice_msg = f"{event.name} {pattern_cn} 第{count}次"
-            
-            self._notify_voice(event.code, voice_msg)
-            
+            # ⚡ [REFINED] 统一信号流向：不再此处直接调用 _notify_voice。
+            # 信号通过 signal_log.emit 推送到 MainWindow 后，由“所见即所播”机制统一处理播报。
             logger.warning(f"🔥 热点信号: {msg}")
         except Exception as e:
             logger.error(f"Signal callback error: {e}")

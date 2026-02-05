@@ -2866,6 +2866,94 @@ def append_today_close_if_needed(series: pd.Series) -> pd.Series:
     return series
 
 
+
+
+
+
+def obv_cross_days_fast_vector(df: pd.DataFrame, ma_period: int = 30, buffer_ratio: float = 0.01) -> pd.Series:
+    """
+    buffer_ratio: 当 OBV 仅比 MAOBV 低 buffer_ratio 时，仍认为金叉连续
+    """
+    close = df['close'].to_numpy(dtype=float)
+    vol = df['vol'].to_numpy(dtype=float)
+    n = len(close)
+    obv = np.zeros(n, dtype=np.float64)
+
+    # OBV
+    diff = close[1:] - close[:-1]
+    signed_vol = np.zeros(n-1, dtype=np.float64)
+    signed_vol[diff>0] = vol[1:][diff>0]
+    signed_vol[diff<0] = -vol[1:][diff<0]
+    obv[1:] = np.cumsum(signed_vol)
+
+    # MAOBV
+    maobv = np.empty(n, dtype=np.float64)
+    maobv[:ma_period-1] = obv[:ma_period-1]
+    cumsum = np.cumsum(obv)
+    maobv[ma_period-1:] = (cumsum[ma_period-1:] - np.concatenate(([0], cumsum[:-ma_period]))) / ma_period
+
+    # 带 buffer 的信号
+    signal = obv > maobv * (1 - buffer_ratio)
+
+    # 连续天数
+    cross_days = np.zeros(n, dtype=np.int32)
+    count = 0
+    for i in range(n):
+        if signal[i]:
+            count += 1
+        else:
+            count = 0
+        cross_days[i] = count
+
+    return pd.Series(cross_days, index=df.index, name='obv_cross_days')
+
+
+
+
+
+# def obv_cross_days_fast_tdx(df: pd.DataFrame, ma_period: int = 30) -> pd.Series:
+#     """
+#     高性能计算 TDX 风格 OBV 金叉连续天数，修正对齐问题
+#     df 必须包含 'close' 和 'vol'
+#     """
+#     close = df['close'].to_numpy(dtype=float)
+#     vol = df['vol'].to_numpy(dtype=float)
+
+#     n = len(close)
+#     if n == 0:
+#         return pd.Series(dtype=int)
+
+#     # 1️⃣ OBV
+#     obv = np.zeros(n, dtype=np.float64)
+#     diff = close[1:] - close[:-1]
+#     signed_vol = np.zeros(n-1, dtype=np.float64)
+#     signed_vol[diff > 0] = vol[1:][diff > 0]
+#     signed_vol[diff < 0] = -vol[1:][diff < 0]
+#     obv[1:] = np.cumsum(signed_vol)
+
+#     # 2️⃣ MAOBV
+#     cumsum = np.cumsum(obv, dtype=np.float64)
+#     maobv = np.empty(n, dtype=np.float64)
+#     maobv[:ma_period-1] = 0  # ⭐ 用 0 对齐，和 TDX 一致
+#     maobv[ma_period-1:] = (cumsum[ma_period-1:] - np.concatenate(([0], cumsum[:-ma_period]))) / ma_period
+
+#     # 3️⃣ 金叉信号
+#     signal = (obv > maobv).astype(np.int8)
+
+#     # 4️⃣ 连续天数
+#     cross_days = np.zeros(n, dtype=np.int32)
+#     count = 0
+#     for i in range(n):
+#         if signal[i]:
+#             count += 1
+#         else:
+#             count = 0
+#         cross_days[i] = count
+
+#     return pd.Series(cross_days, index=df.index, name='obv_cross_days')
+
+
+
 def ema_tdx_numpy(series: pd.Series, timeperiod: int) -> pd.Series:
     # series = append_today_close_if_needed(series)
     x = series.to_numpy(dtype=float)
@@ -5827,17 +5915,23 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
-        
+        df['obv'] = obv_cross_days_fast_vector(df)
 
         # with timed_ctx("ema_tdx_numpy", warn_ms=2):
         #     df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
+        # # with timed_ctx("obv_signal_continuous_numpy", warn_ms=2):
+        # #     result = obv_signal_continuous_numpy(df)
+        # with timed_ctx("obv_cross_days_fast_vector", warn_ms=2):
+        #     df['obv'] = obv_cross_days_fast_vector(df)
+
         # # df['ma61d'] = ema_tdx_numpy_realtime(df['close'], timeperiod=60)
         # import ipdb;ipdb.set_trace()
 
         # with timed_ctx("talib.EMA", warn_ms=2):
         #     df['ma60dema'] = talib.EMA(df['close'], timeperiod=60)
         # cct.print_timing_summary()
-        
+        # import ipdb;ipdb.set_trace()
+
         # 测试
         # # df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
         # # with timed_ctx("talib.EMA", warn_ms=2):
@@ -6744,7 +6838,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 
-    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra','obv']    
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
@@ -7657,9 +7751,13 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
 
     resample = 'd'
-    code = '300063'
+    # code = '300063'
+    # code = '300377'
+    code = '003009'
     # dm = sina_data.Sina().market('all').loc['000002']
     # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
+    df = get_tdx_append_now_df_api('001236', dl=5)
+    import ipdb;ipdb.set_trace()
 
     # dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
     # for inx in tdx_index_code_list:
