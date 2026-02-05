@@ -59,6 +59,8 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
     worker_log("Voice worker process started.")
     
     cancelled_set = set()
+    last_speech_end_ts = 0.0 # [FIX] Timestamp of last speech completion
+
 
     while not stop_event.is_set():
         try:
@@ -132,6 +134,11 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                 continue
 
             # 4. ** 隔离式播报周期 **
+            # [FIX] Timestamp Filtering: Drop stale alerts
+            if msg_t < last_speech_end_ts:
+                worker_log(f"Skipping stale alert: {key} (Time {msg_t} < LastFinish {last_speech_end_ts})")
+                continue
+
             safe_msg = normalize_speech_text(message)
             worker_log(f"Handling: {safe_msg[:40]}... (Key: {key})")
 
@@ -182,6 +189,7 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
 
                     engine.say(safe_msg)
                     engine.runAndWait()
+                    last_speech_end_ts = time.time() # [FIX] Update completion time
                     
                     # 播放结束
                     if feedback_queue and key:

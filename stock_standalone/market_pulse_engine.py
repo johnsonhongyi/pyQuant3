@@ -138,8 +138,9 @@ class DailyPulseEngine:
                                 if int_code in df_all.index:
                                     rec = df_all.loc[int_code]
                             except: pass
-                    snapshot = df_all.loc[code]
+                    # snapshot = df_all.loc[code]   <-- Removed dangerous unconditional access
                     if rec is not None:
+                        snapshot = rec
                         # Extract with priorities
                         if rank == 0: 
                              rank = rec.get('Rank', rec.get('rank', 0))
