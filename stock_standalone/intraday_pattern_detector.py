@@ -86,6 +86,7 @@ class IntradayPatternDetector:
         'open_low_retest',      # 开盘回踩 (开盘≈最低, 缓慢上行)
         'high_sideways_break',  # 横盘突破 (大涨后横盘不破均线再拉升)
         'bull_trap_exit',       # 诱多跑路 (快速拉升后跌破均线)
+        'bear_trap_reversal',   # 诱空反转 (早盘下杀后尾盘突破前高)
         'momentum_failure',     # 主升转弱 (之前是主升，现在破位)
         'strong_auction_open',  # 强力竞价 (高开+强结构+历史联动)
     ]
@@ -108,6 +109,7 @@ class IntradayPatternDetector:
         'open_low_retest': '开盘回踩',
         'high_sideways_break': '横盘突破',
         'bull_trap_exit': '诱多跑路',
+        'bear_trap_reversal': '诱空反转',
         'momentum_failure': '主升转弱',
         'strong_auction_open': '强力竞价',
     }
@@ -122,6 +124,7 @@ class IntradayPatternDetector:
         'high_drop': 25,
         # 级别 3: 核心机会 (主升/强竞价/横盘突破)
         'master_momentum': 30,
+        'bear_trap_reversal': 32,
         'strong_auction_open': 35,
         'high_sideways_break': 38,
         # 级别 4: 进阶机会 (带量/突破)
@@ -286,6 +289,10 @@ class IntradayPatternDetector:
         # 7. 风险跑路信号 (诱多/破位)
         if 'bull_trap_exit' in self.enabled_patterns:
             events.extend(self._check_bull_trap_exit(code, name, tick_df, day_row, prev_close))
+
+        # ⚡ [NEW] 诱空反转 (诱空下杀后再拉升突破)
+        if 'bear_trap_reversal' in self.enabled_patterns:
+            events.extend(self._check_bear_trap_reversal(code, name, tick_df, day_row, prev_close))
         
         # 8. 缩量横盘 / 冲高回落 / 顶部信号
         if 'shrink_sideways' in self.enabled_patterns:
@@ -989,23 +996,42 @@ class IntradayPatternDetector:
         return events
 
     def _check_bull_trap_exit(self, code: str, name: str,
-                             tick_df: Optional[pd.DataFrame],
-                             day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """诱多破位检测 (早盘错误修正)"""
+                              tick_df: Optional[pd.DataFrame],
+                              day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """诱多跑路 (快速拉升后跌破均线)"""
         events = []
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
         open_p = float(day_row.get('open', 0))
         high_p = float(day_row.get('high', 0))
-        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
         amount = float(day_row.get('amount', 0))
         volume = float(day_row.get('volume', 0))
         vwap = amount / volume if volume > 0 else 0
         
         if open_p <= 0 or curr_p <= 0 or vwap <= 0:
             return events
-            
-        # 1. 检测是否曾经“诱多”：开盘后快速大涨 > 3%
+
+        # ⭐ [NEW] 结合过去两天的高点结构与底部分析
+        lasth1d = float(day_row.get('lasth1d', 0))
+        lasth2d = float(day_row.get('lasth2d', 0))
+        lastl1d = float(day_row.get('lastl1d', 0)) # 昨日最低价
+        max_h2 = max(lasth1d, lasth2d)
+        is_rising_trend = lasth1d > lasth2d > 0
+        
+        # 0. 结构性过滤 1：如果当前价格已经高于/持平前两天最高点，说明结构转强，不再视为诱多
+        if max_h2 > 0 and curr_p >= max_h2 * 0.998:
+            return events
+
+        # 1. 结构性过滤 2：如果是上升趋势 (高点升高) 且今日最低点高于昨日最低点 (底部分数升高)
+        # 这种情况下的回落多为洗盘，除非跌破开盘价，否则不轻易报诱多
+        is_ascending_base = is_rising_trend and (day_row.get('low', 0) >= lastl1d * 0.998)
+        if is_ascending_base and curr_p >= open_p * 0.998:
+            return events
+
+        # 2. 检测是否曾经“诱多”：开盘后快速大涨
+        # ⚡ 趋势性修正：如果是连板或高点升高结构，判定門檻从 3.0% 提高到 3.8%，以减少洗盘干扰
+        trap_threshold = 3.8 if is_rising_trend else 3.0
         rising_pct = (high_p - open_p) / open_p * 100
-        if rising_pct < 3.0:
+        if rising_pct < trap_threshold:
             return events
             
         # 注意：此处 state 与 master_momentum 无关，独立判断
@@ -1017,14 +1043,64 @@ class IntradayPatternDetector:
         if state['trap_triggered']:
             return events
             
-        # 2. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
-        if curr_p < vwap * 0.997 or curr_p < open_p * 0.995:
+        # 3. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
+        # ⚡ 趋势修正：上升结构要求的跌破深度更深 (vwap * 0.995 而非 0.997)
+        vwap_tolerance = 0.995 if is_ascending_base else 0.997
+        if curr_p < vwap * vwap_tolerance or curr_p < open_p * 0.992:
             state['trap_triggered'] = True
             events.append(PatternEvent(
                 code=code, name=name, pattern='bull_trap_exit',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=curr_p,
-                detail=f"诱多破位: 早盘大涨{rising_pct:.1f}%后跌破均线, 注意跑路!",
+                detail=f"诱多跑路: 早盘大涨{rising_pct:.1f}%后跌破均线/开盘价",
+                is_high_priority=True
+            ))
+            
+        return events
+
+    def _check_bear_trap_reversal(self, code: str, name: str,
+                                  tick_df: Optional[pd.DataFrame],
+                                  day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """诱空反转 (早盘低开下杀，尾盘拉升突破前高)"""
+        events = []
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        open_p = float(day_row.get('open', 0))
+        low_p = float(day_row.get('low', 0))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        vwap = amount / volume if volume > 0 else 0
+        
+        if open_p <= 0 or curr_p <= 0 or vwap <= 0 or prev_close <= 0:
+            return events
+            
+        # 1. 结构基础：获取前两天最高价
+        lasth1d = float(day_row.get('lasth1d', 0))
+        lasth2d = float(day_row.get('lasth2d', 0))
+        max_h2 = max(lasth1d, lasth2d)
+        if max_h2 <= 0: return events
+
+        # 2. 诱空特征：早盘低开 或 开盘后显著下杀
+        open_gap = (open_p - prev_close) / prev_close * 100
+        kill_drop = (low_p - open_p) / open_p * 100
+        
+        # 诱空条件：低开 < -1.0% 或 盘中下杀 < -1.5%
+        is_bear_trap = open_gap < -1.0 or kill_drop < -1.5
+        if not is_bear_trap:
+            return events
+            
+        # 3. 反转确认：价格收复均线并突破前两天最高价
+        if curr_p > max_h2 and curr_p > vwap * 1.002:
+            # 时间过滤：倾向于 10:30 后的拉升 (002519 这种尾盘更明显)
+            now_time = datetime.now().time()
+            if now_time < dt_time(10, 30):
+                return events
+                
+            rebound_pct = (curr_p - low_p) / low_p * 100
+            events.append(PatternEvent(
+                code=code, name=name, pattern='bear_trap_reversal',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=f"🔥诱空反转: 下杀{kill_drop:.1f}%后强烈回升并突破前高({max_h2:.2f})",
                 is_high_priority=True
             ))
             

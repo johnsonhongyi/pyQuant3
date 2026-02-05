@@ -3404,7 +3404,17 @@ class StockLiveStrategy:
             # 组装最终文本
             speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
             
-            self._voice.announce(speak_text, code=code) # 使用 announce 支持优先级
+            # ⭐ [FIX] 延迟语音播报,确保窗口创建流程有足够启动时间
+            # 窗口创建是异步的,如果语音立即播报,会导致前几个语音无法同步震动效果
+            # 延迟 300ms 让窗口有机会完成创建并注册到 code_to_alert_win
+            def delayed_announce():
+                try:
+                    self._voice.announce(speak_text, code=code)
+                except Exception as e:
+                    logger.debug(f"Delayed announce error: {e}")
+            
+            # 使用 threading.Timer 实现延迟,不阻塞主线程
+            threading.Timer(0.30, delayed_announce).start()
 
         # 4. 记录交易执行 (用于回测优化和收益计算)
         if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:

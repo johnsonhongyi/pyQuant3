@@ -4888,8 +4888,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pass  # 主循环已停止，忽略
 
 
-    def _trigger_alert_visual_effects(self, code, start=True):
-        """根据代码查找窗口并触发视觉效果，并确保窗口可见"""
+    def _trigger_alert_visual_effects(self, code, start=True, retry_count=0):
+        """根据代码查找窗口并触发视觉效果，并确保窗口可见
+        
+        Args:
+            code: 股票代码
+            start: True=开始播报, False=结束播报
+            retry_count: 当前重试次数（内部使用）
+        """
         win = None
         if not hasattr(self, 'code_to_alert_win'): return
         # ⭐ [MODIFIED] 联动增强：快速创建逻辑
@@ -4901,7 +4907,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      win = w
                      break
              
-             # B. [NEW] 如果代码还在就绪队列中，立即“插队”创建，避免语音超前 UI 太久导致的 Mismatch
+             # B. [NEW] 如果代码还在就绪队列中，立即"插队"创建，避免语音超前 UI 太久导致的 Mismatch
              if not win and start:
                  for i, item in enumerate(self._alert_queue):
                      q_code = str(item[0]).strip()
@@ -4951,11 +4957,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(win, 'stop_visual_effects'):
                     win.stop_visual_effects()
         elif start:
-            # ⭐ [FIX] 如果还是找不到匹配，记录下来协助诊断 (且实现逻辑：重复提示只报一次)
-            self._mismatch_warned_codes = getattr(self, '_mismatch_warned_codes', set())
-            if str(code) not in self._mismatch_warned_codes:
-                logger.warning(f"[Linkage] Mismatch: Voice speaking code '{code}', but no matching alert window found. Available windows: {list(self.code_to_alert_win.keys())}")
-                self._mismatch_warned_codes.add(str(code))
+            # ⭐ [FIX] 窗口可能正在创建中,实现重试机制
+            MAX_RETRIES = 5  # 增加到 5 次
+            RETRY_DELAY_MS = 150  # 增加到 150ms
+            
+            if retry_count < MAX_RETRIES:
+                # 延迟后重试
+                logger.debug(f"[Linkage] Window for '{code}' not found, retrying ({retry_count + 1}/{MAX_RETRIES})...")
+                self.after(RETRY_DELAY_MS, lambda: self._trigger_alert_visual_effects(code, start=True, retry_count=retry_count + 1))
+            else:
+                # 达到最大重试次数,记录警告
+                self._mismatch_warned_codes = getattr(self, '_mismatch_warned_codes', set())
+                if str(code) not in self._mismatch_warned_codes:
+                    # 简化警告信息,只打印窗口数量,避免日志冗余
+                    available_count = len(self.code_to_alert_win)
+                    logger.warning(f"[Linkage] Mismatch: Voice speaking code '{code}', but no matching alert window found. ({available_count} windows registered)")
+                    self._mismatch_warned_codes.add(str(code))
 
     def _update_alert_positions(self):
         """

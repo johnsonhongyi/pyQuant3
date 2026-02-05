@@ -17,7 +17,8 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+    QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl, QPoint
 from PyQt6.QtGui import QResizeEvent, QMouseEvent, QColor
@@ -326,12 +327,27 @@ class SignalLogPanel(QWidget, WindowMixin):
         return super().eventFilter(source, event)
 
     def _on_item_double_clicked(self, item):
-        """双击查看完整信号详情"""
+        """双击处理：代码列执行复制，其他列弹出详情"""
         from PyQt6.QtWidgets import QMessageBox
         row = item.row()
+        col = item.column()
+        
+        # 获取基础信息
+        code_str = self.log_table.item(row, 2).text()
+        
+        # ⚡ [NEW] 双击代码列 (Col 2) -> 复制到剪贴板
+        if col == 2:
+            try:
+                QApplication.clipboard().setText(code_str)
+                self.status_label.setText(f"📋 已复制: {code_str}")
+                # logger.info(f"📋 Code copied to clipboard: {code_str}")
+                return
+            except Exception as e:
+                logger.error(f"Failed to copy to clipboard: {e}")
+
+        # 其他列或复制失败 -> 弹出详情对话框 (保持原逻辑)
         time_str = self.log_table.item(row, 0).text()
         type_str = self.log_table.item(row, 1).text()
-        code_str = self.log_table.item(row, 2).text()
         name_str = self.log_table.item(row, 3).text()
         msg_str = self.log_table.item(row, 4).text()
         
@@ -345,7 +361,14 @@ class SignalLogPanel(QWidget, WindowMixin):
         msg_box.setTextFormat(Qt.TextFormat.RichText)
         msg_box.setText(detail)
         msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        
+        # ⭐ [NEW] 加载窗口持久化位置
+        self.load_window_position_qt(msg_box, "signal_detail_msg_box", default_width=400, default_height=300)
+        
         msg_box.exec()
+        
+        # ⭐ [NEW] 保存窗口位置 (用户关闭后持久化)
+        self.save_window_position_qt_visual(msg_box, "signal_detail_msg_box")
 
     def _on_anchor_clicked(self, url: QUrl):
         """处理点击代码链接"""
@@ -405,6 +428,15 @@ class SignalLogPanel(QWidget, WindowMixin):
         # 更新缓存
         self._last_signals[code] = {'pattern': pattern, 'message': message, 'name': name}
         self._last_signals_time[dedup_key] = now_ts
+
+        # (3) ⚡ [NEW] 内容片段级短时去重 (防止不同 pattern 发射相似消息)
+        # 取消息的前 15 个字做指纹，3 秒内不允许同一代码重复 (除非是高优先级)
+        if not is_high_priority:
+            msg_snippet = message[:15]
+            content_key = f"{code}_{msg_snippet}"
+            if now_ts - self._last_signals_time.get(content_key, 0) < 3:
+                return
+            self._last_signals_time[content_key] = now_ts
         
         # 3. 翻译与配色
         pattern_cn = self.PATTERN_NAMES.get(pattern, pattern)
@@ -471,11 +503,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         # 发射日志已添加信号，用于同步语音播报
         self.log_added.emit(code, name, pattern, message)
 
-    def highlight_row_by_content(self, code: str, message_snippet: str):
+    def highlight_row_by_content(self, code: str, message_snippet: str, force_scroll: bool = True):
         """
         根据内容高亮并定位行 (用于语音联动)
-        [FIX] 增加防抖标记，防止反向联动导致死循环
-        [OPTIMIZATION] 使用 findItems 加速查找，支持全量搜索
+        :param force_scroll: 是否强行滚动到该行 (用于防夺权保护策略)
         """
         self._is_programmatic_selection = True
         try:
@@ -516,7 +547,8 @@ class SignalLogPanel(QWidget, WindowMixin):
             if target_item:
                 row = target_item.row()
                 self.log_table.selectRow(row)
-                self.log_table.scrollToItem(target_item)
+                if force_scroll:
+                    self.log_table.scrollToItem(target_item)
                 return True
 
         finally:
