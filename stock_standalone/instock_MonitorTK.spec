@@ -26,6 +26,7 @@ a = Analysis(
         ("monitor_category_list.json", "."),
         ("visualizer_layout.json", "."),
         ("display_cols.json", "."),
+        ("intraday_pattern_config.json", "."),
         ("datacsv/search_history.json", "."),
         ("JSONData/stock_codes.conf", "JSONData"),
         ("JSONData/count.ini", "JSONData"),

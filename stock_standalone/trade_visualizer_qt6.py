@@ -55,6 +55,7 @@ from trading_hub import get_trading_hub, TrackedSignal
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
 visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
+intraday_pattern_config = cct.get_resource_file("intraday_pattern_config.json",BASE_DIR=BASE_DIR)
 
 import re
 try:
@@ -2572,7 +2573,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _load_pattern_config(self) -> Dict[str, Any]:
         """加载形态检测配置"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
+        # config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
+        config_path = intraday_pattern_config
         default_config = {
             "low_open_high_walk": {
                 "gain_threshold": 3.0,
