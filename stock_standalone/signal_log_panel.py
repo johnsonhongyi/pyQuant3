@@ -11,6 +11,7 @@ SignalLogPanel - 实时信号日志面板 (强化版)
 - 窗口位置持久化 (WindowMixin)
 """
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -91,6 +92,8 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._log_buffer: list[str] = []
         # 记录每只股票最后一条信号上下文 {code: {'pattern': p, 'message': m, 'name': n}}
         self._last_signals: dict[str, dict] = {} 
+        # ⚡ [NEW] 时间窗口去重 {f"{code}_{pattern}": timestamp}
+        self._last_signals_time: dict[str, float] = {}
         self._max_lines: int = 500
         
         self._drag_pos: Optional[QPoint] = None
@@ -377,12 +380,31 @@ class SignalLogPanel(QWidget, WindowMixin):
             return
 
         # 2. 智能去重：检查该代码的最后一条消息是否相同
+
+        # 2. ⚡ [ENHANCED] 智能去重策略 (时间窗 + 内容)
+        now_ts = time.time()
+        dedup_key = f"{code}_{pattern}"
+        
+        # (1) 绝对时间窗去重: 相同(代码+形态)在 60秒内 不重复触发
+        last_ts = self._last_signals_time.get(dedup_key, 0)
+        if now_ts - last_ts < 60:
+            # 特例: 如果是高优先级信号，或者消息内容完全不同且包含"跑路"等关键词，则放行
+            is_critical = "跑路" in message or is_high_priority
+            if not is_critical:
+               return
+        
+        # (2) 内容完全一致校验 (防止短时震荡频繁触发相同点位)
         last_ctx = self._last_signals.get(code, {})
-        if last_ctx.get('message') == message:
+        # 清洗消息中的动态部分(如价格、时间)后再比对会更准，这里先比对原始消息
+        if last_ctx.get('message') == message and last_ctx.get('pattern') == pattern:
+            # 即使超过60秒，如果内容完全没变，也可以延长时间窗或忽略
+            # 这里选择更新时间戳但不重复显示
+            self._last_signals_time[dedup_key] = now_ts
             return
         
         # 更新缓存
         self._last_signals[code] = {'pattern': pattern, 'message': message, 'name': name}
+        self._last_signals_time[dedup_key] = now_ts
         
         # 3. 翻译与配色
         pattern_cn = self.PATTERN_NAMES.get(pattern, pattern)
@@ -507,6 +529,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.log_table.setRowCount(0)
         self._log_buffer.clear()
         self._last_signals.clear()
+        self._last_signals_time.clear()  # [FIX] Clear time deduplication cache
         self.count_label.setText("0")
         self.status_label.setText("就绪")
         

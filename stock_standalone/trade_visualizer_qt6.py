@@ -128,6 +128,8 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
     
     logger.debug("[VoiceProcess] Worker started")
     
+    last_speech_end_ts = 0.0 # [FIX] Timestamp filtering
+    
     while stop_flag.value:
         try:
             # ⚡ [NEW] 检查暂停状态 (阻塞直到恢复)
@@ -145,12 +147,20 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 continue
                 
             # 兼容处理
+            msg_ts = 0.0
             if isinstance(data, dict):
                 msg = data.get('text', '')
                 meta = data.get('meta', None)
+                msg_ts = data.get('timestamp', 0.0)
             else:
                 msg = str(data)
                 meta = None
+                msg_ts = time.time()
+
+            # [FIX] Filter out stale messages
+            if msg_ts > 0 and msg_ts < last_speech_end_ts:
+                # logger.debug(f"[VoiceProcess] Skipping stale message: {msg[:10]}... (created {msg_ts} < last_end {last_speech_end_ts})")
+                continue
 
             # 向主进程反馈：开始播报该条信号
             if feedback_queue and meta:
@@ -186,6 +196,9 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
 
                 engine.say(speech_text)
                 engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
+                
+                # [FIX] Update completion timestamp
+                last_speech_end_ts = time.time()
                 
                 time.sleep(0.1)
             except Exception as e:
@@ -249,10 +262,12 @@ class VoiceProcess:
         if self.stop_flag.value:
             # 推送新消息时，确保中止事件是清除的
             self.abort_event.clear()
+            # [FIX] Always include timestamp for deduplication
+            t_now = time.time()
             if meta:
-                self.queue.put({'text': text, 'meta': meta})
+                self.queue.put({'text': text, 'meta': meta, 'timestamp': t_now})
             else:
-                self.queue.put(text)
+                self.queue.put({'text': text, 'meta': None, 'timestamp': t_now})
 
     def abort(self):
         """立即中止当前所有播报"""
@@ -833,7 +848,7 @@ class DataLoaderThread(QThread):
                 # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
                 with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
                     day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample], resample=self.resample, fastohlc=True)
-                    logger.info(f'resample_keys: {self.resample}  dl: {Resample_LABELS_Days[self.resample]} day_df:{day_df[-5:]}')
+                    # logger.debug(f'resample_keys: {self.resample}  dl: {Resample_LABELS_Days[self.resample]} day_df:{day_df[-3:]}')
 
                 # 2. Fetch Realtime/Tick Data (Intraday)
                 # 假设此操作不涉及 HDF5，可以在锁外执行
@@ -2081,7 +2096,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # code -> last_render_timestamp
         self._last_kline_render_time = {}
         # 实时数据更新时的最小渲染间隔 (秒)
-        self._render_throttle_interval = 0.2 
+        self._render_throttle_interval = 0.1 
 
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
@@ -5238,17 +5253,19 @@ class MainWindow(QMainWindow, WindowMixin):
         if is_muted:
             # 🔇 关闭：停止当前并清空队列
             self.voice_thread.abort()
-            self.voice_action.setText("🔇 播报: 关")
+            # self.voice_action.setText("🔇 播报: 关")
+            self.voice_action.setText("🔇 热点播报: 关(Alt+V)")
             logger.info("🔇 语音播报已关闭 (队列已清空)")
         else:
             # 🔊 开启
-            self.voice_action.setText("🔊 播报: 开")
+            # self.voice_action.setText("🔊 播报: 开")
+            self.voice_action.setText("🔊 热点播报: 开(Alt+V)")
             # 确保不处于暂停状态
             self.voice_thread.resume()
             logger.info("🔊 语音播报已开启")
             
         # ⭐ [IPC] 反向同步给主进程
-        self._send_voice_state_to_main_app(enabled=not is_muted)
+        self._send_voice_state_to_main_app(enabled=is_muted)
 
     def _send_voice_state_to_main_app(self, enabled=True):
         """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""

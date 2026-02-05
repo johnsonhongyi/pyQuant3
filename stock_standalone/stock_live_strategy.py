@@ -3170,6 +3170,21 @@ class StockLiveStrategy:
                             f"triggered {getattr(event,'pattern','')}. Detail: {getattr(event,'detail','')}"
                         )
 
+                        # # ⚡ [FIX] 推送给 Visualizer 信号日志 + 语音
+                        # try:
+                        #     ipc_data = {
+                        #         "code": event.code,
+                        #         "name": getattr(event, 'name', event.code),
+                        #         "pattern": "EXIT",  # 统一归类为离场信号
+                        #         "message": f"【跑路信号】{getattr(event, 'detail', '')}，建议止盈离场",
+                        #         "is_high_priority": True,
+                        #         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        #         "priority": 100
+                        #     }
+                        #     send_signal_to_visualizer_ipc(ipc_data)
+                        # except Exception as ipc_e:
+                        #     logger.error(f"Failed to send EXIT signal to visualizer: {ipc_e}")
+
                     
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
