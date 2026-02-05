@@ -134,10 +134,10 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                 continue
 
             # 4. ** 隔离式播报周期 **
-            # [FIX] Timestamp Filtering: Drop stale alerts
-            if msg_t < last_speech_end_ts:
-                worker_log(f"Skipping stale alert: {key} (Time {msg_t} < LastFinish {last_speech_end_ts})")
-                continue
+            # [FIX] 移除错误的时间戳过滤逻辑，改为仅在清空标记存在时跳过
+            # if msg_t < last_speech_end_ts: 
+            #     continue -- 此逻辑会导致排队中的信号被丢弃
+
 
             safe_msg = normalize_speech_text(message)
             worker_log(f"Handling: {safe_msg[:40]}... (Key: {key})")
@@ -448,12 +448,13 @@ class AlertManager:
         # 3. 语音 & BEEP (已禁用滴滴声)
         
         # [OPTIMIZATION] 队列深度保护
-        # 如果队列堆积超过 20 条，且当前不是高优先级，则丢弃，防止语音进程处理不过来导致系统卡顿
+        # [FIX] 放宽限制：从20提升到50,避免过早丢弃语音
+        # 如果队列堆积超过 50 条，且当前不是高优先级，则丢弃，防止语音进程处理不过来导致系统卡顿
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
                 q_size = self.voice_queue.qsize()
-                if q_size > 20 and not is_high:
-                    logger.debug(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
+                if q_size > 50 and not is_high:
+                    logger.warning(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
                     return
 
                 # [Fix] 使用字典包装，包含时间戳以支持竞态检查

@@ -5271,7 +5271,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _show_alert_popup(self, code, name, msg):
-        """显示报警弹窗 (队列化逐个创建 + 同股去重)"""
+        """显示报警弹窗 (队列化逐个创建 + 同股去重 + 长度限制)"""
+        # ===== 常量定义 =====
+        MAX_ALERT_POPUP_QUEUE = 20  # 单批次弹窗队列最大长度
+        MAX_TOTAL_ALERTS = 50  # 总报警窗口数量上限
+        HIGH_PRIORITY_KEYWORDS = ["低开高走", "放量突破", "[HIGH]", "高优先级", "核心", "热点龙头", "主升", "连阳"]
+        
         # ===== 初始化弹窗队列 =====
         if not hasattr(self, '_alert_queue'):
             self._alert_queue = []
@@ -5281,6 +5286,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.active_alerts = []
         if not hasattr(self, 'code_to_alert_win'):
             self.code_to_alert_win = {}
+        
+        # ===== [NEW] 1. 总报警窗口数量限制 =====
+        if len(self.active_alerts) >= MAX_TOTAL_ALERTS:
+            logger.warning(f"总报警窗口已达上限 {MAX_TOTAL_ALERTS}，丢弃信号: {code} {msg[:30]}")
+            # 尝试清理已销毁的窗口
+            self.active_alerts = [w for w in self.active_alerts if w.winfo_exists()]
+            if len(self.active_alerts) >= MAX_TOTAL_ALERTS:
+                return  # 仍然超限，直接丢弃
         
         # ===== 同股去重：如果已有弹窗，更新消息而非新建 =====
         existing_win = self.code_to_alert_win.get(code)
@@ -5303,6 +5316,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if code in self.code_to_alert_win:
                 del self.code_to_alert_win[code]
+        
+        # ===== [MODIFIED] 2. 队列长度限制 + 智能丢弃策略 =====
+        # 只有队列满时才根据信号质量过滤
+        if len(self._alert_queue) >= MAX_ALERT_POPUP_QUEUE:
+            # 检查当前信号是否为高质量
+            is_high_quality = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
+            
+            if is_high_quality:
+                # 高质量信号：优先丢弃队列中的低质量信号
+                dropped = False
+                for i in range(len(self._alert_queue) - 1, -1, -1):  # 从后往前找
+                    item_msg = self._alert_queue[i][2]
+                    if not any(kw in item_msg for kw in HIGH_PRIORITY_KEYWORDS):
+                        dropped_item = self._alert_queue.pop(i)
+                        logger.info(f"队列满，丢弃低质量请求: {dropped_item[0]} {dropped_item[2][:30]}")
+                        dropped = True
+                        break
+                
+                # 如果全是高质量，丢弃最旧的（FIFO）
+                if not dropped:
+                    oldest = self._alert_queue.pop(0)
+                    logger.warning(f"队列满且全高质量，丢弃最旧请求: {oldest[0]} {oldest[2][:30]}")
+            else:
+                # 低质量信号：队列满时直接丢弃
+                logger.debug(f"队列满，丢弃低质量信号（不影响语音）: {code} {msg[:30]}")
+                return  # 不入队列，但不影响语音播报（已在 _trigger_alert 中处理）
         
         # ===== 加入队列，避免同时创建大量窗口 =====
         # 检查队列中是否已有同股请求

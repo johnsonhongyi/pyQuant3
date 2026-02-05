@@ -158,10 +158,13 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 meta = None
                 msg_ts = time.time()
 
-            # [FIX] Filter out stale messages
-            if msg_ts > 0 and msg_ts < last_speech_end_ts:
-                # logger.debug(f"[VoiceProcess] Skipping stale message: {msg[:10]}... (created {msg_ts} < last_end {last_speech_end_ts})")
+            # [FIX] 移除错误的时间戳过滤逻辑。
+            # 原逻辑：if msg_ts > 0 and msg_ts < last_speech_end_ts: continue
+            # 这会导致在播报第一条期间入队的所有信号都被视为“陈旧”而丢弃。
+            # 我们只需要确保不播报启动之前的极老信号即可（可选）。
+            if msg_ts > 0 and time.time() - msg_ts > 300: # 超过5分钟的才视为陈旧
                 continue
+
 
             # 向主进程反馈：开始播报该条信号
             if feedback_queue and meta:
@@ -1960,6 +1963,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_thread = VoiceThread(self)
         self.voice_thread.start()
         self.last_voice_ts = "" # 记录最后一次播报的信号时间
+        self._voice_paused = False # [NEW] 独立的语音暂停标志
         
         # [FIX] 内部实时进程专用的停止标志，避免污染全局 stop_flag
         self.rt_worker_stop_flag = mp.Value('b', True)
@@ -2943,6 +2947,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 2. 显示到信号日志面板（传递高优先级标志以触发闪屏）
             if hasattr(self, 'signal_log_panel'):
+                # ⚡ [FIX] 确保信号连接已建立 (首次访问时连接)
+                if not hasattr(self, '_signal_log_voice_connected'):
+                    try:
+                        self.signal_log_panel.log_added.connect(self._on_signal_log_added)
+                        self._signal_log_voice_connected = True
+                        logger.info("✅ Signal log voice broadcast connected")
+                    except Exception as e:
+                        logger.error(f"Failed to connect signal log voice: {e}")
+                
                 if not self.signal_log_panel.isVisible():
                     self.signal_log_panel.show()
                     self.signal_log_panel.raise_()
@@ -2982,7 +2995,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if not hasattr(self, 'voice_thread') or not self.voice_thread:
                 return
             
-            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+            # [FIX] 使用 MainWindow 自身的语音标志，增强独立性
+            is_muted = getattr(self, '_voice_paused', False)
             if is_muted:
                 return
 
@@ -9873,13 +9887,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 return
 
             # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
-            if '低开走高' in msg and not any(kw in msg for kw in ['强势', '买入', '卖出']):
-                if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
-                    row = self.df_all.loc[code]
-                    o = row.get('open', 0)
-                    l = row.get('low', 0)
-                    if o > l > 0:
-                        return
+            # if '低开走高' in msg and not any(kw in msg for kw in ['强势', '买入', '卖出']):
+            #     if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+            #         row = self.df_all.loc[code]
+            #         o = row.get('open', 0)
+            #         l = row.get('low', 0)
+            #         if o > l > 0:
+            #             return
 
             is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
             
