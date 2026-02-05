@@ -3041,11 +3041,14 @@ class StockLiveStrategy:
             # 区分买点信号 vs 卖点信号
             action = "风险" if pattern_key in ('high_drop', 'top_signal', 'bull_trap_exit', 'momentum_failure') else "形态"
             
-            # === 高优先级信号检测 ===
+            # === 高优先级信号检测 (增强版) ===
             is_high_priority = event.is_high_priority
             high_priority_reason = ""
             
-            if pattern_key in ('low_open_high_walk', 'pullback_upper', 'open_is_low_volume', 'nlow_is_low_volume'):
+            # [NEW] 核心形态精选：低开高走、回踩上攻等必须满足严格条件
+            ELITE_PATTERNS = {'low_open_high_walk', 'pullback_upper', 'open_is_low_volume', 'nlow_is_low_volume'}
+            
+            if pattern_key in ELITE_PATTERNS:
                 # 尝试从实时数据中获取当前行情 (如果可用)
                 try:
                     ratio = 0.0
@@ -3058,7 +3061,7 @@ class StockLiveStrategy:
                     start_at_ma = "@MA" in detail or "@日低" in detail
                     has_volume = ratio > 3.0
                     
-                    # 高优先级条件：从重要位置启动 或 换手>3%
+                    # [CRITICAL] 精选条件：必须同时满足起点+放量
                     if start_at_ma and has_volume:
                         is_high_priority = True
                         ma_level = "MA级别" if "@MA" in detail else "日低"
@@ -3066,11 +3069,14 @@ class StockLiveStrategy:
                         event.is_high_priority = True
                         logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
                     elif start_at_ma:
-                        # 从 MA 附近启动但换手不足，仍标记为较高优先级
-                        is_high_priority = True
-                        high_priority_reason = f"[HIGH] 起点{detail.split('走高')[0].split('@')[1] if '@' in detail else 'MA'}"
-                        event.is_high_priority = True
-                        logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
+                        # 从 MA 附近启动但换手不足，标记为中等优先级（仅语音，不弹窗）
+                        is_high_priority = False  # [FIX] 不触发UI弹窗
+                        high_priority_reason = f"[MID] 起点{detail.split('走高')[0].split('@')[1] if '@' in detail else 'MA'}，换手不足"
+                        logger.info(f"⚠️ 中等优先级信号（仅语音）: {event.code} {event.name} - {high_priority_reason}")
+                    else:
+                        # 起点不佳，静默丢弃UI弹窗
+                        is_high_priority = False
+                        logger.debug(f"低质量信号（静默）: {event.code} {pattern_cn} - 起点不佳或换手不足")
                 except Exception as e:
                     logger.debug(f"High priority check failed: {e}")
             
@@ -3085,12 +3091,14 @@ class StockLiveStrategy:
             priority_tag = "🔥" if is_high_priority else "🔔"
             logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
             
-            # === 语音播报控制 ===
-            # 1. 第一次触发：完整播报
-            # 2. 第2-4次触发：静默（不播报）
-            # 3. 每5次触发：聚合播报 "xxx 低开走高 已触发5次"
-            # 4. 高优先级信号：始终播报
+            # === 语音播报控制 (增强版) ===
+            # 策略调整:
+            # 1. 所有信号都通过 _trigger_alert 处理 (确保DB记录+IPC推送)
+            # 2. _trigger_alert 内部根据信号质量决定是否触发UI弹窗
+            # 3. 语音播报由 _trigger_alert 统一处理
+            
             should_voice = False
+            
             if is_high_priority:
                 should_voice = True
                 msg = f"注意高优先级，{msg}"
@@ -3100,8 +3108,12 @@ class StockLiveStrategy:
                 should_voice = True
                 msg = f"{event.name} {pattern_cn} 已触发{event.count}次"
             
+            # [FIX] 所有需要播报的信号都通过 _trigger_alert 处理
+            # _trigger_alert 会根据 msg 中的关键词判断是否触发UI弹窗
             if should_voice:
                 self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+
+
             
             # === [P7] 仓位状态机联动 ===
             if self.phase_engine and hasattr(self, 'df') and self.df is not None:
@@ -3584,6 +3596,39 @@ class StockLiveStrategy:
             if df.empty:
                 logger.warning(f"StockSelector returned empty candidates for {date_str}")
                 return "无标的"
+            
+            # [NEW] 精选条件：低开高走强势放量上攻
+            # 1. 低开：open < pre_close * 0.98
+            # 2. 高走：当前涨幅 > 2%
+            # 3. 强势放量：量比 > 1.5 或 换手 > 3%
+            elite_df = df.copy()
+            
+            # 应用精选过滤条件（如果列存在）
+            if 'open' in elite_df.columns and 'pre_close' in elite_df.columns:
+                elite_df = elite_df[elite_df['open'] < elite_df['pre_close'] * 0.98]
+                logger.info(f"低开筛选后剩余: {len(elite_df)} 只")
+            
+            if 'change' in elite_df.columns:
+                elite_df = elite_df[elite_df['change'] > 2.0]
+                logger.info(f"高走筛选后剩余: {len(elite_df)} 只")
+            
+            # 放量条件：量比或换手满足其一
+            if 'volume_ratio' in elite_df.columns or 'turnover_rate' in elite_df.columns:
+                volume_filter = pd.Series([False] * len(elite_df), index=elite_df.index)
+                if 'volume_ratio' in elite_df.columns:
+                    volume_filter |= (elite_df['volume_ratio'] > 1.5)
+                if 'turnover_rate' in elite_df.columns:
+                    volume_filter |= (elite_df['turnover_rate'] > 3.0)
+                elite_df = elite_df[volume_filter]
+                logger.info(f"放量筛选后剩余: {len(elite_df)} 只（精选标的）")
+            
+            # 如果精选标的不足5只，用原始候选补充
+            if len(elite_df) < 5:
+                logger.warning(f"精选标的不足5只，用原始候选补充")
+                df = df  # 使用原始候选
+            else:
+                df = elite_df  # 使用精选标的
+                logger.info(f"✅ 使用精选标的: {len(df)} 只")
             
             # 识别热点股 (确保 reason 列存在)
             if 'reason' in df.columns:

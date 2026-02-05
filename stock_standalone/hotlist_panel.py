@@ -418,9 +418,12 @@ class HotlistPanel(QWidget, WindowMixin):
             return
 
         self._voice_paused = not self._voice_paused
+        # [FIX] 同步到主窗口标志位
+        main_window._voice_paused = self._voice_paused
         
         if self._voice_paused:
             main_window.voice_thread.pause()
+
             logger.info("⏸ Voice paused via HotlistPanel")
         else:
             main_window.voice_thread.resume()
