@@ -1640,7 +1640,7 @@ class StockLiveStrategy:
             if current_price >= signal.target_price_high:
                 msg = f"突破目标上限 {signal.target_price_high}"
                 # [P7] 突破确认高优先级播报
-                self.voice_announcer.announce(f"{name} 突破确认", code=code)
+                self.voice_announcer.announce(f"{name}({code}) 突破确认", code=code)
                 return True, msg
             
         # 2. 突破今日高点 (如果当前就是高点且涨幅够)
@@ -1649,7 +1649,7 @@ class StockLiveStrategy:
         if current_price >= high and pct > 3.0:
             msg = f"日内新高突破 ({pct:.1f}%)"
             # [P7] 突破确认高优先级播报
-            self.voice_announcer.announce(f"{name} 强势突破", code=code)
+            self.voice_announcer.announce(f"{name}({code}) 强势突破", code=code)
             return True, msg
             
         return False, ""
@@ -3127,7 +3127,7 @@ class StockLiveStrategy:
                         # 如果标记为 TOP_WATCH / EXIT，强化语音警报
                         if new_phase in (TradePhase.TOP_WATCH, TradePhase.EXIT):
                             msg = f"注意顶部风险: {event.name} ({event.code}) 阶段:{new_phase.value}"
-                            self.voice_announcer.announce(f"{event.name} 顶部信号，分批离场", code=event.code)
+                            self.voice_announcer.announce(f"{event.name}({event.code}) 顶部信号，分批离场", code=event.code)
                             logger.warning(f"🚨 [Phase Alert] {event.code} {event.name} -> {new_phase.value}")
                 except Exception as e:
                     logger.debug(f"Phase engine link failed: {e}")
@@ -3164,10 +3164,13 @@ class StockLiveStrategy:
                     tags = data.get('tags', '')
                     if 'auto_followed' in tags:
                         # 标记为危险，强化报警
-                        self.voice_announcer.announce(
-                            f"警告！{getattr(event, 'name', event.code)} 诱多破位，建议跑路",
-                            code=event.code
-                        )
+                        e_name = getattr(event, 'name', event.code)
+                        e_code = getattr(event, 'code', key)
+                        if e_name == e_code:
+                            f_msg = f"警告！{e_code} 诱多破位，建议跑路"
+                        else:
+                            f_msg = f"警告！{e_name}({e_code}) 诱多破位，建议跑路"
+                        self.voice_announcer.announce(f_msg, code=e_code)
 
                         # ⭐ 关键保护：确保 snapshot 存在
                         if 'snapshot' not in data or not isinstance(data['snapshot'], dict):
@@ -3399,7 +3402,7 @@ class StockLiveStrategy:
             elif "顶部风险" in message: leading_tag = "顶部预警，"
 
             # 组装最终文本
-            speak_text = f"注意{action}，{leading_tag}{name}，{concise_msg}"
+            speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
             
             self._voice.announce(speak_text, code=code) # 使用 announce 支持优先级
 

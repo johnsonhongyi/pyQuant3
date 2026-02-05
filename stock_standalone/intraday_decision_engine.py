@@ -134,10 +134,16 @@ class IntradayDecisionEngine:
                         "debug": debug
                     }
         
+        # 💥 [NEW] 提前进行顶部信号检测，供后续全局使用
+        day_df = snapshot.get('day_df', pd.DataFrame())
+        top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
+        debug["top_score"] = top_info['score']
+        debug["top_signals"] = top_info['signals']
+        
         # ==============================================================================
         # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
         # ==============================================================================
-        hold_decision = self._main_wave_hold_check(row, snapshot, debug)
+        hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info)
         if hold_decision:
             # 如果主升浪逻辑接管，直接返回
             return {
@@ -1382,11 +1388,10 @@ class IntradayDecisionEngine:
             
             # 触发条件
             if buy_score >= threshold:
-                # 【新增】追高过滤：如果偏离 MA5 超过 3.5%，实时策略也不宜直接切入
-                bias_ma5 = (price - float(row.get("ma5d", 0))) / float(row.get("ma5d", 1)) if float(row.get("ma5d", 0)) > 0 else 0
-                if bias_ma5 > 0.035:
-                    debug["realtime_skip"] = f"追高风险(MA5偏离{bias_ma5:.1%})"
-                    return result
+                # 【新增】高位风险拦截：如果顶部信号评分过高 (>0.45)，禁止任何买入/补仓
+                if top_info['score'] > 0.45:
+                    debug["refuse_reason"] = f"高位顶部预警({top_info['score']})"
+                    return self._hold(f"高位风险拦截({top_info['score']})", debug)
 
                 pos = min(buy_score, self.max_position)
                 
@@ -1678,6 +1683,12 @@ class IntradayDecisionEngine:
             debug["量价买入信号"] = signals
             
             if buy_score >= 0.3:
+                # 【新增】高位风险拦截：量价策略也要看顶部评分
+                top_score = debug.get("top_score", 0)
+                if top_score > 0.45:
+                    debug["refuse_reason_vp"] = f"量价买入被高位拦截({top_score})"
+                    return result
+
                 result = {
                     "triggered": True,
                     "action": "买入",
@@ -2084,7 +2095,7 @@ class IntradayDecisionEngine:
     
     # ==================== 主升浪持仓保护 ====================
 
-    def _main_wave_hold_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any] | None:
+    def _main_wave_hold_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any], top_info: dict = None) -> dict[str, Any] | None:
         """
         主升浪持仓保护逻辑 (002667 模型优化)
         """
@@ -2101,40 +2112,69 @@ class IntradayDecisionEngine:
         
         price = float(row.get('trade', 0))
         ma5 = float(row.get('ma5d', 0))
+        ma20 = float(row.get('ma20d', 0) or snapshot.get('ma20d', 0))
         nclose = float(row.get('nclose', 0))
         last_close = float(snapshot.get('last_close', 0))
+        volume = float(row.get('volume', 0)) # 实时量比
         
-        # 实时顶部信号检测
-        day_df = snapshot.get('day_df', pd.DataFrame())
-        top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
+        # 1. 乖离率检查：如果偏离 20 日线过远 (>15%)，主升浪保护需极度谨慎
+        bias_ma20 = (price - ma20) / ma20 if ma20 > 0 else 0
+        is_extreme_bias = bias_ma20 > 0.15
+        
+        if is_extreme_bias:
+            debug["主升状态"] = f"极端乖离({bias_ma20:.1%})"
+        
+        # 实时顶部信号检测 (从外部传入或重新计算)
+        if top_info is None:
+            day_df = snapshot.get('day_df', pd.DataFrame())
+            top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
         
         # 💥 [NEW] 将指标注入 debug，映射到 live 报警
         debug["td_setup"] = snapshot.get('td_setup', 0)
         debug["top_score"] = top_info['score']
         
-        if top_info['score'] > 0.65:
+        # 💥 [NEW] 核心逻辑：高位放量滞涨/阴跌，主升浪也要“弃船”
+        # 如果 top_score 已经很高，或者在高位放量 (量比>2.0) 且破均线
+        is_vol_exhaustion = volume > 2.0 and price < nclose
+        
+        if top_info['score'] > 0.40 or (is_extreme_bias and is_vol_exhaustion):
+            reason = f"主升高位分歧: {', '.join(top_info['signals'])}" if top_info['score'] > 0.4 else "高位放量破均线(主升避险)"
             return {
                 "triggered": True,
                 "action": "卖出",
-                "position": 0.5, # 顶部信号减半仓
-                "reason": f"主升高位预警: {', '.join(top_info['signals'])}"
+                "position": 0.4 if top_info['score'] > 0.6 else 0.7, 
+                "reason": reason
             }
             
         # 核心保护：只要在 5 日线之上，且跌幅未破位（不破昨日收盘且不破今日均价），坚决持仓
         # 002667 案例：在 1.30 之前虽然波动，但未破关键支撑
         
         # 止损熔断：跌破昨日收盘价 且 跌破今日均价 且 跌破 MA5（三合一确认清仓）
-        if last_close > 0 and price < last_close and nclose > 0 and price < nclose and ma5 > 0 and price < ma5:
-             # 这通常意味着趋势反转
+        # 如果是极端高位，只要两项破位就该走
+        is_breaking = 0
+        if last_close > 0 and price < last_close: is_breaking += 1
+        if nclose > 0 and price < nclose: is_breaking += 1
+        if ma5 > 0 and price < ma5: is_breaking += 1
+        
+        if (is_extreme_bias and is_breaking >= 2) or (is_breaking >= 3):
              return {
                 "triggered": True,
                 "action": "强制清仓",
                 "position": 0.0,
-                "reason": "主升浪破位: 破昨收+破均线+破MA5"
+                "reason": f"主升浪破位(高位分歧): {'+'.join(['破昨收' if price < last_close else '', '破均线' if price < nclose else '', '破MA5' if price < ma5 else ''])}"
             }
             
         # 回踩保护：只要高位缩量回调不破 MA5，视为买点/持有
+        # [User Request] 极端高位时不建议“回踩买入”
         if ma5 > 0 and price > ma5 * 0.99:
+            if is_extreme_bias and volume < 0.8:
+                 # 高位缩量下跌，虽未破位但也需警惕
+                 return {
+                    "triggered": True,
+                    "action": "持有",
+                    "position": 0.8, # 减一点点，不焊死
+                    "reason": "主升高位缩量(MA5护航)"
+                }
             return {
                 "triggered": True,
                 "action": "持有",

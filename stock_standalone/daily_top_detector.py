@@ -34,36 +34,51 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
         signals.append(f"TD卖向提示({td_setup})")
 
     # 2. Volume-Price Divergence at Highs (滞涨)
-    # Price is near 10-day high but today's volume is > 1.5x of 5-day avg, while price change is small (< 1%)
+    # Price is near 10-day high but today's volume is > 1.8x of 5-day avg, while price change is small (< 1.5%)
     avg_vol_5 = day_df['volume'].tail(5).mean()
     high_10 = day_df['high'].tail(10).max()
+    high_60 = day_df['high'].tail(60).max()
     
-    if price > high_10 * 0.98 and volume > avg_vol_5 * 1.8:
+    # 滞涨判定：在高位 (10日高点附近) 爆出巨量 (1.8倍) 但不涨
+    if price > high_10 * 0.97 and volume > avg_vol_5 * 1.8:
         pct_change = (price - last_row['close']) / last_row['close'] if current_tick is not None else (last_row['close'] - day_df['close'].iloc[-2]) / day_df['close'].iloc[-2]
         if abs(pct_change) < 0.015:
-            score += 0.25
+            score += 0.35
             signals.append("高位放量滞涨")
+        elif pct_change < -0.01:
+            score += 0.4
+            signals.append("高位放量阴跌/分歧")
 
     # 3. Shadow Signal (长上影/避雷针)
     # Shadow length > Real body * 2 AND high is near 60-day high
     body = abs(last_row['close'] - last_row['open'])
     upper_shadow = last_row['high'] - max(last_row['close'], last_row['open'])
-    if body > 0 and upper_shadow > body * 2 and last_row['high'] > day_df['high'].tail(60).max() * 0.98:
-        score += 0.2
-        signals.append("高位避雷针")
+    if body > 0 and upper_shadow > body * 1.5 and last_row['high'] > high_60 * 0.98:
+        score += 0.25
+        signals.append("高位避雷针/见顶影线")
 
-    # 4. Over-extension (偏离度)
+    # 4. Over-extension (偏离度/乖离)
     # Price > MA5 * 1.08 OR Price > MA20 * 1.15
     ma5 = last_row.get('ma5d', day_df['close'].tail(5).mean())
+    ma20 = last_row.get('ma20d', day_df['close'].tail(20).mean())
     if ma5 > 0 and price > ma5 * 1.08:
-        score += 0.15
+        score += 0.2
         signals.append("短线过热(偏离MA5)")
+    if ma20 > 0 and price > ma20 * 1.20:
+        score += 0.25
+        signals.append("趋势严重乖离(偏离MA20)")
         
     # 5. Continuous Winning (连阳疲劳)
     win = last_row.get('win', 0)
-    if win >= 7:
-        score += 0.1
+    if win >= 6:
+        s_score = 0.1 + (win - 6) * 0.05
+        score += min(s_score, 0.3)
         signals.append(f"连阳疲劳({win}d)")
+    
+    # 6. 新增：高位巨量（即使不是滞涨也该防守）
+    if price > high_60 * 0.95 and volume > avg_vol_5 * 2.5:
+         score += 0.3
+         signals.append("高位历史天量")
 
     return {
         'score': round(min(score, 1.0), 2),

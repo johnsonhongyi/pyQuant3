@@ -5281,7 +5281,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.info("🔊 语音播报已开启")
             
         # ⭐ [IPC] 反向同步给主进程
-        self._send_voice_state_to_main_app(enabled=is_muted)
+        # self._send_voice_state_to_main_app(enabled=is_muted)
 
     def _send_voice_state_to_main_app(self, enabled=True):
         """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""
