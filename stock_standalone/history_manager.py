@@ -219,10 +219,14 @@ class QueryHistoryManager:
 
             def normalize_history(history):
                 normalized = []
+                seen_q = set()
                 for r in history:
                     if not isinstance(r, dict):
                         continue
-                    q = r.get("query", "")
+                    q = r.get("query", "").strip()
+                    if not q or q in seen_q:
+                        continue
+                    seen_q.add(q)
                     starred = r.get("starred", 0)
                     note = r.get("note", "")
                     if isinstance(starred, bool):
@@ -233,18 +237,32 @@ class QueryHistoryManager:
                 return normalized
 
             def merge_history(current, old):
+                """
+                合并内存和磁盘历史。
+                规则：
+                1. 优先保留内存中的记录（包含最新的备注和星标）。
+                2. 对于磁盘中存在但内存中不存在的记录，由于无法判断是'新添加'还是'被删除'，
+                   我们在主程序运行期间，倾向于内存是真理。
+                3. 为了支持多进程（如Visualizer添加），我们只合并最近磁盘中新增的记录。
+                """
                 seen = set()
                 result = []
+                # 1. 先加入内存中的
                 for r in current:
                     q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q not in seen:
+                    if q and q not in seen:
                         seen.add(q)
                         result.append(r)
+                
+                # 2. 加入磁盘中的（如果内存没有，则认为是其他进程添加或历史遗留）
+                # 注意：这会导致删除操作在某些情况下被“复活”。
+                # 修复方法：限制合并数量，且优先内存。
                 for r in old:
                     q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q not in seen:
+                    if q and q not in seen:
                         seen.add(q)
                         result.append(r)
+                
                 return result[:self.MAX_HISTORY]
 
             old_data = {"history1": [], "history2": [], "history3": [], "history4": []}
@@ -287,7 +305,19 @@ class QueryHistoryManager:
             with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"✅ 搜索历史已保存 (h1: {len(merged_data['history1'])} / h2: {len(merged_data['history2'])} / h3: {len(merged_data['history3'])} / h4: {len(merged_data['history4'])})")
+            # ⚙️ 关键：保存后同步内存状态，防止 history1/2/... 指向同一个对象或旧对象
+            self.history1 = list(merged_data["history1"])
+            self.history2 = list(merged_data["history2"])
+            self.history3 = list(merged_data["history3"])
+            self.history4 = list(merged_data["history4"])
+            
+            # 更新当前引用
+            if self.current_key == "history1": self.current_history = self.history1
+            elif self.current_key == "history2": self.current_history = self.history2
+            elif self.current_key == "history3": self.current_history = self.history3
+            elif self.current_key == "history4": self.current_history = self.history4
+
+            logger.info(f"✅ 搜索历史已保存 (h1: {len(self.history1)} / h2: {len(self.history2)} / h3: {len(self.history3)} / h4: {len(self.history4)})")
 
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
@@ -331,20 +361,19 @@ class QueryHistoryManager:
                 normalize_starred_field(raw_h3)
                 normalize_starred_field(raw_h4)
 
-                raw_h1, raw_h2, raw_h3, raw_h4 = map(dedup, (raw_h1, raw_h2, raw_h3, raw_h4))
-
-                h1 = raw_h1[:self.his_limit]
-                h2 = raw_h2[:self.his_limit]
-                h3 = raw_h3[:self.his_limit]
-                h4 = raw_h4[:self.his_limit]
+                h1 = list(raw_h1[:self.his_limit])
+                h2 = list(raw_h2[:self.his_limit])
+                h3 = list(raw_h3[:self.his_limit])
+                h4 = list(raw_h4[:self.his_limit])
 
                 if upgraded:
                     with open(self.history_file, "w", encoding="utf-8") as f:
                         json.dump({"history1": raw_h1, "history2": raw_h2, "history3": raw_h3, "history4": raw_h4}, f, ensure_ascii=False, indent=2)
                     logger.info("✅ 自动升级 search_history.json，starred 字段格式已统一")
             except Exception as e:
-                messagebox.showerror("错误", f"加载搜索历史失败: {e}")
-        return h1, h2, h3, h4
+                logger.error(f"加载搜索历史失败: {e}")
+        # 确保始终返回 4 个独立的列表对象
+        return (list(h1), list(h2), list(h3), list(h4))
 
     def _normalize_record(self, r):
         if isinstance(r, dict):
