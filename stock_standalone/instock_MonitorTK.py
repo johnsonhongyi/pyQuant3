@@ -1727,6 +1727,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
+        
+        # --- [NEW] 窗口位置联动 (Manual Pos Sync) ---
+        def save_main_pos():
+            if hasattr(self, 'save_window_position'):
+                self.save_window_position(self, "main_window")
+                ___toast_message(self, "主窗口位置已保存")
+
+        def load_main_pos():
+            if hasattr(self, 'load_window_position'):
+                self.load_window_position(self, "main_window")
+                ___toast_message(self, "主窗口位置已恢复")
+
+        tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
         self._last_resample = self.resample_combo.get().strip()
         # 在初始化时（StockMonitorApp.__init__）创建并注册：
         self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
@@ -3368,6 +3382,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             command=lambda: self.original_push_logic(stock_code))
             menu.add_command(label="🔍 策略白盒评估...", command=lambda: self.open_strategy_manager(verify_code=stock_code), foreground="blue")
             
+            menu.add_separator()
+            menu.add_command(label="🚫 黑名单管理中心", command=self.open_blacklist_manager)
+            
             # 弹出菜单
             menu.post(event.x_root, event.y_root)
 
@@ -4848,6 +4865,175 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 必须回到主线程操作 GUI
         self.after(0, lambda: self._show_alert_popup(code, name, msg))
 
+    def open_blacklist_manager(self):
+        """打开黑名单管理窗口 (增强版: 逻辑优化 + 布局精简)"""
+        if not self.live_strategy:
+            messagebox.showinfo("提示", "策略引擎未启动")
+            return
+            
+        win = tk.Toplevel(self)
+        win.title("黑名单/已忽略报警管理")
+        win.geometry("900x650")
+        
+        # 窗口位置标识
+        window_id = "BlacklistManager"
+        
+        # 加载位置
+        if hasattr(self, 'load_window_position'):
+            self.load_window_position(win, window_id, default_width=900, default_height=650)
+        else:
+            self.center_window(win, 900, 650)
+        
+        main_frame = ttk.Frame(win, padding=5)
+        main_frame.pack(fill="both", expand=True)
+        
+        # --- [TOP] 综合操作工具栏 ---
+        top_bar = ttk.LabelFrame(main_frame, text="操作中心", padding=5)
+        top_bar.pack(fill="x", pady=2)
+        
+        # 1. 筛选区
+        ttk.Label(top_bar, text="日期:").pack(side="left", padx=2)
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        dates = ["全部"]
+        db_dates = []
+        if hasattr(self.live_strategy, 'trading_logger'):
+            db_dates = self.live_strategy.trading_logger.get_blacklist_dates()
+            dates.extend(db_dates)
+            
+        default_val = today_str if today_str in db_dates else "全部"
+        date_var = tk.StringVar(value=default_val)
+        date_combo = ttk.Combobox(top_bar, textvariable=date_var, values=dates, state="readonly", width=12)
+        date_combo.pack(side="left", padx=2)
+        
+        # 2. 核心操作按钮
+        def refresh(event=None):
+            for i in tree.get_children():
+                tree.delete(i)
+            selected_date = date_var.get()
+            blacklist = self.live_strategy.get_blacklist(date=selected_date)
+            sorted_items = sorted(blacklist.items(), key=lambda x: x[1].get('date', ''), reverse=True)
+            for code, info in sorted_items:
+                tree.insert("", "end", values=(code, info.get('name', ''), info.get('date', ''), info.get('reason', ''), info.get('hit_count', 0)))
+            stats_var.set(f"筛选日期: {selected_date}  |  记录总数: {len(sorted_items)}  |  系统时间: {time.strftime('%H:%M:%S')}")
+            
+        date_combo.bind("<<ComboboxSelected>>", refresh)
+        ttk.Button(top_bar, text="🔍 查询", width=8, command=refresh).pack(side="left", padx=5)
+        
+        ttk.Separator(top_bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        
+        def restore_selected():
+            sel = tree.selection()
+            if not sel: return messagebox.showinfo("提示", "请先选择记录")
+            restored = 0
+            for item in sel:
+                code = tree.item(item, "values")[0]
+                if self.live_strategy.remove_from_blacklist(code): 
+                    restored += 1
+            if restored > 0: 
+                refresh()
+                messagebox.showinfo("成功", f"已成功恢复 {restored} 只股票的报警信号")
+            else:
+                messagebox.showwarning("提示", "未能成功恢复，请刷新后重试")
+
+        ttk.Button(top_bar, text="✅ 恢复报警", command=restore_selected).pack(side="left", padx=2)
+        
+        def delete_permanently():
+            sel = tree.selection()
+            if not sel: return
+            if not messagebox.askyesno("确认", "确定彻底删除选中记录吗？\n(这不仅会删除历史，也会恢复相应股票的实时报警)"): return
+            deleted = 0
+            for item in sel:
+                code = tree.item(item, "values")[0]
+                if self.live_strategy.remove_from_blacklist(code):
+                    deleted += 1
+
+            if deleted > 0: 
+                refresh()
+                messagebox.showinfo("完成", f"已物理删除 {deleted} 条黑名单记录")
+            else:
+                messagebox.showwarning("提示", "删除失败或记录已不存在")
+
+        ttk.Button(top_bar, text="🗑️ 物理删除", command=delete_permanently).pack(side="left", padx=2)
+
+        # 3. 位置同步与关闭
+        ttk.Button(top_bar, text="✖ 关闭", command=win.destroy).pack(side="right", padx=2)
+        
+        def save_pos():
+            if hasattr(self, 'save_window_position'):
+                self.save_window_position(win, window_id)
+                ___toast_message(self, "位置已保存")
+        ttk.Button(top_bar, text="💾 保存位置", command=save_pos).pack(side="right", padx=2)
+
+        def load_pos():
+            if hasattr(self, 'load_window_position'): self.load_window_position(win, window_id)
+        ttk.Button(top_bar, text="🔄 还原位置", command=load_pos).pack(side="right", padx=2)
+
+        # --- [MIDDLE] 数据表格 ---
+        cols = ("code", "name", "date", "reason", "hits")
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.pack(fill="both", expand=True, pady=2)
+        
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        
+        # 排序逻辑定义
+        sort_state = {"col": "date", "reverse": True} # 初始按日期倒序
+        def tree_sort_column(tv, col, reverse):
+            l = [(tv.set(k, col), k) for k in tv.get_children('')]
+            # 数字列特殊处理
+            if col == 'hits':
+                l.sort(key=lambda t: int(t[0] or 0), reverse=reverse)
+            else:
+                l.sort(reverse=reverse)
+            for index, (val, k) in enumerate(l):
+                tv.move(k, '', index)
+            sort_state["col"] = col
+            sort_state["reverse"] = reverse
+            # 更新表头显示排序箭头 (可选)
+            for c in cols:
+                tv.heading(c, text=tv.heading(c)['text'].replace(' ↑','').replace(' ↓',''))
+            arrow = ' ↓' if reverse else ' ↑'
+            tv.heading(col, text=tv.heading(col)['text'] + arrow, command=lambda: tree_sort_column(tv, col, not reverse))
+
+        for col, head in zip(cols, ["代码", "名称", "加入日期", "忽略原因", "触发次数"]):
+            tree.heading(col, text=head, command=lambda _c=col: tree_sort_column(tree, _c, False))
+            width = 80 if col in ["code", "hits"] else (100 if col == "name" else (120 if col == "date" else 300))
+            tree.column(col, width=width, anchor="center" if col != "reason" else "w")
+            
+        tree.pack(fill="both", expand=True, side="left")
+        sb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscroll=sb.set); sb.pack(fill="y", side="right")
+        
+        # --- [BOTTOM] 底部状态信息栏 ---
+        status_bar = ttk.Frame(main_frame, relief="sunken", padding=(5, 2))
+        status_bar.pack(fill="x", side="bottom")
+        stats_var = tk.StringVar(value="正在初始化数据...")
+        ttk.Label(status_bar, textvariable=stats_var, font=("Consolas", 9), foreground="#225588").pack(side="left")
+
+        # 联动与生命周期
+        def on_select(event=None):
+            sel = tree.selection()
+            if sel: 
+                code = tree.item(sel[0], "values")[0]
+                # 触发基础联动
+                self.on_code_click(code)
+                # 强制触发可视化联动 (无视 select_code 限制)
+                if hasattr(self, 'vis_var') and self.vis_var.get():
+                    # 临时重置去重缓存以确保响应
+                    self.vis_select_code = None 
+                    self.open_visualizer(code)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        tree.bind("<Double-1>", lambda e: on_select()) # 增加双击联动支持
+        tree.bind("<Up>", lambda e: win.after(10, on_select))
+        tree.bind("<Down>", lambda e: win.after(10, on_select))
+        
+        def on_win_close():
+            if hasattr(self, 'save_window_position'): self.save_window_position(win, window_id)
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", on_win_close)
+        
+        refresh()
+
     def flash_taskbar(self):
         """让主窗口任务栏图标闪烁，提示用户焦点"""
         try:
@@ -5754,11 +5940,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             def delete_monitor():
                 if hasattr(self, 'live_strategy'):
                     try:
-                        self.live_strategy.remove_monitor(code)
-                        logger.info(f"Deleted alarm rule for {code}")
+                        # --- [MODIFIED] 联动黑名单：删除即视为当日忽略 ---
+                        if hasattr(self.live_strategy, 'add_to_blacklist'):
+                            self.live_strategy.add_to_blacklist(code, name=name, reason="手动删除弹窗报警")
+                        else:
+                            self.live_strategy.remove_monitor(code)
+
+                        logger.info(f"Deleted alarm rule for {code} and added to blacklist")
                         mgr = self._get_alert_manager()
                         if mgr: mgr.stop_current_speech(key=code)
-                        btn_del.config(text="🗑️已删除", state="disabled")
+                        btn_del.config(text="🗑️已忽略", state="disabled")
                         win._is_deleted = True 
                         win.after(1000, lambda: self._close_alert(win, is_manual=True))
                     except Exception as e:

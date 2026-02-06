@@ -131,8 +131,9 @@ class HotlistPanel(QWidget, WindowMixin):
         self._voice_paused = False  # 语音播报状态
         self._is_refreshing = False # 刷新状态标识，防止信号干扰
         self._last_follow_fingerprint = ""
-        self._last_follow_fingerprint = ""
         self.follow_count = 0  # [NEW] Track follow queue count
+        self._last_price_map = {} # [NEW] Cache real-time prices for both Hotlist and Follow Queue
+        self._last_df_follow = None # [NEW] Cache follow queue data for PnL updates
         self._connection_warning_logged = False  # [NEW] Log throttle flag
         
         # 设置为浮动工具窗口（可调整大小）
@@ -537,7 +538,7 @@ class HotlistPanel(QWidget, WindowMixin):
         layout.setSpacing(0)
 
         self.follow_table = QTableWidget()
-        cols = ["序号", "状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"] # Added "序号"
+        cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "理由", "时间"] 
         self.follow_table.setColumnCount(len(cols))
         self.follow_table.setHorizontalHeaderLabels(cols)
         self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -814,6 +815,7 @@ class HotlistPanel(QWidget, WindowMixin):
                     pass
                 else:
                     self.follow_count = len(df_follow) # [NEW] Update count
+                    self._last_df_follow = df_follow # [NEW] Cache
                     self._update_follow_queue(df_follow)
                     self._last_follow_fingerprint = current_fingerprint
                     self._update_status_bar() # [NEW] Refresh UI
@@ -851,28 +853,60 @@ class HotlistPanel(QWidget, WindowMixin):
             price_map = {}
             phase_map = {}
             
+            # 1. Populate prices for Hotlist items
             for item in self.items:
                 if item.code in df.index:
                     row = df.loc[item.code]
-                    price_map[item.code] = row.get('close', row.get('price', 0))
-                    # [NEW] Extract Phase from shadow_info or last_reason if possible, or TradePhase column if it exists
-                    # Currently Phase is stored in 'last_action' or just notes in Hub.
-                    # Best way: Check 'last_action' or 'shadow_info' if Phase Engine writes to it.
-                    # As per P0.6, Phase Engine writes to snap['trade_phase'].
-                    # We might need to expose snap data in df_all or just use what we have.
-                    # For now, let's try to get it from 'trade_phase' column if we added it to df_all in P0.6
+                    price_map[item.code] = float(row.get('close', row.get('price', 0)))
+                    self._last_price_map[item.code] = price_map[item.code]
                     
-                    phase = str(row.get('last_action', '')) # Placeholder
-                    # Try to parse Phase from 'notes' in Hub if needed, but here we just use what's in DF
+                    phase = str(row.get('last_action', ''))
                     if 'trade_phase' in row:
                         phase = str(row['trade_phase'])
-                    
                     phase_map[item.code] = phase
+            
+            # 2. [ENHANCED] Populate prices for Follow Queue items
+            # 从跟单队列 DataFrame 中提取所有代码,并尝试匹配价格
+            if hasattr(self, '_last_df_follow') and self._last_df_follow is not None and not self._last_df_follow.empty:
+                for _, row in self._last_df_follow.iterrows():
+                    code = str(row['code']).strip()
+                    if not code:
+                        continue
+                    
+                    # 尝试多种匹配方式
+                    price = None
+                    
+                    # 方式1: 直接匹配
+                    if code in df.index:
+                        price = float(df.loc[code].get('close', df.loc[code].get('price', 0)))
+                    
+                    # 方式2: 6位代码匹配 (去掉市场前缀)
+                    if price is None or price <= 0:
+                        code_6 = code[:6] if len(code) >= 6 else code
+                        for idx in df.index:
+                            if str(idx).startswith(code_6):
+                                price = float(df.loc[idx].get('close', df.loc[idx].get('price', 0)))
+                                break
+                    
+                    # 方式3: 尝试添加市场前缀
+                    if price is None or price <= 0:
+                        for prefix in ['sh', 'sz', 'SH', 'SZ']:
+                            test_code = f"{prefix}{code}" if not code.startswith(prefix) else code
+                            if test_code in df.index:
+                                price = float(df.loc[test_code].get('close', df.loc[test_code].get('price', 0)))
+                                break
+                    
+                    # 保存到缓存
+                    if price and price > 0:
+                        self._last_price_map[code] = price
+                        logger.debug(f"✅ 价格映射成功: {code} -> {price:.2f}")
+                    else:
+                        logger.debug(f"⚠️ 无法获取价格: {code}")
             
             if price_map:
                 self.update_prices(price_map, phase_map)
                 # [SILENCE] 用户抱怨日志刷屏
-                # logger.debug(f"✅ Hotlist PnL refreshed ({len(price_map)} items)")
+                # logger.debug(f\"✅ Hotlist PnL refreshed ({len(price_map)} items)\")
             
             # [NEW] 刷新跟单队列
             self._update_follow_queue()
@@ -922,6 +956,9 @@ class HotlistPanel(QWidget, WindowMixin):
     def _update_follow_queue(self, df=None):
         """[Phase 2] 刷新跟单队列可视化 (数据由 Worker 提供)"""
         try:
+            if df is None:
+                df = getattr(self, '_last_df_follow', None)
+            
             if df is None:
                 return # 等待 Worker 数据
                 
@@ -991,9 +1028,10 @@ class HotlistPanel(QWidget, WindowMixin):
                         if it.text() != str(row.priority):
                              it.setText(str(row.priority))
                         
-                    # Time Col 10
-                    time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
-                    if (it := self.follow_table.item(row_idx, 10)):
+                    # Time Col 9
+                    time_dt = str(row.updated_at)
+                    time_str = time_dt[5:16] if len(time_dt) > 10 else time_dt # MM-DD HH:MM
+                    if (it := self.follow_table.item(row_idx, 9)):
                         if it.text() != time_str:
                              it.setText(time_str)
 
@@ -1024,9 +1062,9 @@ class HotlistPanel(QWidget, WindowMixin):
             self.follow_table.setRowCount(len(df))
             
             for row_idx, row in enumerate(df.itertuples()):
-                # cols = ["序号", "状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"]
+                # cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "理由", "时间"]
                 
-                # 0. No. - 传整数
+                # 0. No.
                 no_item = NumericTableWidgetItem(row_idx + 1)
                 no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.follow_table.setItem(row_idx, 0, no_item)
@@ -1037,60 +1075,58 @@ class HotlistPanel(QWidget, WindowMixin):
                     status_item.setForeground(QColor('#FFD700')) # Gold
                 elif row.status == 'ENTERED':
                     status_item.setForeground(QColor('#00FF00')) # Green
+                elif row.status == 'EXITED':
+                    status_item.setForeground(QColor('#ddd')) # Gray
                 self.follow_table.setItem(row_idx, 1, status_item)
                 
                 # 2. Code, 3. Name
                 self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.code)))
                 self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.name)))
                 
-                # 4. Signal Type
-                self.follow_table.setItem(row_idx, 4, QTableWidgetItem(str(row.signal_type)))
+                # 4. 现价 (Current Price)
+                curr_price = getattr(row, 'current_price', 0.0)
+                if curr_price <= 0 and hasattr(self, '_last_price_map') and str(row.code) in self._last_price_map:
+                    curr_price = self._last_price_map[str(row.code)]
                 
-                # 5. Phase
-                phase_txt = "-"
-                notes = str(row.notes) if row.notes else ""
-                import re
-                match = re.search(r'\[(.*?)\]', notes)
-                if match:
-                    phase_txt = match.group(1) # SCOUT, LAUNCH etc
-                elif notes:
-                    phase_txt = notes[:10] # Show part of notes if no bracket
-                
-                phase_item = QTableWidgetItem(phase_txt)
-                # [P7] 阶段着色: 风险预警
-                if phase_txt in ('TOP_WATCH', '顶部观察'):
-                    phase_item.setForeground(QColor('#FF8C00')) # DarkOrange
-                elif phase_txt in ('EXIT', '分批离场'):
-                    phase_item.setForeground(QColor('#FF4500')) # OrangeRed
-                elif phase_txt in ('LAUNCH', '启动'):
-                    phase_item.setForeground(QColor('#00BFFF')) # DeepSkyBlue
-                
-                self.follow_table.setItem(row_idx, 5, phase_item)
-                
-                # 6. Priority - 尝试转为数值
-                try:
-                    p_val = float(row.priority)
-                except:
-                    p_val = row.priority
-                p_item = NumericTableWidgetItem(p_val)
-                p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.follow_table.setItem(row_idx, 6, p_item)
-                
-                # 7. Strategy
-                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(str(row.entry_strategy)))
-                
-                # 8. Entry
-                entry_txt = f"{row.entry_price:.2f}" if getattr(row, 'entry_price', 0) > 0 else f"MA5" # 简单显示
-                self.follow_table.setItem(row_idx, 8, QTableWidgetItem(entry_txt))
-                
-                # 9. Reason
-                reason_item = QTableWidgetItem(str(row.notes) if row.notes else "")
-                reason_item.setToolTip(str(row.notes) if row.notes else "")
-                self.follow_table.setItem(row_idx, 9, reason_item)
+                price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
+                price_item = NumericTableWidgetItem(price_txt)
+                price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.follow_table.setItem(row_idx, 4, price_item)
 
-                # 10. Time
-                time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
-                self.follow_table.setItem(row_idx, 10, QTableWidgetItem(time_str))
+                # 5. 盈亏% (PnL %)
+                entry_price = getattr(row, 'entry_price', 0.0)
+                if entry_price <= 0: entry_price = getattr(row, 'detected_price', 0.0)
+                
+                pnl_pct = 0.0
+                if entry_price > 0 and curr_price > 0:
+                    pnl_pct = (curr_price - entry_price) / entry_price * 100
+                
+                pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
+                pnl_item = NumericTableWidgetItem(pnl_txt)
+                pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if pnl_pct > 0: pnl_item.setForeground(QColor(220, 80, 80))
+                elif pnl_pct < 0: pnl_item.setForeground(QColor(80, 200, 120))
+                self.follow_table.setItem(row_idx, 5, pnl_item)
+
+                # 6. 信号 (Signal Type)
+                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(str(row.signal_type)))
+                
+                # 7. 入场 (Entry Strategy / Price)
+                # entry_txt = f"{row.entry_strategy}"
+                # if entry_price > 0: entry_txt += f"({entry_price:.2f})"
+                entry_txt = f"{entry_price:.2f}" if entry_price > 0 else str(row.entry_strategy)
+                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(entry_txt))
+                
+                # 8. 理由 (Reason/Notes) - Handle pattern extraction
+                notes = str(row.notes) if row.notes else ""
+                reason_item = QTableWidgetItem(notes)
+                reason_item.setToolTip(notes)
+                self.follow_table.setItem(row_idx, 8, reason_item)
+
+                # 9. 时间 (Time) - MM-DD HH:MM
+                time_dt = str(row.updated_at)
+                time_str = time_dt[5:16] if len(time_dt) > 10 else time_dt
+                self.follow_table.setItem(row_idx, 9, QTableWidgetItem(time_str))
 
             # [FIX] Restore Scroll and Selection BEFORE re-enabling signals
             if current_code:
@@ -1124,14 +1160,28 @@ class HotlistPanel(QWidget, WindowMixin):
         """跟单队列单击：联动K线"""
         if self._is_refreshing: return
         try:
-            code_item = self.follow_table.item(row, 2) # Shift index No(0), Status(1), Code(2)
+            code_item = self.follow_table.item(row, 2)
             name_item = self.follow_table.item(row, 3)
+            time_item = self.follow_table.item(row, 9) # MM-DD HH:MM
+            
             if code_item and name_item:
                 code = str(code_item.text()).strip()
                 name = str(name_item.text()).strip()
+                
+                # 提取日期 (从 MM-DD HH:MM 提取 MM-DD)
+                signal_date = ""
+                if time_item:
+                    time_txt = time_item.text()
+                    if "-" in time_txt:
+                        signal_date = time_txt.split(' ')[0] # 02-05
+                
                 if code:
-                    # [FIX] Link Only: disable active realtime fetching
-                    self.stock_selected.emit(f"{code}|realtime=false", name)
+                    # [FIX] Link with signal date for K-line marking
+                    link_msg = f"{code}|realtime=false"
+                    if signal_date:
+                        link_msg += f"|signal_date={signal_date}"
+                    
+                    self.stock_selected.emit(link_msg, name)
         except Exception as e:
             logger.error(f"Follow click error: {e}")
 
@@ -1139,13 +1189,27 @@ class HotlistPanel(QWidget, WindowMixin):
         """跟单队列双击：打开详情"""
         if self._is_refreshing: return
         try:
-            code_item = self.follow_table.item(row, 2) # Shift index
+            code_item = self.follow_table.item(row, 2)
             name_item = self.follow_table.item(row, 3)
+            time_item = self.follow_table.item(row, 9)
+            
             if code_item and name_item:
                 code = str(code_item.text()).strip()
                 name = str(name_item.text()).strip()
-                # 触发详情信号 (Main Window handles it)
-                self.item_double_clicked.emit(code, name, 0.0)
+                
+                # Extract date for marking
+                signal_date = ""
+                if time_item:
+                    time_txt = time_item.text()
+                    if "-" in time_txt:
+                        signal_date = time_txt.split(' ')[0]
+                
+                link_msg = f"{code}|realtime=false"
+                if signal_date:
+                    link_msg += f"|signal_date={signal_date}"
+                
+                # 触发详情信号
+                self.item_double_clicked.emit(link_msg, name, 0.0)
         except Exception as e:
             logger.error(f"Follow double-click error: {e}")
 
@@ -1396,6 +1460,28 @@ class HotlistPanel(QWidget, WindowMixin):
             from trading_hub import get_trading_hub, TrackedSignal
             hub = get_trading_hub()
             
+            # [NEW] 自动价格回补：如果当前价格为0，尝试从最近缓存或主窗口获取
+            if price <= 0:
+                if code in self._last_price_map:
+                    price = self._last_price_map[code]
+                    logger.info(f"Using cached price for {code}: {price}")
+                else:
+                    # 尝试从主窗口获取
+                    try:
+                        from PyQt6.QtWidgets import QApplication
+                        for widget in QApplication.topLevelWidgets():
+                            if hasattr(widget, 'df_all') and not widget.df_all.empty:
+                                if code in widget.df_all.index:
+                                    price = float(widget.df_all.loc[code].get('close', 0))
+                                    logger.info(f"Using MainWindow price for {code}: {price}")
+                                    break
+                    except:
+                        pass
+            
+            if price <= 0:
+                logger.warning(f"⚠️ 无法获取价格，放弃加入跟单队列: {code}")
+                return
+
             # 计算目标入场价（默认当前价±3%）
             target_low = price * 0.97
             target_high = price * 1.03

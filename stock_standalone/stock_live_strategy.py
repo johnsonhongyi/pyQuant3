@@ -346,6 +346,11 @@ class StockLiveStrategy:
         self._is_stopping: bool = False
 
         self.config_file = "voice_alert_config.json"
+        
+        # --- [NEW] 黑名单管理 (Blacklist Management) ---
+        self._blacklist_data = {} # {code: {name, date, reason, hit_count}}
+        # Note: 此时 trading_logger 可能还没初始化，会在后续加载
+
         self.alert_callback = None
         self.realtime_service = realtime_service
         
@@ -1113,12 +1118,15 @@ class StockLiveStrategy:
             if df is None or df.empty or not concept_top5:
                 return
 
+            # --- [NEW] 每日黑名单自动重置逻辑 (由于 is_blacklisted 已经处理了日期，这里只需确保不爆炸) ---
+            # 如果需要显示所有窗口记录，则只需在 add_to_blacklist 时记录日期即可。
+
             # 此时 df 已确定为 pd.DataFrame
             target_df: pd.DataFrame = df
 
-            # Extract concept names
+            # Extract concept names - [OPTIMIZATION] 严格限制在前 5 个核心热点板块
             top_concepts = set()
-            for item in concept_top5:
+            for item in concept_top5[:5]:  # 👈 严格限制前5
                 if isinstance(item, (list, tuple)):
                     top_concepts.add(str(item[0]))
                 else:
@@ -1167,6 +1175,10 @@ class StockLiveStrategy:
             for code, row in strong_df.iterrows():
                 # Avoid re-adding
                 if code in self._monitored_stocks:
+                    continue
+                
+                # --- [NEW] 黑名单拦截 ---
+                if self.is_blacklisted(code):
                     continue
 
                 raw_cats = str(row.get('category', ''))
@@ -1559,9 +1571,10 @@ class StockLiveStrategy:
                             triggered, trigger_msg = True, f"蓄势启动确认 (现价 > 开盘)"
                 
                 # --- C. 通用目标价突破 ---
-                if not triggered and signal.target_price_high > 0 and current_price >= signal.target_price_high:
+                target_high = float(getattr(signal, 'target_price_high', 0.0) or 0.0)
+                if not triggered and target_high > 0 and current_price >= target_high:
                     triggered = True
-                    trigger_msg = f"突破目标价 {signal.target_price_high}"
+                    trigger_msg = f"突破目标价 {target_high}"
 
                 if triggered:
                     # 执行跟单交易逻辑
@@ -1636,9 +1649,10 @@ class StockLiveStrategy:
         name = str(row.get('name', ''))
         
         # 1. 突破信号设定的具体目标价
-        if hasattr(signal, 'target_price_high') and signal.target_price_high > 0:
-            if current_price >= signal.target_price_high:
-                msg = f"突破目标上限 {signal.target_price_high}"
+        target_high = float(getattr(signal, 'target_price_high', 0.0) or 0.0)
+        if target_high > 0:
+            if current_price >= target_high:
+                msg = f"突破目标上限 {target_high}"
                 # [P7] 突破确认高优先级播报
                 self.voice_announcer.announce(f"{name}({code}) 突破确认", code=code)
                 return True, msg
@@ -2858,6 +2872,80 @@ class StockLiveStrategy:
         
         return None
 
+    # ---------- 黑名单管理相关方法 ----------
+    def _load_blacklist(self, date=None):
+        """从数据库加载黑名单 (支持日期过滤)"""
+        try:
+            if hasattr(self, 'trading_logger'):
+                data = self.trading_logger.get_blacklist_data(date=date)
+                if date is None:
+                    self._blacklist_data = data # 仅在全量加载时更新缓存
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load blacklist from DB: {e}")
+            if date is None: self._blacklist_data = {}
+        return {}
+
+    def add_to_blacklist(self, code, name="", reason="manual_del"):
+        """将代码加入黑名单"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 1. 保存到数据库
+        if hasattr(self, 'trading_logger'):
+            self.trading_logger.add_to_blacklist(code, name, reason)
+        
+        # 2. 同步内存缓存
+        if code in self._blacklist_data:
+            hit_count = self._blacklist_data[code].get('hit_count', 0)
+        else:
+            hit_count = 0
+            
+        self._blacklist_data[code] = {
+            "name": name,
+            "date": today,
+            "reason": reason,
+            "hit_count": hit_count
+        }
+        
+        logger.info(f"🚫 Added {name}({code}) to blacklist. Reason: {reason}")
+        # 如果当前在监控中，顺便移除
+        self.remove_monitor(code)
+
+    def is_blacklisted(self, code):
+        """检查代码是否在黑名单中 (当日有效)"""
+        # 为了效率，优先检查内存
+        if code not in self._blacklist_data:
+            return False
+        
+        info = self._blacklist_data[code]
+        today = datetime.now().strftime("%Y-%m-%d")
+        return info.get("date") == today
+
+    def get_blacklist(self, date=None):
+        """获取完整黑名单数据 (支持可选日期过滤)"""
+        # 如果提供了日期，直接从 DB 查，不影响全局缓存
+        if date and date != "全部":
+            return self._load_blacklist(date=date)
+            
+        # 默认刷新并返回全量缓存
+        self._load_blacklist() 
+        return self._blacklist_data
+
+    def remove_from_blacklist(self, code):
+        """从黑名单移除 (恢复报警)"""
+        found_in_memory = False
+        if code in self._blacklist_data:
+            del self._blacklist_data[code]
+            found_in_memory = True
+            
+        success_in_db = False
+        if hasattr(self, 'trading_logger'):
+            success_in_db = self.trading_logger.remove_from_blacklist(code)
+            
+        if found_in_memory or success_in_db:
+            logger.info(f"✅ Removed {code} from blacklist. Alerts restored.")
+            return True
+        return False
+
     def remove_monitor(self, code, resample=None):
         """移除指定代码的监控"""
         key = self._resolve_stock_key(code)
@@ -3285,6 +3373,18 @@ class StockLiveStrategy:
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
         """触发报警"""
+        # --- [NEW] 黑名单静默拦截 ---
+        if self.is_blacklisted(code):
+            # [ADD] 统计触发次数
+            if hasattr(self, 'trading_logger'):
+                self.trading_logger.increment_blacklist_hit(code)
+            # 同步内存计数 (可选，UI 刷新时会重载)
+            if code in self._blacklist_data:
+                self._blacklist_data[code]['hit_count'] = self._blacklist_data[code].get('hit_count', 0) + 1
+
+            logger.debug(f"🔇 Blacklist Blocked: {name}({code}) | Hits: {self._blacklist_data[code].get('hit_count')} | Msg: {message[:30]}...")
+            return
+
         logger.debug(f"🔔 ALERT [{resample}]: {message}")
 
         # --- [NEW] 1. 优先级与信号识别 (优先级逻辑增强) ---
@@ -3421,6 +3521,17 @@ class StockLiveStrategy:
             # 记录交易并计算单笔收益
             self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
 
+        # --- [NEW] 5. 跟单队列状态同步 (Follow Queue Sync) ---
+        # 如果是离场信号，自动将跟单队列中的状态置为 EXITED
+        if action in ("卖出", "止损", "止盈") or "清仓" in action:
+            try:
+                hub = get_trading_hub()
+                exit_date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # 更新跟单队列状态为已离场，并记录离场价和时间
+                if hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=exit_date_str, notes=f"Auto closed by {action}: {message[:50]}"):
+                    logger.info(f"🔄 Follow sync: {code} set to EXITED @ {price} on {exit_date_str} due to {action}")
+            except Exception as e:
+                logger.error(f"Follow sync failed for {code}: {e}")
     def _play_sound_async(self):
         # 💥 已移除 winsound 报警，统一使用 VoiceAnnouncer
         pass
@@ -3610,6 +3721,12 @@ class StockLiveStrategy:
                 logger.warning(f"StockSelector returned empty candidates for {date_str}")
                 return "无标的"
             
+            # --- [STRENGTHEN] 黑名单与已忽略标的强效过滤 ---
+            initial_count = len(df)
+            df = df[~df['code'].apply(lambda x: self.is_blacklisted(str(x).zfill(6)))]
+            if len(df) < initial_count:
+                logger.info(f"🚫 Blacklist Filter: Removed {initial_count - len(df)} ignored stocks from candidates.")
+
             # [NEW] 精选条件：低开高走强势放量上攻
             # 1. 低开：open < pre_close * 0.98
             # 2. 高走：当前涨幅 > 2%

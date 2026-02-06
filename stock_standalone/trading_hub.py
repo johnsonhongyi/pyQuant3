@@ -54,6 +54,8 @@ class TrackedSignal:
     detected_date: str         # 首次扫到日期
     detected_price: float      # 扫到时价格
     entry_strategy: str = "竞价买入"  # 入场策略
+    entry_price: float = 0.0         # 实际成交价
+    exit_price: float = 0.0          # 实际离场价
     target_price_low: float = 0.0    # 目标入场价下限
     target_price_high: float = 0.0   # 目标入场价上限
     stop_loss: float = 0.0           # 止损价
@@ -107,6 +109,8 @@ class TradingHub:
                 detected_date TEXT,
                 detected_price REAL,
                 entry_strategy TEXT DEFAULT '竞价买入',
+                entry_price REAL DEFAULT 0.0,
+                exit_price REAL DEFAULT 0.0,
                 target_price_low REAL,
                 target_price_high REAL,
                 stop_loss REAL,
@@ -115,11 +119,23 @@ class TradingHub:
                 source TEXT,
                 notes TEXT,
                 created_at TEXT,
-                updated_at TEXT,
-                UNIQUE(code, detected_date)
+                updated_at TEXT
             )
         """)
         
+        # --- [FIX] 自动热迁移：检查 follow_queue 缺失字段 ---
+        try:
+            c.execute("PRAGMA table_info(follow_queue)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'entry_price' not in columns:
+                logger.info("[TradingHub] Migrating follow_queue: adding entry_price")
+                c.execute("ALTER TABLE follow_queue ADD COLUMN entry_price REAL DEFAULT 0.0")
+            if 'exit_price' not in columns:
+                logger.info("[TradingHub] Migrating follow_queue: adding exit_price")
+                c.execute("ALTER TABLE follow_queue ADD COLUMN exit_price REAL DEFAULT 0.0")
+        except Exception as e:
+            logger.error(f"[TradingHub] Migration error for follow_queue: {e}")
+
         # 持仓记录表
         c.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -138,6 +154,14 @@ class TradingHub:
                 updated_at TEXT
             )
         """)
+        
+        # 持仓记录表 (同样建议检查此表)
+        try:
+            c.execute("PRAGMA table_info(positions)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'strategy' not in columns:
+                 c.execute("ALTER TABLE positions ADD COLUMN strategy TEXT")
+        except: pass
         
         # 每日盈亏统计表
         c.execute("""
@@ -254,44 +278,114 @@ class TradingHub:
         conn = sqlite3.connect(self.signal_db)
         c = conn.cursor()
         
+        # [FIX] 显式列名查询，防止 SELECT * 导致的索引偏移 (could not convert string to float: 'TRACKING')
+        fields = [
+            "id", "code", "name", "signal_type", "detected_date", "detected_price",
+            "entry_strategy", "entry_price", "exit_price", "target_price_low",
+            "target_price_high", "stop_loss", "status", "priority", "source", "notes"
+        ]
+        query_cols = ", ".join(fields)
+        
         if status:
-            c.execute("SELECT * FROM follow_queue WHERE status = ? ORDER BY priority DESC, detected_date", (status,))
+            c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status = ? ORDER BY priority DESC, detected_date", (status,))
         else:
-            c.execute("SELECT * FROM follow_queue WHERE status != 'EXITED' AND status != 'CANCELLED' ORDER BY priority DESC, detected_date")
+            c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status != 'EXITED' AND status != 'CANCELLED' ORDER BY priority DESC, detected_date")
         
         rows = c.fetchall()
         conn.close()
         
+        def safe_float(val, default=0.0):
+            try:
+                return float(val) if val is not None else default
+            except (ValueError, TypeError):
+                return default
+
         signals = []
         for row in rows:
-            signals.append(TrackedSignal(
-                id=row[0], code=row[1], name=row[2], signal_type=row[3],
-                detected_date=row[4], detected_price=row[5], entry_strategy=row[6],
-                target_price_low=row[7], target_price_high=row[8], stop_loss=row[9],
-                status=row[10], priority=row[11], source=row[12], notes=row[13]
-            ))
+            try:
+                # 显式索引绑定 (0-15)
+                signals.append(TrackedSignal(
+                    id=row[0], 
+                    code=str(row[1]), 
+                    name=str(row[2]) if row[2] else "", 
+                    signal_type=str(row[3]) if row[3] else "",
+                    detected_date=str(row[4]) if row[4] else "", 
+                    detected_price=safe_float(row[5]), 
+                    entry_strategy=str(row[6]) if row[6] else "竞价买入",
+                    entry_price=safe_float(row[7]), 
+                    exit_price=safe_float(row[8]),
+                    target_price_low=safe_float(row[9]), 
+                    target_price_high=safe_float(row[10]), 
+                    stop_loss=safe_float(row[11]),
+                    status=str(row[12]) if row[12] else "TRACKING", 
+                    priority=int(row[13] or 5), 
+                    source=str(row[14]) if row[14] else "", 
+                    notes=str(row[15]) if row[15] else ""
+                ))
+            except Exception as e:
+                logger.error(f"[TradingHub] Error parsing follow queue row {row[0] if len(row)>0 else 'unknown'}: {e}")
+                continue
         return signals
     
-    def update_follow_status(self, code: str, new_status: str = None, notes: str = None) -> bool:
-        """更新跟单状态"""
+    def update_follow_status(self, code: str, new_status: str = None, notes: str = None, 
+                            exit_price: float = None, exit_date: str = None) -> bool:
+        """
+        更新跟单状态
+        
+        Args:
+            code: 股票代码
+            new_status: 新状态 (TRACKING/READY/ENTERED/EXITED/CANCELLED)
+            notes: 备注信息
+            exit_price: 离场价格 (仅在 EXITED 状态时使用)
+            exit_date: 离场日期 (仅在 EXITED 状态时使用,格式: YYYY-MM-DD HH:MM:SS)
+        """
         try:
             conn = sqlite3.connect(self.signal_db)
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            if new_status and notes:
-                c.execute("UPDATE follow_queue SET status = ?, notes = ?, updated_at = ? WHERE code = ?",
-                         (new_status, notes, now, code))
-            elif new_status:
-                c.execute("UPDATE follow_queue SET status = ?, updated_at = ? WHERE code = ?",
-                         (new_status, now, code))
-            elif notes:
-                c.execute("UPDATE follow_queue SET notes = ?, updated_at = ? WHERE code = ?",
-                         (notes, now, code))
-            else:
+            # 构建动态 SQL
+            update_fields = []
+            update_values = []
+            
+            if new_status:
+                update_fields.append("status = ?")
+                update_values.append(new_status)
+            
+            if notes:
+                update_fields.append("notes = ?")
+                update_values.append(notes)
+            
+            if exit_price is not None:
+                update_fields.append("exit_price = ?")
+                update_values.append(exit_price)
+            
+            # [NEW] 支持离场日期记录
+            if exit_date:
+                # 检查表中是否有 exit_date 列,如果没有则添加
+                try:
+                    c.execute("SELECT exit_date FROM follow_queue LIMIT 1")
+                except sqlite3.OperationalError:
+                    # 列不存在,添加它
+                    c.execute("ALTER TABLE follow_queue ADD COLUMN exit_date TEXT")
+                    conn.commit()
+                
+                update_fields.append("exit_date = ?")
+                update_values.append(exit_date)
+            
+            # 总是更新 updated_at
+            update_fields.append("updated_at = ?")
+            update_values.append(now)
+            
+            if not update_fields:
                 # Nothing to update
                 conn.close()
                 return True
+            
+            # 执行更新
+            sql = f"UPDATE follow_queue SET {', '.join(update_fields)} WHERE code = ?"
+            update_values.append(code)
+            c.execute(sql, tuple(update_values))
             
             conn.commit()
             conn.close()
@@ -342,16 +436,38 @@ class TradingHub:
         """获取持仓列表"""
         conn = sqlite3.connect(self.signal_db)
         c = conn.cursor()
-        c.execute("SELECT * FROM positions WHERE status = ? ORDER BY entry_date DESC", (status,))
+        
+        # [FIX] 显式列名查询，防止索引偏移
+        fields = [
+            "id", "code", "name", "entry_date", "entry_price", "quantity", 
+            "current_price", "pnl_percent", "status", "strategy", "notes"
+        ]
+        query_cols = ", ".join(fields)
+        
+        c.execute(f"SELECT {query_cols} FROM positions WHERE status = ? ORDER BY entry_date DESC", (status,))
         rows = c.fetchall()
         conn.close()
         
+        def safe_float(val, default=0.0):
+            try:
+                return float(val) if val is not None else default
+            except (ValueError, TypeError):
+                return default
+
         positions = []
         for row in rows:
             positions.append(Position(
-                id=row[0], code=row[1], name=row[2], entry_date=row[3],
-                entry_price=row[4], quantity=row[5], current_price=row[6],
-                pnl_percent=row[7], status=row[8], strategy=row[9], notes=row[10]
+                id=row[0], 
+                code=str(row[1]), 
+                name=str(row[2]) if row[2] else "", 
+                entry_date=str(row[3]) if row[3] else "",
+                entry_price=safe_float(row[4]), 
+                quantity=int(row[5] or 0), 
+                current_price=safe_float(row[6]),
+                pnl_percent=safe_float(row[7]), 
+                status=str(row[8]) if row[8] else "HOLDING", 
+                strategy=str(row[9]) if row[9] else "", 
+                notes=str(row[10]) if row[10] else ""
             ))
         return positions
     
