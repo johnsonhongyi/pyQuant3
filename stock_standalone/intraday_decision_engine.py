@@ -1389,9 +1389,10 @@ class IntradayDecisionEngine:
             # 触发条件
             if buy_score >= threshold:
                 # 【新增】高位风险拦截：如果顶部信号评分过高 (>0.45)，禁止任何买入/补仓
-                if top_info['score'] > 0.45:
-                    debug["refuse_reason"] = f"高位顶部预警({top_info['score']})"
-                    return self._hold(f"高位风险拦截({top_info['score']})", debug)
+                top_score = debug.get("top_score", 0)
+                if top_score > 0.45:
+                    debug["refuse_reason"] = f"高位顶部预警({top_score})"
+                    return self._hold(f"高位风险拦截({top_score})", debug)
 
                 pos = min(buy_score, self.max_position)
                 

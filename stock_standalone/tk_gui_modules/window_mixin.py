@@ -346,19 +346,37 @@ class WindowMixin:
 
             config_file_path = self._get_config_file_path(file_path, scale)
 
+            # [OPTIMIZE] 读取现有数据,检查是否有变化
             data = {}
+            data_changed = True  # 默认认为数据有变化
+            
             if os.path.exists(config_file_path):
                 try:
                     with open(config_file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    
+                    # 检查该窗口的位置数据是否发生变化
+                    if window_name in data:
+                        old_pos = data[window_name]
+                        # 比较所有字段
+                        if (old_pos.get('x') == pos['x'] and 
+                            old_pos.get('y') == pos['y'] and 
+                            old_pos.get('width') == pos['width'] and 
+                            old_pos.get('height') == pos['height']):
+                            data_changed = False
+                            
                 except Exception as e:
                     logger.error(f"[save_window_position_qt] 读取失败: {e}")
 
-            data[window_name] = pos
-            with open(config_file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            # [OPTIMIZE] 只有数据变化时才写盘
+            if data_changed:
+                data[window_name] = pos
+                with open(config_file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            else:
+                logger.debug(f"[save_window_position_qt] 跳过保存 {window_name}: 数据未变化")
+                
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
 

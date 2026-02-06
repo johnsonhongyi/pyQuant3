@@ -148,6 +148,17 @@ class TradingLogger:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_live_sig_date ON live_signal_history (timestamp)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_live_sig_code ON live_signal_history (code)")
             
+            # 6. 黑名单与忽略报警统计表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS live_blacklist (
+                    code TEXT PRIMARY KEY,
+                    name TEXT,
+                    added_date TEXT,
+                    reason TEXT,
+                    hit_count INTEGER DEFAULT 0
+                )
+            """)
+            
             # --- Schema Evolution/Migration (New) ---
             # 检查字段是否缺失 (针对已存在数据库升级)
             cur.execute("PRAGMA table_info(selection_history)")
@@ -799,26 +810,94 @@ class TradingLogger:
         """获取所有或特定周期的语音预警配置"""
         try:
             conn = self.db_manager.get_connection()
-            cur = conn.cursor()
-            
             query = "SELECT * FROM voice_alerts"
             params = []
             if resample:
                 query += " WHERE resample = ?"
                 params.append(resample)
             
-            cur.execute(query, params)
-            rows = cur.fetchall()
-            
-            # 转换为字典列表
-            cols = [d[0] for d in cur.description] # type: ignore
-            results = [dict(zip(cols, row)) for row in rows]
-            
-            cur.close()
-            return results
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
         except Exception as e:
             logger.error(f"Failed to get voice alerts: {e}")
+            return pd.DataFrame()
+
+    # --- 黑名单扩展方法 ---
+    def add_to_blacklist(self, code: str, name: str, reason: str = "manual_del") -> None:
+        """将股票加入黑名单"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            self.db_manager.execute_update("""
+                INSERT OR REPLACE INTO live_blacklist (code, name, added_date, reason, hit_count)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT hit_count FROM live_blacklist WHERE code=?), 0))
+            """, (code, name, today, reason, code))
+        except Exception as e:
+            logger.error(f"DB Error add_to_blacklist: {e}")
+
+    def remove_from_blacklist(self, code: str) -> bool:
+        """从黑名单移除"""
+        try:
+            self.db_manager.execute_update("DELETE FROM live_blacklist WHERE code=?", (code,))
+            return True
+        except Exception as e:
+            logger.error(f"DB Error remove_from_blacklist: {e}")
+            return False
+
+    def get_blacklist_data(self, date: Optional[str] = None) -> dict[str, dict[str, Any]]:
+        """获取黑名单数据 (可选日期筛选)"""
+        try:
+            conn = self.db_manager.get_connection()
+            query = "SELECT * FROM live_blacklist"
+            params = []
+            if date and date != "全部":
+                query += " WHERE added_date = ?"
+                params.append(date)
+            
+            df = pd.read_sql_query(query, conn, params=params)
+            # 转为 dict 方便缓存同步 {code: {name, date, reason, hit_count}}
+            res = {}
+            for _, row in df.iterrows():
+                res[row['code']] = {
+                    "name": row['name'],
+                    "date": row['added_date'],
+                    "reason": row['reason'],
+                    "hit_count": row['hit_count']
+                }
+            return res
+        except Exception as e:
+            logger.error(f"DB Error get_blacklist_data: {e}")
+            return {}
+
+    def get_blacklist_dates(self) -> list[str]:
+        """获取黑名单中存在的所有不同日期"""
+        try:
+            conn = self.db_manager.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT added_date FROM live_blacklist ORDER BY added_date DESC")
+            dates = [row[0] for row in cur.fetchall() if row[0]]
+            cur.close()
+            return dates
+        except Exception as e:
+            logger.error(f"DB Error get_blacklist_dates: {e}")
             return []
+
+    def increment_blacklist_hit(self, code: str) -> None:
+        """增加黑名单触发次数统计"""
+        try:
+            self.db_manager.execute_update(
+                "UPDATE live_blacklist SET hit_count = hit_count + 1 WHERE code = ?", 
+                (code,)
+            )
+        except Exception as e:
+            logger.error(f"DB Error increment_blacklist_hit for {code}: {e}")
+
+    def clear_daily_blacklist(self) -> None:
+        """清空今日黑名单 (如果需求是每日重置，则调用此方法)"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            self.db_manager.execute_update("DELETE FROM live_blacklist WHERE added_date = ?", (today,))
+        except Exception as e:
+            logger.error(f"DB Error clear_daily_blacklist: {e}")
 
     def get_consecutive_losses(self, code: str, days: int = 10, resample: str = 'd') -> int:
         """

@@ -1779,10 +1779,10 @@ class ScrollableMsgBox(QtWidgets.QDialog):
 
         self.label = QtWidgets.QLabel(content)
         self.label.setWordWrap(True)
-        self.label.setTextFormat(Qt.TextFormat.PlainText) # 修改为 PlainText 以支持 \n 换行
+        # self.label.setTextFormat(Qt.TextFormat.PlainText) # 修改为 PlainText 以支持 \n 换行
+        self.label.setTextFormat(Qt.TextFormat.RichText)  # [FIX] 修改为 RichText 以正确渲染 HTML 信号透视信息
         self.label.setOpenExternalLinks(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
-
         content_layout.addWidget(self.label)
         scroll.setWidget(content_widget)
 
@@ -2023,6 +2023,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.current_day_df_code = None  # ⭐ 追踪当前 day_df 实际对应哪个股票 (1.5)
         self.expected_sync_version = -1  # ⭐ 初始化同步版本 (1.4)
         self._table_item_map = {}        # ⭐ 初始化表映射 (1.4)
+        self.follow_marker_items = []    # ⭐ [NEW] 跟单信号标记容器
         self.realtime_queue = Queue()
         self.realtime_task_queue = Queue() # ⭐ 新增：任务队列 (1.3)
         self.realtime_process = None
@@ -6820,6 +6821,10 @@ class MainWindow(QMainWindow, WindowMixin):
                             pass
                 code = real_code
         
+        # [NEW] Capture signal metadata for marking
+        self.current_signal_date = kwargs.get('signal_date')
+        self.current_signal_type = kwargs.get('signal_type', 'Follow')
+        
         # [NEW] Handle specific commands from Monitor (e.g. key bindings)
         if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
             if code == 'TOGGLE_HOTLIST':
@@ -6944,7 +6949,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
 
-
+    def show_stock(self, code, name=None, **kwargs):
+        """ Alias for load_stock_by_code for backward compatibility """
+        return self.load_stock_by_code(code, name, **kwargs)
 
     def _draw_hotspot_markers(self, code, x_axis, day_df):
         """在 K 线图上绘制热点加入标记"""
@@ -7163,6 +7170,146 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotspot_items.clear()
         else:
             self.hotspot_items = []
+
+    def _clear_follow_markers(self):
+        """清理旧的跟单标记"""
+        if hasattr(self, 'follow_marker_items'):
+            for item in self.follow_marker_items:
+                try:
+                    self.kline_plot.removeItem(item)
+                except:
+                    pass
+            self.follow_marker_items.clear()
+        else:
+            self.follow_marker_items = []
+
+    def _draw_follow_markers(self, code, x_axis, day_df):
+        """在 K 线图上绘制跟单信号标记 (使用 🔥 图标表示入场, ❌ 表示离场)"""
+        # 先清理旧标记
+        self._clear_follow_markers()
+        
+        # 从数据库查询该股票的跟单记录
+        try:
+            import sqlite3
+            conn = sqlite3.connect("signal_strategy.db", timeout=5)
+            c = conn.cursor()
+            
+            # 查询该股票的跟单记录 (包括入场和离场信息)
+            c.execute("""
+                SELECT detected_date, exit_date, detected_price, exit_price, status
+                FROM follow_queue
+                WHERE code = ?
+                ORDER BY detected_date DESC
+                LIMIT 1
+            """, (code[:6],))  # 使用6位代码查询
+            
+            row = c.fetchone()
+            conn.close()
+            
+            if not row:
+                # 没有跟单记录,尝试使用传入的 current_signal_date
+                if not getattr(self, 'current_signal_date', None):
+                    return
+                # 使用传入的日期绘制单个 Follow 标记
+                self._draw_single_follow_marker(x_axis, day_df, self.current_signal_date, None)
+                return
+            
+            detected_date, exit_date, detected_price, exit_price, status = row
+            
+            # 绘制入场标记 (Follow)
+            if detected_date:
+                self._draw_single_follow_marker(x_axis, day_df, detected_date, detected_price, marker_type="FOLLOW")
+            
+            # 绘制离场标记 (EXIT)
+            if exit_date and status == "EXITED":
+                self._draw_single_follow_marker(x_axis, day_df, exit_date, exit_price, marker_type="EXIT")
+                
+        except Exception as e:
+            logger.debug(f"Draw follow marker error: {e}")
+            # 降级:使用传入的 current_signal_date
+            if getattr(self, 'current_signal_date', None):
+                self._draw_single_follow_marker(x_axis, day_df, self.current_signal_date, None)
+    
+    def _draw_single_follow_marker(self, x_axis, day_df, target_date, price_hint=None, marker_type="FOLLOW"):
+        """
+        绘制单个跟单标记
+        
+        Args:
+            x_axis: X 轴坐标数组
+            day_df: K 线数据
+            target_date: 目标日期 (可能是 "02-06" 或 "2026-02-06 HH:MM:SS")
+            price_hint: 价格提示 (如果为 None 则从 K 线数据中获取)
+            marker_type: 标记类型 ("FOLLOW" 或 "EXIT")
+        """
+        try:
+            # 提取日期部分 (去掉时间)
+            if ' ' in target_date:
+                target_date = target_date.split(' ')[0]  # "2026-02-06 12:30:00" -> "2026-02-06"
+            
+            # 查找 K 线索引
+            idx = -1
+            for i, d_str in enumerate(day_df.index):
+                if target_date in d_str:
+                    idx = i
+                    break
+            
+            if idx == -1:
+                # 尝试匹配今天
+                if target_date == datetime.now().strftime("%m-%d") or target_date == datetime.now().strftime("%Y-%m-%d"):
+                    idx = len(day_df) - 1
+            
+            if idx == -1:
+                logger.debug(f"Cannot find K-line index for date: {target_date}")
+                return
+            
+            # 获取坐标
+            try:
+                x_pos = x_axis[idx]
+            except:
+                x_pos = idx
+            
+            # 获取价格
+            if price_hint and price_hint > 0:
+                price = price_hint
+            else:
+                price = day_df['close'].iloc[idx]
+            
+            # 根据标记类型选择样式
+            if marker_type == "EXIT":
+                color = '#FF4500'  # 橙红色
+                icon = '❌'
+                label_text = f'EXIT ¥{price:.2f}'
+                anchor_y = 0  # 标记在价格上方
+            else:  # FOLLOW
+                color = '#FFD700'  # 金色
+                icon = '🔥'
+                label_text = f'Follow ¥{price:.2f}'
+                anchor_y = 1  # 标记在价格下方
+            
+            # 绘制一条横向虚线
+            line_len = 12
+            line = pg.PlotCurveItem(
+                x=[x_pos, x_pos + line_len], 
+                y=[price, price], 
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)
+            )
+            self.kline_plot.addItem(line)
+            
+            # 绘制价格标签
+            msg = f'<div style="color: {color}; font-weight: bold; font-size: 9pt;">{label_text}</div>'
+            label = pg.TextItem(html=msg, anchor=(0, anchor_y))
+            label.setPos(x_pos, price)
+            self.kline_plot.addItem(label)
+            
+            # 绘制图标 (Prominent)
+            marker = pg.TextItem(html=f'<div style="font-size: 14pt;">{icon}</div>', anchor=(0, 1 - anchor_y)) 
+            marker.setPos(x_pos, price)
+            self.kline_plot.addItem(marker)
+            
+            self.follow_marker_items.extend([marker, label, line])
+            
+        except Exception as e:
+            logger.debug(f"Draw single follow marker error: {e}")
 
     def _clear_price_gaps(self):
         """清理价格缺口"""
@@ -8230,8 +8377,9 @@ class MainWindow(QMainWindow, WindowMixin):
             #         # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
             #         pass
         
-        # --- 绘制热点标记 (热点自选加入点) ---
+        # --- 绘制热点/跟单标记 ---
         self._draw_hotspot_markers(code, x_axis, day_df)
+        self._draw_follow_markers(code, x_axis, day_df)
         self._draw_signal_annotation(code, x_axis, day_df)
 
 
@@ -9817,8 +9965,16 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
-
         self._closing = True
+
+        # 0.️⃣ 立即停止语音进程 (防止退出过程中继续播报噪音)
+        if hasattr(self, 'voice_thread') and self.voice_thread:
+            logger.info("Closing Voice Broadcast system...")
+            try:
+                self.voice_thread.stop()
+            except Exception as e:
+                logger.error(f"Error stopping voice_thread: {e}")
+
         # [User Request] 退出时清理 History Manager
         if hasattr(self, 'history_manager_process') and self.history_manager_process and self.history_manager_process.is_alive():
             try:
@@ -9828,10 +9984,9 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.error(f"Error closing History Manager: {e}")
                 
-        """窗口关闭事件"""
         # 保存分割器状态
         self.save_splitter_state()
-        """Override close event to save window position"""
+        
         try:
             self.save_window_position_qt_visual(self, "trade_visualizer")
         except Exception as e:
@@ -9842,7 +9997,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stop_flag.value = False
         logger.info(f'stop_flag.value: {self.stop_flag.value}')
 
-        # 0️⃣ 停止并关闭独立面板 (关键：防止 QThread Destroyed)
+        # 2️⃣ 停止并关闭独立面板 (关键：防止 QThread Destroyed)
         if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
             logger.debug("Closing HotlistPanel...")
             try:
@@ -9856,14 +10011,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.signal_log_panel.close()
             except Exception as e:
                 logger.warning(f"Error closing signal_log_panel: {e}")
-        
-        # 0.1️⃣ 停止语音进程 (提前执行，并增加更高优先级的日志)
-        if hasattr(self, 'voice_thread') and self.voice_thread:
-            logger.info("Closing Voice Broadcast system...")
-            try:
-                self.voice_thread.stop()
-            except Exception as e:
-                logger.error(f"Error stopping voice_thread: {e}")
 
         # 0.2️⃣ 停止所有定时器
         if hasattr(self, 'realtime_timer') and self.realtime_timer:
@@ -10038,8 +10185,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if code and code != self.current_code:
             self.load_stock_by_code(code, name)
         
-        # 创建并显示详情弹窗
-        popup = HotSpotPopup(code, name, add_price, self)
+        # [FIX] Extract clean code for popup if it contains metadata
+        clean_code = code.split('|')[0] if '|' in code else code
+        popup = HotSpotPopup(clean_code, name, add_price, self)
         
         # 连接弹窗信号
         popup.group_changed.connect(lambda c, g: self._on_popup_group_changed(c, g))
