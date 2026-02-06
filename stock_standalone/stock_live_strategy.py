@@ -3357,6 +3357,14 @@ class StockLiveStrategy:
             # 使用 detail 增强消息
             msg = f"[日线] {event.name} ({event.code}) {event.detail}"
             
+            # 存储至 snapshot 以供决策引擎使用
+            if event.code in self._monitored_stocks:
+                stock_info = self._monitored_stocks[event.code]
+                if 'snapshot' not in stock_info:
+                    stock_info['snapshot'] = {}
+                stock_info['snapshot']['pattern'] = event.pattern
+                stock_info['snapshot']['pattern_detail'] = event.detail
+            
             # 触发报警
             logger.info(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
             # self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
