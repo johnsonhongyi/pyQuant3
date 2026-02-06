@@ -4254,24 +4254,28 @@ class MainWindow(QMainWindow, WindowMixin):
         self._cleanup_garbage_threads()
         
         if not hasattr(self, "_closing") or getattr(self, "_closing", False):
-            logger.debug(f'self._closing :{getattr(self, "_closing", False)}')
             return  # 窗口正在关闭，不再处理队列
-        # latest_updates = {}  # key: code, value: (tick_df, today_bar)
+
+        updates_batch = {}  # key: code, value: (tick_df, today_bar)
+        
+        # 🔄 聚合本周轮所有更新，只保留最新的
         while True:
             try:
                 code, tick_df, today_bar = self.realtime_queue.get_nowait()
+                updates_batch[code] = (tick_df, today_bar)
             except queue.Empty:
                 break
             except (EOFError, OSError):
                 logger.warning("Realtime queue closed unexpectedly")
                 break
-            except Exception as e:
+            except Exception:
                 logger.exception("Unexpected error in realtime queue")
                 break
 
-            try:
-                # GUI 更新加保护
-                if self.isVisible():  # 确保窗口未关闭
+        # ⚡ 批量处理 GUI 更新
+        if self.isVisible():
+            for code, (tick_df, today_bar) in updates_batch.items():
+                try:
                     self.on_realtime_update(code, tick_df, today_bar)
                     # 更新缓存
                     self._tick_cache[code] = {
@@ -4279,11 +4283,10 @@ class MainWindow(QMainWindow, WindowMixin):
                         'today_bar': today_bar,
                         'ts': time.time()
                     }
-                    logger.debug(f'on_realtime_update today_bar:\n {today_bar}')
-            except RuntimeError as e:
-                logger.warning(f"GUI update skipped: {e}")
-            except Exception:
-                logger.exception("Error in on_realtime_update")
+                except RuntimeError as e:
+                    logger.warning(f"GUI update skipped: {e}")
+                except Exception:
+                    logger.exception(f"Error in on_realtime_update for {code}")
         
         # [NEW] 定时更新底部统计信息
         if self.isVisible():
