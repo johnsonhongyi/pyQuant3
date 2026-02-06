@@ -131,17 +131,17 @@ class StockSelector:
         if today is None:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
 
-        # 1. 基础过滤 (非停牌，成交额需大于 8000万 提高流动性门槛)
+        # 1. 基础过滤 (非停牌，成交额需大于 1.5亿 提高流动性门槛，确保可操作性)
         mask = pd.Series(True, index=df.index)
         if 'volume' in df.columns:
             mask &= (df['volume'] > 0)
         if 'amount' in df.columns:
-            # 如果是 scraper 数据，amount 可能是 0，这里做一个兼容
-            mask &= (df['amount'] >= 0) 
+            # 提高门槛：1.5亿以上，排除流流动性差的僵尸股
+            mask &= (df['amount'] >= 150000000) 
             
         df_active = df[mask].copy()
         if df_active.empty:
-            self.logger.info("无满足基础流动性要求的股票")
+            self.logger.info("无满足高流动性要求的股票 (Threshold: 1.5亿)")
             return pd.DataFrame()
         
         # 获取历史选股频次
@@ -168,9 +168,29 @@ class StockSelector:
                 concept_scores.append((c, avg))
         
         concept_scores.sort(key=lambda x: x[1], reverse=True)
-        top_concepts = set([x[0] for x in concept_scores[:15]]) # 缩小到 Top 15
-        self.logger.info(f"Top 5 Concepts: {[x[0] for x in concept_scores[:5]]}")
+        top_hot_names = [x[0] for x in concept_scores[:5]]
+        self.logger.info(f"Top 5 Concepts: {top_hot_names}")
         self._last_hotspots = concept_scores # 缓存供外部查询
+        
+        # --- [NEW] Identify Sector Leaders (Top 5 per Hot Theme) ---
+        protected_leaders = set()
+        for c_name in top_hot_names:
+            # 在当前活跃股中找属于该题材的
+            sector_stocks = []
+            for code, row in df_active.iterrows():
+                raw_c = row.get('category', row.get('sector', ''))
+                if pd.notna(raw_c) and c_name in str(raw_c):
+                    sector_stocks.append({
+                        'code': str(code).zfill(6),
+                        'percent': float(row.get('percent', 0)),
+                        'amount': float(row.get('amount', 0))
+                    })
+            # 按涨幅和成交额排序，取前 5 名
+            sector_stocks.sort(key=lambda x: (x['percent'], x['amount']), reverse=True)
+            for s in sector_stocks[:5]:
+                protected_leaders.add(s['code'])
+        
+        self.logger.info(f"Protected Sector Leaders: {len(protected_leaders)} stocks from Top 5 Themes")
 
         selected_records = []
 
@@ -207,7 +227,7 @@ class StockSelector:
                         reason.append("均线多排")
 
                 # 2. 突破历史高点判断
-                upper1d = float(data.get('upper1d', 0))
+                upper1d = float(data.get('upper1', 0))
                 if upper1d > 0 and price > upper1d:
                     ratio = float(data.get('ratio', 1.0))
                     if ratio > 1.5: # 适度放量突破
@@ -286,14 +306,64 @@ class StockSelector:
             if pd.notna(raw_c_val) and str(raw_c_val).lower() != 'nan':
                  stock_cats = [c.strip() for c in str(raw_c_val).split(';') if c.strip()]
             
-            strong_sector_hit = [c for c in stock_cats if c in top_concepts]
+            strong_sector_hit = [c for c in stock_cats if c in top_hot_names]
             if strong_sector_hit:
                 score += 15 # 提升权重 from 10 to 15
                 reason.append(f"热点:{strong_sector_hit[0]}")
-                # [新增] 如果是 Top 5 核心热点板块的龙头 (前三名)
-                if any(c in [x[0] for x in concept_scores[:5]] for c in stock_cats):
-                    score += 10
-                    reason.append("核心热点")
+                # [针对性保护] 如果是核心热点前 5 名龙头
+                if code_str in protected_leaders:
+                    score += 50
+                    reason.append("板块龙头")
+
+            # F. [New] 特定模式筛选 (MA60 反转 / 布林上轨攻击)
+            try:
+                # 1. MA60 反转选股
+                ma60 = float(data.get('ma60d', 0))
+                if ma60 > 0:
+                    # 最近 1-2 日有探底 (破MA60)
+                    last_low1d = float(data.get('lastl1d', 0)) # 假设有这些字段
+                    # 或者从 ma60 乖离判断整理
+                    ma60_bias = (price - ma60) / ma60
+                    if -0.01 < ma60_bias < 0.04 and pct > 2.0:
+                        # 穿过前两日最高
+                        max_h_2d = max(float(data.get('lastp1d', 0)), float(data.get('lastp2d', 0)))
+                        if price > max_h_2d and price > ma60:
+                             score += 30
+                             reason.append("MA60反转启动")
+                
+                # 2. 布林上轨攻击 (Upper Attack)
+                upper1d = float(data.get('upper1', 0))
+                if upper1d > 0:
+                    if price > upper1d:
+                        score += 20
+                        reason.append("站稳上轨")
+                        # 检查是否连续攻击 (昨收也在上轨附近或之上)
+                        last_close1d = float(data.get('lastp1d', 0))
+                        upper2d = float(data.get('upper2', 0))
+                        if last_close1d > upper2d * 0.99:
+                             score += 15
+                             reason.append("连续上轨攻击")
+
+                # 3. [User NEW] 触底反弹 + 新高连阳 (Safety Priority)
+                # 检查是否从低位起涨：price 站上 MA10/MA20，且连阳
+                if consecutive_rise >= 2 and ma20 > 0:
+                    dist_to_ma20 = (price - ma20) / ma20
+                    if 0 < dist_to_ma20 < 0.05: # 距离 20 日线不远，属于反弹初中期
+                        score += 35
+                        reason.append("触底反弹启动")
+                        if consecutive_rise >= 3:
+                            score += 20
+                            reason.append("新高连阳(安全)")
+
+                # 4. [Negative Scoring] 冲高回落保护
+                high_p = float(data.get('high', 0))
+                if high_p > price:
+                    upper_shadow = (high_p - price) / (high_p - lastp1d + 0.01) if lastp1d > 0 else 0
+                    if upper_shadow > 0.4: # 上影线过长
+                        score -= 30
+                        reason.append("冲高回落(结构转弱)")
+            except Exception:
+                pass
 
             # E. 历史对比：标签化
             hist_cnt = hist_counts.get(code_str, 0)
@@ -311,9 +381,10 @@ class StockSelector:
                 reason.append("反复走强")
                 status_tag = "反复型"
 
-            # 最终筛选阈值提高 (score >= 45)
-            if score >= 45 and reason: 
-                reason = list(dict.fromkeys(reason))
+            # 最终筛选阈值大幅提高 (score >= 80) 以确保结果精简且高质
+            if score >= 80 and reason: 
+                reason = list(dict.fromkeys(reason)
+)
                 
                 # 自动生成建议
                 if is_pullback and pct < 2:
@@ -350,11 +421,15 @@ class StockSelector:
                 }
                 selected_records.append(record)
 
-        df_selected = pd.DataFrame(selected_records)
+                df_selected = pd.DataFrame(selected_records)
         if not df_selected.empty:
             # 理由去重
             df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
-            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (阈值>=45)")
+            
+            # [CRITICAL] 仅保留前 200 名优质标的
+            df_selected = df_selected.head(200)
+            
+            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (Threshold >= 80, Top 200 Limiter)")
             
             # 保存日志
             self.save_selection_log(df_selected)

@@ -140,8 +140,10 @@ class DailyPatternDetector:
         'vol_drying': '极度缩量',
         'n_day_rising': '多日连阳',
         'platform_break': '平台突破',
-        'rising_structure': '连涨结构',
-        'rebound_yang': '反弹阳'
+        'rising_structure': '上攻结构',
+        'rebound_yang': '底分起跳',
+        'stabilization': '缩量企稳',
+        'ma60_reversal': 'MA60反转',
     }
 
     def __init__(self):
@@ -165,7 +167,13 @@ class DailyPatternDetector:
         # 3. 极度缩量 (通常盘尾或盘中量比低时判断)
         events.extend(self._check_vol_drying(code, name, current_row, prev_rows))
 
-        # 4. V型反转 (Volunteer)
+        # 4. 缩量企稳 (Doji + Support + Low Volume)
+        events.extend(self._check_stabilization(code, name, current_row, prev_rows))
+
+        # 4.5. MA60 反转 (Consolidation + Dip + Breakout)
+        events.extend(self._check_ma60_reversal(code, name, current_row, prev_rows))
+
+        # 5. V型反转 (Volunteer)
         if self.check_volunteer(code, current_row, prev_rows):
             events.append(DailyPatternEvent(
                 code=code, name=name, pattern='v_shape',
@@ -173,7 +181,7 @@ class DailyPatternDetector:
                 detail="V型反转形态", score=80
             ))
 
-        # 5. 平台突破
+        # 6. 平台突破
         if self.check_platform_break(code, current_row, prev_rows):
             events.append(DailyPatternEvent(
                 code=code, name=name, pattern='platform_break',
@@ -261,12 +269,34 @@ class DailyPatternDetector:
         # 4. 连阳判断
         events.extend(self._check_n_day_rising(code, name, df))
 
-        # 5. [New] 连涨结构
+        # 5. V型反转
+        if self.check_volunteer(code, last_row, prev_rows):
+            events.append(DailyPatternEvent(
+                code=code, name=name, pattern='v_shape',
+                date=str(last_row.get('date', '')), price=float(last_row.get('close', 0)),
+                detail="V型反转形态", score=80
+            ))
+
+        # 6. 平台突破
+        if self.check_platform_break(code, last_row, prev_rows):
+            events.append(DailyPatternEvent(
+                code=code, name=name, pattern='platform_break',
+                date=str(last_row.get('date', '')), price=float(last_row.get('close', 0)),
+                detail="五日平台突破", score=75
+            ))
+
+        # 7. 连涨结构
         events.extend(self._check_rising_structure(code, name, df))
         
-        # 6. [New] 反弹阳
+        # 8. 反弹阳
         events.extend(self._check_rebound_yang(code, name, df))
-        
+
+        # 9. 缩量企稳 (Doji near support)
+        # scan 模式通常处理 full history，取最后一行进行判断
+        if len(df) >= 2:
+            events.extend(self._check_stabilization(code, name, last_row, prev_rows))
+            events.extend(self._check_ma60_reversal(code, name, last_row, prev_rows))
+            
         return events
 
     def _check_big_bull(self, code: str, name: str, row: Any, prev_df: Any) -> List[DailyPatternEvent]:
@@ -479,6 +509,104 @@ class DailyPatternDetector:
                 code=code, name=name, pattern='rebound_yang',
                 date=str(last_row.get('date', '')), price=close_p,
                 detail=f"反弹阳(>4日) +{pct:.1f}%", score=70
+            )]
+            
+        return []
+
+    def _check_ma60_reversal(self, code: str, name: str, row: Any, prev_df: Any) -> List[DailyPatternEvent]:
+        """
+        [New] MA60 反转启动检测:
+        1. 长期整理: 过去 5-10 日在 MA60 附近振荡 (乖离 < 5%)
+        2. 探底动作: 最近 1-2 日有低点 < MA60d
+        3. 突破动作: 今日收盘 > MA60d 且收盘 > 前两日最高点 (max_high_2d)
+        """
+        if prev_df is None or len(prev_df) < 10:
+            return []
+            
+        try:
+            ma60 = float(row.get('ma60d', 0))
+            if ma60 <= 0: # 尝试从历史计算
+                ma60 = prev_df['close'].tail(60).mean()
+            
+            if ma60 <= 0: return []
+            
+            close_p = float(row.get('close', 0))
+            low_p = float(row.get('low', 0))
+            
+            # 1. 整理与跳水检查
+            recent_10 = prev_df.tail(10)
+            avg_bias = (recent_10['close'] - ma60).abs().mean() / ma60
+            
+            if avg_bias > 0.06: # 偏离太大，不算整理
+                return []
+                
+            # 2. 探底: 最近 2 天 (含今日) 有低于 MA60
+            has_dip = low_p < ma60 * 1.002 or (prev_df.iloc[-1]['low'] < ma60 * 1.002)
+            if not has_dip:
+                return []
+                
+            # 3. 突破: 穿过 MA60 且 穿过前两日最高
+            max_h_2d = prev_df['high'].tail(2).max()
+            if close_p > ma60 and close_p > max_h_2d:
+                return [DailyPatternEvent(
+                    code=code, name=name, pattern='ma60_reversal',
+                    date=str(row.get('date', '')), price=close_p,
+                    detail=f"MA60反转启动(穿前两日新高{max_h_2d:.2f})",
+                    score=85
+                )]
+        except:
+            pass
+            
+        return []
+
+    def _check_stabilization(self, code: str, name: str, row: Any, prev_df: Any) -> List[DailyPatternEvent]:
+        """
+        [New] 检测缩量企稳(十字星/支撑点): 
+        1. 价格贴近 MA5 或 SWS (支撑线)
+        2. 成交量萎缩 (小于5日均量)
+        3. 形态为小实体或十字星 (Open/Close 差距小)
+        """
+        if prev_df is None or (hasattr(prev_df, 'empty') and prev_df.empty):
+            return []
+            
+        price = float(row.get('close', 0))
+        open_p = float(row.get('open', 0))
+        
+        # 1. 支撑线获取
+        ma5 = float(row.get('ma5', 0)) or float(row.get('ma5d', 0))
+        sws = float(row.get('SWS', 0))
+        
+        supports = [s for s in [ma5, sws] if s > 0]
+        if not supports:
+            return []
+            
+        # 2. 距离检测 (任一支撑 1% 以内)
+        is_near = any(abs(price - s) / s < 0.012 for s in supports)
+        
+        # 3. 实体检测 (Doji-like)
+        body_ratio = abs(price - open_p) / open_p if open_p > 0 else 1.0
+        is_doji = body_ratio < 0.015
+        
+        # 4. 量能检测 (缩量)
+        volume = float(row.get('amount', 0))
+        # prev_df might be a list of dicts in some contexts, or a DataFrame
+        if isinstance(prev_df, pd.DataFrame):
+            vol_ma5 = prev_df['amount'].tail(5).mean()
+        else:
+            vol_ma5 = sum(float(r.get('amount', 0)) for r in prev_df[-5:]) / 5 if len(prev_df) >= 5 else 0
+            
+        is_shrunk = volume < vol_ma5 * 1.1 if vol_ma5 > 0 else True
+        
+        if is_near and is_doji and is_shrunk:
+            detail = "支撑位企稳: "
+            if ma5 > 0 and abs(price - ma5) / ma5 < 0.012: detail += "MA5 "
+            if sws > 0 and abs(price - sws) / sws < 0.012: detail += "SWS "
+            
+            return [DailyPatternEvent(
+                code=code, name=name, pattern='stabilization',
+                date=str(row.get('date', '')), price=price,
+                detail=detail + f"缩量十字星",
+                score=60
             )]
             
         return []

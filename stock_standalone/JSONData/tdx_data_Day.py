@@ -1225,7 +1225,7 @@ def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
     # curr_a = rt_tick['volume']
     
     # 历史特征 (1d 代表昨天)
-    upper_1d = daily_feat['upper1d']
+    upper_1d = daily_feat['upper1']
     close_1d = daily_feat['lastp1d']
     amount_1d = daily_feat['lastv1d']
     eval_1d = int(daily_feat['eval1d'])

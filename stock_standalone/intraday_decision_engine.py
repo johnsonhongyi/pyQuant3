@@ -85,9 +85,12 @@ class IntradayDecisionEngine:
         ma5 = float(row.get("ma5d", 0))
         ma10 = float(row.get("ma10d", 0))
         
-        # 💥 关键点：获取实时均价 nclose (VWAP)，优先从 row 取，其次从 snapshot 取
+        # 💥 关键点：获取实时均价 nclose (VWAP)，优先从 row 取，其次 from snapshot 取
         nclose = float(row.get("nclose", snapshot.get("nclose", 0)))
         debug["nclose"] = nclose
+        
+        last_close = float(snapshot.get("last_close", 0))
+        gap_up = (open_p - last_close) / last_close if last_close > 0 else 0.0
 
         if price <= 0:
             logger.warning(f"Engine: {code} price is 0, skip evaluate")
@@ -1202,7 +1205,14 @@ class IntradayDecisionEngine:
 
             # 条件1: 开盘价高于昨日收盘（跳空高开）
             gap_up = (open_p - last_close) / last_close
-            if gap_up > 0.01:  # 提高到 1.0% 以上才算有效高开
+            if gap_up > 0.05: # 极端高开，必须有巨量支撑 (Moni-trap prevention)
+                if ratio > 12 or volume > last_v1 * 0.4:
+                    buy_score += 0.4
+                    buy_reasons.append(f"强力高开({gap_up:.1%})且放量")
+                else:
+                    buy_score -= 0.2
+                    debug["refuse_reason"] = f"高开无量({gap_up:.1%}, ratio={ratio:.1f})"
+            elif gap_up > 0.01:  # 提高到 1.0% 以上才算有效高开
                 buy_score += 0.15
                 buy_reasons.append(f"显著高开{gap_up:.1%}")
             elif gap_up > 0.003:
@@ -1354,24 +1364,52 @@ class IntradayDecisionEngine:
             
             ma5 = float(row.get("ma5d", 0))
             ma10 = float(row.get("ma10d", 0))
+            last_high = float(snapshot.get("last_high", 0))
             
-            if is_morning_window and ma5 > 0 and ma10 > 0 and price > nclose and structure != "派发":
-                # MA5 回踩检测：价格在 MA5 ± 1% 区间
-                ma5_bias = abs(price - ma5) / ma5
-                if ma5_bias < 0.01:  # 距离 MA5 在 1% 以内
-                    buy_score += 0.25
-                    buy_reasons.append(f"早盘回踩MA5({ma5_bias:.1%})")
+            yesterday_pattern = str(snapshot.get("pattern", "")).lower()
+            is_stabilized_target = "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern or "企稳" in yesterday_pattern
+            is_ma60_reversal = "ma60_reversal" in yesterday_pattern
+            
+            if is_morning_window and ma5 > 0 and structure != "派发":
+                # [Optimization] Lowest Price Entry for Stabilized Targets
+                if is_stabilized_target:
+                    # 企稳结构股：等待回踩昨日高点或MA5
+                    # 只要价格在 [last_high*0.995, last_high*1.01] 或 [ma5*0.995, ma5*1.01] 范围内
+                    hit_ma5 = abs(price - ma5) / ma5 < 0.01
+                    hit_prev_high = abs(price - last_high) / last_high < 0.01 if last_high > 0 else False
                     
-                # MA10 回踩检测：价格在 MA10 ± 1.5% 区间
-                ma10_bias = abs(price - ma10) / ma10
-                if ma10_bias < 0.015:  # 距离 MA10 在 1.5% 以内
-                    buy_score += 0.20
-                    buy_reasons.append(f"早盘回踩MA10({ma10_bias:.1%})")
+                    if hit_ma5 or hit_prev_high:
+                        buy_score += 0.35
+                        reason = "企稳股低吸回踩: " + ("MA5" if hit_ma5 else "") + ("YesterdayHigh" if hit_prev_high else "")
+                        buy_reasons.append(reason)
+                    elif price > last_high * 1.03:
+                        # 企稳股开盘冲太快，适当扣分防止追高，除非量比极大
+                        if float(row.get('ratio', 1)) < 15:
+                            buy_score -= 0.15
+                            debug["refuse_reason"] = "企稳股早盘涨幅过大且无巨量"
+                
+                # [New] [User Request] MA60 反转启动次日加速 logic
+                elif is_ma60_reversal:
+                    # 次日特征：低开高走 或 高开高走 (Opening is the Low)
+                    open_is_low = (low > 0 and (open_p - low) / open_p < 0.005)
+                    if open_is_low and price > open_p:
+                        buy_score += 0.45 
+                        buy_reasons.append("MA60反转次日加速(低点已现)")
+                    elif gap_up > 0 and price > open_p:
+                         buy_score += 0.35
+                         buy_reasons.append("MA60反转次日高走")
+                
+                else:
+                    # 普通强势股加成逻辑
+                    ma5_bias = abs(price - ma5) / ma5
+                    if ma5_bias < 0.01:
+                        buy_score += 0.25
+                        buy_reasons.append(f"早盘回踩MA5({ma5_bias:.1%})")
                     
-                # 如果同时满足靠近 MA5 和 MA10，且价格在两者之间，是极佳买点
-                if ma10 < price < ma5 and price > nclose:
-                    buy_score += 0.15
-                    buy_reasons.append("MA5/MA10夹板支撑")
+                    ma10_bias = abs(price - ma10) / ma10
+                    if ma10_bias < 0.015:
+                        buy_score += 0.20
+                        buy_reasons.append(f"早盘回踩MA10({ma10_bias:.1%})")
             
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
@@ -1437,6 +1475,23 @@ class IntradayDecisionEngine:
                 # [User Request] 不跌破前日收盘价，或者实时盘中大幅回撤跌破前日收盘价都不清仓
                 # 除非是那种极端见顶放量下杀
                 is_breaking_last_close = price < last_close
+
+                # --- [New] Profit Band Protection: SWL -> SWS Shift ---
+                swl = float(row.get("SWL", 0))
+                sws = float(row.get("SWS", 0))
+                orig_reason = snapshot.get('reason', '')
+                if "领涨带" in str(orig_reason) or "SWL" in str(orig_reason):
+                    if price < swl and price > sws:
+                            # 跌出强领涨带，进入波动带，需收紧止盈
+                            urgency = (swl - price) / swl if swl > 0 else 0
+                            sell_pos = max(0.4, 1.0 - urgency * 5) # 剧烈回落则大幅减仓
+                            return {
+                                "triggered": True,
+                                "action": "卖出",
+                                "position": round(sell_pos, 2),
+                                "reason": f"跌出SWL强领涨带, 支撑转SWS({sws:.2f})",
+                                "debug": debug
+                            }
 
                 if is_high_open and is_heavy_vol and is_breaking_last_close:
                     # 高开下杀放量且跌破前收 (这是致命信号，主升浪也得先撤)
@@ -2117,6 +2172,8 @@ class IntradayDecisionEngine:
         nclose = float(row.get('nclose', 0))
         last_close = float(snapshot.get('last_close', 0))
         volume = float(row.get('volume', 0)) # 实时量比
+        open_p = float(row.get('open', 0))
+        high = float(row.get('high', 0))
         
         # 1. 乖离率检查：如果偏离 20 日线过远 (>15%)，主升浪保护需极度谨慎
         bias_ma20 = (price - ma20) / ma20 if ma20 > 0 else 0
@@ -2134,6 +2191,24 @@ class IntradayDecisionEngine:
         debug["td_setup"] = snapshot.get('td_setup', 0)
         debug["top_score"] = top_info['score']
         
+        # 💥 [NEW] D+1/D+2 稳定性检查 (缩量十字星企稳)
+        yesterday_pattern = str(snapshot.get("pattern", "")).lower()
+        is_stabilizing = "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern or "企稳" in yesterday_pattern
+        
+        body_ratio = abs(price - open_p) / open_p if open_p > 0 else 1.0
+        is_curr_doji = body_ratio < 0.015
+        is_curr_shrunk = volume < 1.1 # 盘中成交量比不高
+        
+        if is_main_wave and (is_stabilizing or (is_curr_doji and is_curr_shrunk)):
+             if price > ma5 * 0.995: # 守住五日线
+                 return {
+                    "triggered": True,
+                    "action": "持有",
+                    "position": 1.0,
+                    "reason": "主升浪稳定性确认(缩量企稳/D+1/D+2)",
+                    "debug": debug
+                }
+        
         # 💥 [NEW] 核心逻辑：高位放量滞涨/阴跌，主升浪也要“弃船”
         # 如果 top_score 已经很高，或者在高位放量 (量比>2.0) 且破均线
         is_vol_exhaustion = volume > 2.0 and price < nclose
@@ -2146,6 +2221,31 @@ class IntradayDecisionEngine:
                 "position": 0.4 if top_info['score'] > 0.6 else 0.7, 
                 "reason": reason
             }
+            
+        # 💥 [New] [User Request] 5-6日动能周期识别
+        win_count = int(snapshot.get("win", 0))
+        if win_count >= 5:
+            # 动能衰竭期：只要跌破分时均线 或 产生冲高回落，立即保护
+            if price < nclose or (high > 0 and (high - price) / high > 0.04):
+                return {
+                    "triggered": True,
+                    "action": "卖出",
+                    "position": 0.5, # 减仓一半，识别动能切换
+                    "reason": f"动能周期达标({win_count}d)+分时弱势",
+                    "debug": debug
+                }
+
+        # 💥 [New] 派发结构杀跌拦截 (300548 案例)
+        # 如果当日高位回落幅度很大 且 跌破昨日收盘价 且 跌破今日均价
+        if high > 0 and (high - price) / high > 0.05: # 大幅杀跌
+            if price < last_close and price < nclose:
+                 return {
+                    "triggered": True,
+                    "action": "卖出",
+                    "position": 0.0, # 清仓
+                    "reason": "派发结构确认(高位杀跌破前收)",
+                    "debug": debug
+                }
             
         # 核心保护：只要在 5 日线之上，且跌幅未破位（不破昨日收盘且不破今日均价），坚决持仓
         # 002667 案例：在 1.30 之前虽然波动，但未破关键支撑
@@ -2231,6 +2331,24 @@ class IntradayDecisionEngine:
                  if trend_score > 0.3:
                      score += 0.15
                      reasons.append(f"踩MA10短线撑")
+
+        # --- [New] SWS/SWL Profit Band Logic ---
+        swl = float(row.get("SWL", 0))
+        sws = float(row.get("SWS", 0))
+        if price > swl and swl > 0:
+            score += 0.15
+            reasons.append("处于SWL强力领涨带")
+            debug["profit_band"] = "SWL"
+        elif price > sws and sws > 0:
+            score += 0.05
+            reasons.append("处于SWS小浪波动带")
+            debug["profit_band"] = "SWS"
+        
+        # --- [New] Stabilization Pattern Bonus ---
+        # yesterday_pattern = str(snapshot.get("pattern", ""))
+        # if "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern:
+        #     score += 0.1
+        #     reasons.append(f"昨日信号({yesterday_pattern})加成")
 
         # 2. 结构支撑 (前低/布林/缺口)
         low10 = float(snapshot.get("low10", 0))
