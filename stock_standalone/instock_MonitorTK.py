@@ -1791,24 +1791,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             test_callback=self.on_test_code
         )
 
-        self.search_history1, self.search_history2, self.search_history3, self.search_history4 = self.query_manager.load_search_history()
-
-        # 从 query_manager 获取历史
+        # 从 query_manager 获取历史 (Raw dicts)
         h1, h2, h3, h4 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3, self.query_manager.history4
 
         # [MODIFIED] Enhanced display: "Note (Query)"
         self.search_map1 = {}
         self.search_map2 = {}
+        self.search_map4 = {} # 给历史4也准备一个map
         
         self.search_history1 = self._format_history_list(h1, self.search_map1)
         self.search_history2 = self._format_history_list(h2, self.search_map2) 
-        self.search_history3 = [r["query"] for r in h3] # Keep simple for others if unused
-        self.search_history4 = [r["query"] for r in h4]
+        self.search_history3 = [r["query"] for r in h3]
+        self.search_history4 = self._format_history_list(h4, self.search_map4)
 
         # [MODIFIED] Update combobox values with formatted history
         self.search_combo1['values'] = self.search_history1
         self.search_combo2['values'] = self.search_history2
-        # self.search_combo4['values'] = self.search_history4
+        if hasattr(self, 'search_combo4'):
+            self.search_combo4['values'] = self.search_history4
 
         # Update Combobox values
         self.search_combo1['values'] = self.search_history1
@@ -8234,64 +8234,69 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         return display_list
 
     def sync_history_from_QM(self, **kwargs):
+        """当 QueryHistoryManager 内部变动（添加、使用、编辑、删除）时回调同步到主窗口"""
         self.query_manager.clear_hits()
         source = kwargs.get("source", "")
         selected_query = kwargs.get("selected_query")
 
-        if "search_history1" in kwargs:
-            h1 = kwargs["search_history1"]
-            if h1 is self.query_manager.history2:
-                logger.info("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
-            else:
-                self.search_history1 = self._format_history_list(h1, self.search_map1)
-                if hasattr(self, 'search_combo1'):
-                    self.search_combo1['values'] = self.search_history1
+        # ⚙️ 统一处理 history1 ~ history4
+        configs = [
+            ("search_history1", "search_history1", "search_combo1", "search_map1"),
+            ("search_history2", "search_history2", "search_combo2", "search_map2"),
+            ("search_history3", "search_history3", "search_combo3", None),
+            ("search_history4", "search_history4", "search_combo4", "search_map4"),
+        ]
 
-        if "search_history2" in kwargs:
-            h2 = kwargs["search_history2"]
-            if h2 is self.query_manager.history1:
-                logger.info("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
-            else:
-                self.search_history2 = self._format_history_list(h2, self.search_map2)
-                if hasattr(self, 'search_combo2'):
-                    self.search_combo2['values'] = self.search_history2
-        if "search_history3" in kwargs:
-            h3 = kwargs["search_history3"]
-            if h3 is self.query_manager.history1 or h3 is self.query_manager.history2:
-                logger.info("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
+        for arg_key, attr_name, combo_name, map_name in configs:
+            if arg_key in kwargs:
+                raw_h = kwargs[arg_key]
+                # 🛡️ 强制检查：防止历史记录交叉引用
+                others = [getattr(self.query_manager, f"history{i}") for i in range(1, 5) if f"history{i}" != arg_key[-8:]]
+                if any(raw_h is other for other in others):
+                    logger.warning(f"⚠️ sync_history_from_QM 检出交叉引用 ({arg_key})，已跳过同步")
+                    continue
 
-            else:
-                if hasattr(self, "search_history3") and isinstance(self.search_history3, list):
-                    self.search_history3.clear()
-                    self.search_history3.extend([r["query"] for r in list(h3)])
+                # 格式化并更新本地列表
+                if map_name:
+                    mapping = getattr(self, map_name, {})
+                    formatted = self._format_history_list(raw_h, mapping)
+                    setattr(self, attr_name, formatted)
                 else:
-                    self.search_history3 = [r["query"] for r in list(h3)]
-                
-                if hasattr(self, "kline_monitor") and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-                    try:
-                        self.kline_monitor.refresh_search_combo3()
-                        # 如果是双击联动，强制执行一次查询以应用过滤器
-                        if source == "use" and selected_query:
-                            self.kline_monitor.search_var.set(selected_query)
-                            self.kline_monitor.search_code_status(onclick=True)
-                    except Exception as e:
-                        logger.info(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
+                    # history3 等简单列表
+                    setattr(self, attr_name, [r["query"] for r in raw_h])
 
-        if "search_history4" in kwargs:
-            h4 = kwargs["search_history4"]
-            self.search_history4 = [r["query"] for r in list(h4)]
-            if hasattr(self, 'search_combo4'):
-                self.search_combo4['values'] = self.search_history4
-                if source == "use" and selected_query:
-                    self.search_var4.set(selected_query)
-                    self.apply_search()
+                # 更新 UI Combobox
+                if hasattr(self, combo_name):
+                    combo = getattr(self, combo_name)
+                    # 检查 combo 是否还是有效的 (尤其是 history3 可能在 KLineMonitor 中)
+                    if hasattr(combo, 'winfo_exists') and combo.winfo_exists():
+                        combo['values'] = getattr(self, attr_name)
+                    elif combo_name == "search_combo3":
+                        # history3 特殊处理：KLineMonitor 联动
+                        if hasattr(self, "kline_monitor") and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
+                            try:
+                                self.kline_monitor.refresh_search_combo3()
+                                if source == "use" and selected_query:
+                                    self.kline_monitor.search_var.set(selected_query)
+                                    self.kline_monitor.search_code_status(onclick=True)
+                            except Exception as e:
+                                logger.debug(f"KLineMonitor sync failed: {e}")
+
+                # 如果是"使用"动作，且当前历史匹配，同步 Var 以触发 apply_search
+                if source == "use" and selected_query and arg_key == self.query_manager.current_key:
+                    var_name = f"search_var{arg_key[-1]}"
+                    if hasattr(self, var_name):
+                        getattr(self, var_name).set(selected_query)
+                        # 如果是 history4，手动触发一次搜索
+                        if arg_key == "history4":
+                            self.apply_search()
         
         # ✅ 子窗口同步：转发给策略白盒管理窗口
         if hasattr(self, "_strategy_manager_win") and self._strategy_manager_win and getattr(self._strategy_manager_win, "winfo_exists", lambda: False)():
             try:
                 self._strategy_manager_win._on_history_sync(**kwargs)
             except Exception as e:
-                logger.info(f"[警告] 转发同步到 StrategyManager 失败: {e}")
+                logger.debug(f"StrategyManager forward sync failed: {e}")
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
         # [MODIFIED] Helper to get search map

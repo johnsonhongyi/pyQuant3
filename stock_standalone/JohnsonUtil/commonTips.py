@@ -3702,7 +3702,7 @@ def get_work_hdf_status():
 def get_work_duration():
     int_time = get_now_time_int()
     # now_t = int(now_t)
-    if  get_trade_date_status() and ((700 < int_time < 915) or (1132 < int_time < 1300)):
+    if  get_trade_date_status() and ((700 < int_time < 915) or (1130 < int_time < 1300)):
         # if (int_time > 830 and int_time < 915) or (int_time > 1130 and int_time < 1300) or (int_time > 1500 and int_time < 1510):
         # return False
         return True
