@@ -2091,71 +2091,68 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def update_tree(self):
         assert_main_thread("update_tree")
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
-            return  # 已销毁，直接返回
+            return
+        
         try:
-            if self.refresh_enabled:  # ✅ 只在启用时刷新
+            if self.refresh_enabled:
                 has_update = False
-                _last_df = pd.DataFrame()
+                latest_df = None
+                
+                # 🔄 优化：只取队列中最新的一个数据包，丢弃过时的增量
                 while not self.queue.empty():
-                    df = self.queue.get_nowait()
+                    try:
+                        latest_df = self.queue.get_nowait()
+                    except queue.Empty:
+                        break
+                
+                if latest_df is not None:
+                    df = latest_df
                     # 🔌 在主进程同步更新 DataPublisher
                     if hasattr(self, 'realtime_service') and self.realtime_service:
                         try:
                             self.realtime_service.update_batch(df)
                         except Exception as e:
                             logger.error(f"Main process realtime update error: {e}")
-                    # logger.info(f'df:{df[:1]}')
+
                     if self.sortby_col is not None:
-                        logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    if not _last_df.empty:
-                        try:
-                            _df_diff = df.compare(_last_df, keep_shape=False, keep_equal=False)
-                            # 如果没有变化行，就跳过本轮
-                        except ValueError as e:
-                            # debug 输出索引和列的不一致
-                            logger.debug(f"[df] compare() ValueError: {e}")
-                    else:
-                        _last_df = df.copy()
-                        _df_diff = _last_df
-                    if not _df_diff.empty and df is not None and not df.empty:
+                    
+                    if not df.empty:
                         time_s = time.time()
                         df = detect_signals(df)
-                        # Phase 4: Inject resample info for UI display
+                        
                         cur_res = self.global_values.getkey("resample") or 'd'
                         if 'resample' not in df.columns:
                             df['resample'] = cur_res
                             
-                        self.df_all = df.copy()
-                        _last_df = df.copy()
+                        self.df_all = df  # 直接引用，减少 copy
                         has_update = True
                         
-                        # ✅ Sync data to selector if exists (for MarketPulse / SelectionWindow)
                         if hasattr(self, 'selector') and self.selector:
                             self.selector.df_all_realtime = self.df_all
                             self.selector.resample = cur_res
 
                         logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
-                        # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                         
-                        # ✅ 仅在第一次获取 df_all 后恢复监控窗口
                         if not hasattr(self, "_restore_done"):
                             self._restore_done = True
-                            logger.info("首次数据加载完成，开始恢复监控窗口...")
-                            self.after(2*1000,self.restore_all_monitor_windows)
-                            logger.info("首次数据加载完成，开始55188监控...")
-                            self.after(10*1000, self._check_ext_data_update)
-                            logger.info("首次数据加载完成，延迟开启KLineMonitor...")
-                            self.after(30*1000, self.KLineMonitor_init)
-                            self.after(60*1000, self.schedule_15_30_job)
+                            self.after(2000, self.restore_all_monitor_windows)
+                            self.after(10000, self._check_ext_data_update)
+                            self.after(30000, self.KLineMonitor_init)
+                            self.after(60000, self.schedule_15_30_job)
 
                         if self.search_var1.get() or self.search_var2.get():
                             self.apply_search()
                         else:
                             self.refresh_tree(self.df_all)
                         
-                        # ✅ 强制同步刷新所有已打开的 Top10 窗口
                         self.update_all_top10_windows()
+                        
+                        # 🧹 周期性手动 GC
+                        if not hasattr(self, '_update_count'): self._update_count = 0
+                        self._update_count += 1
+                        if self._update_count % 10 == 0:
+                            gc.collect()
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
@@ -7917,8 +7914,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
         
         self._last_refresh_fingerprint = current_fingerprint
-
-        df = df.copy()
+        # df = df.copy()  # ⚡ 移除 redundant copy()
 
         # 确保 code 列存在并为字符串（便于显示）
         if 'code' not in df.columns:
