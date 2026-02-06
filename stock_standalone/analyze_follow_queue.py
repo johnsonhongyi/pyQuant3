@@ -4,10 +4,10 @@ Follow Queue Analysis Script - 跟单队列复盘分析工具
 分析“竞价买入”失败案例，识别“杀跌模式”。
 """
 import sqlite3
-import pandas as pd
 from datetime import datetime, timedelta
 
 def analyze_follow_queue():
+    import pandas as pd
     signal_db = "signal_strategy.db"
     trading_db = "trading_signals.db"
     

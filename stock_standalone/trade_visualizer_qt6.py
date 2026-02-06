@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Union, Callable
 import signal
 import pandas as pd
 import numpy as np
-import pyqtgraph as pg
+import pyqtgraph as pg # ⚡ 已移至局部作用域 (修复：由于类定义需要，恢复至全局但保持 lazy)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
@@ -2098,6 +2098,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # Initialize Logger with default path to ensure consistency with main program
         self.logger = TradingLogger()
         from intraday_decision_engine import IntradayDecisionEngine
+        from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
+        from strong_consolidation_strategy import StrongConsolidationStrategy
+        from strategy_controller import StrategyController
+
         self.decision_engine = IntradayDecisionEngine() # ⭐ 内部决策引擎
         self.pullback_strat = StrongPullbackMA5Strategy(min_score=60) # ⭐ 强力回撤策略
         self.consolidation_strat = StrongConsolidationStrategy()     # ⭐ 强势整理策略
@@ -2689,6 +2693,8 @@ class MainWindow(QMainWindow, WindowMixin):
     # ================== 热点面板 & 信号日志 ==================
     def _init_hotlist_and_signal_log(self):
         """初始化热点自选面板和信号日志面板"""
+        from hotlist_panel import HotlistPanel
+        from signal_log_panel import SignalLogPanel
         # 1. 热点自选面板 (集中初始化，防止重复)
         if not hasattr(self, 'hotlist_panel'):
             # ⭐ [Independent Window] 设置为 None，允许面板掉到主窗口后面
@@ -3222,6 +3228,8 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Error processing IPC command: {e}")
 
     def _update_signal_log_from_ipc(self, data_list: list):
+        from signal_message_queue import SignalMessage
+        from signal_log_panel import SignalLogPanel
         """处理通过 IPC 推送的信号数据列表 (供测试套件或外部程序使用)"""
         logger.info(f"[IPC] Processing {len(data_list)} signals from IPC")
         for data in data_list:
@@ -3982,6 +3990,7 @@ class MainWindow(QMainWindow, WindowMixin):
         - 1: 决策引擎
         - 2: 全策略(含监理)
         """
+        from strategy_controller import StrategyController
         strategy_map = {
             0: [StrategyController.STRATEGY_PULLBACK_MA5],
             1: [StrategyController.STRATEGY_DECISION_ENGINE],
@@ -10036,11 +10045,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 2️⃣ 停止 realtime_process
         if getattr(self, 'realtime_process', None):
             if self.realtime_process.is_alive():
-                self.realtime_process.join(timeout=1)
+                self.realtime_process.join(timeout=3) # ⬅️ [FIX] 增加等待时间
                 if self.realtime_process.is_alive():
                     logger.info("realtime_process 强制终止")
                     self.realtime_process.terminate()
-                    self.realtime_process.join()
+                    self.realtime_process.join(timeout=1)
             self.realtime_process = None
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
@@ -10074,14 +10083,16 @@ class MainWindow(QMainWindow, WindowMixin):
                     except Exception as e:
                         logger.warning(f"Error stopping thread {id(t)}: {e}")
                 t.deleteLater()
-        # 3.6️⃣ 停止日志，防止 BrokenPipeError
+
+        # 当 GUI 关闭时，触发 stop_event
+        stop_event.set()
+
+        # 3.6️⃣ 停止日志，防止 BrokenPipeError (放在最后一步)
         try:
             from JohnsonUtil.LoggerFactory import stopLogger
             stopLogger()
         except:
             pass
-        # 当 GUI 关闭时，触发 stop_event
-        stop_event.set()
 
         print(f'closeEvent: OK')
         # Accept the event to close
@@ -10245,6 +10256,8 @@ def run_visualizer(initial_code=None, df_all=None):
     sys.exit(app.exec())
 
 def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+    import pyqtgraph as pg
+    pg.setConfigOptions(antialias=True)
     # ⭐ 启用底层故障捕捉，以便锁定 QThread Destroyed 等 C++ 报错
     try:
         import faulthandler
