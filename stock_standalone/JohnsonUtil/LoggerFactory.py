@@ -360,9 +360,25 @@ def stopLogger():
     """停止 QueueListener，在程序退出时调用"""
     global _GLOBAL_LISTENER
     if _GLOBAL_LISTENER:
-        _GLOBAL_LISTENER.stop()
+        try:
+            # ⭐ [FIX] 优雅停止，忽略退出时的 BrokenPipe/EOFError
+            _GLOBAL_LISTENER.stop()
+        except Exception:
+            pass
         _GLOBAL_LISTENER = None
 
+
+class RobustQueueListener(QueueListener):
+    """
+    ⭐ [FIX] 增强型 QueueListener
+    在 Windows 多进程环境下，当主进程或 Pipe 关闭时，默认的 _monitor 会抛出 BrokenPipeError 或 EOFError。
+    该类捕获并屏蔽这些异常，确保退出时不报红。
+    """
+    def _monitor(self):
+        try:
+            super()._monitor()
+        except (EOFError, BrokenPipeError, ConnectionResetError):
+            pass
 
 def _ensure_listener_started(log_f, show_detail=True):
     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
@@ -422,7 +438,7 @@ def _ensure_listener_started(log_f, show_detail=True):
         )
         fh.setFormatter(fh_formatter)
 
-        _GLOBAL_LISTENER = QueueListener(_GLOBAL_QUEUE, ch, fh)
+        _GLOBAL_LISTENER = RobustQueueListener(_GLOBAL_QUEUE, ch, fh)
         _GLOBAL_LISTENER.start()
 
         atexit.register(stopLogger)

@@ -3,11 +3,11 @@ import time
 import json
 import gc
 import traceback
-import pandas as pd
-import numpy as np
 from typing import Any, Optional, Union, Dict, List, Callable
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
+pd = cct.LazyModule('pandas')
+np = cct.LazyModule('numpy')
 from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import LoggerFactory
 from JSONData import tdx_data_Day as tdd
@@ -1757,6 +1757,7 @@ def _handle_init_tdx(
         return False
 
     with timed_ctx("init_tdx_total", warn_ms=1000):
+
         top_now = tdd.getSinaAlldf(
             market=market,
             vol=ct.json_countVol,
@@ -1827,6 +1828,7 @@ def check_code_vect_sum_opt(code,top_all,resample='d'):
     # for co in code_list:
     #     # data_tw = get_vect_daily_data(top_all,code_list)
     #     print(f'code: {co}  ---------------------------')
+    # 
     #     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[[co]])
     #     data_tw  = pd.DataFrame(vect_daily_t)
     #     print(f'dump_vect_daily_ohlcv: {tdd.dump_vect_daily_ohlcv(vect_daily_t, max_days=cct.compute_lastdays)}')
@@ -1841,6 +1843,7 @@ def check_code_vect_sum_opt(code,top_all,resample='d'):
     #     print(f'code: {co}  ---------------------------')
 
     print(f'code: {code_list}  ---------------------------')
+
     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
     data_tw  = pd.DataFrame(vect_daily_t)
     print(f'dump_vect_daily_ohlcv: {tdd.dump_vect_daily_ohlcv(vect_daily_t, max_days=cct.compute_lastdays)}')
@@ -1858,6 +1861,7 @@ def check_code_vect_sum_opt(code,top_all,resample='d'):
 
 
 def get_vect_daily_data(top_all,code_list):
+
     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
     data_tw  = pd.DataFrame(vect_daily_t)
     return  data_tw
@@ -1874,6 +1878,7 @@ def test_opt(top_all,resample='d',code=None):
     # import ipdb;ipdb.set_trace()
     print(f'resample: {resample} ------------------------')
     # data_tw = get_vect_daily_data(top_all,code_list)
+
     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
     # data_t = top_all.loc[code_list]
     data_tw  = pd.DataFrame(vect_daily_t)
@@ -1895,6 +1900,7 @@ def _run_main_pipeline(
     detect_calc_support_var
 ):
     with timed_ctx("fetch_market", warn_ms=800):
+    
         if market == 'indb':
             indf = get_indb_df()
             top_now = tdd.getSinaAlldf(
@@ -1971,6 +1977,7 @@ def _run_main_pipeline(
 
 def get_all_fetch_df(market = 'all', resample= 'd',detect_val = False,status_callback: Callable[[], Any] = None):
     with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+    
         top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
 
         top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
@@ -2270,9 +2277,11 @@ def fetch_and_process(
                 with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
                     indf = get_indb_df()
                     stock_code_list = indf.code.tolist()
+                
                     top_now = tdd.getSinaAlldf(market=stock_code_list,vol=ct.json_countVol, vtype=ct.json_countType)
             else:
                 with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+                
                     top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")

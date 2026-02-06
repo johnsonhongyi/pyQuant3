@@ -1,4 +1,5 @@
 # -*- encoding: utf-8 -*-
+from __future__ import annotations
 
 import argparse
 import datetime
@@ -15,8 +16,9 @@ import collections.abc              #py3
 
 from multiprocessing.pool import ThreadPool
 from multiprocessing import cpu_count
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after multiprocessing")
 
-import pandas as pd
+# import pandas as pd
 # import trollius as asyncio
 # from trollius.coroutines import From
 import asyncio
@@ -24,28 +26,89 @@ import argparse
 from typing import Optional, List, Dict, Union, Any, Tuple, Callable
 
 
-from JohnsonUtil.prettytable import PrettyTable
-from JohnsonUtil import johnson_cons as ct
+# from JohnsonUtil.prettytable import PrettyTable
+# from JohnsonUtil import johnson_cons as ct
 # from JohnsonUtil import inStockDb as inDb
 
 import traceback
 import socket
-from configobj import ConfigObj
+# from configobj import ConfigObj
 import importlib
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.getLogger()
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after LoggerFactory")
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-import numpy as np
+# import numpy as np
 import subprocess
-import a_trade_calendar
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after subprocess")
+# import a_trade_calendar
+# import a_trade_calendar
+# from py_mini_racer import py_mini_racer
+
 # from py_mini_racer import py_mini_racer
 from textwrap import fill
-from JohnsonUtil.prettytable import ALL as ALL
+# from JohnsonUtil.prettytable import ALL as ALL
 # from functools import partial
 import functools
 from multiprocessing import Pool
+
+try:
+    from typing import TYPE_CHECKING
+except ImportError:
+    TYPE_CHECKING = False
+
+if TYPE_CHECKING:
+    import pandas as pd
+    import numpy as np
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after TYPE_CHECKING")
+
+class LazyModule:
+    def __init__(self, key, package=None):
+        self._key = key
+        self._package = package
+        self._module = None
+
+    @property
+    def module(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._key, self._package)
+        return self._module
+
+    def __getattr__(self, name):
+        # print(f"LazyModule Access: {self._key}.{name}")
+        # if self._key == 'JohnsonUtil.johnson_cons':
+        #      print(f"LazyModule Trigger: {self._key} accessing {name}")
+        return getattr(self.module, name)
+
+    def __call__(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+class LazyClass:
+    def __init__(self, module_path, class_name):
+        self.module_path = module_path
+        self.class_name = class_name
+        self._cls = None
+
+    @property
+    def cls(self):
+        if self._cls is None:
+            import importlib
+            module = importlib.import_module(self.module_path)
+            self._cls = getattr(module, self.class_name)
+        return self._cls
+
+    def __call__(self, *args, **kwargs):
+        return self.cls(*args, **kwargs)
+
+pd = LazyModule('pandas')
+np = LazyModule('numpy')
+a_trade_calendar = LazyModule('a_trade_calendar')
+ct = LazyModule('JohnsonUtil.johnson_cons')
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after LazyModules")
+ConfigObj = LazyClass('configobj', 'ConfigObj')
+# from configobj import ConfigObj
 
 try:
     from urllib.request import urlopen, Request
@@ -55,7 +118,7 @@ except ImportError:
 import urllib.error
 import requests
 requests.adapters.DEFAULT_RETRIES = 0
-# sys.path.append("..")
+# print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after requests")
 # sys.path.append("..")
 # print sys.path
 # from JSONData import tdx_data_Day as tdd
@@ -1718,7 +1781,7 @@ function d(t) {
 #     else:
 #         return trade_status
 def read_ini(inifile: str = 'filter.ini', setrule: Optional[str] = None, category: str = 'General', filterkey: str = 'filter_rule') -> Optional[str]:
-    from configobj import ConfigObj
+    # from configobj import ConfigObj
     baser: str = getcwd().split('stock')[0]
     base: str = baser + 'stock' + path_sep
     config_file_path: str = base + inifile

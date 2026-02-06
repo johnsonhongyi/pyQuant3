@@ -35,12 +35,7 @@ from td_sequence import calculate_td_sequence
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
 MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
-# Optional imports
-try:
-    import pyttsx3
-except ImportError:
-    pyttsx3 = None
-    logger.warning("pyttsx3 not found, voice disabled.")
+# pyttsx3 import removed - delegated to VoiceAnnouncer/AlertManager
 
 try:
     from stock_selector import StockSelector
@@ -66,10 +61,7 @@ except ImportError:
     HAS_PHASE_ENGINE = False
     logger.warning("PositionPhaseEngine not found.")
 
-try:
-    import pythoncom
-except ImportError:
-    pythoncom = None
+# pythoncom import removed - usage localized or delegated
 
 
 def normalize_speech_text(text: str) -> str:
@@ -2758,10 +2750,6 @@ class StockLiveStrategy:
         errors = []
         
         try:
-            # 内部使用局部导入以减少加载开销
-            from JSONData import tdx_data_Day as tdd
-            from JohnsonUtil import johnson_cons as ct
-            import json
 
             for key, data in self._monitored_stocks.items():
                 code = data.get('code') or key.split('_')[0]

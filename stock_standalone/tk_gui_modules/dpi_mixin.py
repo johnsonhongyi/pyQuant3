@@ -98,7 +98,10 @@ class DPIMixin:
             self.last_dpi_scale = current_scale
 
         # 每 5 秒检测一次
-        self.after(5000, self._check_dpi_change)
+        if hasattr(self, '_schedule_after'):
+            self._schedule_after(5000, self._check_dpi_change)
+        else:
+            self.after(5000, self._check_dpi_change)
 
     def get_qt_window_scale_base(self, win: Any) -> tuple[float, float]:
         if not PYQT5_AVAILABLE:

@@ -1,4 +1,5 @@
 # -*- encoding: utf-8 -*-
+from __future__ import annotations
 import json
 import os
 import re
@@ -6,14 +7,18 @@ import sys
 import time
 
 sys.path.append("..")
-import pandas as pd
-import numpy as np
+# import pandas as pd
+# import numpy as np
 import requests
 
-from JSONData import tdx_hdf5_api as h5a
-from JSONData import realdatajson as rl
+# from JSONData import tdx_hdf5_api as h5a
+# from JSONData import realdatajson as rl
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
+h5a = cct.LazyModule('JSONData.tdx_hdf5_api')
+rl = cct.LazyModule('JSONData.realdatajson')
+pd = cct.LazyModule('pandas')
+np = cct.LazyModule('numpy')
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import LoggerFactory
@@ -262,6 +267,8 @@ class Sina:
     request_num: int
 
     def __init__(self) -> None:
+        import pandas as pd
+        import numpy as np
         # self.grep_stock_detail = re.compile(r'(\d+)=([^\S][^,]+?)%s' %
         # (r',([\.\d]+)' * 29,))   #\n特例A (4)
         self.grep_stock_detail = re.compile(
@@ -366,9 +373,7 @@ class Sina:
                 valid_tick = h5[h5.ticktime != 0].ticktime
                 if len(valid_tick) > 0:
                     o_time = valid_tick
-                    otime = h5.ticktime
                     ticktime_val = o_time.iloc[0]
-                    
                     ts_str: str
                     if isinstance(ticktime_val, str):
                         ts_str = ticktime_val.replace(":", "")[-6:]
@@ -729,12 +734,6 @@ class Sina:
         else:
             src = 0
 
-        rebuild_df['nlow'] = (
-            src.reindex(rebuild_df.index)
-               .fillna(0)
-            if hasattr(src, 'reindex')
-            else 0
-        )
         rebuild_df['nlow'] = (
             src.reindex(rebuild_df.index)
                .fillna(0)

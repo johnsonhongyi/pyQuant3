@@ -21,12 +21,7 @@ except ImportError:
     winsound = None
 
 # Voice Engine Dependencies
-try:
-    import pyttsx3
-    import pythoncom
-except ImportError:
-    pyttsx3 = None
-    pythoncom = None
+# pyttsx3 and pythoncom are imported lazily in _voice_worker to save memory
 
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name="AlertManager")

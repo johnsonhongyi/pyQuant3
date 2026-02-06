@@ -1,10 +1,14 @@
 from struct import unpack
-import pandas as pd
+# import pandas as pd
 import os
+import sys
+sys.path.append("..")
+from JohnsonUtil import commonTips as cct
 
-
+base_path = cct.get_tdx_dir()
 #PATH = 'C:/Program Files/tdx/T0002/hq_cache/'
-DATAPATH = 'D:/MacTools/WinTools/new_tdx/T0002/hq_cache/'
+# DATAPATH = 'D:/MacTools/WinTools/new_tdx2/T0002/hq_cache/'
+DATAPATH = os.path.join(base_path, 'T0002', 'hq_cache')
 # PATH = os.path.expanduser('~') + DATAPATH
 PATH = DATAPATH
 # print(PATH)
@@ -16,10 +20,12 @@ def read_file_loc(file_name, splits):
 def get_block_zs_tdx_loc(block='hy'):
     """ ��� �Ӧ��ָ������ ��
     hy=��ҵ��dy=����, gn=����, fg=���, sw=����
-    """
-    buf_line = read_file_loc(PATH+'tdxzs3.cfg', '|')
+    """
+    file_path = os.path.join(PATH, 'tdxzs3.cfg')
+    buf_line = read_file_loc(file_path, '|')
 
     mapping = {'hy': '2', 'dq': '3', 'gn': '4', 'fg': '5', 'yjhy': '12', 'zs': '6'}
+    import pandas as pd
     df = pd.DataFrame(buf_line, columns=['name', 'code', 'type', 't1', 't2', 'block'])
     dg = df.groupby(by='type')
     #df.to_excel('block.xlsx')
@@ -34,8 +40,10 @@ def get_block_file(block='gn'):
     """ ������ļ�  block_gn.dat,_fg.dat,_zs.dat  """
 
     file_name = f'block_{block}.dat'
+    file_path = os.path.join(PATH,file_name)
+
     #print(PATH + file_name)
-    with open(PATH + file_name, 'rb') as f:
+    with open(file_path, 'rb') as f:
         buff = f.read()
 
     head = unpack('<384sh', buff[:386])
@@ -47,6 +55,7 @@ def get_block_file(block='gn'):
         num, t = unpack('<2h', bk[9:13])
         stks = bk[13:(12 + 7 * num)].decode('gbk').split('\x00')
         bk_list = bk_list + [[name, block, num, stks]]
+    import pandas as pd
     return pd.DataFrame(bk_list, columns=['name', 'tp', 'num', 'stocks'])
 
 #文件头：384字节
@@ -89,6 +98,7 @@ def gn_block(blk='gn') :
     del t['block']
     #print(bf)
     #print(t)
+    import pandas as pd
     df = pd.merge(t,bf,on='name')
     #print(df)
     return df
@@ -126,13 +136,15 @@ def hy_block(blk='hy'):
 
 
 def get_stock_hyblock_tdx_loc():
-    buf_line = read_file_loc(PATH+'tdxhy.cfg', '|')
+    file_path = os.path.join(PATH, 'tdxhy.cfg')
+    buf_line = read_file_loc(file_path, '|')
     buf_lis = []
     mapping = {'0': 'sz.', '1': 'sh.', '2': 'bj.'}
     for x in buf_line:
         # x[1] = mapping[x[0]] + x[1]
         buf_lis.append(x)
 
+    import pandas as pd
     df = pd.DataFrame(buf_lis, columns=['c0', 'code', 'block', 'c1', 'c2', 'c3'])
     # print(df)
     df.drop(df.columns[[0, 3, 4, 5]], axis=1, inplace=True)
@@ -161,7 +173,6 @@ if __name__ == '__main__':
     df=get_tdx_gn_block_code(cname=False)
     # print(df.stocks.values[0])
     print(df)
-    import ipdb;ipdb.set_trace()
 
     # hyblock = hy_block('hy')
     # hyblock.to_excel('hyblock.xlsx', index=False)

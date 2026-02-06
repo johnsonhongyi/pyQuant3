@@ -35,7 +35,7 @@ import win32con
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 from tkinter import filedialog,Menu,simpledialog
-import pyqtgraph as pg
+# import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
@@ -49,9 +49,10 @@ from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
 from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging, with_log_level
-from JohnsonUtil.LoggerFactory import stopLogger # fix logging BrokenPipeError on exit
-from stock_live_strategy import StockLiveStrategy
-from realtime_data_service import DataPublisher
+# from stock_live_strategy import StockLiveStrategy
+# from realtime_data_service import DataPublisher
+StockLiveStrategy = cct.LazyClass('stock_live_strategy', 'StockLiveStrategy')
+DataPublisher = cct.LazyClass('realtime_data_service', 'DataPublisher')
 # DataPublisher is now handled locally in the Main process for resource efficiency
 from monitor_utils import (
     load_display_config, save_display_config, save_monitor_list, 
@@ -89,14 +90,14 @@ from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
 
 from db_utils import *
-from kline_monitor import KLineMonitor
-from stock_selection_window import StockSelectionWindow
-from stock_selector import StockSelector
+# from kline_monitor import KLineMonitor
+# from stock_selection_window import StockSelectionWindow
+# from stock_selector import StockSelector
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
 import keyboard  # pip install keyboard
-import trade_visualizer_qt6 as qtviz  # 你的 Qt GUI 模块
+# import trade_visualizer_qt6 as qtviz  # ⚡ 移至局部作用域
 from alert_manager import get_alert_manager
 from sys_utils import assert_main_thread
 import struct, pickle
@@ -119,9 +120,9 @@ if sys.platform.startswith('win'):
     logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
-from PyQt6 import QtWidgets, QtCore, QtGui
-from trading_analyzerQt6 import TradingGUI
-from minute_kline_viewer_qt import KlineBackupViewer
+# from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
+# from trading_analyzerQt6 import TradingGUI
+# from minute_kline_viewer_qt import KlineBackupViewer
 
 # ✅ 性能优化模块导入
 try:
@@ -342,6 +343,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 初始化 tk.Tk()
         super().__init__()
         
+        # 初始化退出与任务追踪系统 (必须放在最前面)
+        self._is_closing = False
+        self._after_ids = []
+        
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
         self.main_window = self   
         self.scale_factor = 1.0 
@@ -360,7 +365,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.last_dpi_scale = self.scale_factor
-        # 3. 接下来是 Qt 初始化，它不应该影响 self.scale_factor
+        # 3. 接下来是 Qt 初始化
+        from PyQt6 import QtWidgets
         if not QtWidgets.QApplication.instance():
             self.app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
 
@@ -370,7 +376,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 判断文件是否存在再加载
         if os.path.exists(icon_path):
-            self.after(1000, lambda: self.iconbitmap(icon_path))
+            self._schedule_after(1000, lambda: self.iconbitmap(icon_path))
 
         else:
             logger.error(f"图标文件不存在: {icon_path}")
@@ -491,7 +497,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.update_status_bar_width(pw, left_frame, right_frame)
 
         # 延时更新状态栏宽度
-        self.after(200, lambda: self.update_status_bar_width(pw, left_frame, right_frame))
+        self._schedule_after(200, lambda: self.update_status_bar_width(pw, left_frame, right_frame))
 
         # ----------------- TreeView ----------------- #
         tree_frame = tk.Frame(self)
@@ -558,7 +564,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.handbook = StockHandbook()
         # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
         self.live_strategy = None
-        self.after(3000, self._init_live_strategy)
+        self._schedule_after(3000, self._init_live_strategy)
         
         # ✅ 初始化 55188 数据更新监听状态
         self.last_ext_data_ts_local = 0
@@ -592,7 +598,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._start_process()
 
         # 定时检查队列
-        self.after(1000, self.update_tree)
+        self._schedule_after(1000, self.update_tree)
 
         # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
         self.tk_dispatch_queue = queue.Queue()
@@ -636,7 +642,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
         self.bind("<Alt-k>", lambda event: self.open_market_pulse())
         # 启动周期检测 RDP DPI 变化
-        self.after(3000, self._check_dpi_change)
+        self._schedule_after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
         # self.bind("<Configure>", self.on_resize)
         
@@ -684,7 +690,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error in dispatch queue processing: {e}")
         finally:
             # 100ms 后再次检查
-            self.after(100, self._process_dispatch_queue)
+            if not getattr(self, '_is_closing', False):
+                self._schedule_after(100, self._process_dispatch_queue)
+
+    def _schedule_after(self, ms, func, *args):
+        """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
+        if getattr(self, '_is_closing', False):
+            return None
+        # ⭐ [FIX] 确保 _after_ids 已初始化 (防御性编程)
+        if not hasattr(self, '_after_ids'):
+            self._after_ids = []
+            
+        try:
+            job_id = self.after(ms, func, *args)
+            if job_id:
+                self._after_ids.append(job_id)
+            return job_id
+        except Exception as e:
+            if not getattr(self, '_is_closing', False):
+                logger.warning(f"[_schedule_after] 任务调度失败: {e}")
+            return None
+
+    def _cancel_all_after_jobs(self):
+        """取消所有待执行的 after 任务，防止程序退出后仍回调"""
+        count = 0
+        if hasattr(self, '_after_ids'):
+            for job_id in self._after_ids:
+                try:
+                    self.after_cancel(job_id)
+                    count += 1
+                except Exception:
+                    pass
+            self._after_ids.clear()
+        if count > 0:
+            logger.info(f"已取消 {count} 个待执行的 Tkinter 回调任务")
 
 
     def signal_handler(self, sig, frame):
@@ -721,20 +760,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         def _on_hotkey_close_all_alerts():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self.after(0, self.close_all_alerts)
+            self._schedule_after(0, self.close_all_alerts)
 
         def _on_hotkey_voice_monitor_manager():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self.after(0, self.open_voice_monitor_manager)
+            self._schedule_after(0, self.open_voice_monitor_manager)
         def _on_hotkey_trategy_manager():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self.after(0, self.open_strategy_manager)
+            self._schedule_after(0, self.open_strategy_manager)
         def _on_hotkey_open_market_pulser():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self.after(0, self.open_market_pulse)
+            self._schedule_after(0, self.open_market_pulse)
         def _on_open_live_signal_viewer():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self.after(0, self.open_live_signal_viewer)
+            self._schedule_after(0, self.open_live_signal_viewer)
         # 注册系统全局快捷键
         keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
         keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
@@ -742,7 +781,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         keyboard.add_hotkey('alt+k', _on_hotkey_open_market_pulser)
         keyboard.add_hotkey('alt+q', _on_open_live_signal_viewer)
         # [NEW] Alt+H to toggle Hotlist
-        keyboard.add_hotkey('alt+h', lambda: self.after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
+        keyboard.add_hotkey('alt+h', lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
 
     def on_resize(self, event):
         if event.widget != self:
@@ -752,7 +791,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, "_resize_after_id") and self._resize_after_id:
             self.after_cancel(self._resize_after_id)
         # 只有“停下来”才触发真正刷新
-        self._resize_after_id = self.after(
+        self._resize_after_id = self._schedule_after(
             300,
             self._on_resize_finished
         )
@@ -1008,7 +1047,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 daemon=True
             ).start()
 
-        self.after(60*1000, self.schedule_15_30_job)
+        self._schedule_after(60*1000, self.schedule_15_30_job)
 
     # worker
     def run_15_30_task(self):
@@ -1061,9 +1100,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_close(self):
         try:
             # 设置退出标志，阻止后台线程调用 Tkinter 方法
+            self._is_closing = True
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
-            self._is_closing = True
+            
+            # 立即取消所有待处理的 after 任务
+            self._cancel_all_after_jobs()
             self.close_all_alerts()
             # 0.1 立即关闭所有报警弹窗（停止震动/闪烁循环）
             if hasattr(self, 'active_alerts'):
@@ -1239,20 +1281,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
               
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
-                self.proc.join(timeout=1)
+                # ⭐ [FIX] 给更多时间让后台进程清理 (特别是 MinuteKlineCache 保存)
+                self.proc.join(timeout=5) 
                 if self.proc.is_alive():
                     self.proc.terminate()
+                    self.proc.join(timeout=1.5)
                     logger.info("后台进程已强制终止")
                 else:
                     logger.info("后台进程已安全退出")
-
-            # 11. 停止日志与销毁
-            try:
-                # 显式停止日志监听线程，防止 BrokenPipeError
-                # 放在 manager.shutdown 之前更安全，防止 manager 关闭管道导致 listener 崩溃
-                stopLogger() 
-            except Exception: 
-                pass
 
             if hasattr(self, "manager"):
                 try:
@@ -1265,12 +1301,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.realtime_service = None
                     self.global_dict = None
                     self.manager.shutdown()
-                    # logger.info("SyncManager 已安全关闭") # Logger 已停，此处不再写日志
                 except Exception:
                     pass
 
+            # 11. 停止日志与销毁 (放在最后)
+            try:
+                from JohnsonUtil.LoggerFactory import stopLogger
+                stopLogger() 
+            except Exception: 
+                pass
+
             self.destroy()
-            logger.info("程序正常退出完成") # 此条可能不会显示，因为 Listener 已停止
             
         except Exception as e:
             logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
@@ -1285,7 +1326,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _on_open_column_manager(self):
         if self._open_column_manager_job:
             self.after_cancel(self._open_column_manager_job)
-        self._open_column_manager_job = self.after(1000, self.open_column_manager)
+        self._open_column_manager_job = self._schedule_after(1000, self.open_column_manager)
 
     def open_column_manager(self):
         if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
@@ -1306,13 +1347,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 关闭时清理引用
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
             else:
-                self.after(1000,self._on_open_column_manager)
+                self._schedule_after(1000,self._on_open_column_manager)
 
     def open_column_manager_init(self):
         def _on_open_column_manager_init():
             if self._open_column_manager_job:
                 self.after_cancel(self._open_column_manager_job)
-            self._open_column_manager_job = self.after(1000, self.open_column_manager_init)
+            self._open_column_manager_job = self._schedule_after(1000, self.open_column_manager_init)
         
         if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
             self.ColumnSetManager.open_column_manager_editor()
@@ -1334,7 +1375,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
                 # DISPLAY_COLS = self.current_cols
             else:
-                self.after(1000,_on_open_column_manager_init)
+                self._schedule_after(1000,_on_open_column_manager_init)
 
     def on_close_column_manager(self):
         if self.ColumnSetManager is not None:
@@ -1540,6 +1581,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # follow_ratio = sum(1 for p in percents if p <= stock_percent) / len(percents)
             follow_ratio = compute_follow_ratio(percents, stock_percent)
             score = avg_percent * follow_ratio
+            # 保留两位小数
+            score = round(score, 2)
+            avg_percent = round(avg_percent, 2)
+            follow_ratio = round(follow_ratio, 2)
+            
             concept_score.append((c, score, avg_percent, follow_ratio))
 
         # --- 排序并返回 ---
@@ -1922,7 +1968,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.setup_global_hotkey()
-        self.after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
+        self._schedule_after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
         self.open_column_manager_init()
 
     def replace_st_key_sort_col(self, old_col, new_col):
@@ -2136,10 +2182,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         
                         if not hasattr(self, "_restore_done"):
                             self._restore_done = True
-                            self.after(2000, self.restore_all_monitor_windows)
-                            self.after(10000, self._check_ext_data_update)
-                            self.after(30000, self.KLineMonitor_init)
-                            self.after(60000, self.schedule_15_30_job)
+                            self._schedule_after(2000, self.restore_all_monitor_windows)
+                            self._schedule_after(10000, self._check_ext_data_update)
+                            self._schedule_after(30000, self.KLineMonitor_init)
+                            self._schedule_after(60000, self.schedule_15_30_job)
 
                         if self.search_var1.get() or self.search_var2.get():
                             self.apply_search()
@@ -2157,7 +2203,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
                 if has_update and hasattr(self, 'live_strategy'):
-                    self.after(2000, self._start_feedback_listener)
+                    self._schedule_after(2000, self._start_feedback_listener)
                     if not (915 < cct.get_now_time_int() < 920):
                         # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
                         if self._live_strategy_first_run:
@@ -2170,7 +2216,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
                                 target_res = self.global_values.getkey("resample")
 
-                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
+                            self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
                         else:
                             # 后续：立即执行
                             # res = self.global_values.getkey("resample")
@@ -2198,7 +2244,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error updating tree: {e}", exc_info=True)
         finally:
-            self.after(1000, self.update_tree)
+            self._schedule_after(1000, self.update_tree)
 
     def push_stock_info(self,stock_code, row):
         """
@@ -2415,7 +2461,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.load_ui_states()
         
         # Apply strict linkage immediately
-        self.after(100, self.update_linkage_status)
+        self._schedule_after(100, self.update_linkage_status)
 
 
 
@@ -2521,7 +2567,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error saving UI states: {e}")
 
     def open_visualizer(self, code):
-
+        
         if not code and self._last_resample != self.global_values.getkey("resample"):
             return
 
@@ -2612,6 +2658,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
                     # load_stock_by_code handles the | split automatically
                     initial_payload = f"{code}|resample={resample}"
+                    import trade_visualizer_qt6 as qtviz
                     self.qt_process = mp.Process(
                         target=qtviz.main, 
                         # [FIX] 使用 viz_lifecycle_flag
@@ -4719,10 +4766,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 service = DataPublisher(high_performance=False)
                 elapsed = time.time() - start_time
                 # 使用 after 安全地更新主线程状态
-                self.after(0, lambda: self._on_realtime_service_ready(service, elapsed))
+                self._schedule_after(0, lambda: self._on_realtime_service_ready(service, elapsed))
             except Exception as e:
                 logger.error(f"❌ RealtimeDataService 异步初始化失败: {e}\n{traceback.format_exc()}")
-                self.after(0, lambda: self._on_realtime_service_ready(None, 0))
+                self._schedule_after(0, lambda: self._on_realtime_service_ready(None, 0))
 
         # 在后台线程中加载
         loader_thread = threading.Thread(target=_load_in_thread, daemon=True, name="RealtimeServiceLoader")
@@ -4860,7 +4907,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
             
         # 必须回到主线程操作 GUI
-        self.after(0, lambda: self._show_alert_popup(code, name, msg))
+        self._schedule_after(0, lambda: self._show_alert_popup(code, name, msg))
 
     def open_blacklist_manager(self):
         """打开黑名单管理窗口 (增强版: 逻辑优化 + 布局精简)"""
@@ -5055,7 +5102,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # ⭐ [DEBUG] 记录收到语音事件的代码，帮助定位联动问题
             logger.debug(f"[Linkage] on_voice_speak_start received code: {code} (type: {type(code)})")
-            self.after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
+            self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
         except RuntimeError:
             pass  # 主循环已停止，忽略
 
@@ -5066,7 +5113,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_is_closing', False): return
         try:
             logger.debug(f"[Linkage] on_voice_speak_end received code: {code}")
-            self.after(0, lambda: self._trigger_alert_visual_effects(str(code), start=False))
+            self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=False))
         except RuntimeError:
             pass  # 主循环已停止，忽略
 
@@ -5147,7 +5194,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if retry_count < MAX_RETRIES:
                 # 延迟后重试
                 logger.debug(f"[Linkage] Window for '{code}' not found, retrying ({retry_count + 1}/{MAX_RETRIES})...")
-                self.after(RETRY_DELAY_MS, lambda: self._trigger_alert_visual_effects(code, start=True, retry_count=retry_count + 1))
+                self._schedule_after(RETRY_DELAY_MS, lambda: self._trigger_alert_visual_effects(code, start=True, retry_count=retry_count + 1))
             else:
                 # 达到最大重试次数,记录警告
                 self._mismatch_warned_codes = getattr(self, '_mismatch_warned_codes', set())
@@ -5380,7 +5427,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 mgr.stop_current_speech(key=None if is_manual else target_code)
             
             # 💥 联动核心 2：同步最新的活跃代码列表，确保后续排队的该代码内容被跳过
-            self.after(10, self._update_voice_active_codes)
+            self._schedule_after(10, self._update_voice_active_codes)
         except:
             pass
 
@@ -5645,7 +5692,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 极限优化：缩短处理间隔，从 100ms -> 16ms (约60fps)，加快弹出速度但保留 event loop 呼吸空间
             # [回滚] 用户反馈太快导致“平铺”感，恢复到 100ms 以保持“层级”弹出感
             if self._alert_queue:
-                self.after(100, self._process_alert_queue)
+                self._schedule_after(100, self._process_alert_queue)
             else:
                 self._alert_queue_processing = False
  
@@ -5810,7 +5857,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 if not getattr(w, '_is_enlarged', False):
                     delay = max(30, int(alert_cooldown / 2)) * 1000
-                    self.after(delay, lambda: self._close_alert(w))
+                    self._schedule_after(delay, lambda: self._close_alert(w))
 
             win.start_visual_effects = start_visual_effects
             win.stop_visual_effects = stop_visual_effects
@@ -5818,13 +5865,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.is_flashing = False
             
             # 立即启动优先级颜色提示（如果需要）
-            self.after(50, lambda: (start_priority_flashing(w=win), win.update() if win.winfo_exists() else None))
+            self._schedule_after(50, lambda: (start_priority_flashing(w=win), win.update() if win.winfo_exists() else None))
 
             # 布局管理
             self.active_alerts.append(win)
             self._update_alert_positions()
             self.code_to_alert_win[code] = win
-            self.after(10, self._update_voice_active_codes)
+            self._schedule_after(10, self._update_voice_active_codes)
             
             # 数据获取
             category_content = "暂无详细信息"
@@ -5844,9 +5891,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if not has_voice:
                 delay = max(60, int(alert_cooldown / 2)) * 1000
-                self.after(delay, lambda: self._close_alert(win))
+                self._schedule_after(delay, lambda: self._close_alert(win))
             else:
-                win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
+                win.safety_close_timer = self._schedule_after(180000, lambda: self._close_alert(win))
 
             # UI 面板构造
             win._orig_width, win._orig_height = 400, 180
@@ -5866,9 +5913,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win._is_enlarged = False
                     # 缩小后恢复自动关闭计时
                     if not has_voice:
-                        self.after(max(60, int(alert_cooldown / 2)) * 1000, lambda: self._close_alert(win))
+                        self._schedule_after(max(60, int(alert_cooldown / 2)) * 1000, lambda: self._close_alert(win))
                     else:
-                        win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
+                        win.safety_close_timer = self._schedule_after(180000, lambda: self._close_alert(win))
                 else:
                     new_w, new_h = win._orig_width * 2, win._orig_height * 2
                     win._is_enlarged = True
@@ -6320,6 +6367,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_trading_analyzer_qt6(self):
         """打开 Qt6 版本的交易分析工具"""
+        from PyQt6 import QtWidgets
+        from trading_analyzerQt6 import TradingGUI
         try:
             # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
             if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
@@ -6345,6 +6394,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_kline_viewer_qt(self):
         """打开 Qt 版本的 K 线缓存查看器"""
+        from PyQt6 import QtWidgets
+        from minute_kline_viewer_qt import KlineBackupViewer
         try:
             # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
             if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
@@ -7299,6 +7350,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", f"打开实时信号查询窗口失败: {e}")
 
     def open_stock_selection_window(self):
+        from stock_selection_window import StockSelectionWindow
+        from stock_selector import StockSelector
         """打开策略选股与人工复核窗口 (支持窗口复用)"""
         # 1. 确保 selector存在且数据最新
         try:
@@ -7469,7 +7522,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def on_search_changed(*args):
             if hasattr(self, "_search_after_id"):
                 self.after_cancel(self._search_after_id)
-            self._search_after_id = self.after(200, refresh_buttons)
+            self._search_after_id = self._schedule_after(200, refresh_buttons)
 
         all_cols = [c for c in self.df_all.columns if default_filter(c)]
         search_var.trace_add("write", on_search_changed)
@@ -7608,7 +7661,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, "tk_dispatch_queue"):
              self.tk_dispatch_queue.put(_ui_action)
         else:
-             self.after(0, _ui_action)
+             self._schedule_after(0, _ui_action)
         
         return True
     def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
@@ -7654,7 +7707,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.debug(f"[Tooltip] 获取到代码: {stock_code}, 设置0.2秒定时器")
 
         # 设置0.2秒延迟定时器
-        self._tooltip_timer = self.after(200, lambda e=event:self.show_stock_tooltip(stock_code, e))
+        self._tooltip_timer = self._schedule_after(200, lambda e=event:self.show_stock_tooltip(stock_code, e))
 
 
     def show_stock_tooltip(self, code, event):
@@ -8208,7 +8261,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if self._search_job:
             self.after_cancel(self._search_job)
-        self._search_job = self.after(3000, self.apply_search)  # 3000ms后执行
+        self._search_job = self._schedule_after(3000, self.apply_search)  # 3000ms后执行
 
     def _format_history_list(self, history_list, mapping_dict):
         """Helper to format history items with notes and update mapping"""
@@ -8974,7 +9027,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # q = f'category.str.contains("{concept}", na=False)'
             q = concept
             pyperclip.copy(q)
-            self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
+            self._schedule_after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
         btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
         btn.pack(side="left", padx=4)
         win._btn_copy_expr = btn
@@ -9021,7 +9074,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     v["win"]._tree_top10.selection_set(v["win"]._tree_top10.get_children()[0])  # 选中第一行（可选）
                     v["win"]._tree_top10.focus_set() # 获得焦点
                 v["win"].attributes("-topmost", True)
-                v["win"].after(100, lambda: v["win"].attributes("-topmost", False))
+                if hasattr(self, '_schedule_after'):
+                    self._schedule_after(100, lambda: v["win"].attributes("-topmost", False))
+                else:
+                    v["win"].after(100, lambda: v["win"].attributes("-topmost", False))
                 return  # 不创建新窗口
 
         # --- 新窗口 ---
@@ -9233,7 +9289,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # q = f'category.str.contains("{concept}", na=False)'
                 q = concept
                 pyperclip.copy(q)
-                self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
+                self._schedule_after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
             btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
             btn.pack(side="left", padx=4)
             win._btn_copy_expr = btn
@@ -9346,7 +9402,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tree.focus_set()
 
             # 等 UI / after / PG timer 全部稳定下来
-            win.after(500, do_focus)
+            self._schedule_after(500, do_focus)
         except Exception as e:
             logger.info(f"聚焦 Top10 Tree 失败: {e}")
 
@@ -9369,7 +9425,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if df_concept.empty:
             logger.info(f"概念【{concept_name}】暂无匹配股票")
-            self.after(100, lambda: toast_message(self,f"概念【{concept_name}】暂无匹配股票"))
+            self._schedule_after(100, lambda: toast_message(self,f"概念【{concept_name}】暂无匹配股票"))
             return
 
         # --- 复用窗口 ---
@@ -10007,8 +10063,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     
 
-    def plot_following_concepts_pg(self, code=None, top_n=10):
+    def plot_top10_concepts_pg(self, top_n=10):
+        """用 pyqtgraph 绘制 Top10 热点概念"""
+        import pyqtgraph as pg
+        from PyQt6 import QtWidgets, QtCore, QtGui 
+        if not hasattr(self, "_pg_windows"):
+            self._pg_windows = {}
+            self._pg_data_hash = {}
 
+    def plot_following_concepts_pg(self, code=None, top_n=10):
+        import pyqtgraph as pg
+        from PyQt6 import QtWidgets, QtCore, QtGui 
         if not hasattr(self, "_pg_windows"):
             self._pg_windows = {}
             self._pg_data_hash = {}
@@ -10449,6 +10514,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
 
 
+    def update_single_pg_bar(self, win, score, avg, concept, color):
+        import pyqtgraph as pg
+        from PyQt6 import QtWidgets, QtCore, QtGui
     def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
         """
         更新 PyQtGraph 条形图窗口（NoSQL 多 concept 版本），保证排序对齐：
@@ -10459,6 +10527,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         5. 支持增量条闪烁。
         6. 自动恢复当天已有数据（NoSQL 存储）。
         """
+        import pyqtgraph as pg
+        from PyQt6 import QtWidgets, QtGui, QtCore
         try:
 
             # === 🧩 调试信息 ===
@@ -11155,7 +11225,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # result = counterCategory(df_filtered, 'category', limit=50, table=True)
                 # self._Categoryresult = result
                 # self.query_manager.entry_query.set(self._Categoryresult)
-                self.after(500, lambda: self.refresh_tree(df_filtered, force=True))
+                self._schedule_after(500, lambda: self.refresh_tree(df_filtered, force=True))
                 # 打印剔除条件列表
                 if removed_conditions:
                     # logger.info(f"[剔除的条件列表] {removed_conditions}")
@@ -11324,6 +11394,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
 
     def KLineMonitor_init(self):
+        from kline_monitor import KLineMonitor
         # logger.info("启动K线监控...")
 
         # # 仅初始化一次监控对象
@@ -11878,7 +11949,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.debug(f"[_check_ext_data_update] error: {e}")
         finally:
-            self.after(duration_sleep_time*1000, self._check_ext_data_update)
+            self._schedule_after(duration_sleep_time*1000, self._check_ext_data_update)
 
     def open_archive_loader(self):
         """打开存档选择窗口"""

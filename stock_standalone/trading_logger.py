@@ -806,21 +806,26 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Failed to log voice alert config: {e}")
 
-    def get_voice_alerts(self, resample: Optional[str] = None):
+    def get_voice_alerts(self, resample: Optional[str] = None) -> list[dict[str, Any]]:
         """获取所有或特定周期的语音预警配置"""
         try:
             conn = self.db_manager.get_connection()
+            cur = conn.cursor()
             query = "SELECT * FROM voice_alerts"
             params = []
             if resample:
                 query += " WHERE resample = ?"
                 params.append(resample)
             
-            df = pd.read_sql_query(query, conn, params=params)
-            return df
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            results = [dict(zip(cols, row)) for row in rows]
+            cur.close()
+            return results
         except Exception as e:
             logger.error(f"Failed to get voice alerts: {e}")
-            return pd.DataFrame()
+            return []
 
     # --- 黑名单扩展方法 ---
     def add_to_blacklist(self, code: str, name: str, reason: str = "manual_del") -> None:

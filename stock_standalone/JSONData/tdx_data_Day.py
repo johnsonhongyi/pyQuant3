@@ -1,5 +1,6 @@
 # encoding: utf-8
 # !/usr/bin/python
+from __future__ import annotations
 
 
 import os
@@ -7,21 +8,72 @@ import sys
 sys.path.append("..")
 import time
 from struct import *
-import numpy as np
-import pandas as pd
-from pandas import Series
-from JSONData import tdx_hdf5_api as h5a
+# import numpy as np
+# import pandas as pd
+# from pandas import Series
+# from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
-from JSONData import wencaiData as wcd
+# from JSONData import wencaiData as wcd
 from JSONData import tdxbk
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
-import tushare as ts
-import pandas_ta as ta
-import talib
-from JSONData import sina_data
+# import tushare as ts
+
+try:
+    from typing import TYPE_CHECKING
+except ImportError:
+    TYPE_CHECKING = False
+
+if TYPE_CHECKING:
+    import numpy as np
+    import pandas as pd
+    import tushare as ts
+    import pandas_ta as ta
+    from JSONData import tdx_hdf5_api as h5a
+    from JSONData import wencaiData as wcd
+
+import importlib
+class LazyModule:
+    def __init__(self, key, package=None):
+        self._key = key
+        self._package = package
+        self._module = None
+
+    @property
+    def module(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._key, self._package)
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def __call__(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+pd = LazyModule('pandas')
+np = LazyModule('numpy')
+ts = LazyModule('tushare')
+ta = LazyModule('pandas_ta')
+h5a = LazyModule('JSONData.tdx_hdf5_api')
+wcd = LazyModule('JSONData.wencaiData')
+sina_data = LazyModule('JSONData.sina_data')
+
+# pd = cct.LazyModule('pandas')
+# np = cct.LazyModule('numpy')
+# ta = cct.LazyModule('pandas_ta')
+# h5a = LazyModule('JSONData.tdx_hdf5_api')
+# wcd = LazyModule('JSONData.wencaiData')
+# ConfigObj = LazyClass('configobj', 'ConfigObj')
+
+# import pandas_ta as ta
+# import talib
+# from JSONData import sina_data
+# 能再点东西的是模块，用 LazyModule；
+# 直接拿来 new / 调用的是类或函数，用 LazyClass
+
 import datetime
 import random
 from collections import deque
@@ -3447,6 +3499,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if len(df) > 5:
         df = df.sort_index(ascending=True)
+        import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
@@ -4220,6 +4273,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
     if len(df) > 0:
         df = df.sort_index(ascending=True)
+        import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
@@ -4593,7 +4647,7 @@ def get_tdx_day_to_df(code):
     # print p_day_dir,p_exp_dir
     file_path = p_day_dir + code_u + '.day'
     if not os.path.exists(file_path):
-        ds = Series(
+        ds = pd.Series(
             {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
              'vol': 0})
         return ds
@@ -5471,6 +5525,7 @@ def safe_get(df, col, idx, default=0):
 
 def safe_SMA(df, column, period, name):
     try:
+        import talib
         df[name] = talib.SMA(df[column].astype(float), timeperiod=period)
         return True
     except Exception:
@@ -5911,6 +5966,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
 
+        import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)

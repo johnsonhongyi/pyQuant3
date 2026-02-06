@@ -1,4 +1,6 @@
 #encoding: utf-8
+# !/usr/bin/python
+from __future__ import annotations
 """
 交易数据接口
 Created on 2014/07/31
@@ -14,7 +16,7 @@ import re
 import sys
 import time
 import os
-import pandas as pd
+# import pandas as pd
 import asyncio
 import random
 # from pandas.compat import StringIO
@@ -26,7 +28,38 @@ import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import LoggerFactory
 # from JSONData.prettytable import *
 from JohnsonUtil import commonTips as cct
-from JSONData import tdx_hdf5_api as h5a
+# from JSONData import tdx_hdf5_api as h5a
+
+try:
+    from typing import TYPE_CHECKING
+except ImportError:
+    TYPE_CHECKING = False
+
+if TYPE_CHECKING:
+    import pandas as pd
+    from JSONData import tdx_hdf5_api as h5a
+
+import importlib
+class LazyModule:
+    def __init__(self, key, package=None):
+        self._key = key
+        self._package = package
+        self._module = None
+
+    @property
+    def module(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._key, self._package)
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def __call__(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+pd = LazyModule('pandas')
+h5a = LazyModule('JSONData.tdx_hdf5_api')
 
 try:
     from urllib.request import urlopen, Request

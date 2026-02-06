@@ -2,13 +2,13 @@
 import os
 import shutil
 import requests
-import pandas as pd
 import time
 import json
 import re
 from typing import Dict, Any, Optional
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
+pd = cct.LazyModule('pandas')
 import hashlib
 # logger = LoggerFactory.getLogger(name="scraper_55188")
 logger = LoggerFactory.getLogger()
