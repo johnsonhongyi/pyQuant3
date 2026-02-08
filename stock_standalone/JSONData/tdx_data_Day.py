@@ -3030,7 +3030,7 @@ def ema_tdx_numpy(series: pd.Series, timeperiod: int) -> pd.Series:
 
 
 def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=None, dl=None, power=True, newdays=None, write_tushare=False, writedm=False,detect_calc_support=False):
-
+    import talib
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
     if start is not None and end is not None:

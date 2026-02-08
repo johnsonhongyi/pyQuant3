@@ -150,5 +150,13 @@ stock_standalone/.cmd_history
 stock_standalone/instock_tk.*
 stock_*.conf
 *.log.*
-stock_standalone/JohnsonUtil/global.ini
 stock_standalone/JSONData/count.ini
+# 如果只想忽略 stock_standalone 目录下的
+stock_standalone/test_*.py
+stock_standalone/trace*.chk
+stock_standalone/check_*
+stock_standalone/JSONData/stock_codes.conf
+stock_standalone/verify_*.py
+stock_standalone/unit_test/
+stock/JSONData/count.ini
+stock_standalone/JohnsonUtil/global.ini
