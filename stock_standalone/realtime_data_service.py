@@ -1,6 +1,7 @@
 import time
 from datetime import datetime
 import threading
+import gc
 import pandas as pd
 import sqlite3
 from collections import deque, defaultdict
@@ -284,12 +285,20 @@ class MinuteKlineCache:
             
         updated_codes: set[str] = set()
         # 预计算时间戳 (通常一个 batch 时间一致)
-        # 如果 df 中有 time 或 timestamp 列，则使用它，否则使用当前时间
+        # 优先级：timestamp > time > ticktime > wall_clock
         ts = time.time()
-        if 'time' in df.columns:
-            ts = float(df['time'].iloc[0]) # type: ignore
-        elif 'timestamp' in df.columns:
+        if 'timestamp' in df.columns:
             ts = float(df['timestamp'].iloc[0]) # type: ignore
+        elif 'time' in df.columns:
+            ts = float(df['time'].iloc[0]) # type: ignore
+        elif 'ticktime' in df.columns:
+            t_str = str(df['ticktime'].iloc[0])
+            if ':' in t_str:
+                # 兼容 "HH:MM:SS" 格式，转换为当日 Unix 时间
+                try:
+                    ts = pd.to_datetime(t_str).timestamp()
+                except Exception:
+                    pass
             
         minute_ts = int(ts - (ts % 60))
         
@@ -694,6 +703,10 @@ class IntradayEmotionTracker:
     def get_score(self, code: str) -> float:
         return self.scores.get(code, 50.0) # 默认 50 中性
 
+    def get_scores_batch(self, codes: list[str]) -> dict[str, float]:
+        """批量获取情绪分"""
+        return {code: self.scores.get(code, 50.0) for code in codes}
+
     def get_score_diffs(self, minutes: int = 10) -> dict[str, float]:
         """
         获取 N 分钟前的情绪分变化
@@ -1076,9 +1089,13 @@ class DataPublisher:
             #     df = df.copy()
             #     df['code'] = df.index
 
-            if 'code' not in df.columns:
+            # [FIX] 解决 code 列与 index 名重复导致的二义性
+            if 'code' in df.columns:
                 if df.index.name == 'code':
-                    df = df.reset_index()  # 把 index 转成列，同时 index 变成 RangeIndex
+                    df = df.reset_index(drop=True)
+            else:
+                if df.index.name == 'code':
+                    df = df.reset_index()
                 else:
                     df = df.copy()
                     df['code'] = df.index
@@ -1150,7 +1167,7 @@ class DataPublisher:
 
             # Update global last update timestamp
             # 2. 更新 KLine (仅更新订阅或活跃股) - Vectorized & Batch Optimized
-            if 'trade' in df.columns or 'now' in df.columns or 'price' in df.columns:
+            if any(col in df.columns for col in ['trade', 'now', 'price', 'close']):
                 self.kline_cache.update_batch(df, self.subscribers)
             
             # Record Speed
@@ -1160,6 +1177,12 @@ class DataPublisher:
                 self.batch_rates_dq.append(rows_count / duration)
             self.last_batch_time = t1
             
+            # [Optimization] Periodic GC
+            if self.update_count % 500 == 0:
+                n = gc.collect()
+                if n > 0:
+                    logger.debug(f'🧹 GC collected {n} objects')
+
             # =========================
             # Snapshot Cache (Crash Safe)
             # =========================
@@ -1186,6 +1209,10 @@ class DataPublisher:
 
     def get_emotion_score(self, code: str):
         return self.emotion_tracker.get_score(code)
+
+    def get_emotion_scores(self, codes: list[str]) -> dict[str, float]:
+        """批量获取当前情绪分，用于 UI 列表刷新"""
+        return self.emotion_tracker.get_scores_batch(codes)
 
     def get_v_shape_signal(self, code: str, window: int = 30) -> bool:
         """获取个股是否有 V 型反转信号"""

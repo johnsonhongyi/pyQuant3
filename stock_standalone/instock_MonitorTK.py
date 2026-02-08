@@ -416,7 +416,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict["resample"] = resampleInit
             
             # 🔥 同步初始化 DataPublisher (启动时直接加载)
-            self.realtime_service = DataPublisher(high_performance=False)
+            self.realtime_service = DataPublisher(high_performance=True)
             self._realtime_service_ready = True
             logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
 
@@ -2157,6 +2157,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, 'realtime_service') and self.realtime_service:
                         try:
                             self.realtime_service.update_batch(df)
+                            
+                            # [NEW] 获取实时情绪分 (High Performance)
+                            # 确保有 code 列用于映射
+                            if 'code' not in df.columns:
+                                df['code'] = df.index.astype(str)
+                            
+                            codes = df['code'].tolist()
+                            scores = self.realtime_service.get_emotion_scores(codes)
+                            df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
+
                         except Exception as e:
                             logger.error(f"Main process realtime update error: {e}")
 
@@ -2595,7 +2605,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         real_time_cols = list(cct.real_time_cols) if hasattr(cct, 'real_time_cols') else []
         strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
         # 🛡️ 确保核心字段始终包含，即使用户配置中缺失
-        required_visualizer_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        required_visualizer_cols = ['code', 'name', 'percent', 'dff','per1d', 'Rank', 'win', 'slope', 'volume', 'power_idx']
         
         # 使用去重的方式合并列
         ui_cols = []
@@ -4751,62 +4761,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tk.Button(btn_frame, text="确认添加 (Enter)", command=confirm, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
             tk.Button(btn_frame, text="取消 (Esc)", command=on_close, height=2).pack(side="left", fill="x", expand=True, padx=5)
             
+
         except Exception as e:
             logger.error(f"Add monitor dialog error: {e}")
             messagebox.showerror("Error", f"开启监控对话框失败: {e}")
 
-    def _init_realtime_service_async(self):
-        """
-        🚀 异步初始化 RealtimeDataService (DataPublisher)
-        在后台线程中加载 MinuteKlineCache，避免阻塞 UI 显示
-        """
-        def _load_in_thread():
-            try:
-                start_time = time.time()
-                service = DataPublisher(high_performance=False)
-                elapsed = time.time() - start_time
-                # 使用 after 安全地更新主线程状态
-                self._schedule_after(0, lambda: self._on_realtime_service_ready(service, elapsed))
-            except Exception as e:
-                logger.error(f"❌ RealtimeDataService 异步初始化失败: {e}\n{traceback.format_exc()}")
-                self._schedule_after(0, lambda: self._on_realtime_service_ready(None, 0))
-
-        # 在后台线程中加载
-        loader_thread = threading.Thread(target=_load_in_thread, daemon=True, name="RealtimeServiceLoader")
-        loader_thread.start()
-        logger.info("🔄 开始后台加载 RealtimeDataService...")
-
-    def _on_realtime_service_ready(self, service, elapsed):
-        """处理 RealtimeDataService 加载完成"""
-        self.realtime_service = service
-        self._realtime_service_ready = service is not None
-        
-        if service:
-            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (耗时: {elapsed:.2f}s)")
-            # 如果 live_strategy 已经初始化，注入 realtime_service
-            if hasattr(self, 'live_strategy') and self.live_strategy:
-                self.live_strategy.realtime_service = service
-                logger.info("RealtimeDataService 已注入到已初始化的 StockLiveStrategy")
-            
-            # 如果策略白盒窗口已打开，注入 realtime_service
-            if hasattr(self, '_strategy_manager_win') and self._strategy_manager_win:
-                try:
-                    if self._strategy_manager_win.winfo_exists():
-                        self._strategy_manager_win.realtime_service = service
-                        logger.info("RealtimeDataService 已注入到已打开的 StrategyManager")
-                except:
-                    pass
-            
-            # 🔔 执行所有等待中的回调
-            if hasattr(self, '_realtime_ready_callbacks'):
-                for callback in self._realtime_ready_callbacks:
-                    try:
-                        callback()
-                    except Exception as cb_e:
-                        logger.warning(f"Realtime ready callback failed: {cb_e}")
-                self._realtime_ready_callbacks.clear()
-                logger.debug(f"已执行 {len(self._realtime_ready_callbacks)} 个等待回调")
-        else:
             logger.warning("⚠️ RealtimeDataService 加载失败，部分功能可能不可用")
 
     def on_realtime_service_ready(self, callback: Callable[[], None]) -> None:
@@ -5201,7 +5160,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if str(code) not in self._mismatch_warned_codes:
                     # 简化警告信息,只打印窗口数量,避免日志冗余
                     available_count = len(self.code_to_alert_win)
-                    logger.warning(f"[Linkage] Mismatch: Voice speaking code '{code}', but no matching alert window found. ({available_count} windows registered)")
+                    logger.debug(f"[Linkage] Mismatch: Voice speaking code '{code}', but no matching alert window found. ({available_count} windows registered)")
                     self._mismatch_warned_codes.add(str(code))
 
     def _update_alert_positions(self):
@@ -5591,10 +5550,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.active_alerts = [w for w in self.active_alerts if w.winfo_exists()]
             
             if len(self.active_alerts) >= MAX_TOTAL_ALERTS:
-                logger.warning(f"总报警窗口已达上限 {MAX_TOTAL_ALERTS}，启用窗口回收逻辑...")
                 if self._recycle_alert_window(code):
+                    logger.warning(f"回收窗口: {code} 窗口已达上限 {MAX_TOTAL_ALERTS}...")
                     # 成功回收了一个窗口，为新信号腾出了空间
-                    pass
                 else:
                     return 
         
@@ -5706,7 +5664,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if len(self.active_alerts) < MAX_TOTAL_ALERTS:
             return True
             
-        logger.warning(f"总报警窗口已达上限 {MAX_TOTAL_ALERTS}，启用窗口回收逻辑...")
+        # logger.warning(f"总报警窗口已达上限 {MAX_TOTAL_ALERTS}，启用窗口回收逻辑...")
         victim = None
         for w in self.active_alerts:
             try:
@@ -5716,7 +5674,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except: continue
         
         if victim:
-            logger.info(f"回收旧窗口 {victim.stock_code} 以便为新信号 {new_code} 腾出空间")
+            logger.debug(f"回收旧窗口 {victim.stock_code} 以便为新信号 {new_code} 腾出空间")
             self._close_alert(victim)
             return True
         else:

@@ -802,13 +802,24 @@ class GlobalConfig:
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback=10, value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback=10, value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback=300, value_type="int")
-        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
+        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff','per1d', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
         self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=810, value_type="int")
         self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=921, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
-
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
+        self.vis_column_map = self.get_with_writeback(
+            "general",
+            "vis_column_map",
+            fallback={
+                'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+                'dff': 'DFF', 'per1d': 'per1d','win': '连阳', 'slope': '斜率',
+                'volume': '虚拟量', 'power_idx': '爆发力',
+                'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
+                'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
+            },
+            value_type="dict"
+        )
         try:
             if "x" in saved_wh_str:
                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
@@ -833,7 +844,6 @@ class GlobalConfig:
             self.save()
 
     # ===================== 新增 get_with_writeback =====================
-
     def get_with_writeback(self, section: str, option: str, fallback: Any, value_type: str = "str") -> Any:
         """
         读取配置项，如果不存在则写入 fallback 并返回 fallback
@@ -850,7 +860,7 @@ class GlobalConfig:
         # ===== 1. 确保 section 存在（绝对安全）=====
         if not self.cfg.has_section(section):
             self.cfg.add_section(section)
-
+        import json
         # ===== 2. option 不存在：写回 fallback =====
         if not self.cfg.has_option(section, option):
             try:
@@ -858,10 +868,14 @@ class GlobalConfig:
                     val_str = "True" if bool(fallback) else "False"
                 elif value_type == "list":
                     try:
-                        import json
                         val_str = json.dumps(list(fallback), ensure_ascii=False)
                     except Exception:
                         val_str = "[]"
+                elif value_type == "dict":
+                    try:
+                        val_str = json.dumps(dict(fallback), ensure_ascii=False)
+                    except Exception:
+                        val_str = "{}"
                 else:
                     val_str = str(fallback)
 
@@ -919,6 +933,26 @@ class GlobalConfig:
 
                 raise ValueError("invalid list")
 
+            elif value_type == "dict":
+                raw = raw.strip()
+
+                # 1️⃣ JSON dict（标准格式）
+                try:
+                    value = json.loads(raw)
+                    if isinstance(value, dict):
+                        return value
+                except Exception:
+                    pass
+
+                # 2️⃣ 兼容旧格式：{'a':'A','b':'B'}
+                try:
+                    value = ast.literal_eval(raw)
+                    if isinstance(value, dict):
+                        return value
+                except Exception:
+                    pass
+
+                raise ValueError("invalid dict")
             # ===== tuple_str（重点增强）=====
             elif value_type == "tuple_str":
                 raw = str(raw).strip()
@@ -966,6 +1000,10 @@ class GlobalConfig:
                     if isinstance(fallback, (list, tuple)):
                         return list(fallback)
                     return []
+            elif value_type == "dict":
+                if isinstance(fallback, dict):
+                    return fallback
+                return {}
 
             return fallback
     # =====================================================================
@@ -1056,6 +1094,7 @@ start_init_tdx_time: int = CFG.start_init_tdx_time
 sina_MultiIndex_startTime: int = CFG.sina_MultiIndex_startTime
 voice_rate: int = CFG.voice_rate
 voice_volume: float = CFG.voice_volume
+vis_column_map: Dict[str] = CFG.vis_column_map
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

@@ -3525,7 +3525,7 @@ class StockLiveStrategy:
                 exit_date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 # 更新跟单队列状态为已离场，并记录离场价和时间
                 if hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=exit_date_str, notes=f"Auto closed by {action}: {message[:50]}"):
-                    logger.info(f"🔄 Follow sync: {code} set to EXITED @ {price} on {exit_date_str} due to {action}")
+                    logger.debug(f"🔄 Follow sync: {code} set to EXITED @ {price} on {exit_date_str} due to {action}")
             except Exception as e:
                 logger.error(f"Follow sync failed for {code}: {e}")
     def _play_sound_async(self):

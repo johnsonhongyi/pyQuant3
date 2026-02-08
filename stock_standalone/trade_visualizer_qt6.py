@@ -99,6 +99,35 @@ except ImportError as e:
 pg.setConfigOptions(antialias=True)
 # pg.setConfigOption('background', 'w')
 # pg.setConfigOption('foreground', 'k')
+
+import re
+
+PERIOD_COL_PATTERN = re.compile(r'per\d+d', re.IGNORECASE)
+
+def get_compact_width(col_name: str):
+    """根据列名自动返回紧凑列宽，None 表示不使用紧凑模式"""
+
+    base_map = {
+        'code': 60,
+        'rank': 40,
+        'win': 20,
+        'percent': 45,
+        'dff': 40,
+        'dff2': 40,
+    }
+
+    key = col_name.lower()
+
+    # 1️⃣ 固定列
+    if key in base_map:
+        return base_map[key]
+
+    # 2️⃣ perXd 动态涨幅列（per1d/per2d/...）
+    if PERIOD_COL_PATTERN.fullmatch(key):
+        return 40   # 所有 N 日涨幅统一列宽
+    return None
+
+
 class IntradayAxis(pg.DateAxisItem):
     def tickStrings(self, values, scale, spacing):
         return [time.strftime('%H:%M', time.localtime(v)) for v in values]
@@ -2058,11 +2087,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_timer.timeout.connect(self._poll_realtime_queue)
         self.realtime_timer.start(1000)  # 1秒轮询一次，保证响应速度
         
-        # ⚡ [NEW] 盘后策略自动分析定时器 (16:00 触发)
-        self.backtest_timer = QTimer(self)
-        self.backtest_timer.timeout.connect(self._check_and_run_backtest_analysis)
-        self.backtest_timer.start(60000) # 每分钟检查一次
-        self._last_backtest_date = None
+        # # ⚡ [NEW] 盘后策略自动分析定时器 (16:00 触发)
+        # self.backtest_timer = QTimer(self)
+        # self.backtest_timer.timeout.connect(self._check_and_run_backtest_analysis)
+        # self.backtest_timer.start(60000) # 每分钟检查一次
+        # self._last_backtest_date = None
 
         logger.info(f"[Visualizer] Realtime UI poll timer started at 1000ms")
         logger.info(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
@@ -2326,13 +2355,29 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
-        # 列名中英文映射
-        self.column_map = {
+        # # 列名中英文映射
+        # self.column_map = {
+        #     'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+        #     'dff': 'DFF', 'per1d': 'per1d','win': '连阳', 'slope': '斜率', 'volume': '虚拟量', 'power_idx': '爆发力',
+        #     'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
+        #     'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
+        # }
+        # ===== 1. 内置默认列名映射（永远作为兜底）=====
+        default_column_map = {
             'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
-            'dff': 'DFF', 'win': '连阳', 'slope': '斜率', 'volume': '虚拟量', 'power_idx': '爆发力',
+            'dff': 'DFF', 'per1d': 'per1d', 'win': '连阳', 'slope': '斜率',
+            'volume': '虚拟量', 'power_idx': '爆发力',
             'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
             'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
         }
+        # ===== 2. 从配置读取（可能为空或被用户删坏）=====
+        cfg_map = getattr(cct, "vis_column_map", None)
+        # ===== 3. 生成最终 column_map =====
+        if isinstance(cfg_map, dict) and cfg_map:
+            # 用配置覆盖默认，但不允许删掉默认字段
+            self.column_map = {**default_column_map, **cfg_map}
+        else:
+            self.column_map = default_column_map.copy()
 
         real_time_cols = list(cct.real_time_cols)
         strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
@@ -3467,7 +3512,8 @@ class MainWindow(QMainWindow, WindowMixin):
             
         # 2. 动态启用/禁用冲突的 App-wide 快捷键 (防止双重触发)
         # 包含所有的核心全局热键，确保系统模式开启时，App 内部的 Shortcut 被屏蔽
-        conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/", "Alt+H", "Alt+L"]
+        # conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/", "Alt+H", "Alt+L"]
+        conflict_keys = ["Alt+T", "Alt+F",  "Alt+H", "Alt+L"]
         if hasattr(self, 'shortcuts'):
             for key in conflict_keys:
                 if key in self.shortcuts:
@@ -3485,7 +3531,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 注册系统全局快捷键 (使用 QTimer 确保主线程执行)
             keyboard.add_hotkey('alt+t', lambda: QTimer.singleShot(0, self._show_signal_box))
             keyboard.add_hotkey('alt+f', lambda: QTimer.singleShot(0, self._show_filter_panel))
-            keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
+            # keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
             keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
             keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
@@ -3494,7 +3540,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             self.system_hotkeys_registered = True
-            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H, Alt+L, Ctrl+/)")
+            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H, Alt+L)")
         except Exception as e:
             logger.error(f"❌ 系统快捷键注册失败: {e}")
             self.global_shortcuts_enabled = False
@@ -3507,7 +3553,7 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             keyboard.remove_hotkey('alt+t')
             keyboard.remove_hotkey('alt+f')
-            keyboard.remove_hotkey('ctrl+/')
+            # keyboard.remove_hotkey('ctrl+/')
             keyboard.remove_hotkey('alt+h')
             keyboard.remove_hotkey('alt+l')
             self.system_hotkeys_registered = False
@@ -5961,7 +6007,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
             
             # 颜色渲染
-            if col_name in ('percent', 'dff') and pd.notnull(val):
+            # if col_name in ('percent', 'dff','per1d') and pd.notnull(val):
+            if pd.notnull(val) and (
+                col_name in ('percent', 'dff') 
+                or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
+            ):
                 val_float = float(val)
                 if val_float > 0:
                     item.setForeground(QColor('red'))
@@ -5990,7 +6040,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     item.setData(Qt.ItemDataRole.DisplayRole, new_val)
                     
                     # 更新颜色
-                    if col_name in ('percent', 'dff') and pd.notnull(val):
+                    # if col_name in ('percent', 'dff','per1d') and pd.notnull(val):
+                    if pd.notnull(val) and (
+                        col_name in ('percent', 'dff') 
+                        or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
+                    ):
                         val_float = float(val)
                         if val_float > 0:
                             item.setForeground(QColor('red'))
@@ -9365,23 +9419,56 @@ class MainWindow(QMainWindow, WindowMixin):
             header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
             header.setStretchLastSection(True)
 
-            # 定义紧凑列宽配置 (列名 -> 宽度)
-            compact_map = {
-                'Code': 60, 'Rank': 40, 'win': 35, 'Percent': 55,
-                'dff': 45, 'dff2': 45
-            }
+            # # 定义紧凑列宽配置 (列名 -> 宽度)
+            # compact_map = {
+            #     'Code': 60, 'Rank': 40, 'win': 35, 'Percent': 55,
+            #     'dff': 45, 'dff2': 45
+            # }
+            # # 应用宽度
+            # # headers are dynamic, check match
+            # current_headers = [self.filter_tree.headerItem().text(i) for i in range(self.filter_tree.columnCount())]
             
-            # 应用宽度
-            # headers are dynamic, check match
-            current_headers = [self.filter_tree.headerItem().text(i) for i in range(self.filter_tree.columnCount())]
-            
+            # for i, h_text in enumerate(current_headers):
+            #     if h_text in compact_map:
+            #         self.filter_tree.setColumnWidth(i, compact_map[h_text])
+            #     elif h_text == 'Name':
+            #         # Name 列自适应
+            #         header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
+            current_headers = [
+                self.filter_tree.headerItem().text(i)
+                for i in range(self.filter_tree.columnCount())
+            ]
+
+            self.filter_tree.setRootIsDecorated(False)  # ⭐ 关闭首列树形缩进
             for i, h_text in enumerate(current_headers):
-                if h_text in compact_map:
-                    self.filter_tree.setColumnWidth(i, compact_map[h_text])
-                elif h_text == 'Name':
-                    # Name 列自适应
+                h = h_text.strip()
+                width = get_compact_width(h)
+                # logger.info(f'h: {h} width: {width}')
+                if width is not None:
+                    self.filter_tree.setColumnWidth(i, width)
+                elif h == 'Name':
                     header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-            
+
+
+            # for i, h_text in enumerate(current_headers):
+            #     h = h_text.strip()
+            #     width = get_compact_width(h)
+            #     # logger.info(f'h: {h} width: {width}')
+            #     # ⭐ Code 列左对齐
+            #     if h == 'Code':
+            #         # logger.info(f'左对齐 h: {h} width: {width}')
+            #         for row in range(self.filter_tree.topLevelItemCount()):
+            #             item = self.filter_tree.topLevelItem(row)
+            #             if item:
+            #                 # 确保 Code 列没有图标
+            #                 item.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            #     if width is not None:
+            #         self.filter_tree.setColumnWidth(i, width)
+            #     elif h == 'Name':
+            #         header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
+
             header.setStretchLastSection(True)
 
             # ⭐ 默认按Rank升序排序

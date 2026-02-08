@@ -438,7 +438,7 @@ class AlertManager:
         if log_allowed or is_high:
             self.global_last_alert = now
             prefix = "🔴" if priority == 0 else "📢" if priority == 1 else "ℹ️"
-            logger.info(f"{prefix} [Alert] {message}")
+            logger.warning(f"{prefix} [Alert] {message}")
         
         # 3. 语音 & BEEP (已禁用滴滴声)
         
@@ -449,7 +449,7 @@ class AlertManager:
             try:
                 q_size = self.voice_queue.qsize()
                 if q_size > 50 and not is_high:
-                    logger.warning(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
+                    logger.debug(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
                     return
 
                 # [Fix] 使用字典包装，包含时间戳以支持竞态检查
