@@ -33,6 +33,11 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6 import sip
 from PyQt6 import QtGui
+# # 确保当前目录在路径中，防止 ModuleNotFoundError
+# current_dir = os.path.dirname(os.path.abspath(__file__))
+# if current_dir not in sys.path:
+#     sys.path.insert(0, current_dir)
+
 import stock_logic_utils
 from stock_logic_utils import ensure_parentheses_balanced, remove_invalid_conditions
 from JohnsonUtil import LoggerFactory
@@ -2411,6 +2416,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 在 MainWindow.__init__ 中修改
         self.stock_table.cellClicked.connect(self.on_table_cell_clicked) # 保留点击
+        self.stock_table.cellDoubleClicked.connect(self.on_table_cell_double_clicked) # 新增双击复制
         self.stock_table.currentItemChanged.connect(self.on_current_item_changed) # 新增键盘支持
         # 排序后自动滚动到顶部
         self.stock_table.horizontalHeader().sectionClicked.connect(self.on_header_section_clicked)
@@ -3092,17 +3098,18 @@ class MainWindow(QMainWindow, WindowMixin):
         if date_str is None:
             date_str = datetime.now().strftime('%Y-%m-%d')
             
-        self.statusBar().showMessage(f"正在执行策略分析: {date_str}...")
+        # self.statusBar().showMessage(f"正在执行策略分析: {date_str}...")
+        self.show_status_message(f"正在执行策略分析: {date_str}...")
         try:
             analyzer.run_daily_analysis(target_date=date_str)
-            self.statusBar().showMessage(f"策略分析完成，结果已存入修正日志。", 5000)
+            self.show_status_message(f"策略分析完成，结果已存入修正日志。", 5000)
             
             # 如果是手动触发，弹窗确认
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.information(self, "策略分析完成", f"{date_str} 的策略复盘已完成。\n建议已存入: strategy_self_correction.log")
         except Exception as e:
             logger.error(f"Strategy Analysis Failed: {e}")
-            self.statusBar().showMessage(f"策略分析失败: {e}", 5000)
+            self.show_status_message(f"策略分析失败: {e}", 5000)
 
     def _check_and_run_backtest_analysis(self):
         """定时检查是否需要运行盘后分析 (16:00)"""
@@ -3233,7 +3240,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 content = cmd_str
                 
             # 1. 信号推送命令: SIGNAL|{json_str}
-            logger.info(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
+            logger.debug(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
             if content.startswith("SIGNAL|"):
                 try:
                     json_str = content[7:]
@@ -3245,7 +3252,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         self._update_signal_log_from_ipc([data])
                     elif isinstance(data, list):
                         self._update_signal_log_from_ipc(data)
-                    logger.info(f"IPC SIGNAL processed: {len(data) if isinstance(data, list) else 1} items")
+                    logger.debug(f"IPC SIGNAL processed: {len(data) if isinstance(data, list) else 1} items")
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")
                     
@@ -3408,12 +3415,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.td_action.triggered.connect(self.on_toggle_td_sequential)
         self.toolbar.addAction(self.td_action)
 
-        # [RESTORE] 测试信号按钮
-        test_action = QAction("测试信号", self)
-        test_action.triggered.connect(self._test_send_signal)
-        self.toolbar.addAction(test_action)
+        # # [RESTORE] 测试信号按钮
+        # test_action = QAction("测试信号", self)
+        # test_action.triggered.connect(self._test_send_signal)
+        # self.toolbar.addAction(test_action)
         
-        self.toolbar.addSeparator()
+        # self.toolbar.addSeparator()
 
         # 系统级全局快捷键开关
         self.global_shortcuts_enabled = False  # 默认关闭（仅 App-wide）
@@ -3448,17 +3455,17 @@ class MainWindow(QMainWindow, WindowMixin):
         }
         """)
 
-    def _test_send_signal(self):
-        """测试发送信号 (Restored)"""
-        if hasattr(self, 'signal_log_panel'):
-            import random
-            patterns = ['上升三法', '老鸭头', '蚂蚁上树', '出水芙蓉', '均线金叉']
-            code = f"{random.randint(600000, 603000):06d}"
-            pattern = random.choice(patterns)
-            self.signal_log_panel.append_log(code, "测试股票", pattern, f"测试信号: {pattern} 出现", is_high_priority=True)
-            logger.info(f"Test signal sent: {code} - {pattern}")
-        else:
-            QMessageBox.warning(self, "错误", "信号面板未初始化")
+    # def _test_send_signal(self):
+    #     """测试发送信号 (Restored)"""
+    #     if hasattr(self, 'signal_log_panel'):
+    #         import random
+    #         patterns = ['上升三法', '老鸭头', '蚂蚁上树', '出水芙蓉', '均线金叉']
+    #         code = f"{random.randint(600000, 603000):06d}"
+    #         pattern = random.choice(patterns)
+    #         self.signal_log_panel.append_log(code, "测试股票", pattern, f"测试信号: {pattern} 出现", is_high_priority=True)
+    #         logger.info(f"Test signal sent: {code} - {pattern}")
+    #     else:
+    #         QMessageBox.warning(self, "错误", "信号面板未初始化")
 
     def on_toggle_simulation(self, checked):
         self.show_strategy_simulation = checked
@@ -3863,7 +3870,7 @@ class MainWindow(QMainWindow, WindowMixin):
         text = clipboard.text().strip()
         
         if not text:
-            self.statusBar().showMessage("📋 剪贴板为空", 2000)
+            self.show_status_message("📋 剪贴板为空", 2000)
             return
         
         # 提取6位连续数字（优先匹配第一个6位数字串）
@@ -3876,7 +3883,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if len(digits) >= 1:
                 code = digits.zfill(6)
             else:
-                self.statusBar().showMessage("📋 未找到有效数字", 2000)
+                self.show_status_message("📋 未找到有效数字", 2000)
                 return
         
         # 设置到输入框（textChanged 会触发2秒延迟定时器）
@@ -4487,14 +4494,14 @@ class MainWindow(QMainWindow, WindowMixin):
                     cmd, val = cmd_data
                     if cmd == 'SWITCH_CODE':
                         if isinstance(val, dict):
-                            logger.info(f"Queue CMD: Switching to {val.get('code')} with params {val}")
+                            logger.debug(f"Queue CMD: Switching to {val.get('code')} with params {val}")
                             # [FIX] 避免 multiple values for argument 'code'
                             params = val.copy()
                             code = params.pop('code', None)
                             if code:
                                 self.load_stock_by_code(code, **params)
                         else:
-                            logger.info(f"Queue CMD: Switching to {val}")
+                            logger.debug(f"Queue CMD: Switching to {val}")
                             self.load_stock_by_code(val)
 
                     elif cmd == 'UPDATE_DF_ALL':
@@ -4516,7 +4523,7 @@ class MainWindow(QMainWindow, WindowMixin):
                             self.expected_sync_version = ver
                             latest_full_df = payload
                             df_diffs.clear()
-                            logger.info(f"[Queue] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
+                            logger.debug(f"[Queue] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
                         elif m_type == 'UPDATE_DF_DIFF':
                             if self.expected_sync_version == -1:
                                 # 还没有全量包，丢弃增量并请求同步
@@ -4534,7 +4541,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     
                     elif cmd == 'CMD_SCAN_CONSOLIDATION':
                         # 触发策略扫描
-                        logger.info("Queue CMD: Triggering Consolidation Scan...")
+                        logger.debug("Queue CMD: Triggering Consolidation Scan...")
                         # 确保 SignalBoxDialog 已显示
                         self._show_signal_box()
                         # 延迟以确保窗口初始化完成
@@ -5095,7 +5102,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # logger.debug(f"[Throttle] Skipping render for {code} (Interval: {now-last_render:.2f}s)")
             return
 
-        with timed_ctx("render_charts_realtime", warn_ms=100):
+        with timed_ctx("render_charts_realtime", warn_ms=150):
             self.render_charts(code, self.day_df, tick_df)
             # 更新最后渲染时间
             self._last_kline_render_time[code] = time.time()
@@ -6076,7 +6083,16 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.info("No item at pos")
             return
 
+        # 尝试从当前单元格获取 UserRole (通常是 code)
         stock_code = item.data(Qt.ItemDataRole.UserRole)
+        
+        # [NEW] 如果当前单元格没有 code (比如点击了名称列)，则从同行的第 0 列获取
+        if not stock_code:
+            row_idx = self.stock_table.row(item)
+            code_item = self.stock_table.item(row_idx, 0)
+            if code_item:
+                stock_code = code_item.data(Qt.ItemDataRole.UserRole)
+        
         logger.info(f"Right click stock_code: {stock_code}")
         
         if not stock_code:
@@ -6138,9 +6154,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if row is not None:
             success = self.push_stock_info(stock_code, row)
             if success:
-                self.statusBar().showMessage(f"发送成功: {stock_code}")
+                self.show_status_message(f"发送成功: {stock_code}")
             else:
-                self.statusBar().showMessage(f"发送失败: {stock_code}")
+                self.show_status_message(f"发送失败: {stock_code}")
 
     def _on_add_to_hotlist_from_menu(self, code: str, name: str, row):
         """从右键菜单添加到热点"""
@@ -6150,11 +6166,11 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if hasattr(self, 'hotlist_panel'):
             if self.hotlist_panel.contains(code):
-                self.statusBar().showMessage(f"热点已存在: {code} {name}")
+                self.show_status_message(f"热点已存在: {code} {name}")
             else:
                 success = self.hotlist_panel.add_stock(code, name, price, "右键添加")
                 if success:
-                    self.statusBar().showMessage(f"🔥 添加热点: {code} {name}")
+                    self.show_status_message(f"🔥 添加热点: {code} {name}")
                     # 自动显示面板
                     if not self.hotlist_panel.isVisible():
                         self.hotlist_panel.show()
@@ -6191,7 +6207,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
         if target:
             self._resize_columns_tightly(target)
-            self.statusBar().showMessage(f"Layout Optimized: {target.objectName() or 'Table'}", 2000)
+            self.show_status_message(f"Layout Optimized: {target.objectName() or 'Table'}", 2000)
 
     def _on_column_resized_debounced(self, index, old_size, new_size):
         """列宽变动防抖保存"""
@@ -6214,6 +6230,21 @@ class MainWindow(QMainWindow, WindowMixin):
                         except Exception:
                             pass
                 # 如果 code 变了，currentItemChanged 会处理加载和同步
+
+    def on_table_cell_double_clicked(self, row, column):
+        """双击事件：如果是代码列则复制到剪贴板"""
+        if column == 0:  # 代码列
+            code_item = self.stock_table.item(row, column)
+            if code_item:
+                code = code_item.data(Qt.ItemDataRole.UserRole) or code_item.text()
+                if code:
+                    # 获取剪贴板并设置文本
+                    cb = QApplication.clipboard()
+                    if cb:
+                        cb.setText(code)
+                        # self.statusBar().showMessage(f"📋 已复制代码: {code}", 3000)
+                        self.show_status_message(f"📋 已复制代码: {code}", 3000)
+                        logger.info(f"[Table] Copied to clipboard: {code}")
 
     def switch_stock_prev(self):
         """切换至上一只股票 (1.1/1.2 Context navigation)"""
@@ -6864,8 +6895,8 @@ class MainWindow(QMainWindow, WindowMixin):
         if code is not None:
             code = str(code).strip()
             
-        if getattr(self,'select_resample',None) != 'd':
-            self._capture_view_state()
+        # [UPGRADE] 始终捕获当前视角，以便切换股票或周期时能尽可能保持缩放习惯
+        self._capture_view_state()
 
         if isinstance(code, str):
             # 1. 清理可能的空白和前缀
@@ -7020,13 +7051,24 @@ class MainWindow(QMainWindow, WindowMixin):
         return self.load_stock_by_code(code, name, **kwargs)
 
     def _draw_hotspot_markers(self, code, x_axis, day_df):
-        """在 K 线图上绘制热点加入标记"""
-        # 先清理旧标记
-        self._clear_hotspot_markers()
-        
+        """在 K 线图上绘制热点加入标记 - 复用对象版"""
         if not hasattr(self, 'hotlist_panel'):
             return
             
+        # 1. 初始化持久项 (只运行一次)
+        if not hasattr(self, 'hotspot_line_p'):
+            self.hotspot_line_p = pg.PlotCurveItem(pen=pg.mkPen('#FF4500', width=1, style=Qt.PenStyle.DashLine))
+            self.hotspot_label_p = pg.TextItem(anchor=(0, 1))
+            self.hotspot_marker_p = pg.TextItem(html='<div style="font-size: 14pt;">🔥</div>', anchor=(0, 0))
+            self.kline_plot.addItem(self.hotspot_line_p)
+            self.kline_plot.addItem(self.hotspot_label_p)
+            self.kline_plot.addItem(self.hotspot_marker_p)
+            
+        # 默认隐藏
+        self.hotspot_line_p.hide()
+        self.hotspot_label_p.hide()
+        self.hotspot_marker_p.hide()
+
         # 尝试匹配：直接匹配 or 6位代码匹配
         target_item = None
         
@@ -7058,18 +7100,13 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 add_date = add_time_str
             
-            # 确保日期格式一致 (YYYY-MM-DD)
-            # day_df.index 通常是字符串 'YYYY-MM-DD'
-            
             # 查找对应的 K 线索引
             idx = -1
             if add_date in day_df.index:
-                # 获取整数索引
                 idx_res = day_df.index.get_loc(add_date)
-                # 处理重复索引的情况
                 if isinstance(idx_res, slice):
                     idx = idx_res.start
-                elif hasattr(idx_res, '__iter__'): # array or list
+                elif hasattr(idx_res, '__iter__'): 
                     idx = idx_res[0]
                 else:
                     idx = idx_res
@@ -7081,59 +7118,49 @@ class MainWindow(QMainWindow, WindowMixin):
                     idx = len(day_df) - 1
             
             if idx != -1:
-                
                 # 获取坐标
                 try: 
                     x_pos = x_axis[idx] 
                 except:
-                    # 如果索引越界或 x_axis 不对齐，尝试重新推算 (简单的 idx 对应)
                     x_pos = idx
                 
-                low_val = day_df['low'].iloc[idx]
                 price = item.add_price
                 
-                # 绘制一条横向虚线指示加入价 (更短一些)
-                # 长度：从加入点开始，向右延伸 12 个 bar
+                # 更新位置并显示
                 line_len = 12
                 x_end = x_pos + line_len
-                line = pg.PlotCurveItem(
-                    x=[x_pos, x_end], 
-                    y=[price, price], 
-                    pen=pg.mkPen('#FF4500', width=1, style=Qt.PenStyle.DashLine)
-                )
-                self.kline_plot.addItem(line)
+                self.hotspot_line_p.setData(x=[x_pos, x_end], y=[price, price])
+                self.hotspot_line_p.show()
 
-                # 绘制价格标签 (在虚线上方)
-                # anchor=(0, 1) => 锚点在文本左下角 -> 文本显示在坐标点上方
                 msg = f'<div style="color: #FF4500; font-weight: bold; font-size: 9pt;">¥{price:.2f}</div>'
-                label = pg.TextItem(html=msg, anchor=(0, 1))
-                label.setPos(x_pos, price)
-                self.kline_plot.addItem(label)
+                self.hotspot_label_p.setHtml(msg)
+                self.hotspot_label_p.setPos(x_pos, price)
+                self.hotspot_label_p.show()
 
-                # 绘制火焰图标 (在虚线下方)
-                # anchor=(0, 0) => 锚点在文本左上角 -> 文本显示在坐标点下方
-                marker = pg.TextItem(html='<div style="font-size: 14pt;">🔥</div>', anchor=(0, 0)) 
-                marker.setPos(x_pos, price)
-                self.kline_plot.addItem(marker)
-                
-                # 保存引用以便清理
-                self.hotspot_items.extend([marker, label, line])
+                self.hotspot_marker_p.setPos(x_pos, price)
+                self.hotspot_marker_p.show()
                 
         except Exception as e:
             logger.debug(f"Draw hotspot marker error: {e}")
 
+
     def _draw_signal_annotation(self, code, x_axis, day_df):
-        """在 K 线图上绘制被点击的信号标注"""
-        # 先清理旧标记
-        if hasattr(self, 'signal_annotation_items'):
-            for item in self.signal_annotation_items:
-                try:
-                    self.kline_plot.removeItem(item)
-                except:
-                    pass
-            self.signal_annotation_items.clear()
-        else:
-            self.signal_annotation_items = []
+        """在 K 线图上绘制被点击的信号标注 - 复用对象版"""
+        # 1. 初始化持久项
+        if not hasattr(self, 'anno_arrow_p'):
+            self.anno_arrow_p = pg.ArrowItem(angle=90, tipAngle=30, baseAngle=20, headLen=15, tailLen=10, tailWidth=5, pen={'color': 'w', 'width': 1})
+            self.anno_label_p = pg.TextItem(anchor=(0.5, 0))
+            self.kline_plot.addItem(self.anno_arrow_p)
+            self.kline_plot.addItem(self.anno_label_p)
+            
+            def on_click(event):
+                self.show_supervision_details()
+            self.anno_arrow_p.mouseClickEvent = on_click
+            self.anno_label_p.mouseClickEvent = on_click
+            
+        # 默认隐藏
+        self.anno_arrow_p.hide()
+        self.anno_label_p.hide()
         
         # 检查是否有激活的信号上下文，并且代码匹配
         if not hasattr(self, 'active_signal_context') or not self.active_signal_context:
@@ -7144,8 +7171,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return
             
         try:
-            # 定位到最后一根 K 线 (假设是实时信号)
-            # 如果信号里有时间且能匹配到历史K线最好，但通常是 pending signal
+            # 定位到最后一根 K 线
             idx = len(day_df) - 1
             if idx < 0: return
             
@@ -7155,18 +7181,13 @@ class MainWindow(QMainWindow, WindowMixin):
             except:
                 x_pos = idx
                 
-            # 获取价格 (High or Low based on pattern?)
             row = day_df.iloc[idx]
             high_val = row['high']
             low_val = row['low']
-            close_val = row['close']
             
             pattern = ctx.get('pattern', 'SIGNAL')
             message = ctx.get('message', '')
             
-            # 简化消息显示 (优化重复信息)
-            # 假设消息格式: "Code Name Pattern Detail..."
-            # 我们只提取关键动作或价格
             short_msg = pattern
             if "卖出" in message:
                 short_msg = "卖出"
@@ -7175,79 +7196,52 @@ class MainWindow(QMainWindow, WindowMixin):
             
             is_sell = "卖出" in message or "高开" in pattern or "回落" in pattern
             
-            # 绘制箭头
             if is_sell:
-                # 绿色向下箭头，在最高价上方
                 anchor_y = high_val
-                arrow = pg.ArrowItem(angle=-90, tipAngle=30, baseAngle=20, headLen=15, tailLen=10, tailWidth=5, pen={'color': 'w', 'width': 1}, brush='g')
-                arrow.setPos(x_pos, anchor_y)
+                self.anno_arrow_p.setStyle(angle=-90, brush='g')
+                self.anno_arrow_p.setPos(x_pos, anchor_y)
                 
-                # 文字标签
                 label_html = f'<div style="color: #00FF00; font-weight: bold; font-size: 10pt;">{short_msg}</div>'
-                label = pg.TextItem(html=label_html, anchor=(0.5, 1)) # 底部中心对齐 -> 文字在上方
-                label.setPos(x_pos, anchor_y + (high_val * 0.01)) # 稍微再高一点
-                
+                self.anno_label_p.setHtml(label_html)
+                self.anno_label_p.setAnchor((0.5, 1))
+                self.anno_label_p.setPos(x_pos, anchor_y + (high_val * 0.01))
             else:
-                # 红色向上箭头，在最低价下方
                 anchor_y = low_val
-                arrow = pg.ArrowItem(angle=90, tipAngle=30, baseAngle=20, headLen=15, tailLen=10, tailWidth=5, pen={'color': 'w', 'width': 1}, brush='r')
-                arrow.setPos(x_pos, anchor_y)
+                self.anno_arrow_p.setStyle(angle=90, brush='r')
+                self.anno_arrow_p.setPos(x_pos, anchor_y)
                 
-                # 文字标签
                 label_html = f'<div style="color: #FF0000; font-weight: bold; font-size: 10pt;">{short_msg}</div>'
-                label = pg.TextItem(html=label_html, anchor=(0.5, 0)) # 顶部中心对齐 -> 文字在下方
-                label.setPos(x_pos, anchor_y - (low_val * 0.01))
+                self.anno_label_p.setHtml(label_html)
+                self.anno_label_p.setAnchor((0.5, 0))
+                self.anno_label_p.setPos(x_pos, anchor_y - (low_val * 0.01))
 
-            # Make items clickable
-            # Use partial to bind the slot if needed, but direct connect works for signals
-            # ArrowItem and TextItem in pyqtgraph might not have 'clicked' signal directly
-            # We can use the 'sigClicked' if available or override mousePressEvent
-            # For simplicity, we wrap them or attach mouse events if possible.
-            # Pyqtgraph items often accept mouseClickEvent.
-            
-            def on_click(event):
-                self.show_supervision_details()
-
-            arrow.mouseClickEvent = on_click
-            label.mouseClickEvent = on_click
-            
-            # Ensure they accept mouse events
-            # arrow.setAcceptedMouseButtons(Qt.MouseButton.LeftButton) # arrow inherits from QGraphicsItem? 
-            # pg items usually handle this. ArrowItem might need explicit verify.
-            
-            # Note: arrow/text items in pg might need setClickable(True) or setAcceptHoverEvents.
-            # Let's try simpler binding.
-            
-            self.kline_plot.addItem(arrow)
-            self.kline_plot.addItem(label)
-            self.signal_annotation_items.extend([arrow, label])
-            
-            logger.debug(f"[Annotation] Drew signal annotation for {code}: {short_msg}")
+            self.anno_arrow_p.show()
+            self.anno_label_p.show()
+            logger.debug(f"[Annotation] Updated signal annotation for {code}: {short_msg}")
             
         except Exception as e:
             logger.error(f"Failed to draw signal annotation: {e}")
 
+
     def _clear_hotspot_markers(self):
-        """清理旧的热点标记"""
-        if hasattr(self, 'hotspot_items'):
-            for item in self.hotspot_items:
-                if item in self.kline_plot.items:
-                    self.kline_plot.removeItem(item)
-            self.hotspot_items.clear()
-        else:
-            self.hotspot_items = []
+        """清理旧的热点标记 - 仅隐藏版本"""
+        if hasattr(self, 'hotspot_line_p'):
+            self.hotspot_line_p.hide()
+            self.hotspot_label_p.hide()
+            self.hotspot_marker_p.hide()
+
 
     def _clear_follow_markers(self):
-        """清理旧的跟单标记"""
-        if hasattr(self, 'follow_marker_items'):
-            for item in self.follow_marker_items:
-                try:
-                    self.kline_plot.removeItem(item)
-                except:
-                    pass
-            self.follow_marker_items.clear()
-        else:
-            self.follow_marker_items = []
+        """清理旧的跟单标记 - 仅隐藏版本"""
+        if hasattr(self, 'follow_line_p'):
+            self.follow_line_p.hide()
+            self.follow_label_p.hide()
+            self.follow_marker_p.hide()
+        if hasattr(self, 'exit_line_p'):
+            self.exit_line_p.hide()
+            self.exit_label_p.hide()
+            self.exit_marker_p.hide()
+
 
     def _draw_follow_markers(self, code, x_axis, day_df):
         """在 K 线图上绘制跟单信号标记 (使用 🔥 图标表示入场, ❌ 表示离场)"""
@@ -7297,22 +7291,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._draw_single_follow_marker(x_axis, day_df, self.current_signal_date, None)
     
     def _draw_single_follow_marker(self, x_axis, day_df, target_date, price_hint=None, marker_type="FOLLOW"):
-        """
-        绘制单个跟单标记
-        
-        Args:
-            x_axis: X 轴坐标数组
-            day_df: K 线数据
-            target_date: 目标日期 (可能是 "02-06" 或 "2026-02-06 HH:MM:SS")
-            price_hint: 价格提示 (如果为 None 则从 K 线数据中获取)
-            marker_type: 标记类型 ("FOLLOW" 或 "EXIT")
-        """
+        """绘制单个跟单标记 - 复用对象版"""
         try:
-            # 提取日期部分 (去掉时间)
             if ' ' in target_date:
-                target_date = target_date.split(' ')[0]  # "2026-02-06 12:30:00" -> "2026-02-06"
+                target_date = target_date.split(' ')[0]
             
-            # 查找 K 线索引
             idx = -1
             for i, d_str in enumerate(day_df.index):
                 if target_date in d_str:
@@ -7320,169 +7303,110 @@ class MainWindow(QMainWindow, WindowMixin):
                     break
             
             if idx == -1:
-                # 尝试匹配今天
                 if target_date == datetime.now().strftime("%m-%d") or target_date == datetime.now().strftime("%Y-%m-%d"):
                     idx = len(day_df) - 1
             
             if idx == -1:
-                logger.debug(f"Cannot find K-line index for date: {target_date}")
                 return
             
-            # 获取坐标
             try:
                 x_pos = x_axis[idx]
             except:
                 x_pos = idx
             
-            # 获取价格
-            if price_hint and price_hint > 0:
-                price = price_hint
-            else:
-                price = day_df['close'].iloc[idx]
+            price = price_hint if price_hint and price_hint > 0 else day_df['close'].iloc[idx]
             
-            # 根据标记类型选择样式
             if marker_type == "EXIT":
-                color = '#FF4500'  # 橙红色
-                icon = '❌'
-                label_text = f'EXIT ¥{price:.2f}'
-                anchor_y = 0  # 标记在价格上方
-            else:  # FOLLOW
-                color = '#FFD700'  # 金色
-                icon = '🔥'
-                label_text = f'Follow ¥{price:.2f}'
-                anchor_y = 1  # 标记在价格下方
+                color, icon, label_text, anchor_y = '#FF4500', '❌', f'EXIT ¥{price:.2f}', 0
+                prefix = 'exit'
+            else:
+                color, icon, label_text, anchor_y = '#FFD700', '🔥', f'Follow ¥{price:.2f}', 1
+                prefix = 'follow'
             
-            # 绘制一条横向虚线
+            attr_line = f'{prefix}_line_p'
+            attr_label = f'{prefix}_label_p'
+            attr_marker = f'{prefix}_marker_p'
+
+            if not hasattr(self, attr_line):
+                setattr(self, attr_line, pg.PlotCurveItem(pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)))
+                setattr(self, attr_label, pg.TextItem(anchor=(0, anchor_y)))
+                setattr(self, attr_marker, pg.TextItem(html=f'<div style="font-size: 14pt;">{icon}</div>', anchor=(0, 1 - anchor_y)))
+                self.kline_plot.addItem(getattr(self, attr_line))
+                self.kline_plot.addItem(getattr(self, attr_label))
+                self.kline_plot.addItem(getattr(self, attr_marker))
+            
             line_len = 12
-            line = pg.PlotCurveItem(
-                x=[x_pos, x_pos + line_len], 
-                y=[price, price], 
-                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)
-            )
-            self.kline_plot.addItem(line)
+            getattr(self, attr_line).setData(x=[x_pos, x_pos + line_len], y=[price, price])
+            getattr(self, attr_line).show()
             
-            # 绘制价格标签
             msg = f'<div style="color: {color}; font-weight: bold; font-size: 9pt;">{label_text}</div>'
-            label = pg.TextItem(html=msg, anchor=(0, anchor_y))
-            label.setPos(x_pos, price)
-            self.kline_plot.addItem(label)
+            getattr(self, attr_label).setHtml(msg)
+            getattr(self, attr_label).setAnchor((0, anchor_y))
+            getattr(self, attr_label).setPos(x_pos, price)
+            getattr(self, attr_label).show()
             
-            # 绘制图标 (Prominent)
-            marker = pg.TextItem(html=f'<div style="font-size: 14pt;">{icon}</div>', anchor=(0, 1 - anchor_y)) 
-            marker.setPos(x_pos, price)
-            self.kline_plot.addItem(marker)
-            
-            self.follow_marker_items.extend([marker, label, line])
+            getattr(self, attr_marker).setHtml(f'<div style="font-size: 14pt;">{icon}</div>')
+            getattr(self, attr_marker).setAnchor((0, 1 - anchor_y))
+            getattr(self, attr_marker).setPos(x_pos, price)
+            getattr(self, attr_marker).show()
             
         except Exception as e:
             logger.debug(f"Draw single follow marker error: {e}")
 
+
     def _clear_price_gaps(self):
-        """清理价格缺口"""
-        if not hasattr(self, 'gap_items'):
-            self.gap_items = []
-        for item in self.gap_items:
-            if item in self.kline_plot.items:
-                self.kline_plot.removeItem(item)
-        self.gap_items.clear()
+        """清理价格缺口 - 仅隐藏版本"""
+        if hasattr(self, 'gap_items_pool'):
+            for item in self.gap_items_pool:
+                item.setVisible(False)
+
 
     def _draw_price_gaps(self, x_axis, day_df):
-        """
-        在 K 线图上绘制最近 5 个跳空缺口 (未回补的水平带)
-        Gap Up: Current Low > Previous High
-        Gap Down: Current High < Previous Low
-        """
+        """在 K 线图上绘制最近 5 个跳空缺口 - 对象池版"""
+        if not hasattr(self, 'gap_items_pool'):
+            self.gap_items_pool = []
+            for _ in range(10):
+                item = pg.QtWidgets.QGraphicsRectItem()
+                item.setPen(pg.mkPen(None))
+                item.setBrush(pg.mkBrush(pg.mkColor(190, 190, 190, 90)))
+                item.setVisible(False)
+                self.kline_plot.addItem(item)
+                self.gap_items_pool.append(item)
+        
         self._clear_price_gaps()
 
-        if len(day_df) < 2:
-            return
+        if len(day_df) < 2: return
 
         try:
-            highs = day_df['high'].values
-            lows = day_df['low'].values
-            
-            # 使用列表收集缺口信息
-            gaps = []
-            
-            # 遍历寻找缺口 (这里不使用纯矢量化，因为需要后续的 Search-Forward Fill 检测，循环更直观)
-            # 为了性能，反向遍历寻找最近的 N 个缺口 maybe? 
-            # 但用户要求“最近5个”，我们还是以前向遍历+截取最后5个比较稳妥
-            
+            highs, lows = day_df['high'].values, day_df['low'].values
             total = len(day_df)
             found_gaps = []
-
-            # 性能优化：只扫描最近 20 天的缺口
             scan_start = max(1, total - 20)
 
             for i in range(scan_start, total):
-                prev_high = highs[i-1]
-                prev_low = lows[i-1]
-                curr_high = highs[i]
-                curr_low = lows[i]
+                prev_high, prev_low = highs[i-1], lows[i-1]
+                curr_high, curr_low = highs[i], lows[i]
                 
-                # Gap Up
                 if curr_low > prev_high:
-                    gap_start_price = prev_high
-                    gap_end_price = curr_low
-                    gap_type = 'up'
-                # Gap Down
+                    gap_start_p, gap_end_p = prev_high, curr_low
                 elif curr_high < prev_low:
-                    gap_start_price = curr_high
-                    gap_end_price = prev_low 
-                    gap_type = 'down'
-                else:
-                    continue
+                    gap_start_p, gap_end_p = curr_high, prev_low 
+                else: continue
                 
-                # 记录缺口
-                found_gaps.append({
-                    'start_idx': i,
-                    'start_price': gap_start_price,
-                    'end_price': gap_end_price,
-                    'type': gap_type
-                })
+                found_gaps.append((i, gap_start_p, gap_end_p))
             
-            # 只取最近 5 个
             targets = found_gaps[-5:]
-            
-            for gap in targets:
-                start_idx = gap['start_idx']
-                gap_low = gap['start_price']
-                gap_high = gap['end_price']
-                gap_type = gap['type']
-                
-                # 用户需求: "到整个屏幕不用保留宽度,调整比例缺口水平都直达屏幕右侧最远端"
-                # 这意味着无论是否回补，都画到最右边
-                
-                # 起点: 缺口产生的那一天
-                x_start = x_axis[start_idx] - 0.4
-                
-                # 终点: 屏幕最右端. 
-                # 由于 x_axis 是 0..N 的整数索引映射，我们可以给一个足够大的数
-                # 或者当前数据的最后一根 + 一个屏幕宽度
-                # 取 len(day_df) + 200 应该足够覆盖右侧空白
+            for i, (idx, low, high) in enumerate(targets):
+                if i >= len(self.gap_items_pool): break
+                x_start = x_axis[idx] - 0.4
                 x_end = len(day_df) + 500 
-                
-                width = x_end - x_start
-                height = gap_high - gap_low
-                
-                rect_item = pg.QtWidgets.QGraphicsRectItem(x_start, gap_low, width, height)
-                
-                # 颜色: 加亮些
-                # 原来: (200, 200, 200, 50)
-                # 加亮: 提高不透明度，或者更白一点
-                # 用户说"加亮些"，可能指更显眼。
-                # 试用: (220, 220, 220, 120) -> 接近半透明白
-                # 或者 (180, 180, 180, 100) -> 显眼的灰
-                
-                brush_color = pg.mkColor(190, 190, 190, 90)
-                rect_item.setBrush(pg.mkBrush(brush_color))
-                rect_item.setPen(pg.mkPen(None)) # 无边框
-                
-                self.kline_plot.addItem(rect_item)
-                self.gap_items.append(rect_item)
+                item = self.gap_items_pool[i]
+                item.setRect(x_start, low, x_end - x_start, high - low)
+                item.setVisible(True)
 
         except Exception as e:
             logger.error(f"Draw price gaps error: {e}")
+
 
     def _install_viewbox_guard(self, plot: pg.PlotItem):
         vb = plot.getViewBox()
@@ -7771,17 +7695,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 getattr(self, attr).setData(x_axis, series)
                 getattr(self, attr).setPen(pg.mkPen(color, width=2))
 
-        # --- TD Sequential (神奇九转) ---
-        # 清除旧的 TD 标记
-        if not hasattr(self, 'td_text_items'):
-            self.td_text_items = []
-        for item in self.td_text_items:
-            if item in self.kline_plot.items:
-                self.kline_plot.removeItem(item)
-        self.td_text_items = []
-        
         # 仅在开关开启时绘制
         if getattr(self, 'show_td_sequential', True):
+
             # --- TD Sequential (神奇九转) ---
             try:
                 from JSONData.tdx_data_Day import td_sequential_fast
@@ -7904,11 +7820,9 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.debug(f"TD Sequential display error: {e}")
 
-        # [NEW] 绘制热点加入标记
-        self._draw_hotspot_markers(code, x_axis, day_df)
-
         # [NEW] 绘制跳空缺口 (最近 5 个)
         self._draw_price_gaps(x_axis, day_df)
+
 
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
@@ -8444,9 +8358,10 @@ class MainWindow(QMainWindow, WindowMixin):
             #         pass
         
         # --- 绘制热点/跟单标记 ---
-        self._draw_hotspot_markers(code, x_axis, day_df)
+        # [REMOVED] 重复的 _draw_hotspot_markers 调用
         self._draw_follow_markers(code, x_axis, day_df)
         self._draw_signal_annotation(code, x_axis, day_df)
+
 
 
 
@@ -8491,11 +8406,20 @@ class MainWindow(QMainWindow, WindowMixin):
                 visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
                 if not visible_new.empty:
                     new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
-                    new_rng = new_h - new_l if new_h > new_l else 1.0
-                    p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
-                    target_h = new_rng * p_zoom
-                    target_y_center = new_l + (new_rng * p_center_rel)
-                    vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
+                    
+                    # [FIX] 如果是切换新股，我们保留 X 轴的缩放习惯（看末尾多少根），
+                    # 但 Y 轴由于价格量级可能完全不同（如 20 vs 400），不再使用上一只股票的比例，而是直接全量适配。
+                    if is_new_stock:
+                        y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
+                        vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
+                        logger.debug(f"[VIEW] New stock {code} detected, resetting Y-range only.")
+                    else:
+                        # 周期切换或增量刷新：尽量保持之前的 Y 轴缩放比例关系
+                        new_rng = new_h - new_l if new_h > new_l else 1.0
+                        p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
+                        target_h = new_rng * p_zoom
+                        target_y_center = new_l + (new_rng * p_center_rel)
+                        vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
 
                 # 保持自适应开启
                 vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
@@ -8515,11 +8439,23 @@ class MainWindow(QMainWindow, WindowMixin):
                  
                  # 容差 20% (稍微宽松一点，避免频繁跳动)
                  height = y_max - y_min
-                 # 如果高度极小（初始状态），或者价格完全跑偏
+                 
+                 # [FIX] 如果价格偏离当前视口过大，或者视口没有高度，强制进行自动范围调整
+                 # 特别是针对从 20 跳到 400 这种极端情况，常规的 enableAutoRange 可能不够及时或被其他设置抵消
                  if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
-                     logger.info(f"[AutoRange] Price {last_c:.2f} out of view [{y_min:.2f}, {y_max:.2f}], forcing Y-AutoRange")
+                     logger.info(f"[AutoRange] Price {last_c:.2f} out of view [{y_min:.2f}, {y_max:.2f}], forcing Y-AutoRange/Reset")
+                     
+                     # 1. 尝试最温和的自动范围开启
                      vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
                      vb.setAutoVisible(y=True)
+                     
+                     # 2. 如果偏离实在太离谱 (超过 2 倍高度)，说明之前的缩放完全不适用了，直接调用 Reset 恢复默认视角
+                     if height > 0 and (last_c > y_max + height*2 or last_c < y_min - height*2):
+                         logger.warning(f"[AutoRange] Extreme price gap detected, forcing full reset for {code}")
+                         self._reset_kline_view(df=day_df)
+                     else:
+                         # 否则，尝试强制更新一次范围
+                         vb.autoRange()
 
         # ----------------- 6. 更新实时决策面板 (Phase 7) -----------------
         if is_realtime_active and 'shadow_decision' in locals() and shadow_decision:
