@@ -2625,7 +2625,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              try:
                  if self.viz_command_queue is not None:
                      self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
-                     logger.info(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
+                     logger.debug(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
                      sent = True
                      # 交互提示
                      if hasattr(self, 'status_bar'):
@@ -2663,7 +2663,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # [FIX] 每次启动前强制重置生命周期标志为 True (防止上次退出残留 False)
                     if hasattr(self, 'viz_lifecycle_flag'):
                         self.viz_lifecycle_flag.value = True
-                        logger.info(f"[Visualizer] Resetting viz_lifecycle_flag to True. Addr: {id(self.viz_lifecycle_flag)}")
+                        logger.debug(f"[Visualizer] Resetting viz_lifecycle_flag to True. Addr: {id(self.viz_lifecycle_flag)}")
                     
                     # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
                     # load_stock_by_code handles the | split automatically
