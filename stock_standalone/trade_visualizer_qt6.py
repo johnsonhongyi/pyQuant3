@@ -664,6 +664,8 @@ class SignalOverlay:
 
         xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
 
+        xs, ys, brushes, symbols, sizes, data, pens = [], [], [], [], [], [], []
+
         # 回收旧文本
         for item in self.text_items:
             item.hide()
@@ -678,17 +680,47 @@ class SignalOverlay:
             if x_pos is None or y_pos is None or math.isnan(x_pos) or math.isnan(y_pos):
                 continue  # 跳过异常信号
 
-            xs.append(x_pos)
-            ys.append(y_pos)
-            brushes.append(pg.mkBrush(sig.color))
-            symbols.append(sig.symbol)
-            sizes.append(sig.size)
-            data.append(sig.to_visual_hit()['meta'])
+            # [UPGRADE] Special handling for Emoji Markers (like '🎯')
+            if sig.symbol == '🎯':
+                # Draw Emoji as TextItem (centered on point)
+                marker = self._get_text_item()
+                # Use HTML to control size/color explicitly if needed, but simple unicode works too.
+                # Center anchor (0.5, 0.5) puts the center of text at (x,y)
+                marker.setHtml(f'<div style="font-size: {sig.size}pt; color: #FFD700; font-weight: bold;">{sig.symbol}</div>')
+                marker.setAnchor((0.5, 0.5))
+                marker.setPos(x_pos, y_pos)
+                self.text_items.append(marker)
+                
+                # Add invisible hit target for interaction
+                xs.append(x_pos)
+                ys.append(y_pos)
+                brushes.append(pg.mkBrush((0,0,0,0))) # Transparent
+                symbols.append('o') 
+                sizes.append(sig.size) # Hit area size
+                pens.append(pg.mkPen((0,0,0,0))) # Transparent border
+                data.append(sig.to_visual_hit()['meta'])
+            else:
+                xs.append(x_pos)
+                ys.append(y_pos)
+                brushes.append(pg.mkBrush(sig.color))
+                symbols.append(sig.symbol)
+                sizes.append(sig.size)
+                pens.append(pg.mkPen(None)) # No outline for standard shapes
+                data.append(sig.to_visual_hit()['meta'])
 
             # 添加价格文字标签
             is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
-            anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
-            text_color = (255, 120, 120) if is_buy else (120, 255, 120)
+            
+            # [UPGRADE] Support specific Text Colors for FOLLOW/EXIT
+            if sig.signal_type == SignalType.FOLLOW:
+                text_color = (255, 215, 0) # Gold
+                anchor = (0.5, -0.8) # Below (leave space for large marker)
+            elif sig.signal_type == SignalType.EXIT_FOLLOW:
+                text_color = (255, 69, 0) # OrangeRed
+                anchor = (0.5, 1.5) # Above (Exit)
+            else:
+                anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
+                text_color = (255, 120, 120) if is_buy else (120, 255, 120)
 
             txt = self._get_text_item()
             txt.setText(f"{sig.price:.2f}")
@@ -698,7 +730,7 @@ class SignalOverlay:
             self.text_items.append(txt)
 
         # 最后统一更新 scatter
-        scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, data=data)
+        scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, pen=pens, data=data)
 
 
     def set_on_click_handler(self, handler):
@@ -7052,6 +7084,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _draw_hotspot_markers(self, code, x_axis, day_df):
         """在 K 线图上绘制热点加入标记 - 复用对象版"""
+        self._clear_hotspot_markers() # [FIX] 先清理，防止切股残留
+        
         if not hasattr(self, 'hotlist_panel'):
             return
             
@@ -7243,118 +7277,132 @@ class MainWindow(QMainWindow, WindowMixin):
             self.exit_marker_p.hide()
 
 
-    def _draw_follow_markers(self, code, x_axis, day_df):
-        """在 K 线图上绘制跟单信号标记 (使用 🔥 图标表示入场, ❌ 表示离场)"""
-        # 先清理旧标记
-        self._clear_follow_markers()
-        
-        # 从数据库查询该股票的跟单记录
+    def _get_follow_signals(self, code, day_df) -> list[SignalPoint]:
+        """获取跟单信号点列表 (Follow/Exit)"""
+        signals = []
         try:
             import sqlite3
             conn = sqlite3.connect("signal_strategy.db", timeout=5)
             c = conn.cursor()
-            
-            # 查询该股票的跟单记录 (包括入场和离场信息)
             c.execute("""
                 SELECT detected_date, exit_date, detected_price, exit_price, status
                 FROM follow_queue
                 WHERE code = ?
                 ORDER BY detected_date DESC
                 LIMIT 1
-            """, (code[:6],))  # 使用6位代码查询
-            
+            """, (code[:6],))
             row = c.fetchone()
             conn.close()
             
             if not row:
-                # 没有跟单记录,尝试使用传入的 current_signal_date
-                if not getattr(self, 'current_signal_date', None):
-                    return
-                # 使用传入的日期绘制单个 Follow 标记
-                self._draw_single_follow_marker(x_axis, day_df, self.current_signal_date, None)
-                return
-            
+                # 降级处理：仅当明确请求 follow 类型时显示
+                if getattr(self, 'current_signal_type', None) == 'follow' and getattr(self, 'current_signal_date', None):
+                    t_date = self.current_signal_date
+                    idx = self._find_date_index(day_df, t_date)
+                    if idx != -1:
+                        price = day_df['close'].iloc[idx]
+                        signals.append(SignalPoint(
+                            code=code, timestamp=t_date, bar_index=idx, price=price,
+                            signal_type=SignalType.FOLLOW, reason="Follow Entry (Manual)"
+                        ))
+                return signals
+
             detected_date, exit_date, detected_price, exit_price, status = row
             
-            # 绘制入场标记 (Follow)
+            # 1. Follow Entry
             if detected_date:
-                self._draw_single_follow_marker(x_axis, day_df, detected_date, detected_price, marker_type="FOLLOW")
-            
-            # 绘制离场标记 (EXIT)
-            if exit_date and status == "EXITED":
-                self._draw_single_follow_marker(x_axis, day_df, exit_date, exit_price, marker_type="EXIT")
-                
-        except Exception as e:
-            logger.debug(f"Draw follow marker error: {e}")
-            # 降级:使用传入的 current_signal_date
-            if getattr(self, 'current_signal_date', None):
-                self._draw_single_follow_marker(x_axis, day_df, self.current_signal_date, None)
-    
-    def _draw_single_follow_marker(self, x_axis, day_df, target_date, price_hint=None, marker_type="FOLLOW"):
-        """绘制单个跟单标记 - 复用对象版"""
-        try:
-            if ' ' in target_date:
-                target_date = target_date.split(' ')[0]
-            
-            idx = -1
-            for i, d_str in enumerate(day_df.index):
-                if target_date in d_str:
-                    idx = i
-                    break
-            
-            if idx == -1:
-                if target_date == datetime.now().strftime("%m-%d") or target_date == datetime.now().strftime("%Y-%m-%d"):
-                    idx = len(day_df) - 1
-            
-            if idx == -1:
-                return
-            
-            try:
-                x_pos = x_axis[idx]
-            except:
-                x_pos = idx
-            
-            price = price_hint if price_hint and price_hint > 0 else day_df['close'].iloc[idx]
-            
-            if marker_type == "EXIT":
-                color, icon, label_text, anchor_y = '#FF4500', '❌', f'EXIT ¥{price:.2f}', 0
-                prefix = 'exit'
-            else:
-                color, icon, label_text, anchor_y = '#FFD700', '🔥', f'Follow ¥{price:.2f}', 1
-                prefix = 'follow'
-            
-            attr_line = f'{prefix}_line_p'
-            attr_label = f'{prefix}_label_p'
-            attr_marker = f'{prefix}_marker_p'
+                idx = self._find_date_index(day_df, detected_date)
+                if idx != -1:
+                     # Use detected_price if available, else close
+                    price = detected_price if detected_price else day_df['close'].iloc[idx]
+                    signals.append(SignalPoint(
+                        code=code, timestamp=detected_date, bar_index=idx, price=price,
+                        signal_type=SignalType.FOLLOW, reason="Follow Entry"
+                    ))
 
-            if not hasattr(self, attr_line):
-                setattr(self, attr_line, pg.PlotCurveItem(pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)))
-                setattr(self, attr_label, pg.TextItem(anchor=(0, anchor_y)))
-                setattr(self, attr_marker, pg.TextItem(html=f'<div style="font-size: 14pt;">{icon}</div>', anchor=(0, 1 - anchor_y)))
-                self.kline_plot.addItem(getattr(self, attr_line))
-                self.kline_plot.addItem(getattr(self, attr_label))
-                self.kline_plot.addItem(getattr(self, attr_marker))
-            
-            line_len = 12
-            getattr(self, attr_line).setData(x=[x_pos, x_pos + line_len], y=[price, price])
-            getattr(self, attr_line).show()
-            
-            msg = f'<div style="color: {color}; font-weight: bold; font-size: 9pt;">{label_text}</div>'
-            getattr(self, attr_label).setHtml(msg)
-            getattr(self, attr_label).setAnchor((0, anchor_y))
-            getattr(self, attr_label).setPos(x_pos, price)
-            getattr(self, attr_label).show()
-            
-            getattr(self, attr_marker).setHtml(f'<div style="font-size: 14pt;">{icon}</div>')
-            getattr(self, attr_marker).setAnchor((0, 1 - anchor_y))
-            getattr(self, attr_marker).setPos(x_pos, price)
-            getattr(self, attr_marker).show()
-            
+            # 2. Exit
+            if exit_date and status == "EXITED":
+                idx = self._find_date_index(day_df, exit_date)
+                if idx != -1:
+                    price = exit_price if exit_price else day_df['close'].iloc[idx]
+                    signals.append(SignalPoint(
+                        code=code, timestamp=exit_date, bar_index=idx, price=price,
+                        signal_type=SignalType.EXIT_FOLLOW, reason="Follow Exit"
+                    ))
+                    
         except Exception as e:
-            logger.debug(f"Draw single follow marker error: {e}")
+            logger.debug(f"Get follow signals error: {e}")
+            
+        return signals
+
+    def _draw_follow_lines(self, code, day_df):
+        """仅绘制跟单的价格参考线 (虚线)"""
+        # 清理旧线
+        for attr in ['follow_line_p', 'exit_line_p']:
+             if hasattr(self, attr): getattr(self, attr).hide()
+        
+        # 复用逻辑获取数据，只画线
+        try:
+             import sqlite3
+             conn = sqlite3.connect("signal_strategy.db", timeout=5)
+             row = conn.execute("SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code=? ORDER BY detected_date DESC LIMIT 1", (code[:6],)).fetchone()
+             conn.close()
+             
+             if not row: return
+
+             detected_date, exit_date, detected_price, exit_price, status = row
+             
+             # Entry Line
+             if detected_date:
+                 self._draw_single_line(day_df, detected_date, detected_price, 'follow', '#FFD700')
+             
+             # Exit Line
+             if exit_date and status == "EXITED":
+                 self._draw_single_line(day_df, exit_date, exit_price, 'exit', '#FF4500')
+                 
+        except Exception:
+            pass
+
+    def _draw_single_line(self, day_df, target_date, price, prefix, color):
+        idx = self._find_date_index(day_df, target_date)
+        if idx == -1: return
+        
+        if not price: price = day_df['close'].iloc[idx]
+        
+        attr_line = f'{prefix}_line_p'
+        if not hasattr(self, attr_line):
+            setattr(self, attr_line, pg.PlotCurveItem(pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)))
+            self.kline_plot.addItem(getattr(self, attr_line))
+            
+        line_item = getattr(self, attr_line)
+        line_item.setData(x=[idx, idx + 15], y=[price, price])
+        line_item.show()
+
+    def _find_date_index(self, day_df, target_date):
+        """Helper to find date index"""
+        if ' ' in target_date: target_date = target_date.split(' ')[0]
+        # Optimize: Check exact match first
+        if target_date in day_df.index:
+            return day_df.index.get_loc(target_date)
+            
+        # Fallback to string search
+        for i, d_str in enumerate(day_df.index):
+            if target_date in str(d_str):
+                return i
+        
+        # Current day fallback
+        if target_date == datetime.now().strftime("%Y-%m-%d"):
+            return len(day_df) - 1
+        return -1
+
+    def _clear_follow_markers(self):
+        """清理跟单相关的线和标记 (Compatibility wrapper)"""
+        for attr in ['follow_line_p', 'exit_line_p']:
+            if hasattr(self, attr): getattr(self, attr).hide()
 
 
     def _clear_price_gaps(self):
+        pass # ... existing code ...
         """清理价格缺口 - 仅隐藏版本"""
         if hasattr(self, 'gap_items_pool'):
             for item in self.gap_items_pool:
@@ -7950,12 +7998,17 @@ class MainWindow(QMainWindow, WindowMixin):
                     ))
                     self.last_shadow_decision = shadow_decision # 存储供简报使用
 
+        # 4. Follow Queue Signals (Integrated)
+        follow_signals = self._get_follow_signals(code, day_df)
+        if follow_signals:
+             kline_signals.extend(follow_signals)
+
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
         
         y_visuals = []
         for sig in kline_signals:
-            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY, SignalType.FOLLOW)
             
             # 1. 历史 K 线信号
             if sig.bar_index < len(day_df):
@@ -8358,8 +8411,11 @@ class MainWindow(QMainWindow, WindowMixin):
             #         pass
         
         # --- 绘制热点/跟单标记 ---
-        # [REMOVED] 重复的 _draw_hotspot_markers 调用
-        self._draw_follow_markers(code, x_axis, day_df)
+        self._draw_hotspot_markers(code, x_axis, day_df)
+        
+        # Draw Follow Lines separately (Markers are now handled by SignalOverlay)
+        self._draw_follow_lines(code, day_df)
+        
         self._draw_signal_annotation(code, x_axis, day_df)
 
 
