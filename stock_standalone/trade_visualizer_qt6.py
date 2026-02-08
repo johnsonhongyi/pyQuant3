@@ -2114,6 +2114,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
         self.command_listener_thread: Optional[CommandListenerThread] = None
+        self.garbage_threads: List[DataLoaderThread] = []  # 垃圾回收站,存放待清理的线程
 
         # 定时检查队列 - 使用配置的数据更新频率
         refresh_interval_ms = int(cct.CFG.duration_sleep_time * 1000)  # 秒转毫秒
@@ -2375,7 +2376,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
             QTableWidget::item:selected {
                 background: rgba(255, 215, 0, 80);
-                color: black;
+                color: white;
+                font-weight: bold;
             }
         """)
 
@@ -2662,8 +2664,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 安装全局事件过滤器
         self.input_filter = GlobalInputFilter(self)
         QApplication.instance().installEventFilter(self.input_filter)
-        # Apply initial theme
-        self.apply_qt_theme()
+        # Apply initial theme [MOVED AFTER PANELS INIT]
+        # self.apply_qt_theme()
 
         # Load Stock List
         self.load_stock_list()
@@ -2675,6 +2677,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_tick_signal_pool()
         
         self._init_hotlist_and_signal_log()
+
+        # [FIX] Apply Theme AFTER panels are initialized
+        self.apply_qt_theme()
 
         self.stock_table.horizontalHeader().sectionResized.connect(self._on_column_resized_debounced)
         if hasattr(self, 'filter_tree'):
@@ -5241,15 +5246,17 @@ class MainWindow(QMainWindow, WindowMixin):
             is_dark = (color_text == "#F0F0F0")
         else:
             is_dark = (self.qt_theme == 'dark')
-            bg_main = "#2b2b2b" if is_dark else "#f2faff"
+            # [THEME UPDATE] Match Hotlist/SignalLog Panel (Darker #1e1e1e)
+            bg_main = "#1e1e1e" if is_dark else "#f2faff"
             color_text = "#e6e6e6" if is_dark else "#000000"
 
         # 2. 生成全局样式表
         if is_dark:
-            # 深色基调
-            border_color = "#444444"
-            item_selected = "#094771"
-            header_bg = "#3a3a3a"
+            # 深色基调 (Premium Dark)
+            border_color = "#333333"
+            # Gold Selection
+            item_selected = "rgba(255, 215, 0, 80)"
+            header_bg = "#2a2a2a"
             decision_bg = "#1a1a1a"
         else:
             # 浅色基调 (Trader Blue 风格)
@@ -5285,7 +5292,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 color: #ffffff;
             }}
             QTableWidget, QTreeWidget, QHeaderView::section {{
-                background-color: {bg_main if not is_dark else '#2b2b2b'};
+                background-color: {bg_main if not is_dark else '#1e1e1e'};
                 color: {color_text};
                 gridline-color: {border_color};
             }}
@@ -5294,9 +5301,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 border: 1px solid {border_color};
                 padding: 4px;
             }}
-            QTableWidget::item:selected {{
-                background-color: #094771;
+            /* Unified Gold Selection */
+            QTableWidget::item:selected, QTreeWidget::item:selected {{
+                background-color: {item_selected};
                 color: #FFFFFF;
+                font-weight: bold;
             }}
             QComboBox, QPushButton {{
                 background-color: {decision_bg if not self.custom_bg_app else 'rgba(255,255,255,50)'};
@@ -5353,6 +5362,13 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f'load_layout_preset current_sizes: {current_sizes}')
             self.main_splitter.setSizes(current_sizes)
 
+        # [THEME PROPAGATION] Sync theme with child panels
+        if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+            self.hotlist_panel.apply_theme(is_dark)
+        
+        if hasattr(self, 'signal_log_panel') and self.signal_log_panel:
+            self.signal_log_panel.apply_theme(is_dark)
+
         # [NEW] Init Hotspot Menu
         self._init_hotspot_menu()
 
@@ -5390,6 +5406,44 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
         self.voice_action.triggered.connect(self._toggle_hotlist_voice)
         menubar.addAction(self.voice_action)
+
+    def _apply_widget_theme(self, widget: pg.GraphicsLayoutWidget):
+        """应用主题到 GraphicsLayoutWidget"""
+        if not widget: return
+        
+        # 0. 决定背景色
+        if self.custom_bg_chart:
+            # 优先使用自定义背色
+            bg_color = self.custom_bg_chart
+        else:
+            # 否则根据整体主题暗/亮决定
+            is_dark = (self.qt_theme == 'dark') 
+            bg_color = 'k' if is_dark else 'w'
+        
+        # 1. 设置 Widget 背景
+        widget.setBackground(bg_color)
+        
+        # 2. 遍历所有 PlotItem 应用主题
+        # 注意: ci.items 是个列表，包含了布局里的所有 Item
+        is_chart_dark = True
+        
+        # 如果是自定义背景，计算反差色
+        if self.custom_bg_chart:
+             contrast = self._get_contrast_color(self.custom_bg_chart)
+             is_chart_dark = (contrast == "#F0F0F0")
+        else:
+             is_chart_dark = (self.qt_theme == 'dark')
+
+        fg_color = 'w' if is_chart_dark else 'k'
+        axis_pen = pg.mkPen(color=fg_color, width=1)
+        
+        # 显式更新已知图表
+        if hasattr(self, 'kline_plot'):
+             self._apply_pg_theme_to_plot(self.kline_plot)
+        if hasattr(self, 'tick_plot'):
+             self._apply_pg_theme_to_plot(self.tick_plot)
+        if hasattr(self, 'volume_plot'):
+             self._apply_pg_theme_to_plot(self.volume_plot)
 
     def _init_layout_menu(self):
         """初始化布局预设菜单 (优化版：分层明确，防误触)"""
@@ -10092,7 +10146,18 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
             logger.debug("Closing HotlistPanel...")
             try:
-                self.hotlist_panel.close() # 触发 HotlistPanel.closeEvent -> stops worker
+                # 先停止工作线程
+                if hasattr(self.hotlist_panel, 'data_worker') and self.hotlist_panel.data_worker:
+                    if self.hotlist_panel.data_worker.isRunning():
+                        logger.debug("Stopping HotlistPanel data_worker...")
+                        self.hotlist_panel.data_worker.stop()
+                        # 确保线程完全停止
+                        if not self.hotlist_panel.data_worker.wait(3000):
+                            logger.warning("HotlistPanel data_worker did not stop, terminating...")
+                            self.hotlist_panel.data_worker.terminate()
+                            self.hotlist_panel.data_worker.wait(500)
+                # 然后关闭面板
+                self.hotlist_panel.close()
             except Exception as e:
                 logger.warning(f"Error closing hotlist_panel: {e}")
 
@@ -10132,6 +10197,18 @@ class MainWindow(QMainWindow, WindowMixin):
             self.realtime_process = None
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
+        # 先清理垃圾回收站中的线程
+        if hasattr(self, 'garbage_threads'):
+            logger.debug(f"Cleaning up {len(self.garbage_threads)} garbage threads...")
+            for thread in self.garbage_threads:
+                if thread and thread.isRunning():
+                    thread.stop()
+                    if not thread.wait(1000):
+                        thread.terminate()
+                        thread.wait(500)
+            self.garbage_threads.clear()
+        
+        # 然后停止主 loader
         if hasattr(self, 'loader') and self.loader:
             logger.debug("Stopping main DataLoaderThread...")
             self.loader.stop()          # 通知线程退出
@@ -10395,6 +10472,7 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     start_code = initial_code
 
     # ------------------ 5. 显示 GUI ------------------
+    # ------------------ 5. 显示 GUI ------------------
     window.show()
     if start_code is not None:
         window.load_stock_by_code(start_code)
@@ -10403,12 +10481,15 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
         if len(start_code) in (6, 8):
             window.load_stock_by_code(start_code)
 
+    # [FIX] Connect aboutToQuit to ensure cleanup happens while event loop is still running
+    app.aboutToQuit.connect(window.close)
+
     ret = app.exec()  # 阻塞 Qt 主循环
 
     # ------------------ 6. 清理 ------------------
     if stop_flag:
         stop_flag.value = False
-    window.close()
+    # window.close() -> Validated cleanup moved to aboutToQuit
     sys.exit(ret)
 
 
