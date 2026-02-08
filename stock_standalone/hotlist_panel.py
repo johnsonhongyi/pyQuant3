@@ -7,33 +7,48 @@ HotlistPanel - 热点自选面板
 """
 import sqlite3
 import logging
+import time
+import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import pandas as pd
 from JohnsonUtil import LoggerFactory
+
+# [NEW] Move to top for performance and linting
+try:
+    from trading_analyzerQt6 import NumericTableWidgetItem
+except ImportError:
+    # Fallback
+    from PyQt6.QtWidgets import QTableWidgetItem as NumericTableWidgetItem # type: ignore
+
+try:
+    from trading_hub import get_trading_hub, TrackedSignal
+except ImportError:
+    get_trading_hub = None
+    TrackedSignal = None
+
 # 日内形态检测器
+has_detector_imported = False
 try:
     from intraday_pattern_detector import IntradayPatternDetector, PatternEvent
-    HAS_PATTERN_DETECTOR = True
+    has_detector_imported = True
 except ImportError:
-    HAS_PATTERN_DETECTOR = False
     IntradayPatternDetector = None
     PatternEvent = None
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
-    QMessageBox, QDialog, QFrame, QTabWidget
+    QMessageBox, QDialog, QFrame, QTabWidget, QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QColor, QAction
+from PyQt6 import QtGui
 
 # [REFACTOR] WindowMixin Imports
 from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
-import os
-from PyQt6 import QtGui
 from db_utils import SQLiteConnectionManager
 
 logger = LoggerFactory.getLogger(__name__)
@@ -63,14 +78,14 @@ class HotlistWorker(QThread):
     # 信号：(follow_queue_df, error_msg)
     data_ready = pyqtSignal(object, str)
     
-    def __init__(self, interval=2.0, parent=None):
+    def __init__(self, interval: float = 2.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.interval = interval
         self._running = True
-        
+    
     def run(self):
-        import time
-        from trading_hub import get_trading_hub
+        if get_trading_hub is None:
+            return
         
         while self._running:
             try:
@@ -116,7 +131,7 @@ class HotlistPanel(QWidget, WindowMixin):
     voice_alert = pyqtSignal(str, str)  # code, message - 语音通知信号
     signal_log = pyqtSignal(str, str, str, str, bool)  # code, name, pattern, message, is_high_priority - 信号日志
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
         # [REFACTOR] Mixin Init
@@ -126,15 +141,27 @@ class HotlistPanel(QWidget, WindowMixin):
         self.initial_w = 280
         self.initial_h = 400
         self.items: List[HotlistItem] = []
-        self._drag_pos = None
+        self._drag_pos: Optional[Qt.QPoint] = None
         self.voice_enabled = True  # 是否启用语音通知
         self._voice_paused = False  # 语音播报状态
         self._is_refreshing = False # 刷新状态标识，防止信号干扰
         self._last_follow_fingerprint = ""
         self.follow_count = 0  # [NEW] Track follow queue count
-        self._last_price_map = {} # [NEW] Cache real-time prices for both Hotlist and Follow Queue
-        self._last_df_follow = None # [NEW] Cache follow queue data for PnL updates
+        self._last_price_map: dict[str, float] = {} # [NEW] Cache real-time prices for both Hotlist and Follow Queue
+        self._last_df_follow: Optional[pd.DataFrame] = None # [NEW] Cache follow queue data for PnL updates
         self._connection_warning_logged = False  # [NEW] Log throttle flag
+        self._pos_loaded: bool = False
+        
+        # UI 属性定义 (用于类型提示)
+        self.table: QTableWidget = None # type: ignore
+        self.follow_table: QTableWidget = None # type: ignore
+        self.hotlist_widget: QWidget = None # type: ignore
+        self.follow_widget: QWidget = None # type: ignore
+        self.status_label: QLabel = None # type: ignore
+        self.pause_voice_btn: QPushButton = None # type: ignore
+        self._sync_timer: QTimer = None # type: ignore
+        self.tabs: QTabWidget = None # type: ignore
+        self.header: QFrame = None # type: ignore
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
@@ -144,10 +171,10 @@ class HotlistPanel(QWidget, WindowMixin):
         self.setWindowTitle("🔥 热点自选")
         
         # 可调整大小范围
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(800)  # [OPTIMIZE] Allow wider window
+        self.setMinimumWidth(520)   # [FIX] 提高最小宽度，防止名称列被挤压
+        self.setMaximumWidth(1200)  # [OPTIMIZE] Allow wider window
         self.setMinimumHeight(250)
-        self.setMaximumHeight(800)
+        self.setMaximumHeight(1200)
         self.resize(580, 400)      # [OPTIMIZE] Wider default size
         
         self._init_db()
@@ -180,9 +207,17 @@ class HotlistPanel(QWidget, WindowMixin):
         # [NEW] 加载信号计数（从数据库）
         self._load_signal_counts()
     
-    def showEvent(self, event):
-        """窗口显示时"""
-        super().showEvent(event)
+    def showEvent(self, a0: Optional[QtGui.QShowEvent]):
+        """窗口显示时：加载位置并开启工作线程"""
+        super().showEvent(a0)
+        
+        # 1. 首次显示时加载位置
+        if not getattr(self, '_pos_loaded', False):
+            self._pos_loaded = True
+            # [REFACTOR] Use Unified Loader
+            self.load_window_position_qt(self, "hotlist_panel", default_width=280, default_height=400)
+            
+        # 2. 确保工作线程运行
         if not self.data_worker.isRunning():
             self.data_worker.start()
     
@@ -319,21 +354,27 @@ class HotlistPanel(QWidget, WindowMixin):
         self.tabs.setStyleSheet("""
             QTabWidget::pane {
                 border: 1px solid #444;
-                background: #1e1e1e;
+                background-color: #1e1e1e;
+                top: -1px;
+            }
+            QWidget#hotlist_container, QWidget#follow_container {
+                background-color: #1e1e1e;
             }
             QTabBar::tab {
                 background: #2d2d2d;
                 color: #888;
-                padding: 5px 10px;
+                padding: 6px 12px;
                 border: 1px solid #444;
                 border-bottom: none;
                 border-top-left-radius: 4px;
                 border-top-right-radius: 4px;
+                margin-right: 2px;
             }
             QTabBar::tab:selected {
                 background: #1e1e1e;
                 color: #FFD700;
-                border-bottom: 1px solid #1e1e1e;
+                border-bottom: 2px solid #FFD700;
+                font-weight: bold;
             }
             QTabBar::tab:hover {
                 background: #333;
@@ -342,13 +383,15 @@ class HotlistPanel(QWidget, WindowMixin):
         
         # Tab 1: Hotlist
         self.hotlist_widget = QWidget()
+        self.hotlist_widget.setObjectName("hotlist_container")
         self._init_hotlist_ui()
         self.tabs.addTab(self.hotlist_widget, "🔥 Hotlist")
         
         # Tab 2: Follow Queue
         self.follow_widget = QWidget()
+        self.follow_widget.setObjectName("follow_container")
         self._init_follow_queue_ui()
-        self.tabs.addTab(self.follow_widget, "📋 Follow Queue")
+        self.tabs.addTab(self.follow_widget, "🎯 Follow Queue")
         
         layout.addWidget(self.tabs)
         
@@ -476,35 +519,24 @@ class HotlistPanel(QWidget, WindowMixin):
         self.table.cellDoubleClicked.connect(self._on_double_click)
         self.table.cellClicked.connect(self._on_click)
         
-        # [NEW] 启用列排序功能
-        self.table.setSortingEnabled(True)
-        
         # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
         self.table.currentCellChanged.connect(self._on_current_cell_changed)
         
-        # 表头设置 - 极致紧凑，紧贴内容
-        header = self.table.horizontalHeader()
+        # 表头设置 - 恢复自适应并填充空白
+        h_header = self.table.horizontalHeader()
+        if h_header:
+            h_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # 名称列拉伸
+            h_header.setStretchLastSection(True) # 最后一列拉伸填充
         
-        # 🟢 [OPTIMIZE] 使用 Interactive 模式并预设紧凑宽度
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
-
-        # 预设宽度
-        self.table.setColumnWidth(0, 35)   # 序号
-        self.table.setColumnWidth(1, 60)   # 代码
-        self.table.setColumnWidth(3, 50)   # 加入价
-        self.table.setColumnWidth(4, 50)   # 现价
-        self.table.setColumnWidth(5, 55)   # 盈亏%
-        self.table.setColumnWidth(6, 40)   # 分组
-        self.table.setColumnWidth(7, 50)   # 时间
-        self.table.setColumnWidth(8, 60)   # 信号类型
+        self.table.setSortingEnabled(True) # [FIX] 启用排序
         
-        # 名称列自适应拉伸
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        # 允许横向滚动
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        # 允许手动调整
-        header.setStretchLastSection(False)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff) # 尽量不出现横向滚动条
+        # [NEW] 支持滚轮横向滚动 (Shift+滚轮 或 仅横行超出时)
+        self.table.wheelEvent = self._on_table_wheel_event
+        setattr(self.table, '_original_wheel_event', QTableWidget.wheelEvent)
         
         self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
@@ -513,19 +545,99 @@ class HotlistPanel(QWidget, WindowMixin):
                 color: #ddd;
                 border: none;
                 font-size: 10pt;
+                gridline-color: #333;
             }
+
+            /* 垂直滚动条 - 极窄模式 */
+            QTableWidget QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+
+            QTableWidget QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 100);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+
+            QTableWidget QScrollBar::handle:vertical:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+
+            QTableWidget QScrollBar::add-line:vertical,
+            QTableWidget QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+
+            QTableWidget QScrollBar::add-page:vertical,
+            QTableWidget QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+
+            /* 水平滚动条 - 极窄模式 */
+            QTableWidget QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+
+            QTableWidget QScrollBar::handle:horizontal {
+                background: rgba(180, 180, 180, 100);
+                min-width: 30px;
+                border-radius: 3px;
+            }
+
+            QTableWidget QScrollBar::handle:horizontal:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+
+            QTableWidget QScrollBar::add-line:horizontal,
+            QTableWidget QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+
+            QTableWidget QScrollBar::add-page:horizontal,
+            QTableWidget QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+
+            /* 鼠标悬停 & 选中效果 (金牌主题) */
             QTableWidget::item {
                 padding: 1px 3px;
             }
-            QTableWidget::item:selected {
-                background-color: #444;
+            
+            QTableWidget::item:hover {
+                background: rgba(255, 255, 255, 20);
             }
+
+            QTableWidget::item:selected {
+                background: rgba(255, 215, 0, 80);
+                color: white;
+                font-weight: bold;
+            }
+
+            QHeaderView {
+                background-color: #2a2a2a;
+                border: none;
+            }
+            
             QHeaderView::section {
                 background-color: #2a2a2a;
                 color: #aaa;
                 border: none;
                 padding: 2px 4px;
                 font-size: 9pt;
+            }
+
+            /* 重点修复：滚动条角落白块 */
+            QTableWidget QTableCornerButton::section {
+                background-color: #2a2a2a;
+                border: none;
+            }
+            QAbstractScrollArea::corner, QScrollBar::corner {
+                background: #1e1e1e;
+                border: none;
             }
         """)
         
@@ -545,19 +657,21 @@ class HotlistPanel(QWidget, WindowMixin):
         self.follow_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.follow_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.follow_table.customContextMenuRequested.connect(self._on_follow_context_menu)
-        self.follow_table.cellDoubleClicked.connect(self._on_follow_double_click)
-        self.follow_table.cellClicked.connect(self._on_follow_click)
         # [FIX] Add keyboard navigation support
         self.follow_table.currentCellChanged.connect(self._on_follow_cell_changed)
         
-        header = self.follow_table.horizontalHeader()
-        for i in range(self.follow_table.columnCount()):
-            if i == 3: # 名称
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
-            else:
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        hf = self.follow_table.horizontalHeader()
+        if hf:
+            hf.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hf.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            hf.setStretchLastSection(True) # [FIX] 填充空白
         
-        self.follow_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.follow_table.setSortingEnabled(True) # [FIX] 启用排序
+        
+        self.follow_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded) 
+        # [NEW] 支持滚轮横向滚动
+        self.follow_table.wheelEvent = self._on_follow_wheel_event
+        setattr(self.follow_table, '_original_wheel_event', QTableWidget.wheelEvent)
 
         self.follow_table.verticalHeader().setVisible(False)
         self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
@@ -604,15 +718,12 @@ class HotlistPanel(QWidget, WindowMixin):
             self._refresh_table()
         except Exception as e:
             logger.error(f"Load hotlist error: {e}")
-    
+
     def _refresh_table(self):
         """刷新表格显示"""
-        from trading_analyzerQt6 import NumericTableWidgetItem # Import here to avoid circular dependency if not already imported
-        
         self._is_refreshing = True
         self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
-        was_sorting = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
         
         # [FIX] 保存选中项和滚动条
@@ -678,7 +789,7 @@ class HotlistPanel(QWidget, WindowMixin):
             signal_type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 8, signal_type_item)
         
-        # 自动调整列宽以适应内容
+        # [RESTORE] 自动调整列宽以适应内容
         self.table.resizeColumnsToContents()
         # [FIX] 恢复选中项
         if current_code:
@@ -690,7 +801,8 @@ class HotlistPanel(QWidget, WindowMixin):
         
         self.table.verticalScrollBar().setValue(v_scroll)
         
-        self.table.setSortingEnabled(was_sorting)
+        # [FIX] 强制启用排序，否则 was_sorting 默认为 False 会导致排序丢失
+        self.table.setSortingEnabled(True)
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
         self._is_refreshing = False
@@ -702,6 +814,47 @@ class HotlistPanel(QWidget, WindowMixin):
         hot_count = len(self.items)
         follow_txt = f" | 跟单: {self.follow_count}" if self.follow_count > 0 else ""
         self.status_label.setText(f"🔥 热点: {hot_count}{follow_txt}")
+
+    def _on_table_wheel_event(self, a0: Optional[QtGui.QWheelEvent]):
+        """处理主表格滚轮事件"""
+        if a0:
+            self._generic_wheel_handler(self.table, a0)
+
+    def _on_follow_wheel_event(self, a0: Optional[QtGui.QWheelEvent]):
+        """处理跟单表格滚轮事件"""
+        if a0:
+            self._generic_wheel_handler(self.follow_table, a0)
+
+    def _generic_wheel_handler(self, table: QTableWidget, event: QtGui.QWheelEvent):
+        """通用的滚轮横向/垂直切换逻辑 (Shift+Wheel 或 无垂直条时转向横向)"""
+        # 保护性检查
+        if not table or not event: return
+        
+        # 判断是否需要横向滚动
+        shift_pressed = event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        v_bar = table.verticalScrollBar()
+        h_bar = table.horizontalScrollBar()
+        
+        # 检查是否可以进行横向滚动
+        can_h_scroll = h_bar and h_bar.isVisible() and h_bar.maximum() > 0
+        # 检查是否有垂直滚动条需求
+        can_v_scroll = v_bar and v_bar.isVisible() and v_bar.maximum() > 0
+        
+        # 如果按下 Shift 或者没有垂直滚动条但有水平滚动条，则进行水平滚动
+        if (shift_pressed or not can_v_scroll) and can_h_scroll:
+            delta = event.angleDelta().y() # 垂直滚轮数值
+            if delta != 0:
+                h_bar.setValue(h_bar.value() - delta)
+                event.accept()
+                return
+        
+        # 否则调用原始实现处理垂直滚动
+        orig_wheel = getattr(table, '_original_wheel_event', None)
+        if orig_wheel:
+            orig_wheel(table, event)
+        else:
+            # Fallback
+            QTableWidget.wheelEvent(table, event)
     
     def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察"):
         """
@@ -760,7 +913,7 @@ class HotlistPanel(QWidget, WindowMixin):
             logger.error(f"Add hotlist error: {e}")
             return False
     
-    def remove_stock(self, code: str):
+    def remove_stock(self, code: str) -> bool:
         """移除股票"""
         for item in self.items:
             if item.code == code:
@@ -795,7 +948,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         self._refresh_table()
     
-    def _on_worker_data(self, df_follow, error_msg):
+    def _on_worker_data(self, df_follow: Optional[pd.DataFrame], error_msg: str):
         """Worker 数据回调 (主线程执行)"""
         if error_msg:
             return
@@ -922,7 +1075,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表 (Log once)")
                 self._connection_warning_logged = True
 
-    def update_prices(self, price_map: Dict[str, float], phase_map: Dict[str, str] = None):
+    def update_prices(self, price_map: Dict[str, float], phase_map: Optional[Dict[str, str]] = None):
         """
         批量更新现价和盈亏
         """
@@ -1010,7 +1163,6 @@ class HotlistPanel(QWidget, WindowMixin):
                     # Phase Col 5
                     phase_txt = "-"
                     notes = str(row.notes) if row.notes else ""
-                    import re
                     match = re.search(r'\[(.*?)\]', notes)
                     if match: phase_txt = match.group(1)
                     elif notes: phase_txt = notes[:10]
@@ -1030,7 +1182,8 @@ class HotlistPanel(QWidget, WindowMixin):
                         
                     # Time Col 9
                     time_dt = str(row.updated_at)
-                    time_str = time_dt[5:16] if len(time_dt) > 10 else time_dt # MM-DD HH:MM
+                    # [ENHANCED] 显示完整日期时间 YYYY-MM-DD HH:MM
+                    time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
                     if (it := self.follow_table.item(row_idx, 9)):
                         if it.text() != time_str:
                              it.setText(time_str)
@@ -1038,7 +1191,6 @@ class HotlistPanel(QWidget, WindowMixin):
                 return
 
             # --- FULL REBUILD (Structure Changed or Sorted) ---
-            from trading_analyzerQt6 import NumericTableWidgetItem
             
             # [FIX] Block Signals to prevent side effects during mass changes
             self._is_refreshing = True
@@ -1123,10 +1275,12 @@ class HotlistPanel(QWidget, WindowMixin):
                 reason_item.setToolTip(notes)
                 self.follow_table.setItem(row_idx, 8, reason_item)
 
-                # 9. 时间 (Time) - MM-DD HH:MM
+                # 9. 时间 (Time) - YYYY-MM-DD HH:MM
                 time_dt = str(row.updated_at)
-                time_str = time_dt[5:16] if len(time_dt) > 10 else time_dt
-                self.follow_table.setItem(row_idx, 9, QTableWidgetItem(time_str))
+                time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
+                time_item = QTableWidgetItem(time_str)
+                time_item.setData(Qt.ItemDataRole.UserRole, time_dt) # 保存完整时间
+                self.follow_table.setItem(row_idx, 9, time_item)
 
             # [FIX] Restore Scroll and Selection BEFORE re-enabling signals
             if current_code:
@@ -1143,6 +1297,7 @@ class HotlistPanel(QWidget, WindowMixin):
             self.follow_table.setUpdatesEnabled(True)
             self.follow_table.setSortingEnabled(True) # Re-enable sorting
             self.follow_table.blockSignals(False) # [FIX] Unblock signals
+            # [RESTORE] 自动调整列宽
             self.follow_table.resizeColumnsToContents()
             self._is_refreshing = False
 
@@ -1168,16 +1323,21 @@ class HotlistPanel(QWidget, WindowMixin):
                 code = str(code_item.text()).strip()
                 name = str(name_item.text()).strip()
                 
-                # 提取日期 (从 MM-DD HH:MM 提取 MM-DD)
+                # [OPTIMIZE] 从 UserRole 获取完整日期 (YYYY-MM-DD)
                 signal_date = ""
                 if time_item:
-                    time_txt = time_item.text()
-                    if "-" in time_txt:
-                        signal_date = time_txt.split(' ')[0] # 02-05
+                    full_time = time_item.data(Qt.ItemDataRole.UserRole)
+                    if full_time and len(str(full_time)) >= 10:
+                        signal_date = str(full_time)[:10]
+                    else:
+                        # Fallback
+                        time_txt = time_item.text()
+                        if "-" in time_txt:
+                            signal_date = time_txt.split(' ')[0]
                 
                 if code:
-                    # [FIX] Link with signal date for K-line marking
-                    link_msg = f"{code}|realtime=false"
+                    # [FIX] Link with signal date for K-line marking, specify type to avoid mixing
+                    link_msg = f"{code}|realtime=false|signal_type=follow"
                     if signal_date:
                         link_msg += f"|signal_date={signal_date}"
                     
@@ -1197,14 +1357,18 @@ class HotlistPanel(QWidget, WindowMixin):
                 code = str(code_item.text()).strip()
                 name = str(name_item.text()).strip()
                 
-                # Extract date for marking
+                # [OPTIMIZE] 从 UserRole 获取完整日期
                 signal_date = ""
                 if time_item:
-                    time_txt = time_item.text()
-                    if "-" in time_txt:
-                        signal_date = time_txt.split(' ')[0]
+                    full_time = time_item.data(Qt.ItemDataRole.UserRole)
+                    if full_time and len(str(full_time)) >= 10:
+                        signal_date = str(full_time)[:10]
+                    else:
+                        time_txt = time_item.text()
+                        if "-" in time_txt:
+                            signal_date = time_txt.split(' ')[0]
                 
-                link_msg = f"{code}|realtime=false"
+                link_msg = f"{code}|realtime=false|signal_type=follow"
                 if signal_date:
                     link_msg += f"|signal_date={signal_date}"
                 
@@ -1384,21 +1548,22 @@ class HotlistPanel(QWidget, WindowMixin):
         """单击切换股票"""
         item = self._get_item_from_row(row)
         if item:
-            # [FIX] Link Only: disable active realtime fetching
-            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
+            # [FIX] Hotlist link: No signal_date needed, specify type
+            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
         """键盘导航联动（上下键切换时也触发股票选择）"""
         item = self._get_item_from_row(currentRow)
         if item:
-            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
+            # [FIX] Hotlist link: specify type
+            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
     
     def _on_double_click(self, row: int, col: int):
         """双击打开详情"""
         item = self._get_item_from_row(row)
         if item:
-            # [FIX] Link Only: disable active realtime fetching
-            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
+            # [FIX] Hotlist link: specify type
+            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
             self.item_double_clicked.emit(item.code, item.name, item.add_price)
 
     def select_stock(self, code: str):
@@ -1457,26 +1622,23 @@ class HotlistPanel(QWidget, WindowMixin):
     def _add_to_follow_queue(self, code: str, name: str, price: float, signal_type: str):
         """添加到跟单队列"""
         try:
-            from trading_hub import get_trading_hub, TrackedSignal
+            if get_trading_hub is None or TrackedSignal is None:
+                return
             hub = get_trading_hub()
             
-            # [NEW] 自动价格回补：如果当前价格为0，尝试从最近缓存或主窗口获取
+            # [NEW] 自动价格回补：如果当前价格为0，尝试从主窗口获取
             if price <= 0:
-                if code in self._last_price_map:
-                    price = self._last_price_map[code]
-                    logger.info(f"Using cached price for {code}: {price}")
-                else:
-                    # 尝试从主窗口获取
-                    try:
-                        from PyQt6.QtWidgets import QApplication
-                        for widget in QApplication.topLevelWidgets():
-                            if hasattr(widget, 'df_all') and not widget.df_all.empty:
-                                if code in widget.df_all.index:
-                                    price = float(widget.df_all.loc[code].get('close', 0))
+                try:
+                    for widget in QApplication.topLevelWidgets():
+                        if hasattr(widget, 'df_all'):
+                            mw: Any = widget
+                            if mw.df_all is not None and not mw.df_all.empty:
+                                if code in mw.df_all.index:
+                                    price = float(mw.df_all.loc[code].get('close', 0))
                                     logger.info(f"Using MainWindow price for {code}: {price}")
                                     break
-                    except:
-                        pass
+                except Exception:
+                    pass
             
             if price <= 0:
                 logger.warning(f"⚠️ 无法获取价格，放弃加入跟单队列: {code}")
@@ -1565,7 +1727,7 @@ class HotlistPanel(QWidget, WindowMixin):
         Args:
             df: 包含实时数据的 DataFrame (df_all)
         """
-        if not HAS_PATTERN_DETECTOR:
+        if not has_detector_imported:
             logger.warning("⚠️ Pattern Detector not available (Import failed)")
             return
         
@@ -1711,16 +1873,7 @@ class HotlistPanel(QWidget, WindowMixin):
     # ================== 位置保存/加载 (Unified Mixin) ==================
     # Removed custom _get_config_path, _save_position, _load_position
 
-    def showEvent(self, event):
-        """首次显示时加载位置"""
-        if not hasattr(self, '_pos_loaded'):
-            self._pos_loaded = True
-            # [REFACTOR] Use Unified Loader
-            self.load_window_position_qt(self, "hotlist_panel", default_width=280, default_height=400)
-        super().showEvent(event)
-
     def hideEvent(self, event):
         """隐藏时保存位置"""
-        # self.save_window_position_qt_visual(self, "hotlist_panel")
         super().hideEvent(event)
 

@@ -16,6 +16,8 @@ class SignalType(Enum):
     SHADOW_BUY = "影子买入" # 影子引擎：模拟买入
     SHADOW_SELL = "影子卖出" # 影子引擎：模拟卖出
     VETO = "否决"           # 策略否决：过滤不符合条件的信号
+    FOLLOW = "跟单"         # 热点跟单
+    EXIT_FOLLOW = "离场"    # 跟单离场
 
 class SignalSource(Enum):
     MANUAL = "手动"
@@ -85,4 +87,7 @@ SIGNAL_VISUAL_CONFIG = {
     SignalType.GAP_UP: {"symbol": 'arrow_up', "size": 12, "color": (255, 69, 0)},  # Orange Red
     SignalType.GAP_DOWN: {"symbol": 'arrow_down', "size": 12, "color": (0, 191, 255)}, # Deep Sky Blue
     SignalType.VETO: {"symbol": 'o', "size": 8, "color": (100, 100, 100, 100)},
+    # SignalType.FOLLOW: {"symbol": '🎯', "size": 22, "color": (255, 215, 0)}, # Bullseye for Follow
+    SignalType.FOLLOW: {"symbol": 'star', "size": 20, "color": (255, 215, 0)}, # Gold Star for Follow
+    SignalType.EXIT_FOLLOW: {"symbol": 'x', "size": 12, "color": (255, 69, 0)}, # Orange Red X for Exit
 }
