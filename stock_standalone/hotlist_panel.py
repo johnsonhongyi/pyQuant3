@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
     QMessageBox, QDialog, QFrame, QTabWidget, QApplication
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint
 from PyQt6.QtGui import QColor, QAction
 from PyQt6 import QtGui
 
@@ -106,8 +106,14 @@ class HotlistWorker(QThread):
                 time.sleep(0.1)
 
     def stop(self):
+        """停止工作线程"""
         self._running = False
-        self.wait()
+        # 等待最多 2 秒让线程自然退出
+        if not self.wait(2000):
+            # 如果超时,强制终止
+            logger.warning("HotlistWorker did not stop gracefully, terminating...")
+            self.terminate()
+            self.wait(500)
 
 
 class HotlistPanel(QWidget, WindowMixin):
@@ -141,7 +147,7 @@ class HotlistPanel(QWidget, WindowMixin):
         self.initial_w = 280
         self.initial_h = 400
         self.items: List[HotlistItem] = []
-        self._drag_pos: Optional[Qt.QPoint] = None
+        self._drag_pos: Optional[QPoint] = None
         self.voice_enabled = True  # 是否启用语音通知
         self._voice_paused = False  # 语音播报状态
         self._is_refreshing = False # 刷新状态标识，防止信号干扰
@@ -151,6 +157,28 @@ class HotlistPanel(QWidget, WindowMixin):
         self._last_df_follow: Optional[pd.DataFrame] = None # [NEW] Cache follow queue data for PnL updates
         self._connection_warning_logged = False  # [NEW] Log throttle flag
         self._pos_loaded: bool = False
+        
+        # --- 数据流管理 ---
+        # 数据流校验缓存：{code: (price, volume, amount)}
+        self._last_data_sigs: dict[str, tuple[float, float, float]] = {}
+        
+        # 语音前缀播放控制
+        self._last_voice_prefix_time: float = 0.0  # 全局冷却计时
+        self._batch_spoken_flag: bool = False      # 单批次互斥锁
+        
+        # 信号计数统计：{(code, pattern): count} —— 当天重复信号计数
+        self._signal_counts: dict[tuple[str, str], int] = {}
+        
+        # 日期控制
+        self._last_reset_date = datetime.now().date()
+        
+        # 检测器与指纹状态
+        self._last_check_fingerprint: str = ""
+        self._pattern_detector = None  # 语音暂停标记
+        
+        # [MODIFIED] 移除 QTimer，改用 Worker
+        self.data_worker = HotlistWorker(interval=1.0, parent=self)
+        self.data_worker.data_ready.connect(self._on_worker_data)
         
         # UI 属性定义 (用于类型提示)
         self.table: QTableWidget = None # type: ignore
@@ -178,34 +206,193 @@ class HotlistPanel(QWidget, WindowMixin):
         self.resize(580, 400)      # [OPTIMIZE] Wider default size
         
         self._init_db()
+        # [NEW] Initialize UI first, then apply theme
         self._init_ui()
+        self.apply_theme(is_dark=True) # Default to Dark Theme
         self._load_from_db()
-        
-        # 数据流校验缓存：{code: (price, volume, amount)}
-        self._last_data_sigs: dict[str, tuple[float, float, float]] = {}
-        
-        # 语音前缀播放控制
-        self._last_voice_prefix_time: float = 0.0  # 全局冷却计时
-        self._batch_spoken_flag: bool = False      # 单批次互斥锁
-        
-        # 信号计数统计：{(code, pattern): count} —— 当天重复信号计数
-        self._signal_counts: dict[tuple[str, str], int] = {}
-        self._voice_paused: bool = False
-        
-        # 日期控制
-        self._last_reset_date = datetime.now().date()
-        
-        # 检测器与指纹状态
-        self._last_check_fingerprint: str = ""
-        self._pattern_detector = None  # 语音暂停标记
-        
-        # [MODIFIED] 移除 QTimer，改用 Worker
-        self.data_worker = HotlistWorker(interval=1.0, parent=self)
-        self.data_worker.data_ready.connect(self._on_worker_data)
-        self.data_worker.start()  # [FIX] Start immediately
-        
         # [NEW] 加载信号计数（从数据库）
         self._load_signal_counts()
+
+    def apply_theme(self, is_dark: bool):
+        """应用主题 (支持深/浅色切换)"""
+        if is_dark:
+            bg_main = "#1e1e1e"
+            color_text = "#ddd"
+            header_bg = "#2d2d2d"
+            border_color = "#555"
+            tab_bg = "#1e1e1e"
+            tab_selected_bg = "#1e1e1e"
+            tab_selected_text = "#FFD700"
+            tab_hover_bg = "#333"
+            header_text = "#FFD700"
+            item_selected = "rgba(255, 215, 0, 80)"
+            item_selected_text = "white"
+        else:
+            bg_main = "#f2faff"
+            color_text = "#000000"
+            header_bg = "#eef7ff"
+            border_color = "#b3d7ff"
+            tab_bg = "#eef7ff"
+            tab_selected_bg = "#eef7ff"
+            tab_selected_text = "#000000"
+            tab_hover_bg = "#dbeeff"
+            header_text = "#333"
+            item_selected = "#cce8ff"
+            item_selected_text = "black"
+
+        # 1. 主窗口样式
+        self.setStyleSheet(f"""
+            HotlistPanel {{
+                background-color: {bg_main};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+            }}
+        """)
+        
+        # 2. 标题栏样式
+        if hasattr(self, 'header'):
+            self.header.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {header_bg};
+                    border-bottom: 1px solid {border_color};
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                }}
+                QLabel {{
+                    color: {header_text};
+                    font-weight: bold;
+                    font-size: 10pt;
+                }}
+                QPushButton {{
+                    background-color: transparent;
+                    color: #888;
+                    border: none;
+                    font-size: 9pt;
+                    padding: 2px 6px;
+                }}
+                QPushButton:hover {{
+                    color: #FFD700;
+                }}
+            """)
+            
+        # 3. TabWidget 样式
+        if hasattr(self, 'tabs'):
+            self.tabs.setStyleSheet(f"""
+                QTabWidget::pane {{
+                    border: 1px solid {border_color};
+                    background-color: {bg_main};
+                    top: -1px;
+                }}
+                QWidget#hotlist_container, QWidget#follow_container {{
+                    background-color: {bg_main};
+                }}
+                QTabBar::tab {{
+                    background: {header_bg};
+                    color: #888;
+                    padding: 6px 12px;
+                    border: 1px solid {border_color};
+                    border-bottom: none;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                    margin-right: 2px;
+                }}
+                QTabBar::tab:selected {{
+                    background: {tab_selected_bg};
+                    color: {tab_selected_text};
+                    border-bottom: 2px solid #FFD700;
+                    font-weight: bold;
+                }}
+                QTabBar::tab:hover {{
+                    background: {tab_hover_bg};
+                }}
+            """)
+
+        # 4. 表格样式 (Apply to both tables if they exist)
+        table_style = f"""
+            QTableWidget {{
+                background-color: {bg_main};
+                color: {color_text};
+                border: none;
+                font-size: 10pt;
+                gridline-color: {border_color if is_dark else '#ddd'};
+            }}
+            QTableWidget::item {{
+                padding: 1px 3px;
+            }}
+            QTableWidget::item:hover {{
+                background: rgba(255, 255, 255, 20);
+            }}
+            QTableWidget::item:selected {{
+                background: {item_selected};
+                color: {item_selected_text};
+                font-weight: bold;
+            }}
+            QHeaderView {{
+                background-color: {header_bg};
+                border: none;
+            }}
+            QHeaderView::section {{
+                background-color: {header_bg};
+                color: #aaa;
+                border: none;
+                padding: 2px 4px;
+                font-size: 9pt;
+            }}
+            QTableCornerButton::section {{
+                background-color: {header_bg};
+                border: none;
+            }}
+            QAbstractScrollArea::corner, QScrollBar::corner {{
+                background: {bg_main};
+                border: none;
+            }}
+            
+            /* Scrollbars */
+            QScrollBar:vertical {{
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(180, 180, 180, 100);
+                min-height: 30px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(220, 220, 220, 150);
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+
+            QScrollBar:horizontal {{
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: rgba(180, 180, 180, 100);
+                min-width: 30px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: rgba(220, 220, 220, 150);
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: transparent;
+            }}
+        """
+        
+        if hasattr(self, 'table') and self.table:
+            self.table.setStyleSheet(table_style)
+        if hasattr(self, 'follow_table') and self.follow_table:
+            self.follow_table.setStyleSheet(table_style)
     
     def showEvent(self, a0: Optional[QtGui.QShowEvent]):
         """窗口显示时：加载位置并开启工作线程"""
@@ -217,7 +404,7 @@ class HotlistPanel(QWidget, WindowMixin):
             # [REFACTOR] Use Unified Loader
             self.load_window_position_qt(self, "hotlist_panel", default_width=280, default_height=400)
             
-        # 2. 确保工作线程运行
+        # 2. 确保工作线程运行 (Lazy Start)
         if not self.data_worker.isRunning():
             self.data_worker.start()
     
@@ -225,8 +412,14 @@ class HotlistPanel(QWidget, WindowMixin):
         # [NEW] Save position (debounced)
         self.save_window_position_qt_visual(self, "HotlistPanel")
         
-        if self.data_worker.isRunning():
+        # 停止同步定时器
+        if hasattr(self, '_sync_timer') and self._sync_timer:
+            self._sync_timer.stop()
+        
+        # 停止工作线程 (stop() 方法已经包含了完整的清理逻辑)
+        if hasattr(self, 'data_worker') and self.data_worker and self.data_worker.isRunning():
             self.data_worker.stop()
+        
         super().closeEvent(event)
     
     def _init_db(self):
@@ -290,42 +483,11 @@ class HotlistPanel(QWidget, WindowMixin):
         layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(0)
         
-        # 外框样式
-        self.setStyleSheet("""
-            HotlistPanel {
-                background-color: #1e1e1e;
-                border: 1px solid #555;
-                border-radius: 4px;
-            }
-        """)
-        
-        # 标题栏（可拖动区域）
+        # 1. 标题栏
         self.header = QFrame()
         self.header.setFixedHeight(28)
         self.header.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.header.setStyleSheet("""
-            QFrame {
-                background-color: #2d2d2d;
-                border-bottom: 1px solid #444;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-            }
-            QLabel {
-                color: #FFD700;
-                font-weight: bold;
-                font-size: 10pt;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: #888;
-                border: none;
-                font-size: 9pt;
-                padding: 2px 6px;
-            }
-            QPushButton:hover {
-                color: #FFD700;
-            }
-        """)
+        
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(8, 0, 4, 0)
         
@@ -342,44 +504,14 @@ class HotlistPanel(QWidget, WindowMixin):
         # 关闭按钮
         close_btn = QPushButton("✕")
         close_btn.setToolTip("关闭 (Alt+H)")
-        close_btn.setStyleSheet("QPushButton:hover { color: #ff6b6b; }")
+        close_btn.setStyleSheet("QPushButton:hover { color: #ff6b6b; }") # Keep hover color specific
         close_btn.clicked.connect(self.hide)
         header_layout.addWidget(close_btn)
         
         layout.addWidget(self.header)
         
-        
-        # --- 使用 TabWidget ---
+        # 2. TabWidget
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #444;
-                background-color: #1e1e1e;
-                top: -1px;
-            }
-            QWidget#hotlist_container, QWidget#follow_container {
-                background-color: #1e1e1e;
-            }
-            QTabBar::tab {
-                background: #2d2d2d;
-                color: #888;
-                padding: 6px 12px;
-                border: 1px solid #444;
-                border-bottom: none;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #1e1e1e;
-                color: #FFD700;
-                border-bottom: 2px solid #FFD700;
-                font-weight: bold;
-            }
-            QTabBar::tab:hover {
-                background: #333;
-            }
-        """)
         
         # Tab 1: Hotlist
         self.hotlist_widget = QWidget()
@@ -395,7 +527,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         layout.addWidget(self.tabs)
         
-        # 状态栏 + 暂停语音按钮
+        # 3. 状态栏
         status_bar = QHBoxLayout()
         self.status_label = QLabel("共 0 只热点股")
         self.status_label.setStyleSheet("color: #666; font-size: 9pt; padding: 2px 8px;")
@@ -408,22 +540,9 @@ class HotlistPanel(QWidget, WindowMixin):
         self.pause_voice_btn.setFixedSize(28, 22)
         self.pause_voice_btn.setCheckable(True)
         self.pause_voice_btn.setToolTip("点击暂停/恢复语音播报")
-        self.pause_voice_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: 1px solid #444;
-                border-radius: 3px;
-                font-size: 12pt;
-            }
-            QPushButton:checked {
-                background: #600;
-                border-color: #900;
-            }
-            QPushButton:hover {
-                background: #333;
-            }
-        """)
         self.pause_voice_btn.clicked.connect(self.toggle_voice)
+        self._update_voice_button_style() # Use existing update logic
+        
         status_bar.addWidget(self.pause_voice_btn)
         
         layout.addLayout(status_bar)
@@ -510,8 +629,8 @@ class HotlistPanel(QWidget, WindowMixin):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(9) # Changed from 8 to 9 for "序号"
-        self.table.setHorizontalHeaderLabels(["序号", "代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间", "信号类型"]) # Added "序号" and "信号类型"
+        self.table.setColumnCount(9)
+        self.table.setHorizontalHeaderLabels(["序号", "代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间", "信号类型"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -519,127 +638,23 @@ class HotlistPanel(QWidget, WindowMixin):
         self.table.cellDoubleClicked.connect(self._on_double_click)
         self.table.cellClicked.connect(self._on_click)
         
-        # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
+        # [NEW] 添加键盘导航联动
         self.table.currentCellChanged.connect(self._on_current_cell_changed)
         
-        # 表头设置 - 恢复自适应并填充空白
+        # 表头设置
         h_header = self.table.horizontalHeader()
         if h_header:
             h_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # 名称列拉伸
             h_header.setStretchLastSection(True) # 最后一列拉伸填充
         
-        self.table.setSortingEnabled(True) # [FIX] 启用排序
-        
-        # 允许横向滚动
+        self.table.setSortingEnabled(True)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.verticalHeader().setVisible(False)
         
-        # [NEW] 支持滚轮横向滚动 (Shift+滚轮 或 仅横行超出时)
+        # [NEW] 支持滚轮横向滚动
         self.table.wheelEvent = self._on_table_wheel_event
         setattr(self.table, '_original_wheel_event', QTableWidget.wheelEvent)
-        
-        self.table.verticalHeader().setVisible(False)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1e1e1e;
-                color: #ddd;
-                border: none;
-                font-size: 10pt;
-                gridline-color: #333;
-            }
-
-            /* 垂直滚动条 - 极窄模式 */
-            QTableWidget QScrollBar:vertical {
-                width: 6px;
-                background: transparent;
-                margin: 0px;
-            }
-
-            QTableWidget QScrollBar::handle:vertical {
-                background: rgba(180, 180, 180, 100);
-                min-height: 30px;
-                border-radius: 3px;
-            }
-
-            QTableWidget QScrollBar::handle:vertical:hover {
-                background: rgba(220, 220, 220, 150);
-            }
-
-            QTableWidget QScrollBar::add-line:vertical,
-            QTableWidget QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-
-            QTableWidget QScrollBar::add-page:vertical,
-            QTableWidget QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-
-            /* 水平滚动条 - 极窄模式 */
-            QTableWidget QScrollBar:horizontal {
-                height: 6px;
-                background: transparent;
-                margin: 0px;
-            }
-
-            QTableWidget QScrollBar::handle:horizontal {
-                background: rgba(180, 180, 180, 100);
-                min-width: 30px;
-                border-radius: 3px;
-            }
-
-            QTableWidget QScrollBar::handle:horizontal:hover {
-                background: rgba(220, 220, 220, 150);
-            }
-
-            QTableWidget QScrollBar::add-line:horizontal,
-            QTableWidget QScrollBar::sub-line:horizontal {
-                width: 0px;
-            }
-
-            QTableWidget QScrollBar::add-page:horizontal,
-            QTableWidget QScrollBar::sub-page:horizontal {
-                background: transparent;
-            }
-
-            /* 鼠标悬停 & 选中效果 (金牌主题) */
-            QTableWidget::item {
-                padding: 1px 3px;
-            }
-            
-            QTableWidget::item:hover {
-                background: rgba(255, 255, 255, 20);
-            }
-
-            QTableWidget::item:selected {
-                background: rgba(255, 215, 0, 80);
-                color: white;
-                font-weight: bold;
-            }
-
-            QHeaderView {
-                background-color: #2a2a2a;
-                border: none;
-            }
-            
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #aaa;
-                border: none;
-                padding: 2px 4px;
-                font-size: 9pt;
-            }
-
-            /* 重点修复：滚动条角落白块 */
-            QTableWidget QTableCornerButton::section {
-                background-color: #2a2a2a;
-                border: none;
-            }
-            QAbstractScrollArea::corner, QScrollBar::corner {
-                background: #1e1e1e;
-                border: none;
-            }
-        """)
         
         layout.addWidget(self.table)
 
@@ -1702,18 +1717,6 @@ class HotlistPanel(QWidget, WindowMixin):
         if self.voice_enabled:
             self.voice_alert.emit(code, msg)
             logger.debug(f"Voice alert: {code} - {msg}")
-    
-    def _toggle_voice_pause(self):
-        """切换语音暂停状态"""
-        self._voice_paused = self.pause_voice_btn.isChecked()
-        if self._voice_paused:
-            self.pause_voice_btn.setText("🔇")
-            self.pause_voice_btn.setToolTip("语音已暂停，点击恢复")
-            logger.info("🔇 热点语音播报已暂停")
-        else:
-            self.pause_voice_btn.setText("🔊")
-            self.pause_voice_btn.setToolTip("点击暂停/恢复语音播报")
-            logger.info("🔊 热点语音播报已恢复")
     
     def contains(self, code: str) -> bool:
         """检查是否已包含该股票"""

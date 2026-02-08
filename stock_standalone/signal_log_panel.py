@@ -43,6 +43,8 @@ class SignalLogPanel(QWidget, WindowMixin):
     log_added = pyqtSignal(str, str, str, str)
     # 信号: 当点击清理按钮时发射
     cleared = pyqtSignal()
+    # 信号: 暂停状态切换 (True=Paused, False=Resumed)
+    pause_toggled = pyqtSignal(bool)
     
     # 信号颜色映射
     SIGNAL_COLORS = {
@@ -119,6 +121,139 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.load_window_position_qt(self, "signal_log_panel", default_width=450, default_height=350)
         
         self._init_ui()
+
+    def apply_theme(self, is_dark: bool):
+        """应用主题 (支持深/浅色切换)"""
+        if is_dark:
+            bg_main = "#1e1e1e"
+            color_text = "#ddd"
+            header_bg = "#2a2a2a"
+            border_color = "#444"
+            item_selected = "rgba(255, 215, 0, 80)"
+            item_selected_text = "white"
+            header_text = "#ddd"
+        else:
+            bg_main = "#f2faff"
+            color_text = "#000000"
+            header_bg = "#eef7ff"
+            border_color = "#b3d7ff"
+            item_selected = "#cce8ff"
+            item_selected_text = "black"
+            header_text = "#333"
+
+        # 1. 主窗口样式
+        self.setStyleSheet(f"""
+            SignalLogPanel {{
+                background-color: {bg_main};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+            }}
+        """)
+        
+        # 2. 标题栏样式
+        if hasattr(self, 'header'):
+            self.header.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {header_bg};
+                    border-bottom: 1px solid {border_color};
+                    border-bottom-left-radius: 0px;
+                    border-bottom-right-radius: 0px;
+                }}
+                QLabel {{
+                    color: {header_text};
+                    font-weight: bold;
+                    font-size: 10pt;
+                }}
+                QPushButton {{
+                    background-color: transparent;
+                    color: #888;
+                    border: none;
+                    font-size: 9pt;
+                    padding: 2px 6px;
+                }}
+                QPushButton:hover {{
+                    color: #FFD700;
+                }}
+            """)
+
+        # 3. 表格样式
+        if hasattr(self, 'log_table'):
+            self.log_table.setStyleSheet(f"""
+                QTableWidget {{
+                    background-color: {bg_main};
+                    color: {color_text};
+                    border: none;
+                    gridline-color: {border_color};
+                    font-family: 'Consolas', 'Microsoft YaHei UI';
+                    font-size: 9pt;
+                }}
+                QTableWidget::item {{
+                    padding: 1px 3px;
+                }}
+                QTableWidget::item:hover {{
+                    background: rgba(255, 255, 255, 20);
+                }}
+                QTableWidget::item:selected {{
+                    background: {item_selected};
+                    color: {item_selected_text};
+                    font-weight: bold;
+                }}
+                QHeaderView {{
+                    background-color: {header_bg}; 
+                    border: none;
+                }}
+                QHeaderView::section {{
+                    background-color: {header_bg};
+                    color: #888;
+                    padding: 4px;
+                    border: none;
+                    font-size: 9pt;
+                }}
+                QTableCornerButton::section {{
+                    background-color: {header_bg};
+                    border: none;
+                }}
+                
+                QScrollBar:vertical {{
+                    width: 6px;
+                    background: transparent;
+                    margin: 0px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: rgba(180, 180, 180, 100);
+                    min-height: 30px;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background: rgba(220, 220, 220, 150);
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: transparent;
+                }}
+
+                QScrollBar:horizontal {{
+                    height: 6px;
+                    background: transparent;
+                    margin: 0px;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background: rgba(180, 180, 180, 100);
+                    min-width: 30px;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:horizontal:hover {{
+                    background: rgba(220, 220, 220, 150);
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    width: 0px;
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                    background: transparent;
+                }}
+            """)
     
     def _init_ui(self):
         """初始化UI"""
@@ -127,41 +262,14 @@ class SignalLogPanel(QWidget, WindowMixin):
         layout.setSpacing(0)
         
         # 外框样式
-        self.setStyleSheet("""
-            SignalLogPanel {
-                background-color: #1a1a1a;
-                border: 1px solid #444;
-                border-radius: 4px;
-            }
-        """)
+        # self.setStyleSheet(...) -> Moved to apply_theme
         
         # 标题栏
         self.header = QFrame()
         self.header.setFixedHeight(28)
         self.header.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.header.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border-bottom: 1px solid #333;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }
-            QLabel {
-                color: #00FF00;
-                font-weight: bold;
-                font-size: 10pt;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: #888;
-                border: none;
-                font-size: 9pt;
-                padding: 2px 6px;
-            }
-            QPushButton:hover {
-                color: #00FF00;
-            }
-        """)
+        # self.header.setStyleSheet(...) -> Moved to apply_theme
+
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(8, 0, 4, 0)
         
@@ -201,7 +309,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.log_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.log_table.setAlternatingRowColors(True)
+        self.log_table.setAlternatingRowColors(False) # 禁用交替色，使用统一深色背景
         self.log_table.setShowGrid(False)
         # [mFIX] 启用强焦点以支持键盘导航 (Up/Down/Enter/Esc)
         self.log_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -218,46 +326,12 @@ class SignalLogPanel(QWidget, WindowMixin):
             h_header.setStretchLastSection(True) # 确保最后一列占满剩余空间
         
         # [FIX] 全局背景深色，修复空白区域白色问题
-        self.setStyleSheet("background-color: #121212; color: #cccccc;")
+        # self.setStyleSheet(...) -> Moved to apply_theme
         
-        self.log_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #121212;
-                alternate-background-color: #1a1a1a;
-                color: #cccccc;
-                border: none;
-                gridline-color: #333;
-                font-family: 'Consolas', 'Microsoft YaHei UI';
-                font-size: 9pt;
-            }
-            QTableWidget::item:selected {
-                background-color: #2c5a2c;
-                color: #ffffff;
-            }
-            QHeaderView {
-                background-color: #121212; /* [FIX] 整个 Header 区域背景 */
-                border: none;
-            }
-            QHeaderView::section {
-                background-color: #252525;
-                color: #888;
-                padding: 4px;
-                border: 1px solid #333;
-                font-size: 8pt;
-            }
-            /* [FIX] 修复左上角空白框为白色 */
-            QTableCornerButton::section {
-                background-color: #252525;
-                border: 1px solid #333;
-            }
-            /* [FIX] 垂直表头如果显示，也应为深色 */
-            QHeaderView::section:vertical {
-                background-color: #121212;
-                color: #666;
-                padding-left: 2px;
-                border: none;
-            }
-        """)
+        # self.log_table.setStyleSheet(...) -> Moved to apply_theme
+
+        # Apply default Dark Theme
+        self.apply_theme(is_dark=True)
         
         # 点击联动逻辑 (保持点击代码跳转)
         self.log_table.cellClicked.connect(self._on_cell_clicked)
