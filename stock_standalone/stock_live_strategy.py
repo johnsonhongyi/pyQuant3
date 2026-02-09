@@ -1190,87 +1190,167 @@ class StockLiveStrategy:
                     concept_name: str = list(matched_concepts)[0]
                     stock_name: str = str(row.get('name', code))
                     
-                    # --- 定量评分系统 ---
+                    # --- 定量评分系统 (Enhanced: 10日波动 + 回踩优先) ---
                     score = 0.0
+                    score_reasons = []
                     
-                    # 1. 涨幅贡献 (0 - 0.3)
+                    # 1. 涨幅贡献 (0 - 0.2)
                     pct = float(row.get('percent', 0.0)) # type: ignore
-                    score += min(pct / 10, 0.3) if pct > 3 else min(pct / 10, 0.3) * 0.5
+                    if pct > 3:
+                        score += min(pct / 15, 0.2)
+                        score_reasons.append(f"涨{pct:.1f}%")
                     
-                    # 2. 量能贡献 (0 - 0.2)
+                    # 2. 量能贡献 (0 - 0.15)
                     vol = float(row.get('volume', 0.0)) # type: ignore
-                    if 1.2 <= vol <= 2.5:
-                        score += 0.2
-                    elif vol > 2.5:
-                        score += 0.1 # 天量减分
+                    if 1.5 <= vol <= 3.0:
+                        score += 0.15
+                        score_reasons.append(f"量{vol:.1f}")
+                    elif 1.2 <= vol < 1.5:
+                        score += 0.08
+                    elif vol > 3.0:
+                        score += 0.05 # 天量减分
                     elif vol < 0.8:
                         score -= 0.1 # 地量减分
                     
-                    # 3. 趋势强度 (0 - 0.5)
-                    win_count = int(row.get('win', 0)) # type: ignore
-                    if win_count >= 3:
-                        score += 0.2
-                    
-                    # [新增] 连阳趋势加分
+                    # 3. ⭐ 10日波动评估 (0 - 0.3) - 重点关注大幅波动个股
                     try:
-                        consecutive_positive = 0
-                        curr_price = float(row.get('close', 0))
-                        for i in range(1, 6):
-                            prev_p = float(row.get(f'lastp{i}d', 0))
-                            if prev_p > 0 and curr_price > prev_p:
-                                consecutive_positive += 1
-                                curr_price = prev_p
-                            else:
-                                break
-                        if consecutive_positive >= 3:
-                            score += 0.1
-                            if consecutive_positive >= 5:
+                        high_10d = float(row.get('high10', row.get('hmax', 0)))
+                        low_10d = float(row.get('low10', row.get('lmin', 0)))
+                        if high_10d > 0 and low_10d > 0:
+                            amplitude_10d = (high_10d - low_10d) / low_10d
+                            if amplitude_10d > 0.25:  # 振幅>25%
+                                score += 0.3
+                                score_reasons.append(f"振{amplitude_10d:.0%}")
+                            elif amplitude_10d > 0.15:  # 振幅>15%
+                                score += 0.2
+                                score_reasons.append(f"振{amplitude_10d:.0%}")
+                            elif amplitude_10d > 0.10:  # 振幅>10%
                                 score += 0.1
                     except: pass
                     
-                    # 4. 价格稳定性 (0 - 0.2)
-                    hmax = float(row.get('hmax', 0.0)) # type: ignore
-                    curr = float(row.get('close', 0.0)) # type: ignore
+                    # 4. ⭐ 回踩形态评估 (0 - 0.25) - 回踩更有价值
+                    try:
+                        curr = float(row.get('trade', row.get('close', 0)))  # 使用实时价格
+                        ma5 = float(row.get('ma5d', 0))
+                        ma10 = float(row.get('ma10d', 0))
+                        ma20 = float(row.get('ma20d', 0))
+                        low_today = float(row.get('low', curr))
+                        high_today = float(row.get('high', curr))
+                        open_price = float(row.get('open', curr))
+                        
+                        if curr > 0 and ma5 > 0:
+                            # 回踩MA5后反弹 (低点触及MA5附近，收盘站上)
+                            ma5_touch = abs(low_today - ma5) / ma5 < 0.02  # 低点在MA5±2%
+                            ma5_recover = curr > ma5  # 收盘站上MA5
+                            if ma5_touch and ma5_recover:
+                                score += 0.25
+                                score_reasons.append("踩MA5")
+                            
+                            # 回踩MA10后反弹
+                            elif ma10 > 0:
+                                ma10_touch = abs(low_today - ma10) / ma10 < 0.02
+                                ma10_recover = curr > ma10
+                                if ma10_touch and ma10_recover:
+                                    score += 0.2
+                                    score_reasons.append("踩MA10")
+                            
+                            # 回踩MA20后反弹
+                            elif ma20 > 0:
+                                ma20_touch = abs(low_today - ma20) / ma20 < 0.03
+                                ma20_recover = curr > ma20
+                                if ma20_touch and ma20_recover:
+                                    score += 0.15
+                                    score_reasons.append("踩MA20")
+                    except: pass
+                    
+                    # 5. ⭐ 早盘低点反弹评估 (0 - 0.3) - 新增
+                    try:
+                        import datetime
+                        now_time = datetime.datetime.now().time()
+                        morning_session = datetime.time(9, 30) <= now_time <= datetime.time(11, 30)
+                        
+                        curr = float(row.get('trade', row.get('close', 0)))
+                        low_today = float(row.get('low', curr))
+                        high_today = float(row.get('high', curr))
+                        open_price = float(row.get('open', curr))
+                        
+                        if curr > 0 and low_today > 0 and high_today > low_today:
+                            # 计算当前价格在今日区间的位置
+                            day_range = high_today - low_today
+                            if day_range > 0:
+                                position_ratio = (curr - low_today) / day_range
+                                
+                                # 早盘低点反弹：低点接近开盘价下方，当前价格已反弹
+                                if morning_session:
+                                    # 判断是否早盘探底
+                                    low_below_open = low_today < open_price * 0.98  # 低点比开盘低2%+
+                                    bounced_from_low = position_ratio > 0.5  # 已从低点反弹50%+
+                                    
+                                    if low_below_open and bounced_from_low:
+                                        score += 0.3
+                                        score_reasons.append(f"早盘低点反弹{position_ratio:.0%}")
+                                    elif bounced_from_low:
+                                        score += 0.15
+                                        score_reasons.append(f"反弹{position_ratio:.0%}")
+                                
+                                # 全天判断：接近低点但开始反弹
+                                else:
+                                    near_low = position_ratio < 0.3  # 在低位30%区间
+                                    starting_bounce = curr > low_today * 1.01  # 已离开最低点1%+
+                                    
+                                    if near_low and starting_bounce:
+                                        score += 0.2
+                                        score_reasons.append(f"低位{position_ratio:.0%}")
+                    except: pass
+                    
+                    # 6. 连阳趋势加分 (0 - 0.1)
+                    win_count = int(row.get('win', 0)) # type: ignore
+                    if win_count >= 3:
+                        score += 0.1
+                        score_reasons.append(f"连阳{win_count}")
+                    
+                    # 7. 突破新高加分 (0 - 0.1)
+                    hmax = float(row.get('hmax', 0)) # type: ignore
+                    curr = float(row.get('close', 0)) # type: ignore
+                    if hmax > 0 and curr > hmax:
+                        score += 0.1
+                        score_reasons.append("破高")
+                    
+                    # ⭐ 动态门槛：早盘适当放宽
+                    import datetime
+                    now_time = datetime.datetime.now().time()
+                    is_morning = datetime.time(9, 30) <= now_time <= datetime.time(10, 30)
+                    threshold = 0.5 if is_morning else 0.6
+                    
+                    # 过滤低分候选
+                    if score < threshold:
+                        continue
                     
                     hma5d = float(row.get('ma5d', 0.0)) # type: ignore
                     hma10d = float(row.get('ma10d', 0.0)) # type: ignore
-                    trendS = float(row.get('win', 0.0)) # type: ignore
-                    if hmax > 0 and curr > hmax:
-                        score += 0.2
+                    logger.info(f"HotScan: {code} {stock_name} score={score:.2f} [{','.join(score_reasons)}] ma5={hma5d:.2f}")
                     
-                    # 4. 技术位贡献 (0 - 0.2)
-                    hmax = float(row.get('hmax', float('inf'))) # type: ignore
-                    if float(row.get('close', 0)) > hmax: # type: ignore
-                        score += 0.2 # 突破新高
-                    # select_code ={
-                    #     'code': code,
-                    #     'name': row.get('name', code),
-                    #     'score': score,
-                    #     'concept': concept_name,
-                    #     'pct': pct
-                    # }
-                    # logger.debug(f"candidates append:{select_code}")
-                    logger.info(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {hma5d} 背离ma10d: {hma10d} 评估: {score} 综合趋势分: {trendS} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
                     start_price = float(row.get('trade', row.get('close', 0.0)))
                     # 添加到候选列表
                     candidates.append({
                         'code': code,
                         'name': row.get('name', code),
-                        'score': round(score,1),
+                        'score': round(score, 2),
                         'concept': concept_name,
                         'pct': pct,
-                        'price': start_price
+                        'price': start_price,
+                        'reasons': '|'.join(score_reasons)
                     })
             
             # 按分数从高到低排序
             candidates.sort(key=lambda x: x['score'], reverse=True)
             
-            # 选取前 N 名进行添加
-            slots_remaining = MAX_DAILY_ADDITIONS - added_today_count
+            # 选取前 N 名进行添加 (每策略最多5只)
+            slots_remaining = min(5, MAX_DAILY_ADDITIONS - added_today_count)
             
             for cand in candidates[:slots_remaining]:
-                # 只有评分 > 0.4 才配得上进入监控
-                if cand['score'] >= 0.4:
+                # ⭐ 提高门槛: 评分 >= 0.6 才进入监控
+                if cand['score'] >= 0.6:
                     self.add_monitor(
                         code=str(cand['code']),
                         name=cand['name'],
