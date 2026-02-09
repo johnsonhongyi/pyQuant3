@@ -404,20 +404,22 @@ class TradingHub:
         conn.close()
         return df
     
-    def cleanup_stale_signals(self, max_days: int = 2, current_prices: Dict[str, float] = None) -> Dict[str, List[str]]:
+    def cleanup_stale_signals(self, max_days: int = 2, current_prices: Dict[str, float] = None, check_breakout: bool = False) -> Dict[str, List[str]]:
         """
         清理过期的跟单信号与热点跟踪，支持价格波动清理(不及预期/破位)
         
         规则:
         1. TRACKING/READY 状态超过 max_days 天未入场 → CANCELLED
         2. [NEW] TRACKING/READY 状态如果当前价 < detected_price * 0.93 (跌超7%破位) → CANCELLED
-        3. ENTERED 状态超过 max_days*2 天未更新 → STALE
-        4. Hotlist (follow_record) 中 ACTIVE 状态超过 max_days 天 → CANCELLED
-        5. [NEW] Hotlist 状态如果当前价 < follow_price * 0.93 或跌破 stop_loss → CANCELLED
+        3. [OPTIONAL] check_breakout=True 时，3天内无中阳启动突破 → CANCELLED
+        4. ENTERED 状态超过 max_days*2 天未更新 → STALE
+        5. Hotlist (follow_record) 中 ACTIVE 状态超过 max_days 天 → CANCELLED
+        6. [NEW] Hotlist 状态如果当前价 < follow_price * 0.93 或跌破 stop_loss → CANCELLED
         
         Args:
             max_days: 最大等待天数
-            current_prices: {code: price} 实时价格字典，用于破位检测
+            current_prices: {code: price} 或 {code: {price, percent, volume, high4}} 实时行情字典
+            check_breakout: 是否检查"3天内无中阳突破"（手动清理选项）
             
         Returns:
             Dict[str, List[str]]: 清理详情 {status: [name(code), ...]}
@@ -452,17 +454,48 @@ class TradingHub:
                 reason = ""
 
                 if status in ('TRACKING', 'READY'):
-                    if days_elapsed > max_days:
+                    # [OPTIONAL] 3天内无中阳突破强制清理（仅手动触发）
+                    if check_breakout and days_elapsed >= 3:
+                        if curr_price:
+                            # 检查是否有中阳启动迹象
+                            if isinstance(curr_price, dict):
+                                stock_info = curr_price
+                                pct = stock_info.get('percent', 0)
+                                vol = stock_info.get('volume', 0)
+                                high4 = stock_info.get('high4', 0)
+                                price = stock_info.get('price', 0)
+                                
+                                # 中阳启动定义：涨幅>=4% 且 放量>=1.3 且 突破high4
+                                has_breakout = (pct >= 4.0 and vol >= 1.3 and price > high4 > 0)
+                                
+                                if not has_breakout:
+                                    should_cleanup = True
+                                    reason = "3天内无中阳启动突破"
+                            else:
+                                # 兼容旧价格格式：由于手动选择了强制清理，且已超3天且非字典格式（无法判断启动），保守清理
+                                should_cleanup = True
+                                reason = "3天内无启动(数据源受限)"
+                        else:
+                            # 如果手动强制清理且没有实时价格（说明已掉出活跃榜），且已超3天，视为不活跃信号直接清理
+                            should_cleanup = True
+                            reason = "3天内无启动(已掉出活跃榜)"
+                    
+                    # 时间清理（如果未被3天规则触发）
+                    if not should_cleanup and days_elapsed > max_days:
                         should_cleanup = True
                         reason = f"时间超{max_days}d"
-                    elif curr_price:
-                        # 破位逻辑: 跌超 7% 或 跌破止损
-                        if det_price > 0 and curr_price < det_price * 0.93:
-                            should_cleanup = True
-                            reason = "不及预期(跌>7%)"
-                        elif stop_loss and stop_loss > 0 and curr_price < stop_loss:
-                            should_cleanup = True
-                            reason = "破位止损"
+                    
+                    # 破位清理
+                    if not should_cleanup and curr_price:
+                        price_val = curr_price if isinstance(curr_price, (int, float)) else curr_price.get('price', 0) if isinstance(curr_price, dict) else 0
+                        if price_val > 0:
+                            # 破位逻辑: 跌超 7% 或 跌破止损
+                            if det_price > 0 and price_val < det_price * 0.93:
+                                should_cleanup = True
+                                reason = "不及预期(跌>7%)"
+                            elif stop_loss and stop_loss > 0 and price_val < stop_loss:
+                                should_cleanup = True
+                                reason = "破位止损"
 
                     if should_cleanup:
                         c.execute("UPDATE follow_queue SET status='CANCELLED', notes=COALESCE(notes,'')||' | 自动清理:'||?, updated_at=? WHERE id=?",
@@ -502,12 +535,16 @@ class TradingHub:
                             should_h = True
                             h_reason = f"时间超{max_days}d"
                         elif curr_price:
-                            if fol_price > 0 and curr_price < fol_price * 0.93:
-                                should_h = True
-                                h_reason = "破位阴跌"
-                            elif stop_loss and stop_loss > 0 and curr_price < stop_loss:
-                                should_h = True
-                                h_reason = "跌破止损"
+                            # 提取价格值（支持字典格式）
+                            price_val = curr_price if isinstance(curr_price, (int, float)) else curr_price.get('price', 0) if isinstance(curr_price, dict) else 0
+                            
+                            if price_val > 0:
+                                if fol_price > 0 and price_val < fol_price * 0.93:
+                                    should_h = True
+                                    h_reason = "破位阴跌"
+                                elif stop_loss and stop_loss > 0 and price_val < stop_loss:
+                                    should_h = True
+                                    h_reason = "跌破止损"
                         
                         if should_h:
                             c.execute("UPDATE follow_record SET status='CANCELLED', feedback=COALESCE(feedback,'')||' | 自动清理:'||? WHERE id=?",
