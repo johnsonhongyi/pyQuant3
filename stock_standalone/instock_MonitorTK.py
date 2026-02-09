@@ -1136,16 +1136,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 f"确定要清理 {days} 天前的过期或破位信号吗?\n\n"
                 f"规则: \n"
                 f"1. 超过 {days} 天未入场的跟单信号\n"
-                f"2. 当前价格较检测价跌超 7% (不及预期/破位)\n"
-                f"3. 超过 {days} 天未变动的热点自选"
+                f"2. [NEW] 3天内无中阳启动突破 (涨幅>=4% 且 放量>=1.3 且 突破high4)\n"
+                f"3. 当前价格较检测价跌超 7% (不及预期/破位)\n"
+                f"4. 超过 {days} 天未变动的热点自选"
             ):
                 return
             
-            # 准备实时价格
+            # 准备实时价格和行情数据
             price_map = {}
             if hasattr(self, 'df_all') and not self.df_all.empty:
-                # 使用 'trade' 列作为现价
-                price_map = self.df_all['trade'].to_dict()
+                # [NEW] 扩展为包含完整行情数据的字典，支持"3天内无中阳突破"清理
+                for code, row in self.df_all.iterrows():
+                    try:
+                        price_map[code] = {
+                            'price': float(row.get('trade', 0)),
+                            'percent': float(row.get('percent', 0)),
+                            'volume': float(row.get('volume', 0)),
+                            'high4': float(row.get('high4', 0))
+                        }
+                    except (ValueError, TypeError):
+                        # 降级为简单价格
+                        price_map[code] = float(row.get('trade', 0))
 
             # 执行清理
             hub = get_trading_hub()
@@ -1198,6 +1209,79 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             from tkinter import messagebox
             messagebox.showerror("清理失败", f"清理过程中出现错误:\n{str(e)}")
             logger.error(f"[UI] 信号清理失败: {e}\n{traceback.format_exc()}")
+    
+    def _force_cleanup_stagnant_signals(self):
+        """强制清理全量队列：清理已存在 >=3天 且仍未启动的信号"""
+        try:
+            from trading_hub import get_trading_hub
+            from tkinter import messagebox, scrolledtext
+            import tkinter as tk
+            
+            # 确认对话框
+            if not messagebox.askyesno(
+                "全量队列强制清理", 
+                "确定要对【全量队列】进行强制清理吗?\n\n"
+                "清理规则(所有符合以下条件的信号将被取消):\n"
+                "• 信号已入队存在 >= 3天\n"
+                "• 且未出现中阳启动突破 (或已掉出活跃榜单)\n\n"
+                "此操作将扫描整个 Follow Queue 并移除所有僵尸信号。"
+            ):
+                return
+            
+            # 准备实时价格和行情数据
+            price_map = {}
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                for code, row in self.df_all.iterrows():
+                    try:
+                        price_map[code] = {
+                            'price': float(row.get('trade', 0)),
+                            'percent': float(row.get('percent', 0)),
+                            'volume': float(row.get('volume', 0)),
+                            'high4': float(row.get('high4', 0))
+                        }
+                    except (ValueError, TypeError):
+                        price_map[code] = float(row.get('trade', 0))
+
+            # 执行清理（max_days=999 禁用常规时间清理，check_breakout=True 开启全量突破检测）
+            hub = get_trading_hub()
+            results = hub.cleanup_stale_signals(max_days=999, current_prices=price_map, check_breakout=True)
+            
+            # 统计总数
+            total_cleaned = sum(len(v) for v in results.values())
+            
+            if total_cleaned > 0:
+                report = []
+                if results.get("CANCEL_SIGNAL"):
+                    report.append("【跟单队列 - 强制清理已取消】")
+                    report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
+                    report.append("")
+                
+                if results.get("CANCEL_HOTLIST"):
+                    report.append("【热点自选 - 强制清理已取消】")
+                    report.extend([f" • {item}" for item in results["CANCEL_HOTLIST"]])
+                    report.append("")
+
+                log_win = tk.Toplevel(self)
+                log_win.title(f"强制清理完成 - 共处理 {total_cleaned} 项")
+                log_win.geometry("520x450")
+                
+                txt = scrolledtext.ScrolledText(log_win, wrap=tk.WORD, font=("微软雅黑", 9))
+                txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                txt.insert(tk.END, "\n".join(report))
+                txt.configure(state='disabled')
+                
+                btn = tk.Button(log_win, text="确定", command=log_win.destroy, width=12)
+                btn.pack(pady=10)
+                
+                logger.info(f"[UI] 用户执行了全量队列强制清理: 处理 {total_cleaned} 项")
+            else:
+                messagebox.showinfo("清理完成", "全量扫描完成，未发现符合清理条件的僵尸信号。")
+                logger.info(f"[UI] 用户执行全量队列强制清理: 无需清理")
+                
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("清理失败", f"强制清理过程中出现错误:\n{str(e)}")
+            logger.error(f"[UI] 全量队列强制清理失败: {e}\n{traceback.format_exc()}")
 
 
     # --- DPI and Window management moved to Mixins ---
@@ -3643,6 +3727,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         cleanup_menu.add_command(
             label="清理7天前信号",
             command=lambda: self._cleanup_signals_with_feedback(7)
+        )
+        
+        cleanup_menu.add_separator()
+        
+        cleanup_menu.add_command(
+            label="🚨 强制清理全量队列 (3天未启动信号)",
+            command=lambda: self._force_cleanup_stagnant_signals()
         )
 
         menu.add_cascade(label="🧹 信号清理", menu=cleanup_menu)
@@ -6828,6 +6919,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
 
             def treeview_sort_column(tv, col, reverse):
+                # 记录当前排序状态
+                tv.current_sort_col = col
+                tv.current_sort_reverse = reverse
+                
                 l = [(tv.set(k, col), k) for k in tv.get_children('')]
                 
                 # 智能数值排序:尝试转换为数值,失败则按字符串排序
@@ -6993,6 +7088,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 💥 关键：数据加载后更新统计标签
                 refresh_stats()
+                
+                # ✅ 恢复排序状态
+                if hasattr(tree, 'current_sort_col'):
+                    treeview_sort_column(tree, tree.current_sort_col, tree.current_sort_reverse)
 
             load_data()
             win.refresh_list = load_data

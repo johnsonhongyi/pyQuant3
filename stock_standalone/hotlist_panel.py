@@ -211,9 +211,9 @@ class HotlistPanel(QWidget, WindowMixin):
         # 日期控制
         self._last_reset_date = datetime.now().date()
         
-        # 检测器与指纹状态
-        self._last_check_fingerprint: str = ""
-        self._pattern_detector = None  # 语音暂停标记
+        # [NEW] 窗口缩放状态
+        self._is_enlarged = False
+        self._pre_enlarge_geometry = None
         
         # [MODIFIED] 移除 QTimer，改用 Worker
         self.data_worker = HotlistWorker(interval=1.0, parent=self)
@@ -1935,6 +1935,40 @@ class HotlistPanel(QWidget, WindowMixin):
             # self._save_position()  # Old
             # self.save_window_position_qt_visual(self, "hotlist_panel") # New Unified
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """标题栏双击：自动放大1.5倍 / 还原"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 检查是否在标题栏区域
+            if hasattr(self, 'header') and self.header.geometry().contains(event.pos()):
+                # 排除点击标题栏上的按钮
+                child = self.header.childAt(event.position().toPoint())
+                if isinstance(child, QPushButton):
+                    super().mouseDoubleClickEvent(event)
+                    return
+
+                if not self._is_enlarged:
+                    # 放大
+                    self._pre_enlarge_geometry = self.geometry()
+                    new_w = int(self.width() * 1.5)
+                    new_h = int(self.height() * 1.5)
+                    self.resize(new_w, new_h)
+                    self._is_enlarged = True
+                    logger.info(f"HotlistPanel enlarged to {new_w}x{new_h}")
+                else:
+                    # 还原
+                    if self._pre_enlarge_geometry:
+                        self.setGeometry(self._pre_enlarge_geometry)
+                    else:
+                        new_w = int(self.width() / 1.5)
+                        new_h = int(self.height() / 1.5)
+                        self.resize(new_w, new_h)
+                    self._is_enlarged = False
+                    logger.info("HotlistPanel restored to normal size")
+                
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     # ================== 位置保存/加载 (Unified Mixin) ==================
     # Removed custom _get_config_path, _save_position, _load_position

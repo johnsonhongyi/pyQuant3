@@ -1396,6 +1396,62 @@ class StockLiveStrategy:
             logger.error(f"Error in scan_hot_concepts: {e}", exc_info=True)
             pass
 
+    def _has_anomaly_pattern(self, row: Any) -> tuple[bool, str]:
+        """
+        检测是否具有异动特征
+        
+        异动特征包括：
+        1. 低开高走：开盘<昨收 且 收盘>开盘 且 涨幅>1%
+        2. 高开高走：开盘>昨收+1% 且 收盘接近最高 且 涨幅>2%
+        3. 冲高回落收新高：最高>昨收+3% 且 收盘<最高 但 收盘仍>昨收+1%
+        4. 多日十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+        
+        Returns:
+            (has_anomaly, anomaly_type): 是否有异动特征及类型
+        """
+        try:
+            price = float(row.get('trade', row.get('close', 0)))
+            open_p = float(row.get('open', 0))
+            high = float(row.get('high', 0))
+            low = float(row.get('low', 0))
+            lastp1d = float(row.get('lastp1d', 0))
+            percent = float(row.get('percent', 0))
+            volume = float(row.get('volume', 0))
+            win = int(row.get('win', 0))
+            
+            if price <= 0 or lastp1d <= 0:
+                return False, ""
+            
+            # 1. 低开高走：开盘<昨收-1% 且 收盘>开盘 且 涨幅>1%
+            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (percent > 1.0)
+            if is_low_open_high_close:
+                return True, "低开高走"
+            
+            # 2. 高开高走：开盘>昨收+1% 且 收盘接近最高 且 涨幅>2%
+            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (percent > 2.0)
+            if is_high_open_high_close:
+                return True, "高开高走"
+            
+            # 3. 冲高回落收新高：最高>昨收+3% 且 收盘<最高 但 收盘仍>昨收+1%
+            surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
+            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (percent > 1.0)
+            if is_surge_pullback_new_high:
+                return True, "冲高回落收新高"
+            
+            # 4. 多日回踩收十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+            body_ratio = abs(price - open_p) / price if price > 0 else 1
+            is_doji = body_ratio < 0.01  # 十字星：实体<1%
+            is_shrink_volume = volume < 0.8  # 缩量
+            is_after_rally = win >= 2  # 此前连阳
+            if is_doji and is_shrink_volume and is_after_rally:
+                return True, "多日十字星缩量"
+            
+            return False, ""
+        except Exception as e:
+            logger.debug(f"Anomaly pattern check error: {e}")
+            return False, ""
+
+
     def _scan_rank_for_follow(self, df: pd.DataFrame, concept_top5: list = None, top_n: int = 100) -> None:
         """
         扫描板块联动强势突破股，筛选可跟单标的加入队列
@@ -1521,15 +1577,14 @@ class StockLiveStrategy:
                     signal_type = "板块突破"
                     priority = 8
                 
-                # 标准: 回踩MA5启动 + 放量
-                elif is_ma5_bounce and has_volume:
-                    signal_type = "回踩MA5启动"
-                    priority = 7
-                
-                #备选: 回踩MA10启动
-                elif is_ma10_bounce and has_volume:
-                    signal_type = "回踩MA10启动"
-                    priority = 6
+                # [NEW] 回踩MA5/MA10 需配合异动特征
+                elif (is_ma5_bounce or is_ma10_bounce) and has_volume:
+                    has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
+                    if has_anomaly:
+                        ma_type = "MA5" if is_ma5_bounce else "MA10"
+                        signal_type = f"回踩{ma_type}启动({anomaly_type})"
+                        priority = 7
+                    # 无异动特征的单纯回踩不入队
                 
                 if not signal_type:
                     continue
@@ -2253,24 +2308,29 @@ class StockLiveStrategy:
                                     snap['v_shape_triggered'] = True
                                     logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
                                     
-                                    # [NEW] Add to Follow Queue
+                                    # [NEW] V_SHAPE 入队需配合异动特征
                                     try:
-                                        hub = get_trading_hub()
-                                        today_str = datetime.now().strftime("%Y-%m-%d")
-                                        ts = TrackedSignal(
-                                            code=code, 
-                                            name=data.get('name', ''),
-                                            signal_type='V_SHAPE',
-                                            detected_date=today_str,
-                                            detected_price=p_curr,
-                                            entry_strategy='回踩MA5', # V-Shape often follows up with pullback or momentum
-                                            status='TRACKING',
-                                            priority=9,
-                                            source='RealTime',
-                                            notes=f"V-Shape Drop:{drop:.1%} Rebound:{rebound:.1%}"
-                                        )
-                                        hub.add_to_follow_queue(ts)
-                                        logger.info(f"📋 Auto-added V-Shape to Follow Queue: {code}")
+                                        # 检查是否有异动特征
+                                        has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
+                                        if has_anomaly:
+                                            hub = get_trading_hub()
+                                            today_str = datetime.now().strftime("%Y-%m-%d")
+                                            ts = TrackedSignal(
+                                                code=code, 
+                                                name=data.get('name', ''),
+                                                signal_type=f'V_SHAPE({anomaly_type})',
+                                                detected_date=today_str,
+                                                detected_price=p_curr,
+                                                entry_strategy='回踩MA5',
+                                                status='TRACKING',
+                                                priority=9,
+                                                source='RealTime',
+                                                notes=f"V-Shape Drop:{drop:.1%} Rebound:{rebound:.1%} | {anomaly_type}"
+                                            )
+                                            hub.add_to_follow_queue(ts)
+                                            logger.info(f"📋 V-Shape+异动入队: {code} ({anomaly_type})")
+                                        else:
+                                            logger.debug(f"V-Shape {code} skipped: no anomaly pattern")
                                     except Exception as e:
                                         logger.error(f"Failed to add V-Shape to queue: {e}")
 
