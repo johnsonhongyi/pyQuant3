@@ -2180,7 +2180,7 @@ def fetch_and_process(
                 st_key_sort = g_values.getkey("st_key_sort")
             elif get_status(status_callback) != last_status:
                 last_status = get_status(status_callback)
-            elif cct.get_trade_date_status() and START_INIT > 0 and cct.start_init_tdx_time <= cct.get_now_time_int() <= 915:
+            elif cct.get_trade_date_status() and START_INIT > 0 and cct.start_init_tdx_time <= cct.get_now_time_int() <= 900:
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
                 # 1️⃣ 清理（未完成 → 不允许 init）
@@ -2205,7 +2205,7 @@ def fetch_and_process(
 
                 # 2️⃣ 再次确认时间（防止跨 09:15）
                 now_time = cct.get_now_time_int()
-                if now_time > 915:
+                if now_time > 900:
                     logger.info(
                         f"{today} 已超过初始化截止时间 {now_time}"
                     )
@@ -2221,7 +2221,7 @@ def fetch_and_process(
                     vtype=ct.json_countType
                 )
 
-                if now_time <= 900:
+                if now_time <= 835:
                     resamples = ['2d','3d', 'w', 'm','d']
                 else:
                     resamples = ['2d','3d','d']
@@ -2292,6 +2292,7 @@ def fetch_and_process(
             logger.info(f"resample Main  top_now:{len(top_now)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+
             if top_all.empty:
                 if lastpTDX_DF.empty:
                     with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
@@ -2485,6 +2486,7 @@ def fetch_and_process(
                 )
                 print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
 
+            START_INIT = 1
             for _ in range(int(loop_sleep_time / sleep_step)):
                 if any(cond() for cond in stop_conditions):
                     break
@@ -2493,7 +2495,6 @@ def fetch_and_process(
                 # 每 heartbeat_interval 秒输出一次心跳
                 if sleep_elapsed % heartbeat_interval == 0:
                     logger.debug(f"[心跳] resample={resample} 等待中... {sleep_elapsed}/{int(loop_sleep_time)}s flag={flag.value}")
-            START_INIT = 1
         except Exception as e:
             logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
             logger.error(f"完整堆栈:\n{traceback.format_exc()}")
