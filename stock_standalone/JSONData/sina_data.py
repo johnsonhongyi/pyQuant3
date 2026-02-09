@@ -1351,7 +1351,22 @@ class Sina:
         """统一清洗指标列中的 0.0 或 NaN 值，确保所有返回的数据都是健康的"""
         if df is None or df.empty:
             return df
-        
+
+        now_t = cct.get_now_time_int()  # 例如 931, 1459 这种整数时间
+
+        is_trade_day = cct.get_trade_date_status()
+
+        # 是否在交易时段内
+        in_trade_time = (
+               (925 <= now_t) 
+        )
+            # (925 <= now_t <= 1130) or
+            # (1300 <= now_t <= 1500)
+
+        # 交易日，但不在交易时间 → 直接返回
+        if is_trade_day and not in_trade_time:
+            return df
+
         # ⚡ [FIX] 针对停牌个股 (volume == 0) 的强制对齐逻辑
         # 防止由于 agg_metrics 或历史轨迹残留导致的 nclose 与现价偏离过大
         if 'volume' in df.columns and 'close' in df.columns:

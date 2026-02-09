@@ -11166,7 +11166,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 df_filtered = self.df_all.query(query_search, engine=query_engine)
                 self.refresh_tree(df_filtered)
                 self.status_var2.set('')
-                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+                self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
             else:
                 # 检查 category 列是否存在
                 if 'category' in self.df_all.columns:
@@ -11189,10 +11189,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # logger.info(f"[剔除的条件列表] {removed_conditions}")
                     # 显示到状态栏
                     self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                    self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {final_query}")
                 else:
                     self.status_var2.set('')
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                    self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {final_query}")
                 logger.debug(f'final_query: {final_query}')
         except Exception as e:
             traceback.print_exc()

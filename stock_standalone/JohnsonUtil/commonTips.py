@@ -803,7 +803,7 @@ class GlobalConfig:
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback=10, value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback=300, value_type="int")
         self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff','per1d', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
-        self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=810, value_type="int")
+        self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=800, value_type="int")
         self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=921, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
