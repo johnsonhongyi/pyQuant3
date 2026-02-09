@@ -15,12 +15,59 @@ from dataclasses import dataclass
 import pandas as pd
 from JohnsonUtil import LoggerFactory
 
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
+    QMessageBox, QDialog, QFrame, QTabWidget, QApplication
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint
+from PyQt6.QtGui import QColor, QAction
+from PyQt6 import QtGui
+
 # [NEW] Move to top for performance and linting
-try:
-    from trading_analyzerQt6 import NumericTableWidgetItem
-except ImportError:
-    # Fallback
-    from PyQt6.QtWidgets import QTableWidgetItem as NumericTableWidgetItem # type: ignore
+# [FIX] 增强的 NumericTableWidgetItem，支持正确排序 (避免 -9 vs -35 错误)
+class NumericTableWidgetItem(QTableWidgetItem):
+    """支持数值排序的表格单元格项"""
+    def __init__(self, value, sort_value=None):
+        # [NEW] 统一处理显示逻辑：如果是浮点数，强制保留2位
+        if isinstance(value, float):
+            display_text = f"{value:.2f}"
+        else:
+            display_text = str(value)
+            
+        super().__init__(display_text)
+        
+        if sort_value is not None:
+            self.sort_value = sort_value
+        elif isinstance(value, (int, float)):
+            self.sort_value = value
+        else:
+            # 尝试从字符串中提取数值 (例如 "+9.00%")
+            try:
+                clean_val = display_text.replace('%', '').replace('+', '').replace(',', '').strip()
+                if not clean_val or clean_val == '-':
+                    self.sort_value = -999999.0
+                else:
+                    self.sort_value = float(clean_val)
+            except (ValueError, TypeError):
+                self.sort_value = display_text
+
+    def __lt__(self, other):
+        if not isinstance(other, QTableWidgetItem):
+            return super().__lt__(other)
+        
+        self_val = getattr(self, 'sort_value', None)
+        other_val = getattr(other, 'sort_value', None)
+                
+        if self_val is not None and other_val is not None:
+            try:
+                if type(self_val) == type(other_val):
+                    return self_val < other_val
+                return float(self_val) < float(other_val)
+            except:
+                pass
+        
+        return super().__lt__(other)
 
 try:
     from trading_hub import get_trading_hub, TrackedSignal
@@ -37,14 +84,6 @@ except ImportError:
     IntradayPatternDetector = None
     PatternEvent = None
 
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
-    QMessageBox, QDialog, QFrame, QTabWidget, QApplication
-)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint
-from PyQt6.QtGui import QColor, QAction
-from PyQt6 import QtGui
 
 # [REFACTOR] WindowMixin Imports
 from tk_gui_modules.window_mixin import WindowMixin
@@ -755,7 +794,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         for row, item in enumerate(self.items):
             # 序号 (No.) - 传整数以支持正确排序
-            no_item = NumericTableWidgetItem(row + 1)
+            no_item = NumericTableWidgetItem(row + 1, sort_value=row + 1)
             no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 0, no_item)
             
@@ -768,19 +807,25 @@ class HotlistPanel(QWidget, WindowMixin):
             self.table.setItem(row, 2, name_item)
             
             # 加入价 - 传浮点数
-            add_price_item = NumericTableWidgetItem(item.add_price)
+            add_price_item = NumericTableWidgetItem(item.add_price, sort_value=item.add_price)
             add_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(row, 3, add_price_item)
             
             # 现价 - 如果有值传浮点数，否则传字符串 "-"
             cur_price_val = item.current_price if item.current_price > 0 else "-"
-            cur_price_item = NumericTableWidgetItem(cur_price_val)
+            # 保持排序一致：无价格的放在最下面 (负无穷)
+            sort_price = item.current_price if item.current_price > 0 else -1.0
+            cur_price_item = NumericTableWidgetItem(cur_price_val, sort_value=sort_price)
             cur_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(row, 4, cur_price_item)
             
-            # 盈亏% - 传浮点数
-            pnl_val = item.pnl_percent if item.current_price > 0 else "-"
-            pnl_item = NumericTableWidgetItem(pnl_val)
+            # 盈亏% - 格式化显示以匹配跟单队列风格 (显示 + 和 %)
+            if item.current_price > 0:
+                pnl_val = f"{item.pnl_percent:+.2f}%"
+            else:
+                pnl_val = "-"
+            sort_pnl = item.pnl_percent if item.current_price > 0 else -999.0
+            pnl_item = NumericTableWidgetItem(pnl_val, sort_value=sort_pnl)
             pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if item.pnl_percent > 0:
                 pnl_item.setForeground(QColor(220, 80, 80))  # 红色
@@ -1168,40 +1213,55 @@ class HotlistPanel(QWidget, WindowMixin):
                     # Exact row match guaranteed by checks above
                     
                     # Status Col 1
-                    if (it := self.follow_table.item(row_idx, 1)):
-                        if it.text() != str(row.status):
-                            it.setText(str(row.status))
-                            if row.status == 'TRACKING': it.setForeground(QColor('#FFD700'))
-                            elif row.status == 'ENTERED': it.setForeground(QColor('#00FF00'))
-                            else: it.setForeground(QColor('#ddd'))
+                    # [FIX] 纠正跟单队列 in-place 更新的列索引
+                    # cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "理由", "时间"]
                     
-                    # Phase Col 5
+                    # Col 4: Price
+                    curr_price = 0.0
+                    col4_code = str(row.code)
+                    if hasattr(self, '_last_price_map') and col4_code in self._last_price_map:
+                        curr_price = self._last_price_map[col4_code]
+                    
+                    if (it := self.follow_table.item(row_idx, 4)):
+                        price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
+                        if it.text() != price_txt:
+                            it.setText(price_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = curr_price if curr_price > 0 else -1.0
+                    
+                    # Col 5: PnL %
+                    entry_price = getattr(row, 'entry_price', getattr(row, 'detected_price', 0.0))
+                    pnl_pct = 0.0
+                    if entry_price > 0 and curr_price > 0:
+                        pnl_pct = (curr_price - entry_price) / entry_price * 100
+                    
+                    if (it := self.follow_table.item(row_idx, 5)):
+                        pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
+                        if it.text() != pnl_txt:
+                            it.setText(pnl_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = pnl_pct if curr_price > 0 else -999.0
+                            if pnl_pct > 0: it.setForeground(QColor(220, 80, 80))
+                            elif pnl_pct < 0: it.setForeground(QColor(80, 200, 120))
+                            else: it.setForeground(QColor('#ddd'))
+
+                    # Col 8: Reason (Extract Phase)
                     phase_txt = "-"
                     notes = str(row.notes) if row.notes else ""
                     match = re.search(r'\[(.*?)\]', notes)
                     if match: phase_txt = match.group(1)
                     elif notes: phase_txt = notes[:10]
                     
-                    if (it := self.follow_table.item(row_idx, 5)):
-                        if it.text() != phase_txt:
-                            it.setText(phase_txt)
-                            if phase_txt in ('TOP_WATCH', '顶部观察'): it.setForeground(QColor('#FF8C00'))
-                            elif phase_txt in ('EXIT', '分批离场'): it.setForeground(QColor('#FF4500'))
-                            elif phase_txt in ('LAUNCH', '启动'): it.setForeground(QColor('#00BFFF'))
-                            else: it.setForeground(QColor('#ddd'))
-
-                    # Priority Col 6
-                    if (it := self.follow_table.item(row_idx, 6)):
-                        if it.text() != str(row.priority):
-                             it.setText(str(row.priority))
-                        
-                    # Time Col 9
+                    if (it := self.follow_table.item(row_idx, 8)):
+                        if it.text() != notes:
+                            it.setText(notes)
+                            it.setToolTip(notes)
+                            
+                    # Col 9: Time
                     time_dt = str(row.updated_at)
-                    # [ENHANCED] 显示完整日期时间 YYYY-MM-DD HH:MM
                     time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
                     if (it := self.follow_table.item(row_idx, 9)):
                         if it.text() != time_str:
                              it.setText(time_str)
+                             it.setData(Qt.ItemDataRole.UserRole, time_dt)
 
                 return
 
@@ -1256,7 +1316,8 @@ class HotlistPanel(QWidget, WindowMixin):
                     curr_price = self._last_price_map[str(row.code)]
                 
                 price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
-                price_item = NumericTableWidgetItem(price_txt)
+                sort_price = curr_price if curr_price > 0 else -1.0
+                price_item = NumericTableWidgetItem(price_txt, sort_value=sort_price)
                 price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.follow_table.setItem(row_idx, 4, price_item)
 
@@ -1269,10 +1330,12 @@ class HotlistPanel(QWidget, WindowMixin):
                     pnl_pct = (curr_price - entry_price) / entry_price * 100
                 
                 pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
-                pnl_item = NumericTableWidgetItem(pnl_txt)
+                sort_pnl = pnl_pct if curr_price > 0 else -999.0
+                pnl_item = NumericTableWidgetItem(pnl_txt, sort_value=sort_pnl)
                 pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if pnl_pct > 0: pnl_item.setForeground(QColor(220, 80, 80))
                 elif pnl_pct < 0: pnl_item.setForeground(QColor(80, 200, 120))
+                else: pnl_item.setForeground(QColor('#ddd'))
                 self.follow_table.setItem(row_idx, 5, pnl_item)
 
                 # 6. 信号 (Signal Type)

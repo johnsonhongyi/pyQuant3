@@ -1095,6 +1095,111 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         finally:
             self._task_running = False
 
+    # def on_tree_cleanup_menu_right_click(self, event):
+    #     """树形视图右键菜单"""
+    #     # 创建右键菜单
+    #     menu = tk.Menu(self, tearoff=0)
+        
+    #     # 添加清理选项
+    #     cleanup_menu = tk.Menu(menu, tearoff=0)
+    #     cleanup_menu.add_command(label="清理1天前信号", 
+    #                             command=lambda: self._cleanup_signals_with_feedback(1))
+    #     cleanup_menu.add_command(label="清理2天前信号", 
+    #                             command=lambda: self._cleanup_signals_with_feedback(2))
+    #     cleanup_menu.add_command(label="清理3天前信号", 
+    #                             command=lambda: self._cleanup_signals_with_feedback(3))
+    #     cleanup_menu.add_command(label="清理5天前信号", 
+    #                             command=lambda: self._cleanup_signals_with_feedback(5))
+    #     cleanup_menu.add_command(label="清理7天前信号", 
+    #                             command=lambda: self._cleanup_signals_with_feedback(7))
+        
+    #     menu.add_cascade(label="信号清理", menu=cleanup_menu)
+    #     menu.add_separator()
+    #     menu.add_command(label="刷新", command=lambda: self._schedule_after(0, self.update_tree))
+        
+    #     # 显示菜单
+    #     try:
+    #         menu.tk_popup(event.x_root, event.y_root)
+    #     finally:
+    #         menu.grab_release()
+    
+    def _cleanup_signals_with_feedback(self, days: int):
+        """执行信号清理并显示反馈"""
+        try:
+            from trading_hub import get_trading_hub
+            from tkinter import messagebox, scrolledtext
+            import tkinter as tk
+            
+            # 确认对话框
+            if not messagebox.askyesno(
+                "确认清理", 
+                f"确定要清理 {days} 天前的过期或破位信号吗?\n\n"
+                f"规则: \n"
+                f"1. 超过 {days} 天未入场的跟单信号\n"
+                f"2. 当前价格较检测价跌超 7% (不及预期/破位)\n"
+                f"3. 超过 {days} 天未变动的热点自选"
+            ):
+                return
+            
+            # 准备实时价格
+            price_map = {}
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                # 使用 'trade' 列作为现价
+                price_map = self.df_all['trade'].to_dict()
+
+            # 执行清理
+            hub = get_trading_hub()
+            results = hub.cleanup_stale_signals(max_days=days, current_prices=price_map)
+            
+            # 统计总数
+            total_cleaned = sum(len(v) for v in results.values())
+            
+            if total_cleaned > 0:
+                # 构建详细报告
+                report = []
+                if results.get("CANCEL_SIGNAL"):
+                    report.append("【跟单队列 - 不及预期/过期已取消】")
+                    report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
+                    report.append("")
+                
+                if results.get("CANCEL_HOTLIST"):
+                    report.append("【热点自选 - 破位/过期已取消】")
+                    report.extend([f" • {item}" for item in results["CANCEL_HOTLIST"]])
+                    report.append("")
+                
+                if results.get("STALE_SIGNAL"):
+                    report.append("【长期未动已标记为 STALE】")
+                    report.extend([f" • {item}" for item in results["STALE_SIGNAL"]])
+
+                # 显示详细日志弹窗
+                log_win = tk.Toplevel(self)
+                log_win.title(f"清理完成 - 共处理 {total_cleaned} 项")
+                log_win.geometry("520x450")
+                
+                txt = scrolledtext.ScrolledText(log_win, wrap=tk.WORD, font=("微软雅黑", 9))
+                txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                txt.insert(tk.END, "\n".join(report))
+                txt.configure(state='disabled')
+                
+                # 确定按钮
+                btn = tk.Button(log_win, text="确定", command=log_win.destroy, width=12)
+                btn.pack(pady=10)
+                
+                logger.info(f"[UI] 用户手动清理了 {total_cleaned} 个信号/热点 (>{days}天 或 破位)")
+            else:
+                messagebox.showinfo(
+                    "清理完成", 
+                    f"没有找到需要清理的信号\n\n"
+                    f"所有活动信号都在 {days} 天以内且表现优于预期。"
+                )
+                logger.info(f"[UI] 用户手动清理: 无需清理的信号 (>{days}天)")
+                
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("清理失败", f"清理过程中出现错误:\n{str(e)}")
+            logger.error(f"[UI] 信号清理失败: {e}\n{traceback.format_exc()}")
+
+
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
@@ -3392,55 +3497,176 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
 
+    # def on_tree_right_click(self, event):
+    #     """右键点击 TreeView 行"""
+    #     # 确保选中行
+    #     item_id = self.tree.identify_row(event.y)
+
+    #     if item_id:
+    #         # 选中该行
+    #         self.tree.selection_set(item_id)
+    #         self.tree.focus(item_id)
+            
+    #         # 获取基本信息
+    #         values = self.tree.item(item_id, 'values')
+    #         stock_code = values[0]
+    #         stock_name = values[1] if len(values) > 1 else "未知"
+            
+    #         # 创建菜单
+    #         menu = tk.Menu(self, tearoff=0)
+            
+    #         menu.add_command(label=f"📝 复制提取信息 ({stock_code})", 
+    #                         command=lambda: self.copy_stock_info(stock_code))
+                            
+    #         menu.add_separator()
+            
+    #         menu.add_command(label="🧪 测试买卖策略", 
+    #                         command=lambda  e=event: self.on_tree_click_for_tooltip(e,stock_code,stock_name,True))
+    #                         # command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
+    #         menu.add_command(label="🧪 测试Code策略", 
+    #                         command=lambda  e=event: check_code(self.df_all,stock_code,self.search_var1.get()))
+
+    #         menu.add_command(label="🏷️ 添加标注备注", 
+    #                         command=lambda: self.add_stock_remark(stock_code, stock_name))
+            
+    #         menu.add_command(label="🔔 加入语音预警",
+    #                         command=lambda: self.add_voice_monitor_dialog(stock_code, stock_name))
+                            
+    #         menu.add_command(label="📖 查看标注手札", 
+    #                         command=lambda: self.view_stock_remarks(stock_code, stock_name))
+            
+    #         menu.add_separator()
+            
+    #         menu.add_command(label=f"🚀 发送到关联软件", 
+    #                         command=lambda: self.original_push_logic(stock_code))
+    #         menu.add_command(label="🔍 策略白盒评估...", command=lambda: self.open_strategy_manager(verify_code=stock_code), foreground="blue")
+            
+    #         menu.add_separator()
+    #         menu.add_command(label="🚫 黑名单管理中心", command=self.open_blacklist_manager)
+            
+    #         # 弹出菜单
+    #         menu.post(event.x_root, event.y_root)
+
     def on_tree_right_click(self, event):
         """右键点击 TreeView 行"""
-        # 确保选中行
         item_id = self.tree.identify_row(event.y)
 
-        if item_id:
-            # 选中该行
-            self.tree.selection_set(item_id)
-            self.tree.focus(item_id)
-            
-            # 获取基本信息
-            values = self.tree.item(item_id, 'values')
-            stock_code = values[0]
-            stock_name = values[1] if len(values) > 1 else "未知"
-            
-            # 创建菜单
-            menu = tk.Menu(self, tearoff=0)
-            
-            menu.add_command(label=f"📝 复制提取信息 ({stock_code})", 
-                            command=lambda: self.copy_stock_info(stock_code))
-                            
-            menu.add_separator()
-            
-            menu.add_command(label="🧪 测试买卖策略", 
-                            command=lambda  e=event: self.on_tree_click_for_tooltip(e,stock_code,stock_name,True))
-                            # command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
-            menu.add_command(label="🧪 测试Code策略", 
-                            command=lambda  e=event: check_code(self.df_all,stock_code,self.search_var1.get()))
+        if not item_id:
+            return
 
-            menu.add_command(label="🏷️ 添加标注备注", 
-                            command=lambda: self.add_stock_remark(stock_code, stock_name))
-            
-            menu.add_command(label="🔔 加入语音预警",
-                            command=lambda: self.add_voice_monitor_dialog(stock_code, stock_name))
-                            
-            menu.add_command(label="📖 查看标注手札", 
-                            command=lambda: self.view_stock_remarks(stock_code, stock_name))
-            
-            menu.add_separator()
-            
-            menu.add_command(label=f"🚀 发送到关联软件", 
-                            command=lambda: self.original_push_logic(stock_code))
-            menu.add_command(label="🔍 策略白盒评估...", command=lambda: self.open_strategy_manager(verify_code=stock_code), foreground="blue")
-            
-            menu.add_separator()
-            menu.add_command(label="🚫 黑名单管理中心", command=self.open_blacklist_manager)
-            
-            # 弹出菜单
-            menu.post(event.x_root, event.y_root)
+        # 选中该行
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+
+        # 获取股票信息
+        values = self.tree.item(item_id, 'values')
+        stock_code = values[0]
+        stock_name = values[1] if len(values) > 1 else "未知"
+
+        # ================= 主菜单 =================
+        menu = tk.Menu(self, tearoff=0)
+
+        # —— 基础功能 ——
+        menu.add_command(
+            label=f"📝 复制提取信息 ({stock_code})",
+            command=lambda: self.copy_stock_info(stock_code)
+        )
+
+        menu.add_separator()
+
+        # —— 策略相关 ——
+        menu.add_command(
+            label="🧪 测试买卖策略",
+            command=lambda e=event: self.on_tree_click_for_tooltip(
+                e, stock_code, stock_name, True
+            )
+        )
+
+        menu.add_command(
+            label="🧪 测试Code策略",
+            command=lambda: check_code(self.df_all, stock_code, self.search_var1.get())
+        )
+
+        menu.add_command(
+            label="🔍 策略白盒评估...",
+            command=lambda: self.open_strategy_manager(verify_code=stock_code),
+            foreground="blue"
+        )
+
+        menu.add_separator()
+
+        # —— 标注 & 预警 ——
+        menu.add_command(
+            label="🏷️ 添加标注备注",
+            command=lambda: self.add_stock_remark(stock_code, stock_name)
+        )
+
+        menu.add_command(
+            label="📖 查看标注手札",
+            command=lambda: self.view_stock_remarks(stock_code, stock_name)
+        )
+
+        menu.add_command(
+            label="🔔 加入语音预警",
+            command=lambda: self.add_voice_monitor_dialog(stock_code, stock_name)
+        )
+
+        menu.add_separator()
+
+        # —— 外部联动 ——
+        menu.add_command(
+            label="🚀 发送到关联软件",
+            command=lambda: self.original_push_logic(stock_code)
+        )
+
+        menu.add_separator()
+
+        # ================= 信号清理子菜单 =================
+        cleanup_menu = tk.Menu(menu, tearoff=0)
+
+        cleanup_menu.add_command(
+            label="清理1天前信号",
+            command=lambda: self._cleanup_signals_with_feedback(1)
+        )
+        cleanup_menu.add_command(
+            label="清理2天前信号",
+            command=lambda: self._cleanup_signals_with_feedback(2)
+        )
+        cleanup_menu.add_command(
+            label="清理3天前信号",
+            command=lambda: self._cleanup_signals_with_feedback(3)
+        )
+        cleanup_menu.add_command(
+            label="清理5天前信号",
+            command=lambda: self._cleanup_signals_with_feedback(5)
+        )
+        cleanup_menu.add_command(
+            label="清理7天前信号",
+            command=lambda: self._cleanup_signals_with_feedback(7)
+        )
+
+        menu.add_cascade(label="🧹 信号清理", menu=cleanup_menu)
+
+        menu.add_separator()
+
+        # —— 其他管理 ——
+        menu.add_command(
+            label="🚫 黑名单管理中心",
+            command=self.open_blacklist_manager
+        )
+
+        menu.add_command(
+            label="🔄 刷新",
+            command=lambda: self._schedule_after(0, self.update_tree)
+        )
+
+        # 弹出菜单
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+
 
     def get_stock_info_text(self, code):
         """获取格式化的股票信息文本"""
@@ -12333,6 +12559,19 @@ def parse_args():
         # help="传递 Python 命令字符串执行，例如:\n" + "\n".join(COMMON_COMMANDS)
         # help="传递 Python 命令字符串执行，例如: tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')"
     )
+    
+    # 数据库修复参数
+    # 数据库修复参数
+    parser.add_argument(
+        "-repair-db",
+        "--repair-db",
+        dest="repair_db",
+        nargs='?',
+        const='signal_strategy.db',  # 不带参数时使用默认值
+        default=None,  # 完全不使用该参数时为 None
+        help="修复指定的数据库文件。默认修复 signal_strategy.db。用法: -repair-db [数据库路径]"
+    )
+
 
     args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
     return args
@@ -12447,6 +12686,27 @@ if __name__ == "__main__":
         # mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
+    
+    # ✅ 命令行触发数据库修复 - 必须在最开始检查,避免初始化其他组件
+    if args.repair_db is not None:
+        from db_repair_tool import DatabaseRepairTool
+        
+        # 如果是相对路径,转换为绝对路径
+        target_db = args.repair_db
+        if not os.path.isabs(target_db):
+            target_db = os.path.join(BASE_DIR, target_db)
+        
+        print(f"开始修复数据库: {target_db}")
+        tool = DatabaseRepairTool(target_db)
+        success = tool.run()
+        
+        if success:
+            print("数据库修复完成!")
+            sys.exit(0)
+        else:
+            print("数据库修复失败!")
+            sys.exit(1)
+    
     # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
     log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
     # log_level = LoggerFactory.DEBUG
@@ -12610,7 +12870,8 @@ if __name__ == "__main__":
     if args.test_single:
         logger.info(f'b fetch_and_process')
         test_single_thread()
-        sys.exit(0) 
+        sys.exit(0)
+    
     app = StockMonitorApp()
     if cct.isMac():
         width, height = 100, 32

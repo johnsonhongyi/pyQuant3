@@ -404,6 +404,146 @@ class TradingHub:
         conn.close()
         return df
     
+    def cleanup_stale_signals(self, max_days: int = 2, current_prices: Dict[str, float] = None) -> Dict[str, List[str]]:
+        """
+        清理过期的跟单信号与热点跟踪，支持价格波动清理(不及预期/破位)
+        
+        规则:
+        1. TRACKING/READY 状态超过 max_days 天未入场 → CANCELLED
+        2. [NEW] TRACKING/READY 状态如果当前价 < detected_price * 0.93 (跌超7%破位) → CANCELLED
+        3. ENTERED 状态超过 max_days*2 天未更新 → STALE
+        4. Hotlist (follow_record) 中 ACTIVE 状态超过 max_days 天 → CANCELLED
+        5. [NEW] Hotlist 状态如果当前价 < follow_price * 0.93 或跌破 stop_loss → CANCELLED
+        
+        Args:
+            max_days: 最大等待天数
+            current_prices: {code: price} 实时价格字典，用于破位检测
+            
+        Returns:
+            Dict[str, List[str]]: 清理详情 {status: [name(code), ...]}
+        """
+        results = {"CANCEL_SIGNAL": [], "STALE_SIGNAL": [], "CANCEL_HOTLIST": []}
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            now = datetime.now()
+            
+            # 1. 整理 follow_queue (跟单队列)
+            c.execute("""
+                SELECT id, code, name, detected_date, detected_price, status, stop_loss
+                FROM follow_queue 
+                WHERE status IN ('TRACKING', 'READY', 'ENTERED')
+            """)
+            queue_rows = c.fetchall()
+            
+            for row in queue_rows:
+                q_id, code, name, det_date_str, det_price, status, stop_loss = row
+                curr_price = current_prices.get(code) if current_prices else None
+                
+                # --- 时间清理 ---
+                days_elapsed = -1
+                if det_date_str:
+                    try:
+                        dt = datetime.strptime(det_date_str, '%Y-%m-%d %H:%M:%S') if ' ' in det_date_str else datetime.strptime(det_date_str, '%Y-%m-%d')
+                        days_elapsed = (now - dt).days
+                    except: pass
+
+                should_cleanup = False
+                reason = ""
+
+                if status in ('TRACKING', 'READY'):
+                    if days_elapsed > max_days:
+                        should_cleanup = True
+                        reason = f"时间超{max_days}d"
+                    elif curr_price:
+                        # 破位逻辑: 跌超 7% 或 跌破止损
+                        if det_price > 0 and curr_price < det_price * 0.93:
+                            should_cleanup = True
+                            reason = "不及预期(跌>7%)"
+                        elif stop_loss and stop_loss > 0 and curr_price < stop_loss:
+                            should_cleanup = True
+                            reason = "破位止损"
+
+                    if should_cleanup:
+                        c.execute("UPDATE follow_queue SET status='CANCELLED', notes=COALESCE(notes,'')||' | 自动清理:'||?, updated_at=? WHERE id=?",
+                                 (reason, now.strftime('%Y-%m-%d %H:%M:%S'), q_id))
+                        results["CANCEL_SIGNAL"].append(f"{name}({code}) - {reason}")
+                        logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} CANCELLED ({reason})")
+
+                elif status == 'ENTERED':
+                    stale_limit = max_days * 2
+                    if days_elapsed > stale_limit:
+                        c.execute("UPDATE follow_queue SET status='STALE', notes=COALESCE(notes,'')||' | 自动清理:过期', updated_at=? WHERE id=?",
+                                 (now.strftime('%Y-%m-%d %H:%M:%S'), q_id))
+                        results["STALE_SIGNAL"].append(f"{name}({code}) - 过期")
+                        logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} STALE (>2d)")
+
+            # 2. 整理 follow_record (热点自选)
+            try:
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='follow_record'")
+                if c.fetchone():
+                    c.execute("SELECT id, code, name, follow_date, follow_price, stop_loss FROM follow_record WHERE status='ACTIVE'")
+                    hot_rows = c.fetchall()
+                    for row in hot_rows:
+                        h_id, code, name, fol_date_str, fol_price, stop_loss = row
+                        curr_price = current_prices.get(code) if current_prices else None
+                        
+                        days_elapsed = -1
+                        if fol_date_str:
+                            try:
+                                dt = datetime.strptime(fol_date_str, '%Y-%m-%d %H:%M:%S') if ' ' in fol_date_str else datetime.strptime(fol_date_str, '%Y-%m-%d')
+                                days_elapsed = (now - dt).days
+                            except: pass
+
+                        should_h = False
+                        h_reason = ""
+                        
+                        if days_elapsed > max_days: # 热点跟踪更敏感，直接用 max_days
+                            should_h = True
+                            h_reason = f"时间超{max_days}d"
+                        elif curr_price:
+                            if fol_price > 0 and curr_price < fol_price * 0.93:
+                                should_h = True
+                                h_reason = "破位阴跌"
+                            elif stop_loss and stop_loss > 0 and curr_price < stop_loss:
+                                should_h = True
+                                h_reason = "跌破止损"
+                        
+                        if should_h:
+                            c.execute("UPDATE follow_record SET status='CANCELLED', feedback=COALESCE(feedback,'')||' | 自动清理:'||? WHERE id=?",
+                                     (h_reason, h_id))
+                            results["CANCEL_HOTLIST"].append(f"{name}({code}) - {h_reason}")
+                            logger.info(f"[TradingHub] Auto-cleanup Hotlist: {code} {name} CANCELLED ({h_reason})")
+            except Exception as e:
+                logger.error(f"[TradingHub] Hotlist cleanup error: {e}")
+
+            conn.commit()
+            conn.close()
+            return results
+            
+        except Exception as e:
+            logger.error(f"[TradingHub] Cleanup error: {e}")
+            return results
+
+
+    
+    def check_db_integrity(self) -> bool:
+        """
+        检查数据库完整性
+        
+        Returns:
+            True: 数据库正常
+            False: 数据库损坏
+        """
+        try:
+            conn = sqlite3.connect(self.signal_db, timeout=5)
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            conn.close()
+            return result[0] == 'ok'
+        except Exception as e:
+            logger.error(f"[TradingHub] DB integrity check failed: {e}")
+            return False
+    
     # =========== 持仓管理 ===========
     
     def add_position(self, position: Position) -> bool:
