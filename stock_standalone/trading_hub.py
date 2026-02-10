@@ -1400,6 +1400,66 @@ class TradingHub:
         except Exception as e:
             logger.error(f"[TradingHub] get_watchlist_df error: {e}")
             return pd.DataFrame()
+    
+    def batch_update_watchlist_sectors(self, df_all: pd.DataFrame) -> int:
+        """
+        批量更新 watchlist 中的板块信息
+        
+        Args:
+            df_all: 主数据框,包含 category 字段
+            
+        Returns:
+            更新的记录数
+        """
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            
+            # 获取所有需要更新板块信息的记录
+            c.execute("""
+                SELECT code FROM hot_stock_watchlist 
+                WHERE validation_status != 'DROPPED'
+                AND (sector IS NULL OR sector = '')
+            """)
+            codes_to_update = [row[0] for row in c.fetchall()]
+            
+            if not codes_to_update:
+                conn.close()
+                return 0
+            
+            updated_count = 0
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            for code in codes_to_update:
+                # 从 df_all 中获取板块信息
+                if code in df_all.index:
+                    row = df_all.loc[code]
+                    category = str(row.get('category', ''))
+                    
+                    if category:
+                        # 取第一个板块作为主板块
+                        sectors = category.split(';')
+                        main_sector = sectors[0] if sectors else ''
+                        
+                        if main_sector:
+                            c.execute("""
+                                UPDATE hot_stock_watchlist 
+                                SET sector = ?, updated_at = ?
+                                WHERE code = ?
+                            """, (main_sector, now, code))
+                            updated_count += 1
+            
+            conn.commit()
+            conn.close()
+            
+            if updated_count > 0:
+                logger.info(f"[TradingHub] Batch updated {updated_count} watchlist sectors")
+            
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"[TradingHub] batch_update_watchlist_sectors error: {e}")
+            return 0
 
 
 # 单例模式

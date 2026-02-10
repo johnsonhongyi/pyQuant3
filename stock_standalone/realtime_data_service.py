@@ -89,10 +89,35 @@ class MinuteKlineCache:
         if df.empty:
             return df
             
-        # 最后的防线：确保返回的 DF 绝对没有重复的 (code, time)
-        # 强制转换类型并补齐 6 位代码，保证 drop_duplicates 和后续查看的一致性
+        # 强制转换类型并补齐 6 位代码
         df['time'] = df['time'].astype(int)
         df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
+        
+        # --- [FIX] 数据修复: 剔除非交易时段数据 (盘后/午休脏数据) ---
+        # 假设服务器为 UTC+8 环境 (A股)
+        # (ts + 28800) % 86400 = 当天逝去的秒数
+        # seconds // 60 = 当天逝去的分钟数
+        # HHMM = (mins // 60) * 100 + (mins % 60)
+        
+        # 向量化计算 HHMM
+        seconds_from_midnight = (df['time'] + 28800) % 86400
+        mins_from_midnight = seconds_from_midnight // 60
+        hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+        
+        # 合法性校验: 09:15-11:30, 13:00-15:05 (放宽至 15:05 容纳收盘竞价延时)
+        mask_am = (hhmm >= 915) & (hhmm <= 1130)
+        mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
+        
+        # 应用过滤
+        original_len = len(df)
+        df = df[mask_am | mask_pm]
+        cleaned_len = len(df)
+        
+        if cleaned_len < original_len:
+             # 仅在有清除时由于频率限制改为 debug 或 info
+             pass
+             
+        # 最后的防线：确保返回的 DF 绝对没有重复的 (code, time)
         df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
         return df
 
@@ -125,6 +150,17 @@ class MinuteKlineCache:
             if 'time' in cols:
                 # int32 足够，速度和内存都更优
                 df['time'] = df['time'].astype('int32')
+
+                # --- [FIX] 加载时修复: 剔除非交易时段数据 ---
+                seconds_from_midnight = (df['time'] + 28800) % 86400
+                mins_from_midnight = seconds_from_midnight // 60
+                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+                
+                # 合法性校验: 09:15-11:30, 13:00-15:05
+                mask_am = (hhmm >= 915) & (hhmm <= 1130)
+                mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
+                
+                df = df[mask_am | mask_pm]
 
                 # 排序 + 去重
                 df = (
@@ -783,7 +819,8 @@ class DataPublisher:
     last_batch_time: float
     max_batch_time: float
     _last_batch_fp: str
-    def __init__(self, high_performance: bool = True, scraper_interval: int = 600):
+    _enable_backup: bool
+    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, enable_backup: bool = False):
         # global FP_FILE,CACHE_FILE
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
@@ -797,7 +834,8 @@ class DataPublisher:
         self._cache_path = str(cache_path) if cache_path else "" 
         self._last_save_ts = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
         self._save_interval = 300 # 每 5 分钟备份一次到磁盘
-        
+        self._enable_backup = enable_backup # 是否启用 .bak 文件备份 (Ramdisk 空间紧张默认关闭)
+
         self.cache_slot: DataFrameCacheSlot = DataFrameCacheSlot(
                 cache_file=self._cache_path,
                 fp_file=None,
@@ -1194,7 +1232,7 @@ class DataPublisher:
                 if self._last_save_ts == 0 or cct.get_trade_date_status() and 930 < cct.get_now_time_int() <= close_time:
                     save_cache_df = self.kline_cache.to_dataframe()
                     # logger.debug(f'save_cache_df: {save_cache_df.shape}')
-                    self.cache_slot.save_df(save_cache_df,persist=True)
+                    self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
                     self._last_save_ts = time.time()
                 
         except Exception as e:
