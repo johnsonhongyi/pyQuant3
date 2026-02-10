@@ -239,7 +239,7 @@ class WindowMixin:
                     y = int(pos.get("y", 0) * scale)
 
                     x, y = clamp_window_to_screens(x, y, width, height)
-                    logger.debug(f"[load_window_position_qt] 加载 {window_name}: {width}x{height} {x}+{y}")
+                    logger.debug(f"[load_window_position_qt] 加载 {config_file_path} {window_name}: {width}x{height} {x}+{y}")
 
             if x is None or y is None:
                 geo = self._get_available_geometry_qt(win)
@@ -265,7 +265,7 @@ class WindowMixin:
                         if aw.x() == x and aw.y() == y:
                             x += offset_step
                             y += offset_step
-            logger.debug(f"[load_window_position_qt] config_file_path: {config_file_path}")
+            # logger.debug(f"[load_window_position_qt] config_file_path: {config_file_path}")
             win.setGeometry(x, y, width, height)
             return width, height, x, y
         except Exception as e:
@@ -299,15 +299,15 @@ class WindowMixin:
                     with open(config_file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception as e:
-                    logger.error(f"[save_window_position_qt] 读取失败: {e}")
+                    logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             data[window_name] = pos
             with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
         except Exception as e:
-            logger.error(f"[save_window_position_qt] 失败: {e}")
+            logger.error(f"[save_window_position_qt] {file_path} 失败: {e}")
 
     def save_window_position_qt_visual(self, win: Any, window_name: str, file_path: Optional[str] = None) -> None:
         """保存 PyQt 窗口 position (防抖 5s)"""
@@ -366,16 +366,16 @@ class WindowMixin:
                             data_changed = False
                             
                 except Exception as e:
-                    logger.error(f"[save_window_position_qt] 读取失败: {e}")
+                    logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             # [OPTIMIZE] 只有数据变化时才写盘
             if data_changed:
                 data[window_name] = pos
                 with open(config_file_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+                logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
             else:
-                logger.debug(f"[save_window_position_qt] 跳过保存 {window_name}: 数据未变化")
+                logger.debug(f"[save_window_position_qt] {config_file_path} 跳过保存 {window_name}: 数据未变化")
                 
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
