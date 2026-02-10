@@ -8114,7 +8114,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         y_visuals = []
         for sig in kline_signals:
-            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY, SignalType.FOLLOW)
+            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY, SignalType.FOLLOW, SignalType.WATCH)
             
             # 1. 历史 K 线信号
             if sig.bar_index < len(day_df):
