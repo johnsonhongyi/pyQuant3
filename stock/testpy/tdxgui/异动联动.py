@@ -5752,8 +5752,9 @@ def update_code_entry(stock_code):
         stock_code = stock_code.zfill(6)
         selected_item = tree.selection()
         send_to_tdx(stock_code)
-    code_entry.delete(0, tk.END)
-    code_entry.insert(0, stock_code)
+    # safe_set_stock_code(code_entry, stock_code)
+    # code_entry.delete(0, tk.END)
+    # code_entry.insert(0, stock_code)
 
 # 设置一个变量来追踪每列的排序方向
 sort_directions = {}

@@ -18,6 +18,7 @@ class SignalType(Enum):
     VETO = "否决"           # 策略否决：过滤不符合条件的信号
     FOLLOW = "跟单"         # 热点跟单
     EXIT_FOLLOW = "离场"    # 跟单离场
+    WATCH = "观察"          # 热点观察池
 
 class SignalSource(Enum):
     MANUAL = "手动"
@@ -90,4 +91,5 @@ SIGNAL_VISUAL_CONFIG = {
     SignalType.FOLLOW: {"symbol": '🎯', "size": 18, "color": (255, 215, 0)}, # Bullseye for Follow
     # SignalType.FOLLOW: {"symbol": 'star', "size": 20, "color": (255, 215, 0)}, # Gold Star for Follow
     SignalType.EXIT_FOLLOW: {"symbol": 'x', "size": 12, "color": (255, 69, 0)}, # Orange Red X for Exit
+    SignalType.WATCH: {"symbol": 'o', "size": 14, "color": (147, 112, 219)}, # MediumPurple for Watch
 }

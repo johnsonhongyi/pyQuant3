@@ -17,11 +17,11 @@ Created: 2026-01-23
 
 import sqlite3
 import logging
+import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Any, Optional
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-import pandas as pd
 
 from JohnsonUtil import LoggerFactory
 logger: logging.Logger = LoggerFactory.getLogger()
@@ -29,6 +29,8 @@ logger: logging.Logger = LoggerFactory.getLogger()
 
 class FollowStatus(Enum):
     """跟单状态枚举"""
+    WATCHING = "WATCHING"      # 观察中（热股跨日验证）
+    VALIDATED = "VALIDATED"    # 验证通过，待晋升跟单
     TRACKING = "TRACKING"      # 跟踪中，等待入场时机
     READY = "READY"            # 入场时机出现
     ENTERED = "ENTERED"        # 已入场
@@ -194,10 +196,50 @@ class TradingHub:
             )
         """)
         
+        # 热股观察表 — 跨日验证 (P0核心)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS hot_stock_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                name TEXT,
+                sector TEXT,
+                discover_date TEXT,
+                discover_price REAL,
+                latest_price REAL,
+                trend_score REAL DEFAULT 0,
+                volume_score REAL DEFAULT 0,
+                new_high_flag INTEGER DEFAULT 0,
+                consecutive_strong INTEGER DEFAULT 0,
+                validation_status TEXT DEFAULT 'WATCHING',
+                daily_patterns TEXT,      -- [NEW] 记录日线形态描述
+                pattern_score REAL DEFAULT 0, -- [NEW] 形态打分
+                source TEXT,              -- [NEW] 来源标识
+                drop_reason TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(code, discover_date)
+            )
+        """)
+        
+        # --- [NEW] 热迁移：为 hot_stock_watchlist 增加形态支撑字段 ---
+        try:
+            c.execute("PRAGMA table_info(hot_stock_watchlist)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'daily_patterns' not in columns:
+                c.execute("ALTER TABLE hot_stock_watchlist ADD COLUMN daily_patterns TEXT")
+            if 'pattern_score' not in columns:
+                c.execute("ALTER TABLE hot_stock_watchlist ADD COLUMN pattern_score REAL DEFAULT 0")
+            if 'source' not in columns:
+                c.execute("ALTER TABLE hot_stock_watchlist ADD COLUMN source TEXT")
+            conn.commit()
+        except: pass
+        
         # 创建索引
         c.execute("CREATE INDEX IF NOT EXISTS idx_fq_status ON follow_queue(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_fq_code ON follow_queue(code)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_hw_status ON hot_stock_watchlist(validation_status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_hw_code ON hot_stock_watchlist(code)")
         
         conn.commit()
         conn.close()
@@ -273,7 +315,7 @@ class TradingHub:
             logger.error(f"[TradingHub] Delete from follow queue error: {e}")
             return False
 
-    def get_follow_queue(self, status: str = None) -> List[TrackedSignal]:
+    def get_follow_queue(self, status: str = None) -> list[TrackedSignal]:
         """获取待跟单队列"""
         conn = sqlite3.connect(self.signal_db)
         c = conn.cursor()
@@ -287,7 +329,11 @@ class TradingHub:
         query_cols = ", ".join(fields)
         
         if status:
-            c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status = ? ORDER BY priority DESC, detected_date", (status,))
+            if isinstance(status, (list, tuple)):
+                placeholders = ", ".join(["?"] * len(status))
+                c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status IN ({placeholders}) ORDER BY priority DESC, detected_date", tuple(status))
+            else:
+                c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status = ? ORDER BY priority DESC, detected_date", (status,))
         else:
             c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status != 'EXITED' AND status != 'CANCELLED' ORDER BY priority DESC, detected_date")
         
@@ -403,8 +449,20 @@ class TradingHub:
         )
         conn.close()
         return df
+
+    def get_watchlist_df(self) -> pd.DataFrame:
+        """获取热股观察池(DataFrame格式)"""
+        conn = sqlite3.connect(self.signal_db)
+        # 获取除了已废弃外的所有状态，按日期和评分排序
+        df = pd.read_sql_query(
+            "SELECT * FROM hot_stock_watchlist WHERE validation_status != 'DROPPED' "
+            "ORDER BY discover_date DESC, trend_score DESC",
+            conn
+        )
+        conn.close()
+        return df
     
-    def cleanup_stale_signals(self, max_days: int = 2, current_prices: Dict[str, float] = None, check_breakout: bool = False) -> Dict[str, List[str]]:
+    def cleanup_stale_signals(self, max_days: int = 2, current_prices: dict[str, float] = None, check_breakout: bool = False) -> dict[str, list[str]]:
         """
         清理过期的跟单信号与热点跟踪，支持价格波动清理(不及预期/破位)
         
@@ -422,7 +480,7 @@ class TradingHub:
             check_breakout: 是否检查"3天内无中阳突破"（手动清理选项）
             
         Returns:
-            Dict[str, List[str]]: 清理详情 {status: [name(code), ...]}
+            dict[str, list[str]]: 清理详情 {status: [name(code), ...]}
         """
         results = {"CANCEL_SIGNAL": [], "STALE_SIGNAL": [], "CANCEL_HOTLIST": []}
         try:
@@ -511,6 +569,38 @@ class TradingHub:
                         results["STALE_SIGNAL"].append(f"{name}({code}) - 过期")
                         logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} STALE (>2d)")
 
+            # 2. 队列容量压缩 (限额 100 只)
+            # 获取当前队列中非 EXITED/CANCELLED 的总数
+            c.execute("SELECT id, code, name, status, priority, detected_date FROM follow_queue WHERE status NOT IN ('EXITED', 'CANCELLED')")
+            active_queue = c.fetchall()
+            
+            MAX_QUEUE_SIZE = 100
+            if len(active_queue) > MAX_QUEUE_SIZE:
+                # 排序优先级：
+                # 1. 状态权重：STALE(1) > TRACKING(2) > READY(3) > ENTERED(4) -> 优先清理 STALE
+                # 2. 业务优先级：priority 越低越优先清理
+                # 3. 时间：时间越早越优先清理
+                status_weight = {'STALE': 1, 'TRACKING': 2, 'READY': 3, 'ENTERED': 4}
+                def sort_key(row):
+                    # row: (id, code, name, status, priority, detected_date)
+                    s_weight = status_weight.get(row[3], 99)
+                    prio = row[4] or 5
+                    # 转换时间为可以用作比较的格式
+                    d_date = row[5] or "1970-01-01"
+                    return (s_weight, prio, d_date)
+
+                # 按权重从小到大排序，前面的是最该删除的
+                sorted_queue = sorted(active_queue, key=sort_key)
+                to_remove_count = len(active_queue) - MAX_QUEUE_SIZE
+                to_remove = sorted_queue[:to_remove_count]
+                
+                for r_row in to_remove:
+                    r_id, r_code, r_name, r_status, r_prio, r_date = r_row
+                    reason = "队列扩容清理(限额100)"
+                    c.execute("UPDATE follow_queue SET status='CANCELLED', notes=COALESCE(notes,'')||' | '||?, updated_at=? WHERE id=?",
+                             (reason, now.strftime('%Y-%m-%d %H:%M:%S'), r_id))
+                    results["CANCEL_SIGNAL"].append(f"{r_name}({r_code}) - {reason} [{r_status}]")
+                    logger.info(f"[TradingHub] Queue Limit Cleanup: {r_code} {r_name} CANCELLED")
 
             conn.commit()
             conn.close()
@@ -567,7 +657,7 @@ class TradingHub:
             logger.error(f"[TradingHub] Add position error: {e}")
             return False
     
-    def get_positions(self, status: str = "HOLDING") -> List[Position]:
+    def get_positions(self, status: str = "HOLDING") -> list[Position]:
         """获取持仓列表"""
         conn = sqlite3.connect(self.signal_db)
         c = conn.cursor()
@@ -743,7 +833,7 @@ class TradingHub:
         
         return df
     
-    def get_slippage_summary(self, days: int = 30) -> Dict[str, Any]:
+    def get_slippage_summary(self, days: int = 30) -> dict[str, Any]:
         """获取滑点统计摘要"""
         df = self.get_slippage_analysis(days)
         
@@ -802,7 +892,7 @@ class TradingHub:
         return df
     
     
-    def get_unified_dashboard(self) -> Dict[str, Any]:
+    def get_unified_dashboard(self) -> dict[str, Any]:
         """获取统一仪表盘数据"""
         return {
             "follow_queue_count": len(self.get_follow_queue()),
@@ -864,6 +954,452 @@ class TradingHub:
         except Exception as e:
             logger.error(f"[TradingHub] Sync error: {e}")
             return 0
+
+    # =========== 热股观察队列管理 (P0: 跨日验证引擎) ===========
+
+    def add_to_watchlist(self, code: str, name: str, sector: str, price: float,
+                         source: str = "", daily_patterns: str = "", pattern_score: float = 0) -> bool:
+        """
+        全量归集：将各路选股结果写入观察队列（不直接跟单）
+        """
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            now = datetime.now()
+            today_str = now.strftime('%Y-%m-%d')
+
+            # 去重：同代码同日
+            c.execute("SELECT id, daily_patterns FROM hot_stock_watchlist WHERE code=? AND discover_date=?",
+                      (code, today_str))
+            row = c.fetchone()
+            if row:
+                # 如果已存在，但有新的形态描述，则更新形态（实现形态叠加）
+                wid, old_patterns = row
+                if daily_patterns and daily_patterns not in str(old_patterns):
+                    new_pts = f"{old_patterns};{daily_patterns}" if old_patterns else daily_patterns
+                    c.execute("UPDATE hot_stock_watchlist SET daily_patterns=?, pattern_score=MAX(pattern_score, ?), updated_at=? WHERE id=?",
+                              (new_pts, pattern_score, now.strftime('%Y-%m-%d %H:%M:%S'), wid))
+                    conn.commit()
+                conn.close()
+                return False  
+
+            c.execute("""
+                INSERT INTO hot_stock_watchlist
+                (code, name, sector, discover_date, discover_price, latest_price,
+                 validation_status, daily_patterns, pattern_score, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'WATCHING', ?, ?, ?, ?, ?)
+            """, (code, name, sector, today_str, price, price,
+                  daily_patterns, pattern_score, source,
+                  now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S')))
+
+            conn.commit()
+            conn.close()
+            logger.info(f"[TradingHub] Watchlist+: {code} {name} @{price:.2f} [{daily_patterns}] Score={pattern_score}")
+            return True
+        except Exception as e:
+            logger.error(f"[TradingHub] add_to_watchlist error: {e}")
+            return False
+
+    def validate_watchlist(self, ohlc_data: dict[str, dict] = None) -> dict[str, list]:
+        """
+        跨日验证观察队列中的热股（收盘后调用）
+
+        ohlc_data 格式: {
+            'code': {
+                'close': float, 'high': float, 'low': float, 'open': float,
+                'ma5': float, 'ma10': float,
+                'upper': float,   # Bollinger上轨
+                'high4': float,   # 4日高点
+                'volume_ratio': float,  # 量比
+                'win': int,       # 连阳天数
+            }
+        }
+
+        验证规则（对应实盘验证的强势股特征）:
+        - 趋势确认: close > MA5 且 MA5 > MA10 → trend_score +0.3
+        - Upper上轨: close >= upper * 0.98 → trend_score +0.3
+        - 新高判断: close > high4 → new_high_flag = 1, +0.2
+        - 量能: volume_ratio > 1.2 → volume_score = 0.2
+        - 连阳: win >= 2 → +0.1
+        
+        验证通过: trend_score >= 0.5 AND consecutive_strong >= 1
+        淘汰: 跌破MA10 或 跌破发现价*0.93
+
+        Returns:
+            {'validated': [...], 'dropped': [...], 'watching': [...]}
+        """
+        results = {'validated': [], 'dropped': [], 'watching': []}
+        if not ohlc_data:
+            return results
+
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # 获取所有 WATCHING 状态的热股
+            c.execute("""
+                SELECT id, code, name, sector, discover_price, trend_score,
+                       volume_score, new_high_flag, consecutive_strong,
+                       pattern_score, daily_patterns
+                FROM hot_stock_watchlist
+                WHERE validation_status = 'WATCHING'
+            """)
+            rows = c.fetchall()
+
+            for row in rows:
+                wid, code, name, sector, disc_price, prev_trend, prev_vol, prev_nh, prev_cs, pat_score, pat_desc = row
+
+                data = ohlc_data.get(code)
+                if not data:
+                    continue
+
+                close = float(data.get('close', 0))
+                ma5 = float(data.get('ma5', 0))
+                ma10 = float(data.get('ma10', 0))
+                upper = float(data.get('upper', 0))
+                high4 = float(data.get('high4', 0))
+                vol_ratio = float(data.get('volume_ratio', 0))
+                win = int(data.get('win', 0))
+
+                if close <= 0:
+                    continue
+
+                # ======= 评分计算 (统一特征权重) =======
+                trend_score = 0.0
+                volume_score = 0.0
+                new_high = 0
+
+                # 1. 核心特征: 上轨攀升 (Upper Climb) - 权重置顶 0.4
+                is_upper_climb = (upper > 0 and close >= upper * 0.98)
+                if is_upper_climb:
+                    trend_score += 0.4
+
+                # 2. 核心特征: 新高判断 (New High) - 权重 0.3
+                if high4 > 0 and close > high4:
+                    new_high = 1
+                    trend_score += 0.3
+
+                # 3. 基础特征: MA5/MA10 趋势 (0.2)
+                if ma5 > 0 and ma10 > 0 and close > ma5 and ma5 > ma10:
+                    trend_score += 0.2
+
+                # 4. 形态特征: 日线形态评分折算 (0-100 -> 0-0.3)
+                if pat_score > 0:
+                    trend_score += (pat_score / 333.0)  # max +0.3
+
+                # 5. 量能验证 (0.1)
+                if vol_ratio > 1.2:
+                    volume_score = 0.1
+
+                # 6. 连阳补充 (0.1)
+                if win >= 3:
+                    trend_score += 0.1
+
+                total_score = trend_score + volume_score
+                
+                # [STRICT GATE] 强势股特征校验：如果没有上轨攀升且没有新高，且分值平平，由直接踢出或降级
+                # 用于排除 600000 这种慢爬升但无溢价的大盘股
+                is_high_momentum = is_upper_climb or new_high or (total_score >= 0.8)
+                
+                # ======= 淘汰检测 =======
+                should_drop = False
+                drop_reason = ""
+
+                # 跌破 MA10 或 长期无动能
+                if ma10 > 0 and close < ma10:
+                    should_drop = True
+                    drop_reason = f"跌破MA10({ma10:.2f})"
+                elif not is_high_momentum and total_score < 0.5:
+                    should_drop = True
+                    drop_reason = "动能匮乏(无新高/非上轨)"
+                elif disc_price > 0 and close < disc_price * 0.92:
+                    should_drop = True
+                    drop_reason = f"跌破入池价8%({disc_price:.2f}→{close:.2f})"
+
+                if should_drop:
+                    c.execute("""
+                        UPDATE hot_stock_watchlist
+                        SET validation_status='DROPPED', drop_reason=?,
+                            latest_price=?, trend_score=?, volume_score=?,
+                            new_high_flag=?, consecutive_strong=?, updated_at=?
+                        WHERE id=?
+                    """, (drop_reason, close, trend_score, volume_score,
+                          new_high, prev_cs, now_str, wid))
+                    results['dropped'].append(f"{name}({code}) - {drop_reason}")
+                    logger.info(f"[TradingHub] Watchlist DROP: {code} {name} - {drop_reason}")
+
+                elif total_score >= 0.7:  # [NEW GATE] 晋升门槛提高至 0.7
+                    # 验证通过
+                    c.execute("""
+                        UPDATE hot_stock_watchlist
+                        SET validation_status='VALIDATED',
+                            latest_price=?, trend_score=?, volume_score=?,
+                            new_high_flag=?, consecutive_strong=?, updated_at=?
+                        WHERE id=?
+                    """, (close, trend_score, volume_score,
+                          new_high, prev_cs + 1, now_str, wid))
+                    results['validated'].append(f"{name}({code}) Score={total_score:.2f}")
+                    logger.info(f"[TradingHub] Watchlist VALIDATED: {code} {name} Score={total_score:.2f}")
+                else:
+                    # 继续观察
+                    c.execute("""
+                        UPDATE hot_stock_watchlist
+                        SET latest_price=?, trend_score=?, volume_score=?,
+                            new_high_flag=0, consecutive_strong=0, updated_at=?
+                        WHERE id=?
+                    """, (close, trend_score, volume_score, now_str, wid))
+                    results['watching'].append(f"{name}({code}) Score={total_score:.2f}")
+
+            conn.commit()
+            conn.close()
+            logger.info(f"[TradingHub] Watchlist validation: "
+                        f"validated={len(results['validated'])}, "
+                        f"dropped={len(results['dropped'])}, "
+                        f"watching={len(results['watching'])}")
+        except Exception as e:
+            logger.error(f"[TradingHub] validate_watchlist error: {e}")
+
+        return results
+
+    def promote_validated_stocks(self) -> list[str]:
+        """
+        将验证通过的热股晋升到跟单队列 (follow_queue)
+        入场策略默认为"竞价买入" — 对应实盘验证的最优入场策略
+
+        Returns:
+            List of promoted stock codes
+        """
+        promoted = []
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            now = datetime.now()
+            now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+            today_str = now.strftime('%Y-%m-%d')
+
+            # 获取验证通过的热股
+            c.execute("""
+                SELECT id, code, name, sector, latest_price, trend_score,
+                       new_high_flag, consecutive_strong, daily_patterns, source
+                FROM hot_stock_watchlist
+                WHERE validation_status = 'VALIDATED'
+            """)
+            rows = c.fetchall()
+
+            for row in rows:
+                wid, code, name, sector, price, trend_score, new_high, cs, patterns, orig_source = row
+
+                # 检查 follow_queue 是否已存在（防重复）
+                c.execute("SELECT id FROM follow_queue WHERE code=? AND status IN ('TRACKING','READY','ENTERED')",
+                          (code,))
+                if c.fetchone():
+                    # 已在跟单队列，标记为 PROMOTED 避免重复处理
+                    c.execute("UPDATE hot_stock_watchlist SET validation_status='PROMOTED', updated_at=? WHERE id=?",
+                              (now_str, wid))
+                    continue
+
+                # 计算优先级（基于验证评分）
+                priority = 5
+                if trend_score >= 0.8:
+                    priority = 12
+                elif trend_score >= 0.5:
+                    priority = 8
+                if new_high:
+                    priority += 2
+                if cs >= 2:
+                    priority += 1
+
+                # 止损设定: 发现价 * 0.95
+                stop_loss = price * 0.95
+
+                # 组装详细备注 (P3 状态机核心：保留足迹)
+                detail_notes = f"Score={trend_score:.2f} cs={cs} nh={new_high}"
+                if patterns:
+                    detail_notes += f" | 形态:{patterns}"
+                if orig_source:
+                    detail_notes += f" | 来源:{orig_source}"
+
+                # 写入 follow_queue
+                signal_type = f"验证晋升({sector})" if sector else "验证晋升"
+                c.execute("""
+                    INSERT INTO follow_queue
+                    (code, name, signal_type, detected_date, detected_price,
+                     entry_strategy, stop_loss, status, priority, source, notes,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, '竞价买入', ?, 'VALIDATED', ?, '热股验证', ?, ?, ?)
+                """, (code, name, signal_type, today_str, price,
+                      stop_loss, priority,
+                      detail_notes,
+                      now_str, now_str))
+
+                # 更新 watchlist 状态
+                c.execute("UPDATE hot_stock_watchlist SET validation_status='PROMOTED', updated_at=? WHERE id=?",
+                          (now_str, wid))
+
+                promoted.append(code)
+                logger.info(f"[TradingHub] PROMOTED → follow_queue: {code} {name} "
+                            f"priority={priority} strategy=竞价买入")
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"[TradingHub] promote_validated_stocks error: {e}")
+
+        return promoted
+
+    def evaluate_holding_strength(self, ohlc_data: dict[str, dict] = None) -> dict[str, list]:
+        """
+        评估持仓股的强弱（收盘后调用，留强去弱）
+
+        ohlc_data 格式同 validate_watchlist
+        
+        评估规则:
+        - 站稳 MA5 + upper附近 → STRONG，持有
+        - 跌破 MA5 + 缩量 → WARNING，次日观察
+        - 跌破 MA10 或 冲高回落(最高涨>5%但收阴) → WEAK，降级/建议卖出
+
+        Returns:
+            {'strong': [...], 'warning': [...], 'weak': [...]}
+        """
+        results = {'strong': [], 'warning': [], 'weak': []}
+        if not ohlc_data:
+            return results
+
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # 获取持仓中的跟单 (ENTERED 状态)
+            c.execute("""
+                SELECT id, code, name, detected_price, entry_price, notes
+                FROM follow_queue
+                WHERE status = 'ENTERED'
+            """)
+            holdings = c.fetchall()
+
+            for hold in holdings:
+                fid, code, name, det_price, entry_price, notes = hold
+
+                data = ohlc_data.get(code)
+                if not data:
+                    continue
+
+                close = float(data.get('close', 0))
+                high = float(data.get('high', 0))
+                openp = float(data.get('open', 0))
+                ma5 = float(data.get('ma5', 0))
+                ma10 = float(data.get('ma10', 0))
+                upper = float(data.get('upper', 0))
+                vol_ratio = float(data.get('volume_ratio', 0))
+
+                if close <= 0:
+                    continue
+
+                ref_price = entry_price if entry_price > 0 else det_price
+                pnl_pct = ((close - ref_price) / ref_price * 100) if ref_price > 0 else 0
+
+                # 冲高回落检测: 最高涨幅>5% 但收阴 (close < open)
+                high_pct = ((high - openp) / openp * 100) if openp > 0 else 0
+                is_pump_dump = high_pct > 5.0 and close < openp
+
+                # ==== 弱势判断 ====
+                if is_pump_dump:
+                    reason = f"冲高回落(高点+{high_pct:.1f}%但收阴)"
+                    results['weak'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    # 更新 notes 记录降级原因
+                    new_notes = f"{notes or ''} | 弱势:{reason}"
+                    c.execute("UPDATE follow_queue SET notes=?, updated_at=? WHERE id=?",
+                              (new_notes, now_str, fid))
+                    logger.warning(f"[TradingHub] WEAK: {code} {name} - {reason}")
+
+                elif ma10 > 0 and close < ma10:
+                    reason = f"跌破MA10({ma10:.2f})"
+                    results['weak'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    new_notes = f"{notes or ''} | 弱势:{reason}"
+                    c.execute("UPDATE follow_queue SET notes=?, updated_at=? WHERE id=?",
+                              (new_notes, now_str, fid))
+                    logger.warning(f"[TradingHub] WEAK: {code} {name} - {reason}")
+
+                # ==== 警告 ====
+                elif ma5 > 0 and close < ma5 and vol_ratio < 1.0:
+                    reason = f"跌破MA5+缩量(量比={vol_ratio:.1f})"
+                    results['warning'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    logger.info(f"[TradingHub] WARNING: {code} {name} - {reason}")
+
+                # ==== 强势 ====
+                else:
+                    flags = []
+                    if ma5 > 0 and close > ma5:
+                        flags.append("站稳MA5")
+                    if upper > 0 and close >= upper * 0.98:
+                        flags.append("Upper上轨")
+                    reason = "+".join(flags) if flags else "趋势正常"
+                    results['strong'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+
+            conn.commit()
+            conn.close()
+            logger.info(f"[TradingHub] Holding evaluation: "
+                        f"strong={len(results['strong'])}, "
+                        f"warning={len(results['warning'])}, "
+                        f"weak={len(results['weak'])}")
+        except Exception as e:
+            logger.error(f"[TradingHub] evaluate_holding_strength error: {e}")
+
+        return results
+
+    def get_watchlist_summary(self) -> dict[str, Any]:
+        """获取观察队列统计（供UI展示）"""
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            c.execute("""
+                SELECT validation_status, COUNT(*) 
+                FROM hot_stock_watchlist
+                GROUP BY validation_status
+            """)
+            status_counts = dict(c.fetchall())
+
+            # 最近验证通过的
+            c.execute("""
+                SELECT code, name, sector, trend_score, consecutive_strong
+                FROM hot_stock_watchlist
+                WHERE validation_status = 'VALIDATED'
+                ORDER BY trend_score DESC
+                LIMIT 10
+            """)
+            validated_top = [{
+                'code': r[0], 'name': r[1], 'sector': r[2],
+                'score': r[3], 'cs': r[4]
+            } for r in c.fetchall()]
+
+            conn.close()
+            return {
+                'status_counts': status_counts,
+                'validated_top': validated_top,
+                'total': sum(status_counts.values())
+            }
+        except Exception as e:
+            logger.error(f"[TradingHub] get_watchlist_summary error: {e}")
+            return {'status_counts': {}, 'validated_top': [], 'total': 0}
+
+    def get_watchlist_df(self, status: str = None) -> 'pd.DataFrame':
+        """获取观察队列 DataFrame"""
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            if status:
+                df = pd.read_sql_query(
+                    "SELECT * FROM hot_stock_watchlist WHERE validation_status=? ORDER BY trend_score DESC",
+                    conn, params=(status,))
+            else:
+                df = pd.read_sql_query(
+                    "SELECT * FROM hot_stock_watchlist ORDER BY updated_at DESC", conn)
+            conn.close()
+            return df
+        except Exception as e:
+            logger.error(f"[TradingHub] get_watchlist_df error: {e}")
+            return pd.DataFrame()
 
 
 # 单例模式

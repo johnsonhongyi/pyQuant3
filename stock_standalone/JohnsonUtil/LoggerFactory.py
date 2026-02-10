@@ -347,6 +347,28 @@ from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import multiprocessing
 import os
 import atexit
+from colorama import Fore, Back, Style, init as colorama_init
+
+colorama_init(autoreset=True)
+
+class ColorFormatter(logging.Formatter):
+    """仅给控制台日志加颜色，不影响文件日志"""
+
+    def format(self, record):
+        msg = super().format(record)
+
+        if record.levelno >= logging.CRITICAL:
+            return Back.RED + Fore.WHITE + Style.BRIGHT + msg
+        elif record.levelno >= logging.ERROR:
+            # banner = "█" * 70
+            banner = "-" * 70
+            # return Fore.RED + Style.BRIGHT + f"\n{banner}\n{msg}\n{banner}"
+            # return Fore.RED + Style.BRIGHT + f"{banner}\n{msg}\n{banner}"
+            return Fore.RED + Style.BRIGHT + f"{banner}\n{msg}"
+        elif record.levelno >= logging.WARNING:
+            return Fore.YELLOW + msg
+        else:
+            return msg
 
 # ---------------- 全局变量 ----------------
 _GLOBAL_LOGGER = None
@@ -386,25 +408,28 @@ def _ensure_listener_started(log_f, show_detail=True):
     if _GLOBAL_QUEUE is None and os.getpid() == _MAIN_PID:
         _GLOBAL_QUEUE = multiprocessing.Queue(-1)
 
-        # Console handler
+        # ================= Console handler（彩色） =================
         ch = logging.StreamHandler()
-        ch_formatter = logging.Formatter(
+
+        fmt = (
             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
             if show_detail else
-            "(%(funcName)s:%(lineno)s): %(message)s",
-            datefmt="%m-%d %H:%M:%S"
+            "(%(funcName)s:%(lineno)s): %(message)s"
         )
+
+        ch_formatter = ColorFormatter(fmt, datefmt="%m-%d %H:%M:%S")
         ch.setFormatter(ch_formatter)
 
-        # File handler
+        # ================= File handler（无颜色） =================
         import shutil
         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
+
         fh = RotatingFileHandler(
             log_f,
-            maxBytes=5*1024*1024,
+            maxBytes=5 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
-            delay=True      # ✅ 必需
+            delay=True
         )
 
         def win_safe_rotator(src, dst):
@@ -414,22 +439,14 @@ def _ensure_listener_started(log_f, show_detail=True):
 
         fh.rotator = win_safe_rotator
 
-        # ---------- Custom namer: instock_tk_1.log ----------
         def underscore_namer(name):
-            """
-            logging 默认给的是:
-              instock_tk.log.1
-            这里改成:
-              instock_tk_1.log
-            """
             if name.endswith(".log"):
                 return name
-
             base, idx = name.rsplit(".log.", 1)
             return f"{base}_{idx}.log"
 
         fh.namer = underscore_namer
-        
+
         fh_formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
             if show_detail else
@@ -438,10 +455,75 @@ def _ensure_listener_started(log_f, show_detail=True):
         )
         fh.setFormatter(fh_formatter)
 
+        # ================= 启动监听器 =================
         _GLOBAL_LISTENER = RobustQueueListener(_GLOBAL_QUEUE, ch, fh)
         _GLOBAL_LISTENER.start()
 
         atexit.register(stopLogger)
+
+
+# def _ensure_listener_started_nocolor(log_f, show_detail=True):
+#     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
+
+#     if _GLOBAL_QUEUE is None and os.getpid() == _MAIN_PID:
+#         _GLOBAL_QUEUE = multiprocessing.Queue(-1)
+
+#         # Console handler
+#         ch = logging.StreamHandler()
+#         ch_formatter = logging.Formatter(
+#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+#             if show_detail else
+#             "(%(funcName)s:%(lineno)s): %(message)s",
+#             datefmt="%m-%d %H:%M:%S"
+#         )
+#         ch.setFormatter(ch_formatter)
+
+#         # File handler
+#         import shutil
+#         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
+#         fh = RotatingFileHandler(
+#             log_f,
+#             maxBytes=5*1024*1024,
+#             backupCount=3,
+#             encoding="utf-8",
+#             delay=True      # ✅ 必需
+#         )
+
+#         def win_safe_rotator(src, dst):
+#             shutil.copyfile(src, dst)
+#             with open(src, "w", encoding="utf-8"):
+#                 pass
+
+#         fh.rotator = win_safe_rotator
+
+#         # ---------- Custom namer: instock_tk_1.log ----------
+#         def underscore_namer(name):
+#             """
+#             logging 默认给的是:
+#               instock_tk.log.1
+#             这里改成:
+#               instock_tk_1.log
+#             """
+#             if name.endswith(".log"):
+#                 return name
+
+#             base, idx = name.rsplit(".log.", 1)
+#             return f"{base}_{idx}.log"
+
+#         fh.namer = underscore_namer
+        
+#         fh_formatter = logging.Formatter(
+#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+#             if show_detail else
+#             "(%(funcName)s:%(lineno)s): %(message)s",
+#             datefmt="%m-%d %H:%M:%S"
+#         )
+#         fh.setFormatter(fh_formatter)
+
+#         _GLOBAL_LISTENER = RobustQueueListener(_GLOBAL_QUEUE, ch, fh)
+#         _GLOBAL_LISTENER.start()
+
+#         atexit.register(stopLogger)
 
 # _GLOBAL_LOGGER_PRINTED = False  # 全局标志
 # 全局保存上一次 log_f

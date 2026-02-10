@@ -5,20 +5,22 @@ HotlistPanel - 热点自选面板
 
 数据持久化：signal_strategy.db (follow_record 表)
 """
+import os
+import sys
 import sqlite3
-import logging
 import time
 import re
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 from dataclasses import dataclass
 import pandas as pd
 from JohnsonUtil import LoggerFactory
+from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
-    QMessageBox, QDialog, QFrame, QTabWidget, QApplication
+    QFrame, QTabWidget, QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint
 from PyQt6.QtGui import QColor, QAction
@@ -116,6 +118,8 @@ class HotlistItem:
 class HotlistWorker(QThread):
     # 信号：(follow_queue_df, error_msg)
     data_ready = pyqtSignal(object, str)
+    # [NEW] 信号：(watchlist_df, error_msg)
+    watchlist_ready = pyqtSignal(object, str)
     
     def __init__(self, interval: float = 2.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -132,12 +136,20 @@ class HotlistWorker(QThread):
                 hub = get_trading_hub()
                 df_follow = hub.get_follow_queue_df()
                 
+                # [NEW] 1.2 拉取热股观察池数据
+                df_watchlist = pd.DataFrame()
+                if hasattr(hub, 'get_watchlist_df'):
+                    df_watchlist = hub.get_watchlist_df()
+                
                 # 2. 发送数据 (不要在线程里操作 UI)
                 self.data_ready.emit(df_follow, "")
+                if not df_watchlist.empty:
+                    self.watchlist_ready.emit(df_watchlist, "")
                 
             except Exception as e:
                 logger.error(f"HotlistWorker error: {e}")
                 self.data_ready.emit(None, str(e))
+                self.watchlist_ready.emit(None, str(e))
                 
             # 简单的休眠
             for _ in range(int(self.interval * 10)):
@@ -185,7 +197,7 @@ class HotlistPanel(QWidget, WindowMixin):
         self.initial_y = 0
         self.initial_w = 280
         self.initial_h = 400
-        self.items: List[HotlistItem] = []
+        self.items: list[HotlistItem] = []
         self._drag_pos: Optional[QPoint] = None
         self.voice_enabled = True  # 是否启用语音通知
         self._voice_paused = False  # 语音播报状态
@@ -194,8 +206,10 @@ class HotlistPanel(QWidget, WindowMixin):
         self.follow_count = 0  # [NEW] Track follow queue count
         self._last_price_map: dict[str, float] = {} # [NEW] Cache real-time prices for both Hotlist and Follow Queue
         self._last_df_follow: Optional[pd.DataFrame] = None # [NEW] Cache follow queue data for PnL updates
+        self._last_df_watchlist: Optional[pd.DataFrame] = None # [NEW] Cache watchlist data
         self._connection_warning_logged = False  # [NEW] Log throttle flag
         self._pos_loaded: bool = False
+        self._main_window_cache = None # [NEW] Cache for main window reference
         
         # --- 数据流管理 ---
         # 数据流校验缓存：{code: (price, volume, amount)}
@@ -215,9 +229,21 @@ class HotlistPanel(QWidget, WindowMixin):
         self._is_enlarged = False
         self._pre_enlarge_geometry = None
         
+        # [NEW] 联动去重缓存：{table_name: last_code}
+        self._last_selected_codes: dict[str, str] = {
+            "hotlist": "",
+            "follow": "",
+            "watchlist": ""
+        }
+        
+        # [NEW] 热门板块缓存
+        self._recent_hot_concepts_cache: set[str] = set()
+        self._last_hot_concepts_sync = 0.0
+        
         # [MODIFIED] 移除 QTimer，改用 Worker
         self.data_worker = HotlistWorker(interval=1.0, parent=self)
         self.data_worker.data_ready.connect(self._on_worker_data)
+        self.data_worker.watchlist_ready.connect(self._on_watchlist_data)
         
         # UI 属性定义 (用于类型提示)
         self.table: QTableWidget = None # type: ignore
@@ -228,6 +254,7 @@ class HotlistPanel(QWidget, WindowMixin):
         self.pause_voice_btn: QPushButton = None # type: ignore
         self._sync_timer: QTimer = None # type: ignore
         self.tabs: QTabWidget = None # type: ignore
+        self.watchlist_table: QTableWidget = None # type: ignore
         self.header: QFrame = None # type: ignore
         
         # 设置为浮动工具窗口（可调整大小）
@@ -432,6 +459,8 @@ class HotlistPanel(QWidget, WindowMixin):
             self.table.setStyleSheet(table_style)
         if hasattr(self, 'follow_table') and self.follow_table:
             self.follow_table.setStyleSheet(table_style)
+        if hasattr(self, 'watchlist_table') and self.watchlist_table:
+            self.watchlist_table.setStyleSheet(table_style)
     
     def showEvent(self, a0: Optional[QtGui.QShowEvent]):
         """窗口显示时：加载位置并开启工作线程"""
@@ -448,14 +477,17 @@ class HotlistPanel(QWidget, WindowMixin):
             self.data_worker.start()
     
     def closeEvent(self, event):
-        # [NEW] Save position (debounced)
-        self.save_window_position_qt_visual(self, "HotlistPanel")
-        
-        # 停止同步定时器
-        if hasattr(self, '_sync_timer') and self._sync_timer:
-            self._sync_timer.stop()
-        
-        # 停止工作线程 (stop() 方法已经包含了完整的清理逻辑)
+        """窗口关闭事件：保存位置"""
+        try:
+            # [REFACTOR] 使用 Mixin 保存位置
+            self.save_window_position_qt(self, "HotlistPanel")
+            
+            # 停止线程
+            if hasattr(self, 'data_worker'):
+                self.data_worker.stop()
+        except:
+            pass
+        super().closeEvent(event)
         if hasattr(self, 'data_worker') and self.data_worker and self.data_worker.isRunning():
             self.data_worker.stop()
         
@@ -562,8 +594,15 @@ class HotlistPanel(QWidget, WindowMixin):
         self.follow_widget = QWidget()
         self.follow_widget.setObjectName("follow_container")
         self._init_follow_queue_ui()
-        self.tabs.addTab(self.follow_widget, "🎯 Follow Queue")
+        self.tabs.addTab(self.follow_widget, "🎯 Follow")
         
+        # Tab 3: Watchlist (Heat)
+        self.watchlist_widget = QWidget()
+        self.watchlist_widget.setObjectName("watchlist_container")
+        self._init_watchlist_ui()
+        self.tabs.addTab(self.watchlist_widget, "📊 Watch")
+        
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
         
         # 3. 状态栏
@@ -583,7 +622,15 @@ class HotlistPanel(QWidget, WindowMixin):
         self._update_voice_button_style() # Use existing update logic
         
         status_bar.addWidget(self.pause_voice_btn)
+        # [NEW] 信号连接
+        self.data_worker.data_ready.connect(self._on_worker_data)
+        self.data_worker.watchlist_ready.connect(self._on_watchlist_data)
         
+        # 定时刷新 PnL (仅 UI 更新,数据由 worker 提供)
+        self.refresh_timer = QTimer(self)
+        # self.refresh_timer.timeout.connect(self._refresh_pnl)
+        self.refresh_timer.start(2000)
+
         layout.addLayout(status_bar)
         
         # [NEW] 定时器同步 UI 状态 (如果外部改变了语音状态)
@@ -603,11 +650,14 @@ class HotlistPanel(QWidget, WindowMixin):
                 self._update_voice_button_style()
 
     def _find_main_window(self):
-        """寻找主窗口实例"""
+        """寻找主窗口实例 (带缓存)"""
+        if self._main_window_cache and self._main_window_cache.isVisible():
+            return self._main_window_cache
         try:
             from PyQt6.QtWidgets import QApplication
             for widget in QApplication.topLevelWidgets():
                 if hasattr(widget, 'df_all') and (widget.__class__.__name__ == 'MainWindow' or "Visualizer" in str(widget.windowTitle())):
+                    self._main_window_cache = widget
                     return widget
         except:
             pass
@@ -675,10 +725,12 @@ class HotlistPanel(QWidget, WindowMixin):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_double_click)
-        self.table.cellClicked.connect(self._on_click)
         
         # [NEW] 添加键盘导航联动
         self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        
+        # [NEW] 显式点击去重 (由 itemClicked 统一触发 _on_click)
+        self.table.itemClicked.connect(self._on_item_clicked_simple)
         
         # 表头设置
         h_header = self.table.horizontalHeader()
@@ -728,9 +780,402 @@ class HotlistPanel(QWidget, WindowMixin):
         setattr(self.follow_table, '_original_wheel_event', QTableWidget.wheelEvent)
 
         self.follow_table.verticalHeader().setVisible(False)
-        self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
+        hf.setStyleSheet(self.table.styleSheet()) # Reuse style
         
         layout.addWidget(self.follow_table)
+
+    def _init_watchlist_ui(self):
+        """初始化观察池 UI (Tab 3 content)"""
+        layout = QVBoxLayout(self.watchlist_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.watchlist_table = QTableWidget()
+        # 列定义: 序号, 状态, 代码, 名称, 板块, 发现价, 现价, 盈亏%, 趋势, 量能, 连阳, 形态分, 形态描述, 来源, 发现日期
+        cols = ["序号", "状态", "代码", "名称", "板块", "发现价", "现价", "盈亏%", "趋势", "量能", "连阳", "形态分", "形态描述", "来源", "发现日期"] 
+        self.watchlist_table.setColumnCount(len(cols))
+        self.watchlist_table.setHorizontalHeaderLabels(cols)
+        self.watchlist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.watchlist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.watchlist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.watchlist_table.customContextMenuRequested.connect(self._on_watchlist_context_menu)
+        self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_double_click)
+        self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
+        
+        hw = self.watchlist_table.horizontalHeader()
+        if hw:
+            hw.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hw.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            hw.setStretchLastSection(True)
+        
+        self.watchlist_table.setSortingEnabled(True)
+        self.watchlist_table.verticalHeader().setVisible(False)
+        self.watchlist_table.setStyleSheet(self.table.styleSheet())
+        
+        # [NEW] 支持滚轮横向滚动
+        self.watchlist_table.wheelEvent = self._on_watchlist_wheel_event
+        setattr(self.watchlist_table, '_original_wheel_event', QTableWidget.wheelEvent)
+        
+        layout.addWidget(self.watchlist_table)
+
+    def _on_watchlist_data(self, df_watchlist: Optional[pd.DataFrame], error_msg: str):
+        """Watchlist 数据回调"""
+        if error_msg or df_watchlist is None:
+            return
+        self._last_df_watchlist = df_watchlist
+        
+        # [OPTIMIZE] Only update UI if Watchlist tab is visible
+        if hasattr(self, 'tabs') and self.tabs.currentIndex() == 2:
+            self._update_watchlist_queue(df_watchlist)
+        self._update_status_bar()
+
+    def _update_watchlist_queue(self, df=None):
+        """刷新观察池可视化 (智能增量渲染)"""
+        with timed_ctx("update_watchlist", warn_ms=100):
+            try:
+                if df is None:
+                    df = getattr(self, '_last_df_watchlist', None)
+                if df is None or df.empty:
+                    if hasattr(self, 'watchlist_table'): self.watchlist_table.setRowCount(0)
+                    return
+
+                # --- 准备更新 ---
+                self.watchlist_table.blockSignals(True)
+                is_sorted = self.watchlist_table.isSortingEnabled()
+                if is_sorted:
+                    self.watchlist_table.setSortingEnabled(False)
+            
+                try:
+                    current_rows = self.watchlist_table.rowCount()
+                    needs_full_rebuild = False
+                    
+                    if current_rows != len(df):
+                        needs_full_rebuild = True
+                    else:
+                        # [OPTIMIZE] 如果开启了排序，视觉顺序 != 模型顺序，直接遍历会导致逻辑错位
+                        if is_sorted:
+                            needs_full_rebuild = False 
+                        else:
+                            for i, row in enumerate(df.itertuples()):
+                                item = self.watchlist_table.item(i, 2) # 代码列
+                                if not item or item.text() != str(row.code):
+                                    needs_full_rebuild = True
+                                    break
+                    
+                    if not needs_full_rebuild:
+                        # --- 增量更新 (支持排序状态) ---
+                        code_to_row = {}
+                        for r in range(current_rows):
+                            if (it := self.watchlist_table.item(r, 2)):
+                                code_to_row[it.text()] = r
+                        
+                        for row in df.itertuples():
+                            code_str = str(row.code)
+                            if code_str not in code_to_row:
+                                needs_full_rebuild = True # 发现新代码，触发全量
+                                break
+                            
+                            row_idx = code_to_row[code_str]
+                            
+                            # [NEW] 同步发现日期到 UserRole (确保联动有效)
+                            if (it := self.watchlist_table.item(row_idx, 2)):
+                                d_date = str(row.discover_date) if hasattr(row, 'discover_date') else ""
+                                if len(d_date) > 10: d_date = d_date[:10]
+                                it.setData(Qt.ItemDataRole.UserRole, d_date)
+
+                            # 状态更新
+                            status = str(row.validation_status)
+                            if (it := self.watchlist_table.item(row_idx, 1)):
+                                if it.text() != status:
+                                    it.setText(status)
+                                    if status == 'VALIDATED': it.setForeground(QColor('#00FF00'))
+                                    elif status == 'WATCHING': it.setForeground(QColor('#FFD700'))
+
+                            # [NEW] 板块信息增量校准 (Column 4)
+                            if (it := self.watchlist_table.item(row_idx, 4)):
+                                current_sec = it.text()
+                                if not current_sec or len(current_sec) > 20:
+                                    # 只有在板块为空或过长时尝试重新匹配
+                                    m_window = self._find_main_window()
+                                    if m_window and hasattr(m_window, 'df_all') and code_str in m_window.df_all.index:
+                                        raw_cats = str(m_window.df_all.loc[code_str].get('category', ''))
+                                        hot_c = self._get_recent_hot_concepts(days=2)
+                                        target_sec = ""
+                                        if hot_c and raw_cats:
+                                            for cat in re.split(r'[,，\s|]+', raw_cats):
+                                                if cat in hot_c:
+                                                    target_sec = cat
+                                                    break
+                                        if not target_sec: target_sec = raw_cats
+                                        target_sec = target_sec[:20]
+                                        if current_sec != target_sec:
+                                            it.setText(target_sec)
+
+                            # 现价更新
+                            curr_price = 0.0
+                            if hasattr(self, '_last_price_map') and code_str in self._last_price_map:
+                                curr_price = self._last_price_map[code_str]
+                            
+                            price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
+                            if (it := self.watchlist_table.item(row_idx, 6)):
+                                if it.text() != price_txt:
+                                    it.setText(price_txt)
+                                    if hasattr(it, 'sort_value'): # type: ignore
+                                        it.sort_value = curr_price if curr_price > 0 else -1.0
+                            
+                            # [NEW] 盈亏% 更新 (Column 7)
+                            discover_price = float(row.discover_price or 0.0)
+                            if (it := self.watchlist_table.item(row_idx, 7)):
+                                pnl_pct = 0.0
+                                if discover_price > 0 and curr_price > 0:
+                                    pnl_pct = (curr_price - discover_price) / discover_price * 100
+                                pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
+                                
+                                if it.text() != pnl_txt:
+                                    it.setText(pnl_txt)
+                                    if hasattr(it, 'sort_value'): it.sort_value = pnl_pct if curr_price > 0 else -999.0 # type: ignore
+                                    if pnl_pct > 0: it.setForeground(QColor(220, 80, 80))
+                                    elif pnl_pct < 0: it.setForeground(QColor(80, 200, 120))
+                                    else: it.setForeground(QColor('#ddd'))
+                            
+                            # [NEW] 增量更新趋势等元数据 (Column 8-10)
+                            if (it := self.watchlist_table.item(row_idx, 8)):
+                                val = float(row.trend_score or 0.0)
+                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
+                                    it.setText(f"{val:.2f}")
+                                    it.sort_value = val # type: ignore
+                            if (it := self.watchlist_table.item(row_idx, 9)):
+                                val = float(row.volume_score or 0.0)
+                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
+                                    it.setText(f"{val:.2f}")
+                                    it.sort_value = val # type: ignore
+                            if (it := self.watchlist_table.item(row_idx, 10)):
+                                val = int(row.consecutive_strong or 0)
+                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
+                                    it.setText(str(val))
+                                    it.sort_value = val # type: ignore
+                        
+                        if not needs_full_rebuild:
+                            return
+
+                    # --- 全量重建 ---
+                    self.watchlist_table.setUpdatesEnabled(False)
+                    
+                    # 保存选中状态
+                    current_code = None
+                    curr_row = self.watchlist_table.currentRow()
+                    if curr_row >= 0:
+                        it = self.watchlist_table.item(curr_row, 2)
+                        if it: current_code = it.text()
+                    v_scroll = self.watchlist_table.verticalScrollBar().value()
+
+                    self.watchlist_table.setRowCount(len(df))
+                    
+                    for i, row in enumerate(df.itertuples()):
+                        # 0. 序号, 1. 状态, 2. 代码, 3. 名称, 4. 板块
+                        self.watchlist_table.setItem(i, 0, NumericTableWidgetItem(i+1))
+                        
+                        code_str = str(row.code)
+                        status = str(row.validation_status)
+                        status_item = QTableWidgetItem(status)
+                        if status == 'VALIDATED': status_item.setForeground(QColor('#00FF00'))
+                        elif status == 'WATCHING': status_item.setForeground(QColor('#FFD700'))
+                        self.watchlist_table.setItem(i, 1, status_item)
+                        
+                        code_item = QTableWidgetItem(code_str)
+                        # [NEW] 存入发现日期，用于 K 线图标记
+                        d_date = str(row.discover_date) if hasattr(row, 'discover_date') else ""
+                        if len(d_date) > 10: d_date = d_date[:10]
+                        code_item.setData(Qt.ItemDataRole.UserRole, d_date)
+                        self.watchlist_table.setItem(i, 2, code_item)
+                        self.watchlist_table.setItem(i, 3, QTableWidgetItem(str(row.name)))
+                        
+                        # [OPTIMIZE] 增强板块匹配逻辑：优先选择近期热门题材
+                        sector = str(row.sector) if row.sector else ""
+                        if not sector:
+                             main_window = self._find_main_window()
+                             if main_window and hasattr(main_window, 'df_all'):
+                                 if code_str in main_window.df_all.index:
+                                     raw_categories = str(main_window.df_all.loc[code_str].get('category', ''))
+                                     
+                                     # 1. 尝试匹配最近 2 天的热门板块
+                                     hot_concepts = self._get_recent_hot_concepts(days=2)
+                                     match_found = False
+                                     if hot_concepts and raw_categories:
+                                         cat_list = re.split(r'[,，\s|]+', raw_categories)
+                                         for cat in cat_list:
+                                             if cat in hot_concepts:
+                                                 sector = cat
+                                                 match_found = True
+                                                 break
+                                     
+                                     # 2. 兜底：取原题材并在后续统一截断
+                                     if not match_found:
+                                         sector = raw_categories
+                        
+                        # 3. 统一限制长度为 20 字
+                        if sector:
+                            sector = sector[:20]
+                            
+                        self.watchlist_table.setItem(i, 4, QTableWidgetItem(sector))
+                        
+                        discover_price = float(row.discover_price or 0.0)
+                        self.watchlist_table.setItem(i, 5, NumericTableWidgetItem(discover_price))
+                        
+                        curr_price = 0.0
+                        if hasattr(self, '_last_price_map') and code_str in self._last_price_map:
+                            curr_price = self._last_price_map[code_str]
+                        price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
+                        self.watchlist_table.setItem(i, 6, NumericTableWidgetItem(price_txt, sort_value=curr_price))
+                        
+                        # [NEW] 盈亏% (PnL % in Watchlist)
+                        pnl_pct = 0.0
+                        if discover_price > 0 and curr_price > 0:
+                            pnl_pct = (curr_price - discover_price) / discover_price * 100
+                        pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
+                        pnl_item = NumericTableWidgetItem(pnl_txt, sort_value=pnl_pct if curr_price > 0 else -999.0)
+                        if pnl_pct > 0: pnl_item.setForeground(QColor(220, 80, 80))
+                        elif pnl_pct < 0: pnl_item.setForeground(QColor(80, 200, 120))
+                        self.watchlist_table.setItem(i, 7, pnl_item)
+                        
+                        # 索引偏移: 原 7-13 变为 8-14
+                        self.watchlist_table.setItem(i, 8, NumericTableWidgetItem(float(row.trend_score or 0.0)))
+                        self.watchlist_table.setItem(i, 9, NumericTableWidgetItem(float(row.volume_score or 0.0)))
+                        self.watchlist_table.setItem(i, 10, NumericTableWidgetItem(int(row.consecutive_strong or 0)))
+                        
+                        self.watchlist_table.setItem(i, 11, NumericTableWidgetItem(float(getattr(row, 'pattern_score', 0) or 0)))
+                        
+                        pat_desc = getattr(row, 'daily_patterns', "") or ""
+                        desc_item = QTableWidgetItem(str(pat_desc))
+                        desc_item.setToolTip(str(pat_desc))
+                        self.watchlist_table.setItem(i, 12, desc_item)
+                        
+                        self.watchlist_table.setItem(i, 13, QTableWidgetItem(str(getattr(row, 'source', "") or "")))
+                        self.watchlist_table.setItem(i, 14, QTableWidgetItem(str(row.discover_date or "")))
+
+                    # 恢复状态
+                    if current_code:
+                        for r in range(self.watchlist_table.rowCount()):
+                            it = self.watchlist_table.item(r, 2)
+                            if it and it.text() == current_code:
+                                self.watchlist_table.setCurrentCell(r, 2)
+                                break
+                    
+                    self.watchlist_table.verticalScrollBar().setValue(v_scroll)
+                finally:
+                    if is_sorted:
+                        self.watchlist_table.setSortingEnabled(True)
+                    self.watchlist_table.setUpdatesEnabled(True)
+                    self.watchlist_table.blockSignals(False)
+                    self.watchlist_table.resizeColumnsToContents()
+                    
+            except Exception as e:
+                logger.error(f"Update watchlist UI error: {e}")
+
+    def _get_recent_hot_concepts(self, days=2) -> set[str]:
+        """获取最近几天的热门板块列表 (带缓存)"""
+        now = time.time()
+        if now - self._last_hot_concepts_sync < 60 and self._recent_hot_concepts_cache:
+            return self._recent_hot_concepts_cache
+            
+        concepts = set()
+        try:
+            db_path = "./concept_pg_data.db"
+            if not os.path.exists(db_path):
+                return concepts
+                
+            mgr = SQLiteConnectionManager.get_instance(db_path)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            
+            # 获取最近几天的日期列表
+            c.execute("SELECT DISTINCT date FROM concept_data ORDER BY date DESC LIMIT ?", (days,))
+            recent_dates = [r[0] for r in c.fetchall()]
+            
+            if recent_dates:
+                placeholders = ','.join(['?'] * len(recent_dates))
+                c.execute(f"SELECT DISTINCT concept_name FROM concept_data WHERE date IN ({placeholders})", recent_dates)
+                for r in c.fetchall():
+                    concepts.add(str(r[0]))
+            
+            self._recent_hot_concepts_cache = concepts
+            self._last_hot_concepts_sync = now
+        except Exception as e:
+            logger.error(f"Error fetching recent hot concepts: {e}")
+        return concepts
+
+    def _on_watchlist_click(self, row, col):
+        if row < 0: return
+        with timed_ctx("watchlist_click", warn_ms=100):
+            try:
+                code_item = self.watchlist_table.item(row, 2)
+                name_item = self.watchlist_table.item(row, 3)
+                if code_item and name_item:
+                    code = code_item.text()
+                    discover_date = code_item.data(Qt.ItemDataRole.UserRole) or ""
+                    # [DEBUNCE] 增加去重逻辑
+                    if self._last_selected_codes["watchlist"] != code:
+                        self._last_selected_codes["watchlist"] = code
+                        # 发送附带发现日期的信号
+                        sig_str = f"{code}|realtime=false|signal_type=watchlist"
+                        if discover_date:
+                            sig_str += f"|signal_date={discover_date}"
+                        self.stock_selected.emit(sig_str, name_item.text())
+            except: pass
+
+    def _on_watchlist_double_click(self, row, col):
+        if row < 0: return
+        with timed_ctx("watchlist_double_click", warn_ms=2000):
+            try:
+                code_item = self.watchlist_table.item(row, 2)
+                name_item = self.watchlist_table.item(row, 3)
+                if code_item and name_item:
+                    code = code_item.text()
+                    # 双击通常伴随强关联，直接记录并发送
+                    self._last_selected_codes["watchlist"] = code
+                    self.item_double_clicked.emit(f"{code}|realtime=false", name_item.text(), 0.0)
+            except: pass
+
+    def _on_watchlist_cell_changed(self, row, col, pr, pc):
+        """Watchlist 选中单元格改变回调"""
+        if not getattr(self, '_is_refreshing', False):
+            self._on_watchlist_click(row, col)
+
+    def _on_watchlist_context_menu(self, pos):
+        row = self.watchlist_table.currentRow()
+        if row < 0: return
+        code = self.watchlist_table.item(row, 2).text()
+        
+        menu = QMenu(self)
+        menu.addAction("🔍 查看详情", lambda: self._on_watchlist_double_click(row, 2))
+        
+        # [NEW] 从观察池直接晋升至跟单
+        name = self.watchlist_table.item(row, 3).text()
+        price = 0.0
+        if (it := self.watchlist_table.item(row, 6)): # 现价列
+            try: price = float(it.text())
+            except: pass
+        if price <= 0:
+            if (it := self.watchlist_table.item(row, 5)): # 发现价列
+                try: price = float(it.text())
+                except: pass
+        
+        menu.addAction("🎯 加入跟单队列", lambda: self._add_to_follow_queue(code, name, price, "观察池晋升"))
+        menu.addSeparator()
+        menu.addAction("🗑️ 从观察池移除", lambda: self._remove_from_watchlist(code))
+        menu.exec(self.watchlist_table.mapToGlobal(pos))
+
+    def _remove_from_watchlist(self, code):
+        try:
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            c.execute("UPDATE hot_stock_watchlist SET validation_status='DROPPED' WHERE code=?", (code,))
+            conn.commit()
+            logger.info(f"Removed {code} from watchlist")
+            self._update_watchlist_queue()
+        except Exception as e:
+            logger.error(f"Remove from watchlist error: {e}")
 
     def _load_from_db(self):
         """从数据库加载热点列表"""
@@ -873,7 +1318,14 @@ class HotlistPanel(QWidget, WindowMixin):
         """[NEW] 统一更新状态栏信息"""
         hot_count = len(self.items)
         follow_txt = f" | 跟单: {self.follow_count}" if self.follow_count > 0 else ""
-        self.status_label.setText(f"🔥 热点: {hot_count}{follow_txt}")
+        
+        # [NEW] Watchlist count
+        watch_count = 0
+        if hasattr(self, '_last_df_watchlist') and self._last_df_watchlist is not None:
+            watch_count = len(self._last_df_watchlist)
+        watch_txt = f" | 观察: {watch_count}" if watch_count > 0 else ""
+        
+        self.status_label.setText(f"🔥 热点: {hot_count}{follow_txt}{watch_txt}")
 
     def _on_table_wheel_event(self, a0: Optional[QtGui.QWheelEvent]):
         """处理主表格滚轮事件"""
@@ -884,6 +1336,11 @@ class HotlistPanel(QWidget, WindowMixin):
         """处理跟单表格滚轮事件"""
         if a0:
             self._generic_wheel_handler(self.follow_table, a0)
+
+    def _on_watchlist_wheel_event(self, a0: Optional[QtGui.QWheelEvent]):
+        """处理观察池表格滚轮事件"""
+        if a0:
+            self._generic_wheel_handler(self.watchlist_table, a0)
 
     def _generic_wheel_handler(self, table: QTableWidget, event: QtGui.QWheelEvent):
         """通用的滚轮横向/垂直切换逻辑 (Shift+Wheel 或 无垂直条时转向横向)"""
@@ -993,21 +1450,36 @@ class HotlistPanel(QWidget, WindowMixin):
                     logger.error(f"Remove hotlist error: {e}")
         return False
     
-    def update_prices(self, price_map: Dict[str, float]):
+    def update_prices(self, price_map: dict[str, float], phase_map: Optional[dict[str, str]] = None):
         """
         批量更新现价和盈亏
-        
-        Args:
-            price_map: {code: current_price}
         """
         for item in self.items:
             if item.code in price_map:
                 item.current_price = price_map[item.code]
                 if item.add_price > 0:
                     item.pnl_percent = (item.current_price - item.add_price) / item.add_price * 100
+            
+            if phase_map and item.code in phase_map:
+                # Update visual only (since item struct doesn't have phase field yet, maybe reuse group or notes?)
+                # Actually let's just update the table directly in _refresh_table or store it in item.group for now
+                item.group = phase_map[item.code] or item.group
         
         self._refresh_table()
     
+    def _on_tab_changed(self, index):
+        """Tab 切换回调"""
+        with timed_ctx(f"tab_changed_{index}", warn_ms=100):
+            if index == 1: # Follow
+                if (df := getattr(self, '_last_df_follow', None)) is not None:
+                    self._update_follow_queue(df)
+            elif index == 2: # Watchlist
+                if (df := getattr(self, '_last_df_watchlist', None)) is not None:
+                    self._update_watchlist_queue(df)
+            
+            # 同步刷新一次 PnL
+            self._refresh_pnl_ui_only()
+
     def _on_worker_data(self, df_follow: Optional[pd.DataFrame], error_msg: str):
         """Worker 数据回调 (主线程执行)"""
         if error_msg:
@@ -1029,12 +1501,18 @@ class HotlistPanel(QWidget, WindowMixin):
                 else:
                     self.follow_count = len(df_follow) # [NEW] Update count
                     self._last_df_follow = df_follow # [NEW] Cache
-                    self._update_follow_queue(df_follow)
+                    
+                    # [OPTIMIZE] Only update UI if Follow tab is visible
+                    if hasattr(self, 'tabs') and self.tabs.currentIndex() == 1:
+                        with timed_ctx("tabs_update_follow_status", warn_ms=100):
+                            self._update_follow_queue(df_follow)
+                        
                     self._last_follow_fingerprint = current_fingerprint
                     self._update_status_bar() # [NEW] Refresh UI
             except Exception:
                 # 出错降级：总是更新
-                self._update_follow_queue(df_follow)
+                with timed_ctx("Exception_update_follow_status", warn_ms=100):
+                    self._update_follow_queue(df_follow)
 
             # 刷新 PnL (仅当 Tab 1 可见时？或者总是？)
             # 用户抱怨日志太多，先静默调用
@@ -1046,96 +1524,77 @@ class HotlistPanel(QWidget, WindowMixin):
         # logger.info("界面刷新已触发")
 
     def _refresh_pnl_ui_only(self):
-        """仅做 UI 层面的 PnL 刷新（不拉取数据）"""
-        # [FIX] 使用 window() 而不是 parent() 来获取主窗口（因为 parent=None）
-        main_window = None
-        try:
-            # 尝试通过 window() 获取顶层窗口
-            from PyQt6.QtWidgets import QApplication
-            for widget in QApplication.topLevelWidgets():
-                # 优先寻找带有 df_all 属性且看起来像 MainWindow 的窗口
-                if hasattr(widget, 'df_all'):
-                    if widget.__class__.__name__ == 'MainWindow' or "Visualizer" in str(widget.windowTitle()):
-                        main_window = widget
-                        break
-        except Exception:
-            pass
-        
-        if main_window and hasattr(main_window, 'df_all') and not main_window.df_all.empty:
-            df = main_window.df_all
-            price_map = {}
-            phase_map = {}
+        """仅做 UI 层面的 PnL 刷新 (优化主线程负载)"""
+        # 1. 获取主窗口数据
+        main_window = self._find_main_window()
+        if not (main_window and hasattr(main_window, 'df_all' ) and not main_window.df_all.empty):
+            # [FALLBACK] 无数据时仅尝试基础刷新
+            if hasattr(self, 'tabs'):
+                if self.tabs.currentIndex() == 1:
+                    with timed_ctx("_refresh_pnl_ui_only_update_follow_status", warn_ms=100):
+                        self._update_follow_queue()
+                if self.tabs.currentIndex() == 2: self._update_watchlist_queue()
             
-            # 1. Populate prices for Hotlist items
-            for item in self.items:
-                if item.code in df.index:
-                    row = df.loc[item.code]
-                    price_map[item.code] = float(row.get('close', row.get('price', 0)))
-                    self._last_price_map[item.code] = price_map[item.code]
-                    
+            if not self._connection_warning_logged:
+                logger.warning("⚠️ 无法获取主窗口数据 (df_all empty), 仅执行基础列表刷新")
+                self._connection_warning_logged = True
+            return
+            
+        df = main_window.df_all
+        price_map = {}
+        phase_map = {}
+        
+        # 2. 构建 6 位代码快速查找表 (优化查找性能)
+        lookup_6 = {}
+        for idx in df.index:
+            s_idx = str(idx)
+            code_6 = s_idx[-6:] if len(s_idx) >= 6 else s_idx
+            if code_6 not in lookup_6: # 优先保留完整匹配
+                lookup_6[code_6] = idx
+
+        # 3. 收集所有需要更新价格的代码 (Hotlist + Follow + Watch)
+        codes_to_price = set(item.code for item in self.items)
+        if (df_f := getattr(self, '_last_df_follow', None)) is not None and not df_f.empty:
+            if 'code' in df_f.columns:
+                codes_to_price.update(df_f['code'].unique().astype(str))
+        if (df_w := getattr(self, '_last_df_watchlist', None)) is not None and not df_w.empty:
+            if 'code' in df_w.columns:
+                codes_to_price.update(df_w['code'].unique().astype(str))
+
+        # 4. 更新缓存价格
+        for code in codes_to_price:
+            t_idx = code if code in df.index else lookup_6.get(code[-6:] if len(code)>=6 else code)
+            if t_idx and t_idx in df.index:
+                row = df.loc[t_idx]
+                close_p = float(row.get('close', row.get('price', 0)))
+                self._last_price_map[code] = close_p
+                
+                # 如果是 Hotlist 的项，还需要更新 phase_map
+                # (这里也可以简单点，只要在 self.items 里的都放入 price_map)
+                is_in_hotlist = any(it.code == code for it in self.items)
+                if is_in_hotlist:
+                    price_map[code] = close_p
                     phase = str(row.get('last_action', ''))
                     if 'trade_phase' in row:
                         phase = str(row['trade_phase'])
-                    phase_map[item.code] = phase
-            
-            # 2. [ENHANCED] Populate prices for Follow Queue items
-            # 从跟单队列 DataFrame 中提取所有代码,并尝试匹配价格
-            if hasattr(self, '_last_df_follow') and self._last_df_follow is not None and not self._last_df_follow.empty:
-                for _, row in self._last_df_follow.iterrows():
-                    code = str(row['code']).strip()
-                    if not code:
-                        continue
-                    
-                    # 尝试多种匹配方式
-                    price = None
-                    
-                    # 方式1: 直接匹配
-                    if code in df.index:
-                        price = float(df.loc[code].get('close', df.loc[code].get('price', 0)))
-                    
-                    # 方式2: 6位代码匹配 (去掉市场前缀)
-                    if price is None or price <= 0:
-                        code_6 = code[:6] if len(code) >= 6 else code
-                        for idx in df.index:
-                            if str(idx).startswith(code_6):
-                                price = float(df.loc[idx].get('close', df.loc[idx].get('price', 0)))
-                                break
-                    
-                    # 方式3: 尝试添加市场前缀
-                    if price is None or price <= 0:
-                        for prefix in ['sh', 'sz', 'SH', 'SZ']:
-                            test_code = f"{prefix}{code}" if not code.startswith(prefix) else code
-                            if test_code in df.index:
-                                price = float(df.loc[test_code].get('close', df.loc[test_code].get('price', 0)))
-                                break
-                    
-                    # 保存到缓存
-                    if price and price > 0:
-                        self._last_price_map[code] = price
-                        logger.debug(f"✅ 价格映射成功: {code} -> {price:.2f}")
-                    else:
-                        logger.debug(f"⚠️ 无法获取价格: {code}")
-            
-            if price_map:
-                self.update_prices(price_map, phase_map)
-                # [SILENCE] 用户抱怨日志刷屏
-                # logger.debug(f\"✅ Hotlist PnL refreshed ({len(price_map)} items)\")
-            
-            # [NEW] 刷新跟单队列
-            self._update_follow_queue()
-            
-            # Reset warning flag if connection is good
-            self._connection_warning_logged = False
-            
-        else:
-            # 如果没有主窗口数据，也尝试刷新跟单队列（至少显示列表）
-            self._update_follow_queue()
-            
-            if not self._connection_warning_logged:
-                logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表 (Log once)")
-                self._connection_warning_logged = True
+                    phase_map[code] = phase
+        
+        # 5. 分发更新并节流刷新 UI
+        if price_map:
+            self.update_prices(price_map, phase_map)
+        
+        # [OPTIMIZE] 仅在对应标签页可见时才触发重绘
+        if hasattr(self, 'tabs'):
+            idx = self.tabs.currentIndex()
+            if idx == 1: # Follow Queue
+                with timed_ctx("OPTIMIZE_update_follow_status", warn_ms=100):
+                    self._update_follow_queue()
+            elif idx == 2: # Watchlist
+                self._update_watchlist_queue()
+        
+        self._connection_warning_logged = False
 
-    def update_prices(self, price_map: Dict[str, float], phase_map: Optional[Dict[str, str]] = None):
+    def update_prices(self, price_map: dict[str, float], phase_map: Optional[dict[str, str]] = None):
         """
         批量更新现价和盈亏
         """
@@ -1187,16 +1646,15 @@ class HotlistPanel(QWidget, WindowMixin):
             df = df.drop_duplicates(subset=['code'], keep='first')
 
             # [SMART UPDATE] Check if we can do an in-place update (Speed & Stability)
-            # CRITICAL: If table is sorted by user, modifying items causes them to jump rows immediately,
-            # invalidating any index maps. We MUST disable sorting to update, or just Rebuild.
+            self.follow_table.blockSignals(True)
+            is_sorted = self.follow_table.isSortingEnabled()
+            if is_sorted:
+                self.follow_table.setSortingEnabled(False)
             
-            is_sorted = self.follow_table.isSortingEnabled() 
             current_rows = self.follow_table.rowCount()
             needs_full_rebuild = False
             
-            if is_sorted:
-                needs_full_rebuild = True # Safe fallback for sorted tables
-            elif current_rows != len(df):
+            if current_rows != len(df):
                 needs_full_rebuild = True
             else:
                 # Check if codes match exactly in order (Model Order)
@@ -1370,70 +1828,81 @@ class HotlistPanel(QWidget, WindowMixin):
                         break
             
             self.follow_table.verticalScrollBar().setValue(v_scroll)
-            self.follow_table.horizontalScrollBar().setValue(h_scroll)
-
-            self.follow_table.setUpdatesEnabled(True)
-            self.follow_table.setSortingEnabled(True) # Re-enable sorting
-            self.follow_table.blockSignals(False) # [FIX] Unblock signals
             # [RESTORE] 自动调整列宽
             self.follow_table.resizeColumnsToContents()
-            self._is_refreshing = False
-
+            
         except Exception as e:
-            logger.error(f"Error updating follow queue UI: {e}")
+            logger.error(f"Update follow UI error: {e}")
+        finally:
+            if is_sorted:
+                self.follow_table.setSortingEnabled(True)
+            self.follow_table.setUpdatesEnabled(True)
+            self.follow_table.blockSignals(False)
+            self._is_refreshing = False
 
     def _on_follow_cell_changed(self, currentRow, _currentColumn, _previousRow, _previousColumn):
         """跟单队列键盘导航：联动K线"""
         # 复用单击逻辑，确保行为一致
-        if self._is_refreshing: return
-        if currentRow >= 0:
-            self._on_follow_click(currentRow, 0)
+        if getattr(self, '_is_refreshing', False): return
+        with timed_ctx("follow_cell_changed", warn_ms=100):
+            if currentRow >= 0:
+                self._on_follow_click(currentRow, 0)
         
     def _on_follow_click(self, row, col):
         """跟单队列单击：联动K线"""
-        if self._is_refreshing: return
-        try:
-            code_item = self.follow_table.item(row, 2)
-            name_item = self.follow_table.item(row, 3)
-            time_item = self.follow_table.item(row, 9) # MM-DD HH:MM
-            
-            if code_item and name_item:
-                code = str(code_item.text()).strip()
-                name = str(name_item.text()).strip()
+        if getattr(self, '_is_refreshing', False): return
+        with timed_ctx("follow_click", warn_ms=100):
+            try:
+                code_item = self.follow_table.item(row, 2)
+                name_item = self.follow_table.item(row, 3)
+                time_item = self.follow_table.item(row, 9) # MM-DD HH:MM
                 
-                # [OPTIMIZE] 从 UserRole 获取完整日期 (YYYY-MM-DD)
-                signal_date = ""
-                if time_item:
-                    full_time = time_item.data(Qt.ItemDataRole.UserRole)
-                    if full_time and len(str(full_time)) >= 10:
-                        signal_date = str(full_time)[:10]
-                    else:
-                        # Fallback
-                        time_txt = time_item.text()
-                        if "-" in time_txt:
-                            signal_date = time_txt.split(' ')[0]
-                
-                if code:
-                    # [FIX] Link with signal date for K-line marking, specify type to avoid mixing
-                    link_msg = f"{code}|realtime=false|signal_type=follow"
-                    if signal_date:
-                        link_msg += f"|signal_date={signal_date}"
+                if code_item and name_item:
+                    code = str(code_item.text()).strip()
+                    name = str(name_item.text()).strip()
                     
-                    self.stock_selected.emit(link_msg, name)
-        except Exception as e:
-            logger.error(f"Follow click error: {e}")
+                    # [DEBUNCE] 增加去重逻辑
+                    if self._last_selected_codes["follow"] == code:
+                        return
+                    self._last_selected_codes["follow"] = code
+                    
+                    # [OPTIMIZE] 从 UserRole 获取完整日期 (YYYY-MM-DD)
+                    signal_date = ""
+                    if time_item:
+                        full_time = time_item.data(Qt.ItemDataRole.UserRole)
+                        if full_time and len(str(full_time)) >= 10:
+                            signal_date = str(full_time)[:10]
+                        else:
+                            # Fallback
+                            time_txt = time_item.text()
+                            if "-" in time_txt:
+                                signal_date = time_txt.split(' ')[0]
+                    
+                    if code:
+                        # [FIX] Link with signal date for K-line marking, specify type to avoid mixing
+                        link_msg = f"{code}|realtime=false|signal_type=follow"
+                        if signal_date:
+                            link_msg += f"|signal_date={signal_date}"
+                        
+                        self.stock_selected.emit(link_msg, name)
+            except Exception as e:
+                logger.error(f"Follow click error: {e}")
 
     def _on_follow_double_click(self, row, col):
         """跟单队列双击：打开详情"""
-        if self._is_refreshing: return
-        try:
-            code_item = self.follow_table.item(row, 2)
-            name_item = self.follow_table.item(row, 3)
-            time_item = self.follow_table.item(row, 9)
-            
-            if code_item and name_item:
-                code = str(code_item.text()).strip()
-                name = str(name_item.text()).strip()
+        if getattr(self, '_is_refreshing', False): return
+        with timed_ctx("follow_double_click", warn_ms=100):
+            try:
+                code_item = self.follow_table.item(row, 2)
+                name_item = self.follow_table.item(row, 3)
+                time_item = self.follow_table.item(row, 9)
+                
+                if code_item and name_item:
+                    code = str(code_item.text()).strip()
+                    name = str(name_item.text()).strip()
+                    
+                    # 强标记为最后选中
+                    self._last_selected_codes["follow"] = code
                 
                 # [OPTIMIZE] 从 UserRole 获取完整日期
                 signal_date = ""
@@ -1452,8 +1921,8 @@ class HotlistPanel(QWidget, WindowMixin):
                 
                 # 触发详情信号
                 self.item_double_clicked.emit(link_msg, name, 0.0)
-        except Exception as e:
-            logger.error(f"Follow double-click error: {e}")
+            except Exception as e:
+                logger.error(f"Follow double-click error: {e}")
 
     def _on_follow_context_menu(self, pos):
         """跟单队列右键菜单"""
@@ -1511,7 +1980,8 @@ class HotlistPanel(QWidget, WindowMixin):
                 
                 # [FIX] Force immediate reload from DB to refresh UI
                 new_df = hub.get_follow_queue_df()
-                self._update_follow_queue(new_df)
+                with timed_ctx("_update_follow_status", warn_ms=100):
+                    self._update_follow_queue(new_df)
                 
             else:
                 logger.error(f"Failed to update status for {code}")
@@ -1527,7 +1997,8 @@ class HotlistPanel(QWidget, WindowMixin):
                 logger.info(f"Deleted follow item: {code}")
                 # Force immediate refresh
                 new_df = hub.get_follow_queue_df()
-                self._update_follow_queue(new_df)
+                with timed_ctx("_delete_follow_item", warn_ms=100):
+                    self._update_follow_queue(new_df)
             else:
                 logger.warning(f"Failed to delete {code}")
         except Exception as e:
@@ -1622,24 +2093,35 @@ class HotlistPanel(QWidget, WindowMixin):
                 return item
         return None
     
-    def _on_click(self, row: int, col: int):
-        """单击切换股票"""
-        item = self._get_item_from_row(row)
+    def _on_item_clicked_simple(self, item):
+        """[NEW] 显式点击去重，由 QTableWidget.itemClicked 触发"""
         if item:
-            # [FIX] Hotlist link: No signal_date needed, specify type
-            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
+            self._on_click(item.row(), item.column())
+
+    def _on_click(self, row: int, col: int):
+        """单击切换股票 (带去重)"""
+        if row < 0: return
+        with timed_ctx("hotlist_click", warn_ms=100):
+            item = self._get_item_from_row(row)
+            if item:
+                # [DEBUNCE] 增加去重逻辑，防止重复联动主窗口
+                if self._last_selected_codes["hotlist"] != item.code:
+                    self._last_selected_codes["hotlist"] = item.code
+                    # [FIX] Hotlist link: No signal_date needed, specify type
+                    self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
         """键盘导航联动（上下键切换时也触发股票选择）"""
-        item = self._get_item_from_row(currentRow)
-        if item:
-            # [FIX] Hotlist link: specify type
-            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
+        if currentRow >= 0:
+            self._on_click(currentRow, 0)
     
     def _on_double_click(self, row: int, col: int):
         """双击打开详情"""
+        if row < 0: return
         item = self._get_item_from_row(row)
         if item:
+            # [DEBUNCE] 强关联同步去重缓存
+            self._last_selected_codes["hotlist"] = item.code
             # [FIX] Hotlist link: specify type
             self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
             self.item_double_clicked.emit(item.code, item.name, item.add_price)

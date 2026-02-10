@@ -370,6 +370,11 @@ class StockLiveStrategy:
         self._last_settlement_date = None
         self._market_win_rate_cache = 0.5
         self._market_win_rate_ts = 0.0
+        
+        # --- [NEW] 状态机与验证引擎标记 ---
+        self._watchlist_validated_today: bool = False
+        self._last_validation_date: str = ""
+        self._last_rank_scan_date: str = ""
 
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
@@ -1002,15 +1007,27 @@ class StockLiveStrategy:
         if is_trading_active and (925 <= now_int <= 1505):
              self.executor.submit(self._scan_hot_concepts, df_all, concept_top5, resample=resample)
         
-        # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
-        if 935 <= cct.get_now_time_int() <= 1030:
-            if not getattr(self, '_rank_scan_done_today', False):
-                self.executor.submit(self._scan_rank_for_follow, df_all, concept_top5, top_n=100)
-                self._rank_scan_done_today = True
-        
-        # 每日重置扫描标记
-        # import removed
         today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        now_time_int = cct.get_now_time_int()
+
+        # --- 1.2 [NEW] 每日热股跨日验证 (9:15-9:30 处理昨天入队的标的) ---
+        if 915 <= now_time_int <= 930:
+            if getattr(self, '_last_validation_date', '') != today_str:
+                self.executor.submit(self._daily_watchlist_validation, df_all)
+                self._last_validation_date = today_str
+
+        # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
+        # 1. 开盘自动全扫描 (每日只需运行一次，不限时间，启动即扫)
+        if not getattr(self, '_rank_scan_done_today', False):
+            # 只有在非休市时间且有数据时才扫描
+            if not df_all.empty and cct.get_trade_date_status(): # 确保是交易日
+                 self.executor.submit(self._scan_rank_for_follow, df_all, concept_top5, top_n=100)
+                 self._rank_scan_done_today = True
+                 logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
+            else:
+                 logger.debug(f"⏳ [Startup] Rank scan skipped (Empty DF or Non-trading day)")
+        
+        # 每日重置扫描标记 (移到下方以利用 today_str)
         if getattr(self, '_last_rank_scan_date', '') != today_str:
             self._rank_scan_done_today = False
             self._last_rank_scan_date = today_str
@@ -1402,14 +1419,13 @@ class StockLiveStrategy:
 
     def _has_anomaly_pattern(self, row: Any) -> tuple[bool, str]:
         """
-        归集异动检测模式 (针对跟单跟随策略优化)
+        检测是否具有异动特征 (Restore from 9ce1a1d)
         
         异动特征包括：
-        1. 早盘最低走高：最低点在开盘附近 (low <= open * 1.002) 且 放量收阳
-        2. 低开高走：开盘杀跌后反转，强度确认
-        3. 高开高走：强势跳空确认，高位维持
-        4. 冲高回落收新高：盘中放量冲高，虽有小幅回撤但仍维持在强势区间
-        5. 多日缩量窄幅确认：连阳后的极小实体缩量，蓄势待发
+        1. 低开高走：开盘 < 昨收 且 收盘 > 开盘 且 涨幅 > 1%
+        2. 高开高走：开盘 > 昨收+1% 且 收盘接近最高 且 涨幅 > 2%
+        3. 冲高回落收新高：最高 > 昨收+3% 且 收盘 < 最高 但 收盘价 > 昨收+1%
+        4. 多日十字星缩量：连阳后回踩 + 十字星形态 + 缩量
         
         Returns:
             (has_anomaly, anomaly_type): 是否有异动特征及类型
@@ -1418,23 +1434,43 @@ class StockLiveStrategy:
             price = float(row.get('trade', row.get('close', 0)))
             open_p = float(row.get('open', 0))
             high = float(row.get('high', 0))
-            low = float(row.get('low', 0))
+            # low = float(row.get('low', 0))
             lastp1d = float(row.get('lastp1d', 0))
             percent = float(row.get('percent', 0))
-            volume_ratio = float(row.get('volume', 0))
+            volume = float(row.get('volume', 0)) # volume ratio or normalized volume
             win = int(row.get('win', 0))
             
             if price <= 0 or lastp1d <= 0:
                 return False, ""
             
-            # --- 1. [NEW] 早盘最低走高 (核心模式) ---
-            # 逻辑：最低价非常接近开盘价，表明开盘后几乎没有下杀就直接拉升
-            is_open_is_low = low <= open_p * 1.002 and price > open_p
-            if is_open_is_low and percent >= 1.2:
-                # 配合小级别无回撤逻辑: 若振幅>0，现价需在全天80%以上
-                day_range = high - low
-                if day_range > 0 and (high - price) / day_range <= 0.2:
-                    return True, "早盘最低走高"
+            # 1. 低开高走：开盘 < 昨收 * 0.99 且 收盘 > 开盘 且 涨幅 > 1.0
+            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (percent > 1.0)
+            if is_low_open_high_close:
+                return True, "低开高走"
+            
+            # 2. 高开高走：开盘 > 昨收 * 1.01 且 收盘 > 开盘 * 0.98 且 涨幅 > 2.0
+            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (percent > 2.0)
+            if is_high_open_high_close:
+                return True, "高开高走"
+            
+            # 3. 冲高回落收新高：最高 > 昨收 * 1.03 且 收盘 < 最高 * 0.98 且 涨幅 > 1.0
+            surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
+            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (percent > 1.0)
+            if is_surge_pullback_new_high:
+                return True, "冲高回落收新高"
+            
+            # 4. 多日回踩收十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+            body_ratio = abs(price - open_p) / price if price > 0 else 1
+            is_doji = body_ratio < 0.01  # 十字星：实体<1%
+            is_shrink_volume = volume < 0.8  # 缩量 (Assumption: 'volume' is volume ratio)
+            is_after_rally = win >= 2  # 此前连阳
+            if is_doji and is_shrink_volume and is_after_rally:
+                return True, "多日十字星缩量"
+            
+            return False, ""
+        except Exception as e:
+            logger.debug(f"Anomaly pattern check error: {e}")
+            return False, ""
 
             # --- 2. 低开高走 ---
             # 逻辑：开盘杀跌跌破昨收，但随后收复并大幅走高 (阳线实体大)
@@ -1468,7 +1504,7 @@ class StockLiveStrategy:
 
     def _scan_rank_for_follow(self, df: pd.DataFrame, concept_top5: list = None, top_n: int = 100) -> None:
         """
-        扫描板块联动强势突破股，筛选可跟单标的加入队列
+        扫描板块联动强势突破股，筛选可跟单标的加入队列 (Restore from 9ce1a1d)
         
         核心筛选逻辑:
         1. 板块联动: 属于当日热点板块 (concept_top5) 的龙头股
@@ -1526,19 +1562,41 @@ class StockLiveStrategy:
                 open_p = float(row.get('open', 0))
                 lastp1d = float(row.get('lastp1d', 0))
                 
-                # ma5 = float(row.get('ma5d', 0))  # 暂时不用，注释掉
-                # ma10 = float(row.get('ma10d', 0))
+                ma5 = float(row.get('ma5d', 0))
+                ma10 = float(row.get('ma10d', 0))
                 percent = float(row.get('percent', 0))
                 win_val = row.get('win', 0)
                 win = int(win_val) if win_val is not None and not pd.isna(win_val) else 0
-                volume_ratio = float(row.get('volume', 0)) # 这里 row 中的 volume 通常表示量比
+                volume = float(row.get('volume', 0)) # volume ratio or normalized volume
                 
                 if price <= 0 or open_p <= 0 or lastp1d <= 0:
                     continue
                 
-                # ========== 异动模式专项检测 ==========
+                # ========== 信号判定 (逻辑组合) ==========
+                signal_type = ""
+                priority = 0
+                
+                # 1. 异动模式专项检测
                 has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
-                if not has_anomaly:
+                if has_anomaly:
+                    signal_type = anomaly_type
+                    priority = 10
+                
+                # 2. 回踩均线启动 (均线支撑 + 放量)
+                # 逻辑: 最低价曾触及 MA5/MA10 且 现价站稳上方 且 涨幅 > 2%
+                is_ma5_bounce = (low <= ma5 * 1.01) and (price > ma5) and (percent > 2.0)
+                is_ma10_bounce = (low <= ma10 * 1.01) and (price > ma10) and (percent > 2.0)
+                has_volume = (volume > 1.2) # 量比 > 1.2
+                
+                if not signal_type:
+                    if is_ma5_bounce and has_volume:
+                        signal_type = "回踩MA5启动"
+                        priority = 7
+                    elif is_ma10_bounce and has_volume:
+                        signal_type = "回踩MA10启动"
+                        priority = 6
+                
+                if not signal_type:
                     continue
                 
                 # --- [NEW] 无大幅回撤结构检测 ---
@@ -1548,80 +1606,87 @@ class StockLiveStrategy:
                     pullback_ratio = (high - price) / day_range
                     if pullback_ratio > 0.2:
                         continue # 回撤过大，不符合“强势跟随”模式
-                
-                # --- [NEW] 小级别放量检测 ---
-                # 逻辑：量比 > 1.2 或 具备明显的成交量支持
-                if volume_ratio < 1.2 and percent < 5.0:
-                    continue # 量能不足且并非涨停封板类，剔除
 
-                priority = 5
-                # 优先级加分逻辑
-                if anomaly_type == "早盘最低走高":
-                    priority = 15 # 最高优先级
-                elif anomaly_type == "高开高走":
-                    priority = 12
-                elif anomaly_type == "低开高走":
-                    priority = 10
-                
                 # 连阳加分
                 if win >= 2:
                     priority += 2
                 
-                # 指标确认
-                signal_type = f"板块龙头跟随({anomaly_type})"
-                
-                # 止损设定：最低价下方 1%
-                stop_loss = low * 0.99 if low > 0 else price * 0.95
-
+                # 构造候选者信息
                 candidates.append({
                     'code': code_str,
                     'name': str(row.get('name', code_str)),
                     'signal_type': signal_type,
                     'priority': priority,
                     'price': price,
-                    'percent': percent,
-                    'win': win,
-                    'volume': volume_ratio,
                     'sector': sector_match,
-                    'entry_strategy': "强势跟随",
-                    'stop_loss': stop_loss
+                    'source': f"HotSectorFollow", 
+                    'daily_patterns': f"{signal_type}|Win:{win}"
                 })
-            
+
             # 按优先级排序
             candidates.sort(key=lambda x: x['priority'], reverse=True)
             
             added_count = 0
             for cand in candidates[:10]:  # 每批最多加 10 只
-                tracked_signal = TrackedSignal(
-                    code=cand['code'],
-                    name=cand['name'],
-                    signal_type=cand['signal_type'],
-                    detected_date=today_str,
-                    detected_price=cand['price'],
-                    entry_strategy=cand['entry_strategy'],
-                    target_price_low=cand['price'] * 0.98,
-                    target_price_high=cand['price'] * 1.05,
-                    stop_loss=cand['stop_loss'],
-                    priority=cand['priority'],
-                    source=f"HotSectorFollow|{cand['sector']}",
-                    notes=f"板块:{cand['sector']} 模式:{cand['signal_type']} 连阳:{cand['win']} 量比:{cand['volume']:.1f}"
-                )
-                
-                if hub.add_to_follow_queue(tracked_signal):
-                    added_count += 1
-                    logger.info(f"📋 跟单入队(热门板块): {cand['code']} {cand['name']} [{cand['signal_type']}] P{cand['priority']}")
-            
+                # ⭐ 改造：不再直接入 follow_queue，而是进入 watchlist 进行跨日验证
+                try:
+                    if hub.add_to_watchlist(
+                        code=cand['code'],
+                        name=cand['name'],
+                        sector=cand['sector'],
+                        price=cand['price'],
+                        source=cand['source'],
+                        daily_patterns=cand['daily_patterns']
+                    ):
+                        added_count += 1
+                        logger.info(f"📋 写入热股观察队列: {cand['code']} {cand['name']} [{cand['signal_type']}]")
+                except Exception as e:
+                    logger.error(f"Failed to add watchlist item {cand['code']}: {e}")
+
             if added_count > 0:
-                logger.info(f"✅ 今日自动入队 {added_count} 只板块联动/连阳加速股")
+                logger.info(f"✅ 今日自动写入 {added_count} 只热点观察股，等待跨日验证")
         
         except ImportError:
             logger.debug("TradingHub not available, skip sector follow scan")
         except Exception as e:
             logger.error(f"Error in _scan_rank_for_follow: {e}")
 
-
+    def _daily_watchlist_validation(self, df: pd.DataFrame):
+        """
+        [Phase 3] 每日热股跨日验证调度
+        """
+        try:
+            hub = get_trading_hub()
+            # 1. 构造验证所需的 OHLC 数据字典
+            ohlc_data = {}
+            for code, row in df.iterrows():
+                code_str = str(code).zfill(6)
+                ohlc_data[code_str] = {
+                    'close': float(row.get('close', 0)),
+                    'high': float(row.get('high', 0)),
+                    'low': float(row.get('low', 0)),
+                    'open': float(row.get('open', 0)),
+                    'ma5': float(row.get('ma5d', 0)),
+                    'ma10': float(row.get('ma10d', 0)),
+                    'upper': float(row.get('upper', 0)),
+                    'high4': float(row.get('high4', 0)),
+                    'volume_ratio': float(row.get('volume', 0)),
+                    'win': int(row.get('win', 0)),
+                }
+            
+            # 2. 调用验证引擎
+            results = hub.validate_watchlist(ohlc_data)
+            
+            # 3. 产生语音播报
+            if results['validated']:
+                self.voice_announcer.announce(f"热股跨日验证完成，{len(results['validated'])}只标的通过验证，已晋升跟单。")
+            
+            # 4. 执行晋升（写入 follow_queue）
+            hub.promote_validated_stocks()
+            self._watchlist_validated_today = True
+            
         except Exception as e:
-            logger.error(f"Error in _scan_rank_for_follow: {e}")
+            logger.error(f"Error in _daily_watchlist_validation: {e}")
 
     def _process_follow_queue(self, df: pd.DataFrame, resample='d'):
         """
@@ -1637,7 +1702,7 @@ class StockLiveStrategy:
         # import removed
         now_time = datetime.datetime.now()
         current_time_str = now_time.strftime("%H:%M:%S")
-        is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
+        is_auction_time = "09:25:00" <= current_time_str <= "09:30:00"
         is_trading_time = ("09:30:05" <= current_time_str <= "11:30:00") or \
                           ("13:00:00" <= current_time_str <= "14:57:00")
             
@@ -1652,15 +1717,45 @@ class StockLiveStrategy:
                 if current_price <= 0: continue
                 
                 entry_strategy = str(signal.entry_strategy)
+                status = str(signal.status)
                 triggered = False
                 trigger_msg = ""
                 
+                # --- [NEW] D. 持仓 T+交易监控 (ENTERED 状态) ---
+                if status == 'ENTERED':
+                    high = float(row.get('high', 0.0))
+                    pre_close = float(row.get('lastp1d', 0.0))
+                    if current_price > 0 and pre_close > 0:
+                        high_pct = (high - pre_close) / pre_close * 100
+                        current_pct = (current_price - pre_close) / pre_close * 100
+                        
+                        # 冲高回落检测：曾涨 > 5% 且回落在 2% 以下
+                        if high_pct > 5.0 and current_pct < 2.0:
+                            self.voice_announcer.announce(f"{signal.name} 冲高回落，建议反向做T减仓。")
+                            logger.info(f"⚠️ [HoldingWarn] {code} {signal.name} 冲高回落: high={high_pct:.1f}% curr={current_pct:.1f}%")
+                        
+                        # 趋势走弱检测：跌破 MA5
+                        ma5 = float(row.get('ma5d', 0.0))
+                        if ma5 > 0 and current_price < ma5:
+                            self.voice_announcer.announce(f"{signal.name} 跌破5日线，建议止盈或控制仓位。")
+                            logger.info(f"⚠️ [HoldingWarn] {code} {signal.name} 跌破MA5: curr={current_price:.2f} ma5={ma5:.2f}")
+                    continue # 持仓股已处理完监控，跳过买入触发逻辑
+
+                # --- [NEW] 针对 VALIDATED 股票的属性注入与增强 ---
+                is_validated = (status == 'VALIDATED')
+                # 跨日验证通过的个股，如果是竞价买入策略且早盘，放宽部分过滤条件（或保留最高优先级）
+                
                 # --- A. 竞价策略 ---
                 if "竞价" in entry_strategy and is_auction_time:
+                    # VALIDATED 股票具备更高的 Alpha 加持
                     triggered, trigger_msg = self._check_auction_conditions(code, row)
+                    if not triggered and is_validated:
+                        # 如果没触发但具备强验证，可以考虑微调逻辑（此处保持同步）
+                        pass
                 
                 # --- B. 盘中策略 (回踩/突破/形态) ---
                 elif is_trading_time:
+                    # [Logic remains similar but with status awareness]
                     if "回踩" in entry_strategy:
                         triggered, trigger_msg = self._check_pullback_conditions(code, row)
                     elif "突破" in entry_strategy or "平台" in entry_strategy:
@@ -1668,7 +1763,6 @@ class StockLiveStrategy:
                     elif "V型" in entry_strategy:
                         triggered, trigger_msg = True, "V型反转确认"
                     elif "蓄势" in entry_strategy:
-                        # 简单的趋势维持检查: 现价 > 开盘价 (且不大幅回落)
                         open_p = float(row.get('open', 0))
                         if current_price > open_p:
                             triggered, trigger_msg = True, f"蓄势启动确认 (现价 > 开盘)"
@@ -1680,6 +1774,7 @@ class StockLiveStrategy:
                     trigger_msg = f"突破目标价 {target_high}"
 
                 if triggered:
+                    if is_validated: trigger_msg = f"[强体验证] {trigger_msg}"
                     # 执行跟单交易逻辑
                     self._execute_follow_trade(signal, current_price, trigger_msg, resample)
             
@@ -1880,7 +1975,10 @@ class StockLiveStrategy:
             if now - self.last_follow_sync_ts > 5:
                 try:
                     hub = get_trading_hub()
-                    self.follow_queue_cache = hub.get_follow_queue(status="TRACKING")
+                    # 同步更多状态：验证通过、跟单中、已持仓（用于T交易监控）
+                    self.follow_queue_cache = hub.get_follow_queue(
+                        status=["VALIDATED", "TRACKING", "ENTERED"]
+                    )
                     self.last_follow_sync_ts = now
                 except Exception as e:
                     logger.error(f"Sync follow queue failed: {e}")
@@ -3354,6 +3452,27 @@ class StockLiveStrategy:
             except Exception as db_err:
                 logger.error(f"Failed to save live signal to DB: {db_err}")
 
+            # === [FIX] 自动同步到热股观察池 (Watchlist) ===
+            try:
+                hub = get_trading_hub()
+                # 提取 sector，如果有的话
+                sector = ""
+                if hasattr(self, '_monitored_stocks') and event.code in self._monitored_stocks:
+                   sector = self._monitored_stocks[event.code].get('industry', '')
+                
+                # 写入 Watchlist
+                hub.add_to_watchlist(
+                    code=event.code,
+                    name=event.name,
+                    sector=sector,
+                    price=event.price,
+                    source="日线形态", 
+                    daily_patterns=f"{event.name} {pattern_cn}", 
+                    pattern_score=event.score
+                )
+            except Exception as w_err:
+                logger.error(f"Failed to add to watchlist: {w_err}")
+
             # === [NEW] 自动纠偏逻辑：针对 Follow Queue 的标的，触发风险信号时执行“跑路”通报 ===
             if event.pattern in ('bull_trap_exit', 'momentum_failure'):
                 key = event.code
@@ -3479,12 +3598,23 @@ class StockLiveStrategy:
             logger.info(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
             # self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
             
-            # 也可以选择性的根据形态更新 trading_hub
-            if event.pattern in ('big_bull', 'platform_break'):
-                 try:
-                     hub = get_trading_hub()
-                     hub.update_follow_status(event.code, notes=f"[{pattern_cn}] {event.detail}")
-                 except Exception: pass
+            # 📅 [UNIFIED PIPELINE] 集成至统一观察池
+            # 只有分值 >= 50 的形态才具备“金子”潜力，送入跨日验证闸门
+            if event.score >= 50:
+                try:
+                    hub = get_trading_hub()
+                    hub.add_to_watchlist(
+                        code=event.code,
+                        name=event.name,
+                        sector="", # 实时行情 row 里才有 sector，这里暂缺或后期补齐
+                        price=event.price,
+                        source=f"DailyPattern|{event.pattern}",
+                        daily_patterns=event.detail,
+                        pattern_score=event.score
+                    )
+                    logger.info(f"✨ [归集] 发现高价值形态: {event.code} {event.name} ({event.detail}) -> Watchlist")
+                except Exception as ex:
+                    logger.debug(f"Failed to sync daily pattern to watchlist: {ex}")
 
         except Exception as e:
             logger.error(f"Daily pattern callback failed: {e}")
@@ -4031,7 +4161,28 @@ class StockLiveStrategy:
             self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop") # 清理未持仓的自动股，为明天腾空间
             msg = "清理完成，等待次日自动选股"
             
-            # 4. 语音播报
+            # 4. [NEW] 持仓留强去弱评估
+            try:
+                hub = get_trading_hub()
+                # 构造收盘 OHLC 字典
+                if self.df is not None and not self.df.empty:
+                    ohlc_data = {}
+                    for code, row in self.df.iterrows():
+                        ohlc_data[str(code).zfill(6)] = {
+                            'close': float(row.get('close', 0)),
+                            'high': float(row.get('high', 0)),
+                            'low': float(row.get('low', 0)),
+                            'open': float(row.get('open', 0)),
+                            'ma5': float(row.get('ma5d', 0)),
+                            'ma10': float(row.get('ma10d', 0)),
+                            'win': int(row.get('win', 0)),
+                        }
+                    eval_res = hub.evaluate_holding_strength(ohlc_data)
+                    logger.info(f"Daily Holding Strength Eval: {eval_res}")
+            except Exception as e:
+                logger.error(f"Holding strength eval failed: {e}")
+
+            # 5. 语音播报
             settle_msg = f"今日交易结束，收盘结算完成。{msg}。已准备好次日交易。"
             self._voice.say(settle_msg)
             logger.info(f"Daily Settlement Done. {msg}")
