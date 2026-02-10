@@ -511,48 +511,6 @@ class TradingHub:
                         results["STALE_SIGNAL"].append(f"{name}({code}) - 过期")
                         logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} STALE (>2d)")
 
-            # 2. 整理 follow_record (热点自选)
-            try:
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='follow_record'")
-                if c.fetchone():
-                    c.execute("SELECT id, code, name, follow_date, follow_price, stop_loss FROM follow_record WHERE status='ACTIVE'")
-                    hot_rows = c.fetchall()
-                    for row in hot_rows:
-                        h_id, code, name, fol_date_str, fol_price, stop_loss = row
-                        curr_price = current_prices.get(code) if current_prices else None
-                        
-                        days_elapsed = -1
-                        if fol_date_str:
-                            try:
-                                dt = datetime.strptime(fol_date_str, '%Y-%m-%d %H:%M:%S') if ' ' in fol_date_str else datetime.strptime(fol_date_str, '%Y-%m-%d')
-                                days_elapsed = (now - dt).days
-                            except: pass
-
-                        should_h = False
-                        h_reason = ""
-                        
-                        if days_elapsed > max_days: # 热点跟踪更敏感，直接用 max_days
-                            should_h = True
-                            h_reason = f"时间超{max_days}d"
-                        elif curr_price:
-                            # 提取价格值（支持字典格式）
-                            price_val = curr_price if isinstance(curr_price, (int, float)) else curr_price.get('price', 0) if isinstance(curr_price, dict) else 0
-                            
-                            if price_val > 0:
-                                if fol_price > 0 and price_val < fol_price * 0.93:
-                                    should_h = True
-                                    h_reason = "破位阴跌"
-                                elif stop_loss and stop_loss > 0 and price_val < stop_loss:
-                                    should_h = True
-                                    h_reason = "跌破止损"
-                        
-                        if should_h:
-                            c.execute("UPDATE follow_record SET status='CANCELLED', feedback=COALESCE(feedback,'')||' | 自动清理:'||? WHERE id=?",
-                                     (h_reason, h_id))
-                            results["CANCEL_HOTLIST"].append(f"{name}({code}) - {h_reason}")
-                            logger.info(f"[TradingHub] Auto-cleanup Hotlist: {code} {name} CANCELLED ({h_reason})")
-            except Exception as e:
-                logger.error(f"[TradingHub] Hotlist cleanup error: {e}")
 
             conn.commit()
             conn.close()

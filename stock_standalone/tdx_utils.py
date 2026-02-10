@@ -12,6 +12,7 @@ except ImportError:
 import pandas as pd
 from datetime import datetime
 from typing import Any, Optional, Union, Callable
+from JohnsonUtil import commonTips as cct
 import re
 
 logger = logging.getLogger()
@@ -97,7 +98,7 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
         return True
 
     # ③ 时间窗口校验
-    if not (830 <= now_time <= 915):
+    if not (cct.start_init_tdx_time  <= now_time <= 915):
         logger.debug(f"[CLEAN_SKIP] {today} now={now_time} 不在清理窗口")
         return False
 

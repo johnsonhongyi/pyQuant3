@@ -8,8 +8,7 @@ import threading
 import time
 import os
 import json
-# from sys_utils import get_base_path
-from datetime import datetime, timedelta
+import datetime
 import multiprocessing as mp
 import pandas as pd
 import re
@@ -648,7 +647,7 @@ class StockLiveStrategy:
                         
                         # 1. 强制校准逻辑：即使已存在，如果是 recovered_holding，也要校准时间与价格
                         b_date = str(t.get('buy_date', '') or '')
-                        real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         b_price = float(t['buy_price'])
 
                         # 如果已在监控中
@@ -667,7 +666,7 @@ class StockLiveStrategy:
                         if code not in self._monitored_stocks:
                             # b_date 等变量已在上面定义
                             # 如果数据库里没有有效的 buy_date，才被迫使用当前时间
-                            real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
                             b_price = float(t['buy_price'])
                             
@@ -793,7 +792,7 @@ class StockLiveStrategy:
                         "name": name,
                         "rules": [],
                         "last_alert": 0,
-                        "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "tags": f"auto_{logical_date}",
                         "create_price": float(row.get('price', 0.0)),
                         "snapshot": {
@@ -846,7 +845,7 @@ class StockLiveStrategy:
                     'rules': stock.get('rules', []),
                     'last_alert': stock.get('last_alert', 0),
                     'resample': stock.get('resample', 'd'), # 保存周期信息
-                    'created_time': stock.get('created_time', datetime.now().strftime("%Y-%m-%d %H")),
+                    'created_time': stock.get('created_time', datetime.datetime.now().strftime("%Y-%m-%d %H")),
                     'create_price': stock.get('create_price', 0.0),
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
@@ -915,8 +914,8 @@ class StockLiveStrategy:
                 'rules': [],
                 'last_alert': 0,
                 'resample': resample,
-                'created_time': datetime.now().strftime("%Y-%m-%d %H"),
-                'added_date': datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
+                'created_time': datetime.datetime.now().strftime("%Y-%m-%d %H"),
+                'added_date': datetime.datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
                 'create_price': create_price,
                 'tags': tags or ""
             }
@@ -930,10 +929,11 @@ class StockLiveStrategy:
         stock['rule_type_tag'] = rule_type
         
         # 确保 created_time 和 added_date 存在 (对于旧数据)
+        # import removed
         if 'created_time' not in stock:
-            stock['created_time'] = datetime.now().strftime("%Y-%m-%d %H")
+            stock['created_time'] = datetime.datetime.now().strftime("%Y-%m-%d %H")
         if 'added_date' not in stock:
-            stock['added_date'] = datetime.now().strftime('%Y-%m-%d')
+            stock['added_date'] = datetime.datetime.now().strftime('%Y-%m-%d')
 
         # 确保派生字段存在
         stock.setdefault('rule_keys', set())
@@ -968,8 +968,9 @@ class StockLiveStrategy:
         self._save_monitors()
         
         # 记录到历史以便前端查询
+        # import removed
         self.signal_history.appendleft({
-            'time': datetime.now().strftime("%H:%M:%S"),
+            'time': datetime.datetime.now().strftime("%H:%M:%S"),
             'code': code,
             'name': name,
             'type': rule_type,
@@ -1008,7 +1009,8 @@ class StockLiveStrategy:
                 self._rank_scan_done_today = True
         
         # 每日重置扫描标记
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        # import removed
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
         if getattr(self, '_last_rank_scan_date', '') != today_str:
             self._rank_scan_done_today = False
             self._last_rank_scan_date = today_str
@@ -1023,8 +1025,9 @@ class StockLiveStrategy:
         self._check_strategies(df_all, resample=resample)
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        now_time_str = datetime.now().strftime('%H:%M')
+        # import removed
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        now_time_str = datetime.datetime.now().strftime('%H:%M')
 
         # --- 自动启动判断 (Auto Start) ---
         # 交易时段 + 未启用 + 今日未结算过
@@ -1044,6 +1047,7 @@ class StockLiveStrategy:
              return
 
         # 限制频率: 至少间隔 1s 处理一次，避免 UI 线程密集调用导致积压
+        import time
         now = time.time()
         if now - self._last_process_time < 2.0:
             return
@@ -1097,7 +1101,7 @@ class StockLiveStrategy:
         """
         扫描五大热点板块，识别龙头（增强版）
         """
-
+        # import removed
         global MAX_DAILY_ADDITIONS
         if not self.scan_hot_concepts_status:
             return
@@ -1131,7 +1135,7 @@ class StockLiveStrategy:
             # 策略优化：基于统计的热点龙头筛选
             # 每日限量 5 只，避免监控列表爆炸
             # ------------------------------------------------------------------
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
             
             # 检查今日已添加的热点股数量 (限制在当前周期下)
             added_today_count = sum(1 for k, d in self._monitored_stocks.items() 
@@ -1265,7 +1269,7 @@ class StockLiveStrategy:
                     
                     # 5. ⭐ 早盘低点反弹评估 (0 - 0.3) - 新增
                     try:
-                        import datetime
+                        # import removed
                         now_time = datetime.datetime.now().time()
                         morning_session = datetime.time(9, 30) <= now_time <= datetime.time(11, 30)
                         
@@ -1317,7 +1321,7 @@ class StockLiveStrategy:
                         score_reasons.append("破高")
                     
                     # ⭐ 动态门槛：早盘适当放宽
-                    import datetime
+                    # import removed
                     now_time = datetime.datetime.now().time()
                     is_morning = datetime.time(9, 30) <= now_time <= datetime.time(10, 30)
                     threshold = 0.5 if is_morning else 0.6
@@ -1398,13 +1402,14 @@ class StockLiveStrategy:
 
     def _has_anomaly_pattern(self, row: Any) -> tuple[bool, str]:
         """
-        检测是否具有异动特征
+        归集异动检测模式 (针对跟单跟随策略优化)
         
         异动特征包括：
-        1. 低开高走：开盘<昨收 且 收盘>开盘 且 涨幅>1%
-        2. 高开高走：开盘>昨收+1% 且 收盘接近最高 且 涨幅>2%
-        3. 冲高回落收新高：最高>昨收+3% 且 收盘<最高 但 收盘仍>昨收+1%
-        4. 多日十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+        1. 早盘最低走高：最低点在开盘附近 (low <= open * 1.002) 且 放量收阳
+        2. 低开高走：开盘杀跌后反转，强度确认
+        3. 高开高走：强势跳空确认，高位维持
+        4. 冲高回落收新高：盘中放量冲高，虽有小幅回撤但仍维持在强势区间
+        5. 多日缩量窄幅确认：连阳后的极小实体缩量，蓄势待发
         
         Returns:
             (has_anomaly, anomaly_type): 是否有异动特征及类型
@@ -1416,39 +1421,48 @@ class StockLiveStrategy:
             low = float(row.get('low', 0))
             lastp1d = float(row.get('lastp1d', 0))
             percent = float(row.get('percent', 0))
-            volume = float(row.get('volume', 0))
+            volume_ratio = float(row.get('volume', 0))
             win = int(row.get('win', 0))
             
             if price <= 0 or lastp1d <= 0:
                 return False, ""
             
-            # 1. 低开高走：开盘<昨收-1% 且 收盘>开盘 且 涨幅>1%
-            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (percent > 1.0)
+            # --- 1. [NEW] 早盘最低走高 (核心模式) ---
+            # 逻辑：最低价非常接近开盘价，表明开盘后几乎没有下杀就直接拉升
+            is_open_is_low = low <= open_p * 1.002 and price > open_p
+            if is_open_is_low and percent >= 1.2:
+                # 配合小级别无回撤逻辑: 若振幅>0，现价需在全天80%以上
+                day_range = high - low
+                if day_range > 0 and (high - price) / day_range <= 0.2:
+                    return True, "早盘最低走高"
+
+            # --- 2. 低开高走 ---
+            # 逻辑：开盘杀跌跌破昨收，但随后收复并大幅走高 (阳线实体大)
+            is_low_open_high_close = (open_p < lastp1d * 0.995) and (price > open_p) and (percent >= 1.0)
             if is_low_open_high_close:
                 return True, "低开高走"
             
-            # 2. 高开高走：开盘>昨收+1% 且 收盘接近最高 且 涨幅>2%
-            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (percent > 2.0)
+            # --- 3. 高开高走 ---
+            # 逻辑：开盘即在昨收1%以上，且价格始终维持在高位 (不补缺口或不深踩)
+            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > high * 0.98) and (percent >= 2.0)
             if is_high_open_high_close:
                 return True, "高开高走"
             
-            # 3. 冲高回落收新高：最高>昨收+3% 且 收盘<最高 但 收盘仍>昨收+1%
+            # --- 4. 冲高回落强势维持 (归集之前策略) ---
+            # 逻辑：最高涨幅一度很大(>=3%)，虽小幅回吐但仍维持在强势区间(>=1.0%)
             surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
-            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (percent > 1.0)
-            if is_surge_pullback_new_high:
-                return True, "冲高回落收新高"
+            if surge_ratio >= 0.03 and price > high * 0.97 and percent >= 1.0:
+                return True, "强势维持"
             
-            # 4. 多日回踩收十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+            # --- 5. 多日缩量窄幅形态 (蓄势模式) ---
+            # 逻辑：此前有温和放量连阳(win>=2)，当前实体极小(<1%)且量能极度萎缩(<0.8)
             body_ratio = abs(price - open_p) / price if price > 0 else 1
-            is_doji = body_ratio < 0.01  # 十字星：实体<1%
-            is_shrink_volume = volume < 0.8  # 缩量
-            is_after_rally = win >= 2  # 此前连阳
-            if is_doji and is_shrink_volume and is_after_rally:
-                return True, "多日十字星缩量"
-            
+            if win >= 2 and body_ratio < 0.01 and volume_ratio < 0.8:
+                return True, "蓄势窄幅缩量"
+
             return False, ""
         except Exception as e:
-            logger.debug(f"Anomaly pattern check error: {e}")
+            logger.debug(f"Anomaly pattern hub error: {e}")
             return False, ""
 
 
@@ -1467,7 +1481,8 @@ class StockLiveStrategy:
         
         try:
             hub = get_trading_hub()
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            # import removed
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
             
             # 获取今日已入队的股票代码
             existing_queue = hub.get_follow_queue_df()
@@ -1493,122 +1508,82 @@ class StockLiveStrategy:
                 if code_str in queued_today or code_str in self._monitored_stocks:
                     continue
                 
-                # 获取关键指标
-                price = float(row.get('close', row.get('trade', 0)))
-                ma5 = float(row.get('ma5d', 0))
-                ma10 = float(row.get('ma10d', 0))
-                percent = float(row.get('percent', 0))
-                win = int(row.get('win', 0))  # 连阳天数
-                volume = float(row.get('volume', 0))
-                name = str(row.get('name', code_str))
+                # 获取所属板块
                 category = str(row.get('category', ''))
-                hmax = float(row.get('hmax', 0))
-                high4 = float(row.get('high4', 0))
-                lastp1d = float(row.get('lastp1d', 0))  # 昨收
-                open_p = float(row.get('open', 0))      # 今开
-                
-                if price <= 0 or ma5 <= 0:
-                    continue
-                
-                # ========== 核心筛选条件 ==========
-                signal_type = ""
-                priority = 5
-                sector_match = ""
-                
-                # 1. 板块联动判断
                 stock_cats = set(category.split(';')) if category else set()
                 matched_concepts = stock_cats.intersection(top_concepts)
-                is_sector_linked = len(matched_concepts) > 0
-                if matched_concepts:
-                    sector_match = list(matched_concepts)[0]
                 
-                # 2. 连阳加速 (win >= 2 且当日上涨) - 越早识别越好
-                is_consecutive_yang = win >= 2 and percent > 0
-                
-                # 3. 回踩MA5启动 (价格在 MA5 附近 ±3%，且当日上涨)
-                ma5_bias = (price - ma5) / ma5 if ma5 > 0 else 999
-                is_ma5_bounce = -0.03 <= ma5_bias <= 0.05 and percent > 0
-                
-                # 4. 回踩MA10启动 (价格在 MA10 附近 ±3%，且当日上涨)
-                ma10_bias = (price - ma10) / ma10 if ma10 > 0 else 999
-                is_ma10_bounce = -0.03 <= ma10_bias <= 0.05 and percent > 0
-                
-                # 5. 强势突破 (突破4日高点或历史高点)
-                is_breakout = (price > high4 > 0) or (price > hmax > 0)
-                
-                # 6. 放量配合 (量比 > 1.2)
-                has_volume = volume >= 1.2
-                
-                ma20 = float(row.get('ma20d', 0))
-                low = float(row.get('low', 0))
-                
-                # 7. [NEW] 蓄势潜力 (板块联动 + 放量 + (低点回踩MA10/20) + 启动拉升)
-                is_early_stage = win < 3
-                is_strong_volume = volume >= 1.5 # 当日量能放大
-                
-                # User Request Refinement: Low < MA10 or Low < MA20 implies a dip/test of support
-                # "启动open和low都在开盘" implies the dip was at the open or quickly recovered, forming a solid candle.
-                is_support_test = (low <= ma10 and ma10 > 0) or (low <= ma20 and ma20 > 0)
-                
-                # 强力反转: 现价高于开盘 (阳线) 且 涨幅明显 (>1.5%) 且 现价高于昨收
-                is_strong_reversal = (price > open_p) and (price > lastp1d) and (percent > 1.5)
-                
-                is_accumulation_start = is_sector_linked and is_early_stage and is_strong_volume and is_support_test and is_strong_reversal
-
-                # ========== 组合判断信号类型 ==========
-                
-                # [Optimization] 板块蓄势启动 (User Request: Early Trend Detection)
-                if is_accumulation_start:
-                    signal_type = f"板块蓄势启动"
-                    priority = 11 # Highest Priority
-                
-                # 最优: 板块联动 + 连阳加速 + 放量
-                elif is_sector_linked and is_consecutive_yang and has_volume:
-                    signal_type = f"板块联动连阳"
-                    priority = 10
-                
-                # 优质: 连阳加速 + 回踩MA5启动
-                elif is_consecutive_yang and is_ma5_bounce:
-                    signal_type = "连阳回踩MA5"
-                    priority = 9
-                
-                # 良好: 板块联动 + 突破
-                elif is_sector_linked and is_breakout and has_volume:
-                    signal_type = "板块突破"
-                    priority = 8
-                
-                # [NEW] 回踩MA5/MA10 需配合异动特征
-                elif (is_ma5_bounce or is_ma10_bounce) and has_volume:
-                    has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
-                    if has_anomaly:
-                        ma_type = "MA5" if is_ma5_bounce else "MA10"
-                        signal_type = f"回踩{ma_type}启动({anomaly_type})"
-                        priority = 7
-                    # 无异动特征的单纯回踩不入队
-                
-                if not signal_type:
+                # --- [CORE] 严格过滤：仅处理热门板块个股 ---
+                if not matched_concepts:
                     continue
                 
-                # 计算入场价和止损
-                if "蓄势" in signal_type:
-                    entry_strategy = "蓄势启动跟随"
-                    # 蓄势启动通常以开盘价或昨日收盘价为止损参考
-                    stop_loss = open_p * 0.98 if open_p > 0 else lastp1d * 0.97
-                else:
-                    entry_strategy = "竞价买入" if is_breakout else "回踩MA5"
-                    stop_loss = ma5 * 0.97 if ma5 > lastp1d * 0.97 else lastp1d * 0.97
+                sector_match = list(matched_concepts)[0]
                 
+                # 获取关键指标
+                price = float(row.get('close', row.get('trade', 0)))
+                high = float(row.get('high', 0))
+                low = float(row.get('low', 0))
+                open_p = float(row.get('open', 0))
+                lastp1d = float(row.get('lastp1d', 0))
+                
+                # ma5 = float(row.get('ma5d', 0))  # 暂时不用，注释掉
+                # ma10 = float(row.get('ma10d', 0))
+                percent = float(row.get('percent', 0))
+                win_val = row.get('win', 0)
+                win = int(win_val) if win_val is not None and not pd.isna(win_val) else 0
+                volume_ratio = float(row.get('volume', 0)) # 这里 row 中的 volume 通常表示量比
+                
+                if price <= 0 or open_p <= 0 or lastp1d <= 0:
+                    continue
+                
+                # ========== 异动模式专项检测 ==========
+                has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
+                if not has_anomaly:
+                    continue
+                
+                # --- [NEW] 无大幅回撤结构检测 ---
+                # 逻辑：现价必须在今日波动区间的 80% 以上，即回撤不能超过振幅的 20%
+                day_range = high - low
+                if day_range > 0:
+                    pullback_ratio = (high - price) / day_range
+                    if pullback_ratio > 0.2:
+                        continue # 回撤过大，不符合“强势跟随”模式
+                
+                # --- [NEW] 小级别放量检测 ---
+                # 逻辑：量比 > 1.2 或 具备明显的成交量支持
+                if volume_ratio < 1.2 and percent < 5.0:
+                    continue # 量能不足且并非涨停封板类，剔除
+
+                priority = 5
+                # 优先级加分逻辑
+                if anomaly_type == "早盘最低走高":
+                    priority = 15 # 最高优先级
+                elif anomaly_type == "高开高走":
+                    priority = 12
+                elif anomaly_type == "低开高走":
+                    priority = 10
+                
+                # 连阳加分
+                if win >= 2:
+                    priority += 2
+                
+                # 指标确认
+                signal_type = f"板块龙头跟随({anomaly_type})"
+                
+                # 止损设定：最低价下方 1%
+                stop_loss = low * 0.99 if low > 0 else price * 0.95
+
                 candidates.append({
                     'code': code_str,
-                    'name': name,
+                    'name': str(row.get('name', code_str)),
                     'signal_type': signal_type,
                     'priority': priority,
                     'price': price,
                     'percent': percent,
                     'win': win,
-                    'volume': volume,
+                    'volume': volume_ratio,
                     'sector': sector_match,
-                    'entry_strategy': entry_strategy,
+                    'entry_strategy': "强势跟随",
                     'stop_loss': stop_loss
                 })
             
@@ -1616,7 +1591,7 @@ class StockLiveStrategy:
             candidates.sort(key=lambda x: x['priority'], reverse=True)
             
             added_count = 0
-            for cand in candidates[:8]:  # 每批最多加 8 只
+            for cand in candidates[:10]:  # 每批最多加 10 只
                 tracked_signal = TrackedSignal(
                     code=cand['code'],
                     name=cand['name'],
@@ -1624,17 +1599,17 @@ class StockLiveStrategy:
                     detected_date=today_str,
                     detected_price=cand['price'],
                     entry_strategy=cand['entry_strategy'],
-                    target_price_low=cand['price'] * 0.97,
+                    target_price_low=cand['price'] * 0.98,
                     target_price_high=cand['price'] * 1.05,
                     stop_loss=cand['stop_loss'],
                     priority=cand['priority'],
-                    source=f"LiveStrategy|{cand['sector'] or 'Rank'}",
-                    notes=f"涨幅:{cand['percent']:.1f}% 连阳:{cand['win']} 量比:{cand['volume']:.1f}"
+                    source=f"HotSectorFollow|{cand['sector']}",
+                    notes=f"板块:{cand['sector']} 模式:{cand['signal_type']} 连阳:{cand['win']} 量比:{cand['volume']:.1f}"
                 )
                 
                 if hub.add_to_follow_queue(tracked_signal):
                     added_count += 1
-                    logger.info(f"📋 跟单入队: {cand['code']} {cand['name']} [{cand['signal_type']}] P{cand['priority']} | {cand.get('sector','')}")
+                    logger.info(f"📋 跟单入队(热门板块): {cand['code']} {cand['name']} [{cand['signal_type']}] P{cand['priority']}")
             
             if added_count > 0:
                 logger.info(f"✅ 今日自动入队 {added_count} 只板块联动/连阳加速股")
@@ -1659,7 +1634,8 @@ class StockLiveStrategy:
         if resample != 'd':
             return
             
-        now_time = datetime.now()
+        # import removed
+        now_time = datetime.datetime.now()
         current_time_str = now_time.strftime("%H:%M:%S")
         is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
         is_trading_time = ("09:30:05" <= current_time_str <= "11:30:00") or \
@@ -1745,7 +1721,8 @@ class StockLiveStrategy:
         # Shadow Engine record for near misses
         if 0 <= pct <= 10.0:
             try:
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # import removed
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 SignalMessageQueue().push(SignalMessage(
                     priority=99, timestamp=now_str, code=code, name=str(row.get('name', '')),
                     signal_type="SHADOW_AUCTION", source="Live",
@@ -1824,17 +1801,18 @@ class StockLiveStrategy:
             
             # 3. 加入实时监控 (Hotspot Injection Logic)
             # 构造监控数据结构
+            # import removed
             monitor_data = {
                 "name": name,
                 "code": code,
                 "resample": resample,
                 "last_alert": 0,
-                "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "tags": f"auto_followed_{signal.entry_strategy}",
                 "snapshot": {
                     "score": 99, # High score for followed signal
                     "reason": reason,
-                    "buy_date": datetime.now().strftime("%Y-%m-%d"),
+                    "buy_date": datetime.datetime.now().strftime("%Y-%m-%d"),
                     "cost_price": price,
                     "highest_since_buy": price,
                     # Initialize Phase
@@ -1870,6 +1848,7 @@ class StockLiveStrategy:
             # if not cct.get_trade_date_status():
             #     return
 
+            import time
             now = time.time()  # [FIX] Initialize now variable early
 
             # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
@@ -2173,7 +2152,8 @@ class StockLiveStrategy:
                 # ---------- T+1 状态感知 ----------
                 is_t1_restricted = False
                 if snap.get('buy_date'):
-                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    # import removed
+                    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
                     if snap['buy_date'].startswith(today_str):
                         is_t1_restricted = True
 
@@ -2314,7 +2294,8 @@ class StockLiveStrategy:
                                         has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
                                         if has_anomaly:
                                             hub = get_trading_hub()
-                                            today_str = datetime.now().strftime("%Y-%m-%d")
+                                            # import removed
+                                            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
                                             ts = TrackedSignal(
                                                 code=code, 
                                                 name=data.get('name', ''),
@@ -2434,10 +2415,11 @@ class StockLiveStrategy:
 
                 # --- 3.3 冷却机制：避免短时重复触发 ---
                 cooldown_minutes = 5
-                now_ts = datetime.now()
-                if 'last_trigger_time' not in snap:
-                    snap['last_trigger_time'] = now_ts - timedelta(minutes=cooldown_minutes)
-                    # logger.info(f'timedelta(minutes=cooldown_minutes): {timedelta(minutes=cooldown_minutes)}')
+                # import removed
+                now_ts = datetime.datetime.now()
+                if snap.get('last_trigger_time') is None:
+                    snap['last_trigger_time'] = now_ts - datetime.timedelta(minutes=cooldown_minutes)
+                    # logger.info(f'timedelta(minutes=cooldown_minutes): {datetime.timedelta(minutes=cooldown_minutes)}')
                 time_since_last = (now_ts - snap['last_trigger_time']).total_seconds() / 60
                 if time_since_last >= cooldown_minutes:
                     # [防重复开仓] 核心防御逻辑
@@ -2460,7 +2442,7 @@ class StockLiveStrategy:
                         snap['last_trigger_time'] = now_ts
                         # 特殊冷却：加仓后增加冷却时间，防止短时连续加仓
                         if decision["action"] in ("ADD", "加仓"):
-                             snap['last_trigger_time'] = now_ts + timedelta(minutes=10) 
+                             snap['last_trigger_time'] = now_ts + datetime.timedelta(minutes=10) 
                     elif decision["action"] == "卖出":
                         snap["sell_triggered_today"] = True
                         snap["sell_reason"] = decision["reason"]
@@ -2910,7 +2892,7 @@ class StockLiveStrategy:
                         date_formats = ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d %H', '%Y-%m-%d']
                         for fmt in date_formats:
                             try:
-                                dt_obj = datetime.strptime(created_time_str, fmt)
+                                dt_obj = datetime.datetime.strptime(created_time_str, fmt)
                                 break
                             except ValueError:
                                 continue
@@ -3016,7 +2998,7 @@ class StockLiveStrategy:
 
     def add_to_blacklist(self, code, name="", reason="manual_del"):
         """将代码加入黑名单"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
         # 1. 保存到数据库
         if hasattr(self, 'trading_logger'):
             self.trading_logger.add_to_blacklist(code, name, reason)
@@ -3045,7 +3027,7 @@ class StockLiveStrategy:
             return False
         
         info = self._blacklist_data[code]
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
         return info.get("date") == today
 
     def get_blacklist(self, date=None):
@@ -3238,7 +3220,7 @@ class StockLiveStrategy:
             # => last_alert <= now + (N-1)*cooldown
             future_offset = (cycles - 1) * self._alert_cooldown
             self._monitored_stocks[key]['last_alert'] = time.time() + future_offset
-            dt_str = datetime.fromtimestamp(self._monitored_stocks[key]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
+            dt_str = datetime.datetime.fromtimestamp(self._monitored_stocks[key]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"😴 Snoozed alert for {key}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
 
     def _on_pattern_detected(self, event: 'PatternEvent') -> None:
@@ -3409,7 +3391,7 @@ class StockLiveStrategy:
                         #         "pattern": "EXIT",  # 统一归类为离场信号
                         #         "message": f"【跑路信号】{getattr(event, 'detail', '')}，建议止盈离场",
                         #         "is_high_priority": True,
-                        #         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        #         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         #         "priority": 100
                         #     }
                         #     send_signal_to_visualizer_ipc(ipc_data)
@@ -3528,7 +3510,7 @@ class StockLiveStrategy:
         
         try:
             from signal_message_queue import SignalMessageQueue, SignalMessage
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # 提取信号类型 (如果是 [起跳新星] 等模式)
             sig_type = "ALERT"
             if "起跳新星" in message:
@@ -3572,7 +3554,7 @@ class StockLiveStrategy:
                 "pattern": sig_type if 'sig_type' in locals() else "ALERT",
                 "message": message,
                 "is_high_priority": is_priority,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "priority": 100 if is_priority else 50
             }
              send_signal_to_visualizer_ipc(ipc_data)
@@ -3662,7 +3644,7 @@ class StockLiveStrategy:
         if action in ("卖出", "止损", "止盈") or "清仓" in action:
             try:
                 hub = get_trading_hub()
-                exit_date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                exit_date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 # 更新跟单队列状态为已离场，并记录离场价和时间
                 if hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=exit_date_str, notes=f"Auto closed by {action}: {message[:50]}"):
                     logger.debug(f"🔄 Follow sync: {code} set to EXITED @ {price} on {exit_date_str} due to {action}")
@@ -3676,7 +3658,7 @@ class StockLiveStrategy:
     def start_auto_trading_loop(self, force: bool = False, concept_top5: Optional[list[Any]] = None):
         """开启自动循环优选交易 (支持断点恢复/自动补作业/强制启动)"""
         self.auto_loop_enabled = True
-        now_time = datetime.now()
+        now_time = datetime.datetime.now()
         today_str = now_time.strftime('%Y-%m-%d')
         is_after_close = now_time.strftime('%H:%M') >= "15:00"
 
@@ -3984,7 +3966,7 @@ class StockLiveStrategy:
                     "name": name,
                     "rules": [{'type': 'price_up', 'value': current_price}], 
                     "last_alert": 0,
-                    "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "create_price": current_price,
                     "tags": tag,
                     "snapshot": {
@@ -4042,7 +4024,7 @@ class StockLiveStrategy:
                 self.stop_auto_trading_loop()
             
             # 2. 标记今日已结算
-            self._last_settlement_date = datetime.now().strftime('%Y-%m-%d')
+            self._last_settlement_date = datetime.datetime.now().strftime('%Y-%m-%d')
             
             # 3. 运行选股逻辑，为次日准备
             # 修正：收盘结算只清理自动循环逻辑中的监控
@@ -4070,7 +4052,7 @@ class StockLiveStrategy:
             
             to_remove = []
             
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
             for code, data in self._monitored_stocks.items():
                 tags = str(data.get('tags', ''))
                 # 识别标签
@@ -4103,7 +4085,7 @@ def test_check_strategies_params():
     验证 now, last_alert, sent_data['ts'] 等时间戳类型。
     """
     import time
-    from datetime import datetime
+    # import datetime # handled at top
     
     print("===== 测试参数类型一致性 =====")
     
@@ -4134,7 +4116,7 @@ def test_check_strategies_params():
         print(f"❌ now - sent_data['ts'] 失败: {e}")
     
     # 模拟错误情况：now 为 datetime 对象
-    now_datetime = datetime.now()
+    now_datetime = datetime.datetime.now()
     print(f"\n模拟错误情况: now = datetime.now() -> type: {type(now_datetime).__name__}")
     
     try:

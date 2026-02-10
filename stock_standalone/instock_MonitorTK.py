@@ -1138,7 +1138,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 f"1. 超过 {days} 天未入场的跟单信号\n"
                 f"2. [NEW] 3天内无中阳启动突破 (涨幅>=4% 且 放量>=1.3 且 突破high4)\n"
                 f"3. 当前价格较检测价跌超 7% (不及预期/破位)\n"
-                f"4. 超过 {days} 天未变动的热点自选"
             ):
                 return
             
@@ -1173,10 +1172,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
                     report.append("")
                 
-                if results.get("CANCEL_HOTLIST"):
-                    report.append("【热点自选 - 破位/过期已取消】")
-                    report.extend([f" • {item}" for item in results["CANCEL_HOTLIST"]])
-                    report.append("")
                 
                 if results.get("STALE_SIGNAL"):
                     report.append("【长期未动已标记为 STALE】")
@@ -1224,7 +1219,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "清理规则(所有符合以下条件的信号将被取消):\n"
                 "• 信号已入队存在 >= 3天\n"
                 "• 且未出现中阳启动突破 (或已掉出活跃榜单)\n\n"
-                "此操作将扫描整个 Follow Queue 并移除所有僵尸信号。"
             ):
                 return
             
@@ -1256,10 +1250,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
                     report.append("")
                 
-                if results.get("CANCEL_HOTLIST"):
-                    report.append("【热点自选 - 强制清理已取消】")
-                    report.extend([f" • {item}" for item in results["CANCEL_HOTLIST"]])
-                    report.append("")
 
                 log_win = tk.Toplevel(self)
                 log_win.title(f"强制清理完成 - 共处理 {total_cleaned} 项")
@@ -1327,6 +1317,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 archive_file_tools(t_logger.db_path, "trading_signals", ARCHIVE_DIR, logger)
             except Exception as e:
                 logger.warning(f"交易日志存档失败: {e}")
+            
+            # 2.1 存档信号策略数据库 (TradingHub)
+            try:
+                from trading_hub import get_trading_hub
+                hub = get_trading_hub()
+                archive_file_tools(hub.signal_db, "signal_strategy", ARCHIVE_DIR, logger)
+            except Exception as e:
+                logger.warning(f"信号策略存档失败: {e}")
             
             # 3. 存档手札
             if hasattr(self, 'handbook'):
