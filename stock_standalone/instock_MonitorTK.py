@@ -1138,6 +1138,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 f"1. 超过 {days} 天未入场的跟单信号\n"
                 f"2. [NEW] 3天内无中阳启动突破 (涨幅>=4% 且 放量>=1.3 且 突破high4)\n"
                 f"3. 当前价格较检测价跌超 7% (不及预期/破位)\n"
+                f"4. [NEW] 队列扩容压缩 (全量队列严格限额 100 只)\n"
             ):
                 return
             
@@ -1218,7 +1219,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "确定要对【全量队列】进行强制清理吗?\n\n"
                 "清理规则(所有符合以下条件的信号将被取消):\n"
                 "• 信号已入队存在 >= 3天\n"
-                "• 且未出现中阳启动突破 (或已掉出活跃榜单)\n\n"
+                "• 且未出现中阳启动突破 (或已掉出活跃榜单)\n"
+                "• [NEW] 强制压缩：清理后如仍超 100 只，将剔除低优先级记录\n\n"
             ):
                 return
             
@@ -2399,7 +2401,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
-                if has_update and hasattr(self, 'live_strategy'):
+                if has_update and getattr(self, 'live_strategy', None) is not None:
                     self._schedule_after(2000, self._start_feedback_listener)
                     if not (915 < cct.get_now_time_int() < 920):
                         # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
@@ -2412,8 +2414,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # If toggle exists and is unchecked, use actual current resample
                             if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
                                 target_res = self.global_values.getkey("resample")
-
                             self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
+                            # self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res) if self.live_strategy else None)
                         else:
                             # 后续：立即执行
                             # res = self.global_values.getkey("resample")
@@ -2423,6 +2425,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 target_res = self.global_values.getkey("resample")
 
                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
+                            # self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
                     
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
@@ -2441,7 +2444,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error updating tree: {e}", exc_info=True)
         finally:
-            self._schedule_after(1000, self.update_tree)
+            self._schedule_after(5000, self.update_tree)
 
     def push_stock_info(self,stock_code, row):
         """
@@ -5109,7 +5112,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.live_strategy = StockLiveStrategy(self,alert_cooldown=alert_cooldown,
                                                    voice_enabled=self.voice_var.get(),
                                                    realtime_service=self.realtime_service)
-            
             if self.realtime_service:
                 logger.info("RealtimeDataService injected into StockLiveStrategy.")
             else:
@@ -5866,7 +5868,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if len(self.active_alerts) >= MAX_TOTAL_ALERTS:
                 if self._recycle_alert_window(code):
-                    logger.warning(f"回收窗口: {code} 窗口已达上限 {MAX_TOTAL_ALERTS}...")
+                    logger.debug(f"回收窗口: {code} 窗口已达上限 {MAX_TOTAL_ALERTS}...")
                     # 成功回收了一个窗口，为新信号腾出了空间
                 else:
                     return 

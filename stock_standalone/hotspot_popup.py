@@ -27,12 +27,15 @@ import pyqtgraph as pg
 import numpy as np
 import pandas as pd
 
+from tk_gui_modules.window_mixin import WindowMixin
+from dpi_utils import get_windows_dpi_scale_factor
+
 logger = logging.getLogger(__name__)
 
 DB_FILE = "signal_strategy.db"
 
 
-class HotSpotPopup(QDialog):
+class HotSpotPopup(QDialog, WindowMixin):
     """
     热点详情弹窗
     
@@ -53,10 +56,23 @@ class HotSpotPopup(QDialog):
         self.add_price = add_price
         self.current_price = add_price
         self.pnl_percent = 0.0
+        self.scale_factor = get_windows_dpi_scale_factor()
         
         self._init_ui()
         self._load_signal_history()
         self._load_kline_preview()
+
+        # 加载保存的位置
+        self.load_window_position_qt(self, "HotSpotPopup", default_width=500, default_height=450)
+    
+    def done(self, a0: int) -> None: # type: ignore
+        """对话框关闭、接受或拒绝的统一终点"""
+        try:
+            # 统一保存位置 (此时窗口依然存在且几何信息有效)
+            self.save_window_position_qt(self, "HotSpotPopup")
+        except Exception as e:
+            logger.error(f"Save position in done error: {e}")
+        super().done(a0)
     
     def _init_ui(self):
         """初始化UI"""
@@ -175,6 +191,7 @@ class HotSpotPopup(QDialog):
         action_layout.addWidget(QLabel("止损价:"))
         self.stop_loss_edit = QLineEdit()
         self.stop_loss_edit.setFixedWidth(80)
+        self.stop_loss_edit.setText(f"{self.current_price:.2f}")
         self.stop_loss_edit.setPlaceholderText("0.00")
         action_layout.addWidget(self.stop_loss_edit)
         
@@ -202,7 +219,7 @@ class HotSpotPopup(QDialog):
         self.signal_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.signal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # self.signal_table.setMaximumHeight(120)  # Removed to allow expansion
-        self.signal_table.setMinHeight(150) # Set a reasonable minimum height
+        self.signal_table.setMinimumHeight(150) # Set a reasonable minimum height
         self.signal_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
         header = self.signal_table.horizontalHeader()
@@ -234,15 +251,24 @@ class HotSpotPopup(QDialog):
         btn_layout.addStretch()
         
         close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.reject)
         btn_layout.addWidget(close_btn)
         
         layout.addLayout(btn_layout)
     
     def update_price(self, current_price: float):
         """更新当前价格"""
+        # 记录旧价格用于比对
+        old_price_txt = f"{self.current_price:.2f}"
+        
         self.current_price = current_price
         self.current_price_label.setText(f"¥{current_price:.2f}")
+        
+        # [NEW] 如果止损输入框还是初始价格或为空，则自动同步为最新现价
+        if hasattr(self, 'stop_loss_edit'):
+            current_edit_txt = self.stop_loss_edit.text()
+            if not current_edit_txt or current_edit_txt == old_price_txt or current_edit_txt == "0.00":
+                self.stop_loss_edit.setText(f"{current_price:.2f}")
         
         if self.add_price > 0:
             self.pnl_percent = (current_price - self.add_price) / self.add_price * 100

@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-02-03 02:20  
+> 最后更新：2026-02-10 17:50  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 
@@ -14,32 +14,30 @@
 2.  **每日闭环**: 每日结束时更新【变更日志】和【当前任务状态】，确保次日可无缝接续。
 3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，必须保持最新。
 4.  **自动迭代**: 每次任务完成后，自动依据此规则更新文档并保存历史文件。
+5.  **记忆持续性协议**: 
+    - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
+    - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 ---
 
-## ⚡ 快速恢复指南
-
-**每次新对话只需发送**: `@gemini.md 继续`
-
-我会自动：
-1. 读取此文档，恢复完整上下文
-2. 找到 `🔴 当前任务` 区块，继续实施
-3. 完成后更新进度和变更日志
-
-**常用指令**:
-| 指令 | 说明 |
-|------|------|
-| `@gemini.md 继续` | 继续当前任务 |
-| `@gemini.md 继续 P0.5` | 跳转到 P0.5 任务 |
-| `@gemini.md 状态` | 查看进度 |
-| `@gemini.md 回顾` | 总结已完成工作 |
-
----
-
-## ✅ 最近完成任务: P1.6 - 信号标准化与可视化组件修复 (02-03 02:20)
+## ✅ 最近完成任务: P3 & P4 - 统一跟单流水线与状态机升级 (02-10 17:50)
 
 **状态**: ✅ 已完成
-**目标**: 统一日内/日线信号输出标准，修复 Visualizer 的 IPC 信号接收逻辑，确保端到端信号流的可视化。
+**目标**: 建立以 Watchlist 为中心的统一归集验证体系，提升验证门槛至 0.7，并实现 UI 特征（形态/评分/来源）的全对齐。
+
+### 核心变更
+- **统一流水线 (Unified Pipeline)**: 所有来源标的统一进入 `WATCHING` 状态。
+- **状态机模型**: 实现 `WATCHING -> VALIDATED -> READY -> ENTERED -> HOLDING -> EXITED` 完整流转。
+- **验证评分重构**: `validate_watchlist` 网关门槛提升至 0.7，加权“上轨攀升”与“新高”特征。
+- **UI 对齐**: `HotlistPanel` 新增形态评分、描述、来源展示，支持 ToolTip。
+- **数据库修复**: 彻底修复 `trading_signals.db` 结构损坏问题，补全形态支撑字段。
+
+### 历史记录 (Brain Artifacts)
+- 实施计划: [implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b52a30b0-3f13-4b12-bb09-dfe50b2a1a3b/implementation_plan.md)
+- 任务清单: [task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b52a30b0-3f13-4b12-bb09-dfe50b2a1a3b/task.md)
+- 验收报告: [walkthrough_p4.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b52a30b0-3f13-4b12-bb09-dfe50b2a1a3b/walkthrough_p4.md)
+
+---
 
 ### 变更文件
 
@@ -265,18 +263,36 @@ if hasattr(self, 'pattern_detector'):
 
 ---
 
-## 🔴 当前任务: P1 - 策略整合与系统稳健性 (Strategy & Stability)
+## 🧠 核心上下文记忆 (长期维护)
+
+> [!IMPORTANT]
+> **1. 观察池验证网关 (Single Gate Protocol)**
+> - **文件**: `trading_hub.py` -> `validate_watchlist`
+> - **硬性阈值**: `total_score >= 0.7`
+> - **权重算式**: `趋势(0.3) + 上轨攀升(0.4) + 新高(0.3) + 形态分加成(max 0.3)`
+> - **逻辑**: 每日 9:15 触发验证，不达标维持 `WATCHING`，达标晋升 `VALIDATED`。
+>
+> **2. 数据库一致性**
+> - `hot_stock_watchlist` 表必须包含: `daily_patterns`, `pattern_score`, `source`。
+> - `follow_queue` 在 ENTERED 状态时，必须由 `risk_engine` 实时监控 T+0 止盈止损。
+>
+> **3. 状态机流转**
+> - 禁止任何标的跳过 `VALIDATED` 节点直接进入 `ENTERED`（除手动添加外）。
+
+---
+
+## 🔴 当前任务: Phase 4 留强去弱自动化 (开发中)
 
 **状态**: 🔴 进行中
-**目标**: 进一步整合日内决策逻辑，优化跨进程数据同步，完善自动化测试套件。
+**目标**: 提升持仓股的动态管理能力，实现基于日线走势的自动离场与降级。
 
 ### 核心子任务
 
 | 序号 | 任务描述 | 状态 |
 |------|----------|------|
-| 1 | **端到端逻辑验证**: 使用 `test_signal_suite.py` 完整跑通所有形态的闭环测试 | ⏳ 待办 |
-| 2 | **策略循环解耦**: 持续优化 `stock_live_strategy._check_strategies` 的可预测性 | ⏳ 待办 |
-| 3 | **跨进程性能监控**: 优化 `trade_visualizer_qt6.py` 的 IPC 吞吐性能 | ⏳ 待办 |
+| 1 | **UI 增强**: 在 HotlistPanel 实现形态分、描述与来源的列对齐展示 | ✅ |
+| 2 | **趋势评估**: 在 `cleanup_stale_signals` 中集成收盘强弱评分 | ⏳ 待办 |
+| 3 | **留强去弱**: 实现持仓股跌破 MA5 或出现顶部信号时的自动 EXITED 触发 | ⏳ 待办 |
 
 ### 历史记录
 - **实施计划**: `20260203_0214_implementation_plan.md`
@@ -365,12 +381,11 @@ if hasattr(self, 'pattern_detector'):
 
 ## 📅 变更日志
 
-| 日期 | 内容 | 影响 |
-|------|------|------|
+| 02-10 18:00 | **紧急 BUG 修复**: 修复 `trading_hub.py` 的 NameError (Dict) 与 `instock_MonitorTK.py` 的 NoneType 崩溃 | `trading_hub.py`, `instock_MonitorTK.py` |
+| 02-10 17:50 | **P3/P4 统一流水线整合**: 实现以 Watchlist 为核心的状态机，重构验证评分 (Threshold=0.7)，UI 列对齐 | `trading_hub.py`, `hotlist_panel.py`, `stock_live_strategy.py` |
+| 02-10 17:00 | **数据库结构修复**: 恢复损坏的 trading_signals.db，补全 Watchlist 形态字段 | `trading_hub.py`, `sqlite3` |
 | 02-03 02:20 | **P1.6 信号标准化**: 统一 SignalStandard 结构，修复 Visualizer IPC 接收逻辑 | `intraday_pattern_detector.py`, `trade_visualizer_qt6.py` |
 | 02-02 20:30 | **P0.9 完结**: TD/TopScore 实时报警集 | `stock_live_strategy.py`, `strategy_manager.py` |
-| 02-02 21:00 | **主升浪持仓优化 (P0/P1) 完成**：集成 TD 序列及日线顶部信号检测，实现主升浪持仓保护逻辑，升级状态机支持主升识别 | `td_sequence.py`, `daily_top_detector.py`, `intraday_decision_engine.py`, `position_phase_engine.py` |
-| 02-02 19:05 | **启动主升浪持仓优化任务**：基于 002667 案例，规划 TD 序列、顶部检测器及主升浪保护逻辑 | `gemini.md`, `implementation_plan.md` |
 | 01-24 03:41 | **P1.5 缺口监控与自动跟单完成**：集成向量化全市场缺口扫描，支持自动加入 `TradingHub` 跟单队列，优化 K 线缺口无限带显示 | `trade_visualizer_qt6.py`, `hotlist_panel.py`, `signal_types.py` |
 | 01-23 16:45 | **P6 策略整合完成**：统一日K形态检测，标准化竞价/盘中跟单逻辑 | `stock_live_strategy.py`, `daily_pattern_detector.py`, `daily_strategy_loader.py` |
 | 01-23 12:14 | 板块联动策略优化：聚焦连阳加速+回踩MA5/10启动模式 | `stock_live_strategy.py` |

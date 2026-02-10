@@ -7417,6 +7417,53 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception:
             pass
 
+    def _get_watchlist_signals(self, code, day_df) -> list[SignalPoint]:
+        """获取观察池信号标记 (WATCH)"""
+        signals = []
+        try:
+            # 1. 优先处理显式传递的上下文 (来自双击/联动)
+            if getattr(self, 'current_signal_type', None) == 'watchlist' and getattr(self, 'current_signal_date', None):
+                t_date = self.current_signal_date
+                idx = self._find_date_index(day_df, t_date)
+                if idx != -1:
+                    price = day_df['close'].iloc[idx]
+                    signals.append(SignalPoint(
+                        code=code, timestamp=t_date, bar_index=idx, price=price,
+                        signal_type=SignalType.WATCH, reason="Watchlist Trigger (Context)"
+                    ))
+                return signals
+
+            # 2. 数据库回溯 (兜底显示)
+            import sqlite3
+            db_path = "signal_strategy.db"
+            if not os.path.exists(db_path):
+                return signals
+                
+            conn = sqlite3.connect(db_path, timeout=5)
+            c = conn.cursor()
+            c.execute("""
+                SELECT discover_date, discover_price 
+                FROM hot_stock_watchlist 
+                WHERE code = ? AND validation_status != 'DROPPED'
+                ORDER BY discover_date DESC LIMIT 1
+            """, (code[:6],))
+            row = c.fetchone()
+            conn.close()
+            
+            if row:
+                d_date, d_price = row
+                if d_date:
+                    idx = self._find_date_index(day_df, d_date)
+                    if idx != -1:
+                        price = d_price if d_price else day_df['close'].iloc[idx]
+                        signals.append(SignalPoint(
+                            code=code, timestamp=d_date, bar_index=idx, price=price,
+                            signal_type=SignalType.WATCH, reason="Watchlist Discovery"
+                        ))
+        except Exception as e:
+            logger.debug(f"Error getting watchlist signals: {e}")
+        return signals
+
     def _draw_single_line(self, day_df, target_date, price, prefix, color):
         idx = self._find_date_index(day_df, target_date)
         if idx == -1: return
@@ -7983,7 +8030,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
         if self.show_strategy_simulation:
-            with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
+            with timed_ctx("_run_strategy_simulation_signal", warn_ms=100):
                 kline_signals.extend(self._run_strategy_simulation_new50(code, day_df, n_rows=50))
 
         # 2. 实盘日志历史信号 (CSV) - 引入缓存优化
@@ -8056,6 +8103,11 @@ class MainWindow(QMainWindow, WindowMixin):
         follow_signals = self._get_follow_signals(code, day_df)
         if follow_signals:
              kline_signals.extend(follow_signals)
+             
+        # 5. Watchlist Discovery Signals (Integrated)
+        watch_signals = self._get_watchlist_signals(code, day_df)
+        if watch_signals:
+            kline_signals.extend(watch_signals)
 
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
