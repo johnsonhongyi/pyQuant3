@@ -1670,7 +1670,7 @@ class StockLiveStrategy:
                     'ma10': float(row.get('ma10d', 0)),
                     'upper': float(row.get('upper', 0)),
                     'high4': float(row.get('high4', 0)),
-                    'volume_ratio': float(row.get('volume', 0)),
+                    'volume_ratio': float(row.get('volume', 0)) if float(row.get('volume', 0)) <= 500 else 1.0,  # >500为原始成交量,非量比
                     'win': int(row.get('win', 0)),
                 }
             
@@ -2015,6 +2015,7 @@ class StockLiveStrategy:
                     current_nclose = float(row.get('nclose', 0.0)) # type: ignore
                     current_change = float(row.get('percent', 0.0)) # type: ignore
                     volume_change = float(row.get('volume', 0.0)) # type: ignore
+                    if volume_change > 500: volume_change = 1.0 # 防御处理：若数值巨大则视为原始成交量，量比回退至 1.0
                     ratio_change = float(row.get('ratio', 0.0)) # type: ignore
                     # ma5d_change, ma10d_change 仅获取确保存在，但不直接使用
                     _ = float(row.get('ma5d', 0.0)) # type: ignore
@@ -2340,20 +2341,57 @@ class StockLiveStrategy:
                         messages.append(("RULE", msg))
 
                 # ---------- [NEW] 起跳新星探测逻辑 (win_upper 0 -> 1) ----------
-                # 逻辑：上一个状态为 0 (未站稳)，当前状态 >= 1 (开始站稳)
-                # 配合量能过滤，提高准度
+                # 优化逻辑 (符合用户设计的起跳模式)：
+                # 1. 结构确认: win_upper1 >= 1 (开始站稳压力位)
+                # 2. 形态确认: 高开(>1%) 或 开盘即最低(影线<0.2%)
+                # 3. 趋势确认: 相比开盘价不回落 (高走)
+                # 4. 量能确认: 虚拟量比 > 1.2
                 curr_win_u1 = int(row.get('win_upper1', 0))
-                prev_win_u1 = int(data.get('prev_win_upper1', curr_win_u1)) # 从 data 级(持久)或初始化获取
                 
-                if prev_win_u1 == 0 and curr_win_u1 >= 1:
-                    # 获取 gem_score (形态打分) 进行辅助过滤，如果不存在则默认为高分以触发
-                    gem_score = float(row.get('gem_score', 20.0))
-                    if volume_change > 1.2 and gem_score > 15:
-                        msg = f"🌟 [起跳新星]: {data['name']} 形态修复完成, 站稳压力位! 量能 {volume_change:.1f} 基因 {gem_score:.0f}"
-                        messages.append(("PATTERN", msg))
-                        logger.info(f"🚀 Detected BREAKOUT_STAR for {code} {data['name']}: win_upper1 jump 0->{curr_win_u1}")
+                # 初始化单日触发标记 (snap 会随监控项持久化)
+                if 'star_triggered_date' not in snap:
+                    snap['star_triggered_date'] = ""
                 
-                # 更新持久化状态供下一次循环比对
+                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                
+                # 核心判定：必须要结构性起跳，且今日未在该周期触发过
+                if curr_win_u1 >= 1 and snap['star_triggered_date'] != today_str:
+                    prev_close = float(row.get('lastp1d', 0.0))
+                    open_price = float(row.get('open', 0.0))
+                    low_price = float(row.get('low', 0.0))
+                    
+                    if prev_close > 0 and open_price > 0:
+                        # 指标 1: 高开高走 (高开1%以上且当前不低于开盘)
+                        is_high_open_walk = open_price > prev_close * 1.01 and current_price >= open_price
+                        
+                        # 指标 2: 最低价即开盘价 (影线极短 < 0.2% 视为“早盘最低高走”)
+                        is_open_is_low = (open_price - low_price) / open_price < 0.002 and current_price >= open_price
+                        
+                        # 形态评分辅助 (gem_score)
+                        gem_score = float(row.get('gem_score', row.get('gem_tops', 15.0)))
+                        
+                        # 综合触发条件: (高开高走 OR 开盘最低) 且 满足量能与基本基因分
+                        # 优化 [量能扩张结构]: 
+                        # 1. 虚拟量比 > 1.5 (基准门槛)
+                        # 2. 换手率 > 0.3% (防止微量启动)
+                        # 3. 量能趋势: 当前量比 > 前值 (扩量) 或 处于极端放量区 (>2.5)
+                        curr_vol_ratio = volume_change
+                        prev_vol_ratio = snap.get('last_star_vol', 0.0)
+                        snap['last_star_vol'] = curr_vol_ratio # 记录供下次比对
+                        
+                        is_vol_expanding = curr_vol_ratio > prev_vol_ratio or curr_vol_ratio > 2.5
+                        is_ratio_ok = ratio_change > 0.3
+                        
+                        if (is_high_open_walk or is_open_is_low) and curr_vol_ratio > 1.5 and is_vol_expanding and is_ratio_ok and gem_score > 12:
+                            reason_star = "高开高走" if is_high_open_walk else "起跳最低点"
+                            if curr_win_u1 == 1: reason_star = "首日" + reason_star
+                            
+                            msg_star = f"🌟 [起跳新星]: {data['name']} {reason_star}站稳压力位! 量能 {curr_vol_ratio:.1f} 基因 {gem_score:.1f}"
+                            messages.append(("PATTERN", msg_star))
+                            snap['star_triggered_date'] = today_str # 锁定记录，防轰炸
+                            logger.info(f"🚀 BREAKOUT_STAR triggered: {code} {data['name']} | reason:{reason_star} vol:{curr_vol_ratio:.1f} (prev:{prev_vol_ratio:.1f}) ratio:{ratio_change} score:{gem_score:.1f}")
+                
+                # 维持原有状态链同步
                 data['prev_win_upper1'] = curr_win_u1
 
                 # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
@@ -4175,6 +4213,8 @@ class StockLiveStrategy:
                             'open': float(row.get('open', 0)),
                             'ma5': float(row.get('ma5d', 0)),
                             'ma10': float(row.get('ma10d', 0)),
+                            'upper': float(row.get('upper', 0)),
+                            'volume_ratio': float(row.get('volume', 0)) if float(row.get('volume', 0)) <= 500 else 1.0,  # >500为原始成交量,非量比
                             'win': int(row.get('win', 0)),
                         }
                     eval_res = hub.evaluate_holding_strength(ohlc_data)
