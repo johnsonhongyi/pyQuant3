@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from JohnsonUtil import LoggerFactory
+from db_utils import SQLiteConnectionManager
+
 logger: logging.Logger = LoggerFactory.getLogger()
 
 
@@ -98,7 +100,9 @@ class TradingHub:
     
     def _init_tables(self):
         """初始化新增表结构"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         c = conn.cursor()
         
         # 待跟单队列表
@@ -242,7 +246,6 @@ class TradingHub:
         c.execute("CREATE INDEX IF NOT EXISTS idx_hw_code ON hot_stock_watchlist(code)")
         
         conn.commit()
-        conn.close()
         logger.info("[TradingHub] Tables initialized")
     
     # =========== 待跟单队列管理 ===========
@@ -250,7 +253,9 @@ class TradingHub:
     def add_to_follow_queue(self, signal: TrackedSignal) -> bool:
         """添加信号到待跟单队列"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -290,7 +295,6 @@ class TradingHub:
                 ))
             
             conn.commit()
-            conn.close()
             logger.info(f"[TradingHub] Added to follow queue: {signal.code} {signal.name}")
             return True
         except Exception as e:
@@ -300,12 +304,13 @@ class TradingHub:
     def delete_from_follow_queue(self, code: str) -> bool:
         """从跟单队列中物理删除"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             c.execute("DELETE FROM follow_queue WHERE code = ?", (code,))
             rows_affected = c.rowcount
             conn.commit()
-            conn.close()
             
             if rows_affected > 0:
                 logger.info(f"[TradingHub] Deleted from follow queue: {code}")
@@ -317,7 +322,9 @@ class TradingHub:
 
     def get_follow_queue(self, status: str = None) -> list[TrackedSignal]:
         """获取待跟单队列"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         c = conn.cursor()
         
         # [FIX] 显式列名查询，防止 SELECT * 导致的索引偏移 (could not convert string to float: 'TRACKING')
@@ -338,7 +345,6 @@ class TradingHub:
             c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status != 'EXITED' AND status != 'CANCELLED' ORDER BY priority DESC, detected_date")
         
         rows = c.fetchall()
-        conn.close()
         
         def safe_float(val, default=0.0):
             try:
@@ -386,7 +392,9 @@ class TradingHub:
             exit_date: 离场日期 (仅在 EXITED 状态时使用,格式: YYYY-MM-DD HH:MM:SS)
         """
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -425,7 +433,6 @@ class TradingHub:
             
             if not update_fields:
                 # Nothing to update
-                conn.close()
                 return True
             
             # 执行更新
@@ -434,32 +441,120 @@ class TradingHub:
             c.execute(sql, tuple(update_values))
             
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"[TradingHub] Update follow status error: {e}")
             return False
     
     def get_follow_queue_df(self) -> pd.DataFrame:
-        """获取待跟单队列(DataFrame格式)"""
-        conn = sqlite3.connect(self.signal_db)
-        df = pd.read_sql_query(
-            "SELECT * FROM follow_queue WHERE status NOT IN ('EXITED', 'CANCELLED') ORDER BY priority DESC",
-            conn
+        """获取待跟单队列(DataFrame格式) - 去重版本
+        
+        去重规则:
+        1. 同一股票(code)只保留一条记录
+        2. 优先级: 优先级高 > 时间新 > 价格高
+        3. 合并多个入场理由到 notes 字段
+        """
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
+        
+        # 使用窗口函数去重,保留每个股票的最优记录
+        query = """
+        WITH ranked_queue AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY code
+                       ORDER BY priority DESC, detected_date DESC, detected_price DESC
+                   ) as rn
+            FROM follow_queue
+            WHERE status NOT IN ('EXITED', 'CANCELLED')
+        ),
+        distinct_notes AS (
+            SELECT DISTINCT code, notes, signal_type
+            FROM follow_queue
+            WHERE status NOT IN ('EXITED', 'CANCELLED')
+              AND (notes IS NOT NULL AND notes != '')
+        ),
+        merged_notes AS (
+            SELECT 
+                code,
+                GROUP_CONCAT(notes, '; ') as all_notes,
+                GROUP_CONCAT(signal_type, ', ') as all_signal_types
+            FROM distinct_notes
+            GROUP BY code
         )
-        conn.close()
+        SELECT 
+            rq.*,
+            COALESCE(mn.all_notes, rq.notes) as merged_notes,
+            COALESCE(mn.all_signal_types, rq.signal_type) as merged_signal_types
+        FROM ranked_queue rq
+        LEFT JOIN merged_notes mn ON rq.code = mn.code
+        WHERE rq.rn = 1
+        ORDER BY rq.priority DESC, rq.detected_date DESC
+        """
+        
+        df = pd.read_sql_query(query, conn)
+        
+        # 用合并后的理由替换原理由
+        if not df.empty and 'merged_notes' in df.columns:
+            df['notes'] = df['merged_notes']
+            df['signal_type'] = df['merged_signal_types']
+            df = df.drop(columns=['merged_notes', 'merged_signal_types', 'rn'], errors='ignore')
+        
         return df
 
     def get_watchlist_df(self) -> pd.DataFrame:
-        """获取热股观察池(DataFrame格式)"""
-        conn = sqlite3.connect(self.signal_db)
-        # 获取除了已废弃外的所有状态，按日期和评分排序
-        df = pd.read_sql_query(
-            "SELECT * FROM hot_stock_watchlist WHERE validation_status != 'DROPPED' "
-            "ORDER BY discover_date DESC, trend_score DESC",
-            conn
+        """获取热股观察池(DataFrame格式) - 去重版本
+        
+        去重规则:
+        1. 同一股票(code)只保留一条记录
+        2. 优先级: 趋势分数高 > 日期新 > 形态分数高
+        3. 合并多个发现理由到 daily_patterns 字段
+        """
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
+        
+        # 使用窗口函数去重,保留每个股票的最优记录
+        query = """
+        WITH ranked_watchlist AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY code
+                       ORDER BY trend_score DESC, discover_date DESC, pattern_score DESC
+                   ) as rn
+            FROM hot_stock_watchlist
+            WHERE validation_status != 'DROPPED'
+        ),
+        distinct_patterns AS (
+            SELECT DISTINCT code, daily_patterns
+            FROM hot_stock_watchlist
+            WHERE validation_status != 'DROPPED'
+              AND (daily_patterns IS NOT NULL AND daily_patterns != '')
+        ),
+        merged_patterns AS (
+            SELECT 
+                code,
+                GROUP_CONCAT(daily_patterns, '; ') as all_patterns
+            FROM distinct_patterns
+            GROUP BY code
         )
-        conn.close()
+        SELECT 
+            rw.*,
+            COALESCE(mp.all_patterns, rw.daily_patterns) as merged_patterns
+        FROM ranked_watchlist rw
+        LEFT JOIN merged_patterns mp ON rw.code = mp.code
+        WHERE rw.rn = 1
+        ORDER BY rw.discover_date DESC, rw.trend_score DESC
+        """
+        
+        df = pd.read_sql_query(query, conn)
+        
+        # 用合并后的形态描述替换原描述
+        if not df.empty and 'merged_patterns' in df.columns:
+            df['daily_patterns'] = df['merged_patterns']
+            df = df.drop(columns=['merged_patterns', 'rn'], errors='ignore')
+        
         return df
     
     def cleanup_stale_signals(self, max_days: int = 2, current_prices: dict[str, float] = None, check_breakout: bool = False) -> dict[str, list[str]]:
@@ -484,7 +579,9 @@ class TradingHub:
         """
         results = {"CANCEL_SIGNAL": [], "STALE_SIGNAL": [], "CANCEL_HOTLIST": []}
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now()
             
@@ -603,7 +700,6 @@ class TradingHub:
                     logger.info(f"[TradingHub] Queue Limit Cleanup: {r_code} {r_name} CANCELLED")
 
             conn.commit()
-            conn.close()
             return results
             
         except Exception as e:
@@ -621,9 +717,10 @@ class TradingHub:
             False: 数据库损坏
         """
         try:
-            conn = sqlite3.connect(self.signal_db, timeout=5)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             result = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
             return result[0] == 'ok'
         except Exception as e:
             logger.error(f"[TradingHub] DB integrity check failed: {e}")
@@ -634,7 +731,9 @@ class TradingHub:
     def add_position(self, position: Position) -> bool:
         """添加持仓记录"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -650,7 +749,6 @@ class TradingHub:
             ))
             
             conn.commit()
-            conn.close()
             logger.info(f"[TradingHub] Added position: {position.code}")
             return True
         except Exception as e:
@@ -659,7 +757,9 @@ class TradingHub:
     
     def get_positions(self, status: str = "HOLDING") -> list[Position]:
         """获取持仓列表"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         c = conn.cursor()
         
         # [FIX] 显式列名查询，防止索引偏移
@@ -671,7 +771,6 @@ class TradingHub:
         
         c.execute(f"SELECT {query_cols} FROM positions WHERE status = ? ORDER BY entry_date DESC", (status,))
         rows = c.fetchall()
-        conn.close()
         
         def safe_float(val, default=0.0):
             try:
@@ -699,14 +798,15 @@ class TradingHub:
     def update_position_price(self, code: str, current_price: float) -> bool:
         """更新持仓现价和盈亏"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             
             # 获取入场价
             c.execute("SELECT entry_price FROM positions WHERE code = ? AND status = 'HOLDING'", (code,))
             row = c.fetchone()
             if not row:
-                conn.close()
                 return False
             
             entry_price = row[0]
@@ -719,7 +819,6 @@ class TradingHub:
             """, (current_price, pnl_pct, now, code))
             
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"[TradingHub] Update position price error: {e}")
@@ -729,7 +828,9 @@ class TradingHub:
     
     def get_strategy_performance(self, strategy_name: str = None, days: int = 30) -> pd.DataFrame:
         """获取策略绩效统计"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
@@ -744,14 +845,15 @@ class TradingHub:
                 conn, params=(start_date,)
             )
         
-        conn.close()
         return df
     
     def update_strategy_stats(self, strategy_name: str, date: str, 
                               signals: int, entered: int, wins: int, losses: int, pnl: float):
         """更新策略绩效"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             
             total = wins + losses
@@ -764,7 +866,6 @@ class TradingHub:
             """, (strategy_name, date, signals, entered, wins, losses, pnl, win_rate))
             
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"[TradingHub] Update strategy stats error: {e}")
@@ -772,14 +873,15 @@ class TradingHub:
     
     def get_daily_pnl(self, days: int = 30) -> pd.DataFrame:
         """获取每日盈亏统计"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
         df = pd.read_sql_query(
             "SELECT * FROM daily_pnl WHERE date >= ? ORDER BY date DESC",
             conn, params=(start_date,)
         )
-        conn.close()
         return df
     
     def get_slippage_analysis(self, days: int = 30) -> pd.DataFrame:
@@ -794,7 +896,9 @@ class TradingHub:
             - slippage_pct: 滑点百分比 ((entry - detected) / detected * 100)
             - slippage_direction: '追高' or '低吸' or '准确'
         """
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
         # Join follow_queue and positions on code
@@ -812,7 +916,6 @@ class TradingHub:
         """
         
         df = pd.read_sql_query(query, conn, params=(start_date,))
-        conn.close()
         
         if df.empty:
             return df
@@ -869,26 +972,28 @@ class TradingHub:
     
     def get_trading_history(self, days: int = 30) -> pd.DataFrame:
         """从 trading_signals.db 获取交易历史"""
-        conn = sqlite3.connect(self.trading_db)
+        mgr = SQLiteConnectionManager.get_instance(self.trading_db)
+
+        conn = mgr.get_connection()
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
         df = pd.read_sql_query(
             "SELECT * FROM trade_records WHERE buy_date >= ? ORDER BY buy_date DESC",
             conn, params=(start_date,)
         )
-        conn.close()
         return df
     
     def get_signal_history(self, days: int = 7) -> pd.DataFrame:
         """从 signal_strategy.db 获取信号历史"""
-        conn = sqlite3.connect(self.signal_db)
+        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+        conn = mgr.get_connection()
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
         df = pd.read_sql_query(
             "SELECT * FROM signal_message WHERE created_date >= ? ORDER BY created_date DESC, priority DESC",
             conn, params=(start_date,)
         )
-        conn.close()
         return df
     
     
@@ -909,7 +1014,8 @@ class TradingHub:
         """
         try:
             # 1. Read from Legacy DB
-            conn_legacy = sqlite3.connect(self.trading_db)
+            mgr_legacy = SQLiteConnectionManager.get_instance(self.trading_db)
+            conn_legacy = mgr_legacy.get_connection()
             legacy_df = pd.read_sql_query("SELECT * FROM trade_records WHERE status='OPEN'", conn_legacy)
             conn_legacy.close()
             
@@ -917,7 +1023,8 @@ class TradingHub:
                 return 0
                 
             # 2. Upsert into Hub DB
-            conn_hub = sqlite3.connect(self.signal_db)
+            mgr_hub = SQLiteConnectionManager.get_instance(self.signal_db)
+            conn_hub = mgr_hub.get_connection()
             c = conn_hub.cursor()
             
             synced_count = 0
@@ -963,7 +1070,9 @@ class TradingHub:
         全量归集：将各路选股结果写入观察队列（不直接跟单）
         """
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now()
             today_str = now.strftime('%Y-%m-%d')
@@ -980,7 +1089,6 @@ class TradingHub:
                     c.execute("UPDATE hot_stock_watchlist SET daily_patterns=?, pattern_score=MAX(pattern_score, ?), updated_at=? WHERE id=?",
                               (new_pts, pattern_score, now.strftime('%Y-%m-%d %H:%M:%S'), wid))
                     conn.commit()
-                conn.close()
                 return False  
 
             c.execute("""
@@ -993,7 +1101,6 @@ class TradingHub:
                   now.strftime('%Y-%m-%d %H:%M:%S'), now.strftime('%Y-%m-%d %H:%M:%S')))
 
             conn.commit()
-            conn.close()
             logger.info(f"[TradingHub] Watchlist+: {code} {name} @{price:.2f} [{daily_patterns}] Score={pattern_score}")
             return True
         except Exception as e:
@@ -1033,7 +1140,9 @@ class TradingHub:
             return results
 
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -1152,7 +1261,6 @@ class TradingHub:
                     results['watching'].append(f"{name}({code}) Score={total_score:.2f}")
 
             conn.commit()
-            conn.close()
             logger.info(f"[TradingHub] Watchlist validation: "
                         f"validated={len(results['validated'])}, "
                         f"dropped={len(results['dropped'])}, "
@@ -1172,7 +1280,9 @@ class TradingHub:
         """
         promoted = []
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now = datetime.now()
             now_str = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -1242,7 +1352,6 @@ class TradingHub:
                             f"priority={priority} strategy=竞价买入")
 
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"[TradingHub] promote_validated_stocks error: {e}")
 
@@ -1267,7 +1376,9 @@ class TradingHub:
             return results
 
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -1339,7 +1450,6 @@ class TradingHub:
                     results['strong'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
 
             conn.commit()
-            conn.close()
             logger.info(f"[TradingHub] Holding evaluation: "
                         f"strong={len(results['strong'])}, "
                         f"warning={len(results['warning'])}, "
@@ -1352,7 +1462,9 @@ class TradingHub:
     def get_watchlist_summary(self) -> dict[str, Any]:
         """获取观察队列统计（供UI展示）"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             c.execute("""
                 SELECT validation_status, COUNT(*) 
@@ -1374,7 +1486,6 @@ class TradingHub:
                 'score': r[3], 'cs': r[4]
             } for r in c.fetchall()]
 
-            conn.close()
             return {
                 'status_counts': status_counts,
                 'validated_top': validated_top,
@@ -1387,7 +1498,9 @@ class TradingHub:
     def get_watchlist_df(self, status: str = None) -> 'pd.DataFrame':
         """获取观察队列 DataFrame"""
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             if status:
                 df = pd.read_sql_query(
                     "SELECT * FROM hot_stock_watchlist WHERE validation_status=? ORDER BY trend_score DESC",
@@ -1395,7 +1508,6 @@ class TradingHub:
             else:
                 df = pd.read_sql_query(
                     "SELECT * FROM hot_stock_watchlist ORDER BY updated_at DESC", conn)
-            conn.close()
             return df
         except Exception as e:
             logger.error(f"[TradingHub] get_watchlist_df error: {e}")
@@ -1412,7 +1524,9 @@ class TradingHub:
             更新的记录数
         """
         try:
-            conn = sqlite3.connect(self.signal_db)
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+
+            conn = mgr.get_connection()
             c = conn.cursor()
             
             # 获取所有需要更新板块信息的记录
@@ -1424,7 +1538,6 @@ class TradingHub:
             codes_to_update = [row[0] for row in c.fetchall()]
             
             if not codes_to_update:
-                conn.close()
                 return 0
             
             updated_count = 0
@@ -1450,7 +1563,6 @@ class TradingHub:
                             updated_count += 1
             
             conn.commit()
-            conn.close()
             
             if updated_count > 0:
                 logger.info(f"[TradingHub] Batch updated {updated_count} watchlist sectors")

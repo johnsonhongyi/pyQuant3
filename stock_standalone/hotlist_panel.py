@@ -132,15 +132,18 @@ class HotlistWorker(QThread):
         
         while self._running:
             try:
-                # 1. 拉取跟单队列数据
+                # 1. 拉取数据
                 hub = get_trading_hub()
                 df_follow = hub.get_follow_queue_df()
                 
-                # [NEW] 1.2 拉取热股观察池数据
                 df_watchlist = pd.DataFrame()
                 if hasattr(hub, 'get_watchlist_df'):
                     df_watchlist = hub.get_watchlist_df()
                 
+                # [NEW] 在后台线程中补全板块信息, 避免 UI 卡死
+                if not df_watchlist.empty:
+                    self._augment_watchlist_sectors(df_watchlist)
+
                 # 2. 发送数据 (不要在线程里操作 UI)
                 self.data_ready.emit(df_follow, "")
                 if not df_watchlist.empty:
@@ -155,6 +158,44 @@ class HotlistWorker(QThread):
             for _ in range(int(self.interval * 10)):
                 if not self._running: break
                 time.sleep(0.1)
+
+    def _augment_watchlist_sectors(self, df):
+        """后台纯内存补全板块信息, 不持久化写数据库 (最高效安全)"""
+        try:
+            # 1. 获取最近热点板块映射 (内存字典)
+            hot_concepts_map = {}
+            db_path = "./concept_pg_data.db"
+            if os.path.exists(db_path):
+                try:
+                    # 仅读取, 不涉及事务和锁
+                    mgr = SQLiteConnectionManager.get_instance(db_path)
+                    conn = mgr.get_connection()
+                    c = conn.cursor()
+                    # 获取最近一批板块及其代码列表
+                    c.execute("SELECT concept_name, code_list FROM concept_data ORDER BY date DESC LIMIT 30")
+                    for name, raw_list in c.fetchall():
+                        if not raw_list: continue
+                        # 清理并拆分代码列表
+                        clean_list = raw_list.replace('[','').replace(']','').replace("'",'').replace('"','').split(',')
+                        for code in clean_list:
+                            code = code.strip()
+                            if code and code not in hot_concepts_map:
+                                hot_concepts_map[code] = str(name)[:20]
+                except: pass
+
+            # 2. 内存合并: 补全 DataFrame (不写回数据库, 仅用于 UI 显示)
+            if not df.empty and 'sector' in df.columns:
+                def get_fast_sector(row):
+                    # 优先使用数据库已有的板块
+                    exist = str(row.sector).strip() if row.sector and str(row.sector) != 'None' else ""
+                    if exist: return exist
+                    # 否则从内存映射表中查找
+                    return hot_concepts_map.get(str(row.code), "")
+                
+                df['sector'] = df.apply(get_fast_sector, axis=1)
+                
+        except Exception as e:
+            logger.error(f"Memory augment sectors error: {e}")
 
     def stop(self):
         """停止工作线程"""
@@ -630,7 +671,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         # 定时刷新 PnL (仅 UI 更新,数据由 worker 提供)
         self.refresh_timer = QTimer(self)
-        # self.refresh_timer.timeout.connect(self._refresh_pnl)
+        self.refresh_timer.timeout.connect(self._refresh_pnl)
         self.refresh_timer.start(2000)
 
         layout.addLayout(status_bar)
@@ -738,7 +779,10 @@ class HotlistPanel(QWidget, WindowMixin):
         h_header = self.table.horizontalHeader()
         if h_header:
             h_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # 名称列拉伸
+            # [FIX] 名称列不再强制 Stretch 避免宽度过小时被压缩导致不显示
+            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            h_header.setMinimumSectionSize(40) # 基础最小宽度
+            self.table.setColumnWidth(2, 80)    # 默认给一个宽度
             h_header.setStretchLastSection(True) # 最后一列拉伸填充
         
         self.table.setSortingEnabled(True)
@@ -771,7 +815,9 @@ class HotlistPanel(QWidget, WindowMixin):
         hf = self.follow_table.horizontalHeader()
         if hf:
             hf.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            hf.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            # [FIX] 名称列不再使用 Stretch 模式进行强行压缩，确保完整显示
+            hf.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            self.follow_table.setColumnWidth(3, 80)
             hf.setStretchLastSection(True) # [FIX] 填充空白
         
         self.follow_table.setSortingEnabled(True) # [FIX] 启用排序
@@ -807,7 +853,9 @@ class HotlistPanel(QWidget, WindowMixin):
         hw = self.watchlist_table.horizontalHeader()
         if hw:
             hw.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            hw.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            # [FIX] 名称列显示不全修正
+            hw.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            self.watchlist_table.setColumnWidth(3, 80)
             hw.setStretchLastSection(True)
         
         self.watchlist_table.setSortingEnabled(True)
@@ -820,18 +868,67 @@ class HotlistPanel(QWidget, WindowMixin):
         
         layout.addWidget(self.watchlist_table)
 
+    def _update_item(self, table, row, col, value, sort_value=None, foreground=None):
+        """[HIGH-PERFORMANCE] 复用 Item，避免频繁销毁创建对象导致 UI 卡死"""
+        item = table.item(row, col)
+        
+        # 处理显示文本
+        if isinstance(value, float): display_text = f"{value:.2f}"
+        else: display_text = str(value)
+
+        # 降级：如果原有 Item 类型不匹配（比如原本是普通 Item 现在要 Numeric），则重建
+        if item and (isinstance(value, (int, float)) or sort_value is not None):
+            if not isinstance(item, NumericTableWidgetItem):
+                item = None
+
+        if not item:
+            # 创建新 Item
+            if isinstance(value, (int, float)) or sort_value is not None:
+                item = NumericTableWidgetItem(value, sort_value=sort_value)
+            else:
+                item = QTableWidgetItem(display_text)
+            table.setItem(row, col, item)
+        else:
+            # 复用并更新
+            if item.text() != display_text:
+                item.setText(display_text)
+            if sort_value is not None:
+                item.sort_value = sort_value # type: ignore
+        
+        # 统一设置对齐和颜色
+        if isinstance(value, (int, float)):
+            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+        if foreground:
+            item.setForeground(foreground)
+        else:
+            # 恢复默认颜色，防止复用时颜色污染
+            item.setForeground(QtGui.QBrush())
+        return item
+
     def _on_watchlist_data(self, df_watchlist: Optional[pd.DataFrame], error_msg: str):
         """Watchlist 数据回调"""
-        if error_msg or df_watchlist is None:
+        if error_msg or df_watchlist is None or df_watchlist.empty:
+            if df_watchlist is not None and df_watchlist.empty:
+                if hasattr(self, 'watchlist_table'): self.watchlist_table.setRowCount(0)
             return
+
+        # [NEW] 强势股跟随过滤：仅保留前 30 个，按趋势分和连强分排序
+        sort_cols = []
+        if 'trend_score' in df_watchlist.columns: sort_cols.append('trend_score')
+        if 'consecutive_strong' in df_watchlist.columns: sort_cols.append('consecutive_strong')
+        
+        if sort_cols:
+            df_watchlist = df_watchlist.sort_values(by=sort_cols, ascending=False).head(30)
+        else:
+            df_watchlist = df_watchlist.head(30)
         
         # [OPTIMIZE] 数据指纹检查,避免频繁全量刷新
-        new_fingerprint = ""
-        if not df_watchlist.empty:
-            # 使用代码列表和状态作为指纹
-            codes = sorted(df_watchlist['code'].astype(str).tolist())
-            statuses = df_watchlist['validation_status'].tolist() if 'validation_status' in df_watchlist.columns else []
-            new_fingerprint = f"{len(codes)}:{','.join(codes[:5])}:{','.join(map(str, statuses[:5]))}"
+        codes = sorted(df_watchlist['code'].astype(str).tolist())
+        statuses = df_watchlist['validation_status'].tolist() if 'validation_status' in df_watchlist.columns else []
+        new_fingerprint = f"{len(codes)}:{','.join(codes[:5])}:{','.join(map(str, statuses[:5]))}"
         
         old_fingerprint = getattr(self, '_last_watchlist_fingerprint', '')
         needs_full_rebuild = (new_fingerprint != old_fingerprint)
@@ -866,170 +963,68 @@ class HotlistPanel(QWidget, WindowMixin):
                     _ = self.watchlist_table.setSortingEnabled(False)
             
                 try:
-                    current_rows = self.watchlist_table.rowCount()
-                    needs_full_rebuild = False
+                    # [OPTIMIZE] 直接全量基于 _update_item，它内部会自动复用和最小化更新
+                    if self.watchlist_table.rowCount() != len(df):
+                        self.watchlist_table.setRowCount(len(df))
                     
-                    if current_rows != len(df):
-                        needs_full_rebuild = True
-                    else:
-                        # [OPTIMIZE] 如果开启了排序,视觉顺序 != 模型顺序,直接遍历会导致逻辑错位
-                        if is_sorted:
-                            needs_full_rebuild = False 
-                        else:
-                            for i, row in enumerate(df.itertuples()):
-                                item = self.watchlist_table.item(i, 2) # 代码列
-                                if not item or item.text() != str(row.code):
-                                    needs_full_rebuild = True
-                                    break
-                    
-                    if not needs_full_rebuild:
-                        # --- 增量更新 (支持排序状态) ---
-                        code_to_row = {}
-                        for r in range(current_rows):
-                            if (it := self.watchlist_table.item(r, 2)):
-                                code_to_row[it.text()] = r
-                        
-                        for row in df.itertuples():
-                            code_str = str(row.code)
-                            if code_str not in code_to_row:
-                                needs_full_rebuild = True # 发现新代码,触发全量
-                                break
-                            
-                            row_idx = code_to_row[code_str]
-                            
-                            # [NEW] 同步发现日期到 UserRole (确保联动有效)
-                            if (it := self.watchlist_table.item(row_idx, 2)):
-                                d_date = str(row.discover_date) if hasattr(row, 'discover_date') else ""
-                                if len(d_date) > 10: d_date = d_date[:10]
-                                it.setData(Qt.ItemDataRole.UserRole, d_date)
-
-                            # 状态更新
-                            status = str(row.validation_status)
-                            if (it := self.watchlist_table.item(row_idx, 1)):
-                                if it.text() != status:
-                                    it.setText(status)
-                                    if status == 'VALIDATED': it.setForeground(QColor('#00FF00'))
-                                    elif status == 'WATCHING': it.setForeground(QColor('#FFD700'))
-
-                            # 现价更新
-                            curr_price = 0.0
-                            if hasattr(self, '_last_price_map') and code_str in self._last_price_map:
-                                curr_price = self._last_price_map[code_str]
-                            
-                            price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
-                            if (it := self.watchlist_table.item(row_idx, 6)):
-                                if it.text() != price_txt:
-                                    it.setText(price_txt)
-                                    if hasattr(it, 'sort_value'): # type: ignore
-                                        it.sort_value = curr_price if curr_price > 0 else -1.0
-                            
-                            # [NEW] 盈亏% 更新 (Column 7)
-                            discover_price = float(row.discover_price or 0.0)
-                            if (it := self.watchlist_table.item(row_idx, 7)):
-                                pnl_pct = 0.0
-                                if discover_price > 0 and curr_price > 0:
-                                    pnl_pct = (curr_price - discover_price) / discover_price * 100
-                                pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
-                                
-                                if it.text() != pnl_txt:
-                                    it.setText(pnl_txt)
-                                    if hasattr(it, 'sort_value'): it.sort_value = pnl_pct if curr_price > 0 else -999.0 # type: ignore
-                                    if pnl_pct > 0: it.setForeground(QColor(220, 80, 80))
-                                    elif pnl_pct < 0: it.setForeground(QColor(80, 200, 120))
-                                    else: it.setForeground(QColor('#ddd'))
-                            
-                            # [NEW] 增量更新趋势等元数据 (Column 8-10)
-                            if (it := self.watchlist_table.item(row_idx, 8)):
-                                val = float(row.trend_score or 0.0)
-                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
-                                    it.setText(f"{val:.2f}")
-                                    it.sort_value = val # type: ignore
-                            if (it := self.watchlist_table.item(row_idx, 9)):
-                                val = float(row.volume_score or 0.0)
-                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
-                                    it.setText(f"{val:.2f}")
-                                    it.sort_value = val # type: ignore
-                            if (it := self.watchlist_table.item(row_idx, 10)):
-                                val = int(row.consecutive_strong or 0)
-                                if (it.sort_value if hasattr(it, 'sort_value') else -1) != val: # type: ignore
-                                    it.setText(str(val))
-                                    it.sort_value = val # type: ignore
-                        
-                        if not needs_full_rebuild:
-                            return
-
-                    # --- 全量重建 ---
                     self.watchlist_table.setUpdatesEnabled(False)
+                    needs_full_rebuild_dummy = False 
                     
-                    # 保存选中状态
+                    # 只有数据量较大且当前没有选中的情况下才临时关闭渲染
+                    self.watchlist_table.setUpdatesEnabled(False)
+                    v_scroll = self.watchlist_table.verticalScrollBar().value()
                     current_code = None
                     curr_row = self.watchlist_table.currentRow()
                     if curr_row >= 0:
-                        it = self.watchlist_table.item(curr_row, 2)
-                        if it: current_code = it.text()
-                    v_scroll = self.watchlist_table.verticalScrollBar().value()
-
-                    self.watchlist_table.setRowCount(len(df))
+                        if (it := self.watchlist_table.item(curr_row, 2)):
+                            current_code = it.text()
                     
                     for i, row in enumerate(df.itertuples()):
-                        # 0. 序号, 1. 状态, 2. 代码, 3. 名称, 4. 板块
-                        self.watchlist_table.setItem(i, 0, NumericTableWidgetItem(i+1))
+                        # 0. 序号
+                        self._update_item(self.watchlist_table, i, 0, i+1)
                         
                         code_str = str(row.code)
-                        status = str(row.validation_status)
-                        status_item = QTableWidgetItem(status)
-                        if status == 'VALIDATED': status_item.setForeground(QColor('#00FF00'))
-                        elif status == 'WATCHING': status_item.setForeground(QColor('#FFD700'))
-                        self.watchlist_table.setItem(i, 1, status_item)
+                        status = str(getattr(row, 'validation_status', ''))
+                        color = QColor('#00FF00') if status == 'VALIDATED' else (QColor('#FFD700') if status == 'WATCHING' else None)
+                        self._update_item(self.watchlist_table, i, 1, status, foreground=color)
                         
-                        code_item = QTableWidgetItem(code_str)
-                        # [NEW] 存入发现日期,用于 K 线图标记
-                        d_date = str(row.discover_date) if hasattr(row, 'discover_date') else ""
+                        it_code = self._update_item(self.watchlist_table, i, 2, code_str)
+                        # 存入发现日期,用于 K 线图标记
+                        d_date = str(getattr(row, 'discover_date', ''))
                         if len(d_date) > 10: d_date = d_date[:10]
-                        code_item.setData(Qt.ItemDataRole.UserRole, d_date)
-                        self.watchlist_table.setItem(i, 2, code_item)
-                        self.watchlist_table.setItem(i, 3, QTableWidgetItem(str(row.name)))
+                        it_code.setData(Qt.ItemDataRole.UserRole, d_date)
                         
-                        # [OPTIMIZE] 板块信息直接使用数据库字段,不做额外查询
-                        sector = str(row.sector) if row.sector else ""
-                        if sector and len(sector) > 20:
-                            sector = sector[:20]
-                            
-                        self.watchlist_table.setItem(i, 4, QTableWidgetItem(sector))
+                        self._update_item(self.watchlist_table, i, 3, str(row.name))
                         
-                        discover_price = float(row.discover_price or 0.0)
-                        self.watchlist_table.setItem(i, 5, NumericTableWidgetItem(discover_price))
+                        sector = str(getattr(row, 'sector', ''))
+                        self._update_item(self.watchlist_table, i, 4, sector[:20] if len(sector) > 20 else sector)
+                        
+                        discover_price = float(getattr(row, 'discover_price', 0.0) or 0.0)
+                        self._update_item(self.watchlist_table, i, 5, discover_price)
                         
                         curr_price = 0.0
                         if hasattr(self, '_last_price_map') and code_str in self._last_price_map:
                             curr_price = self._last_price_map[code_str]
-                        price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
-                        self.watchlist_table.setItem(i, 6, NumericTableWidgetItem(price_txt, sort_value=curr_price))
                         
-                        # [NEW] 盈亏% (PnL % in Watchlist)
-                        pnl_pct = 0.0
-                        if discover_price > 0 and curr_price > 0:
-                            pnl_pct = (curr_price - discover_price) / discover_price * 100
+                        self._update_item(self.watchlist_table, i, 6, curr_price if curr_price > 0 else "-", sort_value=curr_price)
+                        
+                        # 盈亏%
+                        pnl_pct = (curr_price - discover_price) / discover_price * 100 if discover_price > 0 and curr_price > 0 else 0.0
                         pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
-                        pnl_item = NumericTableWidgetItem(pnl_txt, sort_value=pnl_pct if curr_price > 0 else -999.0)
-                        if pnl_pct > 0: pnl_item.setForeground(QColor(220, 80, 80))
-                        elif pnl_pct < 0: pnl_item.setForeground(QColor(80, 200, 120))
-                        self.watchlist_table.setItem(i, 7, pnl_item)
+                        pnl_color = QColor(220, 80, 80) if pnl_pct > 0 else (QColor(80, 200, 120) if pnl_pct < 0 else None)
+                        self._update_item(self.watchlist_table, i, 7, pnl_txt, sort_value=pnl_pct if curr_price > 0 else -999.0, foreground=pnl_color)
                         
-                        # 索引偏移: 原 7-13 变为 8-14
-                        self.watchlist_table.setItem(i, 8, NumericTableWidgetItem(float(row.trend_score or 0.0)))
-                        self.watchlist_table.setItem(i, 9, NumericTableWidgetItem(float(row.volume_score or 0.0)))
-                        self.watchlist_table.setItem(i, 10, NumericTableWidgetItem(int(row.consecutive_strong or 0)))
-                        
-                        self.watchlist_table.setItem(i, 11, NumericTableWidgetItem(float(getattr(row, 'pattern_score', 0) or 0)))
+                        self._update_item(self.watchlist_table, i, 8, float(getattr(row, 'trend_score', 0) or 0))
+                        self._update_item(self.watchlist_table, i, 9, float(getattr(row, 'volume_score', 0) or 0))
+                        self._update_item(self.watchlist_table, i, 10, int(getattr(row, 'consecutive_strong', 0) or 0))
+                        self._update_item(self.watchlist_table, i, 11, float(getattr(row, 'pattern_score', 0) or 0))
                         
                         pat_desc = getattr(row, 'daily_patterns', "") or ""
-                        desc_item = QTableWidgetItem(str(pat_desc))
-                        desc_item.setToolTip(str(pat_desc))
-                        self.watchlist_table.setItem(i, 12, desc_item)
+                        it_pat = self._update_item(self.watchlist_table, i, 12, str(pat_desc))
+                        it_pat.setToolTip(str(pat_desc))
                         
-                        self.watchlist_table.setItem(i, 13, QTableWidgetItem(str(getattr(row, 'source', "") or "")))
-                        self.watchlist_table.setItem(i, 14, QTableWidgetItem(str(row.discover_date or "")))
+                        self._update_item(self.watchlist_table, i, 13, str(getattr(row, 'source', "") or ""))
+                        self._update_item(self.watchlist_table, i, 14, str(getattr(row, 'discover_date', '') or ""))
 
                     # 恢复状态
                     if current_code:
@@ -1041,11 +1036,15 @@ class HotlistPanel(QWidget, WindowMixin):
                     
                     self.watchlist_table.verticalScrollBar().setValue(v_scroll)
                 finally:
-                    if is_sorted:
-                        _ = self.watchlist_table.setSortingEnabled(True)
+                    # 只有在明确锁定的情况下才恢复, 且必须恢复
                     self.watchlist_table.setUpdatesEnabled(True)
                     self.watchlist_table.blockSignals(False)
-                    self.watchlist_table.resizeColumnsToContents()
+                    
+                    if is_sorted:
+                        _ = self.watchlist_table.setSortingEnabled(True)
+                    
+                    # [OPTIMIZE] 移除 resizeColumnsToContents(), 这是卡死的罪魁祸首!
+                    # 实时刷新时不应频繁进行重排版几何计算
                     
             except Exception as e:
                 logger.error(f"Update watchlist UI error: {e}")
@@ -1212,68 +1211,47 @@ class HotlistPanel(QWidget, WindowMixin):
             
         v_scroll = self.table.verticalScrollBar().value()
         
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(self.items))
+        if self.table.rowCount() != len(self.items):
+            self.table.setRowCount(len(self.items))
         
         for row, item in enumerate(self.items):
-            # 序号 (No.) - 传整数以支持正确排序
-            no_item = NumericTableWidgetItem(row + 1, sort_value=row + 1)
-            no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 0, no_item)
+            # 序号 (No.)
+            self._update_item(self.table, row, 0, row + 1)
             
-            # 代码
-            code_item = QTableWidgetItem(item.code)
-            self.table.setItem(row, 1, code_item)
+            # 代码 (Col 1)
+            self._update_item(self.table, row, 1, item.code)
             
-            # 名称
-            name_item = QTableWidgetItem(item.name)
-            self.table.setItem(row, 2, name_item)
+            # 名称 (Col 2)
+            self._update_item(self.table, row, 2, item.name)
             
-            # 加入价 - 传浮点数
-            add_price_item = NumericTableWidgetItem(item.add_price, sort_value=item.add_price)
-            add_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 3, add_price_item)
+            # 加入价 (Col 3)
+            self._update_item(self.table, row, 3, item.add_price)
             
-            # 现价 - 如果有值传浮点数，否则传字符串 "-"
-            cur_price_val = item.current_price if item.current_price > 0 else "-"
-            # 保持排序一致：无价格的放在最下面 (负无穷)
+            # 现价 (Col 4)
             sort_price = item.current_price if item.current_price > 0 else -1.0
-            cur_price_item = NumericTableWidgetItem(cur_price_val, sort_value=sort_price)
-            cur_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 4, cur_price_item)
+            self._update_item(self.table, row, 4, item.current_price if item.current_price > 0 else "-", sort_value=sort_price)
             
-            # 盈亏% - 格式化显示以匹配跟单队列风格 (显示 + 和 %)
+            # 盈亏% (Col 5)
             if item.current_price > 0:
                 pnl_val = f"{item.pnl_percent:+.2f}%"
+                pnl_color = QColor(220, 80, 80) if item.pnl_percent > 0 else (QColor(80, 200, 120) if item.pnl_percent < 0 else None)
             else:
                 pnl_val = "-"
+                pnl_color = None
             sort_pnl = item.pnl_percent if item.current_price > 0 else -999.0
-            pnl_item = NumericTableWidgetItem(pnl_val, sort_value=sort_pnl)
-            pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if item.pnl_percent > 0:
-                pnl_item.setForeground(QColor(220, 80, 80))  # 红色
-            elif item.pnl_percent < 0:
-                pnl_item.setForeground(QColor(80, 200, 120))  # 绿色
-            self.table.setItem(row, 5, pnl_item)
+            self._update_item(self.table, row, 5, pnl_val, sort_value=sort_pnl, foreground=pnl_color)
             
-            # 分组
-            group_item = QTableWidgetItem(item.group)
-            group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 6, group_item)
+            # 分组 (Col 6)
+            self._update_item(self.table, row, 6, item.group)
             
-            # 时间 (显示短时间格式)
+            # 时间 (Col 7)
             time_str = item.add_time[5:-3] if len(item.add_time) > 10 else item.add_time
-            time_item = QTableWidgetItem(time_str)
-            time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 7, time_item)
+            self._update_item(self.table, row, 7, time_str)
 
-            # 信号类型
-            signal_type_item = QTableWidgetItem(item.signal_type)
-            signal_type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 8, signal_type_item)
+            # 信号类型 (Col 8)
+            self._update_item(self.table, row, 8, item.signal_type)
         
-        # [RESTORE] 自动调整列宽以适应内容
-        self.table.resizeColumnsToContents()
+        # [RESTORE] 移除性能杀手 resizeColumnsToContents()
         # [FIX] 恢复选中项
         if current_code:
             for r in range(self.table.rowCount()):
@@ -1443,7 +1421,9 @@ class HotlistPanel(QWidget, WindowMixin):
                 # Actually let's just update the table directly in _refresh_table or store it in item.group for now
                 item.group = phase_map[item.code] or item.group
         
-        self._refresh_table()
+        # [OPTIMIZE] 仅当 Hotlist 标签可见时才执行主表格的刷新
+        if hasattr(self, 'tabs') and self.tabs.currentIndex() == 0:
+            self._refresh_table()
     
     def _on_tab_changed(self, index):
         """Tab 切换回调"""
@@ -1455,7 +1435,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 if (df := getattr(self, '_last_df_watchlist', None)) is not None:
                     self._update_watchlist_queue(df)
             
-            # 同步刷新一次 PnL
+            # [OPTIMIZE] 仅当数据源可用时才执行同步刷新，且增加冷却控制
             self._refresh_pnl_ui_only()
 
     def _on_worker_data(self, df_follow: Optional[pd.DataFrame], error_msg: str):
@@ -1503,6 +1483,12 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _refresh_pnl_ui_only(self):
         """仅做 UI 层面的 PnL 刷新 (优化主线程负载)"""
+        # [NEW] 节流保护：避免高频触发重绘
+        now = time.time()
+        if now - getattr(self, '_last_pnl_refresh_tick', 0) < 0.5:
+            return
+        self._last_pnl_refresh_tick = now
+
         # 1. 获取主窗口数据
         main_window = self._find_main_window()
         if not (main_window and hasattr(main_window, 'df_all' ) and not main_window.df_all.empty):
@@ -1525,15 +1511,20 @@ class HotlistPanel(QWidget, WindowMixin):
         price_map = {}
         phase_map = {}
         
-        # 2. 构建 6 位代码快速查找表 (优化查找性能)
-        lookup_6 = {}
-        for idx in df.index:
-            s_idx = str(idx)
-            code_6 = s_idx[-6:] if len(s_idx) >= 6 else s_idx
-            if code_6 not in lookup_6: # 优先保留完整匹配
-                lookup_6[code_6] = idx
+        # 2. 构建或复用 6 位代码快速查找表 (核心优化点：避免每秒重建)
+        lookup_6 = getattr(self, '_cached_lookup_6', None)
+        df_len = len(df)
+        if lookup_6 is None or getattr(self, '_last_df_len', 0) != df_len:
+            lookup_6 = {}
+            for idx in df.index:
+                s_idx = str(idx)
+                code_6 = s_idx[-6:] if len(s_idx) >= 6 else s_idx
+                if code_6 not in lookup_6: # 优先保留完整匹配
+                    lookup_6[code_6] = idx
+            self._cached_lookup_6 = lookup_6
+            self._last_df_len = df_len
 
-        # 3. 收集所有需要更新价格的代码 (Hotlist + Follow + Watch)
+        # 3. 收集更新代码
         codes_to_price = set(item.code for item in self.items)
         if (df_f := getattr(self, '_last_df_follow', None)) is not None and not df_f.empty:
             if 'code' in df_f.columns:
@@ -1542,8 +1533,9 @@ class HotlistPanel(QWidget, WindowMixin):
             if 'code' in df_w.columns:
                 codes_to_price.update(df_w['code'].unique().astype(str))
 
-         # 4. 更新缓存价格和板块信息
-        sector_map = {}  # [NEW] 板块信息缓存
+         # 4. 批量拉取数据 (减少 loc 调用次数)
+        sector_map = {}
+        hotlist_codes = {it.code for it in self.items} # [OPTIMIZE] Pre-calculate set for O(1) lookup
         
         for code in codes_to_price:
             t_idx = code if code in df.index else lookup_6.get(code[-6:] if len(code)>=6 else code)
@@ -1552,29 +1544,24 @@ class HotlistPanel(QWidget, WindowMixin):
                 close_p = float(row.get('close', row.get('price', 0)))
                 self._last_price_map[code] = close_p
                 
-                # [NEW] 缓存板块信息
+                # 缓存板块
                 category = str(row.get('category', ''))
                 if category:
-                    # 取第一个板块作为主板块
                     sectors = category.split(';')
                     main_sector = sectors[0] if sectors else ''
                     if main_sector:
                         sector_map[code] = main_sector
                 
-                # 如果是 Hotlist 的项，还需要更新 phase_map
-                # (这里也可以简单点,只要在 self.items 里的都放入 price_map)
-                is_in_hotlist = any(it.code == code for it in self.items)
-                if is_in_hotlist:
+                # Hotlist 额外数据
+                if code in hotlist_codes:
                     price_map[code] = close_p
                     phase = str(row.get('last_action', ''))
-                    if 'trade_phase' in row:
-                        phase = str(row['trade_phase'])
+                    if 'trade_phase' in row: phase = str(row['trade_phase'])
                     phase_map[code] = phase
         
-        # [NEW] 缓存板块信息供 Watchlist 使用
+        # 缓存板块信息供 Watchlist 使用
         if sector_map:
-            if not hasattr(self, '_last_sector_map'):
-                self._last_sector_map = {}
+            if not hasattr(self, '_last_sector_map'): self._last_sector_map = {}
             self._last_sector_map.update(sector_map)
         
         # 5. 分发更新并节流刷新 UI
@@ -1602,8 +1589,11 @@ class HotlistPanel(QWidget, WindowMixin):
             if row_count == 0:
                 return
             
-            # [OPTIMIZE] 阻塞信号,避免信号风暴
+            # [OPTIMIZE] 阻塞信号并关闭排序，避免 setText 触发高频重排 (Lag 的核心原因)
             _ = self.follow_table.blockSignals(True)
+            was_sorting = self.follow_table.isSortingEnabled()
+            if was_sorting:
+                self.follow_table.setSortingEnabled(False)
             
             # 一次性构建代码到行的映射
             code_to_row = {}
@@ -1628,7 +1618,11 @@ class HotlistPanel(QWidget, WindowMixin):
                             it.setText(price_txt)
                 
                 # 更新盈亏% (Col 5)
-                entry_price = getattr(row, 'entry_price', getattr(row, 'detected_price', 0.0))
+                # [FIX] Better fallback for entry_price
+                entry_price = float(getattr(row, 'entry_price', 0) or 0)
+                if entry_price <= 0:
+                    entry_price = float(getattr(row, 'detected_price', 0) or 0)
+                    
                 if entry_price > 0 and curr_price > 0:
                     pnl_pct = (curr_price - entry_price) / entry_price * 100
                     if (it := self.follow_table.item(row_idx, 5)):
@@ -1645,6 +1639,8 @@ class HotlistPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"Update follow prices error: {e}")
         finally:
+            if was_sorting:
+                self.follow_table.setSortingEnabled(True)
             _ = self.follow_table.blockSignals(False)
     
     def _update_watchlist_prices_only(self):
@@ -1658,8 +1654,11 @@ class HotlistPanel(QWidget, WindowMixin):
             if row_count == 0:
                 return
             
-            # [OPTIMIZE] 阻塞信号,避免信号风暴
+            # [OPTIMIZE] 性能保护
             _ = self.watchlist_table.blockSignals(True)
+            was_sorting = self.watchlist_table.isSortingEnabled()
+            if was_sorting:
+                self.watchlist_table.setSortingEnabled(False)
             
             # 一次性构建代码到行的映射
             code_to_row = {}
@@ -1702,24 +1701,31 @@ class HotlistPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"Update watchlist prices error: {e}")
         finally:
+            if was_sorting:
+                self.watchlist_table.setSortingEnabled(True)
             _ = self.watchlist_table.blockSignals(False)
 
     def update_prices(self, price_map: dict[str, float], phase_map: Optional[dict[str, str]] = None):
-        """
-        批量更新现价和盈亏
-        """
+        """批量更新现价和盈亏 (优化：仅当 Hotlist 可见时触发重绘)"""
+        changed = False
         for item in self.items:
             if item.code in price_map:
-                item.current_price = price_map[item.code]
-                if item.add_price > 0:
-                    item.pnl_percent = (item.current_price - item.add_price) / item.add_price * 100
+                new_p = price_map[item.code]
+                if abs(item.current_price - new_p) > 0.001:
+                    item.current_price = new_p
+                    if item.add_price > 0:
+                        item.pnl_percent = (item.current_price - item.add_price) / item.add_price * 100
+                    changed = True
             
             if phase_map and item.code in phase_map:
-                # Update visual only (since item struct doesn't have phase field yet, maybe reuse group or notes?)
-                # Actually let's just update the table directly in _refresh_table or store it in item.group for now
-                item.group = phase_map[item.code] or item.group
+                new_phase = phase_map[item.code] or item.group
+                if item.group != new_phase:
+                    item.group = new_phase
+                    changed = True
         
-        self._refresh_table()
+        if changed:
+            if hasattr(self, 'tabs') and self.tabs.currentIndex() == 0:
+                self._refresh_table()
 
     def flash_screen(self, color="#FF0000", duration=500):
         """
@@ -1797,7 +1803,11 @@ class HotlistPanel(QWidget, WindowMixin):
                             if hasattr(it, 'sort_value'): it.sort_value = curr_price if curr_price > 0 else -1.0
                     
                     # Col 5: PnL %
-                    entry_price = getattr(row, 'entry_price', getattr(row, 'detected_price', 0.0))
+                    # [FIX] Better fallback for entry_price
+                    entry_price = float(getattr(row, 'entry_price', 0) or 0)
+                    if entry_price <= 0:
+                        entry_price = float(getattr(row, 'detected_price', 0) or 0)
+                        
                     pnl_pct = 0.0
                     if entry_price > 0 and curr_price > 0:
                         pnl_pct = (curr_price - entry_price) / entry_price * 100
@@ -1852,81 +1862,58 @@ class HotlistPanel(QWidget, WindowMixin):
             v_scroll = self.follow_table.verticalScrollBar().value()
             h_scroll = self.follow_table.horizontalScrollBar().value()
 
-            # [FIX] Nuclear Option: Reset RowCount to 0 to guarantee no ghosts
-            self.follow_table.setRowCount(0)
-            self.follow_table.setRowCount(len(df))
+            if self.follow_table.rowCount() != len(df):
+                self.follow_table.setRowCount(len(df))
             
             for row_idx, row in enumerate(df.itertuples()):
-                # cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "理由", "时间"]
-                
                 # 0. No.
-                no_item = NumericTableWidgetItem(row_idx + 1)
-                no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.follow_table.setItem(row_idx, 0, no_item)
+                self._update_item(self.follow_table, row_idx, 0, row_idx + 1)
                 
                 # 1. Status
-                status_item = QTableWidgetItem(str(row.status))
-                if row.status == 'TRACKING':
-                    status_item.setForeground(QColor('#FFD700')) # Gold
-                elif row.status == 'ENTERED':
-                    status_item.setForeground(QColor('#00FF00')) # Green
-                elif row.status == 'EXITED':
-                    status_item.setForeground(QColor('#ddd')) # Gray
-                self.follow_table.setItem(row_idx, 1, status_item)
+                status = str(row.status)
+                color = QColor('#FFD700') if status == 'TRACKING' else (QColor('#00FF00') if status == 'ENTERED' else None)
+                self._update_item(self.follow_table, row_idx, 1, status, foreground=color)
                 
                 # 2. Code, 3. Name
-                self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.code)))
-                self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.name)))
+                self._update_item(self.follow_table, row_idx, 2, str(row.code))
+                self._update_item(self.follow_table, row_idx, 3, str(row.name))
                 
-                # 4. 现价 (Current Price)
+                # 4. 现价
                 curr_price = getattr(row, 'current_price', 0.0)
                 if curr_price <= 0 and hasattr(self, '_last_price_map') and str(row.code) in self._last_price_map:
                     curr_price = self._last_price_map[str(row.code)]
-                
-                price_txt = f"{curr_price:.2f}" if curr_price > 0 else "-"
-                sort_price = curr_price if curr_price > 0 else -1.0
-                price_item = NumericTableWidgetItem(price_txt, sort_value=sort_price)
-                price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.follow_table.setItem(row_idx, 4, price_item)
+                self._update_item(self.follow_table, row_idx, 4, curr_price if curr_price > 0 else "-", sort_value=curr_price)
 
-                # 5. 盈亏% (PnL %)
-                entry_price = getattr(row, 'entry_price', 0.0)
-                if entry_price <= 0: entry_price = getattr(row, 'detected_price', 0.0)
-                
-                pnl_pct = 0.0
-                if entry_price > 0 and curr_price > 0:
-                    pnl_pct = (curr_price - entry_price) / entry_price * 100
-                
+                # 5. 盈亏%
+                entry_price = float(getattr(row, 'entry_price', 0) or 0)
+                if entry_price <= 0:
+                    entry_price = float(getattr(row, 'detected_price', 0) or 0)
+                    
+                pnl_pct = (curr_price - entry_price) / entry_price * 100 if entry_price > 0 and curr_price > 0 else 0.0
                 pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
-                sort_pnl = pnl_pct if curr_price > 0 else -999.0
-                pnl_item = NumericTableWidgetItem(pnl_txt, sort_value=sort_pnl)
-                pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if pnl_pct > 0: pnl_item.setForeground(QColor(220, 80, 80))
-                elif pnl_pct < 0: pnl_item.setForeground(QColor(80, 200, 120))
-                else: pnl_item.setForeground(QColor('#ddd'))
-                self.follow_table.setItem(row_idx, 5, pnl_item)
+                pnl_color = QColor(220, 80, 80) if pnl_pct > 0 else (QColor(80, 200, 120) if pnl_pct < 0 else None)
+                self._update_item(self.follow_table, row_idx, 5, pnl_txt, sort_value=pnl_pct if curr_price > 0 else -999.0, foreground=pnl_color)
 
-                # 6. 信号 (Signal Type)
-                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(str(row.signal_type)))
+                # 6. 信号
+                self._update_item(self.follow_table, row_idx, 6, str(getattr(row, 'signal_type', getattr(row, 'signal_name', ''))))
                 
-                # 7. 入场 (Entry Strategy / Price)
-                # entry_txt = f"{row.entry_strategy}"
-                # if entry_price > 0: entry_txt += f"({entry_price:.2f})"
-                entry_txt = f"{entry_price:.2f}" if entry_price > 0 else str(row.entry_strategy)
-                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(entry_txt))
+                # 7. 入场 (入场价/发现价)
+                if entry_price > 0:
+                    entry_txt = f"{entry_price:.2f}"
+                else:
+                    entry_txt = str(getattr(row, 'entry_strategy', '')) or "-"
+                self._update_item(self.follow_table, row_idx, 7, entry_txt)
                 
-                # 8. 理由 (Reason/Notes) - Handle pattern extraction
+                # 8. 理由
                 notes = str(row.notes) if row.notes else ""
-                reason_item = QTableWidgetItem(notes)
-                reason_item.setToolTip(notes)
-                self.follow_table.setItem(row_idx, 8, reason_item)
+                it_notes = self._update_item(self.follow_table, row_idx, 8, notes)
+                it_notes.setToolTip(notes)
 
-                # 9. 时间 (Time) - YYYY-MM-DD HH:MM
+                # 9. 时间
                 time_dt = str(row.updated_at)
                 time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
-                time_item = QTableWidgetItem(time_str)
-                time_item.setData(Qt.ItemDataRole.UserRole, time_dt) # 保存完整时间
-                self.follow_table.setItem(row_idx, 9, time_item)
+                it_time = self._update_item(self.follow_table, row_idx, 9, time_str)
+                it_time.setData(Qt.ItemDataRole.UserRole, time_dt)
 
             # [FIX] Restore Scroll and Selection BEFORE re-enabling signals
             if current_code:
@@ -1938,8 +1925,7 @@ class HotlistPanel(QWidget, WindowMixin):
                         break
             
             self.follow_table.verticalScrollBar().setValue(v_scroll)
-            # [RESTORE] 自动调整列宽
-            self.follow_table.resizeColumnsToContents()
+            # [RESTORE] 移除性能杀手 resizeColumnsToContents()
             
         except Exception as e:
             logger.error(f"Update follow UI error: {e}")
