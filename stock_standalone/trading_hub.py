@@ -503,7 +503,7 @@ class TradingHub:
         
         return df
 
-    def get_watchlist_df(self) -> pd.DataFrame:
+    def get_watchlist_df(self, status: str = None) -> pd.DataFrame:
         """获取热股观察池(DataFrame格式) - 去重版本
         
         去重规则:
@@ -511,51 +511,62 @@ class TradingHub:
         2. 优先级: 趋势分数高 > 日期新 > 形态分数高
         3. 合并多个发现理由到 daily_patterns 字段
         """
-        mgr = SQLiteConnectionManager.get_instance(self.signal_db)
-
-        conn = mgr.get_connection()
-        
-        # 使用窗口函数去重,保留每个股票的最优记录
-        query = """
-        WITH ranked_watchlist AS (
-            SELECT *,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY code
-                       ORDER BY trend_score DESC, discover_date DESC, pattern_score DESC
-                   ) as rn
-            FROM hot_stock_watchlist
-            WHERE validation_status != 'DROPPED'
-        ),
-        distinct_patterns AS (
-            SELECT DISTINCT code, daily_patterns
-            FROM hot_stock_watchlist
-            WHERE validation_status != 'DROPPED'
-              AND (daily_patterns IS NOT NULL AND daily_patterns != '')
-        ),
-        merged_patterns AS (
+        try:
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+            conn = mgr.get_connection()
+            
+            # [FIX] 支持状态过滤
+            status_filter = ""
+            params = []
+            if status:
+                status_filter = "AND validation_status = ?"
+                params.append(status)
+            else:
+                status_filter = "AND validation_status != 'DROPPED'"
+                
+            query = f"""
+            WITH ranked_watchlist AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY code
+                           ORDER BY trend_score DESC, discover_date DESC, pattern_score DESC
+                       ) as rn
+                FROM hot_stock_watchlist
+                WHERE 1=1 {status_filter}
+            ),
+            distinct_patterns AS (
+                SELECT DISTINCT code, daily_patterns
+                FROM hot_stock_watchlist
+                WHERE 1=1 {status_filter}
+                  AND (daily_patterns IS NOT NULL AND daily_patterns != '')
+            ),
+            merged_patterns AS (
+                SELECT 
+                    code,
+                    GROUP_CONCAT(daily_patterns, '; ') as all_patterns
+                FROM distinct_patterns
+                GROUP BY code
+            )
             SELECT 
-                code,
-                GROUP_CONCAT(daily_patterns, '; ') as all_patterns
-            FROM distinct_patterns
-            GROUP BY code
-        )
-        SELECT 
-            rw.*,
-            COALESCE(mp.all_patterns, rw.daily_patterns) as merged_patterns
-        FROM ranked_watchlist rw
-        LEFT JOIN merged_patterns mp ON rw.code = mp.code
-        WHERE rw.rn = 1
-        ORDER BY rw.discover_date DESC, rw.trend_score DESC
-        """
-        
-        df = pd.read_sql_query(query, conn)
-        
-        # 用合并后的形态描述替换原描述
-        if not df.empty and 'merged_patterns' in df.columns:
-            df['daily_patterns'] = df['merged_patterns']
-            df = df.drop(columns=['merged_patterns', 'rn'], errors='ignore')
-        
-        return df
+                rw.*,
+                COALESCE(mp.all_patterns, rw.daily_patterns) as merged_patterns
+            FROM ranked_watchlist rw
+            LEFT JOIN merged_patterns mp ON rw.code = mp.code
+            WHERE rw.rn = 1
+            ORDER BY rw.discover_date DESC, rw.trend_score DESC
+            """
+            
+            df = pd.read_sql_query(query, conn, params=params)
+            
+            # 用合并后的形态描述替换原描述
+            if not df.empty and 'merged_patterns' in df.columns:
+                df['daily_patterns'] = df['merged_patterns']
+                df = df.drop(columns=['merged_patterns', 'rn'], errors='ignore')
+            
+            return df
+        except Exception as e:
+            logger.error(f"[TradingHub] get_watchlist_df error: {e}")
+            return pd.DataFrame()
     
     def cleanup_stale_signals(self, max_days: int = 2, current_prices: dict[str, float] = None, check_breakout: bool = False) -> dict[str, list[str]]:
         """
@@ -1495,23 +1506,6 @@ class TradingHub:
             logger.error(f"[TradingHub] get_watchlist_summary error: {e}")
             return {'status_counts': {}, 'validated_top': [], 'total': 0}
 
-    def get_watchlist_df(self, status: str = None) -> 'pd.DataFrame':
-        """获取观察队列 DataFrame"""
-        try:
-            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
-
-            conn = mgr.get_connection()
-            if status:
-                df = pd.read_sql_query(
-                    "SELECT * FROM hot_stock_watchlist WHERE validation_status=? ORDER BY trend_score DESC",
-                    conn, params=(status,))
-            else:
-                df = pd.read_sql_query(
-                    "SELECT * FROM hot_stock_watchlist ORDER BY updated_at DESC", conn)
-            return df
-        except Exception as e:
-            logger.error(f"[TradingHub] get_watchlist_df error: {e}")
-            return pd.DataFrame()
     
     def batch_update_watchlist_sectors(self, df_all: pd.DataFrame) -> int:
         """

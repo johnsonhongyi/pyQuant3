@@ -339,6 +339,20 @@ class TradingLogger:
         用于盘后精细化分析
         """
         try:
+            # --- [交易日和交易时段检查] ---
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trade_day = cct.get_trade_date_status()
+                now_time_int = cct.get_now_time_int()
+                # 交易时段: 09:30-11:30 (930-1130) 和 13:00-15:00 (1300-1500)
+                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
+                
+                if not is_trade_day or not is_trading_time:
+                    # logger.debug(f"LiveSignal: 非交易日或非交易时段(trade_day={is_trade_day}, time={now_time_int}),跳过记录 {code} {action}")
+                    return
+            except Exception as check_e:
+                logger.debug(f"LiveSignal: 交易日/时段检查失败 (fallback to allow): {check_e}")
+            
             # --- [Deduplication] ---
             import time
             now_ts = time.time()
