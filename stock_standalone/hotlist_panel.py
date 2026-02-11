@@ -162,17 +162,16 @@ class HotlistWorker(QThread):
     def _augment_watchlist_sectors(self, df):
         """后台纯内存补全板块信息, 不持久化写数据库 (最高效安全)"""
         try:
-            # 1. 获取最近热点板块映射 (内存字典)
+            # 1. 获取最近热点板块映射 (从本地概念库概念映射)
             hot_concepts_map = {}
             db_path = "./concept_pg_data.db"
             if os.path.exists(db_path):
                 try:
-                    # 仅读取, 不涉及事务和锁
                     mgr = SQLiteConnectionManager.get_instance(db_path)
                     conn = mgr.get_connection()
                     c = conn.cursor()
-                    # 获取最近一批板块及其代码列表
-                    c.execute("SELECT concept_name, code_list FROM concept_data ORDER BY date DESC LIMIT 30")
+                    # [NEW] 扩大扫描范围 (最近 60 条记录，覆盖约 5-10 日热点)
+                    c.execute("SELECT concept_name, code_list FROM concept_data ORDER BY date DESC LIMIT 60")
                     for name, raw_list in c.fetchall():
                         if not raw_list: continue
                         # 清理并拆分代码列表
@@ -184,11 +183,16 @@ class HotlistWorker(QThread):
                 except: pass
 
             # 2. 内存合并: 补全 DataFrame (不写回数据库, 仅用于 UI 显示)
-            if not df.empty and 'sector' in df.columns:
+            if not df.empty:
+                # 确保 sector 列存在
+                if 'sector' not in df.columns:
+                    df['sector'] = ""
+
                 def get_fast_sector(row):
-                    # 优先使用数据库已有的板块
-                    exist = str(row.sector).strip() if row.sector and str(row.sector) != 'None' else ""
-                    if exist: return exist
+                    # 优先使用数据库已有的板块 (排除 None/nan)
+                    exist = str(getattr(row, 'sector', '')).strip()
+                    if exist and exist.lower() not in ('', 'none', 'nan'): 
+                        return exist
                     # 否则从内存映射表中查找
                     return hot_concepts_map.get(str(row.code), "")
                 
@@ -921,9 +925,9 @@ class HotlistPanel(QWidget, WindowMixin):
         if 'consecutive_strong' in df_watchlist.columns: sort_cols.append('consecutive_strong')
         
         if sort_cols:
-            df_watchlist = df_watchlist.sort_values(by=sort_cols, ascending=False).head(30)
+            df_watchlist = df_watchlist.sort_values(by=sort_cols, ascending=False).head(100)
         else:
-            df_watchlist = df_watchlist.head(30)
+            df_watchlist = df_watchlist.head(100)
         
         # [OPTIMIZE] 数据指纹检查,避免频繁全量刷新
         codes = sorted(df_watchlist['code'].astype(str).tolist())
@@ -996,8 +1000,13 @@ class HotlistPanel(QWidget, WindowMixin):
                         
                         self._update_item(self.watchlist_table, i, 3, str(row.name))
                         
-                        sector = str(getattr(row, 'sector', ''))
-                        self._update_item(self.watchlist_table, i, 4, sector[:20] if len(sector) > 20 else sector)
+                        # [OPTIMIZE] 增强板块显示 fallback: 数据库 -> 内存缓存
+                        sector = str(getattr(row, 'sector', '')).strip()
+                        if not sector or sector.lower() in ('none', 'nan', ''):
+                            if hasattr(self, '_last_sector_map') and code_str in self._last_sector_map:
+                                sector = self._last_sector_map[code_str]
+                                
+                        self._update_item(self.watchlist_table, i, 4, sector[:20] if sector else "")
                         
                         discover_price = float(getattr(row, 'discover_price', 0.0) or 0.0)
                         self._update_item(self.watchlist_table, i, 5, discover_price)
@@ -1019,9 +1028,10 @@ class HotlistPanel(QWidget, WindowMixin):
                         self._update_item(self.watchlist_table, i, 10, int(getattr(row, 'consecutive_strong', 0) or 0))
                         self._update_item(self.watchlist_table, i, 11, float(getattr(row, 'pattern_score', 0) or 0))
                         
-                        pat_desc = getattr(row, 'daily_patterns', "") or ""
-                        it_pat = self._update_item(self.watchlist_table, i, 12, str(pat_desc))
-                        it_pat.setToolTip(str(pat_desc))
+                        pat_desc = str(getattr(row, 'daily_patterns', "") or "").strip()
+                        display_pat = pat_desc[:20] + "..." if len(pat_desc) > 20 else pat_desc
+                        it_pat = self._update_item(self.watchlist_table, i, 12, display_pat)
+                        it_pat.setToolTip(pat_desc)
                         
                         self._update_item(self.watchlist_table, i, 13, str(getattr(row, 'source', "") or ""))
                         self._update_item(self.watchlist_table, i, 14, str(getattr(row, 'discover_date', '') or ""))
@@ -1478,8 +1488,18 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _refresh_pnl(self):
         """手动刷新按钮回调"""
+        # [NEW] 批量自动补齐板块信息 (将实盘数据持久化回信号库)
+        try:
+            mw = self._find_main_window()
+            if mw and hasattr(mw, 'df_all') and not mw.df_all.empty:
+                hub = get_trading_hub()
+                updated = hub.batch_update_watchlist_sectors(mw.df_all)
+                if updated > 0:
+                    logger.info(f"🔄 自动补齐 {updated} 只个股板块信息")
+        except Exception as e:
+            logger.error(f"Auto sector sync error: {e}")
+
         self._refresh_pnl_ui_only()
-        # logger.info("界面刷新已触发")
 
     def _refresh_pnl_ui_only(self):
         """仅做 UI 层面的 PnL 刷新 (优化主线程负载)"""

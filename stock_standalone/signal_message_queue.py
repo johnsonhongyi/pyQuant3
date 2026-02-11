@@ -299,6 +299,17 @@ class SignalMessageQueue:
     def _persist_signal(self, msg: SignalMessage):
         """持久化到数据库 (Insert)"""
         try:
+            # --- [交易日和交易时段检查] ---
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trade_day = cct.get_trade_date_status()
+                now_time_int = cct.get_now_time_int()
+                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
+                if not is_trade_day or not is_trading_time:
+                    return
+            except Exception:
+                pass  # 检查失败则允许写入
+            
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
             self.db_manager.execute_update("""
                 INSERT INTO signal_message (
@@ -315,6 +326,17 @@ class SignalMessageQueue:
     def _update_db_signal(self, msg: SignalMessage):
         """更新数据库中的信号 (Count, Timestamp等)"""
         try:
+            # --- [交易日和交易时段检查] ---
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trade_day = cct.get_trade_date_status()
+                now_time_int = cct.get_now_time_int()
+                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
+                if not is_trade_day or not is_trading_time:
+                    return
+            except Exception:
+                pass  # 检查失败则允许写入
+            
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
             self.db_manager.execute_update("""
                 UPDATE signal_message
@@ -469,7 +491,22 @@ class SignalMessageQueue:
         自动处理更新计数逻辑
         """
         try:
-            now_time = datetime.now().strftime('%H:%M:%S')
+            # --- [交易日和交易时段检查] ---
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trade_day = cct.get_trade_date_status()
+                now_time_int = cct.get_now_time_int()
+                # 交易时段: 09:30-11:30 (930-1130) 和 13:00-15:00 (1300-1500)
+                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
+                
+                if not is_trade_day or not is_trading_time:
+                    # logger.debug(f"SignalQueue: 非交易日或非交易时段(trade_day={is_trade_day}, time={now_time_int}),跳过记录 {code} {pattern}")
+                    return
+            except Exception as check_e:
+                logger.debug(f"SignalQueue: 交易日/时段检查失败 (fallback to allow): {check_e}")
+            
+            
+            now_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             now_date = datetime.now().strftime('%Y-%m-%d')
             priority_value = 100 if is_high_priority else 50
             
@@ -491,14 +528,14 @@ class SignalMessageQueue:
                     UPDATE signal_message 
                     SET timestamp = ?, count = ?, priority = ?, reason = ?
                     WHERE id = ?
-                """, (now_time, new_count, priority_value, msg, existing[0]))
+                """, (now_timestamp, new_count, priority_value, msg, existing[0]))
                 # logger.debug(f"✅ Live signal updated in DB: {code} - {pattern} (count={new_count})")
             else:
                 # 不存在：插入新记录
                 c.execute("""
                     INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (now_time, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1))
+                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1))
                 # logger.debug(f"✅ Live signal saved to DB: {code} - {pattern}")
             
             conn.commit()

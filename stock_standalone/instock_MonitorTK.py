@@ -12670,6 +12670,17 @@ def parse_args():
         default=None,  # 完全不使用该参数时为 None
         help="修复指定的数据库文件。默认修复 signal_strategy.db。用法: -repair-db [数据库路径]"
     )
+    
+    # 清理非交易时段信号参数
+    parser.add_argument(
+        "-cleanup-signals",
+        "--cleanup-signals",
+        dest="cleanup_signals",
+        nargs='?',
+        const='signal_strategy.db',  # 不带参数时默认清理信号数据库
+        default=None,  # 完全不使用该参数时为 None
+        help="清理数据库中非交易时段的信号记录。默认清理 signal_strategy.db。使用 'all' 清理所有数据库。用法: -cleanup-signals [signal_strategy.db|trading_signals.db|all]"
+    )
 
 
     args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
@@ -12805,6 +12816,86 @@ if __name__ == "__main__":
         else:
             print("数据库修复失败!")
             sys.exit(1)
+    
+    # ✅ 命令行触发清理非交易时段信号
+    if args.cleanup_signals is not None:
+        from cleanup_non_trading_signals import (
+            clean_live_signal_history,
+            clean_signal_message,
+            backup_database
+        )
+        from pathlib import Path
+        
+        # 确定要处理的数据库列表
+        db_files = []
+        
+        if args.cleanup_signals.lower() == 'all':
+            db_files = ['trading_signals.db', 'signal_strategy.db']
+            print("清理所有数据库中的非交易时段信号...")
+        elif args.cleanup_signals in ['signal_strategy.db', 'trading_signals.db']:
+            db_files = [args.cleanup_signals]
+            print(f"清理 {args.cleanup_signals} 中的非交易时段信号...")
+        else:
+            # 如果是相对路径,转换为绝对路径
+            target_db = args.cleanup_signals
+            if not os.path.isabs(target_db):
+                target_db = os.path.join(BASE_DIR, target_db)
+            db_files = [target_db]
+            print(f"清理 {target_db} 中的非交易时段信号...")
+        
+        # 处理每个数据库
+        total_deleted = 0
+        
+        for db_file in db_files:
+            # 转换为绝对路径
+            if not os.path.isabs(db_file):
+                db_path = Path(BASE_DIR) / db_file
+            else:
+                db_path = Path(db_file)
+            
+            if not db_path.exists():
+                print(f"⚠️ 数据库文件不存在,跳过: {db_file}")
+                continue
+            
+            print(f"\n{'='*60}")
+            print(f"开始处理数据库: {db_file}")
+            print(f"{'='*60}")
+            
+            # 备份数据库
+            try:
+                backup_path = backup_database(str(db_path))
+                print(f"✅ 数据库已备份至: {backup_path}")
+            except Exception as e:
+                print(f"❌ 备份失败: {e}")
+                print("是否继续清理? (y/n)")
+                response = input().strip().lower()
+                if response != 'y':
+                    continue
+            
+            # 清理 live_signal_history 表 (在 trading_signals.db 中)
+            if 'trading_signals' in db_file:
+                try:
+                    total, deleted = clean_live_signal_history(str(db_path), dry_run=False)
+                    total_deleted += deleted
+                    print(f"✅ live_signal_history: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
+                except Exception as e:
+                    print(f"❌ 清理 live_signal_history 失败: {e}")
+            
+            # 清理 signal_message 表 (在 signal_strategy.db 中)
+            if 'signal_strategy' in db_file:
+                try:
+                    total, deleted = clean_signal_message(str(db_path), dry_run=False)
+                    total_deleted += deleted
+                    print(f"✅ signal_message: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
+                except Exception as e:
+                    print(f"❌ 清理 signal_message 失败: {e}")
+        
+        # 总结
+        print(f"\n{'='*60}")
+        print(f"✅ [清理完成] 共删除 {total_deleted} 条非交易时段记录")
+        print(f"{'='*60}")
+        sys.exit(0)
+
     
     # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
     log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
