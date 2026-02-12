@@ -676,9 +676,26 @@ class SignalOverlay:
             y_pos = y_visuals[i] if y_visuals is not None else sig.price
             x_pos = sig.bar_index
 
-            # === NaN / None 保护 ===
-            if x_pos is None or y_pos is None or math.isnan(x_pos) or math.isnan(y_pos):
-                continue  # 跳过异常信号
+            # === NaN / None / Slice 保护 ===
+            # [FIX] math.isnan cannot handle slice objects. Must convert or skip.
+            if isinstance(x_pos, slice):
+                x_pos = x_pos.start if x_pos.start is not None else 0
+            if isinstance(y_pos, slice):
+                y_pos = y_pos.start if y_pos.start is not None else 0
+
+            if x_pos is None or y_pos is None:
+                continue
+                
+            try:
+                # Convert to float to ensure math.isnan works and check for validity
+                fx = float(x_pos)
+                fy = float(y_pos)
+                if math.isnan(fx) or math.isnan(fy):
+                    continue
+                # 后续使用转换后的数值
+                x_pos, y_pos = fx, fy
+            except (TypeError, ValueError):
+                continue
 
             # [UPGRADE] Special handling for Emoji Markers (like '🎯')
             if sig.symbol == '🎯':
@@ -5107,6 +5124,10 @@ class MainWindow(QMainWindow, WindowMixin):
                         today_bar[col] = stock_row[col].iloc[0]
 
         # --- 4. 合并到主数据集 ---
+        # ⭐ [FIX] 前置去重：确保主数据集索引唯一，防止 .loc 赋值时因重复索引产生 slice/报错
+        if self.day_df.index.duplicated().any():
+            self.day_df = self.day_df[~self.day_df.index.duplicated(keep='last')]
+
         last_day = self.day_df.index[-1] if not self.day_df.empty else None
 
         if last_day == today_idx:
@@ -5116,9 +5137,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 if col in today_row.index and pd.notna(today_row[col]):
                     # ⭐ [FIX] 如果是 open，且当前已有有效值，不轻易覆盖，防止被 segment 里的第一笔价格带歪
                     if col == 'open' and pd.notna(self.day_df.loc[today_idx, col]) and self.day_df.loc[today_idx, col] > 0:
-                        # 只有在 today_row['open'] 看起来更像“真开盘价”时才覆盖？
-                        # 实际上 official 'open' 列应该是准的，如果是 fallback 产生的 open 则不覆盖
-                        # 简单逻辑：如果已有 open 且 > 0，则保留旧的
                         continue
                     self.day_df.loc[today_idx, col] = today_row[col]
             logger.debug(f"[RT] Updated today's bar for {code}")
@@ -5127,6 +5145,11 @@ class MainWindow(QMainWindow, WindowMixin):
             # 确保列顺序和类型对齐
             today_bar_aligned = today_bar.reindex(columns=self.day_df.columns)
             self.day_df = pd.concat([self.day_df, today_bar_aligned])
+            
+            # 再次去重加固（防止 concat 引入重复）
+            if self.day_df.index.duplicated().any():
+                self.day_df = self.day_df[~self.day_df.index.duplicated(keep='last')]
+                
             logger.debug(f"[RT] Appended today's bar for {code}")
 
         # --- 5. 渲染图表 (节流优化) ---
@@ -7484,7 +7507,17 @@ class MainWindow(QMainWindow, WindowMixin):
         if ' ' in target_date: target_date = target_date.split(' ')[0]
         # Optimize: Check exact match first
         if target_date in day_df.index:
-            return day_df.index.get_loc(target_date)
+            res = day_df.index.get_loc(target_date)
+            if isinstance(res, slice):
+                return int(res.start) if res.start is not None else 0
+            elif isinstance(res, (np.ndarray, list)):
+                # 如果是 array, 返回第一个索引
+                if len(res) > 0:
+                    if hasattr(res, 'dtype') and res.dtype == bool:
+                        return int(np.flatnonzero(res)[0]) if np.any(res) else -1
+                    return int(res[0])
+                return -1
+            return int(res)
             
         # Fallback to string search
         for i, d_str in enumerate(day_df.index):
@@ -8116,9 +8149,18 @@ class MainWindow(QMainWindow, WindowMixin):
         for sig in kline_signals:
             is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY, SignalType.FOLLOW, SignalType.WATCH)
             
+            # 保护:确保 bar_index 是整数而不是 slice
+            bar_idx = sig.bar_index
+            if isinstance(bar_idx, slice):
+                bar_idx = int(bar_idx.start) if bar_idx.start is not None else 0
+                sig.bar_index = bar_idx # ⚡ [FIX] 同步修正对象内的索引，防止下游 update_signals 崩溃
+            else:
+                bar_idx = int(bar_idx)
+                sig.bar_index = bar_idx
+            
             # 1. 历史 K 线信号
-            if sig.bar_index < len(day_df):
-                row = day_df.iloc[int(sig.bar_index)]
+            if bar_idx < len(day_df):
+                row = day_df.iloc[bar_idx]
                 y_low = row['low']
                 y_high = row['high']
                 if is_buy:
@@ -9364,47 +9406,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.filter_combo.count() > 0:
             QTimer.singleShot(100, lambda: self.on_filter_combo_changed(self.filter_combo.currentIndex()))
 
-
-    # def load_history_filters(self):
-    #     from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
-
-    #     self.filter_combo.blockSignals(True)
-    #     self.filter_combo.clear()
-
-    #     history_path = SEARCH_HISTORY_FILE
-
-    #     if not os.path.exists(history_path):
-    #         self.filter_combo.addItem("History file not found")
-    #         self.filter_combo.blockSignals(False)
-    #         return
-
-    #     try:
-    #         with open(history_path, "r", encoding="utf-8") as f:
-    #             data = json.load(f)
-
-    #         # ⭐ 根据选择的 history 载入
-    #         history_key = self.history_selector.currentText()  # "history1" / "history2" / ...
-    #         self.history_items = data.get(history_key, [])
-
-    #         for item in self.history_items:
-    #             q = item.get("query", "")
-    #             note = item.get("note", "")
-    #             label = f"{note} ({q})" if note else q
-    #             self.filter_combo.addItem(label, userData=q)  # Store query in UserData
-
-    #         if not self.history_items:
-    #             self.filter_combo.addItem("(No history)")
-
-    #     except Exception as e:
-    #         self.filter_combo.addItem(f"Error: {e}")
-
-    #     self.filter_combo.blockSignals(False)
-
-    #     # ⭐ 应用配置中保存的查询规则索引，或默认加载第一项
-    #     if hasattr(self, '_pending_filter_query_index'):
-    #         self._apply_pending_filter_index()
-    #     elif self.filter_combo.count() > 0:
-    #         self.on_filter_combo_changed(0)
 
     def on_filter_combo_changed(self, index):
         query_str = self.filter_combo.currentData()

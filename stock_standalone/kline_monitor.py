@@ -337,6 +337,10 @@ class KLineMonitor(tk.Toplevel):
             stock_code = values[0] if len(values) > 0 else None
             stock_code = str(stock_code).zfill(6)
 
+            if hasattr(self.master, "tree_scroll_to_code"):
+                status = self.master.tree_scroll_to_code(stock_code)
+                if not status:
+                    toast_message(self.master, f"{stock_code} is not Found in kline")
             if hasattr(self.master, "push_stock_info"):
                 if self.master.push_stock_info(stock_code, self.master.df_all.loc[stock_code]):
                     self.master.status_var2.set(f"发送成功: {stock_code}")
