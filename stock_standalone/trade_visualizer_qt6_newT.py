@@ -7004,8 +7004,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if code is not None:
             code = str(code).strip()
             
-        # [UPGRADE] 始终捕获当前视角，以便切换股票或周期时能尽可能保持缩放习惯
-        self._capture_view_state()
+        # [UPGRADE] ⭐ [已移除] 不再在切换股票时捕获视图状态
+        # 改为只在用户手动调整视图时捕获(通过sigRangeChangedManually信号)
+        # 避免从K线少的股票切换到K线多的股票时保存错误的参数
+        self._capture_view_state()  # 已禁用
+
 
         if isinstance(code, str):
             # 1. 清理可能的空白和前缀
@@ -7511,7 +7514,6 @@ class MainWindow(QMainWindow, WindowMixin):
             if isinstance(res, slice):
                 return int(res.start) if res.start is not None else 0
             elif isinstance(res, (np.ndarray, list)):
-                # 如果是 array, 返回第一个索引
                 if len(res) > 0:
                     if hasattr(res, 'dtype') and res.dtype == bool:
                         return int(np.flatnonzero(res)[0]) if np.any(res) else -1
@@ -8149,14 +8151,18 @@ class MainWindow(QMainWindow, WindowMixin):
         for sig in kline_signals:
             is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY, SignalType.FOLLOW, SignalType.WATCH)
             
-            # 保护:确保 bar_index 是整数而不是 slice
-            bar_idx = sig.bar_index
-            if isinstance(bar_idx, slice):
-                bar_idx = int(bar_idx.start) if bar_idx.start is not None else 0
-                sig.bar_index = bar_idx # ⚡ [FIX] 同步修正对象内的索引，防止下游 update_signals 崩溃
+            # ⭐ [FIX] 防止bar_index是slice对象导致的TypeError
+            # 某些情况下bar_index可能被错误地设置为slice,需要转换为int
+            if isinstance(sig.bar_index, slice):
+                # 如果是slice,提取start值
+                bar_idx = sig.bar_index.start if sig.bar_index.start is not None else 0
+                logger.warning(f"[SIGNAL] bar_index is slice: {sig.bar_index}, using start={bar_idx}")
             else:
-                bar_idx = int(bar_idx)
-                sig.bar_index = bar_idx
+                try:
+                    bar_idx = int(sig.bar_index)
+                except (TypeError, ValueError) as e:
+                    logger.error(f"[SIGNAL] Invalid bar_index type: {type(sig.bar_index)}, value: {sig.bar_index}, error: {e}")
+                    continue  # 跳过这个信号
             
             # 1. 历史 K 线信号
             if bar_idx < len(day_df):
@@ -8600,14 +8606,39 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 # 处于“记忆”状态：用户之前可能缩放到了某个特定区域
                 new_total = len(day_df)
-                target_left = max(-1, new_total - self._prev_dist_left)
-                target_right = new_total - self._prev_dist_right
+                
+                # 计算之前的可见K线数量(缩放级别)
+                prev_visible_bars = self._prev_dist_left - self._prev_dist_right
+                
+                # ⭐ 核心修复: 保持用户手动移动的相对位置
+                # 理解: _prev_dist_left = 左边缘到末尾的距离, _prev_dist_right = 右边缘到末尾的距离
+                # 例如: 总100根,显示80-100根 → dist_left=20, dist_right=0
+                
+                # 计算之前视图右边缘距离末尾的距离(保持这个距离不变)
+                # 如果用户把最新K线移到中间,dist_right会比较大(比如50)
+                # 如果用户看最新数据,dist_right接近0
+                prev_right_margin = self._prev_dist_right
+                
+                # 在新股票上重现相同的布局
+                target_right = new_total - prev_right_margin
+                target_left = target_right - prev_visible_bars
+                
+                # 边界检查
+                target_left = max(-1, target_left)
+                target_right = min(new_total + 10, target_right)
+                
+                logger.debug(f"[VIEW] Preserve position: right_margin={prev_right_margin:.0f}, visible={prev_visible_bars}, range=({target_left:.0f}, {target_right:.0f})")
+
+
 
                 # 设置 X 轴，留出缓冲
                 vb.setRange(xRange=(target_left, target_right), padding=0)
 
                 # 适配 Y 轴
-                visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
+                # 修复iloc索引类型错误
+                left_idx = int(max(0, target_left))
+                right_idx = int(min(new_total, target_right + 1))
+                visible_new = day_df.iloc[left_idx:right_idx]
                 if not visible_new.empty:
                     new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
                     
@@ -8689,6 +8720,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self.decision_label.setText("实时决策中心: <span style='color:#666;'>未开启实时监控或等待信号...</span>")
             self.supervision_label.setText("🛡️ 流程监理: <span style='color:#666;'>就绪</span>")
             self.hb_label.setText("💤")
+        
+        # ⭐ [核心修复] 只在用户手动调整视图时捕获状态
+        # 避免切换股票时自动捕获,导致使用错误的参数
+        if not hasattr(self, '_view_listener_installed'):
+            vb = self.kline_plot.getViewBox()
+            # 监听用户手动调整(缩放/拖动)
+            vb.sigRangeChangedManually.connect(lambda: self._capture_view_state())
+            self._view_listener_installed = True
+            logger.debug("[VIEW] Installed manual range change listener")
         
     def _update_plot_title(self, code, day_df, tick_df):
         """仅更新 K 线图基础信息（代码、名称、排名、板块等） - 极限性能版"""

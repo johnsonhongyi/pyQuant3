@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Union
 
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 from strong_consolidation_strategy import StrongConsolidationStrategy
@@ -157,7 +157,12 @@ class StrategyController:
             if not pb_results.empty:
                 for timestamp, row in pb_results.iterrows():
                     try:
-                        idx = day_df.index.get_loc(timestamp)
+                        idx_raw: Union[int, slice] = day_df.index.get_loc(timestamp)
+                        # 处理 get_loc 可能返回 slice 的情况
+                        if isinstance(idx_raw, slice):
+                            idx = int(idx_raw.start) if idx_raw.start is not None else 0
+                        else:
+                            idx = int(idx_raw)
                         signals.append(self._create_signal_point(
                             code=code,
                             timestamp=timestamp,
@@ -188,7 +193,12 @@ class StrategyController:
             
             for timestamp, row in eval_df.iterrows():
                 try:
-                    idx = day_df.index.get_loc(timestamp)
+                    idx_raw: Union[int, slice] = day_df.index.get_loc(timestamp)
+                    # 处理 get_loc 可能返回 slice 的情况
+                    if isinstance(idx_raw, slice):
+                        idx = int(idx_raw.start) if idx_raw.start is not None else 0
+                    else:
+                        idx = int(idx_raw)
                     
                     # 构造行情行
                     row_dict: Dict[str, Any] = row.to_dict() # type: ignore
@@ -196,7 +206,7 @@ class StrategyController:
                     row_dict['trade'] = float(row.get('close', 0.0)) # type: ignore
                     
                     # 更新前一个 bar 的快照信息
-                    prev_idx = int(idx) - 1 # type: ignore
+                    prev_idx: int = idx - 1
                     if prev_idx >= 0:
                         snapshot['last_close'] = float(day_df.iloc[prev_idx].get('close', 0.0)) # type: ignore
                         snapshot['nclose'] = float(day_df.iloc[prev_idx].get('close', 0.0)) # type: ignore

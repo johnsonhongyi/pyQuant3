@@ -314,45 +314,49 @@ class MinuteKlineCache:
 
     def update_batch(self, df: Optional[pd.DataFrame], subscribers: dict[str, list[Callable[..., Any]]]):
         """
-        批量更新 K 线缓存并触发订阅
+        批量更新 K 线缓存并触发订阅 (每行独立时间戳处理)
         """
         if df is None or df.empty:
             return
             
         updated_codes: set[str] = set()
-        # 预计算时间戳 (通常一个 batch 时间一致)
-        # 优先级：timestamp > time > ticktime > wall_clock
-        ts = time.time()
+        
+        # 确定时间源列
+        time_col = None
         if 'timestamp' in df.columns:
-            ts = float(df['timestamp'].iloc[0]) # type: ignore
+            time_col = 'timestamp'
         elif 'time' in df.columns:
-            ts = float(df['time'].iloc[0]) # type: ignore
-        elif 'ticktime' in df.columns:
-            t_str = str(df['ticktime'].iloc[0])
-            if ':' in t_str:
-                # 兼容 "HH:MM:SS" 格式，转换为当日 Unix 时间
-                try:
-                    ts = pd.to_datetime(t_str).timestamp()
-                except Exception:
-                    pass
-            
-        minute_ts = int(ts - (ts % 60))
+            time_col = 'time'
+        
+        # 获取墙上时间作为备份
+        wall_clock = time.time()
         
         for row in df.itertuples(index=False):
-            code_raw = getattr(row, 'code', '')
-            if not code_raw: continue
-            code = str(code_raw).strip().zfill(6)
-            
-            price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
-            if price <= 0: continue
-            
-            # 优先提取 'nvol' (用户确认: nvol=nowvol=实时交易量, volume=量比)
-            # vol = float(cast(float, getattr(row, 'vol', getattr(row, 'volume', 0.0))))
-            vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
-            self._update_internal(code, price, vol, minute_ts)
-            updated_codes.add(code)
-            self._last_update_ts[code] = minute_ts
-            
+            try:
+                code_raw = getattr(row, 'code', '')
+                if not code_raw: continue
+                code = str(code_raw).strip().zfill(6)
+                
+                # 价格提取 (trade -> now -> price -> close)
+                price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
+                if price <= 0: continue
+                
+                # 成交量提取 (nvol -> vol -> volume)
+                vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
+                
+                # 时间戳提取
+                ts = float(getattr(row, time_col)) if time_col else wall_clock
+                # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
+                minute_ts = int(ts - (ts % 60))
+                
+                # 核心更新
+                self._update_internal(code, price, vol, minute_ts)
+                updated_codes.add(code)
+                self._last_update_ts[code] = minute_ts
+                
+            except Exception:
+                continue
+
         # 触发订阅回调
         if subscribers:
             for code in updated_codes.intersection(subscribers):
@@ -385,88 +389,54 @@ class MinuteKlineCache:
 
     def _update_internal(self, code: str, price: float, current_cum_vol: float, minute_ts: int):
         """
-        内部核心更新逻辑（最小化开销）
+        原子化更新 K 线 (纯净增量逻辑)
         """
         if code not in self._shared_cache:
             self._shared_cache[code] = deque(maxlen=self._max_len)
         klines = self._shared_cache[code]
         
+        # 1. 初始插入
         if not klines:
             klines.append(KLineItem(
                 time=minute_ts, open=price, high=price, low=price, close=price,
                 volume=0.0, cum_vol_start=current_cum_vol
             ))
+            self._is_dirty = True
+            return
 
-
-        else:
-            last_k = klines[-1]
-            if last_k.time == minute_ts:
-                # 同一分钟：更新当前 K 线
-                last_k.high = max(last_k.high, price)
-                last_k.low = min(last_k.low, price)
-                last_k.close = price
-                
-                # Check for volume reset or negative delta
-                if current_cum_vol < last_k.cum_vol_start:
-                     time_str = datetime.fromtimestamp(minute_ts).strftime('%Y-%m-%d %H:%M:%S')
-                     print(f"[WARNING] Volume Reset Detected - Code: {code}, Time: {time_str}, Current: {current_cum_vol}, Start: {last_k.cum_vol_start}")
-                     last_k.cum_vol_start = current_cum_vol
-                     # If reset happens, we can't calculate meaningful volume for this tick relative to previous start
-                     # Reset volume to 0 for this instant or keep previous? 
-                     # Safest is to reset start and assume minimal volume change for this specific update, 
-                     # effectively restarting the counter for this minute.
-                     last_k.volume = 0.0 
-                else:
-                    last_k.volume = current_cum_vol - last_k.cum_vol_start
-
-                # if code == '000001':
-                #      print(f"[DEBUG] Update KLine - Code: {code}, Time: {minute_ts}, Price: {price}, CumVol: {current_cum_vol}, StartVol: {last_k.cum_vol_start}, Vol: {last_k.volume}")
-                
-                self._is_dirty = True
-            elif minute_ts > last_k.time:
-                # 新的一分钟：结算并开始新 K 线
-                
-                # Hybrid Logic:
-                # 1. Normal Trading: Gap volume belongs to the PREVIOUS bar (e.g., 14:56:00 tick reflects 14:55 activity).
-                # 2. Closing Auction (15:00): The volume event happens AT 15:00, so it belongs to the NEW bar (15:00).
-                
-                prev_end_cum_vol = last_k.cum_vol_start + last_k.volume
-                
-                # Check for reset first
-                if current_cum_vol < prev_end_cum_vol:
-                     time_str = datetime.fromtimestamp(minute_ts).strftime('%Y-%m-%d %H:%M:%S')
-                     print(f"[WARNING] Volume Reset Detected on New Bar - Code: {code}, Time: {time_str}, Current: {current_cum_vol}, PrevEnd: {prev_end_cum_vol}")
-                     # Reset: Start fresh
-                     klines.append(KLineItem(
-                        time=minute_ts, open=price, high=price, low=price, close=price,
-                        volume=0.0, cum_vol_start=current_cum_vol
-                    ))
-                else:
-                    # Determine attribution based on time
-                    is_closing_call = (minute_ts % 10000 == 1500)
-                    
-                    if is_closing_call:
-                        # 15:00 Closing Auction: Attribute gap volume to THIS bar (15:00)
-                        # New bar starts from where previous left off
-                        klines.append(KLineItem(
-                            time=minute_ts, open=price, high=price, low=price, close=price,
-                            volume=current_cum_vol - prev_end_cum_vol, 
-                            cum_vol_start=prev_end_cum_vol
-                        ))
-                    else:
-                        # Normal Trading: Attribute gap volume to PREVIOUS bar
-                        last_k.volume = current_cum_vol - last_k.cum_vol_start
-                        
-                        # New bar starts fresh from current level
-                        klines.append(KLineItem(
-                            time=minute_ts, open=price, high=price, low=price, close=price,
-                            volume=0.0, cum_vol_start=current_cum_vol
-                        ))
-                
-                self._is_dirty = True
+        last_k = klines[-1]
+        
+        # 2. 同一分钟更新
+        if last_k.time == minute_ts:
+            last_k.high = max(last_k.high, price)
+            last_k.low = min(last_k.low, price)
+            last_k.close = price
+            
+            # 成交量处理 (current_cum_vol - 本分钟起始量)
+            if current_cum_vol < last_k.cum_vol_start:
+                # 异常处理：成交量回退
+                last_k.cum_vol_start = current_cum_vol
+                last_k.volume = 0.0
             else:
-                # 忽略过时数据或乱序推送
-                pass
+                last_k.volume = current_cum_vol - last_k.cum_vol_start
+            self._is_dirty = True
+            
+        # 3. 开启新分钟
+        elif minute_ts > last_k.time:
+            # 补齐上一个 Bar 的最终成交量
+            if current_cum_vol >= last_k.cum_vol_start:
+                last_k.volume = current_cum_vol - last_k.cum_vol_start
+            
+            # 插入新分钟起始数据
+            klines.append(KLineItem(
+                time=minute_ts, open=price, high=price, low=price, close=price,
+                volume=0.0,
+                cum_vol_start=current_cum_vol
+            ))
+            self._is_dirty = True
+        else:
+            # 忽略过时数据
+            pass
 
     def detect_v_shape(self, code: str, window: int = 30) -> bool:
         """
@@ -534,6 +504,9 @@ class DailyEmotionBaseline:
         self._baseline_details: dict[str, str] = {} # {code: status_description}
         self._last_calc_date: Optional[str] = None
     
+    def get_last_calc_date(self) -> Optional[str]:
+        return self._last_calc_date
+
     def calculate_baseline(self, df: pd.DataFrame) -> None:
         """开盘时调用，基于日线数据计算基准"""
         from datetime import datetime
@@ -844,6 +817,7 @@ class DataPublisher:
         self._last_save_fp = "" # 上次保存数据的指纹
         self._last_batch_fp = "" # 上次批次数据的指纹
         self._last_save_status = "N/A" # 上次保存状态
+        self._last_update_date: Optional[str] = None # 最近处理的数据日期 (YYYY-MM-DD)
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -866,8 +840,6 @@ class DataPublisher:
         # Mode-based settings: Calculate max_len based on default 60s first
         default_interval = 60
         cache_len = int((self.TARGET_HOURS_HP * 3600) / default_interval) if high_performance else int((self.TARGET_HOURS_LEGACY * 3600) / default_interval)
-        self.kline_cache = MinuteKlineCache(max_len=cache_len)
-        
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
         self.emotion_baseline = DailyEmotionBaseline() # Initialize baseline tracker
@@ -982,11 +954,14 @@ class DataPublisher:
 
     def _maintenance_task(self):
         """
-        后台维护任务：每 10 分钟检查一次内存和数据量
+        后台维护任务：每 5 分钟检查一次内存和数据量
         """
         while True:
-            time.sleep(600)  # 10 minutes
+            time.sleep(300)  # Changed from 600 (10m) to 300 (5m) to match _save_interval
             try:
+                # 无论是否有新数据，都在维护线程检查并执行周期性保存
+                self.save_cache(force=False)
+                
                 status = self.get_status()
                 mem_mb = status.get('memory_usage_mb', 0)
                 total_nodes = status.get('total_nodes', 0)
@@ -1005,13 +980,6 @@ class DataPublisher:
                 
                 # Perf Mode info for logging
                 is_hp = status.get('high_performance_mode', True)
-                perf_str = "高性能 (全天 240m)" if is_hp else "极致省内存 (最近 60m)"
-                auto_str = "ON" if status.get('auto_switch') else "OFF"
-                
-                logger.info(f"🔧 [Maintenance] Pid: {status.get('pid')} Mem: {status.get('memory_usage')} | "
-                            f"Klines: {status.get('klines_cached')} | "
-                            f"Updates: {status.get('update_count')}")
-                
                 # 每小时更新一次板块持续性缓存
                 if time.time() - self.last_db_check > 3600:
                     self._update_sector_cache()
@@ -1149,7 +1117,31 @@ class DataPublisher:
             # # 更新情绪 (传入 baseline)
             # self.emotion_tracker.update_batch(df, self.emotion_baseline)
 
-            # 兼容不同来源的列名
+            # --- 🚀 批次指纹校验与状态处理 ---
+            # 1. 抓取元信息并计算时间戳 (更宽的准入窗口: 9:10 - 15:10)
+            check_sample = df.head(1)
+            raw_ts = time.time()
+            if 'timestamp' in check_sample.columns:
+                raw_ts = float(check_sample['timestamp'].iloc[0])
+            elif 'time' in check_sample.columns:
+                raw_ts = float(check_sample['time'].iloc[0])
+            
+            # 手动判定时段 (替代 strict 的 cct.get_realtime_status)
+            dt_now = datetime.fromtimestamp(raw_ts)
+            hhmm = int(dt_now.strftime('%H%M'))
+            is_trade_day = cct.get_trade_date_status()
+            # 包含盘前集合竞价和盘后滞后数据
+            is_valid_hour = (910 <= hhmm <= 1135) or (1255 <= hhmm <= 1515)
+            is_realtime = is_trade_day and is_valid_hour
+            
+            # 2. 跨日检测
+            incoming_date = dt_now.strftime('%Y-%m-%d')
+            if self._last_update_date and incoming_date != self._last_update_date:
+                logger.info(f"📅 Day transition: {self._last_update_date} -> {incoming_date}. Resetting data.")
+                self.reset_state()
+            self._last_update_date = incoming_date
+
+            # 3. 指纹校验
             fp_cols = ['code']
             for c in ['trade', 'now', 'price']:
                 if c in check_sample.columns:
@@ -1157,86 +1149,85 @@ class DataPublisher:
                     break
             if 'volume' in check_sample.columns:
                 fp_cols.append('volume')
-                
+            
             batch_fp = df_fingerprint(check_sample, cols=fp_cols)
+            is_new_batch = (batch_fp != self._last_batch_fp)
+            
+            # 无论是否实时，若基准尚未计算，优先尝试一次
+            if self.emotion_baseline.get_last_calc_date() is None:
+                self.emotion_baseline.calculate_baseline(df)
+                self.emotion_tracker.update_batch(df, self.emotion_baseline)
 
-            # # 判断 + 更新
-            # if self._last_batch_fp == "":
-            #     # 首次批次：建立指纹，不拦截
-            #     self._last_batch_fp = batch_fp
-            # elif batch_fp == self._last_batch_fp:
-            #     # 重复批次：拦截
-            #     return
-            # else:
-            #     # 新批次：更新指纹
-            #     self._last_batch_fp = batch_fp
-
-            if not cct.get_realtime_status() or self._last_batch_fp and batch_fp == self._last_batch_fp:
-                if self.emotion_baseline._last_calc_date is None:
-                    # 计算开盘基准情绪 (每天确保计算一次)
-                    # 移除 < 940 的限制，交由 emotion_baseline 内部控制频率
-                    self.emotion_baseline.calculate_baseline(df)
-                    # 更新情绪 (传入 baseline)
-                    self.emotion_tracker.update_batch(df, self.emotion_baseline)
-                    logger.info(f'emotion_baseline._last_calc_date: {self.emotion_baseline._last_calc_date}')
-                return
+            # 4. 核心数据更新 (宽时段准入)
+            if (is_realtime or hhmm >= 1500) and is_new_batch:
+                if self.update_count == 0:
+                    logger.info(f"🚦 First realtime batch. Time: {hhmm}, Columns: {list(df.columns)[:5]}")
                 
-            if self.update_count == 0:
-                logger.info(f"🚦 First batch received in DataPublisher. Columns: {list(df.columns)[:10]}")
+                self._last_batch_fp = batch_fp
+                t0 = time.time()
                 
-            self._last_batch_fp = batch_fp
+                # 情绪与 KLine 更新
+                self.emotion_baseline.calculate_baseline(df)
+                self.emotion_tracker.update_batch(df, self.emotion_baseline)
+                
+                if any(col in df.columns for col in ['trade', 'now', 'price', 'close']):
+                    self.kline_cache.update_batch(df, self.subscribers)
+                
+                # 3. 性能统计
+                self.update_count += 1
+                self.total_rows_processed += len(df)
+                t1 = time.time()
+                duration = t1 - t0
+                if duration > 0:
+                    self.batch_rates_dq.append(len(df) / duration)
+                self.last_batch_time = t1
 
-            t0 = time.time()
-            if self.last_batch_clock > 0:
-                self.batch_intervals.append(t0 - self.last_batch_clock)
-            self.last_batch_clock = t0
-
-            # 1. 计算当日基准分 & 实时情绪 (Vectorized)
-            # 只有在新批次到来时才更新，避免指纹拦截后的重复计算
-            self.emotion_baseline.calculate_baseline(df)
-            self.emotion_tracker.update_batch(df, self.emotion_baseline)
-            
-            rows_count = len(df)
-            self.update_count += 1
-            self.total_rows_processed += rows_count
-            
-            # 1. 深度情绪计算 (Vectorized) - Already updated above with baseline
-            # self.emotion_tracker.update_batch(df) # 删除重复调用，避免基准分重置
-
-            # Update global last update timestamp
-            # 2. 更新 KLine (仅更新订阅或活跃股) - Vectorized & Batch Optimized
-            if any(col in df.columns for col in ['trade', 'now', 'price', 'close']):
-                self.kline_cache.update_batch(df, self.subscribers)
-            
-            # Record Speed
-            t1 = time.time()
-            duration = t1 - t0
-            if duration > 0:
-                self.batch_rates_dq.append(rows_count / duration)
-            self.last_batch_time = t1
-            
-            # [Optimization] Periodic GC
-            if self.update_count % 500 == 0:
-                n = gc.collect()
-                if n > 0:
-                    logger.debug(f'🧹 GC collected {n} objects')
+                if self.update_count % 500 == 0:
+                    n = gc.collect()
+                    if n > 0: logger.debug(f'🧹 GC collected {n} objects')
 
             # =========================
-            # Snapshot Cache (Crash Safe)
+            # Snapshot Cache (Periodic Check)
             # =========================
-            now = time.time()
-            close_time = int(self._save_interval / 60) + 1500
-            if now - self._last_save_ts > self._save_interval:
-                # self.save_cache(force=False)
-                # if cct.get_realtime_status() or cct.get_:
-                if self._last_save_ts == 0 or cct.get_trade_date_status() and 930 < cct.get_now_time_int() <= close_time:
-                    save_cache_df = self.kline_cache.to_dataframe()
-                    # logger.debug(f'save_cache_df: {save_cache_df.shape}')
-                    self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
-                    self._last_save_ts = time.time()
+            self.save_cache(force=False)
                 
         except Exception as e:
             logger.error(f"DataPublisher update_batch error: {e}")
+
+    def save_cache(self, force: bool = False):
+        """
+        手动或周期性将当前 K 线缓存保存到磁盘快照
+        :param force: 是否强制保存 (忽略时间间隔)
+        """
+        try:
+            if not hasattr(self, 'kline_cache') or not self.kline_cache:
+                return
+            
+            now = time.time()
+            # 只有在强制模式，或者时间间隔已到时才检查脏标记
+            if not force and (now - self._last_save_ts < self._save_interval):
+                return
+            
+            # 如果不脏，则只更新时间戳
+            if not self.kline_cache._is_dirty and self._last_save_ts > 0:
+                self._last_save_ts = now
+                return
+
+            with timed_ctx("save_kline_cache", warn_ms=1500):
+                save_cache_df = self.kline_cache.to_dataframe()
+                if not save_cache_df.empty:
+                    status = self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
+                    self._last_save_ts = now
+                    self.kline_cache._is_dirty = False
+                    self._last_save_status = "SUCCESS" if status else "FAILED"
+                    logger.info(f"💾 MinuteKlineCache snapshot saved. (Rows: {len(save_cache_df)}, Success: {status}, Force: {force})")
+                else:
+                    # 如果数据为空（可能被过滤了），也更新时间戳以避免频繁重试
+                    self._last_save_ts = now
+                    self._last_save_status = "EMPTY_SKIP"
+                    logger.debug("save_cache skipped: no data to save (maybe outside trading hours).")
+        except Exception as e:
+            logger.error(f"save_cache error: {e}")
 
 
     def subscribe(self, code: str, callback: Callable[..., object]):

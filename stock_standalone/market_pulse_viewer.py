@@ -26,6 +26,75 @@ from tk_gui_modules.window_mixin import WindowMixin
 # Import font/DPI utilities if available from main app context, 
 # otherwise use standard defaults.
 
+class StockDetailPopup(tk.Toplevel, WindowMixin):
+    """
+    Comprehensive Stock Detail Popup with position persistence.
+    """
+    def __init__(self, master, code, name, pulse_viewer):
+        super().__init__(master)
+        self.code = code
+        self.name = name
+        self.pulse_viewer = pulse_viewer
+        
+        self.title(f"Stock Detail: {code} - {name}")
+        # Default geometry
+        self.geometry("600x500")
+        
+        # Load Position
+        self.load_window_position(self, "StockDetailPopup", default_width=600, default_height=500)
+        
+        self._build_ui()
+        
+        # Bindings
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Escape>", lambda e: self.on_close())
+
+    def _build_ui(self):
+        txt = tk.Text(self, font=("Consolas", 10), padx=10, pady=10)
+        txt.pack(fill="both", expand=True)
+        
+        # 1. Basic Info
+        info = [f"【{self.code}】{self.name}"]
+        
+        # 2. Market Pulse Data (from current Treeview selection)
+        item = self.pulse_viewer.tree.selection()
+        if item:
+            vals = self.pulse_viewer.tree.item(item, "values")
+            headers = [self.pulse_viewer.tree.heading(c)['text'] for c in self.pulse_viewer.tree['columns']]
+            info.append("\n[Dashboard Data]")
+            for k, v in zip(headers, vals):
+                info.append(f"{k}: {v}")
+                
+        # 3. Selector Data (Deep Analysis)
+        if self.pulse_viewer.engine and self.pulse_viewer.engine.selector and hasattr(self.pulse_viewer.engine.selector, 'df_all_realtime'):
+             df = self.pulse_viewer.engine.selector.df_all_realtime
+             # Robust lookup
+             rec = None
+             if self.code in df.index: rec = df.loc[self.code]
+             else:
+                  norm_code = self.code.replace('sh','').replace('sz','').zfill(6)
+                  if norm_code in df.index: rec = df.loc[norm_code]
+                  
+             if rec is not None:
+                 info.append(f"\n[Deep Analysis - {self.pulse_viewer.engine.selector.resample}]")
+                 # 55188 / Technicals
+                 keys = ['Rank', 'topR', 'percent', 'trade', 'volume', 'amount', 'turnover', 
+                         'ma5d', 'ma10d', 'ma20d', 'category', 'industry', 'concept', 'reason']
+                 for k in keys:
+                     val = rec.get(k, 'N/A')
+                     info.append(f"{k}: {val}")
+                     
+                 # 55188 Specifics if available
+                 if 'hot' in rec: info.append(f"Hot: {rec['hot']}")
+                 
+        txt.insert("1.0", "\n".join(info))
+        txt.config(state="disabled")
+
+    def on_close(self):
+        """Save position before destroying."""
+        self.save_window_position(self, "StockDetailPopup")
+        self.destroy()
+
 class MarketPulseViewer(tk.Toplevel, WindowMixin):
     def __init__(self, master, monitor_app):
         """
@@ -460,49 +529,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
 
     def show_stock_detail_popup(self, code, name):
         """Display aggregated stock info (55188, Selection, Realtime)."""
-        top = tk.Toplevel(self)
-        top.title(f"Stock Detail: {code} - {name}")
-        top.geometry("600x500")
-        
-        txt = tk.Text(top, font=("Consolas", 10), padx=10, pady=10)
-        txt.pack(fill="both", expand=True)
-        
-        # 1. Basic Info
-        info = [f"【{code}】{name}"]
-        
-        # 2. Market Pulse Data (from current Treeview selection)
-        item = self.tree.selection()
-        if item:
-            vals = self.tree.item(item, "values")
-            headers = [self.tree.heading(c)['text'] for c in self.tree['columns']]
-            info.append("\n[Dashboard Data]")
-            for k, v in zip(headers, vals):
-                info.append(f"{k}: {v}")
-                
-        # 3. Selector Data (Deep Analysis)
-        if self.engine and self.engine.selector and hasattr(self.engine.selector, 'df_all_realtime'):
-             df = self.engine.selector.df_all_realtime
-             # Robust lookup
-             rec = None
-             if code in df.index: rec = df.loc[code]
-             else:
-                  norm_code = code.replace('sh','').replace('sz','').zfill(6)
-                  if norm_code in df.index: rec = df.loc[norm_code]
-                  
-             if rec is not None:
-                 info.append(f"\n[Deep Analysis - {self.engine.selector.resample}]")
-                 # 55188 / Technicals
-                 keys = ['Rank', 'topR', 'percent', 'trade', 'volume', 'amount', 'turnover', 
-                         'ma5d', 'ma10d', 'ma20d', 'category', 'industry', 'concept', 'reason']
-                 for k in keys:
-                     val = rec.get(k, 'N/A')
-                     info.append(f"{k}: {val}")
-                     
-                 # 55188 Specifics if available
-                 if 'hot' in rec: info.append(f"Hot: {rec['hot']}")
-                 
-        txt.insert("1.0", "\n".join(info))
-        txt.config(state="disabled")
+        StockDetailPopup(self, code, name, self)
 
     def on_right_click(self, event):
         """Context Menu."""

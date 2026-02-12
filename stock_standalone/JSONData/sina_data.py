@@ -354,6 +354,30 @@ class Sina:
             df = df.drop(new_suspended)
         return df
 
+    def format_age(self,seconds: float) -> str:
+        if seconds is None:
+            return "N/A"
+
+        seconds = int(max(0, seconds))
+
+        days = seconds // 86400
+        seconds %= 86400
+
+        hours = seconds // 3600
+        seconds %= 3600
+
+        minutes = seconds // 60
+        seconds %= 60
+
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m {seconds}s"
+        elif hours > 0:
+            return f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            return f"{minutes}m {seconds}s"
+        else:
+            return f"{seconds}s"
+
     @property
     def all(self) -> pd.DataFrame:
         """获取所有实时数据 (优化 HDF5 加载逻辑)"""
@@ -364,41 +388,89 @@ class Sina:
         time_s = time.time()
         self.market_type = 'all'
         # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
-        h5 = self._load_hdf_hist_unified(debug=False)
-        
+        # h5 = self._load_hdf_hist_unified(debug=False)
+        # h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
+        # 确保 sina_limit_time 是 int
+        sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+        h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=None, limit_time=sina_limit_time_int)
         if h5 is not None and len(h5) > 0:
             # 基础预处理与质量校验 (Streamlined)
             if 'ticktime' in h5.columns:
                 # 只获取第一个非零 ticktime 用于判断数据鲜度 (Age)
-                valid_ticktimes = h5[h5.ticktime != 0].ticktime
+                # valid_ticktimes = h5[h5.ticktime != 0].ticktime
+                valid_ticktimes = h5['ticktime'].dropna()
+
                 if not valid_ticktimes.empty:
-                    ticktime_val = valid_ticktimes.iloc[0]
-                    now_dt = datetime.datetime.now()
+                    now_dt = pd.Timestamp.now()
+
                     try:
-                        # 尝试计算数据延迟 (l_time)
-                        if ':' in str(ticktime_val):
-                            h_p, m_p, s_p = map(int, str(ticktime_val).split(':'))
-                            last_dt = now_dt.replace(hour=h_p, minute=m_p, second=s_p)
+                        # 🔥 取最大值（最新tick）
+                        ticktime_val = valid_ticktimes.max()
+
+                        # -------- 情况1：Unix时间戳 --------
+                        if isinstance(ticktime_val, (int, float)) and ticktime_val > 1e9:
+                            last_dt = pd.to_datetime(ticktime_val, unit='s')
+
+                        # -------- 情况2：完整日期字符串 --------
+                        elif isinstance(ticktime_val, str) and '-' in ticktime_val:
+                            last_dt = pd.to_datetime(ticktime_val)
+
+                        # -------- 情况3：HH:MM:SS --------
                         else:
-                            ts_s = str(ticktime_val).zfill(6)
-                            last_dt = now_dt.replace(hour=int(ts_s[:2]), minute=int(ts_s[2:4]), second=int(ts_s[4:6]))
+                            t = pd.to_datetime(str(ticktime_val)).time()
+                            last_dt = now_dt.replace(hour=t.hour, minute=t.minute, second=t.second)
+
+                            # 如果算出来在未来，说明是昨天的收盘tick
+                            if last_dt > now_dt:
+                                last_dt -= pd.Timedelta(days=1)
+
                         l_time = (now_dt - last_dt).total_seconds()
-                        if l_time < 0: l_time = 99999
-                    except Exception:
+
+                    except Exception as e:
+                        log.warning(f"Ticktime parse failed: {e}")
                         l_time = 99999
+
+
                         
+                    # sina_limit_time_int: int = int(cct.sina_limit_time) if cct.sina_limit_time is not None else 60
+                    # sina_time_status = (cct.get_work_day_status() and 915 < cct.get_now_time_int() < 926)
+                    
+                    # work_time_now = cct.get_work_time()
+                    # # 决定是否可以使用 HDF5 数据快速返回 (不扫盘，不刷网)
+                    # return_hdf_status = (not work_time_now) or (cct.get_trade_date_status() and l_time < sina_limit_time_int)
+                    
+                    # if ((sina_time_status and l_time < 6) or (not sina_time_status and return_hdf_status)):
+                    #     log.info("Return HDF5 data early (recent:%0.2f)" % l_time)
+                    #     # 统一 ticktime 格式
+                    #     h5.loc[:, 'ticktime'] = h5['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
+                    #     return self._sanitize_indicators(self.combine_lastbuy(h5))
+
                     sina_limit_time_int: int = int(cct.sina_limit_time) if cct.sina_limit_time is not None else 60
-                    sina_time_status = (cct.get_work_day_status() and 915 < cct.get_now_time_int() < 926)
-                    
+                    now_int = cct.get_now_time_int()
+                    is_trade_day = cct.get_trade_date_status()
                     work_time_now = cct.get_work_time()
-                    # 决定是否可以使用 HDF5 数据快速返回 (不扫盘，不刷网)
-                    return_hdf_status = (not work_time_now) or (cct.get_trade_date_status() and l_time < sina_limit_time_int)
-                    
-                    if ((sina_time_status and l_time < 6) or (not sina_time_status and return_hdf_status)):
-                        log.info("Return HDF5 data early (recent:%0.2f)" % l_time)
+                    # ===== 1️⃣ 关键时间窗口划分 =====
+                    # 08:45–09:15 预开盘阶段 —— 强制走 HDF（绝不刷网）
+                    pre_open_force_hdf = 845 <= now_int < 915
+                    # 09:15–09:25 集合竞价 —— 允许非常高频刷新
+                    auction_time = 915 <= now_int < 925
+                    # 09:25–09:30 临近开盘 —— 再次锁回 HDF，避免无效抖动
+                    pre_open_lock = 925 <= now_int < 930
+                    # ===== 2️⃣ 常规 HDF 条件 =====
+                    normal_return_hdf = (not work_time_now) or (is_trade_day and l_time < sina_limit_time_int)
+                    # ===== 3️⃣ 最终是否直接返回 HDF =====
+                    return_hdf_status = pre_open_force_hdf or pre_open_lock or normal_return_hdf
+                    # ===== 4️⃣ 是否触发“早返回”逻辑 =====
+                    # 竞价阶段单独限频更严格（例如6秒）
+                    if ((auction_time and l_time < sina_limit_time_int) or (not auction_time and return_hdf_status)):
+                        log.info("Return HDF5 data early (recent:%s)" % self.format_age(l_time))
                         # 统一 ticktime 格式
-                        h5.loc[:, 'ticktime'] = h5['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
+                        # h5.loc[:, 'ticktime'] = h5['ticktime'].astype(str).apply(
+                        #     lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}"
+                        # )
                         return self._sanitize_indicators(self.combine_lastbuy(h5))
+
+
 
             log.info(f"HDF5 exists but not recent enough or quality poor, continuing to fetch...")
         else:
@@ -1362,7 +1434,7 @@ class Sina:
         )
             # (925 <= now_t <= 1130) or
             # (1300 <= now_t <= 1500)
-
+            
         # 交易日，但不在交易时间 → 直接返回
         if is_trade_day and not in_trade_time:
             return df
@@ -1594,16 +1666,17 @@ class Sina:
             (now_time - float(last_time) > limit_time and cct.get_work_time_duration())
         )
 
+        # need_load = (
+        #     h5_hist is None or 
+        #     last_time is None or 
+        #     (now_time - float(last_time) > limit_time)
+        # )
+
         if need_load:
             if debug:
                 log.debug(f"[UnifiedCache] Loading HDF5: {fname}/{table}")
             with timed_ctx(f"load_h5_{table}", warn_ms=1000):
-                h5_hist = h5a.load_hdf_db(
-                    fname, 
-                    table, 
-                    timelimit=False, 
-                    MultiIndex=True
-                )
+                h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
             
             if h5_hist is not None and not h5_hist.empty:
                 # 写入共享缓存，使所有 Sina 实例能看到
@@ -1793,10 +1866,9 @@ if __name__ == "__main__":
     dd = sina.get_real_time_tick(code)
     tickdf = cct.tick_to_daily_bar(dd)
     print(f'cct.sina_MultiIndex_startTime: {cct.sina_MultiIndex_startTime} dd:{dd[-3:]}')
-    import ipdb;ipdb.set_trace()
-
     df =sina.all
     print(f'ticktime: {df.ticktime[:5]}')    
+    import ipdb;ipdb.set_trace()
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     print(df.loc['601698'].nclose)

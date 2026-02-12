@@ -1416,6 +1416,95 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
 # df = pd.DataFrame(vect_daily_t)
 # check_real_time(df, ['688239', '601360'])
 
+def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False):
+    N = len(df)
+    if N == 0:
+        return {}
+
+    import numpy as np
+
+    # === 1. 构造价格/量能矩阵 ===
+    def get_val_matrix(prefix):
+        cols = [f"{prefix}{i}d" for i in range(1, max_days + 2)]
+        valid_cols = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days + 2))
+        if valid_cols:
+            mat[:, 1:len(valid_cols)+1] = df[valid_cols].values
+        return mat
+
+    P = get_val_matrix('lastp')
+    H = get_val_matrix('lasth')
+    L = get_val_matrix('lastl')
+    V = get_val_matrix('lastv')
+
+    # === 2. 主升结构窗口识别 ===
+    max_win = np.zeros(N, dtype=int)
+
+    for w in range(2, max_days + 1):
+
+        c = np.arange(1, w)
+        p = np.arange(2, w + 1)
+
+        # ① 高点不破趋势
+        cond_high = np.all(H[:, c] >= H[:, p], axis=1)
+
+        # ② 低点整体抬高（允许2%噪音）
+        cond_low = np.all(L[:, 1:w] >= L[:, 2:w+1] * 0.98, axis=1)
+
+        # ③ 整体上涨
+        cond_trend = P[:, 1] > P[:, w]
+
+        # ④ 阳线占多数（避免阴跌结构误判）
+        up_days = np.sum(P[:, 1:w+1] > P[:, 2:w+2], axis=1)
+        cond_bull = up_days >= (w // 2)
+
+        combined = cond_high & cond_low & cond_trend & cond_bull
+
+        if not np.any(combined):
+            break
+
+        max_win[combined] = w
+
+    # === 3. 过滤有效窗口 ===
+    keep_idx = np.where(max_win >= winlimit)[0]
+    if len(keep_idx) == 0:
+        return {}
+
+    # === 4. 结构斜率（每日平均涨幅 %）===
+    start_d = 1
+    end_d = max_win[keep_idx]
+
+    p_start = P[keep_idx, start_d]
+    p_end = P[keep_idx, end_d]
+
+    slopes = (p_start - p_end) / p_end / (max_win[keep_idx] - 1) * 100
+
+    # === 5. 量能爆发系数 ===
+    v_sub = V[keep_idx].copy()
+    col_range = np.arange(V.shape[1])
+
+    range_mask = (col_range >= 1) & (col_range <= end_d[:, None])
+    v_sub[~range_mask] = 0
+
+    avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
+    vol_ratio = V[keep_idx, 1] / (avg_vols + 1e-9)
+
+    power_idx = slopes * vol_ratio
+
+    # === 6. 结果整理 ===
+    res_df = df.iloc[keep_idx].copy()
+    res_df['max_win'] = max_win[keep_idx]
+    res_df['slope'] = np.round(slopes, 2)
+    res_df['vol_ratio'] = np.round(vol_ratio, 2)
+    res_df['power_idx'] = np.round(power_idx, 2)
+    res_df['sum_perc'] = np.round((p_start - p_end) / p_end * 100, 2)
+
+    return {
+        int(w): group.sort_values('power_idx', ascending=False)
+        for w, group in res_df.groupby('max_win')
+    }
+
+
 def strong_momentum_large_cycle_vect(df, max_days=10, winlimit=2,debug=False):
     N = len(df)
     if N == 0: return {}
@@ -2331,14 +2420,16 @@ def fetch_and_process(
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
 
             # test_opt(top_all,resample)
-
+            
             with timed_ctx("plus_history_sum_opt", warn_ms=1000):
                 if resample == 'd':
                     # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
                     result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
                 else:
-                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
+                    # result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
+                    result_opt = strong_momentum_large_cycle_vect_new(top_all,max_days=cct.compute_lastdays,winlimit=1)
             with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+                # print(get_vect_daily_data(top_all,['002455']).T.to_string())
                 clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
                 top_all = align_sum_percent(top_all,clean_sum)
 
@@ -2357,9 +2448,7 @@ def fetch_and_process(
                 top_all = scoring_momentum_pullback_system_top(top_all,max_days=cct.compute_lastdays)
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
-            logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops']]}")
-            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
-            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
+          
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
@@ -2409,6 +2498,11 @@ def fetch_and_process(
             gc.collect()
             cct.print_timing_summary()
             cct.df_memory_usage(df_all)
+
+            logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops','w_upper']]}")
+            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+
             extra_cols = ['win','sum_perc', 'slope', 'vol_ratio', 'power_idx']
             df_show = top_temp.loc[:, ["name"] + sort_cols[:7] + extra_cols].head(10)
          
@@ -2474,8 +2568,8 @@ def fetch_and_process(
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
-                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
-                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score']][:5]}")
+                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
                 print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 print(

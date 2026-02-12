@@ -214,25 +214,25 @@ DEFAULT_DISPLAY_COLS = [
 tip_var_status_flag = mp.Value('b', False)  # boolean
 
 from alerts_manager import AlertManager, open_alert_center, set_global_manager, check_alert
-def ___toast_message(master, text, duration=1500):
-    """短暂提示信息（浮层，不阻塞）"""
-    toast = tk.Toplevel(master)
-    toast.overrideredirect(True)
-    toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
-    label.pack()
-    try:
-        master.update_idletasks()
-        master_x = master.winfo_rootx()
-        master_y = master.winfo_rooty()
-        master_w = master.winfo_width()
-    except Exception:
-        master_x, master_y, master_w = 100, 100, 400
-    toast.update_idletasks()
-    toast_w = toast.winfo_width()
-    toast_h = toast.winfo_height()
-    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
-    toast.after(duration, toast.destroy)
+# def ___toast_message(master, text, duration=1500):
+#     """短暂提示信息（浮层，不阻塞）"""
+#     toast = tk.Toplevel(master)
+#     toast.overrideredirect(True)
+#     toast.attributes("-topmost", True)
+#     label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
+#     label.pack()
+#     try:
+#         master.update_idletasks()
+#         master_x = master.winfo_rootx()
+#         master_y = master.winfo_rooty()
+#         master_w = master.winfo_width()
+#     except Exception:
+#         master_x, master_y, master_w = 100, 100, 400
+#     toast.update_idletasks()
+#     toast_w = toast.winfo_width()
+#     toast_h = toast.winfo_height()
+#     toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+#     toast.after(duration, toast.destroy)
 
 
 def get_visualizer_path(file_base='trade_visualizer_qt6'):
@@ -1470,6 +1470,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
               
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
+                
+                # 💥 [FIX] 在终止进程前，最后强制保存一次 DataPublisher 的 K 线缓存
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        self.realtime_service.save_cache(force=True)
+                    except Exception as e:
+                        logger.warning(f"Final cache save before exit failed: {e}")
+
                 # ⭐ [FIX] 给更多时间让后台进程清理 (特别是 MinuteKlineCache 保存)
                 self.proc.join(timeout=5) 
                 if self.proc.is_alive():
@@ -1967,12 +1975,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def save_main_pos():
             if hasattr(self, 'save_window_position'):
                 self.save_window_position(self, "main_window")
-                ___toast_message(self, "主窗口位置已保存")
+                toast_message(self, "主窗口位置已保存")
 
         def load_main_pos():
             if hasattr(self, 'load_window_position'):
                 self.load_window_position(self, "main_window")
-                ___toast_message(self, "主窗口位置已恢复")
+                toast_message(self, "主窗口位置已恢复")
 
         tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
@@ -2258,6 +2266,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         else:
             if self.vis_var.get() and hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+                self.last_vis_var_status = self.vis_var.get()
                 self.vis_var.set(False)
         resample = self.resample_combo.get().strip()
         logger.info(f'set resample : {resample}')
@@ -2332,7 +2341,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.refresh_enabled:
                 has_update = False
                 latest_df = None
-                
+
+                # 📂 确保 K 线缓存周期性保存 (即便没有新数据进入队列)
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        self.realtime_service.save_cache(force=False)
+                    except Exception as e:
+                        logger.error(f"Periodic cache save check failed: {e}")
+
                 # 🔄 优化：只取队列中最新的一个数据包，丢弃过时的增量
                 while not self.queue.empty():
                     try:
@@ -2437,6 +2453,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if self.viz_command_queue:
                                 self.viz_command_queue = None
                             self._df_first_send_done = False
+                            if self.last_vis_var_status:
+                                self.vis_var.set(True)
+                                self.last_vis_var_status = None
                             # self.vis_var.set(True)
                     # -------------------------
                     self.status_var2.set(f'queue update: {self.format_next_time()}')
@@ -5281,7 +5300,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def save_pos():
             if hasattr(self, 'save_window_position'):
                 self.save_window_position(win, window_id)
-                ___toast_message(self, "位置已保存")
+                toast_message(self, "位置已保存")
         ttk.Button(top_bar, text="💾 保存位置", command=save_pos).pack(side="right", padx=2)
 
         def load_pos():
@@ -7914,7 +7933,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def tree_scroll_to_code(self, code, select_win=False, vis=False):
         """外部调用：定位特定代码 (Thread-Safe via Queue)"""
         if not code:
-            return True
+            return False
 
         def _ui_action():
             try:
@@ -7945,8 +7964,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              self.tk_dispatch_queue.put(_ui_action)
         else:
              self._schedule_after(0, _ui_action)
-        
         return True
+        
     def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
