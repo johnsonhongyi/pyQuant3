@@ -5295,7 +5295,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #             pass
     #     except Exception as e:
     #         pass
-
+    
+    @with_log_level(LoggerFactory.INFO)
     def on_voice_alert(self, code, name, msg):
         """
         处理语音报警触发: 弹窗显示股票详情
