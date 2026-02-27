@@ -8,6 +8,10 @@ block_cipher = None
 
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
+from PyInstaller.utils.hooks import collect_all
+
+datas_st, binaries_st, hiddenimports_st = collect_all('setuptools')
+
 trash_list = [
     'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf', 
     'Qt6Quick', 'Qt6Qml', 'Qt6VirtualKeyboard', 
@@ -32,10 +36,10 @@ a = Analysis(
         ("JSONData/count.ini", "JSONData"),
         ("JohnsonUtil/global.ini", "JohnsonUtil"),
         ("JohnsonUtil/wencai/同花顺板块行业.xlsx", "JohnsonUtil/wencai"),
-         ],
+         ] + datas_st,
     hiddenimports=['a_trade_calendar','JSONData.sina_data','JSONData.tdx_hdf5_api',  'JSONData.realdatajson',
                     'JSONData.wencaiData',  'JSONData.tdxbk', 'pandas','JohnsonUtil.johnson_cons', 'configobj',
-                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract'],
+                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract'] + hiddenimports_st,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -68,6 +72,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="MonitorTK32.ico",    # ✅ 加这一行
 )
 #   icon="MonitorTK32.ico",    # ✅ 加这一行

@@ -57,6 +57,7 @@ class QueryHistoryManager:
         self.search_combo3 = search_combo3
         self.search_combo4 = search_combo4
         self.deleted_stack = []  # 保存被删除的 query 记录
+        self._history_changed = False  # 追踪本次打开期间是否有过修改
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback
@@ -183,8 +184,15 @@ class QueryHistoryManager:
         will_show = True
         if hasattr(self, "editor_frame") and self.editor_frame.winfo_ismapped():
             will_show = False
-
+            # 仅当本次打开期间有过修改时才自动保存
+            if self._history_changed:
+                logger.info("[open_editor] 检测到修改，自动保存历史记录...")
+                self.save_search_history()
+                self._history_changed = False
+            
         if will_show:
+            # 打开时重置修改标志
+            self._history_changed = False
             try:
                 self.history1, self.history2, self.history3, self.history4 = self.load_search_history()
                 if self.current_key == "history1": self.current_history = self.history1
@@ -424,6 +432,7 @@ class QueryHistoryManager:
             new_query = new_query.strip()
             old_query = record["query"]
             record["query"] = new_query
+            self._history_changed = True  # 标记已修改
             
             # 同步回调以更新关联的 UI
             if callable(self.sync_history_callback):
@@ -464,7 +473,7 @@ class QueryHistoryManager:
             self.history3 = self.current_history
         elif self.current_key == "history4":
             self.history4 = self.current_history
-            
+        self._history_changed = True  # 标记已修改
         self.refresh_tree()
         self.entry_query.delete(0, tk.END)
         self.use_query(query)
@@ -482,7 +491,8 @@ class QueryHistoryManager:
             old_val = record.get("starred", 0)
             if isinstance(old_val, bool): old_val = 1 if old_val else 0
             record["starred"] = (old_val + 1) % 5
-            self.refresh_tree() 
+            self._history_changed = True  # 标记已修改
+            self.refresh_tree()
 
     def get_centered_window_position_query(self, parent, win_width, win_height, margin=10):
         mx = parent.winfo_pointerx()
@@ -586,6 +596,7 @@ class QueryHistoryManager:
                 elif self.current_key == "history2": self.history2[idx]["note"] = new_note
                 elif self.current_key == "history3": self.history3[idx]["note"] = new_note
                 self.current_history[idx]["note"] = new_note
+                self._history_changed = True  # 标记已修改
                 self.refresh_tree()
             return
         self.use_query(record["query"])
@@ -698,6 +709,7 @@ class QueryHistoryManager:
         record = self.current_history.pop(idx)
         history_key = self.current_key
         self.deleted_stack.append({"record": record.copy(), "history_key": history_key, "index": idx})
+        self._history_changed = True  # 标记已修改
         self._suppress_switch = True
         self.sync_history_current(record, action="delete", history_key=history_key)
         self.refresh_tree()
@@ -722,6 +734,7 @@ class QueryHistoryManager:
             return
         if 0 <= index <= len(target_history): target_history.insert(index, record)
         else: target_history.insert(0, record)
+        self._history_changed = True  # 标记已修改（撤销恢复也算变更）
         self.sync_history_current(record, action="add", history_key=history_key)
         toast_message(self.root, f"已恢复：{record.get('query')}", 1500)
 

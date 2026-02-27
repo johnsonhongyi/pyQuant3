@@ -16,7 +16,6 @@ import shutil
 import os
 import sys
 from datetime import datetime
-from pathlib import Path
 from sys_utils import get_base_path
 
 class DatabaseRepairTool:

@@ -333,25 +333,33 @@ class Sina:
         if df is None or df.empty:
             return df
             
-        # 集合竞价期间(09:15-09:25)不进行无效股剔除，因为此时价格/成交量可能为0但属于正常状态
-        if 915 <= cct.get_now_time_int() <= 925:
-             return df
-            
-        # 判定条件：open, now 均为 0 表示停牌或无效。
-        # 注意：format_response_data 中已将原始 close 映射为 llastp，并将 now 映射为新 close。
-        # 因此 query 使用 close==0 or now==0 均可。
-        query_str = 'open == 0 and now == 0'
+        # 判定条件优化：只有 open, now, buy, sell 全为 0 才视为停牌。
+        # 如果 buy/sell > 0，说明只是暂时没成交，不应永久屏蔽。
+        query_str = 'open == 0 and now == 0 and buy == 0 and sell == 0'
         if 'close' in df.columns:
-            query_str = 'open == 0 and close == 0 and now == 0'
+            query_str = 'open == 0 and close == 0 and now == 0 and buy == 0 and sell == 0'
             
         suspended = df.query(query_str)
         if len(suspended) > 0:
             new_suspended = suspended.index.tolist()
-            log.info(f"检测到停牌股/无效数据: {len(new_suspended)} 只, 内存已记录并剔除")
-            excluded = cct.GlobalValues().getkey('suspended_codes') or []
-            excluded.extend(new_suspended)
-            cct.GlobalValues().setkey('suspended_codes', list(set(excluded)))
+            now_int = cct.get_now_time_int()
+            
+            # 🚦 策略优化：
+            # 09:45 之前被判定为“无数据”的票，仅在本轮刷新中剔除（防止 UI 显示全 0），
+            # 但不加入 `suspended_codes` 全局黑名单，给“晚开盘/冷门票”留出观察时间。
+            # 09:45 之后仍无任何报价成交的票，才视为确实停牌，永久加入黑名单以节省后续 IO。
+            if now_int > 945:
+                log.info(f"检测到停牌股: {len(new_suspended)} 只, 加入 Session 禁刷列表")
+                excluded = cct.GlobalValues().getkey('suspended_codes') or []
+                excluded.extend(new_suspended)
+                cct.GlobalValues().setkey('suspended_codes', list(set(excluded)))
+            else:
+                # 集合竞价期间(09:15-09:25)通常不剔除，除非完全没数据
+                # 这里我们选择在 09:45 前只做临时剔除
+                log.info(f"活跃保护期（09:45前）: 暂时过滤 {len(new_suspended)} 只无成交/无报价股票，不加入黑名单")
+            
             df = df.drop(new_suspended)
+            
         return df
 
     def format_age(self,seconds: float) -> str:
@@ -1861,7 +1869,7 @@ if __name__ == "__main__":
 
     # print((sina.get_stock_code_data('300107').T))
     code='603056'
-    code='300107'
+    code='920082'
     # dd = sina.get_real_time_tick('300376')
     dd = sina.get_real_time_tick(code)
     tickdf = cct.tick_to_daily_bar(dd)
@@ -1880,7 +1888,7 @@ if __name__ == "__main__":
     print(f'总计: {len(df)}')
     dm = df
     stop_code = dm[~((dm.b1 > 0) | (dm.a1 > 0) | (dm.buy >0) | (dm.sell >0))].loc[:,['name']].T
-    print(f'总计: {len(df)} 停牌个股:\n {stop_code}')
+    print(f'总计: {len(df)} 停牌个股stop_code:{len(stop_code)} \n {stop_code}')
     import ipdb;ipdb.set_trace()
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
