@@ -993,10 +993,7 @@ class HotlistPanel(QWidget, WindowMixin):
                     if self.watchlist_table.rowCount() != len(df):
                         self.watchlist_table.setRowCount(len(df))
                     
-                    self.watchlist_table.setUpdatesEnabled(False)
-                    needs_full_rebuild_dummy = False 
-                    
-                    # 只有数据量较大且当前没有选中的情况下才临时关闭渲染
+                    # [FIX] 去掉重复调用，只保留一次
                     self.watchlist_table.setUpdatesEnabled(False)
                     v_scroll = self.watchlist_table.verticalScrollBar().value()
                     current_code = None
@@ -1069,13 +1066,12 @@ class HotlistPanel(QWidget, WindowMixin):
                     
                     self.watchlist_table.verticalScrollBar().setValue(v_scroll)
                 finally:
-                    # 只有在明确锁定的情况下才恢复, 且必须恢复
+                    # [FIX] 先恢复排序（此时 updatesEnabled=False，排序不触发重绘）
+                    # 再 setUpdatesEnabled(True) 触发唯一一次合并重绘，消除 5 秒卡顿
+                    if is_sorted:
+                        self.watchlist_table.setSortingEnabled(True)
                     self.watchlist_table.setUpdatesEnabled(True)
                     self.watchlist_table.blockSignals(False)
-                    
-                    if is_sorted:
-                        _ = self.watchlist_table.setSortingEnabled(True)
-                    
                     # [OPTIMIZE] 移除 resizeColumnsToContents(), 这是卡死的罪魁祸首!
                     # 实时刷新时不应频繁进行重排版几何计算
                     
@@ -1183,6 +1179,16 @@ class HotlistPanel(QWidget, WindowMixin):
             c.execute("UPDATE hot_stock_watchlist SET validation_status='DROPPED' WHERE code=?", (code,))
             conn.commit()
             logger.info(f"Removed {code} from watchlist")
+            # [FIX] 立即从内存缓存中去掉被删除的行，
+            # 避免 _update_watchlist_queue 使用含 100 条旧数据的 _last_df_watchlist 做全量刷新
+            if self._last_df_watchlist is not None and not self._last_df_watchlist.empty:
+                self._last_df_watchlist = (
+                    self._last_df_watchlist[
+                        self._last_df_watchlist['code'].astype(str) != str(code)
+                    ].reset_index(drop=True)
+                )
+                # 重置指纹，确保下次 worker 数据到来时强制全量重建
+                self._last_watchlist_fingerprint = ""
             self._update_watchlist_queue()
         except Exception as e:
             logger.error(f"Remove from watchlist error: {e}")
