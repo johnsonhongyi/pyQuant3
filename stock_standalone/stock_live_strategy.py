@@ -26,6 +26,7 @@ from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory
+from logger_utils import  with_log_level
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
 from signal_message_queue import SignalMessageQueue, SignalMessage # [NEW] Shadow Engine Support
@@ -1501,7 +1502,7 @@ class StockLiveStrategy:
             logger.debug(f"Anomaly pattern hub error: {e}")
             return False, ""
 
-
+    @with_log_level(LoggerFactory.INFO)
     def _scan_rank_for_follow(self, df: pd.DataFrame, concept_top5: list = None, top_n: int = 100) -> None:
         """
         扫描板块联动强势突破股，筛选可跟单标的加入队列 (Restore from 9ce1a1d)
@@ -1688,6 +1689,8 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Error in _daily_watchlist_validation: {e}")
 
+
+    @with_log_level(LoggerFactory.INFO)
     def _process_follow_queue(self, df: pd.DataFrame, resample='d'):
         """
         [Phase 2] 处理跟单队列：支持竞价、回踩、突破等多种策略
@@ -3614,7 +3617,7 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Failed to refresh daily history cache: {e}")
 
-
+    @with_log_level(LoggerFactory.INFO)
     def _on_daily_pattern_detected(self, event: 'DailyPatternEvent') -> None:
         """日线形态检测回调 - 标准化报警处理"""
         try:

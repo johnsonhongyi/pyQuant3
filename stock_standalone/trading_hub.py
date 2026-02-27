@@ -554,6 +554,7 @@ class TradingHub:
             LEFT JOIN merged_patterns mp ON rw.code = mp.code
             WHERE rw.rn = 1
             ORDER BY rw.discover_date DESC, rw.trend_score DESC
+            LIMIT 200
             """
             
             df = pd.read_sql_query(query, conn, params=params)
@@ -588,7 +589,7 @@ class TradingHub:
         Returns:
             dict[str, list[str]]: 清理详情 {status: [name(code), ...]}
         """
-        results = {"CANCEL_SIGNAL": [], "STALE_SIGNAL": [], "CANCEL_HOTLIST": []}
+        results = {"CANCEL_SIGNAL": [], "STALE_SIGNAL": [], "CANCEL_HOTLIST": [], "PURGED_WATCHLIST": 0}
         try:
             mgr = SQLiteConnectionManager.get_instance(self.signal_db)
 
@@ -709,6 +710,23 @@ class TradingHub:
                              (reason, now.strftime('%Y-%m-%d %H:%M:%S'), r_id))
                     results["CANCEL_SIGNAL"].append(f"{r_name}({r_code}) - {reason} [{r_status}]")
                     logger.info(f"[TradingHub] Queue Limit Cleanup: {r_code} {r_name} CANCELLED")
+
+            # 4. [NEW] 清理 hot_stock_watchlist (观察池)
+            # 物理删除: 已淘汰(DROPPED)或已入场(PROMOTED/EXITED) 超过3天的记录，以及长时间无进展的记录
+            purge_date_3d = (now - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+            purge_date_7d = (now - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # --- 物理清理冗余状态 ---
+            c.execute("""
+                DELETE FROM hot_stock_watchlist 
+                WHERE (validation_status IN ('DROPPED', 'PROMOTED', 'EXITED', 'CANCELLED') AND updated_at < ?)
+                   OR (validation_status = 'WATCHING' AND updated_at < ?)
+            """, (purge_date_3d, purge_date_7d))
+            
+            purged_count = c.rowcount
+            if purged_count > 0:
+                logger.info(f"[TradingHub] Watchlist Purge: Deleted {purged_count} stale/dropped records.")
+                results["PURGED_WATCHLIST"] = purged_count
 
             conn.commit()
             return results
@@ -1088,19 +1106,31 @@ class TradingHub:
             now = datetime.now()
             today_str = now.strftime('%Y-%m-%d')
 
-            # 去重：同代码同日
-            c.execute("SELECT id, daily_patterns FROM hot_stock_watchlist WHERE code=? AND discover_date=?",
-                      (code, today_str))
+            # [REFACTOR] 智能去重：只要该股票在观察中（WATCHING/VALIDATED），就合并形态评分而不是新增行
+            # 这样可以防止同一个股票因为多日被选中而在数据库中堆积多行记录
+            c.execute("""
+                SELECT id, daily_patterns, pattern_score FROM hot_stock_watchlist 
+                WHERE code=? AND validation_status IN ('WATCHING', 'VALIDATED')
+                ORDER BY discover_date DESC LIMIT 1
+            """, (code,))
             row = c.fetchone()
+            
             if row:
-                # 如果已存在，但有新的形态描述，则更新形态（实现形态叠加）
-                wid, old_patterns = row
+                # 如果已在队列中，更新其形态描述和评分（取最大值），更新活跃时间
+                wid, old_patterns, old_score = row
+                new_pts = old_patterns
                 if daily_patterns and daily_patterns not in str(old_patterns):
                     new_pts = f"{old_patterns};{daily_patterns}" if old_patterns else daily_patterns
-                    c.execute("UPDATE hot_stock_watchlist SET daily_patterns=?, pattern_score=MAX(pattern_score, ?), updated_at=? WHERE id=?",
-                              (new_pts, pattern_score, now.strftime('%Y-%m-%d %H:%M:%S'), wid))
-                    conn.commit()
-                return False  
+                
+                new_score = max(old_score or 0, pattern_score)
+                c.execute("""
+                    UPDATE hot_stock_watchlist 
+                    SET daily_patterns=?, pattern_score=?, latest_price=?, updated_at=?, sector=COALESCE(NULLIF(sector, ''), ?)
+                    WHERE id=?
+                """, (new_pts, new_score, price, now.strftime('%Y-%m-%d %H:%M:%S'), sector, wid))
+                conn.commit()
+                # logger.debug(f"[TradingHub] Watchlist Update: {code} {name} merged patterns.")
+                return True
 
             c.execute("""
                 INSERT INTO hot_stock_watchlist
