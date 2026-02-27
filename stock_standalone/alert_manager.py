@@ -45,10 +45,27 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
     import pythoncom
     import time
     
+    # --- [NEW] 配置带轮转的日志记录器 ---
+    import logging.handlers
+    log_file = "voice_worker_debug.log"
+    handler = logging.handlers.RotatingFileHandler(
+        log_file, 
+        maxBytes=2 * 1024 * 1024, # 2MB
+        backupCount=3,            # 保留3个旧文件
+        encoding='utf-8'
+    )
+    # 调整命名方式：从 .log.1 变为 .1.log
+    handler.namer = lambda name: name.replace(".log.", ".") + ".log"
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker] %(message)s', '%Y-%m-%d %H:%M:%S'))
+    
+    w_logger = logging.getLogger("VoiceWorkerProcess")
+    w_logger.setLevel(logging.DEBUG)
+    if not w_logger.handlers:
+        w_logger.addHandler(handler)
+
     def worker_log(msg):
         try:
-            with open("voice_worker_debug.log", "a", encoding="utf-8") as f:
-                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ProcessWorker] {msg}\n")
+            w_logger.debug(msg)
         except: pass
 
     worker_log("Voice worker process started.")
@@ -135,6 +152,13 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
 
 
             safe_msg = normalize_speech_text(message)
+            
+            # [FIX] 如果 Key 为 None，尝试从消息中检测代码 (6位数字)
+            if not key and message:
+                code_match = re.search(r'(\d{6})', str(message))
+                if code_match:
+                    key = code_match.group(1)
+                    
             worker_log(f"Handling: {safe_msg[:40]}... (Key: {key})")
 
             # 标记当前播报品种

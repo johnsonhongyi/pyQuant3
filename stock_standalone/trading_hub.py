@@ -1097,6 +1097,8 @@ class TradingHub:
                          source: str = "", daily_patterns: str = "", pattern_score: float = 0) -> bool:
         """
         全量归集：将各路选股结果写入观察队列（不直接跟单）
+        - 重复加入时保留原始 discover_date，仅更新形态/评分/价格
+        - 已淘汰(DROPPED)的股票被重新检测到时，恢复为 WATCHING
         """
         try:
             mgr = SQLiteConnectionManager.get_instance(self.signal_db)
@@ -1106,32 +1108,45 @@ class TradingHub:
             now = datetime.now()
             today_str = now.strftime('%Y-%m-%d')
 
-            # [REFACTOR] 智能去重：只要该股票在观察中（WATCHING/VALIDATED），就合并形态评分而不是新增行
-            # 这样可以防止同一个股票因为多日被选中而在数据库中堆积多行记录
+            # [FIX] 智能去重：扩大查找范围到所有非 EXITED 状态
+            # 解决问题：DROPPED/PROMOTED 记录被清理后，同股重新入池导致 discover_date 丢失
             c.execute("""
-                SELECT id, daily_patterns, pattern_score FROM hot_stock_watchlist 
-                WHERE code=? AND validation_status IN ('WATCHING', 'VALIDATED')
-                ORDER BY discover_date DESC LIMIT 1
+                SELECT id, daily_patterns, pattern_score, validation_status, discover_date
+                FROM hot_stock_watchlist 
+                WHERE code=?
+                ORDER BY discover_date ASC LIMIT 1
             """, (code,))
             row = c.fetchone()
             
             if row:
-                # 如果已在队列中，更新其形态描述和评分（取最大值），更新活跃时间
-                wid, old_patterns, old_score = row
+                wid, old_patterns, old_score, old_status, old_discover_date = row
+                
+                # 合并形态描述
                 new_pts = old_patterns
-                if daily_patterns and daily_patterns not in str(old_patterns):
+                if daily_patterns and daily_patterns not in str(old_patterns or ''):
                     new_pts = f"{old_patterns};{daily_patterns}" if old_patterns else daily_patterns
                 
                 new_score = max(old_score or 0, pattern_score)
+                
+                # [KEY] 如果之前已淘汰(DROPPED)或已完成(PROMOTED/CANCELLED)，重新激活为 WATCHING
+                # 但无论如何，discover_date 保持不变
+                new_status = old_status
+                if old_status in ('DROPPED', 'CANCELLED'):
+                    new_status = 'WATCHING'
+                    logger.info(f"[TradingHub] Watchlist Reactivate: {code} {name} {old_status} -> WATCHING (discover_date={old_discover_date})")
+
                 c.execute("""
                     UPDATE hot_stock_watchlist 
-                    SET daily_patterns=?, pattern_score=?, latest_price=?, updated_at=?, sector=COALESCE(NULLIF(sector, ''), ?)
+                    SET daily_patterns=?, pattern_score=?, latest_price=?, updated_at=?,
+                        validation_status=?, sector=COALESCE(NULLIF(sector, ''), ?),
+                        source=CASE WHEN source IS NULL OR source='' THEN ? ELSE source END
                     WHERE id=?
-                """, (new_pts, new_score, price, now.strftime('%Y-%m-%d %H:%M:%S'), sector, wid))
+                """, (new_pts, new_score, price, now.strftime('%Y-%m-%d %H:%M:%S'),
+                      new_status, sector, source, wid))
                 conn.commit()
-                # logger.debug(f"[TradingHub] Watchlist Update: {code} {name} merged patterns.")
                 return True
 
+            # 全新股票，首次入池
             c.execute("""
                 INSERT INTO hot_stock_watchlist
                 (code, name, sector, discover_date, discover_price, latest_price,

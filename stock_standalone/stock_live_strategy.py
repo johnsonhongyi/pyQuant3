@@ -1734,13 +1734,15 @@ class StockLiveStrategy:
                         
                         # 冲高回落检测：曾涨 > 5% 且回落在 2% 以下
                         if high_pct > 5.0 and current_pct < 2.0:
-                            self.voice_announcer.announce(f"{signal.name} 冲高回落，建议反向做T减仓。")
+                            msg = "冲高回落，建议反向做T减仓。"
+                            self._trigger_alert(code, signal.name, msg, action="卖出", price=current_price)
                             logger.info(f"⚠️ [HoldingWarn] {code} {signal.name} 冲高回落: high={high_pct:.1f}% curr={current_pct:.1f}%")
                         
                         # 趋势走弱检测：跌破 MA5
                         ma5 = float(row.get('ma5d', 0.0))
                         if ma5 > 0 and current_price < ma5:
-                            self.voice_announcer.announce(f"{signal.name} 跌破5日线，建议止盈或控制仓位。")
+                            msg = "跌破5日线，建议止盈或控制仓位。"
+                            self._trigger_alert(code, signal.name, msg, action="止盈", price=current_price)
                             logger.info(f"⚠️ [HoldingWarn] {code} {signal.name} 跌破MA5: curr={current_price:.2f} ma5={ma5:.2f}")
                     continue # 持仓股已处理完监控，跳过买入触发逻辑
 
@@ -1932,9 +1934,9 @@ class StockLiveStrategy:
                 
             # 5. 报警联动
             action_text = "自动买入"
-            msg = f"{action_text}: {name} ({code}) 价格:{price} 理由:{reason}"
-            self.voice_announcer.announce(msg)
-            logger.info(f"✅ [Trade Executed] {msg}")
+            # msg = f"{action_text}: {name} ({code}) 价格:{price} 理由:{reason}"
+            self._trigger_alert(code, name, f"{action_text} 理由:{reason}", action=action_text, price=price)
+            logger.info(f"✅ [Trade Executed] {name} ({code}) 价格:{price} 理由:{reason}")
             
         except Exception as e:
             logger.error(f"Execute trade failed {code}: {e}")

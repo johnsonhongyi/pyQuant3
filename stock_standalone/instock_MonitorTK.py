@@ -2841,6 +2841,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception as e:
                             logger.warning(f"Failed to load {key}: {e}")
 
+            # [NEW] 恢复主 Treeview 排序列和排序方向
+            saved_sort_col = ui_state.get('sortby_col', None)
+            saved_sort_asc = ui_state.get('sortby_col_ascend', None)
+            if saved_sort_col is not None and saved_sort_asc is not None:
+                self.sortby_col = saved_sort_col
+                self.sortby_col_ascend = bool(saved_sort_asc)
+                logger.info(f"Restored sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
+
             logger.info(f"UI states loaded: {len(ui_state)} items")
 
         except Exception as e:
@@ -2875,6 +2883,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         config['ui_persistence'][name] = var.get()
                     except:
                         pass
+
+            # [NEW] 保存主 Treeview 排序列和排序方向
+            config['ui_persistence']['sortby_col'] = self.sortby_col
+            config['ui_persistence']['sortby_col_ascend'] = self.sortby_col_ascend
+            logger.info(f"Saving sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
 
             with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
