@@ -802,7 +802,7 @@ class GlobalConfig:
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
         self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=120, value_type="int")
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
-        self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=120, value_type="int")
+        self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=180, value_type="int")
         self.sina_limit_time = self.get_with_writeback("general", "sina_limit_time", fallback=30, value_type="int")
         self.sina_dd_limit_time = self.get_with_writeback("general", "sina_dd_limit_time", fallback=1200, value_type="int")
         self.stop_loss_pct = self.get_with_writeback("general", "stop_loss_pct", fallback=0.05, value_type="float")

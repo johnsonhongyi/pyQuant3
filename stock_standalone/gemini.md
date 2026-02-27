@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-02-10 17:50  
+> 最后更新：2026-02-27 20:30  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 
@@ -20,10 +20,19 @@
 
 ---
 
-## ✅ 最近完成任务: P3 & P4 - 统一跟单流水线与状态机升级 (02-10 17:50)
+## ✅ 最近完成任务: 报警日志代码缺失修复 (02-27 20:30)
 
 **状态**: ✅ 已完成
-**目标**: 建立以 Watchlist 为中心的统一归集验证体系，提升验证门槛至 0.7，并实现 UI 特征（形态/评分/来源）的全对齐。
+**目标**: 解决语音报警调试日志中股票代码 (`Key`) 缺失的问题，确保所有报警信号在全链路（日志、IPC、UI）具备完整元数据。
+
+### 核心变更
+- **AlertManager 增强**: `_voice_worker` 现在能从语音文本中正则识别并补全缺失的 6 位股票代码。
+- **信号调用标准化**: 将 `stock_live_strategy.py` 中遗留的直接语音调用重构为 `_trigger_alert` 统一入口。
+- **覆盖场景**: 修复了“持仓股跌破MA5”、“冲高回落”、“自动买入执行”等关键报警的代码缺失问题。
+
+### 历史记录 (Brain Artifacts)
+- 实施计划: [implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b61a772f-8ef7-4e79-a54c-ef0472a81381/20260227_2030_implementation_plan.md)
+- 任务清单: [task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b61a772f-8ef7-4e79-a54c-ef0472a81381/20260227_2030_task.md)
 
 ### 核心变更
 - **统一流水线 (Unified Pipeline)**: 所有来源标的统一进入 `WATCHING` 状态。
@@ -381,6 +390,7 @@ if hasattr(self, 'pattern_detector'):
 
 ## 📅 变更日志
 
+| 02-27 20:30 | **报警日志修复**: 增强 AlertManager 代码识别，重构 StockLiveStrategy 报警入口 | `alert_manager.py`, `stock_live_strategy.py` |
 | 02-10 18:00 | **紧急 BUG 修复**: 修复 `trading_hub.py` 的 NameError (Dict) 与 `instock_MonitorTK.py` 的 NoneType 崩溃 | `trading_hub.py`, `instock_MonitorTK.py` |
 | 02-10 17:50 | **P3/P4 统一流水线整合**: 实现以 Watchlist 为核心的状态机，重构验证评分 (Threshold=0.7)，UI 列对齐 | `trading_hub.py`, `hotlist_panel.py`, `stock_live_strategy.py` |
 | 02-10 17:00 | **数据库结构修复**: 恢复损坏的 trading_signals.db，补全 Watchlist 形态字段 | `trading_hub.py`, `sqlite3` |
