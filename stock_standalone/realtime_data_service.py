@@ -321,12 +321,12 @@ class MinuteKlineCache:
             
         updated_codes: set[str] = set()
         
-        # 确定时间源列
+        # 确定时间源列 (优先识别 market time)
         time_col = None
-        if 'timestamp' in df.columns:
-            time_col = 'timestamp'
-        elif 'time' in df.columns:
-            time_col = 'time'
+        for col in ['timestamp', 'time', 'ticktime']:
+            if col in df.columns:
+                time_col = col
+                break
         
         # 获取墙上时间作为备份
         wall_clock = time.time()
@@ -345,7 +345,15 @@ class MinuteKlineCache:
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
                 
                 # 时间戳提取
-                ts = float(getattr(row, time_col)) if time_col else wall_clock
+                if time_col:
+                    try:
+                        # 鲁棒转换：处理 Unix timestamp, datetime, 或 HH:MM:SS 字符串
+                        val = getattr(row, time_col)
+                        ts = pd.to_datetime(val).timestamp()
+                    except Exception:
+                        ts = wall_clock
+                else:
+                    ts = wall_clock
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
                 
@@ -1117,14 +1125,27 @@ class DataPublisher:
             # # 更新情绪 (传入 baseline)
             # self.emotion_tracker.update_batch(df, self.emotion_baseline)
 
-            # --- 🚀 批次指纹校验与状态处理 ---
             # 1. 抓取元信息并计算时间戳 (更宽的准入窗口: 9:10 - 15:10)
+            # 🚦 优先识别市场时间列，防止系统时钟偏差导致 10:00 左右误触发午休过滤器
             check_sample = df.head(1)
             raw_ts = time.time()
-            if 'timestamp' in check_sample.columns:
-                raw_ts = float(check_sample['timestamp'].iloc[0])
-            elif 'time' in check_sample.columns:
-                raw_ts = float(check_sample['time'].iloc[0])
+            time_source = "system_clock"
+            
+            for col in ['timestamp', 'time', 'ticktime']:
+                if col in check_sample.columns:
+                    try:
+                        val = check_sample[col].iloc[0]
+                        converted_ts = pd.to_datetime(val).timestamp()
+                        raw_ts = float(converted_ts)
+                        time_source = col
+                        break
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to parse {col}: {e}")
+
+            # 仅在非交易活跃期或第一次收到批次时记录诊断信息
+            if not getattr(self, '_time_source_logged', False):
+                logger.info(f"🚦 First realtime batch identified. Time source: {time_source}, Market Time: {datetime.fromtimestamp(raw_ts).strftime('%H:%M:%S')}")
+                self._time_source_logged = True
             
             # 手动判定时段 (替代 strict 的 cct.get_realtime_status)
             dt_now = datetime.fromtimestamp(raw_ts)

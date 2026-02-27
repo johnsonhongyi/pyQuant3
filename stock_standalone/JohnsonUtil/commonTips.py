@@ -85,6 +85,23 @@ class LazyModule:
     def __call__(self, *args, **kwargs):
         return self.module(*args, **kwargs)
 
+# class LazyClass:
+#     def __init__(self, module_path, class_name):
+#         self.module_path = module_path
+#         self.class_name = class_name
+#         self._cls = None
+
+#     @property
+#     def cls(self):
+#         if self._cls is None:
+#             import importlib
+#             module = importlib.import_module(self.module_path)
+#             self._cls = getattr(module, self.class_name)
+#         return self._cls
+
+#     def __call__(self, *args, **kwargs):
+#         return self.cls(*args, **kwargs)
+
 class LazyClass:
     def __init__(self, module_path, class_name):
         self.module_path = module_path
@@ -94,7 +111,9 @@ class LazyClass:
     @property
     def cls(self):
         if self._cls is None:
-            import importlib
+            meipass = getattr(sys, '_MEIPASS', None)
+            if meipass and meipass not in sys.path:
+                sys.path.insert(0, meipass)
             module = importlib.import_module(self.module_path)
             self._cls = getattr(module, self.class_name)
         return self._cls
@@ -703,7 +722,7 @@ _global_dict = {}
 # xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
 
 import configparser
-from pathlib import Path
+import os
 # from config.loader import GlobalConfig
 
 # class GlobalConfigOnly_read:
@@ -764,9 +783,9 @@ from pathlib import Path
 class GlobalConfig:
     def __init__(self, cfg_file=None, **updates):
         if not cfg_file:
-            cfg_file = Path(__file__).parent / "global.ini"
+            cfg_file = os.path.join(os.path.dirname(__file__), "global.ini")
 
-        self.cfg_file = Path(cfg_file)
+        self.cfg_file = cfg_file
         self.cfg = configparser.ConfigParser(
             interpolation=None,
             inline_comment_prefixes=("#", ";")
@@ -4395,12 +4414,17 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
     result = []
     errors = []
 
-    urllist = list(set(urllist))
+    # urllist = list(set(urllist))
+    urllist = list(dict.fromkeys(urllist))
     data_count = len(urllist)
     if data_count == 0:
         return []
 
-    pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
+    # pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
+    pool_count = max(
+        1,
+        min(int(cpu_count() // 1.3), max(4, data_count // 50))
+    )
     # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 50)) #5
     log.info(f"Cpu_count: {pool_count}")
     # 少量任务直接单进程，最稳
@@ -4413,111 +4437,121 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #                 result.append(r)
     #         except Exception as e:
     #             errors.append((c, type(e).__name__, str(e)))
+    
     if data_count <= 200:
         log.debug(f'code: {urllist}')
         for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
             try:
                 r = cmd(c, **kwargs)
-                # r 是子进程返回
+
                 if r is None:
                     continue
 
-                elif isinstance(r, dict) and r.get("__error__"):
-                    # 把 traceback 也保存下来
+                # 1️⃣ dict 错误结构
+                if isinstance(r, dict) and r.get("__error__"):
                     errors.append({
-                        "code": r["code"],
-                        "exc_type": r["exc_type"],
-                        "exc_msg": r["exc_msg"],
+                        "code": r.get("code"),
+                        "exc_type": r.get("exc_type"),
+                        "exc_msg": r.get("exc_msg"),
                         "traceback": r.get("traceback", "")
                     })
-                    # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
-                # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
-                elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+                    continue
+
+                # 2️⃣ DataFrame 内嵌错误
+                # if hasattr(r, 'attrs') and '__error__' in getattr(r, 'attrs', {}):
+                attrs = getattr(r, "attrs", None)
+                if isinstance(attrs, dict) and "__error__" in attrs:
                     err_info = r.attrs['__error__']
-                    errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
-                    # continue  # ⚠️ 跳过
-                # 3️⃣ 否则 r 是正常 DataFrame
-                elif not hasattr(r, 'empty') or not r.empty:
-                # elif isinstance(r, pd.DataFrame) and not r.empty:
+                    errors.append({
+                        "code": err_info.get('code'),
+                        "exc_type": err_info.get('exc_type'),
+                        "exc_msg": err_info.get('exc_msg'),
+                        "traceback": err_info.get('traceback', "")
+                    })
+                    continue
+
+                # 3️⃣ 正常 DataFrame
+                if hasattr(r, 'empty') and not r.empty:
                     result.append(r)
 
             except Exception as e:
-                # 这里捕获 cmd 函数本身异常
-                errors.append((c, type(e).__name__, str(e)))
+                errors.append({
+                    "code": c,
+                    "exc_type": type(e).__name__,
+                    "exc_msg": str(e),
+                    "traceback": ""
+                })
+
     else:
         log.info(f'count:{data_count} pool_count:{pool_count}')
         func = functools.partial(cmd, **kwargs)
-        # worker = functools.partial(process_file_exc, func)
         worker = functools.partial(process_file_exc_traceback, func)
+
         try:
-            # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
-            # 这样可以极大减少管道通信负担，避免结束时管道破裂
-            logger.setLevel(LoggerFactory.WARNING) 
+            logger.setLevel(LoggerFactory.WARNING)
+
             with Pool(processes=pool_count) as pool:
                 for r in tqdm(
                     pool.imap_unordered(worker, urllist, chunksize=10),
                     total=data_count,
-                    unit='it', 
+                    unit='it',
                     mininterval=ct.tqdm_mininterval,
                     unit_scale=True,
                     desc="Running_MP",
                     ncols=getattr(ct, 'ncols', 80),
                 ):
-                    # r 是子进程返回
+
                     if r is None:
                         continue
 
-                    # 1️⃣ 判断 r 是否是 dict 错误
-                    # elif isinstance(r, dict) and r.get("__error__"):
-                    #     errors.append((r["code"], r["exc_type"], r["exc_msg"]))
-                    elif isinstance(r, dict) and r.get("__error__"):
-                        # 把 traceback 也保存下来
+                    # 1️⃣ dict 错误结构
+                    if isinstance(r, dict) and r.get("__error__"):
                         errors.append({
-                            "code": r["code"],
-                            "exc_type": r["exc_type"],
-                            "exc_msg": r["exc_msg"],
+                            "code": r.get("code"),
+                            "exc_type": r.get("exc_type"),
+                            "exc_msg": r.get("exc_msg"),
                             "traceback": r.get("traceback", "")
                         })
-                        # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
-                    # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
-                    elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+                        continue
+
+                    # 2️⃣ DataFrame 内嵌错误
+                    # if hasattr(r, 'attrs') and '__error__' in getattr(r, 'attrs', {}):
+                    attrs = getattr(r, "attrs", None)
+                    if isinstance(attrs, dict) and "__error__" in attrs:
                         err_info = r.attrs['__error__']
-                        errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
-                        # continue  # ⚠️ 跳过
-                    # 3️⃣ 否则 r 是正常 DataFrame
-                    elif not hasattr(r, 'empty') or not r.empty:
-                    # elif isinstance(r, pd.DataFrame) and not r.empty:
+                        errors.append({
+                            "code": err_info.get('code'),
+                            "exc_type": err_info.get('exc_type'),
+                            "exc_msg": err_info.get('exc_msg'),
+                            "traceback": err_info.get('traceback', "")
+                        })
+                        continue
+
+                    # 3️⃣ 正常 DataFrame
+                    if hasattr(r, 'empty') and not r.empty:
                         result.append(r)
 
-            # 执行完后立即恢复原始日志等级
             logger.setLevel(old_level)
 
-            # # 过滤结果，解决 IndexError
-            # result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
-            
-        except (BrokenPipeError, EOFError):
+        except (BrokenPipeError, EOFError) as e:
             logger.setLevel(old_level)
-            log.error(f"MP Error: {e}")
-            # 即使报错，results 变量里通常已经拿到了 100% 的数据
-            # if 'results' in locals():
-            #     result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+            log.error(f"MP Pipe Error: {e}")
+
         except Exception as e:
             logger.setLevel(old_level)
             log.error(f"MP Error: {e}")
 
-    # 主进程统一记录错误（安全）
-    # for code, etype, emsg, traceback in errors:
-    #     log.error("Worker failed | code=%s | %s: %s traceback:%s", code, etype, emsg,traceback)
-    
-    # 主进程统一记录错误（安全）
+
+    # ✅ 主进程统一记录错误（现在 100% 安全）
     for err in errors:
         log.error(
             "Worker failed | code=%s | %s: %s\n%s",
-            err["code"],
-            err["exc_type"],
-            err["exc_msg"],
+            err.get("code"),
+            err.get("exc_type"),
+            err.get("exc_msg"),
             err.get("traceback", "")
         )
+
 
     log.info(
         "Cpu_count: {%d} Time: %.2fs | Total OK: %d | Errors: %d",
@@ -4527,6 +4561,114 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
         len(errors),
     )
     return result
+
+
+# if data_count <= 200:
+    #     log.debug(f'code: {urllist}')
+    #     for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
+    #         try:
+    #             r = cmd(c, **kwargs)
+    #             # r 是子进程返回
+    #             if r is None:
+    #                 continue
+
+    #             elif isinstance(r, dict) and r.get("__error__"):
+    #                 # 把 traceback 也保存下来
+    #                 errors.append({
+    #                     "code": r["code"],
+    #                     "exc_type": r["exc_type"],
+    #                     "exc_msg": r["exc_msg"],
+    #                     "traceback": r.get("traceback", "")
+    #                 })
+    #                 # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
+    #             # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
+    #             elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+    #                 err_info = r.attrs['__error__']
+    #                 errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
+    #                 # continue  # ⚠️ 跳过
+    #             # 3️⃣ 否则 r 是正常 DataFrame
+    #             elif not hasattr(r, 'empty') or not r.empty:
+    #             # elif isinstance(r, pd.DataFrame) and not r.empty:
+    #                 result.append(r)
+
+    #         except Exception as e:
+    #             # 这里捕获 cmd 函数本身异常
+    #             errors.append((c, type(e).__name__, str(e)))
+    # else:
+    #     log.info(f'count:{data_count} pool_count:{pool_count}')
+    #     func = functools.partial(cmd, **kwargs)
+    #     # worker = functools.partial(process_file_exc, func)
+    #     worker = functools.partial(process_file_exc_traceback, func)
+    #     try:
+    #         # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
+    #         # 这样可以极大减少管道通信负担，避免结束时管道破裂
+    #         logger.setLevel(LoggerFactory.WARNING) 
+    #         with Pool(processes=pool_count) as pool:
+    #             for r in tqdm(
+    #                 pool.imap_unordered(worker, urllist, chunksize=10),
+    #                 total=data_count,
+    #                 unit='it', 
+    #                 mininterval=ct.tqdm_mininterval,
+    #                 unit_scale=True,
+    #                 desc="Running_MP",
+    #                 ncols=getattr(ct, 'ncols', 80),
+    #             ):
+    #                 # r 是子进程返回
+    #                 if r is None:
+    #                     continue
+
+    #                 # 1️⃣ 判断 r 是否是 dict 错误
+    #                 # elif isinstance(r, dict) and r.get("__error__"):
+    #                 #     errors.append((r["code"], r["exc_type"], r["exc_msg"]))
+    #                 elif isinstance(r, dict) and r.get("__error__"):
+    #                     # 把 traceback 也保存下来
+    #                     errors.append({
+    #                         "code": r["code"],
+    #                         "exc_type": r["exc_type"],
+    #                         "exc_msg": r["exc_msg"],
+    #                         "traceback": r.get("traceback", "")
+    #                     })
+    #                     # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
+    #                 # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
+    #                 elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+    #                     err_info = r.attrs['__error__']
+    #                     errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
+    #                     # continue  # ⚠️ 跳过
+    #                 # 3️⃣ 否则 r 是正常 DataFrame
+    #                 elif not hasattr(r, 'empty') or not r.empty:
+    #                 # elif isinstance(r, pd.DataFrame) and not r.empty:
+    #                     result.append(r)
+
+    #         # 执行完后立即恢复原始日志等级
+    #         logger.setLevel(old_level)
+
+    #         # # 过滤结果，解决 IndexError
+    #         # result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+            
+    #     except (BrokenPipeError, EOFError):
+    #         logger.setLevel(old_level)
+    #         log.error(f"MP Error: {e}")
+    #         # 即使报错，results 变量里通常已经拿到了 100% 的数据
+    #         # if 'results' in locals():
+    #         #     result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+    #     except Exception as e:
+    #         logger.setLevel(old_level)
+    #         log.error(f"MP Error: {e}")
+
+    # # 主进程统一记录错误（安全）
+    # # for code, etype, emsg, traceback in errors:
+    # #     log.error("Worker failed | code=%s | %s: %s traceback:%s", code, etype, emsg,traceback)
+    
+    # # 主进程统一记录错误（安全）
+    # for err in errors:
+    #     log.error(
+    #         "Worker failed | code=%s | %s: %s\n%s",
+    #         err["code"],
+    #         err["exc_type"],
+    #         err["exc_msg"],
+    #         err.get("traceback", "")
+    #     )
+
 
 # def process_file_exc_traceback(func=None, code=None):
 #     try:

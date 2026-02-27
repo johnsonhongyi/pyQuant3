@@ -29,7 +29,6 @@ import tables
 import psutil
 import shutil
 import errno
-from pathlib import Path
 
 from contextlib import contextmanager
 
@@ -1091,12 +1090,12 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
 
 class SafeHDFWriter:
     def __init__(self, final_path):
-        self.final = Path(final_path)
-        self.tmp = self.final.with_suffix(self.final.suffix + ".tmp")
+        self.final = str(final_path)
+        self.tmp = self.final + ".tmp"
 
     def __enter__(self):
         # 保留旧数据
-        if self.final.exists():
+        if os.path.exists(self.final):
             shutil.copy2(self.final, self.tmp)
         return self.tmp
 
@@ -1104,14 +1103,14 @@ class SafeHDFWriter:
 
         # 写入异常直接丢弃
         if exc_type is not None:
-            if self.tmp.exists():
-                self.tmp.unlink()
+            if os.path.exists(self.tmp):
+                os.remove(self.tmp)
             return False
 
         # 校验失败直接丢弃
         if not validate_h5(self.tmp):
-            if self.tmp.exists():
-                self.tmp.unlink()
+            if os.path.exists(self.tmp):
+                os.remove(self.tmp)
             raise RuntimeError("HDF5 校验失败，放弃写入")
 
         # 原子替换
@@ -1130,7 +1129,7 @@ def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', base
         df.index = df.index.astype(str)
     df = df.fillna(0)
     df = cct.reduce_memory_usage(df, verbose=False)
-    fname = Path(fname)
+    fname = str(fname)
     with SafeHDFWriter(fname) as tmp:
         with SafeHDFStore(tmp, mode='a') as h5:
             if '/' + table in h5.keys(): h5.remove(table)
@@ -2680,7 +2679,7 @@ if __name__ == "__main__":
     if os.path.exists(sina_MultiD_path) and os.path.getsize(sina_MultiD_path) > 5000:
         h5 = readHdf5(sina_MultiD_path)
         h5.shape
-        codelist = ['300245' ,'000002']
+        codelist = ['920082' ,'000002']
 
         for co in codelist:
             if co in h5.index:

@@ -3,7 +3,6 @@ import tkinter as tk
 from tkinter import ttk
 import os
 import json
-from pathlib import Path
 from stock_logic_utils import  toast_message
 from JohnsonUtil import LoggerFactory
 
@@ -38,11 +37,11 @@ class ColumnSetManager(tk.Toplevel):
             # 直接使用
             self.config = config
 
-        elif isinstance(config, (str, Path)):
-            cfg_path = Path(config)
-            self.config_file = str(cfg_path)
+        elif isinstance(config, str):
+            cfg_path = config
+            self.config_file = cfg_path
 
-            if cfg_path.exists():
+            if os.path.exists(cfg_path):
                 try:
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         self.config = json.load(f)

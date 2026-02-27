@@ -402,7 +402,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         sector_text = ""
         for s in hot_list[:10]:
              # s is [name, pct]
-             sector_text += f"{s[0]}: {s[1]}%\n"
+             sector_text += f"{s[0]} : {s[1]}%\n"
         self.txt_sectors.delete("1.0", tk.END)
         self.txt_sectors.insert(tk.END, sector_text)
         

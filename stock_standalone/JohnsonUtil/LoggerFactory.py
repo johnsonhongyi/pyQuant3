@@ -18,7 +18,6 @@ import sys,os
 # sys.path.append("..")
 # from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
 import configparser
-from pathlib import Path
 # from config.loader import GlobalConfig
 
 import ctypes
@@ -193,9 +192,9 @@ def get_conf_path(fname):
 class GlobalConfig:
     def __init__(self, cfg_file=None):
         if not cfg_file:
-            cfg_file = Path(__file__).parent / "global.ini"
+            cfg_file = os.path.join(os.path.dirname(__file__), "global.ini")
 
-        self.cfg_file = Path(cfg_file)
+        self.cfg_file = cfg_file
 
         # 禁用 % 插值
         self.cfg = configparser.ConfigParser(interpolation=None)

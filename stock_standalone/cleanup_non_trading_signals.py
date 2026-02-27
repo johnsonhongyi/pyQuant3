@@ -7,9 +7,9 @@
 import sqlite3
 import logging
 import argparse
+import os
 from datetime import datetime
 from typing import Tuple, List
-from pathlib import Path
 
 # 配置日志
 logging.basicConfig(
@@ -234,9 +234,9 @@ def main():
     total_deleted = 0
     
     for db_file in db_files:
-        db_path = Path(db_file)
+        db_path = db_file
         
-        if not db_path.exists():
+        if not os.path.exists(db_path):
             logger.warning(f"数据库文件不存在,跳过: {db_file}")
             continue
         
@@ -246,7 +246,7 @@ def main():
         
         # 备份数据库
         if not args.dry_run and not args.no_backup:
-            backup_database(str(db_path))
+            backup_database(db_path)
         
         # 清理 live_signal_history 表 (在 trading_signals.db 中)
         if 'trading_signals' in db_file:

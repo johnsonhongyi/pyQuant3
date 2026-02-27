@@ -27,6 +27,20 @@ from PyQt6.QtGui import QColor, QAction
 from PyQt6 import QtGui
 
 # [NEW] Move to top for performance and linting
+import math as _math
+
+def _safe_num(val, default=0, as_int=False):
+    """安全数值转换，NaN / None / 非法值 统一降级为 default"""
+    try:
+        if val is None:
+            return int(default) if as_int else float(default)
+        f = float(val)
+        if _math.isnan(f) or _math.isinf(f):
+            return int(default) if as_int else float(default)
+        return int(f) if as_int else f
+    except (ValueError, TypeError):
+        return int(default) if as_int else float(default)
+
 # [FIX] 增强的 NumericTableWidgetItem，支持正确排序 (避免 -9 vs -35 错误)
 class NumericTableWidgetItem(QTableWidgetItem):
     """支持数值排序的表格单元格项"""
@@ -313,9 +327,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         # 可调整大小范围
         self.setMinimumWidth(520)   # [FIX] 提高最小宽度，防止名称列被挤压
-        self.setMaximumWidth(1200)  # [OPTIMIZE] Allow wider window
         self.setMinimumHeight(250)
-        self.setMaximumHeight(1200)
         self.resize(580, 400)      # [OPTIMIZE] Wider default size
         
         self._init_db()
@@ -796,6 +808,8 @@ class HotlistPanel(QWidget, WindowMixin):
         # [NEW] 支持滚轮横向滚动
         self.table.wheelEvent = self._on_table_wheel_event
         setattr(self.table, '_original_wheel_event', QTableWidget.wheelEvent)
+        # [NEW] Del 键删除选中行
+        self.table.keyPressEvent = self._on_hotlist_key_press
         
         layout.addWidget(self.table)
 
@@ -806,7 +820,7 @@ class HotlistPanel(QWidget, WindowMixin):
         layout.setSpacing(0)
 
         self.follow_table = QTableWidget()
-        cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "理由", "时间"] 
+        cols = ["序号", "状态", "代码", "名称", "现价", "盈亏%", "信号", "入场", "时间", "理由"] 
         self.follow_table.setColumnCount(len(cols))
         self.follow_table.setHorizontalHeaderLabels(cols)
         self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -815,6 +829,8 @@ class HotlistPanel(QWidget, WindowMixin):
         self.follow_table.customContextMenuRequested.connect(self._on_follow_context_menu)
         # [FIX] Add keyboard navigation support
         self.follow_table.currentCellChanged.connect(self._on_follow_cell_changed)
+        # [NEW] Del 键删除选中行
+        self.follow_table.keyPressEvent = self._on_follow_key_press
         
         hf = self.follow_table.horizontalHeader()
         if hf:
@@ -843,8 +859,8 @@ class HotlistPanel(QWidget, WindowMixin):
         layout.setSpacing(0)
 
         self.watchlist_table = QTableWidget()
-        # 列定义: 序号, 状态, 代码, 名称, 板块, 发现价, 现价, 盈亏%, 趋势, 量能, 连阳, 形态分, 形态描述, 来源, 发现日期
-        cols = ["序号", "状态", "代码", "名称", "板块", "发现价", "现价", "盈亏%", "趋势", "量能", "连阳", "形态分", "形态描述", "来源", "发现日期"] 
+        # 列定义: 序号, 状态, 代码, 名称, 板块, 发现价, 现价, 盈亏%, 趋势, 量能, 连阳, 形态分, 发现日期, 形态描述, 来源
+        cols = ["序号", "状态", "代码", "名称", "板块", "发现价", "现价", "盈亏%", "趋势", "量能", "连阳", "形态分", "发现日期", "形态描述", "来源"] 
         self.watchlist_table.setColumnCount(len(cols))
         self.watchlist_table.setHorizontalHeaderLabels(cols)
         self.watchlist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -869,6 +885,8 @@ class HotlistPanel(QWidget, WindowMixin):
         # [NEW] 支持滚轮横向滚动
         self.watchlist_table.wheelEvent = self._on_watchlist_wheel_event
         setattr(self.watchlist_table, '_original_wheel_event', QTableWidget.wheelEvent)
+        # [NEW] Del 键删除选中行
+        self.watchlist_table.keyPressEvent = self._on_watchlist_key_press
         
         layout.addWidget(self.watchlist_table)
 
@@ -876,9 +894,13 @@ class HotlistPanel(QWidget, WindowMixin):
         """[HIGH-PERFORMANCE] 复用 Item，避免频繁销毁创建对象导致 UI 卡死"""
         item = table.item(row, col)
         
-        # 处理显示文本
-        if isinstance(value, float): display_text = f"{value:.2f}"
-        else: display_text = str(value)
+        # 处理显示文本 (NaN 保护)
+        if isinstance(value, float):
+            if _math.isnan(value) or _math.isinf(value):
+                value = 0.0
+            display_text = f"{value:.2f}"
+        else:
+            display_text = str(value)
 
         # 降级：如果原有 Item 类型不匹配（比如原本是普通 Item 现在要 Numeric），则重建
         if item and (isinstance(value, (int, float)) or sort_value is not None):
@@ -1008,7 +1030,7 @@ class HotlistPanel(QWidget, WindowMixin):
                                 
                         self._update_item(self.watchlist_table, i, 4, sector[:20] if sector else "")
                         
-                        discover_price = float(getattr(row, 'discover_price', 0.0) or 0.0)
+                        discover_price = _safe_num(getattr(row, 'discover_price', 0.0))
                         self._update_item(self.watchlist_table, i, 5, discover_price)
                         
                         curr_price = 0.0
@@ -1023,18 +1045,19 @@ class HotlistPanel(QWidget, WindowMixin):
                         pnl_color = QColor(220, 80, 80) if pnl_pct > 0 else (QColor(80, 200, 120) if pnl_pct < 0 else None)
                         self._update_item(self.watchlist_table, i, 7, pnl_txt, sort_value=pnl_pct if curr_price > 0 else -999.0, foreground=pnl_color)
                         
-                        self._update_item(self.watchlist_table, i, 8, float(getattr(row, 'trend_score', 0) or 0))
-                        self._update_item(self.watchlist_table, i, 9, float(getattr(row, 'volume_score', 0) or 0))
-                        self._update_item(self.watchlist_table, i, 10, int(getattr(row, 'consecutive_strong', 0) or 0))
-                        self._update_item(self.watchlist_table, i, 11, float(getattr(row, 'pattern_score', 0) or 0))
+                        self._update_item(self.watchlist_table, i, 8, _safe_num(getattr(row, 'trend_score', 0)))
+                        self._update_item(self.watchlist_table, i, 9, _safe_num(getattr(row, 'volume_score', 0)))
+                        self._update_item(self.watchlist_table, i, 10, _safe_num(getattr(row, 'consecutive_strong', 0), as_int=True))
+                        self._update_item(self.watchlist_table, i, 11, _safe_num(getattr(row, 'pattern_score', 0)))
+                        
+                        self._update_item(self.watchlist_table, i, 12, str(getattr(row, 'discover_date', '') or ""))
                         
                         pat_desc = str(getattr(row, 'daily_patterns', "") or "").strip()
                         display_pat = pat_desc[:20] + "..." if len(pat_desc) > 20 else pat_desc
-                        it_pat = self._update_item(self.watchlist_table, i, 12, display_pat)
+                        it_pat = self._update_item(self.watchlist_table, i, 13, display_pat)
                         it_pat.setToolTip(pat_desc)
                         
-                        self._update_item(self.watchlist_table, i, 13, str(getattr(row, 'source', "") or ""))
-                        self._update_item(self.watchlist_table, i, 14, str(getattr(row, 'discover_date', '') or ""))
+                        self._update_item(self.watchlist_table, i, 14, str(getattr(row, 'source', "") or ""))
 
                     # 恢复状态
                     if current_code:
@@ -1824,9 +1847,9 @@ class HotlistPanel(QWidget, WindowMixin):
                     
                     # Col 5: PnL %
                     # [FIX] Better fallback for entry_price
-                    entry_price = float(getattr(row, 'entry_price', 0) or 0)
+                    entry_price = _safe_num(getattr(row, 'entry_price', 0))
                     if entry_price <= 0:
-                        entry_price = float(getattr(row, 'detected_price', 0) or 0)
+                        entry_price = _safe_num(getattr(row, 'detected_price', 0))
                         
                     pnl_pct = 0.0
                     if entry_price > 0 and curr_price > 0:
@@ -1841,25 +1864,25 @@ class HotlistPanel(QWidget, WindowMixin):
                             elif pnl_pct < 0: it.setForeground(QColor(80, 200, 120))
                             else: it.setForeground(QColor('#ddd'))
 
-                    # Col 8: Reason (Extract Phase)
+                    # Col 8: Time (时间)
+                    time_dt = str(row.updated_at)
+                    time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
+                    if (it := self.follow_table.item(row_idx, 8)):
+                        if it.text() != time_str:
+                             it.setText(time_str)
+                             it.setData(Qt.ItemDataRole.UserRole, time_dt)
+                            
+                    # Col 9: Reason (理由)
                     phase_txt = "-"
                     notes = str(row.notes) if row.notes else ""
                     match = re.search(r'\[(.*?)\]', notes)
                     if match: phase_txt = match.group(1)
                     elif notes: phase_txt = notes[:10]
                     
-                    if (it := self.follow_table.item(row_idx, 8)):
+                    if (it := self.follow_table.item(row_idx, 9)):
                         if it.text() != notes:
                             it.setText(notes)
                             it.setToolTip(notes)
-                            
-                    # Col 9: Time
-                    time_dt = str(row.updated_at)
-                    time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
-                    if (it := self.follow_table.item(row_idx, 9)):
-                        if it.text() != time_str:
-                             it.setText(time_str)
-                             it.setData(Qt.ItemDataRole.UserRole, time_dt)
 
                 return
 
@@ -1905,9 +1928,9 @@ class HotlistPanel(QWidget, WindowMixin):
                 self._update_item(self.follow_table, row_idx, 4, curr_price if curr_price > 0 else "-", sort_value=curr_price)
 
                 # 5. 盈亏%
-                entry_price = float(getattr(row, 'entry_price', 0) or 0)
+                entry_price = _safe_num(getattr(row, 'entry_price', 0))
                 if entry_price <= 0:
-                    entry_price = float(getattr(row, 'detected_price', 0) or 0)
+                    entry_price = _safe_num(getattr(row, 'detected_price', 0))
                     
                 pnl_pct = (curr_price - entry_price) / entry_price * 100 if entry_price > 0 and curr_price > 0 else 0.0
                 pnl_txt = f"{pnl_pct:+.2f}%" if curr_price > 0 else "-"
@@ -1924,16 +1947,16 @@ class HotlistPanel(QWidget, WindowMixin):
                     entry_txt = str(getattr(row, 'entry_strategy', '')) or "-"
                 self._update_item(self.follow_table, row_idx, 7, entry_txt)
                 
-                # 8. 理由
-                notes = str(row.notes) if row.notes else ""
-                it_notes = self._update_item(self.follow_table, row_idx, 8, notes)
-                it_notes.setToolTip(notes)
-
-                # 9. 时间
+                # 8. 时间
                 time_dt = str(row.updated_at)
                 time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
-                it_time = self._update_item(self.follow_table, row_idx, 9, time_str)
+                it_time = self._update_item(self.follow_table, row_idx, 8, time_str)
                 it_time.setData(Qt.ItemDataRole.UserRole, time_dt)
+
+                # 9. 理由
+                notes = str(row.notes) if row.notes else ""
+                it_notes = self._update_item(self.follow_table, row_idx, 9, notes)
+                it_notes.setToolTip(notes)
 
             # [FIX] Restore Scroll and Selection BEFORE re-enabling signals
             if current_code:
@@ -2103,6 +2126,42 @@ class HotlistPanel(QWidget, WindowMixin):
                 logger.error(f"Failed to update status for {code}")
         except Exception as e:
             logger.error(f"Update follow status error: {e}")
+
+    def _on_hotlist_key_press(self, event):
+        """Hotlist 表键盘事件：Del 键移除当前选中股票"""
+        if event.key() == Qt.Key.Key_Delete:
+            row = self.table.currentRow()
+            if row >= 0:
+                # Hotlist 表列布局：序号(0), 代码(1), 名称(2)...
+                code_item = self.table.item(row, 1)
+                if code_item:
+                    self.remove_stock(code_item.text())
+            return  # 消费 Delete 事件
+        QTableWidget.keyPressEvent(self.table, event)
+
+    def _on_watchlist_key_press(self, event):
+        """Watch 表键盘事件：Del 键移除当前选中观察池条目"""
+        if event.key() == Qt.Key.Key_Delete:
+            row = self.watchlist_table.currentRow()
+            if row >= 0:
+                # Watch 表列布局：序号(0), 状态(1), 代码(2)...
+                code_item = self.watchlist_table.item(row, 2)
+                if code_item:
+                    self._remove_from_watchlist(code_item.text())
+            return  # 消费 Delete 事件
+        QTableWidget.keyPressEvent(self.watchlist_table, event)
+
+    def _on_follow_key_press(self, event):
+        """follow_table 键盘事件：Del 键删除当前选中行"""
+        if event.key() == Qt.Key.Key_Delete:
+            row = self.follow_table.currentRow()
+            if row >= 0:
+                code_item = self.follow_table.item(row, 2)
+                if code_item:
+                    self._delete_follow_item(code_item.text())
+            return  # 消费掉 Delete 事件，不再往上传
+        # 其余按键交给默认处理
+        QTableWidget.keyPressEvent(self.follow_table, event)
 
     def _delete_follow_item(self, code: str):
         """彻底删除跟单项"""

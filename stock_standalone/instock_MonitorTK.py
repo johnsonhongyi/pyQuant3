@@ -96,7 +96,7 @@ from db_utils import *
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
-import keyboard  # pip install keyboard
+# import keyboard  # pip install keyboard  # ⚡ 已替换为 Win32 RegisterHotKey API
 # import trade_visualizer_qt6 as qtviz  # ⚡ 移至局部作用域
 from alert_manager import get_alert_manager
 from sys_utils import assert_main_thread
@@ -753,35 +753,128 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """弹出确认框，询问是否退出"""
         if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
             self.on_close()
-    # 在初始化 UI 或后台线程里
-    def setup_global_hotkey(self):
-        """
-        注册系统全局快捷键 Alt+B，调用 close_all_alerts
-        """
-        def _on_hotkey_close_all_alerts():
-            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self._schedule_after(0, self.close_all_alerts)
+    # ========== Win32 RegisterHotKey 全局快捷键 ==========
+    # 使用系统级 RegisterHotKey API 替代 keyboard 库的低级钩子，
+    # 彻底解决长时间运行后 WH_KEYBOARD_LL 被 Windows 自动卸载的问题。
+    
+    # 热键 ID 常量
+    _HOTKEY_ID_BASE = 0xBF00  # 避免与其他程序冲突
+    _HOTKEY_MAP = {
+        # id_offset: (modifier, vk_code, description)
+        0: (win32con.MOD_ALT, 0x42, 'Alt+B'),  # B - 关闭所有报警
+        1: (win32con.MOD_ALT, 0x45, 'Alt+E'),  # E - 语音预警管理
+        2: (win32con.MOD_ALT, 0x53, 'Alt+S'),  # S - 策略管理
+        3: (win32con.MOD_ALT, 0x4B, 'Alt+K'),  # K - 每日复盘
+        # 4: (win32con.MOD_ALT, 0x51, 'Alt+Q'),  # Q - 实时信号
+        5: (win32con.MOD_ALT, 0x48, 'Alt+H'),  # H - 切换Hotlist
+    }
 
-        def _on_hotkey_voice_monitor_manager():
-            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self._schedule_after(0, self.open_voice_monitor_manager)
-        def _on_hotkey_trategy_manager():
-            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self._schedule_after(0, self.open_strategy_manager)
-        def _on_hotkey_open_market_pulser():
-            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self._schedule_after(0, self.open_market_pulse)
-        def _on_open_live_signal_viewer():
-            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
-            self._schedule_after(0, self.open_live_signal_viewer)
-        # 注册系统全局快捷键
-        keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
-        keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
-        keyboard.add_hotkey('alt+s', _on_hotkey_trategy_manager)
-        keyboard.add_hotkey('alt+k', _on_hotkey_open_market_pulser)
-        keyboard.add_hotkey('alt+q', _on_open_live_signal_viewer)
-        # [NEW] Alt+H to toggle Hotlist
-        keyboard.add_hotkey('alt+h', lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
+    def setup_global_hotkey(self, show_toast=False):
+        """
+        使用 Win32 RegisterHotKey API 注册系统全局快捷键。
+        
+        与 keyboard 库的 WH_KEYBOARD_LL 钩子不同，RegisterHotKey 在系统级
+        注册热键，通过 WM_HOTKEY 消息传递，永远不会被 Windows 自动卸载。
+        支持重复调用（先清理旧热键线程再重新注册）。
+        
+        Args:
+            show_toast: 是否在注册完成后显示提示信息（手动重新初始化时为 True）
+        """
+        # 先关闭旧的热键线程（支持重复调用）
+        self._shutdown_global_hotkeys()
+
+        # 热键 ID -> 回调映射
+        hotkey_callbacks = {
+            0: lambda: self._schedule_after(0, self.close_all_alerts),
+            1: lambda: self._schedule_after(0, self.open_voice_monitor_manager),
+            2: lambda: self._schedule_after(0, self.open_strategy_manager),
+            3: lambda: self._schedule_after(0, self.open_market_pulse),
+            4: lambda: self._schedule_after(0, self.open_live_signal_viewer),
+            5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
+        }
+
+        # 线程退出事件
+        self._hotkey_stop_event = threading.Event()
+        self._hotkey_thread_id = None  # 存储线程 ID，用于发送退出消息
+
+        def _hotkey_thread_func():
+            """独立守护线程：注册热键 + 消息循环"""
+            user32 = ctypes.windll.user32
+            WM_HOTKEY = 0x0312
+            WM_QUIT = 0x0012
+            
+            # 保存线程 ID，用于外部发送 WM_QUIT
+            self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+            
+            registered_ids = []
+            
+            # 注册所有热键
+            for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
+                hk_id = self._HOTKEY_ID_BASE + offset
+                if user32.RegisterHotKey(None, hk_id, mod, vk):
+                    registered_ids.append(hk_id)
+                    logger.debug(f"[Hotkey] 已注册: {desc} (id={hk_id})")
+                else:
+                    err = ctypes.get_last_error()
+                    logger.warning(f"[Hotkey] 注册 {desc} 失败 (error={err})，可能已被其他程序占用")
+            
+            logger.info(f"✅ [Hotkey] 全局快捷键已注册 ({len(registered_ids)}/{len(self._HOTKEY_MAP)})")
+            
+            # 消息循环
+            msg = ctypes.wintypes.MSG()
+            while not self._hotkey_stop_event.is_set():
+                # GetMessage 会阻塞直到有消息，收到 WM_QUIT 返回 0
+                ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret <= 0:  # WM_QUIT 或错误
+                    break
+                
+                if msg.message == WM_HOTKEY:
+                    hk_id = msg.wParam
+                    offset = hk_id - self._HOTKEY_ID_BASE
+                    callback = hotkey_callbacks.get(offset)
+                    if callback:
+                        try:
+                            callback()
+                        except Exception as e:
+                            logger.error(f"[Hotkey] 回调执行失败 (id={offset}): {e}")
+            
+            # 清理：注销所有热键
+            for hk_id in registered_ids:
+                user32.UnregisterHotKey(None, hk_id)
+            logger.info("[Hotkey] 全局快捷键已全部注销")
+        
+        # 启动守护线程
+        self._hotkey_thread = threading.Thread(
+            target=_hotkey_thread_func,
+            name="GlobalHotkeyThread",
+            daemon=True
+        )
+        self._hotkey_thread.start()
+
+        hotkey_list = "Alt+B/E/S/K/H"
+        if show_toast:
+            self.status_var.set(f"✅ 全局快捷键已重新初始化: {hotkey_list}")
+
+    def _shutdown_global_hotkeys(self):
+        """安全关闭热键线程，注销所有已注册的全局快捷键"""
+        if hasattr(self, '_hotkey_stop_event') and self._hotkey_stop_event:
+            self._hotkey_stop_event.set()
+        
+        # 向热键线程发送 WM_QUIT 消息，使 GetMessage 返回 0
+        if hasattr(self, '_hotkey_thread_id') and self._hotkey_thread_id:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(
+                    self._hotkey_thread_id, 0x0012, 0, 0  # WM_QUIT
+                )
+            except Exception as e:
+                logger.debug(f"[Hotkey] PostThreadMessage 失败 (可忽略): {e}")
+        
+        # 等待线程退出
+        if hasattr(self, '_hotkey_thread') and self._hotkey_thread and self._hotkey_thread.is_alive():
+            self._hotkey_thread.join(timeout=2.0)
+        
+        self._hotkey_thread_id = None
+        self._hotkey_stop_event = None
 
     def on_resize(self, event):
         if event.widget != self:
@@ -1284,6 +1377,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._is_closing = True
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
+            
+            # ⭐ 注销全局快捷键
+            self._shutdown_global_hotkeys()
             
             # 立即取消所有待处理的 after 任务
             self._cancel_all_after_jobs()
@@ -2086,6 +2182,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
+        # options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警", "重置快捷键"]
         options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
@@ -2126,6 +2223,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             elif action == "复盘数据":
                 self.open_market_pulse()
                 # self.open_strategy_backtest_view()
+            # elif action == "重置快捷键":
+            #     self.setup_global_hotkey(show_toast=True)
 
 
         def on_select(event=None):
@@ -3765,6 +3864,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             label="🚫 黑名单管理中心",
             command=self.open_blacklist_manager
         )
+
+        # menu.add_command(
+        #     label="⌨️ 重新初始化全局快捷键",
+        #     command=lambda: self.setup_global_hotkey(show_toast=True)
+        # )
 
         menu.add_command(
             label="🔄 刷新",
@@ -12843,7 +12947,6 @@ if __name__ == "__main__":
             clean_signal_message,
             backup_database
         )
-        from pathlib import Path
         
         # 确定要处理的数据库列表
         db_files = []
@@ -12866,13 +12969,13 @@ if __name__ == "__main__":
         total_deleted = 0
         
         for db_file in db_files:
-            # 转换为绝对路径
+            # 确定数据库绝对路径
             if not os.path.isabs(db_file):
-                db_path = Path(BASE_DIR) / db_file
+                db_path = os.path.join(BASE_DIR, db_file)
             else:
-                db_path = Path(db_file)
+                db_path = db_file
             
-            if not db_path.exists():
+            if not os.path.exists(db_path):
                 print(f"⚠️ 数据库文件不存在,跳过: {db_file}")
                 continue
             

@@ -319,19 +319,26 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
     # top_all['ratio'] = top_all['volume']
     now_time = cct.get_now_time_int()
+    lastbuy_safe = top_all['lastbuy'].mask(top_all['lastbuy'] == 0, top_all['llastp'])
+    
     if cct.get_trade_date_status():
         logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
         if 'lastbuy' in top_all.columns:
             if 915 < now_time < 930:
                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+
             elif 926 < now_time < 1455:
-                top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+                # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+
+                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
             else:
                 # top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
                 # top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
-                top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+
+                # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
         else:
             top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
@@ -339,7 +346,10 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     else:
         top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
         top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-        
+    
+    top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
+    top_all['dff'].fillna(0, inplace=True)
+
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 
 def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
