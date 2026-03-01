@@ -89,6 +89,7 @@ class IntradayPatternDetector:
         'bear_trap_reversal',   # 诱空反转 (早盘下杀后尾盘突破前高)
         'momentum_failure',     # 主升转弱 (之前是主升，现在破位)
         'strong_auction_open',  # 强力竞价 (高开+强结构+历史联动)
+        'early_momentum_buy',   # 早盘极速抢筹 (高开高走/低开反转)
     ]
     
     # 形态中文名映射
@@ -112,6 +113,7 @@ class IntradayPatternDetector:
         'bear_trap_reversal': '诱空反转',
         'momentum_failure': '主升转弱',
         'strong_auction_open': '强力竞价',
+        'early_momentum_buy': '早盘抢筹',
     }
     
     # ⚡ [NEW] 信号优先级映射 (数值越小优先级越高)
@@ -122,7 +124,8 @@ class IntradayPatternDetector:
         # 级别 2: 趋势转弱 (破位/风险)
         'momentum_failure': 20,
         'high_drop': 25,
-        # 级别 3: 核心机会 (主升/强竞价/横盘突破)
+        # 级别 3: 核心机会 (主升/强竞价/早盘抢筹/横盘突破)
+        'early_momentum_buy': 28,
         'master_momentum': 30,
         'bear_trap_reversal': 32,
         'strong_auction_open': 35,
@@ -472,6 +475,34 @@ class IntradayPatternDetector:
                     timestamp=datetime.now().strftime('%H:%M:%S'),
                     price=open_price,
                     detail=detail
+                ))
+        
+        # --- [NEW] 早盘极速抢筹 (early_momentum_buy) ---
+        # 支持两种形态: (1) 跳空高开且强势 (2) 竞价小幅下杀但开盘极速拉红
+        if 'early_momentum_buy' in self.enabled_patterns:
+            current_price = float(day_row.get('close', day_row.get('trade', 0)))
+            vol = float(day_row.get('volume', 0))
+            amount = float(day_row.get('amount', 0))
+            vwap = amount / vol if vol > 0 else 0
+            
+            # 模式 A: Gap Up & Go (高开高走, 脱离均价线)
+            is_gap_up_and_go = gap_pct >= 2.0 and current_price > open_price and vwap > 0 and current_price >= vwap * 1.005
+            
+            # 模式 B: Gap Down & Reversal (低开反转, 开盘后迅速冲击均价线和昨收)
+            is_gap_down_reversal = gap_pct < 0 and current_price > prev_close and vwap > 0 and current_price >= vwap * 1.005
+            
+            # 必须伴随一定势能 (如近日有连阳基础或TrendS较高)
+            trends = float(day_row.get('TrendS', 50))
+            has_momentum = trends > 55
+            
+            if has_momentum and (is_gap_up_and_go or is_gap_down_reversal):
+                desc = "高开高走" if is_gap_up_and_go else "低开反弹"
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='early_momentum_buy',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=current_price,
+                    detail=f"早盘抢筹: {desc} 上穿均线(VWAP: {vwap:.2f})",
+                    is_high_priority=True
                 ))
         
         return events

@@ -67,8 +67,19 @@ class PositionPhaseEngine:
                 return current_phase, "无实时价格"
 
             # -----------------------------------------------------
-            # 1. 强制离场检查 (Exit Logic)
+            # 1. 强制离场检查 (Exit Logic - VWAP 防御与硬止损)
             # -----------------------------------------------------
+            # 分时均价 (VWAP) 防守线：这是主升浪的生命线
+            if nclose > 0 and current_phase not in [TradePhase.IDLE, TradePhase.EXIT]:
+                # 如果当前价格跌破均价线超过 1% (即远离均线)，且这不是刚开盘前十分钟的剧烈洗盘
+                # 认为主升浪结构被破坏，快速核按钮
+                from datetime import datetime
+                now_str = row.get('time', datetime.now().strftime('%H:M:%S'))
+                # 简单的时间判断：如果是开盘后 (9:40 后)
+                if isinstance(now_str, str) and now_str > "09:40:00":
+                    if current_price < nclose * 0.99:
+                        return TradePhase.EXIT, f"跌破分时均线防守区 (Price:{current_price:.2f} < VWAP:{nclose:.2f})"
+            
             # 用户规则: 回踩破前一日低点
             if last_low > 0 and current_price < last_low:
                 return TradePhase.EXIT, f"跌破昨日低点 {last_low}"
@@ -96,14 +107,16 @@ class PositionPhaseEngine:
             # 3. 状态流转逻辑
             # -----------------------------------------------------
             
-            # [IDLE -> SCOUT]
+            # [IDLE -> SCOUT / LAUNCH / SURGE]
             # 这里的逻辑主要由外部策略(StockLiveStrategy)的 Buy Signal 触发
-            # 如果外部已经买入，这里根据持仓调整状态
-            # 但作为纯状态机，我们也可以定义进入条件
             if current_phase == TradePhase.IDLE:
-                # 如果外部有强信号 (snapshot里有标志)
-                if snap.get('buy_triggered_today'):
-                    return TradePhase.SCOUT, "买入信号触发"
+                # 极大仓位试探：如果是早盘抢筹等极强信号，直接重仓
+                if snap.get('buy_reason') == 'early_momentum_buy':
+                    return TradePhase.LAUNCH, "早盘极速抢筹，激进建仓(50%)"
+                elif snap.get('buy_reason') == 'strong_auction_open':
+                    return TradePhase.ACCUMULATE, "强力竞价开盘，快速建仓(30%)"
+                elif snap.get('buy_triggered_today'):
+                    return TradePhase.SCOUT, "普通买入信号触发，试探建仓(10%)"
             
             # [SCOUT -> ACCUMULATE]
             # 试探成功：站稳成本价上方，且未大涨

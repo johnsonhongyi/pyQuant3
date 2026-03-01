@@ -20,7 +20,25 @@
 
 ---
 
-## ✅ 最近完成任务: 报警日志代码缺失修复 (02-27 20:30)
+## ✅ 最近完成任务: 早盘极速抢筹与去弱留强机制 (02-28 00:37)
+
+**状态**: ✅ 已完成
+**目标**: 针对“精选3,5只个股不能广撒网, 需要去弱留强”的需求，开发超快先机发掘与防御处理。实现早段极端动能捕获和VWAP硬性保护。
+
+### 核心变更
+- **激进抢筹 (Early Momentum)**: 在 `intraday_pattern_detector.py` 补充 `early_momentum_buy` 高优级验证。在 `StockLiveStrategy` `_on_pattern_detected` 级联，满足前5家自动建仓。
+- **仓位风控 (Phase Engine VWAP)**: 在 `evaluate_phase` 完善当实时价格低于结算均线 (VWAP, `nclose * 0.99`) 一定时间后立即强制 `EXIT` 减仓。
+- **数据管线修复**: 将 `MinuteKlineCache` 的保存过滤去除，确保分时均线逻辑全天有效运转。
+- **容量上限管治**: 新增 `_process_follow_queue` 常续监控容量。满5只锁单拒绝广撒网。
+
+### 历史记录 (Brain Artifacts)
+- 实施计划: [20260227_2307_implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b61a772f-8ef7-4e79-a54c-ef0472a81381/20260227_2307_implementation_plan.md)
+- 任务清单: [20260227_2307_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b61a772f-8ef7-4e79-a54c-ef0472a81381/20260227_2307_task.md)
+- 验收报告: [20260228_0037_walkthrough.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b61a772f-8ef7-4e79-a54c-ef0472a81381/20260228_0037_walkthrough.md)
+
+---
+
+## ⏳ 历史完成任务: 报警日志代码缺失修复 (02-27 20:30)
 
 **状态**: ✅ 已完成
 **目标**: 解决语音报警调试日志中股票代码 (`Key`) 缺失的问题，确保所有报警信号在全链路（日志、IPC、UI）具备完整元数据。
@@ -390,6 +408,7 @@ if hasattr(self, 'pattern_detector'):
 
 ## 📅 变更日志
 
+| 02-28 00:37 | **早盘超快抢筹与去弱留强机制**: 实现 early_momentum_buy 高优先级直入及仓位上限(5)，VWAP风控强退出机制解决死拿劣质标的 | `intraday_pattern_detector.py`, `position_phase_engine.py`, `stock_live_strategy.py`, `realtime_data_service.py` |
 | 02-27 20:30 | **报警日志修复**: 增强 AlertManager 代码识别，重构 StockLiveStrategy 报警入口 | `alert_manager.py`, `stock_live_strategy.py` |
 | 02-10 18:00 | **紧急 BUG 修复**: 修复 `trading_hub.py` 的 NameError (Dict) 与 `instock_MonitorTK.py` 的 NoneType 崩溃 | `trading_hub.py`, `instock_MonitorTK.py` |
 | 02-10 17:50 | **P3/P4 统一流水线整合**: 实现以 Watchlist 为核心的状态机，重构验证评分 (Threshold=0.7)，UI 列对齐 | `trading_hub.py`, `hotlist_panel.py`, `stock_live_strategy.py` |

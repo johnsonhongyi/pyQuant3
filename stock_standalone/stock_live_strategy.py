@@ -1780,8 +1780,15 @@ class StockLiveStrategy:
 
                 if triggered:
                     if is_validated: trigger_msg = f"[强体验证] {trigger_msg}"
-                    # 执行跟单交易逻辑
-                    self._execute_follow_trade(signal, current_price, trigger_msg, resample)
+                    # 执行跟单交易逻辑 (增加最大持仓限制: 5只)
+                    trades_info = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades_info if t['status'] == 'OPEN']
+                    if len(open_trades) < 5:
+                        self._execute_follow_trade(signal, current_price, trigger_msg, resample)
+                    else:
+                        limit_msg = f"跟单触发，但持仓已满({len(open_trades)}/5)，跳过买入。"
+                        logger.warning(f"⚠️ [Capacity Full] {code} {signal.name} {trigger_msg} - {limit_msg}")
+                        # self.voice_announcer.announce(f"{signal.name} {limit_msg}", code=code)
             
             except Exception as e:
                 logger.error(f"Process follow queue error {code}: {e}")
@@ -3473,6 +3480,36 @@ class StockLiveStrategy:
                 # 静默模式：只记录日志，不播报
                 logger.debug(f"Signal muted (count={event.count}): {event.code} {pattern_cn}")
             
+            # === [NEW] 极速打板/早盘抢筹自动执行逻辑 ===
+            if pattern_key == 'early_momentum_buy':
+                try:
+                    trades_info = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades_info if t['status'] == 'OPEN']
+                    act_count = len(open_trades)
+                    
+                    if act_count < 5:
+                        from trading_hub import TrackedSignal
+                        new_signal = TrackedSignal(
+                            code=event.code,
+                            name=event.name,
+                            signal_type='early_momentum_buy',
+                            detected_date=datetime.datetime.now().strftime("%Y-%m-%d"),
+                            detected_price=event.price,
+                            entry_strategy='早盘抢筹',
+                            status='VALIDATED',
+                            priority=30,
+                            source='LiveStrategy'
+                        )
+                        msg = f"强势早盘抢筹触发自动买入，当前持仓数: {act_count}/5"
+                        logger.info(f"🚀 [Auto Entry] {event.code} {event.name} execute early_momentum_buy")
+                        self._execute_follow_trade(new_signal, event.price, msg, 'd')
+                    else:
+                        msg = f"早盘抢筹触发，但持仓数已达上限({act_count}/5)，放弃买入。"
+                        logger.warning(f"⚠️ [Capacity Full] {event.code} {event.name} early_momentum_buy skipped. Limit 5 reached.")
+                        self.voice_announcer.announce(msg, code=event.code)
+                except Exception as eval_err:
+                    logger.error(f"Early momentum auto-buy failed: {eval_err}")
+
             # === 高优先级信号触发闪屏 ===
             if is_high_priority and hasattr(self, 'on_high_priority_signal'):
                 try:

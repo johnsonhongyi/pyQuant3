@@ -216,27 +216,48 @@ class QueryHistoryManager:
     def save_search_history(self, confirm_threshold=10):
         try:
             def dedup(history):
-                seen = set()
+                seen_q = set()
+                seen_n = set()
                 result = []
                 for r in history:
-                    q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q not in seen:
-                        seen.add(q)
-                        result.append(r)
+                    if not isinstance(r, dict):
+                        q = str(r).strip()
+                        n = ""
+                        r = {"query": q, "starred": 0, "note": ""}
+                    else:
+                        q = r.get("query", "").strip()
+                        n = r.get("note", "").strip()
+                    
+                    if not q or q in seen_q:
+                        continue
+                    if n and n in seen_n:
+                        continue
+                    
+                    seen_q.add(q)
+                    if n: seen_n.add(n)
+                    result.append(r)
                 return result
 
             def normalize_history(history):
                 normalized = []
                 seen_q = set()
+                seen_n = set()
                 for r in history:
                     if not isinstance(r, dict):
                         continue
                     q = r.get("query", "").strip()
                     if not q or q in seen_q:
                         continue
+                    
+                    # [FIXED] Deduplicate by note: only one newest entry per non-empty note
+                    note = r.get("note", "").strip()
+                    if note and note in seen_n:
+                        continue
+
                     seen_q.add(q)
+                    if note: seen_n.add(note)
+
                     starred = r.get("starred", 0)
-                    note = r.get("note", "")
                     if isinstance(starred, bool):
                         starred = 1 if starred else 0
                     elif not isinstance(starred, int):
@@ -249,27 +270,31 @@ class QueryHistoryManager:
                 合并内存和磁盘历史。
                 规则：
                 1. 优先保留内存中的记录（包含最新的备注和星标）。
-                2. 对于磁盘中存在但内存中不存在的记录，由于无法判断是'新添加'还是'被删除'，
-                   我们在主程序运行期间，倾向于内存是真理。
-                3. 为了支持多进程（如Visualizer添加），我们只合并最近磁盘中新增的记录。
+                2. 同一个备注只保留一条最新的记录（[FIXED] 解决 note 叠加问题）。
                 """
-                seen = set()
+                seen_q = set()
+                seen_n = set()
                 result = []
-                # 1. 先加入内存中的
-                for r in current:
-                    q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q and q not in seen:
-                        seen.add(q)
-                        result.append(r)
                 
-                # 2. 加入磁盘中的（如果内存没有，则认为是其他进程添加或历史遗留）
-                # 注意：这会导致删除操作在某些情况下被“复活”。
-                # 修复方法：限制合并数量，且优先内存。
+                # 1. 先加入内存中的 (Memory entries are truth)
+                for r in current:
+                    q = r.get("query", "").strip()
+                    n = r.get("note", "").strip()
+                    if q and q not in seen_q:
+                        if not n or n not in seen_n:
+                            seen_q.add(q)
+                            if n: seen_n.add(n)
+                            result.append(r)
+                
+                # 2. 加入磁盘中的（补充增量）
                 for r in old:
-                    q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q and q not in seen:
-                        seen.add(q)
-                        result.append(r)
+                    q = r.get("query", "").strip()
+                    n = r.get("note", "").strip()
+                    if q and q not in seen_q:
+                        if not n or n not in seen_n:
+                            seen_q.add(q)
+                            if n: seen_n.add(n)
+                            result.append(r)
                 
                 return result[:self.MAX_HISTORY]
 
@@ -350,13 +375,21 @@ class QueryHistoryManager:
                             upgraded = True
 
                 def dedup(history):
-                    seen = set()
+                    seen_q = set()
+                    seen_n = set()
                     result = []
                     for r in history:
-                        q = r.get("query", "")
-                        if q not in seen:
-                            seen.add(q)
-                            result.append(r)
+                        q = r.get("query", "").strip()
+                        n = r.get("note", "").strip()
+                        if not q or q in seen_q:
+                            continue
+                        # [FIXED] Deduplicate by note during load
+                        if n and n in seen_n:
+                            continue
+                        
+                        seen_q.add(q)
+                        if n: seen_n.add(n)
+                        result.append(r)
                     return result
 
                 raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
