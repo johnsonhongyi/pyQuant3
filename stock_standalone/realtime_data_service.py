@@ -93,31 +93,7 @@ class MinuteKlineCache:
         df['time'] = df['time'].astype(int)
         df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
         
-        # --- [FIX] 数据修复: 剔除非交易时段数据 (盘后/午休脏数据) ---
-        # 假设服务器为 UTC+8 环境 (A股)
-        # (ts + 28800) % 86400 = 当天逝去的秒数
-        # seconds // 60 = 当天逝去的分钟数
-        # HHMM = (mins // 60) * 100 + (mins % 60)
-        
-        # 向量化计算 HHMM
-        seconds_from_midnight = (df['time'] + 28800) % 86400
-        mins_from_midnight = seconds_from_midnight // 60
-        hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-        
-        # 合法性校验: 09:15-11:30, 13:00-15:05 (放宽至 15:05 容纳收盘竞价延时)
-        mask_am = (hhmm >= 915) & (hhmm <= 1130)
-        mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
-        
-        # 应用过滤
-        original_len = len(df)
-        df = df[mask_am | mask_pm]
-        cleaned_len = len(df)
-        
-        if cleaned_len < original_len:
-             # 仅在有清除时由于频率限制改为 debug 或 info
-             pass
-             
-        # 最后的防线：确保返回的 DF 绝对没有重复的 (code, time)
+        # 仅保留排序和去重防线：确保返回的 DF 绝对没有重复的 (code, time)
         df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
         return df
 
