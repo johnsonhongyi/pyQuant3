@@ -308,25 +308,28 @@ if hasattr(self, 'pattern_detector'):
 
 ---
 
-## 🔴 当前任务: Phase 4 留强去弱自动化 (开发中)
+## 🔴 当前任务: Phase 5 分析器性能优化 (分页与时间过滤)
 
 **状态**: 🔴 进行中
-**目标**: 提升持仓股的动态管理能力，实现基于日线走势的自动离场与降级。
+**目标**: 解决交易分析器(`trading_analyzerQt6.py`)查询超大记录时渲染引发的严重卡顿。新增时间区间过滤项与表格分页呈现功能。
 
 ### 核心子任务
 
 | 序号 | 任务描述 | 状态 |
 |------|----------|------|
-| 1 | **UI 增强**: 在 HotlistPanel 实现形态分、描述与来源的列对齐展示 | ✅ |
-| 2 | **趋势评估**: 在 `cleanup_stale_signals` 中集成收盘强弱评分 | ⏳ 待办 |
-| 3 | **留强去弱**: 实现持仓股跌破 MA5 或出现顶部信号时的自动 EXITED 触发 | ⏳ 待办 |
+| 1 | **UI 强化**: 在 `TradingGUI` 顶部栏加入 `时间范围` 条件下拉框，底部置入分页导航栏 | ⏳ 待办 |
+| 2 | **数据剥离渲染**: 将 DataFrame 请求与 QTableWidget 循环渲染分开，依靠 `cached_full_df` 控制当页只绘 200 行 | ⏳ 待办 |
+| 3 | **过滤应用**: 在拉取或渲染前拦截 DataFrame，裁切时间以减少无用数据混淆 | ⏳ 待办 |
 
 ### 历史记录
-- **实施计划**: `20260203_0214_implementation_plan.md`
-- **任务清单**: `20260203_0214_task.md`
-- **成果**: 信号全链路标准化，Visualizer 接收能力恢复。
+- **实施计划**: [20260301_2320_implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/72698ac6-1914-495f-be2e-9dbbf4bbd8df/20260301_2320_implementation_plan.md)
+- **任务清单**: [20260301_2320_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/72698ac6-1914-495f-be2e-9dbbf4bbd8df/20260301_2320_task.md)
 
 ---
+
+## ⏳ 历史完成任务: Phase 4 留强去弱自动化 (03-01 10:35)
+
+**状态**: ✅ 已完成
 
 ### P2: 交易闭环与报警优化 ✅ 已完成
 - [x] **Alert System Hardening**: Created `alert_manager.py` ✅ 01-23

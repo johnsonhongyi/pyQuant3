@@ -61,6 +61,14 @@ except ImportError:
     HAS_PHASE_ENGINE = False
     logger.warning("PositionPhaseEngine not found.")
 
+# [NEW] T+1 交易策略引擎
+try:
+    from t1_strategy_engine import T1StrategyEngine
+    HAS_T1_ENGINE = True
+except ImportError:
+    HAS_T1_ENGINE = False
+    logger.warning("T1StrategyEngine not found.")
+
 # pythoncom import removed - usage localized or delegated
 
 
@@ -362,6 +370,9 @@ class StockLiveStrategy:
         self.follow_queue_cache: List[TrackedSignal] = []
         self.last_follow_sync_ts: float = 0
         
+        # --- [NEW] T+0 动作冷却 ---
+        self._t0_cooldowns: dict[str, float] = {}
+        
         # --- 自动交易相关状态初始化 ---
         self.auto_loop_enabled = False
         self.batch_state = "IDLE"
@@ -443,6 +454,13 @@ class StockLiveStrategy:
             logger.info("PositionPhaseEngine initialized.")
         else:
             self.phase_engine = None
+
+        # --- [NEW] T+1 交易策略引擎 ---
+        if HAS_T1_ENGINE:
+            self.t1_engine = T1StrategyEngine()
+            logger.info("T1StrategyEngine initialized.")
+        else:
+            self.t1_engine = None
 
         # --- Automatic Trading Loop State ---
         # self.auto_loop_enabled = False (已经在上方初始化)
@@ -1744,6 +1762,32 @@ class StockLiveStrategy:
                             msg = "跌破5日线，建议止盈或控制仓位。"
                             self._trigger_alert(code, signal.name, msg, action="止盈", price=current_price)
                             logger.info(f"⚠️ [HoldingWarn] {code} {signal.name} 跌破MA5: curr={current_price:.2f} ma5={ma5:.2f}")
+
+                # [NEW] 交由 T1 引擎进行自动化 T+0 加减仓策略审核 (去弱留强 / 震荡高抛低吸)
+                if hasattr(self, 't1_engine') and self.t1_engine and is_trading_time: # Only evaluate T+0 during trading hours
+                    cost_price = signal.entry_price if hasattr(signal, 'entry_price') and signal.entry_price > 0 else current_price
+                    pos_info = {'entry_price': cost_price}
+                    
+                    t1_action, t1_reason, t1_target = self.t1_engine.evaluate_t0_signal(
+                        code, row, snap, pos_info
+                    )
+                    if t1_action != 'HOLD':
+                        # 防止同一股票反复触发同一类型的自动交易，使用专用缓存机制冷却
+                        import time
+                        sig_key = f"{code}_T0_{t1_action}"
+                        last_ts = self._t0_cooldowns.get(sig_key, 0.0)
+                        now_ts = time.time()
+                        
+                        if now_ts - last_ts > 1800: # 半小时冷却
+                            self._trigger_alert(code, signal.name, t1_reason, action=t1_action, price=current_price)
+                            logger.info(f"🔄 [T+1 Auto] {code} {signal.name} 触发 {t1_action}: {t1_reason}")
+                            
+                            # 全自动化执行日志切分
+                            act_name = "加仓(T0买)" if t1_action == 'ADD' else "去弱留强减仓(T0卖)"
+                            self._execute_t0_trade(code, signal.name, act_name, current_price, t1_reason)
+                            self._t0_cooldowns[sig_key] = now_ts
+                
+                if status == 'ENTERED': # Original continue for ENTERED status, now after T+0 logic
                     continue # 持仓股已处理完监控，跳过买入触发逻辑
 
                 # --- [NEW] 针对 VALIDATED 股票的属性注入与增强 ---
@@ -1948,6 +1992,29 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Execute trade failed {code}: {e}")
 
+    def _execute_t0_trade(self, code: str, name: str, action: str, price: float, reason: str, resample: str = 'd'):
+        """
+        [NEW] 执行 T+0 加减仓: 仅记录交易信号流日志，并不直接平仓整个头寸
+        """
+        try:
+            self.trading_logger.record_trade(
+                code, name, action, price, 0,
+                reason=f"[T+1系统] {reason}",
+                resample=resample
+            )
+            # Notify observer/UI
+            logger.info(f"✅ [T+0 Executed] {name} ({code}) {action} 价格:{price} 理由:{reason}")
+            # Optional: Add specific marker to SQLite target DB if necessary
+            
+            # Send IPC message for visualizer rendering
+            if action == '加仓(T0买)':
+                sig_type = "T0_BUY"
+            else:
+                sig_type = "T0_SELL"
+            msg_data = {"code": code, "name": name, "price": price, "pattern": sig_type, "msg": reason, "time": datetime.datetime.now().strftime("%H:%M:%S")}
+            send_signal_to_visualizer_ipc(msg_data)
+        except Exception as e:
+            logger.error(f"Execute T+0 trade failed {code}: {e}")
 
     def _check_strategies(self, df, resample='d'):
         try:

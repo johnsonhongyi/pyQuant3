@@ -94,6 +94,10 @@ class StockSelector:
             if 'change_pct' in df.columns:
                 df['percent'] = df['change_pct']
             return df
+            
+        # [FIX] 兼容实时数据的列名 (实时数据常使用 'trade' 表示现价)
+        if 'close' not in df.columns and 'trade' in df.columns:
+            df['close'] = df['trade']
 
         # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
         # resample 使用实例化时传入的参数
@@ -421,7 +425,7 @@ class StockSelector:
                 }
                 selected_records.append(record)
 
-                df_selected = pd.DataFrame(selected_records)
+        df_selected = pd.DataFrame(selected_records)
         if not df_selected.empty:
             # 理由去重
             df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
