@@ -1,11 +1,12 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
     QTableWidgetItem, QLabel, QComboBox, QMenu, QTextEdit, QHeaderView, QDialog,
-    QSpinBox, QSplitter, QCheckBox, QMainWindow
+    QSpinBox, QSplitter, QCheckBox, QMainWindow, QTreeWidget, QTreeWidgetItem, QMessageBox
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPoint
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPoint, QEvent
 from PyQt6.QtGui import QAction
 import sys
+import os
 import pandas as pd
 import numpy as np
 from tk_gui_modules.window_mixin import WindowMixin
@@ -13,7 +14,9 @@ from dpi_utils import get_windows_dpi_scale_factor
 import sqlite3
 import json
 import queue # ✅ Import queue
+import math
 from datetime import datetime, timedelta
+from typing import Optional
 
 # 假设 TradingAnalyzer 已经在同一目录
 from trading_logger import TradingLogger
@@ -40,6 +43,103 @@ class NumericTableWidgetItem(QTableWidgetItem):
             if isinstance(self.sort_value, (int, float)) and isinstance(other.sort_value, (int, float)):
                 return self.sort_value < other.sort_value
         return super().__lt__(other)
+
+class DetailTreeWindow(QDialog, WindowMixin):
+    """
+    可复用的股票详情树状窗口，显示开平仓、做T详情以及策略信号信息。
+    """
+    def __init__(self, stock_code: str, stock_name: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.stock_code: str = stock_code
+        self.stock_name: str = stock_name
+        self.setWindowTitle(f"个股详情 - {stock_name} ({stock_code})")
+        # 尺寸
+        self.scale_factor: float = get_windows_dpi_scale_factor()
+        self.load_window_position_qt(self, f"DetailTreeWindow")
+        
+        self.main_layout = QVBoxLayout(self)
+        
+        # 顶部信息
+        self.info_label = QLabel(f"<b>{stock_name}</b> ({stock_code}) 交易及信号明细")
+        self.main_layout.addWidget(self.info_label)
+        
+        # 树形控件
+        self.tree: QTreeWidget = QTreeWidget()
+        self.tree.setHeaderLabels(["时间 / 分类", "动作 / 信号", "详情", "备注"])
+        self.tree.setColumnWidth(0, 200)
+        self.tree.setColumnWidth(1, 150)
+        self.tree.setColumnWidth(2, 250)
+        self.tree.setAlternatingRowColors(True)
+        self.main_layout.addWidget(self.tree)
+        
+        self.load_data()
+        
+    def load_data(self):
+        # 创建根节点
+        trade_root = QTreeWidgetItem(self.tree, ["交易记录 (开仓/平仓/做T)"])
+        signal_root = QTreeWidgetItem(self.tree, ["策略信号记录"])
+        
+        # 抓取交易数据库
+        # 注意：这里如果已经处于 TradingGUI 内部环境，可以考虑复用连接，或在此直接简单查询。
+        try:
+            db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "trading_signals.db"))
+            with sqlite3.connect(db_file_path) as conn:
+                query = "SELECT timestamp, action, price, quantity, trigger_reason, time, date FROM trade_log WHERE code=? ORDER BY timestamp DESC LIMIT 100"
+                df_trades = pd.read_sql_query(query, conn, params=(self.stock_code,))
+        except Exception as e:
+            df_trades = pd.DataFrame()
+            print(f"Error fetching trades: {e}")
+            
+        if not df_trades.empty:
+            for _, row in df_trades.iterrows():
+                t = row.get('time', row.get('timestamp', ''))
+                act = row.get('action', '')
+                p = row.get('price', 0)
+                q = row.get('quantity', 0)
+                reason = row.get('trigger_reason', '')
+                detail = f"价格: {p:.2f} 数量: {q}" if pd.notnull(p) else ""
+                
+                item = QTreeWidgetItem(trade_root, [str(t), str(act), detail, str(reason)])
+                # 根据 action 涂色
+                act_str = str(act).upper()
+                if "BUY" in act_str or "ENTER" in act_str:
+                    item.setForeground(1, Qt.GlobalColor.red)
+                elif "SELL" in act_str or "EXIT" in act_str:
+                    item.setForeground(1, Qt.GlobalColor.darkGreen)
+        else:
+            QTreeWidgetItem(trade_root, ["无记录", "-", "-", "-"])
+            
+        # 抓取信号数据库
+        try:
+            db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "signal_strategy.db"))
+            with sqlite3.connect(db_file_path) as conn:
+                query = "SELECT timestamp, strategy_name, signal_type, price, message FROM strategy_signals WHERE code=? ORDER BY timestamp DESC LIMIT 100"
+                df_signals = pd.read_sql_query(query, conn, params=(self.stock_code,))
+        except Exception as e:
+            df_signals = pd.DataFrame()
+            print(f"Error fetching signals: {e}")
+            
+        if not df_signals.empty:
+            for _, row in df_signals.iterrows():
+                t = row.get('timestamp', '')
+                s_name = row.get('strategy_name', '')
+                s_type = row.get('signal_type', '')
+                msg = row.get('message', '')
+                p = row.get('price', 0)
+                
+                detail = f"类型: {s_type} 触发价: {p:.2f}" if pd.notnull(p) else f"类型: {s_type}"
+                
+                item = QTreeWidgetItem(signal_root, [str(t), str(s_name), detail, str(msg)])
+                item.setForeground(1, Qt.GlobalColor.blue)
+        else:
+            QTreeWidgetItem(signal_root, ["由于非交易时间过滤或无信号，当前无记录", "-", "-", "-"])
+            
+        self.tree.expandAll()
+
+    def closeEvent(self, event):
+        """覆盖关闭事件，保存窗口位置"""
+        self.save_window_position_qt(self, f"DetailTreeWindow")
+        super().closeEvent(event)
 
 class HotSectorAnalysisDialog(QDialog, WindowMixin):
     """
@@ -429,6 +529,13 @@ class TradingGUI(QWidget, WindowMixin):
         self.main_layout = QVBoxLayout()
         self.setLayout(self.main_layout)
 
+        # 初始化分页变量 (务必在连接任何会触发 refresh_table 的信号之前初始化)
+        self.current_page = 1
+        self.page_size = 200
+        self.total_pages = 1
+        self.cached_full_df = pd.DataFrame()
+        self._data_cache = {}
+
         # 顶部：汇总信息
         self.label_summary = QLabel("总收益: 0, 平均收益率: 0%, 总笔数: 0")
         self.main_layout.addWidget(self.label_summary)
@@ -452,7 +559,7 @@ class TradingGUI(QWidget, WindowMixin):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
-            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板"
+            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板", "T+1 预判与做T策略"
         ])
         
         # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
@@ -465,10 +572,20 @@ class TradingGUI(QWidget, WindowMixin):
         self.top_layout.addWidget(QLabel("视图选择:"))
         self.top_layout.addWidget(self.view_combo)
         
+        # 时间区间过滤
+        self.time_filter_combo = QComboBox()
+        self.time_filter_combo.addItems([
+            "全部", "只看今日", "近3天", "近1周", "近1月", "近3月"
+        ])
+        self.time_filter_combo.currentTextChanged.connect(self.refresh_table)
+        self.top_layout.addWidget(QLabel("时间范围:"))
+        self.top_layout.addWidget(self.time_filter_combo)
+        
         # 工具栏菜单 (按钮形式)
         self.tools_btn = QPushButton("工具")
         self.tools_menu = QMenu(self)
         self.tools_menu.addAction("数据库诊断", self.show_db_diagnostics)
+        self.tools_menu.addAction("清理非交易日脏数据", self.trigger_db_cleanup)
         self.tools_btn.setMenu(self.tools_menu)
         self.top_layout.addWidget(self.tools_btn)
 
@@ -478,7 +595,7 @@ class TradingGUI(QWidget, WindowMixin):
         self.top_layout.addWidget(self.analysis_btn)
         
         self.refresh_btn = QPushButton("刷新")
-        self.refresh_btn.clicked.connect(self.refresh_table)
+        self.refresh_btn.clicked.connect(self.force_refresh_table)  # 强制清除缓存刷新
         self.top_layout.addWidget(self.refresh_btn)
 
         self.hotspot_btn = QPushButton("板块热点")
@@ -493,6 +610,11 @@ class TradingGUI(QWidget, WindowMixin):
 
         self.stock_input = QComboBox()
         self.stock_input.setEditable(True)
+        
+        self.clear_filter_btn = QPushButton("清空")
+        self.clear_filter_btn.clicked.connect(lambda: self.stock_input.setCurrentText(""))
+        self.top_layout.addWidget(self.clear_filter_btn)
+        
         self.top_layout.addWidget(QLabel("代码过滤:"))
         self.top_layout.addWidget(self.stock_input)
         self.stock_input.currentTextChanged.connect(self.refresh_table)
@@ -500,6 +622,30 @@ class TradingGUI(QWidget, WindowMixin):
         # 表格显示
         self.table = QTableWidget()
         self.main_layout.addWidget(self.table)
+
+        # 添加底部分页导航条
+        self.pagination_layout = QHBoxLayout()
+        self.btn_first_page = QPushButton("<< 首页")
+        self.btn_prev_page = QPushButton("< 上一页")
+        self.label_page_info = QLabel("第 1 / 1 页 (共 0 条)")
+        self.label_page_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.btn_next_page = QPushButton("下一页 >")
+        self.btn_last_page = QPushButton("尾页 >>")
+        
+        # 翻页按钮绑定
+        self.btn_first_page.clicked.connect(self.first_page)
+        self.btn_prev_page.clicked.connect(self.prev_page)
+        self.btn_next_page.clicked.connect(self.next_page)
+        self.btn_last_page.clicked.connect(self.last_page)
+        
+        self.pagination_layout.addStretch()
+        self.pagination_layout.addWidget(self.btn_first_page)
+        self.pagination_layout.addWidget(self.btn_prev_page)
+        self.pagination_layout.addWidget(self.label_page_info)
+        self.pagination_layout.addWidget(self.btn_next_page)
+        self.pagination_layout.addWidget(self.btn_last_page)
+        self.pagination_layout.addStretch()
+        self.main_layout.addLayout(self.pagination_layout)
 
         # 底部日志/报告显示区域
         self.report_area = QTextEdit()
@@ -528,6 +674,7 @@ class TradingGUI(QWidget, WindowMixin):
 
         # 表格点击与切换信号
         _ = self.table.cellClicked.connect(self.on_table_row_clicked)
+        _ = self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
         _ = self.table.currentCellChanged.connect(self.on_current_cell_changed)
         
         # 添加右键菜单策略
@@ -544,8 +691,158 @@ class TradingGUI(QWidget, WindowMixin):
         self.signal_logger = SignalStrategyLogger()
         self.signal_analyzer = StrategySignalAnalyzer(self.signal_logger)
         
+        # 记录浏览历史用于鼠标前后键导航
+        self._stock_history = []
+        self._history_index = -1
+        
+        # [FIX] 防止表格视图内部的视口(Viewport)截获并消耗掉侧键的点击
+        self.table.viewport().installEventFilter(self)
+        self.installEventFilter(self)
+        
         # 初始刷新
         self.refresh_table()
+
+    def eventFilter(self, obj, event):
+        """全局拦截子控件的鼠标事件，确保前进/后退侧键在任何焦点下生效"""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.BackButton:
+                self.navigate_history(-1)
+                return True
+            elif event.button() == Qt.MouseButton.ForwardButton:
+                self.navigate_history(1)
+                return True
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):
+        """支持鼠标侧键（前进/返回）进行历史导航"""
+        if event.button() == Qt.MouseButton.BackButton:
+            self.navigate_history(-1)
+            event.accept()
+        elif event.button() == Qt.MouseButton.ForwardButton:
+            self.navigate_history(1)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def first_page(self):
+        if self.current_page > 1:
+            self.current_page = 1
+            self._render_current_page()
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._render_current_page()
+
+    def next_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self._render_current_page()
+
+    def last_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page = self.total_pages
+            self._render_current_page()
+
+    def _render_current_page(self):
+        if self.cached_full_df.empty:
+            self.label_page_info.setText("第 1 / 1 页 (共 0 条)")
+            self.display_df(self.cached_full_df)
+            return
+            
+        start_idx = (self.current_page - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        page_df = self.cached_full_df.iloc[start_idx:end_idx]
+        
+        total_rows = len(self.cached_full_df)
+        self.label_page_info.setText(f"第 {self.current_page} / {self.total_pages} 页 (共 {total_rows} 条)")
+        
+        # 仅渲染切片后的数据
+        self.display_df(page_df)
+
+    def navigate_history(self, direction):
+        if not self._stock_history: return
+        new_index = self._history_index + direction
+        if 0 <= new_index < len(self._stock_history):
+            self._history_index = new_index
+            state = self._stock_history[new_index]
+            
+            self._is_navigating_history = True
+            try:
+                # 1. 阻塞下拉框事件，避免由于设值产生连锁刷新反应
+                self.source_combo.blockSignals(True)
+                self.view_combo.blockSignals(True)
+                self.stock_input.blockSignals(True)
+                
+                # 2. 恢复数据源
+                prev_source = self.source_combo.currentText()
+                new_source = state.get("source", "")
+                if new_source and new_source != prev_source:
+                    self.source_combo.setCurrentText(new_source)
+                    self.view_combo.clear()
+                    if new_source == "交易/选股数据库":
+                        self.view_combo.addItems([
+                            "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板", "T+1 预判与做T策略"
+                        ])
+                    else:
+                        self.view_combo.addItems([
+                            "今日信号汇总", "所有信号流", "信号类型统计", "高频信号股"
+                        ])
+
+                # 3. 恢复视图和过滤代码
+                self.view_combo.setCurrentText(state.get("view", ""))
+                self.stock_input.setCurrentText(state.get("filter_code", ""))
+                
+                # 4. 取消阻塞
+                self.source_combo.blockSignals(False)
+                self.view_combo.blockSignals(False)
+                self.stock_input.blockSignals(False)
+                
+                # 5. 精确只执行一次表格刷新
+                self.refresh_table()
+
+                # 6. 如果带有股票代码过滤或者有选中历史，则主动触发联动
+                sel_code = state.get("selected_code", "")
+                if not sel_code:
+                    sel_code = state.get("filter_code", "")
+                
+                if sel_code:
+                    self._safe_send_stock(sel_code)
+                    self._last_selected_code = sel_code
+                    # 同步选择表格行，但屏蔽表格信号避免触发新的点击事件
+                    self.table.blockSignals(True)
+                    try:
+                        self._select_code_in_table(sel_code)
+                    finally:
+                        self.table.blockSignals(False)
+                    
+            finally:
+                self._is_navigating_history = False
+
+    def _select_code_in_table(self, code):
+        for row in range(self.table.rowCount()):
+            if self._get_stock_code_from_row(row) == code:
+                self.table.selectRow(row)
+                break
+
+    def _add_to_history(self, state):
+        if not state or not isinstance(state, dict): return
+        
+        # 避免连续重复记录相同的界面状态
+        if self._stock_history and self._history_index >= 0:
+            curr = self._stock_history[self._history_index]
+            if curr.get("source") == state.get("source") and curr.get("view") == state.get("view") and curr.get("filter_code") == state.get("filter_code") and curr.get("selected_code") == state.get("selected_code"):
+                return
+            
+        # 丢弃当前索引之后的所有记录（像浏览器历史一样分支）
+        self._stock_history = self._stock_history[:self._history_index + 1]
+        self._stock_history.append(state)
+        
+        # 限制历史记录上限
+        if len(self._stock_history) > 100:
+            self._stock_history.pop(0)
+        else:
+            self._history_index += 1
 
     def closeEvent(self, event):
         self.save_window_position_qt(self, "TradingGUI_Geometry")
@@ -558,7 +855,7 @@ class TradingGUI(QWidget, WindowMixin):
         
         if text == "交易/选股数据库":
             self.view_combo.addItems([
-                "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行"
+                "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板", "T+1 预判与做T策略"
             ])
         else:
             self.view_combo.addItems([
@@ -624,7 +921,13 @@ class TradingGUI(QWidget, WindowMixin):
             self.report_area.setPlainText(f"生成报告失败: {e}")
             self.report_area.setVisible(True)
 
-    def refresh_table(self):
+    def force_refresh_table(self):
+        """强制清空本地查询缓存并进行数据库深刷"""
+        if hasattr(self, '_data_cache'):
+            self._data_cache.clear()
+        self.refresh_table()
+
+    def refresh_table(self, *args):
         # 切换显示状态
         self.report_area.setVisible(False)
         self.table.setVisible(True)
@@ -634,10 +937,35 @@ class TradingGUI(QWidget, WindowMixin):
         view = self.view_combo.currentText()
         code = self.stock_input.currentText().strip()
         
-        df = pd.DataFrame()
+        if not getattr(self, '_is_navigating_history', False):
+            # 获取上一次点击/查看的合法标的
+            last_sel = getattr(self, '_last_selected_code', "")
+            self._add_to_history({
+                "source": source,
+                "view": view,
+                "filter_code": code,
+                "selected_code": last_sel
+            })
+            
+        # 极速缓存验证：默认只基于 (source, view) 做缓存，从而让代码和时间区间的过滤完全依靠 Pandas 内存极速切片！
+        cache_key = (source, view)
+        if view == "单只股票明细":
+            # 精细到代码级别的视图保留原样
+            cache_key = (source, view, code)
+            
+        now = datetime.now()
+        use_cache = False
+        if hasattr(self, '_data_cache') and cache_key in self._data_cache:
+            cached_item = self._data_cache[cache_key]
+            if (now - cached_item['time']).total_seconds() < 1800: # 30分钟
+                df = cached_item['df'].copy()
+                use_cache = True
 
-        if source == "交易/选股数据库":
-            self.update_stock_list_traditional()
+        if not use_cache:
+            df = pd.DataFrame()
+
+            if source == "交易/选股数据库":
+                self.update_stock_list_traditional()
             
             if view == "股票汇总":
                 df = self.analyzer.summarize_by_stock()
@@ -655,15 +983,11 @@ class TradingGUI(QWidget, WindowMixin):
             elif view == "股票表现概览":
                 df = self.analyzer.stock_performance()
             elif view == "信号探测历史":
-                # 优化：如果有 code，直接传给后端筛选，避免全量加载
-                df = self.analyzer.get_signal_history_df(code=code if code else None)
-                if code and not df.empty: # This line becomes redundant if backend filtering is perfect, but kept for safety.
-                    df = df[df['code'] == code]
+                # 统一取全量历史交由缓存和前端 Pandas 光速切片，避免频繁打击后端
+                df = self.analyzer.get_signal_history_df(code=None)
             elif view == "实时指标详情":
-                # 优化：如果有 code，直接传给后端筛选，避免全量加载
-                df = self.analyzer.get_signal_history_df(code=code if code else None)
-                if code and not df.empty: # This line becomes redundant if backend filtering is perfect, but kept for safety.
-                    df = df[df['code'] == code]
+                # 统一取全量历史交由缓存和前端 Pandas 光速切片
+                df = self.analyzer.get_signal_history_df(code=None)
                 # 指标列筛选
                 indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
                                 'buy_reason', 'sell_reason', 'time_msg',
@@ -688,12 +1012,13 @@ class TradingGUI(QWidget, WindowMixin):
                 if df.empty:
                      # Fallback to stock performance if no specific strategy data
                      df = self.analyzer.stock_performance()
+            elif view == "T+1 预判与做T策略":
+                self.refresh_t1_strategy_dashboard()
+                return
         else:
             # 实时策略信号库
             if view == "今日信号汇总":
                 df = self.signal_analyzer.get_todays_signal_counts()
-                if code and not df.empty:
-                    df = df[df['code'] == code]
                 
                 # [NEW] Re-order and rename columns for display
                 if not df.empty:
@@ -716,23 +1041,162 @@ class TradingGUI(QWidget, WindowMixin):
                     }, inplace=True)
             elif view == "所有信号流":
                 df = self.signal_analyzer.get_signal_message_df()
-                if code and not df.empty:
-                    df = df[df['code'] == code]
             elif view == "信号类型统计":
                 df = self.signal_analyzer.summarize_signals_by_type()
             elif view == "高频信号股":
                 df = self.signal_analyzer.summarize_signals_by_code()
 
-        # 显示表格
-        self.current_df = df
-        self.display_df(df)
+            # 保存至大表全局缓存 (未执行过滤的状态)
+            if not hasattr(self, '_data_cache'):
+                self._data_cache = {}
+            self._data_cache[cache_key] = {'time': now, 'df': df.copy() if not df.empty else pd.DataFrame()}
 
-        # 更新总收益摘要 (仅在交易模式下有意义，但在信号模式下可显示行数)
+        # ---------------- 内存级极速切片区 ---------------- #
+
+        # 代码级别过滤 (依赖 Pandas 内存过滤实现秒出)
+        if code and not df.empty and 'code' in df.columns:
+            df = df[df['code'].astype(str) == str(code)]
+
+        # 时间区间过滤
+        if not df.empty and 'date' in df.columns:
+            time_filter = self.time_filter_combo.currentText()
+            now = datetime.now()
+            start_date_str = None
+            if time_filter == "只看今日":
+                start_date_str = now.strftime('%Y%m%d')
+                if '-' in str(df['date'].iloc[0]): start_date_str = now.strftime('%Y-%m-%d')
+            elif time_filter == "近3天":
+                start_date_str = (now - timedelta(days=3)).strftime('%Y%m%d')
+                if '-' in str(df['date'].iloc[0]): start_date_str = (now - timedelta(days=3)).strftime('%Y-%m-%d')
+            elif time_filter == "近1周":
+                start_date_str = (now - timedelta(days=7)).strftime('%Y%m%d')
+                if '-' in str(df['date'].iloc[0]): start_date_str = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+            elif time_filter == "近1月":
+                start_date_str = (now - timedelta(days=30)).strftime('%Y%m%d')
+                if '-' in str(df['date'].iloc[0]): start_date_str = (now - timedelta(days=30)).strftime('%Y-%m-%d')
+            elif time_filter == "近3月":
+                start_date_str = (now - timedelta(days=90)).strftime('%Y%m%d')
+                if '-' in str(df['date'].iloc[0]): start_date_str = (now - timedelta(days=90)).strftime('%Y-%m-%d')
+            
+            if start_date_str:
+                df = df[df['date'].astype(str) >= start_date_str]
+        elif not df.empty and 'timestamp' in df.columns:
+            time_filter = self.time_filter_combo.currentText()
+            now = datetime.now()
+            start_date_str = None
+            if time_filter == "只看今日":
+                start_date_str = now.strftime('%Y-%m-%d 00:00:00')
+            elif time_filter == "近3天":
+                start_date_str = (now - timedelta(days=3)).strftime('%Y-%m-%d 00:00:00')
+            elif time_filter == "近1周":
+                start_date_str = (now - timedelta(days=7)).strftime('%Y-%m-%d 00:00:00')
+            elif time_filter == "近1月":
+                start_date_str = (now - timedelta(days=30)).strftime('%Y-%m-%d 00:00:00')
+            elif time_filter == "近3月":
+                start_date_str = (now - timedelta(days=90)).strftime('%Y-%m-%d 00:00:00')
+                
+            if start_date_str:
+                df = df[df['timestamp'].astype(str) >= start_date_str]
+
+        # 缓存数据并计算分页
+        self.cached_full_df = df
+        self.current_df = df
+        self.total_pages = max(1, math.ceil(len(self.cached_full_df) / self.page_size))
+        self.current_page = 1
+
+        # 渲染当页表格
+        self._render_current_page()
+
+        # 更新总收益摘要
         if source == "交易/选股数据库":
             self.refresh_summary_label()
         else:
-            count = len(df) if not df.empty else 0
-            self.label_summary.setText(f"当前视图记录数: {count}")
+            self.label_summary.setText(f"当前视图总记录数: {len(self.cached_full_df)}")
+
+    def refresh_t1_strategy_dashboard(self):
+        """[T+1系统] 生成每日预埋价和全景复盘"""
+        self.report_area.setVisible(False)
+        self.table.setVisible(True)
+        
+        try:
+            from trading_hub import get_trading_hub
+            from t1_strategy_engine import T1StrategyEngine
+            hub = get_trading_hub()
+            t1_engine = T1StrategyEngine()
+            
+            # 聚合目标池：持仓 + 跟单队列 + 热点观察
+            targets = []
+            
+            # 1. 持仓
+            for pos in hub.get_positions("HOLDING"):
+                targets.append({"code": pos.code, "name": pos.name, "source": "实盘持仓", "cost": pos.entry_price})
+            # 2. 跟单
+            for fq in hub.get_follow_queue():
+                if fq.status not in ("EXITED", "CANCELLED", "ENTERED"): # ENTERED is covered by positions
+                    targets.append({"code": fq.code, "name": fq.name, "source": f"跟单: {fq.status}", "cost": fq.entry_price})
+            
+            # 构造 DataFrame
+            result_rows = []
+            # 获取实时快照以计算均线 (借助 live_strategy.df)
+            live_df = None
+            if self.live_strategy and hasattr(self.live_strategy, 'df') and self.live_strategy.df is not None:
+                live_df = self.live_strategy.df
+            
+            # 去重
+            seen = set()
+            for t in targets:
+                code = t['code']
+                if code in seen: continue
+                seen.add(code)
+                
+                row_snap = {}
+                current_price = 0.0
+                high_today = 0.0
+                if live_df is not None and code in live_df.index:
+                    row_snap = live_df.loc[code].to_dict()
+                    current_price = float(row_snap.get('trade', row_snap.get('price', 0)))
+                    high_today = float(row_snap.get('high', current_price))
+                
+                # Use engine to calc targets
+                t1_engine.refresh_targets(code, row_snap, current_price)
+                t_info = t1_engine.target_cache.get(code, {})
+                
+                trend = t_info.get('trend', '未知')
+                trend_val = trend.value if hasattr(trend, 'value') else trend
+                buy_target = t_info.get('buy_target', 0.0)
+                sell_target = t_info.get('sell_target', 0.0)
+                atr = t_info.get('atr', 0.0)
+                
+                # Calc trailing stop distance
+                atr_multiplier = 1.2 if trend_val == '主升浪' else 0.8
+                trailing_stop = high_today - (atr * atr_multiplier) if high_today > 0 else 0.0
+                
+                result_rows.append({
+                    "代码": code,
+                    "名称": t['name'],
+                    "现价": f"{current_price:.2f}" if current_price > 0 else "N/A",
+                    "成本/均价": f"{t['cost']:.2f}" if t['cost'] > 0 else "-",
+                    "趋势定性": trend_val,
+                    "建议买点(支撑)": f"{buy_target:.2f}",
+                    "建议卖点(阻力)": f"{sell_target:.2f}",
+                    "离场防线(ATR)": f"{trailing_stop:.2f}" if trailing_stop > 0 else "-",
+                    "波幅(ATR)": f"{atr:.2f}",
+                    "队列组": t['source'],
+                    "分析时间": t_info.get('last_time', t_info.get('last_update', ''))
+                })
+                
+            df = pd.DataFrame(result_rows)
+            # Reorder
+            if not df.empty:
+                df = df[["代码", "名称", "分析时间", "队列组", "趋势定性", "现价", "成本/均价", "建议买点(支撑)", "建议卖点(阻力)", "离场防线(ATR)", "波幅(ATR)"]]
+            
+            self.current_df = df
+            self.display_df(df)
+            self.label_summary.setText(f"T+1 预判策略加载完毕 | 共 {len(df)} 只活动标的")
+        except Exception as e:
+            self.report_area.setPlainText(f"T+1 分析面板加载失败:\n{e}")
+            self.report_area.setVisible(True)
+            self.table.setVisible(False)
 
     def refresh_performance_dashboard(self):
         """[P7] 绩效看板聚合逻辑"""
@@ -774,7 +1238,9 @@ class TradingGUI(QWidget, WindowMixin):
                 summary_df = summary_df.sort_values(sort_col, ascending=False)
             
             for _, row in summary_df.iterrows():
-                win_rate = (row['wins'] / row['entered'] * 100) if row['entered'] > 0 else 0
+                entered_count = row.get('entered', 0)
+                wins_count = row.get('wins', 0)
+                win_rate = (wins_count / entered_count * 100) if entered_count > 0 else 0
                 pnl_val = row.get('pnl', row.get('profit', 0))
                 display_text += f" {row['strategy_name']:<18}: 胜率 {win_rate:>5.1f}% | 笔数 {row['entered']:>3} | 盈亏 {pnl_val:>9.2f}\n"
         else:
@@ -862,17 +1328,18 @@ class TradingGUI(QWidget, WindowMixin):
             self.stock_input.blockSignals(False)
 
     def display_df(self, df: pd.DataFrame):
+        self.table.setUpdatesEnabled(False)  # 开启离线绘制，禁止每次 setItem 都重绘UI，这是极速丝滑的关键
         self.table.clear()
         if df.empty:
             self.table.setRowCount(0)
             self.table.setColumnCount(0)
+            self.table.setUpdatesEnabled(True)
             return
 
         # 填充数据期间关闭排序
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(df))
         self.table.setColumnCount(len(df.columns))
-        
         # 列名转换字典 (扩充了信号相关列)
         col_mapping = {
             'date': '日期', 'code': '代码', 'name': '名称', 'price': '价格', 'action': '动作', 
@@ -926,7 +1393,8 @@ class TradingGUI(QWidget, WindowMixin):
         
         # 填充完成后开启排序
         self.table.setSortingEnabled(True)
-        self.table.resizeColumnsToContents()
+        # 移除致命的性能杀手 self.table.resizeColumnsToContents() 
+        # 它会挨个像素遍历 4000 个格子的字体大小，清空过滤的卡顿根本原因就在这
         
         # 限制高度文本列的宽度
         header = self.table.horizontalHeader()
@@ -935,10 +1403,16 @@ class TradingGUI(QWidget, WindowMixin):
             if any(k in raw_target for k in ["reason", "msg", "feedback", "indicators"]):
                 self.table.setColumnWidth(j, 250)
                 header.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
-            elif any(k in raw_target for k in ["code", "name", "date", "action", "signal_type"]):
+            elif any(k in raw_target for k in ["time", "date"]):
+                self.table.setColumnWidth(j, 150)
+            elif any(k in raw_target for k in ["code", "name", "action", "signal_type"]):
                 if self.table.columnWidth(j) < 60:
                     self.table.setColumnWidth(j, 80)
-
+            else:
+                if self.table.columnWidth(j) < 60:
+                    self.table.setColumnWidth(j, 90)
+                
+        self.table.setUpdatesEnabled(True) # 恢复 UI 绘制
 
     def get_current_df(self):
         return getattr(self, "current_df", None)
@@ -961,6 +1435,56 @@ class TradingGUI(QWidget, WindowMixin):
         仅当点击 code / name 列时，发送股票代码
         """
         self._trigger_stock_linkage(row, column, force_send=False)
+        
+    def on_table_double_clicked(self, row: int, column: int):
+        """
+        双击行时：
+        1. 如果是 T+1 预判策略，或者直接展示代码详情：弹出树形明细窗口
+        2. 否则，如果不弹窗，也可以选择过滤该股票
+        """
+        stock_code = self._get_stock_code_from_row(row)
+        if not stock_code:
+            return
+            
+        stock_name = ""
+        # 尝试顺便拿一下名称
+        for j in range(self.table.columnCount()):
+            h_item = self.table.horizontalHeaderItem(j)
+            if h_item and h_item.text() in ("名称", "name"):
+                name_item = self.table.item(row, j)
+                if name_item:
+                    stock_name = name_item.text().strip()
+                break
+                
+        self._last_selected_code = stock_code
+        
+        # 弹出独立的 TreeWindow
+        # 我们把它保存为实例属性防止被垃圾回收
+        self.detail_tree_widget = DetailTreeWindow(stock_code, stock_name, parent=self)
+        self.detail_tree_widget.show()
+        
+        # 联动后台发送
+        self.tree_scroll_to_code(stock_code)
+
+    def trigger_db_cleanup(self):
+        """弹出确认选项，然后执行非交易日脏数据清理。"""
+        reply = QMessageBox.question(
+            self,
+            "清理非交易日数据",
+            "是否确认清理数据库中所有源自非交易日（如周末测试）的脏数据记录？\n这可能需要一小段时间。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Dynamically import so we dont have circular dependencies
+                import clean_db_script
+                clean_db_script.clean_trading_signals_db()
+                clean_db_script.clean_signal_strategy_db()
+                QMessageBox.information(self, "清理完成", "非交易日数据清理已完成！您可以点击刷新查看最新数据。")
+                self.force_refresh_table()
+            except Exception as e:
+                QMessageBox.critical(self, "清理失败", f"清理过程中发生错误: {e}")
 
     def _trigger_stock_linkage(self, row: int, column: int, force_send: bool = False):
         """
@@ -981,6 +1505,18 @@ class TradingGUI(QWidget, WindowMixin):
         # 获取当前行的股票代码
         stock_code = self._get_stock_code_from_row(row)
         if stock_code:
+            # 去重：如果连续点击同一个，不需要重复记录历史和发送
+            if getattr(self, '_last_selected_code', None) == stock_code and not force_send:
+                return
+            self._last_selected_code = stock_code
+                
+            if not getattr(self, '_is_navigating_history', False):
+                self._add_to_history({
+                    "source": self.source_combo.currentText(),
+                    "view": self.view_combo.currentText(),
+                    "filter_code": self.stock_input.currentText().strip(),
+                    "selected_code": stock_code
+                })
             # use safe send via queue
             if hasattr(self, 'sender') and self.sender:
                 self._safe_send_stock(stock_code)
@@ -1034,13 +1570,19 @@ class TradingGUI(QWidget, WindowMixin):
         """Qt 主线程执行"""
         if self.on_tree_scroll_to_code and callable(self.on_tree_scroll_to_code):
             try:
+                self.stock_input.blockSignals(True)
                 self.stock_input.setCurrentText(stock_code)
+                self.stock_input.blockSignals(False)
+                self.refresh_table() # 强制更新以响应外来联动
                 self.on_tree_scroll_to_code(stock_code,vis=True)
             except Exception as e:
                 print(f"on_tree_scroll_to_code error: {e}")
         else:
             # 降级方案：如果是独立的，尝试更新输入框
+            self.stock_input.blockSignals(True)
             self.stock_input.setCurrentText(stock_code)
+            self.stock_input.blockSignals(False)
+            self.refresh_table() # 联动独立窗口
             
     def _safe_update_send_status(self, msg):
         """Qt 主线程安全更新状态"""

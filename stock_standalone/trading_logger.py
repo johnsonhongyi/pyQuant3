@@ -252,8 +252,13 @@ class TradingLogger:
         if not records:
             return
             
-        if not records:
-            return
+        try:
+            from JohnsonUtil import commonTips as cct
+            if not cct.get_work_time():
+                # logger.debug("TradeLogger: 非交易时间，拒绝记录选股结果。")
+                return
+        except Exception as check_e:
+            pass
             
         try:
             self.db_manager.executemany("""
@@ -302,7 +307,13 @@ class TradingLogger:
         resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
-
+            try:
+                from JohnsonUtil import commonTips as cct
+                if not cct.get_work_time():
+                    return
+            except Exception as check_e:
+                pass
+                
             date_str = datetime.now().strftime('%Y-%m-%d')
             
             # 合并 debug 信息和行情数据以供后续 AI 分析优化
@@ -342,13 +353,7 @@ class TradingLogger:
             # --- [交易日和交易时段检查] ---
             try:
                 from JohnsonUtil import commonTips as cct
-                is_trade_day = cct.get_trade_date_status()
-                now_time_int = cct.get_now_time_int()
-                # 交易时段: 09:30-11:30 (930-1130) 和 13:00-15:00 (1300-1500)
-                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
-                
-                if not is_trade_day or not is_trading_time:
-                    # logger.debug(f"LiveSignal: 非交易日或非交易时段(trade_day={is_trade_day}, time={now_time_int}),跳过记录 {code} {action}")
+                if not cct.get_work_time():
                     return
             except Exception as check_e:
                 logger.debug(f"LiveSignal: 交易日/时段检查失败 (fallback to allow): {check_e}")
@@ -438,8 +443,8 @@ class TradingLogger:
             # --- [新增] 非交易日拦截 ---
             try:
                 from JohnsonUtil import commonTips as cct
-                if not cct.get_trade_date_status():
-                    logger.warning(f"TradeLogger: 非交易日，拒绝记录交易 ({code} {action})")
+                if not cct.get_work_time():
+                    logger.warning(f"TradeLogger: 非交易时间，拒绝记录交易 ({code} {action})")
                     return
             except Exception as check_e:
                 logger.debug(f"TradeLogger: 交易日检查失败 (fallback to allow): {check_e}")
