@@ -323,13 +323,30 @@ class MinuteKlineCache:
                 # 时间戳提取
                 if time_col:
                     try:
-                        # 鲁棒转换：处理 Unix timestamp, datetime, 或 HH:MM:SS 字符串
                         val = getattr(row, time_col)
-                        ts = pd.to_datetime(val).timestamp()
+                        if isinstance(val, (int, float)) and val > 1e8:
+                            ts = float(val)
+                        elif isinstance(val, str) and val.replace('.', '', 1).isdigit() and float(val) > 1e8:
+                            ts = float(val)
+                        else:
+                            # 鲁棒转换：处理 Unix timestamp, datetime, 或 HH:MM:SS 字符串
+                            dt = pd.to_datetime(val)
+                            if dt.tzinfo is None:
+                                dt = dt.tz_localize('Asia/Shanghai')
+                            ts = dt.timestamp()
                     except Exception:
                         ts = wall_clock
                 else:
                     ts = wall_clock
+                
+                # --- [FIX] 防御盘后冗余数据进入缓存 ---
+                seconds_from_midnight = (ts + 28800) % 86400
+                mins_from_midnight = seconds_from_midnight // 60
+                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+                
+                if not ((915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)):
+                    continue # 放弃非交易时间段的数据, 避免盘后轮询把交易时段数据顶出 deque
+                
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
                 
@@ -337,6 +354,7 @@ class MinuteKlineCache:
                 self._update_internal(code, price, vol, minute_ts)
                 updated_codes.add(code)
                 self._last_update_ts[code] = minute_ts
+                
                 
             except Exception:
                 continue
@@ -361,7 +379,27 @@ class MinuteKlineCache:
             price = float(tick.get('trade', tick.get('now', 0.0)))
             if price <= 0: return
 
-            ts = float(tick.get('timestamp') or tick.get('time') or time.time())
+            val = tick.get('timestamp') or tick.get('time')
+            if val is not None:
+                if isinstance(val, (int, float)) and val > 1e8:
+                    ts = float(val)
+                elif isinstance(val, str) and val.replace('.', '', 1).isdigit() and float(val) > 1e8:
+                    ts = float(val)
+                else:
+                    dt = pd.to_datetime(val)
+                    if dt.tzinfo is None:
+                        dt = dt.tz_localize('Asia/Shanghai')
+                    ts = dt.timestamp()
+            else:
+                ts = time.time()
+                
+            # --- [FIX] 防御盘后冗余数据进入缓存 ---
+            seconds_from_midnight = (ts + 28800) % 86400
+            mins_from_midnight = seconds_from_midnight // 60
+            hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+            if not ((915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)):
+                return
+                
             minute_ts = int(ts - (ts % 60))
             # 优先提取 'nvol'
             # vol = float(tick.get('vol', tick.get('volume', 0.0)))
@@ -1067,8 +1105,10 @@ class DataPublisher:
     def update_batch(self, df: pd.DataFrame):
         """
         接收来自 fetch_and_process 的 DataFrame 快照
-        """
-        if self.paused:
+        """
+        is_trading = cct.get_work_time_duration()
+
+        if self.paused or not is_trading:
             return
             
         try:
@@ -1182,7 +1222,6 @@ class DataPublisher:
                 if self.update_count % 500 == 0:
                     n = gc.collect()
                     if n > 0: logger.debug(f'🧹 GC collected {n} objects')
-
             # =========================
             # Snapshot Cache (Periodic Check)
             # =========================

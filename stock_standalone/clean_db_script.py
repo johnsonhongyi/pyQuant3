@@ -32,12 +32,13 @@ def clean_non_trading_days():
     
     total_deleted = 0
     for db_name, tables in DB_CONFIGS.items():
-        if not os.path.exists(db_name):
-            print(f"Database {db_name} not found, skipping.")
+        db_path = os.path.join(cct.get_base_path(), db_name)
+        if not os.path.exists(db_path):
+            print(f"Database {db_path} not found, skipping.")
             continue
             
-        print(f"\n[{db_name}]")
-        conn = sqlite3.connect(db_name)
+        print(f"\n[{db_name}] at {db_path}")
+        conn = sqlite3.connect(db_path)
         c = conn.cursor()
         
         for table, date_col in tables.items():

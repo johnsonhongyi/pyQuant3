@@ -2555,6 +2555,7 @@ def fetch_and_process(
 
             # 4. 执行分段 Sleep (保持灵敏度)
             if 915 < cct.get_now_time_int() < 945:
+                loop_sleep_time = 30
                 sleep_step = 0.5
             else:
                 sleep_step = 1
@@ -2567,9 +2568,7 @@ def fetch_and_process(
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,
                 lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
             ]
-            
-            if single:
-                break   
+
             # 周期性心跳日志 - 每 10 秒输出一次状态
             heartbeat_interval = 10  # 秒
             sleep_elapsed = 0
@@ -2591,6 +2590,10 @@ def fetch_and_process(
                 print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
 
             START_INIT = 1
+
+            if single:
+                break   
+
             for _ in range(int(loop_sleep_time / sleep_step)):
                 if any(cond() for cond in stop_conditions):
                     break

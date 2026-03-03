@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 import logging
@@ -11,7 +12,6 @@ except ImportError:
     def override(func):
         return func
 
-import numpy as np
 import numpy as np
 from JohnsonUtil import LoggerFactory
 from db_utils import SQLiteConnectionManager
@@ -38,7 +38,10 @@ class TradingLogger:
     交易记录与信号持久化类
     使用 SQLite 存储每日决策、执行记录及收益统计
     """
-    def __init__(self, db_path: str = "./trading_signals.db"):
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            from JohnsonUtil import commonTips as cct
+            db_path = os.path.join(cct.get_base_path(), "trading_signals.db")
         self.db_path = db_path
         self._signal_cache = {} # (code, action) -> timestamp
         # Unified DB Manager

@@ -82,10 +82,17 @@ class DetailTreeWindow(QDialog, WindowMixin):
         # 抓取交易数据库
         # 注意：这里如果已经处于 TradingGUI 内部环境，可以考虑复用连接，或在此直接简单查询。
         try:
-            db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "trading_signals.db"))
+            from JohnsonUtil import commonTips as cct
+            db_file_path = os.path.join(cct.get_base_path(), "trading_signals.db")
             with sqlite3.connect(db_file_path) as conn:
-                query = "SELECT timestamp, action, price, quantity, trigger_reason, time, date FROM trade_log WHERE code=? ORDER BY timestamp DESC LIMIT 100"
-                df_trades = pd.read_sql_query(query, conn, params=(self.stock_code,))
+                # trade_records holds pairs of buy and sell. We split them into rows for display.
+                query = """
+                SELECT buy_date as timestamp, 'BUY' as action, buy_price as price, buy_amount as quantity, buy_reason as trigger_reason FROM trade_records WHERE code=?
+                UNION ALL
+                SELECT sell_date as timestamp, 'SELL' as action, sell_price as price, buy_amount as quantity, sell_reason as trigger_reason FROM trade_records WHERE code=? AND sell_date IS NOT NULL AND status='CLOSED'
+                ORDER BY timestamp DESC LIMIT 100
+                """
+                df_trades = pd.read_sql_query(query, conn, params=(self.stock_code, self.stock_code))
         except Exception as e:
             df_trades = pd.DataFrame()
             print(f"Error fetching trades: {e}")
@@ -111,9 +118,12 @@ class DetailTreeWindow(QDialog, WindowMixin):
             
         # 抓取信号数据库
         try:
-            db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "signal_strategy.db"))
+            # Note: live_signal_history is in trading_signals.db instead of signal_strategy.db
+            from JohnsonUtil import commonTips as cct
+            db_file_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+            # db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "trading_signals.db"))
             with sqlite3.connect(db_file_path) as conn:
-                query = "SELECT timestamp, strategy_name, signal_type, price, message FROM strategy_signals WHERE code=? ORDER BY timestamp DESC LIMIT 100"
+                query = "SELECT timestamp, action as strategy_name, action as signal_type, price, reason as message FROM live_signal_history WHERE code=? ORDER BY timestamp DESC LIMIT 100"
                 df_signals = pd.read_sql_query(query, conn, params=(self.stock_code,))
         except Exception as e:
             df_signals = pd.DataFrame()
@@ -505,8 +515,12 @@ class TradingGUI(QWidget, WindowMixin):
     # 声明信号
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
-    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None):
+    def __init__(self, logger_path: Optional[str] = None, sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None):
         super().__init__()
+        from JohnsonUtil import commonTips as cct
+        if logger_path is None:
+            logger_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+        
         self.scale_factor = get_windows_dpi_scale_factor()
         self.setWindowTitle("策略交易分析工具")
         # self.setGeometry(100, 100, 1000, 600)
@@ -1479,8 +1493,7 @@ class TradingGUI(QWidget, WindowMixin):
             try:
                 # Dynamically import so we dont have circular dependencies
                 import clean_db_script
-                clean_db_script.clean_trading_signals_db()
-                clean_db_script.clean_signal_strategy_db()
+                clean_db_script.clean_non_trading_days()
                 QMessageBox.information(self, "清理完成", "非交易日数据清理已完成！您可以点击刷新查看最新数据。")
                 self.force_refresh_table()
             except Exception as e:

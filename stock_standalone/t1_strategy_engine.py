@@ -5,10 +5,9 @@ T+1 (T+0 滚动) 交易策略计算引擎
 """
 
 import pandas as pd
-import numpy as np
 from datetime import datetime
 import logging
-from typing import Dict, Any, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from enum import Enum
 
 from JohnsonUtil import LoggerFactory
@@ -17,7 +16,6 @@ try:
     from JSONData import tdx_data_Day as tdd
 except ImportError:
     tdd = None
-from JohnsonUtil import johnson_cons as ct
 logger = LoggerFactory.getLogger("t1_strategy_engine")
 
 class TrendState(Enum):
@@ -30,7 +28,7 @@ class T1StrategyEngine:
     def __init__(self):
         # 缓存每个股票的预设目标价和ATR，避免频繁计算
         # {code: {'buy_target': float, 'sell_target': float, 'atr': float, 'trend': TrendState, 'last_update': 'YYYY-MM-DD'}}
-        self.target_cache: Dict[str, Dict[str, Any]] = {}
+        self.target_cache: dict[str, dict[str, Any]] = {}
 
     def _calculate_atr(self, code: str, period: int = 5,resample: str = 'd') -> float:
         """从 tdd 获取历史K线计算 ATR"""
@@ -59,7 +57,7 @@ class T1StrategyEngine:
             logger.debug(f">> [T1Engine] ATR calc failed for {code}: {e}")
             return 0.0
 
-    def refresh_targets(self, code: str, snap: Union[Dict[str, Any], pd.Series], current_price: float) -> None:
+    def refresh_targets(self, code: str, snap: Union[dict[str, Any], pd.Series], current_price: float) -> None:
         """
         每日初次加载或隔日更新时，初始化预判数据。
         """
@@ -133,13 +131,21 @@ class T1StrategyEngine:
         }
         logger.info(f"T1 Targets established for {code}: Trend={trend.value}, Buy={buy_target:.2f}, Sell={sell_target:.2f}, ATR={atr:.2f}")
 
-    def evaluate_t0_signal(self, code: str, row: Union[Dict[str, Any], pd.Series], snap: Union[Dict[str, Any], pd.Series], pos: Dict[str, Any]) -> Tuple[str, str, float]:
+    def evaluate_t0_signal(self, code: str, row: Union[dict[str, Any], pd.Series], snap: Union[dict[str, Any], pd.Series], pos: dict[str, Any]) -> tuple[str, str, float]:
         """
         核心监控：盘中判断是否触发 T+0 自动化加减仓操作。
         Returns:
             (action, reason, target_price) 
             action defaults to 'HOLD'
         """
+        # --- [NEW] 第二层时间防御 (防止非交易时段误报) ---
+        try:
+            from JohnsonUtil import commonTips as cct
+            if not cct.get_work_time():
+                return 'HOLD', "", 0.0
+        except Exception as e:
+            logger.debug(f"Evaluate T0 Signal Timing Guard Error: {e}")
+
         current_price = float(row.get('trade', row.get('price', 0)))
         if current_price <= 0:
             return 'HOLD', "", 0.0

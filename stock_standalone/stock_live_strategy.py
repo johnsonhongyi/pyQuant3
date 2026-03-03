@@ -1721,11 +1721,15 @@ class StockLiveStrategy:
             return
             
         # import removed
+        from JohnsonUtil import commonTips as cct
+        is_work_day = cct.get_day_istrade_date() # Check if today is a trading day
         now_time = datetime.datetime.now()
         current_time_str = now_time.strftime("%H:%M:%S")
-        is_auction_time = "09:25:00" <= current_time_str <= "09:30:00"
-        is_trading_time = ("09:30:05" <= current_time_str <= "11:30:00") or \
-                          ("13:00:00" <= current_time_str <= "14:57:00")
+        
+        # 严格校验：必须是交易日 + 指定时段
+        is_auction_time = is_work_day and ("09:25:00" <= current_time_str <= "09:30:00")
+        is_trading_time = is_work_day and (("09:30:05" <= current_time_str <= "11:30:00") or \
+                           ("13:00:00" <= current_time_str <= "14:57:00"))
             
         for signal in list(self.follow_queue_cache): # Iterate copy to allow removal
             code = signal.code
@@ -1768,6 +1772,17 @@ class StockLiveStrategy:
                     cost_price = signal.entry_price if hasattr(signal, 'entry_price') and signal.entry_price > 0 else current_price
                     pos_info = {'entry_price': cost_price}
                     
+                    # [NEW] 定义 snap 为 T1 引擎所需，优先从监控快照中获取，否则从当前行构造
+                    snap = {}
+                    monitored = self._monitored_stocks.get(code)
+                    if monitored and 'snapshot' in monitored:
+                        snap = monitored['snapshot']
+                    else:
+                        # 兜底：从 row 构造
+                        snap = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+                        if 'lastp1d' in snap: snap['last_close'] = snap['lastp1d']
+                        if hasattr(signal, 'entry_price'): snap['cost_price'] = signal.entry_price
+
                     t1_action, t1_reason, t1_target = self.t1_engine.evaluate_t0_signal(
                         code, row, snap, pos_info
                     )

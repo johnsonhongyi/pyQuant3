@@ -296,12 +296,48 @@ def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, pr
     text_font.configure(size=default_font.cget("size"))  # 可加粗或放大
     # text_font.configure(size=default_font.cget("size") + 1)
 
-    # ✅ 多行输入框 + 自动换行 + 指定字体
-    text = tk.Text(dlg, wrap="word", height=6, font=text_font)
+    # ✅ 多行输入框 + 自动换行 + 指定字体，支持撤销重做
+    text = tk.Text(dlg, wrap="word", height=6, font=text_font, undo=True, maxundo=-1, autoseparators=True)
     text.pack(pady=5, padx=5, fill="both", expand=True)
     if initialvalue:
         text.insert("1.0", initialvalue)
+        text.edit_reset()  # 重置撤销栈
     text.focus_set()
+
+    # 右键菜单与快捷键
+    def do_undo(*args):
+        try: text.event_generate("<<Undo>>")
+        except tk.TclError: pass
+    def do_redo(*args):
+        try: text.event_generate("<<Redo>>")
+        except tk.TclError: pass
+    def do_select_all(*args):
+        text.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def show_context_menu(event):
+        menu = tk.Menu(dlg, tearoff=0)
+        menu.add_command(label="撤销 (Ctrl+Z)", command=do_undo)
+        menu.add_command(label="重做 (Ctrl+Y)", command=do_redo)
+        menu.add_separator()
+        menu.add_command(label="剪切 (Ctrl+X)", command=lambda: text.event_generate("<<Cut>>"))
+        menu.add_command(label="复制 (Ctrl+C)", command=lambda: text.event_generate("<<Copy>>"))
+        menu.add_command(label="黏贴 (Ctrl+V)", command=lambda: text.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="全选 (Ctrl+A)", command=do_select_all)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    if platform.system() == "Darwin":
+        text.bind("<Button-2>", show_context_menu)
+    else:
+        text.bind("<Button-3>", show_context_menu)
+
+    text.bind("<Control-a>", do_select_all)
+    text.bind("<Control-A>", do_select_all)
+    text.bind("<Control-z>", lambda e: do_undo() or "break")
+    text.bind("<Control-Z>", lambda e: do_undo() or "break")
+    text.bind("<Control-y>", lambda e: do_redo() or "break")
+    text.bind("<Control-Y>", lambda e: do_redo() or "break")
 
     def on_ok():
         result["value"] = text.get("1.0", "end-1c").replace("\n", " ")

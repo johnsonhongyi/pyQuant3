@@ -16,6 +16,12 @@ Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
 hotlist_panel.py
  中的hotlist,follow,watch以及语音报警中个股,进行每日复盘,盘中实时跟单实时买卖T+1的策略功能,制作新的只针对交易策略的工具,把现有所有的策略,规则,筛选的个股,选股功能中的个股中每日交易的预埋价,预卖价,个股走势是否主升浪的T+1的每日T的能力,不能成为一锤子买卖,导致风险敞口太大,每日不是低开走高,高开高走,而是震荡上升,震荡下行要有分析预处理能力,通过信号功能作预判,研究所有的信号及趋势交易规则,优化迭代真正的交易系统,当前的所有的已完成的功能都是全数据的筛选预处理,信号,可视化查询买卖点,缺少实际对现有数据的综合交易系统.
 
+[03-02 09:50:42] ERROR:stock_live_strategy.py(_process_follow_queue:1842): Process follow queue error 600395: name 'snap' is not defined
+----------------------------------------------------------------------
+[03-02 09:50:42] ERROR:stock_live_strategy.py(_process_follow_queue:1842): Process follow queue error 600499: name 'snap' is not defined
+----------------------------------------------------------------------
+[03-02 09:50:42] ERROR:stock_live_strategy.py(_process_follow_queue:1842): Process follow queue error 688037: name 'snap' is not
+
 
 open,close
 low ,high

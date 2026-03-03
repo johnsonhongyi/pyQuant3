@@ -20,7 +20,54 @@
 
 ---
 
-## ✅ 最近完成任务: 早盘极速抢筹与去弱留强机制 (02-28 00:37)
+## ✅ 最近完成任务: 弹窗输入框防误触与撤销重做支持 (03-03 11:45)
+
+**状态**: ✅ 已完成
+**目标**: 为系统的浮动输入框（特别是 `history_manager.py` 的 `edit_query`）添加全功能编辑支持，使其具备 Ctrl+Z 撤销、Ctrl+Y 重做以及鼠标右键复制粘贴全选等常见编辑机制。
+
+### 核心变更
+- **撤销栈支持**: 改造 `gui_utils.py` 中的 `askstring_at_parent_single` 对话框，启用 `tk.Text` 的 `undo=True` 并自动记录栈。
+- **快捷键绑定**: 在输入框级别捕获 `Ctrl+Z`, `Ctrl+Y`, `Ctrl+A`，实现安全的事件分发（拦截 `tk.TclError`）。
+- **右键上下文菜单**: 添加特定操作系统的右键激活（Windows/Linux Button-3, macOS Button-2）展示标准的【撤销】、【重做】、【剪切/复制/黏贴/全选】选项菜单。
+
+### 历史记录 (Brain Artifacts)
+- 任务清单: [20260303_1145_task.md]
+- 验收报告: [20260303_1145_walkthrough.md]
+
+---
+
+## ✅ 历史完成任务: 修复盘后时段与时间戳被错误解析导致缓存覆写遗失的问题 (03-02 18:45)
+
+**目标**: 解决 `minute_kline_cache.pkl` 盘后被覆写、没有保留交易时间数据，以及由于 Pandas 时间戳解析错误导致缓存恢复时全盘被过滤清空的问题。
+
+### 核心变更
+- **时区强制本地化 (Timezone Localization)**: 在 `realtime_data_service.py` 的 `MinuteKlineCache.update_batch` 及 `update` 中，修改 `pd.to_datetime(val).timestamp()` 逻辑。使用 `tz_localize('Asia/Shanghai')` 处理 Naive Datetime，使其产生 CST (UTC+8) 的正确真实 Unix 时间戳（原先错将本地 Naive Datetime 作为 UTC 解析，造成 8 小时偏移落入缓存，被过滤器误伤）。
+- **非交易时段硬性防御 (After-hours Defense)**: 添加 `hhmm` 拦截器。仅当 `(915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)` 时才允许数据点放入缓存 `deque`，彻底防止盘后持续轮询把高质量的白盘阶段的分时 K 线顶出队列。
+
+### 历史记录 (Brain Artifacts)
+- 任务清单: [20260302_1845_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/dad72e89-88c4-4730-8367-05225c778d1a/20260302_1845_task.md)
+- 验收报告: [20260302_1845_walkthrough.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/dad72e89-88c4-4730-8367-05225c778d1a/20260302_1845_walkthrough.md)
+
+---
+
+## ✅ 历史完成任务: 数据库路径统一与 T1 交易时间防护 (03-02 08:50)
+
+**状态**: ✅ 已完成
+**目标**: 解决打包 EXE 后数据库表丢失的问题，并彻底拦截非交易时间的 T1 策略信号。
+
+### 核心变更
+- **路径统一 (Unified Path)**: 在 `TradingLogger`、`TradingGUI` 和 `clean_db_script.py` 中统一使用 `cct.get_base_path()`，确保 EXE 环境下数据库访问一致。
+- **时间硬性防护 (Time Guards)**: 在 `stock_live_strategy.py` 引入 `is_work_day` 校验，并在 `T1StrategyEngine.evaluate_t0_signal` 增加 `get_work_time()` 双重拦截。
+- **代码清理**: 优化 `T1StrategyEngine` 的类型注解与导入，移除冗余库。
+
+### 历史记录 (Brain Artifacts)
+- 实施计划: [20260302_0845_implementation_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/918ee711-e9c3-4e05-bcc8-782abb648009/20260302_0845_implementation_plan.md)
+- 任务清单: [20260302_0845_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/918ee711-e9c3-4e05-bcc8-782abb648009/20260302_0845_task.md)
+- 验收报告: [20260302_0845_walkthrough.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/918ee711-e9c3-4e05-bcc8-782abb648009/20260302_0845_walkthrough.md)
+
+---
+
+## ✅ 历史完成任务: 早盘极速抢筹与去弱留强机制 (02-28 00:37)
 
 **状态**: ✅ 已完成
 **目标**: 针对“精选3,5只个股不能广撒网, 需要去弱留强”的需求，开发超快先机发掘与防御处理。实现早段极端动能捕获和VWAP硬性保护。
@@ -411,6 +458,8 @@ if hasattr(self, 'pattern_detector'):
 
 ## 📅 变更日志
 
+| 03-03 11:45 | **编辑体验升级**: 为 edit_query 输入框增加完整的鼠标右键菜单与 Ctrl+Z 撤销/重做支持 | `gui_utils.py` |
+| 03-02 18:50 | **时间戳缓存修复**: 修正 Pandas 时间戳转化的时区偏移错误(UTC->Asia/Shanghai)，增加盘后缓存覆写防御机制 | `realtime_data_service.py` |
 | 02-28 00:37 | **早盘超快抢筹与去弱留强机制**: 实现 early_momentum_buy 高优先级直入及仓位上限(5)，VWAP风控强退出机制解决死拿劣质标的 | `intraday_pattern_detector.py`, `position_phase_engine.py`, `stock_live_strategy.py`, `realtime_data_service.py` |
 | 02-27 20:30 | **报警日志修复**: 增强 AlertManager 代码识别，重构 StockLiveStrategy 报警入口 | `alert_manager.py`, `stock_live_strategy.py` |
 | 02-10 18:00 | **紧急 BUG 修复**: 修复 `trading_hub.py` 的 NameError (Dict) 与 `instock_MonitorTK.py` 的 NoneType 崩溃 | `trading_hub.py`, `instock_MonitorTK.py` |
