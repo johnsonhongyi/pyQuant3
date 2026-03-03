@@ -1640,6 +1640,7 @@ class Sina:
             log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5_slice) if h5_slice is not None else 0, endtime))
 
         return dd
+        
     def _load_hdf_hist_unified(
         self,
         fname: str = 'sina_MultiIndex_data',

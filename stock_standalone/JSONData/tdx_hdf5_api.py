@@ -1992,7 +1992,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             df = dd
                             log.debug("return hdf: %s timel:%s l_t:%s hdf ok:%s", fname, len(o_time), l_time, len(df))
                     else:
-                        log.error("%s %s o_time:%s %s", fname, table, len(o_time), o_time[:3] if len(o_time) >= 3 else o_time)
+                        if code_l is None:
+                            log.error("%s %s o_time:%s %s", fname, table, len(o_time), o_time[:3] if len(o_time) >= 3 else o_time)
 
                     # 记录一下（调试级别）
                     if 'o_time' in locals() and o_time:
