@@ -401,6 +401,8 @@ class Sina:
         # 确保 sina_limit_time 是 int
         sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=None, limit_time=sina_limit_time_int)
+        # import ipdb;ipdb.set_trace()
+
         if h5 is not None and len(h5) > 0:
             # 基础预处理与质量校验 (Streamlined)
             if 'ticktime' in h5.columns:
@@ -503,7 +505,8 @@ class Sina:
             self.request_num += 1
         
         df = self.get_stock_data()
-        
+        # import ipdb;ipdb.set_trace()
+
         # 3. 整合网络数据与聚合指标 (agg_metrics)
         if df is not None and not df.empty:
             agg_data = self.agg_cache.getkey('agg_metrics')
@@ -677,8 +680,10 @@ class Sina:
         
         time_h5_hist = time.time()
         all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
-        startime = None
-        endtime = '15:00:00'
+        startime = '9:25:00'
+        # endtime = '10:00:00'
+        endtime = '10:30:00'
+
         run_col = ['close']
         df_latest = self.get_col_agg_df(h5_hist, df_latest, run_col, all_func, startime, endtime)
         log.info(f'update_agg_cache df_latest get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
@@ -727,15 +732,22 @@ class Sina:
             time_h5_hist = time.time()
             run_col = ['low', 'high']
             all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
-            startime = None
+            startime = '9:25:00'
             # endtime = '10:00:00'
             endtime = '10:30:00'
             # 使用 get_col_agg_df 计算 nclose/nlow/nhigh/nstd
+            # with timed_ctx("_calc_intraday_vwapNhigh", warn_ms=80):
             agg_df = self.get_col_agg_df(h5_hist, df_current, run_col, all_func, startime, endtime)
 
             endtime = '15:00:00'
             run_col = ['close']
-            agg_df = self.get_col_agg_df(h5_hist, agg_df, run_col, all_func, startime, endtime)
+
+            # agg_df = self.get_col_agg_df(h5_hist, agg_df, run_col, all_func, startime, endtime)
+            with timed_ctx("_calc_intraday_vwapNclose", warn_ms=80):
+                agg_df = self.get_col_agg_df(h5_hist, agg_df, run_col, all_func, startime, endtime)
+            # cct.print_timing_summary()
+            # agg_df['nclose'] = self._calc_intraday_vwap(h5_hist, agg_df, startime, endtime)
+
             log.info(f'get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
         else:
             agg_df = pd.DataFrame(columns=['nlow', 'nhigh', 'nclose', 'nstd'])
@@ -962,7 +974,6 @@ class Sina:
                         log.warning("In-memory agg_metrics poor (zero_ratio %s: %.2f), rebuilding" % (c_check, zero_ratio))
                         cache_needs_rebuild = True
                         break
-        
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
         now_int = cct.get_now_time_int()
         if cache_needs_rebuild or 925 < now_int <= 1030 :
@@ -1424,7 +1435,7 @@ class Sina:
             mask = h5['nclose'].fillna(0) <= 0
             if mask.any():
                 h5.loc[mask, 'nclose'] = agg_metrics.reindex(h5.index)['nclose']
-
+        
         return self._sanitize_indicators(h5)
 
     def _sanitize_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1465,36 +1476,50 @@ class Sina:
         else:
             if not df.index.dtype == object:
                 df.index = df.index.astype(str)
-            
+        
+        # print(f"{df.loc['600971'].nhigh}")
         # 目标列及其兜底列
         targets = [('nlow', 'low'), ('nhigh', 'high'), ('nclose', 'close'), ('lastbuy', 'close')]
         for target, fallback in targets:
-            if target in df.columns:
-                # 填充 NaN 为 0，方便统一判断
-                df.loc[:, target] = df[target].fillna(0).values
-                
-                # 1. 基础修正 (针对 0.0)
-                mask = (df[target] <= 0)
-                if mask.any():
-                    if fallback in df.columns:
-                         df.loc[mask, target] = df.loc[mask, fallback].fillna(0).values
-                    
-                    mask_still = (df[target] <= 0)
-                    if mask_still.any() and 'close' in df.columns:
-                         df.loc[mask_still, target] = df.loc[mask_still, 'close']
+            if target not in df.columns:
+                continue
+            # 只处理 NaN
+            mask = df[target].isna()
 
-                # 2. 一致性修正 (确保 nlow 不大于 low, nhigh 不小于 high)
-                if target == 'nlow' and 'low' in df.columns:
-                     # 如果 nlow 反而比今日最低价还高，说明指标由于某种原因落后或初始化错误，强制同步
-                     mask_invalid = (df['nlow'] > df['low']) & (df['low'] > 0)
-                     if mask_invalid.any():
-                          df.loc[mask_invalid, 'nlow'] = df.loc[mask_invalid, 'low']
+            if mask.any() and fallback in df.columns:
+                df.loc[mask, target] = df.loc[mask, fallback]
+
+            # 再处理仍然 NaN 的
+            mask_still = df[target].isna()
+            if mask_still.any() and 'close' in df.columns:
+                df.loc[mask_still, target] = df.loc[mask_still, 'close']
+
+        # for target, fallback in targets:
+        #     if target in df.columns:
+        #         # 填充 NaN 为 0，方便统一判断
+        #         df.loc[:, target] = df[target].fillna(0).values
+        #         # 1. 基础修正 (针对 0.0)
+        #         mask = (df[target] <= 0)
+        #         if mask.any():
+        #             if fallback in df.columns:
+        #                  df.loc[mask, target] = df.loc[mask, fallback].fillna(0).values
+                    
+        #             mask_still = (df[target] <= 0)
+        #             if mask_still.any() and 'close' in df.columns:
+        #                  df.loc[mask_still, target] = df.loc[mask_still, 'close']
+
+                # # 2. 一致性修正 (确保 nlow 不大于 low, nhigh 不小于 high)
+                # if target == 'nlow' and 'low' in df.columns:
+                #      # 如果 nlow 反而比今日最低价还高，说明指标由于某种原因落后或初始化错误，强制同步
+                #      mask_invalid = (df['nlow'] > df['low']) & (df['low'] > 0)
+                #      if mask_invalid.any():
+                #           df.loc[mask_invalid, 'nlow'] = df.loc[mask_invalid, 'low']
                           
-                elif target == 'nhigh' and 'high' in df.columns:
-                     # 如果 nhigh 反而比今日最高价还低，强制同步
-                     mask_invalid_h = (df['nhigh'] < df['high']) & (df['high'] > 0)
-                     if mask_invalid_h.any():
-                          df.loc[mask_invalid_h, 'nhigh'] = df.loc[mask_invalid_h, 'high']
+                # elif target == 'nhigh' and 'high' in df.columns:
+                #      # 如果 nhigh 反而比今日最高价还低，强制同步
+                #      mask_invalid_h = (df['nhigh'] < df['high']) & (df['high'] > 0)
+                #      if mask_invalid_h.any():
+                #           df.loc[mask_invalid_h, 'nhigh'] = df.loc[mask_invalid_h, 'high']
 
         # 处理 nstd
         if 'nstd' in df.columns:
@@ -1597,7 +1622,142 @@ class Sina:
             self.dataframe = self.format_response_data(index)
         return self.dataframe
 
-    def get_col_agg_df(self, h5: pd.DataFrame, dd: pd.DataFrame, run_col: Union[List[str], Dict[str, str]], all_func: Dict[str, str], startime: Optional[str], endtime: Optional[str], freq: Optional[str] = None) -> pd.DataFrame:
+
+
+    def _calc_intraday_vwap_fast(self, h5: pd.DataFrame, startime=None, endtime=None) -> pd.DataFrame:
+        if h5 is None or h5.empty:
+            return pd.DataFrame()
+
+        # 时间切片
+        if startime or endtime:
+            h5 = cct.get_limit_multiIndex_Row(h5,
+                                              col=['close', 'volume'],
+                                              start=startime,
+                                              end=endtime)
+
+        if h5 is None or len(h5) == 0:
+            return pd.DataFrame()
+
+        df = h5[['close', 'volume']].copy()
+
+        if df.empty: return pd.DataFrame()
+
+        # 2. 提取底层 NumPy 数组 (脱离 Pandas 索引对齐开销)
+        # 获取每个 code 的分组边界索引（核心加速点：利用 MultiIndex 已排序的特性）
+        codes = df.index.get_level_values(0).values
+        # 找到每个 code 最后一行的位置
+        diff_mask = np.concatenate([codes[1:] != codes[:-1], [True]])
+        # 找到每个 code 第一行的位置
+        first_mask = np.concatenate([[True], codes[1:] != codes[:-1]])
+
+        close = df['close'].values
+        volume = df['volume'].values
+
+        # 3. 极限向量化计算成交量增量 (Vol Diff)
+        # 用移位减法代替 groupby.diff()
+        vol_diff = np.empty_like(volume)
+        vol_diff[0] = volume[0]
+        vol_diff[1:] = volume[1:] - volume[:-1]
+        # 修正组间差异：每个 code 的第一行不应减去前一个 code 的最后一行
+        vol_diff[first_mask] = volume[first_mask]
+        
+        # 过滤无效数据：将无效位置的增量设为 0
+        invalid_mask = (close <= 0) | (vol_diff <= 0)
+        vol_diff[invalid_mask] = 0
+        amount_inc = close * vol_diff
+
+        # 4. 关键：计算组内累计求和 (利用 np.cumsum 和 偏移)
+        # 这种方法比 groupby.cumsum 快一个数量级
+        cum_vol_all = np.cumsum(vol_diff)
+        cum_amt_all = np.cumsum(amount_inc)
+
+        # 减去上一个代码组的末尾累计值，实现组内 cumsum
+        group_ends = np.where(diff_mask)[0]
+        # 获取每个组之前的总偏移量
+        v_offsets = np.zeros_like(cum_vol_all)
+        a_offsets = np.zeros_like(cum_amt_all)
+        
+        # 获取前一组的累计值
+        v_last_cum = cum_vol_all[group_ends[:-1]]
+        a_last_cum = cum_amt_all[group_ends[:-1]]
+        
+        # 填充偏移量数组（通过重复填充）
+        # 获取每组的长度
+        group_lengths = np.diff(np.concatenate([[-1], group_ends]))
+        v_offsets = np.repeat(np.concatenate([[0], v_last_cum]), group_lengths)
+        a_offsets = np.repeat(np.concatenate([[0], a_last_cum]), group_lengths)
+
+        # 计算 VWAP
+        final_cum_vol = cum_vol_all - v_offsets
+        final_cum_amt = cum_amt_all - a_offsets
+        
+        # 5. 只取每个 code 的最后一行结果
+        # 避免除以 0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            nclose_all = final_cum_amt / final_cum_vol
+        
+        # 提取结果
+        res_v = nclose_all[diff_mask]
+        res_k = df.index.get_level_values(0)[diff_mask]
+
+        return pd.DataFrame({'nclose': res_v}, index=res_k)
+
+    def _calc_intraday_vwap(self,
+                            h5: pd.DataFrame,
+                            startime: Optional[str] = None,
+                            endtime: Optional[str] = None) -> pd.DataFrame:
+        """
+        计算分时VWAP（nclose）
+        h5: MultiIndex (code, ticktime)
+        返回: index=code, column=['nclose']
+        """
+
+        if h5 is None or len(h5) == 0:
+            return pd.DataFrame()
+
+        # 时间切片
+        if startime or endtime:
+            h5 = cct.get_limit_multiIndex_Row(h5,
+                                              col=['close', 'volume'],
+                                              start=startime,
+                                              end=endtime)
+
+        if h5 is None or len(h5) == 0:
+            return pd.DataFrame()
+
+        df = h5[['close', 'volume']].copy()
+
+        # 去掉无效数据
+        df = df[(df['close'] > 0) & (df['volume'] > 0)]
+
+        if len(df) == 0:
+            return pd.DataFrame()
+
+        # 排序（非常重要）
+        df = df.sort_index(level=1)
+
+        # 转为普通列方便处理
+        df = df.reset_index()
+
+        # 计算增量成交量（你的volume是累计）
+        df['vol_diff'] = df.groupby('code')['volume'].diff().fillna(df['volume'])
+
+        # 增量成交额（近似，没有amount只能用close×vol）
+        df['amount_inc'] = df['close'] * df['vol_diff']
+
+        # 累计
+        df['cum_amount'] = df.groupby('code')['amount_inc'].cumsum()
+        df['cum_vol'] = df.groupby('code')['vol_diff'].cumsum()
+
+        # VWAP
+        df['nclose'] = df['cum_amount'] / df['cum_vol']
+
+        # 只保留每个code最后一条
+        result = df.groupby('code').last()[['nclose']]
+
+        return result
+
+    def get_col_agg_df(self, h5: pd.DataFrame, dd: pd.DataFrame, run_col: Union[List[str], Dict[str, str]], all_func: Dict[str, str], startime: Optional[str], endtime: Optional[str], freq: Optional[str] = '5T') -> pd.DataFrame:
         """
         聚合 MultiIndex DataFrame，按 code 聚合 ticktime。
         h5: 原始 tick 数据
@@ -1615,29 +1775,38 @@ class Sina:
 
         # 构建列-聚合函数映射
         func_map = cct.from_list_to_dict(run_col, all_func)
-
         if h5 is not None and len(h5) > len(dd):
             time_n = time.time()
-
-            # 先切片时间
-            if freq is None:
-                h5_slice = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
+            # ===== 修复 nclose 为 VWAP =====
+            if isinstance(run_col, list) and 'close' in run_col:
+                vwap_df = self._calc_intraday_vwap_fast(h5, startime, endtime)
+                if vwap_df is not None and len(vwap_df) > 0:
+                    dd = cct.combine_dataFrame(dd, vwap_df,
+                                               col=None,
+                                               compare=None,
+                                               append=False,
+                                               clean=True)
             else:
-                # 如果按 freq，只取每组最后一条（更高效方式）
-                h5_slice = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
-                if h5_slice is not None:
-                    h5_slice = h5_slice.groupby(level=0).last()
+                # 先切片时间
+                if freq is None:
+                    #没有freq切片返回是multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'last', 'open': 'first'}
+                    h5_slice = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
+                else:
+                    # 如果按 freq，只取每组最后一条（更高效方式）
+                    h5_slice = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
+                    if h5_slice is not None:
+                        h5_slice = h5_slice.groupby(level=0).last()
 
-            if h5_slice is not None and len(h5_slice) > 0:
-                # 重置 index 到 code
-                h5_proc = h5_slice.reset_index().set_index('code')
-                h5_proc.rename(columns=func_map, inplace=True)
-                h5_res = h5_proc.loc[:, now_col]
+                if h5_slice is not None and len(h5_slice) > 0:
+                    # 重置 index 到 code
+                    h5_proc = h5_slice.reset_index().set_index('code')
+                    h5_proc.rename(columns=func_map, inplace=True)
+                    h5_res = h5_proc.loc[:, now_col]
 
-                # 使用 combine_dataFrame 合并
-                dd = cct.combine_dataFrame(dd, h5_res, col=None, compare=None, append=False, clean=True)
+                    # 使用 combine_dataFrame 合并
+                    dd = cct.combine_dataFrame(dd, h5_res, col=None, compare=None, append=False, clean=True)
 
-            log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5_slice) if h5_slice is not None else 0, endtime))
+                log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5_slice) if h5_slice is not None else 0, endtime))
 
         return dd
         
