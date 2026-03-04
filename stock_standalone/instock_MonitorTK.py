@@ -9233,7 +9233,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pattern = rf'[\u4e00-\u9fa5]+[A-Za-z0-9{allowed}（）]*'
             matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', clipboard_text)
             if matches:
-                clipboard_text = f'category.str.contains("^{matches[0]}")'
+                # clipboard_text = f'category.str.contains("^{matches[0]}")'
+                clipboard_text = f'category.str.contains("{matches[0]}")'
 
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)

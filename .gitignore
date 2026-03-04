@@ -10,6 +10,8 @@ __pycache__/
 *.json
 *.bz2
 *.db
+*.xlsx
+**/__pycache__/**
 # C extensions
 #*.so
 
@@ -162,3 +164,4 @@ stock/JSONData/count.ini
 stock_standalone/JohnsonUtil/global.ini
 *.db-shm
 *.db-wal
+stock_standalone/多周期.py
