@@ -2585,8 +2585,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⭐ 新增 History Selector ComboBox
         self.history_selector = QComboBox()
-        self.history_selector.addItems(["history1", "history2", "history3", "history4"])
-        self.history_selector.setCurrentIndex(3)  # 默认选 history4
+        self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
+        self.history_selector.setCurrentIndex(4)  # 默认选 history5
         self.history_selector.setMaximumWidth(100)
         self.history_selector.currentIndexChanged.connect(self.load_history_filters)
         button_row.addWidget(self.history_selector)
@@ -3863,26 +3863,34 @@ class MainWindow(QMainWindow, WindowMixin):
         cat_label.setToolTip("过滤板块: 双击 K 线图标题中的板块词复制，再右键此框粘贴过滤")
         self.toolbar.addWidget(cat_label)
 
-        self.cat_filter_input = QLineEdit()
-        self.cat_filter_input.setPlaceholderText("板块过滤...")
-        self.cat_filter_input.setFixedWidth(110)
-        self.cat_filter_input.setToolTip("输入板块名称后点击过滤 (支持右键粘贴自动智能格式化)")
+        self.cat_filter_input = QComboBox()
+        self.cat_filter_input.setEditable(True)
+        self.cat_filter_input.lineEdit().setPlaceholderText("板块过滤...")
+        self.cat_filter_input.setFixedWidth(130)
+        self.cat_filter_input.setToolTip("选择 history5 记录或输入名称过滤 (支持右键粘贴自动智能格式化)")
         self.cat_filter_input.setStyleSheet("""
-            QLineEdit {
+            QComboBox {
                 background-color: rgba(40, 40, 40, 200);
                 color: #FFCC00;
                 border: 1px solid #555;
                 border-radius: 3px;
                 padding: 2px 5px;
             }
-            QLineEdit:focus {
+            QComboBox:focus {
                 border: 1px solid #FFCC00;
             }
+            QComboBox QAbstractItemView {
+                background-color: rgba(30, 30, 30, 240);
+                color: #FFCC00;
+                selection-background-color: #555;
+            }
         """)
-        self.cat_filter_input.returnPressed.connect(self._on_cat_filter_apply)
+        self.cat_filter_input.lineEdit().returnPressed.connect(self._on_cat_filter_apply)
+        self.cat_filter_input.activated.connect(self._on_cat_filter_activated)
+        
         # 右键菜单：自动粘贴并智能格式化
-        self.cat_filter_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.cat_filter_input.customContextMenuRequested.connect(self._on_cat_filter_right_click)
+        self.cat_filter_input.lineEdit().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cat_filter_input.lineEdit().customContextMenuRequested.connect(self._on_cat_filter_right_click)
         self.toolbar.addWidget(self.cat_filter_input)
 
         cat_query_btn = QPushButton("过滤")
@@ -4018,14 +4026,21 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 fmt = text  # 原样
 
-        self.cat_filter_input.setText(fmt)
+        self.cat_filter_input.setCurrentText(fmt)
         self.cat_filter_input.setFocus()
         # 立即触发过滤
         self._on_cat_filter_apply()
 
+    def _on_cat_filter_activated(self, index):
+        """用户在板块过滤下拉框选择了某一项"""
+        q = self.cat_filter_input.itemData(index)
+        if q:
+            self.cat_filter_input.setCurrentText(q)
+            self._on_cat_filter_apply()
+
     def _on_cat_filter_apply(self):
-        """执行板块过滤：在 df_all 基础上过滤 category 列，更新左侧表格"""
-        keyword = self.cat_filter_input.text().strip()
+        """执行板块过滤：快速路径用 setRowHidden，不重建行"""
+        keyword = self.cat_filter_input.currentText().strip()
         if not keyword:
             self._on_cat_filter_clear()
             return
@@ -4035,11 +4050,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.show_status_message("⚠️ 当前无数据", 2000)
                 return
 
-            # 构建过滤条件: 如果 keyword 已经是 pandas 查询语法，则直接使用
+            # 构建过滤条件
             if '.str.contains' in keyword or '==' in keyword or '>' in keyword or '<' in keyword:
                 query_str = keyword
             else:
-                # 否则视为普通文本按 category 模糊搜索
                 if 'category' in df.columns:
                     query_str = f'category.str.contains("{keyword}", na=False)'
                 else:
@@ -4052,8 +4066,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.show_status_message(f"❌ 未找到匹配: {keyword}", 3000)
                 return
 
-            # 临时更新表格只显示过滤结果
-            self._apply_filtered_df(matched)
+            # ⚡ 快速路径：使用 setRowHidden 而非完整重建
+            col_key = 'code' if 'code' in matched.columns else None
+            matched_codes = set(matched[col_key].astype(str)) if col_key else set(matched.index.astype(str))
+            self._cat_filter_visible_codes = matched_codes
+
+            if hasattr(self, '_table_item_map') and self._table_item_map:
+                self.stock_table.setUpdatesEnabled(False)
+                for code, row_idx in self._table_item_map.items():
+                    self.stock_table.setRowHidden(row_idx, code not in matched_codes)
+                self.stock_table.setUpdatesEnabled(True)
+
             self.update_bottom_stats()
             self.show_status_message(f"🏷️ 过滤成功: 共 {len(matched)} 只", 5000)
 
@@ -4062,54 +4085,20 @@ class MainWindow(QMainWindow, WindowMixin):
             self.show_status_message(f"❌ 过滤出错: {e}", 3000)
 
     def _on_cat_filter_clear(self):
-        """清空板块过滤，恢复原始 df_all 显示"""
+        """清空板块过滤，快速路径：un-hide 所有行"""
         if hasattr(self, 'cat_filter_input'):
-            self.cat_filter_input.clear()
-        # 恢复完整数据
-        if hasattr(self, 'df_all') and not self.df_all.empty:
-            self._apply_filtered_df(self.df_all)
+            self.cat_filter_input.clearEditText()
+        self._cat_filter_visible_codes = None
+        # ⚡ 只 un-hide，不重建，O(n) 极速
+        if hasattr(self, 'stock_table') and self.stock_table:
+            self.stock_table.setUpdatesEnabled(False)
+            for row_idx in range(self.stock_table.rowCount()):
+                self.stock_table.setRowHidden(row_idx, False)
+            self.stock_table.setUpdatesEnabled(True)
         self.update_bottom_stats()
         self.show_status_message("✅ 已清空板块过滤", 2000)
 
-    def _apply_filtered_df(self, df):
-        """将过滤后的 df 渲染到左侧股票列表表格"""
-        try:
-            self.stock_table.setSortingEnabled(False)
-            self.stock_table.setRowCount(0)
-            for idx, row in df.iterrows():
-                r = self.stock_table.rowCount()
-                self.stock_table.insertRow(r)
-                code_val = str(idx) if idx else str(row.get('code', ''))
-                name_val = str(row.get('name', ''))
-                code_item = QTableWidgetItem(code_val)
-                code_item.setData(Qt.ItemDataRole.UserRole, code_val)
-                self.stock_table.setItem(r, 0, code_item)
-                if self.stock_table.columnCount() > 1:
-                    self.stock_table.setItem(r, 1, QTableWidgetItem(name_val))
-                # 其余列同步（若有）
-                for ci, col in enumerate(self.headers[2:], start=2):
-                    val = row.get(col, '')
-                    item_text = str(val) if val is not None else ''
-                    item = NumericTableWidgetItem(item_text)
-                    
-                    # 颜色渲染
-                    if pd.notnull(val) and str(val).strip() and (
-                        col in ('percent', 'dff') 
-                        or (col.startswith('per') and col.endswith('d') and col[3:-1].isdigit())
-                    ):
-                        try:
-                            val_float = float(val)
-                            if val_float > 0:
-                                item.setForeground(QColor('red'))
-                            elif val_float < 0:
-                                item.setForeground(QColor('green'))
-                        except ValueError:
-                            pass
-                            
-                    self.stock_table.setItem(r, ci, item)
-            self.stock_table.setSortingEnabled(True)
-        except Exception as e:
-            logger.error(f"_apply_filtered_df 渲染失败: {e}")
+
 
     def _init_signal_message_box(self):
         """初始化信号消息盒子"""
@@ -4587,11 +4576,12 @@ class MainWindow(QMainWindow, WindowMixin):
             cat_filter_active = False
             filtered_count = 0
             if hasattr(self, 'cat_filter_input') and self.cat_filter_input:
-                cat_filter_text = self.cat_filter_input.text().strip()
+                cat_filter_text = self.cat_filter_input.currentText().strip()
                 if cat_filter_text:
                     cat_filter_active = True
-                    if hasattr(self, 'stock_table') and self.stock_table:
-                        filtered_count = self.stock_table.rowCount()
+                    # ⚡ 直接读取可见 code 集合，避免 rowCount() 含隐藏行
+                    active_codes = getattr(self, '_cat_filter_visible_codes', None)
+                    filtered_count = len(active_codes) if active_codes else 0
 
             # 5. 构造并更新文本
             # 仅显示非零项，或紧凑显示
@@ -5854,6 +5844,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self._table_item_map = {}  # 重置映射
             return
         
+
         # ⚡ 性能优化: 预先关闭信号和排序
         self.stock_table.blockSignals(True)
         self.stock_table.setUpdatesEnabled(False) 
@@ -6056,7 +6047,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.warning(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s ⚠️")
             else:
                 logger.info(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s")
-    
+
+            # ⚡ 全量更新完成后，如果有激活的板块可见性过滤，重新应用 setRowHidden
+            active_codes = getattr(self, '_cat_filter_visible_codes', None)
+            if active_codes and hasattr(self, '_table_item_map') and self._table_item_map:
+                self.stock_table.setUpdatesEnabled(False)
+                for code, row_idx in self._table_item_map.items():
+                    self.stock_table.setRowHidden(row_idx, code not in active_codes)
+                self.stock_table.setUpdatesEnabled(True)
+
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
         try:
@@ -9601,6 +9600,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.filter_combo.blockSignals(True)
         self.filter_combo.clear()
+        self.load_cat_filter_history5() # ✅ 同步刷新左侧板块过滤下拉框
 
         history_path = SEARCH_HISTORY_FILE
 
@@ -9635,6 +9635,33 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.filter_combo.count() > 0:
             QTimer.singleShot(100, lambda: self.on_filter_combo_changed(self.filter_combo.currentIndex()))
 
+
+    def load_cat_filter_history5(self):
+        """[NEW] 为界面左侧的板块过滤框加载 history5 选项"""
+        from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+        if not hasattr(self, 'cat_filter_input'): return
+        
+        self.cat_filter_input.blockSignals(True)
+        # 保存用户当前可能输入的内容，防止重新加载清空正在打字的字
+        cur_text = self.cat_filter_input.currentText()
+        self.cat_filter_input.clear()
+        
+        history_path = SEARCH_HISTORY_FILE
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                history5_items = data.get("history5", [])
+                for item in history5_items:
+                    q = item.get("query", "")
+                    note = item.get("note", "")
+                    label = f"{note} | {q}" if note else q
+                    self.cat_filter_input.addItem(label, userData=q)
+            except Exception as e:
+                pass
+                
+        self.cat_filter_input.setCurrentText(cur_text)
+        self.cat_filter_input.blockSignals(False)
 
     def on_filter_combo_changed(self, index):
         query_str = self.filter_combo.currentData()
@@ -9720,6 +9747,14 @@ class MainWindow(QMainWindow, WindowMixin):
                         # 尝试为额外列也设置数值用于排序
                         num_val = float(val) if val not in ('', None, '-', 'nan') else 0.0
                         child.setData(curr_col_idx, Qt.ItemDataRole.UserRole, num_val)
+                        
+                        # 为 dff / dff2 增加红绿颜色
+                        if col_name in ('dff', 'dff2'):
+                            if num_val > 0:
+                                child.setForeground(curr_col_idx, QBrush(QColor("red")))
+                            elif num_val < 0:
+                                child.setForeground(curr_col_idx, QBrush(QColor("green")))
+                                
                     except:
                         pass
                     curr_col_idx += 1
@@ -9933,8 +9968,8 @@ class MainWindow(QMainWindow, WindowMixin):
             # --- 2. Filter 配置 ---
             filter_config = config.get('filter', {})
             
-            # 2.1 历史文件选择 (history1-4)
-            history_index = filter_config.get('history_index', 3)  # 默认 history4
+            # 2.1 历史文件选择 (history1-5)
+            history_index = filter_config.get('history_index', 4)  # 默认 history5
             if hasattr(self, 'history_selector'):
                 if 0 <= history_index < self.history_selector.count():
                     self.history_selector.blockSignals(True)

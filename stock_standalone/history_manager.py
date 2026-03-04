@@ -268,38 +268,13 @@ class QueryHistoryManager:
                     normalized.append({"query": q, "starred": starred, "note": note})
                 return normalized
 
-            def merge_history(current, old):
+            def _selective_merge(current, old):
                 """
-                合并内存和磁盘历史。
-                规则：
-                1. 优先保留内存中的记录（包含最新的备注和星标）。
-                2. 同一个备注只保留一条最新的记录（[FIXED] 解决 note 叠加问题）。
+                ⭐ [BUGFIX] 内存态为权威：直接返回内存列表，不从磁盘补回已删除的记录。
+                若服务是单会话，内存就是用户最终编辑态。
                 """
-                seen_q = set()
-                seen_n = set()
-                result = []
-                
-                # 1. 先加入内存中的 (Memory entries are truth)
-                for r in current:
-                    q = r.get("query", "").strip()
-                    n = r.get("note", "").strip()
-                    if q and q not in seen_q:
-                        if not n or n not in seen_n:
-                            seen_q.add(q)
-                            if n: seen_n.add(n)
-                            result.append(r)
-                
-                # 2. 加入磁盘中的（补充增量）
-                for r in old:
-                    q = r.get("query", "").strip()
-                    n = r.get("note", "").strip()
-                    if q and q not in seen_q:
-                        if not n or n not in seen_n:
-                            seen_q.add(q)
-                            if n: seen_n.add(n)
-                            result.append(r)
-                
-                return result[:self.MAX_HISTORY]
+                return list(current)[:self.MAX_HISTORY]
+
 
             old_data = {"history1": [], "history2": [], "history3": [], "history4": [], "history5": []}
             if os.path.exists(self.history_file):
@@ -321,11 +296,13 @@ class QueryHistoryManager:
             self.history5 = normalize_history(self.history5)
 
             merged_data = {
-                "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
-                "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
-                "history3": normalize_history(merge_history(self.history3, old_data.get("history3", []))),
-                "history4": normalize_history(merge_history(self.history4, old_data.get("history4", []))),
-                "history5": normalize_history(merge_history(self.history5, old_data.get("history5", []))),
+                # ⭐ [BUGFIX] 以内存态为权威：不把磁盘已删除的记录重新合并回来
+                # 只补充"本会话从未见过"的磁盘记录（query 在内存中从未出现）
+                "history1": normalize_history(_selective_merge(self.history1, old_data.get("history1", []))),
+                "history2": normalize_history(_selective_merge(self.history2, old_data.get("history2", []))),
+                "history3": normalize_history(_selective_merge(self.history3, old_data.get("history3", []))),
+                "history4": normalize_history(_selective_merge(self.history4, old_data.get("history4", []))),
+                "history5": normalize_history(_selective_merge(self.history5, old_data.get("history5", []))),
             }
 
             def changes_count(old_list, new_list):
@@ -925,7 +902,7 @@ def run_manager_process(history_path=None):
     )
     
     # Debug: Print loaded history count
-    print(f"Loaded history counts: H1={len(manager.history1)}, H2={len(manager.history2)}, H3={len(manager.history3, history4)}, H4={len(manager.history5)}")
+    print(f"Loaded history counts: H1={len(manager.history1)}, H2={len(manager.history2)}, H3={len(manager.history3)}, H4={len(manager.history5)},H5={len(manager.history5)}")
     print(f"History file path: {history_path}")
     print(f"File exists: {os.path.exists(history_path)}")
     
