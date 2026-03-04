@@ -1,0 +1,22 @@
+# 数据目录
+JSONData/
+wencai/
+
+dist/
+build/
+.vs/
+.git/
+
+
+# 数据文件
+*.csv
+*.db
+*.xlsx
+*.h5
+*.pkl
+*.log
+*.lock
+
+# Python cache
+__pycache__/
+*.pyc
