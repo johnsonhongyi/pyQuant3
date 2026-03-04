@@ -2495,6 +2495,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # -- 顶部图表: 日 K 线
         self.kline_widget = pg.GraphicsLayoutWidget()
         self.kline_plot = self.kline_widget.addPlot(title="日线 K 线")
+        # [NEW] 双击标题复制板块信息
+        self.kline_plot.titleLabel.mouseDoubleClickEvent = self._on_title_double_clicked
         self.kline_plot.showGrid(x=True, y=True)
         self.kline_plot.setLabel('bottom', '日期索引')
         self.kline_plot.setLabel('left', '价格')
@@ -3855,6 +3857,46 @@ class MainWindow(QMainWindow, WindowMixin):
         """)
         self.toolbar.addWidget(self.code_search_input)
 
+        # --- [NEW] 板块过滤框 ---
+        self.toolbar.addSeparator()
+        cat_label = QLabel("🏷️")
+        cat_label.setToolTip("过滤板块: 双击 K 线图标题中的板块词复制，再右键此框粘贴过滤")
+        self.toolbar.addWidget(cat_label)
+
+        self.cat_filter_input = QLineEdit()
+        self.cat_filter_input.setPlaceholderText("板块过滤...")
+        self.cat_filter_input.setFixedWidth(110)
+        self.cat_filter_input.setToolTip("输入板块名称后点击过滤 (支持右键粘贴自动智能格式化)")
+        self.cat_filter_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(40, 40, 40, 200);
+                color: #FFCC00;
+                border: 1px solid #555;
+                border-radius: 3px;
+                padding: 2px 5px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #FFCC00;
+            }
+        """)
+        self.cat_filter_input.returnPressed.connect(self._on_cat_filter_apply)
+        # 右键菜单：自动粘贴并智能格式化
+        self.cat_filter_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cat_filter_input.customContextMenuRequested.connect(self._on_cat_filter_right_click)
+        self.toolbar.addWidget(self.cat_filter_input)
+
+        cat_query_btn = QPushButton("过滤")
+        cat_query_btn.setToolTip("按板块名称过滤左侧股票列表")
+        cat_query_btn.setFixedWidth(40)
+        cat_query_btn.clicked.connect(self._on_cat_filter_apply)
+        self.toolbar.addWidget(cat_query_btn)
+
+        cat_clear_btn = QPushButton("清空")
+        cat_clear_btn.setToolTip("清空板块过滤，还原列表")
+        cat_clear_btn.setFixedWidth(40)
+        cat_clear_btn.clicked.connect(self._on_cat_filter_clear)
+        self.toolbar.addWidget(cat_clear_btn)
+
         # --- 添加右侧 Reset 按钮 ---
         spacer = QWidget()        # 占位伸缩
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -3863,6 +3905,7 @@ class MainWindow(QMainWindow, WindowMixin):
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_kline_view)
         self.toolbar.addWidget(reset_btn)
+
 
 
     def on_real_time_toggled(self, state):
@@ -3953,6 +3996,120 @@ class MainWindow(QMainWindow, WindowMixin):
         # 重启2秒定时器（每次输入都重置）
         self._search_debounce_timer.stop()
         self._search_debounce_timer.start(2000)  # 2秒延迟
+
+    def _on_cat_filter_right_click(self, pos):
+        """板块过滤框右键：自动粘贴剪贴板内容并智能格式化为 category.str.contains("xxx") 查询"""
+        import re as _re
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        if not text:
+            self.show_status_message("📋 剪贴板为空", 2000)
+            return
+
+        # 如果是6位数字，转为代码过滤
+        if text.isdigit() and len(text) == 6:
+            fmt = f'index.str.contains("^{text}")'
+        else:
+            # 提取第一个中文词（允许混合英文/数字）
+            matches = _re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
+            if matches:
+                fmt = matches[0]
+                # fmt = f'category.str.contains("{matches[0]}")'
+            else:
+                fmt = text  # 原样
+
+        self.cat_filter_input.setText(fmt)
+        self.cat_filter_input.setFocus()
+        # 立即触发过滤
+        self._on_cat_filter_apply()
+
+    def _on_cat_filter_apply(self):
+        """执行板块过滤：在 df_all 基础上过滤 category 列，更新左侧表格"""
+        keyword = self.cat_filter_input.text().strip()
+        if not keyword:
+            self._on_cat_filter_clear()
+            return
+        try:
+            df = self.df_all if hasattr(self, 'df_all') and not self.df_all.empty else pd.DataFrame()
+            if df.empty:
+                self.show_status_message("⚠️ 当前无数据", 2000)
+                return
+
+            # 构建过滤条件: 如果 keyword 已经是 pandas 查询语法，则直接使用
+            if '.str.contains' in keyword or '==' in keyword or '>' in keyword or '<' in keyword:
+                query_str = keyword
+            else:
+                # 否则视为普通文本按 category 模糊搜索
+                if 'category' in df.columns:
+                    query_str = f'category.str.contains("{keyword}", na=False)'
+                else:
+                    query_str = keyword
+
+            from stock_logic_utils import ensure_parentheses_balanced
+            final_query = ensure_parentheses_balanced(query_str)
+            matched = df.query(final_query)
+            if matched.empty:
+                self.show_status_message(f"❌ 未找到匹配: {keyword}", 3000)
+                return
+
+            # 临时更新表格只显示过滤结果
+            self._apply_filtered_df(matched)
+            self.update_bottom_stats()
+            self.show_status_message(f"🏷️ 过滤成功: 共 {len(matched)} 只", 5000)
+
+        except Exception as e:
+            logger.error(f"板块过滤失败: {e}")
+            self.show_status_message(f"❌ 过滤出错: {e}", 3000)
+
+    def _on_cat_filter_clear(self):
+        """清空板块过滤，恢复原始 df_all 显示"""
+        if hasattr(self, 'cat_filter_input'):
+            self.cat_filter_input.clear()
+        # 恢复完整数据
+        if hasattr(self, 'df_all') and not self.df_all.empty:
+            self._apply_filtered_df(self.df_all)
+        self.update_bottom_stats()
+        self.show_status_message("✅ 已清空板块过滤", 2000)
+
+    def _apply_filtered_df(self, df):
+        """将过滤后的 df 渲染到左侧股票列表表格"""
+        try:
+            self.stock_table.setSortingEnabled(False)
+            self.stock_table.setRowCount(0)
+            for idx, row in df.iterrows():
+                r = self.stock_table.rowCount()
+                self.stock_table.insertRow(r)
+                code_val = str(idx) if idx else str(row.get('code', ''))
+                name_val = str(row.get('name', ''))
+                code_item = QTableWidgetItem(code_val)
+                code_item.setData(Qt.ItemDataRole.UserRole, code_val)
+                self.stock_table.setItem(r, 0, code_item)
+                if self.stock_table.columnCount() > 1:
+                    self.stock_table.setItem(r, 1, QTableWidgetItem(name_val))
+                # 其余列同步（若有）
+                for ci, col in enumerate(self.headers[2:], start=2):
+                    val = row.get(col, '')
+                    item_text = str(val) if val is not None else ''
+                    item = NumericTableWidgetItem(item_text)
+                    
+                    # 颜色渲染
+                    if pd.notnull(val) and str(val).strip() and (
+                        col in ('percent', 'dff') 
+                        or (col.startswith('per') and col.endswith('d') and col[3:-1].isdigit())
+                    ):
+                        try:
+                            val_float = float(val)
+                            if val_float > 0:
+                                item.setForeground(QColor('red'))
+                            elif val_float < 0:
+                                item.setForeground(QColor('green'))
+                        except ValueError:
+                            pass
+                            
+                    self.stock_table.setItem(r, ci, item)
+            self.stock_table.setSortingEnabled(True)
+        except Exception as e:
+            logger.error(f"_apply_filtered_df 渲染失败: {e}")
 
     def _init_signal_message_box(self):
         """初始化信号消息盒子"""
@@ -4426,7 +4583,17 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'filter_tree') and self.filter_tree:
                 filter_count = self.filter_tree.topLevelItemCount()
             
-            # 4. 构造并更新文本
+            # 4. 板块过滤计数 (新增)
+            cat_filter_active = False
+            filtered_count = 0
+            if hasattr(self, 'cat_filter_input') and self.cat_filter_input:
+                cat_filter_text = self.cat_filter_input.text().strip()
+                if cat_filter_text:
+                    cat_filter_active = True
+                    if hasattr(self, 'stock_table') and self.stock_table:
+                        filtered_count = self.stock_table.rowCount()
+
+            # 5. 构造并更新文本
             # 仅显示非零项，或紧凑显示
             display_parts = []
             display_parts.append(f"📊 市场: {market_count}")
@@ -4439,6 +4606,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # 筛选数 > 0 才显示
             if filter_count > 0: 
                 display_parts.append(f"🔍 筛选: {filter_count}")
+
+            # 过滤数激活才显示
+            if cat_filter_active:
+                display_parts.append(f"🏷️ 过滤: {filtered_count}")
 
             stats_txt = " | ".join(display_parts)
             
@@ -8752,6 +8923,64 @@ class MainWindow(QMainWindow, WindowMixin):
         if getattr(self, "_last_full_title", "") != full_title:
             self.kline_plot.setTitle(full_title)
             self._last_full_title = full_title
+
+    def _on_title_double_clicked(self, ev):
+        """双击标题复制板块信息 (category_text)"""
+        category_text = getattr(self, "_cached_category_text", "")
+        if category_text:
+            try:
+                # 分割板块文本，找到用户可能点击的那一个
+                categories = [c.strip() for c in category_text.split("|")]
+                target_copy = category_text # 默认
+                
+                # 尝试通过点击位置估算点击了哪个词
+                if hasattr(ev, 'pos') and hasattr(self, 'kline_plot') and hasattr(self.kline_plot, 'titleLabel'):
+                    label_item = self.kline_plot.titleLabel
+                    text_item = label_item.item
+                    
+                    if text_item and hasattr(text_item, 'document'):
+                        # 将坐标映射到 QTextItem 内
+                        pos_in_text = label_item.mapToItem(text_item, ev.pos())
+                        
+                        doc = text_item.document()
+                        layout = doc.documentLayout()
+                        hit_idx = layout.hitTest(pos_in_text, Qt.HitTestAccuracy.FuzzyHit)
+                        plain_text = doc.toPlainText()
+                        
+                        if 0 <= hit_idx < len(plain_text) and len(plain_text) > 0:
+                            # 终极修复：不再手工算左右边界（防各种隐藏字符、换行越位）
+                            # 直接暴力查找各版块词在 plain_text 中的绝对坐标区间
+                            best_match = None
+                            min_dist = 9999
+                            for cat in categories:
+                                start_idx = 0
+                                while True:
+                                    idx = plain_text.find(cat, start_idx)
+                                    if idx == -1:
+                                        break
+                                    end_idx = idx + len(cat)
+                                    
+                                    # 放宽容差：前后3个字符内都算作点击了这个板块（包含 | 的距离）
+                                    if idx - 3 <= hit_idx <= end_idx + 3:
+                                        # 计算距离
+                                        dist = 0 if idx <= hit_idx <= end_idx else min(abs(idx - hit_idx), abs(end_idx - hit_idx))
+                                        if dist < min_dist:
+                                            min_dist = dist
+                                            best_match = cat
+                                    start_idx = idx + len(cat)
+                            
+                            if best_match:
+                                target_copy = best_match
+
+                clipboard = QApplication.clipboard()
+                clipboard.setText(target_copy)
+                logger.info(f"✅ 已复制特定板块信息到剪贴板: {target_copy}")
+                # 使用状态栏反馈（如果存在）
+                if hasattr(self, 'statusBar') and self.statusBar():
+                    self.statusBar().showMessage(f"已复制板块: {target_copy}", 3000)
+            except Exception as e:
+                logger.error(f"复制板块信息失败: {e}")
+        ev.accept()
 
     def _refresh_sensing_bar(self, code):
         """刷新分时图标题中的监理看板（避免刷新 K 线标题导致布局抖动）"""

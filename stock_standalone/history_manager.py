@@ -37,8 +37,8 @@ logger = LoggerFactory.getLogger('QueryHistoryManager')
 #     toast.after(duration, toast.destroy)
 
 class QueryHistoryManager:
-    def __init__(self, root=None, search_var1=None, search_var2=None, search_var3=None, search_var4=None,
-                 search_combo1=None, search_combo2=None, search_combo3=None, search_combo4=None,
+    def __init__(self, root=None, search_var1=None, search_var2=None, search_var3=None, search_var4=None, search_var5=None,
+                 search_combo1=None, search_combo2=None, search_combo3=None, search_combo4=None, search_combo5=None,
                  auto_run=False, history_file="query_history.json",
                  sync_history_callback=None, test_callback=None):
         """
@@ -51,18 +51,20 @@ class QueryHistoryManager:
         self.search_var2 = search_var2
         self.search_var3 = search_var3
         self.search_var4 = search_var4
+        self.search_var5 = search_var5
         self.his_limit = 30
         self.search_combo1 = search_combo1
         self.search_combo2 = search_combo2
         self.search_combo3 = search_combo3
         self.search_combo4 = search_combo4
+        self.search_combo5 = search_combo5
         self.deleted_stack = []  # 保存被删除的 query 记录
         self._history_changed = False  # 追踪本次打开期间是否有过修改
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback
         # 读取历史
-        self.history1, self.history2, self.history3, self.history4 = self.load_search_history()
+        self.history1, self.history2, self.history3, self.history4, self.history5 = self.load_search_history()
         self.current_history = self.history1
         self.current_key = "history1"
         self.MAX_HISTORY = 500
@@ -95,7 +97,7 @@ class QueryHistoryManager:
 
         self.combo_group = ttk.Combobox(
             frame_input,
-            values=["history1", "history2", "history3", "history4"],
+            values=["history1", "history2", "history3", "history4", "history5"],
             state="readonly", width=10
         )
         self.combo_group.set("history1")
@@ -194,11 +196,12 @@ class QueryHistoryManager:
             # 打开时重置修改标志
             self._history_changed = False
             try:
-                self.history1, self.history2, self.history3, self.history4 = self.load_search_history()
+                self.history1, self.history2, self.history3, self.history4, self.history5 = self.load_search_history()
                 if self.current_key == "history1": self.current_history = self.history1
                 elif self.current_key == "history2": self.current_history = self.history2
                 elif self.current_key == "history3": self.current_history = self.history3
                 elif self.current_key == "history4": self.current_history = self.history4
+                elif self.current_key == "history5": self.current_history = self.history5
                 logger.info("[open_editor] History reloaded from disk.")
             except Exception as e:
                 logger.error(f"[open_editor] Failed to reload history: {e}")
@@ -298,7 +301,7 @@ class QueryHistoryManager:
                 
                 return result[:self.MAX_HISTORY]
 
-            old_data = {"history1": [], "history2": [], "history3": [], "history4": []}
+            old_data = {"history1": [], "history2": [], "history3": [], "history4": [], "history5": []}
             if os.path.exists(self.history_file):
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
@@ -307,6 +310,7 @@ class QueryHistoryManager:
                         old_data["history2"] = dedup(loaded_data.get("history2", []))
                         old_data["history3"] = dedup(loaded_data.get("history3", []))
                         old_data["history4"] = dedup(loaded_data.get("history4", []))
+                        old_data["history5"] = dedup(loaded_data.get("history5", []))
                     except json.JSONDecodeError:
                         pass
 
@@ -314,12 +318,14 @@ class QueryHistoryManager:
             self.history2 = normalize_history(self.history2)
             self.history3 = normalize_history(self.history3)
             self.history4 = normalize_history(self.history4)
+            self.history5 = normalize_history(self.history5)
 
             merged_data = {
                 "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
                 "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
                 "history3": normalize_history(merge_history(self.history3, old_data.get("history3", []))),
                 "history4": normalize_history(merge_history(self.history4, old_data.get("history4", []))),
+                "history5": normalize_history(merge_history(self.history5, old_data.get("history5", []))),
             }
 
             def changes_count(old_list, new_list):
@@ -343,20 +349,22 @@ class QueryHistoryManager:
             self.history2 = list(merged_data["history2"])
             self.history3 = list(merged_data["history3"])
             self.history4 = list(merged_data["history4"])
+            self.history5 = list(merged_data["history5"])
             
             # 更新当前引用
             if self.current_key == "history1": self.current_history = self.history1
             elif self.current_key == "history2": self.current_history = self.history2
             elif self.current_key == "history3": self.current_history = self.history3
             elif self.current_key == "history4": self.current_history = self.history4
+            elif self.current_key == "history5": self.current_history = self.history5
 
-            logger.info(f"✅ 搜索历史已保存 (h1: {len(self.history1)} / h2: {len(self.history2)} / h3: {len(self.history3)} / h4: {len(self.history4)})")
+            logger.info(f"✅ 搜索历史已保存 (h1: {len(self.history1)} / h2: {len(self.history2)} / h3: {len(self.history3)} / h4: {len(self.history4)} / h5: {len(self.history5)})")
 
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
 
     def load_search_history(self):
-        h1, h2, h3, h4 = [], [], [], []
+        h1, h2, h3, h4, h5 = [], [], [], [], []
         upgraded = False
         if os.path.exists(self.history_file):
             try:
@@ -396,25 +404,28 @@ class QueryHistoryManager:
                 raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
                 raw_h3 = [self._normalize_record(r) for r in data.get("history3", [])]
                 raw_h4 = [self._normalize_record(r) for r in data.get("history4", [])]
+                raw_h5 = [self._normalize_record(r) for r in data.get("history5", [])]
 
                 normalize_starred_field(raw_h1)
                 normalize_starred_field(raw_h2)
                 normalize_starred_field(raw_h3)
                 normalize_starred_field(raw_h4)
+                normalize_starred_field(raw_h5)
 
                 h1 = list(raw_h1[:self.his_limit])
                 h2 = list(raw_h2[:self.his_limit])
                 h3 = list(raw_h3[:self.his_limit])
                 h4 = list(raw_h4[:self.his_limit])
+                h5 = list(raw_h5[:self.his_limit])
 
                 if upgraded:
                     with open(self.history_file, "w", encoding="utf-8") as f:
-                        json.dump({"history1": raw_h1, "history2": raw_h2, "history3": raw_h3, "history4": raw_h4}, f, ensure_ascii=False, indent=2)
+                        json.dump({"history1": raw_h1, "history2": raw_h2, "history3": raw_h3, "history4": raw_h4, "history5": raw_h5}, f, ensure_ascii=False, indent=2)
                     logger.info("✅ 自动升级 search_history.json，starred 字段格式已统一")
             except Exception as e:
                 logger.error(f"加载搜索历史失败: {e}")
-        # 确保始终返回 4 个独立的列表对象
-        return (list(h1), list(h2), list(h3), list(h4))
+        # 确保始终返回独立的列表对象
+        return (list(h1), list(h2), list(h3), list(h4), list(h5))
 
     def _normalize_record(self, r):
         if isinstance(r, dict):
@@ -448,6 +459,9 @@ class QueryHistoryManager:
         elif sel == "history4":
             self.current_history = self.history4
             self.current_key = "history4"
+        elif sel == "history5":
+            self.current_history = self.history5
+            self.current_key = "history5"
         logger.info(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
 
@@ -506,6 +520,8 @@ class QueryHistoryManager:
             self.history3 = self.current_history
         elif self.current_key == "history4":
             self.history4 = self.current_history
+        elif self.current_key == "history5":
+            self.history5 = self.current_history
         self._history_changed = True  # 标记已修改
         self.refresh_tree()
         self.entry_query.delete(0, tk.END)
@@ -628,6 +644,8 @@ class QueryHistoryManager:
                 if self.current_key == "history1": self.history1[idx]["note"] = new_note
                 elif self.current_key == "history2": self.history2[idx]["note"] = new_note
                 elif self.current_key == "history3": self.history3[idx]["note"] = new_note
+                elif self.current_key == "history4": self.history4[idx]["note"] = new_note
+                elif self.current_key == "history5": self.history5[idx]["note"] = new_note
                 self.current_history[idx]["note"] = new_note
                 self._history_changed = True  # 标记已修改
                 self.refresh_tree()
@@ -669,6 +687,15 @@ class QueryHistoryManager:
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history2=self.history2, source="use", selected_query=query)
                 
+        elif self.current_key == "history3":
+            self.history3 = move_to_top(self.history3, query)
+            if self.search_var3: self.search_var3.set(query)
+            if self.search_combo3:
+                vals = [r["query"] for r in self.history3]
+                self.search_combo3["values"] = vals
+            if callable(self.sync_history_callback):
+                self.sync_history_callback(search_history3=self.history3, source="use", selected_query=query)
+
         elif self.current_key == "history4":
             self.history4 = move_to_top(self.history4, query)
             if self.search_var4: self.search_var4.set(query)
@@ -677,14 +704,15 @@ class QueryHistoryManager:
                 self.search_combo4["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history4=self.history4, source="use", selected_query=query)
-                
-        elif self.current_key == "history3":
-            self.history3 = move_to_top(self.history3, query)
+        
+        elif self.current_key == "history5":
+            self.history5 = move_to_top(self.history5, query)
+            if self.search_var5: self.search_var5.set(query)
+            if self.search_combo5:
+                vals = [r["query"] for r in self.history5]
+                self.search_combo5["values"] = vals
             if callable(self.sync_history_callback):
-                try:
-                    self.sync_history_callback(search_history3=self.history3, source="use", selected_query=query)
-                except Exception as e:
-                    logger.info(f"[警告] 同步 search_history3 失败: {e}")
+                self.sync_history_callback(search_history5=self.history5, source="use", selected_query=query)
         
         self.refresh_tree()
         # self.save_search_history() # 不再不停自动保存，由用户应用过滤器或关闭时保存
@@ -712,6 +740,7 @@ class QueryHistoryManager:
         elif history_key == "history2": combo, var, target = self.search_combo2, self.search_var2, self.history2
         elif history_key == "history3": combo, var, target = self.search_combo3, self.search_var3, self.history3
         elif history_key == "history4": combo, var, target = self.search_combo4, self.search_var4, self.history4
+        elif history_key == "history5": combo, var, target = self.search_combo5, self.search_var5, self.history5
         else: return
         if action == "delete":
             target[:] = [r for r in target if r.get("query") != query]
@@ -730,6 +759,7 @@ class QueryHistoryManager:
                 elif history_key == "history2": self.sync_history_callback(search_history2=self.history2, **cb_kwargs)
                 elif history_key == "history3": self.sync_history_callback(search_history3=self.history3, **cb_kwargs)
                 elif history_key == "history4": self.sync_history_callback(search_history4=self.history4, **cb_kwargs)
+                elif history_key == "history5": self.sync_history_callback(search_history5=self.history5, **cb_kwargs)
             except Exception as e: logger.info(f"[SYNC ERR] {e}")
         suppress_state = getattr(self, "_suppress_switch", False)
         self._suppress_switch = True
@@ -761,6 +791,7 @@ class QueryHistoryManager:
         elif history_key == "history2": target_history = self.history2
         elif history_key == "history3": target_history = self.history3
         elif history_key == "history4": target_history = self.history4
+        elif history_key == "history5": target_history = self.history5
         else: return
         if any(r.get("query") == record.get("query") for r in target_history):
             toast_message(self.root, f"已存在：{record.get('query')}", 1200)
@@ -894,7 +925,7 @@ def run_manager_process(history_path=None):
     )
     
     # Debug: Print loaded history count
-    print(f"Loaded history counts: H1={len(manager.history1)}, H2={len(manager.history2)}, H3={len(manager.history3)}, H4={len(manager.history4)}")
+    print(f"Loaded history counts: H1={len(manager.history1)}, H2={len(manager.history2)}, H3={len(manager.history3, history4)}, H4={len(manager.history5)}")
     print(f"History file path: {history_path}")
     print(f"File exists: {os.path.exists(history_path)}")
     

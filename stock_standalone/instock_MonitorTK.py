@@ -2096,6 +2096,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_history2 = []
         self.search_history3 = []
         self.search_history4 = []
+        self.search_history5 = []
         self._search_job = None
 
         self.search_var1 = tk.StringVar()
@@ -2131,24 +2132,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
 
         # 从 query_manager 获取历史 (Raw dicts)
-        h1, h2, h3, h4 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3, self.query_manager.history4
+        h1, h2, h3, h4 ,h5 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3, self.query_manager.history4 , self.query_manager.history5
 
         # [MODIFIED] Enhanced display: "Note (Query)"
         self.search_map1 = {}
         self.search_map2 = {}
         self.search_map4 = {} # 给历史4也准备一个map
+        self.search_map5 = {} # 给历史5也准备一个map
         
         self.search_history1 = self._format_history_list(h1, self.search_map1)
         self.search_history2 = self._format_history_list(h2, self.search_map2) 
         self.search_history3 = [r["query"] for r in h3]
         self.search_history4 = self._format_history_list(h4, self.search_map4)
+        self.search_history5 = self._format_history_list(h4, self.search_map5)
 
         # [MODIFIED] Update combobox values with formatted history
         self.search_combo1['values'] = self.search_history1
         self.search_combo2['values'] = self.search_history2
         if hasattr(self, 'search_combo4'):
             self.search_combo4['values'] = self.search_history4
-
+        if hasattr(self, 'search_combo5'):
+            self.search_combo5['values'] = self.search_history5
         # Update Combobox values
         self.search_combo1['values'] = self.search_history1
         self.search_combo2['values'] = self.search_history2
@@ -8714,6 +8718,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             ("search_history2", "search_history2", "search_combo2", "search_map2"),
             ("search_history3", "search_history3", "search_combo3", None),
             ("search_history4", "search_history4", "search_combo4", "search_map4"),
+            ("search_history5", "search_history5", "search_combo5", "search_map5"),
         ]
 
         for arg_key, attr_name, combo_name, map_name in configs:
