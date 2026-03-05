@@ -2840,7 +2840,90 @@ class MainWindow(QMainWindow, WindowMixin):
         #    在 IPC 数据包接收后或手动调用 _check_hotlist_patterns()
         #    避免与 StockLiveStrategy 的形态检测重复
         
+        # 4. ⚡ [NEW] 语音播报缓冲池与定时器 (防并发刷屏)
+        self.voice_batch_buffer = {} # {code: {'name': name, 'messages': set(), 'meta': meta}}
+        self.voice_batch_timer = QtCore.QTimer(self)
+        self.voice_batch_timer.setInterval(2500) # 每2.5秒统一播报一次
+        self.voice_batch_timer.timeout.connect(self._process_voice_batch)
+        self.voice_batch_timer.start()
+        
         logger.info("✅ 热点面板和信号日志面板已初始化")
+
+    def _process_voice_batch(self):
+        """统一处理并在固定窗口内播报累积的信号语音 (去重、合并)"""
+        if not hasattr(self, 'voice_thread') or not self.voice_thread:
+            return
+        if getattr(self, '_voice_paused', False):
+            self.voice_batch_buffer.clear()
+            return
+            
+        if not self.voice_batch_buffer:
+            return
+            
+        # 复制并清空缓冲池
+        batch = self.voice_batch_buffer.copy()
+        self.voice_batch_buffer.clear()
+        
+        # --- [NEW] 按优先级定义 ---
+        PRIORITY_MAP = {
+            '跑路': 100,
+            '止损': 100,
+            '诱多': 95,
+            '买入': 90,
+            '强势': 80,
+            '突破': 80,
+            '涨停': 80,
+            '高开': 70,
+            '主升': 70,
+            '动量': 60,
+            '底部': 60
+        }
+        
+        def get_msg_priority(msg_str):
+            score = 0
+            for kw, w in PRIORITY_MAP.items():
+                if kw in msg_str:
+                    score = max(score, w)
+            return score
+            
+        # 1. 对批量内的股票按最高优先级排序
+        batch_list = []
+        for code, data in batch.items():
+            max_prio = 0
+            for m in data['messages']:
+                max_prio = max(max_prio, get_msg_priority(m))
+            data['priority'] = max_prio
+            batch_list.append((code, data))
+            
+        batch_list.sort(key=lambda x: x[1]['priority'], reverse=True)
+        
+        # 2. 依次发音
+        for code, data in batch_list:
+            name = data['name']
+            messages = data['messages']
+            meta = data['meta']
+            
+            # 组合消息
+            stock_id = f"{name} {code}" if name else code
+            
+            # 去除包含相同子串的冗余消息 (比如: "低开走高", "(2次) 低开走高")
+            filtered_msgs = []
+            for m in messages:
+                # 把带计数的 `(x次)` 去掉进行比对
+                core_m = re.sub(r'^\(\d+次\)\s*', '', m)
+                if not any(core_m in existing and core_m != existing for existing in filtered_msgs):
+                     filtered_msgs.append(m)
+
+            # 内部消息也按优先级排序，确保重点短语在前
+            filtered_msgs.sort(key=get_msg_priority, reverse=True)
+            
+            combined_msg = "。".join(filtered_msgs)
+            
+            # 去除一些常见重叠
+            combined_msg = combined_msg.replace('->', '转').replace('ACCUMULATE', '蓄势').replace('SURGE', '冲击')
+            speak_msg = f"{stock_id}, {combined_msg}"
+            
+            self.voice_thread.speak(speak_msg, meta=meta)
 
     def _on_signal_log_clicked(self, code: str, pattern: str = '', message: str = ''):
         """处理信号日志中的代码点击：一键直达"""
@@ -3238,18 +3321,12 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⭐ [关键修复] 捕获用于 UI 匹配的片段 (保持精简形式)
             match_snippet = speak_msg[:20] 
 
-            # (5) 重新组装播报文案：加上代码和名称
-            stock_id = f"{name} {code}" if name else code
-            speak_msg = f"{stock_id}, {speak_msg}"
-
-            # (6) 符号与缩写转写 (提升 TTS 听感)
-            speak_msg = speak_msg.replace('->', '转').replace('ACCUMULATE', '蓄势').replace('SURGE', '冲击')
-            
             if speak_msg:
-                # logger.debug(f"🎙️ [SYNC VOICE] {speak_msg}")
-                # 传递带有 code 和原始片段的元数据，用于 UI 定位
-                meta = {'code': code, 'snippet': match_snippet} 
-                self.voice_thread.speak(speak_msg, meta=meta)
+                # 放入缓冲池，等待定时器统一处理 (去重合并)
+                if code not in self.voice_batch_buffer:
+                    self.voice_batch_buffer[code] = {'name': name, 'messages': set(), 'meta': {'code': code, 'snippet': match_snippet}}
+                
+                self.voice_batch_buffer[code]['messages'].add(speak_msg)
                 
         except Exception as e:
             logger.error(f"Error in signal log sync broadcast: {e}")
