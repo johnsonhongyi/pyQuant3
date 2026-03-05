@@ -73,6 +73,64 @@ class QueryHistoryManager:
         if auto_run:
             self.open_editor()
 
+    def _dedup(self, history):
+        """通用去重逻辑 (基于 query 和 note)"""
+        seen_q = set()
+        seen_n = set()
+        result = []
+        for r in history:
+            if not isinstance(r, dict):
+                q = str(r).strip()
+                n = ""
+                r = {"query": q, "starred": 0, "note": ""}
+            else:
+                q = r.get("query", "").strip()
+                n = r.get("note", "").strip()
+            
+            if not q or q in seen_q:
+                continue
+            if n and n in seen_n:
+                continue
+            
+            seen_q.add(q)
+            if n: seen_n.add(n)
+            result.append(r)
+        return result
+
+    def _normalize_history(self, history):
+        """统一历史记录格式"""
+        normalized = []
+        seen_q = set()
+        seen_n = set()
+        for r in history:
+            if not isinstance(r, dict):
+                continue
+            q = r.get("query", "").strip()
+            if not q or q in seen_q:
+                continue
+            
+            note = r.get("note", "").strip()
+            if note and note in seen_n:
+                continue
+
+            seen_q.add(q)
+            if note: seen_n.add(note)
+
+            starred = r.get("starred", 0)
+            if isinstance(starred, bool):
+                starred = 1 if starred else 0
+            elif not isinstance(starred, int):
+                starred = 0
+            normalized.append({"query": q, "starred": starred, "note": note})
+        return normalized
+
+    def _selective_merge(self, current, old):
+        """
+        ⭐ [BUGFIX] 内存态为权威：直接返回内存列表，不从磁盘补回已删除的记录。
+        """
+        return list(current)[:self.MAX_HISTORY]
+
+
     def _build_ui(self):
         if not self.root:
             return
@@ -218,92 +276,33 @@ class QueryHistoryManager:
 
     def save_search_history(self, confirm_threshold=10):
         try:
-            def dedup(history):
-                seen_q = set()
-                seen_n = set()
-                result = []
-                for r in history:
-                    if not isinstance(r, dict):
-                        q = str(r).strip()
-                        n = ""
-                        r = {"query": q, "starred": 0, "note": ""}
-                    else:
-                        q = r.get("query", "").strip()
-                        n = r.get("note", "").strip()
-                    
-                    if not q or q in seen_q:
-                        continue
-                    if n and n in seen_n:
-                        continue
-                    
-                    seen_q.add(q)
-                    if n: seen_n.add(n)
-                    result.append(r)
-                return result
-
-            def normalize_history(history):
-                normalized = []
-                seen_q = set()
-                seen_n = set()
-                for r in history:
-                    if not isinstance(r, dict):
-                        continue
-                    q = r.get("query", "").strip()
-                    if not q or q in seen_q:
-                        continue
-                    
-                    # [FIXED] Deduplicate by note: only one newest entry per non-empty note
-                    note = r.get("note", "").strip()
-                    if note and note in seen_n:
-                        continue
-
-                    seen_q.add(q)
-                    if note: seen_n.add(note)
-
-                    starred = r.get("starred", 0)
-                    if isinstance(starred, bool):
-                        starred = 1 if starred else 0
-                    elif not isinstance(starred, int):
-                        starred = 0
-                    normalized.append({"query": q, "starred": starred, "note": note})
-                return normalized
-
-            def _selective_merge(current, old):
-                """
-                ⭐ [BUGFIX] 内存态为权威：直接返回内存列表，不从磁盘补回已删除的记录。
-                若服务是单会话，内存就是用户最终编辑态。
-                """
-                return list(current)[:self.MAX_HISTORY]
-
-
             old_data = {"history1": [], "history2": [], "history3": [], "history4": [], "history5": []}
             if os.path.exists(self.history_file):
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
                         loaded_data = json.load(f)
-                        old_data["history1"] = dedup(loaded_data.get("history1", []))
-                        old_data["history2"] = dedup(loaded_data.get("history2", []))
-                        old_data["history3"] = dedup(loaded_data.get("history3", []))
-                        old_data["history4"] = dedup(loaded_data.get("history4", []))
-                        old_data["history5"] = dedup(loaded_data.get("history5", []))
+                        old_data["history1"] = self._dedup(loaded_data.get("history1", []))
+                        old_data["history2"] = self._dedup(loaded_data.get("history2", []))
+                        old_data["history3"] = self._dedup(loaded_data.get("history3", []))
+                        old_data["history4"] = self._dedup(loaded_data.get("history4", []))
+                        old_data["history5"] = self._dedup(loaded_data.get("history5", []))
                     except json.JSONDecodeError:
                         pass
 
-            self.history1 = normalize_history(self.history1)
-            self.history2 = normalize_history(self.history2)
-            self.history3 = normalize_history(self.history3)
-            self.history4 = normalize_history(self.history4)
-            self.history5 = normalize_history(self.history5)
+            self.history1 = self._normalize_history(self.history1)
+            self.history2 = self._normalize_history(self.history2)
+            self.history3 = self._normalize_history(self.history3)
+            self.history4 = self._normalize_history(self.history4)
+            self.history5 = self._normalize_history(self.history5)
 
             merged_data = {
-                # ⭐ [BUGFIX] 以内存态为权威：不把磁盘已删除的记录重新合并回来
-                # 只补充"本会话从未见过"的磁盘记录（query 在内存中从未出现）
-                "history1": normalize_history(_selective_merge(self.history1, old_data.get("history1", []))),
-                "history2": normalize_history(_selective_merge(self.history2, old_data.get("history2", []))),
-                "history3": normalize_history(_selective_merge(self.history3, old_data.get("history3", []))),
-                "history4": normalize_history(_selective_merge(self.history4, old_data.get("history4", []))),
-                "history5": normalize_history(_selective_merge(self.history5, old_data.get("history5", []))),
+                "history1": self._normalize_history(self._selective_merge(self.history1, old_data.get("history1", []))),
+                "history2": self._normalize_history(self._selective_merge(self.history2, old_data.get("history2", []))),
+                "history3": self._normalize_history(self._selective_merge(self.history3, old_data.get("history3", []))),
+                "history4": self._normalize_history(self._selective_merge(self.history4, old_data.get("history4", []))),
+                "history5": self._normalize_history(self._selective_merge(self.history5, old_data.get("history5", []))),
             }
+
 
             def changes_count(old_list, new_list):
                 old_set = {r['query'] for r in old_list}
@@ -359,29 +358,12 @@ class QueryHistoryManager:
                             r["starred"] = 0
                             upgraded = True
 
-                def dedup(history):
-                    seen_q = set()
-                    seen_n = set()
-                    result = []
-                    for r in history:
-                        q = r.get("query", "").strip()
-                        n = r.get("note", "").strip()
-                        if not q or q in seen_q:
-                            continue
-                        # [FIXED] Deduplicate by note during load
-                        if n and n in seen_n:
-                            continue
-                        
-                        seen_q.add(q)
-                        if n: seen_n.add(n)
-                        result.append(r)
-                    return result
-
                 raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
                 raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
                 raw_h3 = [self._normalize_record(r) for r in data.get("history3", [])]
                 raw_h4 = [self._normalize_record(r) for r in data.get("history4", [])]
                 raw_h5 = [self._normalize_record(r) for r in data.get("history5", [])]
+
 
                 normalize_starred_field(raw_h1)
                 normalize_starred_field(raw_h2)
