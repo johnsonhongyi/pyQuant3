@@ -1673,7 +1673,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             test_callback=self.on_test_code
         )
 
-        self.search_history1, self.search_history2, self.search_history3, self.search_history4 = self.query_manager.load_search_history()
+        self.search_history1, self.search_history2, self.search_history3, self.search_history4, *_ = self.query_manager.load_search_history()
+
 
         # 浠?query_manager 鑾峰彇鍘嗗彶
         h1, h2, h3, h4 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3, self.query_manager.history4

@@ -132,8 +132,8 @@ class MinuteKlineCache:
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                 
-                # 合法性校验: 09:15-11:30, 13:00-15:05
-                mask_am = (hhmm >= 915) & (hhmm <= 1130)
+                # 09:25-11:30, 13:00-15:05
+                mask_am = (hhmm >= 925) & (hhmm <= 1130)
                 mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
                 
                 df = df[mask_am | mask_pm]
@@ -345,7 +345,7 @@ class MinuteKlineCache:
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                 
                 if not ((915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)):
-                    continue # 放弃非交易时间段的数据, 避免盘后轮询把交易时段数据顶出 deque
+                    continue # 盘中通过：允许 9:15 开始的竞价数据用于当日异动捕捉
                 
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
@@ -1105,7 +1105,8 @@ class DataPublisher:
     def update_batch(self, df: pd.DataFrame):
         """
         接收来自 fetch_and_process 的 DataFrame 快照
-        """
+        """
+
         is_trading = cct.get_work_time_duration()
 
         if self.paused or not is_trading:
@@ -1142,8 +1143,8 @@ class DataPublisher:
             # self.emotion_tracker.update_batch(df, self.emotion_baseline)
 
             # 1. 抓取元信息并计算时间戳 (更宽的准入窗口: 9:10 - 15:10)
-            # 🚦 优先识别市场时间列，防止系统时钟偏差导致 10:00 左右误触发午休过滤器
-            check_sample = df.head(1)
+            # 🚦 指纹校验优化：采用前 50 行以防止首行静止导致整个批次被跳过
+            check_sample = df.head(50)
             raw_ts = time.time()
             time_source = "system_clock"
             
@@ -1167,8 +1168,9 @@ class DataPublisher:
             dt_now = datetime.fromtimestamp(raw_ts)
             hhmm = int(dt_now.strftime('%H%M'))
             is_trade_day = cct.get_trade_date_status()
-            # 包含盘前集合竞价和盘后滞后数据
+            # 准入控制：盘中允许 9:10 之后的批次进入，包含竞价异动
             is_valid_hour = (910 <= hhmm <= 1135) or (1255 <= hhmm <= 1515)
+            # data_ok = cct.get_work_time()  # 也可以直接用这个，但在 cache 层面 >= 925 更安全
             is_realtime = is_trade_day and is_valid_hour
             
             # 2. 跨日检测
