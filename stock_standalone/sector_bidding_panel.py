@@ -446,41 +446,85 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ------------------------------------------------------------------ UI refresh
     def _refresh_sector_list(self):
         sectors = self.detector.get_active_sectors()
-        sub_cnt = len(self.detector._subscribed)
-        sess = self._session_str()
-        self.status_lbl.setText(
-            f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}"
-        )
-
-        # 2. 刷新左侧板块列表
-        curr = self.sector_list.currentItem()
-        curr_name = curr.data(Qt.ItemDataRole.UserRole) if curr else None
-
+        
+        # 1. 记录当前选中的板块名，以便在刷新后恢复
+        current_item = self.sector_list.currentItem()
+        selected_sector = ""
+        if current_item:
+            selected_sector = current_item.data(Qt.ItemDataRole.UserRole)
+            
         self.sector_list.blockSignals(True)
         self.sector_list.clear()
-        for d in sectors:
-            sn = d['sector']
-            sc = d.get('score', 0)
-            lp = d.get('leader_pct', 0)
-            fc = len(d.get('followers', []))
-            icon = '🔥' if sc >= 6 else '📊'
-            txt = f"{icon} {sn}  强:{sc:.1f}  龙:{lp:+.1f}%  跟:{fc}支"
+        
+        # 2. 填充列表
+        for sdata in sectors:
+            sn = sdata['sector']
+            sc = sdata['score']
+            tags = sdata.get('tags', '')
+            lp = sdata.get('leader_pct', 0)
+            followers = sdata.get('followers', [])
+            fc = len(followers)
+            
+            # 格式化显示：🔥 板块名 [标签] 强:xx 龙:xx% 跟:xx
+            if sc >= 40:
+                icon = '🌋'
+                color = "#FF1493" # 深粉红/火山红
+                bold = True
+            elif sc >= 30:
+                icon = '🔥'
+                color = "#FF3333" # 鲜红
+                bold = True
+            elif sc >= 20:
+                icon = '⚡'
+                color = "#FF9900" # 橙色
+                bold = False
+            elif sc >= 12:
+                icon = '🌟'
+                color = "#FFD700" # 金黄色
+                bold = False
+            elif sc >= 6:
+                icon = '🌊'
+                color = "#00BFFF" # 亮蓝色
+                bold = False
+            else:
+                icon = '📊'
+                color = "#AAAAAA" # 灰色
+                bold = False
+
+            tag_str = f" [{tags}]" if tags else ""
+            txt = f"{icon} {sn}{tag_str}  强:{sc:.1f}  龙:{lp:+.1f}%  跟:{fc}"
+            
             item = QListWidgetItem(txt)
             item.setData(Qt.ItemDataRole.UserRole, sn)
-            if lp > 7:
-                item.setForeground(QColor("#FF3333"))
+            
+            # 高强度标红提示
+            item.setForeground(QColor(color))
+            if bold:
                 f = item.font(); f.setBold(True); item.setFont(f)
-            elif lp > 4:
-                item.setForeground(QColor("#FF9900"))
-            else:
-                item.setForeground(QColor("#CCCCCC"))
+                
             self.sector_list.addItem(item)
-            if sn == curr_name:
+            
+            # 恢复之前的选择
+            if sn == selected_sector:
                 self.sector_list.setCurrentItem(item)
-
-        if not self.sector_list.currentItem() and self.sector_list.count():
+        
+        # 3. 自动选中：如果当前没选中（初次打开或旧选失效），自动选第一个
+        do_auto_select = False
+        if not self.sector_list.currentItem() and self.sector_list.count() > 0:
             self.sector_list.setCurrentRow(0)
+            do_auto_select = True
+            
         self.sector_list.blockSignals(False)
+        
+        # 🚦 强制触发：如果执行了自动选中，手动调用一次选中逻辑（因为 blockSignals 会屏蔽信号）
+        if do_auto_select:
+            self._on_sector_selected(self.sector_list.currentItem(), None)
+        
+        # 4. 更新状态栏
+        sub_cnt = len(self.detector._subscribed)
+        sess = self._session_str()
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
 
     # ------------------------------------------------------------------ sector select
     def _on_sector_selected(self, cur, _prev):
@@ -596,6 +640,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'prices': k_prices,
                 'last_close': r.get('last_close', 0)
             })
+            # 关闭分时走势的编辑功能
+            k_item.setFlags(k_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.stock_table.setItem(i, 5, k_item)
 
             self._set_item(i, 6, r['hint'])
@@ -603,6 +649,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 匹配之前选中的行
             if r['code'] == self._last_selected_code:
                 target_row = i
+
+        # 统一设置所有项为不可编辑 (除特定交互外)
+        for r_idx in range(self.stock_table.rowCount()):
+            for c_idx in range(self.stock_table.columnCount()):
+                it = self.stock_table.item(r_idx, c_idx)
+                if it:
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         # 恢复选中状态
         if target_row >= 0:
@@ -669,6 +722,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._on_sector_selected(cur, None)
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
+        # 双击功能只在分时走势 (Column 5) 上有效
+        if col != 5:
+            return
+
         code_item = self.stock_table.item(row, 0)
         name_item = self.stock_table.item(row, 1)
         if not code_item: return
