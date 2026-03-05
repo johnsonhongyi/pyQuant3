@@ -325,10 +325,11 @@ class HotlistPanel(QWidget, WindowMixin):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setWindowTitle("🔥 热点自选")
         
-        # 可调整大小范围
         self.setMinimumWidth(520)   # [FIX] 提高最小宽度，防止名称列被挤压
         self.setMinimumHeight(250)
-        self.resize(580, 400)      # [OPTIMIZE] Wider default size
+        
+        # 加载保存的位置
+        self.load_window_position_qt(self, "HotlistPanel", default_width=580, default_height=400)
         
         self._init_db()
         # [NEW] Initialize UI first, then apply theme
@@ -522,14 +523,8 @@ class HotlistPanel(QWidget, WindowMixin):
             self.watchlist_table.setStyleSheet(table_style)
     
     def showEvent(self, a0: Optional[QtGui.QShowEvent]):
-        """窗口显示时：加载位置并开启工作线程"""
+        """窗口显示时：开启工作线程"""
         super().showEvent(a0)
-        
-        # 1. 首次显示时加载位置
-        if not getattr(self, '_pos_loaded', False):
-            self._pos_loaded = True
-            # [REFACTOR] Use Unified Loader
-            self.load_window_position_qt(self, "HotlistPanel", default_width=280, default_height=400)
             
         # 2. 确保工作线程运行 (Lazy Start)
         if not self.data_worker.isRunning():
