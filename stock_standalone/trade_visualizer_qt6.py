@@ -5836,8 +5836,8 @@ class MainWindow(QMainWindow, WindowMixin):
             force_full: 是否强制全量刷新 (默认 False)
             changed_codes: 仅更新这些代码的行 (优化点)
         """
-        import time
         start_time = time.time()
+
         
         if df is None or df.empty:
             self.stock_table.setRowCount(0)
