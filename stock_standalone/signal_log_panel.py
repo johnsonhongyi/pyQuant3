@@ -95,8 +95,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._log_buffer: list[str] = []
         # 记录每只股票最后一条信号上下文 {code: {'pattern': p, 'message': m, 'name': n}}
         self._last_signals: dict[str, dict] = {} 
-        # ⚡ [NEW] 时间窗口去重 {f"{code}_{pattern}": timestamp}
+        # 时间窗口去重 {f"{code}_{pattern}": timestamp}
         self._last_signals_time: dict[str, float] = {}
+        # ⚡ [NEW] 记录相同信号的触发次数 {f"{code}_{pattern}": count}
+        self._signal_counts: dict[str, int] = {}
         self._max_lines: int = 500
         
         self._drag_pos: Optional[QPoint] = None
@@ -433,6 +435,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("🔍 信号详细信息")
         msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         msg_box.setText(detail)
         msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
         
@@ -537,7 +540,65 @@ class SignalLogPanel(QWidget, WindowMixin):
         # (4) 移除开头的多余冒号和空格
         clean_msg = re.sub(r'^[:：\s]+', '', clean_msg).strip()
 
-        # 5. 插入表格
+        # 5. 表格去重更新逻辑 (合并相同代码)
+        # 查找最新的 100 行，看是否有相同代码的项
+        found_row = -1
+        for r in range(min(100, self.log_table.rowCount())):
+            code_item = self.log_table.item(r, 2)
+            if code_item and code_item.text() == code:
+                found_row = r
+                break
+                
+        # 更新计数 (按代码累积)
+        self._signal_counts[code] = self._signal_counts.get(code, 0) + 1
+        count = self._signal_counts[code]
+        
+        display_msg = clean_msg
+            
+        if found_row >= 0:
+            # 获取原有的 pattern
+            old_pattern = self.log_table.item(found_row, 1).text()
+            new_pattern = pattern_cn
+            if pattern_cn not in old_pattern:
+                new_pattern = f"{pattern_cn}、{old_pattern}"
+                
+            # 获取原有的 message
+            old_msg = self.log_table.item(found_row, 4).text()
+            old_core_msg = re.sub(r'^\(\d+次\)\s*', '', old_msg)
+            
+            if clean_msg not in old_core_msg:
+                combined_msg = f"{clean_msg} | {old_core_msg}"
+            else:
+                combined_msg = old_core_msg
+                
+            if count > 1:
+                display_msg = f"({count}次) {combined_msg}"
+            else:
+                display_msg = combined_msg
+                
+            # 找到现有行，更新内容和时间
+            self.log_table.item(found_row, 0).setText(now_str)
+            self.log_table.item(found_row, 1).setText(new_pattern)
+            self.log_table.item(found_row, 4).setText(display_msg)
+            
+            # 更新颜色为最新形态颜色
+            for i in range(5):
+                item = self.log_table.item(found_row, i)
+                if item:
+                    item.setForeground(text_color)
+            
+            # 发射日志已添加信号，用于同步语音播报 (即使更新也触发)
+            self.log_added.emit(code, name, pattern, clean_msg)
+            
+            # 若是高优先级或计数达到特定阈值，可选触发闪屏
+            if is_high_priority:
+                self.flash_for_high_priority()
+            return
+
+        # 6. 没有找到现有行，插入新行
+        if count > 1:
+            display_msg = f"({count}次) {clean_msg}"
+            
         row = 0 # 始终在最上方插入最新信号
         self.log_table.insertRow(row)
         
@@ -636,6 +697,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._log_buffer.clear()
         self._last_signals.clear()
         self._last_signals_time.clear()  # [FIX] Clear time deduplication cache
+        self._signal_counts.clear()      # [FIX] Clear signal counts cache
         self.count_label.setText("0")
         self.status_label.setText("就绪")
         
