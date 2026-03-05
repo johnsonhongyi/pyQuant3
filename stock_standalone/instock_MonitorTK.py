@@ -2251,6 +2251,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="策略", command=lambda: self.open_strategy_manager(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)
@@ -2546,6 +2547,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
                             # self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
                     
+                # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
+                if has_update:
+                    now_hm = cct.get_now_time_int()
+                    is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
+
+                    # 在竞价/尾盘时段自动弹出面板（仅初始化一次）
+                    if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
+                        try:
+                            from sector_bidding_panel import SectorBiddingPanel
+                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                            self.sector_bidding_panel.show()
+                            logger.info("📡 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
+                        except Exception as e:
+                            logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
+                            self.sector_bidding_panel = None
+
+                    # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
+                    panel = getattr(self, "sector_bidding_panel", None)
+                    if panel is not None:
+                        try:
+                            panel.on_realtime_data_arrived(self.df_all)
+                        except Exception as e:
+                            logger.error(f"Failed to push data to Sector Bidding Panel: {e}")
+
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
                         if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
@@ -2769,12 +2794,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=lambda: self.open_visualizer(getattr(self, 'select_code', None))
         ).pack(side=tk.LEFT, padx=1)
 
-        ttk.Button(
-            frame_right,
-            text="策略", 
-            width=5,
-            command=self.open_strategy_scan
-        ).pack(side=tk.LEFT, padx=1)
+        # ttk.Button(
+        #     frame_right,
+        #     text="策略", 
+        #     width=5,
+        #     command=self.open_strategy_scan
+        # ).pack(side=tk.LEFT, padx=1)
+
+        # ttk.Button(
+        #     frame_right,
+        #     text="竞价🚀",
+        #     width=6,
+        #     command=self.open_sector_bidding_panel
+        # ).pack(side=tk.LEFT, padx=1)
 
         # Initialize persisted variables that are not bound to main UI buttons immediately
         self.force_d_cycle_var = tk.BooleanVar(value=True)
@@ -2786,6 +2818,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(100, self.update_linkage_status)
 
 
+
+    def open_sector_bidding_panel(self):
+        """手动打开竞价/尾盘板块联动监控面板"""
+        try:
+            if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
+                from sector_bidding_panel import SectorBiddingPanel
+                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                logger.info("📡 手动打开 竞价/尾盘联动监控面板(Tick订阅版)")
+            if self.sector_bidding_panel.isVisible():
+                self.sector_bidding_panel.raise_()
+            else:
+                self.sector_bidding_panel.show()
+            # 立即推一次数据以初始化订阅
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all)
+        except Exception as e:
+            logger.error(f"打开竞价监控面板失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def open_strategy_scan(self):
         """一键打开策略扫描"""

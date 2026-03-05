@@ -88,7 +88,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         # self._migrate_old_history()
         
         # 加载历史到 combo (在 _init_data_tab 中会用到)
-        _, h2, _, h4 = self.query_manager.load_search_history()
+        _, h2, _, h4, *_ = self.query_manager.load_search_history()
         self.history2_list: list[str] = [r["query"] for r in h2]
         self.history4_list: list[str] = [r["query"] for r in h4]
 
@@ -490,7 +490,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 seen.add(f)
         
         # 重新获取最新的 history4_list
-        _, _, _, h4 = self.query_manager.load_search_history()
+        _, _, _, h4, *_ = self.query_manager.load_search_history()
         self.history4_list = [r["query"] for r in h4]
         self.combo_filter['values'] = self.history4_list
         

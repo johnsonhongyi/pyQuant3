@@ -2989,6 +2989,30 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel.show()
             self.hotlist_panel.raise_()
             self.hotlist_panel.activateWindow()
+            
+    # def _open_sector_bidding_panel(self):
+    #     """打开并显示竞价板块联动监控面板"""
+    #     if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
+    #         # 延迟初始化导入，避免循环引用
+    #         try:
+    #             from sector_bidding_panel import SectorBiddingPanel
+    #             self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+    #             logger.info("📡 Sector Bidding Panel Initialized")
+    #         except Exception as e:
+    #             logger.error(f"Failed to initialize Sector Bidding Panel: {e}")
+    #             return
+
+    #     if self.sector_bidding_panel.isVisible():
+    #         self.sector_bidding_panel.raise_()
+    #         self.sector_bidding_panel.activateWindow()
+    #     else:
+    #         self.sector_bidding_panel.show()
+    #         self.sector_bidding_panel.raise_()
+    #         self.sector_bidding_panel.activateWindow()
+            
+    #     # 主动推一次最新的 df_all 数据进去 (防止刚打开时空白)
+    #     if hasattr(self, 'df_all') and not self.df_all.empty:
+    #         self.sector_bidding_panel.on_realtime_data_arrived(self.df_all)
     
     def _add_to_hotlist(self):
         """添加当前股票到热点自选"""
@@ -3222,6 +3246,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 2. 查看历史修正建议
         act_view_log = strategy_menu.addAction("查看策略修正日志")
         act_view_log.triggered.connect(self._view_strategy_correction_log)
+        
+        # # 3. 竞价及尾盘板块联动监控
+        # strategy_menu.addSeparator()
+        # act_sector_bidding = strategy_menu.addAction("竞价及尾盘板块联动监控(一点带面)🚀")
+        # act_sector_bidding.triggered.connect(self._open_sector_bidding_panel)
         
         # 3. 自动分析开关 (可选)
         strategy_menu.addSeparator()
@@ -4630,6 +4659,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # [NEW] 定时更新底部统计信息
         if self.isVisible():
             self.update_bottom_stats()
+            
+        # [NEW] 联动板块监控面板，推送最新 df_all
+        if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel is not None:
+            if self.sector_bidding_panel.isVisible():
+                if hasattr(self, "df_all") and not self.df_all.empty:
+                    self.sector_bidding_panel.on_realtime_data_arrived(self.df_all)
 
     def update_bottom_stats(self):
         """[NEW] 汇总更新底部状态栏统计信息 (支持热点与跟单同步)"""
