@@ -6790,8 +6790,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     log.debug('h5_table:%s' % (h5_table))
 
     if lastpTDX_DF is None or len(lastpTDX_DF) == 0:
-        h5 = h5a.load_hdf_db(h5_fname, table=h5_table,
-                             code_l=codelist, timelimit=False,showtable=showtable)
+        h5 = h5a.load_hdf_db(h5_fname, table=h5_table,code_l=codelist, timelimit=False,showtable=showtable)
         print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
         if h5 is not None and not h5.empty:
             log.debug("load hdf data:%s %s %s" % (h5_fname, h5_table, len(h5)))

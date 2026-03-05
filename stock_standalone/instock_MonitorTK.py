@@ -2832,7 +2832,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.sector_bidding_panel.show()
             # 立即推一次数据以初始化订阅
             if hasattr(self, 'df_all') and not self.df_all.empty:
-                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all)
+                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
         except Exception as e:
             logger.error(f"打开竞价监控面板失败: {e}")
             import traceback

@@ -326,6 +326,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay.addSpacing(4)
         bar_lay.addWidget(self._sep())
 
+        # [NEW] Manual Refresh, Log Toggle, Hide
+        self.btn_refresh = QPushButton("刷新 🔄")
+        self.btn_refresh.setFixedWidth(65)
+        self.btn_refresh.clicked.connect(self.manual_refresh)
+        bar_lay.addWidget(self.btn_refresh)
+
+        self.cb_log = QCheckBox("Log")
+        self.cb_log.setToolTip("开启/关闭后台日志输出")
+        self.cb_log.setChecked(self.detector.enable_log)
+        self.cb_log.stateChanged.connect(self._on_strategy_changed)
+        bar_lay.addWidget(self.cb_log)
+
+        self.btn_hide = QPushButton("隐藏 ✖")
+        self.btn_hide.setFixedWidth(55)
+        self.btn_hide.clicked.connect(self.hide)
+        bar_lay.addWidget(self.btn_hide)
+
+        bar_lay.addWidget(self._sep())
+
         self.status_lbl = QLabel("等待数据...")
         self.status_lbl.setStyleSheet("color:#FFA500;font-weight:bold;")
         bar_lay.addWidget(self.status_lbl)
@@ -372,13 +391,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         rlay.addWidget(self.leader_lbl)
 
         # 个股表（带排序）
-        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '分时走势', '操作']
+        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '分时走势', '形态暗示(安)']
         self.stock_table = QTableWidget(0, len(COLS))
         self.stock_table.setHorizontalHeaderLabels(COLS)
         hdr = self.stock_table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        hdr.sectionClicked.connect(self._on_header_clicked)
+        if hdr:
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            hdr.sectionClicked.connect(self._on_header_clicked)
         self.stock_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.stock_table.customContextMenuRequested.connect(self._show_context_menu)
@@ -397,7 +417,38 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         splitter.setSizes([280, 820])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 1)   # stretch=1 撑满剩余高度
+
+        # ── [NEW] 底部：当日重点表 (Watchlist) ───────────────────────────
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.v_splitter.setChildrenCollapsible(False)
+        self.v_splitter.addWidget(splitter)
+
+        w_group = QGroupBox("📋 当日重点表 (涨停/溢出个股 - 双击/单击联动)")
+        w_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
+        w_lay = QVBoxLayout(w_group)
+        w_lay.setContentsMargins(2, 6, 2, 2)
+        
+        W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因']
+        self.watchlist_table = QTableWidget(0, len(W_COLS))
+        self.watchlist_table.setHorizontalHeaderLabels(W_COLS)
+        self.watchlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.watchlist_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.watchlist_table.setAlternatingRowColors(True)
+        self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
+        self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
+        self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
+        self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
+        
+        # 启用右键菜单支持 (用于联动活跃板块)
+        self.watchlist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.watchlist_table.customContextMenuRequested.connect(self._on_watchlist_context_menu)
+        
+        w_lay.addWidget(self.watchlist_table)
+        self.v_splitter.addWidget(w_group)
+        self.v_splitter.setSizes([500, 180]) # 默认分配比例
+        
+        root.addWidget(self.v_splitter, 1)   # stretch=1 撑满剩余高度
 
     # ------------------------------------------------------------------ helpers
     def _make_cb(self, text: str, key: str, layout: QHBoxLayout) -> QCheckBox:
@@ -424,7 +475,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return f
 
     # ------------------------------------------------------------------ data
-    def on_realtime_data_arrived(self, df_all):
+    def manual_refresh(self):
+        """手动触发评分计算和 UI 刷新 (适用于启动初次加载或收盘后分析)"""
+        try:
+            self.detector.update_scores()
+            self._refresh_sector_list()
+            logger.info("⚡ 已完成手动数据评分刷新")
+        except Exception as e:
+            logger.error(f"Manual refresh failed: {e}")
+
+    def on_realtime_data_arrived(self, df_all, force_update=False):
         """主线程调用，注册订阅、更新评分并同步触发 UI 刷新"""
         try:
             # 1. 更新底层数据与映射
@@ -436,7 +496,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 3. 节流刷新：根据 duration_sleep_time 控制频率
             now = time.time()
             limit = getattr(cct.CFG, 'duration_sleep_time', 5.0)
-            if now - self._last_refresh_ts >= limit:
+            if force_update or (now - self._last_refresh_ts >= limit):
                 self._refresh_sector_list()
                 self._last_refresh_ts = now
 
@@ -526,6 +586,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self, 'status_lbl'):
             self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
 
+        # 5. [NEW] 更新底部重点表
+        self._populate_watchlist()
+
     # ------------------------------------------------------------------ sector select
     def _on_sector_selected(self, cur, _prev):
         if not cur:
@@ -572,7 +635,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             'low_day': data.get('leader_low_day', 0),
             'last_high': data.get('leader_last_high', 0),
             'last_low': data.get('leader_last_low', 0),
-            'hint': '主力拉升'
+            'hint': data.get('pattern_hint', '主力拉升'),
+            'untradable': data.get('is_untradable', False),
+            'is_counter': data.get('is_counter_trend', False)
         }]
         for f in data['followers']:
             rows.append({
@@ -585,7 +650,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'low_day': f.get('low_day', 0),
                 'last_high': f.get('last_high', 0),
                 'last_low': f.get('last_low', 0),
-                'hint': '板块联动'
+                'hint': f.get('pattern_hint', '板块联动'),
+                'untradable': f.get('untradable', False), # Follower untradability not fully tracked yet but added for safety
+                'is_counter': False
             })
 
         # 应用排序
@@ -644,7 +711,27 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             k_item.setFlags(k_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.stock_table.setItem(i, 5, k_item)
 
-            self._set_item(i, 6, r['hint'])
+            hint_str = r['hint']
+            if r['untradable']:
+                hint_str = "🚫一字板 " + hint_str
+            if r['is_counter']:
+                hint_str = "🔥逆势 " + hint_str
+                
+            hint_item = QTableWidgetItem(hint_str)
+            
+            # [Added] 增强颜色提示
+            if "今日主杀" in hint_str or "破均价线" in hint_str:
+                hint_item.setForeground(QColor("#FF1111")) # 亮红提示风险
+            elif "新高" in hint_str or "突破" in hint_str or "放量" in hint_str:
+                hint_item.setForeground(QColor("#FFCC00")) # 金黄色提示异动/突破
+            elif "支撑" in hint_str or "多头" in hint_str:
+                hint_item.setForeground(QColor("#FF99CC")) # 粉紫色提示持仓优势
+            elif r['untradable']:
+                hint_item.setForeground(QColor("#888888")) # 灰色显示不可交易
+            elif r['is_counter']:
+                hint_item.setForeground(QColor("#FFCC00"))
+                
+            self.stock_table.setItem(i, 6, hint_item)
 
             # 匹配之前选中的行
             if r['code'] == self._last_selected_code:
@@ -666,6 +753,151 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _set_item(self, row, col, text):
         self.stock_table.setItem(row, col, QTableWidgetItem(str(text)))
+
+    # ── [NEW] Watchlist Support ──────────────────────────────────────
+    def _populate_watchlist(self):
+        """填充底部当日重点表"""
+        watchlist = self.detector.get_daily_watchlist()
+        
+        # 记录当前选中代码以便恢复
+        selected_code = ""
+        curr_row = self.watchlist_table.currentRow()
+        if curr_row >= 0:
+            item = self.watchlist_table.item(curr_row, 0)
+            if item: selected_code = item.text()
+
+        self.watchlist_table.setRowCount(len(watchlist))
+        target_row = -1
+        
+        for i, w in enumerate(watchlist):
+            # 1. 代码
+            self.watchlist_table.setItem(i, 0, QTableWidgetItem(w['code']))
+            # 2. 名称
+            self.watchlist_table.setItem(i, 1, QTableWidgetItem(w['name']))
+            # 3. 涨幅
+            p_val = w.get('pct', 0)
+            p_item = QTableWidgetItem(f"{p_val:+.2f}%")
+            p_item.setForeground(QColor("#FF4444") if p_val > 0 else QColor("#44CC44"))
+            self.watchlist_table.setItem(i, 2, p_item)
+            # 4. 核心板块
+            s_val = w.get('sector', '')
+            # 过滤掉市场标签
+            market_tags = ['科创板', '创业板', '主板', '中小板', '北证']
+            all_cats = s_val.split(';')
+            cats = [c for c in all_cats if c not in market_tags]
+            sector_short = cats[0] if cats else (all_cats[0] if all_cats else 'N/A')
+            self.watchlist_table.setItem(i, 3, QTableWidgetItem(sector_short))
+            # 5. 触发时间
+            self.watchlist_table.setItem(i, 4, QTableWidgetItem(w.get('time_str', '--:--:--')))
+            # 6. 状态/原因
+            reason = w.get('reason', '')
+            r_item = QTableWidgetItem(reason)
+            if '涨停' in reason:
+                r_item.setForeground(QColor("#FF1493"))
+            self.watchlist_table.setItem(i, 5, r_item)
+
+            if w['code'] == selected_code:
+                target_row = i
+
+        # 设置不可编辑
+        for r_idx in range(self.watchlist_table.rowCount()):
+            for c_idx in range(self.watchlist_table.columnCount()):
+                it = self.watchlist_table.item(r_idx, c_idx)
+                if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        if target_row >= 0:
+            # 仅当当前没有选中行，或者选中行变动时，才恢复选中
+            # 避免实时刷新时反复 setCurrentCell 导致滚动跳动
+            if self.watchlist_table.currentRow() != target_row:
+                self.watchlist_table.blockSignals(True)
+                self.watchlist_table.setCurrentCell(target_row, 0)
+                self.watchlist_table.blockSignals(False)
+
+    def _on_watchlist_clicked(self, row, col):
+        """重点表联动"""
+        item = self.watchlist_table.item(row, 0)
+        if item:
+            code = item.text()
+            self._link_code(code, focus_widget=self.watchlist_table)
+
+    def _on_watchlist_dblclick(self, row, col):
+        """重点表双击：对应列执行不同动作"""
+        # 1. 如果是代码(0)或名称(1)列，弹出详细走势图 (与主表一致)
+        if col <= 1:
+            code_item = self.watchlist_table.item(row, 0)
+            name_item = self.watchlist_table.item(row, 1)
+            if code_item and name_item:
+                code, name = code_item.text(), name_item.text()
+                klines = self._follower_klines(code)
+                # 尽量匹配 meta
+                meta = {'sector': self.watchlist_table.item(row, 3).text() if self.watchlist_table.item(row, 3) else 'N/A'}
+                dlg = DetailedChartDialog(code, name, klines, meta, parent=self)
+                dlg.exec()
+        
+        # 2. 如果是核心板块(3)列，仅执行复制 (联动改为右键)
+        elif col == 3:
+            item = self.watchlist_table.item(row, col)
+            if item:
+                sector_name = item.text()
+                # 去除末尾可能存在的空格
+                sector_name = sector_name.strip()
+                self._copy_to_clipboard(sector_name)
+                # 状态栏提示仅显示复制
+                if hasattr(self, 'status_lbl'):
+                    sess = self._session_str()
+                    self.status_lbl.setText(f"[{sess}] 📋 已复制板块: {sector_name}")
+
+    def _on_watchlist_context_menu(self, pos):
+        """重点表右键点击：联动到活跃板块"""
+        item = self.watchlist_table.itemAt(pos)
+        if not item: return
+        
+        row = item.row()
+        col = item.column()
+        
+        # 仅在点击核心板块列(3)时触发联动
+        if col == 3:
+            sector_name = item.text().strip()
+            if not sector_name: return
+            
+            # 自动联动到活跃板块列表
+            target_sector = None
+            # 兼容多板块字符串
+            parts = [p.strip() for p in sector_name.split(';') if p.strip()]
+            
+            # 遍历左侧列表项寻找匹配
+            found = False
+            for i in range(self.sector_list.count()):
+                list_item = self.sector_list.item(i)
+                sn = list_item.data(Qt.ItemDataRole.UserRole)
+                if sn in parts or any(p in sn for p in parts) or sn == sector_name:
+                    self.sector_list.setCurrentItem(list_item)
+                    # 联动后焦点保留在重点表
+                    self.watchlist_table.setFocus()
+                    found = True
+                    target_sector = sn
+                    break
+            
+            # 状态栏提示结果
+            if hasattr(self, 'status_lbl'):
+                sess = self._session_str()
+                if found:
+                    self.status_lbl.setText(f"[{sess}] 🔗 已联动活跃板块: {target_sector}")
+                else:
+                    self.status_lbl.setText(f"[{sess}] ❌ 未在活跃板块中匹配到: {sector_name}")
+
+    def _on_watchlist_cell_changed(self, row, col, old_row, old_col):
+        """重点表键盘光标联动"""
+        if self._is_populating or row < 0 or row == old_row:
+            return
+        if not self.watchlist_table.hasFocus():
+            return
+        item = self.watchlist_table.item(row, 0)
+        if item:
+            code = item.text()
+            # 键盘切换时延迟触发联动，防止快速连续按键卡顿
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self._link_code(code, focus_widget=self.watchlist_table))
 
     def _follower_klines(self, code: str) -> List[dict]:
         with self.detector._lock:
@@ -783,9 +1015,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         code_item = self.stock_table.item(row, 0)
         if code_item:
             code = code_item.text()
-            self._link_code(code)
+            self._link_code(code, focus_widget=self.stock_table)
 
-    def _link_code(self, code: str):
+    def _link_code(self, code: str, focus_widget=None):
         """将股票代码同步联动到主界面或外挂工具"""
         host = self.main_window
         if not host: return
@@ -804,8 +1036,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if hasattr(host, 'sender') and host.sender:
                 host.sender.send(code)
         
-            # 4. 联动后强制将焦点拿回来，支持左右手配合操作
-            if self.stock_table.isVisible():
+            # 4. [FIX] 根据来源恢复焦点，点击哪里光标留在哪里
+            if focus_widget and focus_widget.isVisible():
+                focus_widget.setFocus()
+            elif not focus_widget and self.stock_table.isVisible():
+                # 默认回退到个股表
                 self.stock_table.setFocus()
             
             # 更新状态记录
@@ -887,6 +1122,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         s['surge_vol']['min_ratio']    = self.spin_vol_ratio.value()
         s['pct_change']['min']         = self.spin_pct_min.value()
         s['pct_change']['max']         = self.spin_pct_max.value()
+        
+        # [NEW] Log state
+        if hasattr(self, 'cb_log'):
+            self.detector.enable_log = self.cb_log.isChecked()
 
     # ------------------------------------------------------------------ window state
     def _restore_geometry(self):

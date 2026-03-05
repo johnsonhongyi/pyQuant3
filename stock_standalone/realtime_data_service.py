@@ -585,25 +585,68 @@ class DailyEmotionBaseline:
                 status_detail = ""
                 # 7. [New] 突破上轨或强势洗盘回踩
                 upper = float(row.get('upper', 0))
-                boll = int(row.get('boll', 0))
-                red = int(row.get('red', 0))
-                gren = int(row.get('gren', 0))
-                win = int(row.get('win', 0))
+                dist_h_l = float(row.get('dist_h_l', 0)) # 振幅
                 price = float(row.get('trade', row.get('close', 0)))
-                ma5 = float(row.get('ma5', 0))
+                ma5 = float(row.get('ma5d', 0))
+                ma60 = float(row.get('ma60d', 0))
+                last_high = float(row.get('last_high', 0))
+                last_low = float(row.get('last_low', 0))
+                last_close = float(row.get('last_close', 0))
 
-                if upper > 0 and price >= upper:
+                # 判断形态结构 (Structural Patterns)
+                is_v_reversal = False
+                if last_close > 0 and price > last_low:
+                     # V反识别：前一日振幅大且有杀跌，今日高开或收回连阳上方
+                     if dist_h_l > 4.0 and price >= last_close:
+                         is_v_reversal = True
+                         score += 15
+
+                # 领涨龙头特征：过ma60且过两日高点
+                ma20 = float(row.get('ma20d', 0)) # 提取 MA20
+                is_ma60_rev = ma60 > 0 and last_close < ma60 and price > ma60
+                is_ma20_rev = ma20 > 0 and last_close < ma20 and price > ma20
+                
+                is_breakthrough = False
+                if (ma60 > 0 and price > ma60) and last_high > 0 and price > last_high:
+                    is_breakthrough = True
+                    score += 10
+
+                # 安全等级基础分 (0-5)
+                safety = 3.0
+                if is_ma60_rev: 
                     score += 15
-                    status_detail = f"上轨:{boll}红:{red}绿{gren}"
+                    safety += 1.0
+                if is_ma20_rev:
+                    score += 10
+                    safety += 0.5
+                if ma20 > ma60 > 0 and price > ma20: safety += 0.5 # 处于多头通道更安全
+                
+                # 振幅/回撤过大则扣安全分
+                if dist_h_l > 8.0: safety -= 0.5
+
+                if is_ma60_rev:
+                    status_detail = f"MA60反转:{int(win)}阳"
+                elif is_ma20_rev:
+                    status_detail = f"MA20反转:{int(win)}阳"
+                elif is_v_reversal:
+                    status_detail = f"V反突破:{int(win)}阳"
+                elif is_breakthrough:
+                    status_detail = f"趋势翻转:{int(win)}阳"
+                elif upper > 0 and price >= upper:
+                    score += 15
+                    status_detail = f"上轨突破:{int(win)}阳"
                 elif ma5 > 0 and price > 0:
-                    # 强势洗盘: 连阳后缩量回踩 MA5
                     dist_ma5 = (price - ma5) / ma5
                     vol_ratio = float(row.get('vol_ratio', row.get('ratio', 1.0)))
                     if -0.015 <= dist_ma5 <= 0.02 and vol_ratio < 1.0 and win >= 2:
                         score += 20
-                        status_detail = f"缩量:{win}红:{red}绿{gren}"
+                        status_detail = f"缩量回踩:{int(win)}阳"
                 else:
-                    status_detail = f"震荡:{win}红:{red}绿{gren}"
+                    status_detail = f"震荡:{int(win)}阳"
+                
+                # 附加安全等级显示
+                status_detail += f" (安:{min(5.0, safety):.1f})"
+
                 # 最终限制
                 self._baselines[code_str] = max(10.0, min(100.0, score))
                 self._baseline_details[code_str] = status_detail
@@ -615,7 +658,12 @@ class DailyEmotionBaseline:
             logger.error(f"Calculate Baseline Error: {e}")
 
     def get_baseline(self, code: str) -> float:
-        return self._baselines.get(str(code), 50.0)
+        code_str = str(code).zfill(6)
+        return self._baselines.get(code_str, 50.0)
+
+    def get_baseline_detail(self, code: str) -> str:
+        code_str = str(code).zfill(6)
+        return self._baseline_details.get(code_str, "")
         
     def get_all_baselines(self) -> dict[str, float]:
         return self._baselines
