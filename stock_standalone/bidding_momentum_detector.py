@@ -30,7 +30,7 @@ class TickSeries:
     """
     __slots__ = ('code', 'klines', 'last_close', 'last_high', 'last_low', 
                  'open_price', 'high_day', 'low_day', 'ma20', 'ma60', 
-                 'category', 'name', 'score')
+                 'category', 'name', 'score', 'first_breakout_ts')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -46,6 +46,7 @@ class TickSeries:
         self.category: str = ''
         self.name: str = ''
         self.score: float = 0.0
+        self.first_breakout_ts: float = 0.0 # 记录当日首次异动的时间戳
 
     def update_meta(self, row: pd.Series):
         """从 df_all 行更新元数据"""
@@ -245,22 +246,28 @@ class BiddingMomentumDetector:
         score = 0.0
         latest = klines[-1]
         cur_close = float(latest.get('close', 0.0))
+        cur_vol = float(latest.get('volume', 0.0))
         cur_open_bar = float(latest.get('open', cur_close))  # 当根k棒开盘
         day_open = float(ts_obj.open_price) or float(klines[0].get('open', cur_close))
-
-        # --- 1. 高开检查 ---
+        
+        # 0. 周期因子 (Cycle Factor): 处于 MA20 之上且 MA20 向上，属于强周期
+        cycle_score = 0.0
+        if ma20 > 0 and cur_close > ma20:
+            cycle_score += 2.0
+            # 如果也站在 MA60 之上，增加持续性评分
+            if ma60 > 0 and cur_close > ma60:
+                cycle_score += 1.0
+        
+        # 1. 竞价/开盘高开强度
         high_open_pct = (day_open - last_close) / last_close * 100 if last_close > 0 else 0.0
-        if self.strategies['ma_rebound']['enabled']:
-            # 昨收回踩 MA20/MA60 范围内（2% 容差）且今日高开
-            near_ma = False
-            if ma20 > 0 and abs(last_close - ma20) / ma20 < 0.03:
-                near_ma = True
-            if ma60 > 0 and abs(last_close - ma60) / ma60 < 0.03:
-                near_ma = True
-            if near_ma and high_open_pct > 1.0:
-                score += 3.0  # 回踩反弹形态
-            elif high_open_pct > 2.0:
-                score += 1.5  # 普通高开
+        bidding_score = 0.0
+        if high_open_pct > 2.0:
+            bidding_score += 2.0
+            if high_open_pct > 5.0: bidding_score += 1.5
+        
+        # 逆势/强势：今日开盘即站在昨日最高价之上
+        if day_open > ts_obj.last_high and ts_obj.last_high > 0:
+            bidding_score += 2.0
 
         # --- 2. 涨幅过滤 ---
         cur_pct = (cur_close - last_close) / last_close * 100 if last_close > 0 else 0.0
@@ -309,9 +316,16 @@ class BiddingMomentumDetector:
             if not (a_min <= amplitude <= a_max):
                 score = 0.0
 
+        # --- 7. 时间因子与首次异动记录 ---
+        final_score = cycle_score + bidding_score + score
+        
         with self._lock:
+            # 如果分数达到门槛且是首次异动，记录时间（用于认定龙头）
+            if final_score >= 5.0 and ts_obj.first_breakout_ts == 0:
+                ts_obj.first_breakout_ts = time.time()
+            
             if code in self._tick_series:
-                self._tick_series[code].score = score
+                self._tick_series[code].score = final_score
 
     # =========================================================
     # 内部：板块聚合
@@ -328,7 +342,8 @@ class BiddingMomentumDetector:
             # 复制评分快照，以及走势图所需的元数据
             snap = {code: (ts.score, ts.current_pct, ts.current_price,
                            ts.name, ts.category, ts.last_close,
-                           ts.high_day, ts.low_day, ts.last_high, ts.last_low)
+                           ts.high_day, ts.low_day, ts.last_high, ts.last_low,
+                           ts.first_breakout_ts)
                     for code, ts in self._tick_series.items()}
 
         # 板块黑名单（屏蔽宽泛、非具体行业/概念板块）
@@ -342,7 +357,7 @@ class BiddingMomentumDetector:
         # 按板块聚合
         import re
         sector_stocks: Dict[str, List[dict]] = defaultdict(list)
-        for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo) in snap.items():
+        for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo, fbts) in snap.items():
             if score < SCORE_THRESHOLD:
                 continue
             parts = re.split(r'[;；,，/\- ]', cat)
@@ -357,7 +372,7 @@ class BiddingMomentumDetector:
                     'code': code, 'score': score,
                     'pct': pct, 'price': price, 'name': name,
                     'last_close': lc, 'high_day': hi, 'low_day': lo,
-                    'last_high': lhi, 'last_low': llo
+                    'last_high': lhi, 'last_low': llo, 'first_breakout_ts': fbts
                 })
 
         now_ts = time.time()
@@ -367,64 +382,105 @@ class BiddingMomentumDetector:
             if not stocks:
                 continue
             
-            # 排序寻找该板块内的最佳候选人（最高异动分）
-            stocks.sort(key=lambda x: x['score'], reverse=True)
-            leader = stocks[0]
-            leader_code = leader['code']
+            # --- 板块内分析 ---
+            # 1. 寻找领涨股 (带量上攻基础分 + 先发时间奖励 - 尾盘回落惩罚)
+            for s in stocks:
+                base_score = s.get('score', 0)
+                # 计算回撤惩罚: (日内最高价 - 现价) / 昨收 => 回撤幅度
+                drawdown_pct = 0.0
+                if s['last_close'] > 0 and s['high_day'] > 0:
+                    drawdown_pct = max(0, (s['high_day'] - s['price']) / s['last_close'] * 100)
+                
+                penalty = drawdown_pct * 3.0 # 回撤 1% 扣 3分
 
-            # 只有板块内有实质性异动的股（score > 4.0）超过一定比例或一定数量，才认为该板块有意义
-            # 这样可以过滤掉零星个股带动的干扰板块
-            high_score_stocks = [s for s in stocks if s['score'] >= 4.0]
-            if not high_score_stocks:
-                continue
+                # 计算先发奖励: 板块内最早起动的给分
+                time_bonus = 0.0
+                if s['first_breakout_ts'] > 0:
+                    # 距离 now 的时间差（假设备选里最早的能获得更高分）
+                    time_bonus = 5.0 # 会在后面二次排序后再细化，这里先给基础活跃分
 
-            # 找跟随股：同板块内其他涨幅 > 0 的股
-            followers = []
-            for c in self.sector_map.get(sector, set()):
-                if c == leader_code:
-                    continue
+                s['leader_score'] = base_score + s['pct'] * 0.5 - penalty + time_bonus
+
+            # 二次筛选真正龙头
+            stocks.sort(key=lambda x: x['leader_score'], reverse=True)
+            candidate_leader = stocks[0]
+            leader_code = candidate_leader['code']
+
+            # 评估同步率 (Follow Ratio) - 对应 tk 中的相关性逻辑
+            # 计算该概念中涨幅 > 0 的股票比例
+            all_member_codes = self.sector_map.get(sector, set())
+            active_member_count = 0
+            total_pct = 0.0
+            
+            for c in all_member_codes:
                 if c in snap:
-                    _, f_pct, f_price, f_name, _, f_lc, f_hi, f_lo, f_lhi, f_llo = snap[c]
+                    _, f_pct, _, _, _, _, _, _, _, _, _ = snap[c]
                     if f_pct > 0:
-                        followers.append({
-                            'code': c, 'name': f_name,
-                            'pct': f_pct, 'price': f_price,
-                            'last_close': f_lc, 'high_day': f_hi, 'low_day': f_lo,
-                            'last_high': f_lhi, 'last_low': f_llo
-                        })
+                        active_member_count += 1
+                        total_pct += f_pct
+            
+            follow_ratio = active_member_count / len(all_member_codes) if all_member_codes else 0
+            avg_pct = total_pct / len(all_member_codes) if all_member_codes else 0
+
+            # 2. 板块入场门槛筛选: 
+            # 必须有异动股 (score>=5.0) 或者是整体跟随度极高 (FollowRatio > 0.6)
+            high_score_stocks = [s for s in stocks if s['score'] >= 5.0]
+            
+            # 如果板块内强力异动股不足或跟随度太低，视为杂毛，不予显示
+            if len(high_score_stocks) < 1 and follow_ratio < 0.4:
+                continue
+                
+            # 3. 确定板块标签逻辑
+            tags = []
+            # 获取龙头对象
+            l_ts = self._tick_series.get(leader_code)
+            if l_ts:
+                day_open = l_ts.open_price or (list(l_ts.klines)[0].get('open') if l_ts.klines else 0)
+                # 高开 tag
+                if (day_open - l_ts.last_close) / l_ts.last_close > 0.03 and l_ts.last_close > 0:
+                    tags.append("高开")
+                # 高走 tag (当前价 > 开盘价)
+                if l_ts.current_price > day_open > 0:
+                    tags.append("高走")
+                # 逆势 tag (全板块平均涨幅显著强于市场或处于强周期)
+                if avg_pct > 2.0:
+                    tags.append("强势")
+                # 反转 tag (昨日跌今日强)
+                if l_ts.last_close < l_ts.last_low * 1.01 and candidate_leader['pct'] > 3:
+                     tags.append("反转")
+
+            # 4. 板块最终强度分 = 龙头分 + 跟随分 + 关联度修正
+            board_score = candidate_leader['score'] * 1.2 + avg_pct * 3.0 + follow_ratio * 15.0
+            
+            # 5. 准备跟随股列表
+            followers = []
+            for c in all_member_codes:
+                if c == leader_code: continue
+                if c in snap:
+                     _, f_pct, f_price, f_name, _, f_lc, f_hi, f_lo, f_lhi, f_llo, f_fbts = snap[c]
+                     followers.append({
+                        'code': c, 'name': f_name, 'pct': f_pct, 'price': f_price,
+                        'last_close': f_lc, 'high_day': f_hi, 'low_day': f_lo,
+                        'last_high': f_lhi, 'last_low': f_llo, 'first_breakout_ts': f_fbts
+                     })
             followers.sort(key=lambda x: x['pct'], reverse=True)
 
-            # [OPTIM] 增强板块评分逻辑：
-            # 基础分 = 龙头异动分
-            # 附加分1 = 强力跟风股数量 (score>=4.0的个数越多，板块强度越高)
-            # 附加分2 = 涨幅溢价
-            board_score = leader['score'] * 1.5 + len(high_score_stocks) * 2.5 + leader['pct'] * 0.5
-            
-            # 过滤单兵作战：如果板块内只有一个强票，且跟随股不多（<2），且基础评分不够高，则略过
-            if len(high_score_stocks) < 2 and len(followers) < 3 and board_score < 15:
-                continue
-
-            # 获取龙头最近 K 线用于 UI 展示
+            # 获取龙头走势
             leader_klines: List[dict] = []
             with self._lock:
-                ts_obj = self._tick_series.get(leader_code)
-                if ts_obj:
-                    leader_klines = list(ts_obj.klines)[-20:]
+                if l_ts: leader_klines = list(l_ts.klines)[-20:]
 
             new_active[sector] = {
                 'sector': sector,
                 'score': round(board_score, 2),
+                'tags': " ".join(tags),
+                'follow_ratio': round(follow_ratio, 2),
                 'leader': leader_code,
-                'leader_name': leader['name'],
-                'leader_pct': round(leader['pct'], 2),
-                'leader_price': leader['price'],
-                'leader_last_close': leader.get('last_close', 0),
-                'leader_high_day': leader.get('high_day', 0),
-                'leader_low_day': leader.get('low_day', 0),
-                'leader_last_high': leader.get('last_high', 0),
-                'leader_last_low': leader.get('last_low', 0),
+                'leader_name': candidate_leader['name'],
+                'leader_pct': round(candidate_leader['pct'], 2),
+                'leader_price': candidate_leader['price'],
                 'leader_klines': leader_klines,
-                'followers': followers[:12],  # 跟随股限制适中
+                'followers': followers[:15],
                 'ts': now_ts,
             }
 
