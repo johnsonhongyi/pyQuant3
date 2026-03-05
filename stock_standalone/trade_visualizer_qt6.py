@@ -9458,7 +9458,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- 3. 启动新进程 ---
             logger.info("Launching History Manager...")
-            self.history_manager_process = multiprocessing.Process(target=history_manager.run_manager_process)
+            self.history_manager_process = multiprocessing.Process(target=history_manager.run_manager_process, kwargs={'df_all': getattr(self, 'df_all', None)})
             self.history_manager_process.daemon = False 
             self.history_manager_process.start()
             logger.info(f"History Manager launched (PID: {self.history_manager_process.pid})")

@@ -40,13 +40,14 @@ class QueryHistoryManager:
     def __init__(self, root=None, search_var1=None, search_var2=None, search_var3=None, search_var4=None, search_var5=None,
                  search_combo1=None, search_combo2=None, search_combo3=None, search_combo4=None, search_combo5=None,
                  auto_run=False, history_file="query_history.json",
-                 sync_history_callback=None, test_callback=None):
+                 sync_history_callback=None, test_callback=None, df_all=None):
         """
         root=None 时不创建窗口，只管理数据
         auto_run=True 时直接打开编辑窗口
         """
         self.root = root
         self.history_file = history_file
+        self.df_all = df_all
         self.search_var1 = search_var1
         self.search_var2 = search_var2
         self.search_var3 = search_var3
@@ -794,14 +795,65 @@ class QueryHistoryManager:
         for record in self.current_history: record.pop("hit", None)
 
     def on_test_click(self):
-        if callable(self.test_callback): self.test_callback(onclick=True)
+        if callable(self.test_callback):
+            self.test_callback(onclick=True)
+        else:
+            self.on_test_code(onclick=True)
+
+    def on_test_code(self, onclick=False):
+        code = self.entry_query.get().strip()
+        result = getattr(self, "_Categoryresult", "")
+
+        if code and code == result:
+            df_code = self.df_all
+        elif code and not (code.isdigit() and len(code) == 6):
+            df_code = self.df_all
+        elif code and code.isdigit() and len(code) == 6:
+            if not hasattr(self, "_select_on_test_code"):
+                self._select_on_test_code = None
+
+            if self._select_on_test_code != code:
+                self._select_on_test_code = code
+                if self.df_all is not None:
+                    df_code = self.df_all.loc[self.df_all.index == code]
+                    from stock_logic_utils import check_code
+                    results = check_code(self.df_all, code, self.search_var1.get() if self.search_var1 else "")
+                else:
+                    df_code = None
+            else:
+                if onclick:
+                    if self.df_all is not None:
+                        df_code = self.df_all.loc[self.df_all.index == code]
+                        from stock_logic_utils import check_code
+                        results = check_code(self.df_all, code, self.search_var1.get() if self.search_var1 else "")
+                        logger.info(f'check_code: {results}')
+                    else:
+                        df_code = None
+
+                    if hasattr(self, "tree_scroll_to_code"):
+                        self.tree_scroll_to_code(code)
+                    if hasattr(self, "kline_monitor") and self.kline_monitor and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
+                        self.kline_monitor.tree_scroll_to_code_kline(code)
+                else:
+                    df_code = self.df_all
+        else:
+            df_code = self.df_all
+
+        if df_code is not None:
+            results = self.test_code(df_code)
+
+            for i, r in enumerate(results):
+                if i < len(self.current_history):
+                    self.current_history[i]["hit"] = r.get("hit", "")
+
+            self.refresh_tree()
 
     def test_code(self, code_data):
         queries = getattr(self, "current_history", [])
         return test_code_against_queries(code_data, queries)
 
 
-def run_manager_process(history_path=None):
+def run_manager_process(history_path=None, df_all=None):
     """
     独立进程入口点，用于启动历史查询管理器
     """
@@ -880,7 +932,8 @@ def run_manager_process(history_path=None):
     manager = QueryHistoryManager(
         root=root, 
         auto_run=True,
-        history_file=history_path
+        history_file=history_path,
+        df_all=df_all
     )
     
     # Debug: Print loaded history count
