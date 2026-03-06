@@ -3960,7 +3960,7 @@ class StockLiveStrategy:
             self._voice.say("手动热点选股强制启动")
             logger.info("Manual Hotspot Selection Triggered (Independent Batch)")
             if hasattr(self, 'df'):
-                self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
+                self.executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5, is_manual=True)
                 self._voice.say(f"手动执行热点筛选{MAX_DAILY_ADDITIONS}只")
                 # 确保 concept_top5 不为 None
                 if concept_top5 is not None:
@@ -4053,15 +4053,13 @@ class StockLiveStrategy:
 
             # 1. State: IDLE - 需要选股
             if self.batch_state == "IDLE":
-                msg = self._import_hotspot_candidates(concept_top5=concept_top5)
-                if "成功导入" in msg:
-                    self.batch_state = "WAITING_ENTRY"
-                    self.batch_start_time = now
-                    self._voice.say(f"新一轮五只优选股已就位")
-                elif "StockSelector不可用" in msg:
-                    pass
-                else:
-                    logger.info(f"Auto Loop: Import failed/skipped: {msg}")
+                if getattr(self, '_is_importing_hotspot', False):
+                    # Already importing, wait
+                    return
+                
+                self._is_importing_hotspot = True
+                self.executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5)
+                # the async method will update the state to WAITING_ENTRY on success
 
             # 2. State: WAITING_ENTRY - 等待建仓
             elif self.batch_state == "WAITING_ENTRY":
@@ -4098,6 +4096,24 @@ class StockLiveStrategy:
         # 过滤出 status='OPEN' 且 code 在 self.current_batch 中的
         holding = [t for t in trades if t['status'] == 'OPEN' and str(t.get('code')).zfill(6) in self.current_batch]
         return len(holding)
+
+    def _import_hotspot_candidates_async(self, concept_top5: Optional[list[Any]] = None, is_manual: bool = False):
+        try:
+            msg = self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=is_manual)
+            now = time.time()
+            if "成功导入" in msg:
+                if not is_manual:
+                    self.batch_state = "WAITING_ENTRY"
+                    self.batch_start_time = now
+                self._voice.say(f"新一轮优选股已就位")
+            elif "StockSelector不可用" in msg:
+                pass
+            else:
+                logger.info(f"Auto Loop: Import failed/skipped: {msg}")
+        except Exception as e:
+            logger.error(f"Async hotspot import failed: {e}")
+        finally:
+            self._is_importing_hotspot = False
 
     def _import_hotspot_candidates(self, concept_top5: Optional[list[Any]] = None, is_manual: bool = False) -> str:
         """

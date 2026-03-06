@@ -2443,7 +2443,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         try:
             if self.refresh_enabled:
-                has_update = False
+                
+                # If we are already processing data async, skip this cycle
+                if getattr(self, '_is_processing_tree_data', False):
+                    return
+                
                 latest_df = None
 
                 # 📂 确保 K 线缓存周期性保存 (即便没有新数据进入队列)
@@ -2461,137 +2465,161 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         break
                 
                 if latest_df is not None:
-                    df = latest_df
-                    # 🔌 在主进程同步更新 DataPublisher
-                    if hasattr(self, 'realtime_service') and self.realtime_service:
-                        try:
-                            self.realtime_service.update_batch(df)
-                            
-                            # [NEW] 获取实时情绪分 (High Performance)
-                            # 确保有 code 列用于映射
-                            if 'code' not in df.columns:
-                                df['code'] = df.index.astype(str)
-                            
-                            codes = df['code'].tolist()
-                            scores = self.realtime_service.get_emotion_scores(codes)
-                            df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
-
-                        except Exception as e:
-                            logger.error(f"Main process realtime update error: {e}")
-
-                    if self.sortby_col is not None:
-                        df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    
-                    if not df.empty:
-                        time_s = time.time()
-                        df = detect_signals(df)
-                        
-                        cur_res = self.global_values.getkey("resample") or 'd'
-                        if 'resample' not in df.columns:
-                            df['resample'] = cur_res
-                            
-                        self.df_all = df  # 直接引用，减少 copy
-                        has_update = True
-                        
-                        if hasattr(self, 'selector') and self.selector:
-                            self.selector.df_all_realtime = self.df_all
-                            self.selector.resample = cur_res
-
-                        logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
-                        
-                        if not hasattr(self, "_restore_done"):
-                            self._restore_done = True
-                            self._schedule_after(2000, self.restore_all_monitor_windows)
-                            self._schedule_after(10000, self._check_ext_data_update)
-                            self._schedule_after(30000, self.KLineMonitor_init)
-                            self._schedule_after(60000, self.schedule_15_30_job)
-
-                        if self.search_var1.get() or self.search_var2.get():
-                            self.apply_search()
-                        else:
-                            self.refresh_tree(self.df_all)
-                        
-                        self.update_all_top10_windows()
-                        
-                        # 🧹 周期性手动 GC
-                        if not hasattr(self, '_update_count'): self._update_count = 0
-                        self._update_count += 1
-                        if self._update_count % 10 == 0:
-                            gc.collect()
-                            
-                # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
-                # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
-                if has_update and getattr(self, 'live_strategy', None) is not None:
-                    self._schedule_after(2000, self._start_feedback_listener)
-                    if not (915 < cct.get_now_time_int() < 920):
-                        # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
-                        if self._live_strategy_first_run:
-                            # 第一次：延迟执行
-                            self._live_strategy_first_run = False
-                            # res = self.global_values.getkey("resample")
-                            # [FIX] Voice Alert Management cycle is 'd'. Ensure we check 'd' alerts even if UI is '3d'.
-                            target_res = 'd'
-                            # If toggle exists and is unchecked, use actual current resample
-                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
-                                target_res = self.global_values.getkey("resample")
-                            self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
-                            # self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res) if self.live_strategy else None)
-                        else:
-                            # 后续：立即执行
-                            # res = self.global_values.getkey("resample")
-                            target_res = 'd'
-                            # If toggle exists and is unchecked, use actual current resample
-                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
-                                target_res = self.global_values.getkey("resample")
-
-                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
-                            # self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
-                    
-                # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
-                if has_update:
-                    now_hm = cct.get_now_time_int()
-                    is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
-
-                    # 在竞价/尾盘时段自动弹出面板（仅初始化一次）
-                    if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
-                        try:
-                            from sector_bidding_panel import SectorBiddingPanel
-                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                            self.sector_bidding_panel.show()
-                            logger.info("📡 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
-                        except Exception as e:
-                            logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
-                            self.sector_bidding_panel = None
-
-                    # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
-                    panel = getattr(self, "sector_bidding_panel", None)
-                    if panel is not None:
-                        try:
-                            panel.on_realtime_data_arrived(self.df_all)
-                        except Exception as e:
-                            logger.error(f"Failed to push data to Sector Bidding Panel: {e}")
-
-                if has_update:
-                    if self._last_resample != self.global_values.getkey("resample"):
-                        if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
-                            logger.debug(f'[send_df] resample:{self._last_resample} to {self.global_values.getkey("resample")} change force full send init df_first_send_done to False now:{self._df_first_send_done}')
-                            if hasattr(self, 'df_ui_prev'):
-                                del self.df_ui_prev  # 删除缓存，模拟初始化
-                            self._last_resample = self.global_values.getkey("resample")
-                            if self.viz_command_queue:
-                                self.viz_command_queue = None
-                            self._df_first_send_done = False
-                            if self.last_vis_var_status:
-                                self.vis_var.set(True)
-                                self.last_vis_var_status = None
-                            # self.vis_var.set(True)
-                    # -------------------------
-                    self.status_var2.set(f'queue update: {self.format_next_time()}')
+                    self._is_processing_tree_data = True
+                    # Offload the heavy Pandas operations and IPC to a thread
+                    if not hasattr(self, 'executor'):
+                        from concurrent.futures import ThreadPoolExecutor
+                        self.executor = ThreadPoolExecutor(max_workers=5)
+                    self.executor.submit(self._process_tree_data_async, latest_df)
 
         except Exception as e:
-            logger.error(f"Error updating tree: {e}", exc_info=True)
+            logger.error(f"Error starting tree update: {e}", exc_info=True)
         finally:
+            # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
+
+    def _process_tree_data_async(self, df):
+        """Asynchronously process dataframe (detect signals) to avoid blocking Tkinter main loop."""
+        try:
+            # 🔌 在主进程同步更新 DataPublisher
+            if hasattr(self, 'realtime_service') and self.realtime_service:
+                try:
+                    self.realtime_service.update_batch(df)
+                    
+                    # [NEW] 获取实时情绪分 (High Performance)
+                    # 确保有 code 列用于映射
+                    if 'code' not in df.columns:
+                        df['code'] = df.index.astype(str)
+                    
+                    codes = df['code'].tolist()
+                    scores = self.realtime_service.get_emotion_scores(codes)
+                    df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
+
+                except Exception as e:
+                    logger.error(f"Main process realtime update error: {e}")
+
+            if getattr(self, 'sortby_col', None) is not None:
+                # Need to read sortby_col safely, it's modified in main thread
+                df = df.sort_values(by=self.sortby_col, ascending=getattr(self, 'sortby_col_ascend', False))
+            
+            if not df.empty:
+                time_s = time.time()
+                df = detect_signals(df)
+                
+                cur_res = self.global_values.getkey("resample") or 'd'
+                if 'resample' not in df.columns:
+                    df['resample'] = cur_res
+                    
+                logger.info(f'detect_signals async duration time:{time.time()-time_s:.2f}')
+                
+                # Now that data crunching is done, schedule the UI update back on the main thread
+                self._schedule_after(0, lambda: self._apply_tree_data_sync(df, cur_res))
+            else:
+                 self._is_processing_tree_data = False
+
+        except Exception as e:
+            logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
+            self._is_processing_tree_data = False
+
+    def _apply_tree_data_sync(self, df, cur_res):
+        """Sync step: update internal state and Tkinter UI on the main thread."""
+        try:
+            self.df_all = df  # 直接引用，减少 copy
+            has_update = True
+            
+            if hasattr(self, 'selector') and self.selector:
+                self.selector.df_all_realtime = self.df_all
+                self.selector.resample = cur_res
+
+            if not hasattr(self, "_restore_done"):
+                self._restore_done = True
+                self._schedule_after(2000, self.restore_all_monitor_windows)
+                self._schedule_after(10000, self._check_ext_data_update)
+                self._schedule_after(30000, self.KLineMonitor_init)
+                self._schedule_after(60000, self.schedule_15_30_job)
+
+            if getattr(self.search_var1, 'get', lambda: False)() or getattr(self.search_var2, 'get', lambda: False)():
+                self.apply_search()
+            else:
+                self.refresh_tree(self.df_all)
+            
+            self.update_all_top10_windows()
+            
+            # 🧹 周期性手动 GC
+            if not hasattr(self, '_update_count'): self._update_count = 0
+            self._update_count += 1
+            if self._update_count % 10 == 0:
+                gc.collect()
+                
+            # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
+            if has_update and getattr(self, 'live_strategy', None) is not None:
+                self._schedule_after(2000, self._start_feedback_listener)
+                if not (915 < cct.get_now_time_int() < 920):
+                    if getattr(self, '_live_strategy_first_run', False):
+                        # 第一次：延迟执行
+                        self._live_strategy_first_run = False
+                        target_res = 'd'
+                        if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
+                            target_res = self.global_values.getkey("resample")
+                        self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
+                    else:
+                        # 后续：立即执行
+                        target_res = 'd'
+                        if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
+                            target_res = self.global_values.getkey("resample")
+
+                        # Call this asynchronously so it doesn't block the UI *again*
+                        if hasattr(self, 'executor'):
+                             self.executor.submit(self.live_strategy.process_data, self.df_all, getattr(self, 'concept_top5', None), target_res)
+                        else:
+                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
+                
+            # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
+            if has_update:
+                now_hm = cct.get_now_time_int()
+                is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
+
+                # 在竞价/尾盘时段自动弹出面板（仅初始化一次）
+                if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
+                    try:
+                        from sector_bidding_panel import SectorBiddingPanel
+                        self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                        self.sector_bidding_panel.show()
+                        logger.info("📡 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
+                        self.sector_bidding_panel = None
+
+                # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
+                panel = getattr(self, "sector_bidding_panel", None)
+                if panel is not None:
+                    try:
+                        # 确保发送给竞价面板的是经过 `detect_signals` 完全检测完毕的数据
+                        # 我们已经将 `on_realtime_data_arrived` 改造为非阻塞的消息入列操作
+                        panel.on_realtime_data_arrived(self.df_all.copy())
+                    except Exception as e:
+                        logger.error(f"Failed to push data to Sector Bidding Panel: {e}")
+
+            if has_update:
+                if getattr(self, '_last_resample', None) != self.global_values.getkey("resample"):
+                    if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+                        logger.debug(f'[send_df] resample:{self._last_resample} to {self.global_values.getkey("resample")} change force full send init df_first_send_done to False now:{self._df_first_send_done}')
+                        if hasattr(self, 'df_ui_prev'):
+                            del self.df_ui_prev  # 删除缓存，模拟初始化
+                        self._last_resample = self.global_values.getkey("resample")
+                        if getattr(self, 'viz_command_queue', None):
+                            self.viz_command_queue = None
+                        self._df_first_send_done = False
+                        if getattr(self, 'last_vis_var_status', None):
+                            self.vis_var.set(True)
+                            self.last_vis_var_status = None
+                # -------------------------
+                self.status_var2.set(f'queue update: {self.format_next_time()}')
+
+        except Exception as e:
+            logger.error(f"Error applying tree data: {e}", exc_info=True)
+        finally:
+            self._is_processing_tree_data = False
 
     def push_stock_info(self,stock_code, row):
         """

@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QSplitter, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
-    QStyledItemDelegate, QStyleOptionViewItem, QDialog
+    QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings, QSize, QPoint, QRect
+from PyQt6.QtCore import Qt, QTimer, QSettings, QSize, QPoint, QRect, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
 import pyqtgraph as pg
 
@@ -22,6 +22,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from bidding_momentum_detector import BiddingMomentumDetector
 from JohnsonUtil import commonTips as cct
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,19 @@ class TimeAxisItem(pg.AxisItem):
                 ticks.append("")
         return ticks
 
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    """自定义表格项，支持数值排序而不是字符串字典排序"""
+    def __lt__(self, other):
+        if isinstance(other, QTableWidgetItem):
+            try:
+                # 去除可能的百分号和加号再转换为浮点数
+                val_self = float(self.text().replace('%', '').replace('+', '').strip())
+                val_other = float(other.text().replace('%', '').replace('+', '').strip())
+                return val_self < val_other
+            except ValueError:
+                pass # 回退到普通字符串比较
+        return super().__lt__(other)
 
 class DetailedChartDialog(QDialog):
     """双击弹出的详细分时图窗口 (带成交量、多重参考线及全量实时数据)"""
@@ -248,6 +262,36 @@ class DetailedChartDialog(QDialog):
                 rect.setPos(0, y_min - (y_max - y_min)*0.05) 
                 self.pw.addItem(rect)
 
+class DataProcessWorker(QObject):
+    """Worker object to process realtime data in a separate QThread."""
+    finished = pyqtSignal()
+    
+    def __init__(self, detector):
+        super().__init__()
+        self.detector = detector
+        self.df_queue = []
+        self._is_running = True
+        
+    def add_data(self, df):
+        self.df_queue.append(df)
+        
+    def process_data(self):
+        """Continuously process data from the queue."""
+        while self._is_running:
+            if self.df_queue:
+                df = self.df_queue.pop(0)
+                try:
+                    self.detector.register_codes(df)
+                    self.detector.update_scores()
+                    self.finished.emit()
+                except Exception as e:
+                    logger.error(f"[SectorBiddingPanel Worker] Error: {e}")
+            else:
+                QThread.msleep(50)
+                
+    def stop(self):
+        self._is_running = False
+
 class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
 
@@ -271,6 +315,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._is_populating = False
         self._last_selected_code = None
         self._last_refresh_ts = 0
+        self._force_update_requested = False
+
+        # Async Data Processing Worker
+        self._worker_thread = QThread(self)
+        self._worker = DataProcessWorker(self.detector)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.process_data)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker_thread.start()
 
         # UI 刷新计时器 (保持定义但默认不启动，作为 fallback 或数据中断时的兜底)
         self._refresh_timer = QTimer(self)
@@ -281,6 +334,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._score_timer = QTimer(self)
         self._score_timer.timeout.connect(self.detector.update_scores)
         # self._score_timer.start(5000) # [CHANGE] 改为数据驱动
+
+    def closeEvent(self, event):
+        """Window close event, clean up threads."""
+        if hasattr(self, '_worker'):
+             self._worker.stop()
+        if hasattr(self, '_worker_thread'):
+             self._worker_thread.quit()
+             self._worker_thread.wait(1000)
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ UI
     def _init_ui(self):
@@ -324,6 +386,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             w.valueChanged.connect(self._on_strategy_changed)
 
         bar_lay.addSpacing(4)
+        bar_lay.addWidget(self._sep())
+        
+        # [NEW] Search Bar
+        bar_lay.addWidget(QLabel("🔍搜索:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("例如: MA60反转 涨幅>3")
+        self.search_input.setFixedWidth(180)
+        self.search_input.returnPressed.connect(self._on_search_triggered)
+        bar_lay.addWidget(self.search_input)
+        
+        self.btn_search = QPushButton("查询")
+        self.btn_search.setFixedWidth(55)
+        self.btn_search.clicked.connect(self._on_search_triggered)
+        bar_lay.addWidget(self.btn_search)
+        
+        self.btn_clear_search = QPushButton("清除")
+        self.btn_clear_search.setFixedWidth(55)
+        self.btn_clear_search.clicked.connect(self._on_search_cleared)
+        bar_lay.addWidget(self.btn_clear_search)
+
         bar_lay.addWidget(self._sep())
 
         # [NEW] Manual Refresh, Log Toggle, Hide
@@ -396,7 +478,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setHorizontalHeaderLabels(COLS)
         hdr = self.stock_table.horizontalHeader()
         if hdr:
-            hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
             hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
             hdr.sectionClicked.connect(self._on_header_clicked)
         self.stock_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -423,19 +505,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.v_splitter.setChildrenCollapsible(False)
         self.v_splitter.addWidget(splitter)
 
-        w_group = QGroupBox("📋 当日重点表 (涨停/溢出个股 - 双击/单击联动)")
-        w_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
-        w_lay = QVBoxLayout(w_group)
+        self.watchlist_group = QGroupBox("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
+        self.watchlist_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
+        w_lay = QVBoxLayout(self.watchlist_group)
         w_lay.setContentsMargins(2, 6, 2, 2)
         
         W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因']
         self.watchlist_table = QTableWidget(0, len(W_COLS))
         self.watchlist_table.setHorizontalHeaderLabels(W_COLS)
-        self.watchlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.watchlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.watchlist_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
+        self.watchlist_table.setSortingEnabled(True) # [ADD] Enable table clicking/sorting
         self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
         self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
         self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
@@ -445,7 +528,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.customContextMenuRequested.connect(self._on_watchlist_context_menu)
         
         w_lay.addWidget(self.watchlist_table)
-        self.v_splitter.addWidget(w_group)
+        self.v_splitter.addWidget(self.watchlist_group)
         self.v_splitter.setSizes([500, 180]) # 默认分配比例
         
         root.addWidget(self.v_splitter, 1)   # stretch=1 撑满剩余高度
@@ -485,23 +568,31 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.error(f"Manual refresh failed: {e}")
 
     def on_realtime_data_arrived(self, df_all, force_update=False):
-        """主线程调用，注册订阅、更新评分并同步触发 UI 刷新"""
+        """主线程调用，将数据推入后台线程列队避免卡顿 UI"""
         try:
-            # 1. 更新底层数据与映射
-            self.detector.register_codes(df_all)
+            # Drop obsolete frames if we are piling up
+            if len(self._worker.df_queue) > 1:
+                 self._worker.df_queue.clear()
+                 
+            self._worker.add_data(df_all)
             
-            # 2. 实时评分聚合
-            self.detector.update_scores()
-
-            # 3. 节流刷新：根据 duration_sleep_time 控制频率
-            now = time.time()
-            limit = getattr(cct.CFG, 'duration_sleep_time', 5.0)
-            if force_update or (now - self._last_refresh_ts >= limit):
-                self._refresh_sector_list()
-                self._last_refresh_ts = now
-
+            # Record force_update request state
+            self._force_update_requested = force_update
+            
         except Exception as e:
-            logger.error(f"[SectorBiddingPanel] on_realtime_data_arrived: {e}")
+            logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
+
+    def _on_worker_finished(self):
+         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+         try:
+             now = time.time()
+             limit = getattr(cct.CFG, 'duration_sleep_time', 5.0)
+             if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
+                 self._refresh_sector_list()
+                 self._last_refresh_ts = now
+                 self._force_update_requested = False
+         except Exception as e:
+             logger.error(f"[SectorBiddingPanel] _on_worker_finished: {e}")
 
     # ------------------------------------------------------------------ UI refresh
     def _refresh_sector_list(self):
@@ -583,8 +674,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 4. 更新状态栏
         sub_cnt = len(self.detector._subscribed)
         sess = self._session_str()
-        if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
+        
+        # [NEW] Render total hits if search is active
+        if hasattr(self, '_active_search_query') and self._active_search_query:
+            self.status_lbl.setText(f"[{sess}] 过滤模式 | 关键字: {self._active_search_query}")
+        else:
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
 
         # 5. [NEW] 更新底部重点表
         self._populate_watchlist()
@@ -607,6 +703,76 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if d['sector'] == sn:
                 self._link_code(d['leader'])
                 break
+
+    # ------------------------------------------------------------------ search functionality
+    def _on_search_triggered(self):
+        query = self.search_input.text().strip()
+        self._active_search_query = query
+        self.manual_refresh()
+        
+    def _on_search_cleared(self):
+        self.search_input.clear()
+        self._active_search_query = ""
+        self.manual_refresh()
+        
+    def _evaluate_search_condition(self, query_str: str, row_data: dict) -> bool:
+        """
+        Evaluate natural queries like "MA60反转 涨幅>3 涨幅<8".
+        Returns True if row_data matches ALL whitespace-separated conditions.
+        """
+        if not query_str:
+            return True
+            
+        conditions = query_str.split()
+        
+        for cond in conditions:
+            # Check for numeric comparators: >, <, >=, <=, =
+            match = re.search(r'(涨幅|现价|量比)(>=|<=|>|<|==|=)([-+]?\d*\.?\d+)', cond)
+            if match:
+                field, op, val_str = match.groups()
+                try:
+                    target_val = float(val_str)
+                    actual_val = 0.0
+                    
+                    if field == '涨幅':
+                        actual_val = row_data.get('pct', 0.0)
+                        if 'leader_pct' in row_data:
+                            actual_val = row_data.get('leader_pct', 0.0) 
+                    elif field == '现价':
+                        actual_val = row_data.get('price', 0.0)
+                        if 'leader_price' in row_data:
+                             actual_val = row_data.get('leader_price', 0.0)
+                    elif field == '量比':
+                        pass # Requires extracting vol ratio from df_all if needed. Skip for now or default true.
+                    
+                    if op == '>':
+                        if not actual_val > target_val: return False
+                    elif op == '<':
+                        if not actual_val < target_val: return False
+                    elif op in ('>=', '=>'):
+                        if not actual_val >= target_val: return False
+                    elif op in ('<=', '=<'):
+                        if not actual_val <= target_val: return False
+                    elif op in ('=', '=='):
+                        if not abs(actual_val - target_val) < 0.01: return False
+                        
+                except ValueError:
+                    continue # Ignore invalid floats
+            else:
+                # Fallback to general text inclusion search (Code, Name, Hint, Role)
+                text_to_search = (
+                    str(row_data.get('code', '')) + 
+                    str(row_data.get('name', '')) + 
+                    str(row_data.get('hint', '')) + 
+                    str(row_data.get('pattern_hint', '')) + 
+                    str(row_data.get('leader_name', '')) +
+                    str(row_data.get('role', '')) +
+                    str(row_data.get('tags', ''))
+                )
+                if cond.lower() not in text_to_search.lower():
+                    return False
+                    
+        return True
 
     # ------------------------------------------------------------------ table fill
     def _populate_table(self, data: dict):
@@ -654,6 +820,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'untradable': f.get('untradable', False), # Follower untradability not fully tracked yet but added for safety
                 'is_counter': False
             })
+
+        # Filter based on active search
+        active_query = getattr(self, '_active_search_query', '')
+        if active_query:
+            filtered_rows = []
+            for r in rows:
+                if self._evaluate_search_condition(active_query, r):
+                    filtered_rows.append(r)
+            rows = filtered_rows
 
         # 应用排序
         col = self._sort_col
@@ -759,6 +934,23 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """填充底部当日重点表"""
         watchlist = self.detector.get_daily_watchlist()
         
+        # [NEW] Filter based on active search
+        active_query = getattr(self, '_active_search_query', '')
+        if active_query:
+            filtered_wl = []
+            for w in watchlist:
+                # Map watchlist fields to expect format for _evaluate_search_condition
+                row_mock = {
+                    'code': w['code'],
+                    'name': w['name'],
+                    'pct': w.get('pct', 0.0),
+                    'sector': w.get('sector', ''),
+                    'reason': w.get('reason', '')
+                }
+                if self._evaluate_search_condition(active_query, row_mock):
+                    filtered_wl.append(w)
+            watchlist = filtered_wl
+        
         # 记录当前选中代码以便恢复
         selected_code = ""
         curr_row = self.watchlist_table.currentRow()
@@ -767,6 +959,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if item: selected_code = item.text()
 
         self.watchlist_table.setRowCount(len(watchlist))
+        
+        # [NEW] Disable sorting while populating to prevent sort crashes
+        self.watchlist_table.setSortingEnabled(False)
         target_row = -1
         
         for i, w in enumerate(watchlist):
@@ -776,7 +971,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.watchlist_table.setItem(i, 1, QTableWidgetItem(w['name']))
             # 3. 涨幅
             p_val = w.get('pct', 0)
-            p_item = QTableWidgetItem(f"{p_val:+.2f}%")
+            p_item = NumericTableWidgetItem(f"{p_val:+.2f}%")
             p_item.setForeground(QColor("#FF4444") if p_val > 0 else QColor("#44CC44"))
             self.watchlist_table.setItem(i, 2, p_item)
             # 4. 核心板块
@@ -812,6 +1007,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.watchlist_table.blockSignals(True)
                 self.watchlist_table.setCurrentCell(target_row, 0)
                 self.watchlist_table.blockSignals(False)
+                
+        # [NEW] Re-enable sorting
+        self.watchlist_table.setSortingEnabled(True)
+        # [NEW] Update Watchlist title stats
+        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只, 涨停/溢出个股)")
 
     def _on_watchlist_clicked(self, row, col):
         """重点表联动"""
