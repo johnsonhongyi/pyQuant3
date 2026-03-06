@@ -560,21 +560,30 @@ class BiddingMomentumDetector:
         # --- Limit-up tracking for daily_watchlist ---
         # This logic is added here to populate self.daily_watchlist
         # It checks for stocks that are at or near limit-up and adds them to the watchlist
-        current_time_str = datetime.datetime.fromtimestamp(now_ts).strftime('%m%d-%H%M')
         for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo, fbts, phint, untrd, isctr) in snap.items():
             if pct >= get_limit_up_threshold(code) and not untrd: # Check for near limit-up dynamically by market
-                # If it's already in the watchlist, keep its INITIAL trigger time
+                # If it's already in the watchlist, only update dynamic fields, NEVER touch time_str
                 if code in self.daily_watchlist:
-                    pass # Do NOT overwrite the time, we want the first trigger time!
+                    # 只更新涨幅和形态，保留首次触发时间不变
+                    self.daily_watchlist[code]['pct'] = round(pct, 2)
+                    if phint:
+                        self.daily_watchlist[code]['pattern_hint'] = phint
                 else:
-                    # Add to watchlist
+                    # 新入表：使用该股自己的首次异动时间戳(first_breakout_ts)作为触发时间
+                    # 如果 fbts 可用且合理，用它；否则 fallback 到当前批次时间
+                    if fbts > 0:
+                        trigger_ts = fbts
+                    else:
+                        trigger_ts = now_ts
+                    trigger_time_str = datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M')
                     self.daily_watchlist[code] = {
                         'code': code,
                         'name': name,
                         'sector': cat, # Use the full category string for watchlist
                         'pct': round(pct, 2),
-                        'time_str': current_time_str,
+                        'time_str': trigger_time_str,
                         'reason': '涨停',
+                        'pattern_hint': phint,
                         'release_risk': False # Placeholder for future logic
                     }
         # [NEW] Log the watchlist if enabled (OUTSIDE the sector loop)

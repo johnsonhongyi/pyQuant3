@@ -288,6 +288,8 @@ class DataProcessWorker(QObject):
                     logger.error(f"[SectorBiddingPanel Worker] Error: {e}")
             else:
                 QThread.msleep(50)
+        # Emit finished again when loop exits to ensure thread knows it can quit
+        self.finished.emit()
                 
     def stop(self):
         self._is_running = False
@@ -317,8 +319,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_refresh_ts = 0
         self._force_update_requested = False
 
-        # Async Data Processing Worker
-        self._worker_thread = QThread(self)
+        # Async Data Processing Worker - DON'T parent thread to widget!
+        # Parenting to QWidget causes Qt to delete the thread when the widget is destroyed,
+        # even if the thread is still running. Manage lifecycle manually instead.
+        self._worker_thread = QThread()  # No parent - managed manually
         self._worker = DataProcessWorker(self.detector)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.process_data)
@@ -336,13 +340,33 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # self._score_timer.start(5000) # [CHANGE] 改为数据驱动
 
     def closeEvent(self, event):
-        """Window close event, clean up threads."""
+        """Window close event, clean up threads gracefully."""
+        # 1. 先停止定时器，不产生新任务
+        if hasattr(self, '_refresh_timer'):
+            self._refresh_timer.stop()
+        if hasattr(self, '_score_timer'):
+            self._score_timer.stop()
+        # 2. 告知 worker 停止循环
         if hasattr(self, '_worker'):
-             self._worker.stop()
-        if hasattr(self, '_worker_thread'):
-             self._worker_thread.quit()
-             self._worker_thread.wait(1000)
+            try:
+                self._worker.stop()
+            except Exception:
+                pass
+        # 3. 等待线程退出（最多 3 秒）
+        if hasattr(self, '_worker_thread') and self._worker_thread is not None:
+            thread = self._worker_thread
+            if thread.isRunning():
+                thread.quit()   # 请求事件循环退出（process_data 是普通 while，需要 _is_running 来退出）
+                if not thread.wait(3000):
+                    # 超时则强制终止
+                    logger.warning("[SectorBiddingPanel] Worker thread did not stop in time, terminating...")
+                    thread.terminate()
+                    thread.wait(500)
+            thread.deleteLater()   # 安全释放
+            self._worker_thread = None
+        self._save_geometry()
         super().closeEvent(event)
+
 
     # ------------------------------------------------------------------ UI
     def _init_ui(self):
@@ -353,84 +377,94 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # ── 紧凑工具栏 ──────────────────────────────────────────────────
         bar = QFrame()
         bar.setFrameShape(QFrame.Shape.StyledPanel)
-        bar_lay = QHBoxLayout(bar)
-        bar_lay.setContentsMargins(4, 2, 4, 2)
-        bar_lay.setSpacing(6)
+        bar_lay_main = QVBoxLayout(bar)
+        bar_lay_main.setContentsMargins(4, 2, 4, 2)
+        bar_lay_main.setSpacing(2)
+        
+        # 第一排工具栏
+        bar_lay_1 = QHBoxLayout()
+        bar_lay_1.setSpacing(6)
 
         bold = QFont()
         bold.setBold(True)
 
         # 策略开关
-        self.cb_new_high   = self._make_cb("新高",    'new_high',        bar_lay)
-        self.cb_ma_rebound = self._make_cb("MA回踩高开", 'ma_rebound',   bar_lay)
-        self.cb_surge_vol  = self._make_cb("放量",     'surge_vol',       bar_lay)
-        self.cb_consec     = self._make_cb("连续拉升", 'consecutive_up',  bar_lay)
+        self.cb_new_high   = self._make_cb("新高",    'new_high',        bar_lay_1)
+        self.cb_ma_rebound = self._make_cb("MA回踩高开", 'ma_rebound',   bar_lay_1)
+        self.cb_surge_vol  = self._make_cb("放量",     'surge_vol',       bar_lay_1)
+        self.cb_consec     = self._make_cb("连续拉升", 'consecutive_up',  bar_lay_1)
 
-        bar_lay.addWidget(self._sep())
+        bar_lay_1.addWidget(self._sep())
 
-        bar_lay.addWidget(QLabel("放量倍≥"))
+        bar_lay_1.addWidget(QLabel("放量倍≥"))
         self.spin_vol_ratio = self._make_spin(1.0, 10.0, 0.1,
             self.detector.strategies['surge_vol']['min_ratio'])
-        bar_lay.addWidget(self.spin_vol_ratio)
+        bar_lay_1.addWidget(self.spin_vol_ratio)
 
-        bar_lay.addWidget(QLabel(" 涨幅%"))
+        bar_lay_1.addWidget(QLabel(" 涨幅%"))
         self.spin_pct_min = self._make_spin(-20, 20, 0.5,
             self.detector.strategies['pct_change']['min'])
-        bar_lay.addWidget(self.spin_pct_min)
-        bar_lay.addWidget(QLabel("~"))
+        bar_lay_1.addWidget(self.spin_pct_min)
+        bar_lay_1.addWidget(QLabel("~"))
         self.spin_pct_max = self._make_spin(-20, 20, 0.5,
             self.detector.strategies['pct_change']['max'])
-        bar_lay.addWidget(self.spin_pct_max)
+        bar_lay_1.addWidget(self.spin_pct_max)
 
         for w in [self.spin_vol_ratio, self.spin_pct_min, self.spin_pct_max]:
             w.valueChanged.connect(self._on_strategy_changed)
 
-        bar_lay.addSpacing(4)
-        bar_lay.addWidget(self._sep())
+        bar_lay_1.addSpacing(4)
+        bar_lay_1.addWidget(self._sep())
         
         # [NEW] Search Bar
-        bar_lay.addWidget(QLabel("🔍搜索:"))
+        bar_lay_1.addWidget(QLabel("🔍搜索:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("例如: MA60反转 涨幅>3")
         self.search_input.setFixedWidth(180)
         self.search_input.returnPressed.connect(self._on_search_triggered)
-        bar_lay.addWidget(self.search_input)
+        bar_lay_1.addWidget(self.search_input)
         
         self.btn_search = QPushButton("查询")
         self.btn_search.setFixedWidth(55)
         self.btn_search.clicked.connect(self._on_search_triggered)
-        bar_lay.addWidget(self.btn_search)
+        bar_lay_1.addWidget(self.btn_search)
         
         self.btn_clear_search = QPushButton("清除")
         self.btn_clear_search.setFixedWidth(55)
         self.btn_clear_search.clicked.connect(self._on_search_cleared)
-        bar_lay.addWidget(self.btn_clear_search)
+        bar_lay_1.addWidget(self.btn_clear_search)
+        
+        bar_lay_1.addStretch()
+        bar_lay_main.addLayout(bar_lay_1)
 
-        bar_lay.addWidget(self._sep())
-
-        # [NEW] Manual Refresh, Log Toggle, Hide
+        # 第二排工具栏
+        bar_lay_2 = QHBoxLayout()
+        bar_lay_2.setSpacing(6)
+        
         self.btn_refresh = QPushButton("刷新 🔄")
         self.btn_refresh.setFixedWidth(65)
         self.btn_refresh.clicked.connect(self.manual_refresh)
-        bar_lay.addWidget(self.btn_refresh)
+        bar_lay_2.addWidget(self.btn_refresh)
 
         self.cb_log = QCheckBox("Log")
         self.cb_log.setToolTip("开启/关闭后台日志输出")
         self.cb_log.setChecked(self.detector.enable_log)
         self.cb_log.stateChanged.connect(self._on_strategy_changed)
-        bar_lay.addWidget(self.cb_log)
+        bar_lay_2.addWidget(self.cb_log)
 
         self.btn_hide = QPushButton("隐藏 ✖")
         self.btn_hide.setFixedWidth(55)
         self.btn_hide.clicked.connect(self.hide)
-        bar_lay.addWidget(self.btn_hide)
+        bar_lay_2.addWidget(self.btn_hide)
 
-        bar_lay.addWidget(self._sep())
+        bar_lay_2.addWidget(self._sep())
 
         self.status_lbl = QLabel("等待数据...")
         self.status_lbl.setStyleSheet("color:#FFA500;font-weight:bold;")
-        bar_lay.addWidget(self.status_lbl)
-        bar_lay.addStretch()
+        bar_lay_2.addWidget(self.status_lbl)
+        bar_lay_2.addStretch()
+        
+        bar_lay_main.addLayout(bar_lay_2)
 
         root.addWidget(bar)
 
@@ -707,6 +741,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ------------------------------------------------------------------ search functionality
     def _on_search_triggered(self):
         query = self.search_input.text().strip()
+        if not query:
+            query = self.search_input.placeholderText().replace("例如: ", "").strip()
+            self.search_input.setText(query)
         self._active_search_query = query
         self.manual_refresh()
         
