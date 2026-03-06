@@ -1378,6 +1378,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
             
+            # 关闭竞价窗口
+            if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
+                try:
+                    logger.info("正在关闭竞价窗口...")
+                    self.sector_bidding_panel.close()
+                except Exception as e:
+                    logger.warning(f"关闭竞价窗口异常: {e}")
+
             # ⭐ 注销全局快捷键
             self._shutdown_global_hotkeys()
             
