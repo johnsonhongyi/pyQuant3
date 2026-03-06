@@ -14,6 +14,7 @@ from cache_utils import DataFrameCacheSlot, df_fingerprint
 import psutil
 import os
 logger = LoggerFactory.getLogger()
+h5a = cct.LazyModule('JSONData.tdx_hdf5_api')
 
 # CFG = cct.GlobalConfig()
 # win10_ramdisk_triton = CFG.get_path("win10_ramdisk_triton")
@@ -131,9 +132,11 @@ class MinuteKlineCache:
                 seconds_from_midnight = (df['time'] + 28800) % 86400
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-                
-                # 09:25-11:30, 13:00-15:05
-                mask_am = (hhmm >= 925) & (hhmm <= 1130)
+
+                # --- [FIX] 加载时修复: 统一时间标准 (9:15-11:31, 13:00-15:05) ---
+                # 兼容竞价数据 (9:15开始) 和 收盘集合竞价 (15:05结束)
+                # 确保 240 根 K 线的核心逻辑不受干扰
+                mask_am = (hhmm >= 915) & (hhmm <= 1131)
                 mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
                 
                 df = df[mask_am | mask_pm]
@@ -340,12 +343,12 @@ class MinuteKlineCache:
                     ts = wall_clock
                 
                 # --- [FIX] 防御盘后冗余数据进入缓存 ---
+                # --- [FIX] 统一时间准入标准 (9:15-11:31, 13:00-15:05) ---
                 seconds_from_midnight = (ts + 28800) % 86400
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-                
-                if not ((915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)):
-                    continue # 盘中通过：允许 9:15 开始的竞价数据用于当日异动捕捉
+                if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
+                    continue 
                 
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
@@ -393,11 +396,11 @@ class MinuteKlineCache:
             else:
                 ts = time.time()
                 
-            # --- [FIX] 防御盘后冗余数据进入缓存 ---
+            # --- [FIX] 统一时间准入标准 ---
             seconds_from_midnight = (ts + 28800) % 86400
             mins_from_midnight = seconds_from_midnight // 60
             hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-            if not ((915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)):
+            if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
                 return
                 
             minute_ts = int(ts - (ts % 60))
@@ -524,6 +527,7 @@ class DailyEmotionBaseline:
     def __init__(self):
         self._baselines: dict[str, float] = {}  # {code: baseline_score}
         self._baseline_details: dict[str, str] = {} # {code: status_description}
+        self._structural_anchors: dict[str, dict[str, float]] = {} # {code: {yesterday_high, prev_high, ma60, ma20}}
         self._last_calc_date: Optional[str] = None
     
     def get_last_calc_date(self) -> Optional[str]:
@@ -543,6 +547,19 @@ class DailyEmotionBaseline:
 
             # 转换为 dict 迭代更快，而且为了逻辑清晰
             # 这里的 df 应该是 full candidate list 或者包含 historical data columns 的 df
+            from stock_standalone.strategy_config import COLUMN_MAPPING
+            c_mapping = COLUMN_MAPPING.get('DAILY', {})
+            
+            # 使用映射解析列名，保留 hardcoded 作为 fallback 兼容
+            m_ma5   = c_mapping.get('ma5d', 'ma5d')
+            m_ma20  = c_mapping.get('ma20d', 'ma20d')
+            m_ma60  = c_mapping.get('ma60d', 'ma60d')
+            m_h1    = c_mapping.get('lasth1d', 'lasth1d')
+            m_h2    = c_mapping.get('lasth2d', 'lasth2d')
+            m_p1    = c_mapping.get('lastp1d', 'lastp1d')
+            m_p2    = c_mapping.get('lastp2d', 'lastp2d')
+            m_low   = c_mapping.get('last_low', 'last_low')
+
             for idx, row in df.iterrows():
                 # 兼容：如果 code 在列中则取列，否则取 index
                 if 'code' in row:
@@ -553,6 +570,18 @@ class DailyEmotionBaseline:
                 code_str = str(code_val).strip().zfill(6)
                 score = 50.0  # 中性起点
                 
+                # 转换所有必要的数值，优先从映射列取
+                price      = float(row.get('trade', row.get('close', 0)))
+                ma5        = float(row.get(m_ma5, row.get('ma5d', row.get('ma5', 0))))
+                ma20       = float(row.get(m_ma20, row.get('ma20d', row.get('ma20', 0))))
+                ma60       = float(row.get(m_ma60, row.get('ma60d', row.get('ma60', 0))))
+                lasth1d    = float(row.get(m_h1, row.get('lasth1d', row.get('last_high', 0))))
+                lasth2d    = float(row.get(m_h2, row.get('lasth2d', 0)))
+                lastp1d    = float(row.get(m_p1, row.get('lastp1d', row.get('last_close', 0))))
+                lastp2d    = float(row.get(m_p2, row.get('lastp2d', 0)))
+                last_low   = float(row.get(m_low, row.get('last_low', row.get('low', 0))))
+                dist_h_l   = float(row.get('dist_h_l', 4.0)) # 振幅，缺省给 4.0
+
                 # 1. 连阳加分 (win >= 3 满分)
                 win = float(row.get('win', 0))
                 score += min(win * 5, 15)  # 最多+15
@@ -585,31 +614,45 @@ class DailyEmotionBaseline:
                 status_detail = ""
                 # 7. [New] 突破上轨或强势洗盘回踩
                 upper = float(row.get('upper', 0))
-                dist_h_l = float(row.get('dist_h_l', 0)) # 振幅
-                price = float(row.get('trade', row.get('close', 0)))
-                ma5 = float(row.get('ma5d', 0))
-                ma60 = float(row.get('ma60d', 0))
-                last_high = float(row.get('last_high', 0))
-                last_low = float(row.get('last_low', 0))
-                last_close = float(row.get('last_close', 0))
 
                 # 判断形态结构 (Structural Patterns)
                 is_v_reversal = False
-                if last_close > 0 and price > last_low:
-                     # V反识别：前一日振幅大且有杀跌，今日高开或收回连阳上方
-                     if dist_h_l > 4.0 and price >= last_close:
+                if lastp1d > 0 and price > last_low:
+                     # V反识别
+                     if dist_h_l > 4.0 and price >= lastp1d:
                          is_v_reversal = True
                          score += 15
 
-                # 领涨龙头特征：过ma60且过两日高点
-                ma20 = float(row.get('ma20d', 0)) # 提取 MA20
-                is_ma60_rev = ma60 > 0 and last_close < ma60 and price > ma60
-                is_ma20_rev = ma20 > 0 and last_close < ma20 and price > ma20
+                # 领涨龙头特征
+                is_ma60_rev = ma60 > 0 and lastp1d < ma60 and price > ma60
+                is_ma20_rev = ma20 > 0 and lastp1d < ma20 and price > ma20
+
+                # 判断前两日结构是否处于上升通道 (收盘和新高都在上升)
+                is_rising_struct = (lastp1d > lastp2d > 0) and (lasth1d > lasth2d > 0)
                 
                 is_breakthrough = False
-                if (ma60 > 0 and price > ma60) and last_high > 0 and price > last_high:
-                    is_breakthrough = True
-                    score += 10
+                # 强势结构：站稳 MA60 且突破近两日最高点
+                curr_structural_high = float(max(lasth1d, lasth2d))
+                if (ma60 > 0 and price > ma60) and curr_structural_high > 0 and price > curr_structural_high:
+                    if is_rising_struct:
+                        is_breakthrough = True
+                        score += 20 # 动力分大幅提升 (符合上升结构)
+                    else:
+                        is_breakthrough = True
+                        score += 10 # 普通突破
+                
+                # 记录锚点供盘中追踪
+                code_str = str(code_val).strip().zfill(6)
+                self._structural_anchors[code_str] = {
+                    'yesterday_high': lasth1d,
+                    'prev_high': lasth2d,
+                    'ma60': ma60,
+                    'ma20': ma20,
+                    'last_low': last_low,
+                    'last_close': lastp1d,
+                    'last_close_p2': lastp2d,
+                    'is_rising_struct': is_rising_struct
+                }
 
                 # 安全等级基础分 (0-5)
                 safety = 3.0
@@ -624,14 +667,14 @@ class DailyEmotionBaseline:
                 # 振幅/回撤过大则扣安全分
                 if dist_h_l > 8.0: safety -= 0.5
 
-                if is_ma60_rev:
+                if is_breakthrough:
+                    status_detail = f"结构突破:{int(win)}阳"
+                elif is_ma60_rev:
                     status_detail = f"MA60反转:{int(win)}阳"
                 elif is_ma20_rev:
                     status_detail = f"MA20反转:{int(win)}阳"
                 elif is_v_reversal:
                     status_detail = f"V反突破:{int(win)}阳"
-                elif is_breakthrough:
-                    status_detail = f"趋势翻转:{int(win)}阳"
                 elif upper > 0 and price >= upper:
                     score += 15
                     status_detail = f"上轨突破:{int(win)}阳"
@@ -671,22 +714,30 @@ class DailyEmotionBaseline:
     def get_all_baseline_details(self) -> dict[str, str]:
         return self._baseline_details
 
+    def get_anchor(self, code: str) -> dict[str, float]:
+        return self._structural_anchors.get(str(code).zfill(6), {})
+
 class IntradayEmotionTracker:
     """
     盘中情绪追踪器
     计算个股及市场情绪分
     """
     scores: dict[str, float]
-    history: deque
+    _sbc_alert_set: set[str]
+    _last_sbc_status: dict[str, bool]
+    history: deque[tuple[float, dict[str, float]]]
     
     def __init__(self):
         self.scores = {} # {code: score}
+        self._sbc_alert_set = set() # 记录今日已提醒过的强势结构代码
+        self._last_sbc_status = {}  # {code: bool} 记录上一状态，实现触发式而非持续式信号
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
         # item: (timestamp, scores_dict)
-        self.history = deque(maxlen=300) 
+        self.history = deque(maxlen=300)
 
     def clear(self):
         self.scores.clear()
+        self._sbc_alert_set.clear()
 
     def update_batch(self, df: pd.DataFrame, baseline_tracker: Optional[DailyEmotionBaseline] = None):
         """
@@ -696,67 +747,144 @@ class IntradayEmotionTracker:
         try:
             if df.empty: return
             
-            # 1. Check for existing emotion score in DF (from upstream)
+            # --- [NEW] Start Config-Driven Column Projection ---
+            from stock_standalone.strategy_config import COLUMN_MAPPING, STRUCTURAL_THRESHOLD
+            c_mapping = COLUMN_MAPPING.get('REALTIME', {})
+            
+            # 定义内部逻辑使用的标准列名
+            col_trade = c_mapping.get('trade', 'trade')
+            col_amount = c_mapping.get('amount', 'amount')
+            col_vol = c_mapping.get('vol', 'vol')      # 原始成交量
+            col_ratio = c_mapping.get('volume', 'volume') # 量比
+
+            # 动态解析输入 DF 中的可用列
+            active_trade_col = col_trade if col_trade in df.columns else ('now' if 'now' in df.columns else 'trade')
+            active_amt_col = col_amount if col_amount in df.columns else 'amount'
+            active_vol_col = col_vol if col_vol in df.columns else ('volume' if 'volume' in df.columns else 'vol')
+            active_ratio_col = col_ratio if col_ratio in df.columns else 'ratio'
+
+            vwap_support_val = STRUCTURAL_THRESHOLD.get('SBC_RISING', {}).get('vwap_support', 1.002)
+            # --- End Config-Driven Column Projection ---
+
+            # 1. 优先检查现有的情绪分
             if 'scan_score_emotion' in df.columns:
                 self.scores = df.set_index('code')['scan_score_emotion'].to_dict()
-                return
-
-            if 'percent' not in df.columns:
-                return
-
-            # 2. Vectorized 深度情绪计算 with Smoothing
-            EMA_ALPHA = 0.3  # 平滑系数
-            MAX_DELTA = 15   # 单次最大变动幅度
+                # 注意：即使有了分数，也要继续执行后续的结构判定逻辑
             
-            # 获取基准值
+            # 2. Vectorized 深度情绪计算 (仅在百分比存在时)
+            # 初始化基准，确保在所有分支中 baselines 均定义
             if baseline_tracker:
-                # Map baselines to the current dataframe
                 baselines = df['code'].map(baseline_tracker.get_all_baselines()).fillna(50.0)
             else:
                 baselines = pd.Series(50.0, index=df.index)
-            
-            percent = df['percent']
-            vol_ratio = df['ratio'] if 'ratio' in df.columns else pd.Series(1.0, index=df.index)
-            
-            # 增量公式
-            delta = percent * 2.0
-            
-            # 动量修正
-            momentum = pd.Series(0.0, index=df.index)
-            mask_up = (vol_ratio > 1.5) & (percent > 0)
-            mask_down = (vol_ratio > 1.5) & (percent < 0)
-            momentum[mask_up] = 5.0
-            momentum[mask_down] = -5.0
-            
-            delta = delta + momentum
-            delta = delta.clip(-MAX_DELTA, MAX_DELTA)
-            
-            target_scores = baselines + delta
-            
-            # EMA 平滑
-            # get previous scores aligned with current df
-            # fillna with baselines (if no previous score, start from baseline)
-            prev_scores = df['code'].map(self.scores).fillna(baselines)
-            
-            final_scores = prev_scores * (1 - EMA_ALPHA) + target_scores * EMA_ALPHA
-            
-            # 特殊状态修正 (Override)
-            # 恐慌盘：跌幅 > 5% 且放量 -> 额外扣分
-            mask_panic = (percent < -5) & (vol_ratio > 1.5)
-            # 抢筹：涨幅 > 5% 且放量 -> 额外加分
-            mask_mania = (percent > 5) & (vol_ratio > 1.5)
-            
-            final_scores[mask_panic] -= 5
-            final_scores[mask_mania] += 5
-            
-            # 限制在 0-100
-            final_scores = final_scores.clip(0, 100)
-            
-            self.scores = dict(zip(df['code'], final_scores))
 
-            # 3. 将结果写回 DataFrame (用于下游策略 & 日志)
-            # 注意: df 是引用传递，修改会影响外部
-            df['rt_emotion'] = final_scores
+            if 'percent' in df.columns:
+                EMA_ALPHA = 0.3
+                MAX_DELTA = 15
+                
+                percent = df['percent']
+                vol_ratio = df[active_ratio_col] if active_ratio_col in df.columns else pd.Series(1.0, index=df.index)
+                
+                delta = (percent * 2.0).clip(-MAX_DELTA, MAX_DELTA)
+                target_scores = baselines + delta
+                
+                prev_scores = df['code'].map(self.scores).fillna(baselines)
+                final_scores = prev_scores * (1 - EMA_ALPHA) + target_scores * EMA_ALPHA
+                
+                # 强化放量状态分数
+                mask_mania = (percent > 5) & (vol_ratio > 1.5)
+                final_scores[mask_mania] += 5
+                
+                final_scores = final_scores.clip(0, 100)
+                self.scores = dict(zip(df['code'], final_scores))
+            else:
+                # 如果没有百分比，至少保持之前的分数并确保 final_scores 存在
+                final_scores = pd.Series(df['code'].map(self.scores).fillna(baselines).values, index=df.index)
+
+            # 3. [New] 分时结构追踪与 VWAP 计算
+            # 即使没有量/额，也要预埋 sbc_status 列避免 KeyError
+            df['sbc_status'] = '' 
+            
+            if active_amt_col in df.columns and active_vol_col in df.columns:
+                df['avg_price'] = (df[active_amt_col] / df[active_vol_col]).fillna(df[active_trade_col] if active_trade_col in df.columns else 0)
+                
+                if baseline_tracker:
+                    sbc_signals = []
+                    scores_dict = final_scores.to_dict()
+                    
+                    for idx_val, row in df.iterrows():
+                        code_str = str(row['code']).zfill(6)
+                        anchors = baseline_tracker.get_anchor(code_str)
+                        
+                        # 默认状态
+                        is_sbc = False
+                        status = []
+                        
+                        if anchors:
+                            # 标准化价格获取：优先使用配置映射的 trade 列，其次是 trade/now 默认值
+                            price = float(row.get(active_trade_col, row.get('trade', row.get('now', 0))))
+                            avg_p = float(row['avg_price'])
+                            y_high = float(anchors.get('yesterday_high', 0))
+                            p_high = float(anchors.get('prev_high', 0))
+                            ma60 = float(anchors.get('ma60', 0))
+                            last_l = float(anchors.get('last_low', 0))
+                            
+                            # 688787 特征 1: 站稳均价线 (VWAP Support)
+                            if price > avg_p * vwap_support_val: # 比例从配置读取
+                                status.append("均线上")
+                            
+                            # 特征 2: 突破多日高点 (Structural Breakout)
+                            if price > max(y_high, p_high) > 0:
+                                status.append("创多日高")
+                                
+                            # 特征 3: MA60 支撑位反弹
+                            if ma60 > 0 and price > ma60 > last_l:
+                                status.append("MA60支撑")
+                            
+                            # 特征 4: 诱空反转识别 (Bear Trap)
+                            # 早盘跌破昨日低点后又快速收复昨日收盘价
+                            last_c = float(anchors.get('last_close', 0))
+                            low_p = float(row.get('low', price))
+                            if low_p < last_l < last_c and price > last_c:
+                                status.append("诱空转多")
+
+                            # 综合判定：SBC (Structural Breakout Champion)
+                            is_rising = anchors.get('is_rising_struct', False)
+                            is_sbc = "均线上" in status and ("创多日高" in status or "诱空转多" in status) and is_rising
+                            prev_sbc = self._last_sbc_status.get(code_str, False)
+                            
+                            # Debug log for 688787 specifically
+                            if code_str == '688787' and ("均线上" in status):
+                                logger.info(f"[DEBUG-SBC] 688787: status={status}, is_rising={is_rising}, is_sbc={is_sbc}, price={price}, ma60={ma60}")
+
+                            if is_sbc:
+                                 # 只有在从“非SBC”转为“SBC”时，或者处于“创多日高”的持续突破初期才标记 🚀
+                                 if not prev_sbc:
+                                     sbc_signals.append("🚀强势结构")
+                                     scores_dict[idx_val] += 10 # 触发瞬间额外加分
+                                 else:
+                                     # 持续状态下仅保持状态描述
+                                     sbc_signals.append("-".join(status))
+                                 
+                                 # 初次发现记录日志，触发系统预警
+                                 alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}"
+                                 if alert_key not in self._sbc_alert_set:
+                                     self._sbc_alert_set.add(alert_key)
+                                     logger.info(f"🚀 [SBC-Breakout] {code_str} 强势结构确认: 突破多日高位同时站稳均线 ({avg_p:.2f})")
+                            else:
+                                 sbc_signals.append("-".join(status))
+                            
+                            # 同步当前状态
+                            self._last_sbc_status[code_str] = is_sbc
+                        else:
+                            sbc_signals.append('')
+                        
+                    df['sbc_status'] = sbc_signals
+                    # 同步回 final_scores
+                    final_scores = pd.Series(scores_dict, index=df.index)
+            
+            # 4. 将结果写回 DataFrame (用于下游策略 & 日志)
+            df['rt_emotion'] = final_scores.clip(0, 100)
             df['emotion_baseline'] = baselines
             
             # --- [New] Expose Baseline Status/Reason ---
@@ -766,18 +894,18 @@ class IntradayEmotionTracker:
             
             # Use 'code' column for mapping
             if 'code' in df.columns:
-                 # Ensure code is string for mapping
                 df['emotion_status'] = df['code'].astype(str).map(details).fillna('')
             else:
-                # Fallback if code is index
                 df['emotion_status'] = df.index.astype(str).map(details).fillna('')
             
             # Record history snapshot
             now = time.time()
             self.history.append((now, self.scores.copy()))
-                
+            if len(self.history) > 60:
+                self.history.popleft()
+
         except Exception as e:
-            logger.error(f"IntradayEmotionTracker update error: {e}")
+            logger.error(f"IntradayEmotionTracker update error: {str(e)}")
 
     def get_score(self, code: str) -> float:
         return self.scores.get(code, 50.0) # 默认 50 中性
@@ -941,15 +1069,32 @@ class DataPublisher:
         # Crash Recovery: Load Last Snapshot
         # =========================
         try:
+            # --- [UNIFIED CACHE FIX] ---
+            # 策略：优先加载 PKL 快照。如果 PKL 缺失或数据量严重不足 (少于 2000 只股)，
+            # 则尝试从 sina_MultiIndex_data.h5 增量恢复。
             cached_df = self.cache_slot.load_df()
+            total_stocks = len(cached_df['code'].unique()) if not cached_df.empty else 0
+            
+            if total_stocks < 2000:
+                logger.info(f"📡 Snapshot deficient (Stocks: {total_stocks}), attempting recovery from HDF5...")
+                h5_df = self.recover_from_hdf5()
+                if not h5_df.empty:
+                    if cached_df.empty:
+                        cached_df = h5_df
+                    else:
+                        # 合并：以 H5 为准，补全缺失股票
+                        cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
+                    new_total = len(cached_df['code'].unique())
+                    logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
+
             if not cached_df.empty:
                 with timed_ctx("from_dataframe", warn_ms=800):
                     self.kline_cache.from_dataframe(cached_df)
-                logger.info(f"♻️ MinuteKlineCache recovered from disk: {len(cached_df)} nodes.")
+                logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
             else:
                 logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
         except Exception as e:
-            logger.error(f"MinuteKlineCache recovery failed: {e}")
+            logger.error(f"Snapshot load error: {e}")
 
     def reset_state(self):
         """
@@ -1150,6 +1295,61 @@ class DataPublisher:
             
             time.sleep(10) # 维持心跳检查频率
         
+    def recover_from_hdf5(self) -> pd.DataFrame:
+        """
+        从 sina_MultiIndex_data.h5 恢复当日 Tick 轨迹并转化为 K 线格式
+        """
+        try:
+            h5_fname = 'sina_MultiIndex_data'
+            # 动态获取当前使用的 limit_time 后缀
+            limit_time_int = int(getattr(cct, 'sina_limit_time', 60))
+            h5_table = f"all_{limit_time_int}"
+            
+            logger.info(f"🔍 Reading HDF5: {h5_fname} table: {h5_table}")
+            # 使用 tdx_hdf5_api 的统一接口读取
+            df_mi = h5a.load_hdf_db(h5_fname, h5_table, MultiIndex=True)
+            
+            if df_mi is None or df_mi.empty:
+                logger.warning("⚠️ HDF5 recovery source is empty.")
+                return pd.DataFrame()
+            
+            # --- 结构转换：MultiIndex -> Flat DataFrame ---
+            # H5 结构通常是: Index=['code', 'ticktime'], Columns=['close', 'high', 'low', 'volume', ...]
+            df = df_mi.reset_index()
+            
+            # 特殊处理：将 'ticktime' 字段转为 Unix 整数时间戳 'time'
+            if 'ticktime' in df.columns:
+                # 兼容性处理：如果包含日期，转为 Unix
+                if pd.api.types.is_datetime64_any_dtype(df['ticktime']):
+                    df['time'] = df['ticktime'].view('int64') // 10**9
+                else:
+                    # 如果是 HH:MM:SS，则拼接今日日期
+                    now_str = datetime.now().strftime('%Y-%m-%d')
+                    df['time'] = pd.to_datetime(now_str + " " + df['ticktime'].astype(str)).view('int64') // 10**9
+            
+            # 补齐 MinuteKlineCache 需要的字段
+            if 'close' in df.columns:
+                if 'open' not in df.columns: df['open'] = df['close']
+                if 'high' not in df.columns: df['high'] = df['close']
+                if 'low' not in df.columns: df['low'] = df['close']
+            
+            # 累计成交量处理 (H5 如果存的是分笔，这里需要聚合)
+            # 但实际上 sina_MultiIndex 存的是快照轨迹，可以直接使用
+            if 'volume' not in df.columns: df['volume'] = 0
+            df['cum_vol_start'] = 0 # 恢复时通常设为0，由后续 update 修正
+            
+            # 规范化列名
+            needed = ['code', 'time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start']
+            df = df[[c for c in needed if c in df.columns]]
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"❌ recover_from_hdf5 failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return pd.DataFrame()
+
     def update_batch(self, df: pd.DataFrame):
         """
         接收来自 fetch_and_process 的 DataFrame 快照
@@ -1208,17 +1408,17 @@ class DataPublisher:
                         logger.warning(f"⚠️ Failed to parse {col}: {e}")
 
             # 仅在非交易活跃期或第一次收到批次时记录诊断信息
+            dt_now = datetime.fromtimestamp(raw_ts)
+            hhmm = int(dt_now.strftime('%H%M'))
+            
             if not getattr(self, '_time_source_logged', False):
-                logger.info(f"🚦 First realtime batch identified. Time source: {time_source}, Market Time: {datetime.fromtimestamp(raw_ts).strftime('%H:%M:%S')}")
+                logger.info(f"🚦 First realtime batch identified. Time source: {time_source}, Market Time: {hhmm}")
                 self._time_source_logged = True
             
             # 手动判定时段 (替代 strict 的 cct.get_realtime_status)
-            dt_now = datetime.fromtimestamp(raw_ts)
-            hhmm = int(dt_now.strftime('%H%M'))
             is_trade_day = cct.get_trade_date_status()
-            # 准入控制：盘中允许 9:10 之后的批次进入，包含竞价异动
-            is_valid_hour = (910 <= hhmm <= 1135) or (1255 <= hhmm <= 1515)
-            # data_ok = cct.get_work_time()  # 也可以直接用这个，但在 cache 层面 >= 925 更安全
+            # 准入控制：盘中允许 9:15 之后的批次进入，包含完整竞价
+            is_valid_hour = (915 <= hhmm <= 1135) or (1255 <= hhmm <= 1515)
             is_realtime = is_trade_day and is_valid_hour
             
             # 2. 跨日检测
@@ -1228,15 +1428,27 @@ class DataPublisher:
                 self.reset_state()
             self._last_update_date = incoming_date
 
-            # 3. 指纹校验
+            # 3. [CRITICAL FIX] 指纹校验优化：防止局部静态个股屏蔽全场更新
+            # 如果只取 head(50)，一旦前 50 只没有成交，全场都会丢数据
+            # 策略：多段采样 (头 + 尾 + 均匀跨度) + 随机因子
+            total_count = len(df)
+            indices = [0] # 头部
+            if total_count > 100:
+                # 每隔 10% 采样一个点
+                indices.extend([int(total_count * i / 10) for i in range(1, 10)])
+                indices.append(total_count - 1) # 尾部
+            
+            # 提取指纹特征列
             fp_cols = ['code']
             for c in ['trade', 'now', 'price']:
-                if c in check_sample.columns:
+                if c in df.columns:
                     fp_cols.append(c)
                     break
-            if 'volume' in check_sample.columns:
+            if 'volume' in df.columns:
                 fp_cols.append('volume')
             
+            # 仅对采样行进行指纹计算，确保覆盖全场
+            check_sample = df.iloc[list(set(indices))]
             batch_fp = df_fingerprint(check_sample, cols=fp_cols)
             is_new_batch = (batch_fp != self._last_batch_fp)
             
@@ -1272,6 +1484,7 @@ class DataPublisher:
                 if self.update_count % 500 == 0:
                     n = gc.collect()
                     if n > 0: logger.debug(f'🧹 GC collected {n} objects')
+
             # =========================
             # Snapshot Cache (Periodic Check)
             # =========================

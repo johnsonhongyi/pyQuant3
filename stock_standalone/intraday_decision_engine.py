@@ -600,7 +600,17 @@ class IntradayDecisionEngine:
             sell_score += 0.45  # 高权重
             reasons.append(f"急速冲高回落(泵高{pump_height:.1%}回撤{pullback_depth:.1%})")
             
-        # 二次冲高失败检测：如果 high 距离日内最高还有较大差距，说明反弹乏力
+        # [NEW] T+1 诱多防御：当日绿盘且均价线下，大幅增加抛售意愿
+        percent = float(snapshot.get('percent', 0.0))
+        if percent < -1.0 and price < nclose * 0.99:
+            sell_score += 0.40
+            reasons.append("T1防守:绿盘且跑输均价线")
+
+        # 【新增】如果跌出昨日收盘价 3% 以上，并且也是当前日内最低价附近，极大增强卖出信号（破位）
+        low_val = float(debug.get("low_val", snapshot.get("low_val", 0)))
+        if price < last_close * 0.97 and price <= low_val * 1.01:
+            sell_score += 0.35
+            reasons.append("今日破位主杀段")
         highest_today = float(snapshot.get('highest_today', high))
         if highest_today > 0 and high < highest_today * 0.985 and price < nclose:
             # 日内次高点也无法触及前高的 98.5%，反弹乏力

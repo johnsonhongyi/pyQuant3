@@ -38,12 +38,14 @@ class SQLiteConnectionManager:
         self._init_wal()
 
     def _init_wal(self):
-        """Enable WAL mode for better concurrency"""
+        """Enable WAL mode for better concurrency and auto-checkpoint"""
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA temp_store=MEMORY;")
+            # [NEW] 100页缓冲即刻将 wal 挂载回主库，让外部实时访问无锁
+            conn.execute("PRAGMA wal_autocheckpoint=100;")
             conn.close()
             logger.info(f"DB WAL mode enabled for {self.db_path}")
         except Exception as e:
@@ -53,6 +55,8 @@ class SQLiteConnectionManager:
         """Get a thread-local connection"""
         if not hasattr(self.local, 'conn'):
             self.local.conn = sqlite3.connect(self.db_path, timeout=30.0)
+            # [NEW] 加强并发等待时间，5000毫秒轮询等锁
+            self.local.conn.execute("PRAGMA busy_timeout=5000;")
             # Enable foreign keys by default if needed, or other pragmas
             # self.local.conn.execute("PRAGMA foreign_keys = ON;") 
         return self.local.conn
@@ -118,9 +122,21 @@ def get_indb_df(days=10):
         indf = inDb.showcount(inDb.selectlastDays(days + 5), sort_date=True)
     return indf
 
+def _get_concept_db_conn():
+    """统一的 concept DB 连接，注入 WAL 和 并发控制 PRAGMA"""
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA wal_autocheckpoint=100;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+    except Exception as e:
+        logger.warning(f"Failed to set PRAGMA on {DB_PATH}: {e}")
+    return conn
+
 def init_concept_db():
     """初始化概念数据 SQLite 数据库"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _get_concept_db_conn()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS concept_data (
@@ -139,7 +155,7 @@ def save_concept_pg_data(win, concept_name):
     try:
         init_concept_db()
         date_str = datetime.now().strftime("%Y%m%d")
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_concept_db_conn()
         cur = conn.cursor()
 
         def to_serializable(obj):
@@ -193,7 +209,7 @@ def save_concept_pg_data_simple(win, concept_name):
     try:
         init_concept_db()
         date_str = datetime.now().strftime("%Y%m%d")
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_concept_db_conn()
         cur = conn.cursor()
 
         # 将 ndarray 转为 list
@@ -243,7 +259,7 @@ def load_concept_pg_data_no_serializable(concept_name):
     """加载当天概念数据"""
     date_str = datetime.now().strftime("%Y%m%d")
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_concept_db_conn()
         cur = conn.cursor()
         cur.execute("SELECT init_data, prev_data FROM concept_data WHERE date=? AND concept_name=?",
                     (date_str, concept_name))
@@ -263,7 +279,7 @@ def load_all_concepts_pg_data():
     date_str = datetime.now().strftime("%Y%m%d")
     result = {}
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_concept_db_conn()
         cur = conn.cursor()
         cur.execute("SELECT concept_name, init_data, prev_data FROM concept_data WHERE date=?", (date_str,))
         rows = cur.fetchall()
