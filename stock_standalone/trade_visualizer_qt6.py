@@ -56,6 +56,7 @@ from signal_log_panel import SignalLogPanel
 from hotspot_popup import HotSpotPopup
 from signal_message_queue import SignalMessage, SignalMessageQueue
 from trading_hub import get_trading_hub, TrackedSignal
+from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
@@ -2190,6 +2191,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.pullback_strat = StrongPullbackMA5Strategy(min_score=60) # ⭐ 强力回撤策略
         self.consolidation_strat = StrongConsolidationStrategy()     # ⭐ 强势整理策略
         self.strategy_controller = StrategyController(self) # ⭐ 新增：统一策略控制器
+        
+        # ⚡ [NEW] SBC Strategy Components (Structural Breakout Champion)
+        self.sbc_tracker = IntradayEmotionTracker()
+        self.sbc_baseline_loader = DailyEmotionBaseline()
 
         # 策略模拟开关
         self.show_strategy_simulation = True
@@ -8423,6 +8428,45 @@ class MainWindow(QMainWindow, WindowMixin):
         watch_signals = self._get_watchlist_signals(code, day_df)
         if watch_signals:
             kline_signals.extend(watch_signals)
+
+        # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
+        # 仅在有实时分时数据，且启用了策略模拟时计算
+        if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
+            try:
+                # 1. 计算日线基准 (Baseline)
+                # 取历史最新的 day_df 数据进行基准计算
+                last_hist = day_df.iloc[-1:].copy()
+                last_hist['code'] = code # 确保有 code 字段
+                self.sbc_baseline_loader.calculate_baseline(last_hist)
+                
+                # 2. 从 tick_df 重新生成带指标的分时 df
+                # 根据真实数据验证，tick_df 需要包含 trade/price, amount, volume 等
+                sbc_tick_df = tick_df.copy()
+                if 'code' not in sbc_tick_df.columns:
+                    sbc_tick_df['code'] = code
+                if 'trade' not in sbc_tick_df.columns and 'close' in sbc_tick_df.columns:
+                    sbc_tick_df['trade'] = sbc_tick_df['close']
+                
+                # 3. 批量更新追踪器
+                self.sbc_tracker.update_batch(sbc_tick_df, self.sbc_baseline_loader)
+                
+                # 4. 提取信号
+                if 'sbc_status' in sbc_tick_df.columns:
+                    for idx in range(len(sbc_tick_df)):
+                        status = sbc_tick_df['sbc_status'].iloc[idx]
+                        if isinstance(status, str) and "🚀" in status:
+                            p = float(sbc_tick_df['trade'].iloc[idx])
+                            # 使用 TICK_LIVE 标记或者利用真实的时间戳
+                            t_stamp = sbc_tick_df.index[idx] if isinstance(sbc_tick_df.index, pd.DatetimeIndex) else "TICK_LIVE"
+                            kline_signals.append(SignalPoint(
+                                code=code, timestamp=t_stamp, bar_index=idx, price=p,
+                                signal_type=SignalType.BUY, # 复用 BUY 类型，配合红色准星图标 (在 visualize_utils 可能需特殊处理，或者此处用 FOLLOW 的 🎯)
+                                source=SignalSource.STRATEGY_ENGINE,
+                                reason=status
+                            ))
+            except Exception as e:
+                logger.debug(f"SBC Intraday calculation error: {e}")
+
 
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
