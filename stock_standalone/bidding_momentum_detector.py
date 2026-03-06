@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+def get_limit_up_threshold(code: str) -> float:
+    """获取各市场接近涨停的阈值 (主板10%, 科创/创业20%, 北证30%)"""
+    code_str = str(code)
+    if code_str.startswith(('688', '30')):
+        return 19.5
+    elif code_str.startswith(('43', '83', '87', '92')):
+        return 29.5
+    return 9.5
+
+
 
 class TickSeries:
     """
@@ -454,7 +464,11 @@ class BiddingMomentumDetector:
             try:
                 # 如果是字符串，转为 unix timestamp
                 if isinstance(ts_val, (str, pd.Timestamp)):
-                    data_ts = pd.to_datetime(ts_val).timestamp()
+                    dt = pd.to_datetime(ts_val)
+                    data_ts = dt.timestamp()
+                    # [BUG FIX] 防止昨天的纯时间字符串 "15:00:00" 被 pandas 默认解析为今天的 15:00 (变成未来时间)
+                    if data_ts > time.time() + 60:
+                        data_ts = (dt - pd.Timedelta(days=1)).timestamp()
                 else:
                     data_ts = float(ts_val)
             except:
@@ -546,12 +560,12 @@ class BiddingMomentumDetector:
         # --- Limit-up tracking for daily_watchlist ---
         # This logic is added here to populate self.daily_watchlist
         # It checks for stocks that are at or near limit-up and adds them to the watchlist
-        current_time_str = datetime.datetime.fromtimestamp(now_ts).strftime('%H:%M:%S')
+        current_time_str = datetime.datetime.fromtimestamp(now_ts).strftime('%m%d-%H%M')
         for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo, fbts, phint, untrd, isctr) in snap.items():
-            if pct >= 9.5 and not untrd: # Check for near limit-up and not untradable (e.g., one-word board)
-                # If it's already in the watchlist, update its time
+            if pct >= get_limit_up_threshold(code) and not untrd: # Check for near limit-up dynamically by market
+                # If it's already in the watchlist, keep its INITIAL trigger time
                 if code in self.daily_watchlist:
-                    self.daily_watchlist[code]['time_str'] = current_time_str
+                    pass # Do NOT overwrite the time, we want the first trigger time!
                 else:
                     # Add to watchlist
                     self.daily_watchlist[code] = {
@@ -629,7 +643,8 @@ class BiddingMomentumDetector:
 
                 # 识别一字板 (Untradable)
                 # 如果个股在评价时已经标记为不可交易，或者现在表现为一字涨停，则确认为不可交易
-                if s.get('is_untradable') or (s['pct'] > 9.5 and (s['high_day'] - s['low_day']) < 0.01):
+                limit_threshold = get_limit_up_threshold(s['code'])
+                if s.get('is_untradable') or (s['pct'] > limit_threshold and (s['high_day'] - s['low_day']) < 0.01):
                     s['is_untradable'] = True
                     # 一字板不作为活跃龙头显示，大幅降低其在板块内的领涨评分权重
                     s['leader_score'] -= 50.0 
