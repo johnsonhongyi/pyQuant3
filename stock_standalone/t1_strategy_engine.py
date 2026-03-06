@@ -150,6 +150,19 @@ class T1StrategyEngine:
         if current_price <= 0:
             return 'HOLD', "", 0.0
             
+        # --- 0. 极弱盘口与诱多防御 (T+1 核心纪律) ---
+        percent = float(row.get('percent', 0.0))
+        nclose = float(row.get('nclose', 0.0))  # VWAP
+        high = float(row.get('high', current_price))
+        pre_close = float(row.get('lastp1d', current_price))
+        
+        # 诱多特征1：现价跌破日内均价线 (均价线是多空分水岭，跌破意味着当日买入者亏损，极易形成恐慌踩踏)
+        # 诱多特征2：跌破平盘线 (percent < 0)，弱势不补仓
+        # 诱多特征3：长上影线杀跌 (从高点回落超过 4%)
+        high_pct = (high - pre_close) / pre_close * 100 if pre_close > 0 else 0
+        if current_price < nclose * 0.995 or percent < 0.0 or (high_pct > 3.0 and (high - current_price)/high > 0.04):
+            return 'HOLD', "", 0.0
+
         self.refresh_targets(code, snap, current_price)
         targets = self.target_cache.get(code)
         if not targets:

@@ -1647,20 +1647,46 @@ class StockLiveStrategy:
             
             added_count = 0
             for cand in candidates[:10]:  # 每批最多加 10 只
-                # ⭐ 改造：不再直接入 follow_queue，而是进入 watchlist 进行跨日验证
-                try:
-                    if hub.add_to_watchlist(
-                        code=cand['code'],
-                        name=cand['name'],
-                        sector=cand['sector'],
-                        price=cand['price'],
-                        source=cand['source'],
-                        daily_patterns=cand['daily_patterns']
-                    ):
-                        added_count += 1
-                        logger.info(f"📋 写入热股观察队列: {cand['code']} {cand['name']} [{cand['signal_type']}]")
-                except Exception as e:
-                    logger.error(f"Failed to add watchlist item {cand['code']}: {e}")
+                # ⭐ [NEW] Fast-Track 机制：如果属于极致强势的异动信号 (priority >= 10) 且有热点支持，允许盘中直接跟单！
+                if cand['priority'] >= 10:
+                    try:
+                        # 对于超强信号，尝试模拟构造一个 TrackingSignal 进行直接突击，如果 Hub 支持会写入 DB
+                        # 兼容老版直接 push
+                        sig = dict(
+                            code=cand['code'],
+                            name=cand['name'],
+                            signal_type=cand['daily_patterns'], # 形态透传
+                            detected_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            detected_price=cand['price'],
+                            entry_strategy="日内动能突袭", # 标识特殊来源
+                            status="TRACKING",
+                            priority=cand['priority'],
+                            source=cand['source'],
+                            notes="Fast-Track 日内强势直通"
+                        )
+                        
+                        # 尝试通过 HUB 标准 TrackedSignal 格式增加
+                        from trading_hub import TrackedSignal
+                        track_sig = TrackedSignal(**sig)
+                        hub.add_to_follow_queue(track_sig)
+                        logger.info(f"🚀 [Fast-Track] 盘中极强信号直接进入实盘跟单队列: {cand['code']} {cand['name']}")
+                    except Exception as e:
+                        logger.error(f"Failed to fast-track {cand['code']}: {e}")
+                else:
+                    # ⭐ 改造：常规信号进入 watchlist 进行跨日验证
+                    try:
+                        if hub.add_to_watchlist(
+                            code=cand['code'],
+                            name=cand['name'],
+                            sector=cand['sector'],
+                            price=cand['price'],
+                            source=cand['source'],
+                            daily_patterns=cand['daily_patterns']
+                        ):
+                            added_count += 1
+                            logger.info(f"📋 写入热股观察队列: {cand['code']} {cand['name']} [{cand['signal_type']}]")
+                    except Exception as e:
+                        logger.error(f"Failed to add watchlist item {cand['code']}: {e}")
 
             if added_count > 0:
                 logger.info(f"✅ 今日自动写入 {added_count} 只热点观察股，等待跨日验证")
@@ -1787,20 +1813,33 @@ class StockLiveStrategy:
                         code, row, snap, pos_info
                     )
                     if t1_action != 'HOLD':
-                        # 防止同一股票反复触发同一类型的自动交易，使用专用缓存机制冷却
-                        import time
-                        sig_key = f"{code}_T0_{t1_action}"
-                        last_ts = self._t0_cooldowns.get(sig_key, 0.0)
-                        now_ts = time.time()
+                        # [NEW] 针对 T+1 做 T+0 的单日次级防线：同向交易每日限一次 (重点卡死 ADD)
+                        allow_trade = True
+                        act_name = "加仓(T0买)" if t1_action == 'ADD' else "去弱留强减仓(T0卖)"
                         
-                        if now_ts - last_ts > 1800: # 半小时冷却
-                            self._trigger_alert(code, signal.name, t1_reason, action=t1_action, price=current_price)
-                            logger.info(f"🔄 [T+1 Auto] {code} {signal.name} 触发 {t1_action}: {t1_reason}")
+                        if t1_action == 'ADD':
+                            # 查重：今天是否已经做过多单加仓？
+                            trades_today = self.trading_logger.get_today_trades()
+                            for t in trades_today:
+                                if t['code'] == code and "加仓" in t['action']:
+                                    allow_trade = False
+                                    logger.debug(f"⚠️ [T+1 Guard] {code} 今日已触发过加仓，受限单日锁，忽略本次 ADD 信号: {t1_reason}")
+                                    break
+                                    
+                        if allow_trade:
+                            # 防止同一股票反复触发同一类型的自动交易，使用专用缓存机制冷却
+                            import time
+                            sig_key = f"{code}_T0_{t1_action}"
+                            last_ts = self._t0_cooldowns.get(sig_key, 0.0)
+                            now_ts = time.time()
                             
-                            # 全自动化执行日志切分
-                            act_name = "加仓(T0买)" if t1_action == 'ADD' else "去弱留强减仓(T0卖)"
-                            self._execute_t0_trade(code, signal.name, act_name, current_price, t1_reason)
-                            self._t0_cooldowns[sig_key] = now_ts
+                            if now_ts - last_ts > 1800: # 半小时冷却
+                                self._trigger_alert(code, signal.name, t1_reason, action=t1_action, price=current_price)
+                                logger.info(f"🔄 [T+1 Auto] {code} {signal.name} 触发 {t1_action}: {t1_reason}")
+                                
+                                # 全自动化执行日志切分
+                                self._execute_t0_trade(code, signal.name, act_name, current_price, t1_reason)
+                                self._t0_cooldowns[sig_key] = now_ts
                 
                 if status == 'ENTERED': # Original continue for ENTERED status, now after T+0 logic
                     continue # 持仓股已处理完监控，跳过买入触发逻辑
