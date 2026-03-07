@@ -114,51 +114,54 @@ def _prepare_day_df(raw: pd.DataFrame) -> pd.DataFrame:
 
 def _get_day_context(code: str, day_df: pd.DataFrame, tick_date):
     """
-    为回放日 tick_date 提取「无前瞻」的历史行数据，并创建新的 baseline 实例。
-    返回 (baseline, anchors, last_close, ma5, ma10, ma60, day_row)
+    【对齐两端逻辑链条】— 基于时间点提取严格历史基准
+    确保锚点 (Yesterday High 等) 指向分时图日期 D 的前一交易日 D-1
     """
-    ts = pd.Timestamp(tick_date)
-    hist = day_df[day_df.index < ts]
-    if hist.empty:
-        # Fallback: 如果没有任何历史行（比如今天是最早日期），用全量中最近一行
-        hist = day_df.sort_index().head(1)
-    if hist.empty:
+    # 1. 统一日期格式标识 (D)
+    t_date_str = tick_date.strftime('%Y-%m-%d') if hasattr(tick_date, 'strftime') else str(tick_date)
+    
+    # 2. 选取严格早于当前分时日期的日线数据作为历史基板 (T-1 及其之前)
+    # 这就是“用时间取”的核心：通过日期字符串进行索引切片隔离
+    hist_day_df = day_df[day_df.index.astype(str) < t_date_str]
+    
+    if hist_day_df.empty:
+        # 极端兜底
         return None, {}, 0.0, 0.0, 0.0, 0.0, None
 
-    row = hist.iloc[-1]   # 前一交易日这一行
+    # T-1 行 (真正意义上的“昨日”)
+    row = hist_day_df.iloc[-1]
+    # T-2 行 (用于判定上升结构等)
+    prev_row = hist_day_df.iloc[-2] if len(hist_day_df) >= 2 else row
 
-    # 直接从日线行读取 MA 值（不依赖 get_anchor 的有限 key 集）
-    ma5  = float(row.get('ma5d',  row.get('ma5',  0)))
-    ma10 = float(row.get('ma10d', row.get('ma10', 0)))
-    ma20 = float(row.get('ma20d', row.get('ma20', 0)))
-    ma60 = float(row.get('ma60d', row.get('ma60', 0)))
-    last_close  = float(row.get('close', 0))
-    yesterday_h = float(row.get('high',  0))
-    prev_h      = float(hist.iloc[-2]['high']) if len(hist) >= 2 else yesterday_h
-
-    # 每天创建新的 baseline 实例（绕过日期守卫 _last_calc_date == today）
-    # 注意：真实盘中 calculate_baseline 传入的是包含今日在内的最新行 (T)，
-    # 这样 bl_row 中的 lasth1d (由于 shift 1) 才是 T-1 (昨日) 的高点。
-    hist_inc = day_df[day_df.index <= ts]
-    if not hist_inc.empty:
-        bl_row = hist_inc.tail(1).copy()
-    else:
-        bl_row = hist.tail(1).copy()
-        
-    baseline = DailyEmotionBaseline()
-    baseline._last_calc_date = None   # 强制允许计算
-    baseline.calculate_baseline(bl_row)
-
-    anchors = {
-        'yesterday_high':  float(bl_row.iloc[-1].get('lasth1d', 0)),
-        'prev_high':       float(bl_row.iloc[-1].get('lasth2d', 0)),
-        'ma60':            ma60,
-        'ma20':            ma20,
-        'last_low':        float(bl_row.iloc[-1].get('last_low', row.get('low', 0))),
-        'last_close':      last_close,
-        'last_close_p2':   float(bl_row.iloc[-1].get('lastp2d', 0)),
-        'is_rising_struct': bool(bl_row.iloc[-1].get('lastp1d', 0) > bl_row.iloc[-1].get('lastp2d', 0)),
+    # 3. 构造与 DailyEmotionBaseline 对齐的审计数据组
+    # 手动提取 D-1 实值，避免依赖 shift 列名冲突
+    bl_data = {
+        'code':          code,
+        'last_high':     float(row['high']),
+        'high2':         float(prev_row['high']),
+        'last_close':    float(row['close']),
+        'close2':        float(prev_row['close']),
+        'last_low':      float(row['low']),
+        # 均线参数显式传递
+        'ma60d':         float(row.get('ma60', row.get('ma60d', row['close']))),
+        'ma20d':         float(row.get('ma20', row.get('ma20d', row['close']))),
+        'ma5d':          float(row.get('ma5',  row.get('ma5d',  row['close']))),
+        'ma10d':         float(row.get('ma10', row.get('ma10d', row.get('ma10', 0)))),
     }
+    bl_df = pd.DataFrame([bl_data])
+    
+    # 初始化基准实例并强制推演
+    baseline = DailyEmotionBaseline()
+    baseline._last_calc_date = None # 允许重复计算
+    baseline.calculate_baseline(bl_df)
+
+    # 4. 提取锚点字典 (用于打印和引擎内部判定)
+    anchors = baseline.get_anchor(code)
+    last_close = bl_data['last_close']
+    ma5        = bl_data['ma5d']
+    ma10       = bl_data['ma10d']
+    ma60       = bl_data['ma60d']
+
     return baseline, anchors, last_close, ma5, ma10, ma60, row
 
 
@@ -172,10 +175,24 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False):
     # 1. 日线数据
     try:
         resample = 'd'
+        # [ALIGN] 强制对齐线上加载方式：开启 fastohlc 确保指标列名与线上一致
         raw = tdd.get_tdx_Exp_day_to_df(
-            code, dl=ct.Resample_LABELS_Days[resample], resample=resample)
+            code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
         if raw is None or raw.empty:
             print(f"❌ 无法获取 {code} 日线数据"); return
+        
+        # [FIX] 统一索引为日期字符串 (解决 AttributeError)
+        try:
+            # 使用更稳健的转换链：to_datetime -> 检查是否为日期类型 -> 格式化
+            dts = pd.to_datetime(raw.index)
+            raw.index = [d.strftime('%Y-%m-%d') for d in dts]
+        except Exception:
+            # 兜底：从列中提取
+            for col in ('date', 'trade_date'):
+                if col in raw.columns:
+                    raw.index = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in raw[col]]
+                    break
+        
         day_df = _prepare_day_df(raw)
     except Exception as e:
         import traceback
