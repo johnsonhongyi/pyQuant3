@@ -165,3 +165,5 @@ stock_standalone/JohnsonUtil/global.ini
 *.db-shm
 *.db-wal
 stock_standalone/多周期.py
+find_zeros.py
+inspect_*.py

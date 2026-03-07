@@ -1656,7 +1656,7 @@ class StockLiveStrategy:
                             code=cand['code'],
                             name=cand['name'],
                             signal_type=cand['daily_patterns'], # 形态透传
-                            detected_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            detected_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             detected_price=cand['price'],
                             entry_strategy="日内动能突袭", # 标识特殊来源
                             status="TRACKING",

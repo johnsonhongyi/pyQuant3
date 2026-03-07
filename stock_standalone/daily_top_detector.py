@@ -24,7 +24,7 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
     # Use real-time data if provided, else use last_row
     price = current_tick.get('trade', last_row['close']) if current_tick is not None else last_row['close']
     high = current_tick.get('high', last_row['high']) if current_tick is not None else last_row['high']
-    volume = current_tick.get('volume', last_row['volume']) if current_tick is not None else last_row['volume']
+    volume = current_tick.get('volume', last_row.get('volume', last_row.get('vol', 0))) if current_tick is not None else last_row.get('volume', last_row.get('vol', 0))
     
     # 1. TD Sequence Check (Setup count)
     td_setup = last_row.get('td_setup', 0)
@@ -35,9 +35,9 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
 
     # 2. Volume-Price Divergence at Highs (滞涨)
     # Price is near 10-day high but today's volume is > 1.8x of 5-day avg, while price change is small (< 1.5%)
-    avg_vol_5 = day_df['volume'].tail(5).mean()
-    high_10 = day_df['high'].tail(10).max()
-    high_60 = day_df['high'].tail(60).max()
+    avg_vol_5 = day_df['volume'].tail(5).mean() if 'volume' in day_df.columns else day_df['vol'].tail(5).mean()
+    high_10 = last_row.get('max10', day_df['high'].tail(10).max())
+    high_60 = last_row.get('hmax60', day_df['high'].tail(60).max())
     
     # 滞涨判定：在高位 (10日高点附近) 爆出巨量 (1.8倍) 但不涨
     if price > high_10 * 0.97 and volume > avg_vol_5 * 1.8:

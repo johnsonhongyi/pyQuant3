@@ -564,29 +564,37 @@ class SignalOverlay:
         self.tick_scatter = pg.ScatterPlotItem(pxMode=True, zValue=101)
         self.tick_plot.addItem(self.tick_scatter)
 
-        self.text_items = []
-        self._text_pool = []  # 对象池：存放 TextItem
+        # 按图表分开管理文本，防止跨图表覆盖
+        self.text_items = {'kline': [], 'tick': []}
+        self._text_pool = {'kline': [], 'tick': []}
 
-    def _get_text_item(self) -> pg.TextItem:
-        """从池中获取或新建 TextItem"""
-        if self._text_pool:
-            t = self._text_pool.pop()
+    def _get_text_item(self, target='kline') -> pg.TextItem:
+        """从对应池中获取或新建 TextItem"""
+        if self._text_pool[target]:
+            t = self._text_pool[target].pop()
             t.show()
             return t
         
-        # 池空了，新建并添加到场景 (默认先加到 kline_plot，后续可通过 addItem 调整或直接 setPos)
         t = pg.TextItem('', anchor=(0.5, 1))
-        self.kline_plot.addItem(t)
+        plot = self.kline_plot if target == 'kline' else self.tick_plot
+        plot.addItem(t)
         return t
 
     def clear(self):
         """清理所有信号标记 (回收对象到池)"""
         self.kline_scatter.clear()
         self.tick_scatter.clear()
-        for item in self.text_items:
-            item.hide()
-            self._text_pool.append(item)
-        self.text_items.clear()
+        # 兼容处理未转换的情况
+        if isinstance(self.text_items, list):
+            for item in self.text_items:
+                item.hide()
+            self.text_items.clear()
+        else:
+            for t in ['kline', 'tick']:
+                for item in self.text_items[t]:
+                    item.hide()
+                    self._text_pool[t].append(item)
+                self.text_items[t].clear()
 
     # def update_signals_old(self, signals: list[SignalPoint], target='kline', y_visuals=None):
     #     """
@@ -657,10 +665,10 @@ class SignalOverlay:
 
         if not signals:
             scatter.clear()
-            for item in self.text_items:
+            for item in self.text_items[target]:
                 item.hide()
-                self._text_pool.append(item)
-            self.text_items.clear()
+                self._text_pool[target].append(item)
+            self.text_items[target].clear()
             return
 
         xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
@@ -668,10 +676,10 @@ class SignalOverlay:
         xs, ys, brushes, symbols, sizes, data, pens = [], [], [], [], [], [], []
 
         # 回收旧文本
-        for item in self.text_items:
+        for item in self.text_items[target]:
             item.hide()
-            self._text_pool.append(item)
-        self.text_items.clear()
+            self._text_pool[target].append(item)
+        self.text_items[target].clear()
 
         for i, sig in enumerate(signals):
             y_pos = y_visuals[i] if y_visuals is not None else sig.price
@@ -701,13 +709,13 @@ class SignalOverlay:
             # [UPGRADE] Special handling for Emoji Markers (like '🎯')
             if sig.symbol == '🎯':
                 # Draw Emoji as TextItem (centered on point)
-                marker = self._get_text_item()
+                marker = self._get_text_item(target)
                 # Use HTML to control size/color explicitly if needed, but simple unicode works too.
                 # Center anchor (0.5, 0.5) puts the center of text at (x,y)
                 marker.setHtml(f'<div style="font-size: {sig.size}pt; color: #FFD700; font-weight: bold;">{sig.symbol}</div>')
                 marker.setAnchor((0.5, 0.5))
                 marker.setPos(x_pos, y_pos)
-                self.text_items.append(marker)
+                self.text_items[target].append(marker)
                 
                 # Add invisible hit target for interaction
                 xs.append(x_pos)
@@ -726,26 +734,27 @@ class SignalOverlay:
                 pens.append(pg.mkPen(None)) # No outline for standard shapes
                 data.append(sig.to_visual_hit()['meta'])
 
-            # 添加价格文字标签
-            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
-            
-            # [UPGRADE] Support specific Text Colors for FOLLOW/EXIT
-            if sig.signal_type == SignalType.FOLLOW:
-                text_color = (255, 215, 0) # Gold
-                anchor = (0.5, -0.8) # Below (leave space for large marker)
-            elif sig.signal_type == SignalType.EXIT_FOLLOW:
-                text_color = (255, 69, 0) # OrangeRed
-                anchor = (0.5, 1.5) # Above (Exit)
-            else:
-                anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
-                text_color = (255, 120, 120) if is_buy else (120, 255, 120)
+            # 添加价格文字标签 (K线图上通常隐藏具体价格数字以保持整洁，主要通过分时图查看详情)
+            if target != 'kline':
+                is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+                
+                # [UPGRADE] Support specific Text Colors for FOLLOW/EXIT
+                if sig.signal_type == SignalType.FOLLOW:
+                    text_color = (255, 215, 0) # Gold
+                    anchor = (0.5, -0.8) # Below (leave space for large marker)
+                elif sig.signal_type == SignalType.EXIT_FOLLOW:
+                    text_color = (255, 69, 0) # OrangeRed
+                    anchor = (0.5, 1.5) # Above (Exit)
+                else:
+                    anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
+                    text_color = (255, 120, 120) if is_buy else (120, 255, 120)
 
-            txt = self._get_text_item()
-            txt.setText(f"{sig.price:.2f}")
-            txt.setAnchor(anchor)
-            txt.setColor(text_color)
-            txt.setPos(x_pos, y_pos)
-            self.text_items.append(txt)
+                txt = self._get_text_item(target)
+                txt.setText(f"{sig.price:.2f}")
+                txt.setAnchor(anchor)
+                txt.setColor(text_color)
+                txt.setPos(x_pos, y_pos)
+                self.text_items[target].append(txt)
 
         # 最后统一更新 scatter
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, pen=pens, data=data)
@@ -911,14 +920,16 @@ class DataLoaderThread(QThread):
     code: str
     resample: str
     mutex_lock: QMutex
+    fastohlc: bool
     _search_code: Optional[str]
     _resample: Optional[str]
 
-    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd') -> None:
+    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True) -> None:
         super().__init__()
         self.code = code
         self.resample = resample
         self.mutex_lock = mutex_lock # 存储锁对象
+        self.fastohlc = fastohlc
         self._search_code = None
         self._resample = None
 
@@ -939,14 +950,20 @@ class DataLoaderThread(QThread):
                 # 1. Fetch Daily Data (Historical)
                 # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
                 with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-                    day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample], resample=self.resample, fastohlc=True)
+                    # 根据 fastohlc 参数决定是否加载完整指标 (如 ma60d 等 SBC 基准)
+                    day_df = tdd.get_tdx_Exp_day_to_df(
+                        self.code, 
+                        dl=Resample_LABELS_Days[self.resample], 
+                        resample=self.resample, 
+                        fastohlc=self.fastohlc
+                    )
                     # logger.debug(f'resample_keys: {self.resample}  dl: {Resample_LABELS_Days[self.resample]} day_df:{day_df[-3:]}')
 
-                # 2. Fetch Realtime/Tick Data (Intraday)
-                # 假设此操作不涉及 HDF5，可以在锁外执行
+                    # 2. Fetch Realtime/Tick Data (Intraday)
+                # 强制对齐 verify_sbc_pattern.py 的数据质量：启用 enrich_data=True
                 with timed_ctx("get_real_time_tick", warn_ms=800):
-                    tick_df = sina_data.Sina().get_real_time_tick(self.code)
-
+                    tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
+                    # print(f'tick_df:{tick_df}')                    
             self._search_code = self.code
             self._resample = self.resample
             with timed_ctx("emit", warn_ms=800):
@@ -1100,12 +1117,13 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
             is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 925)
             if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
-                    tick_df = s.get_real_time_tick(code)
+                    tick_df = s.get_real_time_tick(code, enrich_data=True)
                     # logger.debug(f'tick_df: {tick_df[:3]}')
                     # tick_df = drop_tick_all_zero(tick_df)
                 if tick_df is not None and not tick_df.empty:
                     with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
                         today_bar = tick_to_daily_bar(tick_df)
+                        # print(f'today_bar:{today_bar}')
                         try:
                             queue.put_nowait((code, tick_df, today_bar))
                             force_fetch = False # 成功抓取一次后清除强制标记
@@ -2034,7 +2052,7 @@ class RealtimeWorker(QObject):
             return
         try:
             with timed_ctx("_sina.get_real_time_tick", warn_ms=800):
-                tick_df = self._sina.get_real_time_tick(self._code)
+                tick_df = self._sina.get_real_time_tick(self._code, enrich_data=True)
             with timed_ctx("_sina.get_real_time_tick_to_daily_bar", warn_ms=800):
                 today_bar = tick_to_daily_bar(tick_df)
             if today_bar.empty:
@@ -5284,8 +5302,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⭐ 核心修复：既然 DataLoaderThread 已经带回了最新的 tick_df，直接利用它来生成首个幽灵 K 线
         # 这样无论是否在交易时间，只要打开图表，就能看到最新的今天行情。
-        # [FIX] 只有在 realtime 开启时才使用实时数据
-        if self.realtime and tick_df is not None and not tick_df.empty:
+        # [FIX] 只要开启了实时模式 OR 开启了策略模拟，都应该尝试使用 tick_df 进行详细渲染
+        if (self.realtime or self.show_strategy_simulation) and tick_df is not None and not tick_df.empty:
             logger.debug(f"[InitialLoad] Using fresh tick_df from DataLoader for {code}, triggering update...")
             today_bar = tick_to_daily_bar(tick_df)
             # 立即触发同步 (不使用 QTimer 以防闪烁)
@@ -5304,11 +5322,18 @@ class MainWindow(QMainWindow, WindowMixin):
                 with timed_ctx("render_charts", warn_ms=100):
                     self.render_charts(code, self.day_df, None)
         else:
-            # [FIX] realtime 关闭时，直接渲染历史数据（不使用缓存）
-            logger.debug(f"[InitialLoad] Realtime disabled, rendering historical data only for {code}")
-            self._capture_view_state()
-            with timed_ctx("render_charts", warn_ms=100):
-                self.render_charts(code, self.day_df, None)
+            # [FIX] realtime 关闭时，如果开启了策略模拟且有数据，尝试展示
+            if self.show_strategy_simulation and tick_df is not None and not tick_df.empty:
+                logger.debug(f"[InitialLoad] Realtime disabled but strategy simulation on. Rendering with tick_df for {code}")
+                self._capture_view_state()
+                with timed_ctx("render_charts", warn_ms=100):
+                    self.render_charts(code, self.day_df, tick_df)
+            else:
+                # [FIX] realtime 关闭时，直接渲染历史数据（不使用缓存）
+                logger.debug(f"[InitialLoad] Realtime disabled, rendering historical data only for {code}")
+                self._capture_view_state()
+                with timed_ctx("render_charts", warn_ms=100):
+                    self.render_charts(code, self.day_df, None)
         
         # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
         # self._reset_kline_view(self.day_df)
@@ -7424,10 +7449,13 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=80):
+            # 如果开启策略模拟，则需要加载完整日线指标 (fastohlc=False)
+            fastohlc_val = not getattr(self, 'show_strategy_simulation', False)
             self.loader = DataLoaderThread(
                 code,
                 self.hdf5_mutex,
-                resample=self.resample
+                resample=self.resample,
+                fastohlc=fastohlc_val
             )
         with timed_ctx("data_loaded", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)
@@ -8431,13 +8459,66 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
         # 仅在有实时分时数据，且启用了策略模拟时计算
+        logger.debug(f"[DEBUG SBC] code={code}, tick_df_is_None={tick_df is None}, tick_df_empty={tick_df.empty if tick_df is not None else True}, show_strategy_simulation={self.show_strategy_simulation}")
         if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
             try:
                 # 1. 计算日线基准 (Baseline)
-                # 取历史最新的 day_df 数据进行基准计算
-                last_hist = day_df.iloc[-1:].copy()
-                last_hist['code'] = code # 确保有 code 字段
-                self.sbc_baseline_loader.calculate_baseline(last_hist)
+                # ----------------- 核心修复：两版逻辑链条对齐 -----------------
+                # 确定分时数据所属的交易日期 D (解决 HH:MM:SS 默认解析为系统“今天”的问题)
+                try:
+                    # 获取第一笔成交的时间标识
+                    raw_ts = tick_df.index.get_level_values('ticktime')[0] if isinstance(tick_df.index, pd.MultiIndex) else (tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0])
+                    
+                    if isinstance(raw_ts, str) and len(raw_ts) <= 8:
+                        # 只有 HH:MM:SS -> 认为它是目前日线中最新的一天 (D)
+                        t_date_str = day_df.index[-1]
+                    else:
+                        t_dt = pd.to_datetime(raw_ts)
+                        if t_dt.year < 2000: # Unix 时间戳处理
+                            t_dt = pd.to_datetime(raw_ts, unit='s')
+                        interpreted_date = t_dt.strftime('%Y-%m-%d')
+                        # 如果解析结果大于日线末尾（如周末看盘），锁定到日线最后一天
+                        t_date_str = min(interpreted_date, day_df.index[-1])
+                except:
+                    t_date_str = day_df.index[-1]
+                
+                # 选取【严格早于】当前渲染日期的数据作为历史基板 (T-1)
+                hist_day_df = day_df[day_df.index < t_date_str]
+                if hist_day_df.empty and len(day_df) >= 2:
+                    # 兜底：如果日线只有两天且分时正好是最后一天，则取倒数第二行
+                    hist_day_df = day_df.iloc[:-1]
+                elif hist_day_df.empty:
+                    # 极限兜底：取第一行
+                    hist_day_df = day_df.iloc[:1]
+                
+                if not hist_day_df.empty:
+                    # [FIX] 锁定历史行：此时 hist_day_df.iloc[-1] 对应真正的“昨日” (T-1)
+                    row = hist_day_df.iloc[-1]
+                    prev_row = hist_day_df.iloc[-2] if len(hist_day_df) >= 2 else row
+                    
+                    # 构造与 DailyEmotionBaseline 完全对齐的模拟数据集
+                    # 这里的数值必须是 D 之前的实值，而非包含 D 之后的偏移值
+                    bl_data = {
+                        'code':        code,
+                        'last_high':   float(row['high']),  # 对应 D-1 高点
+                        'high2':       float(prev_row['high']), # 对应 D-2 高点
+                        'last_close':  float(row['close']),
+                        'close2':      float(prev_row['close']),
+                        'last_low':    float(row['low']),
+                        'ma60':        float(row.get('ma60', row.get('ma60d', row['close']))),
+                        'ma60d':       float(row.get('ma60', row.get('ma60d', row['close']))),
+                        'ma20':        float(row.get('ma20', row.get('ma20d', row['close']))),
+                        'ma20d':       float(row.get('ma20', row.get('ma20d', row['close']))),
+                        'ma5':         float(row.get('ma5',  row.get('ma5d',  row['close']))),
+                        'ma5d':        float(row.get('ma5',  row.get('ma5d',  row['close']))),
+                    }
+                    bl_df = pd.DataFrame([bl_data])
+                    self.sbc_baseline_loader.calculate_baseline(bl_df)
+                    
+                    # Log Check: 确保与 verify_sbc_pattern.py 输出一致
+                    # logger.info(f"[DEBUG SBC ALIGN] {code} anchor: last_high={bl_data['last_high']}, last_close={bl_data['last_close']}")
+                else:
+                    logger.debug(f"[DEBUG SBC] Date alignment failed for {t_date_str}")
                 
                 # 2. 从 tick_df 重新生成带指标的分时 df
                 # 根据真实数据验证，tick_df 需要包含 trade/price, amount, volume 等
@@ -8447,26 +8528,41 @@ class MainWindow(QMainWindow, WindowMixin):
                 if 'trade' not in sbc_tick_df.columns and 'close' in sbc_tick_df.columns:
                     sbc_tick_df['trade'] = sbc_tick_df['close']
                 
+                # [FIX] 确保均价(VWAP)计算一致性
+                # 如果有累积額和量，重新计算均价以增加鲁棒性
+                if 'amount' in sbc_tick_df.columns and 'volume' in sbc_tick_df.columns:
+                    sbc_tick_df['avg_price'] = (sbc_tick_df['amount'] / sbc_tick_df['volume']).fillna(sbc_tick_df['trade'])
+                
                 # 3. 批量更新追踪器
+                # [FIX] 既然是渲染全天图表，必须重置该股票的追踪状态，防止多次切换导致的累积均价异常或信号被拦截
+                c_clean = str(code).zfill(6)
+                if hasattr(self.sbc_tracker, '_last_vol'): self.sbc_tracker._last_vol[c_clean] = 0.0
+                if hasattr(self.sbc_tracker, '_cumulative_amt'): self.sbc_tracker._cumulative_amt[c_clean] = 0.0
+                if hasattr(self.sbc_tracker, '_last_sbc_status'): self.sbc_tracker._last_sbc_status[c_clean] = False
+                if hasattr(self.sbc_tracker, '_last_date'): self.sbc_tracker._last_date[c_clean] = 0 # 强制触发 update_batch 内部的日期重置逻辑
+
                 self.sbc_tracker.update_batch(sbc_tick_df, self.sbc_baseline_loader)
                 
-                # 4. 提取信号
+                # 4. 提取专门用于分时图绘制的 SBC 信号
+                # 每次开始执行前先清空
+                self.all_today_sbc_signals = []
                 if 'sbc_status' in sbc_tick_df.columns:
                     for idx in range(len(sbc_tick_df)):
                         status = sbc_tick_df['sbc_status'].iloc[idx]
-                        if isinstance(status, str) and "🚀" in status:
+                        if isinstance(status, str) and ("🚀" in status or "⚠️" in status):
                             p = float(sbc_tick_df['trade'].iloc[idx])
-                            # 使用 TICK_LIVE 标记或者利用真实的时间戳
-                            t_stamp = sbc_tick_df.index[idx] if isinstance(sbc_tick_df.index, pd.DatetimeIndex) else "TICK_LIVE"
-                            kline_signals.append(SignalPoint(
-                                code=code, timestamp=t_stamp, bar_index=idx, price=p,
-                                signal_type=SignalType.BUY, # 复用 BUY 类型，配合红色准星图标 (在 visualize_utils 可能需特殊处理，或者此处用 FOLLOW 的 🎯)
+                            # 对齐 SignalType 到 FOLLOW (买) / EXIT_FOLLOW (卖) 以呈现黄金色视觉风格
+                            stype = SignalType.FOLLOW if "🚀" in status else SignalType.EXIT_FOLLOW
+                            self.all_today_sbc_signals.append(SignalPoint(
+                                code=code, timestamp="TICK_LIVE", bar_index=idx, price=p,
+                                signal_type=stype,
                                 source=SignalSource.STRATEGY_ENGINE,
-                                reason=status
+                                reason=status,
+                                debug_info={'tick_idx': idx}
                             ))
+                            logger.debug(f"[DEBUG SBC FOR TICK] Extracted: {status} at {p}")
             except Exception as e:
                 logger.debug(f"SBC Intraday calculation error: {e}")
-
 
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
@@ -8863,20 +8959,50 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- [UPGRADE] Intraday Tick Signals (Shadow/Realtime) ---
             # 直接在分时图上标记影子信号
+            tick_signals_to_draw = []
 
-            if is_realtime_active and self.show_strategy_simulation:
+            if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
                 # 复用刚才计算好的实时影子决策
                 if 'shadow_decision' in locals() and shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
                     y_p = float(tick_df['close'].iloc[-1])
                     idx = len(tick_df) - 1
-                    tick_point = SignalPoint(
+                    tick_signals_to_draw.append(SignalPoint(
                         code=code, timestamp="TICK_LIVE", bar_index=idx, price=y_p,
                         signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
                         source=SignalSource.SHADOW_ENGINE,
                         reason=shadow_decision['reason'],
                         debug_info=shadow_decision.get('debug', {})
-                    )
-                    self.signal_overlay.update_signals([tick_point], target='tick')
+                    ))
+                
+                # [NEW] 提取 SBC 实时信号展示在分时图
+                # 直接从专门的列表中获取 (已避免在 kline_signals 中污染日线图)
+                if hasattr(self, 'all_today_sbc_signals') and getattr(self, 'all_today_sbc_signals'):
+                    import copy
+                    buy_list = []
+                    sell_list = []
+                    for sig in getattr(self, 'all_today_sbc_signals'):
+                        if sig.signal_type in (SignalType.BUY, SignalType.FOLLOW):
+                            buy_list.append(sig)
+                        elif sig.signal_type in (SignalType.SELL, SignalType.EXIT_FOLLOW):
+                            sell_list.append(sig)
+                    
+                    filtered_sigs = []
+                    if buy_list:
+                        filtered_sigs.append(buy_list[0])
+                        if len(buy_list) > 1:
+                            filtered_sigs.append(buy_list[-1])
+                    if sell_list:
+                        filtered_sigs.append(sell_list[0])
+                        if len(sell_list) > 1:
+                            filtered_sigs.append(sell_list[-1])
+                    
+                    for sig in filtered_sigs:
+                        tick_sig = copy.deepcopy(sig)
+                        # tick_sig.bar_index 已经是分时图中的 index, 不需再赋值
+                        tick_signals_to_draw.append(tick_sig)
+
+                if tick_signals_to_draw:
+                    self.signal_overlay.update_signals(tick_signals_to_draw, target='tick')
 
 
             # if is_realtime_active and self.show_strategy_simulation:
@@ -11054,7 +11180,7 @@ if __name__ == "__main__":
         parser.add_argument(
             "-log",
             "--log-level",
-            default="info",
+            default="debug",
             choices=LOG_LEVEL_MAP.keys(),
             help="Log level: debug / info / warning / error"
         )

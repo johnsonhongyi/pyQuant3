@@ -1891,6 +1891,7 @@ class Sina:
         self,
         code: Union[str, List[str]],
         l_limit_time: Optional[int] = None,
+        enrich_data: bool = False,
         debug: bool = False
     ) -> pd.DataFrame:
         """
@@ -1919,8 +1920,94 @@ class Sina:
             if debug:
                 log.error(f"Filter error for codes {codes}: {e}")
 
-        # 4. 清洗全零行并返回
-        return self.drop_tick_all_zero(df_code)
+        # 4. 清洗全零行
+        df_code = self.drop_tick_all_zero(df_code)
+
+        # 5. [NEW] 数据增强：合成增量成交量和成交额
+        if enrich_data and not df_code.empty:
+            df_code = self.process_tick_v_a_data(df_code)
+
+        return df_code
+
+    def process_tick_v_a_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        [NEW] 增强分时数据：将累积成交量转换为每笔增量，并合成成交额 (Amount/VWAP Basis)。
+        """
+        if df.empty:
+            return df
+
+        # 清理 09:25 之前的无效盘前数据
+        df_work = df.copy()
+        try:
+            import datetime as _dt
+            cutoff_time = _dt.time(9, 25, 0)
+            if isinstance(df_work.index, pd.MultiIndex):
+                # ticktime 在第 1 层 (level 1)
+                tt_level = df_work.index.get_level_values('ticktime') if 'ticktime' in df_work.index.names \
+                           else df_work.index.get_level_values(1)
+                # 转换为 time 对象进行比较
+                tt_times = pd.DatetimeIndex(tt_level).time
+                mask = tt_times >= cutoff_time
+                df_work = df_work[mask]
+            elif isinstance(df_work.index, pd.DatetimeIndex):
+                mask = df_work.index.time >= cutoff_time
+                df_work = df_work[mask]
+            if df_work.empty:
+                return df_work
+        except Exception as e:
+            log.warning(f"process_tick_v_a_data: 盘前清理失败，跳过: {e}")
+            df_work = df.copy()
+
+        if 'code' not in df_work.columns:
+            if isinstance(df_work.index, pd.MultiIndex):
+                # 如果 MultiIndex 中有 'code' level，则提取它
+                if 'code' in df_work.index.names:
+                    df_work = df_work.reset_index('code')
+                else:
+                    # 假设 level 0 是 code
+                    df_work.insert(0, 'code', df_work.index.get_level_values(0))
+            else:
+                df_work.insert(0, 'code', df_work.index)
+        
+        # 彻底消除索引名称与列名冲突 (Groupby 要求的确定性)
+        if df_work.index.name == 'code':
+            df_work.index.name = None
+        if isinstance(df_work.index, pd.MultiIndex) and 'code' in df_work.index.names:
+            # 如果 reset_index 没处理干净，重命名该 level
+            new_names = [n if n != 'code' else None for n in df_work.index.names]
+            df_work.index.names = new_names
+
+        # 识别关键列
+        col_vol = 'volume' if 'volume' in df_work.columns else 'vol'
+        col_price = 'close' if 'close' in df_work.columns else 'now'
+        
+        if col_vol not in df_work.columns or col_price not in df_work.columns:
+            return df
+
+        # 分组处理以防代码交叉影响
+        def _calc_group(group):
+            # 1. 计算增量成交量 (tick volume)
+            # 对于历史批量数据，使用 diff；对于第一条数据，假设即为该时刻增量
+            delta_v = group[col_vol].diff().fillna(group[col_vol])
+            delta_v = delta_v.apply(lambda x: max(0, x)) # 防范负增量
+            
+            # 2. 如果缺少成交额，用 现价 * 增量成交量 合成
+            if 'amount' not in group.columns or (group['amount'] <= 0).all():
+                # 合成增量成交额
+                delta_a = delta_v * group[col_price]
+                group['amount'] = delta_a.cumsum()
+            
+            # 3. 记录增量成交量供下游使用 (如计算均价线)
+            group['tick_vol'] = delta_v
+            return group
+
+        df_processed = df_work.groupby('code', group_keys=False).apply(_calc_group)
+        
+        # 计算合成均价
+        if 'amount' in df_processed.columns:
+            df_processed['avg_price'] = (df_processed['amount'] / df_processed[col_vol]).fillna(df_processed[col_price])
+        df_processed = df_processed.set_index('code', append=True).swaplevel()
+        return df_processed
 
 
     # def get_real_time_tick_old(self, code: str, l_limit_time: int = int(cct.sina_limit_time), debug: bool = False) -> pd.DataFrame:
@@ -2042,6 +2129,9 @@ if __name__ == "__main__":
     code='920082'
     # dd = sina.get_real_time_tick('300376')
     dd = sina.get_real_time_tick(code)
+    dde = sina.get_real_time_tick(code, enrich_data=True)
+    import ipdb;ipdb.set_trace()
+
     tickdf = cct.tick_to_daily_bar(dd)
     print(f'cct.sina_MultiIndex_startTime: {cct.sina_MultiIndex_startTime} dd:{dd[-3:]}')
     df =sina.all
