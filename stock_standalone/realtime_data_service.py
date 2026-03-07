@@ -7,12 +7,20 @@ import sqlite3
 from collections import deque, defaultdict
 from typing import Any, Optional, cast
 from collections.abc import Callable
-from JohnsonUtil import LoggerFactory
-from JohnsonUtil import commonTips as cct
-from JohnsonUtil.commonTips import timed_ctx
-from cache_utils import DataFrameCacheSlot, df_fingerprint
 import psutil
 import os
+
+# ── 环境配置 ─────────────────────────────────────────────────────────────────
+try:
+    from JohnsonUtil import LoggerFactory
+    from JohnsonUtil import commonTips as cct
+    from JohnsonUtil.commonTips import timed_ctx
+    from cache_utils import DataFrameCacheSlot, df_fingerprint
+except ImportError:
+    from stock_standalone.JohnsonUtil import LoggerFactory
+    from stock_standalone.JohnsonUtil import commonTips as cct
+    from stock_standalone.JohnsonUtil.commonTips import timed_ctx
+    from stock_standalone.cache_utils import DataFrameCacheSlot, df_fingerprint
 logger = LoggerFactory.getLogger()
 h5a = cct.LazyModule('JSONData.tdx_hdf5_api')
 
@@ -757,6 +765,7 @@ class IntradayEmotionTracker:
     _last_sbc_status: dict[str, bool]
     _last_vol: dict[str, float]      # 记录上一笔成交总量，用于计算增量
     _cumulative_amt: dict[str, float] # 记录累积成交额，用于合成 VWAP
+    _intraday_high: dict[str, float] # 记录日内最高价，用于识别突破
     history: deque[tuple[float, dict[str, float]]]
     
     def __init__(self):
@@ -765,6 +774,7 @@ class IntradayEmotionTracker:
         self._last_sbc_status = {}  # {code: bool} 记录上一状态，实现触发式而非持续式信号
         self._last_vol = {}
         self._cumulative_amt = {}
+        self._intraday_high = {}
         self._last_date = {}        # {code: day_num} 用于处理跨天重置累积量
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
         # item: (timestamp, scores_dict)
@@ -775,6 +785,7 @@ class IntradayEmotionTracker:
         self._sbc_alert_set.clear()
         self._last_vol.clear()
         self._cumulative_amt.clear()
+        self._intraday_high.clear()
         self._last_date.clear()
 
     def update_batch(self, df: pd.DataFrame, baseline_tracker: Optional[DailyEmotionBaseline] = None):
@@ -807,6 +818,14 @@ class IntradayEmotionTracker:
 
             vwap_support_val = STRUCTURAL_THRESHOLD.get('SBC_RISING', {}).get('vwap_support', 1.002)
             # --- End Config-Driven Column Projection ---
+            
+            # [PRE-CALC] 为趋势加速判定预计算滚动指标
+            if active_trade_col in df.columns:
+                # 3 周期价格变动 (加速上涨判定)
+                df['_p_fast'] = df[active_trade_col].diff(3)
+            if active_vol_col in df.columns:
+                # 5 周期平均成交量 (带量判定)
+                df['_v_avg'] = df[active_vol_col].rolling(5, min_periods=1).mean()
 
             # 1. 优先检查现有的情绪分
             if 'scan_score_emotion' in df.columns:
@@ -878,6 +897,7 @@ class IntradayEmotionTracker:
                                 logger.info(f"🔄 [{code_str}] Resetting intraday trackers for new day {r_day_num}")
                             self._last_vol[code_str] = 0.0
                             self._cumulative_amt[code_str] = 0.0
+                            self._intraday_high[code_str] = 0.0
                             self._last_date[code_str] = r_day_num
 
                         anchors = baseline_tracker.get_anchor(code_str)
@@ -921,10 +941,35 @@ class IntradayEmotionTracker:
                             # 卖出特征 2: 跌破 MA60 支撑 (MA60 Breakdown)
                             if ma60 > 0 and price < ma60 < row.get('open', price):
                                 status.append("跌破MA60")
+                                
+                            # --- 🔥 [NEW] 趋势加速逻辑 ---
+                            # 1. 价格突破日内高点 (新高)
+                            # 2. 量比 > 1.8
+                            # 3. 价格 > MA60 (大周期支撑)
+                            # 4. 突然加速上涨带量 (最近 3-tick 价格升, 当前 vol > 均值 * 1.5)
+                            vol_r = float(row.get(active_ratio_col, 1.0))
+                            p_fast = float(row.get('_p_fast', 0))
+                            v_avg = float(row.get('_v_avg', 0))
+                            cur_vol = float(row.get(active_vol_col, 0))
+                            
+                            r_high = float(row.get('high', price))
+                            i_high = self._intraday_high.get(code_str, 0.0)
+                            
+                            # 初次记录
+                            if i_high == 0: self._intraday_high[code_str] = r_high
+                            
+                            is_new_high = r_high > i_high > 0
+                            is_accel = (p_fast > 0) and (cur_vol > v_avg * 1.5)
+                            
+                            if price > ma60 and is_new_high and vol_r > 1.8 and is_accel:
+                                status.append("🔥趋势加速")
+                            
+                            # 更新日内高点
+                            if r_high > i_high: self._intraday_high[code_str] = r_high
 
                             # 综合判定：SBC (Structural Breakout Champion)
                             is_rising = anchors.get('is_rising_struct', False)
-                            is_sbc_buy = "均线上" in status and ("创多日高" in status or "诱空转多" in status)
+                            is_sbc_buy = ("均线上" in status and ("创多日高" in status or "诱空转多" in status)) or ("🔥趋势加速" in status)
                             is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             
                             is_sbc = is_sbc_buy or is_sbc_sell
@@ -937,7 +982,12 @@ class IntradayEmotionTracker:
                             if is_sbc:
                                  # 只有在从“非SBC”转为“SBC”时标记图标
                                  if not prev_sbc:
-                                     sig_text = "🚀强势结构" if is_sbc_buy else "⚠️结构破位"
+                                     sig_text = "🚀强势结构"
+                                     if "🔥趋势加速" in status:
+                                         sig_text = "🔥趋势加速"
+                                     elif not is_sbc_buy: # 如果不是买点，那就是破位
+                                         sig_text = "⚠️结构破位"
+                                     
                                      sbc_signals.append(sig_text)
                                      
                                      alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{'buy' if is_sbc_buy else 'sell'}"

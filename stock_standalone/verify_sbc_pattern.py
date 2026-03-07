@@ -15,16 +15,18 @@ import time
 # ── 环境配置 ─────────────────────────────────────────────────────────────────
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), 'stock_standalone'))
-from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
+
 try:
     from JSONData import tdx_data_Day as tdd
     from JohnsonUtil import johnson_cons as ct
+    from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
     from signal_types import SignalType
     from stock_visual_utils import show_chart_with_signals
     import sbc_core as sbc_core
 except ImportError:
     from stock_standalone.JSONData import tdx_data_Day as tdd
     from stock_standalone.JohnsonUtil import johnson_cons as ct
+    from stock_standalone.JohnsonUtil.commonTips import timed_ctx, print_timing_summary
     from stock_standalone.signal_types import SignalType
     from stock_standalone.stock_visual_utils import show_chart_with_signals
     import stock_standalone.sbc_core as sbc_core
@@ -249,10 +251,15 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             # 获取 df_day 在原始 stock_df 中的位置索引偏移
             day_start_idx = stock_df.index.get_loc(df_day.index[0])
             
-            for s in day_signals:
-                s.bar_index += day_start_idx
-                all_signals.append(s)
-    print_timing_summary()
+            if isinstance(day_signals, list):
+                for s in day_signals:
+                    # 避免对 None 或非 SignalPoint 对象操作 (如果是 dict 也兼容处理)
+                    if hasattr(s, 'bar_index'):
+                        s.bar_index += day_start_idx
+                    elif isinstance(s, dict) and 'bar_index' in s:
+                        s['bar_index'] += day_start_idx
+                    all_signals.append(s)
+    print_timing_summary(2)
     signals = all_signals
     # 统计数据 - 使用 name 进行比对，防止枚举对象不一致
     buy_cnt  = sum(1 for s in signals if s.signal_type.name in ["BUY", "FOLLOW"])

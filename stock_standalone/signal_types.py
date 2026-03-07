@@ -44,6 +44,9 @@ class SignalPoint:
 
     @property
     def symbol(self) -> str:
+        # 针对 SBC 信号，优先从 reason 中提取图标
+        if "🔥" in self.reason: return "🔥"
+        if "🚀" in self.reason: return "🚀"
         return SIGNAL_VISUAL_CONFIG.get(self.signal_type, {}).get("symbol", "o")
 
     @property
@@ -81,7 +84,7 @@ SIGNAL_VISUAL_CONFIG = {
     SignalType.SELL: {"symbol": 't', "size": 15, "color": (0, 255, 0)},
     SignalType.ADD: {"symbol": 'p', "size": 12, "color": (255, 100, 100)},
     SignalType.SUB: {"symbol": 'h', "size": 12, "color": (100, 255, 100)},
-    SignalType.STOP_LOSS: {"symbol": 'x', "size": 12, "color": (255, 255, 0)},
+    SignalType.STOP_LOSS: {"symbol": 'x', "size": 18, "color": (0, 255, 0)},
     SignalType.TAKE_PROFIT: {"symbol": 'star', "size": 15, "color": (255, 215, 0)},
     SignalType.SHADOW_BUY: {"symbol": 't1', "size": 10, "color": (200, 200, 200, 150)},
     SignalType.SHADOW_SELL: {"symbol": 't', "size": 10, "color": (150, 150, 150, 150)},
@@ -90,6 +93,6 @@ SIGNAL_VISUAL_CONFIG = {
     SignalType.VETO: {"symbol": 'o', "size": 8, "color": (100, 100, 100, 100)},
     SignalType.FOLLOW: {"symbol": '🎯', "size": 18, "color": (255, 215, 0)}, # Bullseye for Follow
     # SignalType.FOLLOW: {"symbol": 'star', "size": 20, "color": (255, 215, 0)}, # Gold Star for Follow
-    SignalType.EXIT_FOLLOW: {"symbol": 'x', "size": 12, "color": (255, 69, 0)}, # Orange Red X for Exit
+    SignalType.EXIT_FOLLOW: {"symbol": 'x', "size": 18, "color": (0, 255, 0)}, # Green X for Exit
     SignalType.WATCH: {"symbol": 'o', "size": 14, "color": (147, 112, 219)}, # MediumPurple for Watch
 }
