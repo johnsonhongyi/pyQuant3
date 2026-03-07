@@ -575,6 +575,7 @@ class DailyEmotionBaseline:
             
             # 使用映射解析列名，保留 hardcoded 作为 fallback 兼容
             m_ma5   = c_mapping.get('ma5d', 'ma5d')
+            m_ma10  = c_mapping.get('ma10d', 'ma10d') # [NEW] Added for consistency
             m_ma20  = c_mapping.get('ma20d', 'ma20d')
             m_ma60  = c_mapping.get('ma60d', 'ma60d')
             m_h1    = c_mapping.get('lasth1d', 'lasth1d')
@@ -596,6 +597,7 @@ class DailyEmotionBaseline:
                 # 转换所有必要的数值，优先从映射列取
                 price      = float(row.get('trade', row.get('close', 0)))
                 ma5        = float(row.get(m_ma5, row.get('ma5d', row.get('ma5', 0))))
+                ma10       = float(row.get(m_ma10, row.get('ma10d', row.get('ma10', 0))))
                 ma20       = float(row.get(m_ma20, row.get('ma20d', row.get('ma20', 0))))
                 ma60       = float(row.get(m_ma60, row.get('ma60d', row.get('ma60', 0))))
                 lasth1d    = float(row.get(m_h1, row.get('lasth1d', row.get('last_high', 0))))
@@ -935,20 +937,20 @@ class IntradayEmotionTracker:
                             if is_sbc:
                                  # 只有在从“非SBC”转为“SBC”时标记图标
                                  if not prev_sbc:
-                                     if is_sbc_buy:
-                                         sbc_signals.append("🚀强势结构")
-                                         scores_dict[idx_val] += 10 # 触发瞬间额外加分
-                                     elif is_sbc_sell:
-                                         sbc_signals.append("⚠️结构破位")
+                                     sig_text = "🚀强势结构" if is_sbc_buy else "⚠️结构破位"
+                                     sbc_signals.append(sig_text)
+                                     
+                                     alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{'buy' if is_sbc_buy else 'sell'}"
+                                     if alert_key not in self._sbc_alert_set:
+                                         self._sbc_alert_set.add(alert_key)
+                                         if is_sbc_buy:
+                                             scores_dict[idx_val] += 10 # 触发瞬间额外加分
+                                             logger.info(f"🚀 [SBC-Breakout] {code_str} 强势结构确认: 突破多日高位同时站稳均线 ({avg_p:.2f})")
+                                         else:
+                                             logger.info(f"⚠️ [SBC-Breakdown] {code_str} 结构性破位: 跌破关键位置或均线 ({avg_p:.2f})")
                                  else:
                                      # 持续状态下仅保持状态描述
                                      sbc_signals.append("-".join(status))
-                                 
-                                 # 初次发现记录日志，触发系统预警
-                                 alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}"
-                                 if alert_key not in self._sbc_alert_set:
-                                     self._sbc_alert_set.add(alert_key)
-                                     logger.info(f"🚀 [SBC-Breakout] {code_str} 强势结构确认: 突破多日高位同时站稳均线 ({avg_p:.2f})")
                             else:
                                  sbc_signals.append("-".join(status))
                             

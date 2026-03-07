@@ -18,12 +18,15 @@ try:
     from JohnsonUtil import johnson_cons as ct
     from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
     from intraday_decision_engine import IntradayDecisionEngine
-    from signal_types import SignalPoint, SignalType, SignalSource
 except ImportError:
     from stock_standalone.JSONData import tdx_data_Day as tdd
     from stock_standalone.JohnsonUtil import johnson_cons as ct
     from stock_standalone.realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
     from stock_standalone.intraday_decision_engine import IntradayDecisionEngine
+
+try:
+    from signal_types import SignalPoint, SignalType, SignalSource
+except ImportError:
     from stock_standalone.signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger(__name__)
@@ -71,18 +74,29 @@ def prepare_day_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns=mapping).copy()
     df.columns = [c.lower() for c in df.columns]
     
-    # [性能优化] 检查是否已经存在基础指标，如果存在则跳过重算
-    needed = ['ma5', 'ma10', 'ma20', 'ma60']
-    missing = [m for m in needed if m not in df.columns and f'{m}d' not in df.columns]
-    
-    if missing:
-        if 'close' in df.columns:
-            if 'ma5' in missing: df['ma5'] = df['close'].rolling(5).mean()
-            if 'ma10' in missing: df['ma10'] = df['close'].rolling(10).mean()
-            # ⭐ [CRITICAL] 对齐原始逻辑：MA20 使用 EMA(26)，MA60 使用 EMA(60)
-            if 'ma20' in missing: df['ma20'] = tdd.ema_tdx_numpy(df['close'], timeperiod=26)
-            if 'ma60' in missing: df['ma60'] = tdd.ema_tdx_numpy(df['close'], timeperiod=60)
-            
+    # needed = ['ma5', 'ma10', 'ma20', 'ma60']
+
+    # if 'close' in df.columns:
+    #     # 强制重新计算以确保逻辑一致性
+    #     df['ma5'] = df['close'].rolling(5).mean()
+    #     df['ma10'] = df['close'].rolling(10).mean()
+    #     # ⭐ [CRITICAL] 对齐原始逻辑：MA20 使用 EMA(26)，MA60 使用 EMA(60)
+    #     df['ma20'] = tdd.ema_tdx_numpy(df['close'], timeperiod=26)
+    #     df['ma60'] = tdd.ema_tdx_numpy(df['close'], timeperiod=60)
+        
+    #     # [NEW] 计算 win (连阳) 和 red (5日线上) 以对齐 baseline
+    #     df['is_up'] = (df['close'] > df['close'].shift(1)).astype(int)
+    #     df['win'] = df['is_up'].groupby((df['is_up'] != df['is_up'].shift()).cumsum()).cumsum()
+    #     df.loc[df['is_up'] == 0, 'win'] = 0
+        
+    #     df['is_red'] = (df['close'] > df['ma5']).astype(int)
+    #     df['red'] = df['is_red'].groupby((df['is_red'] != df['is_red'].shift()).cumsum()).cumsum()
+    #     df.loc[df['is_red'] == 0, 'red'] = 0
+
+    #     # 同步映射后缀版本
+    #     for m in needed:
+    #         df[f'{m}d'] = df[m]
+
     # 确保索引是 DatetimeIndex
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
@@ -261,16 +275,37 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
     # 2. 计算 Baseline (锚点提取逻辑)
     # 这里的逻辑必须与可视化器内联版本保持一致，确保 688787 等股票正确
     try:
-        raw_ts = tick_df.index.get_level_values('ticktime')[0] if isinstance(tick_df.index, pd.MultiIndex) else (tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0])
-        t_date_str = pd.to_datetime(raw_ts).strftime('%Y-%m-%d')
+        if isinstance(tick_df.index, pd.MultiIndex):
+            raw_ts = tick_df.index.get_level_values('ticktime')[0]
+        else:
+            raw_ts = tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0]
+            
+        # [ALIGN] 增强日期转换，处理 Unix 时间戳 (int/float)
+        if isinstance(raw_ts, (int, float, np.integer, np.floating)):
+            # 兼容毫秒级时间戳 (如果是 2020 年以后的 13 位，则除以 1000)
+            if raw_ts > 1.5e12: ts_val = raw_ts / 1000.0
+            else: ts_val = raw_ts
+            t_date_str = pd.to_datetime(ts_val, unit='s').strftime('%Y-%m-%d')
+        else:
+            t_date_str = pd.to_datetime(raw_ts).strftime('%Y-%m-%d')
     except:
-        t_date_str = day_df.index[-1]
+        t_date_str = str(day_df.index[-1])[:10]
 
     hist = day_df[day_df.index.astype(str) < t_date_str]
     if hist.empty:
-        hist = day_df[day_df.index.astype(str) <= t_date_str] # 可能是今天刚开盘，没有历史数据
-        if len(hist) >= 2: hist = hist.iloc[:-1] # 至少保留一根作为昨收基准
-        else: hist = day_df.iloc[:-1] if len(day_df) >= 2 else day_df
+        # 兜底：如果日线包含当天（即盘后或回测数据），需要强行排除当天以获取前一个交易日的指标
+        hist = day_df[day_df.index.astype(str) <= t_date_str]
+        if len(hist) >= 2: 
+            hist = hist.iloc[:-1] # 截断当前天
+        else:
+            # 只有1天或依然为空，则 fallback 到全局 day_df 的最后一个有效的前一天
+            valid_days = day_df[day_df.index.astype(str) < t_date_str]
+            if not valid_days.empty:
+                hist = valid_days
+            elif len(day_df) >= 2:
+                hist = day_df.iloc[:-1]
+            else:
+                hist = day_df
         
     row = hist.iloc[-1]
     prev_row = hist.iloc[-2] if len(hist) >= 2 else row
@@ -287,7 +322,17 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         'ma20d':       float(row.get('ma20', row.get('ma20d', row['close']))),
         'ma10d':       float(row.get('ma10', row.get('ma10d', row['close']))),
         'ma5d':        float(row.get('ma5',  row.get('ma5d',  row['close']))),
+        # [NEW] 扩充字段以对齐 DailyEmotionBaseline.calculate_baseline
+        'win':         float(row.get('win', 0)),
+        'red':         float(row.get('red', 0)),
+        'TrendS':      float(row.get('TrendS', 50)),
+        'slope':       float(row.get('slope', 0)),
+        'sum_perc':    float(row.get('sum_perc', 0)),
+        'power_idx':   float(row.get('power_idx', 0)),
+        'upper':       float(row.get('upper', 0)),
+        'dist_h_l':    float(row.get('dist_h_l', 4.0)),
     }
+
     
     # [UPGRADE] 动态判定上升结构，保持与 DailyEmotionBaseline 逻辑一致
     is_rising_struct = (bl_data['lastp1d'] > bl_data['lastp2d'] > 0) and (bl_data['lasth1d'] > bl_data['lasth2d'] > 0)
@@ -295,7 +340,7 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
     # [NEW] Restore Logic Logs for standalone verification
     if verbose:
         print(f"\n── {t_date_str} | 昨收:{bl_data['lastp1d']:.2f} | 昨高:{bl_data['lasth1d']:.2f} | MA5:{bl_data['ma5d']:.2f} | MA10:{bl_data['ma10d']:.2f} ──")
-        print(f"   [DEBUG] Engine Anchors: {{'yesterday_high': {bl_data['lasth1d']:.2f}, 'prev_high': {bl_data['lasth2d']:.2f}, 'ma60': {bl_data['ma60d']:.2f}, 'ma20': {bl_data['ma20d']:.2f}, 'last_low': {bl_data['last_low']:.2f}, 'last_close': {bl_data['lastp1d']:.2f}, 'last_close_p2': {bl_data['lastp2d']:.2f}, 'is_rising_struct': {is_rising_struct}}}")
+        print(f"   [DEBUG] Engine Anchors: {{'yesterday_high': {bl_data['lasth1d']:.2f}, 'prev_high': {bl_data['lasth2d']:.2f}, 'ma60': {bl_data['ma60d']:.2f}, 'ma20': {bl_data['ma20d']:.2f}, 'last_low': {bl_data['last_low']:.2f}, 'last_close': {bl_data['lastp1d']:.2f}, 'last_close_p2': {bl_data['lastp2d']:.2f}, 'is_rising_struct上涨结构': {is_rising_struct}}}")
     
     baseline_loader = DailyEmotionBaseline()
     baseline_loader.calculate_baseline(pd.DataFrame([bl_data]))
@@ -325,7 +370,12 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             # Sina 数据源通常提供的是累计额和累计量
             tick_df['avg_price'] = (tick_df['amount'] / tick_df['volume']).fillna(tick_df['trade'])
         else:
-            tick_df['avg_price'] = tick_df['trade']
+            # Reconstruct VWAP for cached data without amount
+            c_arr = tick_df['trade'].values
+            v_arr = tick_df['volume'].values if 'volume' in tick_df.columns else np.ones(len(tick_df))
+            ca = (c_arr * v_arr).cumsum()
+            cv = np.maximum(v_arr.cumsum(), 1e-9)
+            tick_df['avg_price'] = ca / cv
             
     # 计算增量成交量 (针对 snapshot 数据源)
     if 'volume' in tick_df.columns:
@@ -349,10 +399,25 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         "market_win_rate": 0.5,
         "day_df": day_df,
     }
+    for k, v in bl_data.items():
+        if k not in snapshot:
+            snapshot[k] = v
+            
     day_high = bl_data['lastp1d']
     prices_so_far = []
     lows_so_far = []
     
+    # 信号频率限制器 (简单的去重逻辑)
+    # 记录最近一次触发某种信号的时间/索引，防止 1 分钟内重复触发
+    last_signal_times = {} # {signal_type.name: last_idx}
+
+    def parse_t(t):
+        if isinstance(t, (int, float)) and t > 100000000:
+            import datetime
+            return datetime.datetime.fromtimestamp(t).strftime('%H:%M')
+        s = str(t)
+        return s[-8:-3] if len(s) > 8 else (s if len(s) <= 5 else s[:5])
+
     # 模拟逐行评估（为了与 verify 逻辑一致）
     # 如果性能压力大，可以考虑每隔 N 行评估一次，但为了准确性这里采用逐行
     for i, (idx, r) in enumerate(tick_df.iterrows()):
@@ -382,6 +447,8 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             'nclose':  float(r.get('avg_price', p)),
             'ma5d':    bl_data['ma5d'],
             'ma10d':   bl_data['ma10d'],
+            'ma20d':   bl_data['ma20d'],
+            'ma60d':   bl_data['ma60d'],
         }
         
         # 4.1 核心状态判定 (SBC 🚀)
@@ -390,14 +457,20 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             t_str = "00:00"
             if verbose:
                 t_val = r.get('time', r.get('ticktime', r.get('Timestamp', '')))
-                t_str = str(t_val)[-8:-3] if len(str(t_val)) > 5 else "00:00"
-                print(f"[{t_str}] 🎯 买入: {status} at {p:.2f}")
+                t_str = parse_t(t_val)
             
-            signals.append(SignalPoint(
-                code=code, timestamp=str(r.get('ticktime', t_str)), 
-                bar_index=i, price=p,
-                signal_type=SignalType.FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=status
-            ))
+            # 简单的频率过滤：30个tick或分钟内
+            last_idx = last_signal_times.get("FOLLOW", -999)
+            if i - last_idx > 30:
+                if verbose:
+                    print(f"[{t_str}] 🎯 买入: {status} at {p:.2f}")
+                
+                signals.append(SignalPoint(
+                    code=code, timestamp=str(r.get('ticktime', t_str)), 
+                    bar_index=i, price=p,
+                    signal_type=SignalType.FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=status
+                ))
+                last_signal_times["FOLLOW"] = i
 
         # 4.2 决策引擎评估 (卖出 ⚠️)
         decision = engine.evaluate(row_dict, snapshot, mode="sell_only")
@@ -412,19 +485,23 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                 t_str = "00:00"
                 if verbose:
                     t_val = r.get('time', r.get('ticktime', r.get('Timestamp', '')))
-                    t_str = str(t_val)[-8:-3] if len(str(t_val)) > 5 else "00:00"
-                    print(f"[{t_str}] ⚠️  卖出: {action} at {p:.2f} | {reason}")
+                    t_str = parse_t(t_val)
                 
-                signals.append(SignalPoint(
-                    code=code, timestamp=str(r.get('ticktime', t_str)), 
-                    bar_index=i, price=p,
-                    signal_type=SignalType.EXIT_FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=reason
-                ))
+                # 同样的频率过滤
+                last_idx = last_signal_times.get("EXIT", -999)
+                if i - last_idx > 30:
+                    if verbose:
+                        print(f"[{t_str}] ⚠️  卖出: {action} at {p:.2f} | {reason}")
+                    
+                    signals.append(SignalPoint(
+                        code=code, timestamp=str(r.get('ticktime', t_str)), 
+                        bar_index=i, price=p,
+                        signal_type=SignalType.EXIT_FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=reason
+                    ))
+                    last_signal_times["EXIT"] = i
             
     # 准备可视化时轴标签 (必须是字符串格式，防止 pyqtgraph 渲染 Timestamp 崩溃)
-    def parse_t(t):
-        s = str(t)
-        return s[-8:-3] if len(s) > 8 else (s if len(s) <= 5 else s[:5])
+    # 这里复用已在上文定义的 parse_t 函数
 
     if isinstance(tick_df.index, pd.MultiIndex):
         raw_times = tick_df.index.get_level_values('ticktime')
