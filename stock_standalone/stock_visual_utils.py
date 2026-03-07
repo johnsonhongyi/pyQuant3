@@ -200,13 +200,16 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart",
                             avg_series=None, time_labels=None, use_line=False):
     """Quick helper to show a chart."""
     app = QApplication.instance()
+    is_new_app = False
     if not app:
         app = QApplication(sys.argv)
+        is_new_app = True
     
     win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line)
     win.show()
-    # If this is called from a script, we might want to exec
-    if sys.stdin.isatty() or 'IPython' not in sys.modules:
+
+    # [FIX] 仅在独立脚本运行时启动主循环，避免在已有 GUI (竞价面板) 中报错闪退
+    if is_new_app:
         app.exec()
     return win
 

@@ -12,17 +12,23 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QSplitter, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
-    QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit
+    QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
+    QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QSize, QPoint, QRect, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
 import pyqtgraph as pg
 
 from tk_gui_modules.window_mixin import WindowMixin
-from bidding_momentum_detector import BiddingMomentumDetector
-from JohnsonUtil import commonTips as cct
+try:
+    from bidding_momentum_detector import BiddingMomentumDetector
+    from JohnsonUtil import commonTips as cct
+except ImportError:
+    from stock_standalone.bidding_momentum_detector import BiddingMomentumDetector
+    from stock_standalone.JohnsonUtil import commonTips as cct
 import time
 import re
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +102,45 @@ class TrendDelegate(QStyledItemDelegate):
             x1 = draw_rect.left() + i * step
             y1 = to_y(prices[i])
             x2 = draw_rect.left() + (i + 1) * step
-            y2 = to_y(prices[i + 1])
+            y2 = to_y(prices[i+1])
             painter.drawLine(QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2)))
             
         painter.restore()
+
+
+class SBCTestThread(QThread):
+    """SBC 模式验证后台线程，防止 GUI 卡死"""
+    finished_data = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None):
+        super().__init__()
+        self.code = code
+        self.use_live = use_live
+        self.hdf5_lock = hdf5_lock
+
+    def run(self):
+        try:
+            try:
+                import verify_sbc_pattern
+            except ImportError:
+                from stock_standalone import verify_sbc_pattern
+            # 调用验证函数，不开启可视化(同步弹窗)，仅返回计算结果包
+            result = verify_sbc_pattern.verify_with_real_data(
+                self.code, 
+                use_live=self.use_live, 
+                show_viz=False,
+                hdf5_lock=self.hdf5_lock
+            )
+            if result and isinstance(result, dict):
+                self.finished_data.emit(result)
+            else:
+                self.error_occurred.emit(f"未能获取 {self.code} 的验证数据或数据格式不正确")
+        except Exception as e:
+            import traceback
+            error_msg = f"SBC 线程执行失败: {str(e)}"
+            logger.error(f"{error_msg}\n{traceback.format_exc()}")
+            self.error_occurred.emit(error_msg)
 
 
 class TimeAxisItem(pg.AxisItem):
@@ -318,6 +359,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_selected_code = None
         self._last_refresh_ts = 0
         self._force_update_requested = False
+        self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
 
         # Async Data Processing Worker - DON'T parent thread to widget!
         # Parenting to QWidget causes Qt to delete the thread when the widget is destroyed,
@@ -456,6 +498,23 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_hide.setFixedWidth(55)
         self.btn_hide.clicked.connect(self.hide)
         bar_lay_2.addWidget(self.btn_hide)
+
+        # ── [NEW] SBC Test Buttons ──
+        bar_lay_2.addWidget(self._sep())
+        
+        self.btn_sbc_live = QPushButton("SBC实时⚡")
+        self.btn_sbc_live.setFixedWidth(85)
+        self.btn_sbc_live.setStyleSheet("background-color: #2a3a4a; color: #00ff88; font-weight: bold;")
+        self.btn_sbc_live.setToolTip("使用Sina实时数据验证SBC信号 (需在个股表选中代码)")
+        self.btn_sbc_live.clicked.connect(lambda: self._run_sbc_test(True))
+        bar_lay_2.addWidget(self.btn_sbc_live)
+
+        self.btn_sbc_replay = QPushButton("SBC回放")
+        self.btn_sbc_replay.setFixedWidth(75)
+        self.btn_sbc_replay.setStyleSheet("background-color: #2a3a4a; color: #aad4ff;")
+        self.btn_sbc_replay.setToolTip("使用本地缓存/日线数据执行SBC逻辑回放")
+        self.btn_sbc_replay.clicked.connect(lambda: self._run_sbc_test(False))
+        bar_lay_2.addWidget(self.btn_sbc_replay)
 
         bar_lay_2.addWidget(self._sep())
 
@@ -600,6 +659,97 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.info("⚡ 已完成手动数据评分刷新")
         except Exception as e:
             logger.error(f"Manual refresh failed: {e}")
+
+    def _run_sbc_test(self, use_live: bool):
+        """
+        [NEW] 调用 verify_sbc_pattern.py 逻辑验证选中个股 of SBC 信号
+        使用线程异步执行，防止 GUI 卡死
+        """
+        # 检查是否已有线程正在运行
+        if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
+            QMessageBox.information(self, "请稍候", f"后台正在对 {self._sbc_thread.code} 进行验证，请等待完成后再试。")
+            return
+
+        code = self._get_selected_stock()
+        if not code:
+            QMessageBox.warning(self, "未选中个股", "请在个股表或重点表中先选中一只个股再执行测试。")
+            return
+            
+        # 尝试获取主窗口的 HDF5 锁
+        hdf5_lock = getattr(self.main_window, 'hdf5_mutex', None)
+        
+        # 记录正在测试的状态
+        status_msg = f"正在测试 {code} ({'实时' if use_live else '回放'})..."
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"⏳ {status_msg}")
+            self.status_lbl.setStyleSheet("color: yellow; font-weight: bold;")
+        
+        # 创建并启动后台线程
+        self._sbc_thread = SBCTestThread(code, use_live, hdf5_lock=hdf5_lock)
+        self._sbc_thread.finished_data.connect(self._on_sbc_test_finished)
+        self._sbc_thread.error_occurred.connect(self._on_sbc_test_error)
+        self._sbc_thread.start()
+        
+        logger.info(f"⏳ SBC 信号测试已启动后台线程: {code} (Live Mode: {use_live})")
+
+    def _on_sbc_test_finished(self, data: dict):
+        """线程完成后的回调，在 GUI 线程显示图表"""
+        try:
+            # 动态导入可视化函数
+            try:
+                from stock_visual_utils import show_chart_with_signals
+            except ImportError:
+                from stock_standalone.stock_visual_utils import show_chart_with_signals
+            
+            # 使用返回的结果包调用可视化
+            win = show_chart_with_signals(
+                data["viz_df"],
+                data["signals"],
+                data["title"],
+                avg_series=data["avg_series"],
+                time_labels=data["time_labels"],
+                use_line=data["use_live"]
+            )
+            
+            # 管理窗口引用，防止被回收
+            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
+            if win:
+                self._sbc_test_windows.append(win)
+                logger.info(f"✅ SBC 可视化窗口已创建: {data['title']}")
+            
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"✅ SBC 测试完成: {data['title']}")
+                self.status_lbl.setStyleSheet("color: #00FF00; font-weight: bold;")
+                # 5秒后还原
+                QTimer.singleShot(5000, lambda: self.status_lbl.setText("准备就绪"))
+                
+        except Exception as e:
+            logger.error(f"SBC 可视化显示失败: {e}")
+            self._on_sbc_test_error(f"渲染图表失败: {str(e)}")
+
+    def _on_sbc_test_error(self, err_msg: str):
+        """线程出错回调"""
+        logger.error(f"❌ SBC 测试线程出错: {err_msg}")
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText("❌ SBC 错误")
+            self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
+        QMessageBox.critical(self, "SBC 测试错误", err_msg)
+
+    def _get_selected_stock(self) -> Optional[str]:
+        """提取当前选中的个股代码"""
+        # 1. 优先检查中间个股明细表
+        row = self.stock_table.currentRow()
+        if row >= 0:
+            it = self.stock_table.item(row, 0)
+            if it: return it.text()
+            
+        # 2. 兜底检查底部重点表
+        row = self.watchlist_table.currentRow()
+        if row >= 0:
+            it = self.watchlist_table.item(row, 0)
+            if it: return it.text()
+            
+        return None
 
     def on_realtime_data_arrived(self, df_all, force_update=False):
         """主线程调用，将数据推入后台线程列队避免卡顿 UI"""

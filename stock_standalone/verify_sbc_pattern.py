@@ -16,14 +16,16 @@ import time
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), 'stock_standalone'))
 
-from JSONData import tdx_data_Day as tdd
-from JohnsonUtil import johnson_cons as ct
 try:
+    from JSONData import tdx_data_Day as tdd
+    from JohnsonUtil import johnson_cons as ct
     from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
     from intraday_decision_engine import IntradayDecisionEngine
     from signal_types import SignalPoint, SignalType
     from stock_visual_utils import show_chart_with_signals
 except ImportError:
+    from stock_standalone.JSONData import tdx_data_Day as tdd
+    from stock_standalone.JohnsonUtil import johnson_cons as ct
     from stock_standalone.realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
     from stock_standalone.intraday_decision_engine import IntradayDecisionEngine
     from stock_standalone.signal_types import SignalPoint, SignalType
@@ -167,7 +169,7 @@ def _get_day_context(code: str, day_df: pd.DataFrame, tick_date):
 
 # ── 主函数 ────────────────────────────────────────────────────────────────────
 
-def verify_with_real_data(code: str = '688787', use_live: bool = False):
+def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None):
     source_name = "Sina Realtime" if use_live else "Cache PKL"
     print(f"\n🚀 [实战验证] 回放 {code} — 当卖则卖·当买则买 (Source: {source_name})")
     print("=" * 60)
@@ -176,10 +178,18 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False):
     try:
         resample = 'd'
         # [ALIGN] 强制对齐线上加载方式：开启 fastohlc 确保指标列名与线上一致
-        raw = tdd.get_tdx_Exp_day_to_df(
-            code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+        # [LOCK] 如果提供了外部锁，则在锁内执行 HDF5 敏感操作
+        if hdf5_lock:
+            from PyQt6.QtCore import QMutexLocker
+            with QMutexLocker(hdf5_lock):
+                raw = tdd.get_tdx_Exp_day_to_df(
+                    code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+        else:
+            raw = tdd.get_tdx_Exp_day_to_df(
+                code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+
         if raw is None or raw.empty:
-            print(f"❌ 无法获取 {code} 日线数据"); return
+            print(f"❌ 无法获取 {code} 日线数据"); return None
         
         # [FIX] 统一索引为日期字符串 (解决 AttributeError)
         try:
@@ -201,7 +211,10 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False):
     # 2. 获取 Tick 数据源
     if use_live:
         try:
-            from JSONData import sina_data
+            try:
+                from JSONData import sina_data
+            except ImportError:
+                from stock_standalone.JSONData import sina_data
             sina = sina_data.Sina()
             print(f"📡 正在从 Sina 获取 {code} 实时数据...")
             stock_df = sina.get_real_time_tick(code, enrich_data=True)
@@ -466,13 +479,25 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False):
         'volume': v_arr_vwap,
     })
 
-    show_chart_with_signals(
-        viz_df, signals,
-        f"[{code}] 买卖验证 — 结构性信号",
-        avg_series=vwap_series,
-        time_labels=time_labels,
-        use_line=use_live,  # live 模式用线图，避免密集竖柱
-    )
+    # 5. 可视化
+    if show_viz:
+        return show_chart_with_signals(
+            viz_df, signals,
+            f"[{code}] 买卖验证 — 结构性信号",
+            avg_series=vwap_series,
+            time_labels=time_labels,
+            use_line=use_live,  # live 模式用线图，避免密集竖柱
+        )
+    else:
+        # 返回数据包，供 GUI 线程异步渲染
+        return {
+            "viz_df": viz_df,
+            "signals": signals,
+            "title": f"[{code}] 买卖验证 — 结构性信号",
+            "avg_series": vwap_series,
+            "time_labels": time_labels,
+            "use_live": use_live
+        }
 
 
 if __name__ == "__main__":
