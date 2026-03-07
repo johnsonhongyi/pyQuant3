@@ -45,18 +45,16 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
     import pythoncom
     import time
     
-    # --- [NEW] 配置带轮转的日志记录器 ---
+    # --- [FIX] 使用普通 FileHandler 避免多进程下的轮转冲突 (Windows WinError 32) ---
     import logging.handlers
     log_file = "voice_worker_debug.log"
-    handler = logging.handlers.RotatingFileHandler(
+    handler = logging.FileHandler(
         log_file, 
-        maxBytes=2 * 1024 * 1024, # 2MB
-        backupCount=3,            # 保留3个旧文件
-        encoding='utf-8'
+        mode='a',
+        encoding='utf-8',
+        delay=True
     )
-    # 调整命名方式：从 .log.1 变为 .1.log
-    handler.namer = lambda name: name.replace(".log.", ".") + ".log"
-    handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker] %(message)s', '%Y-%m-%d %H:%M:%S'))
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker-%(process)d] %(message)s', '%Y-%m-%d %H:%M:%S'))
     
     w_logger = logging.getLogger("VoiceWorkerProcess")
     w_logger.setLevel(logging.DEBUG)
@@ -97,11 +95,6 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                     worker_log("Cleared __ALL__ flag (queue idle)")
                 continue
 
-            # Truncate debug log if too large to prevent disk issues
-            try:
-                if os.path.exists("voice_worker_debug.log") and os.path.getsize("voice_worker_debug.log") > 5*1024*1024:
-                    with open("voice_worker_debug.log", "w") as f: f.write(f"[{datetime.now()}] Log truncated.\n")
-            except: pass
 
             # 支持多种格式 (Dict 优先)
             if isinstance(item, dict):
