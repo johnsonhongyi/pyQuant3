@@ -15,7 +15,7 @@ import time
 # ── 环境配置 ─────────────────────────────────────────────────────────────────
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), 'stock_standalone'))
-
+from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
 try:
     from JSONData import tdx_data_Day as tdd
     from JohnsonUtil import johnson_cons as ct
@@ -238,20 +238,21 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         
     grouped = list(stock_df.groupby('date'))
     print(f"Analyzing {len(grouped)} day(s)...")
-    
-    for tick_date, df_day in grouped:
-        # 调用 sbc_core 核心逻辑 (包含 Baseline 提取、SBC 判定、决策引擎评估)
-        res = sbc_core.run_sbc_analysis_core(code, day_df, df_day, verbose=True)
-        
-        # 提取信号并修正索引偏移，使其与全局图表对齐
-        day_signals = res.get('signals', [])
-        # 获取 df_day 在原始 stock_df 中的位置索引偏移
-        day_start_idx = stock_df.index.get_loc(df_day.index[0])
-        
-        for s in day_signals:
-            s.bar_index += day_start_idx
-            all_signals.append(s)
-
+    with timed_ctx("sbc_core_analysis", warn_ms=100):
+        for tick_date, df_day in grouped:
+            # 调用 sbc_core 核心逻辑 (包含 Baseline 提取、SBC 判定、决策引擎评估)
+            res = sbc_core.run_sbc_analysis_core(code, day_df, df_day, verbose=True)
+            # res = sbc_core.run_sbc_analysis_core_slow(code, day_df, df_day, verbose=True)
+            
+            # 提取信号并修正索引偏移，使其与全局图表对齐
+            day_signals = res.get('signals', [])
+            # 获取 df_day 在原始 stock_df 中的位置索引偏移
+            day_start_idx = stock_df.index.get_loc(df_day.index[0])
+            
+            for s in day_signals:
+                s.bar_index += day_start_idx
+                all_signals.append(s)
+    print_timing_summary()
     signals = all_signals
     # 统计数据 - 使用 name 进行比对，防止枚举对象不一致
     buy_cnt  = sum(1 for s in signals if s.signal_type.name in ["BUY", "FOLLOW"])
@@ -310,6 +311,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SBC Pattern Verification Tool")
     parser.add_argument("code", nargs="?", default="688787", help="Stock code (default: 688787)")
     parser.add_argument("--live", action="store_true", help="Use live Sina data instead of cache")
+    parser.add_argument("--no-viz", action="store_true", help="Disable visualization for benchmarking")
     args = parser.parse_args()
 
-    verify_with_real_data(args.code, use_live=args.live)
+    verify_with_real_data(args.code, use_live=args.live, show_viz=not args.no_viz)
