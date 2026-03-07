@@ -16,20 +16,21 @@ import time
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), 'stock_standalone'))
 
+# 导入底层依赖 (优先绝对路径)
 try:
-    from JSONData import tdx_data_Day as tdd
-    from JohnsonUtil import johnson_cons as ct
-    from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
-    from intraday_decision_engine import IntradayDecisionEngine
-    from signal_types import SignalPoint, SignalType
-    from stock_visual_utils import show_chart_with_signals
-except ImportError:
     from stock_standalone.JSONData import tdx_data_Day as tdd
     from stock_standalone.JohnsonUtil import johnson_cons as ct
     from stock_standalone.realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
     from stock_standalone.intraday_decision_engine import IntradayDecisionEngine
     from stock_standalone.signal_types import SignalPoint, SignalType
     from stock_standalone.stock_visual_utils import show_chart_with_signals
+except ImportError:
+    from JSONData import tdx_data_Day as tdd
+    from JohnsonUtil import johnson_cons as ct
+    from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
+    from intraday_decision_engine import IntradayDecisionEngine
+    from signal_types import SignalPoint, SignalType
+    from stock_visual_utils import show_chart_with_signals
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 MAX_BUY_PER_DAY  = 3   # 每日上图买点上限
@@ -139,10 +140,10 @@ def _get_day_context(code: str, day_df: pd.DataFrame, tick_date):
     # 手动提取 D-1 实值，避免依赖 shift 列名冲突
     bl_data = {
         'code':          code,
-        'last_high':     float(row['high']),
-        'high2':         float(prev_row['high']),
-        'last_close':    float(row['close']),
-        'close2':        float(prev_row['close']),
+        'lasth1d':       float(row['high']),
+        'lasth2d':       float(prev_row['high']),
+        'lastp1d':       float(row['close']),
+        'lastp2d':       float(prev_row['close']),
         'last_low':      float(row['low']),
         # 均线参数显式传递
         'ma60d':         float(row.get('ma60', row.get('ma60d', row['close']))),
@@ -159,7 +160,7 @@ def _get_day_context(code: str, day_df: pd.DataFrame, tick_date):
 
     # 4. 提取锚点字典 (用于打印和引擎内部判定)
     anchors = baseline.get_anchor(code)
-    last_close = bl_data['last_close']
+    last_close = bl_data['lastp1d']
     ma5        = bl_data['ma5d']
     ma10       = bl_data['ma10d']
     ma60       = bl_data['ma60d']
