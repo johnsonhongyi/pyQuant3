@@ -550,89 +550,165 @@ class IntradayDecisionEngine:
     def _sell_decision(self, price: float, ma5: float, ma10: float, 
                        snapshot: dict[str, Any], structure: str, debug: dict[str, Any]) -> tuple[str, float, str]:
         """
-        卖出信号判定
+        卖出信号判定 (精准版)
         
-        Returns:
-            (action, position_delta, reason)
+        核心理念：卖出和买入一样，需要多维度信号共振，而非单一条件即触发。
+        优先在局部高点（反弹高位）卖出，而非在低点全量抛售。
+        
+        三大支柱 (Pillars):
+          P1 - 趋势压力 (Trend Pressure): 均线/乖离/结构
+          P2 - 量价背离 (Volume-Price Divergence): 量能衰竭
+          P3 - 价格行为 (Price Action): 冲高回落/二次顶
+
+        规则：需要至少两个支柱同时触发，且得分 >= 0.65 才卖出。
         """
         sell_score = 0.0
-        last_close = float(snapshot.get("last_close", 0))
-        high = float(debug.get("high_val", 0)) # 在 evaluate 中已通过 row 获取
-        if high <= 0: # 降级方案
-            high = price
-        
+        pillar_hits: list[str] = []  # 记录哪些支柱被触发
         reasons: list[str] = []
-        if price > ma5 * 1.05:
-            sell_score += 0.2
-            reasons.append("短线乖离过大")
-        if price < ma10:
-            sell_score += 0.15
-            reasons.append("价格低于MA10")
-        if structure in ["派发", "走弱"]:
-            sell_score += 0.1
-            reasons.append(f"结构{structure}")
-        if last_close > 0 and price < last_close * 0.97:
-            sell_score += 0.2
-            reasons.append(f"跌破昨收{last_close:.2f}")
-            
-        # 额外加分项：反弹无力/均价线压制检测
+
+        last_close = float(snapshot.get("last_close", 0))
         nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
-        if nclose > 0:
-             if price < nclose * 0.985:
-                 sell_score += 0.25 # 增加权重
-                 reasons.append("深跌均价线下")
-             elif price < nclose:
-                 # 衝高回落后的反抽无力
-                 if high > nclose * 1.005 and (high - price)/high > 0.03:
-                     # "华力创通"式：上午冲高失败，持续远离均价线
-                     sell_score += 0.35
-                     reasons.append("衝高回落且均价线压制(抛压大)")
-                 else:
-                     sell_score += 0.15
-                     reasons.append("均价线下运行")
+        high = float(debug.get("high_val", 0))
+        if high <= 0:
+            high = price
+        highest_today = float(snapshot.get('highest_today', high))
+        volume = float(debug.get("volume_ratio", snapshot.get("volume", 1.0)))
+
+        # ================================================================
+        # 💡 最优卖点前置条件：价格必须在局部相对高位才值得卖出
+        # "不是无脑卖，卖也尽量最优的卖点尽量高"
+        # 如果价格已经跌到远离当日高点，说明最优卖点已过，现在触发只是追杀
+        # 这种情况由 _stop_check 处理，不在这里触发主动卖出
+        # ================================================================
+        if highest_today > 0:
+            distance_from_high = (highest_today - price) / highest_today
+            # 移除 4% 跌幅限制：结构破坏在下跌多少时都应该触发卖出
+            pass
         
-        # 【新增】利用 snapshot 中的日内追踪字段进行更精确的冲高回落检测
+        # ================================================================
+        # 支柱 1 (P1): 趋势压力
+        # - 严重乖离 (远高于均线，获利了结时机)
+        # - 均线下穿结构
+        # - 派发/走弱形态
+        # ================================================================
+        p1_score = 0.0
+        if price > ma5 * 1.07:  # 乖离超过 7%，高位卖出时机
+            p1_score += 0.35
+            reasons.append(f"乖离过大({(price/ma5-1):.1%})")
+        elif price > ma5 * 1.04:  # 乖离 4-7%
+            p1_score += 0.15
+            reasons.append("中度乖离")
+            
+        if price < ma10:
+            p1_score += 0.20
+            reasons.append("跌破MA10")
+
+        if structure in ["派发", "走弱"]:
+            p1_score += 0.25
+            reasons.append(f"结构{structure}")
+        elif structure == "中性" and nclose > 0 and price < nclose * 0.995:
+            p1_score += 0.10  # 中性结构但均价线下方
+            
+        if p1_score >= 0.25:
+            pillar_hits.append("趋势压力")
+            sell_score += p1_score
+
+        # ================================================================
+        # 支柱 2 (P2): 量价背离
+        # - 均价线显著下移
+        # - 绿盘配合均价线压制
+        # - 冲高回落但量能萎缩
+        # ================================================================
+        p2_score = 0.0
+        vwap_trend_score = float(debug.get("VWAP趋势分", 0))  # 从 debug 中复用已算好的分数
+
+        if nclose > 0 and price < nclose * 0.985:
+            p2_score += 0.30
+            reasons.append("深入均价线下方")
+        elif nclose > 0 and price < nclose:
+            # 均价线下方 + 量能是否异常
+            if volume < 0.6:
+                p2_score += 0.20
+                reasons.append("均价下且缩量")
+            else:
+                p2_score += 0.10
+
+        percent = float(snapshot.get('percent', 0.0))
+        if percent < -1.5 and price < nclose:
+            p2_score += 0.25
+            reasons.append(f"绿盘({percent:.1f}%)且均价压制")
+            
+        # 急速冲高后量能骤减 (冲高时放量,下跌时缩量 → 主力减持迹象)
         pump_height = float(snapshot.get('pump_height', 0))
         pullback_depth = float(snapshot.get('pullback_depth', 0))
-        
-        # 急速冲高回落检测：泵高 > 3%，回撤 > 2.5%，且已跌破均价
-        if pump_height > 0.03 and pullback_depth > 0.025 and price < nclose:
-            sell_score += 0.45  # 高权重
-            reasons.append(f"急速冲高回落(泵高{pump_height:.1%}回撤{pullback_depth:.1%})")
-            
-        # [NEW] T+1 诱多防御：当日绿盘且均价线下，大幅增加抛售意愿
-        percent = float(snapshot.get('percent', 0.0))
-        if percent < -1.0 and price < nclose * 0.99:
-            sell_score += 0.40
-            reasons.append("T1防守:绿盘且跑输均价线")
+        if pump_height > 0.025 and pullback_depth > 0.02 and volume < 0.8:
+            p2_score += 0.30
+            reasons.append(f"冲高回落量能萎缩(↑{pump_height:.1%}↓{pullback_depth:.1%})")
 
-        # 【新增】如果跌出昨日收盘价 3% 以上，并且也是当前日内最低价附近，极大增强卖出信号（破位）
-        low_val = float(debug.get("low_val", snapshot.get("low_val", 0)))
-        if price < last_close * 0.97 and price <= low_val * 1.01:
-            sell_score += 0.35
-            reasons.append("今日破位主杀段")
-        highest_today = float(snapshot.get('highest_today', high))
+        if p2_score >= 0.20:
+            pillar_hits.append("量价背离")
+            sell_score += p2_score
+
+        # ================================================================
+        # 支柱 3 (P3): 价格行为 (局部顶部特征)
+        # - 高点下移（二次及以上冲高均低于前高）
+        # - 昨收破位
+        # - 当日最低价平台破位
+        # ================================================================
+        p3_score = 0.0
+        highest_since_buy = float(snapshot.get('highest_since_buy', high))
+        
+        # 二次冲高失败（最优卖点：反弹到相对高点但仍低于前高）
         if highest_today > 0 and high < highest_today * 0.985 and price < nclose:
-            # 日内次高点也无法触及前高的 98.5%，反弹乏力
-            sell_score += 0.2
-            reasons.append("二次冲高失败")
+            p3_score += 0.25
+            reasons.append("日内二次冲高失败")
+        
+        # 持有高点下移（买入后每次反弹都更低）
+        if highest_since_buy > 0 and high < highest_since_buy * 0.98 and nclose > 0 and price < nclose:
+            p3_score += 0.30
+            reasons.append(f"反弹高点持续下移")
+
+        # 跌破昨收触发加权
+        if last_close > 0 and price < last_close * 0.97:
+            p3_score += 0.20
+            reasons.append(f"跌破昨收({last_close:.2f})")
             
-        # “连阳持仓”保护逻辑：如果是强势连阳，且未出现结构走弱，略微调低卖出分数
-        # 注意：这里我们无法直接获取 row，但可以使用 debug 中缓存的信息或 snapshot
-        # 为了兼容性，我们修改 _multiday_trend_score 使其能处理 snapshot
+        # 当日破位主杀
+        low_val = float(debug.get("low_val", snapshot.get("low_val", 0)))
+        if price < last_close * 0.97 and low_val > 0 and price <= low_val * 1.01:
+            p3_score += 0.15
+            reasons.append("日内破位主杀")
+
+        if p3_score >= 0.25:
+            pillar_hits.append("价格行为")
+            sell_score += p3_score
+
+        # ================================================================
+        # 特殊豁免：连阳强势持仓保护
+        # 如果是强势连阳且结构未走坏，扣减评分、保护仓位
+        # ================================================================
         multiday_score = self._multiday_trend_score(snapshot, debug)
         if multiday_score > 0.3 and structure not in ["派发", "走弱"]:
-            sell_score -= 0.15
+            sell_score -= 0.20
             debug["持仓保护"] = "连阳护航"
-        
-        debug["sell_score"] = sell_score
+            reasons.append("⚠️ 连阳持仓保护")
+
+        debug["sell_score"] = round(sell_score, 2)
+        debug["sell_pillars"] = pillar_hits
         debug["sell_reasons"] = reasons
         
-        if sell_score >= 0.5 or (structure == "派发" and sell_score >= 0.35):
-            # 派发结构下，更低的分数即可触发卖出
-            return ("卖出", -max(sell_score, 0.5), " | ".join(reasons))
+        # 触发条件：需两个独立支柱 + 总分 >= 0.65（派发结构降低），追杀式（仅靠分数但无支柱）门槛拒绝
+        n_pillars = len(pillar_hits)
+        threshold = 0.50 if structure == "派发" else 0.65
+        
+        if n_pillars >= 2 and sell_score >= threshold:
+            return ("卖出", -max(sell_score, 0.5), " | ".join(p for p in reasons if "⚠️" not in p))
+        elif structure == "派发" and sell_score >= 0.45 and n_pillars >= 1:
+            # 派发结构：单支柱豁免，门槛低
+            return ("卖出", -0.5, " | ".join(p for p in reasons if "⚠️" not in p))
         
         return ("持仓", 0, "")
+
     
     # ==================== 止损止盈 ====================
     
@@ -659,24 +735,59 @@ class IntradayDecisionEngine:
             # 达到硬止损线，全清
             return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
         
+        # --- [New] 🚨 提前预警与主动防守 (Early Detection Sell Logic) 🚨 ---
+        # 目标：在达到 2.5% 的硬性预警前，通过结构、均线、流动性特征提前识别风险。
+        vwap_trend_score = self._vwap_trend_check(row, snapshot, debug)
+        structure = debug.get("structure", "UNKNOWN")
+        
+        # A. 均线下移严重 (VWAP Downtrend) + 破位
+        if vwap_trend_score < -0.3 and price < nclose and pnl_pct < -0.01:
+            return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": f"均线下移明显且亏损{abs(pnl_pct):.1%}"}
+            
+        # B. 反弹无力与拒绝 (Failed Rebounds)
+        # 记录的日内高点
+        highest_today = float(snapshot.get('highest_today', high))
+        highest_since_buy = float(snapshot.get('highest_since_buy', high))
+        
+        if nclose > 0 and price < nclose:
+            # 高点下移 (Lower Highs): 日内最高点无法突破，且当前价又跌回均线之下
+            if highest_since_buy > 0 and high < highest_since_buy * 0.985 and pnl_pct < -0.015:
+                # 已经是第二次/第三次冲高失败
+                return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
+                
+            # 强拒绝 (Strong Rejection): 反弹触及均价线附近即被打回
+            distance_to_vwap = (nclose - high) / nclose
+            if 0 < distance_to_vwap < 0.005 and (high - price) / high > 0.015 and pnl_pct < -0.01:
+                return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
+                
+            # 极弱反弹 (Weak Rejection): 远离均线的小幅反弹，随后继续下跌
+            if distance_to_vwap > 0.015 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
+                # 缩量且离均线很远的反弹失败
+                return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
+                
+        # C. 流动性衰竭 (Liquidity Drain)
+        # 连续上涨后量能不足导致的阴跌
+        if structure == "派发" and volume < 0.5 and pnl_pct < -0.015:
+             return {"triggered": True, "action": "流动性预警", "position": 0.4, "reason": "派发结构伴随量能枯竭"}
+
+        # 2. 传统预警止损 (-2.5%)
         if pnl_pct < -0.025: # 预警止损收紧到 2.5%
             # 检查是否有反弹无力迹象（低于均价）或结构走弱
-            structure = debug.get("structure", "UNKNOWN")
             if (nclose > 0 and price < nclose) or structure in ["派发", "走弱"]:
                 # 如果是派发，直接全清，不再减半
                 target_pos = 0.0 if structure == "派发" else 0.4
                 return {"triggered": True, "action": "预警止损", "position": target_pos, "reason": f"结构{structure}且亏损{abs(pnl_pct):.1%}"}
 
-        # --- [New] 每日中轴趋势止损 (Daily Midline Stop-Loss) ---
+        # --- 每日中轴趋势止损 (Daily Midline Stop-Loss) ---
         # 依赖于 StockLiveStrategy 注入的 snapshot 数据
         mid_rising = snapshot.get('midline_rising', False)
         mid_falling = snapshot.get('midline_falling', False)
         
-        # 1. 趋势止损：中轴连跌且今日价格在均价之下 (Weakening Trend)
+        # 3. 趋势止损：中轴连跌且今日价格在均价之下 (Weakening Trend)
         if mid_falling and price < nclose and pnl_pct < -0.015:
             return {"triggered": True, "action": "趋势止损", "position": 0.3, "reason": "日线中轴重心下移且弱于均价"}
 
-        # 2. 也是趋势止损：如果中轴没有上升，且今日高开低走(或冲高回落)跌破均价
+        # 4. 也是趋势止损：如果中轴没有上升，且今日高开低走(或冲高回落)跌破均价
         if not mid_rising:
              # 检查是否大幅回撤
              if high > 0 and (high - price) / high > 0.02 and price < nclose:
@@ -1469,69 +1580,81 @@ class IntradayDecisionEngine:
             threshold = max(max_normal_pullback, 0.005) + 0.003
 
             if price < nclose and (deviation > threshold or snapshot.get("sell_triggered_today", False)):
-                # 如果曾经破位且现在还没收回均线，持续报警
-                already_broken = snapshot.get("sell_triggered_today", False)
-                prefix = "[破位持续] " if already_broken else ""
+                # ================================================================
+                # 💡 最优卖点守卫: 如果价格已经离日内高点过远(>3.5%)，
+                # 说明最优出货点已过, 且如果高点已触破则价格在下跌途中,
+                # 此时"破均线"触发的提示失去实际意义 (更像追杀而非主动卖出),
+                # 止损由 _stop_check 接管，这里只处理"主动最优卖出"信号。
+                # ================================================================
+                highest_today_g = float(snapshot.get('highest_today', price))
+                dist_from_high = (highest_today_g - price) / highest_today_g if highest_today_g > 0 else 0
                 
-                # 【新热点板块龙头保护】识别 连阳、主升、核心 标签
-                reason_str = str(snapshot.get('reason', '')).lower()
-                is_main_wave = any(tag in reason_str for tag in ["连阳", "主升", "核心", "热门", "龙头"])
-                momentum_floor = 0.5 if "核心" in reason_str or "龙头" in reason_str else (0.4 if is_main_wave else 0.2)
-                
-                # 判断场景
-                is_high_open = open_p > last_close * 1.02 # 高开 2%+
-                is_heavy_vol = ratio > 5.0 or (snapshot.get('lastv1d', 0) > 0 and volume > snapshot['lastv1d'] * 0.8) # 换手大或成交量接近昨日 80%
-
-                # [User Request] 不跌破前日收盘价，或者实时盘中大幅回撤跌破前日收盘价都不清仓
-                # 除非是那种极端见顶放量下杀
-                is_breaking_last_close = price < last_close
-
-                # --- [New] Profit Band Protection: SWL -> SWS Shift ---
-                swl = float(row.get("SWL", 0))
-                sws = float(row.get("SWS", 0))
-                orig_reason = snapshot.get('reason', '')
-                if "领涨带" in str(orig_reason) or "SWL" in str(orig_reason):
-                    if price < swl and price > sws:
-                            # 跌出强领涨带，进入波动带，需收紧止盈
-                            urgency = (swl - price) / swl if swl > 0 else 0
-                            sell_pos = max(0.4, 1.0 - urgency * 5) # 剧烈回落则大幅减仓
-                            return {
-                                "triggered": True,
-                                "action": "卖出",
-                                "position": round(sell_pos, 2),
-                                "reason": f"跌出SWL强领涨带, 支撑转SWS({sws:.2f})",
-                                "debug": debug
-                            }
-
-                if is_high_open and is_heavy_vol and is_breaking_last_close:
-                    # 高开下杀放量且跌破前收 (这是致命信号，主升浪也得先撤)
-                    sell_pos = 0.1 if is_main_wave else 0.0 # 主升浪优选留一点观察位
-                    reason = f"高开下杀放量且破前收(核心卖点), 偏离{deviation:.1%}"
-                elif not is_breaking_last_close:
-                    # 虽然跌破均线，但还在前收之上，主升浪保护
-                    urgency = min(deviation / 0.03, 1.0)
-                    min_pos = max(0.5 if is_main_wave else 0.3, momentum_floor)
-                    sell_pos = max(min_pos, 1.0 - urgency * 0.5)
-                    reason = f"{prefix}跌破均线但守在前收之上(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线但守在前收之上(偏离{deviation:.1%})"
+                # 如果离日内高点超过 3.5%，且不是第一次破位报警，则不重复触发，让 _stop_check 接管
+                if dist_from_high > 0.035 and snapshot.get("sell_triggered_today", False):
+                    debug["sell_skip_reason"] = f"离高点{dist_from_high:.1%}已过最优点, _stop_check接管"
                 else:
-                    # 普通破位且跌破前收
-                    if morning_pump:
-                        sell_multiplier = 1.0 + (pump_height * 10.0)
-                        urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
-                        min_pos = momentum_floor
-                        sell_pos = max(min_pos, 1.0 - (1.0 - urgency) * 0.5)
-                        reason = f"{prefix}诱多后破位前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}诱多后破位前收(偏离{deviation:.1%})"
-                    else:
+                    already_broken = snapshot.get("sell_triggered_today", False)
+                    prefix = "[破位持续] " if already_broken else ""
+                    
+                    # 【新热点板块龙头保护】识别 连阳、主升、核心 标签
+                    reason_str = str(snapshot.get('reason', '')).lower()
+                    is_main_wave = any(tag in reason_str for tag in ["连阳", "主升", "核心", "热门", "龙头"])
+                    momentum_floor = 0.5 if "核心" in reason_str or "龙头" in reason_str else (0.4 if is_main_wave else 0.2)
+                    
+                    # 判断场景
+                    is_high_open = open_p > last_close * 1.02 # 高开 2%+
+                    is_heavy_vol = ratio > 5.0 or (snapshot.get('lastv1d', 0) > 0 and volume > snapshot['lastv1d'] * 0.8) # 换手大或成交量接近昨日 80%
+
+                    # [User Request] 不跌破前日收盘价，或者实时盘中大幅回撤跌破前日收盘价都不清仓
+                    # 除非是那种极端见顶放量下杀
+                    is_breaking_last_close = price < last_close
+
+                    # --- [New] Profit Band Protection: SWL -> SWS Shift ---
+                    swl = float(row.get("SWL", 0))
+                    sws = float(row.get("SWS", 0))
+                    orig_reason = snapshot.get('reason', '')
+                    if "领涨带" in str(orig_reason) or "SWL" in str(orig_reason):
+                        if price < swl and price > sws:
+                                # 跌出强领涨带，进入波动带，需收紧止盈
+                                urgency = (swl - price) / swl if swl > 0 else 0
+                                sell_pos = max(0.4, 1.0 - urgency * 5) # 剧烈回落则大幅减仓
+                                return {
+                                    "triggered": True,
+                                    "action": "卖出",
+                                    "position": round(sell_pos, 2),
+                                    "reason": f"跌出SWL强领涨带, 支撑转SWS({sws:.2f})",
+                                    "debug": debug
+                                }
+
+                    if is_high_open and is_heavy_vol and is_breaking_last_close:
+                        # 高开下杀放量且跌破前收 (这是致命信号，主升浪也得先撤)
+                        sell_pos = 0.1 if is_main_wave else 0.0 # 主升浪优选留一点观察位
+                        reason = f"高开下杀放量且破前收(核心卖点), 偏离{deviation:.1%}"
+                    elif not is_breaking_last_close:
+                        # 虽然跌破均线，但还在前收之上，主升浪保护
                         urgency = min(deviation / 0.03, 1.0)
-                        min_pos = momentum_floor
+                        min_pos = max(0.5 if is_main_wave else 0.3, momentum_floor)
                         sell_pos = max(min_pos, 1.0 - urgency * 0.5)
-                        reason = f"{prefix}跌破均线与前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线与前收 {deviation:.1%}"
-                
-                return {
-                    "triggered": True,
-                    "action": "卖出",
-                    "position": round(sell_pos, 2),
-                    "reason": reason,
+                        reason = f"{prefix}跌破均线但守在前收之上(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线但守在前收之上(偏离{deviation:.1%})"
+                    else:
+                        # 普通破位且跌破前收
+                        if morning_pump:
+                            sell_multiplier = 1.0 + (pump_height * 10.0)
+                            urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
+                            min_pos = momentum_floor
+                            sell_pos = max(min_pos, 1.0 - (1.0 - urgency) * 0.5)
+                            reason = f"{prefix}诱多后破位前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}诱多后破位前收(偏离{deviation:.1%})"
+                        else:
+                            urgency = min(deviation / 0.03, 1.0)
+                            min_pos = momentum_floor
+                            sell_pos = max(min_pos, 1.0 - urgency * 0.5)
+                            reason = f"{prefix}跌破均线与前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线与前收 {deviation:.1%}"
+                    
+                    return {
+                        "triggered": True,
+                        "action": "卖出",
+                        "position": round(sell_pos, 2),
+                        "reason": reason,
                     "debug": debug
                 }
             

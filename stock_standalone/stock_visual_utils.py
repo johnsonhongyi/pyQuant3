@@ -134,7 +134,7 @@ class SignalOverlay:
 
 class StandaloneKlineChart(QMainWindow):
     """Simple chart window for visualization."""
-    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None):
+    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False):
         super().__init__()
         self.setWindowTitle(title)
         self.resize(1000, 600)
@@ -153,14 +153,20 @@ class StandaloneKlineChart(QMainWindow):
         self.pw = pg.PlotWidget(axisItems=axis_items)
         layout.addWidget(self.pw)
         
-        # Prepare data for CandlestickItem
-        # index, open, close, low, high
-        k_data = []
-        for i, (idx, row) in enumerate(df.iterrows()):
-            k_data.append([i, row['open'], row['close'], row['low'], row['high']])
-        
-        self.candlestick = CandlestickItem(k_data)
-        self.pw.addItem(self.candlestick)
+        # Prepare data: line chart for live/tick data, candlestick for minute-bar data
+        if use_line:
+            # Live tick mode: simple line chart of close prices (no spurious bars)
+            close_y = df['close'].values
+            close_x = np.arange(len(close_y))
+            self.pw.plot(close_x, close_y,
+                         pen=pg.mkPen(QColor(100, 200, 255), width=1.5), name="Price")
+        else:
+            # Minute/day bar mode: full candlestick chart
+            k_data = []
+            for i, (idx, row) in enumerate(df.iterrows()):
+                k_data.append([i, row['open'], row['close'], row['low'], row['high']])
+            self.candlestick = CandlestickItem(k_data)
+            self.pw.addItem(self.candlestick)
         
         # Add VWAP/Average Price Line
         if avg_series is not None:
@@ -190,13 +196,14 @@ class StandaloneKlineChart(QMainWindow):
             ticks = [(i, time_labels[i]) for i in tick_indices]
             axis.setTicks([ticks, []])
 
-def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None):
+def show_chart_with_signals(df, signals=None, title="Stock Chart",
+                            avg_series=None, time_labels=None, use_line=False):
     """Quick helper to show a chart."""
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
     
-    win = StandaloneKlineChart(df, signals, title, avg_series, time_labels)
+    win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line)
     win.show()
     # If this is called from a script, we might want to exec
     if sys.stdin.isatty() or 'IPython' not in sys.modules:

@@ -318,10 +318,13 @@ class MinuteKlineCache:
                 
                 # 价格提取 (trade -> now -> price -> close)
                 price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
-                if price <= 0: continue
                 
                 # 成交量提取 (nvol -> vol -> volume)
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
+                
+                # [PROTECTION] 价格或成交量为 0 的异常数据丢弃 (防脏数据进入缓存)
+                if price <= 0 or vol <= 0:
+                    continue
                 
                 # 时间戳提取
                 if time_col:
@@ -407,6 +410,11 @@ class MinuteKlineCache:
             # 优先提取 'nvol'
             # vol = float(tick.get('vol', tick.get('volume', 0.0)))
             vol = float(tick.get('nvol', tick.get('vol', tick.get('volume', 0.0))))
+            
+            # [PROTECTION] 异常数据丢弃
+            if price <= 0 or vol <= 0:
+                return
+
             self._update_internal(code_clean, price, vol, minute_ts)
             self._last_update_ts[code_clean] = minute_ts
         except Exception as e:
@@ -430,6 +438,20 @@ class MinuteKlineCache:
             return
 
         last_k = klines[-1]
+
+        # [Daily Reset] 如果检测到跨日期，清空前序 K 线，确保 Intraday 纯净性
+        # Unix 戳转天数 (UTC+8)
+        last_day_num = (last_k.time + 28800) // 86400
+        curr_day_num = (minute_ts + 28800) // 86400
+        if curr_day_num > last_day_num:
+            logger.info(f"📅 [{code}] Date changed detected ({last_day_num} -> {curr_day_num}), clearing cache.")
+            klines.clear()
+            klines.append(KLineItem(
+                time=minute_ts, open=price, high=price, low=price, close=price,
+                volume=0.0, cum_vol_start=current_cum_vol
+            ))
+            self._is_dirty = True
+            return
         
         # 2. 同一分钟更新
         if last_k.time == minute_ts:
@@ -537,9 +559,6 @@ class DailyEmotionBaseline:
         """开盘时调用，基于日线数据计算基准"""
         from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
-        if self._last_calc_date == today:
-            return  # 今日已计算
-        
         try:
             count = 0
             # 临时增加 robust 检查
@@ -547,7 +566,11 @@ class DailyEmotionBaseline:
 
             # 转换为 dict 迭代更快，而且为了逻辑清晰
             # 这里的 df 应该是 full candidate list 或者包含 historical data columns 的 df
-            from stock_standalone.strategy_config import COLUMN_MAPPING
+            # logger.debug(f"[DEBUG-BASELINE] calculate_baseline: columns={list(df.columns)}, count={len(df)}")
+            try:
+                from strategy_config import COLUMN_MAPPING
+            except ImportError:
+                from stock_standalone.strategy_config import COLUMN_MAPPING
             c_mapping = COLUMN_MAPPING.get('DAILY', {})
             
             # 使用映射解析列名，保留 hardcoded 作为 fallback 兼容
@@ -715,7 +738,12 @@ class DailyEmotionBaseline:
         return self._baseline_details
 
     def get_anchor(self, code: str) -> dict[str, float]:
-        return self._structural_anchors.get(str(code).zfill(6), {})
+        code_str = str(code).zfill(6)
+        res = self._structural_anchors.get(code_str, {})
+        if not res:
+            # logger.debug(f"[DEBUG-BASELINE] No anchor for {code_str}. Current anchors: {list(self._structural_anchors.keys())[:5]}")
+            pass
+        return res
 
 class IntradayEmotionTracker:
     """
@@ -725,12 +753,17 @@ class IntradayEmotionTracker:
     scores: dict[str, float]
     _sbc_alert_set: set[str]
     _last_sbc_status: dict[str, bool]
+    _last_vol: dict[str, float]      # 记录上一笔成交总量，用于计算增量
+    _cumulative_amt: dict[str, float] # 记录累积成交额，用于合成 VWAP
     history: deque[tuple[float, dict[str, float]]]
     
     def __init__(self):
         self.scores = {} # {code: score}
         self._sbc_alert_set = set() # 记录今日已提醒过的强势结构代码
         self._last_sbc_status = {}  # {code: bool} 记录上一状态，实现触发式而非持续式信号
+        self._last_vol = {}
+        self._cumulative_amt = {}
+        self._last_date = {}        # {code: day_num} 用于处理跨天重置累积量
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
         # item: (timestamp, scores_dict)
         self.history = deque(maxlen=300)
@@ -738,6 +771,9 @@ class IntradayEmotionTracker:
     def clear(self):
         self.scores.clear()
         self._sbc_alert_set.clear()
+        self._last_vol.clear()
+        self._cumulative_amt.clear()
+        self._last_date.clear()
 
     def update_batch(self, df: pd.DataFrame, baseline_tracker: Optional[DailyEmotionBaseline] = None):
         """
@@ -748,7 +784,11 @@ class IntradayEmotionTracker:
             if df.empty: return
             
             # --- [NEW] Start Config-Driven Column Projection ---
-            from stock_standalone.strategy_config import COLUMN_MAPPING, STRUCTURAL_THRESHOLD
+            try:
+                from strategy_config import COLUMN_MAPPING, STRUCTURAL_THRESHOLD
+            except ImportError:
+                from stock_standalone.strategy_config import COLUMN_MAPPING, STRUCTURAL_THRESHOLD
+                
             c_mapping = COLUMN_MAPPING.get('REALTIME', {})
             
             # 定义内部逻辑使用的标准列名
@@ -805,15 +845,39 @@ class IntradayEmotionTracker:
             # 即使没有量/额，也要预埋 sbc_status 列避免 KeyError
             df['sbc_status'] = '' 
             
-            if active_amt_col in df.columns and active_vol_col in df.columns:
-                df['avg_price'] = (df[active_amt_col] / df[active_vol_col]).fillna(df[active_trade_col] if active_trade_col in df.columns else 0)
-                
-                if baseline_tracker:
+            # --- [UNIFIED] Consume Enriched Data from Underlying Service ---
+            # 信号检测逻辑现在依赖于底层数据服务提供的 'avg_price' (VWAP)。
+            # 如果底层未提供 (如非 Sina 数据源)，则使用现价作为兜底。
+            if 'avg_price' not in df.columns:
+                col_price = active_trade_col if active_trade_col in df.columns else ('close' if 'close' in df.columns else 'now')
+                df['avg_price'] = df[col_price] if col_price in df.columns else 0
+            
+            # 强制执行基准判定逻辑 (SBC)
+            if baseline_tracker:
                     sbc_signals = []
                     scores_dict = final_scores.to_dict()
                     
+                    # 获取当前环境秒数用于兜底
+                    now_ts = time.time()
+                    
                     for idx_val, row in df.iterrows():
                         code_str = str(row['code']).zfill(6)
+                        
+                        # [Daily Reset Protection] 检测到新的一天，重置累积 VWAP 计算器
+                        # 优先从 row 中读取 time/timestamp
+                        r_ts = getattr(row, 'time', getattr(row, 'timestamp', now_ts))
+                        if isinstance(r_ts, str):
+                            try: r_ts = pd.to_datetime(r_ts).timestamp()
+                            except: r_ts = now_ts
+                        
+                        r_day_num = int((r_ts + 28800) // 86400)
+                        if r_day_num > self._last_date.get(code_str, 0):
+                            if code_str in self._last_date: # 不是第一次见，是真的变天了
+                                logger.info(f"🔄 [{code_str}] Resetting intraday trackers for new day {r_day_num}")
+                            self._last_vol[code_str] = 0.0
+                            self._cumulative_amt[code_str] = 0.0
+                            self._last_date[code_str] = r_day_num
+
                         anchors = baseline_tracker.get_anchor(code_str)
                         
                         # 默认状态
@@ -847,21 +911,35 @@ class IntradayEmotionTracker:
                             low_p = float(row.get('low', price))
                             if low_p < last_l < last_c and price > last_c:
                                 status.append("诱空转多")
+                            
+                            # ⚡ [NEW] 卖出特征 1: 跌破均价线 (VWAP Breakdown)
+                            if price < avg_p * 0.995:
+                                status.append("跌破均线")
+                            
+                            # 卖出特征 2: 跌破 MA60 支撑 (MA60 Breakdown)
+                            if ma60 > 0 and price < ma60 < row.get('open', price):
+                                status.append("跌破MA60")
 
                             # 综合判定：SBC (Structural Breakout Champion)
                             is_rising = anchors.get('is_rising_struct', False)
-                            is_sbc = "均线上" in status and ("创多日高" in status or "诱空转多" in status) and is_rising
+                            is_sbc_buy = "均线上" in status and ("创多日高" in status or "诱空转多" in status)
+                            is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
+                            
+                            is_sbc = is_sbc_buy or is_sbc_sell
                             prev_sbc = self._last_sbc_status.get(code_str, False)
                             
                             # Debug log for 688787 specifically
-                            if code_str == '688787' and ("均线上" in status):
-                                logger.info(f"[DEBUG-SBC] 688787: status={status}, is_rising={is_rising}, is_sbc={is_sbc}, price={price}, ma60={ma60}")
+                            # if code_str == '688787' and ("均线上" in status):
+                            #     logger.info(f"[DEBUG-SBC] 688787: status={status}, is_rising={is_rising}, is_sbc={is_sbc}, price={price}, ma60={ma60}")
 
                             if is_sbc:
-                                 # 只有在从“非SBC”转为“SBC”时，或者处于“创多日高”的持续突破初期才标记 🚀
+                                 # 只有在从“非SBC”转为“SBC”时标记图标
                                  if not prev_sbc:
-                                     sbc_signals.append("🚀强势结构")
-                                     scores_dict[idx_val] += 10 # 触发瞬间额外加分
+                                     if is_sbc_buy:
+                                         sbc_signals.append("🚀强势结构")
+                                         scores_dict[idx_val] += 10 # 触发瞬间额外加分
+                                     elif is_sbc_sell:
+                                         sbc_signals.append("⚠️结构破位")
                                  else:
                                      # 持续状态下仅保持状态描述
                                      sbc_signals.append("-".join(status))

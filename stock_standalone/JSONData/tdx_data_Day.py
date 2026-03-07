@@ -7814,6 +7814,11 @@ if __name__ == '__main__':
     df = get_tdx_append_now_df_api('001236', dl=5)
     import ipdb;ipdb.set_trace()
 
+    # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    dff=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample,fastohlc=True)
+    
+    
     # dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
     # for inx in tdx_index_code_list:
     #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
@@ -7886,10 +7891,7 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     
-    # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
-    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
-    
-    import ipdb;ipdb.set_trace()
+   
     # compute_lastdays_percent_profile(df, lastdays=5)
     evtdf = evaluate_trading_signal(df)
     print(f"evtdf: {evtdf[['open', 'close','upper','EVAL_STATE','trade_signal']].tail(60)}")
