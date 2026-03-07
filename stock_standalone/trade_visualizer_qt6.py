@@ -57,6 +57,7 @@ from hotspot_popup import HotSpotPopup
 from signal_message_queue import SignalMessage, SignalMessageQueue
 from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
+import sbc_core
 
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
@@ -8458,111 +8459,21 @@ class MainWindow(QMainWindow, WindowMixin):
             kline_signals.extend(watch_signals)
 
         # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
-        # 仅在有实时分时数据，且启用了策略模拟时计算
-        logger.debug(f"[DEBUG SBC] code={code}, tick_df_is_None={tick_df is None}, tick_df_empty={tick_df.empty if tick_df is not None else True}, show_strategy_simulation={self.show_strategy_simulation}")
+        # TODO: 以后将 sbc_tracker/baseline_loader 等都收纳到 sbc_core 内部
+        self.all_today_sbc_signals = []
         if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
-            try:
-                # 1. 计算日线基准 (Baseline)
-                # ----------------- 核心修复：两版逻辑链条对齐 -----------------
-                # 确定分时数据所属的交易日期 D (解决 HH:MM:SS 默认解析为系统“今天”的问题)
+            with timed_ctx("sbc_core_analysis", warn_ms=100):
                 try:
-                    # 获取第一笔成交的时间标识
-                    raw_ts = tick_df.index.get_level_values('ticktime')[0] if isinstance(tick_df.index, pd.MultiIndex) else (tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0])
-                    
-                    if isinstance(raw_ts, str) and len(raw_ts) <= 8:
-                        # 只有 HH:MM:SS -> 认为它是目前日线中最新的一天 (D)
-                        t_date_str = day_df.index[-1]
-                    else:
-                        t_dt = pd.to_datetime(raw_ts)
-                        if t_dt.year < 2000: # Unix 时间戳处理
-                            t_dt = pd.to_datetime(raw_ts, unit='s')
-                        interpreted_date = t_dt.strftime('%Y-%m-%d')
-                        # 如果解析结果大于日线末尾（如周末看盘），锁定到日线最后一天
-                        t_date_str = min(interpreted_date, day_df.index[-1])
-                except:
-                    t_date_str = day_df.index[-1]
-                
-                # 选取【严格早于】当前渲染日期的数据作为历史基板 (T-1)
-                hist_day_df = day_df[day_df.index < t_date_str]
-                if hist_day_df.empty and len(day_df) >= 2:
-                    # 兜底：如果日线只有两天且分时正好是最后一天，则取倒数第二行
-                    hist_day_df = day_df.iloc[:-1]
-                elif hist_day_df.empty:
-                    # 极限兜底：取第一行
-                    hist_day_df = day_df.iloc[:1]
-                
-                if not hist_day_df.empty:
-                    # [FIX] 锁定历史行：此时 hist_day_df.iloc[-1] 对应真正的“昨日” (T-1)
-                    row = hist_day_df.iloc[-1]
-                    prev_row = hist_day_df.iloc[-2] if len(hist_day_df) >= 2 else row
-                    
-                    # 构造与 DailyEmotionBaseline 完全对齐的模拟数据集
-                    # 这里的数值必须是 D 之前的实值，而非包含 D 之后的偏移值
-                    bl_data = {
-                        'code':        code,
-                        'last_high':   float(row['high']),  # 对应 D-1 高点
-                        'high2':       float(prev_row['high']), # 对应 D-2 高点
-                        'last_close':  float(row['close']),
-                        'close2':      float(prev_row['close']),
-                        'last_low':    float(row['low']),
-                        'ma60':        float(row.get('ma60', row.get('ma60d', row['close']))),
-                        'ma60d':       float(row.get('ma60', row.get('ma60d', row['close']))),
-                        'ma20':        float(row.get('ma20', row.get('ma20d', row['close']))),
-                        'ma20d':       float(row.get('ma20', row.get('ma20d', row['close']))),
-                        'ma5':         float(row.get('ma5',  row.get('ma5d',  row['close']))),
-                        'ma5d':        float(row.get('ma5',  row.get('ma5d',  row['close']))),
-                    }
-                    bl_df = pd.DataFrame([bl_data])
-                    self.sbc_baseline_loader.calculate_baseline(bl_df)
-                    
-                    # Log Check: 确保与 verify_sbc_pattern.py 输出一致
-                    # logger.info(f"[DEBUG SBC ALIGN] {code} anchor: last_high={bl_data['last_high']}, last_close={bl_data['last_close']}")
-                else:
-                    logger.debug(f"[DEBUG SBC] Date alignment failed for {t_date_str}")
-                
-                # 2. 从 tick_df 重新生成带指标的分时 df
-                # 根据真实数据验证，tick_df 需要包含 trade/price, amount, volume 等
-                sbc_tick_df = tick_df.copy()
-                if 'code' not in sbc_tick_df.columns:
-                    sbc_tick_df['code'] = code
-                if 'trade' not in sbc_tick_df.columns and 'close' in sbc_tick_df.columns:
-                    sbc_tick_df['trade'] = sbc_tick_df['close']
-                
-                # [FIX] 确保均价(VWAP)计算一致性
-                # 如果有累积額和量，重新计算均价以增加鲁棒性
-                if 'amount' in sbc_tick_df.columns and 'volume' in sbc_tick_df.columns:
-                    sbc_tick_df['avg_price'] = (sbc_tick_df['amount'] / sbc_tick_df['volume']).fillna(sbc_tick_df['trade'])
-                
-                # 3. 批量更新追踪器
-                # [FIX] 既然是渲染全天图表，必须重置该股票的追踪状态，防止多次切换导致的累积均价异常或信号被拦截
-                c_clean = str(code).zfill(6)
-                if hasattr(self.sbc_tracker, '_last_vol'): self.sbc_tracker._last_vol[c_clean] = 0.0
-                if hasattr(self.sbc_tracker, '_cumulative_amt'): self.sbc_tracker._cumulative_amt[c_clean] = 0.0
-                if hasattr(self.sbc_tracker, '_last_sbc_status'): self.sbc_tracker._last_sbc_status[c_clean] = False
-                if hasattr(self.sbc_tracker, '_last_date'): self.sbc_tracker._last_date[c_clean] = 0 # 强制触发 update_batch 内部的日期重置逻辑
-
-                self.sbc_tracker.update_batch(sbc_tick_df, self.sbc_baseline_loader)
-                
-                # 4. 提取专门用于分时图绘制的 SBC 信号
-                # 每次开始执行前先清空
-                self.all_today_sbc_signals = []
-                if 'sbc_status' in sbc_tick_df.columns:
-                    for idx in range(len(sbc_tick_df)):
-                        status = sbc_tick_df['sbc_status'].iloc[idx]
-                        if isinstance(status, str) and ("🚀" in status or "⚠️" in status):
-                            p = float(sbc_tick_df['trade'].iloc[idx])
-                            # 对齐 SignalType 到 FOLLOW (买) / EXIT_FOLLOW (卖) 以呈现黄金色视觉风格
-                            stype = SignalType.FOLLOW if "🚀" in status else SignalType.EXIT_FOLLOW
-                            self.all_today_sbc_signals.append(SignalPoint(
-                                code=code, timestamp="TICK_LIVE", bar_index=idx, price=p,
-                                signal_type=stype,
-                                source=SignalSource.STRATEGY_ENGINE,
-                                reason=status,
-                                debug_info={'tick_idx': idx}
-                            ))
-                            logger.debug(f"[DEBUG SBC FOR TICK] Extracted: {status} at {p}")
-            except Exception as e:
-                logger.debug(f"SBC Intraday calculation error: {e}")
+                    # 委托 sbc_core 进行高性能批量分析
+                    sbc_results = sbc_core.run_sbc_analysis_core(code, day_df, tick_df, verbose=True)
+                    self.all_today_sbc_signals = sbc_results.get("signals", [])
+                    # ⭐ [FIX] 立即刷新视觉层数据
+                    self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
+                except Exception as e:
+                    logger.debug(f"SBC integration error: {e}")
+        else:
+            # 性能优化：如果不显示或没数据，确保旧信号被清理
+            self.signal_overlay.update_signals([], target='tick')
 
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)

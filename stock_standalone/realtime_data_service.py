@@ -599,9 +599,9 @@ class DailyEmotionBaseline:
                 ma20       = float(row.get(m_ma20, row.get('ma20d', row.get('ma20', 0))))
                 ma60       = float(row.get(m_ma60, row.get('ma60d', row.get('ma60', 0))))
                 lasth1d    = float(row.get(m_h1, row.get('lasth1d', row.get('last_high', 0))))
-                lasth2d    = float(row.get(m_h2, row.get('lasth2d', 0)))
+                lasth2d    = float(row.get(m_h2, row.get('lasth2d', row.get('high2', 0))))
                 lastp1d    = float(row.get(m_p1, row.get('lastp1d', row.get('last_close', 0))))
-                lastp2d    = float(row.get(m_p2, row.get('lastp2d', 0)))
+                lastp2d    = float(row.get(m_p2, row.get('lastp2d', row.get('close2', 0))))
                 last_low   = float(row.get(m_low, row.get('last_low', row.get('low', 0))))
                 dist_h_l   = float(row.get('dist_h_l', 4.0)) # 振幅，缺省给 4.0
 
