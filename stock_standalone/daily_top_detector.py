@@ -5,11 +5,12 @@ Daily Top Detector for identifying distribution phases and trend exhaustion.
 import pandas as pd
 import numpy as np
 
-def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
+def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None, cache_dict: dict = None) -> dict:
     """
     Analyze daily K-line history to detect top signals.
     :param day_df: DataFrame with daily OHLCV data.
     :param current_tick: Real-time tick data for today (optional).
+    :param cache_dict: Optional dictionary to cache expensive pandas re-calculations across ticks.
     :return: dict with score (0.0-1.0) and signals list.
     """
     if day_df.empty or len(day_df) < 10:
@@ -35,9 +36,18 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
 
     # 2. Volume-Price Divergence at Highs (滞涨)
     # Price is near 10-day high but today's volume is > 1.8x of 5-day avg, while price change is small (< 1.5%)
-    avg_vol_5 = day_df['volume'].tail(5).mean() if 'volume' in day_df.columns else day_df['vol'].tail(5).mean()
-    high_10 = last_row.get('max10', day_df['high'].tail(10).max())
-    high_60 = last_row.get('hmax60', day_df['high'].tail(60).max())
+    if cache_dict is not None and "avg_vol_5" in cache_dict:
+        avg_vol_5 = cache_dict["avg_vol_5"]
+        high_10 = cache_dict["high_10"]
+        high_60 = cache_dict["high_60"]
+    else:
+        avg_vol_5 = day_df['volume'].tail(5).mean() if 'volume' in day_df.columns else day_df['vol'].tail(5).mean()
+        high_10 = last_row.get('max10', day_df['high'].tail(10).max())
+        high_60 = last_row.get('hmax60', day_df['high'].tail(60).max())
+        if cache_dict is not None:
+            cache_dict["avg_vol_5"] = avg_vol_5
+            cache_dict["high_10"] = high_10
+            cache_dict["high_60"] = high_60
     
     # 滞涨判定：在高位 (10日高点附近) 爆出巨量 (1.8倍) 但不涨
     if price > high_10 * 0.97 and volume > avg_vol_5 * 1.8:
@@ -59,8 +69,15 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None) -> dict:
 
     # 4. Over-extension (偏离度/乖离)
     # Price > MA5 * 1.08 OR Price > MA20 * 1.15
-    ma5 = last_row.get('ma5d', day_df['close'].tail(5).mean())
-    ma20 = last_row.get('ma20d', day_df['close'].tail(20).mean())
+    if cache_dict is not None and "ma5" in cache_dict:
+        ma5 = cache_dict["ma5"]
+        ma20 = cache_dict["ma20"]
+    else:
+        ma5 = last_row.get('ma5d', day_df['close'].tail(5).mean())
+        ma20 = last_row.get('ma20d', day_df['close'].tail(20).mean())
+        if cache_dict is not None:
+            cache_dict["ma5"] = ma5
+            cache_dict["ma20"] = ma20
     if ma5 > 0 and price > ma5 * 1.08:
         score += 0.2
         signals.append("短线过热(偏离MA5)")

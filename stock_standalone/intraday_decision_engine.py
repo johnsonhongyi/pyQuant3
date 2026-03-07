@@ -9,6 +9,7 @@ import datetime as dt
 from typing import Any
 from daily_top_detector import detect_top_signals
 import pandas as pd
+from JohnsonUtil.commonTips import timed_ctx
 logger = logging.getLogger(__name__)
 
 
@@ -68,50 +69,46 @@ class IntradayDecisionEngine:
         Returns:
             dict: {
                 "action": str ("买入", "卖出", "持仓", "止损", "止盈", "警告"),
-                "position": float (新目标持仓, 0.0-1.0),
-                "reason": str (触发理由),
-                "debug": dict (盘中结构、趋势强度等分析信息)
-            }
         """
-        code = row.get("code", "unknown")
         debug: dict[str, Any] = {}
+        # ---------- 基础字段预取与预处理 (Field Extraction & Preprocessing) ----------
         price = float(row.get("trade", 0))
-        high = float(row.get("high", 0))
-        debug["high_val"] = high
-        low = float(row.get("low", 0)) # 用于后续分析
-        open_p = float(row.get("open", 0))
-
-        ratio = float(row.get("ratio", 0))
+        if price <= 0:
+            return self._hold("价格无效", debug)
+            
+        high = float(row.get("high", price))
+        low = float(row.get("low", price))
+        open_p = float(row.get("open", price))
+        ratio = float(row.get("volume_ratio", row.get("ratio", 0)))
+        
         ma5 = float(row.get("ma5d", 0))
         ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        ma60 = float(row.get("ma60d", 0))
         
-        # 💥 关键点：获取实时均价 nclose (VWAP)，优先从 row 取，其次 from snapshot 取
-        nclose = float(row.get("nclose", snapshot.get("nclose", 0)))
-        debug["nclose"] = nclose
+        nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+        last_close = float(snapshot.get("last_close", snapshot.get("lastp1d", 0)))
         
-        last_close = float(snapshot.get("last_close", 0))
-        gap_up = (open_p - last_close) / last_close if last_close > 0 else 0.0
-
-        if price <= 0:
-            logger.warning(f"Engine: {code} price is 0, skip evaluate")
-            return self._hold("价格无效", debug)
+        # 调试信息基础
+        debug.update({
+            "nclose": nclose,
+            "high_val": high,
+            "trade": price,
+            "ratio": ratio
+        })
         
-        # ---------- 基础行情分析（提前进行以填充调试信息） ----------
-        # 1. 均线有效性检查
+        # ---------- 基础行情分析 ----------
+        # 1. 均线与结构分析
         if ma5 > 0 and ma10 > 0:
-            # 盘中结构分析
             structure = self._intraday_structure(price, high, open_p, ratio)
-            debug["structure"] = structure
-            
-            # 趋势强度评估
             trend_strength = self._trend_strength(row, debug)
-            debug["trend_strength"] = trend_strength
         else:
             structure = "UNKNOWN"
             trend_strength = 0.0
-            debug["structure"] = structure
-            debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
+            
+        debug["structure"] = structure
+        debug["trend_strength"] = trend_strength
 
         # ==============================================================================
         # 💥 [CRITICAL] P0 风控优先级：止损/止盈信号必须优先于所有其他逻辑
@@ -139,14 +136,17 @@ class IntradayDecisionEngine:
         
         # 💥 [NEW] 提前进行顶部信号检测，供后续全局使用
         day_df = snapshot.get('day_df', pd.DataFrame())
-        top_info = detect_top_signals(day_df, row) # 传入 row 作为当前 tick
+        cache_dict = snapshot.setdefault('top_detector_cache', {})
+        with timed_ctx("eval.0_top_detector"):
+            top_info = detect_top_signals(day_df, row, cache_dict=cache_dict) # 传入 row 作为当前 tick
         debug["top_score"] = top_info['score']
         debug["top_signals"] = top_info['signals']
         
         # ==============================================================================
         # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
         # ==============================================================================
-        hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info)
+        with timed_ctx("eval.1_main_wave_hold"):
+            hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info)
         if hold_decision:
             # 如果主升浪逻辑接管，直接返回
             return {
@@ -342,208 +342,305 @@ class IntradayDecisionEngine:
             return self._hold("均线数据无效", debug)
 
         # ---------- 卖出信号检测 ----------
-        if mode in ("full", "sell_only"):
-            if is_t1_restricted:
-                debug["sell_skip"] = "T+1限制，跳过卖出信号检测"
-            else:
-                sell_action, sell_pos, sell_reason = self._sell_decision(price, ma5, ma10, snapshot, structure, debug)
-                if sell_action == "卖出":
-                    debug["sell_reason"] = sell_reason
+        with timed_ctx("eval.2_sell_check"):
+            if mode in ("full", "sell_only"):
+                if is_t1_restricted:
+                    debug["sell_skip"] = "T+1限制，跳过卖出信号检测"
+                else:
+                    sell_action, sell_pos, sell_reason = self._sell_decision(price, ma5, ma10, snapshot, structure, debug)
+                    if sell_action == "卖出":
+                        debug["sell_reason"] = sell_reason
+                        return {
+                            "action": "卖出",
+                            "position": sell_pos,
+                            "reason": sell_reason,
+                            "debug": debug
+                        }
+
+        # ---------- 买入信号检测 ----------
+        with timed_ctx("eval.3_buy_check"):
+            if mode in ("full", "buy_only"):
+                action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
+                
+                # 【新增】支撑位开仓检测 (Support Rebound)
+                # 即使均线信号平平，如果跌到了强支撑位且企稳，也是高胜率开仓点
+                support_score, support_reason = self._support_rebound_check(row, snapshot, debug)
+                if support_score > 0.1:
+                    if action == "持仓":
+                        # 支撑位反转：覆盖原有的观望信号
+                        action = "买入"
+                        base_pos = 0.2  # 基础仓位
+                        ma_reason = f"[支撑反弹] {support_reason}"
+                    elif action == "买入":
+                        # 双重确认
+                        base_pos += 0.1
+                        ma_reason += f" & {support_reason}"
+                
+                # --- 模式识别：加速股模式 & MA60 突破 (提前判断以支持升级) ---
+                # [新增] MA60 突破 + Red > 5 加速模式
+                ma60_result = self._check_ma60_red5_acceleration(row, snapshot, debug)
+                if ma60_result["triggered"]:
+                    if action == "持仓": 
+                        action = "买入"
+                    base_pos += ma60_result["bonus"]
+                    ma_reason += f" | {ma60_result['reason']}"
+
+                acc_result = self._check_acceleration_pattern(row, snapshot, debug)
+                if acc_result["is_acc"]:
+                    if action == "持仓": 
+                        action = "买入"
+                    base_pos += acc_result["bonus"]
+                    ma_reason += f" | {acc_result['reason']}"
+
+                debug["ma_decision"] = ma_reason
+
+                if action == "持仓":
+                    # [迭代优化] 虽然均线判定持仓，但如果是加速股，应该给予更强的正面理由
+                    is_holding = float(snapshot.get("cost_price", 0)) > 0
+                    if is_holding:
+                        red_val = int(snapshot.get('red', 0))
+                        if red_val >= 5 and price > ma5:
+                            ma_reason = f"加速延续(Red{red_val}) | {ma_reason}"
+                    return self._hold(ma_reason, debug)
+                
+                if action == "买入":
+                    # 💥 核心修正：结构性熔断机制 💥
+                    # 如果盘中结构判定为"派发"(冲高大幅回落)，坚决禁止开仓，无论其他指标多好
+                    if structure == "派发":
+                        debug["refuse_buy"] = "结构为派发(冲高回落)"
+                        return self._hold(f"结构{structure}禁买", debug)
+                    
+                    # (模式识别已移至上方)
+
+                    # 1. 应用基础过滤器
+                    base_pos += self._yesterday_anchor(price, snapshot, debug)
+                    base_pos += self._structure_filter(row, debug)
+                    base_pos += self._extreme_filter(row, debug)
+                    
+                    # 2. 趋势强度与多日情绪加成
+                    multiday_score = self._multiday_trend_score(row, debug)
+                    if trend_strength > 0.5 or multiday_score > 0.3:
+                        base_pos += 0.1
+                    elif trend_strength < -0.3:
+                        base_pos -= 0.1
+                    
+                    # 【新增】单阳惩罚 (One-Day Wonder Penalty)
+                    # 统计发现 win=1 时买入胜率为 0%，需连续确认
+                    win_days = int(snapshot.get('win', 0))
+                    if win_days == 1:
+                        base_pos -= 0.15
+                        debug["单阳惩罚"] = -0.15
+                    
+                    # 3. 量能与均价约束 (关键点)
+                    # 【新增】量能模糊区间惩罚
+                    # 统计发现 volume 在 0.8-1.2 之间胜率仅 18%
+                    current_vol = float(row.get('volume', 0))
+                    if 0.8 <= current_vol <= 1.2:
+                        base_pos -= 0.10
+                        debug["量能模糊"] = -0.10
+                        
+                    base_pos += self._volume_bonus(row, debug)
+                    
+                    # --- 进化: 应用防御惩罚 ---
+                    base_pos -= defense_level
+                    if "PTSD扣分" in debug:
+                        base_pos += debug["PTSD扣分"] # 这是一个负数
+                    
+                    # 4. 选股分加成
+                    base_pos += selection_bonus
+                    
+                    # 5. 支撑位得分加成 & 实时信号加成
+                    if support_score > 0:
+                        base_pos += support_score
+                        debug["支撑加成"] = support_score
+                    
+                    # 注入实时信号加成
+                    base_pos += rt_bonus
+                    base_pos += v_shape_bonus
+                    
+                    # 注入 55188 外部信号加成
+                    base_pos += popularity_bonus
+                    base_pos += capital_bonus
+                    base_pos += sector_bonus
+                    
+                    # 如果价格在今日今日成交均价（nclose）下方，【硬性拒绝】买入
+                    # User Rule: 不允许任何低于分时均线（VWAP）的买入
+                    if nclose > 0 and price < nclose:
+                        # 例外：极强的支撑位抄底(score>0.25)且偏离均价极近(<0.5%)，由于是左侧交易，允许在均价线下波动
+                        if support_score > 0.25 and (nclose - price)/nclose < 0.005:
+                              debug["均价约束"] = "支撑位极近豁免"
+                        else:
+                            return self._hold(f"低于分时均线(VWAP:{nclose:.2f})禁买", debug)
+                        
+                    # 【新增】昨日均价线约束
+                    last_nclose = float(snapshot.get("nclose", 0))
+                    if last_nclose > 0 and price < last_nclose:
+                        # 同样，若有强支撑，减轻惩罚
+                        if support_score > 0.2:
+                            base_pos -= 0.05
+                        else:
+                            base_pos -= 0.15
+                            debug["昨日锚点约束"] = "低于昨均价"
+
+                    # 6. 低位大仓位逻辑 (靠近 low10/low60 加成)
+                    low10 = float(snapshot.get("low10", 0))
+                    low60 = float(snapshot.get("low60", 0))
+                    if (low10 > 0 and price < low10 * 1.02) or (low60 > 0 and price < low60 * 1.03):
+                        if structure != "派发" and price > nclose:
+                            base_pos += 0.1
+                            debug["开仓权重"] = "低位加成"
+
+                    # 【新增】VWAP (成交均价) 趋势判定：过滤无效震荡单
+                    # 逻辑：均价线代表当日/昨日的市场平均成本。成本下移说明趋势走弱。
+                    # 只有在 "重心上移" 或 "低位企稳" 时才开仓。
+                    vwap_score = self._vwap_trend_check(row, snapshot, debug)
+                    base_pos += vwap_score
+                    
+                    # 如果 VWAP 趋势严重走坏 (score < -0.2) 且没有强支撑豁免，直接熔断
+                    if vwap_score < -0.2 and support_score < 0.15:
+                        return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
+
+                    # --- [新增] 智能加仓逻辑 (Smart Positioning) ---
+                    # 如果当前已经是持仓状态，则判定是否符合加仓条件
+                    is_holding = float(snapshot.get("cost_price", 0)) > 0
+                    if is_holding:
+                        # [迭代优化] 用户需求：如果保持加速状态且红柱高位，继续持仓甚至加仓
+                        red_val = int(snapshot.get('red', 0))
+                        win_val = int(snapshot.get('win', 0))
+                        if red_val >= 5 and price > ma5 and win_val >= 2:
+                            debug["迭代持仓"] = f"Red{red_val}加速延续"
+                            # 如果评分本身很高，允许维持高分，这样就不会触发卖出/减仓
+                            base_pos = max(base_pos, 0.45) 
+                        
+                        add_pos_decision = self._check_add_position(row, snapshot, debug)
+                        if not add_pos_decision["allow"]:
+                            # 如果不是为了持仓，而是为了新买入/加仓，则受限于 add_pos_decision
+                            # 但如果是为了维持"持仓"，我们这里已经在 evaluate 流程中了
+                            pass 
+                        else:
+                            debug["加仓信号"] = "符合条件"
+
+                    # ==============================================================================
+                    # 💥 最终门槛大幅提高 (根据回测，得分 < 0.3 胜率极低)
+                    # MIN_BUY_SCORE 从隐性 ~0.3 提升至显性 0.40
+                    # ==============================================================================
+                    debug["实时买入分"] = round(base_pos, 2)
+                    
+                    if base_pos < 0.40:  # Hard Threshold
+                        return self._hold(f"评分不足({base_pos:.2f}<0.4)", debug)
+
+                    final_pos = max(min(base_pos, self.max_position * 1.2), 0)
+                    # Double check to ensure non-zero if we passed the threshold (though logically 0.4 > 0)
+                    if final_pos <= 0:
+                         return self._hold("仓位由风控限制为0", debug)
+
+                    reason = f"{structure} | {ma_reason} | 得分{base_pos:.2f}"
+                    if is_holding: reason = "[加仓] " + reason
+                    logger.info(f"DecisionEngine {'ADD' if is_holding else 'BUY'} pos={final_pos:.2f} reason={reason}")
+
                     return {
-                        "action": "卖出",
-                        "position": sell_pos,
-                        "reason": sell_reason,
+                        "action": "买入",
+                        "position": round(final_pos, 2),
+                        "reason": reason,
                         "debug": debug
                     }
 
-        # ---------- 买入信号检测 ----------
-        if mode in ("full", "buy_only"):
-            action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
-            
-            # 【新增】支撑位开仓检测 (Support Rebound)
-            # 即使均线信号平平，如果跌到了强支撑位且企稳，也是高胜率开仓点
-            support_score, support_reason = self._support_rebound_check(row, snapshot, debug)
-            if support_score > 0.1:
-                if action == "持仓":
-                    # 支撑位反转：覆盖原有的观望信号
-                    action = "买入"
-                    base_pos = 0.2  # 基础仓位
-                    ma_reason = f"[支撑反弹] {support_reason}"
-                elif action == "买入":
-                    # 双重确认
-                    base_pos += 0.1
-                    ma_reason += f" & {support_reason}"
-            
-            # --- 模式识别：加速股模式 & MA60 突破 (提前判断以支持升级) ---
-            # [新增] MA60 突破 + Red > 5 加速模式
-            ma60_result = self._check_ma60_red5_acceleration(row, snapshot, debug)
-            if ma60_result["triggered"]:
-                if action == "持仓": 
-                    action = "买入"
-                base_pos += ma60_result["bonus"]
-                ma_reason += f" | {ma60_result['reason']}"
+        return self._hold("无有效信号", debug)
 
-            acc_result = self._check_acceleration_pattern(row, snapshot, debug)
-            if acc_result["is_acc"]:
-                if action == "持仓": 
-                    action = "买入"
-                base_pos += acc_result["bonus"]
-                ma_reason += f" | {acc_result['reason']}"
+    def evaluate_dynamic(self, base_eval: dict, row: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+            """
+            动态卖出信号计算，只针对 tick 变化字段
+            保留基础 evaluate 的 debug 与基础计算结果，避免重复计算均线、选股加成等
+            """
+            debug = base_eval.get("debug", {}).copy()
 
-            debug["ma_decision"] = ma_reason
+            price = float(row.get("trade", 0))
+            if price <= 0:
+                return {"action": "持仓", "reason": "价格无效", "debug": debug}
 
-            if action == "持仓":
-                # [迭代优化] 虽然均线判定持仓，但如果是加速股，应该给予更强的正面理由
-                is_holding = float(snapshot.get("cost_price", 0)) > 0
-                if is_holding:
-                    red_val = int(snapshot.get('red', 0))
-                    if red_val >= 5 and price > ma5:
-                        ma_reason = f"加速延续(Red{red_val}) | {ma_reason}"
-                return self._hold(ma_reason, debug)
-            
-            if action == "买入":
-                # 💥 核心修正：结构性熔断机制 💥
-                # 如果盘中结构判定为"派发"(冲高大幅回落)，坚决禁止开仓，无论其他指标多好
-                if structure == "派发":
-                    debug["refuse_buy"] = "结构为派发(冲高回落)"
-                    return self._hold(f"结构{structure}禁买", debug)
-                
-                # (模式识别已移至上方)
+            high = float(row.get("high", price))
+            low = float(row.get("low", price))
+            nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+            pct_now = float(row.get("percent", 0))
 
-                # 1. 应用基础过滤器
-                base_pos += self._yesterday_anchor(price, snapshot, debug)
-                base_pos += self._structure_filter(row, debug)
-                base_pos += self._extreme_filter(row, debug)
-                
-                # 2. 趋势强度与多日情绪加成
-                multiday_score = self._multiday_trend_score(row, debug)
-                if trend_strength > 0.5 or multiday_score > 0.3:
-                    base_pos += 0.1
-                elif trend_strength < -0.3:
-                    base_pos -= 0.1
-                
-                # 【新增】单阳惩罚 (One-Day Wonder Penalty)
-                # 统计发现 win=1 时买入胜率为 0%，需连续确认
-                win_days = int(snapshot.get('win', 0))
-                if win_days == 1:
-                    base_pos -= 0.15
-                    debug["单阳惩罚"] = -0.15
-                
-                # 3. 量能与均价约束 (关键点)
-                # 【新增】量能模糊区间惩罚
-                # 统计发现 volume 在 0.8-1.2 之间胜率仅 18%
-                current_vol = float(row.get('volume', 0))
-                if 0.8 <= current_vol <= 1.2:
-                    base_pos -= 0.10
-                    debug["量能模糊"] = -0.10
-                    
-                base_pos += self._volume_bonus(row, debug)
-                
-                # --- 进化: 应用防御惩罚 ---
-                base_pos -= defense_level
-                if "PTSD扣分" in debug:
-                    base_pos += debug["PTSD扣分"] # 这是一个负数
-                
-                # 4. 选股分加成
-                base_pos += selection_bonus
-                
-                # 5. 支撑位得分加成 & 实时信号加成
-                if support_score > 0:
-                    base_pos += support_score
-                    debug["支撑加成"] = support_score
-                
-                # 注入实时信号加成
-                base_pos += rt_bonus
-                base_pos += v_shape_bonus
-                
-                # 注入 55188 外部信号加成
-                base_pos += popularity_bonus
-                base_pos += capital_bonus
-                base_pos += sector_bonus
-                
-                # 如果价格在今日今日成交均价（nclose）下方，【硬性拒绝】买入
-                # User Rule: 不允许任何低于分时均线（VWAP）的买入
-                if nclose > 0 and price < nclose:
-                    # 例外：极强的支撑位抄底(score>0.25)且偏离均价极近(<0.5%)，由于是左侧交易，允许在均价线下波动
-                    if support_score > 0.25 and (nclose - price)/nclose < 0.005:
-                          debug["均价约束"] = "支撑位极近豁免"
-                    else:
-                        return self._hold(f"低于分时均线(VWAP:{nclose:.2f})禁买", debug)
-                    
-                # 【新增】昨日均价线约束
-                last_nclose = float(snapshot.get("nclose", 0))
-                if last_nclose > 0 and price < last_nclose:
-                    # 同样，若有强支撑，减轻惩罚
-                    if support_score > 0.2:
-                        base_pos -= 0.05
-                    else:
-                        base_pos -= 0.15
-                        debug["昨日锚点约束"] = "低于昨均价"
+            # 更新 snapshot 高低点
+            snapshot["highest_today"] = max(snapshot.get("highest_today", price), high)
+            snapshot["highest_since_buy"] = max(snapshot.get("highest_since_buy", price), high)
+            snapshot["low_val"] = min(snapshot.get("low_val", price), low)
 
-                # 6. 低位大仓位逻辑 (靠近 low10/low60 加成)
-                low10 = float(snapshot.get("low10", 0))
-                low60 = float(snapshot.get("low60", 0))
-                if (low10 > 0 and price < low10 * 1.02) or (low60 > 0 and price < low60 * 1.03):
-                    if structure != "派发" and price > nclose:
-                        base_pos += 0.1
-                        debug["开仓权重"] = "低位加成"
+            debug["trade"] = price
+            debug["high_val"] = high
+            debug["low_val"] = low
+            debug["percent"] = pct_now
+            debug["nclose"] = nclose
 
-                # 【新增】VWAP (成交均价) 趋势判定：过滤无效震荡单
-                # 逻辑：均价线代表当日/昨日的市场平均成本。成本下移说明趋势走弱。
-                # 只有在 "重心上移" 或 "低位企稳" 时才开仓。
-                vwap_score = self._vwap_trend_check(row, snapshot, debug)
-                base_pos += vwap_score
-                
-                # 如果 VWAP 趋势严重走坏 (score < -0.2) 且没有强支撑豁免，直接熔断
-                if vwap_score < -0.2 and support_score < 0.15:
-                    return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
-
-                # --- [新增] 智能加仓逻辑 (Smart Positioning) ---
-                # 如果当前已经是持仓状态，则判定是否符合加仓条件
-                is_holding = float(snapshot.get("cost_price", 0)) > 0
-                if is_holding:
-                    # [迭代优化] 用户需求：如果保持加速状态且红柱高位，继续持仓甚至加仓
-                    red_val = int(snapshot.get('red', 0))
-                    win_val = int(snapshot.get('win', 0))
-                    if red_val >= 5 and price > ma5 and win_val >= 2:
-                        debug["迭代持仓"] = f"Red{red_val}加速延续"
-                        # 如果评分本身很高，允许维持高分，这样就不会触发卖出/减仓
-                        base_pos = max(base_pos, 0.45) 
-                    
-                    add_pos_decision = self._check_add_position(row, snapshot, debug)
-                    if not add_pos_decision["allow"]:
-                        # 如果不是为了持仓，而是为了新买入/加仓，则受限于 add_pos_decision
-                        # 但如果是为了维持"持仓"，我们这里已经在 evaluate 流程中了
-                        pass 
-                    else:
-                        debug["加仓信号"] = "符合条件"
-
-                # ==============================================================================
-                # 💥 最终门槛大幅提高 (根据回测，得分 < 0.3 胜率极低)
-                # MIN_BUY_SCORE 从隐性 ~0.3 提升至显性 0.40
-                # ==============================================================================
-                debug["实时买入分"] = round(base_pos, 2)
-                
-                if base_pos < 0.40:  # Hard Threshold
-                    return self._hold(f"评分不足({base_pos:.2f}<0.4)", debug)
-
-                final_pos = max(min(base_pos, self.max_position * 1.2), 0)
-                # Double check to ensure non-zero if we passed the threshold (though logically 0.4 > 0)
-                if final_pos <= 0:
-                     return self._hold("仓位由风控限制为0", debug)
-
-                reason = f"{structure} | {ma_reason} | 得分{base_pos:.2f}"
-                if is_holding: reason = "[加仓] " + reason
-                logger.info(f"DecisionEngine {'ADD' if is_holding else 'BUY'} pos={final_pos:.2f} reason={reason}")
-
+            # ---------- 高优先级止损/止盈 ----------
+            stop_result = self._stop_check(row, snapshot, debug)
+            if stop_result["triggered"]:
                 return {
-                    "action": "买入",
-                    "position": round(final_pos, 2),
-                    "reason": reason,
+                    "action": stop_result["action"],
+                    "position": stop_result.get("position", 0),
+                    "reason": f"[动态止损] {stop_result['reason']}",
                     "debug": debug
                 }
 
-        return self._hold("无有效信号", debug)
+            # ---------- 涨跌停过滤 ----------
+            last_close = float(snapshot.get("last_close", 0))
+            limit_info = self._is_price_limit(row.get("code", ""), price, last_close, high, low, row.get("open", price), row.get("ratio", 0), snapshot)
+            debug.update(limit_info)
+
+            if limit_info.get("limit_up", False):
+                return {"action": "持仓", "reason": "一字涨停/封涨停动态持仓", "debug": debug}
+            if limit_info.get("limit_down", False):
+                return {"action": "持仓", "reason": "跌停，信号无效", "debug": debug}
+
+            # ---------- 高位/趋势卖出逻辑 ----------
+            # 复用 base_eval 中的 top_signals/top_score
+
+            # 从 base_eval debug 中获取 top_info，保证 score 和 signals 都存在
+
+            top_info_base = base_eval.get("debug", {})
+            top_info = {
+                "score": top_info_base.get("score", 0.0),
+                "signals": top_info_base.get("signals", [])
+            }
+
+            hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info)
+
+            if hold_decision:
+                return {
+                    "action": hold_decision["action"],
+                    "position": round(hold_decision.get("position", 0), 2),
+                    "reason": f"[动态主升浪保护] {hold_decision['reason']}",
+                    "debug": debug
+                }
+
+            # ---------- 实时高优先级决策 ----------
+            is_t1_restricted = False
+            if snapshot.get('buy_date'):
+                today_str = dt.datetime.now().strftime('%Y-%m-%d')
+                if snapshot['buy_date'].startswith(today_str):
+                    is_t1_restricted = True
+            # ---------- 实时优先卖出 ----------
+            priority_result = self._realtime_priority_check(row, snapshot, mode="sell_only", debug=debug, _is_t1_restricted=is_t1_restricted)
+            if priority_result["triggered"]:
+                return priority_result
+
+            # ---------- 常规卖出判断 ----------
+            sell_action, sell_pos, sell_reason = self._sell_decision(
+                price,
+                snapshot.get('ma5d', 0),
+                snapshot.get('ma10d', 0),
+                snapshot,
+                snapshot.get('structure', 'UNKNOWN'),
+                debug
+            )
+            if sell_action == "卖出":
+                debug["sell_reason"] = sell_reason
+                return {"action": "卖出", "position": sell_pos, "reason": sell_reason, "debug": debug}
+
+            # 默认持仓
+            return {"action": "持仓", "reason": "无动态卖出触发", "debug": debug}
 
     # ==================== 卖出信号 ====================
     
@@ -594,6 +691,8 @@ class IntradayDecisionEngine:
         p1_score = 0.0
         if price > ma5 * 1.07:  # 乖离超过 7%，高位卖出时机
             p1_score += 0.35
+            if ma5 <= 0:
+                raise ValueError(f"MA5无效，数据异常! price={price}, row={ma5} snapshot={snapshot}")
             reasons.append(f"乖离过大({(price/ma5-1):.1%})")
         elif price > ma5 * 1.04:  # 乖离 4-7%
             p1_score += 0.15
