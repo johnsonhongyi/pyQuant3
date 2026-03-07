@@ -1666,6 +1666,17 @@ class IntradayDecisionEngine:
         volume_price_result = self._volume_price_signal(row, snapshot, mode, debug)
         if volume_price_result["triggered"]:
             return volume_price_result
+            
+        # ========== 4. 跌穿昨日最低价 (User defined priority rule) ==========
+        last_low = float(snapshot.get("last_low", 0))
+        if last_low > 0 and price < last_low:
+             return {
+                 "triggered": True,
+                 "action": "卖出",
+                 "position": 0.0,
+                 "reason": f"跌穿昨低({last_low:.2f})破位主杀",
+                 "debug": debug
+             }
         
         return result
 

@@ -16,61 +16,25 @@ import time
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), 'stock_standalone'))
 
-# 导入底层依赖 (优先绝对路径)
 try:
-    from stock_standalone.JSONData import tdx_data_Day as tdd
-    from stock_standalone.JohnsonUtil import johnson_cons as ct
-    from stock_standalone.realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
-    from stock_standalone.intraday_decision_engine import IntradayDecisionEngine
-    from stock_standalone.signal_types import SignalPoint, SignalType
-    from stock_standalone.stock_visual_utils import show_chart_with_signals
-except ImportError:
     from JSONData import tdx_data_Day as tdd
     from JohnsonUtil import johnson_cons as ct
-    from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
-    from intraday_decision_engine import IntradayDecisionEngine
-    from signal_types import SignalPoint, SignalType
+    from signal_types import SignalType
     from stock_visual_utils import show_chart_with_signals
+    import sbc_core as sbc_core
+except ImportError:
+    from stock_standalone.JSONData import tdx_data_Day as tdd
+    from stock_standalone.JohnsonUtil import johnson_cons as ct
+    from stock_standalone.signal_types import SignalType
+    from stock_standalone.stock_visual_utils import show_chart_with_signals
+    import stock_standalone.sbc_core as sbc_core
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 MAX_BUY_PER_DAY  = 3   # 每日上图买点上限
-MAX_SELL_PER_DAY = 3   # 每日上图卖点上限
-
-# 优先卖出关键词（结构性信号：反弹失败/高点下移/首次跌破均线）
-PRIORITY_SELL_KW = [
-    "高点下移", "反弹", "冲高回落", "乖离",
-    "跌破均线", "跌破MA10", "量价背离",
-    "趋势压力", "价格行为","结构派发", "结构走弱",
-    "二次冲高失败", "持续下移",
-]
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-def _ts_to_date(ts):
-    """时间戳或时间字符串 → date"""
-    if ts is None:
-        return None
-    # pandas Timestamp 或 datetime 对象
-    if hasattr(ts, 'date'):
-        try:
-            return ts.date()
-        except Exception:
-            pass
-    # Unix 时间戳 (float/int)
-    if isinstance(ts, (int, float)) and ts > 1_000_000_000:
-        return datetime.fromtimestamp(ts).date()
-    # 字符串 ticktime: 'HH:MM:SS' 或 'YYYY-MM-DD HH:MM:SS'
-    if isinstance(ts, str):
-        try:
-            if len(ts) <= 8:  # 'HH:MM:SS' → 今天
-                return datetime.now().date()
-            return datetime.strptime(ts[:10], '%Y-%m-%d').date()
-        except Exception:
-            return datetime.now().date()
-    return None
-
-
-def _fmt(ts) -> str:
+def _fts(ts) -> str:
     # pandas Timestamp 或 datetime 对象（ticktime MultiIndex reset 后）
     if hasattr(ts, 'strftime'):
         return ts.strftime("%H:%M")
@@ -90,14 +54,15 @@ def _fmt(ts) -> str:
         return '??:??'
 
 
+
+
 def _prepare_day_df(raw: pd.DataFrame) -> pd.DataFrame:
     """标准化列名 + 计算 shift 衍生列 + 确保 DatetimeIndex"""
     df = raw.copy()
     for src, dst in [('ma60', 'ma60d'), ('ma20', 'ma20d'), ('ma5', 'ma5d'), ('ma10', 'ma10d')]:
         if src in df.columns and dst not in df.columns:
             df[dst] = df[src]
-        elif dst not in df.columns:
-            df[dst] = df.get('close', 0)
+
     for n in range(1, 6):
         df[f'lasth{n}d'] = df['high'].shift(n)
         df[f'lastp{n}d'] = df['close'].shift(n)
@@ -115,60 +80,20 @@ def _prepare_day_df(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _get_day_context(code: str, day_df: pd.DataFrame, tick_date):
-    """
-    【对齐两端逻辑链条】— 基于时间点提取严格历史基准
-    确保锚点 (Yesterday High 等) 指向分时图日期 D 的前一交易日 D-1
-    """
-    # 1. 统一日期格式标识 (D)
-    t_date_str = tick_date.strftime('%Y-%m-%d') if hasattr(tick_date, 'strftime') else str(tick_date)
-    
-    # 2. 选取严格早于当前分时日期的日线数据作为历史基板 (T-1 及其之前)
-    # 这就是“用时间取”的核心：通过日期字符串进行索引切片隔离
-    hist_day_df = day_df[day_df.index.astype(str) < t_date_str]
-    
-    if hist_day_df.empty:
-        # 极端兜底
-        return None, {}, 0.0, 0.0, 0.0, 0.0, None
-
-    # T-1 行 (真正意义上的“昨日”)
-    row = hist_day_df.iloc[-1]
-    # T-2 行 (用于判定上升结构等)
-    prev_row = hist_day_df.iloc[-2] if len(hist_day_df) >= 2 else row
-
-    # 3. 构造与 DailyEmotionBaseline 对齐的审计数据组
-    # 手动提取 D-1 实值，避免依赖 shift 列名冲突
-    bl_data = {
-        'code':          code,
-        'lasth1d':       float(row['high']),
-        'lasth2d':       float(prev_row['high']),
-        'lastp1d':       float(row['close']),
-        'lastp2d':       float(prev_row['close']),
-        'last_low':      float(row['low']),
-        # 均线参数显式传递
-        'ma60d':         float(row.get('ma60', row.get('ma60d', row['close']))),
-        'ma20d':         float(row.get('ma20', row.get('ma20d', row['close']))),
-        'ma5d':          float(row.get('ma5',  row.get('ma5d',  row['close']))),
-        'ma10d':         float(row.get('ma10', row.get('ma10d', row.get('ma10', 0)))),
-    }
-    bl_df = pd.DataFrame([bl_data])
-    
-    # 初始化基准实例并强制推演
-    baseline = DailyEmotionBaseline()
-    baseline._last_calc_date = None # 允许重复计算
-    baseline.calculate_baseline(bl_df)
-
-    # 4. 提取锚点字典 (用于打印和引擎内部判定)
-    anchors = baseline.get_anchor(code)
-    last_close = bl_data['lastp1d']
-    ma5        = bl_data['ma5d']
-    ma10       = bl_data['ma10d']
-    ma60       = bl_data['ma60d']
-
-    return baseline, anchors, last_close, ma5, ma10, ma60, row
-
-
 # ── 主函数 ────────────────────────────────────────────────────────────────────
+
+def fetch_daily_data(code, days=150, hdf5_lock=None):
+    """获取日线数据，默认获取150天以确保MA60稳定"""
+    resample = 'd'
+    if hdf5_lock:
+        from PyQt6.QtCore import QMutexLocker
+        with QMutexLocker(hdf5_lock):
+            raw = tdd.get_tdx_Exp_day_to_df(
+                code, dl=days, resample=resample, fastohlc=False)
+    else:
+        raw = tdd.get_tdx_Exp_day_to_df(
+            code, dl=days, resample=resample, fastohlc=False)
+    return raw
 
 def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None):
     source_name = "Sina Realtime" if use_live else "Cache PKL"
@@ -183,11 +108,9 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         if hdf5_lock:
             from PyQt6.QtCore import QMutexLocker
             with QMutexLocker(hdf5_lock):
-                raw = tdd.get_tdx_Exp_day_to_df(
-                    code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+                raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
         else:
-            raw = tdd.get_tdx_Exp_day_to_df(
-                code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+            raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
 
         if raw is None or raw.empty:
             print(f"❌ 无法获取 {code} 日线数据"); return None
@@ -208,7 +131,6 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     except Exception as e:
         import traceback
         print(f"❌ 日线加载失败: {e}"); traceback.print_exc(); return
-
     # 2. 获取 Tick 数据源
     if use_live:
         try:
@@ -269,7 +191,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             print(f"❌ 未找到缓存: {cache_path}"); return
         try:
             full = pd.read_pickle(cache_path)
-            stock_df = full[full['code'] == code].copy().sort_values('time')
+            stock_df = full[full['code'] == code].copy().sort_values('time').reset_index(drop=True)
             if stock_df.empty:
                 print(f"❌ 缓存中无 {code} 数据"); return
             print(f"✅ 成功加载 {len(stock_df)} 条分钟线数据")
@@ -278,8 +200,6 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             print(f"❌ 读取缓存失败: {e}"); return
 
     # 3. 逐分钟回放（日期感知）
-    tracker = IntradayEmotionTracker()
-    engine  = IntradayDecisionEngine()
     signals: list = []
 
     # 生成用于图表 X 轴的字符串时间标签
@@ -302,155 +222,40 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         now = time.time()
         times = [now + i * 60 for i in range(len(stock_df))]
 
-    time_labels = [_fmt(t) for t in times]
+    time_labels = [_fts(t) for t in times]
 
-    # 日期状态（每日边界重置）
-    current_date = None
-    baseline     = None
-    anchors: dict  = {}
-    last_close = ma5 = ma10 = ma60 = 0.0
-    cum_vol = cum_amt = 0.0
-    prices_so_far: list = []
-    lows_so_far:   list = []
-    day_high   = 0.0
-    snapshot:  dict = {}
-    day_buy_cnt = day_sell_cnt = 0
-
-    print("Processing ticks...")
-    for i, row in enumerate(stock_df.itertuples()):
-        # 统一获取各列，带 fallback
-        # live 模式下直接用 times[i]（已优先选择 ticktime）避免 getattr 拿到错误列
-        if use_live and i < len(times):
-            r_time = times[i]
+    # ── 3. 分析逻辑 (使用 sbc_core 核心) ───────────────────────────────────
+    all_signals = []
+    
+    # 预先标记日期列用于分组
+    if 'date' not in stock_df.columns:
+        # times 可能包含 datetime 对象或 Timestamp
+        import numpy as np
+        if times and isinstance(times[0], (int, float, np.integer, np.floating)):
+            stock_df['date'] = pd.to_datetime([t/1000.0 if t > 1.5e12 else t for t in times], unit='s').strftime('%Y-%m-%d')
         else:
-            r_time = getattr(row, 'time', times[i] if i < len(times) else time.time())
-        r_close = getattr(row, 'close', getattr(row, 'trade', 0.0))
-        r_open = getattr(row, 'open', getattr(row, 'buy', r_close))
-        r_high = getattr(row, 'high', r_close)
-        r_low = getattr(row, 'low', r_close)
-        r_vol = getattr(row, 'volume', getattr(row, 'vol', 0.0))
-        r_tick_vol = getattr(row, 'tick_vol', r_vol)
-
-        tick_date = _ts_to_date(r_time)
-        if tick_date is None:
-            # 对于 live 模式，ticktime 是字符串，_ts_to_date 已正确处理
-            # 若仍然为 None，使用今天日期强制继续
-            from datetime import date as _date
-            tick_date = _date.today()
-
-        # ── 日期边界：重建当日历史锚点 ──────────────────────────────────────
-        if tick_date != current_date:
-            ctx = _get_day_context(code, day_df, tick_date)
-            if ctx[0] is None:
-                continue
-            baseline, anchors, last_close, ma5, ma10, ma60, _ = ctx
-
-            current_date = tick_date
-            cum_vol = cum_amt = 0.0
-            prices_so_far, lows_so_far = [], []
-            day_high = last_close
-            tracker._last_sbc_status = {}  # type: ignore[attr-defined]
-            day_buy_cnt = day_sell_cnt = 0
-
-            # snapshot 仅保留必要的日线和基础结构数据，不 mock 持仓，避免提前触发硬止损
-            snapshot = {
-                "cost_price":        0.0,
-                "highest_since_buy": 0.0,
-                "last_close":        last_close,
-                "loss_streak":       0,
-                "market_win_rate":   0.5,
-                "day_df":            day_df,
-            }
-            print(f"\n── {tick_date} | 昨收:{last_close:.2f}"
-                  f" | 昨高:{anchors.get('yesterday_high', 0):.2f}"
-                  f" | MA5:{ma5:.2f} | MA10:{ma10:.2f} ──")
-            print(f"   [DEBUG] Engine Anchors: {baseline.get_anchor(code)}")
-
-        # ── 累计 VWAP ────────────────────────────────────────────────────────
-        # 如果是 enriched 数据，直接用它算的 cum_vol 和 cum_amt；否则手动累加
-        v = r_tick_vol
-        a = getattr(row, 'amount', v * r_close)
+            stock_df['date'] = pd.to_datetime(times).strftime('%Y-%m-%d')
         
-        cum_vol += v
-        cum_amt += a
-        nclose = getattr(row, 'avg_price', cum_amt / cum_vol if cum_vol > 0 else r_close)
-        pct    = (r_close - last_close) / last_close * 100 if last_close else 0.0
+    grouped = list(stock_df.groupby('date'))
+    print(f"Analyzing {len(grouped)} day(s)...")
+    
+    for tick_date, df_day in grouped:
+        # 调用 sbc_core 核心逻辑 (包含 Baseline 提取、SBC 判定、决策引擎评估)
+        res = sbc_core.run_sbc_analysis_core(code, day_df, df_day, verbose=True)
+        
+        # 提取信号并修正索引偏移，使其与全局图表对齐
+        day_signals = res.get('signals', [])
+        # 获取 df_day 在原始 stock_df 中的位置索引偏移
+        day_start_idx = stock_df.index.get_loc(df_day.index[0])
+        
+        for s in day_signals:
+            s.bar_index += day_start_idx
+            all_signals.append(s)
 
-        tick_data = pd.DataFrame([{
-            'code':    code,
-            'trade':   r_close,
-            'high':    r_high,
-            'low':     r_low,
-            'vol':     cum_vol,
-            'volume':  getattr(row, 'volume_ratio', 1.0),
-            'amount':  cum_amt,
-            'percent': pct,
-            'avg_price': nclose,
-        }])
-
-        # ── 3.1 买入评估（SBC，每日最多 MAX_BUY_PER_DAY 个）────────────────
-        tracker.update_batch(tick_data, baseline)
-        status = tick_data['sbc_status'].iloc[0]
-        if status and "🚀" in str(status) and day_buy_cnt < MAX_BUY_PER_DAY:
-            t_str = _fmt(r_time)
-            print(f"[{t_str}] 🎯 买入: {status} at {r_close:.2f}")
-            signals.append(SignalPoint(code, r_time, i, r_close,
-                                       SignalType.FOLLOW, reason=str(status)))
-            day_buy_cnt += 1
-
-        # ── 3.2 卖出评估（结构性信号，不依赖持仓）───────────────────────────
-        prices_so_far.append(r_close)
-        lows_so_far.append(r_low)
-        day_high = max(day_high, r_high)
-
-        if r_high > snapshot["highest_since_buy"]:
-            snapshot["highest_since_buy"] = r_high
-        snapshot.update({
-            "nclose":        nclose,
-            "highest_today": day_high,
-            "low_val":       min(lows_so_far),
-        })
-
-        row_dict = {
-            'code':    code,
-            'trade':   row.close,
-            'high':    row.high,
-            'low':     row.low,
-            'open':    row.open,
-            'volume':  getattr(row, 'volume_ratio', 1.0),
-            'vol':     v,
-            'percent': pct,
-            'nclose':  nclose,
-            # 关键：直接用从 day_df 行读到的 MA 值 ↓
-            'ma5d':    ma5,
-            'ma10d':   ma10,
-        }
-        decision = engine.evaluate(row_dict, snapshot, mode="sell_only")
-        action   = decision.get("action", "")
-        reason   = decision.get("reason", "")
-
-        sell_actions = {
-            "卖出", "止损", "预警止损", "移动止盈", "高位止盈",
-            "趋势止损", "破位减仓", "强制清仓",
-            "主动防守", "主动减仓", "流动性预警",
-        }
-        if action in sell_actions:
-            t_str       = _fmt(r_time)
-            is_priority = any(kw in reason for kw in PRIORITY_SELL_KW)
-
-            if day_sell_cnt < MAX_SELL_PER_DAY and is_priority:
-                print(f"[{t_str}] ⚠️  卖出: {action} at {row.close:.2f} | {reason}")
-                signals.append(SignalPoint(code, r_time, i, row.close,
-                                           SignalType.EXIT_FOLLOW, reason=reason))
-                day_sell_cnt += 1
-            elif day_sell_cnt < MAX_SELL_PER_DAY and action in ("止损", "强制清仓", "主动减仓"):
-                # 非结构性但强力止损：仅打印参考
-                print(f"[{t_str}]   止损参考: {action} at {row.close:.2f} | {reason}")
-            # else: 已达上限或噪音，静默
-
-    # 4. 统计 & 可视化
-    buy_cnt  = sum(1 for s in signals if s.signal_type in [SignalType.BUY, SignalType.FOLLOW])
-    sell_cnt = sum(1 for s in signals if s.signal_type in [SignalType.SELL, SignalType.EXIT_FOLLOW])
+    signals = all_signals
+    # 统计数据 - 使用 name 进行比对，防止枚举对象不一致
+    buy_cnt  = sum(1 for s in signals if s.signal_type.name in ["BUY", "FOLLOW"])
+    sell_cnt = sum(1 for s in signals if s.signal_type.name in ["SELL", "EXIT_FOLLOW", "STOP_LOSS"])
     print(f"\n{'='*60}")
     print(f"✅ 回放完成: {buy_cnt} 个买点  |  {sell_cnt} 个卖出点")
 
