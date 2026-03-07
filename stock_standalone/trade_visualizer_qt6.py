@@ -58,6 +58,7 @@ from signal_message_queue import SignalMessage, SignalMessageQueue
 from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 import sbc_core
+from stock_visual_utils import PercentAxisItem
 
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
@@ -707,8 +708,10 @@ class SignalOverlay:
             except (TypeError, ValueError):
                 continue
 
-            # [UPGRADE] Special handling for Emoji Markers (like '🎯')
-            if sig.symbol == '🎯':
+            # [UPGRADE] Special handling for Emoji Markers (like '🎯', '🔥', '🚀', '⚠️')
+            # Natively pyqtgraph ScatterPlotItem does not support these unicode symbols as shapes.
+            is_emoji = isinstance(sig.symbol, str) and len(sig.symbol) == 1 and ord(sig.symbol) > 127
+            if is_emoji or sig.symbol == '🎯':
                 # Draw Emoji as TextItem (centered on point)
                 marker = self._get_text_item(target)
                 # Use HTML to control size/color explicitly if needed, but simple unicode works too.
@@ -2537,7 +2540,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_widget = pg.GraphicsLayoutWidget()
         # [FIX] 使用自定义时间轴
         self.tick_axis = TimeAxis([], orientation='bottom')
-        self.tick_plot = self.tick_widget.addPlot(title="实时 / 分时图", axisItems={'bottom': self.tick_axis})
+        self.tick_pct_axis = PercentAxisItem(None, orientation='right')
+        self.tick_plot = self.tick_widget.addPlot(title="实时 / 分时图", axisItems={'bottom': self.tick_axis, 'right': self.tick_pct_axis})
+        self.tick_plot.showAxis('right')
+        self.tick_plot.getAxis('right').linkToView(self.tick_plot.getViewBox())
         self.tick_plot.showGrid(x=True, y=True)
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.tick_plot.disableAutoRange()
@@ -8621,7 +8627,29 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
 
-            pre_close = tick_df['llastp'].iloc[-1] if 'llastp' in tick_df.columns else tick_df['pre_close'].iloc[-1] if 'pre_close' in tick_df.columns else prices[0]
+            # ⭐ 准确获取昨日收盘价作为百分比基准 (解决百分比不对齐问题)
+            pre_close = 0
+            if 'llastp' in tick_df.columns and tick_df['llastp'].iloc[-1] > 0:
+                pre_close = tick_df['llastp'].iloc[-1]
+            elif 'pre_close' in tick_df.columns and tick_df['pre_close'].iloc[-1] > 0:
+                pre_close = tick_df['pre_close'].iloc[-1]
+            
+            # 如果 tick_df 里没有，从历史日线 day_df 获取
+            if pre_close <= 0 and day_df is not None and not day_df.empty:
+                # 判断最后一行是否是今天
+                today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+                last_dt_str = str(day_df.index[-1]).split()[0]
+                if last_dt_str == today_str and len(day_df) >= 2:
+                    pre_close = float(day_df.iloc[-2]['close'])
+                else:
+                    pre_close = float(day_df.iloc[-1]['close'])
+            
+            # 最终兜底
+            if pre_close <= 0:
+                pre_close = prices[0] if len(prices) > 0 else 1.0
+
+            if hasattr(self, 'tick_pct_axis'):
+                self.tick_pct_axis.set_base_price(pre_close)
 
             if not hasattr(self, 'tick_curve') or self.tick_curve not in self.tick_plot.items:
                 self.tick_curve = self.tick_plot.plot(x_ticks, prices, pen=pg.mkPen(tick_curve_color, width=2))
@@ -8648,61 +8676,37 @@ class MainWindow(QMainWindow, WindowMixin):
             self.tick_avg_prices = avg_prices
             self.tick_times = tick_df['time'].tolist() if 'time' in tick_df.columns else []
 
-            # --- 分时图参考线“归一化”防压扁逻辑 ---
-            # 目标：当昨日/前日价格差距巨大时，将参考线“吸引”到可见边缘，确保今日分时图足够大，同时展示相对高低关系
-            p_min, p_max = prices.min(), prices.max()
-            p_mid = (p_min + p_max) / 2
-            p_span = max(p_max - p_min, p_mid * 0.005) # 最小 0.5% 视口高度
-            
-            # 定义舒适显示边界：参考线偏离今日中点超过 1.2 倍今日振幅时进行特殊处理
-            v_limit = 1.0 * p_span 
-            
-            ref_items = []
+            # --- 分时图参考线 ---
             # 1. 昨日收盘
-            ref_items.append({'id': 'pre', 'val': pre_close, 'color': pre_close_color})
-            
+            if not hasattr(self, 'pre_close_line') or self.pre_close_line not in self.tick_plot.items:
+                self.pre_close_line = self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, width=2, style=Qt.PenStyle.DashLine))
+            else:
+                self.pre_close_line.setValue(pre_close)
+                self.pre_close_line.setPen(pg.mkPen(pre_close_color, width=2, style=Qt.PenStyle.DashLine))
+
             # 2. 前日均价
+            ppre_drawn = False
             if len(day_df) >= 2:
                 ppre_row = day_df.iloc[-2]
                 ppre_vol = ppre_row.get('volume', ppre_row.get('vol', 0))
                 if ppre_vol > 0:
                     ppre_avg = ppre_row.get('amount', 0) / ppre_vol
-                    ref_items.append({'id': 'ppre', 'val': ppre_avg, 'color': '#00FF00'})
-
-            # 排序以保持相对高低顺序 (归一化的核心：只要谁比谁高就好)
-            ref_items.sort(key=lambda x: x['val'])
-            
-            for i, item in enumerate(ref_items):
-                true_val = item['val']
-                diff = true_val - p_mid
-                
-                if abs(diff) > v_limit:
-                    # 偏离太大，归一化映射：固定在今日视口边缘附近，并根据序号排队，防止重合
-                    direction = 1 if diff > 0 else -1
-                    # 让多条线在边缘留出微小间隙 (5% 振幅步长)
-                    rank_offset = (i - (len(ref_items)-1)/2.0) * (0.05 * p_span)
-                    item['draw_y'] = p_mid + (direction * v_limit) + rank_offset
-                else:
-                    item['draw_y'] = true_val
-
-            # 更新/绘制 UI 线条
-            for item in ref_items:
-                if item['id'] == 'pre':
-                    if not hasattr(self, 'pre_close_line') or self.pre_close_line not in self.tick_plot.items:
-                        self.pre_close_line = self.tick_plot.addLine(y=item['draw_y'], pen=pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
-                    else:
-                        self.pre_close_line.setValue(item['draw_y'])
-                        self.pre_close_line.setPen(pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
-                elif item['id'] == 'ppre':
-                    if not hasattr(self, 'ppre_avg_line') or self.ppre_avg_line not in self.tick_plot.items:
-                        self.ppre_avg_line = self.tick_plot.addLine(y=item['draw_y'], pen=pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
-                    else:
-                        self.ppre_avg_line.setValue(item['draw_y'])
-                        self.ppre_avg_line.setPen(pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
-                    self.ppre_avg_line.setVisible(True)
+                    # 防止前日均价过远撑爆图表，做个限制
+                    y_max_temp = float(tick_df['high'].dropna().max()) if 'high' in tick_df.columns and not tick_df['high'].dropna().empty else prices.max()
+                    y_min_temp = float(tick_df['low'].dropna().min()) if 'low' in tick_df.columns and not tick_df['low'].dropna().empty else prices.min()
+                    max_dev = max(abs(y_max_temp - pre_close), abs(pre_close - y_min_temp))
+                    
+                    if abs(ppre_avg - pre_close) <= max_dev * 1.5:
+                        if not hasattr(self, 'ppre_avg_line') or self.ppre_avg_line not in self.tick_plot.items:
+                            self.ppre_avg_line = self.tick_plot.addLine(y=ppre_avg, pen=pg.mkPen('#00FF00', width=2, style=Qt.PenStyle.DashLine))
+                        else:
+                            self.ppre_avg_line.setValue(ppre_avg)
+                            self.ppre_avg_line.setPen(pg.mkPen('#00FF00', width=2, style=Qt.PenStyle.DashLine))
+                        self.ppre_avg_line.setVisible(True)
+                        ppre_drawn = True
 
             # 兜底：如果没拿到 ppre 数据，隐藏线条
-            if len(ref_items) < 2 and hasattr(self, 'ppre_avg_line'):
+            if not ppre_drawn and hasattr(self, 'ppre_avg_line'):
                 self.ppre_avg_line.hide()
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
@@ -8738,9 +8742,18 @@ class MainWindow(QMainWindow, WindowMixin):
                         y_max = float(valid_high.max())
                         y_min = float(valid_low.min())
                         
-                        # 添加一些 padding
-                        y_range = y_max - y_min
-                        padding = y_range * 0.05 if y_range > 0 else 0.1
+                        # 确保以昨日收盘价为中心对称显示，并留出足够间隙显示最高/最低 labels
+                        margin_up = y_max - pre_close
+                        margin_down = pre_close - y_min
+                        margin = max(margin_up, margin_down)
+                        # 给 10% 的额外 buffer 空间，确保 10.00% 这样的 label 能在边缘显示出来
+                        if margin <= 0: margin = max(pre_close * 0.01, 0.1)  
+                        
+                        y_max = pre_close + margin
+                        y_min = pre_close - margin
+                        
+                        # 适当增加 padding (15%) 以便在轴上看到完整百分比标签
+                        padding = margin * 0.15
                         
                         # 获取 ViewBox
                         vb = self.tick_plot.getViewBox()
@@ -8889,25 +8902,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 直接从专门的列表中获取 (已避免在 kline_signals 中污染日线图)
                 if hasattr(self, 'all_today_sbc_signals') and getattr(self, 'all_today_sbc_signals'):
                     import copy
-                    buy_list = []
-                    sell_list = []
                     for sig in getattr(self, 'all_today_sbc_signals'):
-                        if sig.signal_type in (SignalType.BUY, SignalType.FOLLOW):
-                            buy_list.append(sig)
-                        elif sig.signal_type in (SignalType.SELL, SignalType.EXIT_FOLLOW):
-                            sell_list.append(sig)
-                    
-                    filtered_sigs = []
-                    if buy_list:
-                        filtered_sigs.append(buy_list[0])
-                        if len(buy_list) > 1:
-                            filtered_sigs.append(buy_list[-1])
-                    if sell_list:
-                        filtered_sigs.append(sell_list[0])
-                        if len(sell_list) > 1:
-                            filtered_sigs.append(sell_list[-1])
-                    
-                    for sig in filtered_sigs:
                         tick_sig = copy.deepcopy(sig)
                         # tick_sig.bar_index 已经是分时图中的 index, 不需再赋值
                         tick_signals_to_draw.append(tick_sig)

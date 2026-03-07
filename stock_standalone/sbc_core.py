@@ -233,6 +233,8 @@ def get_day_context(code: str, day_df: pd.DataFrame, tick_date):
 
         row = hist_day_df.iloc[-1]
         prev_row = hist_day_df.iloc[-2] if len(hist_day_df) >= 2 else row
+        prev2_row = hist_day_df.iloc[-3] if len(hist_day_df) >= 3 else prev_row
+        prev3_row = hist_day_df.iloc[-4] if len(hist_day_df) >= 4 else prev2_row
 
         bl_data = {
             'code':          code,
@@ -248,6 +250,8 @@ def get_day_context(code: str, day_df: pd.DataFrame, tick_date):
             'ma20d':         float(row.get('ma20', row.get('ma20d', row['close']))),
             'ma5d':          float(row.get('ma5',  row.get('ma5d',  row['close']))),
             'ma10d':         float(row.get('ma10', row.get('ma10d', row.get('ma10', 0)))),
+            'prev3_high_max': float(max(prev_row['high'], prev2_row['high'], prev3_row['high'])),
+            'prev3_close_max': float(max(prev_row['close'], prev2_row['close'], prev3_row['close'])),
         }
         bl_df = pd.DataFrame([bl_data])
         
@@ -406,7 +410,7 @@ def parse_t(t):
     """
     将 tick 的时间值统一转换成 HH:MM 格式（北京时间）。
     t 可以是:
-        - 字符串 '2026-03-07 13:45:12'
+        - 字符串 '2026-03-07 13:45:12' 或 '13:45:12'
         - pd.Timestamp
         - Unix 时间戳（秒或毫秒）
     """
@@ -414,58 +418,90 @@ def parse_t(t):
         if t is None or pd.isna(t) or t == '':
             return '00:00'
 
-        # 数字类型 -> Unix 时间戳
+        # 字符串优先处理 (通常已经是本地时间 HH:MM:SS 或 YYYY-MM-DD HH:MM:SS)
+        if isinstance(t, str):
+            if ' ' in t: # YYYY-MM-DD HH:MM:SS
+                return t.split(' ')[1][:5]
+            if ':' in t: # HH:MM:SS
+                return t[:5]
+            # 其他字符串尝试 pd.to_datetime 兜底
+
+        # 数字类型 -> Unix 时间戳 (处理北京时间偏移)
         if isinstance(t, (int, float, np.integer, np.floating)):
             # 毫秒级时间戳 (> 10位)
             if t > 1e12:
                 dt_val = pd.to_datetime(t / 1000, unit='s', utc=True)
             else:
                 dt_val = pd.to_datetime(t, unit='s', utc=True)
-        else:
-            dt_val = pd.to_datetime(t, utc=True)
-
-        # 转北京时间
-        dt_val = dt_val.tz_convert('Asia/Shanghai') if dt_val.tzinfo else dt_val + pd.Timedelta(hours=8)
-
+            
+            # 转北京时间 (如果是 Unix 时间戳通常是绝对时间，需要 +8)
+            dt_val = dt_val.tz_convert('Asia/Shanghai') if dt_val.tzinfo else dt_val + pd.Timedelta(hours=8)
+            return dt_val.strftime('%H:%M')
+            
+        # 其他类型 (pd.Timestamp 等)
+        dt_val = pd.to_datetime(t)
         return dt_val.strftime('%H:%M')
+        
     except Exception:
         s = str(t)
+        # 尝试提取末尾的 HH:MM
+        if ':' in s:
+            parts = s.split(':')
+            if len(parts) >= 2:
+                # 简单寻找数字
+                import re
+                m = re.search(r'(\d{1,2}:\d{2})', s)
+                if m: return m.group(1)
         return s[:5]
 
 def get_tick_str(r):
-    # 取优先级时间列
+    # 取优先级时间列 (兼容对象与字典)
     t_val = None
-    for attr in ('ticktime', 'time', 'Timestamp'):
-        t_val = getattr(r, attr, None)
+    # 增加更多可能的键名，特别是 reset_index 后的 index 或 level_0
+    for attr in ('ticktime', 'time', 'Timestamp', 'index', 'level_0', 'now', 'tick_time'):
+        if isinstance(r, dict):
+            t_val = r.get(attr)
+        else:
+            t_val = getattr(r, attr, None)
+            
         if t_val is not None:
             break
+            
+    if t_val is None or pd.isna(t_val) or t_val == '':
+        # 兜底：如果都没有，尝试从整个 dict 中寻找包含 time 的 key (仅针对 dict)
+        if isinstance(r, dict):
+            for k, v in r.items():
+                if 'time' in k.lower() and v is not None:
+                    t_val = v
+                    break
+        
     if t_val is None or pd.isna(t_val) or t_val == '':
         t_val = '00:00'
     return parse_t(t_val)
 
+
+
+
 def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame, use_live: bool = False, verbose: bool = False):
     """
-    SBC 信号分析核心逻辑 (高性能版本，共用 update_batch)
+    SBC 信号分析核心逻辑 (高性能版本：数据全对齐 + 动态决策引擎 + 🚀&🔥全捕捉)
     """
-    # 1. 对齐环境 (使用副本防止污染外部 DataFrame)
-    with timed_ctx("1_copy_df"):
+    # 1. 环境准备 (使用副本防止污染原始 DataFrame)
+    with timed_ctx("1_copy_df", warn_ms=800):
         day_df = prepare_day_df(day_df.copy())
         tick_df = tick_df.copy()
     
-    # 2. 计算 Baseline (锚点提取逻辑)
-    # 这里的逻辑必须与可视化器内联版本保持一致，确保 688787 等股票正确
-    with timed_ctx("2_baseline_date_sync"):
+    # 2. 计算 Baseline (锚点提取逻辑) - 必须确保信号判定的基准线唯一且正确
+    with timed_ctx("2_baseline_date_sync", warn_ms=800):
         try:
             if isinstance(tick_df.index, pd.MultiIndex):
                 raw_ts = tick_df.index.get_level_values('ticktime')[0]
             else:
                 raw_ts = tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0]
                 
-            # [ALIGN] 增强日期转换，处理 Unix 时间戳 (int/float)
+            # [ALIGN] 增强型日期转换
             if isinstance(raw_ts, (int, float, np.integer, np.floating)):
-                # 兼容毫秒级时间戳 (如果是 2020 年以后的 13 位，则除以 1000)
-                if raw_ts > 1.5e12: ts_val = raw_ts / 1000.0
-                else: ts_val = raw_ts
+                ts_val = raw_ts / 1000.0 if raw_ts > 1.5e12 else raw_ts
                 t_date_str = pd.to_datetime(ts_val, unit='s').strftime('%Y-%m-%d')
             else:
                 t_date_str = pd.to_datetime(raw_ts).strftime('%Y-%m-%d')
@@ -474,25 +510,19 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
 
         hist = day_df[day_df.index.astype(str) < t_date_str]
         if hist.empty:
-            # 兜底：如果日线包含当天（即盘后或回测数据），需要强行排除当天以获取前一个交易日的指标
             hist = day_df[day_df.index.astype(str) <= t_date_str]
-            if len(hist) >= 2: 
-                hist = hist.iloc[:-1] # 截断当前天
+            if len(hist) >= 2: hist = hist.iloc[:-1]
             else:
-                # 只有1天或依然为空，则 fallback 到全局 day_df 的最后一个有效的前一天
                 valid_days = day_df[day_df.index.astype(str) < t_date_str]
-                if not valid_days.empty:
-                    hist = valid_days
-                elif len(day_df) >= 2:
-                    hist = day_df.iloc[:-1]
-                else:
-                    hist = day_df
+                hist = valid_days if not valid_days.empty else (day_df.iloc[:-1] if len(day_df) >= 2 else day_df)
             
         row = hist.iloc[-1]
         prev_row = hist.iloc[-2] if len(hist) >= 2 else row
+        prev2_row = hist.iloc[-3] if len(hist) >= 3 else prev_row
+        prev3_row = hist.iloc[-4] if len(hist) >= 4 else prev2_row
     
 
-    with timed_ctx("3_baseline_calc"):
+    with timed_ctx("3_baseline_calc", warn_ms=800):
         bl_data = {
             'code':        code,
             'trade':       float(row['close']),
@@ -505,7 +535,6 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             'ma20d':       float(row.get('ma20', row.get('ma20d', row['close']))),
             'ma10d':       float(row.get('ma10', row.get('ma10d', row['close']))),
             'ma5d':        float(row.get('ma5',  row.get('ma5d',  row['close']))),
-            # [NEW] 扩充字段以对齐 DailyEmotionBaseline.calculate_baseline
             'win':         float(row.get('win', 0)),
             'red':         float(row.get('red', 0)),
             'TrendS':      float(row.get('TrendS', 50)),
@@ -514,13 +543,25 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             'power_idx':   float(row.get('power_idx', 0)),
             'upper':       float(row.get('upper', 0)),
             'dist_h_l':    float(row.get('dist_h_l', 4.0)),
+            'prev3_high_max': float(max(prev_row['high'], prev2_row['high'], prev3_row['high'])),
+            'prev3_close_max': float(max(prev_row['close'], prev2_row['close'], prev3_row['close'])),
         }
 
+        # 动态判定上升结构: 1. 连续两天抬升 2. 或突破/贴近上轨 3. 或均线多头且连阳 4. 或突破前3日高点 5. 或日线均线反转(站回MA5/MA10)
+        basic_rise = (bl_data['lastp1d'] > bl_data['lastp2d'] > 0) and (bl_data['lasth1d'] > bl_data['lasth2d'] > 0)
+        near_upper = (bl_data['upper'] > 0) and (bl_data['lastp1d'] >= bl_data['upper'] * 0.985)
+        strong_trend = (bl_data['ma5d'] > bl_data['ma10d'] > 0) and (bl_data['lastp1d'] > bl_data['ma5d']) and (bl_data['win'] >= 2)
+        break_3d = (bl_data['lastp1d'] > bl_data['prev3_high_max']) or (bl_data['lastp1d'] >= bl_data['prev3_close_max'] and bl_data['lastp1d'] > bl_data['lastp2d'])
         
-        # [UPGRADE] 动态判定上升结构，保持与 DailyEmotionBaseline 逻辑一致
-        is_rising_struct = (bl_data['lastp1d'] > bl_data['lastp2d'] > 0) and (bl_data['lasth1d'] > bl_data['lasth2d'] > 0)
+        # 反转结构：类似分时站回均线，收盘强势收复 MA5 或 MA10 且大于昨收
+        reversal = (bl_data['lastp1d'] > bl_data['lastp2d']) and (
+            (bl_data['lastp1d'] > bl_data['ma5d'] >= bl_data['lastp2d']) or 
+            (bl_data['lastp1d'] > bl_data['ma10d'] >= bl_data['lastp2d'])
+        )
         
-        # [NEW] Restore Logic Logs for standalone verification
+        is_rising_struct = basic_rise or near_upper or strong_trend or break_3d or reversal
+        bl_data['is_rising_struct'] = is_rising_struct
+        
         if verbose:
             print(f"\n── {t_date_str} | 昨收:{bl_data['lastp1d']:.2f} | 昨高:{bl_data['lasth1d']:.2f} | MA5:{bl_data['ma5d']:.2f} | MA10:{bl_data['ma10d']:.2f} ──")
             print(f"   [DEBUG] Engine Anchors: {{'yesterday_high': {bl_data['lasth1d']:.2f}, 'prev_high': {bl_data['lasth2d']:.2f}, 'ma60': {bl_data['ma60d']:.2f}, 'ma20': {bl_data['ma20d']:.2f}, 'last_low': {bl_data['last_low']:.2f}, 'last_close': {bl_data['lastp1d']:.2f}, 'last_close_p2': {bl_data['lastp2d']:.2f}, 'is_rising_struct上涨结构': {is_rising_struct}}}")
@@ -528,53 +569,45 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         baseline_loader = DailyEmotionBaseline()
         baseline_loader.calculate_baseline(pd.DataFrame([bl_data]))
     
-    if verbose:
-        print("Processing ticks...")
-    
-    # 3. 准备分时数据并执行分析
-    with timed_ctx("4_tick_df_fix"):
+    # 3. 准备分时数据并执行分析 (VWAP 计算)
+    with timed_ctx("4_tick_df_fix", warn_ms=800):
         if isinstance(tick_df.index, pd.MultiIndex):
             tick_df = tick_df.reset_index()
             
         c_clean = str(code).zfill(6)
         if 'code' not in tick_df.columns: tick_df['code'] = c_clean
         
-        # 对齐价格列
+        # 统一价格列
         for p_col in ['trade', 'price', 'close', 'Close']:
             if p_col in tick_df.columns:
                 tick_df['trade'] = tick_df[p_col].astype(float)
                 break
             
-        # 填充成交额与成交量，计算均价 (VWAP) - 这是 SBC 指标的核心前提
         if 'amount' not in tick_df.columns and 'amt' in tick_df.columns:
             tick_df['amount'] = tick_df['amt']
         
         if 'avg_price' not in tick_df.columns:
             if 'amount' in tick_df.columns and 'volume' in tick_df.columns:
-                # Sina 数据源通常提供的是累计额和累计量
                 tick_df['avg_price'] = (tick_df['amount'] / tick_df['volume']).fillna(tick_df['trade'])
             else:
-                # Reconstruct VWAP for cached data without amount
                 c_arr = tick_df['trade'].values
                 v_arr = tick_df['volume'].values if 'volume' in tick_df.columns else np.ones(len(tick_df))
                 ca = (c_arr * v_arr).cumsum()
                 cv = np.maximum(v_arr.cumsum(), 1e-9)
                 tick_df['avg_price'] = ca / cv
                 
-        # 计算增量成交量 (针对 snapshot 数据源)
         if 'volume' in tick_df.columns:
             tick_df['vol'] = tick_df['volume'].diff().fillna(tick_df['volume']).clip(lower=0)
         elif 'vol' not in tick_df.columns:
             tick_df['vol'] = 0
 
-    with timed_ctx("5_tracker_batch_update"):
+    # 4. 批量更新 EmotionTracker
+    with timed_ctx("5_tracker_batch_update", warn_ms=800):
         tracker = IntradayEmotionTracker()
         tracker.update_batch(tick_df, baseline_loader)
     
-    # 4. 提取信号
+    # 5. 信号提取循环 (使用 evaluate_dynamic 极大提升遍历性能)
     signals = []
-    
-    # [NEW] 集成 Decision Engine 以对齐卖出逻辑
     engine = IntradayDecisionEngine()
     snapshot = {
         "cost_price": 0.0,
@@ -583,133 +616,173 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         "loss_streak": 0,
         "market_win_rate": 0.5,
         "day_df": day_df,
+        **bl_data
     }
-    for k, v in bl_data.items():
-        if k not in snapshot:
-            snapshot[k] = v
-            
-    day_high = float(bl_data['lastp1d'])
-    day_low = float(bl_data['last_low'])
-    snapshot["highest_today"] = day_high
-    snapshot["low_val"] = day_low
     
-    # 信号频率限制器 (简单的去重逻辑)
+    lastp1d_val = float(bl_data['lastp1d'])
+    row_init = {k: bl_data[k] for k in ['ma5d','ma10d','ma20d','ma60d','lastp1d','lastp2d','lasth1d','lasth2d','last_low','trade']}
+    base_eval = engine.evaluate(row_init, snapshot, mode="sell_only")
+    
     last_signal_times = {} # {signal_type.name: last_idx}
     
-    # 预先提取日线级常量 campos
-    lastp1d_val = float(bl_data['lastp1d'])
-    row_const = {
-        'code':    code,
-        'ma5d':    float(bl_data['ma5d']),
-        'ma10d':   float(bl_data['ma10d']),
-        'ma20d':   float(bl_data['ma20d']),
-        'ma60d':   float(bl_data['ma60d']),
-        'lastp1d': lastp1d_val,
-    }
-
-    # # 调试信号
-    # debug_sbc_signals(tick_df, lastp1d_val)
-
-    # 模拟逐行评估（为了与 verify 逻辑一致）
-    # 💥 [PRE-CONVERT] 先将 DataFrame 转为 list of dicts 极大提升遍历速度
-    with timed_ctx("5.1_engine_loop"):
-        tick_list = tick_df.to_dict('records')
-        row_dict = row_const.copy() # 重用此 dict 减少创建开销
+    # [PERF] 先将 DataFrame 转为 list of dicts 提升 5-10 倍遍历速度
+    with timed_ctx("6_engine_loop", warn_ms=800):
+        # reset_index 确保索引中的时间/代码信息进入 dict
+        tick_list = tick_df.reset_index().to_dict('records')
+        row_dict = row_init.copy() 
+        day_high = lastp1d_val
+        day_low = bl_data['last_low']
+        
+        # [NEW] 追踪实时情绪分 (Emotion Score) 以对应 buyscore
+        baseline_score = float(bl_data.get('TrendS', 50))
+        
+        # 结构溢价 (Structural Alpha): 如果多日结构处于上升态势，给予显著的基础分加成
+        # 这是为了解决用户反馈的“多日连续性”问题，让强势股在开盘即拥有更高的情绪起点
+        struct_alpha = 15 if bl_data.get('is_rising_struct', False) else 0
+        baseline_score += struct_alpha
+        
+        curr_emo_score = baseline_score
+        EMA_ALPHA = 0.25 # 略微降低 EMA 权重，让初始结构溢价维持更久
         
         for i, r in enumerate(tick_list):
-            p = float(r.get('trade', r.get('close', 0)))
+            p = float(r.get('trade', 0))
             cur_high = float(r.get('high', p))
             cur_low = float(r.get('low', p))
             avg_price = float(r.get('avg_price', p))
             
-            day_high = day_high if day_high > cur_high else cur_high
-            day_low = day_low if day_low < cur_low else cur_low
+            day_high = max(day_high, cur_high)
+            day_low = min(day_low, cur_low)
             
-            if cur_high > snapshot["highest_since_buy"]:
-                snapshot["highest_since_buy"] = cur_high
-                
+            # 手动同步 snapshot 关键点 (evaluate_dynamic 内部也会尝试 max，但外部显式同步更安全)
             snapshot["nclose"] = avg_price
             snapshot["highest_today"] = day_high
             snapshot["low_val"] = day_low
             
-            # 使用 update 批量替换变动字段，比 copy() + 逐个赋键更快
             row_dict.update({
                 'trade':   p,
                 'high':    cur_high,
                 'low':     cur_low,
                 'open':    float(r.get('open', p)),
-                'volume':  float(r.get('volume_ratio', r.get('volume', 1.0))),
                 'vol':     float(r.get('vol', 0)),
                 'percent': (p - lastp1d_val) / lastp1d_val * 100 if lastp1d_val else 0,
                 'nclose':  avg_price,
             })
             
-            # 4.1 核心状态判定 (SBC 🚀)
+            # (A.0) 实时计算买入强度 (buyscore)
+            pct_now = row_dict['percent']
+            vol_ratio = float(r.get('amount_ratio', r.get('ratio', 1.0)))
+            
+            # 价增分：涨幅贡献更加灵敏 (每 1% 约 4-5分)
+            price_score = pct_now * 4.5
+            
+            # 量能分：成交量/金额比贡献 (线性增长，不再是硬门槛)
+            # 例如 1.5倍量贡 4分, 3倍量贡献 16分, 5倍量贡献 32分
+            volume_score = (vol_ratio - 1.0) * 8.0 if vol_ratio > 1.0 else 0
+            
+            # 状态分：如果是强势结构或加速，额外加成
+            status_bonus = 0
+            if "加速" in str(r.get('sbc_status', '')): status_bonus += 10
+            elif "强势" in str(r.get('sbc_status', '')): status_bonus += 5
+            
+            # 位置分：创新高或突破关键昨高
+            pos_bonus = 0
+            if p >= day_high: pos_bonus += 5
+            if p >= bl_data.get('yesterday_high', 0): pos_bonus += 3
+            
+            target_score = baseline_score + price_score + volume_score + status_bonus + pos_bonus
+            
+            # EMA 平滑，防止分值剧烈跳变
+            curr_emo_score = curr_emo_score * (1 - EMA_ALPHA) + target_score * EMA_ALPHA
+            curr_emo_score = np.clip(curr_emo_score, 0, 100)
+            row_dict['emotion_score'] = curr_emo_score
+            
+            # (A) SBC 买入信号判定: 🚀强势结构 或 🔥趋势加速
             status = str(r.get('sbc_status', ''))
-            if status and "🚀" in status:
-                t_str = "00:00"
-                if verbose:
-                    t_val = r.get('time', r.get('ticktime', r.get('Timestamp', '')))
-                    t_str = parse_t(t_val)
-                
-                # 简单的频率过滤
+            # 规范化图标显示，确保“趋势加速”带🔥，“强势结构”带🚀 (不覆盖原有明细文字)
+            if "趋势加速" in status and "🔥" not in status: status = "🔥" + status
+            if "强势结构" in status and "🚀" not in status: status = "🚀" + status
+            
+            is_buy_sbc = any(kw in status for kw in ["强势结构", "趋势加速", "🚀", "🔥"])
+            
+            if is_buy_sbc:
                 last_idx = last_signal_times.get("FOLLOW", -999)
-                if i - last_idx > 30:
+                last_s = last_signal_times.get("FOLLOW_STATUS", "")
+                last_p = last_signal_times.get("LAST_BUY_PRICE", 0.0)
+                
+                # 1. 信号分级与状态
+                is_cur_acc = "趋势加速" in status or "🔥" in status
+                is_cur_struct = ("强势结构" in status or "🚀" in status) and not is_cur_acc
+                was_last_acc = "🔥" in last_s or "趋势加速" in last_s
+                
+                # 2. 核心逻辑：逐级确认 (Step-by-Step Confirmation)
+                # (a) 动量升级：从 🚀 转为 🔥，无视 30 Tick 立即确认
+                is_upgrade = is_cur_acc and not was_last_acc
+                
+                # (b) 价格加强：如果是相同性质的信号，必须价格创新高才显示 (过滤横盘)
+                # (c) 性质切换：如果信号性质发生变化 (🔥<->🚀)，且在 30 Tick 冷却外，视为新的确认买点
+                is_status_change = status != last_s
+                is_price_higher = p > last_p
+                
+                # 3. 最终触发条件
+                # 允许性质切换或价格加强后的信号，只要冷却时间已到；或者是即时的动量升级
+                should_trigger = (i - last_idx > 30 and (is_status_change or is_price_higher)) or is_upgrade
+                
+                if should_trigger:
+                    t_str = get_tick_str(r) if verbose else ""
                     if verbose:
-                        print(f"[{t_str}] 🎯 买入: {status} at {p:.2f}")
+                        # 组合前缀图标，保留 🎯 并注明具体级别 emoji
+                        emoji = "🔥" if is_cur_acc else "🚀"
+                        print(f"[{t_str}] 🎯 {emoji} 买入: {status} at {p:.2f} \033[93m({curr_emo_score:.1f})\033[0m")
                     
                     signals.append(SignalPoint(
                         code=code, timestamp=str(r.get('ticktime', t_str)), 
-                        bar_index=i, price=p,
-                        signal_type=SignalType.FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=status
+                        bar_index=i, price=p, 
+                        signal_type=SignalType.FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=status,
+                        debug_info={'buy_score': round(curr_emo_score, 1)}
                     ))
                     last_signal_times["FOLLOW"] = i
+                    last_signal_times["FOLLOW_STATUS"] = status
+                    last_signal_times["LAST_BUY_PRICE"] = p
     
-            # 4.2 决策引擎评估 (卖出 ⚠️)
-            with timed_ctx("engine_evaluate"):
-                decision = engine.evaluate(row_dict, snapshot, mode="sell_only")
+            # (B) 决策引擎动态评估 (卖出信号判定)
+            decision = engine.evaluate_dynamic(base_eval, row_dict, snapshot)
             action = decision.get("action", "")
             reason = decision.get("reason", "")
             
             if action in {"卖出", "止损", "预警止损", "移动止盈", "高位止盈", "趋势止损", "破位减仓", "强制清仓", "主动防守", "主动减仓"}:
-                is_priority = any(kw in reason for kw in PRIORITY_SELL_KW)
-                if is_priority:
-                    # 同样的频率过滤
+                if any(kw in reason for kw in PRIORITY_SELL_KW):
                     last_idx = last_signal_times.get("EXIT", -999)
                     if i - last_idx > 30:
-                        t_str = "00:00"
+                        t_str = get_tick_str(r) if verbose else ""
                         if verbose:
-                            t_val = r.get('time', r.get('ticktime', r.get('Timestamp', '')))
-                            t_str = parse_t(t_val)
-                        if verbose:
-                            print(f"[{t_str}] ⚠️  卖出: {action} at {p:.2f} | {reason}")
+                            sel_score = decision.get("debug", {}).get("top_score", 0.0)
+                            print(f"[{t_str}] ⚠️  卖出: \033[1;32m{action}\033[0m at {p:.2f} | {reason} \033[93m({sel_score:.2f})\033[0m")
                         
                         signals.append(SignalPoint(
                             code=code, timestamp=str(r.get('ticktime', t_str)), 
                             bar_index=i, price=p,
-                            signal_type=SignalType.EXIT_FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=reason
+                            signal_type=SignalType.EXIT_FOLLOW, source=SignalSource.STRATEGY_ENGINE, reason=reason,
+                            debug_info={'sell_score': round(decision.get("debug", {}).get("top_score", 0.0), 2)}
                         ))
                         last_signal_times["EXIT"] = i
             
-    # 准备可视化时轴标签 (必须是字符串格式，防止 pyqtgraph 渲染 Timestamp 崩溃)
-    # 这里复用已在上文定义的 parse_t 函数
-
-    with timed_ctx("6_render_prep_time_label"):
-        if isinstance(tick_df.index, pd.MultiIndex):
-            raw_times = tick_df.index.get_level_values('ticktime')
-        elif 'ticktime' in tick_df.columns:
+    # 6. 可视化后期处理 (Time Labels & Avg Series)
+    with timed_ctx("7_viz_prep", warn_ms=800):
+        if 'ticktime' in tick_df.columns:
             raw_times = tick_df['ticktime']
         elif 'time' in tick_df.columns:
             raw_times = tick_df['time']
+        elif isinstance(tick_df.index, pd.MultiIndex):
+            raw_times = tick_df.index.get_level_values('ticktime')
         else:
             raw_times = tick_df.index
 
         t_labels = [parse_t(t) for t in raw_times]
         
-        avg_series = (tick_df['amount'].cumsum() / tick_df['volume'].cumsum()).fillna(tick_df['trade']).tolist() if 'amount' in tick_df.columns else []
-
-    # if verbose:
-    #     print_timing_summary()
+        if 'amount' in tick_df.columns and 'volume' in tick_df.columns:
+            avg_series = (tick_df['amount'].cumsum() / tick_df['volume'].cumsum()).fillna(tick_df['trade']).tolist()
+        else:
+            avg_series = tick_df['avg_price'].tolist() if 'avg_price' in tick_df.columns else []
 
     return {
         "signals": signals,
@@ -885,177 +958,3 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"tick_to_daily_bar error: {e}")
         return pd.DataFrame()
-
-
-# def run_sbc_analysis_core_other(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame, use_live: bool = False, verbose: bool = False):
-#     """
-#     SBC 信号分析核心逻辑 (极限性能优化 + 动态卖出 + verbose 日志)
-#     """
-#     import datetime as dt
-
-#     # 1. 对齐环境
-#     day_df = prepare_day_df(day_df.copy())
-#     tick_df = tick_df.copy()
-
-#     # 2. 计算 Baseline
-#     try:
-#         if isinstance(tick_df.index, pd.MultiIndex):
-#             raw_ts = tick_df.index.get_level_values('ticktime')[0]
-#         else:
-#             raw_ts = tick_df['ticktime'].iloc[0] if 'ticktime' in tick_df.columns else tick_df['time'].iloc[0]
-            
-#         # [ALIGN] 增强日期转换，处理 Unix 时间戳 (int/float)
-#         if isinstance(raw_ts, (int, float, np.integer, np.floating)):
-#             # 兼容毫秒级时间戳 (如果是 2020 年以后的 13 位，则除以 1000)
-#             if raw_ts > 1.5e12: ts_val = raw_ts / 1000.0
-#             else: ts_val = raw_ts
-#             t_date_str = pd.to_datetime(ts_val, unit='s').strftime('%Y-%m-%d')
-#         else:
-#             t_date_str = pd.to_datetime(raw_ts).strftime('%Y-%m-%d')
-#     except:
-#         t_date_str = str(day_df.index[-1])[:10]
-
-#     hist = day_df[day_df.index.astype(str) < t_date_str]
-#     if hist.empty:
-#         hist = day_df.iloc[:-1] if len(day_df) >= 2 else day_df
-#     row = hist.iloc[-1]
-#     prev_row = hist.iloc[-2] if len(hist) >= 2 else row
-
-#     bl_data = {
-#         'code': code,
-#         'trade': float(row['close']),
-#         'lasth1d': float(row['high']),
-#         'lasth2d': float(prev_row['high']),
-#         'lastp1d': float(row['close']),
-#         'lastp2d': float(prev_row['close']),
-#         'last_low': float(row['low']),
-#         'ma60d': float(row.get('ma60', row.get('ma60d', row['close']))),
-#         'ma20d': float(row.get('ma20', row.get('ma20d', row['close']))),
-#         'ma10d': float(row.get('ma10', row.get('ma10d', row['close']))),
-#         'ma5d': float(row.get('ma5', row.get('ma5d', row['close']))),
-#         'win': float(row.get('win', 0)),
-#         'red': float(row.get('red', 0)),
-#         'TrendS': float(row.get('TrendS', 50)),
-#         'slope': float(row.get('slope', 0)),
-#         'sum_perc': float(row.get('sum_perc', 0)),
-#         'power_idx': float(row.get('power_idx', 0)),
-#         'upper': float(row.get('upper', 0)),
-#         'dist_h_l': float(row.get('dist_h_l', 4.0)),
-#     }
-
-#     # ---------- 上升结构判定 ----------
-#     is_rising_struct = (bl_data['lastp1d'] > bl_data['lastp2d'] > 0) and (bl_data['lasth1d'] > bl_data['lasth2d'] > 0)
-#     bl_data['is_rising_struct'] = is_rising_struct
-
-#     # ---------- Baseline Loader ----------
-#     baseline_loader = DailyEmotionBaseline()
-#     baseline_loader.calculate_baseline(pd.DataFrame([bl_data]))
-
-#     # ---------- Verbose 输出 ----------
-#     if verbose:
-#         print(f"\n── {t_date_str} | 昨收:{bl_data['lastp1d']:.2f} | 昨高:{bl_data['lasth1d']:.2f} | MA5:{bl_data['ma5d']:.2f} | MA10:{bl_data['ma10d']:.2f} ──")
-#         print(f"   [DEBUG] Engine Anchors: {{'yesterday_high': {bl_data['lasth1d']:.2f}, 'prev_high': {bl_data['lasth2d']:.2f}, 'ma60': {bl_data['ma60d']:.2f}, 'ma20': {bl_data['ma20d']:.2f}, 'last_low': {bl_data['last_low']:.2f}, 'last_close': {bl_data['lastp1d']:.2f}, 'last_close_p2': {bl_data['lastp2d']:.2f}, 'is_rising_struct上涨结构': {is_rising_struct}}}")
-
-#     # 3. 分时数据预处理
-#     if isinstance(tick_df.index, pd.MultiIndex):
-#         tick_df = tick_df.reset_index()
-#     tick_df['code'] = str(code).zfill(6)
-#     tick_df['trade'] = tick_df.get('trade', tick_df.get('close', tick_df.get('Close', 0))).astype(float)
-#     tick_df['avg_price'] = (tick_df.get('amount', 0) / tick_df.get('volume', 1)).fillna(tick_df['trade'])
-#     tick_df['vol'] = tick_df.get('volume', 0).diff().fillna(tick_df.get('volume', 0)).clip(lower=0)
-#     lastp1d_val = bl_data['lastp1d']
-#     tick_df['percent'] = (tick_df['trade'] - lastp1d_val) / lastp1d_val * 100
-
-
-#     # 4. Tracker 批量更新
-#     tracker = IntradayEmotionTracker()
-#     tracker.update_batch(tick_df, baseline_loader)
-
-#     # 调试信号 (需要在 update_batch 之后调用，因为 sbc_status 在那里生成的)
-#     if verbose:
-#         debug_sbc_signals(tick_df, lastp1d_val)
-
-#     # 5. 基础卖出评估（一次性）
-#     engine = IntradayDecisionEngine()
-#     row_dict = {k: bl_data[k] for k in ['ma5d','ma10d','ma20d','ma60d','lastp1d','lastp2d','lasth1d','lasth2d','last_low','trade']}
-#     snapshot = {
-#         "cost_price": 0.0,
-#         "highest_since_buy": 0.0,
-#         "last_close": lastp1d_val,
-#         "loss_streak": 0,
-#         "market_win_rate": 0.5,
-#         "day_df": day_df,
-#         "highest_today": lastp1d_val,
-#         "low_val": bl_data['last_low'],
-#         **bl_data
-#     }
-
-#     base_eval = engine.evaluate(row_dict, snapshot, mode="sell_only")
-
-#     # ---------- 循环生成信号 ----------
-#     signals = []
-#     last_signal_times = {}
-
-#     for i, r in enumerate(tick_df.itertuples(index=False)):
-#         # 更新 tick 行信息
-
-#         row_dict.update({
-#             'trade': r.trade,
-#             'high': getattr(r, 'high', r.trade),
-#             'low': getattr(r, 'low', r.trade),
-#             'open': getattr(r, 'open', r.trade),
-#             'vol': getattr(r, 'vol', 0),
-#             'percent': getattr(r, 'percent', 0),
-#             'nclose': getattr(r, 'avg_price', r.trade)
-#         })
-
-#         snapshot["highest_since_buy"] = max(snapshot["highest_since_buy"], row_dict['high'])
-#         snapshot["highest_today"] = max(snapshot["highest_today"], row_dict['high'])
-#         snapshot["low_val"] = min(snapshot["low_val"], row_dict['low'])
-
-#         status = str(getattr(r, 'sbc_status', ''))
-
-#         # 买入信号
-#         if "🚀" in status:
-#             last_idx = last_signal_times.get("FOLLOW", -999)
-#             if i - last_idx > 30:
-#                 t_str = get_tick_str(r)
-#                 if verbose:
-#                     print(f"[{t_str}] 🎯 买入: {status} at {r.trade:.2f}")
-#                 signals.append(SignalPoint(code=code, timestamp=str(getattr(r, 'ticktime', t_str)), bar_index=i,
-#                                            price=r.trade, signal_type=SignalType.FOLLOW,
-#                                            source=SignalSource.STRATEGY_ENGINE, reason=status))
-#                 last_signal_times["FOLLOW"] = i
-
-#         # 卖出信号（动态评估）
-#         decision = engine.evaluate_dynamic(base_eval, row_dict, snapshot)
-#         action, reason = decision.get("action", ""), decision.get("reason", "")
-#         if action in {"卖出", "止损", "预警止损", "移动止盈", "高位止盈", "趋势止损",
-#                       "破位减仓", "强制清仓", "主动防守", "主动减仓"}:
-#             if any(kw in reason for kw in PRIORITY_SELL_KW):
-#                 last_idx = last_signal_times.get("EXIT", -999)
-#                 if i - last_idx > 30:
-#                     # t_str = parse_t(getattr(r, 'ticktime', '00:00'))
-#                     t_str = get_tick_str(r)
-#                     if verbose:
-#                         print(f"[{t_str}] ⚠️ 卖出: {action} at {r.trade:.2f} | {reason}")
-#                     signals.append(SignalPoint(code=code, timestamp=str(getattr(r, 'ticktime', t_str)), bar_index=i,
-#                                                price=r.trade, signal_type=SignalType.EXIT_FOLLOW,
-#                                                source=SignalSource.STRATEGY_ENGINE, reason=reason))
-#                     last_signal_times["EXIT"] = i
-
-#     # ---------- 可视化数据 ----------
-#     if 'ticktime' in tick_df.columns:
-#         t_labels = [parse_t(t) for t in tick_df['ticktime']]
-#     else:
-#         t_labels = [parse_t(i) for i in range(len(tick_df))]
-#     avg_series = (tick_df['amount'].cumsum() / tick_df['volume'].cumsum()).fillna(tick_df['trade']).tolist() if 'amount' in tick_df.columns else []
-
-#     return {
-#         "signals": signals,
-#         "viz_df": tick_df,
-#         "title": f"SBC Core - {code} ({t_date_str})",
-#         "avg_series": avg_series,
-#         "time_labels": t_labels,
-#         "use_live": use_live
-#     }

@@ -5,7 +5,9 @@ Daily Top Detector for identifying distribution phases and trend exhaustion.
 import pandas as pd
 import numpy as np
 
-def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None, cache_dict: dict = None) -> dict:
+from typing import Any, Optional
+
+def detect_top_signals(day_df: pd.DataFrame, current_tick: Optional[dict[str, Any]] = None, cache_dict: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """
     Analyze daily K-line history to detect top signals.
     :param day_df: DataFrame with daily OHLCV data.
@@ -23,9 +25,10 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: dict = None, cache_di
     last_row = day_df.iloc[-1]
     
     # Use real-time data if provided, else use last_row
-    price = current_tick.get('trade', last_row['close']) if current_tick is not None else last_row['close']
-    high = current_tick.get('high', last_row['high']) if current_tick is not None else last_row['high']
-    volume = current_tick.get('volume', last_row.get('volume', last_row.get('vol', 0))) if current_tick is not None else last_row.get('volume', last_row.get('vol', 0))
+    price = float(current_tick.get('trade', last_row['close'])) if current_tick is not None else float(last_row['close'])
+    high = float(current_tick.get('high', last_row['high'])) if current_tick is not None else float(last_row['high'])
+    volume = float(current_tick.get('volume', last_row.get('volume', last_row.get('vol', 0)))) if current_tick is not None else float(last_row.get('volume', last_row.get('vol', 0)))
+    
     
     # 1. TD Sequence Check (Setup count)
     td_setup = last_row.get('td_setup', 0)
