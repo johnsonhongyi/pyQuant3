@@ -902,6 +902,111 @@ def scoring_momentum_pullback_system_base_realtime(df: pd.DataFrame, max_days: i
     res['gem_score'] = np.round(scores, 2)
     return res.sort_values(by='gem_score', ascending=False)
 
+def buy_sell_score_momentum_vect(df: pd.DataFrame, max_days: int = 9):
+    """
+    急速矢量化评分系统 (buy_sell_score_momentum_vect)
+    ---------------------------------------------
+    集成趋势加速、OHLC 结构演变与趋势评分加权。
+    旨在捕捉从下跌/盘整结构到上涨结构的演变，并给出趋势加速分。
+    同步支持 0d 迭代行情与历史回溯判定。
+    """
+    N = len(df)
+    if N == 0: return df
+
+    # --- 0. 升级内部 get_mat 以支持 0d 动态迭代 ---
+    def get_mat(prefix):
+        # 实时数据注入后，potential_cols 包含 0d/0
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+            elif idx > 0:
+                # 填充缺失值，确保矢量计算不因为 NaN 崩掉
+                mat[:, idx] = mat[:, idx-1]
+        return mat
+
+    # --- 1. 构建基础矩阵 ---
+    C = get_mat('lastp')   # Close (0=今日现价, 1=昨日...)
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band (压力位)
+    M5 = get_mat('ma5')    # 5日线
+    M10 = get_mat('ma10')  # 10日线
+    H4 = get_mat('high4')  # 前高
+    P = get_mat('per')     # 涨跌幅
+
+    # --- 2. 核心量化指标：动量 (Momentum) 与 加速度 (Acceleration) ---
+    # 动量：当前价格相对于昨日的斜率百分比
+    mom0 = (C[:, 0] - C[:, 1]) / np.maximum(C[:, 1], 1e-9) * 100
+    # 动量：昨日相对于前日的斜率
+    mom1 = (C[:, 1] - C[:, 2]) / np.maximum(C[:, 2], 1e-9) * 100
+    # 加速度：斜率的变化率 (动力是否在加强)
+    accel = mom0 - mom1
+
+    # --- 3. 结构化演变：从下跌/横盘 转为 上涨 ---
+    # 结构一：上穿关键均线 (由空转多)
+    was_bear = (C[:, 1] < M5[:, 1]) | (C[:, 1] < M10[:, 1])
+    is_bull = (C[:, 0] >= M5[:, 0]) & (C[:, 0] >= M10[:, 0])
+    pivot_reverse = (was_bear & is_bull).astype(float) * 20.0
+    
+    # 结构二：突围关键压力 (Upper / High4)
+    out_upper = (C[:, 0] > U[:, 0]) & (C[:, 1] <= U[:, 1])
+    out_h4 = (C[:, 0] > H4[:, 0]) & (C[:, 1] <= H4[:, 1])
+    break_bonus = (out_upper.astype(float) * 15.0) + (out_h4.astype(float) * 10.0)
+
+    # --- 4. 实时 K 线形态形态评分 (OHLC 每日走势叠加) ---
+    # 计算日内强度位置：收盘价在日内高低点中的相对位置
+    day_range = np.maximum(H[:, 0] - L[:, 0], 1e-9)
+    day_pos = (C[:, 0] - L[:, 0]) / day_range
+    # 收盘靠近最高点，给予额外走势分
+    ohlc_shape_score = day_pos * 12.0
+    
+    # 开报低走 vs 低开高走
+    low_start = (O[:, 0] <= L[:, 0] * 1.002).astype(float) * 8.0 
+
+    # --- 5. 综合买卖评分计算 ---
+    # 买入分 (buyscore)：动量爆发 + 加速溢价 + 结构反转 + 形态承接
+    buy_scores = (
+        np.clip(mom0 * 3.5, -10, 30) +   # 基础爆发力
+        np.clip(accel * 5.0, -15, 25) +  # 趋势加速强度 (核心权重)
+        pivot_reverse +                   # 结构性转折奖励
+        break_bonus +                     # 压力突破奖励
+        ohlc_shape_score +                # 形态走势对齐
+        low_start                         # 底部开盘承接
+    )
+    
+    # 趋势保持权重：如果 5/10/20 多头排列，给一个 10 分的基础护航分
+    strong_trend = (M5[:, 0] > M10[:, 0]) & (C[:, 0] > M5[:, 0])
+    buy_scores += strong_trend.astype(float) * 10.0
+
+    # 卖出分 (sellscore)：冲高回落 + 加速衰减 + 破位结构
+    # 冲高回落幅度
+    retreat = (H[:, 0] - C[:, 0]) / np.maximum(H[:, 0], 1e-9) * 100
+    sell_scores = (
+        np.clip(retreat * 6.0, 0, 40) +    # 冲高回落权重最高
+        np.clip(-accel * 4.0, 0, 20) +     # 动力衰减权重
+        ((C[:, 0] < M5[:, 0]) & (C[:, 1] >= M5[:, 1])).astype(float) * 30.0 # 瞬间破位
+    )
+
+    # --- 6. 结果注入与性能自检 ---
+    res = df.copy()
+    res['buyscore'] = np.round(np.clip(buy_scores, 0, 100), 2)
+    res['sellscore'] = np.round(np.clip(sell_scores, 0, 100), 2)
+    
+    # 统计信息用于自检
+    if N > 0:
+        avg_buy = res['buyscore'].mean()
+        max_buy = res['buyscore'].max()
+        logger.debug(f"[QuantScore-Vect] N={N}, AvgBuy={avg_buy:.2f}, MaxBuy={max_buy:.2f}, Transitions={pivot_reverse.sum()}")
+
+    return res
+    
 def scoring_momentum_pullback_system_base(df: pd.DataFrame, max_days: int = 9):
     N = len(df)
     if N == 0: return df
@@ -2456,6 +2561,8 @@ def fetch_and_process(
                 # top_all = scoring_momentum_pullback_system_base_realtime(top_all,max_days=cct.compute_lastdays)
             with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
                 top_all = scoring_momentum_pullback_system_top(top_all,max_days=cct.compute_lastdays)
+            with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
+                top_all = buy_sell_score_momentum_vect(top_all,max_days=cct.compute_lastdays)
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
           

@@ -979,6 +979,41 @@ class DataLoaderThread(QThread):
         finally:
             logger.debug(f"[DataLoaderThread] Thread for {self.code} is exiting run().")
 
+class SBCTestThread(QThread):
+    """SBC 模式验证后台线程，防止 GUI 卡死"""
+    finished_data = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None):
+        super().__init__()
+        self.code = code
+        self.use_live = use_live
+        self.hdf5_lock = hdf5_lock
+
+    def run(self):
+        try:
+            try:
+                import verify_sbc_pattern
+            except ImportError:
+                from stock_standalone import verify_sbc_pattern
+            # 调用验证函数，不开启可视化(同步弹窗)，仅返回计算结果包
+            result = verify_sbc_pattern.verify_with_real_data(
+                self.code, 
+                use_live=self.use_live, 
+                show_viz=False,
+                hdf5_lock=self.hdf5_lock
+            )
+            if result and isinstance(result, dict):
+                self.finished_data.emit(result)
+            else:
+                self.error_occurred.emit(f"未能获取 {self.code} 的验证数据或数据格式不正确")
+        except Exception as e:
+            import traceback
+            error_msg = f"SBC 线程执行失败: {str(e)}"
+            logger.error(f"{error_msg}\n{traceback.format_exc()}")
+            self.error_occurred.emit(error_msg)
+
+
 
 
 def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
@@ -2130,6 +2165,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.expected_sync_version = -1  # ⭐ 初始化同步版本 (1.4)
         self._table_item_map = {}        # ⭐ 初始化表映射 (1.4)
         self.follow_marker_items = []    # ⭐ [NEW] 跟单信号标记容器
+        self._sbc_test_windows = []      # ⭐ [NEW] SBC 测试窗口引用容器
+
         self.realtime_queue = Queue()
         self.realtime_task_queue = Queue() # ⭐ 新增：任务队列 (1.3)
         self.realtime_process = None
@@ -2658,6 +2695,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.setHeaderLabels(["Filtered Results"])
         self.filter_tree.setColumnCount(1)
         self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
+        self.filter_tree.itemDoubleClicked.connect(self._on_filter_tree_item_double_clicked)
+
         # 添加键盘导航支持
         self.filter_tree.currentItemChanged.connect(self.on_filter_tree_current_changed)
         
@@ -3607,6 +3646,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.td_action.triggered.connect(self.on_toggle_td_sequential)
         self.toolbar.addAction(self.td_action)
 
+        # [NEW] SBC 回放 Action
+        self.sbc_replay_action = QAction("SBC回放", self)
+        self.sbc_replay_action.setToolTip("使用本地缓存/日线数据执行SBC逻辑回放")
+        self.sbc_replay_action.triggered.connect(lambda: self._run_sbc_test(False))
+        self.toolbar.addAction(self.sbc_replay_action)
+
         # # [RESTORE] 测试信号按钮
         # test_action = QAction("测试信号", self)
         # test_action.triggered.connect(self._test_send_signal)
@@ -3697,6 +3742,69 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.day_df,
                     getattr(self, 'tick_df', pd.DataFrame())
                 )
+
+    def _run_sbc_test(self, use_live: bool, code: Optional[str] = None):
+        """
+        [NEW] 调用 verify_sbc_pattern.py 逻辑验证指定或当前个股 of SBC 信号
+        使用线程异步执行，防止 GUI 卡死
+        """
+        # 检查是否已有线程正在运行
+        if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
+            QMessageBox.information(self, "请稍候", f"后台正在对 {self._sbc_thread.code} 进行验证，请等待完成后再试。")
+            return
+
+        target_code = code or self.current_code
+        if not target_code:
+            QMessageBox.warning(self, "未选中个股", "请先在主图或列表中选中/加载一只个股再执行测试。")
+            return
+            
+        # 尝试获取 HDF5 锁
+        hdf5_lock = getattr(self, 'hdf5_mutex', None)
+        
+        # 发送开始日志
+        logger.info(f"⏳ SBC 信号测试已启动后台线程: {target_code} (Live Mode: {use_live})")
+        
+        # 创建并启动后台线程
+        self._sbc_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock)
+        self._sbc_thread.finished_data.connect(self._on_sbc_test_finished)
+        self._sbc_thread.error_occurred.connect(self._on_sbc_test_error)
+        self._sbc_thread.start()
+
+
+    def _on_sbc_test_finished(self, data: dict):
+        """线程完成后的回调，在 GUI 线程显示图表"""
+        try:
+            # 动态导入可视化函数
+            try:
+                from stock_visual_utils import show_chart_with_signals
+            except ImportError:
+                from stock_standalone.stock_visual_utils import show_chart_with_signals
+            
+            # 使用返回的结果包调用可视化
+            win = show_chart_with_signals(
+                data["viz_df"],
+                data["signals"],
+                data["title"],
+                avg_series=data["avg_series"],
+                time_labels=data["time_labels"],
+                use_line=data["use_live"]
+            )
+            
+            # 管理窗口引用，防止被回收
+            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
+            if win:
+                self._sbc_test_windows.append(win)
+                logger.info(f"✅ SBC 可视化窗口已创建: {data['title']}")
+            
+        except Exception as e:
+            logger.error(f"SBC 可视化显示失败: {e}")
+            self._on_sbc_test_error(f"渲染图表失败: {str(e)}")
+
+    def _on_sbc_test_error(self, err_msg: str):
+        """线程出错回调"""
+        logger.error(f"❌ SBC 测试线程出错: {err_msg}")
+        QMessageBox.critical(self, "SBC 测试错误", err_msg)
+
 
 
     def on_toggle_global_keys(self, checked):
@@ -6537,6 +6645,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # 创建右键菜单
         menu = QMenu(self)
         
+        # [NEW] SBC 回放分析
+        sbc_action = menu.addAction("📊 SBC 回放分析")
+        sbc_action.triggered.connect(lambda: self._run_sbc_test(False, stock_code))
+        
+        menu.addSeparator()
+        
         # 发送到通达信
         send_action = menu.addAction("📤 发送到通达信")
         send_action.triggered.connect(lambda: self._on_send_to_tdx(stock_code, row))
@@ -6565,6 +6679,12 @@ class MainWindow(QMainWindow, WindowMixin):
         if not stock_code: return
         
         menu = QMenu(self)
+        
+        # [NEW] SBC 回放分析
+        sbc_action = menu.addAction("📊 SBC 回放分析")
+        sbc_action.triggered.connect(lambda: self._run_sbc_test(False, stock_code))
+        
+        menu.addSeparator()
         
         # 添加到热点
         hotlist_action = menu.addAction("🔥 添加到热点自选")
@@ -6672,7 +6792,11 @@ class MainWindow(QMainWindow, WindowMixin):
                         cb.setText(code)
                         # self.statusBar().showMessage(f"📋 已复制代码: {code}", 3000)
                         self.show_status_message(f"📋 已复制代码: {code}", 3000)
-                        logger.info(f"[Table] Copied to clipboard: {code}")
+                    logger.info(f"[Table] Copied to clipboard: {code}")
+                
+                # [NEW] 双击代码列同时执行 SBC 回放分析
+                self._run_sbc_test(False, code)
+
 
     def switch_stock_prev(self):
         """切换至上一只股票 (1.1/1.2 Context navigation)"""
@@ -8742,24 +8866,22 @@ class MainWindow(QMainWindow, WindowMixin):
                         y_max = float(valid_high.max())
                         y_min = float(valid_low.min())
                         
-                        # 确保以昨日收盘价为中心对称显示，并留出足够间隙显示最高/最低 labels
-                        margin_up = y_max - pre_close
-                        margin_down = pre_close - y_min
-                        margin = max(margin_up, margin_down)
-                        # 给 10% 的额外 buffer 空间，确保 10.00% 这样的 label 能在边缘显示出来
-                        if margin <= 0: margin = max(pre_close * 0.01, 0.1)  
+                        # 不再强制对称渲染，只要确保昨收基准线和今日最高/最低点都在可见范围内
+                        view_y_max = max(y_max, pre_close)
+                        view_y_min = min(y_min, pre_close)
+                        y_range = view_y_max - view_y_min
                         
-                        y_max = pre_close + margin
-                        y_min = pre_close - margin
+                        # 防止 y_range 为 0 导致崩溃 (横盘时给 1% 空间)
+                        if y_range <= 0: y_range = pre_close * 0.01
                         
-                        # 适当增加 padding (15%) 以便在轴上看到完整百分比标签
-                        padding = margin * 0.15
+                        # 设置 10% padding 确保 label 不会被边缘切掉
+                        padding = y_range * 0.1
                         
                         # 获取 ViewBox
                         vb = self.tick_plot.getViewBox()
                         
                         # 手动设置 Y 轴范围
-                        vb.setYRange(y_min - padding, y_max + padding, padding=0)
+                        vb.setYRange(view_y_min - padding, view_y_max + padding, padding=0)
                         
                         # 手动设置 X 轴范围（避免调用 updateAutoRange）
                         # 使用有效数据的索引范围
@@ -8779,8 +8901,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.debug(f"tick_plot range setting failed: {e}")
 
 
-            # ⭐ 构建分时图标题（包含监理看板）
-            tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)"
+            # ⭐ 构建分时图标题（显式包含当日最高/最低及其涨幅）
+            high_pct = (y_max - pre_close) / pre_close * 100 if pre_close > 0 else 0
+            low_pct = (y_min - pre_close) / pre_close * 100 if pre_close > 0 else 0
+            
+            tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:+.2f}%)  H:{y_max:.2f} ({high_pct:+.2f}%) L:{y_min:.2f} ({low_pct:+.2f}%)"
 
             # 追加监理看板信息
             if not self.df_all.empty:
@@ -9301,6 +9426,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'ma5d': float(day_df['close'].rolling(5).mean().iloc[-1]),
                 'ma10d': float(day_df['close'].rolling(10).mean().iloc[-1]),
                 'ma20d': float(day_df['close'].rolling(20).mean().iloc[-1]),
+                'ma60d': float(day_df['close'].rolling(60).mean().iloc[-1]),
                 'nclose': nclose_val
             }
 
@@ -10046,6 +10172,13 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ 无论如何确保焦点留在 filter_tree，防止联动逻辑掠夺焦点
         self.filter_tree.setFocus()
 
+    def _on_filter_tree_item_double_clicked(self, item, column):
+        """Filter Tree 双击事件：执行 SBC 回放分析"""
+        code = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+        if code:
+            self._run_sbc_test(False, code)
+
+
     def on_filter_tree_current_changed(self, current, previous):
         """处理键盘导航（上下键）"""
         if current:
@@ -10617,7 +10750,18 @@ class MainWindow(QMainWindow, WindowMixin):
         """窗口关闭统一退出清理"""
         self._closing = True
 
+        # 0.1️⃣ 清理打开的 SBC 回放窗口
+        if hasattr(self, '_sbc_test_windows'):
+            for win in self._sbc_test_windows:
+                try:
+                    if win.isVisible():
+                        win.close()
+                except:
+                    pass
+            self._sbc_test_windows.clear()
+
         # 0.️⃣ 立即停止语音进程 (防止退出过程中继续播报噪音)
+
         if hasattr(self, 'voice_thread') and self.voice_thread:
             logger.info("Closing Voice Broadcast system...")
             try:
