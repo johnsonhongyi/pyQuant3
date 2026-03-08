@@ -59,6 +59,7 @@ from monitor_utils import (
     load_monitor_list, list_archives, archive_file_tools, archive_search_history_list,
     ensure_parentheses_balanced
 )
+from data_hub_service import DataHubService
 from tdx_utils import (
     clean_bad_columns, cross_process_lock, get_clean_flag_path,
     cleanup_old_clean_flags, clean_expired_tdx_file, is_tdx_clean_done, sanitize,
@@ -329,6 +330,10 @@ def send_with_visualizer(func):
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
+        # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
+        # Ensure DataHub is ready before any data processing starts
+        self.data_hub = DataHubService.get_instance()
+        
         # ⭐ 启动计时
         self._init_start_time = time.time()
         

@@ -938,8 +938,42 @@ def buy_sell_score_momentum_vect(df: pd.DataFrame, max_days: int = 9):
     U = get_mat('upper')   # Upper Band (压力位)
     M5 = get_mat('ma5')    # 5日线
     M10 = get_mat('ma10')  # 10日线
+    M20 = get_mat('ma20')  # 20日线
     H4 = get_mat('high4')  # 前高
     P = get_mat('per')     # 涨跌幅
+
+    # --- [NEW] 1.5 结构与活跃度预处理 (Base Score) ---
+    # 活跃度基础分 (Base Activity)
+    power = df['power_idx'].values if 'power_idx' in df.columns else np.zeros(N)
+    win_days = df['win'].values if 'win' in df.columns else np.zeros(N)
+    
+    # 活跃度底分起步 40，最高加到 70 左右
+    base_activity = 40.0 + np.clip(power * 2.0, 0, 20) + np.clip(win_days * 3.0, 0, 15)
+    
+    # 结构性突破分 (Structural Breakouts)
+    # 1. 突破2日高点
+    break_2d_high = (C[:, 0] > np.maximum(H[:, 1], H[:, 2])).astype(float) * 10.0
+    
+    # 2. 一阳穿多线 (破 M5, M10, M20)
+    # 收盘站上3条线，且昨日（或今日开盘）在至少一条线之下
+    break_multi_ma = (C[:, 0] > M5[:, 0]) & (C[:, 0] > M10[:, 0]) & (C[:, 0] > M20[:, 0]) & \
+                     ((C[:, 1] < M5[:, 1]) | (C[:, 1] < M10[:, 1]) | (C[:, 1] < M20[:, 1]))
+    break_ma_bonus = break_multi_ma.astype(float) * 20.0
+    
+    # 3. 突破 hmax (前期60日新高或特定大周期新高)
+    hmax_val = df['hmax'].values if 'hmax' in df.columns else np.full(N, 1e9)
+    # 排除 hmax <= 0 的情况
+    break_hmax = ((C[:, 0] >= hmax_val) & (hmax_val > 0)).astype(float) * 15.0
+    
+    # 4. 连续小阴，高点下移惩罚 (Continuous small yin, lowering highs)
+    lowering_highs = (H[:, 1] < H[:, 2]) & (H[:, 2] < H[:, 3]) & (C[:, 1] <= O[:, 1]) & (C[:, 2] <= O[:, 2])
+    lowering_penalty = lowering_highs.astype(float) * -15.0
+    
+    # 综合结构底分 (Structure Base Score，供盘中引擎和基线使用)
+    structure_base_score = np.clip(
+        base_activity + break_2d_high + break_ma_bonus + break_hmax + lowering_penalty,
+        10, 100
+    )
 
     # --- 2. 核心量化指标：动量 (Momentum) 与 加速度 (Acceleration) ---
     # 动量：当前价格相对于昨日的斜率百分比
@@ -971,14 +1005,18 @@ def buy_sell_score_momentum_vect(df: pd.DataFrame, max_days: int = 9):
     low_start = (O[:, 0] <= L[:, 0] * 1.002).astype(float) * 8.0 
 
     # --- 5. 综合买卖评分计算 ---
-    # 买入分 (buyscore)：动量爆发 + 加速溢价 + 结构反转 + 形态承接
+    # 买入分 (buyscore)：动量爆发 + 加速溢价 + 结构反转 + 形态承接 + [NEW]结构底分溢价权重
+    # 将结构底分中超出 50 的部分转化为附加动量
+    structure_momentum_bonus = np.maximum(structure_base_score - 50.0, 0.0) * 0.4
+    
     buy_scores = (
         np.clip(mom0 * 3.5, -10, 30) +   # 基础爆发力
         np.clip(accel * 5.0, -15, 25) +  # 趋势加速强度 (核心权重)
         pivot_reverse +                   # 结构性转折奖励
         break_bonus +                     # 压力突破奖励
         ohlc_shape_score +                # 形态走势对齐
-        low_start                         # 底部开盘承接
+        low_start +                       # 底部开盘承接
+        structure_momentum_bonus          # 结合结构基底分
     )
     
     # 趋势保持权重：如果 5/10/20 多头排列，给一个 10 分的基础护航分
@@ -998,6 +1036,7 @@ def buy_sell_score_momentum_vect(df: pd.DataFrame, max_days: int = 9):
     res = df.copy()
     res['buyscore'] = np.round(np.clip(buy_scores, 0, 100), 2)
     res['sellscore'] = np.round(np.clip(sell_scores, 0, 100), 2)
+    res['structure_base_score'] = np.round(structure_base_score, 2)  # [NEW] 输出供后续决策引擎使用
     
     # 统计信息用于自检
     if N > 0:

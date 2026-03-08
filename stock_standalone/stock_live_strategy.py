@@ -2779,8 +2779,20 @@ class StockLiveStrategy:
                 self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
 
                 # --- ⭐ 将决策与监理感知回写至 snap (供 UI 同步使用) ---
-                snap['last_action'] = decision.get('action', 'HOLD')
+                action = decision.get('action', 'HOLD')
+                snap['last_action'] = action
                 snap['last_reason'] = decision.get('reason', '')
+                
+                # [NEW] 信号持久化：如果是明确的买卖，固化为 last_signal 供跨日做T
+                if action in ("买入", "BUY", "加仓", "ADD"):
+                    snap['last_signal'] = "BUY"
+                    snap['last_signal_date'] = datetime.datetime.now().strftime("%Y-%m-%d")
+                elif action in ("卖出", "SELL", "止损", "止盈", "减仓"):
+                    snap['last_signal'] = "SELL"
+                    snap['last_signal_date'] = datetime.datetime.now().strftime("%Y-%m-%d")
+                
+                # [NEW] 记录结构分类到底层存储
+                snap['structure_base_score'] = float(row.get('structure_base_score', 50.0))
                 
                 # 修正：market_win_rate 和 loss_streak 已在上文注入 snap，此处无需重复赋值且避免 NameError
                 vwap = current_nclose
@@ -2804,6 +2816,9 @@ class StockLiveStrategy:
                     df.at[code, 'last_action'] = snap.get('last_action', '')
                     df.at[code, 'last_reason'] = snap.get('last_reason', '')
                     df.at[code, 'shadow_info'] = snap.get('shadow_info', '')
+                    df.at[code, 'last_signal'] = snap.get('last_signal', 'HOLD')
+                    df.at[code, 'last_signal_date'] = snap.get('last_signal_date', '')
+                    df.at[code, 'structure_base_score'] = snap.get('structure_base_score', 50.0)
                 except Exception as e:
                     pass
 

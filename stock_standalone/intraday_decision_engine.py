@@ -269,6 +269,11 @@ class IntradayDecisionEngine:
         # ---------- 0. 选股分权重加成 (New: 对应 “反向验证” 需求) ----------
         # 根据 StockSelector 的评分增加基础权重，评分越高，买入信心越足
         selection_score = float(snapshot.get("score", 0))
+        
+        # [NEW] 引入前期矢量化预处理计算出的 `structure_base_score` 作为结构底分评估
+        structure_base_score = float(snapshot.get("structure_base_score", 50.0))
+        historical_signal = snapshot.get("last_signal", "HOLD") # 用于区分新开仓还是做T
+        
         selection_bonus = 0.0
         if selection_score >= 65:
             selection_bonus = 0.2
@@ -448,6 +453,19 @@ class IntradayDecisionEngine:
                     
                     # 4. 选股分加成
                     base_pos += selection_bonus
+                    
+                    # [NEW] 结构预处理分加成 (Structure Base Score Bonus)
+                    if structure_base_score >= 75:
+                        base_pos += 0.15
+                        debug["结构加成"] = f"强底分({structure_base_score})"
+                    elif structure_base_score <= 40:
+                        base_pos -= 0.15
+                        debug["结构惩罚"] = f"弱底分({structure_base_score})"
+                        
+                    # [NEW] 信号延续：如果历史信号是买入，今天触发则是追加做T买点，稍微放宽或增加权重
+                    if historical_signal in ("BUY", "买入", "1", 1) and structure_base_score > 50:
+                        base_pos += 0.1
+                        debug["做T加持"] = "前日买点延续"
                     
                     # 5. 支撑位得分加成 & 实时信号加成
                     if support_score > 0:
@@ -1472,6 +1490,21 @@ class IntradayDecisionEngine:
             volume_bonus = self._volume_emotion_score(volume, ratio, last_v1, last_v2, last_v3, debug)
             buy_score += volume_bonus
             
+            # [NEW] 融合结构预处理分 (structure_base_score)
+            structure_base_score = float(snapshot.get("structure_base_score", 50.0))
+            if structure_base_score >= 75:
+                 buy_score += 0.2
+                 buy_reasons.append(f"强底分({structure_base_score})")
+            elif structure_base_score <= 40:
+                 buy_score -= 0.2
+                 buy_reasons.append(f"弱底分({structure_base_score})")
+                 
+            # [NEW] 判断是否是顺势做T
+            historical_signal = snapshot.get("last_signal", "HOLD")
+            if historical_signal in ("BUY", "买入", "1", 1) and structure_base_score > 50:
+                 buy_score += 0.15
+                 buy_reasons.append("做T加持")
+                 
             # 条件6: 多日情绪趋势（使用历史 5 日数据）
             multiday_score = self._multiday_trend_score(row, debug)
             if multiday_score > 0.3:

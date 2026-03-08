@@ -59,7 +59,7 @@ from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 import sbc_core
 from stock_visual_utils import PercentAxisItem
-
+from data_hub_service import DataHubService
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
 visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
@@ -388,7 +388,11 @@ VoiceThread = VoiceProcess
 
 
 class CandlestickItem(pg.GraphicsObject):
-    def __init__(self, data, theme='light'):
+    def __init__(self, data=None, theme='dark'):
+        # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
+        # Ensure DataHub is ready in the Visualizer process
+        self.data_hub = DataHubService.get_instance()
+        
         super().__init__()
         self.data = np.asarray(data)
         self.theme = theme
@@ -7070,6 +7074,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.df_cache = df  # 直接引用，不复制
                 self.df_all = df
                 logger.debug(f"[_process_df_all_update] df_all updated, rows={len(self.df_all)}")
+                # 🚀 [NEW] 将包含最新分数的完整快照统一发布到中心缓存
+                try:
+                    DataHubService.get_instance().publish_df_all(self.df_all)
+                except Exception as e:
+                    logger.error(f"[DataHub] GUI publish df_all failed: {e}")
             elif df is not None:
                 self.df_cache = pd.DataFrame()
                 self.df_all = self.df_cache
