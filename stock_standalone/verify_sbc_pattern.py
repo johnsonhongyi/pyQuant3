@@ -133,73 +133,31 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     except Exception as e:
         import traceback
         print(f"❌ 日线加载失败: {e}"); traceback.print_exc(); return
-    # 2. 获取 Tick 数据源
-    if use_live:
-        try:
-            try:
-                from JSONData import sina_data
-            except ImportError:
-                from stock_standalone.JSONData import sina_data
-            sina = sina_data.Sina()
-            print(f"📡 正在从 Sina 获取 {code} 实时数据...")
-            stock_df = sina.get_real_time_tick(code, enrich_data=True)
-            if stock_df is None or stock_df.empty:
-                print(f"❌ 无法获取 {code} 实时数据"); return
-            
-            stock_df = stock_df.copy()
+    # 2. 获取 Tick 数据源 (使用 sbc_core 统筹加载与补全逻辑)
+    try:
+        stock_df = sbc_core.load_tick_data(code, use_live=use_live)
+        if stock_df is None or stock_df.empty:
+            print(f"❌ 无法获取 {code} 数据（Cache & Sina 均失败）")
+            return None
+        
+        # 统一标准化处理 (兼容 load_tick_data 返回)
+        if 'trade' in stock_df.columns and 'close' not in stock_df.columns:
+            stock_df['close'] = stock_df['trade']
+        if 'tick_vol' in stock_df.columns and 'volume' not in stock_df.columns:
+            stock_df['volume'] = stock_df['tick_vol']
+        
+        # 确保基础列存在供后续逻辑使用
+        for col in ['high', 'low', 'open']:
+            if col not in stock_df.columns:
+                stock_df[col] = stock_df['close']
 
-            # Sina 返回 MultiIndex(code, ticktime) — 把 ticktime 从 index 提取成列
-            if isinstance(stock_df.index, pd.MultiIndex):
-                stock_df = stock_df.reset_index()
-                # 过滤只保留当前 code
-                if 'code' in stock_df.columns:
-                    stock_df = stock_df[stock_df['code'] == code].copy()
-                # ticktime 现在是列，直接用字符串格式 'YYYY-MM-DD HH:MM:SS'
-                # 转为 RangeIndex 便于 itertuples
-                stock_df = stock_df.reset_index(drop=True)
-            elif stock_df.index.name == 'ticktime':
-                # 单层 ticktime index
-                stock_df = stock_df.reset_index()
-
-            # 兼容性转换：Sina 实时数据列名标准化
-            mapping = {
-                'trade': 'close',
-                'volume': 'volume',
-                'amount': 'amount'
-            }
-            for src, dst in mapping.items():
-                if src in stock_df.columns and dst not in stock_df.columns:
-                    stock_df[dst] = stock_df[src]
-            
-            # 如果没有 high/low，用 close 替代 (Tick 数据特性)
-            for col in ['high', 'low']:
-                if col not in stock_df.columns:
-                    stock_df[col] = stock_df['close']
-            
-            # Open 价逻辑：对于分时 Tick，每一笔的开盘价是上一笔的收盘价
-            if 'open' not in stock_df.columns:
-                stock_df['open'] = stock_df['close'].shift(1).fillna(stock_df['close'])
-
-
-            print(f"✅ 成功获取 {len(stock_df)} 条实时数据")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"❌ 获取实时数据失败: {e}"); return
-    else:
-        # 分钟线缓存
-        cache_path = r"G:\minute_kline_cache.pkl"
-        if not os.path.exists(cache_path):
-            print(f"❌ 未找到缓存: {cache_path}"); return
-        try:
-            full = pd.read_pickle(cache_path)
-            stock_df = full[full['code'] == code].copy().sort_values('time').reset_index(drop=True)
-            if stock_df.empty:
-                print(f"❌ 缓存中无 {code} 数据"); return
-            print(f"✅ 成功加载 {len(stock_df)} 条分钟线数据")
+        print(f"✅ 成功加载 {len(stock_df)} 条数据 (Source: {source_name})")
+        if not stock_df.empty:
             print(f"💰 价格区间: {stock_df['low'].min():.2f} – {stock_df['high'].max():.2f}\n")
-        except Exception as e:
-            print(f"❌ 读取缓存失败: {e}"); return
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"❌ 数据加载失败: {e}"); return
 
     # 3. 逐分钟回放（日期感知）
     signals: list = []
@@ -300,7 +258,8 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             f"[{code}] 买卖验证 — 结构性信号",
             avg_series=vwap_series,
             time_labels=time_labels,
-            use_line=use_live,  # live 模式用线图，避免密集竖柱
+            use_line=True,  # live 模式用线图，避免密集竖柱
+            # use_line=use_live,  # live 模式用线图，避免密集竖柱
         )
     else:
         # 返回数据包，供 GUI 线程异步渲染

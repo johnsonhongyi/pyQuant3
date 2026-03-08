@@ -2648,9 +2648,14 @@ def fetch_and_process(
             # inside update_tree() to eliminate cross-process proxy overhead.
             with timed_ctx("format_floats", warn_ms=800):
                 df_all = format_floats(df_all)
-            # with timed_ctx("reduce_memory_usage", warn_ms=800):
-            #     df_all = cct.reduce_memory_usage(df_all)
-            queue.put(df_all)
+            # 🔌 [REFINED] Send dual snapshots (Full for Cache, Filtered for UI)
+            # This ensures MinuteKlineCache stays up-to-date for ALL stocks
+            # while the UI remains responsive and filtered.
+            data_packet = {
+                'full_snapshot': top_all,
+                'filtered_ui_data': df_all
+            }
+            queue.put(data_packet)
             gc.collect()
             cct.print_timing_summary()
             cct.df_memory_usage(df_all)

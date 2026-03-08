@@ -2479,7 +2479,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 if latest_df is not None:
                     self._is_processing_tree_data = True
-                    # Offload the heavy Pandas operations and IPC to a thread
+                    # [PACKET] latest_df might be a dict {full_snapshot, filtered_ui_data}
+                    # We pass it to the async handler
                     if not hasattr(self, 'executor'):
                         from concurrent.futures import ThreadPoolExecutor
                         self.executor = ThreadPoolExecutor(max_workers=5)
@@ -2491,15 +2492,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
 
-    def _process_tree_data_async(self, df):
+    def _process_tree_data_async(self, data_packet):
         """Asynchronously process dataframe (detect signals) to avoid blocking Tkinter main loop."""
         try:
-            # 🔌 在主进程同步更新 DataPublisher
+            # [PACKET SETUP] Handle dual snapshot or legacy single df
+            if isinstance(data_packet, dict):
+                full_df = data_packet.get('full_snapshot')
+                df = data_packet.get('filtered_ui_data')
+            else:
+                full_df = data_packet
+                df = data_packet
+
+            # 🔌 在主进程同步更新 DataPublisher (使用 Full Snapshot)
             if hasattr(self, 'realtime_service') and self.realtime_service:
                 try:
-                    self.realtime_service.update_batch(df)
+                    # 使用 full_df 确保缓存完整性，即使 UI 过滤了该 stock
+                    self.realtime_service.update_batch(full_df)
                     
-                    # [NEW] 获取实时情绪分 (High Performance)
+                    # [NEW] 获取实时情绪分 (High Performance) - 使用 UI df 进行展示映射
                     # 确保有 code 列用于映射
                     if 'code' not in df.columns:
                         df['code'] = df.index.astype(str)
@@ -2556,6 +2566,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 self.refresh_tree(self.df_all)
             
+            # [REMOVED] Redundant publish (Consolidated to Strategy processing endpoint)
+
             self.update_all_top10_windows()
             
             # 🧹 周期性手动 GC
