@@ -8,14 +8,15 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt6.QtGui import QColor, QPicture, QPainter
 from PyQt6.QtCore import Qt, QRectF, QPointF
+from tk_gui_modules.window_mixin import WindowMixin
 
-try:
-    from tk_gui_modules.window_mixin import WindowMixin
-except ImportError:
-    # If missing, define a dummy mixin to avoid crashing
-    class WindowStateMixin:
-        def load_window_position_qt(self, *args, **kwargs): pass
-        def save_window_position_qt(self, *args, **kwargs): pass
+# try:
+#     from tk_gui_modules.window_mixin import WindowMixin
+# except ImportError:
+#     # If missing, define a dummy mixin to avoid crashing
+#     class WindowStateMixin:
+#         def load_window_position_qt(self, *args, **kwargs): pass
+#         def save_window_position_qt(self, *args, **kwargs): pass
 
 
 # Import existing signals definitions if available
@@ -167,15 +168,32 @@ class SignalOverlay:
                 reason_clean = reason.replace("强势结构", "强势") \
                                      .replace("均线上-创多日高-", "") \
                                      .replace("诱空转多-", "") \
-                                     .replace("趋势加速", "加速")
+                                     .replace("趋势加速", "加速") \
+                                     .replace("冠军核心回踩", "回踩") \
+                                     .replace("突破回踩", "回踩") \
+                                     .replace("分时新高", "新高")
+                
                 if is_emoji:
                     # 如果 reason 里已经包含图标，去掉 reason 中的图标以免和 symbol 重复
                     reason_clean = reason_clean.replace(symbol, "").strip()
-                    reason_text = f" | {symbol} {action_name}: {reason_clean}"
+                
+                # --- [TEXT WRAP OPTIMIZATION] ---
+                # 超过8个字自动转成多行，确保细节保留的同时不横向占用过多空间
+                max_chars = 8
+                if len(reason_clean) > max_chars:
+                    # 按照 max_chars 强制切分
+                    lines = [reason_clean[i:i+max_chars] for i in range(0, len(reason_clean), max_chars)]
+                    reason_final = "<br/>".join(lines)
                 else:
-                    reason_text = f" | {action_name}: {reason_clean}"
+                    reason_final = reason_clean
+
+                if is_emoji:
+                    reason_text = f" | {symbol} {action_name}: {reason_final}"
+                else:
+                    reason_text = f" | {action_name}: {reason_final}"
             else:
                 reason_text = f" | {action_name}"
+
 
             # 恢复之前用户喜欢的文字背景与边框效果，保证清晰度
             bg_brush = pg.mkBrush(20, 20, 20, 220)
@@ -311,8 +329,8 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             
         # load previously saved window position
         # self.load_window_position_qt(self, f"StandaloneKlineChart_{title}", default_width=1000, default_height=600)
-        self.load_window_position_qt(self, f"StandaloneKlineChart", default_width=1000, default_height=600)
-
+        width, height, x, y = self.load_window_position_qt(self, f"StandaloneKlineChart", default_width=1000, default_height=600)
+        # print(f'width:{width}, height:{height}, x:{x}, y:{y}')
         # Crosshair setup
         self.df_ref = df
         self.time_labels_ref = time_labels
@@ -369,7 +387,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
     def closeEvent(self, event):
         """窗口关闭事件：保存位置"""
         try:
-            self.save_window_position_qt(self, f"StandaloneKlineChart")
+            self.save_window_position_qt_visual(self, f"StandaloneKlineChart")
             # self.save_window_position_qt(self, f"StandaloneKlineChart_{self.windowTitle()}")
             # self.save_window_position_qt_visual(self, f"StandaloneKlineChart_{self.windowTitle()}")
         except Exception as e:
