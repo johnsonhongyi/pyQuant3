@@ -600,7 +600,9 @@ class DailyEmotionBaseline:
                     code_val = idx
                 
                 code_str = str(code_val).strip().zfill(6)
-                score = 50.0  # 中性起点
+                
+                # [NEW] 获取通过矩阵预处理的结构和活跃度综合基础分
+                score = float(row.get('structure_base_score', 50.0))
                 
                 # 转换所有必要的数值，优先从映射列取
                 price      = float(row.get('trade', row.get('close', 0)))
@@ -1646,6 +1648,14 @@ class DataPublisher:
                 save_cache_df = self.kline_cache.to_dataframe()
                 if not save_cache_df.empty:
                     status = self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
+                    
+                    # 🚀 [NEW] Centralized Tick Cache Publish
+                    try:
+                        from data_hub_service import DataHubService
+                        DataHubService.get_instance().publish_tick_cache(save_cache_df)
+                    except Exception as dh_err:
+                        logger.error(f"[DataHub] Failed to publish tick cache: {dh_err}")
+                        
                     self._last_save_ts = now
                     self.kline_cache._is_dirty = False
                     self._last_save_status = "SUCCESS" if status else "FAILED"

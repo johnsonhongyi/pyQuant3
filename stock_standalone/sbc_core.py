@@ -142,46 +142,57 @@ def load_day_data(code: str, hdf5_lock=None, resample: str = 'd', fastohlc: bool
 def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\minute_kline_cache.pkl"):
     """加载 Tick 或分钟线数据"""
     if use_live:
+        stock_df = None
         try:
-            try:
-                from JSONData import sina_data
-            except ImportError:
-                from stock_standalone.JSONData import sina_data
-            sina = sina_data.Sina()
-            logger.info(f"📡 正在从 Sina 获取 {code} 实时数据...")
-            stock_df = sina.get_real_time_tick(code, enrich_data=True)
-            if stock_df is None or stock_df.empty:
-                logger.error(f"❌ 无法获取 {code} 实时数据")
-                return None
-            
-            stock_df = stock_df.copy()
-
-            # Sina 数据标准化
-            if isinstance(stock_df.index, pd.MultiIndex):
-                stock_df = stock_df.reset_index()
-                if 'code' in stock_df.columns:
-                    stock_df = stock_df[stock_df['code'] == code].copy()
-                stock_df = stock_df.reset_index(drop=True)
-            elif stock_df.index.name == 'ticktime':
-                stock_df = stock_df.reset_index()
-
-            mapping = {'trade': 'close', 'volume': 'volume', 'amount': 'amount'}
-            for src, dst in mapping.items():
-                if src in stock_df.columns and dst not in stock_df.columns:
-                    stock_df[dst] = stock_df[src]
-            
-            for col in ['high', 'low']:
-                if col not in stock_df.columns:
-                    stock_df[col] = stock_df['close']
-            
-            if 'open' not in stock_df.columns:
-                stock_df['open'] = stock_df['close'].shift(1).fillna(stock_df['close'])
-
-            logger.info(f"✅ 成功获取 {len(stock_df)} 条实时数据")
-            return stock_df
+            from data_hub_service import DataHubService
+            hub_df = DataHubService.get_instance().get_tick_cache(code)
+            if hub_df is not None and not hub_df.empty:
+                logger.info(f"⚡ [DataHub] Successfully fetched {len(hub_df)} live ticks for {code}")
+                stock_df = hub_df.copy()
         except Exception as e:
-            logger.error(f"❌ 获取实时数据失败: {e}")
-            return None
+            logger.error(f"[DataHub] Failed to fetch live tick for {code}: {e}")
+
+        if stock_df is None or stock_df.empty:
+            try:
+                try:
+                    from JSONData import sina_data
+                except ImportError:
+                    from stock_standalone.JSONData import sina_data
+                sina = sina_data.Sina()
+                logger.info(f"📡 正在从 Sina 获取 {code} 实时数据...")
+                stock_df = sina.get_real_time_tick(code, enrich_data=True)
+                if stock_df is None or stock_df.empty:
+                    logger.error(f"❌ 无法获取 {code} 实时数据")
+                    return None
+                
+                stock_df = stock_df.copy()
+
+                # Sina 数据标准化
+                if isinstance(stock_df.index, pd.MultiIndex):
+                    stock_df = stock_df.reset_index()
+                    if 'code' in stock_df.columns:
+                        stock_df = stock_df[stock_df['code'] == code].copy()
+                    stock_df = stock_df.reset_index(drop=True)
+                elif stock_df.index.name == 'ticktime':
+                    stock_df = stock_df.reset_index()
+
+                mapping = {'trade': 'close', 'volume': 'volume', 'amount': 'amount'}
+                for src, dst in mapping.items():
+                    if src in stock_df.columns and dst not in stock_df.columns:
+                        stock_df[dst] = stock_df[src]
+                
+                for col in ['high', 'low']:
+                    if col not in stock_df.columns:
+                        stock_df[col] = stock_df['close']
+                
+                if 'open' not in stock_df.columns:
+                    stock_df['open'] = stock_df['close'].shift(1).fillna(stock_df['close'])
+
+                logger.info(f"✅ 成功获取 {len(stock_df)} 条实时数据")
+                return stock_df
+            except Exception as e:
+                logger.error(f"❌ 获取实时数据失败: {e}")
+                return None
     else:
         if not os.path.exists(cache_path):
             logger.error(f"❌ 未找到缓存: {cache_path}")
@@ -253,6 +264,28 @@ def get_day_context(code: str, day_df: pd.DataFrame, tick_date):
             'prev3_high_max': float(max(prev_row['high'], prev2_row['high'], prev3_row['high'])),
             'prev3_close_max': float(max(prev_row['close'], prev2_row['close'], prev3_row['close'])),
         }
+        
+        # 🚀 [NEW] Centralized df_all extraction for structure_base_score
+        try:
+            from data_hub_service import DataHubService
+            hub_df_all = DataHubService.get_instance().get_df_all()
+            if hub_df_all is not None and not hub_df_all.empty:
+                # support both code string and numerical index if padded
+                code_pad = code.zfill(6)
+                if code_pad in hub_df_all.index:
+                    hub_row = hub_df_all.loc[code_pad]
+                elif 'code' in hub_df_all.columns:
+                    match = hub_df_all[hub_df_all['code'] == code_pad]
+                    hub_row = match.iloc[0] if not match.empty else None
+                else:
+                    hub_row = None
+                
+                if hub_row is not None and 'structure_base_score' in hub_row:
+                    bl_data['structure_base_score'] = float(hub_row['structure_base_score'])
+                    logger.debug(f"[SBC] Loaded structure_base_score={bl_data['structure_base_score']} from DataHub")
+        except Exception as e:
+            logger.error(f"[SBC] Failed to fetch df_all from DataHub: {e}")
+
         bl_df = pd.DataFrame([bl_data])
         
         baseline = DailyEmotionBaseline()
