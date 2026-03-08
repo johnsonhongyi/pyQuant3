@@ -7,7 +7,7 @@ from datetime import datetime
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt6.QtGui import QColor, QPicture, QPainter
-from PyQt6.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer
 from tk_gui_modules.window_mixin import WindowMixin
 
 # try:
@@ -239,6 +239,10 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
     def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False):
         super().__init__()
+        # [UPGRADE] Ensure title contains "SBC" for discovery if it is a signal chart
+        if signals is not None and "SBC" not in title:
+            title = f"SBC Pattern - {title}"
+            
         self.setWindowTitle(title)
         self.resize(1000, 600)
         
@@ -249,6 +253,22 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        
+        # --- Toolbar for Rearrange ---
+        toolbar = QWidget()
+        toolbar.setFixedHeight(30)
+        toolbar_layout = QVBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(5, 0, 5, 0)
+        from PyQt6.QtWidgets import QHBoxLayout, QPushButton
+        btn_layout = QHBoxLayout()
+        self.btn_rearrange = QPushButton("窗口重排")
+        self.btn_rearrange.setFixedWidth(80)
+        self.btn_rearrange.setStyleSheet("background-color: #444; color: white; border: 1px solid #666;")
+        self.btn_rearrange.clicked.connect(self._on_rearrange_clicked)
+        btn_layout.addWidget(self.btn_rearrange)
+        btn_layout.addStretch()
+        toolbar_layout.addLayout(btn_layout)
+        layout.addWidget(toolbar)
         
         # Setup Axis if time labels provided
         axis_items = {}
@@ -330,6 +350,18 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         # load previously saved window position
         # self.load_window_position_qt(self, f"StandaloneKlineChart_{title}", default_width=1000, default_height=600)
         width, height, x, y = self.load_window_position_qt(self, f"StandaloneKlineChart", default_width=1000, default_height=600)
+        
+        # 🚀 [NEW] Smart Placement: Dock next to Bidding Panel if Title matches SBC
+        if "SBC" in title:
+            try:
+                try:
+                    from .qt_window_utils import place_next_to
+                except ImportError:
+                    from qt_window_utils import place_next_to
+                QTimer.singleShot(200, lambda: place_next_to(int(self.winId()), "Sector Bidding Panel"))
+            except Exception as e:
+                print(f"Smart placement error: {e}")
+
         # print(f'width:{width}, height:{height}, x:{x}, y:{y}')
         # Crosshair setup
         self.df_ref = df
@@ -400,6 +432,17 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             self.close()
         else:
             super().keyPressEvent(event)
+
+    def _on_rearrange_clicked(self):
+        """Trigger global window tiling."""
+        try:
+            try:
+                from .qt_window_utils import tile_all_windows
+            except ImportError:
+                from qt_window_utils import tile_all_windows
+            tile_all_windows()
+        except Exception as e:
+            print(f"Rearrange error: {e}")
 
 def show_chart_with_signals(df, signals=None, title="Stock Chart",
                             avg_series=None, time_labels=None, use_line=False):

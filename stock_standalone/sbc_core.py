@@ -139,6 +139,46 @@ def load_day_data(code: str, hdf5_lock=None, resample: str = 'd', fastohlc: bool
         logger.error(f"❌ 日线加载失败: {e}")
         return None
 
+def fast_fill_from_tick(stock_df: pd.DataFrame, tick_df: pd.DataFrame,use_tick_vol = True) -> pd.DataFrame:
+    """
+    将 tick 数据补充进 stock_df，并过滤无效 tick
+    """
+
+    tick = tick_df.reset_index()
+
+    # 时间转换
+    tick['ticktime'] = pd.to_datetime(tick['ticktime']).dt.tz_localize('Asia/Shanghai')
+    tick['time'] = tick['ticktime'].astype('int64') // 10**9
+
+    # 成交量列
+    if use_tick_vol:
+        vol_col = 'tick_vol' if 'tick_vol' in tick.columns else 'volume'
+    else:
+        vol_col = 'volume'
+    # ---- 过滤无效 tick ----
+    tick = tick[
+        (tick[vol_col] > 0) &
+        (tick['close'] > 0)
+    ]
+
+    # 统一字段
+    tick_part = tick[['code','time','open','high','low','close']].copy()
+    tick_part['volume'] = tick[vol_col]
+
+    cols = ['code','time','open','high','low','close','volume']
+    stock_part = stock_df[cols]
+
+    # 合并
+    df = pd.concat([stock_part, tick_part], ignore_index=True)
+
+    # 排序
+    df = df.sort_values(['code','time'])
+
+    # 去重（tick优先）
+    df = df.drop_duplicates(['code','time'], keep='last')
+
+    return df.reset_index(drop=True)
+
 def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\minute_kline_cache.pkl"):
     """加载 Tick 或分钟线数据"""
     if use_live:
@@ -152,7 +192,9 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
         except Exception as e:
             logger.error(f"[DataHub] Failed to fetch live tick for {code}: {e}")
 
-        if stock_df is None or stock_df.empty:
+        # [REFINED] Trigger supplemental fetch if data is insufficient (< 200 ticks)
+        # This ensures SBC Replay has a full 240-minute trajectory
+        if stock_df is None or len(stock_df) < 200:
             try:
                 try:
                     from JSONData import sina_data
@@ -200,14 +242,29 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
         try:
             full = pd.read_pickle(cache_path)
             stock_df = full[full['code'] == code].copy().sort_values('time')
+            # [REFINED] If cache is insufficient (< 200), trigger Sina fallback
+            if stock_df.empty or len(stock_df) < 200:
+                logger.info(f"⏳ [Cache] Data insufficient ({len(stock_df)} ticks), trying Sina trajectory fallback...")
+                try:
+                    from JSONData import sina_data
+                    sina = sina_data.Sina()
+                    sina_df = sina.get_real_time_tick(code, enrich_data=True)
+                    if sina_df is not None and not sina_df.empty:
+                        logger.info(f"⚡ [Sina] Successfully retrieved {len(sina_df)} ticks for {code}")
+                        # Return Sina data as it's more complete
+                        stock_df = fast_fill_from_tick(stock_df, sina_df ,use_tick_vol=False)
+                        # return sina_df
+                except Exception as sina_err:
+                    logger.error(f"❌ Sina fallback failed: {sina_err}")
+
             if stock_df.empty:
                 logger.error(f"❌ 缓存中无 {code} 数据")
                 return None
             logger.info(f"✅ 成功加载 {len(stock_df)} 条分钟线数据")
-            return stock_df
         except Exception as e:
             logger.error(f"❌ 读取缓存失败: {e}")
             return None
+    return stock_df
 
 def get_sbc_analysis_package(code: str, use_live: bool = False, hdf5_lock=None, resample: str = 'd', fastohlc: bool = True, cache_path: str = r"G:\minute_kline_cache.pkl", day_df: Optional[pd.DataFrame] = None, tick_df: Optional[pd.DataFrame] = None, verbose: bool = True) -> Optional[Dict[str, Any]]:
     """

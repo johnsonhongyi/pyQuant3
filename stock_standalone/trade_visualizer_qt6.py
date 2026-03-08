@@ -3656,6 +3656,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.sbc_replay_action.triggered.connect(lambda: self._run_sbc_test(False))
         self.toolbar.addAction(self.sbc_replay_action)
 
+        # [NEW] Rearrange Action
+        self.rearrange_action = QAction("重排", self)
+        self.rearrange_action.setToolTip("自动平铺所有打开的监控窗口")
+        self.rearrange_action.triggered.connect(self._on_rearrange_clicked)
+        self.toolbar.addAction(self.rearrange_action)
+
         # # [RESTORE] 测试信号按钮
         # test_action = QAction("测试信号", self)
         # test_action.triggered.connect(self._test_send_signal)
@@ -3712,6 +3718,17 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_strategy_simulation = checked
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def _on_rearrange_clicked(self):
+        """Trigger global window tiling across all PyQuant windows."""
+        try:
+            try:
+                from .qt_window_utils import tile_all_windows
+            except ImportError:
+                from qt_window_utils import tile_all_windows
+            tile_all_windows()
+        except Exception as e:
+            logger.error(f"Rearrange error: {e}")
 
     # def on_toggle_td_sequential(self, checked):
     #     """切换神奇九转显示"""
@@ -3795,10 +3812,20 @@ class MainWindow(QMainWindow, WindowMixin):
             )
             
             # 管理窗口引用，防止被回收
+            if not hasattr(self, '_sbc_test_windows'):
+                self._sbc_test_windows = []
             self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
             if win:
+                win.raise_()
+                win.activateWindow()
                 self._sbc_test_windows.append(win)
-                logger.info(f"✅ SBC 可视化窗口已创建: {data['title']}")
+                logger.info(f"✅ SBC 可视化窗口已创建并激活: {data['title']}")
+                # 延时触发自动对齐
+                try:
+                    from .qt_window_utils import tile_all_windows
+                    QTimer.singleShot(1000, tile_all_windows)
+                except Exception:
+                    pass
             
         except Exception as e:
             logger.error(f"SBC 可视化显示失败: {e}")
@@ -11117,38 +11144,45 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
         sys.exit(0)
 
     # ------------------ 4. Primary: 启动 GUI ------------------
-    app = QApplication(sys.argv)
-    window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
-    
-    # ⭐ [Refactor] 将 ListenerThread 移入 window 内部管理，确保统一清理
-    window.command_listener_thread = CommandListenerThread(server_socket)
-    # ⭐ [FIX] 使用 process_ipc_command 处理所有 IPC 指令 (含 SIGNAL)
-    window.command_listener_thread.command_received.connect(window.process_ipc_command)
-    window.command_listener_thread.dataframe_received.connect(window.on_dataframe_received)
-    window.command_listener_thread.start()
+    ret = 1
+    try:
+        app = QApplication(sys.argv)
+        window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
+        
+        # ⭐ [Refactor] 将 ListenerThread 移入 window 内部管理，确保统一清理
+        window.command_listener_thread = CommandListenerThread(server_socket)
+        # ⭐ [FIX] 使用 process_ipc_command 处理所有 IPC 指令 (含 SIGNAL)
+        window.command_listener_thread.command_received.connect(window.process_ipc_command)
+        window.command_listener_thread.dataframe_received.connect(window.on_dataframe_received)
+        window.command_listener_thread.start()
 
-    start_code = initial_code
+        start_code = initial_code
 
-    # ------------------ 5. 显示 GUI ------------------
-    # ------------------ 5. 显示 GUI ------------------
-    window.show()
-    if start_code is not None:
-        window.load_stock_by_code(start_code)
-    elif len(sys.argv) > 1:
-        start_code = sys.argv[1]
-        if len(start_code) in (6, 8):
+        # ------------------ 5. 显示 GUI ------------------
+        window.show()
+        if start_code is not None:
             window.load_stock_by_code(start_code)
+        elif len(sys.argv) > 1:
+            start_code = sys.argv[1]
+            if len(start_code) in (6, 8):
+                window.load_stock_by_code(start_code)
 
-    # [FIX] Connect aboutToQuit to ensure cleanup happens while event loop is still running
-    app.aboutToQuit.connect(window.close)
+        # [FIX] Connect aboutToQuit to ensure cleanup happens while event loop is still running
+        app.aboutToQuit.connect(window.close)
 
-    ret = app.exec()  # 阻塞 Qt 主循环
+        ret = app.exec()  # 阻塞 Qt 主循环
 
-    # ------------------ 6. 清理 ------------------
-    if stop_flag:
-        stop_flag.value = False
-    # window.close() -> Validated cleanup moved to aboutToQuit
-    sys.exit(ret)
+    except Exception as e:
+        logger.error(f"Error during GUI initialization or execution: {e}")
+        import traceback
+        traceback.print_exc()
+        if stop_flag:
+            stop_flag.value = False
+        sys.exit(1)
+    finally:
+        if stop_flag:
+            stop_flag.value = False
+        sys.exit(ret)
 
 
 def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
@@ -11156,6 +11190,9 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
     try:
         import faulthandler
         faulthandler.enable()
+        import signal
+        # Handle Ctrl+C (SIGINT) for clean exit
+        signal.signal(signal.SIGINT, signal.SIG_DFL) 
     except Exception:
         pass
 
@@ -11165,6 +11202,7 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
         logger.setLevel(log_level.value)
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     stop_flag = stop_flag if stop_flag else mp.Value('b', True)   # 出厂运行
     try:
         server_socket.bind((IPC_HOST, IPC_PORT))
@@ -11276,13 +11314,26 @@ if __name__ == "__main__":
         f"log={args.log_level} debug_realtime={realtime}"
     )
 
-    main(
-        initial_code=initial_code,
-        stop_flag=stop_flag,
-        log_level=log_level,
-        debug_realtime=realtime,
-        command_queue=None  # CLI 启动模式下暂无外部队列
-    )
+    try:
+        main(
+            initial_code=initial_code,
+            stop_flag=stop_flag,
+            log_level=log_level,
+            debug_realtime=realtime,
+            command_queue=None  # CLI 启动模式下暂无外部队列
+        )
+    except KeyboardInterrupt:
+        logger.info("Application terminated by user (Ctrl+C).")
+        if stop_flag:
+            stop_flag.value = False
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Critical error in main: {e}")
+        import traceback
+        traceback.print_exc()
+        if stop_flag:
+            stop_flag.value = False
+        sys.exit(1)
 
     # logger.setLevel(LoggerFactory.DEBUG)
     # stop_flag =  mp.Value('b', True)   # 出厂运行

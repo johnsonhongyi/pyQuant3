@@ -444,6 +444,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.cb_surge_vol  = self._make_cb("放量",     'surge_vol',       bar_lay_1)
         self.cb_consec     = self._make_cb("连续拉升", 'consecutive_up',  bar_lay_1)
 
+        bar_lay_1.addStretch()
+        # 🚀 [NEW] Rearrange Button
+        self.btn_tile = QPushButton("窗口重排")
+        self.btn_tile.setFixedWidth(70)
+        self.btn_tile.setStyleSheet("background-color: #444; color: #00ff88; border: 1px solid #00ff88;")
+        self.btn_tile.clicked.connect(self._on_rearrange_clicked)
+        bar_lay_1.addWidget(self.btn_tile)
+
         bar_lay_1.addWidget(self._sep())
 
         bar_lay_1.addWidget(QLabel("放量倍≥"))
@@ -1549,6 +1557,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if 1430 <= hm <= 1500:
             return "尾盘异动"
         return "盘中监控"
+
+    def _on_rearrange_clicked(self):
+        """Trigger global window tiling."""
+        try:
+            from qt_window_utils import tile_all_windows
+            tile_all_windows()
+        except Exception as e:
+            logger.error(f"Rearrange error: {e}")
 
     def closeEvent(self, event):
         self._refresh_timer.stop()

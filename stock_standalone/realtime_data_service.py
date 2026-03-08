@@ -64,6 +64,7 @@ class MinuteKlineCache:
     _shared_cache: dict[str, deque[KLineItem]]
     _last_update_ts: dict[str, int]
     _is_dirty: bool
+    _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
 
     def __init__(self, max_len: int = 240):
         self._max_len = max_len
@@ -72,6 +73,7 @@ class MinuteKlineCache:
         self._last_update_ts: dict[str, int] = {}
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
+        self._supplemented_codes = set()
 
     def __len__(self) -> int:
         return len(self._shared_cache)
@@ -106,7 +108,21 @@ class MinuteKlineCache:
         df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
         return df
 
-    def from_dataframe(self, df: Optional[pd.DataFrame]):
+    def count_gaps(self, threshold: int = 200) -> dict[str, int]:
+        """
+        统计数据完整性：返回低于 threshold 个 tick 的 ticker 数量及详情
+        """
+        low_tick_codes = {}
+        for code, dq in self._shared_cache.items():
+            count = len(dq)
+            if 0 < count < threshold:
+                low_tick_codes[code] = count
+        
+        if low_tick_codes:
+            logger.info(f"📊 [DataHub] Found {len(low_tick_codes)} stocks with insufficient history (< {threshold} ticks).")
+        return low_tick_codes
+
+    def from_dataframe(self, df: Optional[pd.DataFrame], merge: bool = False):
         """
         从 DataFrame 恢复缓存数据（性能优化版，可直接替换）
         """
@@ -156,8 +172,9 @@ class MinuteKlineCache:
                     .drop_duplicates(subset=['code', 'time'], keep='last')
                 )
 
-            # 清空现有缓存
-            self.clear()
+            # [REFINED] Only clear if not merging
+            if not merge:
+                self.clear()
 
             # 局部变量加速
             shared_cache = self._shared_cache
@@ -306,6 +323,10 @@ class MinuteKlineCache:
         if df is None or df.empty:
             return
             
+        # [REMOVED] Automatic supplemental fetch removed per user feedback.
+        # Regular refreshes now handle all codes via dual-snapshot (Full + Filtered).
+        # _supplemental_fetch remains available for manual on-demand usage (e.g. SBC Replay).
+
         updated_codes: set[str] = set()
         
         # 确定时间源列 (优先识别 market time)
@@ -325,14 +346,18 @@ class MinuteKlineCache:
                 code = str(code_raw).strip().zfill(6)
                 
                 # 价格提取 (trade -> now -> price -> close)
-                price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
+                price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'close', getattr(row, 'price', 0.0))))))
                 
-                # 成交量提取 (nvol -> vol -> volume)
+                # [USER VERSION] 成交量提取优先级:
+                # 用户反馈 nvol 是 volume 的别名，优先使用 nvol
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
                 
-                # [PROTECTION] 价格或成交量为 0 的异常数据丢弃 (防脏数据进入缓存)
+                # [USER VERSION] 过滤价格为 0 或成交量为 0 的记录
                 if price <= 0 or vol <= 0:
                     continue
+                
+                # [REFINED] 即使本间隔无成交，只要价格有效，也记录该分钟 Bar，确保全市场 240 对齐
+                # (注意：由于上方过滤了 vol <= 0，成交量为 0 的个股将不会记录分钟节点)
                 
                 # 时间戳提取
                 if time_col:
@@ -383,6 +408,8 @@ class MinuteKlineCache:
                             callback(code, klines[0])
                         except Exception as e:
                             logger.error(f"Callback error for {code}: {e}")
+
+        # [REMOVED] Premature DataHub publish (moved to Signal calculation points)
 
     def update(self, code: str, tick: dict):
         """
@@ -492,6 +519,65 @@ class MinuteKlineCache:
         else:
             # 忽略过时数据
             pass
+
+    # def fast_fill_from_tick(self, tick_df: pd.DataFrame,use_tick_vol = False) -> pd.DataFrame:
+    #     """
+    #     将 tick 数据补充进 stock_df，并过滤无效 tick
+    #     """
+
+    #     tick = tick_df.reset_index()
+
+    #     # 时间转换
+    #     tick['ticktime'] = pd.to_datetime(tick['ticktime']).dt.tz_localize('Asia/Shanghai')
+    #     tick['time'] = tick['ticktime'].astype('int64') // 10**9
+
+    #     # 成交量列
+    #     if use_tick_vol:
+    #         vol_col = 'tick_vol' if 'tick_vol' in tick.columns else 'volume'
+    #     else:
+    #         vol_col = 'volume'
+    #     # ---- 过滤无效 tick ----
+    #     tick = tick[
+    #         (tick[vol_col] > 0) &
+    #         (tick['close'] > 0)
+    #     ]
+
+    #     # 统一字段
+    #     tick_part = tick[['code','time','open','high','low','close']].copy()
+    #     tick_part['volume'] = tick[vol_col]
+
+    #     # cols = ['code','time','open','high','low','close','volume']
+    #     # stock_part = stock_df[cols]
+
+    #     # # 合并
+    #     # df = pd.concat([stock_part, tick_part], ignore_index=True)
+
+    #     # 排序
+    #     # df = df.sort_values(['code','time'])
+
+    #     # 去重（tick优先）
+    #     # df = df.drop_duplicates(['code','time'], keep='last')
+    #     return tick_part
+
+    def _supplemental_fetch(self, code: str):
+        """
+        [NEW] 补充抓取：对于 tick 数不足的个股，从 Sina 获取完整当日轨迹
+        """
+        try:
+            from JSONData import sina_data
+            sina = sina_data.Sina()
+            # 💡 [USER HINT] 使用 enrich_data=True 获取当日完整轨迹
+            tick_df = sina.get_real_time_tick(code, enrich_data=True)
+            
+            if tick_df is not None and not tick_df.empty:
+                logger.info(f"💡 Supplemental fetch for {code}: retrieved {len(tick_df)} ticks from Sina trajectory.")
+                # 将轨迹数据转换为 K 线并合并 (⚡ Essential: merge=True)
+                # Note: from_dataframe with merge=True adds/updates stocks without clearing others
+                # tick_df = self.fast_fill_from_tick(tick_df)
+                self.from_dataframe(tick_df, merge=True)
+                self._supplemented_codes.add(code)
+        except Exception as e:
+            logger.error(f"❌ Supplemental fetch failed for {code}: {e}")
 
     def detect_v_shape(self, code: str, window: int = 30) -> bool:
         """
@@ -1595,7 +1681,31 @@ class DataPublisher:
                     logger.info(f"🚦 First realtime batch. Time: {hhmm}, Columns: {list(df.columns)[:5]}")
                 
                 self._last_batch_fp = batch_fp
-                t0 = time.time()
+                
+                # 🔌 [REFINED] Backend-driven Signal Detection & Data Hub Publishing
+                # Logic moved from GUI to backend for multi-process awareness
+                enriched_df = df.copy()
+                try:
+                    from stock_logic_utils import detect_signals
+                    # detect_signals handles scores and signal types (BUY_N, BUY_S, etc.)
+                    enriched_df = detect_signals(enriched_df)
+                except Exception as sig_err:
+                    logger.error(f"[Backend] Signal detection failed: {sig_err}")
+
+                # Publish Enriched Data to DataHubService (HDF5)
+                # This makes SBC scores available to all processes
+                try:
+                    from data_hub_service import DataHubService
+                    DataHubService.get_instance().publish_df_all(enriched_df)
+                except Exception as dh_err:
+                    logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
+
+                # Periodically log gap statistics
+                if self.update_count % 30 == 0:
+                    self.kline_cache.count_gaps(threshold=200)
+
+                # Continue with existing pipeline...
+                self.update_count += 1
                 
                 # 情绪与 KLine 更新
                 self.emotion_baseline.calculate_baseline(df)
@@ -1612,6 +1722,19 @@ class DataPublisher:
                 if duration > 0:
                     self.batch_rates_dq.append(len(df) / duration)
                 self.last_batch_time = t1
+
+                # 🔌 [REFINED] Sync to Data Hub Service
+                # Ensure SBC scores and full data are available for other processes
+                try:
+                    from data_hub_service import DataHubService
+                    # We publish the latest snapshot to the Data Hub
+                    # df already has 'code' column from step 1504-1512
+                    DataHubService.get_instance().publish_df_all(df)
+                    
+                    # [FUTURE] Integration of SBC signals directly from sbc_core if needed
+                    # Currently, sbc_core reads from DataHub, so publishing here is sufficient
+                except Exception as e:
+                    logger.error(f"Failed to publish to Data Hub: {e}")
 
                 if self.update_count % 500 == 0:
                     n = gc.collect()
@@ -1647,15 +1770,21 @@ class DataPublisher:
             with timed_ctx("save_kline_cache", warn_ms=1500):
                 save_cache_df = self.kline_cache.to_dataframe()
                 if not save_cache_df.empty:
+                    # 1. 保存到本地磁盘进行恢复
                     status = self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
                     
-                    # 🚀 [NEW] Centralized Tick Cache Publish
+                    # 🔌 [REFINED] 同步到 Data Hub (shared_tick_cache.h5)
+                    # 使得其他进程 (如 SectorBiddingPanel) 能够透明地读取轨迹数据
                     try:
                         from data_hub_service import DataHubService
                         DataHubService.get_instance().publish_tick_cache(save_cache_df)
                     except Exception as dh_err:
                         logger.error(f"[DataHub] Failed to publish tick cache: {dh_err}")
                         
+                    # [FIX] self.kline_cache is MinuteKlineCache, which doesn't have to_pickle.
+                    # Data is already saved by self.cache_slot.save_df(save_cache_df, ...) above.
+                    # No extra saving needed here for recovery as save_df target is self._cache_path.
+                    
                     self._last_save_ts = now
                     self.kline_cache._is_dirty = False
                     self._last_save_status = "SUCCESS" if status else "FAILED"

@@ -2006,6 +2006,8 @@ class Sina:
         # 计算合成均价
         if 'amount' in df_processed.columns:
             df_processed['avg_price'] = (df_processed['amount'] / df_processed[col_vol]).fillna(df_processed[col_price])
+        if 'open' not in df_processed.columns:
+            df_processed['open'] = df_processed['close'].shift(1).fillna(df_processed['close'])
         df_processed = df_processed.set_index('code', append=True).swaplevel()
         return df_processed
 
