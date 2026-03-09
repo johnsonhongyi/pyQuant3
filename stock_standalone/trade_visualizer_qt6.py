@@ -2489,7 +2489,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # }
         # ===== 1. 内置默认列名映射（永远作为兜底）=====
         default_column_map = {
-            'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+            'code': '代码', 'name': '名称', 'Rank': '排名','percent': '涨幅%', 
             'dff': 'DFF', 'per1d': 'per1d', 'win': '连阳', 'slope': '斜率',
             'volume': '虚拟量', 'power_idx': '爆发力',
             'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
@@ -2497,6 +2497,7 @@ class MainWindow(QMainWindow, WindowMixin):
         }
         # ===== 2. 从配置读取（可能为空或被用户删坏）=====
         cfg_map = getattr(cct, "vis_column_map", None)
+        
         # ===== 3. 生成最终 column_map =====
         if isinstance(cfg_map, dict) and cfg_map:
             # 用配置覆盖默认，但不允许删掉默认字段
@@ -2509,11 +2510,21 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 🛡️ 整合可视化所需的核心列，确保 'dff', 'Rank' 等字段始终出现在表头
         visualizer_core_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
-
+        
         # 使用去重的方式合并列
-        combined_header_cols = []
         source_cols = real_time_cols if len(real_time_cols) > 4 and 'percent' in real_time_cols else visualizer_core_cols
-        for c in (source_cols + visualizer_core_cols + strategy_cols):
+        all_candidate_cols = source_cols + visualizer_core_cols + strategy_cols
+
+        # ⭐ [FIX] 严格使用 self.column_map 的键顺序作为表头显示的顺序
+        combined_header_cols = []
+        # 1. 直接遍历 column_map，只要该列在候选名中或者是核心列，就按顺序加入
+        for c in self.column_map.keys():
+            if c in all_candidate_cols or c in visualizer_core_cols:
+                if c not in combined_header_cols:
+                    combined_header_cols.append(c)
+        
+        # 2. 补漏：防止某些 real_time_cols 没在 column_map 里定义
+        for c in all_candidate_cols:
             if c not in combined_header_cols:
                 combined_header_cols.append(c)
 
@@ -4384,6 +4395,20 @@ class MainWindow(QMainWindow, WindowMixin):
 
             self.update_bottom_stats()
             self.show_status_message(f"🏷️ 过滤成功: 共 {len(matched)} 只", 5000)
+
+            # ⭐ [NEW] 自动保存成功的查询到 history5 (如果不在列表中)
+            try:
+                exists = False
+                for i in range(self.cat_filter_input.count()):
+                    if self.cat_filter_input.itemData(i) == keyword:
+                        exists = True
+                        break
+                if not exists:
+                    from history_manager import quick_save_specific_history
+                    if quick_save_specific_history(keyword, "history5"):
+                        self.load_cat_filter_history5()
+            except Exception as e:
+                logger.debug(f"自动保存过滤历史失败: {e}")
 
         except Exception as e:
             logger.error(f"板块过滤失败: {e}")

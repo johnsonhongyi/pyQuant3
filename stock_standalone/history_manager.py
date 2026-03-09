@@ -853,6 +853,63 @@ class QueryHistoryManager:
         return test_code_against_queries(code_data, queries)
 
 
+
+def quick_save_specific_history(query, history_key="history5", note=""):
+    """
+    [NEW] 快速保存一个查询到指定历史分组，不经过 QueryHistoryManager 实例。
+    主要用于 Visualizer 等其他模块静默保存筛选成功的条件。
+    """
+    if not query: return
+    
+    from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+    history_file = SEARCH_HISTORY_FILE
+    
+    data = {"history1":[], "history2":[], "history3":[], "history4":[], "history5":[]}
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"[quick_save_specific_history] Load error: {e}")
+            
+    # 获取目标列表
+    target_list = data.get(history_key, [])
+    if not isinstance(target_list, list): target_list = []
+    
+    # 归一化处理 (参考 QueryHistoryManager._normalize_record)
+    new_record = {"query": str(query).strip(), "starred": 0, "note": str(note).strip()}
+    
+    # 去重逻辑：如果已经存在相同 query，则移到最前，或者不处理。
+    # 这里采用“移到最前”逻辑，保持活性。
+    new_list = []
+    new_list.append(new_record)
+    
+    seen_queries = {new_record["query"]}
+    for item in target_list:
+        if not isinstance(item, dict):
+            q_val = str(item).strip()
+        else:
+            q_val = item.get("query", "").strip()
+            
+        if q_val and q_val not in seen_queries:
+            if isinstance(item, dict):
+                new_list.append(item)
+            else:
+                new_list.append({"query": q_val, "starred": 0, "note": ""})
+            seen_queries.add(q_val)
+            
+    # 限制长度
+    data[history_key] = new_list[:100]
+    
+    try:
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"[quick_save_specific_history] Query saved to {history_key}: {query}")
+        return True
+    except Exception as e:
+        logger.error(f"[quick_save_specific_history] Save error: {e}")
+        return False
+
 def run_manager_process(history_path=None, df_all=None):
     """
     独立进程入口点，用于启动历史查询管理器
