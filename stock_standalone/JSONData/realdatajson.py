@@ -832,9 +832,8 @@ def get_sina_dd_count_price_realTime(df='',table='all',vol='0',type='0'):
         df = get_sina_all_json_dd(vol,type)
 
     if len(df)>0:
-        import ipdb;ipdb.set_trace()
-        
-        df['couts']=df.groupby(['code'])['code'].transform('count')
+        if 'couts' not in df.columns:
+            df['couts']=df.groupby(['code'])['code'].transform('count')
         # df=df[(df['kind'] == 'U')]
         df=df.sort_values(by='couts',ascending=0)
         time_drop=time.time()

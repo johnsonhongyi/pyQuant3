@@ -410,6 +410,10 @@ class KlineBackupViewer(QMainWindow):
             for i, col in enumerate(df.columns):
                 if str(col).lower() in ('code', 'time', 'ticktime', 'datetime'):
                     table_view.resizeColumnToContents(i)
+                    # [FIX] Ensure time columns are wide enough for HH:MM:SS
+                    if str(col).lower() in ('time', 'ticktime', 'datetime'):
+                        if table_view.columnWidth(i) < 120:
+                            table_view.setColumnWidth(i, 120)
 
     def auto_load(self):
         # Default path resolution
