@@ -8583,7 +8583,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'percent': row.get('percent', 0),
                         'volume': row.get('volume', 0),
                         'category': row.get('category', ''),
-                        'price': row.get('price', row.get('trade', 0)),
+                        'price': row.get('trade', row.get('close', 0)),
                         'high4': row.get('high4', 0),
                         'max5': row.get('max5', 0),
                         'max10': row.get('max10', 0),

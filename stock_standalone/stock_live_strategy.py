@@ -391,8 +391,8 @@ class StockLiveStrategy:
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
         
-        # 使用 max_workers=1 避免并发资源竞争，本身计算量很小
-        self.executor = ThreadPoolExecutor(max_workers=1)
+        # 告警任务和后台扫描需要足够的并发工人，避免因 sleep/IO 阻塞导致任务积压
+        self.executor = ThreadPoolExecutor(max_workers=4)
         
         # --- 初始化记录器 (必须在 _load_monitors 之前) ---
         self.trading_logger = TradingLogger()
@@ -3844,166 +3844,137 @@ class StockLiveStrategy:
             logger.error(f"Daily pattern callback failed: {e}")
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
-        """触发报警"""
-        # --- [NEW] 黑名单静默拦截 ---
+        """触发报警 (异步分发器)"""
+        # --- 1. 快速过滤 (同步执行，必须极快) ---
         if self.is_blacklisted(code):
-            # [ADD] 统计触发次数
             if hasattr(self, 'trading_logger'):
                 self.trading_logger.increment_blacklist_hit(code)
-            # 同步内存计数 (可选，UI 刷新时会重载)
             if code in self._blacklist_data:
                 self._blacklist_data[code]['hit_count'] = self._blacklist_data[code].get('hit_count', 0) + 1
-
-            logger.debug(f"🔇 Blacklist Blocked: {name}({code}) | Hits: {self._blacklist_data[code].get('hit_count')} | Msg: {message[:30]}...")
+            logger.debug(f"🔇 Blacklist Blocked: {name}({code})")
             return
 
-        logger.debug(f"🔔 ALERT [{resample}]: {message}")
-
-        # --- [NEW] 1. 优先级与信号识别 (优先级逻辑增强) ---
+        # --- 2. 状态识别 (同步) ---
         is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险"])
+        now_ts = time.time()
+        
+        # --- 3. UI 节流判定 (同步) ---
+        should_skip_ui = False
+        if self.alert_callback:
+            if not hasattr(self, '_ui_callback_throttle'): 
+                self._ui_callback_throttle = {'last_t': 0, 'count': 0}
+            
+            if now_ts - self._ui_callback_throttle['last_t'] < 1.0:
+                self._ui_callback_throttle['count'] += 1
+            else:
+                self._ui_callback_throttle['last_t'] = now_ts
+                self._ui_callback_throttle['count'] = 1
+            
+            should_skip_ui = (self._ui_callback_throttle['count'] > 3 and not is_priority)
+
+        # --- 4. 投递异步任务 (线程池) ---
+        # 打包上下文数据，防止主线程随后的循环修改局部变量（虽然这里是传参，但保险起见快照化关键信息）
+        alert_ctx = {
+            'code': code, 'name': name, 'message': message, 
+            'action': action, 'price': price, 'resample': resample,
+            'is_priority': is_priority, 'should_skip_ui': should_skip_ui,
+            'timestamp_str': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
         
         try:
-            from signal_message_queue import SignalMessageQueue, SignalMessage
-            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # 提取信号类型 (如果是 [起跳新星] 等模式)
-            sig_type = "ALERT"
-            if "起跳新星" in message:
-                sig_type = "BREAKOUT_STAR"
-            elif "形态" in message or "PATTERN" in message:
-                sig_type = "PATTERN"
-            elif is_priority:
-                sig_type = "MOMENTUM"
-            
-            SignalMessageQueue().push(SignalMessage(
-                priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
-                timestamp=now_str,
-                code=code,
-                name=name,
-                signal_type=sig_type,
-                source="live_strategy",
-                reason=message,
-                score=0.0
-            ))
-            
-            # [FIX] 同时持久化到 live_signal_history 表，供 LiveSignalViewer 查询历史
-            # ViewReader 读取的是 trading_logger.db 中的 live_signal_history
-            self.trading_logger.log_live_signal(
-                code=code,
-                name=name,
-                price=price,
-                action=sig_type, # 将 PATTERN/ALERT/BREAKOUT_STAR作为动作
-                reason=message,
-                resample=resample
-            )
-            
-            
+            # 优先使用内部线程池
+            if hasattr(self, 'executor') and self.executor:
+                self.executor.submit(self._async_alert_worker, alert_ctx)
+            else:
+                # 兜底方案
+                t = threading.Thread(target=self._async_alert_worker, args=(alert_ctx,), daemon=True)
+                t.start()
         except Exception as e:
-            logger.debug(f"Push to Queue/DB failed: {e}")
+            logger.error(f"Failed to submit alert task: {e}")
 
-        # [NEW] ⚡ 实时推送到 Visualizer (绕过 DB 延迟)
+    def _async_alert_worker(self, ctx: dict) -> None:
+        """异步报警执行者 (后台线程运行)"""
         try:
-             ipc_data = {
-                "code": code,
-                "name": name,
-                "pattern": sig_type if 'sig_type' in locals() else "ALERT",
-                "message": message,
-                "is_high_priority": is_priority,
-                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "priority": 100 if is_priority else 50
-            }
-             send_signal_to_visualizer_ipc(ipc_data)
-        except Exception:
-            pass
-            
-        # 1. 回调 (UI 优先，确保窗口先弹出来)
-        # 1. 回调 (UI 优先，确保窗口先弹出来) - [OPTIMIZATION] 突发保护
-        # 如果短时间内大量回调，UI 会卡死。增加节流阀。
-        if self.alert_callback:
+            code, name, message = ctx['code'], ctx['name'], ctx['message']
+            action, price, resample = ctx['action'], ctx['price'], ctx['resample']
+            is_priority, should_skip_ui = ctx['is_priority'], ctx['should_skip_ui']
+            now_str = ctx['timestamp_str']
+
+            # --- A. 信号持久化 (Log/DB/Queue) ---
             try:
-                now_t = time.time()
-                # 初始化节流状态
-                if not hasattr(self, '_ui_callback_throttle'): 
-                    self._ui_callback_throttle = {'last_t': 0, 'count': 0}
-                
-                # 1秒内超过 3 次调用，则进入限流模式 (仅放行高优先级)
-                if now_t - self._ui_callback_throttle['last_t'] < 1.0:
-                    self._ui_callback_throttle['count'] += 1
-                else:
-                    self._ui_callback_throttle['last_t'] = now_t
-                    self._ui_callback_throttle['count'] = 1
-                
-                # 限流判定：如果过于频繁且不是高优先级，则跳过 UI 弹窗
-                should_skip_ui = (self._ui_callback_throttle['count'] > 3 and not is_priority)
-                
-                if not should_skip_ui:
-                    self.alert_callback(code, name, message)
-                else:
-                    logger.debug(f"UI Alert throttled for {code}")
+                from signal_message_queue import SignalMessageQueue, SignalMessage
+                sig_type = "ALERT"
+                if "起跳新星" in message: sig_type = "BREAKOUT_STAR"
+                elif "形态" in message or "PATTERN" in message: sig_type = "PATTERN"
+                elif is_priority: sig_type = "MOMENTUM"
+
+                # 写入策略数据库 (SQLite 同步写在大并发下耗时显著)
+                SignalMessageQueue().push(SignalMessage(
+                    priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
+                    timestamp=now_str, code=code, name=name, signal_type=sig_type,
+                    source="live_strategy", reason=message, score=0.0
+                ))
+                # 写入交易日志库
+                self.trading_logger.log_live_signal(
+                    code=code, name=name, price=price, action=sig_type, reason=message, resample=resample
+                )
             except Exception as e:
-                logger.error(f"Alert callback error: {e}")
+                logger.debug(f"Async DB persistence failed: {e}")
 
-        # 2. 语音播报（后置，避免阻塞 UI 窗口产生感官延迟）
-        if self.voice_enabled:
-            # --- [优化] 语音内容精简与去重 ---
-            # message 可能包含：[T+1限制] 名称 (代码) 内容1 \n 内容2...
-            unique_parts = []
-            seen = set()
-            
-            # 1. 基础清理：移除重复的名称和代码
-            clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
-            
-            # 2. 中文分词去重 (简单实现：按常见标点分割)
-            # 使用 re.split 支持多分隔符
-            raw_parts = re.split(r'[，。！| \s]+', clean_msg)
-            for part in raw_parts:
-                part = part.strip()
-                # 过滤掉过短的无意义字符，且只保留第一次出现的非重复内容
-                if part and part not in seen and len(part) > 1:
-                    unique_parts.append(part)
-                    seen.add(part)
-            
-            # 3. 限制播报长度：最多 3 个关键要素
-            concise_msg = "，".join(unique_parts[:3])
+            # --- B. IPC 实时推送 ---
+            try:
+                ipc_data = {
+                    "code": code, "name": name, "pattern": sig_type if 'sig_type' in locals() else "ALERT",
+                    "message": message, "is_high_priority": is_priority, "timestamp": now_str, "priority": 100 if is_priority else 50
+                }
+                send_signal_to_visualizer_ipc(ipc_data)
+            except Exception: pass
 
-            # 4. [新增] 强势标签引导
-            leading_tag = ""
-            if "连阳" in message: leading_tag = "强势连阳，"
-            elif "热点" in message: leading_tag = "热点龙头，"
-            elif "主升" in message: leading_tag = "主升启动，"
-            elif "TD序列" in message: leading_tag = "高位风险项，"
-            elif "顶部风险" in message: leading_tag = "顶部预警，"
-
-            # 组装最终文本
-            speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
-            
-            # ⭐ [FIX] 延迟语音播报,确保窗口创建流程有足够启动时间
-            # 窗口创建是异步的,如果语音立即播报,会导致前几个语音无法同步震动效果
-            # 延迟 300ms 让窗口有机会完成创建并注册到 code_to_alert_win
-            def delayed_announce():
+            # --- C. UI 回调 (执行外部注册函数) ---
+            if self.alert_callback and not should_skip_ui:
                 try:
+                    self.alert_callback(code, name, message)
+                except Exception as e:
+                    logger.error(f"Async Alert callback error: {e}")
+
+            # --- D. 语音播报 ---
+            if self.voice_enabled:
+                # 语义清理
+                clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
+                import re
+                raw_parts = re.split(r'[，。！| \s]+', clean_msg)
+                seen = set()
+                unique_parts = [p.strip() for p in raw_parts if p.strip() and p.strip() not in seen and not seen.add(p.strip())] # type: ignore
+                concise_msg = "，".join(unique_parts[:3])
+
+                leading_tag = ""
+                if "连阳" in message: leading_tag = "强势连阳，"
+                elif "热点" in message: leading_tag = "热点龙头，"
+                elif "主升" in message: leading_tag = "主升启动，"
+                elif "顶部风险" in message: leading_tag = "顶部预警，"
+
+                speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
+                try:
+                    # 即使是异步，也保留 200ms 小间隔让 UI 窗口先创建（如果是新出的信号）
+                    time.sleep(0.2)
                     self._voice.announce(speak_text, code=code)
                 except Exception as e:
-                    logger.debug(f"Delayed announce error: {e}")
-            
-            # 使用 threading.Timer 实现延迟,不阻塞主线程
-            threading.Timer(0.30, delayed_announce).start()
+                    logger.debug(f"Async announce error: {e}")
 
-        # 4. 记录交易执行 (用于回测优化和收益计算)
-        if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
-            # 记录交易并计算单笔收益
-            self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
+            # --- E. 交易记录执行 (DB 写) ---
+            if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
+                self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
 
-        # --- [NEW] 5. 跟单队列状态同步 (Follow Queue Sync) ---
-        # 如果是离场信号，自动将跟单队列中的状态置为 EXITED
-        if action in ("卖出", "止损", "止盈") or "清仓" in action:
-            try:
-                hub = get_trading_hub()
-                exit_date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # 更新跟单队列状态为已离场，并记录离场价和时间
-                if hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=exit_date_str, notes=f"Auto closed by {action}: {message[:50]}"):
-                    logger.debug(f"🔄 Follow sync: {code} set to EXITED @ {price} on {exit_date_str} due to {action}")
-            except Exception as e:
-                logger.error(f"Follow sync failed for {code}: {e}")
+            # --- F. 跟单队列同步 (DB 写/IPC) ---
+            if action in ("卖出", "止损", "止盈", "清仓"):
+                try:
+                    from trading_hub import get_trading_hub
+                    hub = get_trading_hub()
+                    hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=now_str, notes=f"Auto closed by {action}: {message[:50]}")
+                except Exception: pass
+
+        except Exception as outer_e:
+            logger.error(f"Critical error in _async_alert_worker: {outer_e}")
     def _play_sound_async(self):
         # 💥 已移除 winsound 报警，统一使用 VoiceAnnouncer
         pass

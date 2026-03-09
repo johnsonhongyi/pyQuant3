@@ -443,6 +443,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.after(100, self._auto_fit_columns)
                 
         except Exception as e:
+            logger.error(f"错误 加载数据失败: {e}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("错误", f"加载数据失败: {e}")
 
     def _auto_fit_columns(self):

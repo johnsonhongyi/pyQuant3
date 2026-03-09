@@ -947,7 +947,7 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
         df=get_sina_all_json_dd(vol,type)
 
         if len(df)>0:
-            dm = cct.combine_dataFrame(dp,df.loc[:, ['name', 'couts', 'kind', 'prev_price','price']])
+            dm = cct.combine_dataFrame(dp,df.loc[:, ['name', 'couts', 'kind', 'prev_price']])
             log.info("top_now:main:%s subobject:%s dm:%s "%(len(dp),len(df),len(dm)))
             log.debug("dmMerge:%s"%dm.columns[:5])
             dm.couts=dm.couts.fillna(0)
