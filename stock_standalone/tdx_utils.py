@@ -232,7 +232,7 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None):
             
         await asyncio.sleep(timesleep)
 
-def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswith: Any = None, ignore_func: Optional[Callable[[str], bool]] = None) -> threading.Thread:
+def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswith: Any = None, ignore_func: Optional[Callable[[str], bool]] = None ,on_new_code: Optional[Callable[[str], None]] = None,logger=logger) -> threading.Thread:
     """
     在后台线程中启动剪贴板监听，并尝试通过 sender.send(code) 发送代码。
     ignore_func: 接收代码字符串，返回 True 则忽略发送。
@@ -253,6 +253,10 @@ def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswit
                     if hasattr(sender, 'send'):
                         logger.info(f"📋 Clipboard Monitoring: Sending detected code {code}")
                         sender.send(code)
+                    # 新增 UI callback
+                    if on_new_code:
+                        logger.info(f"📋 Clipboard Monitoring: Sending open_visualizer code {code}")
+                        on_new_code(code)
                 except Exception as e:
                     # Assuming 'logger' is available in this scope (e.g., imported globally)
                     logger.error(f"ClipboardListener send error: {e}")

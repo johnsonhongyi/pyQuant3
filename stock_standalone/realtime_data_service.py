@@ -66,8 +66,9 @@ class MinuteKlineCache:
     _is_dirty: bool
     _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
 
-    def __init__(self, max_len: int = 240):
+    def __init__(self, max_len: int = 240, simulation_mode: bool = False):
         self._max_len = max_len
+        self.simulation_mode = simulation_mode
         # {code: deque([KLineItem, ...])}
         self._shared_cache: dict[str, deque[KLineItem]] = {}
         self._last_update_ts: dict[str, int] = {}
@@ -405,39 +406,45 @@ class MinuteKlineCache:
                 else:
                     ts = time.time()
                 
-                # --- [FIX] 未来时间防御墙与严格审计 ---
-                now_ts = time.time()
-                # 如果解析出的时间领先系统超过 10 分钟 (600s)
-                if ts > now_ts + 600:
-                    original_ts = ts
-                    # 尝试纠偏：如果领先超过 30 分钟，极有可能是昨日残余盘后数据（15:00）被解析为今日下午
-                    diff = ts - now_ts
-                    if diff > 1800:
-                        ts -= 86400  # 回退 24 小时
-                    
-                    # 再次校验，如果修正后依然超前，判定为严重脏数据
+                # --- [FIX] 未来时间防御墙与严格审计 (Simulation 模式下跳过) ---
+                if not self.simulation_mode:
+                    now_ts = time.time()
+                    # 如果解析出的时间领先系统超过 10 分钟 (600s)
                     if ts > now_ts + 600:
-                        logger.error(f"❌ [{code}] INVALID FUTURE TICK: {datetime.fromtimestamp(original_ts)} (Now: {datetime.fromtimestamp(now_ts)}, diff={diff:.1f}s, col={time_col_found})")
+                        original_ts = ts
+                        # 尝试纠偏：如果领先超过 30 分钟，极有可能是昨日残余盘后数据（15:00）被解析为今日下午
+                        diff = ts - now_ts
+                        if diff > 1800:
+                            ts -= 86400  # 回退 24 小时
+                        
+                        # 再次校验，如果修正后依然超前，判定为严重脏数据
+                        if ts > now_ts + 600:
+                            logger.error(f"❌ [{code}] INVALID FUTURE TICK: {datetime.fromtimestamp(original_ts)} (Now: {datetime.fromtimestamp(now_ts)}, diff={diff:.1f}s, col={time_col_found})")
+                            continue
+                    
+                    # --- [FIX] 日期一致性校验 (确保是当日数据，防止 H5 脏数据注入) ---
+                    dt_obj = datetime.fromtimestamp(ts)
+                    now_dt = datetime.fromtimestamp(now_ts)
+                    if dt_obj.date() != now_dt.date():
+                        # 特殊处理：如果是 15:00 左右的数据，通常是昨日残留，设为 WARNING 以减噪
+                        if 1455 <= hhmm <= 1505:
+                            logger.warning(f"⚠️ [{code}] Residual data skipped: tick_date={dt_obj.date()}, val={val}")
+                        else:
+                            logger.error(f"❌ [{code}] DATE MISMATCH: tick_date={dt_obj.date()}, today={now_dt.date()} (val={val}, col={time_col_found})")
                         continue
-                
-                # --- [FIX] 日期一致性校验 (确保是当日数据，防止 H5 脏数据注入) ---
-                dt_obj = datetime.fromtimestamp(ts)
-                now_dt = datetime.fromtimestamp(now_ts)
-                if dt_obj.date() != now_dt.date():
-                    # 特殊处理：如果是 15:00 左右的数据，通常是昨日残留，设为 WARNING 以减噪
-                    if 1455 <= hhmm <= 1505:
-                        logger.warning(f"⚠️ [{code}] Residual data skipped: tick_date={dt_obj.date()}, val={val}")
-                    else:
-                        logger.error(f"❌ [{code}] DATE MISMATCH: tick_date={dt_obj.date()}, today={now_dt.date()} (val={val}, col={time_col_found})")
-                    continue
-                
-                # --- [FIX] 防御盘后冗余数据进入缓存 ---
-                # --- [FIX] 统一时间准入标准 (9:15-11:31, 13:00-15:05) ---
-                seconds_from_midnight = (ts + 28800) % 86400
-                mins_from_midnight = int(seconds_from_midnight // 60)
-                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-                if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
-                    continue 
+                    
+                    # --- [FIX] 防御盘后冗余数据进入缓存 ---
+                    # --- [FIX] 统一时间准入标准 (9:15-11:31, 13:00-15:05) ---
+                    seconds_from_midnight = (ts + 28800) % 86400
+                    mins_from_midnight = int(seconds_from_midnight // 60)
+                    hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+                    if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
+                        continue 
+                else:
+                    # Simulation 模式下依然计算 hhmm 供 _update_internal 使用
+                    seconds_from_midnight = (ts + 28800) % 86400
+                    mins_from_midnight = int(seconds_from_midnight // 60)
+                    hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                 
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
@@ -904,7 +911,10 @@ class DailyEmotionBaseline:
                 count += 1
             
             self._last_calc_date = today
-            logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
+            if count > 10:
+                logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
+            else:
+                logger.debug(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
         except Exception as e:
             logger.error(f"Calculate Baseline Error: {e}")
 
@@ -951,9 +961,15 @@ class IntradayEmotionTracker:
         self._cumulative_amt = {}
         self._intraday_high = {}
         self._last_date = {}        # {code: day_num} 用于处理跨天重置累积量
+        self._code_to_name = {}     # [Phase 4] 系统内部名称映射兜底
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
         # item: (timestamp, scores_dict)
         self.history = deque(maxlen=300)
+
+    def register_names(self, name_map: dict[str, str]):
+        """[Phase 4] 注册代码名称对应关系"""
+        if isinstance(name_map, dict):
+            self._code_to_name.update(name_map)
 
     def clear(self):
         self.scores.clear()
@@ -962,6 +978,7 @@ class IntradayEmotionTracker:
         self._cumulative_amt.clear()
         self._intraday_high.clear()
         self._last_date.clear()
+        # self._code_to_name.clear() # 通常名称不随数据清除
 
     def update_batch(self, df: pd.DataFrame, baseline_tracker: Optional[DailyEmotionBaseline] = None):
         """
@@ -1055,10 +1072,20 @@ class IntradayEmotionTracker:
                     
                     # 获取当前环境秒数用于兜底
                     now_ts = time.time()
-                    
                     for idx_val, row in df.iterrows():
                         code_str = str(row['code']).zfill(6)
+                        # [Phase 4] 只有明确有 name 才显示，否则为空字符串
+                        name_raw = row.get('name', '')
+                        # 如果 name 字段内容和 code 一致，说明是 fallback 进来的，我们认为这不算“真正有显示名称”
+                        name_str = str(name_raw) if name_raw and str(name_raw) != code_str else ""
                         
+                        # 只有在内部映射表里确实有不一样的名称时才显示
+                        if not name_str and code_str in self._code_to_name:
+                            candidate = self._code_to_name[code_str]
+                            if candidate != code_str:
+                                name_str = candidate
+                        
+                        name_display = f" {name_str}" if name_str else ""
                         # [Daily Reset Protection] 检测到新的一天，重置累积 VWAP 计算器
                         # 优先从 row 中读取 time/timestamp
                         r_ts = getattr(row, 'time', getattr(row, 'timestamp', now_ts))
@@ -1168,11 +1195,13 @@ class IntradayEmotionTracker:
                                      alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{'buy' if is_sbc_buy else 'sell'}"
                                      if alert_key not in self._sbc_alert_set:
                                          self._sbc_alert_set.add(alert_key)
+                                         # 获取行数据中的时间字符串用于打印
+                                         r_time_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1]
                                          if is_sbc_buy:
                                              scores_dict[idx_val] += 10 # 触发瞬间额外加分
-                                             logger.info(f"🚀 [SBC-Breakout] {code_str} 强势结构确认: 突破多日高位同时站稳均线 ({avg_p:.2f})")
+                                             logger.warning(f"🚀 [SBC-Breakout] {code_str}{name_display} 强势结构确认: {r_time_str} 突破多日高位同时站稳均线 ({avg_p:.2f})")
                                          else:
-                                             logger.info(f"⚠️ [SBC-Breakdown] {code_str} 结构性破位: 跌破关键位置或均线 ({avg_p:.2f})")
+                                             logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
                                  else:
                                      # 持续状态下仅保持状态描述
                                      sbc_signals.append("-".join(status))
@@ -1298,9 +1327,10 @@ class DataPublisher:
     max_batch_time: float
     _last_batch_fp: str
     _enable_backup: bool
-    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, enable_backup: bool = False):
+    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, enable_backup: bool = False, validation_mode: bool = False):
         # global FP_FILE,CACHE_FILE
         self.paused = False
+        self.simulation_mode = validation_mode # 是否为模拟回放/验证模式
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 1200.0 # 阈值调低至 1200MB
@@ -1345,11 +1375,14 @@ class DataPublisher:
         # Mode-based settings: Calculate max_len based on default 60s first
         default_interval = 60
         cache_len = int((self.TARGET_HOURS_HP * 3600) / default_interval) if high_performance else int((self.TARGET_HOURS_LEGACY * 3600) / default_interval)
-        self.kline_cache = MinuteKlineCache(max_len=cache_len)
+        self.kline_cache = MinuteKlineCache(max_len=cache_len, simulation_mode=self.simulation_mode)
         
         self.emotion_baseline = DailyEmotionBaseline() # Initialize baseline tracker
         self.emotion_tracker = IntradayEmotionTracker()
         self.subscribers = defaultdict(lambda: cast(list[Callable[..., object]], []))
+        
+        # [Phase 4] Central Name Mapping
+        self._code_to_name: dict[str, str] = {}
         
         # Performance Tracking
         self.start_time = time.time()
@@ -1379,27 +1412,30 @@ class DataPublisher:
             # --- [UNIFIED CACHE FIX] ---
             # 策略：优先加载 PKL 快照。如果 PKL 缺失或数据量严重不足 (少于 2000 只股)，
             # 则尝试从 sina_MultiIndex_data.h5 增量恢复。
-            cached_df = self.cache_slot.load_df()
-            total_stocks = len(cached_df['code'].unique()) if not cached_df.empty else 0
-            
-            if total_stocks < 2000:
-                logger.info(f"📡 Snapshot deficient (Stocks: {total_stocks}), attempting recovery from HDF5...")
-                h5_df = self.recover_from_hdf5()
-                if not h5_df.empty:
-                    if cached_df.empty:
-                        cached_df = h5_df
-                    else:
-                        # 合并：以 H5 为准，补全缺失股票
-                        cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
-                    new_total = len(cached_df['code'].unique())
-                    logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
+            if not self.simulation_mode:
+                cached_df = self.cache_slot.load_df()
+                total_stocks = len(cached_df['code'].unique()) if not cached_df.empty else 0
+                
+                if total_stocks < 2000:
+                    logger.info(f"📡 Snapshot deficient (Stocks: {total_stocks}), attempting recovery from HDF5...")
+                    h5_df = self.recover_from_hdf5()
+                    if not h5_df.empty:
+                        if cached_df.empty:
+                            cached_df = h5_df
+                        else:
+                            # 合并：以 H5 为准，补全缺失股票
+                            cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
+                        new_total = len(cached_df['code'].unique())
+                        logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
 
-            if not cached_df.empty:
-                with timed_ctx("from_dataframe", warn_ms=800):
-                    self.kline_cache.from_dataframe(cached_df)
-                logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
+                if not cached_df.empty:
+                    with timed_ctx("from_dataframe", warn_ms=800):
+                        self.kline_cache.from_dataframe(cached_df)
+                    logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
+                else:
+                    logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
             else:
-                logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
+                logger.info("🛡️ Simulation Mode: Skipping Live MinuteKlineCache recovery to ensure data isolation.")
         except Exception as e:
             logger.error(f"Snapshot load error: {e}")
 
@@ -1614,8 +1650,7 @@ class DataPublisher:
             
             logger.info(f"🔍 Reading HDF5: {h5_fname} table: {h5_table}")
             # 使用 tdx_hdf5_api 的统一接口读取
-            df_mi = h5a.load_hdf_db(h5_fname, h5_table, MultiIndex=True)
-            
+            df_mi = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False,MultiIndex=True)
             if df_mi is None or df_mi.empty:
                 logger.warning("⚠️ HDF5 recovery source is empty.")
                 return pd.DataFrame()
@@ -1657,6 +1692,17 @@ class DataPublisher:
             logger.error(traceback.format_exc())
             return pd.DataFrame()
 
+    def register_names(self, df_or_dict: Any):
+        """[Phase 4] 为系统注册股票名称"""
+        if isinstance(df_or_dict, pd.DataFrame):
+            if 'code' in df_or_dict.columns and 'name' in df_or_dict.columns:
+                m = df_or_dict.set_index('code')['name'].to_dict()
+                self._code_to_name.update(m)
+                self.emotion_tracker.register_names(m) # 同时同步给 tracker
+        elif isinstance(df_or_dict, dict):
+            self._code_to_name.update(df_or_dict)
+            self.emotion_tracker.register_names(df_or_dict)
+
     def update_batch(self, df: pd.DataFrame):
         """
         接收来自 fetch_and_process 的 DataFrame 快照
@@ -1689,7 +1735,26 @@ class DataPublisher:
                     df = df.copy()
                     df['code'] = df.index
 
-            # logger.info(f'df:{df[:3]} col:{df.columns} "code" in df.columns: {"code" in df.columns}')
+            # [Phase 4] Data Enrichment: Ensure 'name' column exists
+            if 'name' in df.columns:
+                # Learn/Update name mapping from incoming data
+                try:
+                    # Only learn names that are real (not just the code)
+                    mask = (df['name'].notna()) & (df['name'].astype(str) != df['code'].astype(str))
+                    if mask.any():
+                        # Cast to str to satisfy type checker
+                        new_names = {str(k): str(v) for k, v in df[mask].set_index('code')['name'].to_dict().items()}
+                        if new_names:
+                            self._code_to_name.update(new_names)
+                            self.emotion_tracker.register_names(new_names)
+                except:
+                    pass
+            
+            if 'name' not in df.columns and self._code_to_name:
+                # 尽量不在主循环中逐行 map 以保持性能，仅在列缺失时补全
+                df['name'] = df['code'].map(self._code_to_name).fillna(df['code'])
+            elif 'name' not in df.columns:
+                df['name'] = df['code'] # 兜底防止后续 KeyError
             # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
             check_sample = df.head(5).copy()
             
@@ -1780,6 +1845,9 @@ class DataPublisher:
                 # 🔌 [REFINED] Backend-driven Signal Detection & Data Hub Publishing
                 # Logic moved from GUI to backend for multi-process awareness
                 enriched_df = df.copy()
+                if 'code' in enriched_df.columns:
+                    enriched_df = enriched_df.drop_duplicates(subset=['code'])
+                
                 try:
                     from stock_logic_utils import detect_signals
                     # detect_signals handles scores and signal types (BUY_N, BUY_S, etc.)
@@ -1794,15 +1862,21 @@ class DataPublisher:
                 # except Exception as dh_err:
                 #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
 
-                # Periodically log gap statistics
-                if self.update_count % 30 == 0:
+                # [OPTIMIZED] Periodically log gap statistics - throttle to avoid log flood
+                now_t = time.time()
+                if not hasattr(self, '_last_gap_log_t'): self._last_gap_log_t = 0
+                if now_t - self._last_gap_log_t > 300: # Every 5 minutes
                     self.kline_cache.count_gaps(threshold=200)
+                    self._last_gap_log_t = now_t
 
                 # Continue with existing pipeline...
                 self.update_count += 1
                 
                 # 情绪与 KLine 更新
-                self.emotion_baseline.calculate_baseline(df)
+                # [OPTIMIZED] Skip calculate_baseline if already done for TODAY
+                if self.emotion_baseline.get_last_calc_date() != datetime.now().strftime("%Y-%m-%d"):
+                    self.emotion_baseline.calculate_baseline(df)
+                
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
                 
                 if any(col in df.columns for col in ['trade', 'now', 'price', 'close']):

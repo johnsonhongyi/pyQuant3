@@ -452,6 +452,17 @@ class RealtimeSignalManager:
         if df.empty:
             return df
             
+        # [FIX] 处理重复索引，防止 reindex/loc 报错
+        if df.index.duplicated().any():
+            df = df[~df.index.duplicated(keep='first')]
+            
+        # [FIX] 兼容不同的现价列名 (now, trade, price, close)
+        price_col = 'now'
+        for col in ['now', 'trade', 'price', 'close']:
+            if col in df.columns:
+                price_col = col
+                break
+
         # 确保 code 是索引且存在列中
         if 'code' not in df.columns:
             df['code'] = df.index.astype(str).str.zfill(6)
@@ -463,7 +474,7 @@ class RealtimeSignalManager:
         missing_codes = codes.difference(self.state_df.index)
         if not missing_codes.empty:
             new_states = pd.DataFrame({
-                'prev_now': df.loc[missing_codes, 'now'],
+                'prev_now': df.loc[missing_codes, price_col],
                 'today_high': df.loc[missing_codes, 'high'],
                 'today_low': df.loc[missing_codes, 'low'],
                 'prev_signal': None,
@@ -474,9 +485,18 @@ class RealtimeSignalManager:
                 self.volume_history[c] = [df.at[c, 'volume']]
 
         # 提取当前数据和历史状态数据
+        # [FIX] 兼容不同的现价列名 (now, trade, price, close)
+        price_col = 'now'
+        for col in ['now', 'trade', 'close']:
+            if col in df.columns:
+                price_col = col
+                break
+        
+        now_arr = df[price_col].values
+        
+        # 提取历史状态数据
         state = self.state_df.loc[codes]
         
-        now_arr = df['now'].values
         high_arr = df['high'].values
         low_arr = df['low'].values
         volume_arr = df['volume'].values
@@ -501,7 +521,7 @@ class RealtimeSignalManager:
         kdj_j = df.get('kdj_j', 50).values if 'kdj_j' in df.columns else np.full(len(df), 50.0)
         kdj_k = df.get('kdj_k', 50).values if 'kdj_k' in df.columns else np.full(len(df), 50.0)
         kdj_d = df.get('kdj_d', 50).values if 'kdj_d' in df.columns else np.full(len(df), 50.0)
-        open_arr = df['open'].values
+        open_arr = df.get('open', now_arr).values if 'open' in df.columns else now_arr
 
         # 向量化成交量异常判断 (此处由于涉及到 history，优化空间有限，但可以做简单的平均)
         # ⚡ 优化：仅针对 1000+ 股票时，跳过过于复杂的历史成交量计算，使用简单的比例对比

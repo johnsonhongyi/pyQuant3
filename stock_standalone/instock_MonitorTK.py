@@ -615,7 +615,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 📋 启动后台剪贴板监听服务 (包含自动查重逻辑，避免重复发送当前已选中代码)
         self.clipboard_monitor = start_clipboard_listener(
             self.sender, 
-            ignore_func=lambda code: code == getattr(self, 'select_code', None)
+            ignore_func=lambda code: code == getattr(self, 'select_code', None),
+            on_new_code=self._on_clipboard_code_visualizer
         )
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1930,7 +1931,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # logger.info(f'concept_score[:10]:{concept_score[:10]}')
         self.concept_top5 = concept_score[:5]
-        return concept_score[:10]
+        return concept_score[:top_n]
 
 
 
@@ -2172,8 +2173,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_combo2['values'] = self.search_history2
 
         # [NEW] Custom selection handler to map Label -> Query
-        def on_combo1_selected(event):
-            selection = self.search_combo1.get()
         def on_combo1_selected(event):
             selection = self.search_combo1.get()
             # real_query = self.search_map1.get(selection, selection)
@@ -3005,6 +3004,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         except Exception as e:
             logger.error(f"Error saving UI states: {e}")
+
+
+    def _on_clipboard_code_visualizer(self, stock_code):
+
+        self.after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
+
+
+    def _handle_clipboard_code_visualizer(self, stock_code):
+
+        self.select_code = stock_code
+
+        if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+            self.open_visualizer(stock_code)
 
     def open_visualizer(self, code):
         
@@ -8761,36 +8773,59 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"提取出的条件: {removed}")
         logger.info(f"拼接后的 final_query:{final_query}")
 
+    # def _on_search_var_change(self, *_):
+    #     val1 = self.search_var1.get().strip()
+    #     val2 = self.search_var2.get().strip()
+
+    #     # [FIX] 当 val1 为空时，不应该仅用 val2 触发搜索
+    #     # 因为清空 val1 通常意味着用户想要查看全部数据
+    #     if not val1:
+    #         # 如果有挂起的搜索任务，取消它
+    #         if self._search_job:
+    #             self.after_cancel(self._search_job)
+    #             self._search_job = None
+    #         # 清除上次值，避免后续误判
+    #         if hasattr(self, "_last_value"):
+    #             self._last_value = ""
+    #         return  # 不触发搜索
+
+    #     # 构建原始查询语句 (统一使用 parts 逻辑与 apply_search 保持对齐，决定 _last_value 是否相等)
+    #     parts = []
+    #     if val1: parts.append(f"({val1})")
+    #     if val2: parts.append(f"({val2})")
+    #     query = " and ".join(parts)
+
+    #     # 如果新值和上次一样，就不触发
+    #     if hasattr(self, "_last_value") and self._last_value == query:
+    #         return
+    #     self._last_value = query
+
+    #     if self._search_job:
+    #         self.after_cancel(self._search_job)
+    #     self._search_job = self._schedule_after(3000, self.apply_search)  # 3000ms后执行
+
+
     def _on_search_var_change(self, *_):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
 
-        # [FIX] 当 val1 为空时，不应该仅用 val2 触发搜索
-        # 因为清空 val1 通常意味着用户想要查看全部数据
-        if not val1:
-            # 如果有挂起的搜索任务，取消它
-            if self._search_job:
-                self.after_cancel(self._search_job)
-                self._search_job = None
-            # 清除上次值，避免后续误判
-            if hasattr(self, "_last_value"):
-                self._last_value = ""
-            return  # 不触发搜索
+        # 构建 query
+        parts = [v for v in (val1, val2) if v]
+        query = " and ".join(f"({p})" for p in parts)
 
-        # 构建原始查询语句
-        if val1 and val2:
-            query = f"({val1}) and ({val2})"
-        else:
-            query = val1
-
-        # 如果新值和上次一样，就不触发
-        if hasattr(self, "_last_value") and self._last_value == query:
+        # 如果 query 没变，不触发搜索，也不重置 after
+        if getattr(self, "_last_value", None) == query:
             return
+
+        # 更新 _last_value
         self._last_value = query
 
-        if self._search_job:
+        # 取消之前的搜索任务
+        if getattr(self, "_search_job", None):
             self.after_cancel(self._search_job)
-        self._search_job = self._schedule_after(3000, self.apply_search)  # 3000ms后执行
+        
+        # 3 秒后触发 apply_search
+        self._search_job = self.after(3000, self.apply_search)
 
     def _format_history_list(self, history_list, mapping_dict):
         """Helper to format history items with notes and update mapping"""
@@ -9348,6 +9383,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)
+
+        # # 直接更新 _last_value，防止防抖再触发
+        # val1 = self.search_var1.get().strip()
+        # val2 = self.search_var2.get().strip()
+        # parts = [v for v in (val1, val2) if v]
+        # query = " and ".join(f"({p})" for p in parts)
+        # self._last_value = query
+
+        # # 立即执行搜索
+        # self.apply_search()
 
     def on_right_click_search_var4(self, event):
         """search_var4 的右键快捷键，逻辑同 var2"""
@@ -11622,6 +11667,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # if val4: parts.append(f"({val4})")
         
         query = " and ".join(parts)
+        # # 如果新值和上次一样，就不触发
+        # if hasattr(self, "_last_value") and self._last_value == query:
+        #     return
         self._last_value = query
 
         try:
@@ -11726,11 +11774,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if val1.count('or') > 0 and val1.count('(') > 0:
                 if val2 :
                     query_search = f"({val1}) and {val2}"
-                    logger.info(f'query: {query_search} ')
+                    logger.debug(f'query: {query_search} ')
 
                 else:
                     query_search = f"({val1})"
-                    logger.info(f'query: {query_search} ')
+                    logger.debug(f'query: {query_search} ')
                 # if removed_conditions:
                 #     query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
                 #     logger.info(f'removed_query_search: {query_search} removed_conditions:{removed_conditions}')
