@@ -168,7 +168,7 @@ class StockFeatureMarker:
         # 4. 概念热点 (🔥)
         if category and self._is_hot_concept(category):
             icons.append(self.ICONS['hot_concept'])
-
+        
         # 5. 突破新高 (⬆️)
         if price > 0:
             if (hmax > 0 and price >= hmax) or (max5 > 0 and price >= max5):

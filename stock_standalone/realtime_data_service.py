@@ -364,12 +364,12 @@ class MinuteKlineCache:
                 
                 # [REFINED] 成交量提取逻辑优化
                 # 为了支持 Bidding 阶段，优先使用 volume/nvol 等累积值
-                # current_cum_vol = 0.0
-                # for vc in vol_cols_found:
-                #     val = getattr(row, vc, 0.0)
-                #     if val is not None:
-                #         current_cum_vol = float(val)
-                #         break
+                current_cum_vol = 0.0
+                for vc in vol_cols_found:
+                    val = getattr(row, vc, 0.0)
+                    if val is not None:
+                        current_cum_vol = float(val)
+                        break
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
                 
                 # [REFINED] 允许 0 成交量数据进入缓存以支持竞价和不活跃个股
