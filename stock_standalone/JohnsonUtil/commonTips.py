@@ -26,7 +26,7 @@ import argparse
 from typing import Optional, List, Dict, Union, Any, Tuple, Callable
 
 
-# from JohnsonUtil.prettytable import PrettyTable
+from JohnsonUtil.prettytable import PrettyTable
 # from JohnsonUtil import johnson_cons as ct
 # from JohnsonUtil import inStockDb as inDb
 

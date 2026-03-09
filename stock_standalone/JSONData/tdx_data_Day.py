@@ -4489,8 +4489,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     # codelist=df.code.tolist()
     # cct._write_to_csv(df,'codeall')
     # top_now = get_mmarket='all'arket_price_sina_dd_realTime(df, vol, type)
-#    df =  df.dropna()
-    
+    # df =  df.dropna()
 
     if isinstance(df, pd.DataFrame) and len(df) > 0:
         if 'code' in df.columns:
@@ -4612,6 +4611,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         top_now['ratio'] = 0.0
     # top_now = top_now.query('open != 0 and close != 0')
     # return cct.reduce_memory_usage(top_now)
+
     return top_now
 
 

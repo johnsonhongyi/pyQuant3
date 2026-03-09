@@ -576,10 +576,10 @@ def process_merged_sina_with_history(df, mode='A'):
     eval_2d   = df['eval2d'].astype(int)   # 前天状态
     signal_1d = df['signal1d'].astype(int) # 昨天产生的信号
     ma_ref    = df['ma51d']                # 支撑位
-    
+
     # 3. 核心条件判定
     # 启动：价格突围 + 放量
-    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (curr_a > amount_1d * 1.1)
+    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (curr_a > 1.1)
     # 持续：维持在压力位上方
     cond_trend_continue = (curr_c > upper_1d) & (close_1d > upper_1d)
     # 回撤：缩量且守住均线
@@ -2547,11 +2547,13 @@ def fetch_and_process(
             else:
                 with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
                     top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
-            with timed_ctx("sina_with_history", warn_ms=1000):
-                top_all = process_merged_sina_with_history(top_all)
+
             time_sum = time.time()
             with timed_ctx("calc_indicators", warn_ms=1000):
                 top_all = calc_indicators(top_all, logger, resample)
+            #step volume
+            with timed_ctx("sina_with_history", warn_ms=1000):
+                top_all = process_merged_sina_with_history(top_all)
             logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             # top_all = calc_indicators(top_all, resample)
 
@@ -2710,7 +2712,7 @@ def fetch_and_process(
                 sleep_step = 0.5
             else:
                 sleep_step = 1
-
+            # print(f'loop_sleep_time: {loop_sleep_time} sleep_step:{sleep_step} looptime: {loop_sleep_time / sleep_step}')
             stop_conditions = [
                 lambda: not flag.value,
                 lambda: not cct.get_work_time(),

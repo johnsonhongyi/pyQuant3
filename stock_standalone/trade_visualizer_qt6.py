@@ -3808,7 +3808,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 data["title"],
                 avg_series=data["avg_series"],
                 time_labels=data["time_labels"],
-                use_line=data["use_live"]
+                use_line=data["use_line"] if self.realtime else False
             )
             
             # 管理窗口引用，防止被回收

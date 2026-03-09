@@ -115,15 +115,18 @@ class DataFrameCacheSlot:
         if not persist:
             return True
 
+        temp_file = self.cache_file + f".{os.getpid()}.tmp"
         try:
             self._check_disk_space()
 
             # 1. atomic write to temp file
-            temp_file = self.cache_file + ".tmp"
             with open(temp_file, "wb") as f:
                 df.to_pickle(f)
                 f.flush()
-                # os.fsync(f.fileno()) # Windows slow, optional
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
             
             # 2. create backup if exists (Only if backup=True)
             if backup and os.path.exists(self.cache_file):
@@ -135,24 +138,16 @@ class DataFrameCacheSlot:
                     os.rename(self.cache_file, bak_file)
                 except Exception:
                     pass
-            elif not backup and os.path.exists(self.cache_file):
-                # If no backup needed, just remove the old file before rename
-                 try:
-                    os.remove(self.cache_file)
-                 except Exception:
-                    pass
 
-            # 3. rename temp to target
-            if os.path.exists(self.cache_file):
-                os.remove(self.cache_file)
-            os.rename(temp_file, self.cache_file)
-
+            # 3. replace target with temp
+            # os.replace is atomic and works on Windows for replacing existing files
+            os.replace(temp_file, self.cache_file)
             return True
 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"save_df failed: {e}")
-            self._safe_remove(self.cache_file)
+            self._safe_remove(temp_file)
             return False
 
     # =========================
@@ -182,12 +177,16 @@ class DataFrameCacheSlot:
         self._mem_fp = fp
 
         if persist and self.fp_file:
+            temp_fp = self.fp_file + f".{os.getpid()}.tmp"
             try:
-                with open(self.fp_file, "w", encoding="utf-8") as f:
+                with open(temp_fp, "w", encoding="utf-8") as f:
                     json.dump(fp, f)
+                    f.flush()
+                os.replace(temp_fp, self.fp_file)
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"save_fp failed: {e}")
+                self._safe_remove(temp_fp)
 
     # =========================
     # Utils

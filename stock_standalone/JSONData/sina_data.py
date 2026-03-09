@@ -505,7 +505,6 @@ class Sina:
             self.request_num += 1
         
         df = self.get_stock_data()
-        # import ipdb;ipdb.set_trace()
 
         # 3. 整合网络数据与聚合指标 (agg_metrics)
         if df is not None and not df.empty:
@@ -1242,20 +1241,29 @@ class Sina:
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
 
 
-        # # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
-        df['ticktime'] = df['ticktime'].astype(str).str[-8:]
-
-
-        # #nclose 数据异常
-        # # 1. 确保 dt 是日期字符串（如果是 datetime 可以用 .dt.date / .strftime）
-        # df['dt'] = df['dt'].astype(str)
-        # # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
-        # df['ticktime'] = df['ticktime'].astype(str).str[-8:]
-        # # 3. 拼接成完整时间
-        # df['ticktime'] = df['dt'] + ' ' + df['ticktime']
-        # # df['ticktime'] = pd.to_datetime(df['ticktime'])
-        # df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
-
+        # 2. 确保 ticktime 是完整的 YYYY-MM-DD HH:MM:SS 格式
+        df['dt'] = df['dt'].astype(str).str[:10]
+        tt_raw = df['ticktime'].astype(str)
+        # 如果长度为 8 (HH:MM:SS)，则补齐日期前缀
+        mask_short = tt_raw.str.len() == 8
+        if mask_short.any():
+            df.loc[mask_short, 'ticktime'] = df.loc[mask_short, 'dt'] + ' ' + tt_raw.loc[mask_short]
+        
+        # 3. 统一转换为 Timestamp 对象 (避免混合类型)
+        df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+        
+        # 检测未来 Tick 并纠偏至上一个交易日 (API 有时在非交易时段返回 dt 为今日但数据是旧的)
+        now = pd.Timestamp.now()
+        future_mask = df['ticktime'] > (now + pd.Timedelta(minutes=3))
+        if future_mask.any():
+            last_date = cct.get_last_trade_date()
+            log.warning(f"[TICK-纠偏] 检测到未来时间(SINA-DETAIL), 纠偏至 {last_date}: {df.loc[future_mask, 'ticktime'].iloc[0]}")
+            # 重新按上个交易日解析
+            df.loc[future_mask, 'ticktime'] = pd.to_datetime(
+                last_date + ' ' + df.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
+                errors='coerce'
+            )
+        
         dt_v = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt_v)]
 
@@ -1311,8 +1319,24 @@ class Sina:
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
 
-            df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
-            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
+            # df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
+            mask = df['ticktime'].astype(str).str.len() <= 8
+
+            df.loc[mask, 'ticktime'] = df.loc[mask, 'dt'].astype(str) + ' ' + df.loc[mask, 'ticktime']
+
+            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S', errors='coerce')
+
+            # 检测未来 Tick 并纠偏至上一个交易日
+            now = pd.Timestamp.now()
+            future_mask = df['ticktime'] > (now + pd.Timedelta(minutes=3))
+            if future_mask.any():
+                last_date = cct.get_last_trade_date()
+                log.warning(f"[TICK-纠偏] 检测到未来时间(SINA-LIST), 纠偏至 {last_date}: {df.loc[future_mask, 'ticktime'].iloc[0]}")
+                # 重新按上个交易日解析
+                df.loc[future_mask, 'ticktime'] = pd.to_datetime(
+                    last_date + ' ' + df.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
+                    errors='coerce'
+                )
 
             # # 1. 统一为字符串
             # df['dt'] = df['dt'].astype(str).str[:10]

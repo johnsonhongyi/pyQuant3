@@ -159,6 +159,7 @@ class DataHubService:
         """
         发布分钟线/Tick 缓存数据到 HDF5 文件。同样具备多进程原子写入安全。
         """
+        pass
         if df is None or df.empty:
             return False
             

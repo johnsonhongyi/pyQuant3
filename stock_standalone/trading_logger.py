@@ -89,7 +89,8 @@ class TradingLogger:
                     pnl_pct REAL,    -- 盈亏比例
                     status TEXT,     -- 'OPEN' or 'CLOSED'
                     feedback TEXT,   -- 策略反馈 (用户点评)
-                    resample TEXT DEFAULT 'd' -- 周期标识
+                    resample TEXT DEFAULT 'd', -- 周期标识
+                    action TEXT      -- [新增] 交易动作类型 (买入, ADD, 卖出等)
                 )
             """)
             conn.commit()
@@ -191,6 +192,9 @@ class TradingLogger:
             if "resample" not in existing_trade_cols:
                 cur.execute("ALTER TABLE trade_records ADD COLUMN resample TEXT DEFAULT 'd'")
                 logger.info("DB Migration: Added 'resample' column to trade_records")
+            if "action" not in existing_trade_cols:
+                cur.execute("ALTER TABLE trade_records ADD COLUMN action TEXT")
+                logger.info("DB Migration: Added 'action' column to trade_records")
             
             # Migration for signal_history
             cur.execute("PRAGMA table_info(signal_history)")
@@ -455,7 +459,7 @@ class TradingLogger:
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 检查是否已有持仓
-            cur.execute("SELECT id, buy_price, buy_amount, fee FROM trade_records WHERE code=? AND resample=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code, resample))
+            cur.execute("SELECT id, buy_price, buy_amount, fee, action FROM trade_records WHERE code=? AND resample=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code, resample))
             existing_trade = cur.fetchone()
 
             if action == "买入":
@@ -473,9 +477,9 @@ class TradingLogger:
                 # 开启新仓
                 fee = price * amount * fee_rate
                 cur.execute("""
-                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-                """, (code, name, now_str, price, amount, reason, fee, resample))
+                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample, action)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+                """, (code, name, now_str, price, amount, reason, fee, resample, action))
             
             elif action == "ADD":
                 if not existing_trade:
@@ -483,9 +487,9 @@ class TradingLogger:
                     # 如果没有持仓，退化为买入
                     fee = price * amount * fee_rate
                     cur.execute("""
-                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-                    """, (code, name, now_str, price, amount, reason, fee, resample))
+                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample, action)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+                    """, (code, name, now_str, price, amount, reason, fee, resample, action))
                 else:
                     # 加仓：更新均价和股数，并追加理由
                     t_id, old_price, old_amount, old_fee = existing_trade
@@ -505,10 +509,10 @@ class TradingLogger:
                     
                     cur.execute("""
                         UPDATE trade_records 
-                        SET buy_price=?, buy_amount=?, buy_reason=?, fee=?
+                        SET buy_price=?, buy_amount=?, buy_reason=?, fee=?, action=?
                         WHERE id=?
-                    """, (new_avg_price, new_amount, new_reason, new_fee, t_id))
-                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 原因: {reason}")
+                    """, (new_avg_price, new_amount, new_reason, new_fee, action, t_id))
+                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 动作: {action}, 原因: {reason}")
 
             elif action == "卖出" or "止" in action:
                 if existing_trade:
@@ -521,9 +525,9 @@ class TradingLogger:
                     
                     cur.execute("""
                         UPDATE trade_records 
-                        SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
+                        SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED', action=?
                         WHERE id=?
-                    """, (now_str, price, reason, total_fee, net_profit, pnl_pct, t_id))
+                    """, (now_str, price, reason, total_fee, net_profit, pnl_pct, action, t_id))
                     logger.debug(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
                 else:
                     logger.debug(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
@@ -661,8 +665,11 @@ class TradingLogger:
         
         return df
 
-    def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
-        """获取交易记录（包含持仓中和已平仓）"""
+    def get_today_trades(self, resample: Optional[str] = None) -> list[dict[str, Any]]:
+        """获取今天的交易记录"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        return self.get_trades(start_date=today, resample=resample)
+
     def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
         """获取交易记录（包含持仓中和已平仓）"""
         conn = self.db_manager.get_connection()

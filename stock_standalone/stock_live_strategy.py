@@ -1829,7 +1829,7 @@ class StockLiveStrategy:
                             # 查重：今天是否已经做过多单加仓？
                             trades_today = self.trading_logger.get_today_trades()
                             for t in trades_today:
-                                if t['code'] == code and "加仓" in t['action']:
+                                if t['code'] == code and t.get('action') and "加仓" in t['action']:
                                     allow_trade = False
                                     logger.debug(f"⚠️ [T+1 Guard] {code} 今日已触发过加仓，受限单日锁，忽略本次 ADD 信号: {t1_reason}")
                                     break
