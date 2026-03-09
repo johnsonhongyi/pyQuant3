@@ -833,7 +833,7 @@ class GlobalConfig:
             "general",
             "vis_column_map",
             fallback={
-                'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+                'code': '代码', 'name': '名称','Rank': '排名', 'percent': '涨幅', 
                 'dff': 'DFF', 'per1d': 'per1d','win': '连阳', 'slope': '斜率',
                 'volume': '虚拟量', 'power_idx': '爆发力',
                 'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
