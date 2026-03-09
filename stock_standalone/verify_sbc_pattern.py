@@ -269,7 +269,8 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             "title": f"[{code}] 买卖验证 — 结构性信号",
             "avg_series": vwap_series,
             "time_labels": time_labels,
-            "use_live": use_live
+            "use_line": True 
+            # "use_live": use_live,
         }
 
 

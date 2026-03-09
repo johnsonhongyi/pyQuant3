@@ -329,40 +329,61 @@ class MinuteKlineCache:
 
         updated_codes: set[str] = set()
         
-        # 确定时间源列 (优先识别 market time)
-        time_col = None
-        for col in ['timestamp', 'time', 'ticktime']:
-            if col in df.columns:
-                time_col = col
+        # [OPTIMIZATION] 预先裁剪 DataFrame 列，减少 itertuples 遍历时的对象开销
+        core_cols = ['code']
+        # 识别价格列
+        price_col_found = None
+        for pc in ['trade', 'now', 'close', 'price']:
+            if pc in df.columns:
+                price_col_found = pc
+                core_cols.append(pc)
+                break
+        # 识别成交量列
+        vol_cols_found = [c for c in ['nvol', 'vol', 'volume'] if c in df.columns]
+        core_cols.extend(vol_cols_found)
+        # 识别时间列
+        time_col_found = None
+        for tc in ['timestamp', 'time', 'ticktime']:
+            if tc in df.columns:
+                time_col_found = tc
+                core_cols.append(tc)
                 break
         
-        # 获取墙上时间作为备份
-        wall_clock = time.time()
-        
-        for row in df.itertuples(index=False):
+        # 仅遍历核心列，极大提升 5000+ 个股的更新效率
+        df_iter = df[core_cols]
+        for row in df_iter.itertuples(index=False):
             try:
                 code_raw = getattr(row, 'code', '')
                 if not code_raw: continue
                 code = str(code_raw).strip().zfill(6)
                 
-                # 价格提取 (trade -> now -> price -> close)
-                price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'close', getattr(row, 'price', 0.0))))))
+                # [OPTIMIZATION] 使用预先识别的列名提取价格，避免多次 getattr 尝试
+                price = 0.0
+                if price_col_found:
+                    price = float(getattr(row, price_col_found, 0.0))
                 
-                # [USER VERSION] 成交量提取优先级:
-                # 用户反馈 nvol 是 volume 的别名，优先使用 nvol
+                # [REFINED] 成交量提取逻辑优化
+                # 为了支持 Bidding 阶段，优先使用 volume/nvol 等累积值
+                # current_cum_vol = 0.0
+                # for vc in vol_cols_found:
+                #     val = getattr(row, vc, 0.0)
+                #     if val is not None:
+                #         current_cum_vol = float(val)
+                #         break
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
                 
-                # [USER VERSION] 过滤价格为 0 或成交量为 0 的记录
-                if price <= 0 or vol <= 0:
+                # [REFINED] 允许 0 成交量数据进入缓存以支持竞价和不活跃个股
+                if price <= 0 and vol <= 0:
                     continue
                 
-                # [REFINED] 即使本间隔无成交，只要价格有效，也记录该分钟 Bar，确保全市场 240 对齐
-                # (注意：由于上方过滤了 vol <= 0，成交量为 0 的个股将不会记录分钟节点)
+                # 即使本间隔无成交，只要价格有效，也记录该分钟 Bar，确保全市场 240 对齐
                 
                 # 时间戳提取
-                if time_col:
+                ts = 0.0
+                val = None
+                if time_col_found:
+                    val = getattr(row, time_col_found)
                     try:
-                        val = getattr(row, time_col)
                         if isinstance(val, (int, float)) and val > 1e8:
                             ts = float(val)
                         elif isinstance(val, str) and val.replace('.', '', 1).isdigit() and float(val) > 1e8:
@@ -371,17 +392,49 @@ class MinuteKlineCache:
                             # 鲁棒转换：处理 Unix timestamp, datetime, 或 HH:MM:SS 字符串
                             dt = pd.to_datetime(val)
                             if dt.tzinfo is None:
-                                dt = dt.tz_localize('Asia/Shanghai')
+                                # [FIX] 显式锁定北京时间，防止 .timestamp() 默认将其视为 UTC 导致的 8 小时超前
+                                try:
+                                    dt = dt.tz_localize('Asia/Shanghai')
+                                except Exception:
+                                    # 如果已经有时区或报错，保持现状
+                                    pass
                             ts = dt.timestamp()
-                    except Exception:
-                        ts = wall_clock
+                    except Exception as e:
+                        logger.error(f"❌ [{code}] Time parse error: col={time_col_found}, val={val}, err={e}")
+                        continue
                 else:
-                    ts = wall_clock
+                    ts = time.time()
+                
+                # --- [FIX] 未来时间防御墙与严格审计 ---
+                now_ts = time.time()
+                # 如果解析出的时间领先系统超过 10 分钟 (600s)
+                if ts > now_ts + 600:
+                    original_ts = ts
+                    # 尝试纠偏：如果领先超过 30 分钟，极有可能是昨日残余盘后数据（15:00）被解析为今日下午
+                    diff = ts - now_ts
+                    if diff > 1800:
+                        ts -= 86400  # 回退 24 小时
+                    
+                    # 再次校验，如果修正后依然超前，判定为严重脏数据
+                    if ts > now_ts + 600:
+                        logger.error(f"❌ [{code}] INVALID FUTURE TICK: {datetime.fromtimestamp(original_ts)} (Now: {datetime.fromtimestamp(now_ts)}, diff={diff:.1f}s, col={time_col_found})")
+                        continue
+                
+                # --- [FIX] 日期一致性校验 (确保是当日数据，防止 H5 脏数据注入) ---
+                dt_obj = datetime.fromtimestamp(ts)
+                now_dt = datetime.fromtimestamp(now_ts)
+                if dt_obj.date() != now_dt.date():
+                    # 特殊处理：如果是 15:00 左右的数据，通常是昨日残留，设为 WARNING 以减噪
+                    if 1455 <= hhmm <= 1505:
+                        logger.warning(f"⚠️ [{code}] Residual data skipped: tick_date={dt_obj.date()}, val={val}")
+                    else:
+                        logger.error(f"❌ [{code}] DATE MISMATCH: tick_date={dt_obj.date()}, today={now_dt.date()} (val={val}, col={time_col_found})")
+                    continue
                 
                 # --- [FIX] 防御盘后冗余数据进入缓存 ---
                 # --- [FIX] 统一时间准入标准 (9:15-11:31, 13:00-15:05) ---
                 seconds_from_midnight = (ts + 28800) % 86400
-                mins_from_midnight = seconds_from_midnight // 60
+                mins_from_midnight = int(seconds_from_midnight // 60)
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                 if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
                     continue 
@@ -390,7 +443,7 @@ class MinuteKlineCache:
                 minute_ts = int(ts - (ts % 60))
                 
                 # 核心更新
-                self._update_internal(code, price, vol, minute_ts)
+                self._update_internal(code, price, current_cum_vol, minute_ts, hhmm=hhmm)
                 updated_codes.add(code)
                 self._last_update_ts[code] = minute_ts
                 
@@ -436,7 +489,7 @@ class MinuteKlineCache:
                 
             # --- [FIX] 统一时间准入标准 ---
             seconds_from_midnight = (ts + 28800) % 86400
-            mins_from_midnight = seconds_from_midnight // 60
+            mins_from_midnight = int(seconds_from_midnight // 60)
             hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
             if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
                 return
@@ -446,18 +499,19 @@ class MinuteKlineCache:
             # vol = float(tick.get('vol', tick.get('volume', 0.0)))
             vol = float(tick.get('nvol', tick.get('vol', tick.get('volume', 0.0))))
             
-            # [PROTECTION] 异常数据丢弃
-            if price <= 0 or vol <= 0:
+            # [REFINED] 异常数据丢弃 (放宽成交量限制以支持竞价)
+            if price <= 0:
                 return
 
-            self._update_internal(code_clean, price, vol, minute_ts)
+            self._update_internal(code_clean, price, vol, minute_ts, hhmm)
             self._last_update_ts[code_clean] = minute_ts
         except Exception as e:
             logger.error(f"MinuteKlineCache.update error for {code}: {e}")
 
-    def _update_internal(self, code: str, price: float, current_cum_vol: float, minute_ts: int):
+    def _update_internal(self, code: str, price: float, current_cum_vol: float, minute_ts: int, hhmm: Optional[int] = None):
         """
         原子化更新 K 线 (纯净增量逻辑)
+        hhmm: 当前时段，用于支持竞价时段 (9:30以前) 的成交量回退容错
         """
         if code not in self._shared_cache:
             self._shared_cache[code] = deque(maxlen=self._max_len)
@@ -487,6 +541,27 @@ class MinuteKlineCache:
             ))
             self._is_dirty = True
             return
+
+        # 获取 hhmm (如果未传入) 作为容错
+        if hhmm is None:
+            seconds_from_midnight = (minute_ts + 28800) % 86400
+            mins_from_midnight = int(seconds_from_midnight // 60)
+            hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+        
+        # [SELF-HEALING] 处理潜在的未来时间 Bar 污染导致的更新中断
+        # 如果缓存最后一个 Bar 在未来超过 5 分钟，且当前数据是合法的“过去”时间
+        if last_k.time > time.time() + 300 and minute_ts < last_k.time:
+            # print(f"DEBUG [{code}]: HEALING TRIGGERED. last_k={datetime.fromtimestamp(last_k.time)}, current={datetime.fromtimestamp(minute_ts)}")
+            logger.warning(f"🚨 [{code}] Future bar detected ({datetime.fromtimestamp(last_k.time)}), pruning to recover.")
+            klines.pop()
+            if not klines:
+                klines.append(KLineItem(
+                    time=minute_ts, open=price, high=price, low=price, close=price,
+                    volume=0.0, cum_vol_start=current_cum_vol
+                ))
+                self._is_dirty = True
+                return
+            last_k = klines[-1] # 更新引用
         
         # 2. 同一分钟更新
         if last_k.time == minute_ts:
@@ -495,10 +570,22 @@ class MinuteKlineCache:
             last_k.close = price
             
             # 成交量处理 (current_cum_vol - 本分钟起始量)
+            # [REFINED] 容忍成交量回退 (防止因数据源乱序或竞价阶段重置导致缓存归零)
             if current_cum_vol < last_k.cum_vol_start:
-                # 异常处理：成交量回退
-                last_k.cum_vol_start = current_cum_vol
-                last_k.volume = 0.0
+                # [USER HINT] 9:30 以前的竞价可能导致成交量由于重置而回退
+                is_bidding = (hhmm < 930)
+                rollback_amount = last_k.cum_vol_start - current_cum_vol
+                
+                # 竞价时期容错更高；9:30 后仅容忍 1000 股以内的微小波动
+                limit_amt = last_k.cum_vol_start * 0.1 if is_bidding else 1000
+                
+                if rollback_amount > limit_amt and rollback_amount > 1000:
+                    # 确定是大规模重置（如跨日更新未及时清除或数据源异常）
+                    last_k.cum_vol_start = current_cum_vol
+                    last_k.volume = 0.0
+                else:
+                    # 视为噪声/抖动/竞价微调，忽略此笔成交量更新，维持现有 volume
+                    pass
             else:
                 last_k.volume = current_cum_vol - last_k.cum_vol_start
             self._is_dirty = True
@@ -1572,7 +1659,7 @@ class DataPublisher:
         """
         接收来自 fetch_and_process 的 DataFrame 快照
         """
-
+        t0 = time.time()
         is_trading = cct.get_work_time_duration()
 
         if self.paused or not is_trading:
@@ -1647,14 +1734,14 @@ class DataPublisher:
             self._last_update_date = incoming_date
 
             # 3. [CRITICAL FIX] 指纹校验优化：防止局部静态个股屏蔽全场更新
-            # 如果只取 head(50)，一旦前 50 只没有成交，全场都会丢数据
-            # 策略：多段采样 (头 + 尾 + 均匀跨度) + 随机因子
+            # [REFINED] 扩大采样范围，确保大盘个股变动能实时触发批次更新
             total_count = len(df)
-            indices = [0] # 头部
+            # 头 50 + 尾 50 + 均匀采样，充分覆盖 5000+ 个股
+            indices = list(range(0, min(total_count, 50))) # 头部 50 只
             if total_count > 100:
-                # 每隔 10% 采样一个点
-                indices.extend([int(total_count * i / 10) for i in range(1, 10)])
-                indices.append(total_count - 1) # 尾部
+                # 每隔 5% 采样一个点
+                indices.extend([int(total_count * i / 20) for i in range(1, 20)])
+                indices.extend(list(range(max(0, total_count - 50), total_count))) # 尾部 50 只
             
             # 提取指纹特征列
             fp_cols = ['code']
@@ -1667,7 +1754,9 @@ class DataPublisher:
             
             # 仅对采样行进行指纹计算，确保覆盖全场
             check_sample = df.iloc[list(set(indices))]
-            batch_fp = df_fingerprint(check_sample, cols=fp_cols)
+            
+            # [REFINED] 将分钟级时间加入指纹，确保每分钟至少触发一次全流程 (Heartbeat)
+            batch_fp = f"{hhmm}_" + df_fingerprint(check_sample, cols=fp_cols)
             is_new_batch = (batch_fp != self._last_batch_fp)
             
             # 无论是否实时，若基准尚未计算，优先尝试一次
@@ -1723,19 +1812,7 @@ class DataPublisher:
                     self.batch_rates_dq.append(len(df) / duration)
                 self.last_batch_time = t1
 
-                # 🔌 [REFINED] Sync to Data Hub Service
-                # Ensure SBC scores and full data are available for other processes
-                try:
-                    from data_hub_service import DataHubService
-                    # We publish the latest snapshot to the Data Hub
-                    # df already has 'code' column from step 1504-1512
-                    DataHubService.get_instance().publish_df_all(df)
-                    
-                    # [FUTURE] Integration of SBC signals directly from sbc_core if needed
-                    # Currently, sbc_core reads from DataHub, so publishing here is sufficient
-                except Exception as e:
-                    logger.error(f"Failed to publish to Data Hub: {e}")
-
+                # 🔌 [REFINED] Periodic metadata logging
                 if self.update_count % 500 == 0:
                     n = gc.collect()
                     if n > 0: logger.debug(f'🧹 GC collected {n} objects')
@@ -1775,11 +1852,11 @@ class DataPublisher:
                     
                     # 🔌 [REFINED] 同步到 Data Hub (shared_tick_cache.h5)
                     # 使得其他进程 (如 SectorBiddingPanel) 能够透明地读取轨迹数据
-                    try:
-                        from data_hub_service import DataHubService
-                        DataHubService.get_instance().publish_tick_cache(save_cache_df)
-                    except Exception as dh_err:
-                        logger.error(f"[DataHub] Failed to publish tick cache: {dh_err}")
+                    # try:
+                    #     from data_hub_service import DataHubService
+                    #     DataHubService.get_instance().publish_tick_cache(save_cache_df)
+                    # except Exception as dh_err:
+                    #     logger.error(f"[DataHub] Failed to publish tick cache: {dh_err}")
                         
                     # [FIX] self.kline_cache is MinuteKlineCache, which doesn't have to_pickle.
                     # Data is already saved by self.cache_slot.save_df(save_cache_df, ...) above.

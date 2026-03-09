@@ -705,8 +705,16 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         df = df.sort_values(by='couts', ascending=False)
         df = df.drop_duplicates('code')
         print(f"djdf:{time.time()-time_drop:.1f}", end=' ')
-        log.info(f"sina-DD:{df[:1]}")
-        df = df.loc[:, ['code','name','couts','kind','prev_price','ticktime']]
+        df['ticktime'] = df['ticktime'].astype(str)
+        # 补齐日期前缀，使其与 sina_data 格式一致
+        today_str = time.strftime('%Y-%m-%d')
+        mask_short = df['ticktime'].str.len() == 8
+        if mask_short.any():
+            df.loc[mask_short, 'ticktime'] = today_str + ' ' + df.loc[mask_short, 'ticktime']
+        
+        # 统一转为 datetime 对象防止类型混合
+        df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+
         df['code'] = df['code'].apply(lambda x: str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
         if len(df) > 0:
             df = df.set_index('code')
@@ -939,7 +947,7 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
         df=get_sina_all_json_dd(vol,type)
 
         if len(df)>0:
-            dm = cct.combine_dataFrame(dp,df)
+            dm = cct.combine_dataFrame(dp,df.loc[:, ['name', 'couts', 'kind', 'prev_price','price']])
             log.info("top_now:main:%s subobject:%s dm:%s "%(len(dp),len(df),len(dm)))
             log.debug("dmMerge:%s"%dm.columns[:5])
             dm.couts=dm.couts.fillna(0)
@@ -1403,6 +1411,28 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 dd = h5.loc[co_inx]
                 if len(dd) > 100:
                     log.info(f"return sina_ratio market:{market} count:{len(dd)}")
+                    dd['ticktime'] = dd['ticktime'].astype(str)
+                    
+                    # 补齐日期前缀，增加未来检测纠偏
+                    today_str = time.strftime('%Y-%m-%d')
+                    mask_short = dd['ticktime'].str.len() == 8
+                    if mask_short.any():
+                        dd.loc[mask_short, 'ticktime'] = today_str + ' ' + dd.loc[mask_short, 'ticktime']
+                    
+                    dd['ticktime'] = pd.to_datetime(dd['ticktime'], errors='coerce')
+                    
+                    # 检测未来 Tick 并纠偏至上一个交易日
+                    now = pd.Timestamp.now()
+                    future_mask = dd['ticktime'] > (now + pd.Timedelta(minutes=3))
+                    if future_mask.any():
+                        last_date = cct.get_last_trade_date()
+                        log.warning(f"[TICK-纠偏] 检测到未来时间(HDF), 纠偏至 {last_date}: {dd.loc[future_mask, 'ticktime'].iloc[0]}")
+                        # 重新按上个交易日解析
+                        dd.loc[future_mask, 'ticktime'] = pd.to_datetime(
+                            last_date + ' ' + dd.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
+                            errors='coerce'
+                        )
+
                     return dd
 
     # --------- URL 构建 ---------
@@ -1504,6 +1534,28 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
             f"[SINA-LIMIT-CANDIDATE] base={base_limit} new={limit_time}"
         )
         _update_sina_limit_time(limit_time)
+        
+    df['ticktime'] = df['ticktime'].astype(str)
+    # 补齐日期前缀，增加未来检测纠偏
+    today_str = time.strftime('%Y-%m-%d')
+    mask_short = df['ticktime'].str.len() == 8
+    if mask_short.any():
+        df.loc[mask_short, 'ticktime'] = today_str + ' ' + df.loc[mask_short, 'ticktime']
+    
+    # 统一转为 datetime 对象
+    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+
+    # 检测未来 Tick 并纠偏至上一个交易日 (主要针对非开盘时段获取到了昨日数据)
+    now = pd.Timestamp.now()
+    future_mask = df['ticktime'] > (now + pd.Timedelta(minutes=3))
+    if future_mask.any():
+        last_date = cct.get_last_trade_date()
+        log.warning(f"[TICK-纠偏] 检测到未来时间(SINA), 纠偏至 {last_date}: {df.loc[future_mask, 'ticktime'].iloc[0]}")
+        # 重新按上个交易日解析
+        df.loc[future_mask, 'ticktime'] = pd.to_datetime(
+            last_date + ' ' + df.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
+            errors='coerce'
+        )
 
     return df
 
