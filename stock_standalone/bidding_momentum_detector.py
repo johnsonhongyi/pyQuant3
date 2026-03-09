@@ -31,8 +31,14 @@ def get_limit_up_threshold(code: str) -> float:
     elif code_str.startswith(('43', '83', '87', '92')):
         return 29.5
     return 9.5
-
-
+    
+SECTOR_BLACKLIST = {
+    '深股通', '沪股通', '融资融券', '标普概念', 'MSCI中国', '剔除纳斯', 
+    '机构重仓', '昨日涨停', '昨日触板', '创业板综', '证金持股', '上证180',
+    '中证500', '沪深300', '深证成指', '基金重仓', '北向资金', '深成指',
+    '含HS300', '国企改革', '破净股', '预盈预增', 'QFII重仓', '社保重仓',
+    '基金新增', '预亏预减'
+}
 
 class TickSeries:
     """
@@ -41,7 +47,9 @@ class TickSeries:
     __slots__ = ('code', 'klines', 'last_close', 'last_high', 'last_low', 
                  'open_price', 'high_day', 'low_day', 'ma20', 'ma60', 
                  'category', 'name', 'score', 'first_breakout_ts', 'pattern_hint',
-                 'is_untradable', 'is_counter_trend', 'is_gap_leader')
+                 'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
+                 'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
+                 '_splitted_cats', '_total_vol', '_total_amt')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -62,6 +70,16 @@ class TickSeries:
         self.is_untradable: bool = False
         self.is_counter_trend: bool = False
         self.is_gap_leader: bool = False
+        self.lastdu: float = 0.0 # [NEW] 价格波动幅度 (Range Volatility)
+        self.lastdu4: float = 0.0 # [NEW] 短期(4日)价格波动幅度
+        self.ral: int = 0 # [NEW] Relative Accumulation Level (count(low > ma20))
+        self.top0: int = 0 # 一字涨停计数 (强度指标)
+        self.top15: int = 0 # 强势突破计数 (强度指标)
+        self.is_accumulating: bool = False # [NEW]
+        self.is_reversal: bool = False # [NEW]
+        self._splitted_cats: Optional[List[str]] = None
+        self._total_vol: float = 0.0
+        self._total_amt: float = 0.0
 
     def update_meta(self, row: pd.Series):
         """从 df_all 行更新元数据"""
@@ -75,15 +93,51 @@ class TickSeries:
         self.ma60 = float(row.get('ma60d', 0.0))
         self.category = str(row.get('category', ''))
         self.name = str(row.get('name', self.code))
+        self.lastdu = float(row.get('lastdu', 0.0))
+        self.lastdu4 = float(row.get('lastdu4', 0.0))
+        self.ral = int(row.get('ral', 0))
+        self.top0 = int(row.get('top0', 0))
+        self.top15 = int(row.get('top15', 0))
+        self._splitted_cats = None # 重置缓存
+
+    def get_splitted_cats(self) -> List[str]:
+        if self._splitted_cats is not None:
+            return self._splitted_cats
+        import re
+        parts = re.split(r'[;；,，/\- ]', str(self.category))
+        self._splitted_cats = [p.strip() for p in parts if p.strip() and p.strip() != 'nan']
+        return self._splitted_cats
 
     def push_kline(self, kline: dict):
         """追加一根分钟 K 线"""
+        # 如果队列满了，减去最老的统计
+        if len(self.klines) == self.klines.maxlen:
+            oldest = self.klines[0]
+            v = float(oldest.get('volume', 0.0))
+            c = float(oldest.get('close', 0.0))
+            self._total_vol -= v
+            self._total_amt -= v * c
+
         self.klines.append(kline)
+        # 增量维护统计
+        vol = float(kline.get('volume', 0.0))
+        close = float(kline.get('close', 0.0))
+        self._total_vol += vol
+        self._total_amt += vol * close
+        if close > self.high_day: self.high_day = close
+        if close < self.low_day or self.low_day == 0: self.low_day = close
 
     def load_history(self, klines: List[dict]):
         """初始化冷启历史数据"""
+        self._total_vol = 0.0
+        self._total_amt = 0.0
+        self.klines.clear()
         for k in klines[-self.klines.maxlen:]:
-            self.klines.append(k)
+            self.push_kline(k)
+
+    @property
+    def vwap(self) -> float:
+        return self._total_amt / self._total_vol if self._total_vol > 0 else self.current_price
 
     @property
     def current_pct(self) -> float:
@@ -108,9 +162,10 @@ class BiddingMomentumDetector:
     - 发现龙头后展开板块，找出跟随股
     """
 
-    def __init__(self, realtime_service: Optional["DataPublisher"] = None):
+    def __init__(self, realtime_service: Optional["DataPublisher"] = None, simulation_mode: bool = False):
         # ---- 数据服务 ----
         self.realtime_service = realtime_service
+        self.simulation_mode = simulation_mode
 
         # ---- 策略参数：支持动态配置 ----
         self.strategies: Dict[str, Dict[str, Any]] = {
@@ -141,15 +196,43 @@ class BiddingMomentumDetector:
         self._last_gc_ts: float = 0.0
 
         # 聚合门槛评分 (下调以捕捉萌芽期)
-        self.score_threshold = 2.0
+        self.score_threshold = 1.0
         # 板块入场所需个股最低分
-        self.sector_min_score = 3.0
+        self.sector_min_score = 2.0
         # 记录最后看到的数据时间戳（用于模拟回测时同步时钟）
         self.last_data_ts = 0.0
 
-        # key=code, val={name, sector, pct, time_str, reason, release_risk}
+        # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
         self.daily_watchlist: Dict[str, Dict[str, Any]] = {}
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
+
+        # ---- [NEW] 选股器联动与两阶段刷新 ----
+        self.stock_selector_seeds: Set[str] = set() # 昨曾强势/反转股代码
+        self._concept_data_date: Optional[datetime.date] = None
+        self._concept_first_phase_done = False
+        self._concept_second_phase_done = False
+        
+        # [Tier 2] 增量缓存
+        self._global_snap_cache: Dict[str, Dict[str, Any]] = {}
+        self._sector_active_stocks_persistent: Dict[str, Dict[str, Any]] = defaultdict(dict)
+
+        # 初始加载一次昨日选股结果
+        self._load_stock_selector_data()
+
+    def _load_stock_selector_data(self):
+        """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
+        try:
+            from trading_logger import TradingLogger
+            t_logger = TradingLogger()
+            # 获取最近一天的选股记录 (不带 limit，使用默认逻辑)
+            df_seeds = t_logger.get_selections_df() 
+            if not df_seeds.empty and 'code' in df_seeds.columns:
+                # 过滤高分种子
+                high_seeds = df_seeds[df_seeds['score'] >= 80]['code'].astype(str).str.zfill(6).tolist()
+                self.stock_selector_seeds = set(high_seeds)
+                logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股")
+        except Exception as e:
+            logger.warning(f"[Detector] 加载 StockSelector 数据失败: {e}")
 
     # =========================================================
     # 公共接口
@@ -203,6 +286,7 @@ class BiddingMomentumDetector:
 
                 if code not in self._subscribed:
                     try:
+                        # [Modified] Simulation mode also needs subscription to populate TickSeries.klines
                         self.realtime_service.subscribe(code, self._on_tick)
                         self._subscribed.add(code)
                     except Exception as e:
@@ -225,16 +309,24 @@ class BiddingMomentumDetector:
         with self._lock:
             return list(self.daily_watchlist.values())
 
-    def update_scores(self):
+    def update_scores(self, active_codes=None):
         """
         定时调用（如 UI 刷新计时器），对所有已注册 code 重新评分，
         并聚合为板块结果。适用于没有订阅推送（非交易时段调试）。
+        
+        active_codes: List[str], 如果提供，则仅对这些代码进行评分（提升回放效率）
         """
-        with self._lock:
-            codes = list(self._tick_series.keys())
+        if active_codes is not None:
+            codes = active_codes
+        else:
+            with self._lock:
+                codes = list(self._tick_series.keys())
+                
         for code in codes:
             self._evaluate_code(code)
-        self._aggregate_sectors()
+        
+        # 优化：仅聚合受影响的板块
+        self._aggregate_sectors(active_codes=active_codes)
         self._gc_old_sectors()
 
     # =========================================================
@@ -285,6 +377,12 @@ class BiddingMomentumDetector:
         
         # 0. 周期因子 (Cycle Factor): 处于 MA20 之上且 MA20 向上，属于强周期
         cycle_score = 0.0
+        
+        # [NEW] 种子股加分 (StockSelector 预选项)
+        is_hot_seed = code in self.stock_selector_seeds
+        if is_hot_seed:
+            cycle_score += 5.0
+
         if ma20 > 0 and cur_close > ma20:
             cycle_score += 1.0  # 基础牛熊分
             if ma60 > 0 and cur_close > ma60:
@@ -293,6 +391,8 @@ class BiddingMomentumDetector:
         # [Moved Up] 状态标志初始化
         is_counter = False
         is_untradable = False
+        is_accumulating = False # [NEW] 蓄势标志
+        is_reversal = False     # [NEW] 反转标志
         
         # 0.1 历史强度因子 (Integrated from DailyEmotionBaseline)
         hist_strength = 0.0
@@ -329,9 +429,7 @@ class BiddingMomentumDetector:
             
         # [Moved Out] 不可交易检查 (一字板/无量拉升) - 不依赖 realtime_service
         if cur_pct > 8.0:
-            all_highs = [float(k.get('high', 0)) for k in klines]
-            all_lows  = [float(k.get('low', 0))  for k in klines]
-            if max(all_highs) == min(all_lows):
+            if ts_obj.high_day == ts_obj.low_day and ts_obj.high_day > 0:
                 is_untradable = True
         
         # [New] 今日实时价格行为分析 - 区分V反参与日 vs V反后次冲日
@@ -346,11 +444,11 @@ class BiddingMomentumDetector:
         
         # 2. 动量信号 (Surge/High)
         if not intraday_signal:
-            # 2.1 放量拉升检测
-            if len(klines) >= 3:
-                vols = [float(k.get('volume', 0)) for k in klines]
-                if vols[-1] > sum(vols[-3:-1])/2 * 1.5 and cur_close > klines[-2].get('close', 0):
-                    intraday_signal = "放量内激"
+            # 2.1 放量拉升检测 (仅比较最近两根K线，避免全量扫描)
+            if len(klines) >= 2:
+                prev = klines[-2]
+                if cur_vol > float(prev.get('volume', 0)) * 2.0 and cur_close > float(prev.get('close', 0)):
+                    intraday_signal = "放量外激" # [Modified label to avoid confusion]
             
             # 2.2 日内新高
             if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.998:
@@ -359,16 +457,13 @@ class BiddingMomentumDetector:
 
         # 3. 支撑/止损信号
         ma_break_signal = ""
-        if len(klines) >= 5:
-            total_vol = sum(float(k.get('volume', 0)) for k in klines)
-            if total_vol > 0:
-                vwap = sum(float(k.get('close', 0)) * float(k.get('volume', 0)) for k in klines) / total_vol
-                vwap_dist = (cur_close - vwap) / vwap * 100.0
-                
-                if vwap_dist < -0.6 and cur_pct < 0:
-                    ma_break_signal = "破均价线"
-                elif abs(vwap_dist) < 0.2:
-                    ma_break_signal = "均线支撑"
+        vwap = ts_obj.vwap
+        vwap_dist = (cur_close - vwap) / vwap * 100.0 if vwap > 0 else 0.0
+        
+        if vwap_dist < -0.6 and cur_pct < 0:
+            ma_break_signal = "破均价线"
+        elif abs(vwap_dist) < 0.2:
+            ma_break_signal = "均线支撑"
 
         # 4. 保底形态描述 (确保不为空)
         base_pattern = ""
@@ -377,6 +472,42 @@ class BiddingMomentumDetector:
             elif cur_close < ma20 < ma60: base_pattern = "空头下杀"
             elif ma20 > ma60 and cur_close < ma20: base_pattern = "多头回踩"
             elif ma20 < ma60 and cur_close > ma20: base_pattern = "低位反抽"
+
+        # [NEW] 蓄势 (Accumulating) & 反转 (Reversal) 逻辑
+        # 1. 蓄势：低波动 + 均线附近 + 异动缩量后初放
+        # 使用预处理的 lastdu4/lastdu (Range Volatility) 替代 dist_h_l
+        last_du4 = getattr(ts_obj, 'lastdu4', 5.0) 
+        ral_val = getattr(ts_obj, 'ral', 0)
+        
+        # 蓄势评分加成
+        if 0 < (cur_close - ma20) / ma20 < 0.015 and last_du4 < 2.5:
+            is_accumulating = True
+            bonus = 5.0
+            if ral_val > 15: bonus += 3.0 # 长期守住 MA20 的强势蓄势
+            cycle_score += bonus
+            base_pattern = f"蓄势({ral_val})|{base_pattern}" if base_pattern else f"蓄势({ral_val})"
+        
+        # 2. 反转与强度加成
+        top0_val = getattr(ts_obj, 'top0', 0)
+        top15_val = getattr(ts_obj, 'top15', 0)
+        if top0_val > 0: cycle_score += 10.0 # 一字涨停高权重
+        if top15_val > 0: cycle_score += 5.0 # 强势突破加成
+        
+        # 2. 反转：种子股昨日强今日开盘弱现转强，或 MA60 处企稳反弹
+        if is_hot_seed and open_gap_pct < 0 and cur_pct > 0:
+            is_reversal = True
+            cycle_score += 7.0
+            base_pattern = f"反转|{base_pattern}" if base_pattern else "预选反转"
+        elif ma60 > 0 and abs((cur_close - ma60)/ma60) < 0.01 and cur_pct > 1.0:
+            is_reversal = True
+            cycle_score += 4.0
+            base_pattern = f"反转支撑|{base_pattern}" if base_pattern else "MA60反转"
+            
+        # [NEW] 低开高走 (Low Open, High Surge) Logic
+        if day_open > 0 and (day_open - last_close) / last_close < -0.01 and cur_pct > 0.5:
+             is_reversal = True
+             cycle_score += 3.0
+             base_pattern = f"低开高走|{base_pattern}" if base_pattern else "低开高走"
 
         # 5. 组装最终 pattern_hint
         # 结构: [历史/基础形态] | [今日实时信号]
@@ -412,69 +543,70 @@ class BiddingMomentumDetector:
         if self.strategies['pct_change']['enabled']:
             p_min = self.strategies['pct_change']['min']
             p_max = self.strategies['pct_change']['max']
-            if not (p_min <= cur_pct <= p_max):
+            # [Fix] 如果涨幅不足 p_min，评分清零
+            # 允许 蓄势/反转/种子股/高分周期股 绕过此限制，以便在萌芽期识别
+            if cur_pct < p_min and not (is_accumulating or is_reversal or is_hot_seed or cycle_score >= 4.0):
                 with self._lock:
                     if code in self._tick_series:
-                        self._tick_series[code].score = 0.0
+                         self._tick_series[code].score = 0.0
                 return
             score += min(cur_pct / p_max * 2.0, 2.0)  # 最多 2 分
 
         # --- 3. 连续上涨 K 棒 ---
-        if self.strategies['consecutive_up']['enabled'] and len(klines) >= 3:
+        if self.strategies['consecutive_up']['enabled'] and len(klines) >= 2:
             n_bars = self.strategies['consecutive_up']['bars']
-            recents = klines[-n_bars:]
-            closes = [float(k.get('close', 0)) for k in recents]
-            is_consecutive = all(closes[i] > closes[i-1] for i in range(1, len(closes)))
-            if is_consecutive:
-                score += 2.0
+            if len(klines) >= n_bars:
+                recents = list(klines)[-n_bars:] # deque to list is fine for small N
+                is_consecutive = all(recents[i]['close'] > recents[i-1]['close'] for i in range(1, len(recents)))
+                if is_consecutive: score += 2.0
 
-        # --- 4. 放量检查 ---
-        if self.strategies['surge_vol']['enabled'] and len(klines) >= 5:
-            vols = [float(k.get('volume', 0)) for k in klines]
-            recent_avg = sum(vols[-3:]) / 3 if len(vols) >= 3 else vols[-1]
-            hist_avg = sum(vols[:-3]) / max(len(vols)-3, 1) if len(vols) > 3 else recent_avg
-            min_ratio = self.strategies['surge_vol']['min_ratio']
-            if hist_avg > 0 and recent_avg / hist_avg >= min_ratio:
-                score += 2.0 * min(recent_avg / hist_avg / min_ratio, 2.0)
+        # --- 4. 放量检查 (基于 TickSeries 维护的 vwap 和历史统计) ---
+        if self.strategies['surge_vol']['enabled'] and len(klines) >= 2:
+            cur_v = float(klines[-1].get('volume', 0.0))
+            prev_v = float(klines[-2].get('volume', 0.0))
+            if prev_v > 0 and cur_v / prev_v >= self.strategies['surge_vol']['min_ratio']:
+                score += 1.5
 
         # --- 5. 每日新高附近 ---
         if self.strategies['new_high']['enabled']:
-            if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.99:
+            if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.998:
                 score += 1.5
 
-        # --- 6. 振幅过滤（整体振幅过小或过大则剔除）---
-        if self.strategies['amplitude']['enabled'] and len(klines) > 1 and last_close > 0:
-            all_highs = [float(k.get('high', 0)) for k in klines]
-            all_lows  = [float(k.get('low', 0))  for k in klines]
-            h = max(all_highs) if all_highs else 0.0
-            l = min(all_lows)  if all_lows  else 0.0
-            amplitude = (h - l) / last_close * 100 if last_close > 0 else 0.0
-            a_min = self.strategies['amplitude']['min']
-            a_max = self.strategies['amplitude']['max']
-            if not (a_min <= amplitude <= a_max):
+        # --- 6. 振幅过滤 (使用 TickSeries 的 incremental high_day/low_day) ---
+        if self.strategies['amplitude']['enabled'] and last_close > 0:
+            amplitude = (ts_obj.high_day - ts_obj.low_day) / last_close * 100
+            if not (self.strategies['amplitude']['min'] <= amplitude <= self.strategies['amplitude']['max']):
                 score = 0.0
 
-        # --- 7. 时间因子与首次异动记录 ---
+        # --- 7. 最终评分与活性修正 ---
         final_score = cycle_score + bidding_score + score
-        
-        # 尝试从数据中获取模拟时间，否则回测时显示的“首异时间”会是此时此刻的墙上时间
+        # [NEW] 活性修正：如果最近 3 分钟价格没有变动且未涨停，分数减半 (针对 user 提到的 0.0% 问题)
+        if len(klines) >= 3:
+            last_3 = [k['close'] for k in list(klines)[-3:]]
+            if len(set(last_3)) == 1 and cur_pct < get_limit_up_threshold(code):
+                final_score *= 0.5
+
+        # 尝试从数据中获取模拟时间
         data_ts = 0.0
+        # 1. 优先从当前最新 row 提取时间
         ts_val = latest.get('ticktime', latest.get('timestamp', latest.get('time')))
         if ts_val:
             try:
-                # 如果是字符串，转为 unix timestamp
                 if isinstance(ts_val, (str, pd.Timestamp)):
                     dt = pd.to_datetime(ts_val)
                     data_ts = dt.timestamp()
-                    # [BUG FIX] 防止昨天的纯时间字符串 "15:00:00" 被 pandas 默认解析为今天的 15:00 (变成未来时间)
+                    # 防止跨天解析偏差
                     if data_ts > time.time() + 60:
                         data_ts = (dt - pd.Timedelta(days=1)).timestamp()
                 else:
                     data_ts = float(ts_val)
             except:
-                data_ts = time.time()
+                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+        # 2. 兜底从 K 线提取
+        elif klines:
+            data_ts = klines[-1].get('timestamp', self.last_data_ts if self.last_data_ts > 0 else time.time())
         else:
-            data_ts = time.time()
+            data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
         with self._lock:
             # 如果分数达到门槛且是首次异动，记录时间（用于认定龙头）
@@ -492,6 +624,8 @@ class BiddingMomentumDetector:
                 ts_obj.is_untradable = is_untradable
                 ts_obj.is_counter_trend = is_counter
                 ts_obj.is_gap_leader = is_gap_leader  # 连续跳空强势龙头标记
+                ts_obj.is_accumulating = is_accumulating # [NEW]
+                ts_obj.is_reversal = is_reversal         # [NEW]
             
             # 更新全局最后时间
             if data_ts > self.last_data_ts:
@@ -501,312 +635,224 @@ class BiddingMomentumDetector:
     # 内部：板块聚合
     # =========================================================
 
-    def _aggregate_sectors(self):
+    def _aggregate_sectors(self, active_codes=None):
         """
         将高分个股聚合到板块，找龙头和跟随股。
-        在主刷新计时器或 update_scores() 中调用。
+        active_codes: 如果提供，则只更新受这些个股影响的板块。
         """
-
+        import re
+        
         with self._lock:
-            # 复制评分快照，以及走势图所需的元数据
-            snap = {code: (ts.score, ts.current_pct, ts.current_price,
-                           ts.name, ts.category, ts.last_close,
-                           ts.high_day, ts.low_day, ts.last_high, ts.last_low,
-                           ts.first_breakout_ts, getattr(ts, 'pattern_hint', ""),
-                           getattr(ts, 'is_untradable', False),
-                           getattr(ts, 'is_counter_trend', False))
-                    for code, ts in self._tick_series.items()}
+            if active_codes is not None:
+                codes_to_process = active_codes
+            else:
+                codes_to_process = list(self._tick_series.keys())
 
-        # 板块黑名单（屏蔽宽泛、非具体行业/概念板块）
-        SECTOR_BLACKLIST = {
-            '深股通', '沪股通', '融资融券', '标普概念', 'MSCI中国', '剔除纳斯', 
-            '机构重仓', '昨日涨停', '昨日触板', '创业板综', '证金持股', '上证180',
-            '中证500', '沪深300', '深证成指', '基金重仓', '北向资金', '深成指',
-            '含HS300', '国企改革', '破净股', '预盈预增', 'QFII重仓', '社保重仓'
-        }
+            # 1. 更新 snap 缓存
+            for code in codes_to_process:
+                ts = self._tick_series.get(code)
+                if ts:
+                    # 价格行为数据
+                    data = {
+                        'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
+                        'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
+                        'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
+                        'last_low': ts.last_low, 'first_breakout_ts': ts.first_breakout_ts, 
+                        'pattern_hint': getattr(ts, 'pattern_hint', ""),
+                        'klines': list(ts.klines), # [Phase 4] 必须包含 K 线用于 UI 渲染
+                        'is_untradable': getattr(ts, 'is_untradable', False),
+                        'is_counter_trend': getattr(ts, 'is_counter_trend', False),
+                        'is_accumulating': getattr(ts, 'is_accumulating', False),
+                        'is_reversal': getattr(ts, 'is_reversal', False),
+                        'ral': getattr(ts, 'ral', 0),
+                        'top0': getattr(ts, 'top0', 0),
+                        'top15': getattr(ts, 'top15', 0)
+                    }
+                    self._global_snap_cache[code] = data
+                    
+                    # 2. 同步更新增量分组 (持久化)
+                    cats = ts.get_splitted_cats()
+                    if ts.score >= self.score_threshold:
+                        for cat in cats:
+                            if cat not in SECTOR_BLACKLIST and len(cat) <= 8:
+                                self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
+                    else:
+                        for cat in cats:
+                            if code in self._sector_active_stocks_persistent.get(cat, {}):
+                                del self._sector_active_stocks_persistent[cat][code]
+            
+            snap = self._global_snap_cache
+            
+            # 3. 确定需要重算的板块
+            target_sectors = set()
+            if active_codes is not None:
+                for code in active_codes:
+                    ts = self._tick_series.get(code)
+                    if ts:
+                        for p in ts.get_splitted_cats():
+                            if p not in SECTOR_BLACKLIST: target_sectors.add(p)
+            else:
+                target_sectors = None # 全量更新
 
-        # [New] 计算全市场平均涨幅，用于识别“逆势异军突起”
         market_avg_pct = 0.0
         if snap:
-            market_avg_pct = sum(x[1] for x in snap.values()) / len(snap)
-            self.last_market_avg = market_avg_pct # 存回 detector 供 _evaluate_code 使用
+            market_avg_pct = sum(x['pct'] for x in snap.values()) / len(snap)
+            self.last_market_avg = market_avg_pct
 
-        # 按板块聚合
-        import re
-        sector_stocks: Dict[str, List[dict]] = defaultdict(list)
-        for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo, fbts, phint, untrd, isctr) in snap.items():
-            if score < self.score_threshold:
-                continue
-            parts = re.split(r'[;；,，/\- ]', cat)
-            for p in parts:
-                p = p.strip()
-                if not p or p == 'nan' or p in SECTOR_BLACKLIST:
-                    continue
-                # 过滤太长的描述性板块名
-                if len(p) > 8: 
-                    continue
-                sector_stocks[p].append({
-                    'code': code, 'score': score,
-                    'pct': pct, 'price': price, 'name': name,
-                    'last_close': lc, 'high_day': hi, 'low_day': lo,
-                    'last_high': lhi, 'last_low': llo, 'first_breakout_ts': fbts,
-                    'pattern_hint': phint, 'is_untradable': untrd, 'is_counter_trend': isctr
-                })
+        now_dt = datetime.datetime.now()
+        today = now_dt.date()
+        now_t = now_dt.hour * 100 + now_dt.minute
+        if self._concept_data_date != today:
+            self._concept_data_date = today
+            self._concept_first_phase_done = False
+            self._concept_second_phase_done = False
+            self.daily_watchlist.clear()
+            if hasattr(self, "_sector_active_stocks_persistent"):
+                self._sector_active_stocks_persistent.clear()
+            logger.info(f"[Detector] {today} 跨天重置状态")
 
-        # 优先使用最后接收到的数据时间戳，否则使用系统时间
         now_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
-        new_active: Dict[str, Dict[str, Any]] = {}
 
-        # --- Limit-up tracking for daily_watchlist ---
-        # This logic is added here to populate self.daily_watchlist
-        # It checks for stocks that are at or near limit-up and adds them to the watchlist
-        for code, (score, pct, price, name, cat, lc, hi, lo, lhi, llo, fbts, phint, untrd, isctr) in snap.items():
-            if pct >= get_limit_up_threshold(code) and not untrd: # Check for near limit-up dynamically by market
-                # If it's already in the watchlist, only update dynamic fields, NEVER touch time_str
+        # --- 更新全量 Watchlist (仅针对有变动的个股) ---
+        codes_for_watchlist = active_codes if active_codes is not None else snap.keys()
+        for code in codes_for_watchlist:
+            d = snap.get(code)
+            if d and d['pct'] >= get_limit_up_threshold(code) and not d['is_untradable']:
                 if code in self.daily_watchlist:
-                    # 只更新涨幅和形态，保留首次触发时间不变
-                    self.daily_watchlist[code]['pct'] = round(pct, 2)
-                    if phint:
-                        self.daily_watchlist[code]['pattern_hint'] = phint
+                    self.daily_watchlist[code]['pct'] = round(d['pct'], 2)
+                    if d['pattern_hint']: self.daily_watchlist[code]['pattern_hint'] = d['pattern_hint']
                 else:
-                    # 新入表：使用该股自己的首次异动时间戳(first_breakout_ts)作为触发时间
-                    # 如果 fbts 可用且合理，用它；否则 fallback 到当前批次时间
-                    if fbts > 0:
-                        trigger_ts = fbts
-                    else:
-                        trigger_ts = now_ts
-                    trigger_time_str = datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M')
+                    trigger_ts = d['first_breakout_ts'] if d['first_breakout_ts'] > 0 else now_ts
                     self.daily_watchlist[code] = {
-                        'code': code,
-                        'name': name,
-                        'sector': cat, # Use the full category string for watchlist
-                        'pct': round(pct, 2),
-                        'time_str': trigger_time_str,
-                        'reason': '涨停',
-                        'pattern_hint': phint,
-                        'release_risk': False # Placeholder for future logic
+                        'code': code, 'name': d['name'], 'sector': d['category'], 'pct': round(d['pct'], 2),
+                        'time_str': datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M'),
+                        'reason': '涨停', 'pattern_hint': d['pattern_hint']
                     }
-        # [NEW] Log the watchlist if enabled (OUTSIDE the sector loop)
-        if self.enable_log and self.daily_watchlist:
-            watchlist = self.get_daily_watchlist()
-            if watchlist:
-                logger.info(f"📋 当日重点表 ({len(watchlist)} 只):")
-                for w in watchlist:
-                    # 获取第一个非市场标签的概念板块
-                    market_tags = ['科创板', '创业板', '主板', '中小板', '北证']
-                    all_cats = w['sector'].split(';')
-                    cats = [c for c in all_cats if c not in market_tags]
-                    sector_short = cats[0] if cats else (all_cats[0] if all_cats else 'N/A')
-                    
-                    reason_tag = f"[{w['reason']}]" if w.get('reason') else ''
-                    logger.info(f"   {w['name']} ({w['code']}) {reason_tag} {w['pct']:+.1f}% 首触发: {w['time_str']} 板块: {sector_short}")
-                logger.info("-" * 60)
 
-        for sector, stocks in sector_stocks.items():
-            if not stocks:
+        new_active = {} if target_sectors is None else self.active_sectors.copy()
+        
+        # 将 persistent dict 转换为 list 给计算逻辑使用
+        sectors_to_update = target_sectors if target_sectors is not None else self._sector_active_stocks_persistent.keys()
+        
+        for sector in sectors_to_update:
+            stocks_dict = self._sector_active_stocks_persistent.get(sector, {})
+            if not stocks_dict:
+                if sector in new_active: del new_active[sector]
                 continue
             
-            # --- 板块内分析 ---
-            # 1. 寻找领涨股 (带量上攻基础分 + 先发时间奖励 - 尾盘回落惩罚)
+            stocks = list(stocks_dict.values())
+            
             for s in stocks:
-                base_score = s.get('score', 0)
-                # 计算回撤惩罚: (日内最高价 - 现价) / 昨收 => 回撤幅度
-                drawdown_pct = 0.0
-                if s['last_close'] > 0 and s['high_day'] > 0:
-                    drawdown_pct = max(0, (s['high_day'] - s['price']) / s['last_close'] * 100)
-                
-                # 惩罚项：如果从高位回撤超过 1.0%，则大概率不是当下的真龙头
+                base_score = s['score']
+                drawdown_pct = max(0, (s['high_day'] - s['price']) / s['last_close'] * 100) if s['last_close'] > 0 else 0
                 penalty = drawdown_pct * 4.0 
-
-                # 计算先发奖励: 越早起动的分数越高 (09:30-10:00 权重最高)
                 time_bonus = 0.0
                 if s['first_breakout_ts'] > 0:
-                    # 假定以 09:30 为基准
                     market_open_dt = pd.Timestamp.fromtimestamp(s['first_breakout_ts']).replace(hour=9, minute=30, second=0)
                     time_diff_min = (market_open_dt.timestamp() - s['first_breakout_ts']) / 60.0
-                    # 早于 09:30 的（竞价）给 10 分固定奖励，09:30-10:00 每分钟递减
-                    if time_diff_min >= 0:
-                        time_bonus = 10.0 + time_diff_min * 0.1
-                    else:
-                        # 09:30 之后，起动越晚奖励越少
-                        time_bonus = max(0, 10.0 + time_diff_min * 0.5)
-
-                # 龙头综合评分 (Composite Score)
-                # 强化涨幅权重 (1.2)，基础异动分权重 (0.8)，确保领涨性
+                    time_bonus = 10.0 + time_diff_min * (0.1 if time_diff_min >= 0 else 0.5)
+                
                 s['leader_score'] = base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus
-                
-                # [Added] 形态属性奖励与逆势溢价
-                phint = s.get('pattern_hint', "")
-                if "V反" in phint: s['leader_score'] += 5.0
-                if "突破" in phint: s['leader_score'] += 3.0
-                if "MA60反转" in phint: s['leader_score'] += 8.0
-                if "MA20反转" in phint: s['leader_score'] += 4.0
-                
-                # 逆势带头作用：大盘跌，它涨，带量异动
-                if market_avg_pct < -0.5 and s['pct'] > 1.0:
-                    # 逆势加成：基础分翻倍的一个加成或固定奖励
-                    s['leader_score'] += 10.0 
-                    s['is_counter_trend'] = True
-                else:
-                    s['is_counter_trend'] = False
+                if market_avg_pct < -0.5 and s['pct'] > 1.0: s['leader_score'] += 10.0 
+                if s['is_untradable']: s['leader_score'] -= 50.0 
 
-                # 识别一字板 (Untradable)
-                # 如果个股在评价时已经标记为不可交易，或者现在表现为一字涨停，则确认为不可交易
-                limit_threshold = get_limit_up_threshold(s['code'])
-                if s.get('is_untradable') or (s['pct'] > limit_threshold and (s['high_day'] - s['low_day']) < 0.01):
-                    s['is_untradable'] = True
-                    # 一字板不作为活跃龙头显示，大幅降低其在板块内的领涨评分权重
-                    s['leader_score'] -= 50.0 
-
-            # 二次筛选真正龙头
             stocks.sort(key=lambda x: x['leader_score'], reverse=True)
             candidate_leader = stocks[0]
             leader_code = candidate_leader['code']
             leader_pct = candidate_leader['pct']
 
-            # 评估同步率 (Follow Ratio) - 对应 tk 中 get_following_concepts_by_correlation 的逻辑
             all_member_codes = self.sector_map.get(sector, set())
             active_member_count = 0
             total_pct = 0.0
             leader_sign = 1 if leader_pct > 0 else (-1 if leader_pct < 0 else 0)
-            
             for c in all_member_codes:
                 if c in snap:
-                    snap_data = snap[c]
-                    f_pct = snap_data[1]  # current_pct
-                    # 与龙头同向运动即为跟随 (对齐 TK np.sign(percents) == stock_sign)
-                    f_sign = 1 if f_pct > 0 else (-1 if f_pct < 0 else 0)
-                    if f_sign == leader_sign and f_sign != 0:
+                    mc_pct = snap[c]['pct']
+                    mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
+                    if mc_sign == leader_sign and mc_sign != 0:
                         active_member_count += 1
-                        total_pct += f_pct
+                        total_pct += mc_pct
             
             follow_ratio = active_member_count / len(all_member_codes) if all_member_codes else 0
             avg_pct = total_pct / len(all_member_codes) if all_member_codes else 0
-
-            # 2. 板块入场门槛筛选: 
-            # 满足以下之一即可显示：
-            # a) 有个股评分达到了 sector_min_score (3.0) 且板块成员有多于 1 只有异动
-            # b) 跟随度较高 (FollowRatio > 0.3) 且龙头涨幅突出 (pct > 2%)
             high_score_stocks = [s for s in stocks if s['score'] >= self.sector_min_score]
-            
             if len(high_score_stocks) < 1 and (follow_ratio < 0.3 or leader_pct < 2.0):
+                if sector in new_active: del new_active[sector]
                 continue
                 
-            # 3. 确定板块标签逻辑
             tags = []
-            # 获取龙头对象
+            l_data = candidate_leader
             l_ts = self._tick_series.get(leader_code)
             if l_ts:
                 day_open = l_ts.open_price or (list(l_ts.klines)[0].get('open') if l_ts.klines else 0)
-                # 高开 tag
-                if (day_open - l_ts.last_close) / l_ts.last_close > 0.03 and l_ts.last_close > 0:
-                    tags.append("高开")
-                # 高走 tag (当前价 > 开盘价)
-                if l_ts.current_price > day_open > 0:
-                    tags.append("高走")
-                # 逆势 tag (全板块平均涨幅显著强于市场或处于强周期)
-                if getattr(candidate_leader, 'is_counter_trend', False):
-                    tags.append("逆势领头")
-                if avg_pct > 2.0:
-                    tags.append("强势")
-                # 反转 tag (昨日跌今日强)
-                if l_ts.last_close < l_ts.last_low * 1.01 and candidate_leader['pct'] > 3:
-                     tags.append("反转")
+                if (day_open - l_ts.last_close) / l_ts.last_close > 0.03 and l_ts.last_close > 0: tags.append("高开")
+                if l_data['price'] > day_open > 0: tags.append("高走")
+                if 920 <= now_t <= 925:
+                    if leader_pct > 3.0: tags.append("竞价抢筹")
+                    elif leader_pct < -3.0: tags.append("竞价恐慌")
+                if 1300 <= now_t <= 1310: tags.append("午后异动")
 
-            # 4. 板块最终强度分 = 龙头分 + 跟随分 + 关联度修正
-            board_score = candidate_leader['score'] * 1.2 + avg_pct * 3.0 + follow_ratio * 15.0
+            s_top0_sum = sum(s.get('top0', 0) for s in stocks)
+            s_top15_sum = sum(s.get('top15', 0) for s in stocks)
+            hotness_multiplier = 1.0 + (s_top0_sum * 0.15) + (s_top15_sum * 0.05)
+            tk_correlation_score = avg_pct * follow_ratio * 50.0 
+            board_score = (candidate_leader['score'] * 1.0 + avg_pct * 5.0 + follow_ratio * 20.0 + tk_correlation_score) * hotness_multiplier
             
-            # 5. 准备跟随股列表 (按涨幅降序，保留首异时间)
-            followers = []
-            for c in all_member_codes:
-                if c == leader_code: continue
-                if c in snap:
-                     sd = snap[c]
-                     followers.append({
-                        'code': c, 'name': sd[3], 'pct': sd[1], 'price': sd[2],
-                        'last_close': sd[5], 'high_day': sd[6], 'low_day': sd[7],
-                        'last_high': sd[8], 'last_low': sd[9], 'first_breakout_ts': sd[10],
-                        'pattern_hint': sd[11], 'is_untradable': sd[12]
-                     })
-            followers.sort(key=lambda x: x['pct'], reverse=True)
-
-            # 6. [New] 联动板块分析 - 类 get_following_concepts_by_correlation
-            # 找出领涨股所属的所有 concept，统计每个 concept 的跟随率和平均涨幅
-            linked_concepts: list[dict] = []
-            leader_cat = candidate_leader.get('category', '')
-            # 如果 snap 数据中没有 category（快照不含此字段），需从 _tick_series 取
-            if not leader_cat:
-                l_ts2 = self._tick_series.get(leader_code)
-                leader_cat = getattr(l_ts2, 'category', '') if l_ts2 else ''
-            leader_concepts = [c.strip() for c in re.split(r'[;；,，/ \\-]', leader_cat) if c.strip() and len(c.strip()) <= 8]
+            sector_type = "📈 跟随"
+            if board_score > 60 and (leader_pct > 5.0 or s_top0_sum > 0) and follow_ratio > 0.4: sector_type = "🔥 强攻"
+            elif any(s.get('is_accumulating') for s in stocks) or sum(s.get('ral', 0) for s in stocks)/len(stocks) > 12:
+                sector_type = "♨️ 蓄势"
+            elif any(s.get('is_reversal') for s in stocks):
+                sector_type = "🔄 反转"
+            tags.insert(0, sector_type)
+            
+            # 联动板块分析 (精简版)
+            linked_concepts = []
+            leader_concepts = [c.strip() for c in re.split(r'[;；,，/ \\-]', l_data['category']) if c.strip() and len(c.strip()) <= 8]
             if leader_concepts:
-                leader_pct_val = candidate_leader['pct']
-                leader_sign  = 1 if leader_pct_val > 0 else (-1 if leader_pct_val < 0 else 0)
                 for concept in leader_concepts:
+                    if concept == sector: continue
                     members = self.sector_map.get(concept)
-                    if not members or len(members) < 4:
-                        continue
-                    follow_count = 0
-                    concept_total_pct = 0.0
-                    concept_member_cnt = 0
-                    for mc in members:
-                        if mc in snap:
-                            mc_pct = snap[mc][1]
-                            mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
-                            concept_total_pct += mc_pct
-                            concept_member_cnt += 1
-                            if mc_sign == leader_sign and mc_sign != 0:
-                                follow_count += 1
-                    if concept_member_cnt > 0:
-                        c_avg_pct = round(concept_total_pct / concept_member_cnt, 2)
-                        c_follow_ratio = round(follow_count / concept_member_cnt, 2)
-                        c_score = round(c_avg_pct * c_follow_ratio, 2)
-                        linked_concepts.append({
-                            'concept': concept,
-                            'score': c_score,
-                            'avg_pct': c_avg_pct,
-                            'follow_ratio': c_follow_ratio,
-                            'member_cnt': concept_member_cnt,
-                        })
-                linked_concepts.sort(key=lambda x: x['score'], reverse=True)
-
-            # 获取龙头走势
-            leader_klines: List[dict] = []
-            with self._lock:
-                if l_ts: leader_klines = list(l_ts.klines)[-20:]
+                    if not members or len(members) < 3: continue
+                    f_count = sum(1 for mc in members if mc in snap and (1 if snap[mc]['pct']>0 else -1) == leader_sign)
+                    total_c_pct = sum(snap[mc]['pct'] for mc in members if mc in snap and (1 if snap[mc]['pct']>0 else -1) == leader_sign)
+                    c_follow = f_count / len(members)
+                    c_avg_pct = total_c_pct / len(members) if len(members) > 0 else 0
+                    if c_follow > 0.4: linked_concepts.append({
+                        'concept': concept, 
+                        'follow_ratio': round(c_follow, 2),
+                        'avg_pct': round(c_avg_pct, 2)
+                    })
 
             new_active[sector] = {
-                'sector': sector,
-                'score': round(board_score, 2),
-                'tags': " ".join(tags),
-                'follow_ratio': round(follow_ratio, 2),
-                'leader': leader_code,
-                'leader_code': leader_code,
-                'leader_name': candidate_leader['name'],
-                'leader_pct': round(candidate_leader['pct'], 2),
-                'leader_price': candidate_leader['price'],
-                'leader_first_ts': candidate_leader['first_breakout_ts'],
-                'pattern_hint': candidate_leader.get('pattern_hint', ''),
-                'is_untradable': candidate_leader.get('is_untradable', False),
-                'is_counter_trend': candidate_leader.get('is_counter_trend', False),
-                'leader_klines': leader_klines,
-                'followers': followers[:15],
-                'linked_concepts': linked_concepts[:5],  # 最多展示 top-5 联动板块
-                'ts': now_ts,
+                'sector': sector, 'score': round(board_score, 2), 'tags': " ".join(tags),
+                'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
+                'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
+                'leader_price': l_data.get('price', 0.0),
+                'leader_klines': l_data.get('klines', []),
+                'leader_last_close': l_data.get('last_close', 0),
+                'leader_high_day': l_data.get('high_day', 0),
+                'leader_low_day': l_data.get('low_day', 0),
+                'leader_last_high': l_data.get('last_high', 0),
+                'leader_last_low': l_data.get('last_low', 0),
+                'leader_first_ts': l_data['first_breakout_ts'],
+                'pattern_hint': l_data['pattern_hint'],
+                'is_untradable': l_data['is_untradable'],
+                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
+                'linked_concepts': linked_concepts[:3]
             }
 
         with self._lock:
             self.active_sectors = new_active
 
-    def _gc_old_sectors(self, max_age: float = 900.0):
-        """清理 900s (15min) 内没有更新的板块"""
-        now_ts = time.time()
-        if now_ts - self._last_gc_ts < 60:
-            return
-        self._last_gc_ts = now_ts
+    def _gc_old_sectors(self):
+        """清理长时间不活跃的板块结果"""
+        now = time.time()
+        if now - self._last_gc_ts < 30: return
+        self._last_gc_ts = now
         with self._lock:
             stale = [s for s, d in self.active_sectors.items()
-                     if now_ts - d.get('ts', 0) > max_age]
+                     if now - d.get('ts', 0) > 900.0] # max_age is 900.0
             for s in stale:
                 del self.active_sectors[s]
 

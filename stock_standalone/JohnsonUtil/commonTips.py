@@ -2137,52 +2137,98 @@ def get_run_path_stock(fp=None):
     return path
 
 
+# def get_run_path_tdx(fp=None):
+#     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
+#     # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
+#     path = getcwd()
+#     log.debug(f'tdx_all_df_path {path}')
+#     alist = path.split('stock')
+#     # if len(alist) > 0:
+#     if len(alist) > 0 and path.find('stock') >=0:
+#         path = alist[0]
+#         # os_sep=get_os_path_sep()
+#         if fp is not None:
+#             # path = path + fp + '.h5'
+#             path  =  os.path.join(path, fp + '.h5')
+#             if not check_file_exist(path):
+#                 log.error(f'path not find : {path}')
+#                 # path = tdx_all_df_path + os.sep + fp + '.h5'
+#                 path = os.path.join(tdx_all_df_path, fp + '.h5')
+#                 log.debug(f'tdx_all_df_path: {tdx_all_df_path} os.sep: {os.sep} path: {path}')
+#                 if not check_file_exist(path):
+#                     log.error(f'path not find tdx_all_df_path : {path} os.sep:{os.sep}')
+#                 else:
+#                     log.info(f'path find in tdx_all_df_path : {path} os.sep:{os.sep}')
+
+#         log.debug("info:%s getcwd:%s"%(alist[0],path))
+#     else:
+#         if isMac():
+#             # path  = root_path[1].split('stock')[0] + fp + '.h5'
+#             path  =  os.path.join(root_path[1].split('stock')[0], fp + '.h5')
+
+#             if not check_file_exist(path):
+#                 log.error(f'path not find : {path}')
+#         else:
+#             # path  = root_path[0].split('stock')[0] + fp + '.h5'
+#             path  =  os.path.join(root_path[0].split('stock')[0], fp + '.h5')
+#             if not check_file_exist(path):
+#                 log.error(f'path not find1 : {path}')
+#                 # path = tdx_all_df_path + os.sep + fp + '.h5'
+#                 path = os.path.join(tdx_all_df_path, fp + '.h5')
+#                 log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
+#                 if not check_file_exist(path):
+#                     log.error(f'path not find tdx_all_df_path : {path}')
+#                 else:
+#                     log.info(f'path find in tdx_all_df_path : {path}')
+#         log.debug("error:%s cwd:%s"%(alist[0],path))
+#     return path
+
+
+def get_run_path_tdx_Path(name):
+    from pathlib import Path
+    ramdisk = get_ramdisk_dir()
+
+    if ramdisk:
+        path = os.path.join(ramdisk, f"{name}.h5")
+        return path
+
+    base = Path(__file__).resolve().parents[2]
+
+    return str(base / f"{name}.h5")
+
+
 def get_run_path_tdx(fp=None):
-    # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
-    # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
-    path = getcwd()
-    log.debug(f'tdx_all_df_path {path}')
-    alist = path.split('stock')
-    # if len(alist) > 0:
-    if len(alist) > 0 and path.find('stock') >=0:
-        path = alist[0]
-        # os_sep=get_os_path_sep()
-        if fp is not None:
-            # path = path + fp + '.h5'
-            path  =  os.path.join(path, fp + '.h5')
-            if not check_file_exist(path):
-                log.error(f'path not find : {path}')
-                # path = tdx_all_df_path + os.sep + fp + '.h5'
-                path = os.path.join(tdx_all_df_path, fp + '.h5')
-                log.debug(f'tdx_all_df_path: {tdx_all_df_path} os.sep: {os.sep} path: {path}')
-                if not check_file_exist(path):
-                    log.error(f'path not find tdx_all_df_path : {path} os.sep:{os.sep}')
-                else:
-                    log.info(f'path find in tdx_all_df_path : {path} os.sep:{os.sep}')
 
-        log.debug("info:%s getcwd:%s"%(alist[0],path))
+    cwd = os.getcwd()
+    log.debug(f'tdx_all_df_path {cwd}')
+
+    base = cwd
+
+    # 找到 pyQuant3 根目录
+    if 'pyQuant3' in cwd:
+        base = cwd[:cwd.find('pyQuant3') + len('pyQuant3')]
     else:
-        if isMac():
-            # path  = root_path[1].split('stock')[0] + fp + '.h5'
-            path  =  os.path.join(root_path[1].split('stock')[0], fp + '.h5')
+        log.error(f'pyQuant3 not found in cwd: {cwd}')
+
+    if fp is not None:
+        path = os.path.join(base, fp + '.h5')
+
+        if not check_file_exist(path):
+            log.error(f'path not find : {path}')
+
+            # fallback 到 tdx_all_df_path
+            path = os.path.join(tdx_all_df_path, fp + '.h5')
+            log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
 
             if not check_file_exist(path):
-                log.error(f'path not find : {path}')
-        else:
-            # path  = root_path[0].split('stock')[0] + fp + '.h5'
-            path  =  os.path.join(root_path[0].split('stock')[0], fp + '.h5')
-            if not check_file_exist(path):
-                log.error(f'path not find1 : {path}')
-                # path = tdx_all_df_path + os.sep + fp + '.h5'
-                path = os.path.join(tdx_all_df_path, fp + '.h5')
-                log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
-                if not check_file_exist(path):
-                    log.error(f'path not find tdx_all_df_path : {path}')
-                else:
-                    log.info(f'path find in tdx_all_df_path : {path}')
-        log.debug("error:%s cwd:%s"%(alist[0],path))
-    return path
+                log.error(f'path not find tdx_all_df_path : {path}')
+            else:
+                log.info(f'path find in tdx_all_df_path : {path}')
 
+        log.debug(f'info:{base} getcwd:{path}')
+        return path
+
+    return base
 
 tdx_hd5_name = r'tdx_all_df_%s' % (300)
 tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
@@ -2309,44 +2355,78 @@ RamBaseDir = get_ramdisk_dir()
 
 VALID_EXTS = ('.pkl', '.json', '.h5', '.lock')
 
+# def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
+#     if not filename:
+#         return None
+
+#     basedir = RamBaseDir
+#     if not basedir or not os.path.isdir(basedir):
+#         log.error(f"ramdisk Root Err: {basedir}")
+#         return None
+
+#     # 1. 如果是 Windows 且是单独盘符，自动加分隔符
+#     if os.name == 'nt' and len(basedir) == 2 and basedir[1] == ':':
+#         basedir += os.sep  # 自动补 '\'
+            
+#     # 1️⃣ 如果已经是“真正的绝对路径”（如 G:\xxx）
+#     if os.path.isabs(filename):
+#         return filename
+
+#     # 2️⃣ 只保留文件名，防止 G:xxx / a/b/xxx 这种污染
+#     filename = os.path.basename(filename)
+
+#     # 3️⃣ 扩展名处理
+#     name, ext = os.path.splitext(filename)
+
+#     if lock:
+#         filename = name + '.lock'
+#     else:
+#         # if ext.lower() in ('.pkl', '.json'):
+#         #     pass  # 保持不变
+#         # elif ext.lower() == '.h5':
+#         if ext.lower() == '.h5':
+#             pass
+#         elif ext:
+#             # log.info(f'')
+#             pass
+#         else:
+#             filename = name + '.h5'
+
+#     # 4️⃣ 用 os.path.join，禁止字符串拼接
+#     file_path = os.path.join(basedir, filename)
+
+#     return file_path
+
+
 def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
+
     if not filename:
         return None
 
     basedir = RamBaseDir
+
     if not basedir or not os.path.isdir(basedir):
         log.error(f"ramdisk Root Err: {basedir}")
         return None
 
-    # 1. 如果是 Windows 且是单独盘符，自动加分隔符
-    if os.name == 'nt' and len(basedir) == 2 and basedir[1] == ':':
-        basedir += os.sep  # 自动补 '\'
-            
-    # 1️⃣ 如果已经是“真正的绝对路径”（如 G:\xxx）
-    if os.path.isabs(filename):
-        return filename
+    # 统一盘符格式
+    basedir = os.path.abspath(basedir)
 
-    # 2️⃣ 只保留文件名，防止 G:xxx / a/b/xxx 这种污染
+    # 如果已经是绝对路径
+    if os.path.isabs(filename):
+        return os.path.abspath(filename)
+
+    # 只保留文件名
     filename = os.path.basename(filename)
 
-    # 3️⃣ 扩展名处理
     name, ext = os.path.splitext(filename)
 
     if lock:
         filename = name + '.lock'
     else:
-        # if ext.lower() in ('.pkl', '.json'):
-        #     pass  # 保持不变
-        # elif ext.lower() == '.h5':
-        if ext.lower() == '.h5':
-            pass
-        elif ext:
-            # log.info(f'')
-            pass
-        else:
+        if not ext:
             filename = name + '.h5'
 
-    # 4️⃣ 用 os.path.join，禁止字符串拼接
     file_path = os.path.join(basedir, filename)
 
     return file_path

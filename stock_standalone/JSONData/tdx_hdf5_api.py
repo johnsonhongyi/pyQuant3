@@ -167,7 +167,8 @@ class SafeHDFStore(pd.HDFStore):
         global RAMDISK_KEY
 
         # 文件路径处理
-        if self.fname_o.lower().find(self.basedir.lower()) < 0 and (self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0):
+        # if self.fname_o.lower().find(self.basedir.lower()) < 0 and (self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0):
+        if not os.path.isabs(self.fname_o) and (self.fname_o == cct.tdx_hd5_name or 'tdx_all_df' in self.fname_o):
             self.multiIndexsize = True
             self.fname = cct.get_run_path_tdx(self.fname_o)
             self.basedir = self.fname.split(self.fname_o)[0]

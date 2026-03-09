@@ -539,6 +539,35 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         bar_lay_main.addLayout(bar_lay_2)
 
+        # 第三排工具栏：门槛与灵敏度
+        bar_lay_3 = QHBoxLayout()
+        bar_lay_3.setSpacing(6)
+
+        bar_lay_3.addWidget(QLabel("🎯 个股分≥"))
+        self.spin_score_threshold = self._make_spin(0.0, 20.0, 0.5, self.detector.score_threshold)
+        bar_lay_3.addWidget(self.spin_score_threshold)
+
+        bar_lay_3.addWidget(QLabel(" 🏗️ 板块分≥"))
+        self.spin_sector_min_score = self._make_spin(0.0, 50.0, 0.5, self.detector.sector_min_score)
+        bar_lay_3.addWidget(self.spin_sector_min_score)
+
+        bar_lay_3.addWidget(self._sep())
+
+        bar_lay_3.addWidget(QLabel(" 📉 最小振幅%:"))
+        self.spin_amplitude_min = self._make_spin(0.0, 10.0, 0.5, self.detector.strategies['amplitude']['min'])
+        bar_lay_3.addWidget(self.spin_amplitude_min)
+
+        bar_lay_3.addWidget(QLabel(" 🧱 连红K棒:"))
+        self.spin_consec_bars = self._make_spin(1, 10, 1, self.detector.strategies['consecutive_up']['bars'])
+        bar_lay_3.addWidget(self.spin_consec_bars)
+
+        for w in [self.spin_score_threshold, self.spin_sector_min_score, 
+                 self.spin_amplitude_min, self.spin_consec_bars]:
+            w.valueChanged.connect(self._on_strategy_changed)
+
+        bar_lay_3.addStretch()
+        bar_lay_main.addLayout(bar_lay_3)
+
         root.addWidget(bar)
 
         # ── 主体：Splitter ───────────────────────────────────────────────
@@ -722,7 +751,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 data["title"],
                 avg_series=data["avg_series"],
                 time_labels=data["time_labels"],
-                use_line=data["use_live"]
+                use_line=data["use_line"]
             )
             
             # 管理窗口引用，防止被回收
@@ -977,7 +1006,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ------------------------------------------------------------------ table fill
     def _populate_table(self, data: dict):
-        leader_code   = data['leader']
+        leader_code   = data.get('leader', '')
         leader_name   = data.get('leader_name', leader_code)
         leader_pct    = data.get('leader_pct', 0.0)
         leader_price  = data.get('leader_price', 0.0)
@@ -993,10 +1022,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         )
 
         rows = [{
-            'code': data['leader'], 'name': data['leader_name'],
+            'code': leader_code, 
+            'name': leader_name,
             'role': '🏆龙头',
-            'pct': data['leader_pct'], 'price': data['leader_price'],
-            'klines': data['leader_klines'],
+            'pct': leader_pct, 
+            'price': leader_price,
+            'klines': leader_klines,
             'last_close': data.get('leader_last_close', 0),
             'high_day': data.get('leader_high_day', 0),
             'low_day': data.get('leader_low_day', 0),
@@ -1524,9 +1555,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         s['pct_change']['min']         = self.spin_pct_min.value()
         s['pct_change']['max']         = self.spin_pct_max.value()
         
+        # [NEW] Real-time Thresholds
+        if hasattr(self, 'spin_score_threshold'):
+            self.detector.score_threshold = self.spin_score_threshold.value()
+        if hasattr(self, 'spin_sector_min_score'):
+            self.detector.sector_min_score = self.spin_sector_min_score.value()
+        
+        # [NEW] Extended Strategy Params
+        s['amplitude']['min'] = self.spin_amplitude_min.value()
+        s['consecutive_up']['bars'] = int(self.spin_consec_bars.value())
+        
         # [NEW] Log state
         if hasattr(self, 'cb_log'):
             self.detector.enable_log = self.cb_log.isChecked()
+            
+        # [FIX] 确保改动即时在 UI 生效
+        self.manual_refresh()
+        if self.sector_list.currentItem():
+             self._on_sector_selected(self.sector_list.currentItem(), None)
 
     # ------------------------------------------------------------------ window state
     def _restore_geometry(self):
