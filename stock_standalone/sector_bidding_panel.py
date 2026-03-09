@@ -26,10 +26,7 @@ try:
 except ImportError:
     from stock_standalone.bidding_momentum_detector import BiddingMomentumDetector
     from stock_standalone.JohnsonUtil import commonTips as cct
-try:
-    from data_hub_service import DataHubService
-except ImportError:
-    from stock_standalone.data_hub_service import DataHubService
+# [REMOVED] DataHubService Imports
 import time
 import re
 import traceback
@@ -346,7 +343,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def __init__(self, main_window: Any):
         # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
         # Ensure DataHub is ready in the Bidding Panel process
-        self.data_hub = DataHubService.get_instance()
+        # self.data_hub = DataHubService.get_instance()
+        pass
         
         super().__init__(None)         # 独立窗口
         self.main_window = main_window

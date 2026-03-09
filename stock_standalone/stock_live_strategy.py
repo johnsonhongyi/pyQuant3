@@ -1132,13 +1132,8 @@ class StockLiveStrategy:
                     df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
                     df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
 
-        # [NEW] 🔌 发布包含 SBC 评分与策略信号的最终数据到 Data Hub (IPC)
-        try:
-            from data_hub_service import DataHubService
-            hub = DataHubService.get_instance()
-            hub.publish_df_all(df_all)
-        except Exception as pub_err:
-            logger.error(f"Failed to publish strategy-enriched data to DataHub: {pub_err}")
+        # [REMOVED] DataHubService publish logic
+        pass
 
 
     def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any], resample: str = 'd'):

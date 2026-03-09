@@ -59,7 +59,7 @@ from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 import sbc_core
 from stock_visual_utils import PercentAxisItem
-from data_hub_service import DataHubService
+# from data_hub_service import DataHubService
 from sys_utils import get_base_path
 BASE_DIR = get_base_path()
 visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
@@ -391,7 +391,8 @@ class CandlestickItem(pg.GraphicsObject):
     def __init__(self, data=None, theme='dark'):
         # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
         # Ensure DataHub is ready in the Visualizer process
-        self.data_hub = DataHubService.get_instance()
+            # self.data_hub = DataHubService.get_instance()
+        pass
         
         super().__init__()
         self.data = np.asarray(data)
@@ -4207,39 +4208,68 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.info(f"[INFO] Real-time stopped, cleared today's:{today_str} data for {self.current_code}")
 
     def _on_search_code_jump(self):
-        """处理搜索框回车：跳转到左侧表格对应的股票行"""
-        code_input = self.code_search_input.text().strip()
-        if not code_input:
+        """处理搜索框回车：支持 6 位代码或中文名称跳转"""
+        raw_input = self.code_search_input.text().strip()
+        if not raw_input:
             return
         
-        self._search_code = code_input
-        # 补齐 6 位代码
-        code = code_input.zfill(6)
+        self._search_code = raw_input
+        # 判断是否包含中文
+        is_name_search = any('\u4e00' <= char <= '\u9fa5' for char in raw_input)
         
-        # 在 stock_table 中查找匹配的行
         found_row = -1
-        for row in range(self.stock_table.rowCount()):
-            item = self.stock_table.item(row, 0)  # 第一列是 code
-            if item:
-                item_code = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                if str(item_code).zfill(6) == code:
-                    found_row = row
-                    break
+        target_code = ""
         
+        if is_name_search:
+            # --- 1. 名称搜索模式 ---
+            name_col = -1
+            if hasattr(self, 'headers'):
+                try:
+                    name_col = self.headers.index('name')
+                except ValueError:
+                    pass
+            
+            if name_col >= 0:
+                for row in range(self.stock_table.rowCount()):
+                    name_item = self.stock_table.item(row, name_col)
+                    if name_item and name_item.text().strip() == raw_input:
+                        found_row = row
+                        break
+            
+            # 如果表格中没找到，尝试在全量映射中反查代码
+            if found_row == -1 and hasattr(self, 'code_name_map') and self.code_name_map:
+                for c, n in self.code_name_map.items():
+                    if n == raw_input:
+                        target_code = c
+                        break
+        else:
+            # --- 2. 代码搜索模式 (原有逻辑) ---
+            code = raw_input.zfill(6)
+            target_code = code
+            for row in range(self.stock_table.rowCount()):
+                item = self.stock_table.item(row, 0)  # 第一列是 code
+                if item:
+                    item_code = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                    if str(item_code).zfill(6) == code:
+                        found_row = row
+                        break
+        
+        # 执行跳转或直接加载
         if found_row >= 0:
             # 找到匹配行 - 选中并滚动到可见
             self.stock_table.setCurrentCell(found_row, 0)
             self.stock_table.scrollToItem(self.stock_table.item(found_row, 0))
-            # 加载该股票的 K 线图
-            self.load_stock_by_code(code)
-            self.show_status_message(f"✅ 跳转到: {code}", 3000)
-            # 清空输入框
-            # self.code_search_input.clear()
+            # 提取真实代码加载
+            code_item = self.stock_table.item(found_row, 0)
+            final_code = code_item.data(Qt.ItemDataRole.UserRole) or code_item.text()
+            self.load_stock_by_code(str(final_code).zfill(6))
+            self.show_status_message(f"✅ 跳转到: {raw_input}", 3000)
+        elif target_code:
+            # 表中未找到，但有目标代码，直接加载
+            self.load_stock_by_code(str(target_code).zfill(6))
+            self.show_status_message(f"🚀 直接加载: {raw_input} ({target_code})", 3000)
         else:
-            # 未找到 - 尝试直接加载
-            self.load_stock_by_code(code)
-            self.show_status_message(f"⚠️ 表中未找到 {code}，尝试直接加载", 3000)
-            # self.code_search_input.clear()
+            self.show_status_message(f"❌ 未找到匹配: {raw_input}", 3000)
 
     def _on_search_input_right_click(self, pos):
         """搜索框右键菜单：自动粘贴并提取6位数字"""
@@ -7101,11 +7131,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.df_cache = df  # 直接引用，不复制
                 self.df_all = df
                 logger.debug(f"[_process_df_all_update] df_all updated, rows={len(self.df_all)}")
-                # 🚀 [NEW] 将包含最新分数的完整快照统一发布到中心缓存
-                try:
-                    DataHubService.get_instance().publish_df_all(self.df_all)
-                except Exception as e:
-                    logger.error(f"[DataHub] GUI publish df_all failed: {e}")
+                # [REMOVED] DataHubService publish logic
+                pass
             elif df is not None:
                 self.df_cache = pd.DataFrame()
                 self.df_all = self.df_cache

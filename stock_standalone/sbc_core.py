@@ -183,14 +183,16 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
     """加载 Tick 或分钟线数据"""
     if use_live:
         stock_df = None
-        try:
-            from data_hub_service import DataHubService
-            hub_df = DataHubService.get_instance().get_tick_cache(code)
-            if hub_df is not None and not hub_df.empty:
-                logger.info(f"⚡ [DataHub] Successfully fetched {len(hub_df)} live ticks for {code}")
-                stock_df = hub_df.copy()
-        except Exception as e:
-            logger.error(f"[DataHub] Failed to fetch live tick for {code}: {e}")
+        # [REMOVED] DataHubService fetch logic
+        pass
+        # try:
+        #     from data_hub_service import DataHubService
+        #     hub_df = DataHubService.get_instance().get_tick_cache(code)
+        #     if hub_df is not None and not hub_df.empty:
+        #         logger.info(f"⚡ [DataHub] Successfully fetched {len(hub_df)} live ticks for {code}")
+        #         stock_df = hub_df.copy()
+        # except Exception as e:
+        #     logger.error(f"[DataHub] Failed to fetch live tick for {code}: {e}")
 
         # [REFINED] Trigger supplemental fetch if data is insufficient (< 200 ticks)
         # This ensures SBC Replay has a full 240-minute trajectory
@@ -322,26 +324,27 @@ def get_day_context(code: str, day_df: pd.DataFrame, tick_date):
             'prev3_close_max': float(max(prev_row['close'], prev2_row['close'], prev3_row['close'])),
         }
         
-        # 🚀 [NEW] Centralized df_all extraction for structure_base_score
-        try:
-            from data_hub_service import DataHubService
-            hub_df_all = DataHubService.get_instance().get_df_all()
-            if hub_df_all is not None and not hub_df_all.empty:
-                # support both code string and numerical index if padded
-                code_pad = code.zfill(6)
-                if code_pad in hub_df_all.index:
-                    hub_row = hub_df_all.loc[code_pad]
-                elif 'code' in hub_df_all.columns:
-                    match = hub_df_all[hub_df_all['code'] == code_pad]
-                    hub_row = match.iloc[0] if not match.empty else None
-                else:
-                    hub_row = None
-                
-                if hub_row is not None and 'structure_base_score' in hub_row:
-                    bl_data['structure_base_score'] = float(hub_row['structure_base_score'])
-                    logger.debug(f"[SBC] Loaded structure_base_score={bl_data['structure_base_score']} from DataHub")
-        except Exception as e:
-            logger.error(f"[SBC] Failed to fetch df_all from DataHub: {e}")
+        # [REMOVED] DataHubService df_all logic
+        # try:
+        #     from data_hub_service import DataHubService
+        #     hub_df_all = DataHubService.get_instance().get_df_all()
+        #     if hub_df_all is not None and not hub_df_all.empty:
+        #         # support both code string and numerical index if padded
+        #         code_pad = code.zfill(6)
+        #         if code_pad in hub_df_all.index:
+        #             hub_row = hub_df_all.loc[code_pad]
+        #         elif 'code' in hub_df_all.columns:
+        #             match = hub_df_all[hub_df_all['code'] == code_pad]
+        #             hub_row = match.iloc[0] if not match.empty else None
+        #         else:
+        #             hub_row = None
+        #         
+        #         if hub_row is not None and 'structure_base_score' in hub_row:
+        #             bl_data['structure_base_score'] = float(hub_row['structure_base_score'])
+        #             logger.debug(f"[SBC] Loaded structure_base_score={bl_data['structure_base_score']} from DataHub")
+        # except Exception as e:
+        #     logger.error(f"[SBC] Failed to fetch df_all from DataHub: {e}")
+        pass
 
         bl_df = pd.DataFrame([bl_data])
         

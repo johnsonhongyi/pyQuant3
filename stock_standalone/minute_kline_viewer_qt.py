@@ -137,19 +137,21 @@ class DataFrameModel(QAbstractTableModel):
 
     def headerData(self, col, orientation, role):
         if orientation == _Horizontal and role == _DisplayRole:
-            return self._data.columns[col]
+            if 0 <= col < self._data.shape[1]:
+                return self._data.columns[col]
         return None
 
     def sort(self, column, order):
         """Sort table by given column number."""
         try:
-            col_name = self._data.columns[column]
-            self.layoutAboutToBeChanged.emit()
-            self._data = self._data.sort_values(
-                by=col_name, 
-                ascending=(order == Qt.SortOrder.AscendingOrder)
-            )
-            self.layoutChanged.emit()
+            if 0 <= column < self._data.shape[1]:
+                col_name = self._data.columns[column]
+                self.layoutAboutToBeChanged.emit()
+                self._data = self._data.sort_values(
+                    by=col_name, 
+                    ascending=(order == Qt.SortOrder.AscendingOrder)
+                )
+                self.layoutChanged.emit()
         except Exception as e:
             print(f"Sort Error: {e}")
 
@@ -214,6 +216,22 @@ class KlineBackupViewer(QMainWindow):
     def active_df(self) -> pd.DataFrame:
         """根据当前模式返回活跃的数据集"""
         return self.df_mem if self.is_memory_mode else self.df_file
+
+    def get_queried_df(self) -> pd.DataFrame:
+        """应用全局 Query 后的数据集"""
+        df = self.active_df
+        query_str = self.query_input.text().strip()
+        if not query_str:
+            return df
+        
+        try:
+            # 记录下查询字符串以便调试
+            # print(f"[DEBUG] Applying query: {query_str}")
+            return df.query(query_str)
+        except Exception as e:
+            # 如果查询失败，返回原数据并在状态栏显示错误
+            self.statusBar().showMessage(f"Query Error: {e}")
+            return df
 
     @active_df.setter
     def active_df(self, value: pd.DataFrame):
@@ -300,6 +318,26 @@ class KlineBackupViewer(QMainWindow):
         toolbar_layout.addWidget(self.btn_scan)
         
         main_layout.addLayout(toolbar_layout)
+        
+        # --- 第二栏：高级查询 (Advanced Query) ---
+        query_layout = QHBoxLayout()
+        query_layout.addWidget(QLabel("Query:"))
+        
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("e.g. close > 10 and volume > 100000 (Supports pandas .query() syntax)")
+        self.query_input.returnPressed.connect(self.on_apply_query)
+        query_layout.addWidget(self.query_input, 1)
+        
+        self.btn_apply_query = QPushButton("Apply")
+        self.btn_apply_query.setStyleSheet("background-color: #34495e; color: white;")
+        self.btn_apply_query.clicked.connect(self.on_apply_query)
+        query_layout.addWidget(self.btn_apply_query)
+        
+        self.btn_clear_query = QPushButton("Clear")
+        self.btn_clear_query.clicked.connect(self.on_clear_query)
+        query_layout.addWidget(self.btn_clear_query)
+        
+        main_layout.addLayout(query_layout)
 
         # Stats Label
         self.stats_label = QLabel("No data loaded. Please open a minute_kline_cache.pkl file.")
@@ -307,7 +345,10 @@ class KlineBackupViewer(QMainWindow):
         main_layout.addWidget(self.stats_label)
 
         # Splitter for Summary and Details
-        splitter = QSplitter(_Vertical)
+        self.main_splitter = QSplitter(_Vertical)
+        
+        # Upper Splitter: Summary + Details (Horizontal)
+        self.upper_splitter = QSplitter(_Horizontal)
         
         # Summary Table (Grouped by code)
         self.summary_table = QTableView()
@@ -324,12 +365,51 @@ class KlineBackupViewer(QMainWindow):
         self.detail_table.setSortingEnabled(True)
         self.detail_table.doubleClicked.connect(self.on_double_click)
         
-        splitter.addWidget(self.summary_table)
-        splitter.addWidget(self.detail_table)
+        self.upper_splitter.addWidget(self.summary_table)
+        self.upper_splitter.addWidget(self.detail_table)
+        self.upper_splitter.setStretchFactor(0, 1)
+        self.upper_splitter.setStretchFactor(1, 2)
+
+        # Bottom Area: Full Queried Results
+        self.full_results_table = QTableView()
+        self.full_results_table.setAlternatingRowColors(True)
+        self.full_results_table.setSelectionBehavior(_SelectRows)
+        self.full_results_table.setSortingEnabled(True)
+        self.full_results_table.doubleClicked.connect(self.on_double_click)
         
-        main_layout.addWidget(splitter, 1)
+        # Add a label for the bottom area
+        bottom_container = QWidget()
+        bottom_layout = QVBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(0, 5, 0, 0)
+        self.full_results_label = QLabel("<b>Full Queried Results:</b> 0 records")
+        bottom_layout.addWidget(self.full_results_label)
+        bottom_layout.addWidget(self.full_results_table)
+
+        self.main_splitter.addWidget(self.upper_splitter)
+        self.main_splitter.addWidget(bottom_container)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 1)
+        
+        main_layout.addWidget(self.main_splitter, 1)
 
         self.statusBar().showMessage("Ready")
+        
+    def _smart_resize(self, table_view):
+        """智能调整列宽：行数少时全量平衡，行数多时优先保证核心列（code, time）"""
+        model = table_view.model()
+        if not model or not hasattr(model, '_data'):
+            return
+        df = model._data
+        if df.empty:
+            return
+            
+        if len(df) < 1000:
+            table_view.resizeColumnsToContents()
+        else:
+            # 仅针对核心长列进行调整，避免大表由于全列扫描导致的 UI 挂起
+            for i, col in enumerate(df.columns):
+                if str(col).lower() in ('code', 'time', 'ticktime', 'datetime'):
+                    table_view.resizeColumnToContents(i)
 
     def auto_load(self):
         # Default path resolution
@@ -351,61 +431,62 @@ class KlineBackupViewer(QMainWindow):
     def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         统一 DataFrame 结构：
-        - MultiIndex(code, ticktime) → 普通列 code, ticktime
-        - ticktime 自适应类型：
-            - datetime → 保留
-            - str → 转 datetime
-            - float/int timestamp → 转 datetime
-        - 重置 index，保证 Viewer 内部只使用列
+        - 确保 'code' 和 'time' 是列记录
+        - 解决索引与列名冲突问题
         """
         df = df.copy()
 
+        # 1. 彻底解决索引名与列名冲突 (ValueError: 'code' is both an index level and a column label)
+        # 在 reset_index 之前，如果索引名或 level 名与列名冲突，pandas 会报错。
+        # 我们采用最激进策略：先强制清除索引名称
+        col_list = df.columns.tolist()
+        
         if isinstance(df.index, pd.MultiIndex):
-            idx_names = df.index.names
+            # 记录旧索引值，以便后续手动提取（如果列中缺失）
+            try:
+                # 检查是否有名为 code 的 level
+                if 'code' in df.index.names and 'code' not in col_list:
+                    df['code'] = df.index.get_level_values('code').astype(str)
+                # 检查是否有名为 time/ticktime 的 level
+                for tname in ['time', 'ticktime', 'datetime']:
+                    if tname in df.index.names and tname not in col_list:
+                        df[tname] = df.index.get_level_values(tname)
+                        break
+            except:
+                pass
+            # 强制清空索引名以消除歧义
+            df.index.names = [None] * len(df.index.names)
+        else:
+            # 单层索引的情况
+            if df.index.name in col_list:
+                # 如果 index name 冲突，直接重置时会报错，所以先改名
+                df.index.name = f"fixed_idx_{df.index.name}"
+            elif df.index.name is None and 'index' in col_list:
+                df.index.name = "original_index"
 
-            # code
-            if 'code' in idx_names:
-                df['code'] = df.index.get_level_values('code')
-            else:
-                df['code'] = df.index.get_level_values(0)
-
-            # ticktime / time / datetime
-            time_level = None
-            for name in idx_names:
-                if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
-                    time_level = name
-                    break
-
-            if time_level:
-                ts = df.index.get_level_values(time_level)
-            else:
-                ts = df.index.get_level_values(1)
-
-            # 自适应处理 ticktime
-            if np.issubdtype(ts.dtype, np.datetime64):
-                df['ticktime'] = ts
-            elif np.issubdtype(ts.dtype, np.number):
-                # float/int timestamp → datetime
-                df['ticktime'] = pd.to_datetime(ts, unit='s', errors='coerce')
-            else:
-                # str → datetime
-                df['ticktime'] = pd.to_datetime(ts, errors='coerce')
-
+        # 2. 处理索引转列 (MultiIndex 后 reset，或者单层 index 包含 code)
+        if isinstance(df.index, pd.MultiIndex):
             df.reset_index(drop=True, inplace=True)
         else:
-            # 单层 index 或普通 DataFrame
-            if 'ticktime' in df.columns:
-                if np.issubdtype(df['ticktime'].dtype, np.datetime64):
-                    pass  # 保留
-                elif np.issubdtype(df['ticktime'].dtype, np.number):
-                    df['ticktime'] = pd.to_datetime(df['ticktime'], unit='s', errors='coerce')
-                else:
-                    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
-
-            # 如果 index 是 code，也转成列
-            if 'code' not in df.columns:
+            # 如果 index 不是 RangeIndex，且我们还没拿到 code 列
+            if not isinstance(df.index, pd.RangeIndex) and 'code' not in df.columns:
                 df = df.reset_index()
-                df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+                # 尝试通过位置或名称找 code
+                if 'code' not in df.columns:
+                    col0 = df.columns[0]
+                    if 'level' in str(col0) or 'index' in str(col0):
+                        df.rename(columns={col0: 'code'}, inplace=True)
+
+        # 3. 字段映射集成 (统一使用 time 而不是 ticktime，但保留 ticktime 作为别名)
+        if 'ticktime' in df.columns and 'time' not in df.columns:
+            df['time'] = df['ticktime']
+            
+        # 4. 确保核心列存在且类型正确
+        if 'code' in df.columns:
+            df['code'] = df['code'].astype(str)
+        else:
+            # 如果实在没拿到 code，造一个占位符或取第一列
+            df['code'] = "000000"
 
         return df
 
@@ -545,9 +626,8 @@ class KlineBackupViewer(QMainWindow):
         elif source_name in self.internal_dfs:
             self.is_memory_mode = False # Treat as file-like for direct local modification
             self.df_file = self.internal_dfs[source_name].copy()
-            self.update_summary()
-            self.on_filter()
-            self.statusBar().showMessage(f"Loaded internal source: {source_name} dataCount: {len(self.df_file)}")
+            self.on_apply_query()
+            self.statusBar().showMessage(f"Loaded internal source: {source_name} count: {len(self.df_file)}", 3000)
 
     def on_refresh(self):
         if self.is_memory_mode:
@@ -579,8 +659,7 @@ class KlineBackupViewer(QMainWindow):
                 return
 
             self.df_mem = df
-            self.update_summary()
-            self.on_filter()
+            self.on_apply_query()
             
             stock_count = len(df['code'].unique())
             total_nodes = len(df)
@@ -647,33 +726,45 @@ class KlineBackupViewer(QMainWindow):
                 return
 
             self.df_file = df
-            self.update_summary()
-            self.on_filter()
+            self.on_apply_query()
 
-            # 文件信息
-            mtime = os.path.getmtime(file_path)
-            time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-
-            stock_count = len(df['code'].unique())
-            total_nodes = len(df)
-
-            # calculate fingerprint for display
+            # --- 元数据统计 (放在独立 try-except 中，避免报错导致加载失败) ---
             try:
-                from cache_utils import df_fingerprint
-                fp = df_fingerprint(df, cols=['code', 'time', 'close', 'volume'])
-            except ImportError:
-                fp = "N/A (cache_utils not found)"
+                # 文件信息
+                mtime = os.path.getmtime(file_path)
+                time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
 
-            self.stats_label.setText(
-                f"📊 File: {os.path.basename(file_path)} | Last Modified: {time_str} | "
-                f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
-                f"🔑 Fingerprint (MD5): {fp}"
-            )
-            self.statusBar().showMessage(f"Data loaded successfully. dateCount: {len(self.df_file)}")
+                stock_count = len(df['code'].unique())
+                total_nodes = len(df)
+
+                # calculate fingerprint for display
+                fp = "N/A"
+                try:
+                    from cache_utils import df_fingerprint
+                    # 尝试自适应列名
+                    fp_cols = [c for c in ['code', 'time', 'ticktime', 'close', 'volume'] if c in df.columns]
+                    fp = df_fingerprint(df, cols=fp_cols)
+                except:
+                    pass
+
+                self.stats_label.setText(
+                    f"📊 File: {os.path.basename(file_path)} | Last Modified: {time_str} | "
+                    f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
+                    f"🔑 Fingerprint (MD5): {fp}"
+                )
+            except Exception as stats_e:
+                print(f"Stats Error: {stats_e}")
+                self.stats_label.setText(f"Loaded {os.path.basename(file_path)} (Stats failed)")
+
+            self.statusBar().showMessage(f"Data loaded successfully. count: {len(self.df_file)}", 3000)
 
         except Exception as e:
+            import traceback
+            err_msg = traceback.format_exc()
+            print(f"\n[ERROR] Load Data Failed: {file_path}")
+            print(err_msg)
             self.stats_label.setText(f"Error loading data: {e}")
-            self.statusBar().showMessage("Error loading data.")
+            self.statusBar().showMessage("Error loading data. Check console for details.")
 
 
 
@@ -718,12 +809,13 @@ class KlineBackupViewer(QMainWindow):
     #         self.statusBar().showMessage("Error loading data.")
 
     def update_summary(self):
+        """刷新摘要表 (使用当前查询结果)"""
         try:
-            df = self.active_df
+            df = self.get_queried_df()
             if df.empty:
                 self.summary_table.setModel(DataFrameModel(pd.DataFrame(columns=['code', 'count'])))
                 if hasattr(self, 'stats_label'):
-                    self.stats_label.setText(f"Count: 0 | {'MEMORY' if self.is_memory_mode else 'FILE'}")
+                    self.stats_label.setText(f"Count: 0 | {'MEMORY' if self.is_memory_mode else 'FILE'} | Query Active")
                 return
                 
             # 解决 'code' 既是索引又是列名的歧义问题
@@ -732,8 +824,8 @@ class KlineBackupViewer(QMainWindow):
             elif 'code' in df.index.names:
                 codes = df.index.get_level_values('code')
             else:
-                # 兜底：如果找不到 code 列/索引，打印错误
-                raise KeyError("'code' column or index not found in DataFrame.")
+                # 兜底：取第一列
+                codes = df.iloc[:, 0]
 
             summary = codes.value_counts().reset_index()
             summary.columns = ['code', 'count']
@@ -741,13 +833,84 @@ class KlineBackupViewer(QMainWindow):
             
             model = DataFrameModel(summary)
             self.summary_table.setModel(model)
+            self._smart_resize(self.summary_table)
         except Exception as e:
             print(f"DEBUG: update_summary Error: {e}")
+
+    def on_apply_query(self):
+        """执行查询并刷新界面"""
+        query_str = self.query_input.text().strip()
+        self.statusBar().showMessage(f"Applying query: {query_str}" if query_str else "Refreshing data summary...")
+        
+        df_queried = self.get_queried_df()
+        
+        # 统计数据
+        total_count = len(self.active_df)
+        match_count = len(df_queried)
+        stock_count = df_queried['code'].nunique() if 'code' in df_queried.columns else 0
+        total_stocks = self.active_df['code'].nunique() if not self.active_df.empty else 0
+        
+        # 1. 更新底部统计标签与表格 (full_results_table)
+        if query_str:
+            self.full_results_label.setText(f"<b>Queried Results:</b> {match_count} found ({stock_count} stocks) / Total {total_count}")
+            self.full_results_table.setModel(DataFrameModel(df_queried))
+            self._smart_resize(self.full_results_table)
+        else:
+            # 无查询时显示总量统计
+            self.full_results_label.setText(f"<b>Full Dataset:</b> {total_count} records ({total_stocks} stocks)")
+            # 性能优化：无查询时底部表格不显示全量（除非极小），避免 UI 挂起
+            if total_count < 500:
+                self.full_results_table.setModel(DataFrameModel(self.active_df))
+                self._smart_resize(self.full_results_table)
+            else:
+                # 显示空表但保留列名，防止 IndexError 并清晰提示
+                self.full_results_table.setModel(DataFrameModel(pd.DataFrame(columns=self.active_df.columns)))
+        
+        # 2. 更新顶部 stats_label (持久化主要统计)
+        if hasattr(self, 'stats_label'):
+            mode_str = 'MEMORY' if self.is_memory_mode else 'FILE'
+            if query_str:
+                self.stats_label.setText(f"Matches: {match_count} ({stock_count} stocks) | Base: {total_count} | Mode: {mode_str}")
+            else:
+                self.stats_label.setText(f"Total: {total_count} records | Stocks: {total_stocks} | Mode: {mode_str}")
+
+        # 3. 处理摘要表 (左侧)
+        self.update_summary()
+        self.on_filter()
+        
+        # 4. 处理右侧快照视图 (快照仅在有活跃查询且有结果时显示)
+        if query_str and not df_queried.empty:
+            # 找到每个 code 的最后一行
+            time_col = 'time' if 'time' in df_queried.columns else 'ticktime'
+            
+            # 使用快速聚合
+            if time_col in df_queried.columns:
+                # 预排序，加速 groupby.tail
+                df_snapshot = df_queried.sort_values(['code', time_col]).groupby('code').tail(1)
+            else:
+                df_snapshot = df_queried.groupby('code').tail(1)
+            
+            self.detail_table.setModel(DataFrameModel(df_snapshot.sort_values('code')))
+            self._smart_resize(self.detail_table)
+            self.statusBar().showMessage(f"Query Result: {match_count} rows | Snapshots: {len(df_snapshot)}", 3000)
+        elif not query_str:
+            # 如果是清空或初始化，右侧详情表重置为空（等待用户点击左侧）
+            self.detail_table.setModel(DataFrameModel(pd.DataFrame()))
+        else:
+            # 有查询但无结果
+            self.detail_table.setModel(DataFrameModel(pd.DataFrame()))
+            self.statusBar().showMessage("Query applied. No matches found.", 3000)
+
+    def on_clear_query(self):
+        """清空查询"""
+        self.query_input.clear()
+        self.on_apply_query()
+        self.statusBar().showMessage("Query cleared. Showing full summary counts.", 3000)
 
     def on_filter(self):
         try:
             search_text = self.search_input.text().strip().upper()
-            df = self.active_df
+            df = self.get_queried_df()
             if df.empty:
                 self.summary_table.setModel(DataFrameModel(pd.DataFrame(columns=['code', 'count'])))
                 return
@@ -761,6 +924,7 @@ class KlineBackupViewer(QMainWindow):
                 summary = summary.sort_values('count', ascending=False)
                 model = DataFrameModel(summary)
                 self.summary_table.setModel(model)
+                self._smart_resize(self.summary_table)
         except Exception as e:
             print(f"DEBUG: on_filter Error: {e}")
 
@@ -772,29 +936,28 @@ class KlineBackupViewer(QMainWindow):
             
             # print(f"[DEBUG] on_summary_clicked: index.row()={index.row()}, index.column()={index.column()}")
             
-            df = self.active_df
-            if df.empty:
-                # print("[DEBUG] on_summary_clicked: active_df is empty, returning")
+            # 使用 raw 数据集 (active_df) 而不是 filtered 数据集，以便看到该股票的完整多行历史 (横排多行)
+            df_full = self.active_df
+            if df_full.empty:
                 return
                 
             model = index.model()
             if not isinstance(model, DataFrameModel):
-                # print(f"[DEBUG] on_summary_clicked: model is not DataFrameModel: {type(model)}")
                 return
             
-            # 假设代码在第一列
+            # 提取代码
             code = str(model._data.iloc[index.row(), 0])
-            # print(f"[DEBUG] on_summary_clicked: code={code}")
             
-            if 'code' not in df.columns:
-                detail_df = df.loc[[code]].copy()
+            # 过滤该代码的所有历史记录
+            if 'code' not in df_full.columns:
+                detail_df = df_full.loc[[code]].copy()
             else:
-                detail_df = df[df['code'] == code].copy()
+                detail_df = df_full[df_full['code'] == code].copy()
             
-            # print(f"[DEBUG] on_summary_clicked: detail_df.shape={detail_df.shape}")
-
             if 'time' in detail_df.columns:
                 detail_df = detail_df.sort_values('time', ascending=False)
+            elif 'ticktime' in detail_df.columns:
+                detail_df = detail_df.sort_values('ticktime', ascending=False)
             
             # Calculate vol_ratio
             if hasattr(self, 'last6vol_map') and code in self.last6vol_map:
@@ -806,7 +969,7 @@ class KlineBackupViewer(QMainWindow):
 
             new_model = DataFrameModel(detail_df)
             self.detail_table.setModel(new_model)
-            self.detail_table.resizeColumnsToContents()
+            self._smart_resize(self.detail_table)
             
             # 🛡️ 强制处理 Qt 事件，避免与 Tkinter 事件循环冲突
             QApplication.processEvents()
