@@ -2504,7 +2504,7 @@ def fetch_and_process(
                     time.sleep(1)
                 continue
 
-            elif START_INIT > 0 and (not cct.get_work_time()):
+            elif START_INIT > 0 and (not cct.get_work_time() and not (1500 <= cct.get_now_time_int() <= 1535)):
                 for _ in range(5):
                     if not flag.value or get_status(status_callback) != last_status:
                         break
@@ -2715,7 +2715,7 @@ def fetch_and_process(
             # print(f'loop_sleep_time: {loop_sleep_time} sleep_step:{sleep_step} looptime: {loop_sleep_time / sleep_step}')
             stop_conditions = [
                 lambda: not flag.value,
-                lambda: not cct.get_work_time(),
+                lambda: not cct.get_work_time() and not (1500 <= cct.get_now_time_int() <= 1535),
                 lambda: get_status(status_callback) != last_status,
                 lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample,
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,

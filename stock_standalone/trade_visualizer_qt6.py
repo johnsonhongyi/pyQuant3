@@ -4326,8 +4326,8 @@ class MainWindow(QMainWindow, WindowMixin):
             # 提取第一个中文词（允许混合英文/数字）
             matches = _re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
             if matches:
-                fmt = matches[0]
-                # fmt = f'category.str.contains("{matches[0]}")'
+                # fmt = matches[0]
+                fmt = f'category.str.contains("{matches[0]}")'
             else:
                 fmt = text  # 原样
 

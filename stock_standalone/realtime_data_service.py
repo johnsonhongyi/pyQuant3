@@ -1210,6 +1210,8 @@ class IntradayEmotionTracker:
                 self.history.popleft()
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logger.error(f"IntradayEmotionTracker update error: {str(e)}")
 
     def get_score(self, code: str) -> float:
@@ -1663,8 +1665,11 @@ class DataPublisher:
         is_trading = cct.get_work_time_duration()
 
         if self.paused or not is_trading:
-            return
-            
+            if self.emotion_baseline.get_last_calc_date() is None:
+                pass
+            else:
+                return
+
         try:
             if df.empty: return
 
@@ -1758,12 +1763,13 @@ class DataPublisher:
             # [REFINED] 将分钟级时间加入指纹，确保每分钟至少触发一次全流程 (Heartbeat)
             batch_fp = f"{hhmm}_" + df_fingerprint(check_sample, cols=fp_cols)
             is_new_batch = (batch_fp != self._last_batch_fp)
-            
+
             # 无论是否实时，若基准尚未计算，优先尝试一次
             if self.emotion_baseline.get_last_calc_date() is None:
                 self.emotion_baseline.calculate_baseline(df)
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
-
+                if not is_trading:
+                    return
             # 4. 核心数据更新 (宽时段准入)
             if (is_realtime or hhmm >= 1500) and is_new_batch:
                 if self.update_count == 0:

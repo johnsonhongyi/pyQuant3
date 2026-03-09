@@ -674,7 +674,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                  return
         except:
              pass
-
+        
         # 动态获取 realtime_service (异步加载后可能已更新)
         if not self.realtime_service and hasattr(self.master, 'realtime_service'):
             if self.master.realtime_service:
@@ -691,8 +691,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             
         # 刷新统计
         cache_size = 0
-        if hasattr(self.realtime_service, 'kl_cache'):
-            cache_size = len(self.realtime_service.kl_cache)
+        if hasattr(self.realtime_service, 'kline_cache'):
+            cache_size = len(self.realtime_service.kline_cache)
             
         self.lbl_rt_stats.config(text=f"K线缓存对象数: {cache_size}")
         
@@ -720,6 +720,17 @@ class StrategyManager(tk.Toplevel, WindowMixin):
 
         # 2. 批量关联 Name 和 Volume 以及实时 55188 数据
         df_all = getattr(self.master, 'df_all', None)
+
+        # [FIX] 非交易时间 master.df_all 为空时，从 realtime_service 读取只读快照供查询显示
+        if (df_all is None or (hasattr(df_all, 'empty') and df_all.empty)) and self.realtime_service:
+            try:
+                snap = self.realtime_service.get_df_snapshot()
+                if not snap.empty:
+                    df_all = snap
+                    logger.debug("_refresh_data_tab: 非交易时间，使用 realtime_service 快照数据")
+            except Exception as e:
+                logger.warning(f"_refresh_data_tab: 获取快照失败: {e}")
+
         ext_data_map = {}
         if self.realtime_service:
             try:
