@@ -715,7 +715,8 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         # 统一转为 datetime 对象防止类型混合
         df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
 
-        df['code'] = df['code'].apply(lambda x: str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
+        # df['code'] = df['code'].apply(lambda x: str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
+        df['code'] = df['code'].astype(str).str.replace(r'^(sh|sz|bj)', '', regex=True)
         if len(df) > 0:
             df = df.set_index('code')
             h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False)
@@ -831,6 +832,8 @@ def get_sina_dd_count_price_realTime(df='',table='all',vol='0',type='0'):
         df = get_sina_all_json_dd(vol,type)
 
     if len(df)>0:
+        import ipdb;ipdb.set_trace()
+        
         df['couts']=df.groupby(['code'])['code'].transform('count')
         # df=df[(df['kind'] == 'U')]
         df=df.sort_values(by='couts',ascending=0)

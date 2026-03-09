@@ -1781,13 +1781,12 @@ class DataPublisher:
                 except Exception as sig_err:
                     logger.error(f"[Backend] Signal detection failed: {sig_err}")
 
-                # Publish Enriched Data to DataHubService (HDF5)
-                # This makes SBC scores available to all processes
-                try:
-                    from data_hub_service import DataHubService
-                    DataHubService.get_instance().publish_df_all(enriched_df)
-                except Exception as dh_err:
-                    logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
+                # [REMOVED] DataHubService publish logic
+                # try:
+                #     from data_hub_service import DataHubService
+                #     DataHubService.get_instance().publish_df_all(enriched_df)
+                # except Exception as dh_err:
+                #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
 
                 # Periodically log gap statistics
                 if self.update_count % 30 == 0:
