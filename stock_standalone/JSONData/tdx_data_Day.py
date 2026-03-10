@@ -60,7 +60,8 @@ ta = LazyModule('pandas_ta')
 h5a = LazyModule('JSONData.tdx_hdf5_api')
 wcd = LazyModule('JSONData.wencaiData')
 sina_data = LazyModule('JSONData.sina_data')
-
+# pd.options.display.float_format = '{:.2f}'.format
+# np.set_printoptions(precision=2, suppress=True)
 # pd = cct.LazyModule('pandas')
 # np = cct.LazyModule('numpy')
 # ta = cct.LazyModule('pandas_ta')

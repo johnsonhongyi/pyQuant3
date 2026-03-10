@@ -12764,17 +12764,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 # KLineMonitor class moved to kline_monitor.py
 
-def test_single_thread(single=True, test_strategy=False):
+def test_single_thread(single=True, test_strategy=False, resample=None):
     """
     单线程测试函数。
     :param single: 是否单次执行（默认 True，执行一次后返回）
     :param test_strategy: 是否同时测试 StockLiveStrategy
+    :param resample: 指定回测/测试的周期 (e.g., 'd', 'w', 'm')，如果不指定则使用全局默认值
     """
     import queue
     # 用普通 dict 代替 manager.dict()
     global marketInit,resampleInit
     shared_dict = {}
-    shared_dict["resample"] = resampleInit
+    shared_dict["resample"] = resample if resample is not None else resampleInit
     shared_dict["market"] = marketInit
 
     # 用 Python 内置 queue 代替 multiprocessing.Queue

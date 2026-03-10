@@ -260,8 +260,11 @@ class BiddingMomentumDetector:
                 }
                 logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股 (Sc>=80)")
             
-            # [NEW] 加载会话持久化数据 (得分/强度)
-            self.load_persistent_data()
+            # [FIX] 模拟模式下不加载持久化会话数据，防止实盘干扰回测结果
+            if not self.simulation_mode:
+                self.load_persistent_data()
+            else:
+                logger.info("[Detector] Simulation Mode Active: Skipping persistent session data load.")
         except Exception as e:
             logger.warning(f"[Detector] 种子加载或持久化恢复失败: {e}")
 
@@ -742,13 +745,16 @@ class BiddingMomentumDetector:
             data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
         with self._lock:
-            # 如果分数达到门槛且是首次异动，记录时间（用于认定龙头）
-            if final_score >= 5.0 and ts_obj.first_breakout_ts == 0:
+            # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
+            # 这样能更准确捕捉涨停瞬间，哪怕涨停时由于某些原因评分还没跟上 (例如量还没放出来)
+            limit_up_price = last_close * (1.0 + get_limit_up_threshold(code) / 100.0)
+            is_at_limit = cur_close >= limit_up_price - 0.005 # 容差 1 分钱
+            
+            if (final_score >= 5.0 or is_at_limit) and ts_obj.first_breakout_ts == 0:
                 ts_obj.first_breakout_ts = data_ts
             
-            # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0），重置异动时间
-            # 防止那种集合竞价虚高、开盘瞬间冲高随即长久失败的股票一直霸占“首异时间”
-            if final_score < 2.0:
+            # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0）且不处于涨停状态，重置异动时间
+            if final_score < 2.0 and not is_at_limit:
                 ts_obj.first_breakout_ts = 0
 
             if code in self._tick_series:

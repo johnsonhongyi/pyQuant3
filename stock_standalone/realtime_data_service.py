@@ -841,7 +841,7 @@ class DailyEmotionBaseline:
             m_h2    = c_mapping.get('lasth2d', 'lasth2d')
             m_p1    = c_mapping.get('lastp1d', 'lastp1d')
             m_p2    = c_mapping.get('lastp2d', 'lastp2d')
-            m_low   = c_mapping.get('last_low', 'last_low')
+            m_low   = c_mapping.get('last_low', 'lastl1d')
 
             for idx, row in df.iterrows():
                 # 兼容：如果 code 在列中则取列，否则取 index
@@ -865,9 +865,33 @@ class DailyEmotionBaseline:
                 lasth2d    = float(row.get(m_h2, row.get('lasth2d', row.get('high2', 0))))
                 lastp1d    = float(row.get(m_p1, row.get('lastp1d', row.get('last_close', 0))))
                 lastp2d    = float(row.get(m_p2, row.get('lastp2d', row.get('close2', 0))))
-                last_low   = float(row.get(m_low, row.get('last_low', row.get('low', 0))))
+                
+                # [FIX] 明确使用 lastl1d 作为前一日低点，并提取多日序列
+                lastl1d    = float(row.get('lastl1d', row.get(m_low, row.get('last_low', row.get('low', 0)))))
+                lastl2d    = float(row.get('lastl2d', 0))
+                lastl3d    = float(row.get('lastl3d', 0))
+                
+                # 提取成交量序列 (用于放量/加速判断)
+                lastv1d    = float(row.get('lastv1d', 0))
+                lastv2d    = float(row.get('lastv2d', 0))
+                lastv3d    = float(row.get('lastv3d', 0))
+                
+                last_low   = lastl1d # 默认锚点
                 dist_h_l   = float(row.get('dist_h_l', 4.0)) # 振幅，缺省给 4.0
 
+                # [NEW] 提取大周期和竞价元数据 (源自 compute_perd_df)
+                max5       = float(row.get('max5', 0))
+                max10      = float(row.get('max10', 0))
+                hmax       = float(row.get('hmax', 0))
+                hmax60     = float(row.get('hmax60', row.get('hmax2', 0))) # 60日高点
+                high4      = float(row.get('high4', 0))
+                low4       = float(row.get('low4', 0))
+                ral        = float(row.get('ral', 0))
+                top0       = float(row.get('top0', 0))
+                top15      = float(row.get('top15', 0))
+                lastdu4    = float(row.get('lastdu4', 0))
+                category   = str(row.get('category', ''))
+                
                 # 1. 连阳加分 (win >= 3 满分)
                 win = float(row.get('win', 0))
                 score += min(win * 5, 15)  # 最多+15
@@ -897,7 +921,41 @@ class DailyEmotionBaseline:
                 if power > 15: score += 10
                 elif power > 8: score += 5
                 
+                # [NEW] 7. 竞价与强度因子 (基于 compute_perd_df 逻辑)
+                if top0 > 0: score += 10    # 极强竞价 (一字/涨停竞价)
+                if top15 > 0: score += 10   # 强势开盘/异动
+                if ral > 15: score += 10    # 相对强度极高
+                elif ral > 8: score += 5
+                
+                # [NEW] 8. 区间振幅 (lastdu4 - 绝对值体现波动率)
+                abs_lastdu4 = abs(lastdu4)
+                if abs_lastdu4 > 15: score += 15 # 振幅巨大 (活跃/异动)
+                elif abs_lastdu4 > 8: score += 10
+                elif abs_lastdu4 > 4: score += 5
+
+                # [NEW] 9. 成交量异动 & 活异动判断
+                is_vol_spike = False
+                if lastv1d > 0 and lastv2d > 0 and lastv3d > 0:
+                    avg_v = (lastv2d + lastv3d) / 2
+                    if lastv1d > avg_v * 1.5:
+                        is_vol_spike = True
+                        score += 10 # 明显放量
+                
                 status_detail = ""
+                is_active_anomaly = False # 活异动 (窄幅突围)
+                is_acceleration = False   # 加速 (活跃放量)
+
+                # 逻辑：低活跃突然高走或竞价极强
+                if abs_lastdu4 < 6 and (top15 > 0 or top0 > 0 or price > max5):
+                    is_active_anomaly = True
+                    score += 20
+                    status_detail = "活异动"
+                
+                # 逻辑：高活跃且量能维持/增加
+                elif abs_lastdu4 >= 6 and (is_vol_spike or lastv1d >= lastv2d):
+                    is_acceleration = True
+                    score += 10
+                    status_detail = "加速"
                 # 7. [New] 突破上轨或强势洗盘回踩
                 upper = float(row.get('upper', 0))
 
@@ -926,6 +984,44 @@ class DailyEmotionBaseline:
                     else:
                         is_breakthrough = True
                         score += 10 # 普通突破
+
+                # [NEW] 9. 大周期突破判定 (Proximity to max5/high4/hmax)
+                # 源自 compute_perd_df 指标：判定是否正处于大级别压力位突破点
+                if price > 0:
+                    breakout_status = ""
+                    # 强势启动识别 (刚刚突破关键压力位)
+                    is_fresh_breakout = False
+                    
+                    # 1. 60日大回归突破 (最高优先级)
+                    if hmax60 > 0 and price >= hmax60:
+                        score += 30
+                        breakout_status = "强势启动" if lastp1d < hmax60 else "大回归突破"
+                        is_fresh_breakout = (lastp1d < hmax60)
+                    # 2. 30日/近期高点突破
+                    elif hmax > 0 and price >= hmax:
+                        score += 25
+                        breakout_status = "强势发力" if lastp1d < hmax else "30D突破"
+                        is_fresh_breakout = (lastp1d < hmax)
+                    # 3. 5日最高点 (max5)
+                    elif max5 > 0 and price >= max5:
+                        score += 15
+                        breakout_status = "5D突破"
+                        is_fresh_breakout = (lastp1d < max5)
+                    # 4. 近期结构高点 (high4)
+                    elif high4 > 0 and price >= high4:
+                        score += 10
+                        breakout_status = "近期突破"
+                        is_fresh_breakout = (lastp1d < high4)
+                    
+                    # 如果是新鲜突破且伴随放量，赋予更高描述
+                    if is_fresh_breakout and (is_vol_spike or top15 > 0):
+                        breakout_status = "强启动"
+                        score += 10 # 额外动力加分
+                    
+                    if breakout_status:
+                        # 只有在没有更强的描述时才作为主要状态
+                        if not status_detail or "震荡" in status_detail or status_detail in ["加速", "活异动"]:
+                            status_detail = breakout_status if not status_detail else f"{status_detail}|{breakout_status}"
                 
                 # 记录锚点供盘中追踪
                 code_str = str(code_val).strip().zfill(6)
@@ -937,7 +1033,17 @@ class DailyEmotionBaseline:
                     'last_low': last_low,
                     'last_close': lastp1d,
                     'last_close_p2': lastp2d,
-                    'is_rising_struct': is_rising_struct
+                    'is_rising_struct': is_rising_struct,
+                    'category': category,
+                    'max5': max5,
+                    'high4': high4,
+                    'hmax': hmax,
+                    'hmax60': hmax60,
+                    'lastdu4': lastdu4,
+                    'lastv1d': lastv1d,
+                    'lastl1d': lastl1d,
+                    'is_active_anomaly': is_active_anomaly,
+                    'is_acceleration': is_acceleration
                 }
 
                 # 安全等级基础分 (0-5)
@@ -976,9 +1082,9 @@ class DailyEmotionBaseline:
                 # 附加安全等级显示
                 status_detail += f" (安:{min(5.0, safety):.1f})"
 
-                # 最终限制
-                self._baselines[code_str] = max(10.0, min(100.0, score))
-                self._baseline_details[code_str] = status_detail
+                # 最终限制 (统一 round 2 确保显示美观)
+                self._baselines[code_str] = round(max(10.0, min(100.0, score)), 2)
+                self._baseline_details[code_str] = status_detail if status_detail else "震荡"
                 count += 1
             
             self._last_calc_date = today
@@ -1024,6 +1130,7 @@ class IntradayEmotionTracker:
     _last_vol: dict[str, float]      # 记录上一笔成交总量，用于计算增量
     _cumulative_amt: dict[str, float] # 记录累积成交额，用于合成 VWAP
     _intraday_high: dict[str, float] # 记录日内最高价，用于识别突破
+    _signal_start_price: dict[str, float] # [NEW] 记录信号触发时的价格，用于计算绩效反馈
     history: deque[tuple[float, dict[str, float]]]
     
     def __init__(self):
@@ -1033,6 +1140,7 @@ class IntradayEmotionTracker:
         self._last_vol = {}
         self._cumulative_amt = {}
         self._intraday_high = {}
+        self._signal_start_price = {} # {code: start_price}
         self._last_date = {}        # {code: day_num} 用于处理跨天重置累积量
         self._code_to_name = {}     # [Phase 4] 系统内部名称映射兜底
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
@@ -1050,6 +1158,7 @@ class IntradayEmotionTracker:
         self._last_vol.clear()
         self._cumulative_amt.clear()
         self._intraday_high.clear()
+        self._signal_start_price.clear()
         self._last_date.clear()
         # self._code_to_name.clear() # 通常名称不随数据清除
 
@@ -1083,6 +1192,14 @@ class IntradayEmotionTracker:
 
             vwap_support_val = STRUCTURAL_THRESHOLD.get('SBC_RISING', {}).get('vwap_support', 1.002)
             # --- End Config-Driven Column Projection ---
+            
+            # [NEW] Filter out invalid ticks (zero volume or trade price)
+            if active_vol_col in df.columns:
+                df = df[df[active_vol_col] > 0]
+            if active_trade_col in df.columns:
+                df = df[df[active_trade_col] > 0]
+            
+            if df.empty: return
             
             # [PRE-CALC] 为趋势加速判定预计算滚动指标
             if active_trade_col in df.columns:
@@ -1121,11 +1238,11 @@ class IntradayEmotionTracker:
                 mask_mania = (percent > 5) & (vol_ratio > 1.5)
                 final_scores[mask_mania] += 5
                 
-                final_scores = final_scores.clip(0, 100)
+                final_scores = final_scores.clip(0, 100).round(2)
                 self.scores = dict(zip(df['code'], final_scores))
             else:
                 # 如果没有百分比，至少保持之前的分数并确保 final_scores 存在
-                final_scores = pd.Series(df['code'].map(self.scores).fillna(baselines).values, index=df.index)
+                final_scores = pd.Series(df['code'].map(self.scores).fillna(baselines).values, index=df.index).round(2)
 
             # 3. [New] 分时结构追踪与 VWAP 计算
             # 即使没有量/额，也要预埋 sbc_status 列避免 KeyError
@@ -1189,16 +1306,37 @@ class IntradayEmotionTracker:
                             avg_p = float(row['avg_price'])
                             y_high = float(anchors.get('yesterday_high', 0))
                             p_high = float(anchors.get('prev_high', 0))
-                            ma60 = float(anchors.get('ma60', 0))
+                            ma60 = float(row.get('ma60', anchors.get('ma60', 0))) # 动态 ma60 优先
                             last_l = float(anchors.get('last_low', 0))
+                            
+                            hmax60 = float(anchors.get('hmax60', 0))
+                            hmax   = float(anchors.get('hmax', 0))
+                            max5   = float(anchors.get('max5', 0))
+                            high4  = float(anchors.get('high4', 0))
+                            last_c = float(anchors.get('last_close', 0))
                             
                             # 688787 特征 1: 站稳均价线 (VWAP Support)
                             if price > avg_p * vwap_support_val: # 比例从配置读取
                                 status.append("均线上")
                             
                             # 特征 2: 突破多日高点 (Structural Breakout)
-                            if price > max(y_high, p_high) > 0:
+                            structural_high = max(y_high, p_high, high4, 0)
+                            if price > structural_high > 0:
                                 status.append("创多日高")
+                                
+                            # --- ⚡ [NEW] 强势启动 / 大回归识别 ---
+                            is_strong_start = False
+                            if hmax60 > 0 and price > hmax60:
+                                label = "强势启动" if last_c < hmax60 else "大回归突破"
+                                status.append(label)
+                                is_strong_start = (last_c < hmax60)
+                            elif hmax > 0 and price > hmax:
+                                label = "强启动" if last_c < hmax else "30D突破"
+                                status.append(label)
+                                is_strong_start = (last_c < hmax)
+                            elif max5 > 0 and price > max5:
+                                status.append("5D突破")
+                                is_strong_start = (last_c < max5)
                                 
                             # 特征 3: MA60 支撑位反弹
                             if ma60 > 0 and price > ma60 > last_l:
@@ -1206,7 +1344,6 @@ class IntradayEmotionTracker:
                             
                             # 特征 4: 诱空反转识别 (Bear Trap)
                             # 早盘跌破昨日低点后又快速收复昨日收盘价
-                            last_c = float(anchors.get('last_close', 0))
                             low_p = float(row.get('low', price))
                             if low_p < last_l < last_c and price > last_c:
                                 status.append("诱空转多")
@@ -1246,7 +1383,7 @@ class IntradayEmotionTracker:
 
                             # 综合判定：SBC (Structural Breakout Champion)
                             is_rising = anchors.get('is_rising_struct', False)
-                            is_sbc_buy = ("均线上" in status and ("创多日高" in status or "诱空转多" in status)) or ("🔥趋势加速" in status)
+                            is_sbc_buy = ("均线上" in status and ("创多日高" in status or "诱空转多" in status or "强势启动" in status or "强启动" in status)) or ("🔥趋势加速" in status)
                             is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             
                             is_sbc = is_sbc_buy or is_sbc_sell
@@ -1257,6 +1394,7 @@ class IntradayEmotionTracker:
                             #     logger.info(f"[DEBUG-SBC] 688787: status={status}, is_rising={is_rising}, is_sbc={is_sbc}, price={price}, ma60={ma60}")
 
                             if is_sbc:
+
                                  # 只有在从“非SBC”转为“SBC”时标记图标
                                  if not prev_sbc:
                                      sig_text = "🚀强势结构"
@@ -1273,13 +1411,33 @@ class IntradayEmotionTracker:
                                          # 获取行数据中的时间字符串用于打印
                                          r_time_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1]
                                          if is_sbc_buy:
-                                             scores_dict[idx_val] += 10 # 触发瞬间额外加分
-                                             logger.warning(f"🚀 [SBC-Breakout] {code_str}{name_display} 强势结构确认: {r_time_str} 突破多日高位同时站稳均线 ({avg_p:.2f})")
+                                             bonus = 15 if is_strong_start else 10
+                                             scores_dict[idx_val] += bonus # 触发瞬间额外加分
+                                             msg = f"🚀 [SBC-Breakout] {code_str}{name_display} "
+                                             if is_strong_start: msg += "强势启动确认: "
+                                             else: msg += "强势结构确认: "
+                                             logger.warning(f"{msg}{r_time_str} 突破关键高位并站稳均线 ({avg_p:.2f})")
+                                             
+                                             # [Performance Feedback] 记录起始价格
+                                             if code_str not in self._signal_start_price:
+                                                 self._signal_start_price[code_str] = price
                                          else:
                                              logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
                                  else:
                                      # 持续状态下仅保持状态描述
                                      sbc_signals.append("-".join(status))
+                                     
+                                     # [Performance Feedback] 计算绩效分：如果信号后持续走强，额外奖励
+                                     if code_str in self._signal_start_price:
+                                         start_p = self._signal_start_price[code_str]
+                                         if start_p > 0:
+                                             performance_pct = (price - start_p) / start_p * 100
+                                             if performance_pct > 0:
+                                                 # 绩效加分 (涨幅的 2.5倍，封顶 25分)
+                                                 perf_bonus = min(25, performance_pct * 2.5)
+                                                 scores_dict[idx_val] += perf_bonus
+                                                 if performance_pct > 2:
+                                                     status.append(f"绩效+{perf_bonus:.0f}")
                             else:
                                  sbc_signals.append("-".join(status))
                             
