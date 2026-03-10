@@ -1437,6 +1437,7 @@ class DataPublisher:
         self._last_batch_fp = "" # 上次批次数据的指纹
         self._last_save_status = "N/A" # 上次保存状态
         self._last_update_date: Optional[str] = None # 最近处理的数据日期 (YYYY-MM-DD)
+        self._is_recovered_empty = False # 是否处于“加载失败导致空数据”的危险状态
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -1517,12 +1518,15 @@ class DataPublisher:
                     with timed_ctx("from_dataframe", warn_ms=800):
                         self.kline_cache.from_dataframe(cached_df)
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
+                    self._is_recovered_empty = False
                 else:
-                    logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
+                    logger.warning("ℹ️ No MinuteKlineCache found on disk or empty. Protection ACTIVE.")
+                    self._is_recovered_empty = True
             else:
                 logger.info("🛡️ Simulation Mode: Skipping Live MinuteKlineCache recovery to ensure data isolation.")
         except Exception as e:
             logger.error(f"Snapshot load error: {e}")
+            self._is_recovered_empty = True
 
     def reset_state(self):
         """
@@ -2019,20 +2023,25 @@ class DataPublisher:
             with timed_ctx("save_kline_cache", warn_ms=1500):
                 save_cache_df = self.kline_cache.to_dataframe()
                 if not save_cache_df.empty:
-                    # 1. 保存到本地磁盘进行恢复
-                    status = self.cache_slot.save_df(save_cache_df, persist=True, backup=self._enable_backup)
+                    # [PROTECTION] 如果启动时加载失败，且当前数据量依然不足 (如 < 10000 行)，禁止自动保存覆盖
+                    current_rows = len(save_cache_df)
+                    if self._is_recovered_empty and current_rows < 10000:
+                        if now - self._last_save_ts > 1800: # 每 30 分钟才报一次警告
+                             logger.warning(f"⚠️ [Protection] Snapshot save SKIPPED: Recovered empty, and current rows({current_rows}) < 10000 threshold.")
+                             self._last_save_ts = now
+                        return
+
+                    # 1. 保存到本地磁盘进行恢复 (已在 cache_utils.py 中加持 min_rows_factor 保护)
+                    status = self.cache_slot.save_df(
+                        save_cache_df, 
+                        persist=True, 
+                        backup=self._enable_backup,
+                        min_rows_factor=0.5,
+                        force=force
+                    )
                     
-                    # 🔌 [REFINED] 同步到 Data Hub (shared_tick_cache.h5)
-                    # 使得其他进程 (如 SectorBiddingPanel) 能够透明地读取轨迹数据
-                    # try:
-                    #     from data_hub_service import DataHubService
-                    #     DataHubService.get_instance().publish_tick_cache(save_cache_df)
-                    # except Exception as dh_err:
-                    #     logger.error(f"[DataHub] Failed to publish tick cache: {dh_err}")
-                        
-                    # [FIX] self.kline_cache is MinuteKlineCache, which doesn't have to_pickle.
-                    # Data is already saved by self.cache_slot.save_df(save_cache_df, ...) above.
-                    # No extra saving needed here for recovery as save_df target is self._cache_path.
+                    if status:
+                        self._is_recovered_empty = False # 成功保存一次后，解除空加载警报
                     
                     self._last_save_ts = now
                     self.kline_cache._is_dirty = False

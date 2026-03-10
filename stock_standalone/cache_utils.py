@@ -113,7 +113,7 @@ class DataFrameCacheSlot:
                 self._safe_remove(self.cache_file)
                 return pd.DataFrame()
 
-    def save_df(self, df: pd.DataFrame, persist: bool = True, backup: bool = False) -> bool:
+    def save_df(self, df: pd.DataFrame, persist: bool = True, backup: bool = False, min_rows_factor: float = 0.5, force: bool = False) -> bool:
         if df is None or df.empty:
             if self.logger:
                 self.logger.warning("save_df skipped: empty df")
@@ -125,6 +125,26 @@ class DataFrameCacheSlot:
 
         if not persist:
             return True
+
+        if not force and os.path.exists(self.cache_file):
+            try:
+                # [PROTECTION] 如果新数据量远小于旧数据量，拦截覆盖
+                # 仅在非强制模式下检查
+                new_count = len(df)
+                # 使用读取方式（可能较慢但安全）
+                try:
+                    old_df_meta = pd.read_pickle(self.cache_file, compression='zstd')
+                except Exception:
+                    old_df_meta = pd.read_pickle(self.cache_file)
+                
+                old_count = len(old_df_meta)
+                if new_count < old_count * min_rows_factor:
+                    if self.logger:
+                        self.logger.error(f"🛑 [DataProtection] Save BLOCKED: New rows({new_count}) < {min_rows_factor} * Old rows({old_count}). Set force=True to overwrite.")
+                    return False
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Data volume check failed (corrupted old file?), proceeding: {e}")
 
         temp_file = self.cache_file + f".{os.getpid()}.tmp"
         try:

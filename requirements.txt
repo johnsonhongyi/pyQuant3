@@ -157,3 +157,4 @@ xyzservices==2025.4.0
 yarg==0.1.9
 yarl==1.20.0
 zipp @ file:///home/conda/feedstock_root/build_artifacts/zipp_1625284368454/work
+zstandard

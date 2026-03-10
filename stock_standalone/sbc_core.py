@@ -242,7 +242,13 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
             logger.error(f"❌ 未找到缓存: {cache_path}")
             return None
         try:
-            full = pd.read_pickle(cache_path)
+            # 优先尝试 zstd 压缩读取 (对应 cache_utils.py 的保存方式)
+            try:
+                full = pd.read_pickle(cache_path, compression='zstd')
+            except Exception:
+                # 兜底：传统读取
+                full = pd.read_pickle(cache_path)
+                
             stock_df = full[full['code'] == code].copy().sort_values('time')
             # [REFINED] If cache is insufficient (< 200), trigger Sina fallback
             if stock_df.empty or len(stock_df) < 200:

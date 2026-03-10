@@ -1388,7 +1388,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 关闭竞价窗口
             if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
                 try:
-                    logger.info("正在关闭竞价窗口...")
+                    logger.info("正在关闭竞价窗口并保存数据...")
+                    # [NEW] 在销毁前强制保存数据
+                    if hasattr(self.sector_bidding_panel, 'detector') and self.sector_bidding_panel.detector:
+                        self.sector_bidding_panel.detector.save_persistent_data()
                     self.sector_bidding_panel.close()
                 except Exception as e:
                     logger.warning(f"关闭竞价窗口异常: {e}")
@@ -1447,9 +1450,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.warning(f"手札存档失败: {e}")
                     
             try:
+                archive_file_tools(WINDOW_CONFIG_FILE, "window_config", ARCHIVE_DIR, logger)
+            except Exception as e:
+                logger.warning(f"vwindow_config失败: {e}")
+
+            try:
                 archive_file_tools(VOICE_ALERT_CONFIG_FILE, "voice_alert_config", ARCHIVE_DIR, logger)
             except Exception as e:
-                logger.warning(f"手札存档失败: {e}")
+                logger.warning(f"voice_alert失败: {e}")
 
             # 4. 如果 concept 窗口存在，也保存位置并隐藏
             if hasattr(self, "_concept_win") and self._concept_win:

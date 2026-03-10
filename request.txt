@@ -22,6 +22,7 @@ pymysql
 py_mini_racer
 pywebio==1.8.3
 pyperclip==1.8.2
+zstandard
 #ta-lib==0.5.1 need https://github.com/cgohlke/talib-build/releases
 #pytables:  https://www.lfd.uci.edu/~gohlke/pythonlibs/#ta-lib
 #conda install -n py39 -c conda-forge pytables   #pip install --upgrade tables

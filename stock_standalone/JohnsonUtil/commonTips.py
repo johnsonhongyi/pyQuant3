@@ -8590,6 +8590,7 @@ if __name__ == '__main__':
     print(f"get_day_istrade_date('2026-02-27'): {get_day_istrade_date('2026-02-27')}")
     print(f'get_trade_date_status : {get_trade_date_status()}')
     print(get_ramdisk_path("minute_kline_cache.pkl"))
+    print(get_ramdisk_path("bidding_session_data.json.gz"))
     lastday = get_last_trade_date()
     last2day = get_last_trade_date(lastday)
     trade_gap = get_trade_day_distance(lastday,get_today())
