@@ -57,7 +57,7 @@ def get_mock_cat(code):
         return f'{market};半导体;芯片'
     return market
 
-def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_speed=0.0, stops=None):
+def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True):
     """
     基于 HDF5 本地 Tick 数据，按时间线回放并推入 DataPublisher/BiddingMomentumDetector。
     
@@ -146,7 +146,8 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
     logger.info(f"Successfully fetched {len(real_df_all)} real stock records (Data Leakage Protection Active).")
 
     # [Phase 4] 注册代码名称对应关系
-    publisher = DataPublisher(high_performance=True, scraper_interval=99999, enable_backup=False, validation_mode=True)
+    publisher = DataPublisher(high_performance=True, scraper_interval=99999, enable_backup=False, 
+                              simulation_mode=True, verbose=not concise)
     publisher.register_names(real_df_all)
     pd.options.mode.chained_assignment = None # 避免测试时出现 SettingWithCopyWarning
     
@@ -192,7 +193,7 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
     # --- [阈值调整 - 基于真实数据] ---
     detector.score_threshold = 1.0        # 调低以便看到更多个股异动
     detector.sector_min_score = 1.0       # 对应 _aggregate_sectors 中的 high_score_stocks 门槛
-    detector.board_score_threshold = 1.0  # 全局板块显示门槛
+    detector.sector_score_threshold = 1.0 # 全局板块显示门槛 (注意：之前误写为 board_score_threshold)
     
     # --- [New] 初始化情绪基准 ---
     if hasattr(publisher, 'emotion_baseline'):
@@ -350,7 +351,10 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 elif speed_x > 1: speed_label = "🚗"
                 else: speed_label = "🚶"
 
-                sys.stdout.write(f"\r[Playback] {speed_label} Progress: {t_str} | Speed: {speed_x:.1f}x ({tps:.0f} tps) | Pub: {cost_pub:.1f}ms | Det: {cost_det:.1f}ms | Total: {len(publisher.kline_cache.cache)}      ")
+                if concise:
+                    sys.stdout.write(f"\r[Playback] {speed_label} {t_str} | {speed_x:.1f}x ({tps:.0f} tps) | Total: {len(publisher.kline_cache.cache)}      ")
+                else:
+                    sys.stdout.write(f"\r[Playback] {speed_label} Progress: {t_str} | Speed: {speed_x:.1f}x ({tps:.0f} tps) | Pub: {cost_pub:.1f}ms | Det: {cost_det:.1f}ms | Total: {len(publisher.kline_cache.cache)}      ")
                 sys.stdout.flush()
     
             # 检查是否到达切片观察点
@@ -452,6 +456,7 @@ if __name__ == "__main__":
     parser.add_argument("--observation", type=str, action="append", help="Observation timestamps (HH:MM:SS) to pause and inspect. Can be specified multiple times.")
     parser.add_argument("--start", type=str, default="09:30:00", help="Simulation start time (HH:MM:SS)")
     parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
     
     args = parser.parse_args()
     
@@ -463,5 +468,6 @@ if __name__ == "__main__":
         start_time_str=args.start, 
         end_time_str=args.end, 
         playback_speed=args.speed, 
-        stops=slice_stops
+        stops=slice_stops,
+        concise=not args.verbose
     )

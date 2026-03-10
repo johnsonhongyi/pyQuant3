@@ -82,38 +82,75 @@ def find_app_hwnds() -> List[Dict]:
     win32gui.EnumWindows(enum_callback, None)
     return found_windows
 
+# def tile_all_windows(monitor_index: int = 0):
+#     """
+#     Standard tiling: resizes ALL app windows to fit a grid.
+#     Refined: Now defaults to rearrange_sbc_windows if only SBC windows are target.
+#     """
+#     if not HAS_WIN32: return
+    
+#     hwnds_info = find_app_hwnds()
+#     # If we have SBC windows, prioritize the specialized layout
+#     sbc_windows = [w for w in hwnds_info if w['title'].startswith(SBC_PREFIX)]
+#     if sbc_windows:
+#         rearrange_sbc_windows(monitor_index)
+#         # If there are OTHER windows, we could tile them too, but typically 
+#         # the user just wants the active data windows arranged.
+#         return
+
+#     if not hwnds_info:
+#         logger.info("No app windows found to tile.")
+#         return
+
+#     # ... rest of original generic tiling logic ...
+#     wa_left, wa_top, wa_right, wa_bottom, wa_w, wa_h = get_monitor_work_area(monitor_index)
+#     n = len(hwnds_info)
+#     cols = int(n**0.5) or 1
+#     rows = (n + cols - 1) // cols
+#     cell_w, cell_h = wa_w // cols, wa_h // rows
+
+#     for i, info in enumerate(hwnds_info):
+#         row, col = i // cols, i % cols
+#         x, y = wa_left + col * cell_w, wa_top + row * cell_h
+#         win32gui.MoveWindow(info['hwnd'], x, y, cell_w, cell_h, True)
+#     logger.info(f"Tiled {n} windows in {rows}x{cols} grid.")
+
 def tile_all_windows(monitor_index: int = 0):
-    """
-    Standard tiling: resizes ALL app windows to fit a grid.
-    Refined: Now defaults to rearrange_sbc_windows if only SBC windows are target.
-    """
-    if not HAS_WIN32: return
+    if not HAS_WIN32:
+        return
     
     hwnds_info = find_app_hwnds()
-    # If we have SBC windows, prioritize the specialized layout
+
+    # 只找 SBC 窗口
     sbc_windows = [w for w in hwnds_info if w['title'].startswith(SBC_PREFIX)]
+
     if sbc_windows:
-        rearrange_sbc_windows(monitor_index)
-        # If there are OTHER windows, we could tile them too, but typically 
-        # the user just wants the active data windows arranged.
+        # [FIX] 确保传递的是过滤后的 sbc_windows 列表
+        rearrange_sbc_windows(monitor_index, sbc_windows)
         return
 
     if not hwnds_info:
         logger.info("No app windows found to tile.")
         return
 
-    # ... rest of original generic tiling logic ...
     wa_left, wa_top, wa_right, wa_bottom, wa_w, wa_h = get_monitor_work_area(monitor_index)
+
     n = len(hwnds_info)
     cols = int(n**0.5) or 1
     rows = (n + cols - 1) // cols
-    cell_w, cell_h = wa_w // cols, wa_h // rows
+
+    cell_w = wa_w // cols
+    cell_h = wa_h // rows
 
     for i, info in enumerate(hwnds_info):
         row, col = i // cols, i % cols
-        x, y = wa_left + col * cell_w, wa_top + row * cell_h
+        x = wa_left + col * cell_w
+        y = wa_top + row * cell_h
+
         win32gui.MoveWindow(info['hwnd'], x, y, cell_w, cell_h, True)
+
     logger.info(f"Tiled {n} windows in {rows}x{cols} grid.")
+    
 
 def get_monitor_work_area(monitor_index: int = 0):
     try:
@@ -125,22 +162,28 @@ def get_monitor_work_area(monitor_index: int = 0):
     except:
         return 0, 0, 1920, 1080, 1920, 1080
 
-def rearrange_sbc_windows(monitor_index: int = 0):
+def rearrange_sbc_windows(monitor_index: int = 0, windows_list: List[Dict] = None):
     """
     Specialized rearrangement for SBC Pattern windows:
-    1. Filter ONLY "SBC Pattern - " windows.
-    2. KEEP original window sizes.
-    3. Tile them side-by-side, wrapping to next row if they exceed screen width.
+    1. Filter ONLY "SBC Pattern - " windows if windows_list is None.
+    2. SORT windows by title to ensure strict order.
+    3. KEEP original window sizes.
+    4. Tile them side-by-side, wrapping to next row if they exceed screen width.
     """
     if not HAS_WIN32: return
     
-    all_windows = find_app_hwnds()
-    sbc_windows = [w for w in all_windows if w['title'].startswith(SBC_PREFIX)]
+    if windows_list is None:
+        all_windows = find_app_hwnds()
+        sbc_windows = [w for w in all_windows if w['title'].startswith(SBC_PREFIX)]
+    else:
+        sbc_windows = windows_list
     
     if not sbc_windows:
         logger.info("No SBC Pattern windows found to rearrange.")
-        # Fallback to general tiling if no SBC windows found but others exist
         return
+
+    # [FIX] 必须严格按照标题排序（例如 SBC Pattern - 000001, SBC Pattern - 600000）
+    sbc_windows.sort(key=lambda x: x['title'])
 
     # Use current monitor or monitor of the first SBC window
     try:
@@ -177,7 +220,7 @@ def rearrange_sbc_windows(monitor_index: int = 0):
         curr_x += w + padding
         max_row_h = max(max_row_h, h + padding)
 
-    logger.info(f"Rearranged {len(sbc_windows)} SBC windows without resizing.")
+    logger.info(f"Rearranged {len(sbc_windows)} SBC windows in strict order.")
 
 def place_next_to(hwnd_child: int, parent_title_part: str = "Sector Bidding Panel"):
     """Place a window immediately to the right of a 'parent' window."""

@@ -323,6 +323,10 @@ class DataProcessWorker(QObject):
             if self.df_queue:
                 df = self.df_queue.pop(0)
                 try:
+                    # [HEARTBEAT] 后台数据处理心跳
+                    if self.detector.enable_log:
+                        logger.info(f"💓 [Worker] Processing heartbeat: Queue size={len(self.df_queue)}")
+                        
                     self.detector.register_codes(df)
                     self.detector.update_scores()
                     self.finished.emit()
@@ -386,6 +390,23 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._score_timer = QTimer(self)
         self._score_timer.timeout.connect(self.detector.update_scores)
         # self._score_timer.start(5000) # [CHANGE] 改为数据驱动
+
+        # 🚀 [Proactive] 启动引导初始化
+        if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None and not self.main_window.df_all.empty:
+             self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
+             logger.info("📡 [SectorPanel] Cold start initialized with main window's df_all")
+        else:
+             if hasattr(self, 'status_lbl'):
+                 self.status_lbl.setText("⏳ 等待主窗口数据或手动刷新...")
+
+    def showEvent(self, event):
+        """窗口显示时，尝试触发初次刷新以填补白板"""
+        super().showEvent(event)
+        # 即使数据还未到，先清空加载一次状态
+        if self.sector_list.count() == 0:
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🔄 准备首次数据评分映射...")
+            QTimer.singleShot(500, self.manual_refresh)
 
     def closeEvent(self, event):
         """Window close event, clean up threads gracefully."""
@@ -513,6 +534,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_hide.clicked.connect(self.hide)
         bar_lay_2.addWidget(self.btn_hide)
 
+        # [NEW] 板块综合强度过滤
+        bar_lay_2.addWidget(self._sep())
+        lbl_strength = QLabel("🔥 强度≥")
+        lbl_strength.setStyleSheet("color: #ff3333; font-weight: bold;")
+        bar_lay_2.addWidget(lbl_strength)
+        self.spin_strength = self._make_spin(0.0, 500.0, 1.0, self.detector.sector_score_threshold)
+        self.spin_strength.setToolTip("过滤核心强度(板分)较低的噪点板块")
+        self.spin_strength.valueChanged.connect(self._on_threshold_changed)
+        bar_lay_2.addWidget(self.spin_strength)
+
         # ── [NEW] SBC Test Buttons ──
         bar_lay_2.addWidget(self._sep())
         
@@ -551,6 +582,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.spin_sector_min_score = self._make_spin(0.0, 50.0, 0.5, self.detector.sector_min_score)
         bar_lay_3.addWidget(self.spin_sector_min_score)
 
+        bar_lay_3.addWidget(QLabel(" 🔥 强度≥"))
+        self.spin_sector_score_threshold = self._make_spin(0.0, 500.0, 5.0, getattr(self.detector, 'sector_score_threshold', 5.0))
+        bar_lay_3.addWidget(self.spin_sector_score_threshold)
+
         bar_lay_3.addWidget(self._sep())
 
         bar_lay_3.addWidget(QLabel(" 📉 最小振幅%:"))
@@ -562,7 +597,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_3.addWidget(self.spin_consec_bars)
 
         for w in [self.spin_score_threshold, self.spin_sector_min_score, 
-                 self.spin_amplitude_min, self.spin_consec_bars]:
+                 self.spin_sector_score_threshold, self.spin_amplitude_min, self.spin_consec_bars]:
             w.valueChanged.connect(self._on_strategy_changed)
 
         bar_lay_3.addStretch()
@@ -695,13 +730,37 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ------------------------------------------------------------------ data
     def manual_refresh(self):
-        """手动触发评分计算和 UI 刷新 (适用于启动初次加载或收盘后分析)"""
+        """手动触发评分计算和 UI 刷新 (增加防抖和状态反馈)"""
+        if not hasattr(self, 'btn_refresh'): return
+        
         try:
-            self.detector.update_scores()
-            self._refresh_sector_list()
-            logger.info("⚡ 已完成手动数据评分刷新")
+            # 1. 按钮防抖与反馈
+            self.btn_refresh.setEnabled(False)
+            self.btn_refresh.setText("刷新中...")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("⏳ 正在全量计算评分 (请稍候)...")
+                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            # 2. 强制触发全量重算
+            # [REFINED] 要求后台线程在处理下一帧时忽略时间窗口限制
+            self._force_update_requested = True
+            
+            # 立即在当前线程尝试刷新（如果队列为空）
+            if not self._worker.df_queue:
+                self.detector.update_scores()
+                self._refresh_sector_list()
+                logger.info("⚡ [Manual] 已完成同步数据评分刷新")
+            else:
+                logger.info("⚡ [Manual] 任务已加入队列，等待后台处理...")
+
+            # 3. 3秒后恢复按钮 (防抖)
+            QTimer.singleShot(3000, lambda: self.btn_refresh.setEnabled(True))
+            QTimer.singleShot(3000, lambda: self.btn_refresh.setText("刷新 🔄"))
+            
         except Exception as e:
             logger.error(f"Manual refresh failed: {e}")
+            self.btn_refresh.setEnabled(True)
+            self.btn_refresh.setText("刷新 🔄")
 
     def _run_sbc_test(self, use_live: bool):
         """
@@ -810,20 +869,53 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
 
     def _on_worker_finished(self):
-         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
-         try:
-             now = time.time()
-             limit = getattr(cct.CFG, 'duration_sleep_time', 5.0)
-             if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
-                 self._refresh_sector_list()
-                 self._last_refresh_ts = now
-                 self._force_update_requested = False
-         except Exception as e:
-             logger.error(f"[SectorBiddingPanel] _on_worker_finished: {e}")
+        """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+        try:
+            now = time.time()
+            
+            # [REFINED] 动态获取 sleep 时间，直接从已经导入的 cct.CFG 获取
+            try:
+                # cct (JohnsonUtil.commonTips) 已经在模块顶部导入
+                limit = float(getattr(cct.CFG, 'duration_sleep_time', 5.0))
+            except:
+                limit = 5.0
+                
+            # 允许竞价期间更快速刷新 (最低 1s)
+            limit = max(1.0, limit)
+            
+            if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
+                # [HEARTBEAT] 前台刷新心跳
+                if self.detector.enable_log:
+                    logger.info(f"💓 [Board Panel] Refreshing heartbeat: Total sectors={len(self.detector.active_sectors)}")
+                    
+                self._refresh_sector_list()
+                self._last_refresh_ts = now
+                self._force_update_requested = False
+                
+        except Exception as e:
+            logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
 
     # ------------------------------------------------------------------ UI refresh
     def _refresh_sector_list(self):
+        # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
+        if self._worker.df_queue:
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
+                self.status_lbl.setStyleSheet("color: #FFD700; font-weight: bold;")
+        
         sectors = self.detector.get_active_sectors()
+        
+        if not sectors:
+            # 如果目前没有活跃板块，在状态栏提示
+            if hasattr(self, 'status_lbl') and not self._worker.df_queue:
+                self.status_lbl.setText("📝 目前无满足门槛的活跃板块")
+                self.status_lbl.setStyleSheet("color: #AAAAAA;")
+            return
+        
+        now_str = datetime.now().strftime("%H:%M:%S")
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"✅ 刷新完成 ({now_str}) | 活跃板块: {len(sectors)}")
+            self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
         
         # 1. 记录当前选中的板块名，以便在刷新后恢复
         current_item = self.sector_list.currentItem()
@@ -894,8 +986,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         self.sector_list.blockSignals(False)
         
-        # 🚦 强制触发：如果执行了自动选中，手动调用一次选中逻辑（因为 blockSignals 会屏蔽信号）
-        if do_auto_select:
+        # 🚦 [FIX] 强制触发：无论是否 auto_select，只要有选中项，都重刷一次右侧个股表
+        # 否则如果板块选择没变，右侧数据（现价/涨幅）就不会随刷新周期更新
+        if self.sector_list.currentItem():
             self._on_sector_selected(self.sector_list.currentItem(), None)
         
         # 4. 更新状态栏
@@ -1545,6 +1638,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         QApplication.clipboard().setText(code)
 
     # ------------------------------------------------------------------ strategy
+    def _on_threshold_changed(self, val):
+        """同步强度门槛到 detector 并刷新列表"""
+        self.detector.sector_score_threshold = float(val)
+        self._refresh_sector_list()
+
     def _on_strategy_changed(self):
         s = self.detector.strategies
         s['new_high']['enabled']       = self.cb_new_high.isChecked()
@@ -1560,6 +1658,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.detector.score_threshold = self.spin_score_threshold.value()
         if hasattr(self, 'spin_sector_min_score'):
             self.detector.sector_min_score = self.spin_sector_min_score.value()
+        if hasattr(self, 'spin_sector_score_threshold'):
+            self.detector.sector_score_threshold = self.spin_sector_score_threshold.value()
         
         # [NEW] Extended Strategy Params
         s['amplitude']['min'] = self.spin_amplitude_min.value()

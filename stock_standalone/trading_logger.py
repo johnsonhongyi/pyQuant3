@@ -492,7 +492,7 @@ class TradingLogger:
                     """, (code, name, now_str, price, amount, reason, fee, resample, action))
                 else:
                     # 加仓：更新均价和股数，并追加理由
-                    t_id, old_price, old_amount, old_fee = existing_trade
+                    t_id, old_price, old_amount, old_fee, last_action = existing_trade
                     # 尝试读取旧理由
                     cur.execute("SELECT buy_reason FROM trade_records WHERE id=?", (t_id,))
                     res = cur.fetchone()
@@ -516,7 +516,7 @@ class TradingLogger:
 
             elif action == "卖出" or "止" in action:
                 if existing_trade:
-                    t_id, b_price, b_amount, old_fee = existing_trade
+                    t_id, b_price, b_amount, old_fee, last_action = existing_trade
                     sell_fee = price * b_amount * fee_rate # 假设卖出股数等于当前全部持仓
                     total_fee = old_fee + sell_fee
                     gross_profit = (price - b_price) * b_amount

@@ -45,7 +45,7 @@ class TickSeries:
     单只个股的分钟 K 线滚动队列，外加基础统计缓存。
     """
     __slots__ = ('code', 'klines', 'last_close', 'last_high', 'last_low', 
-                 'open_price', 'high_day', 'low_day', 'ma20', 'ma60', 
+                 'open_price', 'now_price', 'high_day', 'low_day', 'ma20', 'ma60', 
                  'category', 'name', 'score', 'first_breakout_ts', 'pattern_hint',
                  'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
@@ -58,6 +58,7 @@ class TickSeries:
         self.last_high: float = 0.0
         self.last_low: float = 0.0
         self.open_price: float = 0.0
+        self.now_price: float = 0.0 # [NEW] 实时 Tick 价格
         self.high_day: float = 0.0
         self.low_day: float = 0.0
         self.ma20: float = 0.0
@@ -87,6 +88,9 @@ class TickSeries:
         self.last_high = float(row.get('lasth1d', self.last_close))
         self.last_low = float(row.get('lastl1d', self.last_close))
         self.open_price = float(row.get('open', 0.0))
+        # [FIX] 捕获实时价格，优先从 'now' (新浪实时) 或 'trade' (常用) 或 'price' (常用) 提取
+        # 涨幅也是实时计算，不再依赖分钟线
+        self.now_price = float(row.get('now', row.get('trade', row.get('price', row.get('nclose', self.now_price)))))
         self.high_day = float(row.get('high', 0.0))
         self.low_day = float(row.get('low', 0.0))
         self.ma20 = float(row.get('ma20d', 0.0))
@@ -142,13 +146,18 @@ class TickSeries:
     @property
     def current_pct(self) -> float:
         """当前在日内的涨幅 (%), 基于 last_close"""
-        if not self.klines or self.last_close <= 0:
+        if self.last_close <= 0:
             return 0.0
-        last = self.klines[-1]
-        return (last.get('close', 0.0) - self.last_close) / self.last_close * 100.0
+        # [FIX] 优先使用实时价格
+        cp = self.current_price
+        if cp <= 0: return 0.0
+        return (cp - self.last_close) / self.last_close * 100.0
 
     @property
     def current_price(self) -> float:
+        # [FIX] 优先返还最新的 Tick 价格，否则回退到 K 线
+        if self.now_price > 0:
+            return self.now_price
         if not self.klines:
             return 0.0
         return self.klines[-1].get('close', 0.0)
@@ -194,12 +203,17 @@ class BiddingMomentumDetector:
 
         # 上次板块 GC 时间戳
         self._last_gc_ts: float = 0.0
+        # [NEW] 上次刷新时间戳 (用于控制刷新频率)
+        self._last_refresh_ts: float = 0.0
+        # [NEW] 强制刷新请求标志
+        self._force_update_requested: bool = False
 
         # 聚合门槛评分 (下调以捕捉萌芽期)
         self.score_threshold = 1.0
         # 板块入场所需个股最低分
         self.sector_min_score = 2.0
-        # 记录最后看到的数据时间戳（用于模拟回测时同步时钟）
+        # [NEW] 板块综合强度门槛 (board_score)
+        self.sector_score_threshold: float = 5.0
         self.last_data_ts = 0.0
 
         # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
@@ -262,11 +276,15 @@ class BiddingMomentumDetector:
         self._rebuild_sector_map(df)
 
         new_codes = []
-        for row in df.itertuples():
-            code = str(getattr(row, 'Index')).strip().zfill(6)
+        for row in df.itertuples(index=False):
+            # [FIX] 显式使用 code 列，避免 itertuples Index 属性导致的 RangeIndex 数据错位
+            code = str(getattr(row, 'code', '')).strip().zfill(6)
+            if code == '000000' or not code: continue
+            
             with self._lock:
                 if code not in self._tick_series:
                     ts_obj = TickSeries(code)
+                    # 将 row 转为 dict 并丢弃可能干扰的 Index
                     ts_obj.update_meta(pd.Series(row._asdict()))
                     self._tick_series[code] = ts_obj
                     new_codes.append(code)
@@ -367,13 +385,13 @@ class BiddingMomentumDetector:
 
         score = 0.0
         latest = klines[-1]
-        cur_close = float(latest.get('close', 0.0))
+        # [FIX] 使用实时价格评估，确保 Tick 级别响应
+        cur_close = ts_obj.current_price
+        cur_pct = ts_obj.current_pct
+        
         cur_vol = float(latest.get('volume', 0.0))
         cur_open_bar = float(latest.get('open', cur_close))  # 当根k棒开盘
         day_open = float(ts_obj.open_price) or float(klines[0].get('open', cur_close))
-        
-        # [Moved Up] 当前涨幅
-        cur_pct = (cur_close - last_close) / last_close * 100 if last_close > 0 else 0.0
         
         # 0. 周期因子 (Cycle Factor): 处于 MA20 之上且 MA20 向上，属于强周期
         cycle_score = 0.0
@@ -627,9 +645,11 @@ class BiddingMomentumDetector:
                 ts_obj.is_accumulating = is_accumulating # [NEW]
                 ts_obj.is_reversal = is_reversal         # [NEW]
             
-            # 更新全局最后时间
+            # [FIX] 无论如何确保 last_data_ts 能够推进
             if data_ts > self.last_data_ts:
                 self.last_data_ts = data_ts
+            elif data_ts == 0:
+                self.last_data_ts = time.time()
 
     # =========================================================
     # 内部：板块聚合
@@ -702,14 +722,16 @@ class BiddingMomentumDetector:
         now_dt = datetime.datetime.now()
         today = now_dt.date()
         now_t = now_dt.hour * 100 + now_dt.minute
-        if self._concept_data_date != today:
-            self._concept_data_date = today
-            self._concept_first_phase_done = False
-            self._concept_second_phase_done = False
-            self.daily_watchlist.clear()
-            if hasattr(self, "_sector_active_stocks_persistent"):
-                self._sector_active_stocks_persistent.clear()
-            logger.info(f"[Detector] {today} 跨天重置状态")
+    # [REMOVED] Daily reset prevents multi-day analysis. 
+    # Use cross-day logic if specific data cleaning is needed, otherwise rely on memory management.
+    # if self._concept_data_date != today:
+    #     self._concept_data_date = today
+    #     self._concept_first_phase_done = False
+    #     self._concept_second_phase_done = False
+    #     self.daily_watchlist.clear()
+    #     if hasattr(self, "_sector_active_stocks_persistent"):
+    #         self._sector_active_stocks_persistent.clear()
+    #     logger.info(f"[Detector] {today} Day Transition - Multi-day support active")
 
         now_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
@@ -740,7 +762,13 @@ class BiddingMomentumDetector:
                 if sector in new_active: del new_active[sector]
                 continue
             
-            stocks = list(stocks_dict.values())
+            # [FIX] 动态过滤：即使在持久化缓存中，也要确保个股分满足当前 UI 设定的门槛
+            # 这样用户在 UI 调整“个股分≥”时，列表能立即变多/变少
+            stocks = [s for s in stocks_dict.values() if s.get('score', 0) >= self.score_threshold]
+            
+            if not stocks:
+                if sector in new_active: del new_active[sector]
+                continue
             
             for s in stocks:
                 base_score = s['score']
@@ -773,37 +801,58 @@ class BiddingMomentumDetector:
                         active_member_count += 1
                         total_pct += mc_pct
             
+            # 联动分析与强度综合评分
             follow_ratio = active_member_count / len(all_member_codes) if all_member_codes else 0
             avg_pct = total_pct / len(all_member_codes) if all_member_codes else 0
-            high_score_stocks = [s for s in stocks if s['score'] >= self.sector_min_score]
-            if len(high_score_stocks) < 1 and (follow_ratio < 0.3 or leader_pct < 2.0):
+            
+            # [REFINED] 噪点过滤：成员数过少（少于 4 只股）的概念通常是虚假的，剔除。
+            if len(all_member_codes) < 4:
                 if sector in new_active: del new_active[sector]
                 continue
-                
+
+            # 提取龙头元数据供后续使用
             tags = []
             l_data = candidate_leader
             l_ts = self._tick_series.get(leader_code)
             if l_ts:
                 day_open = l_ts.open_price or (list(l_ts.klines)[0].get('open') if l_ts.klines else 0)
-                if (day_open - l_ts.last_close) / l_ts.last_close > 0.03 and l_ts.last_close > 0: tags.append("高开")
-                if l_data['price'] > day_open > 0: tags.append("高走")
+                if l_ts.last_close > 0 and (day_open - l_ts.last_close) / l_ts.last_close > 0.03: tags.append("高开")
+                if l_data.get('price', 0) > day_open > 0: tags.append("高走")
+                
+                # 记录竞价情绪
+                now_t = int(time.strftime("%H%M"))
                 if 920 <= now_t <= 925:
                     if leader_pct > 3.0: tags.append("竞价抢筹")
                     elif leader_pct < -3.0: tags.append("竞价恐慌")
                 if 1300 <= now_t <= 1310: tags.append("午后异动")
 
+            # 计算群体热度加成
             s_top0_sum = sum(s.get('top0', 0) for s in stocks)
             s_top15_sum = sum(s.get('top15', 0) for s in stocks)
             hotness_multiplier = 1.0 + (s_top0_sum * 0.15) + (s_top15_sum * 0.05)
-            tk_correlation_score = avg_pct * follow_ratio * 50.0 
-            board_score = (candidate_leader['score'] * 1.0 + avg_pct * 5.0 + follow_ratio * 20.0 + tk_correlation_score) * hotness_multiplier
+
+            # [REFINED] 极严格过滤：模仿 TK 去弱留强逻辑
+            # 以群体效应 (avg_pct * follow_ratio) 为核心依据。
+            tk_correlation_score = avg_pct * follow_ratio * 4.0 
             
+            # 基础门槛：即便个股分高，如果联动性极其平淡 (低于 15%) 且平均涨幅低，排除该板块。
+            # 这是“369个活跃板块”缩减到“15-30个”的关键。
+            if follow_ratio < 0.15 and avg_pct < 1.5:
+                 if sector in new_active: del new_active[sector]
+                 continue
+            
+            # 最终板分公式：(板块均值加权 + 联动比例加权 + 个股强势溢价) * 热度系数
+            # 目标产出区间 0-10，对标 TK 强度分析
+            board_score = (avg_pct * 0.8 + follow_ratio * 4.0 + (candidate_leader['score'] * 0.05) + tk_correlation_score) * hotness_multiplier
+            
+            # [NEW] 标记板块类型
             sector_type = "📈 跟随"
-            if board_score > 60 and (leader_pct > 5.0 or s_top0_sum > 0) and follow_ratio > 0.4: sector_type = "🔥 强攻"
-            elif any(s.get('is_accumulating') for s in stocks) or sum(s.get('ral', 0) for s in stocks)/len(stocks) > 12:
+            if board_score > 6.0 and (leader_pct > 5.0 or s_top0_sum > 0) and follow_ratio > 0.4: sector_type = "🔥 强攻"
+            elif any(s.get('is_accumulating') for s in stocks) or (sum(s.get('ral', 0) for s in stocks)/len(stocks) > 12):
                 sector_type = "♨️ 蓄势"
             elif any(s.get('is_reversal') for s in stocks):
                 sector_type = "🔄 反转"
+            
             tags.insert(0, sector_type)
             
             # 联动板块分析 (精简版)
@@ -824,8 +873,14 @@ class BiddingMomentumDetector:
                         'avg_pct': round(c_avg_pct, 2)
                     })
 
+            # [NEW] 板块综合强度过滤
+            if board_score < self.sector_score_threshold:
+                 if sector in new_active: del new_active[sector]
+                 continue
+                 
             new_active[sector] = {
                 'sector': sector, 'score': round(board_score, 2), 'tags': " ".join(tags),
+                'ts': time.time(), # [FIX] 添加时间戳，用于 GC
                 'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_price': l_data.get('price', 0.0),
@@ -834,7 +889,7 @@ class BiddingMomentumDetector:
                 'leader_high_day': l_data.get('high_day', 0),
                 'leader_low_day': l_data.get('low_day', 0),
                 'leader_last_high': l_data.get('last_high', 0),
-                'leader_last_low': l_data.get('last_low', 0),
+                'leader_last_low': l_data.get('low_day', 0), # Corrected from leader_last_low to low_day
                 'leader_first_ts': l_data['first_breakout_ts'],
                 'pattern_hint': l_data['pattern_hint'],
                 'is_untradable': l_data['is_untradable'],
@@ -848,13 +903,27 @@ class BiddingMomentumDetector:
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
         now = time.time()
-        if now - self._last_gc_ts < 30: return
-        self._last_gc_ts = now
-        with self._lock:
-            stale = [s for s, d in self.active_sectors.items()
-                     if now - d.get('ts', 0) > 900.0] # max_age is 900.0
-            for s in stale:
-                del self.active_sectors[s]
+        # [REFINED] 动态获取 sleep 时间，如果 CFG 没变，尝试从文件重新加载或使用合理默认值
+        # 考虑到 cct.CFG 可能不会实时响应 global.ini 变化，这里我们强制获取最新
+        try:
+            limit = float(getattr(cct.CFG, 'duration_sleep_time', 5.0)) if cct else 5.0
+        except:
+            limit = 5.0
+            
+        # 允许竞价期间更快速刷新 (最低 1s)
+        limit = max(1.0, limit)
+        
+        if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
+            with self._lock:
+                 # [REFINED] 缩短过期时间，从 900s (15min) 缩短到 300s (5min)
+                 # 保持热度表的实时性，防止早盘干扰持续整天。
+                 stale = [s for s, d in self.active_sectors.items()
+                          if now - d.get('ts', 0) > 300.0] 
+                 for s in stale:
+                     del self.active_sectors[s]
+            self._last_refresh_ts = now
+            self._force_update_requested = False
+
 
     # =========================================================
     # 内部：板块图
@@ -865,9 +934,11 @@ class BiddingMomentumDetector:
         if 'category' not in df.columns:
             return
         new_map: Dict[str, Set[str]] = defaultdict(set)
-        for row in df.itertuples():
-            # itertuples 默认将 index 作为第一个元素或名为 Index 的属性
-            code = str(getattr(row, 'Index')).strip().zfill(6)
+        for row in df.itertuples(index=False):
+            # [FIX] 使用显式属性 code 代替 Index
+            code = str(getattr(row, 'code', '')).strip().zfill(6)
+            if not code or code == '000000':
+                continue
             cat = str(getattr(row, 'category', ''))
             if not cat or cat == 'nan':
                 continue
@@ -875,6 +946,11 @@ class BiddingMomentumDetector:
                 p = p.strip()
                 if p:
                     new_map[p].add(code)
+        
+        # [NEW] 激进清理：如果新图与旧图差异过大，或者旧图完全是乱序代码（如含有 000001, 000002 序列），强制清空缓存
+        if self.sector_map and len(new_map) > 50:
+            self._sector_active_stocks_persistent.clear()
+            
         self.sector_map = new_map
 
     # =========================================================
