@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
     QMessageBox
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings, QSize, QPoint, QRect, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
 import pyqtgraph as pg
 
@@ -29,11 +29,15 @@ except ImportError:
 # [REMOVED] DataHubService Imports
 import time
 import re
+import os
+import json
 import traceback
+
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_KEY = "SectorBiddingPanel"
+SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
 
 def _ascii_kline(klines: List[dict], width: int = 24) -> str:
@@ -48,6 +52,18 @@ def _ascii_kline(klines: List[dict], width: int = 24) -> str:
         return "─" * len(closes)
     bars = '▁▂▃▅▇'
     return ''.join(bars[min(4, int((c - mn) / (mx - mn) * 4.99))] for c in closes)
+
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    """支持数值排序的表格项"""
+    def __lt__(self, other):
+        try:
+            # 移除百分号和正号进行比较
+            t1 = self.text().replace('%', '').replace('+', '')
+            t2 = other.text().replace('%', '').replace('+', '')
+            return float(t1) < float(t2)
+        except (ValueError, TypeError):
+            return super().__lt__(other)
 
 
 class TrendDelegate(QStyledItemDelegate):
@@ -361,8 +377,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
-        self._restore_geometry()
         self._init_ui()
+        self._restore_geometry()
 
         # 状态记录
         self._is_populating = False
@@ -403,7 +419,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """窗口显示时，尝试触发初次刷新以填补白板"""
         super().showEvent(event)
         # 即使数据还未到，先清空加载一次状态
-        if self.sector_list.count() == 0:
+        if self.sector_table.rowCount() == 0:
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("🔄 准备首次数据评分映射...")
             QTimer.singleShot(500, self.manual_refresh)
@@ -433,7 +449,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     thread.wait(500)
             thread.deleteLater()   # 安全释放
             self._worker_thread = None
+        
+        # [NEW] Persist scores and layout on close
         self._save_geometry()
+        if hasattr(self, 'detector'):
+            self.detector.save_persistent_data()
+            
         super().closeEvent(event)
 
 
@@ -606,8 +627,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         root.addWidget(bar)
 
         # ── 主体：Splitter ───────────────────────────────────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
 
         # 左：板块排行
         left = QWidget()
@@ -618,12 +639,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         lbl_sec.setStyleSheet("font-weight:bold;background:#2a2a3e;color:#aad4ff;padding:2px;")
         llay.addWidget(lbl_sec)
 
-        self.sector_list = QListWidget()
-        self.sector_list.setFont(QFont("Microsoft YaHei", 10))
-        self.sector_list.currentItemChanged.connect(self._on_sector_selected)
-        self.sector_list.itemDoubleClicked.connect(self._on_sector_dblclick)
-        llay.addWidget(self.sector_list)
-        splitter.addWidget(left)
+        self.sector_table = QTableWidget(0, 4)
+        self.sector_table.setHorizontalHeaderLabels(['板块', '强度', '龙头', '状态'])
+        self.sector_table.verticalHeader().setVisible(False)
+        self.sector_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.sector_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.sector_table.setAlternatingRowColors(True)
+        self.sector_table.setFont(QFont("Microsoft YaHei", 9))
+        self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.sector_table.setSortingEnabled(True)
+        
+        self.sector_table.itemSelectionChanged.connect(self._on_sector_table_selection_changed)
+        self.sector_table.itemDoubleClicked.connect(self._on_sector_table_dblclick)
+        llay.addWidget(self.sector_table)
+        self.splitter.addWidget(left)
 
         # 右：个股明细
         right = QWidget()
@@ -665,16 +695,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         vh = self.stock_table.verticalHeader()
         if vh: vh.setDefaultSectionSize(40) # 增大行高以便看清曲线
         rlay.addWidget(self.stock_table)
-        splitter.addWidget(right)
+        self.splitter.addWidget(right)
 
-        splitter.setSizes([280, 820])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        # [MODIFIED] Default ratio 4.5:5.5
+        self.splitter.setSizes([495, 605]) 
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
 
         # ── [NEW] 底部：当日重点表 (Watchlist) ───────────────────────────
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
         self.v_splitter.setChildrenCollapsible(False)
-        self.v_splitter.addWidget(splitter)
+        self.v_splitter.addWidget(self.splitter)
 
         self.watchlist_group = QGroupBox("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
         self.watchlist_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
@@ -736,26 +767,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         try:
             # 1. 按钮防抖与反馈
             self.btn_refresh.setEnabled(False)
-            self.btn_refresh.setText("刷新中...")
+            self.btn_refresh.setText("扫描中...")
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText("⏳ 正在全量计算评分 (请稍候)...")
+                self.status_lbl.setText("⏳ 正在重新扫描数据及板块...")
                 self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            # 2. [NEW] 重新扫描：获取主窗口最新全量数据并重构映射 (解决板块漂移或个股新增)
+            if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
+                df_all = self.main_window.df_all
+                logger.info(f"🔄 [Manual] 重新扫描全量数据 (n={len(df_all)})")
+                self.detector.register_codes(df_all)
             
             # 2. 强制触发全量重算
             # [REFINED] 要求后台线程在处理下一帧时忽略时间窗口限制
             self._force_update_requested = True
             
-            # 立即在当前线程尝试刷新（如果队列为空）
-            if not self._worker.df_queue:
-                self.detector.update_scores()
-                self._refresh_sector_list()
-                logger.info("⚡ [Manual] 已完成同步数据评分刷新")
-            else:
-                logger.info("⚡ [Manual] 任务已加入队列，等待后台处理...")
+            # 立即在当前线程尝试完成一次刷新 (跳过队列，立即响应)
+            self.detector.update_scores()
+            self._refresh_sector_list()
+            logger.info("⚡ [Manual] 重新扫描及评分刷新已完成")
 
-            # 3. 3秒后恢复按钮 (防抖)
-            QTimer.singleShot(3000, lambda: self.btn_refresh.setEnabled(True))
-            QTimer.singleShot(3000, lambda: self.btn_refresh.setText("刷新 🔄"))
+            # 3. 2秒后恢复按钮 (防抖)
+            QTimer.singleShot(2000, lambda: self.btn_refresh.setEnabled(True))
+            QTimer.singleShot(2000, lambda: self.btn_refresh.setText("刷新 🔄"))
             
         except Exception as e:
             logger.error(f"Manual refresh failed: {e}")
@@ -918,78 +952,74 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
         
         # 1. 记录当前选中的板块名，以便在刷新后恢复
-        current_item = self.sector_list.currentItem()
         selected_sector = ""
-        if current_item:
-            selected_sector = current_item.data(Qt.ItemDataRole.UserRole)
+        items = self.sector_table.selectedItems()
+        if items:
+            selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
             
-        self.sector_list.blockSignals(True)
-        self.sector_list.clear()
+        self.sector_table.blockSignals(True)
+        self.sector_table.setSortingEnabled(False) # 填充时静默
+        self.sector_table.setRowCount(0)
         
-        # 2. 填充列表
-        for sdata in sectors:
+        # 2. 填充表格
+        for i, sdata in enumerate(sectors):
             sn = sdata['sector']
             sc = sdata['score']
             tags = sdata.get('tags', '')
             lp = sdata.get('leader_pct', 0)
-            followers = sdata.get('followers', [])
-            fc = len(followers)
+            ln = sdata.get('leader_name', '未知')
             
-            # 格式化显示：🔥 板块名 [标签] 强:xx 龙:xx% 跟:xx
-            if sc >= 40:
-                icon = '🌋'
-                color = "#FF1493" # 深粉红/火山红
-                bold = True
-            elif sc >= 30:
-                icon = '🔥'
-                color = "#FF3333" # 鲜红
-                bold = True
-            elif sc >= 20:
-                icon = '⚡'
-                color = "#FF9900" # 橙色
-                bold = False
-            elif sc >= 12:
-                icon = '🌟'
-                color = "#FFD700" # 金黄色
-                bold = False
-            elif sc >= 6:
-                icon = '🌊'
-                color = "#00BFFF" # 亮蓝色
-                bold = False
+            # 选择颜色和图标
+            if sc >= 15: # 归一化后的新门槛
+                color = "#FF3333" # 强攻红
+                icon_char = "🔥"
+            elif sc >= 8:
+                color = "#FF9900" # 蓄势橙
+                icon_char = "⚡"
             else:
-                icon = '📊'
-                color = "#AAAAAA" # 灰色
-                bold = False
+                color = "#AAAAAA" # 观测灰
+                icon_char = "📊"
 
-            tag_str = f" [{tags}]" if tags else ""
-            txt = f"{icon} {sn}{tag_str}  强:{sc:.1f}  龙:{lp:+.1f}%  跟:{fc}"
+            self.sector_table.insertRow(i)
             
-            item = QListWidgetItem(txt)
-            item.setData(Qt.ItemDataRole.UserRole, sn)
+            # 第一列：板块名 (带图标)
+            item_name = QTableWidgetItem(f"{icon_char} {sn}")
+            item_name.setData(Qt.ItemDataRole.UserRole, sn)
+            item_name.setForeground(QColor(color))
+            self.sector_table.setItem(i, 0, item_name)
             
-            # 高强度标红提示
-            item.setForeground(QColor(color))
-            if bold:
-                f = item.font(); f.setBold(True); item.setFont(f)
-                
-            self.sector_list.addItem(item)
+            # 第二列：强度 (数值以便排序)
+            from sector_bidding_panel import NumericTableWidgetItem
+            item_score = NumericTableWidgetItem(f"{sc:.1f}")
+            item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_score.setForeground(QColor(color))
+            self.sector_table.setItem(i, 1, item_score)
             
+            # 第三列：龙头股 (名+幅)
+            item_leader = QTableWidgetItem(f"{ln} ({lp:+.1f}%)")
+            item_leader.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.sector_table.setItem(i, 2, item_leader)
+            
+            # 第四列：状态标签
+            item_tag = QTableWidgetItem(tags)
+            item_tag.setFont(QFont("Microsoft YaHei", 8))
+            self.sector_table.setItem(i, 3, item_tag)
+
             # 恢复之前的选择
             if sn == selected_sector:
-                self.sector_list.setCurrentItem(item)
+                self.sector_table.selectRow(i)
         
-        # 3. 自动选中：如果当前没选中（初次打开或旧选失效），自动选第一个
-        do_auto_select = False
-        if not self.sector_list.currentItem() and self.sector_list.count() > 0:
-            self.sector_list.setCurrentRow(0)
-            do_auto_select = True
-            
-        self.sector_list.blockSignals(False)
+        self.sector_table.setSortingEnabled(True)
+        self.sector_table.blockSignals(False)
+        
+        # 3. 自动选中第一个
+        if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
+            self.sector_table.selectRow(0)
         
         # 🚦 [FIX] 强制触发：无论是否 auto_select，只要有选中项，都重刷一次右侧个股表
         # 否则如果板块选择没变，右侧数据（现价/涨幅）就不会随刷新周期更新
-        if self.sector_list.currentItem():
-            self._on_sector_selected(self.sector_list.currentItem(), None)
+        if self.sector_table.selectedItems():
+            self._on_sector_table_selection_changed()
         
         # 4. 更新状态栏
         sub_cnt = len(self.detector._subscribed)
@@ -1006,23 +1036,42 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._populate_watchlist()
 
     # ------------------------------------------------------------------ sector select
-    def _on_sector_selected(self, cur, _prev):
-        if not cur:
+    def _on_sector_table_selection_changed(self):
+        """板块表选中项变更 → 刷新个股列表"""
+        curr_row = self.sector_table.currentRow()
+        if curr_row < 0:
             self.stock_table.setRowCount(0)
             return
-        sn = cur.data(Qt.ItemDataRole.UserRole)
+
+        # 获取当前单元格的内容，Data 被存在第一列
+        item = self.sector_table.item(curr_row, 0)
+        if not item: return
+        
+        sn = item.data(Qt.ItemDataRole.UserRole)
+        # 遍历探测器中的活跃板块，找到匹配的数据
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
                 self._populate_table(d)
                 return
 
-    def _on_sector_dblclick(self, item):
-        """双击板块 → 将龙头推送到 TK / Qt 联动"""
+    def _on_sector_table_dblclick(self, row, col):
+        """双击板块行 → 将龙头代码同步联动 (TK/Qt)"""
+        item = self.sector_table.item(row, 0)
+        if not item: return
+        
         sn = item.data(Qt.ItemDataRole.UserRole)
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
+                # 执行代码联动 (Link Code)
                 self._link_code(d['leader'])
                 break
+
+    # [DEPRECATED] 兼容性占位
+    def _on_sector_selected(self, cur, _prev):
+        pass
+
+    def _on_sector_dblclick(self, item):
+        pass
 
     # ------------------------------------------------------------------ search functionality
     def _on_search_triggered(self):
@@ -1392,11 +1441,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 遍历左侧列表项寻找匹配
             found = False
-            for i in range(self.sector_list.count()):
-                list_item = self.sector_list.item(i)
+            for i in range(self.sector_table.rowCount()):
+                list_item = self.sector_table.item(i, 0)
                 sn = list_item.data(Qt.ItemDataRole.UserRole)
                 if sn in parts or any(p in sn for p in parts) or sn == sector_name:
-                    self.sector_list.setCurrentItem(list_item)
+                    self.sector_table.setCurrentCell(i, 0)
                     # 联动后焦点保留在重点表
                     self.watchlist_table.setFocus()
                     found = True
@@ -1474,9 +1523,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._sort_col = col
             self._sort_asc = False
         # 刷新当前板块
-        cur = self.sector_list.currentItem()
-        if cur:
-            self._on_sector_selected(cur, None)
+        curr_row = self.sector_table.currentRow()
+        if curr_row >= 0:
+            self._on_sector_table_selection_changed()
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
         # 双击功能只在分时走势 (Column 5) 上有效
@@ -1671,25 +1720,88 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         # [FIX] 确保改动即时在 UI 生效
         self.manual_refresh()
-        if self.sector_list.currentItem():
-             self._on_sector_selected(self.sector_list.currentItem(), None)
+        if self.sector_table.currentRow() >= 0:
+             self._on_sector_table_selection_changed()
 
     # ------------------------------------------------------------------ window state
     def _restore_geometry(self):
+        """[NEW] 从 window_config.json 恢复 UI 布局 (弃用注册表)避色 HKEY_CURRENT_USER 污染"""
         try:
-            settings = QSettings("StockMonitor", SETTINGS_KEY)
-            geom = settings.value("geometry")
-            if geom:
-                self.restoreGeometry(geom)
-        except Exception:
-            pass
+            if not os.path.exists(WINDOW_CONFIG_FILE):
+                return
+            
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            p_data = config.get(SETTINGS_SECTION, {})
+            if not isinstance(p_data, dict) or not p_data:
+                return
+
+            # Helper: Hex string -> QByteArray
+            def to_qba(hex_str: Any) -> Optional[QByteArray]:
+                if not isinstance(hex_str, str) or not hex_str:
+                    return None
+                return QByteArray.fromHex(hex_str.encode('ascii'))
+
+            # 恢复窗口几何形状
+            geom_hex = p_data.get("geometry")
+            q_geom = to_qba(geom_hex)
+            if q_geom:
+                self.restoreGeometry(q_geom)
+            
+            # 恢复分割条状态
+            if hasattr(self, 'splitter') and self.splitter:
+                s_state_hex = p_data.get("splitter_state")
+                q_s_state = to_qba(s_state_hex)
+                if q_s_state:
+                    self.splitter.restoreState(q_s_state)
+            
+            if hasattr(self, 'v_splitter') and self.v_splitter:
+                vs_state_hex = p_data.get("v_splitter_state")
+                q_vs_state = to_qba(vs_state_hex)
+                if q_vs_state:
+                    self.v_splitter.restoreState(q_vs_state)
+                
+            logger.info(f"♻️ [UI] 布局已从 {os.path.basename(WINDOW_CONFIG_FILE)} 恢复")
+        except Exception as e:
+            logger.warning(f"⚠️ [UI] 恢复布局失败: {e}")
 
     def _save_geometry(self):
+        """[NEW] 将 UI 布局保存至 window_config.json (弃用注册表)"""
         try:
-            settings = QSettings("StockMonitor", SETTINGS_KEY)
-            settings.setValue("geometry", self.saveGeometry())
-        except Exception:
-            pass
+            config: dict[str, Any] = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            config = data
+                except Exception:
+                    pass
+            
+            # Helper: QByteArray -> Hex string
+            def to_hex(qba: QByteArray) -> str:
+                # QByteArray.toHex() returns another QByteArray in PyQt6.
+                # Convert to bytes then decode.
+                return bytes(qba.toHex().data()).decode('ascii')
+
+            p_data = config.get(SETTINGS_SECTION, {})
+            if not isinstance(p_data, dict):
+                p_data = {}
+                
+            p_data["geometry"] = to_hex(self.saveGeometry())
+            p_data["splitter_state"] = to_hex(self.splitter.saveState())
+            p_data["v_splitter_state"] = to_hex(self.v_splitter.saveState())
+            p_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            config[SETTINGS_SECTION] = p_data
+            
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"💾 [UI] 布局已同步至 {os.path.basename(WINDOW_CONFIG_FILE)}")
+        except Exception as e:
+            logger.error(f"❌ [UI] 保存布局失败: {e}")
 
     # ------------------------------------------------------------------ misc
     @staticmethod
@@ -1705,7 +1817,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_rearrange_clicked(self):
         """Trigger global window tiling."""
         try:
-            from qt_window_utils import tile_all_windows
+            try:
+                from .qt_window_utils import tile_all_windows
+            except (ImportError, ValueError):
+                from qt_window_utils import tile_all_windows
             tile_all_windows()
         except Exception as e:
             logger.error(f"Rearrange error: {e}")
@@ -1714,6 +1829,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._refresh_timer.stop()
         self._score_timer.stop()
         self._save_geometry()
+        
+        # [NEW] 显式保存竞价 session 数据
+        try:
+            if hasattr(self, 'detector') and self.detector:
+                self.detector.save_persistent_data()
+        except Exception as e:
+            logger.error(f"Error saving persistent data on close: {e}")
+
         # 兼容旧接口
         try:
             self.save_window_position_qt_visual(self, "sector_bidding_panel")

@@ -262,7 +262,7 @@ class StrategyController:
         return SignalPoint(
             code=code,
             timestamp=timestamp if isinstance(timestamp, datetime) else pd.to_datetime(timestamp),
-            bar_index=int(idx),
+            bar_index=int(idx) if not pd.isna(idx) else 0,
             price=float(price),
             signal_type=stype,
             source=source,

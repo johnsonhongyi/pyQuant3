@@ -116,40 +116,24 @@ def find_app_hwnds() -> List[Dict]:
 #     logger.info(f"Tiled {n} windows in {rows}x{cols} grid.")
 
 def tile_all_windows(monitor_index: int = 0):
+    """
+    [FIX] 现在仅重排 'SBC Pattern - ' 开头的子窗口。
+    避免在没有子窗口时误将主程序（MonitorTK/PyQuant）或其他无关窗口重排（平铺）。
+    """
     if not HAS_WIN32:
         return
     
     hwnds_info = find_app_hwnds()
 
-    # 只找 SBC 窗口
+    # 严格过滤：仅处理 SBC Pattern 窗口
     sbc_windows = [w for w in hwnds_info if w['title'].startswith(SBC_PREFIX)]
 
-    if sbc_windows:
-        # [FIX] 确保传递的是过滤后的 sbc_windows 列表
-        rearrange_sbc_windows(monitor_index, sbc_windows)
+    if not sbc_windows:
+        logger.info(f"💾 [WinManager] 未发现 '{SBC_PREFIX}' 开头的窗口，跳过重排。")
         return
 
-    if not hwnds_info:
-        logger.info("No app windows found to tile.")
-        return
-
-    wa_left, wa_top, wa_right, wa_bottom, wa_w, wa_h = get_monitor_work_area(monitor_index)
-
-    n = len(hwnds_info)
-    cols = int(n**0.5) or 1
-    rows = (n + cols - 1) // cols
-
-    cell_w = wa_w // cols
-    cell_h = wa_h // rows
-
-    for i, info in enumerate(hwnds_info):
-        row, col = i // cols, i % cols
-        x = wa_left + col * cell_w
-        y = wa_top + row * cell_h
-
-        win32gui.MoveWindow(info['hwnd'], x, y, cell_w, cell_h, True)
-
-    logger.info(f"Tiled {n} windows in {rows}x{cols} grid.")
+    # [FIX] 确保执行专用的 SBC 重排逻辑（保持原始大小，仅平铺位置）
+    rearrange_sbc_windows(monitor_index, sbc_windows)
     
 
 def get_monitor_work_area(monitor_index: int = 0):

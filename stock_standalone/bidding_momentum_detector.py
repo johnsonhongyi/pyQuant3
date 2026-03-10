@@ -17,6 +17,10 @@ import re
 from typing import Dict, List, Set, Any, Optional, Callable, TYPE_CHECKING
 from collections import defaultdict, deque
 import pandas as pd
+import json
+import os
+import gzip
+from JohnsonUtil import commonTips as cct
 
 if TYPE_CHECKING:
     from realtime_data_service import DataPublisher
@@ -221,7 +225,7 @@ class BiddingMomentumDetector:
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
 
         # ---- [NEW] 选股器联动与两阶段刷新 ----
-        self.stock_selector_seeds: Set[str] = set() # 昨曾强势/反转股代码
+        self.stock_selector_seeds: Dict[str, Dict[str, Any]] = {} # 昨曾强势/反转股代码
         self._concept_data_date: Optional[datetime.date] = None
         self._concept_first_phase_done = False
         self._concept_second_phase_done = False
@@ -242,11 +246,17 @@ class BiddingMomentumDetector:
             df_seeds = t_logger.get_selections_df() 
             if not df_seeds.empty and 'code' in df_seeds.columns:
                 # 过滤高分种子
-                high_seeds = df_seeds[df_seeds['score'] >= 80]['code'].astype(str).str.zfill(6).tolist()
-                self.stock_selector_seeds = set(high_seeds)
-                logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股")
+                high_df = df_seeds[df_seeds['score'] >= 80]
+                self.stock_selector_seeds = {
+                    str(r.code).zfill(6): {'code': str(r.code).zfill(6), 'reason': getattr(r, 'reason', '')}
+                    for r in high_df.itertuples(index=False)
+                }
+                logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股 (Sc>=80)")
+            
+            # [NEW] 加载会话持久化数据 (得分/强度)
+            self.load_persistent_data()
         except Exception as e:
-            logger.warning(f"[Detector] 加载 StockSelector 数据失败: {e}")
+            logger.warning(f"[Detector] 种子加载或持久化恢复失败: {e}")
 
     # =========================================================
     # 公共接口
@@ -345,6 +355,99 @@ class BiddingMomentumDetector:
         
         # 优化：仅聚合受影响的板块
         self._aggregate_sectors(active_codes=active_codes)
+
+    # ------------------------------------------------------------------ 持久化
+    def _get_persistence_path(self) -> str:
+        # 使用 JohnsonUtil 中的 ramdisk 路径获取方法，统一管理
+        return cct.get_ramdisk_path("bidding_session_data.json.gz")
+
+    def save_persistent_data(self):
+        """保存当前个股得分和板块强度到磁盘"""
+        try:
+            data = {
+                'timestamp': round(time.time(), 2),
+                'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if ts.score > 0},
+                'sector_data': {name: {
+                    'score': round(info.get('score', 0), 2),
+                    'leader': info.get('leader', ''),
+                    'status': info.get('status', '')
+                } for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
+                'watchlist': self.daily_watchlist
+            }
+            path = self._get_persistence_path()
+            # 使用 gzip 压缩存储 JSON
+            with gzip.open(path, 'wt', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            stock_scores_data = data.get('stock_scores')
+            sector_data_info = data.get('sector_data')
+            
+            ss_count = len(stock_scores_data) if isinstance(stock_scores_data, dict) else 0
+            sd_count = len(sector_data_info) if isinstance(sector_data_info, dict) else 0
+            logger.info(f"💾 [Detector] 会话数据已保存: {path} ({ss_count} stocks, {sd_count} sectors)")
+        except Exception as e:
+            logger.error(f"❌ [Detector] 保存会话数据失败: {e}")
+
+    def load_persistent_data(self):
+        """启动时从磁盘恢复得分和强度"""
+        try:
+            path = self._get_persistence_path()
+            if not os.path.exists(path):
+                return
+
+            # [REFINED] 跨日保护逻辑：考虑周末和非交易日
+            mtime = os.path.getmtime(path)
+            file_dt = datetime.datetime.fromtimestamp(mtime)
+            file_date_str = file_dt.strftime('%Y-%m-%d')
+            now_dt = datetime.datetime.now()
+            today_str = now_dt.strftime('%Y-%m-%d')
+
+            is_expired = False
+            try:
+                # 获取从文件日期到今天的交易日列表 (使用 cct 中已初始化的 lazy-loaded 实例)
+                trade_days = cct.a_trade_calendar.get_trade_days(file_date_str, today_str)
+                
+                # 1. 如果中间隔了至少一个完整的交易日，肯定过期
+                if len(trade_days) > 2:
+                    is_expired = True
+                # 2. 如果是相邻交易日（如周五到周一，或昨日到今日）
+                elif len(trade_days) == 2:
+                    # 如果今日是交易日，且已经接近/进入开盘时段 (9:15)，则视为过期
+                    if cct.get_day_istrade_date(today_str):
+                        if now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 15):
+                            is_expired = True
+                    # 如果今日不是交易日，或者还没到 9:15，我们保留上一交易日的数据
+                # 3. 如果 len(trade_days) == 1，说明在同一个交易日内或都是非交易日，不过期
+            except Exception as e:
+                # 兜底逻辑：如果交易日历获取失败，回退到 15.5 小时硬性判断
+                if time.time() - mtime > 15.5 * 3600:
+                    is_expired = True
+                logger.debug(f"[Detector] 交易日历判断异常，使用保底时长判断: {e}")
+
+            if is_expired:
+                logger.info(f"📅 [Detector] 持久化数据已过期 ({file_date_str} -> {today_str})，跳过加载。")
+                return
+
+            # 使用 gzip 解压读取
+            with gzip.open(path, 'rt', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # 恢复个股分
+            stock_scores = data.get('stock_scores', {})
+            for code, score in stock_scores.items():
+                if code not in self._tick_series:
+                    self._tick_series[code] = TickSeries(code)
+                self._tick_series[code].score = score
+
+            # 恢复板块数据
+            self.active_sectors = data.get('sector_data', {})
+            
+            # 恢复重点表
+            self.daily_watchlist = data.get('watchlist', {})
+            
+            logger.info(f"♻️ [Detector] 会话数据已恢复: {len(stock_scores)} 只个股, {len(self.active_sectors)} 个板块")
+        except Exception as e:
+            logger.error(f"❌ [Detector] 加载会话数据失败: {e}")
         self._gc_old_sectors()
 
     # =========================================================
@@ -397,9 +500,14 @@ class BiddingMomentumDetector:
         cycle_score = 0.0
         
         # [NEW] 种子股加分 (StockSelector 预选项)
-        is_hot_seed = code in self.stock_selector_seeds
-        if is_hot_seed:
-            cycle_score += 5.0
+        seed_info = self.stock_selector_seeds.get(code)
+        if seed_info:
+            cycle_score += 3.0  # 选股器加分，但不过分膨胀
+            # 将选股理由同步到形态暗示的前端
+            if seed_info.get('reason'):
+                with self._lock:
+                    if code in self._tick_series:
+                        self._tick_series[code].pattern_hint = f"[{seed_info['reason'].split('|')[0]}]"
 
         if ma20 > 0 and cur_close > ma20:
             cycle_score += 1.0  # 基础牛熊分
@@ -506,15 +614,15 @@ class BiddingMomentumDetector:
             base_pattern = f"蓄势({ral_val})|{base_pattern}" if base_pattern else f"蓄势({ral_val})"
         
         # 2. 反转与强度加成
-        top0_val = getattr(ts_obj, 'top0', 0)
-        top15_val = getattr(ts_obj, 'top15', 0)
-        if top0_val > 0: cycle_score += 10.0 # 一字涨停高权重
-        if top15_val > 0: cycle_score += 5.0 # 强势突破加成
+        top0_val = 1 if getattr(ts_obj, 'top0', 0) > 0 else 0
+        top15_val = 1 if getattr(ts_obj, 'top15', 0) > 0 else 0
+        if top0_val: cycle_score += 3.0 # 涨停强势因子
+        if top15_val: cycle_score += 2.0 # 突破强势因子
         
         # 2. 反转：种子股昨日强今日开盘弱现转强，或 MA60 处企稳反弹
-        if is_hot_seed and open_gap_pct < 0 and cur_pct > 0:
+        if seed_info and open_gap_pct < 0 and cur_pct > 0:
             is_reversal = True
-            cycle_score += 7.0
+            cycle_score += 4.0
             base_pattern = f"反转|{base_pattern}" if base_pattern else "预选反转"
         elif ma60 > 0 and abs((cur_close - ma60)/ma60) < 0.01 and cur_pct > 1.0:
             is_reversal = True
@@ -563,12 +671,12 @@ class BiddingMomentumDetector:
             p_max = self.strategies['pct_change']['max']
             # [Fix] 如果涨幅不足 p_min，评分清零
             # 允许 蓄势/反转/种子股/高分周期股 绕过此限制，以便在萌芽期识别
-            if cur_pct < p_min and not (is_accumulating or is_reversal or is_hot_seed or cycle_score >= 4.0):
+            if cur_pct < p_min and not (is_accumulating or is_reversal or seed_info or cycle_score >= 4.0):
                 with self._lock:
                     if code in self._tick_series:
                          self._tick_series[code].score = 0.0
                 return
-            score += min(cur_pct / p_max * 2.0, 2.0)  # 最多 2 分
+            score += min(cur_pct / p_max * 1.5, 1.5)  # 归一化分值
 
         # --- 3. 连续上涨 K 棒 ---
         if self.strategies['consecutive_up']['enabled'] and len(klines) >= 2:
@@ -827,9 +935,9 @@ class BiddingMomentumDetector:
                 if 1300 <= now_t <= 1310: tags.append("午后异动")
 
             # 计算群体热度加成
-            s_top0_sum = sum(s.get('top0', 0) for s in stocks)
-            s_top15_sum = sum(s.get('top15', 0) for s in stocks)
-            hotness_multiplier = 1.0 + (s_top0_sum * 0.15) + (s_top15_sum * 0.05)
+            s_top0_sum = sum(1 for s in stocks if s.get('top0', 0) > 0)
+            s_top15_sum = sum(1 for s in stocks if s.get('top15', 0) > 0)
+            hotness_multiplier = min(2.0, 1.0 + (s_top0_sum * 0.1) + (s_top15_sum * 0.03))
 
             # [REFINED] 极严格过滤：模仿 TK 去弱留强逻辑
             # 以群体效应 (avg_pct * follow_ratio) 为核心依据。
