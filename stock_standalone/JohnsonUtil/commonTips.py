@@ -781,6 +781,18 @@ import os
 #     def __repr__(self):
 #         return f"<GlobalConfig {self.cfg_file}>"
 
+def safe_load_json(raw):
+    import json
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # 替换单引号为双引号
+        raw2 = raw.replace("'", '"')
+        # 去掉连续双引号
+        raw2 = re.sub(r'""', '"', raw2)
+        return json.loads(raw2)
+
+
 
 class GlobalConfig:
     def __init__(self, cfg_file=None, **updates):
@@ -823,7 +835,7 @@ class GlobalConfig:
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback=10, value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback=10, value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback=300, value_type="int")
-        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff','per1d', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
+        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent', 'Rank', 'dff','per1d', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
         self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=800, value_type="int")
         self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=925, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
@@ -929,7 +941,8 @@ class GlobalConfig:
                 raw = raw.strip()
                 # 1️⃣ JSON list（推荐）
                 try:
-                    value = json.loads(raw)
+                    # value = json.loads(raw)
+                    value = safe_load_json(raw)
                     if isinstance(value, list):
                         return value
                 except Exception:

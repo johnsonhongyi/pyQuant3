@@ -344,11 +344,20 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                             if price > ts.high_day: ts.high_day = price
                             if price < ts.low_day or ts.low_day == 0: ts.low_day = price
             
-            # 补充确实依赖的基础字段
-            if 'percent' not in batch_df.columns and 'trade' in batch_df.columns and 'settlement' in batch_df.columns:
-                # 简化：因为历史 tick 没有 percent，我们假装 percent = (trade - pre_close)/pre_close
+            # [DATA LEAKAGE PROTECTION] 强制重新计算涨幅，防止 HDF5 中自带的 EOD 涨幅干扰回测
+            if 'trade' in batch_df.columns:
+                # 寻找昨收：优先用 settlement (llastp), 否则用 real_df_all 中的 lastp1d
+                if 'settlement' not in batch_df.columns or (batch_df['settlement'] == 0).all():
+                    # 尝试从 registry 补全昨收
+                    batch_df['settlement'] = batch_df['code'].map(lambda x: getattr(detector._tick_series.get(x), 'last_close', 0))
+                
+                # 强制覆盖 percent
                 batch_df['percent'] = (batch_df['trade'] - batch_df['settlement']) / batch_df['settlement'] * 100
-                batch_df.loc[batch_df['settlement'] == 0, 'percent'] = 0.0 # 避免除0
+                batch_df.loc[batch_df['settlement'] <= 0, 'percent'] = 0.0
+                
+                # [FIX] 强制覆盖 high/low 为当前价，防止 Detector 从 row 获取到 EOD 高低点
+                batch_df['high'] = batch_df['trade']
+                batch_df['low'] = batch_df['trade']
                 
             if 'ratio' not in batch_df.columns:
                  batch_df['ratio'] = 1.0 # 占位量比
@@ -413,7 +422,7 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 emotion_scores = publisher.emotion_tracker.scores
                 for ts in all_ts[:5]:
                     e_score = emotion_scores.get(ts.code, 0.0)
-                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - Emotion: {e_score:.1f}, Detector: {ts.score:.1f}, Pct: {ts.current_pct:+.1f}%")
+                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - 热度: {e_score:.1f}, 结构: {ts.score:.1f}, 涨幅: {ts.current_pct:+.1f}%")
                 print("-" * 60)
     
                 # --- 测试/观察打印：我们在终端中打印最强的 3 个概念板块 ---
@@ -429,19 +438,29 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                     leader_info = f"{sec_info['leader_name']} ({sec_info['leader']})"
                     if sec_info.get('is_untradable'):
                         leader_info += " [🚫一字]"
-                    # 简化输出便于联动，形态信息作为可选后缀
+                    
+                    # 获取龙头的 Emotion 评分 (如果是 DataPublisher 模式)
+                    leader_emotion = 0.0
+                    if hasattr(publisher, 'emotion_tracker'):
+                        leader_emotion = publisher.emotion_tracker.scores.get(sec_info['leader'], 0.0)
+                    
                     pattern = sec_info.get('pattern_hint', '')
                     time_str = pd.Timestamp.fromtimestamp(sec_info['leader_first_ts']).strftime('%H:%M:%S') if sec_info['leader_first_ts']>0 else 'N/A'
-                    print(f"     -> 领涨龙头: {leader_info} [首异时间: {time_str}]")
+                    print(f"     -> 领涨龙头: {leader_info} [强度: {sec_info['score']:.1f} | 热度: {leader_emotion:.1f}] [首异: {time_str}]")
                     if pattern:
                         print(f"        [形态: {pattern}]")
                     
-                    # 跟风小弟
+                    # 跟风小弟: 显示分数和涨幅
                     f_parts = []
                     for f in sec_info.get("followers", [])[:5]:
+                        f_code = f['code']
+                        f_em = 0.0
+                        if hasattr(publisher, 'emotion_tracker'):
+                            f_em = publisher.emotion_tracker.scores.get(f_code, 0.0)
+                        
                         f_ts = f.get('first_ts', 0)
                         f_time = pd.Timestamp.fromtimestamp(f_ts).strftime('%H:%M:%S') if f_ts > 0 else '?'
-                        f_parts.append(f"{f['name']} \033[93m{f['code']}\033[0m ({f['pct']:+.1f}%) [{f_time}]")
+                        f_parts.append(f"{f.get('name', 'N/A')} ({f_code}) [\033[92m{f.get('pct', 0.0):+.1f}%\033[0m 强:{f.get('score', 0.0):.1f}/热:{f_em:.1f}]")
                     if f_parts:
                         print(f"     -> 跟风小弟: {', '.join(f_parts)}")
                     

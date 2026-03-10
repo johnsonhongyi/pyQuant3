@@ -53,6 +53,7 @@ class TickSeries:
                  'category', 'name', 'score', 'first_breakout_ts', 'pattern_hint',
                  'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
+                 'is_upper_band', 'is_new_high', 
                  '_splitted_cats', '_total_vol', '_total_amt')
 
     def __init__(self, code: str, max_len: int = 30):
@@ -82,6 +83,8 @@ class TickSeries:
         self.top15: int = 0 # 强势突破计数 (强度指标)
         self.is_accumulating: bool = False # [NEW]
         self.is_reversal: bool = False # [NEW]
+        self.is_upper_band: bool = False # [NEW] 沿 Upper 上轨
+        self.is_new_high: bool = False   # [NEW] 创历史/波段新高
         self._splitted_cats: Optional[List[str]] = None
         self._total_vol: float = 0.0
         self._total_amt: float = 0.0
@@ -645,6 +648,24 @@ class BiddingMomentumDetector:
              cycle_score += 3.0
              base_pattern = f"低开高走|{base_pattern}" if base_pattern else "低开高走"
 
+        # [NEW] "新高"与"上轨" (New High & Upper Band)
+        is_new_high = False
+        is_upper_band = False
+        if ts_obj.last_high > 0 and cur_close > ts_obj.last_high:
+            is_new_high = True
+            cycle_score += 5.0 # 跨入新高区间，资金关注度极高
+            
+        # 简单模拟 Upper 上轨：价格始终在 MA20 之上 2% 且 MA20 向上
+        if ma20 > 0 and (cur_close - ma20) / ma20 > 0.02:
+            # 检查最近 3 根 K 线是否都在 MA20 之上
+            if len(klines) >= 3 and all(float(k['close']) > ma20 for k in list(klines)[-3:]):
+                is_upper_band = True
+                cycle_score += 3.0
+                base_pattern = f"沿上轨🚀|{base_pattern}" if base_pattern else "沿上轨🚀"
+        
+        if is_new_high:
+            base_pattern = f"★新高|{base_pattern}" if base_pattern else "★新高"
+
         # 5. 组装最终 pattern_hint
         # 结构: [历史/基础形态] | [今日实时信号]
         detail_hint = ""
@@ -765,6 +786,8 @@ class BiddingMomentumDetector:
                 ts_obj.is_gap_leader = is_gap_leader  # 连续跳空强势龙头标记
                 ts_obj.is_accumulating = is_accumulating # [NEW]
                 ts_obj.is_reversal = is_reversal         # [NEW]
+                ts_obj.is_upper_band = is_upper_band     # [NEW]
+                ts_obj.is_new_high = is_new_high         # [NEW]
             
             # [FIX] 无论如何确保 last_data_ts 能够推进
             if data_ts > self.last_data_ts:
@@ -1014,7 +1037,7 @@ class BiddingMomentumDetector:
                 'leader_first_ts': l_data['first_breakout_ts'],
                 'pattern_hint': l_data['pattern_hint'],
                 'is_untradable': l_data['is_untradable'],
-                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
+                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
                 'linked_concepts': linked_concepts[:3]
             }
 

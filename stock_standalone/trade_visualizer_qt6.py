@@ -2505,25 +2505,30 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             self.column_map = default_column_map.copy()
 
+
+        # 1️⃣ 原始 real_time_cols 顺序保持不变
         real_time_cols = list(cct.real_time_cols)
         strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
-
-        # 🛡️ 整合可视化所需的核心列，确保 'dff', 'Rank' 等字段始终出现在表头
         visualizer_core_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
-        
+
         # 使用去重的方式合并列
         source_cols = real_time_cols if len(real_time_cols) > 4 and 'percent' in real_time_cols else visualizer_core_cols
         all_candidate_cols = source_cols + visualizer_core_cols + strategy_cols
 
-        # ⭐ [FIX] 严格使用 self.column_map 的键顺序作为表头显示的顺序
+        # 2️⃣ 保持 real_time_cols 顺序，其他列按 column_map 排序
         combined_header_cols = []
-        # 1. 直接遍历 column_map，只要该列在候选名中或者是核心列，就按顺序加入
+
+        # 先把 real_time_cols 加进去，顺序不变
+        for c in source_cols:
+            if c not in combined_header_cols:
+                combined_header_cols.append(c)
+
+        # 然后按 column_map 的顺序加入剩余已知列
         for c in self.column_map.keys():
-            if c in all_candidate_cols or c in visualizer_core_cols:
-                if c not in combined_header_cols:
-                    combined_header_cols.append(c)
-        
-        # 2. 补漏：防止某些 real_time_cols 没在 column_map 里定义
+            if c in all_candidate_cols and c not in combined_header_cols:
+                combined_header_cols.append(c)
+
+        # 最后补漏：所有还没在 combined_header_cols 的列，按原顺序加上
         for c in all_candidate_cols:
             if c not in combined_header_cols:
                 combined_header_cols.append(c)
