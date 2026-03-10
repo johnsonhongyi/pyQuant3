@@ -186,7 +186,8 @@ class IntradayDecisionEngine:
             debug["追高惩罚"] = -0.15
 
         # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
-        loss_streak = int(snapshot.get("loss_streak", 0))
+        streak_val = snapshot.get("loss_streak", 0)
+        loss_streak = int(streak_val) if not pd.isna(streak_val) else 0
         if loss_streak >= 2:
             # 连续亏损 2 次：进入"冷宫"
             if mode != "sell_only":
@@ -231,8 +232,10 @@ class IntradayDecisionEngine:
         
         # 5. 55188 外部加分 (外部人气与资金流向)
         # 人气排名 (1-100), 主力排名 (1-100), 主力净占比%
-        hot_rank = int(snapshot.get('hot_rank', 999))
-        zhuli_rank = int(snapshot.get('zhuli_rank', 999))
+        hr_val = snapshot.get('hot_rank', 999)
+        hot_rank = int(hr_val) if not pd.isna(hr_val) else 999
+        zr_val = snapshot.get('zhuli_rank', 999)
+        zhuli_rank = int(zr_val) if not pd.isna(zr_val) else 999
         net_ratio_ext = float(snapshot.get('net_ratio_ext', 0))
         hot_tag = snapshot.get('hot_tag', "")
         
@@ -403,7 +406,8 @@ class IntradayDecisionEngine:
                     # [迭代优化] 虽然均线判定持仓，但如果是加速股，应该给予更强的正面理由
                     is_holding = float(snapshot.get("cost_price", 0)) > 0
                     if is_holding:
-                        red_val = int(snapshot.get('red', 0))
+                        rv_val = snapshot.get('red', 0)
+                        red_val = int(rv_val) if not pd.isna(rv_val) else 0
                         if red_val >= 5 and price > ma5:
                             ma_reason = f"加速延续(Red{red_val}) | {ma_reason}"
                     return self._hold(ma_reason, debug)
@@ -431,7 +435,8 @@ class IntradayDecisionEngine:
                     
                     # 【新增】单阳惩罚 (One-Day Wonder Penalty)
                     # 统计发现 win=1 时买入胜率为 0%，需连续确认
-                    win_days = int(snapshot.get('win', 0))
+                    wd_val = snapshot.get('win', 0)
+                    win_days = int(wd_val) if not pd.isna(wd_val) else 0
                     if win_days == 1:
                         base_pos -= 0.15
                         debug["单阳惩罚"] = -0.15
@@ -523,8 +528,10 @@ class IntradayDecisionEngine:
                     is_holding = float(snapshot.get("cost_price", 0)) > 0
                     if is_holding:
                         # [迭代优化] 用户需求：如果保持加速状态且红柱高位，继续持仓甚至加仓
-                        red_val = int(snapshot.get('red', 0))
-                        win_val = int(snapshot.get('win', 0))
+                        rv2_val = snapshot.get('red', 0)
+                        red_val = int(rv2_val) if not pd.isna(rv2_val) else 0
+                        wv2_val = snapshot.get('win', 0)
+                        win_val = int(wv2_val) if not pd.isna(wv2_val) else 0
                         if red_val >= 5 and price > ma5 and win_val >= 2:
                             debug["迭代持仓"] = f"Red{red_val}加速延续"
                             # 如果评分本身很高，允许维持高分，这样就不会触发卖出/减仓
@@ -1219,8 +1226,10 @@ class IntradayDecisionEngine:
         price = float(row.get("trade", 0))
         ma60 = float(row.get("ma60d", 0))
         ma5 = float(row.get("ma5d", 0))
-        red = int(snapshot.get("red", 0))
-        win = int(snapshot.get("win", 0))
+        rv3_val = snapshot.get("red", 0)
+        red = int(rv3_val) if not pd.isna(rv3_val) else 0
+        wv3_val = snapshot.get("win", 0)
+        win = int(wv3_val) if not pd.isna(wv3_val) else 0
         nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
         
         result = {"triggered": False, "bonus": 0.0, "reason": ""}
@@ -1528,9 +1537,11 @@ class IntradayDecisionEngine:
 
             # 条件8: 大阳变盘点/惜售爆发检测 (Consolidation & Momentum Breakout)
             # Move definitions up to support Cond 9
-            win = int(snapshot.get("win", 0))
+            wv5_val = snapshot.get("win", 0)
+            win = int(wv5_val) if not pd.isna(wv5_val) else 0
             sum_perc = float(snapshot.get("sum_perc", 0))
-            red = int(snapshot.get("red", 0))
+            rv5_val = snapshot.get("red", 0)
+            red = int(rv5_val) if not pd.isna(rv5_val) else 0
 
             # [新增] 条件9: 主升浪加速启动 (Opening Low-High Acceleration)
             # 用户痛点：开盘5分钟最低走高，随后加速封板，容易丢失
@@ -1579,7 +1590,8 @@ class IntradayDecisionEngine:
                     buy_reasons.append(f"惜售连阳({win}d)加速")
 
             # 情况 B: 中线走红后的变盘突破 (red >= 5，站稳5日线后横盘爆发)
-            gren = int(snapshot.get("gren", 0))
+            gv_val = snapshot.get("gren", 0)
+            gren = int(gv_val) if not pd.isna(gv_val) else 0
             if red >= 5 and abs(sum_perc) < 12:
                 # 变盘信号：价格拉升封锁波动，突破今日开盘价并站稳均线
                 if price > open_p * 1.005 and price > nclose:
@@ -2264,9 +2276,11 @@ class IntradayDecisionEngine:
             reasons.append("突破5日高")
 
         # ---------- 7. 连阳加速与五日线强度 (New) ----------
-        win = int(source_data.get("win", 0))
+        wv6_val = source_data.get("win", 0)
+        win = int(wv6_val) if not pd.isna(wv6_val) else 0
         sum_perc = float(source_data.get("sum_perc", 0))
-        red = int(source_data.get("red", 0))
+        rv6_val = source_data.get("red", 0)
+        red = int(rv6_val) if not pd.isna(rv6_val) else 0
 
         if win >= 2:
             # 强势惜售：高低点持续抬升
@@ -2281,7 +2295,8 @@ class IntradayDecisionEngine:
 
         if red >= 3:
             # 长期站稳五日线，通常意味着强撑或主力控盘
-            gren = int(source_data.get("gren", 0))
+            gv2_val = source_data.get("gren", 0)
+            gren = int(gv2_val) if not pd.isna(gv2_val) else 0
             net_strength = red - gren
             
             if red >= 5:
@@ -2431,8 +2446,10 @@ class IntradayDecisionEngine:
         """
         主升浪持仓保护逻辑 (002667 模型优化)
         """
-        win = int(snapshot.get('win', 0))
-        red = int(snapshot.get('red', 0))
+        wv4_val = snapshot.get('win', 0)
+        win = int(wv4_val) if not pd.isna(wv4_val) else 0
+        rv4_val = snapshot.get('red', 0)
+        red = int(rv4_val) if not pd.isna(rv4_val) else 0
         
         # 定义主升浪阶段：连阳3日以上 或 站稳5日线5日以上
         is_main_wave = win >= 3 or red >= 5
@@ -2499,7 +2516,8 @@ class IntradayDecisionEngine:
             }
             
         # 💥 [New] [User Request] 5-6日动能周期识别
-        win_count = int(snapshot.get("win", 0))
+        wc_val = snapshot.get("win", 0)
+        win_count = int(wc_val) if not pd.isna(wc_val) else 0
         if win_count >= 5:
             # 动能衰竭期：只要跌破分时均线 或 产生冲高回落，立即保护
             if price < nclose or (high > 0 and (high - price) / high > 0.04):

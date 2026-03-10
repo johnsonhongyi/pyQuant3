@@ -103,9 +103,16 @@ class TickSeries:
         self.name = str(row.get('name', self.code))
         self.lastdu = float(row.get('lastdu', 0.0))
         self.lastdu4 = float(row.get('lastdu4', 0.0))
-        self.ral = int(row.get('ral', 0))
-        self.top0 = int(row.get('top0', 0))
-        self.top15 = int(row.get('top15', 0))
+        # [FIX] 对可能为 NaN 的整数字段进行安全转换
+        ral_val = row.get('ral', 0)
+        self.ral = int(ral_val) if not pd.isna(ral_val) else 0
+        
+        top0_val = row.get('top0', 0)
+        self.top0 = int(top0_val) if not pd.isna(top0_val) else 0
+        
+        top15_val = row.get('top15', 0)
+        self.top15 = int(top15_val) if not pd.isna(top15_val) else 0
+        
         self._splitted_cats = None # 重置缓存
 
     def get_splitted_cats(self) -> List[str]:

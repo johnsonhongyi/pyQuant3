@@ -390,7 +390,8 @@ def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
     upper_1d = daily_feat['upper1']
     close_1d = daily_feat['lastp1d']
     amount_1d = daily_feat['lastv1d']
-    eval_1d = int(daily_feat['eval1d'])
+    eval_val = daily_feat['eval1d']
+    eval_1d = int(eval_val) if not pd.isna(eval_val) else 9
     ma10d_curr = daily_feat['ma51d'] # 假设实时判断的生命线使用昨日MA5作为参考
 
     if upper_1d <= 0:
@@ -514,7 +515,7 @@ def process_merged_sina_signal_eval(df, mode='A'):
     upper_1d = df['upper']
     close_1d = df['lastp1d']
     amount_1d = df['lastv1d']
-    eval_1d = df['EVAL_STATE'].astype(int)
+    eval_1d = df['EVAL_STATE'].fillna(9).astype(int)
     ma_ref = df['ma5d'] # 假设 ma5d 是你的生命线
 
     # 2. 判定条件 (矢量化)
@@ -572,9 +573,9 @@ def process_merged_sina_with_history(df, mode='A'):
     upper_1d = df['upper1']
     close_1d = df['lastp1d']
     amount_1d = df['lastv1d']
-    eval_1d   = df['eval1d'].astype(int)   # 昨天状态
-    eval_2d   = df['eval2d'].astype(int)   # 前天状态
-    signal_1d = df['signal1d'].astype(int) # 昨天产生的信号
+    eval_1d   = df['eval1d'].fillna(9).astype(int)   # 昨天状态
+    eval_2d   = df['eval2d'].fillna(9).astype(int)   # 前天状态
+    signal_1d = df['signal1d'].fillna(5).astype(int) # 昨天产生的信号
     ma_ref    = df['ma51d']                # 支撑位
 
     # 3. 核心条件判定
@@ -2674,12 +2675,12 @@ def fetch_and_process(
             sina_limit_val = g_values.getkey("sina_limit_time")
             if sina_limit_val is None:
                 sina_limit_val = cct.sina_limit_time if hasattr(cct, 'sina_limit_time') else 30
-            sina_limit = int(sina_limit_val)
+            sina_limit = int(sina_limit_val) if not pd.isna(sina_limit_val) else 30
 
             cfg_sleep_val = g_values.getkey("duration_sleep_time")
             if cfg_sleep_val is None:
                 cfg_sleep_val = duration_sleep_time
-            cfg_sleep = int(cfg_sleep_val)
+            cfg_sleep = int(cfg_sleep_val) if not pd.isna(cfg_sleep_val) else 120
 
             # 2. 判断是否为交易时段 (9:15 - 15:00)
             now_int = cct.get_now_time_int()

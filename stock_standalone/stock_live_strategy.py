@@ -274,7 +274,8 @@ class StrategySupervisor:
             return True, f"全场胜率过低({market_win_rate:.1%})，提高防御"
 
         # 4. 霉运/个股冷宫机制 (Failure Filter)
-        loss_streak = int(snap.get('loss_streak', 0))
+        ls_val = snap.get('loss_streak', 0)
+        loss_streak = int(ls_val) if not pd.isna(ls_val) else 0
         max_loss = self.constraints.get('max_loss_streak', 2)
         if isinstance(max_loss, (int, float)) and loss_streak >= int(max_loss):
             return True, f"个股近期连亏{loss_streak}次，强行降温"
@@ -1347,7 +1348,8 @@ class StockLiveStrategy:
                     except: pass
                     
                     # 6. 连阳趋势加分 (0 - 0.1)
-                    win_count = int(row.get('win', 0)) # type: ignore
+                    wc_val = row.get('win', 0)
+                    win_count = int(wc_val) if not pd.isna(wc_val) else 0
                     if win_count >= 3:
                         score += 0.1
                         score_reasons.append(f"连阳{win_count}")
@@ -1458,9 +1460,10 @@ class StockLiveStrategy:
             high = float(row.get('high', 0))
             # low = float(row.get('low', 0))
             lastp1d = float(row.get('lastp1d', 0))
-            percent = float(row.get('percent', 0))
+            p_val = float(row.get('percent', 0))
             volume = float(row.get('volume', 0)) # volume ratio or normalized volume
-            win = int(row.get('win', 0))
+            w_val = row.get('win', 0)
+            win = int(w_val) if not pd.isna(w_val) else 0
             
             if price <= 0 or lastp1d <= 0:
                 return False, ""
@@ -1917,14 +1920,17 @@ class StockLiveStrategy:
             )
             has_strong = any(p.pattern == 'strong_auction_open' for p in patterns)
             
+            vol_val = volume
+            vol_int = int(vol_val) if not pd.isna(vol_val) else 0
             if not has_strong:
                 msg = f"竞价高开{pct:.1f}%但缺乏强结构支撑 (需Open≈Low且TrendS>60)"
                 logger.debug(f"Reject follow entry for {code}: {msg}")
                 return False, msg
             
-            return True, f"强力竞价确认: 高开{pct:.2f}% 量{int(volume)} (具备强结构)"
+            return True, f"强力竞价确认: 高开{pct:.2f}% 量{vol_int} (具备强结构)"
 
-        return True, f"竞价达标: 高开{pct:.2f}% 量{int(volume)}"
+        vol_int = int(volume) if not pd.isna(volume) else 0
+        return True, f"竞价达标: 高开{pct:.2f}% 量{vol_int}"
             
         # Shadow Engine record for near misses
         if 0 <= pct <= 10.0:
@@ -1934,7 +1940,7 @@ class StockLiveStrategy:
                 SignalMessageQueue().push(SignalMessage(
                     priority=99, timestamp=now_str, code=code, name=str(row.get('name', '')),
                     signal_type="SHADOW_AUCTION", source="Live",
-                    reason=f"Gap:{pct:.1f}% Vol:{int(volume)}", score=pct
+                    reason=f"Gap:{pct:.1f}% Vol:{int(volume) if not pd.isna(volume) else 0}", score=pct
                 ))
             except: pass
             
@@ -2482,7 +2488,8 @@ class StockLiveStrategy:
                 # 2. 形态确认: 高开(>1%) 或 开盘即最低(影线<0.2%)
                 # 3. 趋势确认: 相比开盘价不回落 (高走)
                 # 4. 量能确认: 虚拟量比 > 1.2
-                curr_win_u1 = int(row.get('win_upper1', 0))
+                w_u1_val = row.get('win_upper1', 0)
+                curr_win_u1 = int(w_u1_val) if not pd.isna(w_u1_val) else 0
                 
                 # 初始化单日触发标记 (snap 会随监控项持久化)
                 if 'star_triggered_date' not in snap:
@@ -4383,7 +4390,7 @@ class StockLiveStrategy:
                             'ma10': float(row.get('ma10d', 0)),
                             'upper': float(row.get('upper', 0)),
                             'volume_ratio': float(row.get('volume', 0)) if float(row.get('volume', 0)) <= 500 else 1.0,  # >500为原始成交量,非量比
-                            'win': int(row.get('win', 0)),
+                            'win': int(row.get('win', 0)) if not pd.isna(row.get('win', 0)) else 0,
                         }
                     eval_res = hub.evaluate_holding_strength(ohlc_data)
                     logger.info(f"Daily Holding Strength Eval: {eval_res}")

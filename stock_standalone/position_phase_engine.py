@@ -5,6 +5,7 @@ Position Phase Engine
 用于管理个股交易的生命周期 (SCOUT -> SURGE -> EXIT)
 """
 import enum
+import pandas as pd
 from typing import Dict, Any, Tuple, Optional
 
 class TradePhase(enum.Enum):
@@ -132,8 +133,10 @@ class PositionPhaseEngine:
 
             # [LAUNCH -> SURGE]
             # 启动加速：涨停或连板，或者达到主升浪指标 (连阳3日 或 红5日)
-            win_val = int(snap.get('win', 0))
-            red_val = int(snap.get('red', 0))
+            win_val_raw = snap.get('win', 0)
+            win_val = int(win_val_raw) if not pd.isna(win_val_raw) else 0
+            red_val_raw = snap.get('red', 0)
+            red_val = int(red_val_raw) if not pd.isna(red_val_raw) else 0
             if current_phase in [TradePhase.LAUNCH, TradePhase.ACCUMULATE, TradePhase.SCOUT]:
                 if win_val >= 3 or red_val >= 5:
                     return TradePhase.SURGE, f"主升浪开启: 连阳{win_val}/加速{red_val}"
