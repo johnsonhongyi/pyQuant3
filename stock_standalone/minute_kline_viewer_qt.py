@@ -687,7 +687,12 @@ class KlineBackupViewer(QMainWindow):
             ext = os.path.splitext(file_path)[1].lower()
 
             if ext == ".pkl":
-                df = pd.read_pickle(file_path)
+                try:
+                    # 优先尝试 zstd 压缩格式加载
+                    df = pd.read_pickle(file_path, compression='zstd')
+                except:
+                    # 兼容传统的未压缩 pkl 格式
+                    df = pd.read_pickle(file_path)
 
             elif ext == ".h5":
                 # 获取所有 key
@@ -1120,9 +1125,10 @@ class KlineBackupViewer(QMainWindow):
                     self.statusBar().showMessage("File Mode: No file path.")
                     return
                 
-                self.statusBar().showMessage(f"Saving to {self.current_file}...")
-                df.to_pickle(self.current_file)
-                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)}!")
+                self.statusBar().showMessage(f"Saving to {self.current_file} (zstd compressed)...")
+                # 统一使用 zstd 压缩保存，保持简洁的文件体积
+                df.to_pickle(self.current_file, compression='zstd')
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} (Compressed)!")
                 
         except Exception as e:
             self.statusBar().showMessage(f"Save Failed: {e}")

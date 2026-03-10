@@ -61,16 +61,19 @@ class MinuteKlineCache:
     每股保留最近 N 根 1分钟K线
     """
     _max_len: int
-    _shared_cache: dict[str, deque[KLineItem]]
+    _slack: int
+    _shared_cache: dict[str, list[KLineItem]]
     _last_update_ts: dict[str, int]
     _is_dirty: bool
     _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
+    simulation_mode: bool
 
-    def __init__(self, max_len: int = 240, simulation_mode: bool = False):
+    def __init__(self, max_len: int = 240, simulation_mode: bool = False, verbose: bool = False):
         self._max_len = max_len
+        self._slack = 20  # [NEW] 裁切缓冲区，避免频繁触发切片操作
         self.simulation_mode = simulation_mode
-        # {code: deque([KLineItem, ...])}
-        self._shared_cache: dict[str, deque[KLineItem]] = {}
+        self.verbose = verbose
+        self._shared_cache: dict[str, list[KLineItem]] = {} # code -> list[KLineItem]
         self._last_update_ts: dict[str, int] = {}
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
@@ -158,13 +161,36 @@ class MinuteKlineCache:
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
 
-                # --- [FIX] 加载时修复: 统一时间标准 (9:15-11:31, 13:00-15:05) ---
-                # 兼容竞价数据 (9:15开始) 和 收盘集合竞价 (15:05结束)
-                # 确保 240 根 K 线的核心逻辑不受干扰
-                mask_am = (hhmm >= 915) & (hhmm <= 1131)
+                # --- [FIX] 加载时修复: 剔除竞价阶段模拟数据 (9:15-9:24) ---
+                # 历史日（非今天）一律剔除 9:15-9:24
+                # 今天的数据，如果当前已经过了 9:25，也一律剔除
+                now_dt = datetime.now()
+                now_hhmm = now_dt.hour * 100 + now_dt.minute
+                
+                # 使用 timestamp 快速判别今天 (UTC+8)
+                df_date_val = ((df['time'] + 28800) // 86400).astype(int)
+                today_date_val = int((time.time() + 28800) // 86400)
+                
+                is_today = (df_date_val == today_date_val)
+                # 准入规则 (情绪数据优化版)：
+                # 1. 9:25 及之后的成交数据全保留 (跨天分析、分时趋势的核心)
+                # 2. 9:15-9:24 (以及 9:26-9:29) 的模拟数据：
+                #    - 如果是【今天】且【目前还在开盘前】(now_hhmm < 930)，暂时保留用于主力意图预判。
+                #    - 一旦【跨入 9:30 以后】或加载【历史日期】，直接过滤 9:15-9:24 及其他非 9:25 的开盘前模拟数据。
+                mask_real = (hhmm >= 925)
+                # 只有 9:25 是真实的集合竞价结果，其他 (9:15-9:24, 9:26-9:29) 均为情绪数据
+                is_auction_result = (hhmm == 925)
+                mask_bidding_live = is_today & (hhmm >= 915) & (hhmm < 930) & (now_hhmm < 930)
+                
+                # 最终准入：要么是 9:25 之后(含9:25)的真实数据，要么是正在实盘竞价中的情绪数据
+                mask_am = mask_real | mask_bidding_live
                 mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
                 
-                df = df[mask_am | mask_pm]
+                df = df[(mask_am & (hhmm <= 1131)) | mask_pm]
+                
+                # 特殊二次过滤：如果是 9:30 以后加载今天的数据，强制剔除非 9:25 的 pre-9:30 数据
+                if is_today.any() and now_hhmm >= 930:
+                    df = df[~((df['code'].isin(df[is_today]['code'])) & (hhmm >= 915) & (hhmm < 930) & (~is_auction_result))]
 
                 # 排序 + 去重
                 df = (
@@ -191,14 +217,14 @@ class MinuteKlineCache:
             get_volume = attrgetter('volume')
             get_cum    = attrgetter('cum_vol_start')
 
-            # 按 code 分组重建 deque（不再二次排序）
+            # 按 code 分组重建（不再二次排序）
             for code, group in df.groupby('code', sort=False):
-                dq = deque(maxlen=max_len)
+                kl_list = []
 
-                # itertuples 是目前 pandas → Python 最快路径
+                # itertuples 是目前 pandas -> Python 最快路径
                 for r in group.itertuples(index=False):
                     try:
-                        dq.append(
+                        kl_list.append(
                             KLineItem(
                                 time=get_time(r),
                                 open=get_open(r),
@@ -212,8 +238,11 @@ class MinuteKlineCache:
                     except Exception:
                         # 与原逻辑一致，跳过坏行
                         continue
-
-                shared_cache[str(code)] = dq
+                
+                # 初始加载裁切
+                if len(kl_list) > max_len:
+                    kl_list = kl_list[-max_len:]
+                shared_cache[str(code)] = kl_list
 
             self._is_dirty = True
             self._is_restored = True
@@ -251,10 +280,10 @@ class MinuteKlineCache:
             # 清空当前
             self.clear()
             
-            # 按 code 分组重建 deque
+            # 按 code 分组重建
             for code, group in df.groupby('code'):
                 code_str = str(code)
-                new_dq: deque[KLineItem] = deque(maxlen=self._max_len)
+                new_list: list[KLineItem] = []
                 # itertuples 性能较好
                 for row in group.itertuples(index=False):
                     try:
@@ -268,10 +297,12 @@ class MinuteKlineCache:
                             volume=float(getattr(row, 'volume', 0.0)),
                             cum_vol_start=float(getattr(row, 'cum_vol_start', 0.0))
                         )
-                        new_dq.append(item)
+                        new_list.append(item)
                     except (AttributeError, ValueError, TypeError):
                         continue
-                self._shared_cache[code_str] = new_dq
+                if len(new_list) > self._max_len:
+                    new_list = new_list[-self._max_len:]
+                self._shared_cache[code_str] = new_list
             
             self._is_dirty = True 
             self._is_restored = True
@@ -286,7 +317,7 @@ class MinuteKlineCache:
         return self._max_len
 
     @property
-    def cache(self) -> dict[str, deque[KLineItem]]:
+    def cache(self) -> dict[str, list[KLineItem]]:
         return self._shared_cache
 
     @property
@@ -298,11 +329,11 @@ class MinuteKlineCache:
         if self._max_len != max_len:
             logger.info(f"✂️ MinuteKlineCache Trimming: {self._max_len} -> {max_len} nodes")
             self._max_len = max_len
-            # 对所有现有数据进行重建以同步 maxlen 属性
-            for code in list(self._shared_cache.keys()):
-                dq = self._shared_cache[code]
-                # 无论当前长度如何，都必须重建 deque 以修改只读的 maxlen 属性
-                self._shared_cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
+            # 对所有现有数据进行批量裁切
+            for code in self._shared_cache:
+                klines = self._shared_cache[code]
+                if len(klines) > max_len:
+                    self._shared_cache[code] = klines[-max_len:]
 
     def clear(self):
         """完全清空缓存"""
@@ -313,7 +344,7 @@ class MinuteKlineCache:
     def get_klines(self, code: str, n: int = 60) -> list[dict[str, Any]]:
         if code not in self._shared_cache:
             return []
-        nodes = list(self._shared_cache[code])[-n:]
+        nodes = self._shared_cache[code][-n:]
         # Support dict-based access for existing strategy code
         return [node.as_dict() for node in nodes]
 
@@ -334,13 +365,13 @@ class MinuteKlineCache:
         core_cols = ['code']
         # 识别价格列
         price_col_found = None
-        for pc in ['trade', 'now', 'close', 'price']:
+        for pc in ['trade', 'now', 'close', 'price', 'hq_last', 'llastp']:
             if pc in df.columns:
                 price_col_found = pc
                 core_cols.append(pc)
                 break
         # 识别成交量列
-        vol_cols_found = [c for c in ['nvol', 'vol', 'volume'] if c in df.columns]
+        vol_cols_found = [c for c in ['nvol', 'vol', 'volume', 'hq_nvol'] if c in df.columns]
         core_cols.extend(vol_cols_found)
         # 识别时间列
         time_col_found = None
@@ -352,7 +383,10 @@ class MinuteKlineCache:
         
         # 仅遍历核心列，极大提升 5000+ 个股的更新效率
         df_iter = df[core_cols]
-        for row in df_iter.itertuples(index=False):
+        if self.simulation_mode and self.verbose and not df_iter.empty:
+             print(f"DEBUG: update_batch simulation processing {len(df_iter)} rows. Cols: {core_cols}. First row: {df_iter.iloc[0].to_dict() if len(df_iter)>0 else 'N/A'}")
+             
+        for idx, row in enumerate(df_iter.itertuples(index=False)):
             try:
                 code_raw = getattr(row, 'code', '')
                 if not code_raw: continue
@@ -406,6 +440,11 @@ class MinuteKlineCache:
                 else:
                     ts = time.time()
                 
+                # --- [FIX] 统一时间准入检查 ---
+                seconds_from_midnight = (ts + 28800) % 86400
+                mins_from_midnight = int(seconds_from_midnight // 60)
+                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
+                
                 # --- [FIX] 未来时间防御墙与严格审计 (Simulation 模式下跳过) ---
                 if not self.simulation_mode:
                     now_ts = time.time()
@@ -435,21 +474,15 @@ class MinuteKlineCache:
                     
                     # --- [FIX] 防御盘后冗余数据进入缓存 ---
                     # --- [FIX] 统一时间准入标准 (9:15-11:31, 13:00-15:05) ---
-                    seconds_from_midnight = (ts + 28800) % 86400
-                    mins_from_midnight = int(seconds_from_midnight // 60)
-                    hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                     if not ((915 <= hhmm <= 1131) or (1300 <= hhmm <= 1505)):
                         continue 
-                else:
-                    # Simulation 模式下依然计算 hhmm 供 _update_internal 使用
-                    seconds_from_midnight = (ts + 28800) % 86400
-                    mins_from_midnight = int(seconds_from_midnight // 60)
-                    hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-                
                 # 兼容处理：如果是 YYYYMMDDHHMMSS 格式 (通常 > 2e9)，这里不做复杂转换，假定系统统传 Unix
                 minute_ts = int(ts - (ts % 60))
                 
                 # 核心更新
+                if self.verbose and self.simulation_mode and idx < 5: # 增加采样
+                     print(f"DEBUG: [{code}] price={price}, vol={current_cum_vol}, time={datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}, hhmm={hhmm}, ts={ts}")
+                
                 self._update_internal(code, price, current_cum_vol, minute_ts, hhmm=hhmm)
                 updated_codes.add(code)
                 self._last_update_ts[code] = minute_ts
@@ -521,33 +554,55 @@ class MinuteKlineCache:
         hhmm: 当前时段，用于支持竞价时段 (9:30以前) 的成交量回退容错
         """
         if code not in self._shared_cache:
-            self._shared_cache[code] = deque(maxlen=self._max_len)
+            self._shared_cache[code] = []
         klines = self._shared_cache[code]
         
-        # 1. 初始插入
-        if not klines:
+        # [NEW] 情绪数据清理 (9:30 自动剔除模拟竞价数据)
+        # 用户反馈：9:30 以后 9:15-9:24 就只是情绪数据，会干扰均线判断逻辑，应予以清理。
+        if hhmm is not None and hhmm >= 930 and klines:
+             has_bidding = False
+             curr_dt = datetime.fromtimestamp(minute_ts)
+             for k in klines:
+                 k_dt = datetime.fromtimestamp(k.time)
+                 if k_dt.date() == curr_dt.date():
+                     k_hhmm = k_dt.hour * 100 + k_dt.minute
+                     # 9:25 是真实的集合竞价，保留；清理 9:15-9:24 及可能的 9:26-9:29 模拟数据
+                     if 915 <= k_hhmm < 930 and k_hhmm != 925:
+                         has_bidding = True
+                         break
+             
+             if has_bidding:
+                 self._shared_cache[code] = [k for k in klines if not (
+                     datetime.fromtimestamp(k.time).date() == curr_dt.date() and 
+                     915 <= (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) < 930 and
+                     (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) != 925
+                 )]
+                 klines = self._shared_cache[code]
+                 logger.info(f"🧹 [{code}] Bidding sentiment bars (Pre-9:30) pruned at {hhmm} to avoid MA interference.")
+                 self._is_dirty = True
+
+        # 1. 初始插入 or 跨天插入
+        is_new_day = False
+        if klines:
+            last_dt = datetime.fromtimestamp(klines[-1].time)
+            curr_dt = datetime.fromtimestamp(minute_ts)
+            if last_dt.date() != curr_dt.date():
+                is_new_day = True
+
+        if not klines or is_new_day:
+            # [REFINED] 强化集合竞价成交量捕捉 (9:25 是第一根时，将全量成交记入 volume)
+            vol_for_first = current_cum_vol if (925 <= hhmm <= 931) else 0.0
             klines.append(KLineItem(
                 time=minute_ts, open=price, high=price, low=price, close=price,
-                volume=0.0, cum_vol_start=current_cum_vol
+                volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
             ))
             self._is_dirty = True
             return
 
+        # 重要：清理后重新获取 last_k 引用，确保后续更新针对的是清理后的 K 线链条
         last_k = klines[-1]
 
-        # [Daily Reset] 如果检测到跨日期，清空前序 K 线，确保 Intraday 纯净性
-        # Unix 戳转天数 (UTC+8)
-        last_day_num = (last_k.time + 28800) // 86400
-        curr_day_num = (minute_ts + 28800) // 86400
-        if curr_day_num > last_day_num:
-            logger.info(f"📅 [{code}] Date changed detected ({last_day_num} -> {curr_day_num}), clearing cache.")
-            klines.clear()
-            klines.append(KLineItem(
-                time=minute_ts, open=price, high=price, low=price, close=price,
-                volume=0.0, cum_vol_start=current_cum_vol
-            ))
-            self._is_dirty = True
-            return
+        # [Daily Reset] 用户要求支持多日，不在此处重置
 
         # 获取 hhmm (如果未传入) 作为容错
         if hhmm is None:
@@ -555,11 +610,9 @@ class MinuteKlineCache:
             mins_from_midnight = int(seconds_from_midnight // 60)
             hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
         
-        # [SELF-HEALING] 处理潜在的未来时间 Bar 污染导致的更新中断
-        # 如果缓存最后一个 Bar 在未来超过 5 分钟，且当前数据是合法的“过去”时间
+        # [SELF-HEALING] 处理潜在的未来时间 Bar 污染
         if last_k.time > time.time() + 300 and minute_ts < last_k.time:
-            # print(f"DEBUG [{code}]: HEALING TRIGGERED. last_k={datetime.fromtimestamp(last_k.time)}, current={datetime.fromtimestamp(minute_ts)}")
-            logger.warning(f"🚨 [{code}] Future bar detected ({datetime.fromtimestamp(last_k.time)}), pruning to recover.")
+            logger.warning(f"🚨 [{code}] Future bar detected, pruning to recover.")
             klines.pop()
             if not klines:
                 klines.append(KLineItem(
@@ -568,7 +621,7 @@ class MinuteKlineCache:
                 ))
                 self._is_dirty = True
                 return
-            last_k = klines[-1] # 更新引用
+            last_k = klines[-1]
         
         # 2. 同一分钟更新
         if last_k.time == minute_ts:
@@ -576,39 +629,56 @@ class MinuteKlineCache:
             last_k.low = min(last_k.low, price)
             last_k.close = price
             
-            # 成交量处理 (current_cum_vol - 本分钟起始量)
-            # [REFINED] 容忍成交量回退 (防止因数据源乱序或竞价阶段重置导致缓存归零)
             if current_cum_vol < last_k.cum_vol_start:
-                # [USER HINT] 9:30 以前的竞价可能导致成交量由于重置而回退
                 is_bidding = (hhmm < 930)
                 rollback_amount = last_k.cum_vol_start - current_cum_vol
-                
-                # 竞价时期容错更高；9:30 后仅容忍 1000 股以内的微小波动
                 limit_amt = last_k.cum_vol_start * 0.1 if is_bidding else 1000
                 
                 if rollback_amount > limit_amt and rollback_amount > 1000:
-                    # 确定是大规模重置（如跨日更新未及时清除或数据源异常）
                     last_k.cum_vol_start = current_cum_vol
                     last_k.volume = 0.0
-                else:
-                    # 视为噪声/抖动/竞价微调，忽略此笔成交量更新，维持现有 volume
-                    pass
             else:
                 last_k.volume = current_cum_vol - last_k.cum_vol_start
             self._is_dirty = True
             
         # 3. 开启新分钟
         elif minute_ts > last_k.time:
+            last_hhmm = datetime.fromtimestamp(last_k.time).hour * 100 + datetime.fromtimestamp(last_k.time).minute
+            
             # 补齐上一个 Bar 的最终成交量
             if current_cum_vol >= last_k.cum_vol_start:
-                last_k.volume = current_cum_vol - last_k.cum_vol_start
+                # [FIX] 9:25 -> 9:30 跨越特殊处理
+                # 9:25 的 Volume 在集合竞价结束时已固定。后续 9:30 的 Tick 不应再推高 9:25 的成交量。
+                if last_hhmm == 925 and hhmm >= 930:
+                    pass 
+                else:
+                    last_k.volume = current_cum_vol - last_k.cum_vol_start
+            
+            # [FIX] 确定新分钟的起始累积成交量
+            # 正常情况下是当前 Tick 的累积量，但跨越 gap 时应以上一个 Bar 的终点为起点
+            new_cum_vol_start = current_cum_vol
+            if last_hhmm == 925 and hhmm >= 930:
+                new_cum_vol_start = last_k.cum_vol_start + last_k.volume
             
             # 插入新分钟起始数据
+            # 如果当前 Tick 已有超出 new_cum_vol_start 的增量，直接计入 volume
+            new_vol = 0.0
+            if current_cum_vol > new_cum_vol_start:
+                new_vol = current_cum_vol - new_cum_vol_start
+
             klines.append(KLineItem(
                 time=minute_ts, open=price, high=price, low=price, close=price,
-                volume=0.0,
-                cum_vol_start=current_cum_vol
+                volume=new_vol,
+                cum_vol_start=new_cum_vol_start
             ))
+            
+            # [REFINED] 平滑裁切逻辑：超过 max_len + slack 时一次性批量删除
+            # 避免 list 被频繁执行 O(N) 的 pop(0)
+            if len(klines) > self._max_len + self._slack:
+                # 裁切掉最早的 _slack 根 K 线
+                # 例如 max_len=240, slack=20, 长度到 261 时，裁切掉前 20 根变成 241 根
+                klines[:self._slack] = []
+                
             self._is_dirty = True
         else:
             # 忽略过时数据
@@ -734,11 +804,12 @@ class DailyEmotionBaseline:
     """
     开盘基准值：基于历史指标构建当日情绪锚点
     """
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
         self._baselines: dict[str, float] = {}  # {code: baseline_score}
         self._baseline_details: dict[str, str] = {} # {code: status_description}
         self._structural_anchors: dict[str, dict[str, float]] = {} # {code: {yesterday_high, prev_high, ma60, ma20}}
         self._last_calc_date: Optional[str] = None
+        self.verbose = verbose
     
     def get_last_calc_date(self) -> Optional[str]:
         return self._last_calc_date
@@ -912,9 +983,11 @@ class DailyEmotionBaseline:
             
             self._last_calc_date = today
             if count > 10:
-                logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
+                if self.verbose:
+                    logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
             else:
-                logger.debug(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
+                if self.verbose:
+                    logger.debug(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
         except Exception as e:
             logger.error(f"Calculate Baseline Error: {e}")
 
@@ -1077,7 +1150,9 @@ class IntradayEmotionTracker:
                         # [Phase 4] 只有明确有 name 才显示，否则为空字符串
                         name_raw = row.get('name', '')
                         # 如果 name 字段内容和 code 一致，说明是 fallback 进来的，我们认为这不算“真正有显示名称”
-                        name_str = str(name_raw) if name_raw and str(name_raw) != code_str else ""
+                        if name_raw == code_str:
+                            name_raw = ''
+                        name_str = str(name_raw) if name_raw else ""
                         
                         # 只有在内部映射表里确实有不一样的名称时才显示
                         if not name_str and code_str in self._code_to_name:
@@ -1327,11 +1402,20 @@ class DataPublisher:
     max_batch_time: float
     _last_batch_fp: str
     _enable_backup: bool
-    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, enable_backup: bool = False, validation_mode: bool = False):
-        # global FP_FILE,CACHE_FILE
+    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, 
+                 enable_backup: bool = False, validation_mode: bool = False,
+                 simulation_mode: bool = False, verbose: bool = False):
         self.paused = False
-        self.simulation_mode = validation_mode # 是否为模拟回放/验证模式
-        self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
+        self.high_performance = high_performance
+        self.simulation_mode = simulation_mode
+        self.verbose = verbose
+        
+        # 核心缓存组件 (传递 verbose)
+        self.kline_cache = MinuteKlineCache(
+            max_len=240 if high_performance else 1440,
+            simulation_mode=simulation_mode,
+            verbose=verbose
+        )
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 1200.0 # 阈值调低至 1200MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
@@ -1369,15 +1453,16 @@ class DataPublisher:
         self.last_db_check = 0.0
 
         # Time-based goals (Hours)
-        self.TARGET_HOURS_HP = 4.0
-        self.TARGET_HOURS_LEGACY = 2.0
+        # [MODIFIED] Increased from 4.0 to 20.0 to support 5 days of multi-day analysis
+        self.TARGET_HOURS_HP = 20.0
+        self.TARGET_HOURS_LEGACY = 4.0
 
         # Mode-based settings: Calculate max_len based on default 60s first
         default_interval = 60
         cache_len = int((self.TARGET_HOURS_HP * 3600) / default_interval) if high_performance else int((self.TARGET_HOURS_LEGACY * 3600) / default_interval)
-        self.kline_cache = MinuteKlineCache(max_len=cache_len, simulation_mode=self.simulation_mode)
-        
-        self.emotion_baseline = DailyEmotionBaseline() # Initialize baseline tracker
+        self.kline_cache.set_mode(cache_len) # Update mode rather than re-creating
+        # [New] 基准值追踪器 (传递 verbose)
+        self.emotion_baseline = DailyEmotionBaseline(verbose=verbose)
         self.emotion_tracker = IntradayEmotionTracker()
         self.subscribers = defaultdict(lambda: cast(list[Callable[..., object]], []))
         
@@ -1710,11 +1795,13 @@ class DataPublisher:
         t0 = time.time()
         is_trading = cct.get_work_time_duration()
 
-        if self.paused or not is_trading:
-            if self.emotion_baseline.get_last_calc_date() is None:
-                pass
-            else:
-                return
+        # [FIX] Simulation Mode 必须绕过暂停和时段检查
+        if not self.simulation_mode:
+            if self.paused or not is_trading:
+                if self.emotion_baseline.get_last_calc_date() is None:
+                    pass
+                else:
+                    return
 
         try:
             if df.empty: return
@@ -1799,8 +1886,9 @@ class DataPublisher:
             # 2. 跨日检测
             incoming_date = dt_now.strftime('%Y-%m-%d')
             if self._last_update_date and incoming_date != self._last_update_date:
-                logger.info(f"📅 Day transition: {self._last_update_date} -> {incoming_date}. Resetting data.")
-                self.reset_state()
+                # [REMOVED] Daily reset on transition prevents multi-day analysis.
+                logger.info(f"📅 Day transition: {self._last_update_date} -> {incoming_date}. (Multi-day support enabled, keeping cache)")
+                # self.reset_state()
             self._last_update_date = incoming_date
 
             # 3. [CRITICAL FIX] 指纹校验优化：防止局部静态个股屏蔽全场更新
@@ -1835,10 +1923,13 @@ class DataPublisher:
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
                 if not is_trading:
                     return
-            # 4. 核心数据更新 (宽时段准入)
-            if (is_realtime or hhmm >= 1500) and is_new_batch:
+            # 4. 核心数据更新 (Simulation 模式下跳过 is_realtime 检查)
+            if (self.simulation_mode or is_realtime or hhmm >= 1500) and is_new_batch:
                 if self.update_count == 0:
                     logger.info(f"🚦 First realtime batch. Time: {hhmm}, Columns: {list(df.columns)[:5]}")
+                
+                if self.verbose:
+                    logger.info(f"💾 Processing batch: {hhmm} ({len(df)} stocks)")
                 
                 self._last_batch_fp = batch_fp
                 
@@ -1874,12 +1965,14 @@ class DataPublisher:
                 
                 # 情绪与 KLine 更新
                 # [OPTIMIZED] Skip calculate_baseline if already done for TODAY
-                if self.emotion_baseline.get_last_calc_date() != datetime.now().strftime("%Y-%m-%d"):
-                    self.emotion_baseline.calculate_baseline(df)
-                
+                # [FIX] Simulation 模式下跳过自动重新计算，防止覆盖手动设置的大样基准
+                if not self.simulation_mode:
+                    if self.emotion_baseline.get_last_calc_date() != datetime.now().strftime("%Y-%m-%d"):
+                        self.emotion_baseline.calculate_baseline(df)
+                    
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
                 
-                if any(col in df.columns for col in ['trade', 'now', 'price', 'close']):
+                if any(col in df.columns for col in ['trade', 'now', 'price', 'close', 'hq_last', 'llastp']):
                     self.kline_cache.update_batch(df, self.subscribers)
                 
                 # 3. 性能统计
@@ -2007,7 +2100,7 @@ class DataPublisher:
         for i in range(num_stocks):
             code = f"600{i:03d}"
             if code not in self.kline_cache.cache:
-                self.kline_cache.cache[code] = deque(maxlen=self.kline_cache.max_len)
+                self.kline_cache.cache[code] = []
             
             for _ in range(n_klines):
                 # 必须存储 KLineItem 对象
@@ -2215,7 +2308,7 @@ if __name__ == "__main__":
     print(f"   - Total Updates: {final_status.get('update_count')}")
     print(f"   - Memory Usage: {final_status.get('memory_usage')}")
     print(f"   - KLines Cached (Stocks): {klines_count}")
-    print(f"   - Total Nodes across all deques: {total_nodes}")
+    print(f"   - Total Nodes across all lists: {total_nodes}")
     print(f"   - Avg Nodes per Stock: {final_status.get('avg_nodes_per_stock', 0):.1f}")
     print(f"   - Est. Incremental Memory per Node: {per_node:.1f} bytes")
     
