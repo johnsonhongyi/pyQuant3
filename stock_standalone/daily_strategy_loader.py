@@ -11,6 +11,7 @@ Daily Strategy Loader
 Run typical time: 09:00 - 09:20
 """
 import logging
+import pandas as pd
 from datetime import datetime
 from typing import List, Dict
 
@@ -69,7 +70,8 @@ def load_daily_strategies(force_run: bool = False, min_score: int = 45):
     # 2. 遍历结果并转换
     for _, row in df.iterrows():
         try:
-            score = float(row.get('score', 0))
+            score_val = row.get('score', 0)
+            score = float(score_val) if not pd.isna(score_val) else 0
             if score < min_score:
                 continue
                 

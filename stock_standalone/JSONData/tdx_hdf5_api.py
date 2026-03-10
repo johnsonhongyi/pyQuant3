@@ -1143,197 +1143,6 @@ def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', base
     return True
 
 
-
-def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', baseCount=500,
-                 append=True, MultiIndex=False, rewrite=False, showtable=False):
-#     [12-24 09:45:12] ERROR:data_utils.py(fetch_and_process:395): resample: d Error in background process: Setting a MultiIndex dtype to anything other than object is not supported
-# Traceback (most recent call last):
-#   File "data_utils.py", line 337, in fetch_and_process
-#   File "JSONData\tdx_data_Day.py", line 3306, in getSinaAlldf
-#   File "JSONData\sina_data.py", line 451, in all
-#   File "JSONData\sina_data.py", line 900, in get_stock_data
-#   File "JSONData\sina_data.py", line 1052, in format_response_data
-#   File "JSONData\tdx_hdf5_api.py", line 1093, in write_hdf_db
-#   File "pandas\core\indexes\multi.py", line 3727, in astype
-# TypeError: Setting a MultiIndex dtype to anything other than object is not supported
-    time_t = time.time()
-
-    if df is None or df.empty:
-        log.warning("write_hdf_db: df is None or empty, skip write")
-        return pd.DataFrame()  # 返回空 DF 避免 NoneType
-
-    # 处理索引
-    if 'code' in df.columns and not MultiIndex:
-        df = df.set_index('code')
-
-    df = df.fillna(0)
-    df = df[~df.index.duplicated(keep='first')]
-
-    tmpdf = pd.DataFrame()
-
-    with SafeHDFStore(fname, mode='a') as store:
-        if store is None:
-            log.error("HDF5 store is None: %s", fname)
-            return False
-
-        table_key = '/' + table
-        keys = store.keys()
-        if showtable:
-            log.info("fname: %s keys:%s", fname, keys)
-            print(f"fname: {fname} keys:{keys}")
-
-        # 读取已有数据
-        if append and table_key in keys:
-            try:
-                tmpdf = store.get(table)
-                if tmpdf is None or not isinstance(tmpdf, pd.DataFrame):
-                    log.warning("HDF5 key %s invalid or None, resetting tmpdf to empty", table_key)
-                    tmpdf = pd.DataFrame()
-                else:
-                    tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-            except Exception as e:
-                log.error("Error reading HDF5 key %s: %s", table_key, e)
-                tmpdf = pd.DataFrame()
-
-        # MultiIndex 或普通 DataFrame 合并逻辑
-        if append and not tmpdf.empty:
-            # MultiIndex 分支
-            if MultiIndex:
-                try:
-                    multi_code = tmpdf.index.get_level_values('code').unique().tolist()
-                    df_multi_code = df.index.get_level_values('code').unique().tolist()
-                    dratio = cct.get_diff_dratio(multi_code, df_multi_code)
-                    if dratio < ct.dratio_limit:
-                        comm_code = list(set(df_multi_code) & set(multi_code))
-                        if comm_code:
-                            inx_key = comm_code[np.random.randint(0, len(comm_code))]
-                            if inx_key in df.index.get_level_values('code'):
-                                now_time = df.loc[inx_key].index[-1]
-                                tmp_time = tmpdf.loc[inx_key].index[-1]
-                                if now_time == tmp_time:
-                                    log.debug("%s %s Multi out %s hdf5:%s No Write!!!" %
-                                              (fname, table, inx_key, now_time))
-                                    return False
-                    elif dratio == 1:
-                        log.info("newData ratio: %s all:%s", dratio, len(df))
-                    else:
-                        log.debug("dratio:%s main:%s new:%s %s %s Multi All Write" %
-                                  (dratio, len(multi_code), len(df_multi_code), fname, table))
-                except Exception as e:
-                    log.error("MultiIndex merge error: %s", e)
-            else:
-                # 普通 DataFrame 合并逻辑
-                try:
-                    if 'code' in tmpdf.columns:
-                        tmpdf = tmpdf.set_index('code')
-                    if 'code' in df.columns:
-                        df = df.set_index('code')
-
-                    diff_columns = set(df.columns) - set(tmpdf.columns)
-                    if diff_columns:
-                        log.error("columns diff:%s", diff_columns)
-
-                    limit_t = time.time()
-                    df['timel'] = limit_t
-                    df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
-
-                    if not append:
-                        df['timel'] = time.time()
-                    elif fname == 'powerCompute':
-                        o_time = df[df.timel < limit_t].timel.tolist()
-                        o_time = sorted(set(o_time), reverse=False)
-                        if len(o_time) >= ct.h5_time_l_count:
-                            o_time = [time.time() - t_x for t_x in o_time]
-                            o_timel = len(o_time)
-                            o_time = np.mean(o_time)
-                            if o_time > ct.h5_power_limit_time:
-                                df['timel'] = time.time()
-                                log.error("%s %s o_time:%.1f timel:%s" %
-                                          (fname, table, o_time, o_timel))
-                    log.info("read hdf merge time: %.2f", time.time() - time_t)
-                except Exception as e:
-                    log.error("DataFrame merge error: %s", e)
-
-        # Object 类型列处理
-        obj_cols = df.select_dtypes(include=['object']).columns.tolist()
-        if obj_cols:
-            df[obj_cols] = df[obj_cols].astype(str)
-        df.index = df.index.astype(str)
-        df = df.fillna(0)
-
-        # 写入 HDF5
-        try:
-            if table_key in keys and rewrite:
-                store.remove(table)
-            store.put(table, df, format='table', index=not MultiIndex, append=False,
-                      complib=complib, data_columns=True)
-            store.flush()
-        except Exception as e:
-            log.error("write_hdf_db HDF5 put error: %s", e)
-            return False
-
-    log.info("write_hdf_db done: table=%s, rows=%d, time=%.2f",
-             table, len(df), time.time() - time_t)
-    return df
-
-# def read_hdf_safe(store, table_name, chunk_size=1000):
-#     dfs = []
-#     start = 0
-#     while True:
-#         try:
-#             df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
-#             if df_chunk.empty:
-#                 break
-#             dfs.append(df_chunk)
-#             start += chunk_size
-#         except tables.exceptions.HDF5ExtError as e:
-#             print(f"Chunk read error at rows {start}-{start+chunk_size}: {e}")
-#             start += chunk_size  # 跳过损坏 chunk
-#     if dfs:
-#         return pd.concat(dfs)
-#     else:
-#         return pd.DataFrame()
-
-# def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc',readonly=False):
-#     """
-#     尝试读取 HDF5 table，如果读取失败，则逐块读取。
-#     返回 DataFrame。
-#     """
-#     try:
-#         # 直接读取整个 table
-#         df = store[table_name]
-#         df = df[~df.index.duplicated(keep='first')]
-#         return df
-#     except tables.exceptions.HDF5ExtError as e:
-#         log.error(f"{table_name} read error: {e}, attempting chunked read...")
-#         # 逐块读取
-#         import ipdb;ipdb.set_trace()
-
-#         dfs = []
-#         start = 0
-#         while True:
-#             try:
-#                 storer = store.get_storer(table_name)
-#                 if not storer.is_table:
-#                     raise RuntimeError(f"{table_name} is not a table format")
-#                 df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
-#                 if df_chunk.empty:
-#                     break
-#                 dfs.append(df_chunk)
-#                 start += chunk_size
-#             except tables.exceptions.HDF5ExtError:
-#                 # 跳过损坏块
-#                 print(f"Skipping corrupted chunk {start}-{start+chunk_size}")
-#                 start += chunk_size
-#         if not readonly and dfs:
-#             df = pd.concat(dfs)
-#             df = df[~df.index.duplicated(keep='first')]
-#             rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
-#             return df
-#         else:
-#             print(f"All chunks of {table_name} are corrupted")
-#             return pd.DataFrame()
-
 def quarantine_hdf_file(fname, reason, rebuild_func=None):
     log.critical(f"[HDF QUARANTINE] {fname}, reason={reason}")
 
@@ -1362,7 +1171,7 @@ def quarantine_hdf_file(fname, reason, rebuild_func=None):
 
 
 def safe_load_table(store, table_name, chunk_size=1000,
-                    MultiIndex=False, complib='blosc',
+                    MultiIndex=False, complib='blosc',complevel=9,
                     readonly=False):
     """
     安全读取 HDF5 table：
@@ -1450,13 +1259,68 @@ def safe_load_table(store, table_name, chunk_size=1000,
         rebuild_table(
             store, table_name, df,
             MultiIndex=MultiIndex,
-            complib=complib
+            complib=complib,
+            complevel=complevel
         )
 
     return df
 
+def rebuild_table(store, table_name, new_df, *,
+                  MultiIndex=False,
+                  complib='blosc',
+                  complevel=9,
+                  index_col=["code","name"]):
+    """
+    安全重建 HDF 表：
+    - 删除旧表并重新写入
+    - 兼容单索引、多索引
+    - 自动检查 index_col 是否存在
+    """
+    key = '/' + table_name
 
-def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
+    # 检查 index_col 是否存在于 df
+    if index_col:
+        index_col_valid = [c for c in index_col if c in new_df.columns]
+        if not index_col_valid:
+            index_col_valid = None
+    else:
+        index_col_valid = None
+
+    # 删除旧表
+    if key in store.keys():
+        log.info(f"Removing old table {table_name}")
+        store.remove(key)
+
+    if new_df.empty:
+        log.warning(f"Table {table_name} is empty, skipped rebuilding")
+        return
+
+    # 写入新表
+    if not MultiIndex:
+        store.put(
+            key, new_df,
+            format='table',
+            append=False,
+            complib=complib,
+            complevel=complevel,
+            data_columns=index_col_valid
+        )
+    else:
+        store.put(
+            key, new_df,
+            format='table',
+            index=True,         # 保留 MultiIndex
+            append=False,
+            complib=complib,
+            complevel=complevel,
+            data_columns=index_col_valid
+        )
+
+    store.flush()
+    log.info(f"Rebuilt table {table_name}, shape={new_df.shape}")
+    
+
+def rebuild_table_src(store, table_name, new_df,MultiIndex=False,complib='blosc',complevel=9,index_col=["code","name"]):
     """
     删除旧 table 并重建
     """
@@ -1467,9 +1331,11 @@ def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
     if not new_df.empty:
         # store.put(table_name, new_df, format='table',complib=complib, data_columns=True)
         if not MultiIndex:
-            store.put(table_name, new_df, format='table', append=False, complib=complib, data_columns=True)
+            # store.put(table_name, new_df, format='table', append=False, complib=complib, complevel=complevel,data_columns=True)
+            store.put(table_name, new_df, format='table', append=False, complib=complib, complevel=complevel,data_columns=index_col)
         else:
-            store.put(table_name, new_df, format='table', index=False, complib=complib, data_columns=True, append=False)
+            # store.put(table_name, new_df, format='table', index=False, complib=complib, complevel=complevel,data_columns=True, append=False)
+            store.put(table_name, new_df, format='table', index=False, complib=complib, complevel=complevel,data_columns=index_col, append=False)
         store.flush()
 
 def safe_remove_h5_table(h5, table, max_retry=5, retry_interval=0.2):
@@ -1489,7 +1355,70 @@ def safe_remove_h5_table(h5, table, max_retry=5, retry_interval=0.2):
 def put_table_safe(h5, table, df, *,
                    MultiIndex=False,
                    rewrite=False,
-                   complib='blosc'):
+                   complib='blosc',
+                   complevel=9,
+                   index_col=["code","name"]):
+    """
+    安全写入 HDF 表，兼容单索引、多索引、缺失索引列
+    - MultiIndex: 是否使用多级索引（行索引）
+    - rewrite: 是否清空原表
+    - index_col: 需要建立查询索引的列列表，缺失会自动忽略
+    """
+    key = '/' + table
+
+    # 确认 index_col 存在于 df 中
+    if index_col:
+        index_col_valid = [c for c in index_col if c in df.columns]
+        if not index_col_valid:
+            index_col_valid = None
+    else:
+        index_col_valid = None
+
+    if key in h5.keys():
+        if not MultiIndex:
+            # 清空原表
+            h5.remove(key)
+            h5.put(
+                key, df,
+                format='table',
+                append=False,
+                complib=complib,
+                complevel=complevel,
+                data_columns=index_col_valid
+            )
+        else:
+            # MultiIndex 情况
+            if rewrite or len(h5[key]) < 1:
+                h5.remove(key)
+
+            h5.put(
+                key, df,
+                format='table',
+                index=True,  # 保留 MultiIndex
+                append=True,
+                complib=complib,
+                complevel=complevel,
+                data_columns=index_col_valid
+            )
+    else:
+        # 新表创建
+        h5.put(
+            key, df,
+            format='table',
+            index=(not MultiIndex),  # 单索引时保留默认整数索引
+            append=MultiIndex,
+            complib=complib,
+            complevel=complevel,
+            data_columns=index_col_valid
+        )
+
+def put_table_safe_src(h5, table, df, *,
+                   MultiIndex=False,
+                   rewrite=False,
+                   complib='blosc',
+                   complevel=9,
+                   index_col=["code","name"]):
+                   # index_col=["code","name"]):
 
     #单文件模式
     key = '/' + table
@@ -1502,7 +1431,8 @@ def put_table_safe(h5, table, df, *,
                 format='table',
                 append=False,
                 complib=complib,
-                data_columns=True
+                complevel=complevel,
+                data_columns=index_col
             )
         else:
             if rewrite or len(h5[table]) < 1:
@@ -1514,7 +1444,8 @@ def put_table_safe(h5, table, df, *,
                 index=False,
                 append=True,
                 complib=complib,
-                data_columns=True
+                complevel=complevel,
+                data_columns=index_col
             )
     else:
         h5.put(
@@ -1523,7 +1454,8 @@ def put_table_safe(h5, table, df, *,
             index=MultiIndex is False,
             append=MultiIndex,
             complib=complib,
-            data_columns=True
+            complevel=complevel,
+            data_columns=index_col
         )
 
 

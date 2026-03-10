@@ -1242,6 +1242,12 @@ def extract_all_features(df, lastdays=5, code=None):
 
     return features
 
+def safe_int(df, col, default=0):
+    """安全取整"""
+    if col in df and pd.notna(df[col]):
+        return int(df[col])
+    return default
+    
 def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
     """
     实时计算单个标的的交易信号
@@ -1280,7 +1286,8 @@ def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
     upper_1d = daily_feat['upper1']
     close_1d = daily_feat['lastp1d']
     amount_1d = daily_feat['lastv1d']
-    eval_1d = int(daily_feat['eval1d'])
+    # eval_1d = int(daily_feat['eval1d'])
+    eval_1d = safe_int(daily_feat, 'eval1d')
     ma10d_curr = daily_feat['ma51d'] # 假设实时判断的生命线使用昨日MA5作为参考
 
     if upper_1d <= 0:

@@ -456,8 +456,10 @@ class IntradayPatternDetector:
         # --- [NEW] 强力竞价 (strong_auction_open) ---
         if 'strong_auction_open' in self.enabled_patterns and gap_pct >= conf["strong_auction_gap"]:
             low_p = float(day_row.get('low', 0))
-            trends = float(day_row.get('TrendS', 0))
-            win_count = int(day_row.get('win', 0))
+            trends_val = day_row.get('TrendS', 0)
+            trends = float(trends_val) if not pd.isna(trends_val) else 0.0
+            win_val = day_row.get('win', 0)
+            win_count = int(win_val) if not pd.isna(win_val) else 0
             
             # 1. 结构检查: Open 近似等于 Low (无下影线或极短下影线)
             is_open_low = low_p >= open_price * conf["strong_auction_open_low"]
@@ -980,7 +982,8 @@ class IntradayPatternDetector:
         is_open_low = abs(open_p - day_low) / open_p < conf_mm["open_low_tolerance"] if open_p > 0 else False
         
         # 3. 判定历史连板/连阳晋级 (win 计数)
-        win_count = int(day_row.get('win', 0))
+        win_val = day_row.get('win', 0)
+        win_count = int(win_val) if not pd.isna(win_val) else 0
         win_msg = f" win {win_count} 进 {win_count+1}" if win_count > 0 else ""
         
         # 4. 判定有效主升区间 (如偏离 0.5% ~ 3.5%)

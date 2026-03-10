@@ -160,9 +160,10 @@ class StrategyController:
                         idx_raw: Union[int, slice] = day_df.index.get_loc(timestamp)
                         # 处理 get_loc 可能返回 slice 的情况
                         if isinstance(idx_raw, slice):
-                            idx = int(idx_raw.start) if idx_raw.start is not None else 0
+                            idx_start = idx_raw.start
+                            idx = int(idx_start) if idx_start is not None and not pd.isna(idx_start) else 0
                         else:
-                            idx = int(idx_raw)
+                            idx = int(idx_raw) if not pd.isna(idx_raw) else 0
                         signals.append(self._create_signal_point(
                             code=code,
                             timestamp=timestamp,
@@ -193,12 +194,17 @@ class StrategyController:
             
             for timestamp, row in eval_df.iterrows():
                 try:
+                    if pd.isna(timestamp):
+                        continue
+                        
                     idx_raw: Union[int, slice] = day_df.index.get_loc(timestamp)
                     # 处理 get_loc 可能返回 slice 的情况
                     if isinstance(idx_raw, slice):
-                        idx = int(idx_raw.start) if idx_raw.start is not None else 0
+                        idx_start = idx_raw.start
+                        idx = int(idx_start) if idx_start is not None and not pd.isna(idx_start) else 0
                     else:
-                        idx = int(idx_raw)
+                        # 兼容处理可能返回的 float NaN 或其他非整型
+                        idx = int(idx_raw) if not pd.isna(idx_raw) else 0
                     
                     # 构造行情行
                     row_dict: Dict[str, Any] = row.to_dict() # type: ignore
@@ -206,7 +212,7 @@ class StrategyController:
                     row_dict['trade'] = float(row.get('close', 0.0)) # type: ignore
                     
                     # 更新前一个 bar 的快照信息
-                    prev_idx: int = idx - 1
+                    prev_idx: int = int(idx) - 1
                     if prev_idx >= 0:
                         snapshot['last_close'] = float(day_df.iloc[prev_idx].get('close', 0.0)) # type: ignore
                         snapshot['nclose'] = float(day_df.iloc[prev_idx].get('close', 0.0)) # type: ignore
@@ -247,6 +253,8 @@ class StrategyController:
                     continue
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logger.error(f"Error in evaluate_historical_signals for {code}: {e}", exc_info=True)
             
         return signals
