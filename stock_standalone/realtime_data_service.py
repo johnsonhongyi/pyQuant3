@@ -1211,7 +1211,7 @@ class IntradayEmotionTracker:
 
             # 1. 优先检查现有的情绪分
             if 'scan_score_emotion' in df.columns:
-                self.scores = df.set_index('code')['scan_score_emotion'].to_dict()
+                self.scores.update(df.set_index('code')['scan_score_emotion'].to_dict())
                 # 注意：即使有了分数，也要继续执行后续的结构判定逻辑
             
             # 2. Vectorized 深度情绪计算 (仅在百分比存在时)
@@ -1239,7 +1239,7 @@ class IntradayEmotionTracker:
                 final_scores[mask_mania] += 5
                 
                 final_scores = final_scores.clip(0, 100).round(2)
-                self.scores = dict(zip(df['code'], final_scores))
+                self.scores.update(dict(zip(df['code'], final_scores)))
             else:
                 # 如果没有百分比，至少保持之前的分数并确保 final_scores 存在
                 final_scores = pd.Series(df['code'].map(self.scores).fillna(baselines).values, index=df.index).round(2)
