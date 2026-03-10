@@ -57,9 +57,9 @@ def get_mock_cat(code):
         return f'{market};半导体;芯片'
     return market
 
-def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True):
+def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None):
     """
-    基于 HDF5 本地 Tick 数据，按时间线回放并推入 DataPublisher/BiddingMomentumDetector。
+    基于 HDF5 本地 Tick 数据，按时间线回回放并推入 DataPublisher/BiddingMomentumDetector。
     
     playback_speed:
       1.0 = 与真实时间流逝一致
@@ -68,6 +68,9 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
       
     stops: List[str]
       特定时间节点的切片停顿点 (例如 ["09:20:00", "09:30:00", "09:45:00"])，到达后会打印状态并要求按回车继续。
+
+    resample: str
+      指定回测 baseline 的周期 (e.g., 'd', '2d', '3d', 'w', 'm')
     """
     if stops is None:
         stops = []
@@ -92,6 +95,18 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
         if 'time' in df.columns:
             df.rename(columns={'time': 'ticktime'}, inplace=True)
             
+    # [NEW] Filter by stock codes if specified
+    if codes:
+        if isinstance(codes, str):
+            codes = [c.strip() for c in codes.split(',')]
+        
+        # Robust check for 'code' in column or index
+        if 'code' in df.columns:
+            df = df[df['code'].astype(str).str.zfill(6).isin(codes)]
+        else:
+            df = df[df.index.get_level_values('code').astype(str).str.zfill(6).isin(codes)] if isinstance(df.index, pd.MultiIndex) else df[df.index.astype(str).str.zfill(6).isin(codes)]
+        logger.info(f"Filtered playback data for {len(codes)} stocks: {codes}")
+
     # 按照实际 ticktime 进行排序
     df.sort_values(by='ticktime', inplace=True)
     
@@ -122,8 +137,8 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
     logger.info(f"Filtered to time range {start_time_str} - {end_time_str}. Total ticks: {len(df)}")
     
     # --- [REAL DATA MODE] ---
-    logger.info("Fetching REAL production data for baseline registry...")
-    real_df_all = test_single_thread(single=True)
+    logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
+    real_df_all = test_single_thread(single=True, resample=resample)
     if real_df_all is None or real_df_all.empty:
         logger.error("Failed to fetch real data from production environment.")
         return
@@ -143,11 +158,18 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
         if col in real_df_all.columns:
             real_df_all[col] = 0.0
             
+    # [NEW] Filter the registry/baseline data if specific codes are targeted
+    if codes:
+        if 'code' in real_df_all.columns:
+            real_df_all = real_df_all[real_df_all['code'].astype(str).str.zfill(6).isin(codes)]
+        else:
+            real_df_all = real_df_all[real_df_all.index.astype(str).str.zfill(6).isin(codes)]
+        
     logger.info(f"Successfully fetched {len(real_df_all)} real stock records (Data Leakage Protection Active).")
 
     # [Phase 4] 注册代码名称对应关系
     publisher = DataPublisher(high_performance=True, scraper_interval=99999, enable_backup=False, 
-                              simulation_mode=True, verbose=not concise)
+                               simulation_mode=True, verbose=not concise)
     publisher.register_names(real_df_all)
     pd.options.mode.chained_assignment = None # 避免测试时出现 SettingWithCopyWarning
     
@@ -292,6 +314,13 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
             # e.g.: code, trade, percent, highest, lowest, open, volume
             # (真实中，DataPublisher 接收的是最新行情)
             
+            # [FIX] 显式清理缓存，防止由于 RegisterRegistry 缓存导致的实盘数据干扰
+            if idx == 0:
+                detector.active_sectors.clear()
+                detector.daily_watchlist.clear()
+                if hasattr(detector, '_sector_active_stocks_persistent'):
+                    detector._sector_active_stocks_persistent.clear()
+
             batch_df = tick_slice.copy()
             
             # 改名映射（适应我们的系统需求）
@@ -301,6 +330,19 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
             if 'llastp' in batch_df.columns: rename_map['llastp'] = 'settlement'
             
             batch_df.rename(columns=rename_map, inplace=True)
+            
+            # [FIX] 同步 Tick 级别价格数据到 Detector 的 TickSeries 中
+            # 这样 detector.update_scores 才能基于最新 Tick 价格计算现价涨幅和异动
+            with detector._lock:
+                for row_t in batch_df.itertuples():
+                    c = str(row_t.code).zfill(6)
+                    if c in detector._tick_series:
+                        ts = detector._tick_series[c]
+                        price = float(getattr(row_t, 'trade', 0))
+                        if price > 0:
+                            ts.now_price = price
+                            if price > ts.high_day: ts.high_day = price
+                            if price < ts.low_day or ts.low_day == 0: ts.low_day = price
             
             # 补充确实依赖的基础字段
             if 'percent' not in batch_df.columns and 'trade' in batch_df.columns and 'settlement' in batch_df.columns:
@@ -350,7 +392,7 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 elif speed_x > 5: speed_label = "🚅"
                 elif speed_x > 1: speed_label = "🚗"
                 else: speed_label = "🚶"
-
+                
                 if concise:
                     sys.stdout.write(f"\r[Playback] {speed_label} {t_str} | {speed_x:.1f}x ({tps:.0f} tps) | Total: {len(publisher.kline_cache.cache)}      ")
                 else:
@@ -367,8 +409,11 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 all_ts = sorted(detector._tick_series.values(), key=lambda x: x.score, reverse=True)
                 print("-" * 60)
                 print(f"[{stop_time}] 当下个股评分排行 (Top 5):")
+                # 获取 EmotionTracker 的当前分数
+                emotion_scores = publisher.emotion_tracker.scores
                 for ts in all_ts[:5]:
-                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - Score: {ts.score:.1f}, Pct: {ts.current_pct:+.1f}%, Cat: {getattr(ts, 'category', 'N/A')[:30]}...")
+                    e_score = emotion_scores.get(ts.code, 0.0)
+                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - Emotion: {e_score:.1f}, Detector: {ts.score:.1f}, Pct: {ts.current_pct:+.1f}%")
                 print("-" * 60)
     
                 # --- 测试/观察打印：我们在终端中打印最强的 3 个概念板块 ---
@@ -457,6 +502,8 @@ if __name__ == "__main__":
     parser.add_argument("--start", type=str, default="09:30:00", help="Simulation start time (HH:MM:SS)")
     parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
+    parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', 'w', 'm'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
+    parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
     
     args = parser.parse_args()
     
@@ -469,5 +516,7 @@ if __name__ == "__main__":
         end_time_str=args.end, 
         playback_speed=args.speed, 
         stops=slice_stops,
-        concise=not args.verbose
+        concise=not args.verbose,
+        resample=args.resample,
+        codes=args.codes
     )

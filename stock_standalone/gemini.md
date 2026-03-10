@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-02-27 20:30  
+> 最后更新：2026-03-10 22:45  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 
@@ -18,9 +18,24 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## ✅ 最近完成任务: 强势启动与绩效评分逻辑集成 (03-10 22:40)
+
+**状态**: ✅ 已完成
+**目标**: 集成大周期突破（强势启动）识别逻辑，并引入基于信号后涨幅的动态绩效评分机制。
+
+### 核心变更
+- **结构化突破 (Structural Breakout)**: 在 `calculate_baseline` 中整合 `hmax60`, `hmax`, `max5`, `high4` 等大周期高点锚点，对“刚刚大于发力”的强势启动给予 +20 至 +30 的额外情感加分。
+- **绩效反馈回路 (Performance Feedback)**: 在 `IntradayEmotionTracker` 中实现对信号触发价的记录。若信号后股价持续上涨，则按涨幅阶梯式奖励“绩效分” (最高 +25)，确保最强龙头的评分能顶格显示 (100分)。
+- **回放增强**: 优化 `test_bidding_replay.py`，支持显示 Emotion 与 Detector 双重评分，并增加代码过滤功能。
+
+### 历史记录 (Brain Artifacts)
+- 实施计划: [20260310_2240_implementation_plan.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260310_2240_implementation_plan.md)
+- 任务清单: [20260310_2240_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260310_2240_task.md)
+- 验收报告: [20260310_2240_walkthrough.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260310_2240_walkthrough.md)
+
 ---
 
-## ✅ 最近完成任务: K 线图标题双击第一板块词修复 (03-05 00:08)
+## ✅ 历史完成任务: K 线图标题双击第一板块词修复 (03-05 00:08)
 
 **状态**: ✅ 已完成
 **目标**: 彻底修复在有特殊富文本元素（例如HTML的 Span）时，点击第一个板块词仍会复制整行的 Bug。
@@ -472,7 +487,9 @@ if hasattr(self, 'pattern_detector'):
 
 ## 📅 变更日志
 
-| 03-05 00:08 | **UI 终极修复**: 采用直接坐标空间距离计算代替字符边界嗅探，彻底解决了第一个板块词错位的异常 | `trade_visualizer_qt6.py` |
+| 日期时间 | 变更描述 | 涉及文件 |
+| :--- | :--- | :--- |
+| 03-10 22:40 | **强势启动与绩效评分**: 集成 `hmax60`/`hmax`/`max5`/`high4` 突破识别，新增信号后动态绩效加分逻辑 | `realtime_data_service.py`, `test_bidding_replay.py` |
 | 03-04 23:55 | **UI 双增强**: 修复标题 hitTest 走漏换行符，新增板块过滤框支持右键粘贴过滤、清空 | `trade_visualizer_qt6.py` |
 | 03-03 11:45 | **编辑体验升级**: 为 edit_query 输入框增加完整的鼠标右键菜单与 Ctrl+Z 撤销/重做支持 | `gui_utils.py` |
 | 03-02 18:50 | **时间戳缓存修复**: 修正 Pandas 时间戳转化的时区偏移错误(UTC->Asia/Shanghai)，增加盘后缓存覆写防御机制 | `realtime_data_service.py` |
