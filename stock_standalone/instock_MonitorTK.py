@@ -3820,25 +3820,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 列索引
         col_idx = int(sel_col.replace("#", "")) - 1
-        col_name = 'category'  # 这里假设只有 category 列需要弹窗
-
+        
         vals = self.tree.item(sel_row, "values")
         if not vals:
             return
 
-        # 获取股票代码
+        # 获取股票代码和名称
         code = vals[0]
         name = vals[1]
 
-        # 通过 code 从 df_all 获取 category 内容
-        try:
-            category_content = self.df_all.loc[code, 'category']
-        except KeyError:
-            category_content = "未找到该股票的 category 信息"
-
-        # self.show_category_detail(code,name,category_content)
-        self.view_stock_remarks(code, name)
-        pyperclip.copy(code)
+        # 根据双击的列执行不同逻辑
+        if col_idx == 0:  # code
+            self._run_sbc_test_from_tk(code, use_live=True)
+            logger.info(f"Double-click 'code' for Live SBC: {code} ({name})")
+        elif col_idx == 1:  # name
+            self._run_sbc_test_from_tk(code, use_live=False)
+            logger.info(f"Double-click 'name' for Replay SBC: {code} ({name})")
+        else:
+            # 其他列保持原有逻辑：查看备注并复制代码
+            self.view_stock_remarks(code, name)
+            pyperclip.copy(code)
+            logger.info(f"Double-click other column for Remarks: {code} ({name})")
 
 
 
@@ -3936,6 +3938,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             label="🔍 策略白盒评估...",
             command=lambda: self.open_strategy_manager(verify_code=stock_code),
             foreground="blue"
+        )
+
+        menu.add_separator()
+
+        # —— SBC 验证策略 ——
+        menu.add_command(
+            label="🧪 SBC 实时测试",
+            command=lambda: self._run_sbc_test_from_tk(stock_code, use_live=True)
+        )
+
+        menu.add_command(
+            label="🧪 SBC 回放测试",
+            command=lambda: self._run_sbc_test_from_tk(stock_code, use_live=False)
         )
 
         menu.add_separator()
@@ -4367,8 +4382,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win = self.strategy_report_win
             win.title(f"🧪 策略测试 - {name} ({code})")
             win.lift()
-            win.attributes("-topmost", True)
-            win.after(50, lambda: win.attributes("-topmost", False))
+            # win.attributes("-topmost", True)
+            # win.after(50, lambda: win.attributes("-topmost", False))
             # 如果组件已存在，则直接更新，不销毁也不抢夺焦点
             if hasattr(win, 'txt_widget'):
                 win.top_frame.config(bg=action_color)
@@ -4571,6 +4586,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Copy Info Error: {e}")
             messagebox.showerror("错误", f"提取信息失败: {e}")
+
+    def _run_sbc_test_from_tk(self, stock_code, use_live=False):
+        """从 TK 界面触发 SBC 信号验证"""
+        if not hasattr(self, 'sector_bidding_panel') or not self.sector_bidding_panel:
+            # 如果面板还没初始化，尝试动态加载并执行
+            try:
+                from sector_bidding_panel import SectorBiddingPanel
+                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                # 面板不需要显示，仅使用其内部的线程管理和 HDF5 锁
+            except Exception as e:
+                logger.error(f"Failed to load SectorBiddingPanel: {e}")
+                import tkinter.messagebox as messagebox
+                messagebox.showerror("错误", f"无法加载 SBC 验证模块: {e}")
+                return
+
+        # 从 df_all 提取昨日 OHLC 详情，注入参考线
+        extra_lines = {}
+        if hasattr(self, 'df_all') and stock_code in self.df_all.index:
+            try:
+                row = self.df_all.loc[stock_code]
+                extra_lines = {
+                    'last_close': float(row.get('lastp1d', 0)),
+                    'last_high':  float(row.get('lasth1d', 0)),
+                    'last_low':   float(row.get('lastl1d', 0)),
+                    'high4':      float(row.get('high4', 0))
+                }
+            except Exception as e:
+                logger.warning(f"Failed to extract extra_lines for {stock_code}: {e}")
+
+        # 调用 PyQt 面板中的测试逻辑 (已重构支持传入 code 和 extra_lines)
+        self.sector_bidding_panel._run_sbc_test(use_live, code=stock_code, extra_lines=extra_lines)
+        logger.info(f"SBC {'Live' if use_live else 'Replay'} test triggered for {stock_code} with extra_lines: {extra_lines}")
 
     def add_stock_remark(self, code, name):
         """添加备注 - 使用自定义窗口支持多行"""
@@ -5377,10 +5424,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.live_strategy = StockLiveStrategy(self,alert_cooldown=alert_cooldown,
                                                    voice_enabled=self.voice_var.get(),
                                                    realtime_service=self.realtime_service)
-            if self.realtime_service:
-                logger.info("RealtimeDataService injected into StockLiveStrategy.")
+            # 如果实时服务还没准备好，则注册回调以便后续自动注入
+            if not self.realtime_service:
+                self.on_realtime_service_ready(lambda: setattr(self.live_strategy, 'realtime_service', self.realtime_service))
+                logger.info("StockLiveStrategy 已初始化 (RealtimeDataService 将在就绪时自动注入)")
             else:
-                logger.info("StockLiveStrategy 已初始化 (RealtimeDataService 稍后注入)")
+                logger.info("RealtimeDataService injected into StockLiveStrategy.")
             
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
@@ -8213,156 +8262,156 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              self._schedule_after(0, _ui_action)
         return True
         
-    def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
-        """处理树视图点击事件，延迟显示提示框"""
-        logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
-        if not is_manual and not self.tip_var.get():
-            return
-        # 取消之前的定时器
-        if getattr(self, '_tooltip_timer', None):
-            try:
-                self.after_cancel(self._tooltip_timer)
-            except Exception:
-                pass
-            self._tooltip_timer = None
+    # def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
+    #     """处理树视图点击事件，延迟显示提示框"""
+    #     logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
+    #     if not is_manual and not self.tip_var.get():
+    #         return
+    #     # 取消之前的定时器
+    #     if getattr(self, '_tooltip_timer', None):
+    #         try:
+    #             self.after_cancel(self._tooltip_timer)
+    #         except Exception:
+    #             pass
+    #         self._tooltip_timer = None
 
-        # 销毁之前的提示框
-        if getattr(self, '_current_tooltip', None):
-            try:
-                self._current_tooltip.destroy()
-            except Exception:
-                pass
-            self._current_tooltip = None
+    #     # 销毁之前的提示框
+    #     if getattr(self, '_current_tooltip', None):
+    #         try:
+    #             self._current_tooltip.destroy()
+    #         except Exception:
+    #             pass
+    #         self._current_tooltip = None
 
-        if stock_code is None:
-            # 获取点击的行
-            item = self.tree.identify_row(event.y)
-            if not item:
-                logger.debug("[Tooltip] 未点击到有效行")
-                return
+    #     if stock_code is None:
+    #         # 获取点击的行
+    #         item = self.tree.identify_row(event.y)
+    #         if not item:
+    #             logger.debug("[Tooltip] 未点击到有效行")
+    #             return
 
-            # 获取股票代码
-            values = self.tree.item(item, 'values')
-            if not values:
-                logger.debug("[Tooltip] 行没有数据")
-                return
-            stock_code = str(values[0])  # code在第一列
-            stock_name = str(values[1])  # code在第二列
+    #         # 获取股票代码
+    #         values = self.tree.item(item, 'values')
+    #         if not values:
+    #             logger.debug("[Tooltip] 行没有数据")
+    #             return
+    #         stock_code = str(values[0])  # code在第一列
+    #         stock_name = str(values[1])  # code在第二列
             
-        else:
-            stock_code = stock_code
-        self.test_strategy_for_stock(stock_code, stock_name)
-        # x_root, y_root = event.x_root, event.y_root  # 保存坐标
-        logger.debug(f"[Tooltip] 获取到代码: {stock_code}, 设置0.2秒定时器")
+    #     else:
+    #         stock_code = stock_code
+    #     self.test_strategy_for_stock(stock_code, stock_name)
+    #     # x_root, y_root = event.x_root, event.y_root  # 保存坐标
+    #     logger.debug(f"[Tooltip] 获取到代码: {stock_code}, 设置0.2秒定时器")
 
-        # 设置0.2秒延迟定时器
-        self._tooltip_timer = self._schedule_after(200, lambda e=event:self.show_stock_tooltip(stock_code, e))
+    #     # 设置0.2秒延迟定时器
+    #     self._tooltip_timer = self._schedule_after(200, lambda e=event:self.show_stock_tooltip(stock_code, e))
 
 
-    def show_stock_tooltip(self, code, event):
-        """显示股票信息提示框，支持位置保存/加载"""
-        logger.debug(f"[Tooltip] show_stock_tooltip 被调用: code={code}")
+    # def show_stock_tooltip(self, code, event):
+    #     """显示股票信息提示框，支持位置保存/加载"""
+    #     logger.debug(f"[Tooltip] show_stock_tooltip 被调用: code={code}")
 
-        # 清理定时器引用
-        self._tooltip_timer = None
+    #     # 清理定时器引用
+    #     self._tooltip_timer = None
 
-        # 从 df_all 获取股票数据
-        if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty:
-            logger.debug("[Tooltip] df_all 为空或不存在")
-            return
+    #     # 从 df_all 获取股票数据
+    #     if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty:
+    #         logger.debug("[Tooltip] df_all 为空或不存在")
+    #         return
 
-        # 清理代码前缀
-        code_clean = code.strip()
-        for icon in ['🔴', '🟢', '📊', '⚠️']:
-            code_clean = code_clean.replace(icon, '').strip()
+    #     # 清理代码前缀
+    #     code_clean = code.strip()
+    #     for icon in ['🔴', '🟢', '📊', '⚠️']:
+    #         code_clean = code_clean.replace(icon, '').strip()
 
-        if code_clean not in self.df_all.index:
-            logger.debug(f"[Tooltip] 代码 {code_clean} 不在 df_all.index 中")
-            return
+    #     if code_clean not in self.df_all.index:
+    #         logger.debug(f"[Tooltip] 代码 {code_clean} 不在 df_all.index 中")
+    #         return
 
-        stock_data = self.df_all.loc[code_clean]
-        stock_name = stock_data.get('name', code_clean) if hasattr(stock_data, 'get') else code_clean
+    #     stock_data = self.df_all.loc[code_clean]
+    #     stock_name = stock_data.get('name', code_clean) if hasattr(stock_data, 'get') else code_clean
 
-        logger.debug(f"[Tooltip] 找到股票数据，准备创建提示框")
+    #     logger.debug(f"[Tooltip] 找到股票数据，准备创建提示框")
 
-        # 关闭已存在的 tooltip
-        if hasattr(self, '_current_tooltip') and self._current_tooltip:
-            try:
-                self._current_tooltip.destroy()
-            except:
-                pass
+    #     # 关闭已存在的 tooltip
+    #     if hasattr(self, '_current_tooltip') and self._current_tooltip:
+    #         try:
+    #             self._current_tooltip.destroy()
+    #         except:
+    #             pass
 
-        # 创建 Toplevel 窗口（带边框，可拖拽）
-        window_id = "stock_tooltip"
-        win = tk.Toplevel(self)
-        win.title(f"📊 {stock_name} ({code_clean})")
-        win.configure(bg='#FFF8E7')
-        win.resizable(True, True)
+    #     # 创建 Toplevel 窗口（带边框，可拖拽）
+    #     window_id = "stock_tooltip"
+    #     win = tk.Toplevel(self)
+    #     win.title(f"📊 {stock_name} ({code_clean})")
+    #     win.configure(bg='#FFF8E7')
+    #     win.resizable(True, True)
         
-        # 加载保存的位置，或使用默认位置
-        self.load_window_position(win, window_id, default_width=280, default_height=320)
-        self._current_tooltip = win
+    #     # 加载保存的位置，或使用默认位置
+    #     self.load_window_position(win, window_id, default_width=280, default_height=320)
+    #     self._current_tooltip = win
 
-        # ESC / 关闭时保存位置
-        def on_close(event=None):
-            self.save_window_position(win, window_id)
-            win.destroy()
-            self._current_tooltip = None
+    #     # ESC / 关闭时保存位置
+    #     def on_close(event=None):
+    #         self.save_window_position(win, window_id)
+    #         win.destroy()
+    #         self._current_tooltip = None
         
-        win.bind("<Escape>", on_close)
-        win.protocol("WM_DELETE_WINDOW", on_close)
+    #     win.bind("<Escape>", on_close)
+    #     win.protocol("WM_DELETE_WINDOW", on_close)
 
-        # 获取多行文本和对应颜色
-        lines, colors = self._format_stock_info(stock_data)
+    #     # 获取多行文本和对应颜色
+    #     lines, colors = self._format_stock_info(stock_data)
 
-        # 创建 Text 控件（无滚动条，用鼠标滚轮滚动）
-        frame = tk.Frame(win, bg='#FFF8E7')
-        frame.pack(fill='both', expand=True, padx=5, pady=5)
+    #     # 创建 Text 控件（无滚动条，用鼠标滚轮滚动）
+    #     frame = tk.Frame(win, bg='#FFF8E7')
+    #     frame.pack(fill='both', expand=True, padx=5, pady=5)
         
-        text_widget = tk.Text(
-            frame,
-            bg='#FFF8E7',
-            bd=0,
-            padx=8,
-            pady=6,
-            wrap='word',
-            font=("Microsoft YaHei", 9)
-        )
-        text_widget.pack(fill='both', expand=True)
+    #     text_widget = tk.Text(
+    #         frame,
+    #         bg='#FFF8E7',
+    #         bd=0,
+    #         padx=8,
+    #         pady=6,
+    #         wrap='word',
+    #         font=("Microsoft YaHei", 9)
+    #     )
+    #     text_widget.pack(fill='both', expand=True)
         
-        # 绑定鼠标滚轮滚动
-        def on_mousewheel(event):
-            text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        text_widget.bind("<MouseWheel>", on_mousewheel)
-        frame.bind("<MouseWheel>", on_mousewheel)
+    #     # 绑定鼠标滚轮滚动
+    #     def on_mousewheel(event):
+    #         text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    #     text_widget.bind("<MouseWheel>", on_mousewheel)
+    #     frame.bind("<MouseWheel>", on_mousewheel)
 
-        for i, (line, color) in enumerate(zip(lines, colors)):
-            tag_name = f"line_{i}"
-            text_widget.insert(tk.END, line + "\n", tag_name)
-            text_widget.tag_config(tag_name, foreground=color, font=("Microsoft YaHei", 9))
+    #     for i, (line, color) in enumerate(zip(lines, colors)):
+    #         tag_name = f"line_{i}"
+    #         text_widget.insert(tk.END, line + "\n", tag_name)
+    #         text_widget.tag_config(tag_name, foreground=color, font=("Microsoft YaHei", 9))
 
-            # 检查 signal 行，单独设置图标颜色和大小
-            if "signal:" in line:
-                icon_index = line.find("👍")
-                if icon_index == -1:
-                    icon_index = line.find("🚀")
-                if icon_index == -1:
-                    icon_index = line.find("☀️")
+    #         # 检查 signal 行，单独设置图标颜色和大小
+    #         if "signal:" in line:
+    #             icon_index = line.find("👍")
+    #             if icon_index == -1:
+    #                 icon_index = line.find("🚀")
+    #             if icon_index == -1:
+    #                 icon_index = line.find("☀️")
 
-                if icon_index != -1:
-                    start = f"{i+1}.{icon_index}"
-                    end = f"{i+1}.{icon_index+2}"
-                    text_widget.tag_add(f"icon_{i}", start, end)
-                    text_widget.tag_config(f"icon_{i}", foreground="#FF6600", font=("Microsoft YaHei", 12, "bold"))
+    #             if icon_index != -1:
+    #                 start = f"{i+1}.{icon_index}"
+    #                 end = f"{i+1}.{icon_index+2}"
+    #                 text_widget.tag_add(f"icon_{i}", start, end)
+    #                 text_widget.tag_config(f"icon_{i}", foreground="#FF6600", font=("Microsoft YaHei", 12, "bold"))
 
-        text_widget.config(state=tk.DISABLED)
+    #     text_widget.config(state=tk.DISABLED)
 
-        # 底部关闭按钮
-        btn_frame = tk.Frame(win, bg='#FFF8E7')
-        btn_frame.pack(fill='x', pady=3)
-        tk.Button(btn_frame, text="关闭 (ESC)", command=on_close, width=10).pack()
+    #     # 底部关闭按钮
+    #     btn_frame = tk.Frame(win, bg='#FFF8E7')
+    #     btn_frame.pack(fill='x', pady=3)
+    #     tk.Button(btn_frame, text="关闭 (ESC)", command=on_close, width=10).pack()
 
-        logger.debug(f"[Tooltip] 提示框已创建")
+    #     logger.debug(f"[Tooltip] 提示框已创建")
 
     def _format_stock_info(self, stock_data):
         """格式化股票信息为显示文本，并返回颜色标签"""
@@ -8450,6 +8499,118 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ]
 
         return lines, colors
+
+
+    def on_tree_click_for_tooltip(self, event, stock_code=None, stock_name=None, is_manual=False):
+        if not is_manual and not self.tip_var.get(): return
+
+        # 1. 只取消定時器，【不要】銷毀窗口
+        if getattr(self, '_tooltip_timer', None):
+            self.after_cancel(self._tooltip_timer)
+            self._tooltip_timer = None
+
+        # 2. 獲取代碼 (保持原樣)
+        if stock_code is None:
+            item = self.tree.identify_row(event.y)
+            if not item: return
+            values = self.tree.item(item, 'values')
+            if not values: return
+            stock_code, stock_name = str(values[0]), str(values[1])
+
+        # 3. 執行策略與定時更新
+        self.test_strategy_for_stock(stock_code, stock_name)
+        self._tooltip_timer = self._schedule_after(200, lambda e=event: self.show_stock_tooltip(stock_code, e))
+
+
+    def show_stock_tooltip(self, code, event):
+        """顯示股票信息提示框，支持窗口復用"""
+        logger.debug(f"[Tooltip] show_stock_tooltip 調用: code={code}")
+        self._tooltip_timer = None
+
+        # 1. 獲取數據與清理代碼 (保持原樣)
+        if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty: return
+        code_clean = code.strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']: code_clean = code_clean.replace(icon, '').strip()
+        
+        if code_clean not in self.df_all.index: return
+        stock_data = self.df_all.loc[code_clean]
+        stock_name = stock_data.get('name', code_clean)
+
+        # 2. 【復用邏輯】檢查窗口是否存在
+        win_exists = False
+        if hasattr(self, '_current_tooltip') and self._current_tooltip:
+            try:
+                # 1. 檢查窗口是否還活著
+                if self._current_tooltip.winfo_exists():
+                    win = self._current_tooltip
+                    
+                    # 2. 如果窗口被最小化 (iconic)，則恢復正常狀態 (normal)
+                    if win.state() == "iconic":
+                        win.deiconify()
+                    
+                    # 3. 如果窗口是被隱藏的 (withdrawn)，重新顯示
+                    # win.deiconify() 
+                    
+                    # 4. 提到最前方並獲取焦點
+                    win.lift()
+                    # win.focus_force() 
+                    win_exists = True
+            except Exception as e:
+                logger.error(f"[Tooltip] 檢查窗口狀態出錯: {e}")
+                win_exists = False
+
+        if not win_exists:
+            # 只有不存在時才創建新窗口
+            win = tk.Toplevel(self)
+            self._current_tooltip = win
+            win.configure(bg='#FFF8E7')
+            # 初始化時加載位置
+            self.load_window_position(win, "stock_tooltip", default_width=280, default_height=320)
+            
+            # 定義隱藏函數 (替代原本的關閉)
+            def on_hide(event=None):
+                self.save_window_position(win, "stock_tooltip")
+                win.withdraw() # 隱藏而不是銷毀
+            
+            win.bind("<Escape>", on_hide)
+            win.protocol("WM_DELETE_WINDOW", on_hide)
+            
+            # 創建內部控件 (只在第一次創建時建立引用)
+            win.frame = tk.Frame(win, bg='#FFF8E7')
+            win.frame.pack(fill='both', expand=True, padx=5, pady=5)
+            win.text_widget = tk.Text(win.frame, bg='#FFF8E7', bd=0, padx=8, pady=6, wrap='word', font=("Microsoft YaHei", 9))
+            win.text_widget.pack(fill='both', expand=True)
+            
+            # 綁定滾輪
+            win.text_widget.bind("<MouseWheel>", lambda e: win.text_widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+        else:
+            win = self._current_tooltip
+
+        # 3. 【內容更新】刷新標題與文本
+        win.title(f"📊 {stock_name} ({code_clean})")
+        
+        # 開啟編輯權限
+        win.text_widget.config(state=tk.NORMAL)
+        win.text_widget.delete('1.0', tk.END) # 清空舊內容
+
+        lines, colors = self._format_stock_info(stock_data)
+        for i, (line, color) in enumerate(zip(lines, colors)):
+            tag_name = f"line_{i}"
+            win.text_widget.insert(tk.END, line + "\n", tag_name)
+            win.text_widget.tag_config(tag_name, foreground=color, font=("Microsoft YaHei", 9))
+            
+            # 處理 Signal 圖標 (保持原樣邏輯)
+            if "signal:" in line:
+                for icon in ["👍", "🚀", "☀️"]:
+                    idx = line.find(icon)
+                    if idx != -1:
+                        start, end = f"{i+1}.{idx}", f"{i+1}.{idx+2}"
+                        win.text_widget.tag_add(f"icon_{i}", start, end)
+                        win.text_widget.tag_config(f"icon_{i}", foreground="#FF6600", font=("Microsoft YaHei", 12, "bold"))
+
+        win.text_widget.config(state=tk.DISABLED) # 重新鎖定
+        logger.debug(f"[Tooltip] 提示框內容已更新: {code_clean}")
+
 
 
     def toggle_feature_colors(self):

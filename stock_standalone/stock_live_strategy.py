@@ -174,8 +174,10 @@ class VoiceAnnouncer:
         """发送报警"""
         # 触发回调 (Legacy support)
         if self.on_speak_start:
-            try: self.on_speak_start(code)
-            except: pass
+            try:
+                self.on_speak_start(code)
+            except Exception:
+                pass
             
         # 提升优先级
         p = 2
@@ -201,8 +203,10 @@ class VoiceAnnouncer:
         self.manager.stop()
 
     def _safe_callback(self, cb, arg):
-        try: cb(arg)
-        except: pass
+        try:
+            cb(arg)
+        except Exception:
+            pass
 
 
 class StrategySupervisor:
@@ -394,6 +398,7 @@ class StockLiveStrategy:
         
         # 告警任务和后台扫描需要足够的并发工人，避免因 sleep/IO 阻塞导致任务积压
         self.executor = ThreadPoolExecutor(max_workers=4)
+        self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
         # --- 初始化记录器 (必须在 _load_monitors 之前) ---
         self.trading_logger = TradingLogger()
@@ -1106,8 +1111,9 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.error(f"Sector Monitor Check Failed: {e}")
 
-        # --- [关键] 异步触发策略判定 ---
-        self.executor.submit(self._check_strategies, self.df, resample=resample)
+        # --- [关键] 异步触发策略判定 (增加防重入保护) ---
+        if not self._is_checking:
+             self.executor.submit(self._check_strategies, self.df, resample=resample)
 
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
         # 将各股的最新决策与监理感知指标写回 df_all，以便前端实时显示
@@ -1469,18 +1475,18 @@ class StockLiveStrategy:
                 return False, ""
             
             # 1. 低开高走：开盘 < 昨收 * 0.99 且 收盘 > 开盘 且 涨幅 > 1.0
-            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (percent > 1.0)
+            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (p_val > 1.0)
             if is_low_open_high_close:
                 return True, "低开高走"
             
             # 2. 高开高走：开盘 > 昨收 * 1.01 且 收盘 > 开盘 * 0.98 且 涨幅 > 2.0
-            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (percent > 2.0)
+            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (p_val > 2.0)
             if is_high_open_high_close:
                 return True, "高开高走"
             
             # 3. 冲高回落收新高：最高 > 昨收 * 1.03 且 收盘 < 最高 * 0.98 且 涨幅 > 1.0
             surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
-            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (percent > 1.0)
+            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (p_val > 1.0)
             if is_surge_pullback_new_high:
                 return True, "冲高回落收新高"
             
@@ -1499,26 +1505,26 @@ class StockLiveStrategy:
 
             # --- 2. 低开高走 ---
             # 逻辑：开盘杀跌跌破昨收，但随后收复并大幅走高 (阳线实体大)
-            is_low_open_high_close = (open_p < lastp1d * 0.995) and (price > open_p) and (percent >= 1.0)
+            is_low_open_high_close = (open_p < lastp1d * 0.995) and (price > open_p) and (p_val >= 1.0)
             if is_low_open_high_close:
                 return True, "低开高走"
             
             # --- 3. 高开高走 ---
             # 逻辑：开盘即在昨收1%以上，且价格始终维持在高位 (不补缺口或不深踩)
-            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > high * 0.98) and (percent >= 2.0)
+            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > high * 0.98) and (p_val >= 2.0)
             if is_high_open_high_close:
                 return True, "高开高走"
             
             # --- 4. 冲高回落强势维持 (归集之前策略) ---
             # 逻辑：最高涨幅一度很大(>=3%)，虽小幅回吐但仍维持在强势区间(>=1.0%)
             surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
-            if surge_ratio >= 0.03 and price > high * 0.97 and percent >= 1.0:
+            if surge_ratio >= 0.03 and price > high * 0.97 and p_val >= 1.0:
                 return True, "强势维持"
             
             # --- 5. 多日缩量窄幅形态 (蓄势模式) ---
             # 逻辑：此前有温和放量连阳(win>=2)，当前实体极小(<1%)且量能极度萎缩(<0.8)
             body_ratio = abs(price - open_p) / price if price > 0 else 1
-            if win >= 2 and body_ratio < 0.01 and volume_ratio < 0.8:
+            if win >= 2 and body_ratio < 0.01 and volume < 0.8:
                 return True, "蓄势窄幅缩量"
 
             return False, ""
@@ -2079,6 +2085,9 @@ class StockLiveStrategy:
             logger.error(f"Execute T+0 trade failed {code}: {e}")
 
     def _check_strategies(self, df, resample='d'):
+        if self._is_checking:
+            return
+        self._is_checking = True
         try:
             # --- [新增] 全局交易日判断：非交易日不执行策略逻辑 ---
             # if not cct.get_trade_date_status():
@@ -2934,6 +2943,8 @@ class StockLiveStrategy:
             logger.error(f"Strategy Check Error: {e}")
             import traceback
             logger.error(traceback.format_exc())
+        finally:
+            self._is_checking = False
 
     def _check_strategies_simple(self, df):
         try:

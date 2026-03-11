@@ -148,11 +148,12 @@ class SBCTestThread(QThread):
     finished_data = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, code: str, use_live: bool, hdf5_lock=None):
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None):
         super().__init__()
         self.code = code
         self.use_live = use_live
         self.hdf5_lock = hdf5_lock
+        self.extra_lines = extra_lines
 
     def run(self):
         try:
@@ -165,7 +166,8 @@ class SBCTestThread(QThread):
                 self.code, 
                 use_live=self.use_live, 
                 show_viz=False,
-                hdf5_lock=self.hdf5_lock
+                hdf5_lock=self.hdf5_lock,
+                extra_lines=self.extra_lines
             )
             if result and isinstance(result, dict):
                 self.finished_data.emit(result)
@@ -820,7 +822,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_refresh.setEnabled(True)
             self.btn_refresh.setText("刷新 🔄")
 
-    def _run_sbc_test(self, use_live: bool):
+    def _run_sbc_test(self, use_live: bool, code: str = None, extra_lines: dict = None):
         """
         [NEW] 调用 verify_sbc_pattern.py 逻辑验证选中个股 of SBC 信号
         使用线程异步执行，防止 GUI 卡死
@@ -830,7 +832,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             QMessageBox.information(self, "请稍候", f"后台正在对 {self._sbc_thread.code} 进行验证，请等待完成后再试。")
             return
 
-        code = self._get_selected_stock()
+        if not code:
+            code = self._get_selected_stock()
+            
         if not code:
             QMessageBox.warning(self, "未选中个股", "请在个股表或重点表中先选中一只个股再执行测试。")
             return
@@ -845,7 +849,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.status_lbl.setStyleSheet("color: yellow; font-weight: bold;")
         
         # 创建并启动后台线程
-        self._sbc_thread = SBCTestThread(code, use_live, hdf5_lock=hdf5_lock)
+        self._sbc_thread = SBCTestThread(code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines)
         self._sbc_thread.finished_data.connect(self._on_sbc_test_finished)
         self._sbc_thread.error_occurred.connect(self._on_sbc_test_error)
         self._sbc_thread.start()
@@ -868,7 +872,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 data["title"],
                 avg_series=data["avg_series"],
                 time_labels=data["time_labels"],
-                use_line=data["use_line"]
+                use_line=data["use_line"],
+                extra_lines=data.get("extra_lines")
             )
             
             # 管理窗口引用，防止被回收
