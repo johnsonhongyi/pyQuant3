@@ -839,6 +839,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             QMessageBox.warning(self, "未选中个股", "请在个股表或重点表中先选中一只个股再执行测试。")
             return
             
+        from PyQt6.QtGui import QGuiApplication
+        from PyQt6.QtCore import Qt
+        modifiers = QGuiApplication.keyboardModifiers()
+        is_multi_window = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        self._sbc_test_is_multi = is_multi_window
+        
         # 尝试获取主窗口的 HDF5 锁
         hdf5_lock = getattr(self.main_window, 'hdf5_mutex', None)
         
@@ -865,6 +871,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             except ImportError:
                 from stock_standalone.stock_visual_utils import show_chart_with_signals
             
+            # 管理窗口引用，防止被回收
+            if not hasattr(self, '_sbc_test_windows'):
+                self._sbc_test_windows = []
+            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
+            
+            is_multi = getattr(self, '_sbc_test_is_multi', False)
+            existing_win = self._sbc_test_windows[-1] if self._sbc_test_windows and not is_multi else None
+            
             # 使用返回的结果包调用可视化
             win = show_chart_with_signals(
                 data["viz_df"],
@@ -873,12 +887,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 avg_series=data["avg_series"],
                 time_labels=data["time_labels"],
                 use_line=data["use_line"],
-                extra_lines=data.get("extra_lines")
+                extra_lines=data.get("extra_lines"),
+                existing_win=existing_win
             )
             
-            # 管理窗口引用，防止被回收
-            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
-            if win:
+            if win and win not in self._sbc_test_windows:
                 self._sbc_test_windows.append(win)
                 logger.info(f"✅ SBC 可视化窗口已创建: {data['title']}")
             

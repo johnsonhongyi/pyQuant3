@@ -4619,7 +4619,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 调用 PyQt 面板中的测试逻辑 (已重构支持传入 code 和 extra_lines)
         self.sector_bidding_panel._run_sbc_test(use_live, code=stock_code, extra_lines=extra_lines)
-        logger.info(f"SBC {'Live' if use_live else 'Replay'} test triggered for {stock_code} with extra_lines: {extra_lines}")
+        logger.debug(f"SBC {'Live' if use_live else 'Replay'} test triggered for {stock_code} with extra_lines: {extra_lines}")
 
     def add_stock_remark(self, code, name):
         """添加备注 - 使用自定义窗口支持多行"""
@@ -8506,12 +8506,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_tree_click_for_tooltip(self, event, stock_code=None, stock_name=None, is_manual=False):
         if not is_manual and not self.tip_var.get(): return
 
-        # 1. 只取消定時器，【不要】銷毀窗口
+        # 1. 取消舊任務 (核心防抖)
         if getattr(self, '_tooltip_timer', None):
-            self.after_cancel(self._tooltip_timer)
+            try:
+                self.after_cancel(self._tooltip_timer)
+            except: pass
             self._tooltip_timer = None
 
-        # 2. 獲取代碼 (保持原樣)
+        # 2. 獲取代碼 (解析當前點擊的股票)
         if stock_code is None:
             item = self.tree.identify_row(event.y)
             if not item: return
@@ -8519,9 +8521,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not values: return
             stock_code, stock_name = str(values[0]), str(values[1])
 
-        # 3. 執行策略與定時更新
-        self.test_strategy_for_stock(stock_code, stock_name)
-        self._tooltip_timer = self._schedule_after(200, lambda e=event: self.show_stock_tooltip(stock_code, e))
+        # 3. 定義打包任務 (包含計算 + 顯示)
+        def do_heavy_work():
+            # 只有當 200ms 內沒有新操作時，這兩行才會執行一次
+            self.test_strategy_for_stock(stock_code, stock_name)
+            self.show_stock_tooltip(stock_code, event)
+            self._tooltip_timer = None # 執行完清空標記
+
+        # 4. 使用你的安全調度器發送任務
+        self._tooltip_timer = self._schedule_after(200, do_heavy_work)
+        logger.debug(f"[Tooltip] 設置完整防抖 (200ms): {stock_code}")
+
 
 
     def show_stock_tooltip(self, code, event):
@@ -8542,20 +8552,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win_exists = False
         if hasattr(self, '_current_tooltip') and self._current_tooltip:
             try:
-                # 1. 檢查窗口是否還活著
                 if self._current_tooltip.winfo_exists():
                     win = self._current_tooltip
                     
-                    # 2. 如果窗口被最小化 (iconic)，則恢復正常狀態 (normal)
-                    if win.state() == "iconic":
+                    # 💡 關鍵：無論是最小化還是隱藏(withdrawn)，都必須執行 deiconify() 才能重新顯示
+                    if win.state() != "normal":
                         win.deiconify()
                     
-                    # 3. 如果窗口是被隱藏的 (withdrawn)，重新顯示
-                    # win.deiconify() 
-                    
-                    # 4. 提到最前方並獲取焦點
-                    win.lift()
-                    # win.focus_force() 
+                    win.lift()      # 提到最前方
                     win_exists = True
             except Exception as e:
                 logger.error(f"[Tooltip] 檢查窗口狀態出錯: {e}")
