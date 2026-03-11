@@ -528,7 +528,12 @@ if __name__ == "__main__":
     
     logger.info("Initializing Sector Bidding Slice Backtest Tool...")
     # 默认观测点
-    slice_stops = args.observation if args.observation else ["09:45:00", "10:00:00", "10:30:00", "11:00:00", "13:30:00", "14:00:00", "14:30:00", "14:45:00"]
+    slice_stops = []
+    if args.observation:
+        for s in args.observation:
+            slice_stops.extend([x.strip() for x in s.split(',')])
+    else:
+        slice_stops = ["09:45:00", "10:00:00", "10:30:00", "11:00:00", "13:30:00", "14:00:00", "14:30:00", "14:45:00"]
     
     run_replay(
         start_time_str=args.start, 

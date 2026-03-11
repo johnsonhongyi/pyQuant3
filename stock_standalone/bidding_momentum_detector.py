@@ -53,7 +53,7 @@ class TickSeries:
                  'category', 'name', 'score', 'first_breakout_ts', 'pattern_hint',
                  'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
-                 'is_upper_band', 'is_new_high', 
+                 'is_upper_band', 'is_new_high', 'momentum_score',
                  '_splitted_cats', '_total_vol', '_total_amt')
 
     def __init__(self, code: str, max_len: int = 30):
@@ -85,6 +85,7 @@ class TickSeries:
         self.is_reversal: bool = False # [NEW]
         self.is_upper_band: bool = False # [NEW] 沿 Upper 上轨
         self.is_new_high: bool = False   # [NEW] 创历史/波段新高
+        self.momentum_score: float = 0.0 # [NEW] 持续动量累计分
         self._splitted_cats: Optional[List[str]] = None
         self._total_vol: float = 0.0
         self._total_amt: float = 0.0
@@ -379,7 +380,8 @@ class BiddingMomentumDetector:
         try:
             data = {
                 'timestamp': round(time.time(), 2),
-                'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if ts.score > 0},
+                'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if (ts.score > 0 or ts.momentum_score > 0)},
+                'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in self._tick_series.items() if ts.momentum_score > 0},
                 'sector_data': {name: {
                     'score': round(info.get('score', 0), 2),
                     'leader': info.get('leader', ''),
@@ -451,6 +453,12 @@ class BiddingMomentumDetector:
                 if code not in self._tick_series:
                     self._tick_series[code] = TickSeries(code)
                 self._tick_series[code].score = score
+            
+            # 恢复动量分
+            momentum_scores = data.get('momentum_scores', {})
+            for code, m_score in momentum_scores.items():
+                if code in self._tick_series:
+                    self._tick_series[code].momentum_score = m_score
 
             # 恢复板块数据
             self.active_sectors = data.get('sector_data', {})
@@ -735,13 +743,44 @@ class BiddingMomentumDetector:
             if not (self.strategies['amplitude']['min'] <= amplitude <= self.strategies['amplitude']['max']):
                 score = 0.0
 
-        # --- 7. 最终评分与活性修正 ---
-        final_score = cycle_score + bidding_score + score
-        # [NEW] 活性修正：如果最近 3 分钟价格没有变动且未涨停，分数减半 (针对 user 提到的 0.0% 问题)
+        # --- 7. 持续动量累计逻辑 (Momentum Persistence) ---
+        # [NEW] 强势状态维持加分：均线上+0.05 (由0.2下调), 维持高位+0.1
+        m_plus = 0.0
+        if vwap > 0 and cur_close >= vwap:
+            m_plus += 0.05
+        if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.998:
+            m_plus += 0.05 # 维持高位即便不破新高也持续低速加分
+        
+        # [NEW] 回落重罚 (Retreat Penalty) & 均线惩罚
+        if ts_obj.high_day > 0 and cur_close < ts_obj.high_day * 0.98:
+            # 股价从高点回落超过 2%，视为走弱，扣除 0.5 分/批次
+            ts_obj.momentum_score = max(0.0, ts_obj.momentum_score - 0.5)
+        elif vwap > 0 and cur_close < vwap:
+            # 破均线的一瞬间重罚并快速衰减 (冷却)
+            ts_obj.momentum_score = max(0.0, ts_obj.momentum_score - 1.0)
+        elif m_plus > 0:
+            # 仅在维持强势且未回落时才加分
+            ts_obj.momentum_score = min(20.0, ts_obj.momentum_score + m_plus)
+        else:
+            # 衰减逻辑：如果没有持续强势表现，动量分缓慢回落
+            ts_obj.momentum_score = max(0.0, ts_obj.momentum_score - 0.1)
+
+        # --- 8. 最终评分与活性修正 ---
+        # 最终分 = 瞬时分(cycle+bidding+score) + 持续动量分
+        final_score = cycle_score + bidding_score + score + ts_obj.momentum_score
+        
+        # [NEW] 高开低走 (Gap Trap) 惩罚
+        # 如果高开超过 3.5% 但当前跌破均线且涨幅回撤超过高开幅度的一半
+        if open_gap_pct > 3.5 and cur_close < vwap and cur_pct < open_gap_pct * 0.6:
+            final_score *= 0.5 # 评分直接减半
+            ts_obj.momentum_score *= 0.5
+        
+        # [NEW] 活性修正：如果最近 3 分钟价格没有变动且未涨停，分数大幅衰减 (针对僵尸股)
         if len(klines) >= 3:
             last_3 = [k['close'] for k in list(klines)[-3:]]
             if len(set(last_3)) == 1 and cur_pct < get_limit_up_threshold(code):
-                final_score *= 0.5
+                final_score *= 0.3
+                ts_obj.momentum_score *= 0.8 # 动量一同衰减
 
         # 尝试从数据中获取模拟时间
         data_ts = 0.0
