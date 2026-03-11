@@ -234,6 +234,14 @@ class BiddingMomentumDetector:
         # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
         self.daily_watchlist: Dict[str, Dict[str, Any]] = {}
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
+        
+        # ---- [NEW] 强度历史对比与变动追踪 ----
+        # sector -> deque((ts, score))
+        self.sector_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=600))
+        self.comparison_interval: float = 30 * 60 # 默认 30 分钟对比窗口 (秒)
+        # sector -> anchor_score (用于分阶段变动观测)
+        self.sector_anchors: Dict[str, float] = {}
+        self.reset_threshold: float = 10.0 # 变动超过 10 分自动重置锚点
 
         # ---- [NEW] 选股器联动与两阶段刷新 ----
         self.stock_selector_seeds: Dict[str, Dict[str, Any]] = {} # 昨曾强势/反转股代码
@@ -389,17 +397,41 @@ class BiddingMomentumDetector:
                 } for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
                 'watchlist': self.daily_watchlist
             }
+            # [REFINED] 防覆盖保护：
+            # 1. 如果没有活跃板块 且 没有重点股 且 没有显著得分的个股
+            # 我们跳过保存以防止覆盖掉之前有效的历史会话数据。
+            sd_count = len(data.get('sector_data', {}))
+            wl_count = len(data.get('watchlist', {}))
+            
+            # 为了过滤浮点数残留，只统计得分超过 0.1 的个股
+            significant_stocks = {code: s for code, s in data.get('stock_scores', {}).items() if s >= 0.1}
+            ss_count = len(significant_stocks)
+            
+            if sd_count == 0 and wl_count == 0 and ss_count == 0:
+                logger.info("ℹ️ [Detector] 当前无活跃板块、重点股及显著个股分，跳过会话保存以保护历史数据。")
+                return
+
+            # [ENRICHED] 补充元数据：保存所有显著个股、重点股以及种子股的名称与昨日特征 (形态)
+            # 优先包含有分值的个股，同时包含所有种子股以备查询
+            relevant_codes = set(significant_stocks.keys()) | set(data.get('watchlist', {}).keys()) | set(self.stock_selector_seeds.keys())
+            meta_data = {}
+            for code in relevant_codes:
+                ts = self._tick_series.get(code)
+                name = ts.name if ts else self.stock_selector_seeds.get(code, {}).get('name', '')
+                reason = self.stock_selector_seeds.get(code, {}).get('reason', '')
+                if name or reason:
+                    meta_data[code] = {
+                        'name': name,
+                        'reason': reason
+                    }
+            data['meta_data'] = meta_data
+
             path = self._get_persistence_path()
             # 使用 gzip 压缩存储 JSON
             with gzip.open(path, 'wt', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
-            stock_scores_data = data.get('stock_scores')
-            sector_data_info = data.get('sector_data')
-            
-            ss_count = len(stock_scores_data) if isinstance(stock_scores_data, dict) else 0
-            sd_count = len(sector_data_info) if isinstance(sector_data_info, dict) else 0
-            logger.info(f"💾 [Detector] 会话数据已保存: {path} ({ss_count} stocks, {sd_count} sectors)")
+            logger.info(f"💾 [Detector] 会话数据已保存: {path} ({ss_count} sig-stocks, {sd_count} sectors, {wl_count} watchlist)")
         except Exception as e:
             logger.error(f"❌ [Detector] 保存会话数据失败: {e}")
 
@@ -1061,9 +1093,46 @@ class BiddingMomentumDetector:
                  if sector in new_active: del new_active[sector]
                  continue
                  
+            # [NEW] 变动对比逻辑
+            now = time.time()
+            # 1. 记录历史
+            self.sector_history[sector].append((now, board_score))
+            
+            # 2. 寻找前值 (最接近 now - interval)
+            target_ts = now - self.comparison_interval
+            prev_score = board_score
+            found_prev = False
+            
+            # 从后往前找最接近 target_ts 的记录
+            hist = self.sector_history[sector]
+            for i in range(len(hist)-1, -1, -1):
+                h_ts, h_score = hist[i]
+                if h_ts <= target_ts:
+                    # 找到了或超过了目标点
+                    if target_ts - h_ts < 300: # 容差 5 分钟，否则太旧的数据没意义
+                        prev_score = h_score
+                        found_prev = True
+                    break
+            
+            score_diff = board_score - prev_score if found_prev else 0.0
+            
+            # 3. 分阶段变动重置 (锚点逻辑)
+            if sector not in self.sector_anchors:
+                self.sector_anchors[sector] = board_score
+            
+            anchor = self.sector_anchors[sector]
+            # 如果变动过大，重置锚点进入下一阶段观测
+            if abs(board_score - anchor) >= self.reset_threshold:
+                self.sector_anchors[sector] = board_score
+                anchor = board_score
+            
+            staged_diff = board_score - anchor
+
             new_active[sector] = {
                 'sector': sector, 'score': round(board_score, 2), 'tags': " ".join(tags),
                 'ts': time.time(), # [FIX] 添加时间戳，用于 GC
+                'score_diff': round(score_diff, 2),        # 对比固定时长(30m)的变动
+                'staged_diff': round(staged_diff, 2),      # 阶段性变动 (10分阈值重置)
                 'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_price': l_data.get('price', 0.0),
