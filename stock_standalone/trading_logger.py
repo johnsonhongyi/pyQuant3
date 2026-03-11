@@ -15,7 +15,7 @@ except ImportError:
 import numpy as np
 from JohnsonUtil import LoggerFactory
 from db_utils import SQLiteConnectionManager
-
+from logger_utils import  with_log_level
 # LoggerFactory.getLogger() 返回的类型通过注解明确
 logger: logging.Logger = LoggerFactory.getLogger()
 
@@ -470,7 +470,7 @@ class TradingLogger:
                     return
                 if amount <= 0:
                     # 当买入量为 0 时（通常为模拟或追踪模式），记录为日内全量信号，不再静默跳过
-                    logger.debug(f"TradeLogger: {code} ({name}) '买入' amount is 0. Recording as discovery signal.")
+                    logger.warning(f"TradeLogger: {code} ({name}) '买入' amount is 0. Recording as discovery signal.")
                     cur.close()
                     self.log_live_signal(code, name, price, action, f"[OBSERVE] {reason}", resample=resample)
                     return
@@ -512,7 +512,7 @@ class TradingLogger:
                         SET buy_price=?, buy_amount=?, buy_reason=?, fee=?, action=?
                         WHERE id=?
                     """, (new_avg_price, new_amount, new_reason, new_fee, action, t_id))
-                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 动作: {action}, 原因: {reason}")
+                    logger.warning(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 动作: {action}, 原因: {reason}")
 
             elif action == "卖出" or "止" in action:
                 if existing_trade:
@@ -528,9 +528,9 @@ class TradingLogger:
                         SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED', action=?
                         WHERE id=?
                     """, (now_str, price, reason, total_fee, net_profit, pnl_pct, action, t_id))
-                    logger.debug(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
+                    logger.warning(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
                 else:
-                    logger.debug(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
+                    logger.warning(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
             
             
             conn.commit()

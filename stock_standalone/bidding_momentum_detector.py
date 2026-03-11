@@ -54,7 +54,8 @@ class TickSeries:
                  'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
                  'is_upper_band', 'is_new_high', 'momentum_score',
-                 '_splitted_cats', '_total_vol', '_total_amt')
+                 '_splitted_cats', '_total_vol', '_total_amt',
+                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -89,20 +90,46 @@ class TickSeries:
         self._splitted_cats: Optional[List[str]] = None
         self._total_vol: float = 0.0
         self._total_amt: float = 0.0
+        self.score_anchor: float = 0.0
+        self.score_diff: float = 0.0
+        self.price_anchor: float = 0.0
+        self.pct_diff: float = 0.0
 
     def update_meta(self, row: pd.Series):
         """从 df_all 行更新元数据"""
-        self.last_close = float(row.get('lastp1d', row.get('nclose', 0.0)))
-        self.last_high = float(row.get('lasth1d', self.last_close))
-        self.last_low = float(row.get('lastl1d', self.last_close))
-        self.open_price = float(row.get('open', 0.0))
-        # [FIX] 捕获实时价格，优先从 'now' (新浪实时) 或 'trade' (常用) 或 'price' (常用) 提取
-        # 涨幅也是实时计算，不再依赖分钟线
-        self.now_price = float(row.get('now', row.get('trade', row.get('price', row.get('nclose', self.now_price)))))
-        self.high_day = float(row.get('high', 0.0))
-        self.low_day = float(row.get('low', 0.0))
-        self.ma20 = float(row.get('ma20d', 0.0))
-        self.ma60 = float(row.get('ma60d', 0.0))
+        # [FIX] 优先查找 llstp, llastp 或 pre_close 作为昨日收盘价
+        val_last = row.get('llastp', row.get('lastp1d', row.get('pre_close', row.get('llastp1d', 0.0))))
+        self.last_close = float(val_last) if not pd.isna(val_last) else 0.0
+        
+        # 如果依然没有获得有效的 last_close，尝试 nclose 但要小心它可能是现价
+        if self.last_close <= 0:
+            val_nclose = row.get('nclose', 0.0)
+            self.last_close = float(val_nclose) if not pd.isna(val_nclose) else 0.0
+
+        val_lasth = row.get('lasth1d', self.last_close)
+        self.last_high = float(val_lasth) if not pd.isna(val_lasth) else 0.0
+        
+        val_lastl = row.get('lastl1d', self.last_close)
+        self.last_low = float(val_lastl) if not pd.isna(val_lastl) else 0.0
+        
+        val_open = row.get('open', 0.0)
+        self.open_price = float(val_open) if not pd.isna(val_open) else 0.0
+        
+        # [FIX] 捕获实时价格
+        val_now = row.get('now', row.get('trade', row.get('price', row.get('nclose', self.now_price))))
+        self.now_price = float(val_now) if not pd.isna(val_now) else 0.0
+        
+        val_high = row.get('high', 0.0)
+        self.high_day = float(val_high) if not pd.isna(val_high) else 0.0
+        
+        val_low = row.get('low', 0.0)
+        self.low_day = float(val_low) if not pd.isna(val_low) else 0.0
+        
+        val_ma20 = row.get('ma20d', 0.0)
+        self.ma20 = float(val_ma20) if not pd.isna(val_ma20) else 0.0
+        
+        val_ma60 = row.get('ma60d', 0.0)
+        self.ma60 = float(val_ma60) if not pd.isna(val_ma60) else 0.0
         self.category = str(row.get('category', ''))
         self.name = str(row.get('name', self.code))
         self.lastdu = float(row.get('lastdu', 0.0))
@@ -236,12 +263,14 @@ class BiddingMomentumDetector:
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
         
         # ---- [NEW] 强度历史对比与变动追踪 ----
-        # sector -> deque((ts, score))
-        self.sector_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=600))
         self.comparison_interval: float = 30 * 60 # 默认 30 分钟对比窗口 (秒)
-        # sector -> anchor_score (用于分阶段变动观测)
+        self.baseline_time: float = time.time()  # 阈值的初始基准时间
+        # sector -> anchor_score
         self.sector_anchors: Dict[str, float] = {}
         self.reset_threshold: float = 10.0 # 变动超过 10 分自动重置锚点
+        
+        # [NEW] 个股切片涨幅重置阈值 (1.0%)
+        self.price_reset_threshold: float = 1.0
 
         # ---- [NEW] 选股器联动与两阶段刷新 ----
         self.stock_selector_seeds: Dict[str, Dict[str, Any]] = {} # 昨曾强势/反转股代码
@@ -395,6 +424,10 @@ class BiddingMomentumDetector:
                     'leader': info.get('leader', ''),
                     'status': info.get('status', '')
                 } for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
+                'stock_score_anchors': {code: round(ts.score_anchor, 2) 
+                                        for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
+                'baseline_time': round(self.baseline_time, 2),
+                'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
                 'watchlist': self.daily_watchlist
             }
             # [REFINED] 防覆盖保护：
@@ -452,7 +485,7 @@ class BiddingMomentumDetector:
             is_expired = False
             try:
                 # 获取从文件日期到今天的交易日列表 (使用 cct 中已初始化的 lazy-loaded 实例)
-                trade_days = cct.a_trade_calendar.get_trade_days(file_date_str, today_str)
+                trade_days = cct.a_trade_calendar.get_trade_days_interval(file_date_str, today_str)
                 
                 # 1. 如果中间隔了至少一个完整的交易日，肯定过期
                 if len(trade_days) > 2:
@@ -494,6 +527,16 @@ class BiddingMomentumDetector:
 
             # 恢复板块数据
             self.active_sectors = data.get('sector_data', {})
+            
+            # 恢复全量历史与锚点
+            stock_anchors = data.get('stock_score_anchors', {})
+            for code, anchor in stock_anchors.items():
+                if code in self._tick_series:
+                    self._tick_series[code].score_anchor = anchor
+                    
+            self.baseline_time = data.get('baseline_time', time.time())
+                
+            self.sector_anchors = data.get('sector_anchors', {})
             
             # 恢复重点表
             self.daily_watchlist = data.get('watchlist', {})
@@ -737,43 +780,44 @@ class BiddingMomentumDetector:
             bidding_score += 2.0
 
         # --- 2. 涨幅过滤 ---
+        passed_filter = True
         if self.strategies['pct_change']['enabled']:
             p_min = self.strategies['pct_change']['min']
             p_max = self.strategies['pct_change']['max']
             # [Fix] 如果涨幅不足 p_min，评分清零
             # 允许 蓄势/反转/种子股/高分周期股 绕过此限制，以便在萌芽期识别
             if cur_pct < p_min and not (is_accumulating or is_reversal or seed_info or cycle_score >= 4.0):
-                with self._lock:
-                    if code in self._tick_series:
-                         self._tick_series[code].score = 0.0
-                return
-            score += min(cur_pct / p_max * 1.5, 1.5)  # 归一化分值
-
-        # --- 3. 连续上涨 K 棒 ---
-        if self.strategies['consecutive_up']['enabled'] and len(klines) >= 2:
-            n_bars = self.strategies['consecutive_up']['bars']
-            if len(klines) >= n_bars:
-                recents = list(klines)[-n_bars:] # deque to list is fine for small N
-                is_consecutive = all(recents[i]['close'] > recents[i-1]['close'] for i in range(1, len(recents)))
-                if is_consecutive: score += 2.0
-
-        # --- 4. 放量检查 (基于 TickSeries 维护的 vwap 和历史统计) ---
-        if self.strategies['surge_vol']['enabled'] and len(klines) >= 2:
-            cur_v = float(klines[-1].get('volume', 0.0))
-            prev_v = float(klines[-2].get('volume', 0.0))
-            if prev_v > 0 and cur_v / prev_v >= self.strategies['surge_vol']['min_ratio']:
-                score += 1.5
-
-        # --- 5. 每日新高附近 ---
-        if self.strategies['new_high']['enabled']:
-            if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.998:
-                score += 1.5
-
-        # --- 6. 振幅过滤 (使用 TickSeries 的 incremental high_day/low_day) ---
-        if self.strategies['amplitude']['enabled'] and last_close > 0:
-            amplitude = (ts_obj.high_day - ts_obj.low_day) / last_close * 100
-            if not (self.strategies['amplitude']['min'] <= amplitude <= self.strategies['amplitude']['max']):
+                passed_filter = False
                 score = 0.0
+            else:
+                score += min(cur_pct / p_max * 1.5, 1.5)  # 归一化分值
+
+        if passed_filter:
+            # --- 3. 连续上涨 K 棒 ---
+            if self.strategies['consecutive_up']['enabled'] and len(klines) >= 2:
+                n_bars = self.strategies['consecutive_up']['bars']
+                if len(klines) >= n_bars:
+                    recents = list(klines)[-n_bars:] # deque to list is fine for small N
+                    is_consecutive = all(recents[i]['close'] > recents[i-1]['close'] for i in range(1, len(recents)))
+                    if is_consecutive: score += 2.0
+    
+            # --- 4. 放量检查 (基于 TickSeries 维护的 vwap 和历史统计) ---
+            if self.strategies['surge_vol']['enabled'] and len(klines) >= 2:
+                cur_v = float(klines[-1].get('volume', 0.0))
+                prev_v = float(klines[-2].get('volume', 0.0))
+                if prev_v > 0 and cur_v / prev_v >= self.strategies['surge_vol']['min_ratio']:
+                    score += 1.5
+    
+            # --- 5. 每日新高附近 ---
+            if self.strategies['new_high']['enabled']:
+                if ts_obj.high_day > 0 and cur_close >= ts_obj.high_day * 0.998:
+                    score += 1.5
+    
+            # --- 6. 振幅过滤 (使用 TickSeries 的 incremental high_day/low_day) ---
+            if self.strategies['amplitude']['enabled'] and last_close > 0:
+                amplitude = (ts_obj.high_day - ts_obj.low_day) / last_close * 100
+                if not (self.strategies['amplitude']['min'] <= amplitude <= self.strategies['amplitude']['max']):
+                    score = 0.0
 
         # --- 7. 持续动量累计逻辑 (Momentum Persistence) ---
         # [NEW] 强势状态维持加分：均线上+0.05 (由0.2下调), 维持高位+0.1
@@ -836,6 +880,28 @@ class BiddingMomentumDetector:
         else:
             data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
+        # [NEW] 记录个股历史得分并计算增量涨跌
+        now = time.time()
+        
+        # 初始基准值挂载
+        if ts_obj.score_anchor == 0.0 and final_score > 0:
+            ts_obj.score_anchor = final_score
+            
+        score_diff = final_score - ts_obj.score_anchor
+        
+        # [NEW] 个股切片涨幅计算与重置逻辑
+        if ts_obj.price_anchor == 0.0 and cur_close > 0:
+            ts_obj.price_anchor = cur_close
+            
+        pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.price_anchor * 100.0 if ts_obj.price_anchor > 0 else 0.0
+        
+        # 超过阈值后自动重置锚点 (对齐板块逻辑)
+        if abs(pct_diff) >= self.price_reset_threshold:
+            ts_obj.price_anchor = cur_close
+            pct_diff = 0.0
+            
+        ts_obj.pct_diff = pct_diff
+
         with self._lock:
             # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
             # 这样能更准确捕捉涨停瞬间，哪怕涨停时由于某些原因评分还没跟上 (例如量还没放出来)
@@ -852,6 +918,8 @@ class BiddingMomentumDetector:
             if code in self._tick_series:
                 ts_obj = self._tick_series[code]
                 ts_obj.score = final_score
+                ts_obj.score_diff = score_diff
+                # ts_obj.pct_diff 已在前面赋值
                 ts_obj.is_untradable = is_untradable
                 ts_obj.is_counter_trend = is_counter
                 ts_obj.is_gap_leader = is_gap_leader  # 连续跳空强势龙头标记
@@ -901,7 +969,9 @@ class BiddingMomentumDetector:
                         'is_reversal': getattr(ts, 'is_reversal', False),
                         'ral': getattr(ts, 'ral', 0),
                         'top0': getattr(ts, 'top0', 0),
-                        'top15': getattr(ts, 'top15', 0)
+                        'top15': getattr(ts, 'top15', 0),
+                        'score_diff': getattr(ts, 'score_diff', 0.0),
+                        'pct_diff': getattr(ts, 'pct_diff', 0.0)
                     }
                     self._global_snap_cache[code] = data
                     
@@ -1095,33 +1165,22 @@ class BiddingMomentumDetector:
                  
             # [NEW] 变动对比逻辑
             now = time.time()
-            # 1. 记录历史
-            self.sector_history[sector].append((now, board_score))
+            # 检测是否超过设定的比较间隔时间 (阈值限制)
+            if now - self.baseline_time >= self.comparison_interval:
+                # 触发阈值刷新，重置基准时间与所有的基准分锚点
+                self.baseline_time = now
+                self.sector_anchors.clear()
+                for ts in self._tick_series.values():
+                    ts.score_anchor = ts.score
+                    ts.price_anchor = ts.current_price # 同步重置个股价格锚点
             
-            # 2. 寻找前值 (最接近 now - interval)
-            target_ts = now - self.comparison_interval
-            prev_score = board_score
-            found_prev = False
-            
-            # 从后往前找最接近 target_ts 的记录
-            hist = self.sector_history[sector]
-            for i in range(len(hist)-1, -1, -1):
-                h_ts, h_score = hist[i]
-                if h_ts <= target_ts:
-                    # 找到了或超过了目标点
-                    if target_ts - h_ts < 300: # 容差 5 分钟，否则太旧的数据没意义
-                        prev_score = h_score
-                        found_prev = True
-                    break
-            
-            score_diff = board_score - prev_score if found_prev else 0.0
-            
-            # 3. 分阶段变动重置 (锚点逻辑)
             if sector not in self.sector_anchors:
                 self.sector_anchors[sector] = board_score
+                
+            score_diff = board_score - self.sector_anchors[sector]
             
+            # 3. 分阶段变动重置 (辅助参考)
             anchor = self.sector_anchors[sector]
-            # 如果变动过大，重置锚点进入下一阶段观测
             if abs(board_score - anchor) >= self.reset_threshold:
                 self.sector_anchors[sector] = board_score
                 anchor = board_score
@@ -1136,16 +1195,18 @@ class BiddingMomentumDetector:
                 'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_price': l_data.get('price', 0.0),
-                'leader_klines': l_data.get('klines', []),
+                'leader_klines': list(l_ts.klines)[-35:] if l_ts else [],
                 'leader_last_close': l_data.get('last_close', 0),
                 'leader_high_day': l_data.get('high_day', 0),
                 'leader_low_day': l_data.get('low_day', 0),
                 'leader_last_high': l_data.get('last_high', 0),
                 'leader_last_low': l_data.get('low_day', 0), # Corrected from leader_last_low to low_day
                 'leader_first_ts': l_data['first_breakout_ts'],
+                'leader_score_val': l_data.get('score', 0.0),
+                'leader_score_diff': l_data.get('score_diff', 0.0),
                 'pattern_hint': l_data['pattern_hint'],
                 'is_untradable': l_data['is_untradable'],
-                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
+                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'score_diff': s.get('score_diff', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
                 'linked_concepts': linked_concepts[:3]
             }
 

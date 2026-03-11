@@ -1931,21 +1931,33 @@ class Sina:
         # 2. 统一代码列表格式
         codes = [code] if isinstance(code, str) else code
         
-        # 3. 高性能过滤 (利用 MultiIndex)
+        # 3. 高性能过滤 (利用 MultiIndex 索引加速)
         df_code = pd.DataFrame()
         try:
             with timed_ctx("sina_data_tick_filter", warn_ms=200):
                 if isinstance(h5_hist.index, pd.MultiIndex):
-                    # MultiIndex 模式下，第一层通常是 code
+                    # [OPTIMIZE] 如果 codes 较少，使用 .loc 直接定位比 .isin 遍历索引快得多
+                    # 假定 MultiIndex 第一层是 code 且已排序
+                    valid_codes = [c for c in codes if c in h5_hist.index.levels[0]]
+                    if valid_codes:
+                        df_code = h5_hist.loc[valid_codes]
+                else:
+                    valid_codes = [c for c in codes if c in h5_hist.index]
+                    if valid_codes:
+                        df_code = h5_hist.loc[valid_codes]
+        except Exception as e:
+            # Fallback to isin for safety if loc fails
+            try:
+                if isinstance(h5_hist.index, pd.MultiIndex):
                     df_code = h5_hist.loc[h5_hist.index.get_level_values(0).isin(codes)]
                 else:
                     df_code = h5_hist.loc[h5_hist.index.isin(codes)]
-        except Exception as e:
-            if debug:
-                log.error(f"Filter error for codes {codes}: {e}")
+            except:
+                if debug: log.error(f"Filter error for codes {codes}: {e}")
 
         # 4. 清洗全零行
-        df_code = self.drop_tick_all_zero(df_code)
+        if not df_code.empty:
+            df_code = self.drop_tick_all_zero(df_code)
 
         # 5. [NEW] 数据增强：合成增量成交量和成交额
         if enrich_data and not df_code.empty:
@@ -1997,7 +2009,6 @@ class Sina:
         if df_work.index.name == 'code':
             df_work.index.name = None
         if isinstance(df_work.index, pd.MultiIndex) and 'code' in df_work.index.names:
-            # 如果 reset_index 没处理干净，重命名该 level
             new_names = [n if n != 'code' else None for n in df_work.index.names]
             df_work.index.names = new_names
 
@@ -2008,31 +2019,25 @@ class Sina:
         if col_vol not in df_work.columns or col_price not in df_work.columns:
             return df
 
-        # 分组处理以防代码交叉影响
-        def _calc_group(group):
-            # 1. 计算增量成交量 (tick volume)
-            # 对于历史批量数据，使用 diff；对于第一条数据，假设即为该时刻增量
-            delta_v = group[col_vol].diff().fillna(group[col_vol])
-            delta_v = delta_v.apply(lambda x: max(0, x)) # 防范负增量
-            
-            # 2. 如果缺少成交额，用 现价 * 增量成交量 合成
-            if 'amount' not in group.columns or (group['amount'] <= 0).all():
-                # 合成增量成交额
-                delta_a = delta_v * group[col_price]
-                group['amount'] = delta_a.cumsum()
-            
-            # 3. 记录增量成交量供下游使用 (如计算均价线)
-            group['tick_vol'] = delta_v
-            return group
-
-        df_processed = df_work.groupby('code', group_keys=False).apply(_calc_group)
+        # [OPTIMIZE] 极限向量化：替代慢速的 groupby().apply()
+        # 1. 计算每笔增量成交量 (tick_vol)
+        # 用 groupby().diff() 配合 fillna 处理每组的第一行
+        df_work['tick_vol'] = df_work.groupby('code')[col_vol].diff().fillna(df_work[col_vol]).clip(lower=0)
         
-        # 计算合成均价
-        if 'amount' in df_processed.columns:
-            df_processed['avg_price'] = (df_processed['amount'] / df_processed[col_vol]).fillna(df_processed[col_price])
-        if 'open' not in df_processed.columns:
-            df_processed['open'] = df_processed['close'].shift(1).fillna(df_processed['close'])
-        df_processed = df_processed.set_index('code', append=True).swaplevel()
+        # 2. 合成增量成交额与累计成交额
+        if 'amount' not in df_work.columns or (df_work['amount'] <= 0).all():
+            delta_a = df_work['tick_vol'] * df_work[col_price]
+            df_work['amount'] = delta_a.groupby(df_work['code']).cumsum()
+        
+        # 3. 计算合成均价 (VWAP 基准)
+        df_work['avg_price'] = (df_work['amount'] / df_work[col_vol]).fillna(df_work[col_price])
+        
+        if 'open' not in df_work.columns:
+            # 粗略模拟开盘价（如果是分时轨迹）
+            df_work['open'] = df_work.groupby('code')[col_price].shift(1).fillna(df_work[col_price])
+
+        # 4. 恢复索引结构
+        df_processed = df_work.set_index('code', append=True).swaplevel()
         return df_processed
 
 

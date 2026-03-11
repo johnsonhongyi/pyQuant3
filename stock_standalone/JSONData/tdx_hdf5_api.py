@@ -144,9 +144,9 @@ class SafeHDFStore(pd.HDFStore):
 
         self.fname_o = fname
         self.mode = mode
-        self.probe_interval = kwargs.pop("probe_interval", 2)  
+        self.probe_interval = kwargs.pop("probe_interval", 0.05)  
         self.lock_timeout = kwargs.pop("lock_timeout", 10)  
-        self.max_wait = 60
+        self.max_wait = 30
         self.multiIndexsize = False
         self.log = log
         self.basedir = BaseDir
@@ -243,13 +243,13 @@ class SafeHDFStore(pd.HDFStore):
                 super().__init__(self.fname, **kwargs)
 
         if self.mode != 'r':
-            with timed_ctx("acquire_lock"):
+            with timed_ctx("acquire_writer_lock"):
                 self._acquire_lock()
         else:
-            with timed_ctx("wait_for_lock"):
-                # 读模式仍然需要检查是否有写者，但我们可以允许并发读
-                # 这里目前维持原有的互斥逻辑，但确保它能被正确释放
-                self._acquire_lock()
+            with timed_ctx("wait_for_writer_lock"):
+                # 读模式只需要确认没有写者正在操作
+                # 多进程读在大并发下若还用互锁，会导致严重排队
+                self._wait_for_lock()
 
     def __enter__(self):
         return self
