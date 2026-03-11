@@ -237,7 +237,7 @@ class PercentAxisItem(pg.AxisItem):
 
 class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
-    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False):
+    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None):
         super().__init__()
         # [UPGRADE] Ensure title contains "SBC" for discovery if it is a signal chart
         if signals is not None and "SBC" not in title:
@@ -324,6 +324,80 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             avg_x = np.arange(len(avg_series))
             avg_y = np.asarray(avg_series)
             self.avg_plot = self.pw.plot(avg_x, avg_y, pen=pg.mkPen(QColor(255, 255, 255, 180), width=1.5, style=Qt.PenStyle.DashLine), name="VWAP")
+        
+        # Add Extra Reference Lines: Last Close, Last High, Last Low
+        if extra_lines:
+            lc = extra_lines.get('last_close', 0)
+            lh = extra_lines.get('last_high', 0)
+            ll = extra_lines.get('last_low', 0)
+            
+            if lc > 0:
+                # 昨日收盘：亮黄色，粗实体线
+                l_pen = pg.mkPen(QColor(255, 255, 0, 255), width=2.5, style=Qt.PenStyle.SolidLine)
+                l_line = pg.InfiniteLine(angle=0, movable=False, pen=l_pen, label="LC:{value:.2f}", labelOpts={'position': 0.95, 'color': (255, 255, 0)})
+                l_line.setPos(lc)
+                self.pw.addItem(l_line)
+            
+            if lh > 0:
+                # 昨日最高：强烈品红色/紫色 (Strong Magenta)，粗实体线
+                h_pen = pg.mkPen(QColor(255, 0, 255, 255), width=2.5, style=Qt.PenStyle.SolidLine)
+                h_line = pg.InfiniteLine(angle=0, movable=False, pen=h_pen, label="LH:{value:.2f}", labelOpts={'position': 0.85, 'color': (255, 0, 255)})
+                h_line.setPos(lh)
+                self.pw.addItem(h_line)
+                
+            if ll > 0:
+                # 昨日最低：亮红色，虚线
+                lo_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(QColor(255, 50, 50, 200), width=2, style=Qt.PenStyle.DashLine), label="LL:{value:.2f}", labelOpts={'position': 0.75, 'color': (255, 50, 50)})
+                lo_line.setPos(ll)
+                self.pw.addItem(lo_line)
+
+            h4 = extra_lines.get('high4', 0)
+            if h4 > 0:
+                # H4：粗绿色
+                h4_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(QColor(0, 255, 0, 220), width=3, style=Qt.PenStyle.SolidLine), label="H4:{value:.2f}", labelOpts={'position': 0.65, 'color': (0, 255, 0)})
+                h4_line.setPos(h4)
+                self.pw.addItem(h4_line)
+
+        # --- [NEW] Draw Gap Bands ---
+        if df is not None and not df.empty:
+            # 1. 隔日/隔夜缺口 (Overnight Gap)
+            if extra_lines:
+                lh = extra_lines.get('last_high', 0)
+                ll = extra_lines.get('last_low', 0)
+                
+                day_low = df['low'].min()
+                day_high = df['high'].max()
+                
+                # 向上跳空缺口：昨日最高 < 今日最低
+                if lh > 0 and day_low > lh:
+                    gap_up = pg.LinearRegionItem([lh, day_low], orientation=pg.LinearRegionItem.Horizontal, 
+                                                brush=QColor(0, 80, 255, 30), movable=False)
+                    self.pw.addItem(gap_up)
+                
+                # 向下跳空缺口：昨日最低 > 今日最高
+                if ll > 0 and day_high < ll:
+                    gap_down = pg.LinearRegionItem([day_high, ll], orientation=pg.LinearRegionItem.Horizontal, 
+                                                  brush=QColor(255, 30, 0, 30), movable=False)
+                    self.pw.addItem(gap_down)
+            
+            # 2. 序列内部缺口 (Internal Gaps between bars)
+            # 如果是多日数据，检测相邻 K 线之间的缺口
+            if not use_line and len(df) > 1:
+                opens = df['open'].values
+                closes = df['close'].values
+                lows = df['low'].values
+                highs = df['high'].values
+                for i in range(1, len(df)):
+                    # 向上缺口
+                    if lows[i] > highs[i-1]:
+                        g = pg.LinearRegionItem([highs[i-1], lows[i]], orientation=pg.LinearRegionItem.Horizontal, 
+                                               brush=QColor(0, 200, 255, 20), movable=False)
+                        self.pw.addItem(g)
+                    # 向下缺口
+                    elif highs[i] < lows[i-1]:
+                        g = pg.LinearRegionItem([highs[i], lows[i-1]], orientation=pg.LinearRegionItem.Horizontal, 
+                                               brush=QColor(255, 50, 0, 20), movable=False)
+                        self.pw.addItem(g)
         
         self.overlay = SignalOverlay(self.pw)
         if signals:
@@ -445,7 +519,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             print(f"Rearrange error: {e}")
 
 def show_chart_with_signals(df, signals=None, title="Stock Chart",
-                            avg_series=None, time_labels=None, use_line=False):
+                            avg_series=None, time_labels=None, use_line=False, extra_lines=None):
     """Quick helper to show a chart."""
     app = QApplication.instance()
     is_new_app = False
@@ -453,7 +527,7 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart",
         app = QApplication(sys.argv)
         is_new_app = True
     
-    win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line)
+    win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines)
     win.show()
 
     # [FIX] 仅在独立脚本运行时启动主循环，避免在已有 GUI (竞价面板) 中报错闪退

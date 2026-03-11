@@ -68,7 +68,8 @@ def _prepare_day_df(raw: pd.DataFrame) -> pd.DataFrame:
     for n in range(1, 6):
         df[f'lasth{n}d'] = df['high'].shift(n)
         df[f'lastp{n}d'] = df['close'].shift(n)
-    df['last_low']   = df['low'].shift(1)
+        df[f'lastl{n}d'] = df['low'].shift(n)
+    df['last_low']   = df['lastl1d']
     df['last_close'] = df['lastp1d']
     df['last_high']  = df['lasth1d']
     df = df.ffill().bfill()
@@ -97,7 +98,7 @@ def fetch_daily_data(code, days=150, hdf5_lock=None):
             code, dl=days, resample=resample, fastohlc=False)
     return raw
 
-def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None):
+def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None, extra_lines = None):
     source_name = "Sina Realtime" if use_live else "Cache PKL"
     print(f"\n🚀 [实战验证] 回放 {code} — 当卖则卖·当买则买 (Source: {source_name})")
     print("=" * 60)
@@ -253,13 +254,24 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
 
     # 5. 可视化
     if show_viz:
+        # 提取昨日价格参考线数据
+        auto_extra = {
+            'last_close': day_df['last_close'].iloc[-1] if 'last_close' in day_df.columns else 0,
+            'last_high': day_df['last_high'].iloc[-1] if 'last_high' in day_df.columns else 0,
+            'last_low': day_df['last_low'].iloc[-1] if 'last_low' in day_df.columns else 0,
+            'high4': day_df['lasth2d'].iloc[-1] if 'lasth4d' in day_df.columns else 0
+        }
+        # 如果外部传入了 extra_lines，则进行合并/覆盖
+        if extra_lines and isinstance(extra_lines, dict):
+            auto_extra.update(extra_lines)
+
         return show_chart_with_signals(
             viz_df, signals,
             f"[{code}] 买卖验证 — 结构性信号",
             avg_series=vwap_series,
             time_labels=time_labels,
             use_line=True,  # live 模式用线图，避免密集竖柱
-            # use_line=use_live,  # live 模式用线图，避免密集竖柱
+            extra_lines=auto_extra
         )
     else:
         # 返回数据包，供 GUI 线程异步渲染
@@ -269,7 +281,13 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             "title": f"[{code}] 买卖验证 — 结构性信号",
             "avg_series": vwap_series,
             "time_labels": time_labels,
-            "use_line": True 
+            "use_line": True,
+            "extra_lines": {
+                'last_close': day_df['last_close'].iloc[-1] if 'last_close' in day_df.columns else 0,
+                'last_high': day_df['last_high'].iloc[-1] if 'last_high' in day_df.columns else 0,
+                'last_low': day_df['last_low'].iloc[-1] if 'last_low' in day_df.columns else 0,
+                'high4': day_df['lasth4d'].iloc[-1] if 'lasth4d' in day_df.columns else 0
+            }
             # "use_live": use_live,
         }
 
