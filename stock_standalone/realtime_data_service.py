@@ -1229,14 +1229,42 @@ class IntradayEmotionTracker:
                 vol_ratio = df[active_ratio_col] if active_ratio_col in df.columns else pd.Series(1.0, index=df.index)
                 
                 delta = (percent * 2.0).clip(-MAX_DELTA, MAX_DELTA)
-                target_scores = baselines + delta
+                
+                # [NEW] 情绪高位回落惩罚：如果现价比日内最高价跌去 > 2%
+                retreat_penalty = pd.Series(0.0, index=df.index)
+                if self._intraday_high:
+                    highs = df['code'].map(self._intraday_high).fillna(0.0)
+                    cur_prices = df[active_trade_col] if active_trade_col in df.columns else df.get('trade', 0.0)
+                    # 只有在有最高价记录且当前价低于最高价 2% 以上时
+                    mask_retreat = (highs > 0) & (cur_prices < highs * 0.98)
+                    retreat_penalty[mask_retreat] = -15.0 # 强制情绪降温
+                
+                target_scores = baselines + delta + retreat_penalty
                 
                 prev_scores = df['code'].map(self.scores).fillna(baselines)
-                final_scores = prev_scores * (1 - EMA_ALPHA) + target_scores * EMA_ALPHA
+                
+                # [NEW] 冷却加速：如果当前目标分低于之前分 (走弱)，提高 EMA_ALPHA 实现快降
+                # 默认 0.3, 走弱时 0.6
+                alpha_series = pd.Series(EMA_ALPHA, index=df.index)
+                mask_cooling = target_scores < prev_scores
+                alpha_series[mask_cooling] = 0.6
+                
+                final_scores = prev_scores * (1 - alpha_series) + target_scores * alpha_series
                 
                 # 强化放量状态分数
                 mask_mania = (percent > 5) & (vol_ratio > 1.5)
                 final_scores[mask_mania] += 5
+                
+                # [NEW] 高开低走 (Gap Trap) 情绪封板
+                # 如果开盘涨幅很高 (>5%) 但目前已经跌去一半涨幅，情绪分封顶 70
+                open_prices = df.get('open', pd.Series(0.0, index=df.index))
+                # 从 baseline_tracker 获取昨日收盘价
+                if baseline_tracker:
+                    last_closes = df['code'].map(lambda c: baseline_tracker.get_anchor(c).get('last_close', 0.0))
+                    open_gap_pct = (open_prices - last_closes) / last_closes * 100.0
+                    
+                    mask_gap_trap = (open_gap_pct > 5.0) & (percent < open_gap_pct * 0.5)
+                    final_scores[mask_gap_trap] = final_scores[mask_gap_trap].clip(0, 70)
                 
                 final_scores = final_scores.clip(0, 100).round(2)
                 self.scores.update(dict(zip(df['code'], final_scores)))
