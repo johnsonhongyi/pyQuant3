@@ -106,31 +106,65 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     # 1. 日线数据
     try:
         resample = 'd'
-        # [ALIGN] 强制对齐线上加载方式：开启 fastohlc 确保指标列名与线上一致
-        # [LOCK] 如果提供了外部锁，则在锁内执行 HDF5 敏感操作
-        if hdf5_lock:
-            from PyQt6.QtCore import QMutexLocker
-            with QMutexLocker(hdf5_lock):
-                raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
-        else:
-            raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
+        
+        # [OPT] 如果传入了 TK 的整行 df_all 数据，则利用其伪造一个 day_df，节省本地读取
+        if extra_lines and extra_lines.get('df_all_row'):
+            print("🚀 使用 TK df_all_row 构建基准常数，跳过本地 tdd 读取...")
+            r = extra_lines['df_all_row']
+            val_h1  = r.get('lasth1d', r.get('high', 0))
+            val_l1  = r.get('lastl1d', r.get('low', 0))
+            val_c1  = r.get('lastp1d', r.get('close', 0))
+            val_h2  = r.get('lasth2d', val_h1)
+            val_c2  = r.get('lastp2d', val_c1)
+            
+            # 构建一个具有兼容时序的 4 行 DataFrame（采用极老的硬编码日期确保一定被视为 history）
+            fake_dates = ['2000-01-01', '2000-01-02', '2000-01-03', '2000-01-04']
+            records = [
+                {'high': val_h1, 'close': val_c1, 'low': val_l1},  # prev3
+                {'high': val_h1, 'close': val_c1, 'low': val_l1},  # prev2
+                {'high': val_h2, 'close': val_c2, 'low': val_l1},  # prev1
+                r.copy()  # prev (最终将作为 baseline 取用)
+            ]
+            
+            # 对基准行对齐必须的字段名称
+            records[-1]['close'] = val_c1
+            records[-1]['high'] = val_h1
+            records[-1]['low'] = val_l1
+            records[-1]['ma5d'] = r.get('ma51d', val_c1)
+            records[-1]['ma10d'] = r.get('ma101d', val_c1)
+            records[-1]['ma20d'] = r.get('ma201d', val_c1)
+            records[-1]['ma60d'] = r.get('ma601d', val_c1)
+            records[-1]['last_close'] = val_c1
+            records[-1]['last_high']  = val_h1
+            records[-1]['last_low']   = val_l1
+            records[-1]['lasth4d']    = r.get('high4', val_h1)
 
-        if raw is None or raw.empty:
-            print(f"❌ 无法获取 {code} 日线数据"); return None
-        
-        # [FIX] 统一索引为日期字符串 (解决 AttributeError)
-        try:
-            # 使用更稳健的转换链：to_datetime -> 检查是否为日期类型 -> 格式化
-            dts = pd.to_datetime(raw.index)
-            raw.index = [d.strftime('%Y-%m-%d') for d in dts]
-        except Exception:
-            # 兜底：从列中提取
-            for col in ('date', 'trade_date'):
-                if col in raw.columns:
-                    raw.index = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in raw[col]]
-                    break
-        
-        day_df = _prepare_day_df(raw)
+            day_df = pd.DataFrame(records, index=fake_dates)
+        else:
+            # [ALIGN] 强制对齐线上加载方式：开启 fastohlc 确保指标列名与线上一致
+            if hdf5_lock:
+                from PyQt6.QtCore import QMutexLocker
+                with QMutexLocker(hdf5_lock):
+                    raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
+            else:
+                raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
+
+            if raw is None or raw.empty:
+                print(f"❌ 无法获取 {code} 日线数据"); return None
+            
+            # [FIX] 统一索引为日期字符串 (解决 AttributeError)
+            try:
+                # 使用更稳健的转换链：to_datetime -> 检查是否为日期类型 -> 格式化
+                dts = pd.to_datetime(raw.index)
+                raw.index = [d.strftime('%Y-%m-%d') for d in dts]
+            except Exception:
+                # 兜底：从列中提取
+                for col in ('date', 'trade_date'):
+                    if col in raw.columns:
+                        raw.index = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in raw[col]]
+                        break
+            
+            day_df = _prepare_day_df(raw)
     except Exception as e:
         import traceback
         print(f"❌ 日线加载失败: {e}"); traceback.print_exc(); return
@@ -205,7 +239,6 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             res = sbc_core.run_sbc_analysis_core(code, day_df, df_day, verbose=True)
             # res = sbc_core.run_sbc_analysis_core_slow(code, day_df, df_day, verbose=True)
             
-            # 提取信号并修正索引偏移，使其与全局图表对齐
             day_signals = res.get('signals', [])
             # 获取 df_day 在原始 stock_df 中的位置索引偏移
             day_start_idx = stock_df.index.get_loc(df_day.index[0])
@@ -252,19 +285,19 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         'volume': v_arr_vwap,
     })
 
+    # 提取昨日价格参考线数据
+    auto_extra = {
+        'last_close': day_df['last_close'].iloc[-1] if 'last_close' in day_df.columns else 0,
+        'last_high': day_df['last_high'].iloc[-1] if 'last_high' in day_df.columns else 0,
+        'last_low': day_df['last_low'].iloc[-1] if 'last_low' in day_df.columns else 0,
+        'high4': day_df['lasth2d'].iloc[-1] if 'lasth4d' in day_df.columns else 0
+    }
+    # 如果外部传入了 extra_lines，则进行合并/覆盖
+    if extra_lines and isinstance(extra_lines, dict):
+        auto_extra.update(extra_lines)
+
     # 5. 可视化
     if show_viz:
-        # 提取昨日价格参考线数据
-        auto_extra = {
-            'last_close': day_df['last_close'].iloc[-1] if 'last_close' in day_df.columns else 0,
-            'last_high': day_df['last_high'].iloc[-1] if 'last_high' in day_df.columns else 0,
-            'last_low': day_df['last_low'].iloc[-1] if 'last_low' in day_df.columns else 0,
-            'high4': day_df['lasth2d'].iloc[-1] if 'lasth4d' in day_df.columns else 0
-        }
-        # 如果外部传入了 extra_lines，则进行合并/覆盖
-        if extra_lines and isinstance(extra_lines, dict):
-            auto_extra.update(extra_lines)
-
         return show_chart_with_signals(
             viz_df, signals,
             f"[{code}] 买卖验证 — 结构性信号",
@@ -282,21 +315,15 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             "avg_series": vwap_series,
             "time_labels": time_labels,
             "use_line": True,
-            "extra_lines": {
-                'last_close': day_df['last_close'].iloc[-1] if 'last_close' in day_df.columns else 0,
-                'last_high': day_df['last_high'].iloc[-1] if 'last_high' in day_df.columns else 0,
-                'last_low': day_df['last_low'].iloc[-1] if 'last_low' in day_df.columns else 0,
-                'high4': day_df['lasth4d'].iloc[-1] if 'lasth4d' in day_df.columns else 0
-            }
-            # "use_live": use_live,
+            "extra_lines": auto_extra
         }
 
-
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser(description="SBC Pattern Verification Tool")
     parser.add_argument("code", nargs="?", default="688787", help="Stock code (default: 688787)")
     parser.add_argument("--live", action="store_true", help="Use live Sina data instead of cache")
     parser.add_argument("--no-viz", action="store_true", help="Disable visualization for benchmarking")
     args = parser.parse_args()
-
+    
     verify_with_real_data(args.code, use_live=args.live, show_viz=not args.no_viz)

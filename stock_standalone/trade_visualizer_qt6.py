@@ -1011,11 +1011,12 @@ class SBCTestThread(QThread):
     finished_data = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, code: str, use_live: bool, hdf5_lock=None):
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None):
         super().__init__()
         self.code = code
         self.use_live = use_live
         self.hdf5_lock = hdf5_lock
+        self.extra_lines = extra_lines
 
     def run(self):
         try:
@@ -1028,7 +1029,8 @@ class SBCTestThread(QThread):
                 self.code, 
                 use_live=self.use_live, 
                 show_viz=False,
-                hdf5_lock=self.hdf5_lock
+                hdf5_lock=self.hdf5_lock,
+                extra_lines=self.extra_lines
             )
             if result and isinstance(result, dict):
                 self.finished_data.emit(result)
@@ -3824,8 +3826,24 @@ class MainWindow(QMainWindow, WindowMixin):
         # 发送开始日志
         logger.info(f"⏳ SBC 信号测试已启动后台线程: {target_code} (Live Mode: {use_live})")
         
+        # [NEW DATA EXTRACTION] 从 df_all 提取最新数据透传给 SBC 验证逻辑
+        extra_lines = {}
+        if hasattr(self, 'df_all') and not self.df_all.empty and target_code in self.df_all.index:
+            try:
+                row = self.df_all.loc[target_code]
+                row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+                extra_lines = {
+                    'last_close': float(row_dict.get('lastp1d', 0)),
+                    'last_high':  float(row_dict.get('lasth1d', 0)),
+                    'last_low':   float(row_dict.get('lastl1d', 0)),
+                    'high4':      float(row_dict.get('high4', 0)),
+                    'df_all_row': row_dict  # 完整透传给 verify_sbc_pattern
+                }
+            except Exception as e:
+                logger.warning(f"Failed to extract extra_lines for SBC test in GUI: {e}")
+
         # 创建并启动后台线程
-        self._sbc_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock)
+        self._sbc_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines)
         self._sbc_thread.finished_data.connect(self._on_sbc_test_finished)
         self._sbc_thread.error_occurred.connect(self._on_sbc_test_error)
         self._sbc_thread.start()
@@ -3847,7 +3865,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 data["title"],
                 avg_series=data["avg_series"],
                 time_labels=data["time_labels"],
-                use_line=data["use_line"] if self.realtime else False
+                use_line=data["use_line"] if self.realtime else False,
+                extra_lines=data.get("extra_lines")
             )
             
             # 管理窗口引用，防止被回收
