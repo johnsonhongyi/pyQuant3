@@ -3,6 +3,8 @@ import os
 import re
 import pandas as pd
 import numpy as np
+import json
+import gzip
 from datetime import datetime
 
 from typing import Optional, Any, Callable, Dict
@@ -87,7 +89,7 @@ class DataFrameModel(QAbstractTableModel):
                 
                 if role == _DisplayRole or role == Qt.ItemDataRole.EditRole:
                     # Time Formatting for display only
-                    if role == _DisplayRole and col_name.lower() in ('time', 'timestamp'):
+                    if role == _DisplayRole and col_name.lower() in ('time', 'timestamp', 'ticktime'):
                         try:
                             ts = float(val)
                             if ts > 1000000000:
@@ -481,9 +483,10 @@ class KlineBackupViewer(QMainWindow):
                     if 'level' in str(col0) or 'index' in str(col0):
                         df.rename(columns={col0: 'code'}, inplace=True)
 
-        # 3. 字段映射集成 (统一使用 time 而不是 ticktime，但保留 ticktime 作为别名)
-        if 'ticktime' in df.columns and 'time' not in df.columns:
-            df['time'] = df['ticktime']
+        # 3. 字段映射集成 (双兼容模式: time / ticktime 有那个用那个)
+        # if 'ticktime' in df.columns and 'time' not in df.columns:
+        #     df['time'] = df['ticktime']
+        # 注意: 这里保持注释状态以维持数据列清洁，逻辑在 Model 和联动中适配
             
         # 4. 确保核心列存在且类型正确
         if 'code' in df.columns:
@@ -557,7 +560,7 @@ class KlineBackupViewer(QMainWindow):
             self,
             "Open Cache File",
             start_dir,
-            "HDF5 Files (*.h5);;All Files (*);;Pickle Files (*.pkl)"
+            "HDF5 Files (*.h5);;Session Files (*.json *.json.gz);;Pickle Files (*.pkl);;All Files (*)"
         )
 
         if file_name:
@@ -565,11 +568,11 @@ class KlineBackupViewer(QMainWindow):
             ext = os.path.splitext(file_name)[1].lower()
             if ext == ".pkl":
                 self.load_data(file_name)
-            elif ext == ".h5":
-                self.load_data(file_name)
-            else:
-                # 默认尝试 pickle
-                self.load_data(file_name)
+            elif ext in (".json", ".gz"):
+                df = self._load_session_json(file_name)
+                if not df.empty:
+                    self.df_file = df
+                    self.on_apply_query()
 
             # 更新数据源显示
             if self.source_combo.currentText() != "File":
@@ -722,6 +725,9 @@ class KlineBackupViewer(QMainWindow):
                         return
 
                 df = pd.read_hdf(file_path, key=key)
+
+            elif ext in (".json", ".gz"):
+                df = self._load_session_json(file_path)
 
             else:
                 self.stats_label.setText(f"Unsupported file type: {ext}")
@@ -963,10 +969,10 @@ class KlineBackupViewer(QMainWindow):
             else:
                 detail_df = df_full[df_full['code'] == code].copy()
             
-            if 'time' in detail_df.columns:
-                detail_df = detail_df.sort_values('time', ascending=False)
-            elif 'ticktime' in detail_df.columns:
-                detail_df = detail_df.sort_values('ticktime', ascending=False)
+            # 详情表排序 (双兼容 time / ticktime)
+            time_cols = [c for c in ['time', 'ticktime', 'timestamp'] if c in detail_df.columns]
+            if time_cols:
+                detail_df = detail_df.sort_values(time_cols[0], ascending=False)
             
             # Calculate vol_ratio
             if hasattr(self, 'last6vol_map') and code in self.last6vol_map:
@@ -1224,6 +1230,93 @@ class KlineBackupViewer(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Delete Failed: {e}")
             print(f"DEBUG: Delete by Time Error: {e}")
+
+    def _load_session_json(self, file_path: str) -> pd.DataFrame:
+        """解析 bidding_session_data.json.gz 或 json 格式"""
+        try:
+            if file_path.endswith('.gz'):
+                with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            
+            # 转换为 DataFrame
+            rows = []
+            stock_scores = data.get('stock_scores', {})
+            momentum_scores = data.get('momentum_scores', {})
+            watchlist = data.get('watchlist', {})
+            sector_data = data.get('sector_data', {})
+            meta_data = data.get('meta_data', {})
+            
+            # [FALLBACK] 从本地 selection_log.csv 加载名称与形态作为补充
+            fallback_meta = {}
+            try:
+                local_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selection_log.csv")
+                if os.path.exists(local_csv):
+                    f_df = pd.read_csv(local_csv)
+                    if 'code' in f_df.columns:
+                        f_df['code'] = f_df['code'].astype(str).str.zfill(6)
+                        if 'date' in f_df.columns:
+                            f_df = f_df.sort_values('date', ascending=False)
+                        f_df = f_df.drop_duplicates('code')
+                        for r in f_df.itertuples():
+                            fallback_meta[r.code] = {
+                                'name': getattr(r, 'name', ''),
+                                'reason': getattr(r, 'reason', '')
+                            }
+            except:
+                pass
+
+            # 并联所有个股信息
+            all_codes = set(stock_scores.keys()) | set(momentum_scores.keys()) | set(watchlist.keys()) | set(meta_data.keys())
+            
+            # 建立板块反向映射 code -> [sectors]
+            code_to_sectors = {}
+            for sector, info in sector_data.items():
+                leader = info.get('leader')
+                followers = info.get('followers', [])
+                if leader:
+                    code_to_sectors.setdefault(leader, []).append(f"{sector}(L)")
+                for f in followers:
+                    code_to_sectors.setdefault(f, []).append(sector)
+
+            for code in all_codes:
+                w_info = watchlist.get(code, {})
+                m_info = meta_data.get(code, {})
+                f_info = fallback_meta.get(code, {})
+                
+                # 优先级：关注池 > 会话元数据 > 本地历史日志
+                final_name = w_info.get('name') or m_info.get('name') or f_info.get('name') or ''
+                final_pattern = w_info.get('pattern_hint') or m_info.get('reason') or f_info.get('reason') or ''
+
+                rows.append({
+                    'code': code,
+                    'name': final_name,
+                    'score': stock_scores.get(code, 0.0),
+                    'momentum': momentum_scores.get(code, 0.0),
+                    'watchlist': 1 if code in watchlist else 0,
+                    'reason': w_info.get('reason', ''),
+                    'pattern': final_pattern,
+                    'sectors': ",".join(code_to_sectors.get(code, [])),
+                    'time': os.path.getmtime(file_path),
+                    'type': 'SESSION'
+                })
+            
+            if not rows:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(rows)
+            # 排序：有分数的排前面
+            if not df.empty:
+                df.sort_values(['score', 'momentum'], ascending=False, inplace=True)
+            return df
+            
+        except Exception as e:
+            print(f"Error parsing session JSON: {e}")
+            if hasattr(self, 'statusBar'):
+                self.statusBar().showMessage(f"JSON Parse Error: {e}")
+            return pd.DataFrame()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

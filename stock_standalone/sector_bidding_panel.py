@@ -57,12 +57,18 @@ def _ascii_kline(klines: List[dict], width: int = 24) -> str:
 class NumericTableWidgetItem(QTableWidgetItem):
     """支持数值排序的表格项"""
     def __lt__(self, other):
+        if not isinstance(other, QTableWidgetItem):
+            return super().__lt__(other)
         try:
-            # 移除百分号和正号进行比较
-            t1 = self.text().replace('%', '').replace('+', '')
-            t2 = other.text().replace('%', '').replace('+', '')
-            return float(t1) < float(t2)
-        except (ValueError, TypeError):
+            # 提取主要数值：处理 "38.5 (↑1.2)" 这种格式，只取前面的 38.5
+            def get_val(item):
+                text = item.text().replace('%', '').replace('+', '').strip()
+                if '(' in text:
+                    text = text.split('(')[0].strip()
+                return float(text)
+            
+            return get_val(self) < get_val(other)
+        except (ValueError, TypeError, IndexError):
             return super().__lt__(other)
 
 
@@ -189,15 +195,17 @@ class TimeAxisItem(pg.AxisItem):
 class NumericTableWidgetItem(QTableWidgetItem):
     """自定义表格项，支持数值排序而不是字符串字典排序"""
     def __lt__(self, other):
-        if isinstance(other, QTableWidgetItem):
-            try:
-                # 去除可能的百分号和加号再转换为浮点数
-                val_self = float(self.text().replace('%', '').replace('+', '').strip())
-                val_other = float(other.text().replace('%', '').replace('+', '').strip())
-                return val_self < val_other
-            except ValueError:
-                pass # 回退到普通字符串比较
-        return super().__lt__(other)
+        if not isinstance(other, QTableWidgetItem):
+            return super().__lt__(other)
+        try:
+            def get_val(item):
+                text = item.text().replace('%', '').replace('+', '').strip()
+                if '(' in text:
+                    text = text.split('(')[0].strip()
+                return float(text)
+            return get_val(self) < get_val(other)
+        except (ValueError, TypeError, IndexError):
+            return super().__lt__(other)
 
 class DetailedChartDialog(QDialog):
     """双击弹出的详细分时图窗口 (带成交量、多重参考线及全量实时数据)"""
@@ -375,11 +383,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._sort_col = 4             # 默认按涨幅排序
         self._sort_asc = False
 
-        self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
-        self.resize(1100, 680)
-        self._init_ui()
-        self._restore_geometry()
-
         # 状态记录
         self._is_populating = False
         self._last_selected_code = None
@@ -387,15 +390,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._force_update_requested = False
         self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
 
-        # Async Data Processing Worker - DON'T parent thread to widget!
-        # Parenting to QWidget causes Qt to delete the thread when the widget is destroyed,
-        # even if the thread is still running. Manage lifecycle manually instead.
+        self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
+        self.resize(1100, 680)
+        
+        # Async Data Processing Worker - MUST be before UI init
         self._worker_thread = QThread()  # No parent - managed manually
         self._worker = DataProcessWorker(self.detector)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.process_data)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker_thread.start()
+
+        self._init_ui()
+        self._restore_geometry()
 
         # UI 刷新计时器 (保持定义但默认不启动，作为 fallback 或数据中断时的兜底)
         self._refresh_timer = QTimer(self)
@@ -555,15 +562,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_hide.clicked.connect(self.hide)
         bar_lay_2.addWidget(self.btn_hide)
 
-        # [NEW] 板块综合强度过滤
-        bar_lay_2.addWidget(self._sep())
-        lbl_strength = QLabel("🔥 强度≥")
-        lbl_strength.setStyleSheet("color: #ff3333; font-weight: bold;")
-        bar_lay_2.addWidget(lbl_strength)
-        self.spin_strength = self._make_spin(0.0, 500.0, 1.0, self.detector.sector_score_threshold)
-        self.spin_strength.setToolTip("过滤核心强度(板分)较低的噪点板块")
-        self.spin_strength.valueChanged.connect(self._on_threshold_changed)
-        bar_lay_2.addWidget(self.spin_strength)
 
         # ── [NEW] SBC Test Buttons ──
         bar_lay_2.addWidget(self._sep())
@@ -597,7 +595,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         bar_lay_3.addWidget(QLabel("🎯 个股分≥"))
         self.spin_score_threshold = self._make_spin(0.0, 20.0, 0.5, self.detector.score_threshold)
+        self.spin_score_threshold.valueChanged.connect(self._on_strategy_changed)
         bar_lay_3.addWidget(self.spin_score_threshold)
+        
+        bar_lay_3.addWidget(self._sep())
+        
+        bar_lay_3.addWidget(QLabel(" 观测时长:"))
+        self.btn_sub_10 = QPushButton("-10m")
+        self.btn_sub_10.setFixedWidth(45)
+        self.btn_sub_10.clicked.connect(lambda: self._adjust_interval(-10))
+        bar_lay_3.addWidget(self.btn_sub_10)
+        
+        self.lbl_interval = QLabel(f"{int(self.detector.comparison_interval/60)}m")
+        self.lbl_interval.setStyleSheet("color: #00ff88; font-weight: bold; min-width: 30px;")
+        self.lbl_interval.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bar_lay_3.addWidget(self.lbl_interval)
+        
+        self.btn_add_10 = QPushButton("+10m")
+        self.btn_add_10.setFixedWidth(45)
+        self.btn_add_10.clicked.connect(lambda: self._adjust_interval(10))
+        bar_lay_3.addWidget(self.btn_add_10)
+
+        bar_lay_3.addStretch()
 
         bar_lay_3.addWidget(QLabel(" 🏗️ 板块分≥"))
         self.spin_sector_min_score = self._make_spin(0.0, 50.0, 0.5, self.detector.sector_min_score)
@@ -931,7 +950,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ------------------------------------------------------------------ UI refresh
     def _refresh_sector_list(self):
-        # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
+        # 1. 安全检查，防止初始化过程中的过早调用
+        if not hasattr(self, '_worker') or self._worker is None:
+            return
+            
+        # 2. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
         if self._worker.df_queue:
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
@@ -988,11 +1011,27 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             item_name.setForeground(QColor(color))
             self.sector_table.setItem(i, 0, item_name)
             
-            # 第二列：强度 (数值以便排序)
+            # 第二列：强度 (显示当前值及变动箭头)
             from sector_bidding_panel import NumericTableWidgetItem
-            item_score = NumericTableWidgetItem(f"{sc:.1f}")
+            
+            diff = sdata.get('score_diff', 0.0)
+            simple_arrow = ""
+            if diff > 0.1:
+                simple_arrow = f" (↑{diff:+.1f})"
+            elif diff < -0.1:
+                simple_arrow = f" (↓{diff:+.1f})"
+                
+            item_score = NumericTableWidgetItem(f"{sc:.1f}{simple_arrow}")
             item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_score.setForeground(QColor(color))
+            
+            # 颜色逻辑：如果有显著增长变红，显著下跌变绿
+            if diff > 0.1:
+                item_score.setForeground(QColor("#FF4444"))
+            elif diff < -0.1:
+                item_score.setForeground(QColor("#44CC44"))
+            else:
+                item_score.setForeground(QColor(color))
+                
             self.sector_table.setItem(i, 1, item_score)
             
             # 第三列：龙头股 (名+幅)
@@ -1690,7 +1729,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_threshold_changed(self, val):
         """同步强度门槛到 detector 并刷新列表"""
         self.detector.sector_score_threshold = float(val)
+        # 板块分改变，通常也意味着观测锚点的重新审视 (可选：不一定要重置锚点)
         self._refresh_sector_list()
+
+    def _adjust_interval(self, delta_m: int):
+        """调节对比时长 (分钟)"""
+        curr_m = int(self.detector.comparison_interval / 60)
+        new_m = max(1, curr_m + delta_m)
+        self.detector.comparison_interval = new_m * 60
+        self.lbl_interval.setText(f"{new_m}m")
+        # 调节时间意味着对比基准变了，重置所有锚点
+        self.detector.sector_anchors.clear()
+        self.manual_refresh()
 
     def _on_strategy_changed(self):
         s = self.detector.strategies
@@ -1761,6 +1811,48 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 q_vs_state = to_qba(vs_state_hex)
                 if q_vs_state:
                     self.v_splitter.restoreState(q_vs_state)
+            
+            # [NEW] 恢复业务参数
+            try:
+                if "score_threshold" in p_data:
+                    self.spin_score_threshold.setValue(p_data["score_threshold"])
+                if "pct_min" in p_data:
+                    self.spin_pct_min.setValue(p_data["pct_min"])
+                if "pct_max" in p_data:
+                    self.spin_pct_max.setValue(p_data["pct_max"])
+                if "vol_ratio" in p_data:
+                    self.spin_vol_ratio.setValue(p_data["vol_ratio"])
+                if "comparison_interval_min" in p_data:
+                    ival = p_data["comparison_interval_min"]
+                    self.detector.comparison_interval = ival * 60
+                    self.lbl_interval.setText(f"{ival}m")
+                
+                # 恢复勾选状态
+                strat_data = p_data.get("strategies", {})
+                if strat_data:
+                    self.cb_new_high.setChecked(strat_data.get('new_high', True))
+                    self.cb_ma_rebound.setChecked(strat_data.get('ma_rebound', True))
+                    self.cb_surge_vol.setChecked(strat_data.get('surge_vol', True))
+                    self.cb_consec.setChecked(strat_data.get('consecutive_up', True))
+                
+                if "cb_log" in p_data:
+                    self.cb_log.setChecked(p_data["cb_log"])
+
+                # [NEW] 补充缺失的持久化参数
+                if "sector_min_score" in p_data:
+                    self.spin_sector_min_score.setValue(p_data["sector_min_score"])
+                if "amplitude_min" in p_data:
+                    self.spin_amplitude_min.setValue(p_data["amplitude_min"])
+                if "consec_bars" in p_data:
+                    self.spin_consec_bars.setValue(p_data["consec_bars"])
+                if "sector_score_threshold" in p_data:
+                    # 优先使用 spin_sector_score_threshold
+                    self.spin_sector_score_threshold.setValue(p_data["sector_score_threshold"])
+
+                # 同步到 detector
+                self._on_strategy_changed()
+            except Exception as e:
+                logger.warning(f"Error restoring business settings: {e}")
                 
             logger.info(f"♻️ [UI] 布局已从 {os.path.basename(WINDOW_CONFIG_FILE)} 恢复")
         except Exception as e:
@@ -1792,6 +1884,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             p_data["geometry"] = to_hex(self.saveGeometry())
             p_data["splitter_state"] = to_hex(self.splitter.saveState())
             p_data["v_splitter_state"] = to_hex(self.v_splitter.saveState())
+            
+            # [NEW] 持久化所有过滤设置
+            p_data["score_threshold"] = self.spin_score_threshold.value()
+            p_data["sector_score_threshold"] = self.spin_sector_score_threshold.value()
+            p_data["sector_min_score"] = self.spin_sector_min_score.value()
+            p_data["amplitude_min"] = self.spin_amplitude_min.value()
+            p_data["consec_bars"] = self.spin_consec_bars.value()
+            
+            p_data["pct_min"] = self.spin_pct_min.value()
+            p_data["pct_max"] = self.spin_pct_max.value()
+            p_data["vol_ratio"] = self.spin_vol_ratio.value()
+            p_data["comparison_interval_min"] = int(self.detector.comparison_interval / 60)
+            
+            # 策略勾选状态
+            p_data["strategies"] = {
+                k: v.get('enabled', False) for k, v in self.detector.strategies.items()
+            }
+            p_data["cb_log"] = self.cb_log.isChecked()
+            
             p_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             config[SETTINGS_SECTION] = p_data
@@ -1825,21 +1936,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"Rearrange error: {e}")
 
-    def closeEvent(self, event):
-        self._refresh_timer.stop()
-        self._score_timer.stop()
-        self._save_geometry()
-        
-        # [NEW] 显式保存竞价 session 数据
-        try:
-            if hasattr(self, 'detector') and self.detector:
-                self.detector.save_persistent_data()
-        except Exception as e:
-            logger.error(f"Error saving persistent data on close: {e}")
 
-        # 兼容旧接口
-        try:
-            self.save_window_position_qt_visual(self, "sector_bidding_panel")
-        except Exception:
-            pass
-        super().closeEvent(event)
+if __name__ == "__main__":
+    import sys
+    from PyQt6.QtWidgets import QApplication
+
+    # 配置基础日志
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # 简单的 MockMainWindow 以满足初始化需求
+    class MockMainWindow:
+        def __init__(self):
+            self.realtime_service = None
+
+    app = QApplication(sys.argv)
+    
+    # 尝试设置美观的暗色风格 (如果系统支持)
+    app.setStyle('Fusion')
+    
+    mock_win = MockMainWindow()
+    window = SectorBiddingPanel(main_window=mock_win)
+    window.show()
+    
+    sys.exit(app.exec())
