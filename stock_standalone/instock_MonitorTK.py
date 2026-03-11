@@ -4606,11 +4606,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, 'df_all') and stock_code in self.df_all.index:
             try:
                 row = self.df_all.loc[stock_code]
+                row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
                 extra_lines = {
-                    'last_close': float(row.get('lastp1d', 0)),
-                    'last_high':  float(row.get('lasth1d', 0)),
-                    'last_low':   float(row.get('lastl1d', 0)),
-                    'high4':      float(row.get('high4', 0))
+                    'last_close': float(row_dict.get('lastp1d', 0)),
+                    'last_high':  float(row_dict.get('lasth1d', 0)),
+                    'last_low':   float(row_dict.get('lastl1d', 0)),
+                    'high4':      float(row_dict.get('high4', 0)),
+                    'df_all_row': row_dict  # 完整透传给 verify_sbc_pattern
                 }
             except Exception as e:
                 logger.warning(f"Failed to extract extra_lines for {stock_code}: {e}")
