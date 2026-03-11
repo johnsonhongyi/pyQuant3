@@ -2587,8 +2587,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.addWidget(self.stock_table)
 
         # 2. 右侧区域: 分离器 (日 K 线 + 分时图)
-        right_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.main_splitter.addWidget(right_splitter)
+        self.right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.addWidget(self.right_splitter)
 
         # 3. 初始状态：面板会在后面通过 _init_hotlist_and_signal_log 统一初始化
         # 我们在这里保留布局结构，但不反复实例化面板对象
@@ -2609,7 +2609,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.kline_plot.setLabel('left', '价格')
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.kline_plot.disableAutoRange()
-        right_splitter.addWidget(self.kline_widget)
+        self.right_splitter.addWidget(self.kline_widget)
 
         # ⭐ 安装 ViewBox 守护钩子 (锁定 X 轴, Y 轴自动)
         # self._install_viewbox_guard(self.kline_plot)
@@ -2627,7 +2627,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_plot.showGrid(x=True, y=True)
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.tick_plot.disableAutoRange()
-        right_splitter.addWidget(self.tick_widget)
+        self.right_splitter.addWidget(self.tick_widget)
 
         # ⭐ 安装分时图的 ViewBox 守护钩子
         # self._install_viewbox_guard(self.tick_plot)
@@ -2682,8 +2682,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_crosshair_label.setVisible(False)
 
         # 设置分割器大小 (80% 顶部, 20% 底部) - 给 K 线更多空间
-        # right_splitter.setSizes([800, 150])
-        right_splitter.setSizes([300, 100])  # 3:1 比例
+        # self.right_splitter.setSizes([800, 150])
+        self.right_splitter.setSizes([300, 100])  # 3:1 比例
 
         # 3. Filter Panel (Initially Hidden)
         self.filter_panel = QWidget()
@@ -5536,7 +5536,43 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⭐ 记录当前加载成功的股票代码
         self.current_day_df_code = code
+        # 1. 優先獲取可用於渲染的實時/模擬數據 (The "Ghost Bar" Source)
 
+        effective_tick_df = None
+        if tick_df is not None and not tick_df.empty:
+            effective_tick_df = tick_df
+        elif self._tick_cache.get(code):
+            # 即使 DataLoader 沒傳，如果快取有，也應該拿出來用
+            effective_tick_df = self._tick_cache.get(code).get("tick_df")
+
+        # 2. 決定是否執行詳細渲染 (包含幽靈 K 線)
+        should_render_detailed = (
+            self.realtime or self.show_strategy_simulation
+        ) and effective_tick_df is not None
+
+        if should_render_detailed:
+            logger.debug(
+                f"[InitialLoad] Detailed rendering for {code} (Realtime:{self.realtime}, Sim:{self.show_strategy_simulation})"
+            )
+            today_bar = tick_to_daily_bar(effective_tick_df)
+
+            # 注意：這裡直接調用渲染，確保模擬數據被帶入
+            self._capture_view_state()
+            with timed_ctx("render_charts_detailed", warn_ms=100):
+                # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
+                self.render_charts(code, self.day_df, effective_tick_df)
+
+            # 如果 realtime 真的有開，才去啟動定時刷新或同步狀態
+            if self.realtime:
+                self.on_realtime_update(code, effective_tick_df, today_bar)
+        else:
+            # 3. 兜底：純歷史數據渲染
+            logger.debug(f"[InitialLoad] historical rendering only for {code}")
+            self._capture_view_state()
+            with timed_ctx("render_charts_historical", warn_ms=100):
+                self.render_charts(code, self.day_df, None)
+
+        '''
         # ⭐ 核心修复：既然 DataLoaderThread 已经带回了最新的 tick_df，直接利用它来生成首个幽灵 K 线
         # 这样无论是否在交易时间，只要打开图表，就能看到最新的今天行情。
         # [FIX] 只要开启了实时模式 OR 开启了策略模拟，都应该尝试使用 tick_df 进行详细渲染
@@ -5571,7 +5607,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._capture_view_state()
                 with timed_ctx("render_charts", warn_ms=100):
                     self.render_charts(code, self.day_df, None)
-        
+        '''
         # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
         # self._reset_kline_view(self.day_df)
 
@@ -6916,9 +6952,13 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.show_status_message(f"📋 已复制代码: {code}", 3000)
                     logger.info(f"[Table] Copied to clipboard: {code}")
                 
-                # [NEW] 双击代码列同时执行 SBC 回放分析
-                self._run_sbc_test(False, code)
-
+        if column == 1:  # Name列
+            code_item = self.stock_table.item(row, 0)
+            if code_item:
+                code = code_item.data(Qt.ItemDataRole.UserRole) or code_item.text()
+                if code:
+                    # [NEW] 双击代码列同时执行 SBC 回放分析
+                    self._run_sbc_test(False, code)
 
     def switch_stock_prev(self):
         """切换至上一只股票 (1.1/1.2 Context navigation)"""
@@ -8277,7 +8317,8 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         渲染完整图表...
         """
-
+        # print(f'self.right_splitter.count():{self.right_splitter.count()}\n')
+        
         if day_df.empty:
             # [FIX] 只有当 code 发生变化且数据为空时才彻底清理。
             # 如果是同一只股由于某种原因触发了空渲染，我们选择保留旧图，防止“闪没”

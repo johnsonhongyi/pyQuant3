@@ -7,7 +7,12 @@ from typing import Tuple,List,Dict
 from JohnsonUtil import LoggerFactory
 import logging
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, scrolledtext
+
+try:
+    from tk_gui_modules.window_mixin import WindowMixin
+except ImportError:
+    WindowMixin = None
 
 # 获取或创建日志记录器
 logger: logging.Logger = LoggerFactory.getLogger("instock_TK.StockLogic")
@@ -108,22 +113,7 @@ def remove_invalid_conditions(query: str, invalid_cols: list[str]) -> str:
 #     }
 #     return {t for t in tokens if not t.isupper() and t not in keywords}
 
-def format_check_result(results: list[dict]) -> str:
-    lines = []
-    for i, r in enumerate(results, 1):
-        lines.append(f"[条件 {i}]")
-        lines.append(f"  表达式: {r['expr']}")
-        lines.append(f"  是否通过: {'✅ 是' if r['ok'] else '❌ 否'}")
 
-        if not r["ok"]:
-            if r["reason"] == "missing_columns":
-                lines.append("  缺失字段:")
-                for c in r["missing"]:
-                    lines.append(f"    - {c}")
-            else:
-                lines.append(f"  失败原因: {r['reason']}")
-        lines.append("")  # 空行
-    return "\n".join(lines)
 
 
 def extract_columns(expr: str) -> set:
@@ -226,9 +216,8 @@ def check_code(
     parent=None
 ) -> Any:
     """
-    使用 Tk 弹窗显示股票检查报告
+    使用 Tk 自定义弹窗显示股票检查报告，并支持显示字段详情。
     """
-
     if code not in df.index:
         messagebox.showwarning(
             "股票检查",
@@ -238,14 +227,158 @@ def check_code(
         return None
 
     df_code = df.loc[[code]]
+    # 使用 test_code_query 获取拆分后的结果
     report = test_code_query(df_code, queries)
-    text = format_check_result(report)
+    summary_text = format_check_result(report)
 
-    messagebox.showinfo(
-        f"股票检查报告 - {code}",
-        text,
-        parent=parent
-    )
+    # 创建自定义报告窗口
+    win = tk.Toplevel(parent)
+    win.title(f"股票检查报告 - {code}")
+    bg_color = "#E3F2FD"  # 淡蓝色背景
+    win.configure(bg=bg_color)
+    
+    report_win_name = "check_report_win"
+    w_win, h_win = 750, 500
+    
+    # 尝试加载上次保存的位置大小
+    loaded = False
+    scale_factor = getattr(parent, 'scale_factor', 1.0)
+    
+    if parent and hasattr(parent, 'load_window_position'):
+        _, _, lx, ly = parent.load_window_position(win, report_win_name, default_width=w_win, default_height=h_win)
+        if lx is not None:
+            loaded = True
+    elif WindowMixin:
+        helper = WindowMixin()
+        helper.scale_factor = scale_factor
+        _, _, lx, ly = helper.load_window_position(win, report_win_name, default_width=w_win, default_height=h_win)
+        if lx is not None:
+            loaded = True
+        
+    if not loaded:
+        # 如果没有保存的位置，则按之前要求：使右下角对齐鼠标指针
+        mx, my = win.winfo_pointerx(), win.winfo_pointery()
+        win.geometry(f"{w_win}x{h_win}+{max(0, mx - w_win)}+{max(0, my - h_win)}")
+    
+    if parent:
+        win.transient(parent)
+
+    def on_close_report():
+        """关闭时保存位置"""
+        if parent and hasattr(parent, 'save_window_position'):
+            parent.save_window_position(win, report_win_name)
+        elif WindowMixin:
+            helper = WindowMixin()
+            helper.scale_factor = scale_factor
+            helper.save_window_position(win, report_win_name)
+        win.destroy()
+        
+    win.protocol("WM_DELETE_WINDOW", on_close_report)
+
+    # 结果显示区域
+    tk.Label(win, text="[ 检查结果摘要 ]", font=("微软雅黑", 10, "bold"), bg=bg_color).pack(anchor="w", padx=10, pady=5)
+    
+    st = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=15)
+    st.pack(fill="both", expand=True, padx=10, pady=5)
+    st.insert(tk.END, summary_text)
+    st.config(state=tk.DISABLED)
+
+    def show_all_details():
+        """显示所有字段的值 (按顺序 col: 值)"""
+        details_win = tk.Toplevel(win)
+        details_win.title(f"数据详情内容 - {code}")
+        details_win.configure(bg=bg_color)
+        
+        detail_win_name = "check_details_win"
+        w_det, h_det = 500, 800
+        
+        # 尝试加载位置
+        loaded_det = False
+        if parent and hasattr(parent, 'load_window_position'):
+            _, _, lx, ly = parent.load_window_position(details_win, detail_win_name, default_width=w_det, default_height=h_det)
+            if lx is not None:
+                loaded_det = True
+        elif WindowMixin:
+            helper = WindowMixin()
+            helper.scale_factor = scale_factor
+            _, _, lx, ly = helper.load_window_position(details_win, detail_win_name, default_width=w_det, default_height=h_det)
+            if lx is not None:
+                loaded_det = True
+
+        if not loaded_det:
+            # 调整位置：使右下角对齐鼠标指针
+            mx, my = details_win.winfo_pointerx(), details_win.winfo_pointery()
+            details_win.geometry(f"{w_det}x{h_det}+{max(0, mx - w_det)}+{max(0, my - h_det)}")
+
+        def on_close_details():
+            if parent and hasattr(parent, 'save_window_position'):
+                parent.save_window_position(details_win, detail_win_name)
+            elif WindowMixin:
+                helper = WindowMixin()
+                helper.scale_factor = scale_factor
+                helper.save_window_position(details_win, detail_win_name)
+            details_win.destroy()
+            
+        details_win.protocol("WM_DELETE_WINDOW", on_close_details)
+        
+        row_dict = df.loc[code].to_dict()
+        
+        # 提取查询中涉及的列以便高亮或优先显示
+        used_cols = set()
+        for r in report:
+            if 'expr' in r:
+                used_cols.update(extract_columns(r['expr']))
+        
+        lines = []
+        if used_cols:
+            lines.append(">>> 查询涉及的关键字段:")
+            for c in sorted(list(used_cols)):
+                lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
+            lines.append("-" * 40)
+            
+        lines.append(">>> 所有字段列表 (DataFrame 顺序):")
+        for c in df.columns:
+            lines.append(f"{c}: {row_dict.get(c, 'N/A')}")
+            
+        detail_text = "\n".join(lines)
+        
+        dst = scrolledtext.ScrolledText(details_win, wrap=tk.WORD)
+        dst.pack(fill="both", expand=True, padx=10, pady=10)
+        dst.insert(tk.END, detail_text)
+        dst.config(state=tk.DISABLED)
+        
+        # 增加一个简单的查找/过滤功能
+        filter_frame = tk.Frame(details_win, bg=bg_color)
+        filter_frame.pack(fill="x", padx=10, pady=5)
+        tk.Label(filter_frame, text="过滤字段:", bg=bg_color).pack(side="left")
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(filter_frame, textvariable=search_var)
+        search_entry.pack(side="left", fill="x", expand=True, padx=5)
+        
+        def on_search(*args):
+            query = search_var.get().lower()
+            filtered_lines = [line for line in lines if query in line.lower()]
+            dst.config(state=tk.NORMAL)
+            dst.delete("1.0", tk.END)
+            dst.insert(tk.END, "\n".join(filtered_lines))
+            dst.config(state=tk.DISABLED)
+            
+        search_var.trace_add("write", on_search)
+
+    # 按钮栏
+    btn_frame = tk.Frame(win, bg=bg_color)
+    btn_frame.pack(fill="x", pady=10)
+    
+    btn_details = tk.Button(btn_frame, text="显示详情", command=show_all_details, 
+                            bg="#2196F3", fg="white", font=("微软雅黑", 9, "bold"))
+    btn_details.pack(side="left", padx=20)
+    
+    btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report)
+    btn_close.pack(side="right", padx=20)
+
+    # 确保窗口在前台
+    win.lift()
+    win.focus_force()
 
     return report
 
