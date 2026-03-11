@@ -954,32 +954,54 @@ class DataLoaderThread(QThread):
             # 使用 QMutexLocker 自动管理锁定和解锁
             if self._search_code == self.code and self._resample == self.resample:
                 return  # 数据已经加载过，不重复
-                
-            with QMutexLocker(self.mutex_lock):
-                # 1. Fetch Daily Data (Historical)
-                # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
-                with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-                    # 根据 fastohlc 参数决定是否加载完整指标 (如 ma60d 等 SBC 基准)
-                    day_df = tdd.get_tdx_Exp_day_to_df(
-                        self.code, 
-                        dl=Resample_LABELS_Days[self.resample], 
-                        resample=self.resample, 
-                        fastohlc=self.fastohlc
-                    )
-                    # logger.debug(f'resample_keys: {self.resample}  dl: {Resample_LABELS_Days[self.resample]} day_df:{day_df[-3:]}')
+            
+            day_df = pd.DataFrame()
+            tick_df = pd.DataFrame()
 
-                    # 2. Fetch Realtime/Tick Data (Intraday)
-                # 强制对齐 verify_sbc_pattern.py 的数据质量：启用 enrich_data=True
-                with timed_ctx("get_real_time_tick", warn_ms=800):
-                    tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
-                    # print(f'tick_df:{tick_df}')                    
+            # 1. Fetch Daily Data (Historical) with Retry
+            for attempt in range(3):
+                try:
+                    with QMutexLocker(self.mutex_lock):
+                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt}", warn_ms=800):
+                            day_df = tdd.get_tdx_Exp_day_to_df(
+                                self.code, 
+                                dl=Resample_LABELS_Days[self.resample], 
+                                resample=self.resample, 
+                                fastohlc=self.fastohlc
+                            )
+                    if not day_df.empty:
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.warning(f"Final attempt failed for day_df {self.code}: {e}")
+                    else:
+                        time.sleep(0.05 * (attempt + 1))
+            
+            # 2. Fetch Realtime/Tick Data (Intraday) with Retry
+            for attempt in range(3):
+                try:
+                    with QMutexLocker(self.mutex_lock):
+                        with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=800):
+                            tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
+                    if not tick_df.empty:
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.warning(f"Final attempt failed for tick_df {self.code}: {e}")
+                    else:
+                        time.sleep(0.05 * (attempt + 1))
+
+            if day_df.empty and tick_df.empty:
+                logger.error(f"Failed to load any data for {self.code} after retries")
+
             self._search_code = self.code
             self._resample = self.resample
             with timed_ctx("emit", warn_ms=800):
                 self.data_loaded.emit(self.code, day_df, tick_df)
+
         except Exception:
-            # ⭐ 核心改进：使用 logger.exception 自动记录完整堆栈，并确保信号发出
-            logger.exception(f"DataLoaderThread Error for {self.code}")
+            logger.exception(f"DataLoaderThread Critical Error for {self.code}")
+            # 注意：即便出错也 emit，否则 UI 线程可能一直处于等待状态
             self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
         finally:
             logger.debug(f"[DataLoaderThread] Thread for {self.code} is exiting run().")
@@ -5484,12 +5506,21 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_initial_loaded(self, code, day_df, tick_df):
         # ⚡ 立即更新标题,清除 "Loading..." 状态
-        if not day_df.empty:
+        if day_df is not None and not day_df.empty:
             self._update_plot_title(code, day_df, tick_df)
 
         # 检查是否是当前请求的代码
         if code != self.current_code:
             logger.debug(f"[Rapid Browse] Discarding outdated result for {code}, current is {self.current_code}")
+            return
+
+        # [FIX] 如果加载失败(empty)且我们已经有该股的数据，则不要覆盖(防止图表消失)
+        if (day_df is None or day_df.empty) and not self.day_df.empty and self.current_day_df_code == code:
+            logger.warning(f"[InitialLoad] RECEIVED EMPTY DATA for {code}, but keeping existing data to prevent clearing.")
+            # 尝试使用缓存补全实时
+            cached = self._tick_cache.get(code)
+            if cached:
+                self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
             return
 
         # ⚡ 过滤掉今天的数据，只保留过去的日 K
@@ -8244,21 +8275,17 @@ class MainWindow(QMainWindow, WindowMixin):
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
         """
-        渲染完整图表：
-          - 日 K 线 + MA5/10/20 + 布林带 + 信号
-          - 成交量 + 成交量 MA5
-          - 实时幽灵 K 线 (Ghost Candle)
-          - 实时分时图 + 均价线 + 昨日收盘参考线
-          - 主题感知
-          - 顶层信号箭头
+        渲染完整图表...
         """
 
-
         if day_df.empty:
-            self.kline_plot.setTitle(f"{code} - No Data")
-            self.tick_plot.setTitle("No Tick Data")
-            # 清理旧图形，防止切股后还有残留
-            self.kline_plot.clear()
+            # [FIX] 只有当 code 发生变化且数据为空时才彻底清理。
+            # 如果是同一只股由于某种原因触发了空渲染，我们选择保留旧图，防止“闪没”
+            if self.current_day_df_code != code:
+                self.kline_plot.setTitle(f"{code} - No Data")
+                self.tick_plot.setTitle("No Tick Data")
+                # 清理旧图形，防止切股后还有残留
+                self.kline_plot.clear()
             self.tick_plot.clear()
             if hasattr(self, 'volume_plot'):
                 self.volume_plot.clear()

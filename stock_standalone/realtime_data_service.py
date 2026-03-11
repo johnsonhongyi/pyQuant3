@@ -1664,6 +1664,8 @@ class DataPublisher:
         self.max_batch_time = 0.0
         self.batch_rates_dq = deque(maxlen=10) # Last 10 batch rates (rows/sec)
         
+        self._last_save_ts = self.start_time  # [FIX] Prevent immediate save on startup
+
         # 55188 External Data Integration
         self.scraper_55188 = Scraper55188()
         self.ext_data_55188 = pd.DataFrame()

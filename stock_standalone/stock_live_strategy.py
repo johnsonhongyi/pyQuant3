@@ -1929,8 +1929,7 @@ class StockLiveStrategy:
             
             return True, f"强力竞价确认: 高开{pct:.2f}% 量{vol_int} (具备强结构)"
 
-        vol_int = int(volume) if not pd.isna(volume) else 0
-        return True, f"竞价达标: 高开{pct:.2f}% 量{vol_int}"
+        
             
         # Shadow Engine record for near misses
         if 0 <= pct <= 10.0:
@@ -2128,17 +2127,23 @@ class StockLiveStrategy:
                     traceback.print_exc()
             # --- [NEW] 检查跟单队列触发 ---
             self._process_follow_queue(df, resample)
-            # 过滤对应周期的监控项
-            monitored_keys = self._monitored_stocks.keys()
-            filtered_keys = [k for k in monitored_keys if self._monitored_stocks[k].get('resample', 'd') == resample]
-            
+            # --- [优化] 线程安全地获取监控键名列表 ---
+            monitored_snapshot = dict(self._monitored_stocks) # 浅拷贝，防止迭代中变动
+            filtered_keys = [k for k, v in monitored_snapshot.items() if v.get('resample', 'd') == resample]
             valid_keys = [k for k in filtered_keys if k.split('_')[0] in df.index]
             now = time.time()  # 使用时间戳，与 last_alert 等保持类型一致
             for key in valid_keys:
-                data = self._monitored_stocks[key]
-                code = data.get('code', key.split('_')[0])
-                last_alert = data.get('last_alert', 0)
-                # logger.debug(f"{code} data:{data}")
+                try:
+                    # 再次防御性检查 Key 存在性
+                    if key not in self._monitored_stocks:
+                        continue
+                        
+                    data = self._monitored_stocks[key]
+                    code = data.get('code', key.split('_')[0])
+                    last_alert = data.get('last_alert', 0)
+                except Exception as e:
+                    logger.error(f"提取股票基础信息异常 {key}: {e}")
+                    continue
 
                 # ---------- 冷却判断 ----------
                 if now - last_alert < self._alert_cooldown:
@@ -2148,21 +2153,21 @@ class StockLiveStrategy:
                 # [SAFEGUARD] Ensure row is a dict and handle potential duplicate indices
                 row_raw = df.loc[code]
                 row_series = row_raw.iloc[0] if isinstance(row_raw, pd.DataFrame) else row_raw
-                row: dict[str, Any] = row_series.to_dict() # type: ignore
+                row = row_series.to_dict()
                 messages = []  # [Fix] 提前初始化 messages，供日/日内形态检测使用
 
                 # ---------- 安全获取行情数据 ----------
                 try:
-                    current_price = float(row.get('trade', 0.0)) # type: ignore
-                    current_nclose = float(row.get('nclose', 0.0)) # type: ignore
-                    current_change = float(row.get('percent', 0.0)) # type: ignore
-                    volume_change = float(row.get('volume', 0.0)) # type: ignore
+                    current_price = float(row.get('trade', 0.0))
+                    current_nclose = float(row.get('nclose', 0.0))
+                    current_change = float(row.get('percent', 0.0))
+                    volume_change = float(row.get('volume', 0.0))
                     if volume_change > 500: volume_change = 1.0 # 防御处理：若数值巨大则视为原始成交量，量比回退至 1.0
-                    ratio_change = float(row.get('ratio', 0.0)) # type: ignore
+                    ratio_change = float(row.get('ratio', 0.0))
                     # ma5d_change, ma10d_change 仅获取确保存在，但不直接使用
-                    _ = float(row.get('ma5d', 0.0)) # type: ignore
-                    _ = float(row.get('ma10d', 0.0)) # type: ignore
-                    current_high = float(row.get('high', 0.0)) # type: ignore
+                    _ = float(row.get('ma5d', 0.0))
+                    _ = float(row.get('ma10d', 0.0))
+                    current_high = float(row.get('high', 0.0))
                 except (ValueError, TypeError) as e:
                     logger.warning(f"{code} 行情数据异常: {e}")
                     continue
@@ -2646,36 +2651,29 @@ class StockLiveStrategy:
                             if time.time() - last_sync > 60: # Every 60s
                                 try:
                                     hub = get_trading_hub()
-                                    # Sync current phase if not synced recently
-                                    new_note = f"[{new_phase.value}] {phase_reason}"
-                                    # Use update_follow_status but only if different? 
-                                    # To avoid DB spam, we blindly update notes timestamp
+                                    new_note = f"[{new_phase.value}] 持仓续航"
                                     hub.update_follow_status(code, notes=new_note)
                                     snap['phase_synced_ts'] = time.time()
                                 except Exception: pass
 
                         # 4. 根据状态获取目标仓位
                         target_pos_ratio = self.phase_engine.get_target_position(new_phase)
-                        # 将状态机的建议注入到 decision (作为参考或覆盖)
-                        # 如果 decision 原本是 HOLD，但状态机说 SCOUT(10%)，是否要买入?
-                        # 策略融合：以状态机为指导上限
-                        
-                        # Case A: 状态机处于持有阶段 (SCOUT/ACC/LAUNCH/SURGE)
-                        if new_phase not in (TradePhase.IDLE, TradePhase.EXIT, TradePhase.TOP_WATCH):
-                             # 如果 decision 还是 IDLE/HOLD，检查是否有必要补仓
-                             # 暂且只用来做风控上限约束
-                             pass
-                        
                         snap['phase_target_pos'] = target_pos_ratio
 
                     except Exception as e:
                         logger.error(f"Phase engine error {code}: {e}")
-
+                
+                if decision['action'] != "HOLD":
+                    messages.append(("RULE", f"决策引擎建议 {decision['action']}: {decision['reason']}"))
+                    
                 # --- ⭐ 影子策略并行运行 (Dual Strategy Optimization) ---
                 shadow_decision = self.shadow_engine.evaluate(row, snap)
                 
                 # --- ⭐ 盈利监理重磅拦截 (Supervision Veto) ---
                 is_vetoed, veto_reason = self.supervisor.veto(code, decision, row_series, snap)
+                    
+
+
 
                 # 记录影子差异 (Inject into debug info for later analysis)
                 if shadow_decision["action"] in ("买入", "加仓", "BUY", "ADD"):
@@ -2832,75 +2830,6 @@ class StockLiveStrategy:
                 except Exception as e:
                     pass
 
-                # # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
-                # if self.realtime_service:
-                #     try:
-                #         # Emotion Score
-                #         rt_emotion = self.realtime_service.get_emotion_score(code)
-                #         snap['rt_emotion'] = rt_emotion
-
-                #         # K-Line Pattern (V-Shape Reversal)
-                #         klines = self.realtime_service.get_minute_klines(code, n=30)
-                #         if len(klines) >= 15:
-                #             lows = [k['low'] for k in klines]
-                #             closes = [k['close'] for k in klines]
-                #             p_curr = closes[-1]
-                #             p_low = min(lows)
-                            
-                #             # Logic: Deep drop from start of window (>2%) + Significant Rebound (>1.5%)
-                #             p_start = closes[0]
-                #             if p_start > 0 and p_low > 0:
-                #                 drop = (p_low - p_start) / p_start
-                #                 rebound = (p_curr - p_low) / p_low
-                                
-                #                 if drop < -0.02 and rebound > 0.015:
-                #                     snap['v_shape_signal'] = True
-                #                     snap['rt_emotion'] += 15 # Bonus for reversal
-                #                     logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
-
-                #     except Exception as e:
-                #         logger.debug(f"Realtime service fetch error: {e}")
-
-                # # ---------- 决策引擎 ----------
-                # decision = self.decision_engine.evaluate(row, snap)
-                # logger.debug(f"Strategy: {code} ({data['name']}) Engine Result: {decision['action']} Score: {decision['debug'].get('实时买入分', 0)} Reason: {decision['reason']}")
-                
-                # # --- 状态记忆持久化 (New) ---
-                # if decision["action"] == "买入":
-                #     snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
-                #     snap["buy_triggered_today"] = True
-                # elif decision["action"] == "卖出":
-                #     snap["sell_triggered_today"] = True
-                
-                # # 记录最高分作为今日目标追踪
-                # snap["max_score_today"] = max(snap.get("max_score_today", 0), decision["debug"].get("实时买入分", 0))
-
-                # # 记录信号历史 (增强版：传递完整行情数据以便后续分析)
-                # row_data = {
-                #     'ma5d': float(row.get('ma5d', 0)),
-                #     'ma10d': float(row.get('ma10d', 0)),
-                #     'ma20d': float(row.get('ma20d', 0)),
-                #     'ma60d': float(row.get('ma60d', 0)),
-                #     'ratio': float(row.get('ratio', 0)),
-                #     'volume': float(row.get('volume', 0)),
-                #     'nclose': current_nclose,
-                #     'high': current_high,
-                #     'low': float(row.get('low', 0)),
-                #     'open': float(row.get('open', 0)),
-                #     'percent': current_change,
-                #     'turnover': float(row.get('turnover', 0)),
-                #     'win': snap.get('win', 0),
-                #     'red': snap.get('red', 0),
-                #     'gren': snap.get('gren', 0),
-                #     'sum_perc': snap.get('sum_perc', 0),
-                #     'low10': snap.get('low10', 0),
-                #     'lower': snap.get('lower', 0),
-                #     'highest_today': snap.get('highest_today', current_high),
-                #     'pump_height': snap.get('pump_height', 0),
-                #     'pullback_depth': snap.get('pullback_depth', 0),
-                # }
-                # self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
-
                 if decision["action"] not in ("持仓", "观望"):
                     pos_val = decision.get("position", 0)
                     # 防止 NaN 转换为整数失败
@@ -2926,39 +2855,81 @@ class StockLiveStrategy:
 
                 # ---------- 调试输出 ----------
                 # logger.debug(f"{code} DEBUG: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.2f}")
+                
+                # if messages:
+                #     # ---------- 去重 & 合并 ----------
+                #     priority_order = ["RISK", "RULE", "POSITION", "PATTERN"]
+                #     priority_rank = {k:i for i,k in enumerate(priority_order)}
+                #     unique_msgs = {}
+                #     last_duplicate = {}
+                #     for mtype, msg in messages:
+                #         if isinstance(msg, pd.Series):
+                #             msg = msg.iloc[0] if not msg.empty else ""
+                #         msg = str(msg)
+                        
+                #         if msg not in unique_msgs:
+                #             unique_msgs[msg] = mtype
+                #         else:
+                #             last_duplicate[msg] = mtype  # 保留重复在最后
+                #     t1_prefix = "[T+1限制] " if is_t1_restricted else ""
+                #     combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
+
+                #     log_msg = combined_msgs.replace('\n', ' | ')
+                #     logger.debug(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
+                #     # 确保 action 是字符串或 None，避免 Series 导致 trigger_alert 失败
+                #     if isinstance(action, pd.Series):
+                #         action = action.iloc[0] if not action.empty else "HOLD"
+                #     self._trigger_alert(code, data['name'], combined_msgs, action=str(action), price=current_price, resample=resample)
+                    
+                #     # [RESTORED] Console feedback with Siren emoji
+                #     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 触发报警: {code} {action} - {log_msg}")
+                    
+                #     data['last_alert'] = now
+                    
+                #     # [RESTORED] Periodic save of monitors to persist alert state
+                #     self._save_monitors()
+
+                #     data['below_nclose_count'] = 0
+                #     data['below_nclose_start'] = 0
+                #     data['below_last_close_count'] = 0
+                #     data['below_last_close_start'] = 0
 
                 if messages:
-                    # ---------- 去重 & 合并 ----------
-                    priority_order = ["RISK", "RULE", "POSITION", "PATTERN"]
-                    priority_rank = {k:i for i,k in enumerate(priority_order)}
-                    unique_msgs = {}
-                    last_duplicate = {}
-                    for mtype, msg in messages:
-                        if isinstance(msg, pd.Series):
+                    priority_order = ["RISK","RULE","POSITION","PATTERN"]
+                    unique_msgs = []
+                    seen = set()
+                    for mtype,msg in messages:
+                        if isinstance(msg,pd.Series):
                             msg = msg.iloc[0] if not msg.empty else ""
                         msg = str(msg)
-                        
-                        if msg not in unique_msgs:
-                            unique_msgs[msg] = mtype
-                        else:
-                            last_duplicate[msg] = mtype  # 保留重复在最后
+                        if msg not in seen:
+                            seen.add(msg)
+                            unique_msgs.append(msg)
                     t1_prefix = "[T+1限制] " if is_t1_restricted else ""
-                    combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
-
-                    log_msg = combined_msgs.replace('\n', ' | ')
-                    logger.debug(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
-                    # 确保 action 是字符串或 None，避免 Series 导致 trigger_alert 失败
-                    if isinstance(action, pd.Series):
+                    combined_msgs = t1_prefix + "\n".join(unique_msgs)
+                    log_msg = combined_msgs.replace("\n"," | ")
+                    if isinstance(action,pd.Series):
                         action = action.iloc[0] if not action.empty else "HOLD"
-                    self._trigger_alert(code, data['name'], combined_msgs, action=str(action), price=current_price, resample=resample)
+                    self._trigger_alert(
+                        code,
+                        data['name'],
+                        combined_msgs,
+                        action=str(action),
+                        price=current_price,
+                        resample=resample
+                    )
+                    # logger.info(f'{decision["action"]}')
+                    if decision["action"]  in ("VETO", "买入",'卖出'):
+                        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 {code} {action} - {log_msg}")
                     data['last_alert'] = now
-
+                    self._save_monitors()
                     data['below_nclose_count'] = 0
                     data['below_nclose_start'] = 0
                     data['below_last_close_count'] = 0
                     data['below_last_close_start'] = 0
                 else:
                     logger.debug(f"{code} data: {messages}")
+
         except Exception as e:
             logger.error(f"Strategy Check Error: {e}")
             import traceback
@@ -3821,7 +3792,7 @@ class StockLiveStrategy:
                 stock_info['snapshot']['pattern_detail'] = event.detail
             
             # 触发报警
-            logger.info(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
+            logger.debug(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
             # self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
             
             # 📅 [UNIFIED PIPELINE] 集成至统一观察池
@@ -3838,7 +3809,7 @@ class StockLiveStrategy:
                         daily_patterns=event.detail,
                         pattern_score=event.score
                     )
-                    logger.info(f"✨ [归集] 发现高价值形态: {event.code} {event.name} ({event.detail}) -> Watchlist")
+                    logger.debug(f"✨ [归集] 发现高价值形态: {event.code} {event.name} ({event.detail}) -> Watchlist")
                 except Exception as ex:
                     logger.debug(f"Failed to sync daily pattern to watchlist: {ex}")
 
