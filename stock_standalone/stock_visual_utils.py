@@ -93,7 +93,7 @@ class SignalOverlay:
             self.plot_item.removeItem(item)
         self.text_items.clear()
 
-    def update_signals(self, signals):
+    def update_signals(self, signals, is_compact=False):
         self.clear()
         if not signals:
             return
@@ -144,29 +144,32 @@ class SignalOverlay:
                 score_text = f" <span style='font-size: 8pt; color: #FFFF00; font-weight: bold;'>({debug_info['sell_score']})</span>"
             
             action_name = "买" if is_buy else "卖"
-            if reason:
-                reason_clean = reason.replace("强势结构", "强势") \
-                                     .replace("均线上-创多日高-", "") \
-                                     .replace("诱空转多-", "") \
-                                     .replace("趋势加速", "加速") \
-                                     .replace("冠军核心回踩", "回踩") \
-                                     .replace("突破回踩", "回踩") \
-                                     .replace("分时新高", "新高")
-                if is_emoji:
-                    reason_clean = reason_clean.replace(symbol, "").strip()
-                max_chars = 8
-                if len(reason_clean) > max_chars:
-                    lines = [reason_clean[i:i+max_chars] for i in range(0, len(reason_clean), max_chars)]
-                    reason_final = "<br/>".join(lines)
-                else:
-                    reason_final = reason_clean
-
-                if is_emoji:
-                    reason_text = f" | {symbol} {action_name}: {reason_final}"
-                else:
-                    reason_text = f" | {action_name}: {reason_final}"
-            else:
+            if is_compact:
                 reason_text = f" | {action_name}"
+            else:
+                if reason:
+                    reason_clean = reason.replace("强势结构", "强势") \
+                                         .replace("均线上-创多日高-", "") \
+                                         .replace("诱空转多-", "") \
+                                         .replace("趋势加速", "加速") \
+                                         .replace("冠军核心回踩", "回踩") \
+                                         .replace("突破回踩", "回踩") \
+                                         .replace("分时新高", "新高")
+                    if is_emoji:
+                        reason_clean = reason_clean.replace(symbol, "").strip()
+                    max_chars = 8
+                    if len(reason_clean) > max_chars:
+                        lines = [reason_clean[i:i+max_chars] for i in range(0, len(reason_clean), max_chars)]
+                        reason_final = "<br/>".join(lines)
+                    else:
+                        reason_final = reason_clean
+
+                    if is_emoji:
+                        reason_text = f" | {symbol} {action_name}: {reason_final}"
+                    else:
+                        reason_text = f" | {action_name}: {reason_final}"
+                else:
+                    reason_text = f" | {action_name}"
 
             bg_brush = pg.mkBrush(20, 20, 20, 220)
             border_pen = pg.mkPen(label_color, width=1)
@@ -206,7 +209,7 @@ class PercentAxisItem(pg.AxisItem):
 
 class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
-    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None):
+    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, refresh_func=None):
         super().__init__()
         if signals is not None and "SBC" not in title:
             title = f"SBC Pattern - {title}"
@@ -232,6 +235,14 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         self.btn_rearrange.setStyleSheet("background-color: #444; color: white; border: 1px solid #666;")
         self.btn_rearrange.clicked.connect(self._on_rearrange_clicked)
         btn_layout.addWidget(self.btn_rearrange)
+        
+        # [NEW] Linkage button
+        self.btn_link = QPushButton("🔗 联动")
+        self.btn_link.setFixedWidth(70)
+        self.btn_link.setStyleSheet("background-color: #AA4444; color: white; border: 1px solid #FF8888; font-weight: bold;")
+        self.btn_link.clicked.connect(self._on_linkage_clicked)
+        btn_layout.addWidget(self.btn_link)
+        
         btn_layout.addStretch()
         toolbar_layout.addLayout(btn_layout)
         self.layout_widget.addWidget(toolbar)
@@ -246,6 +257,28 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
 
         self.load_window_position_qt(self, f"StandaloneKlineChart", default_width=1000, default_height=600)
         
+        self.refresh_func = refresh_func
+        if self.refresh_func:
+            try:
+                try:
+                    from stock_standalone.JohnsonUtil import commonTips as cct
+                except ImportError:
+                    from JohnsonUtil import commonTips as cct
+                conf_ini = cct.get_conf_path('global.ini')
+                if not conf_ini:
+                    print("global.ini 加载失败，程序无法继续运行动态刷新")
+                    duration_sleep_time = 5
+                else:
+                    CFG = cct.GlobalConfig(conf_ini)
+                    duration_sleep_time = getattr(CFG, 'duration_sleep_time', 5)
+            except Exception as e:
+                print(f"配置加载异常: {e}")
+                duration_sleep_time = 5
+                
+            self.refresh_timer = QTimer(self)
+            self.refresh_timer.timeout.connect(self._on_refresh_timer)
+            self.refresh_timer.start(int(duration_sleep_time * 1000))
+        
         if "SBC" in title:
             try:
                 try:
@@ -255,6 +288,23 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                 QTimer.singleShot(200, lambda: place_next_to(int(self.winId()), "Sector Bidding Panel"))
             except Exception as e:
                 print(f"Smart placement error: {e}")
+
+    def _on_refresh_timer(self):
+        if hasattr(self, 'refresh_func') and self.refresh_func:
+            try:
+                res = self.refresh_func()
+                if res and isinstance(res, dict):
+                    df = res.get('viz_df') if 'viz_df' in res else res.get('df')
+                    sig = res.get('signals')
+                    ttl = res.get('title', self.windowTitle())
+                    avg = res.get('avg_series')
+                    lbl = res.get('time_labels')
+                    uline = res.get('use_line', False)
+                    ext = res.get('extra_lines')
+                    if df is not None and not df.empty:
+                        self.update_plot(df, sig, ttl, avg, lbl, uline, ext)
+            except Exception as e:
+                print(f"动态刷新失败: {e}")
 
     def mouse_moved(self, evt):
         pos = evt[0]
@@ -294,38 +344,52 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             title = f"SBC Pattern - {title}"
         self.setWindowTitle(title)
         
-        # Recreate PlotWidget to handle axis switch correctly
-        if self.pw is not None:
-            self.layout_widget.removeWidget(self.pw)
-            self.pw.deleteLater()
-            self.pw = None
+        # Only recreate PlotWidget on init to avoid severe flicker and jump
+        is_compact = self.width() < 800
 
-        axis_items = {}
-        if time_labels:
-            time_map = {i: label for i, label in enumerate(time_labels)}
-            axis_items['bottom'] = TimeAxisItem(time_map, orientation='bottom')
+        if not init and self.pw is not None:
+            self.pw.clear()
+            if hasattr(self, 'overlay'):
+                self.overlay.text_items.clear()
             
-        base_price = None
-        if df is not None and not df.empty:
-            if 'llastp' in df.columns and df['llastp'].iloc[-1] > 0:
-                base_price = df['llastp'].iloc[-1]
-            elif 'pre_close' in df.columns and df['pre_close'].iloc[-1] > 0:
-                base_price = df['pre_close'].iloc[-1]
-            elif 'open' in df.columns:
-                base_price = df['open'].iloc[0]
-            elif 'close' in df.columns:
-                base_price = df['close'].iloc[0]
+            if time_labels:
+                axis_bottom = self.pw.getAxis('bottom')
+                if isinstance(axis_bottom, TimeAxisItem):
+                    axis_bottom.time_map = {i: label for i, label in enumerate(time_labels)}
+                    axis_bottom.picture = None
+                    axis_bottom.update()
+        else:
+            if self.pw is not None:
+                self.layout_widget.removeWidget(self.pw)
+                self.pw.deleteLater()
+                self.pw = None
+
+            axis_items = {}
+            if time_labels:
+                time_map = {i: label for i, label in enumerate(time_labels)}
+                axis_items['bottom'] = TimeAxisItem(time_map, orientation='bottom')
                 
-        if base_price:
-            self.base_price_ref = base_price
-            axis_items['right'] = PercentAxisItem(base_price, orientation='right')
+            base_price = None
+            if df is not None and not df.empty:
+                if 'llastp' in df.columns and df['llastp'].iloc[-1] > 0:
+                    base_price = df['llastp'].iloc[-1]
+                elif 'pre_close' in df.columns and df['pre_close'].iloc[-1] > 0:
+                    base_price = df['pre_close'].iloc[-1]
+                elif 'open' in df.columns:
+                    base_price = df['open'].iloc[0]
+                elif 'close' in df.columns:
+                    base_price = df['close'].iloc[0]
+                    
+            if base_price:
+                self.base_price_ref = base_price
+                axis_items['right'] = PercentAxisItem(base_price, orientation='right')
+                
+            self.pw = pg.PlotWidget(axisItems=axis_items)
+            self.layout_widget.addWidget(self.pw)
             
-        self.pw = pg.PlotWidget(axisItems=axis_items)
-        self.layout_widget.addWidget(self.pw)
-        
-        if 'right' in axis_items:
-            self.pw.showAxis('right')
-            self.pw.getAxis('right').linkToView(self.pw.getViewBox())
+            if 'right' in axis_items:
+                self.pw.showAxis('right')
+                self.pw.getAxis('right').linkToView(self.pw.getViewBox())
         
         if df is not None:
             if use_line:
@@ -385,7 +449,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                         self.pw.addItem(pg.LinearRegionItem([highs[i], lows[i-1]], orientation=pg.LinearRegionItem.Horizontal, brush=QColor(255, 50, 0, 20), movable=False))
         
         self.overlay = SignalOverlay(self.pw)
-        if signals: self.overlay.update_signals(signals)
+        if signals: self.overlay.update_signals(signals, is_compact=is_compact)
             
         self.pw.showGrid(x=True, y=True, alpha=0.3)
         self.pw.setLabel('left', 'Price')
@@ -427,7 +491,79 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             tile_all_windows()
         except: pass
 
-def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None):
+    def _on_linkage_clicked(self):
+        import re
+        title = self.windowTitle()
+        match = re.search(r'(?:\[|\b)(\d{6})(?:\]|\b)', title)
+        if not match:
+            print("未在标题中找到6位股票代码，无法联动")
+            return
+            
+        code = match.group(1)
+        print(f"🔗 启动联动核心: {code}")
+
+        # --- ⚡ [FAST PATH] 瞬间响应部分 ---
+
+        # 1. 复制到剪贴板 (最快，TK 按键可立即生效)
+        try:
+            QApplication.clipboard().setText(code)
+        except: pass
+
+        # 2. 发送到关联的可视化和监控面板 (PyQt6 内存级别联动)
+        try:
+            for widget in QApplication.topLevelWidgets():
+                if widget is self: continue
+                # 兼容可视化器和主监控面板的信号/方法
+                if hasattr(widget, 'tree_scroll_to_code'):
+                    try: widget.tree_scroll_to_code(code, vis=True)
+                    except: pass
+                elif hasattr(widget, 'scroll_to_code_signal'):
+                    try: widget.scroll_to_code_signal.emit(code)
+                    except: pass
+                # [NEW] 尝试检查是否有指令队列 (Queue 模式)
+                if hasattr(widget, 'command_queue') and widget.command_queue:
+                    try: widget.command_queue.put(('SWITCH_CODE', {'code': code}))
+                    except: pass
+        except: pass
+
+        # 3. 通过 Socket IPC 联动外部可视化进程 (跨进程极致速度)
+        def send_socket():
+            try:
+                import socket
+                ipc_host, ipc_port = '127.0.0.1', 26668
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.2)
+                    s.connect((ipc_host, ipc_port))
+                    s.sendall(f"CODE|{code}|resample=d".encode('utf-8'))
+                print("✅ Socket: 联动指令已送达")
+            except: pass
+        
+        # Socket 其实也很快，但为了绝对不卡顿，也可以扔进后台
+        import threading
+        threading.Thread(target=send_socket, daemon=True).start()
+
+        # --- 🐢 [SLOW PATH] 异步跳转部分 ---
+        
+        def slow_tdx_link():
+            try:
+                try: from stock_standalone.JohnsonUtil.stock_sender import StockSender
+                except ImportError: from JohnsonUtil.stock_sender import StockSender
+                
+                class DummyVar:
+                    def get(self): return True
+                
+                # 实例化和同步发送 (此过程涉及 Win32 窗口搜索，耗时 100-300ms)
+                sender = StockSender(tdx_var=DummyVar(), ths_var=DummyVar(), dfcf_var=DummyVar())
+                sender.send(code)
+                print(f"✅ TDX: 异步跳转完成")
+            except Exception as e:
+                print(f"⚠️ TDX: 异步跳转失败: {e}")
+
+        # 使用线程执行耗时的 Win32 操作，避免阻塞 UI
+        threading.Thread(target=slow_tdx_link, daemon=True).start()
+        print("🚀 联动任务已全部分发")
+
+def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None):
     existing_instance = QApplication.instance()
     app = existing_instance or QApplication(sys.argv)
     is_new_app = (existing_instance is None)
@@ -443,7 +579,7 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=No
             print(f"Reuse failed: {e}")
             
     if win is None:
-        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines)
+        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines, refresh_func=refresh_func)
         win.show()
 
     if is_new_app: app.exec()

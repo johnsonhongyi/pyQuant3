@@ -4335,7 +4335,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(str(target_code).zfill(6))
             self.show_status_message(f"🚀 直接加载: {raw_input} ({target_code})", 3000)
         else:
-            self.show_status_message(f"❌ 未找到匹配: {raw_input}", 3000)
+            self.show_status_message(f"❌ 未找到匹配: {raw_input[:10]}", 3000)
+            logger.error(f"❌ 未找到匹配: {raw_input}")
 
     def _on_search_input_right_click(self, pos):
         """搜索框右键菜单：自动粘贴并提取6位数字"""
@@ -4434,7 +4435,8 @@ class MainWindow(QMainWindow, WindowMixin):
             final_query = ensure_parentheses_balanced(query_str)
             matched = df.query(final_query)
             if matched.empty:
-                self.show_status_message(f"❌ 未找到匹配: {keyword}", 3000)
+                self.show_status_message(f"❌ 未找到匹配: {len(matched)}", 3000)
+                logger.error(f"❌ 未找到匹配: {keyword}")
                 return
 
             # ⚡ 快速路径：使用 setRowHidden 而非完整重建
@@ -6987,7 +6989,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 if code:
                     # [NEW] 双击代码列同时执行 SBC 回放分析
                     self._run_sbc_test(False, code)
-
+        if column == 2:  # 涨幅列
+            code_item = self.stock_table.item(row, 0)
+            if code_item:
+                code = code_item.data(Qt.ItemDataRole.UserRole) or code_item.text()
+                if code:
+                    # [NEW] 双击代码列同时执行 SBC 回放分析
+                    self._run_sbc_test(True, code)
+                    
     def switch_stock_prev(self):
         """切换至上一只股票 (1.1/1.2 Context navigation)"""
         curr_row = self.stock_table.currentRow()

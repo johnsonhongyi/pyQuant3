@@ -303,8 +303,9 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             f"[{code}] 买卖验证 — 结构性信号",
             avg_series=vwap_series,
             time_labels=time_labels,
-            use_line=True,  # live 模式用线图，避免密集竖柱
-            extra_lines=auto_extra
+            use_line=True,  # 无论 live 还是 cache，数据都是高密度 Tick 分时，必须用线图
+            extra_lines=auto_extra,
+            refresh_func=lambda: verify_with_real_data(code, use_live=use_live, show_viz=False, hdf5_lock=hdf5_lock, extra_lines=extra_lines)
         )
     else:
         # 返回数据包，供 GUI 线程异步渲染
@@ -322,8 +323,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="SBC Pattern Verification Tool")
     parser.add_argument("code", nargs="?", default="688787", help="Stock code (default: 688787)")
-    parser.add_argument("--live", action="store_true", help="Use live Sina data instead of cache")
+    parser.add_argument("--cache", action="store_true", help="Use local cache instead of live Sina data")
     parser.add_argument("--no-viz", action="store_true", help="Disable visualization for benchmarking")
     args = parser.parse_args()
     
-    verify_with_real_data(args.code, use_live=args.live, show_viz=not args.no_viz)
+    use_live = not args.cache
+    verify_with_real_data(args.code, use_live=use_live, show_viz=not args.no_viz)
