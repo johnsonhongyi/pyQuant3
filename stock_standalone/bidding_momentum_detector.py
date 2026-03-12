@@ -313,6 +313,24 @@ class BiddingMomentumDetector:
     # 公共接口
     # =========================================================
 
+    def reset_observation_anchors(self):
+        """
+        手动或按周期重置所有观测基准：
+        1. 重置板块强度锚点
+        2. 重置个股分锚点
+        3. 重置个股价格瞄点 (用于切片涨跌计算)
+        4. 重置全局基准时间
+        """
+        now = time.time()
+        with self._lock:
+            self.baseline_time = now
+            self.sector_anchors.clear()
+            for ts in self._tick_series.values():
+                ts.score_anchor = ts.score
+                ts.price_anchor = ts.current_price
+            logger.info(f"🔄 [Detector] All observation anchors have been reset.")
+
+
     def set_strategy(self, key: str, **kwargs):
         """动态更新策略参数"""
         if key in self.strategies:
@@ -428,6 +446,8 @@ class BiddingMomentumDetector:
                                         for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
                 'baseline_time': round(self.baseline_time, 2),
                 'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
+                'stock_price_anchors': {code: round(ts.price_anchor, 4) 
+                                        for code, ts in self._tick_series.items() if ts.price_anchor > 0},
                 'watchlist': self.daily_watchlist
             }
             # [REFINED] 防覆盖保护：
@@ -538,6 +558,12 @@ class BiddingMomentumDetector:
                 
             self.sector_anchors = data.get('sector_anchors', {})
             
+            # 恢复价格锚点 (用于计算切片涨跌 pct_diff)
+            stock_price_anchors = data.get('stock_price_anchors', {})
+            for code, p_anchor in stock_price_anchors.items():
+                if code in self._tick_series:
+                    self._tick_series[code].price_anchor = p_anchor
+                
             # 恢复重点表
             self.daily_watchlist = data.get('watchlist', {})
             
@@ -884,22 +910,28 @@ class BiddingMomentumDetector:
         now = time.time()
         
         # 初始基准值挂载
-        if ts_obj.score_anchor == 0.0 and final_score > 0:
+        if ts_obj.score_anchor <= 0.0 and final_score > 0:
             ts_obj.score_anchor = final_score
             
         score_diff = final_score - ts_obj.score_anchor
         
         # [NEW] 个股切片涨幅计算与重置逻辑
+        # [FIX] 跟随板块：初次发现异动时建立锚点。后续完全由 _aggregate_sectors 的周期计时器
+        # 或手动请求刷新来统一重置锚点，保证在一个周期(默认30分钟)内涨跌幅度持续累计。
+        
+        # 1. 基准建立：如果 anchor 为 0，立即使用当前价建立
         if ts_obj.price_anchor <= 0 and cur_close > 0:
             ts_obj.price_anchor = cur_close
             
-        pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.price_anchor * 100.0 if ts_obj.price_anchor > 0 else 0.0
+        # 2. 计算增量涨幅 (百分点变动)
+        # 使用 last_close 作为核心基准，这样 pct_diff 指代的是“自基准时间后的累计涨幅增量”
+        # 例如：基准时刻涨幅2.0%，当前2.5%，则 pct_diff = +0.50%
+        pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.last_close * 100.0 if ts_obj.last_close > 0 else 0.0
         ts_obj.pct_diff = pct_diff
         
-        # 超过阈值后自动重置锚点 (对调板块逻辑)
-        if abs(pct_diff) >= self.price_reset_threshold:
-            ts_obj.price_anchor = cur_close
-            # logger.info(f"♻️ [Detector] Price anchor reset for {code}: {pct_diff:+.2f}%")
+        # [REM] 移除 abs(pct_diff) >= 1.0% 的激进重置，防止数值瞬间回零。
+        # 观察逻辑由 _aggregate_sectors 的时间窗口统一管理。
+
 
         with self._lock:
             # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
@@ -1040,12 +1072,10 @@ class BiddingMomentumDetector:
         # 4. [NEW] 全局对照基准重置逻辑 (移动到循环外，每周期仅检查一次)
         now = time.time()
         if now - self.baseline_time >= self.comparison_interval:
-            logger.info(f"🔄 [Detector] Resetting comparison baseline: Interval={self.comparison_interval/60:.1f}m, Sector count={len(self.sector_anchors)}")
-            self.baseline_time = now
-            self.sector_anchors.clear()
-            for ts in self._tick_series.values():
-                ts.score_anchor = ts.score
-                ts.price_anchor = ts.current_price
+            self.reset_observation_anchors()
+            
+            # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
+
             
             # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
             target_sectors = None
@@ -1176,17 +1206,9 @@ class BiddingMomentumDetector:
                  if sector in new_active: del new_active[sector]
                  continue
                  
-            # [NEW] 变动对比逻辑
-            now = time.time()
-            # 检测是否超过设定的比较间隔时间 (阈值限制)
-            if now - self.baseline_time >= self.comparison_interval:
-                # 触发阈值刷新，重置基准时间与所有的基准分锚点
-                logger.info(f"🔄 [Detector] Resetting comparison baseline: Interval={self.comparison_interval/60:.1f}m, Sector count={len(self.sector_anchors)}")
-                self.baseline_time = now
-                self.sector_anchors.clear()
-                for ts in self._tick_series.values():
-                    ts.score_anchor = ts.score
-                    ts.price_anchor = ts.current_price # 同步重置个股价格锚点
+            # [REM] 移除此处冗余的基准重置逻辑，已在循环外部(Line 1054) 统一处理。
+            # 保持逻辑单一职责，避免在循环内部重复刷新全局状态。
+
             
             if sector not in self.sector_anchors:
                 self.sector_anchors[sector] = board_score

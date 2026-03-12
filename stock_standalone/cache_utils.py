@@ -202,10 +202,11 @@ class DataFrameCacheSlot:
             max_retries = 3
             for i in range(max_retries):
                 try:
-                    os.replace(temp_file, self.cache_file)
-                    self._last_fp = new_fp
-                    self._last_count = new_count
-                    return True
+                    if os.path.exists(temp_file):
+                        os.replace(temp_file, self.cache_file)
+                        self._last_fp = new_fp
+                        self._last_count = new_count
+                        return True
                 except OSError as e:
                     if i < max_retries - 1:
                         # 随机避让，解决多进程冲突

@@ -1863,9 +1863,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         new_m = max(1, curr_m + delta_m)
         self.detector.comparison_interval = new_m * 60
         self.lbl_interval.setText(f"{new_m}m")
-        # 调节时间意味着对比基准变了，重置所有锚点
-        self.detector.sector_anchors.clear()
+        # 调节时间意味着对比基准变了，重置所有锚点 (包括个股价格瞄点)
+        self.detector.reset_observation_anchors()
         self.manual_refresh()
+
 
     def _on_strategy_changed(self):
         s = self.detector.strategies
