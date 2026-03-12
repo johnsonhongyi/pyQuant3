@@ -97,7 +97,7 @@ class TrendDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         rect = option.rect
-        margin_h, margin_v = 4, 4
+        margin_h, margin_v = 2, 2
         draw_rect = rect.adjusted(margin_h, margin_v, -margin_h, -margin_v)
         
         display_prices = list(prices)
@@ -417,6 +417,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self._init_ui()
         self._restore_geometry()
+        self._restore_ui_state()
 
         # UI 刷新计时器 (保持定义但默认不启动，作为 fallback 或数据中断时的兜底)
         self._refresh_timer = QTimer(self)
@@ -473,17 +474,84 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # [NEW] Persist scores and layout on close
         self._save_geometry()
+        self._save_ui_state()
         if hasattr(self, 'detector'):
             self.detector.save_persistent_data()
             
         super().closeEvent(event)
 
+    def _save_ui_state(self):
+        """保存表格列宽、Splitter 状态等 UI 设置"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            data_to_save = {}
+            
+            # 保存各表状态 (Hex 格式)
+            data_to_save['sector_table_state'] = self.sector_table.horizontalHeader().saveState().toHex().data().decode()
+            data_to_save['stock_table_state'] = self.stock_table.horizontalHeader().saveState().toHex().data().decode()
+            data_to_save['watchlist_table_state'] = self.watchlist_table.horizontalHeader().saveState().toHex().data().decode()
+            
+            # 保存 Splitter 状态
+            data_to_save['splitter_h_state'] = self.splitter.saveState().toHex().data().decode()
+            data_to_save['v_splitter_state'] = self.v_splitter.saveState().toHex().data().decode()
+
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
+            # 读取并合并现有配置
+            full_data = {}
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
+                        full_data = json.load(f)
+                except Exception: pass
+            
+            full_data[SETTINGS_SECTION + "_ui_state"] = data_to_save
+            with open(config_file_path, "w", encoding="utf-8") as f:
+                json.dump(full_data, f, ensure_ascii=False, indent=2)
+                
+            logger.debug(f"📊 [SectorPanel] UI state saved to {config_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save UI state: {e}")
+
+    def _restore_ui_state(self):
+        """恢复表格列宽、Splitter 状态等 UI 设置"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            if not os.path.exists(config_file_path):
+                return
+                
+            with open(config_file_path, "r", encoding="utf-8") as f:
+                full_data = json.load(f)
+            
+            ui_state = full_data.get(SETTINGS_SECTION + "_ui_state")
+            if not ui_state:
+                return
+            
+            # 恢复各表列状态
+            if 'sector_table_state' in ui_state:
+                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['sector_table_state'].encode()))
+            if 'stock_table_state' in ui_state:
+                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['stock_table_state'].encode()))
+            if 'watchlist_table_state' in ui_state:
+                self.watchlist_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['watchlist_table_state'].encode()))
+            
+            # 恢复 Splitter 比例
+            if 'splitter_h_state' in ui_state:
+                self.splitter.restoreState(QByteArray.fromHex(ui_state['splitter_h_state'].encode()))
+            if 'v_splitter_state' in ui_state:
+                self.v_splitter.restoreState(QByteArray.fromHex(ui_state['v_splitter_state'].encode()))
+            
+            logger.debug("📊 [SectorPanel] UI state restored")
+        except Exception as e:
+            logger.error(f"Failed to restore UI state: {e}")
+
 
     # ------------------------------------------------------------------ UI
     def _init_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(3)
+        root.setContentsMargins(2, 2, 2, 2)
+        root.setSpacing(2)
 
         # ── 紧凑工具栏 ──────────────────────────────────────────────────
         bar = QFrame()
@@ -674,17 +742,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.sector_table = QTableWidget(0, 5)
         self.sector_table.setHorizontalHeaderLabels(['板块', '强度', '涨跌', '龙头', '状态'])
+        self.sector_table.setAlternatingRowColors(True)
+        self.sector_table.setFont(QFont("Microsoft YaHei", 9))
         self.sector_table.verticalHeader().setVisible(False)
+        self.sector_table.verticalHeader().setDefaultSectionSize(25) # 紧凑行高
         self.sector_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.sector_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.sector_table.setAlternatingRowColors(True)
         self.sector_table.setFont(QFont("Microsoft YaHei", 9))
-        self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.sector_table.setSortingEnabled(True)
         
         self.sector_table.itemSelectionChanged.connect(self._on_sector_table_selection_changed)
         self.sector_table.itemDoubleClicked.connect(self._on_sector_table_dblclick)
+        self.sector_table.cellClicked.connect(self._on_sector_table_cell_clicked)
         llay.addWidget(self.sector_table)
         self.splitter.addWidget(left)
 
@@ -713,7 +785,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         hdr = self.stock_table.horizontalHeader()
         if hdr:
             hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-            hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+            # hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
             hdr.sectionClicked.connect(self._on_header_clicked)
         self.stock_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -722,11 +794,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.cellDoubleClicked.connect(self._on_stock_double_clicked) # 双击放大
         self.stock_table.currentCellChanged.connect(self.on_stock_cell_changed) # 键盘光标联动
         self.stock_table.setAlternatingRowColors(True)
-        self.stock_table.setFont(QFont("Microsoft YaHei", 10))
+        self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
         self.stock_table.setItemDelegateForColumn(6, TrendDelegate(self)) # 图形化走势
         vh = self.stock_table.verticalHeader()
-        if vh: vh.setDefaultSectionSize(40) # 增大行高以便看清曲线
+        if vh: vh.setDefaultSectionSize(32) # 紧凑行高
         rlay.addWidget(self.stock_table)
         self.splitter.addWidget(right)
 
@@ -749,7 +821,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table = QTableWidget(0, len(W_COLS))
         self.watchlist_table.setHorizontalHeaderLabels(W_COLS)
         self.watchlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.watchlist_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        # self.watchlist_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.watchlist_table.verticalHeader().setVisible(False)
+        self.watchlist_table.verticalHeader().setDefaultSectionSize(25) # 紧凑行高
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
@@ -1116,7 +1190,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
                 self._populate_table(d)
+                
+                # [NEW] 联动逻辑：如果是用户光标切换（且不是正在刷新的静默状态），自动联动龙头
+                if self.sector_table.hasFocus():
+                    leader_code = d.get('leader')
+                    if leader_code:
+                        self._link_code(leader_code, focus_widget=self.sector_table)
                 return
+
+    def _on_sector_table_cell_clicked(self, row, col):
+        """点击板块表单元格 → 自动联动龙头"""
+        item = self.sector_table.item(row, 0)
+        if not item: return
+        
+        sn = item.data(Qt.ItemDataRole.UserRole)
+        for d in self.detector.get_active_sectors():
+            if d['sector'] == sn:
+                # 无论点击哪一列，都联动该板块的龙头
+                self._link_code(d['leader'], focus_widget=self.sector_table)
+                break
 
     def _on_sector_table_dblclick(self, row, col):
         """双击板块行 → 将龙头代码同步联动 (TK/Qt)"""
