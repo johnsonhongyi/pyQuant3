@@ -148,6 +148,12 @@ class StrategyController:
             # 1. 运行 StrongPullbackMA5 策略 (批量)
             # 该策略内部已实现“首次触发”逻辑，返回的已是过滤后的买点
             is_valid, msg = self.pullback_strat.validate_df(day_df)
+            
+            if "cycle_stage" not in day_df.columns and "ma60d" in day_df.columns:
+                from data_utils import (calc_cycle_stage_vect)
+                # with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=800):
+                day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
+
             if not is_valid:
                 logger.warning(f"Stock {code} historical simulation skip: {msg}")
                 pb_results = pd.DataFrame()
@@ -209,6 +215,7 @@ class StrategyController:
                     # 构造行情行
                     row_dict: Dict[str, Any] = row.to_dict() # type: ignore
                     row_dict['code'] = code
+                    row_dict["cycle_stage"] = int(row.get("cycle_stage", 0))
                     row_dict['trade'] = float(row.get('close', 0.0)) # type: ignore
                     
                     # 更新前一个 bar 的快照信息
@@ -249,7 +256,9 @@ class StrategyController:
                         highest_so_far = float(snapshot.get('highest_since_buy', 0.0))
                         snapshot['highest_since_buy'] = max(highest_so_far, float(row.get('close', 0.0))) # type: ignore
                 except Exception as e:
-                    logger.error(f"Error in step evaluation for {code} at {timestamp}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    logger.exception(f"Error in step evaluation for {code} at {timestamp}")
                     continue
 
         except Exception as e:

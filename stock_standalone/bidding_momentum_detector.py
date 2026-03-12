@@ -282,6 +282,9 @@ class BiddingMomentumDetector:
         self._global_snap_cache: Dict[str, Dict[str, Any]] = {}
         self._sector_active_stocks_persistent: Dict[str, Dict[str, Any]] = defaultdict(dict)
 
+        # [NEW] 模式保护
+        self.in_history_mode = False
+
         # 初始加载一次昨日选股结果
         self._load_stock_selector_data()
 
@@ -392,10 +395,16 @@ class BiddingMomentumDetector:
     def get_active_sectors(self) -> List[Dict[str, Any]]:
         """
         返回当前活跃板块列表，按 score 降序。
+        [DEFENSIVE] 确保每个 dict 都有 'sector' 字段，防止旧快照加载后渲染报错。
         """
         with self._lock:
-            result = sorted(self.active_sectors.values(),
-                           key=lambda x: x.get('score', 0), reverse=True)
+            res = []
+            for name, info in self.active_sectors.items():
+                if not isinstance(info, dict): continue
+                if 'sector' not in info:
+                    info['sector'] = name
+                res.append(info)
+            result = sorted(res, key=lambda x: x.get('score', 0), reverse=True)
         return result
 
     def get_daily_watchlist(self) -> List[Dict[str, Any]]:
@@ -426,22 +435,27 @@ class BiddingMomentumDetector:
         self._aggregate_sectors(active_codes=active_codes)
 
     # ------------------------------------------------------------------ 持久化
-    def _get_persistence_path(self) -> str:
+    def _get_persistence_path(self, snapshot_date: str = None) -> str:
         # 使用 JohnsonUtil 中的 ramdisk 路径获取方法，统一管理
+        if snapshot_date:
+            path = os.path.join(cct.get_base_path(), "snapshots")
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
+            return os.path.join(path, f"bidding_{snapshot_date}.json.gz")
         return cct.get_ramdisk_path("bidding_session_data.json.gz")
 
     def save_persistent_data(self):
         """保存当前个股得分和板块强度到磁盘"""
+        if self.in_history_mode:
+            # 此时处于历史复盘模式，不保存快照以防止覆盖真实数据
+            return
+
         try:
             data = {
                 'timestamp': round(time.time(), 2),
                 'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if (ts.score > 0 or ts.momentum_score > 0)},
                 'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in self._tick_series.items() if ts.momentum_score > 0},
-                'sector_data': {name: {
-                    'score': round(info.get('score', 0), 2),
-                    'leader': info.get('leader', ''),
-                    'status': info.get('status', '')
-                } for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
+                'sector_data': {name: info for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
                 'stock_score_anchors': {code: round(ts.score_anchor, 2) 
                                         for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
                 'baseline_time': round(self.baseline_time, 2),
@@ -464,18 +478,36 @@ class BiddingMomentumDetector:
                 logger.info("ℹ️ [Detector] 当前无活跃板块、重点股及显著个股分，跳过会话保存以保护历史数据。")
                 return
 
-            # [ENRICHED] 补充元数据：保存所有显著个股、重点股以及种子股的名称与昨日特征 (形态)
-            # 优先包含有分值的个股，同时包含所有种子股以备查询
+            # [ENRICHED] 补充元数据：保存所有显著个股与活跃板块内个股的数据
             relevant_codes = set(significant_stocks.keys()) | set(data.get('watchlist', {}).keys()) | set(self.stock_selector_seeds.keys())
+            
+            # 加入所有活跃板块中的个股
+            for sinfo in self.active_sectors.values():
+                relevant_codes.add(sinfo.get('leader'))
+                for f in sinfo.get('followers', []):
+                    relevant_codes.add(f.get('code'))
+            
             meta_data = {}
             for code in relevant_codes:
+                if not code: continue
                 ts = self._tick_series.get(code)
-                name = ts.name if ts else self.stock_selector_seeds.get(code, {}).get('name', '')
-                reason = self.stock_selector_seeds.get(code, {}).get('reason', '')
-                if name or reason:
+                if ts:
                     meta_data[code] = {
-                        'name': name,
-                        'reason': reason
+                        'name': ts.name,
+                        'reason': getattr(ts, 'pattern_hint', ''),
+                        'category': ts.category,
+                        'last_close': ts.last_close,
+                        'high_day': ts.high_day,
+                        'low_day': ts.low_day,
+                        'last_high': ts.last_high,
+                        'last_low': ts.last_low,
+                        'klines': list(ts.klines)
+                    }
+                elif code in self.stock_selector_seeds:
+                    s_seed = self.stock_selector_seeds[code]
+                    meta_data[code] = {
+                        'name': s_seed.get('name', ''),
+                        'reason': s_seed.get('reason', '')
                     }
             data['meta_data'] = meta_data
 
@@ -484,7 +516,13 @@ class BiddingMomentumDetector:
             with gzip.open(path, 'wt', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"💾 [Detector] 会话数据已保存: {path} ({ss_count} sig-stocks, {sd_count} sectors, {wl_count} watchlist)")
+            # [NEW] 同时保存一份带日期的快照用于复盘
+            today_str = datetime.datetime.now().strftime('%Y%m%d')
+            snapshot_path = self._get_persistence_path(snapshot_date=today_str)
+            with gzip.open(snapshot_path, 'wt', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"💾 [Detector] 会话数据已保存: {path} 及快照 {snapshot_path} ({ss_count} sig-stocks, {sd_count} sectors, {wl_count} watchlist)")
         except Exception as e:
             logger.error(f"❌ [Detector] 保存会话数据失败: {e}")
 
@@ -571,6 +609,151 @@ class BiddingMomentumDetector:
         except Exception as e:
             logger.error(f"❌ [Detector] 加载会话数据失败: {e}")
         self._gc_old_sectors()
+
+    def load_from_snapshot(self, filepath: str) -> bool:
+        """从指定的快照文件恢复数据，用于历史复盘"""
+        try:
+            if not os.path.exists(filepath):
+                logger.error(f"Snapshot file not found: {filepath}")
+                return False
+
+            with gzip.open(filepath, 'rt', encoding='utf-8') as f:
+                data = json.load(f)
+
+            with self._lock:
+                # 1. 重置当前状态
+                self._tick_series.clear()
+                self.active_sectors.clear()
+                self.daily_watchlist.clear()
+                self.sector_anchors.clear()
+
+                # 2. 恢复个股数据与 Snap 缓存
+                stock_scores = data.get('stock_scores', {})
+                momentum_scores = data.get('momentum_scores', {})
+                meta_data = data.get('meta_data', {})
+                
+                self._global_snap_cache.clear()
+                
+                for code, score in stock_scores.items():
+                    ts = TickSeries(code)
+                    ts.score = score
+                    ts.momentum_score = momentum_scores.get(code, 0.0)
+                    
+                    # 恢复元数据
+                    if code in meta_data:
+                        m = meta_data[code]
+                        ts.name = m.get('name', code)
+                        ts.pattern_hint = m.get('reason', '')
+                        ts.category = m.get('category', '')
+                        ts.last_close = m.get('last_close', 0.0)
+                        ts.high_day = m.get('high_day', 0.0)
+                        ts.low_day = m.get('low_day', 0.0)
+                        ts.last_high = m.get('last_high', 0.0)
+                        ts.last_low = m.get('last_low', 0.0)
+                        for k in m.get('klines', []):
+                            ts.push_kline(k)
+                    
+                    self._tick_series[code] = ts
+                    
+                    # 同时重建 _global_snap_cache 以便 UI 渲染个股详情
+                    self._global_snap_cache[code] = {
+                        'score': score, 'pct': ts.current_pct, 'price': ts.current_price,
+                        'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
+                        'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
+                        'last_low': ts.last_low, 'pattern_hint': ts.pattern_hint,
+                        'klines': list(ts.klines),
+                        'is_untradable': ts.is_untradable,
+                        'is_counter_trend': ts.is_counter_trend,
+                        'ral': ts.ral
+                    }
+
+                # 恢复价格锚点与分值锚点
+                stock_price_anchors = data.get('stock_price_anchors', {})
+                for code, p_anchor in stock_price_anchors.items():
+                    if code in self._tick_series:
+                        self._tick_series[code].price_anchor = p_anchor
+                
+                stock_score_anchors = data.get('stock_score_anchors', {})
+                for code, s_anchor in stock_score_anchors.items():
+                    if code in self._tick_series:
+                        self._tick_series[code].score_anchor = s_anchor
+
+                # 3. 恢复板块与重点表
+                raw_sectors = data.get('sector_data', {})
+                # [DEFENSIVE] 修复缺失字段逻辑
+                for name, info in raw_sectors.items():
+                    if not isinstance(info, dict): continue
+                    if 'sector' not in info: info['sector'] = name
+                    if 'followers' not in info: info['followers'] = [] # [FIX] 防止 UI KeyError
+                    
+                    l_code = info.get('leader')
+                    if l_code and l_code in self._global_snap_cache:
+                        l_snap = self._global_snap_cache[l_code]
+                        if 'leader_name' not in info: info['leader_name'] = l_snap.get('name', '未知')
+                        if 'leader_pct' not in info: info['leader_pct'] = l_snap.get('pct', 0.0)
+                        if 'leader_price' not in info: info['leader_price'] = l_snap.get('price', 0.0)
+                        if 'leader_klines' not in info: info['leader_klines'] = l_snap.get('klines', [])
+                        if 'pattern_hint' not in info: info['pattern_hint'] = l_snap.get('pattern_hint', '')
+
+                self.active_sectors = raw_sectors
+                self.daily_watchlist = data.get('watchlist', {})
+                
+                # 额外修复：确保 watchlist 中的个股名称也被恢复
+                for code, w in self.daily_watchlist.items():
+                    if not w.get('name') and code in meta_data:
+                        w['name'] = meta_data[code].get('name', code)
+                    if not w.get('sector') and code in meta_data:
+                        w['sector'] = meta_data[code].get('category', '')
+                
+                self.sector_anchors = data.get('sector_anchors', {})
+                self.baseline_time = data.get('baseline_time', time.time())
+                
+                # 成功加载后进入历史模式
+                self.in_history_mode = True
+
+            logger.info(f"🎬 [Detector] 历史快照已加载: {filepath} ({len(self.active_sectors)} 板块)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load snapshot: {e}")
+            return False
+
+    def reconstruct_followers(self, sector_name: str):
+        """
+        [NEW] 手工从元数据缓存中重建指定板块的跟随股 (针对旧快照)
+        扫描 _global_snap_cache 中所有属于该板块的个股。
+        """
+        with self._lock:
+            if sector_name not in self.active_sectors:
+                logger.warning(f"⚠️ [Detector] Sector {sector_name} not found in active_sectors")
+                return
+
+            info = self.active_sectors[sector_name]
+            leader_code = info.get('leader', '')
+            
+            # 搜集候选人
+            candidates = []
+            for code, snap in self._global_snap_cache.items():
+                if code == leader_code: continue
+                
+                # 匹配板块
+                cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(snap.get('category', ''))) if c.strip()]
+                if sector_name in cats:
+                    candidates.append({
+                        'code': code,
+                        'name': snap.get('name', code),
+                        'pct': snap.get('pct', 0.0),
+                        'score': snap.get('score', 0.0),
+                        'score_diff': snap.get('score_diff', 0.0),
+                        'pct_diff': snap.get('pct_diff', 0.0),
+                        'price': snap.get('price', 0.0),
+                        'first_ts': snap.get('first_breakout_ts', 0.0)
+                    })
+            
+            # 按评分排序取前 15 名
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+            info['followers'] = candidates[:15]
+            
+            logger.info(f"✅ [Detector] Sector {sector_name} reconstructed: {len(info['followers'])} followers found.")
 
     # =========================================================
     # 内部：订阅回调

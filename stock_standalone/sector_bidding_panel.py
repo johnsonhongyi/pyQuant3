@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
-    QMessageBox
+    QMessageBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
@@ -389,6 +389,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_refresh_ts = 0
         self._force_update_requested = False
         self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
+        self._is_history_mode = False   # [NEW] 历史复盘模式标志
+        self._history_date = ""         # [NEW] 历史数据日期
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
@@ -630,6 +632,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_hide.clicked.connect(self.hide)
         bar_lay_2.addWidget(self.btn_hide)
 
+        bar_lay_2.addWidget(self._sep())
+
+        self.btn_history = QPushButton("历史复盘 📂")
+        self.btn_history.setFixedWidth(85)
+        self.btn_history.clicked.connect(self._on_history_load_clicked)
+        bar_lay_2.addWidget(self.btn_history)
+
+        self.btn_live = QPushButton("实时 📡")
+        self.btn_live.setFixedWidth(65)
+        self.btn_live.setStyleSheet("background-color: #2a3a4a; color: #00ff88; font-weight: bold;")
+        self.btn_live.clicked.connect(self._on_back_to_live_clicked)
+        self.btn_live.setVisible(False) # 初始隐藏
+        bar_lay_2.addWidget(self.btn_live)
+
 
         # ── [NEW] SBC Test Buttons ──
         bar_lay_2.addWidget(self._sep())
@@ -739,9 +755,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.sector_table.setSortingEnabled(True)
+        self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
         
         self.sector_table.itemSelectionChanged.connect(self._on_sector_table_selection_changed)
-        self.sector_table.itemDoubleClicked.connect(self._on_sector_table_dblclick)
+        self.sector_table.cellDoubleClicked.connect(self._on_sector_table_dblclick)
         self.sector_table.cellClicked.connect(self._on_sector_table_cell_clicked)
         llay.addWidget(self.sector_table)
         self.splitter.addWidget(left)
@@ -991,6 +1009,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def on_realtime_data_arrived(self, df_all, force_update=False):
         """主线程调用，将数据推入后台线程列队避免卡顿 UI"""
+        if self._is_history_mode:
+            return # [NEW] 历史模式下拦截实时数据
         try:
             # Drop obsolete frames if we are piling up
             if len(self._worker.df_queue) > 1:
@@ -1194,11 +1214,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 break
 
     def _on_sector_table_dblclick(self, row, col):
-        """双击板块行 → 将龙头代码同步联动 (TK/Qt)"""
+        """双击板块行 → 将龙头代码同步联动 (TK/Qt) + 复制板块名称"""
         item = self.sector_table.item(row, 0)
         if not item: return
         
         sn = item.data(Qt.ItemDataRole.UserRole)
+        # 复制板块名称到剪贴板
+        self._copy_to_clipboard(str(sn))
+        
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
                 # 执行代码联动 (Link Code)
@@ -1319,7 +1342,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             'untradable': data.get('is_untradable', False),
             'is_counter': data.get('is_counter_trend', False)
         }]
-        for f in data['followers']:
+        for f in data.get('followers', []):
             rows.append({
                 'code': f['code'], 'name': f['name'],
                 'role': '📌跟随',
@@ -1369,7 +1392,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setRowCount(len(rows))
         target_row = -1
         for i, r in enumerate(rows):
-            self._set_item(i, 0, r['code'])
+            it0 = self._set_item(i, 0, r['code'])
+            if it0:
+                # 存储该个股所属的板块名称，用于右键“定位板块”
+                it0.setData(Qt.ItemDataRole.UserRole + 1, data.get('sector', '未知'))
+                
             self._set_item(i, 1, r['name'])
 
             role_item = QTableWidgetItem(r['role'])
@@ -1465,7 +1492,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setUpdatesEnabled(True)
 
     def _set_item(self, row, col, text):
-        self.stock_table.setItem(row, col, QTableWidgetItem(str(text)))
+        it = QTableWidgetItem(str(text))
+        self.stock_table.setItem(row, col, it)
+        return it
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self):
@@ -1549,7 +1578,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [NEW] Re-enable sorting
         self.watchlist_table.setSortingEnabled(True)
         # [NEW] Update Watchlist title stats
-        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只, 涨停/溢出个股)")
+        # [NEW] Update Watchlist title stats (History indicator integrated)
+        hist_suffix = ""
+        if self._is_history_mode:
+            try:
+                # 显示完整日期时间
+                f_dt = datetime.fromtimestamp(self.detector.baseline_time).strftime('%Y-%m-%d %H:%M:%S')
+                hist_suffix = f" | 🎬 [历史复盘: {f_dt}]"
+            except:
+                hist_suffix = " | 🎬 [历史复盘]"
+                
+        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只, 涨停/溢出个股){hist_suffix}")
 
     def _on_watchlist_clicked(self, row, col):
         """重点表联动"""
@@ -1560,30 +1599,33 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_watchlist_dblclick(self, row, col):
         """重点表双击：对应列执行不同动作"""
-        # 1. 如果是代码(0)或名称(1)列，弹出详细走势图 (与主表一致)
-        if col <= 1:
-            code_item = self.watchlist_table.item(row, 0)
-            name_item = self.watchlist_table.item(row, 1)
-            if code_item and name_item:
-                code, name = code_item.text(), name_item.text()
-                klines = self._follower_klines(code)
-                # 尽量匹配 meta
-                meta = {'sector': self.watchlist_table.item(row, 3).text() if self.watchlist_table.item(row, 3) else 'N/A'}
-                dlg = DetailedChartDialog(code, name, klines, meta, parent=self)
-                dlg.exec()
-        
-        # 2. 如果是核心板块(3)列，仅执行复制 (联动改为右键)
+        code_item = self.watchlist_table.item(row, 0)
+        name_item = self.watchlist_table.item(row, 1)
+        if not code_item: return
+        code, name = code_item.text(), (name_item.text() if name_item else "")
+
+        # [NEW] 1. 复制功能：代码(0)复制代码, 名称(1)复制名称, 核心板块(3)复制板块
+        if col == 0:
+            self._copy_to_clipboard(code)
+            return
+        elif col == 1:
+            self._copy_to_clipboard(name)
+            return
         elif col == 3:
-            item = self.watchlist_table.item(row, col)
-            if item:
-                sector_name = item.text()
-                # 去除末尾可能存在的空格
-                sector_name = sector_name.strip()
-                self._copy_to_clipboard(sector_name)
-                # 状态栏提示仅显示复制
-                if hasattr(self, 'status_lbl'):
-                    sess = self._session_str()
-                    self.status_lbl.setText(f"[{sess}] 📋 已复制板块: {sector_name}")
+            sect_item = self.watchlist_table.item(row, 3)
+            if sect_item: self._copy_to_clipboard(sect_item.text().strip())
+            return
+
+        # 2. 如果是代码/名称列，弹出详细走势图 (联动)
+        if col <= 1:
+            klines = self._follower_klines(code)
+            meta = {'sector': self.watchlist_table.item(row, 3).text() if self.watchlist_table.item(row, 3) else 'N/A'}
+            dlg = DetailedChartDialog(code, name, klines, meta, parent=self)
+            dlg.exec()
+            
+            if hasattr(self, 'status_lbl'):
+                sess = self._session_str()
+                self.status_lbl.setText(f"[{sess}] 📊 已打开个股详情: {name} ({code})")
 
     def _on_watchlist_context_menu(self, pos):
         """重点表右键点击：联动到活跃板块"""
@@ -1692,16 +1734,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._on_sector_table_selection_changed()
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
-        # 双击功能只在分时走势 (Column 6) 上有效
-        if col != 6:
-            return
-
         code_item = self.stock_table.item(row, 0)
         name_item = self.stock_table.item(row, 1)
         if not code_item: return
         code = code_item.text()
         name = name_item.text() if name_item else code
-        
+
+        # 复制功能：代码列(0)复制代码，名称列(1)复制名称
+        if col == 0:
+            self._copy_to_clipboard(code)
+            return
+        elif col == 1:
+            self._copy_to_clipboard(name)
+            return
+
+        # 双击功能只在分时走势 (Column 6) 上有效
+        if col != 6:
+            return
+
         # 💡 [ENHANCEMENT] 尝试从 realtime_service 获取全量 K 线 (n=240, 约一整天)
         klines = []
         meta = {
@@ -1823,8 +1873,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                        lambda: self.on_stock_clicked(row, 0))
         menu.addAction(f"📈 主窗口定位",
                        lambda: self.on_stock_clicked(row, 0))
+        
+        # [NEW] 定位所属板块
+        sector_name = (self.stock_table.item(row, 0) or QTableWidgetItem()).data(Qt.ItemDataRole.UserRole + 1)
+        if sector_name:
+            menu.addAction(f"📂 定位所属板块: {sector_name}", lambda: self._locate_sector(sector_name))
+            
         menu.addSeparator()
         menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
+        menu.addAction("📋 复制名称", lambda: self._copy_to_clipboard(name))
         menu.exec(self.stock_table.mapToGlobal(pos))
 
     def _add_to_hotlist(self, code: str, name: str):
@@ -2049,6 +2106,71 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"❌ [UI] 保存布局失败: {e}")
 
+    def _on_history_load_clicked(self):
+        """弹出文件选择框加载历史快照"""
+        snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
+        if not os.path.exists(snapshots_dir):
+            os.makedirs(snapshots_dir, exist_ok=True)
+            
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择历史竞价快照", snapshots_dir, "Snapshot Files (*.json.gz)"
+        )
+        
+        if file_path:
+            if self.detector.load_from_snapshot(file_path):
+                self._is_history_mode = True
+                # 从文件名尝试提取日期 bidding_20260312.json.gz
+                match = re.search(r'bidding_(\d+)', os.path.basename(file_path))
+                self._history_date = match.group(1) if match else "Unknown"
+                
+                # 更新 UI 状态
+                self.btn_live.setVisible(True)
+                self.btn_history.setStyleSheet("background-color: #4a3a2a; color: #ff9900;")
+                self.btn_refresh.setEnabled(False) # 历史模式下不能“刷新”实时数据
+                
+                # 触发一次 UI 刷新
+                self._refresh_sector_list()
+                self._populate_watchlist()
+                
+                if hasattr(self, 'status_lbl'):
+                    self.status_lbl.setText(f"🎬 [历史复盘] 📅 {self._history_date} | 数据已加载")
+                    self.status_lbl.setStyleSheet("color: #ff9900; font-weight: bold;")
+                    
+                # 触发重点表标题刷新
+                self._populate_watchlist()
+            else:
+                QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏或格式不正确。")
+
+    def _on_back_to_live_clicked(self):
+        """切回实时模式"""
+        self._is_history_mode = False
+        self.btn_live.setVisible(False)
+        self.btn_history.setStyleSheet("")
+        self.btn_refresh.setEnabled(True)
+        
+        # 恢复锚点并尝试冷启一次数据
+        self.detector.reset_observation_anchors()
+        self.manual_refresh()
+        
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText("📡 已切回实时监控模式")
+            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+        # 触发重点表标题刷新
+        self._populate_watchlist()
+
+    def _locate_sector(self, sector_name: str):
+        """在左侧板块表中找到并滚动到指定的板块"""
+        if not sector_name: return
+        for i in range(self.sector_table.rowCount()):
+            item = self.sector_table.item(i, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == sector_name:
+                self.sector_table.selectRow(i)
+                self.sector_table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
+                # 触发联动刷新右侧表
+                self._on_sector_table_selection_changed()
+                break
+
     # ------------------------------------------------------------------ misc
     @staticmethod
     def _session_str() -> str:
@@ -2070,6 +2192,35 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             tile_all_windows()
         except Exception as e:
             logger.error(f"Rearrange error: {e}")
+
+
+    # ── [NEW] Context Menu Handlers ──────────────────────────────
+    def _on_sector_context_menu(self, pos):
+        """板块列表右键菜单"""
+        item = self.sector_table.itemAt(pos)
+        if item is None:
+            return
+            
+        row = self.sector_table.row(item)
+        sector_name = self.sector_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2a2a3e; color: #aad4ff; border: 1px solid #4a4a6e; } QMenu::item:selected { background-color: #3e3e5e; }")
+        
+        act_reconstruct = menu.addAction("🛠️ 手工重建跟随股 (针对旧快照)")
+        act_reconstruct.triggered.connect(lambda: self._handle_reconstruct_followers(sector_name))
+        
+        menu.exec(self.sector_table.viewport().mapToGlobal(pos))
+        
+    def _handle_reconstruct_followers(self, sector_name):
+        """调用 detector 重建跟随股并刷新 UI"""
+        self.detector.reconstruct_followers(sector_name)
+        # 刷新板块列表（内部会重新填充）
+        self._refresh_sector_list()
+        
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"✅ 板块 [{sector_name}] 跟随股已智能找回")
+            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
 
 
 if __name__ == "__main__":

@@ -194,7 +194,7 @@ def isDigit(x):
     except ValueError:
         return False
 
-async def get_clipboard_contents(timesleep=0.5, code_startswith=None):
+async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipboard=False):
     """
     异步生成器：监控剪贴板并返回符合条件的股票代码。
     支持在后台线程中运行的 asyncio 任务环境，通过 to_thread 避免剪贴板操作阻塞循环。
@@ -224,6 +224,12 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None):
                     if len(code) == 6 and isDigit(code) and code.startswith(code_startswith):
                         if code != last_code:
                             yield code
+                            if not keep_clipboard:
+                                try:
+                                    await asyncio.to_thread(pyperclip.copy, '')
+                                    logger.debug("📋 Clipboard cleared after detection")
+                                except Exception as e:
+                                    logger.warning(f"Failed to clear clipboard: {e}")
                             last_code = code
         except Exception:
             # 捕获剪贴板锁定异常，稍后重试
@@ -232,7 +238,11 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None):
             
         await asyncio.sleep(timesleep)
 
-def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswith: Any = None, ignore_func: Optional[Callable[[str], bool]] = None ,on_new_code: Optional[Callable[[str], None]] = None,logger=logger) -> threading.Thread:
+def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswith: Any = None, 
+                             ignore_func: Optional[Callable[[str], bool]] = None, 
+                             on_new_code: Optional[Callable[[str], None]] = None, 
+                             keep_clipboard: bool = False,
+                             logger=logger) -> threading.Thread:
     """
     在后台线程中启动剪贴板监听，并尝试通过 sender.send(code) 发送代码。
     ignore_func: 接收代码字符串，返回 True 则忽略发送。
@@ -243,7 +253,7 @@ def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswit
         asyncio.set_event_loop(new_loop)
         
         async def _task():
-            async for code in get_clipboard_contents(timesleep, code_startswith):
+            async for code in get_clipboard_contents(timesleep, code_startswith, keep_clipboard=keep_clipboard):
                 try:
                     # 如果提供了外部逻辑检查（如：与 UI 选中代码重复），则忽略
                     if ignore_func and ignore_func(code):
