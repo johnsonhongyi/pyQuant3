@@ -1375,6 +1375,92 @@ def generate_simple_vect_features(df):
     return feat_df.reset_index().to_dict('records')
 
 
+
+def extract_vect_daily_df(df, lastdays=5, code=None, name=None):
+    """
+    从 df 提取最近 lastdays 的 OHLCV 数据
+    并返回展开后的 DataFrame (兼容 vect_daily_to_df)
+
+    返回结构:
+    code name day open high low close volume
+    """
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    tail = df.tail(lastdays)
+
+    rows = []
+
+    vals_open = tail['open'].to_numpy() if 'open' in tail else [None]*lastdays
+    vals_high = tail['high'].to_numpy() if 'high' in tail else [None]*lastdays
+    vals_low = tail['low'].to_numpy() if 'low' in tail else [None]*lastdays
+    vals_close = tail['close'].to_numpy() if 'close' in tail else [None]*lastdays
+    vals_vol = tail['vol'].to_numpy() if 'vol' in tail else [None]*lastdays
+
+    # reversed: 1d=昨天
+    for i in range(lastdays):
+        d = i + 1
+
+        idx = -(i + 1)
+
+        rows.append({
+            "code": code,
+            "name": name,
+            "day": d,
+            "open": vals_open[idx],
+            "high": vals_high[idx],
+            "low": vals_low[idx],
+            "close": vals_close[idx],
+            "volume": vals_vol[idx],
+        })
+
+    return pd.DataFrame(rows)
+
+def vect_daily_to_df(vect_daily_t, max_days=6):
+    """
+    将 vect_daily_t 中的 lastoNd / lasthNd / lastlNd / lastpNd / lastvNd
+    转换为 pandas DataFrame
+
+    Parameters
+    ----------
+    vect_daily_t : list[dict] | dict
+        vect 数据
+    max_days : int
+        展开多少天
+
+    Returns
+    -------
+    pd.DataFrame
+        columns:
+        code name day open high low close volume
+    """
+
+    if isinstance(vect_daily_t, dict):
+        vect_daily_t = [vect_daily_t]
+
+    rows = []
+
+    for item in vect_daily_t:
+        code = item.get("code", "")
+        name = item.get("name", "")
+
+        for d in range(1, max_days + 1):
+            rows.append({
+                "code": code,
+                "name": name,
+                "day": d,
+                "open": item.get(f"lasto{d}d"),
+                "high": item.get(f"lasth{d}d"),
+                "low": item.get(f"lastl{d}d"),
+                "close": item.get(f"lastp{d}d"),
+                "volume": item.get(f"lastv{d}d"),
+            })
+
+    df = pd.DataFrame(rows)
+
+    return df
+
 def dump_vect_daily_ohlcv(vect_daily_t, max_days=6, title=True):
     """
     将 vect_daily_t 中的 lastoNd / lasthNd / lastlNd / lastpNd / lastvNd
@@ -7805,6 +7891,39 @@ if __name__ == '__main__':
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
     
+    time_s = time.time()
+
+    code = '003009'
+    resample = 'd'
+    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+
+    # time_s = time.time()
+    # signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
+    # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
+    # time_s = time.time()
+    with timed_ctx("extract_all_features", warn_ms=50):
+        all_features = extract_all_features(df,lastdays=cct.compute_lastdays)
+        dd = vect_daily_to_df(all_features,max_days=cct.compute_lastdays)
+
+    # dump_vect_daily_ohlcv(all_features,max_days=cct.compute_lastdays)
+    print(f'time: {time.time() - time_s :.8f}  check code: {code} all_features:{len(all_features)} ')
+    with timed_ctx("extract_vect_daily_df", warn_ms=50):
+        dt = extract_vect_daily_df(df,lastdays=cct.compute_lastdays)
+    cct.print_timing_summary()
+    # sina = get_sina_data_df('920274')
+
+    # realtime_signal = evaluate_realtime_signal_tick(sina,all_features)
+    # print(f'evaluate_realtime_signal_tick: {realtime_signal}')
+
+    import ipdb;ipdb.set_trace()
+
+    # generate_df_vect_daily_features = generate_df_vect_daily_features(df,lastdays=cct.compute_lastdays)
+    # # pd.DataFrame(generate_df_vect_daily_features).set_index('code')
+    # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
+
+
+
+
     # code='601212'
     # df=get_tdx_append_now_df_api_tofile(code)
     # import ipdb;ipdb.set_trace()
@@ -7873,23 +7992,6 @@ if __name__ == '__main__':
     # print(f'{df[:2]} ')
     # import ipdb;ipdb.set_trace()
 
-    # time_s = time.time()
-    # signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
-    # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
-    # time_s = time.time()
-    # all_features = extract_all_features(df,lastdays=cct.compute_lastdays)
-    # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} all_features:{len(all_features)} ')
-    # sina = get_sina_data_df('920274')
-
-    # realtime_signal = evaluate_realtime_signal_tick(sina,all_features)
-    # print(f'evaluate_realtime_signal_tick: {realtime_signal}')
-
-    # import ipdb;ipdb.set_trace()
-
-    # time_s = time.time()
-    # generate_df_vect_daily_features = generate_df_vect_daily_features(df,lastdays=cct.compute_lastdays)
-    # # pd.DataFrame(generate_df_vect_daily_features).set_index('code')
-    # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
     code = '920101'

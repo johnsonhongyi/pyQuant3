@@ -55,7 +55,7 @@ class TickSeries:
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
                  'is_upper_band', 'is_new_high', 'momentum_score',
                  '_splitted_cats', '_total_vol', '_total_amt',
-                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff')
+                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'cycle_stage')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -94,6 +94,7 @@ class TickSeries:
         self.score_diff: float = 0.0
         self.price_anchor: float = 0.0
         self.pct_diff: float = 0.0
+        self.cycle_stage: int = 2
 
     def update_meta(self, row: pd.Series):
         """从 df_all 行更新元数据"""
@@ -143,7 +144,11 @@ class TickSeries:
         
         top15_val = row.get('top15', 0)
         self.top15 = int(top15_val) if not pd.isna(top15_val) else 0
-        
+
+        # [NEW] 从 DataRow 提取周期阶段
+        stage_val = row.get('cycle_stage', row.get('cycle_stage_vect', 2))
+        self.cycle_stage = int(stage_val) if not pd.isna(stage_val) else 2
+
         self._splitted_cats = None # 重置缓存
 
     def get_splitted_cats(self) -> List[str]:

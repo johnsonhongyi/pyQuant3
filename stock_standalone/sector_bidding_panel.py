@@ -761,6 +761,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.sector_table.itemSelectionChanged.connect(self._on_sector_table_selection_changed)
         self.sector_table.cellDoubleClicked.connect(self._on_sector_table_dblclick)
         self.sector_table.cellClicked.connect(self._on_sector_table_cell_clicked)
+        # [NEW] 排序后自动滚动到顶部
+        self.sector_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.sector_table.scrollToTop())
         llay.addWidget(self.sector_table)
         self.splitter.addWidget(left)
 
@@ -835,6 +837,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
         self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
         self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
+        # [NEW] 排序后自动滚动到顶部
+        self.watchlist_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.watchlist_table.scrollToTop())
         
         # 启用右键菜单支持 (用于联动活跃板块)
         self.watchlist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1732,6 +1736,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         curr_row = self.sector_table.currentRow()
         if curr_row >= 0:
             self._on_sector_table_selection_changed()
+        # [NEW] 排序后自动滚动到顶部
+        self.stock_table.scrollToTop()
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
         code_item = self.stock_table.item(row, 0)

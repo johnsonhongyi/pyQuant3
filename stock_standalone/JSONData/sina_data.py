@@ -1868,12 +1868,6 @@ class Sina:
             (now_time - float(last_time) > limit_time and cct.get_work_time_duration())
         )
 
-        # need_load = (
-        #     h5_hist is None or 
-        #     last_time is None or 
-        #     (now_time - float(last_time) > limit_time)
-        # )
-
         if need_load:
             if debug:
                 log.debug(f"[UnifiedCache] Loading HDF5: {fname}/{table}")
@@ -1911,7 +1905,69 @@ class Sina:
     #         # 没有匹配到返回空 DataFrame
     #         return pd.DataFrame(columns=h5_hist.columns)
 
+
     def get_real_time_tick(
+        self,
+        code: Union[str, List[str]],
+        l_limit_time: Optional[int] = None,
+        enrich_data: bool = False,
+        debug: bool = False
+    ) -> pd.DataFrame:
+        """
+        获取一个或多个股票的实时轨迹 Tick 数据（极限性能版）。
+        - 支持批量查询，提高查询效率
+        - MultiIndex 高性能过滤
+        - 可选增量成交量/成交额处理
+        """
+
+        # --- 1. 统一加载 HDF5 历史数据缓存 ---
+        h5_hist = self._load_hdf_hist_unified(
+            table=None if l_limit_time is None else f'all_{l_limit_time}',
+            debug=debug
+        )
+
+        if h5_hist.empty:
+            return pd.DataFrame()
+
+        # --- 2. 统一 code 列表格式 ---
+        codes = [code] if isinstance(code, str) else code
+        codes_set = set(codes)
+
+        df_code = pd.DataFrame()
+
+        # --- 3. 高性能过滤 ---
+        try:
+            if isinstance(h5_hist.index, pd.MultiIndex):
+                level0_codes = h5_hist.index.levels[0]
+                valid_codes = list(level0_codes.intersection(codes_set))
+                if valid_codes:
+                    df_code = h5_hist.loc[valid_codes]
+            else:
+                valid_codes = h5_hist.index.intersection(codes_set)
+                if not valid_codes.empty:
+                    df_code = h5_hist.loc[valid_codes]
+        except Exception as e:
+            # 万一极端错误，fallback 最安全方式
+            if isinstance(h5_hist.index, pd.MultiIndex):
+                df_code = h5_hist.loc[h5_hist.index.get_level_values(0).isin(codes)]
+            else:
+                df_code = h5_hist.loc[h5_hist.index.isin(codes)]
+            if debug:
+                log.error(f"[get_real_time_tick fallback] Filter error: {e}")
+
+        if df_code.empty:
+            return pd.DataFrame()
+
+        # --- 4. 清洗全零行 (vectorized) ---
+        df_code = self.drop_tick_all_zero(df_code)
+
+        # --- 5. 数据增强：增量成交量/成交额 ---
+        if enrich_data:
+            df_code = self.process_tick_v_a_data(df_code)
+
+        return df_code
+
+    def get_real_time_tick_slow(
         self,
         code: Union[str, List[str]],
         l_limit_time: Optional[int] = None,

@@ -797,6 +797,8 @@ class HotlistPanel(QWidget, WindowMixin):
             h_header.setStretchLastSection(True) # 最后一列拉伸填充
         
         self.table.setSortingEnabled(True)
+        # [NEW] 排序后自动滚动到顶部
+        self.table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.verticalHeader().setVisible(False)
         
@@ -836,6 +838,8 @@ class HotlistPanel(QWidget, WindowMixin):
             hf.setStretchLastSection(True) # [FIX] 填充空白
         
         self.follow_table.setSortingEnabled(True) # [FIX] 启用排序
+        # [NEW] 排序后自动滚动到顶部
+        self.follow_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.follow_table.scrollToTop())
         
         self.follow_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded) 
         # [NEW] 支持滚轮横向滚动
@@ -874,6 +878,8 @@ class HotlistPanel(QWidget, WindowMixin):
             hw.setStretchLastSection(True)
         
         self.watchlist_table.setSortingEnabled(True)
+        # [NEW] 排序后自动滚动到顶部
+        self.watchlist_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.watchlist_table.scrollToTop())
         self.watchlist_table.verticalHeader().setVisible(False)
         self.watchlist_table.setStyleSheet(self.table.styleSheet())
         
