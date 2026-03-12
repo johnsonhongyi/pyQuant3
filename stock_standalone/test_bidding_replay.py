@@ -17,13 +17,46 @@ from JohnsonUtil import commonTips as cct
 # [NEW] Import real data fetching logic
 from instock_MonitorTK import test_single_thread
 
-# 设置日志
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 HDF5_FILE = r"g:\sina_MultiIndex_data.h5"
 KEY = "all_30"
+
+def analyze_data_integrity(detector, stop_time):
+    """
+    [NEW] 深度分析当前探测器内部状态的连贯性
+    """
+    print(f"\n🔍 [Data Integrity Report @ {stop_time}]")
+    print("-" * 50)
+    
+    # 1. 检查基准时间
+    elapsed_min = (time.time() - detector.baseline_time) / 60
+    print(f"⌛ 观测窗口已持续: {elapsed_min:.1f} min (预设间隔: {detector.comparison_interval/60:.1f} min)")
+    
+    # 2. 采样个股锚点状态
+    all_ts = list(detector._tick_series.values())
+    if all_ts:
+        active_ts = [ts for ts in all_ts if ts.now_price > 0]
+        reset_ts = [ts for ts in active_ts if ts.price_anchor == ts.now_price]
+        valid_diff = [ts for ts in active_ts if ts.pct_diff != 0]
+        
+        print(f"📈 个股统计: 总计={len(all_ts)}, 活跃={len(active_ts)}, 锚点重置={len(reset_ts)}, 有效涨跌={len(valid_diff)}")
+        
+        # 采样前 3 名有变动的票
+        valid_ts = sorted(valid_diff, key=lambda x: abs(x.pct_diff), reverse=True)
+        for ts in valid_ts[:3]:
+            print(f"   [Sample] {ts.code}: 现价={ts.now_price:.2f}, 锚点={ts.price_anchor:.2f}, 涨跌={ts.pct_diff:+.2f}%")
+    
+    # 3. 采样板块锚点状态
+    if detector.sector_anchors:
+        sec_samples = sorted(detector.sector_anchors.items(), key=lambda x: x[1], reverse=True)[:3]
+        print(f"🗂️ 板块锚点: 已记录={len(detector.sector_anchors)} 个")
+        for name, anchor in sec_samples:
+            print(f"   [Sample] {name}: 基准分={anchor:.1f}")
+    
+    print("-" * 50)
+
 
 def get_mock_cat(code):
     """
@@ -414,16 +447,19 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 sys.stdout.write("\n\n")
                 logger.info(f"=== ⏰ 触发时间切片停顿观测点: {stop_time} ===")
                 
+                # [NEW] 调用深度自检分析
+                analyze_data_integrity(detector, stop_time)
+                
                 # [NEW] 打印当前个股前 10 评分，排查为何板块为空
                 all_ts = sorted(detector._tick_series.values(), key=lambda x: x.score, reverse=True)
-                print("-" * 60)
-                print(f"[{stop_time}] 当下个股评分排行 (Top 5):")
+                print(f"\n🚀 [{stop_time}] 当下个股评分排行 (Top 5):")
                 # 获取 EmotionTracker 的当前分数
                 emotion_scores = publisher.emotion_tracker.scores
                 for ts in all_ts[:5]:
                     e_score = emotion_scores.get(ts.code, 0.0)
-                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - 热度: {e_score:.1f}, 结构: {ts.score:.1f}, 涨幅: {ts.current_pct:+.1f}%")
+                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - 结构: {ts.score:.1f}, 热度: {e_score:.1f}, 涨幅: {ts.current_pct:+.1f}%, \033[94m涨跌: {ts.pct_diff:+.2f}%\033[0m")
                 print("-" * 60)
+
     
                 # --- 测试/观察打印：我们在终端中打印最强的 3 个概念板块 ---
                 all_sectors = detector.get_active_sectors()
@@ -439,20 +475,25 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                     if sec_info.get('is_untradable'):
                         leader_info += " [🚫一字]"
                     
-                    # 获取龙头的 Emotion 评分 (如果是 DataPublisher 模式)
-                    leader_emotion = 0.0
                     if hasattr(publisher, 'emotion_tracker'):
-                        leader_emotion = publisher.emotion_tracker.scores.get(sec_info['leader'], 0.0)
+                        # leader_emotion = publisher.emotion_tracker.scores.get(sec_info['leader'], 0.0)
+                        pass
+
                     
-                    pattern = sec_info.get('pattern_hint', '')
-                    time_str = pd.Timestamp.fromtimestamp(sec_info['leader_first_ts']).strftime('%H:%M:%S') if sec_info['leader_first_ts']>0 else 'N/A'
-                    print(f"     -> 领涨龙头: {leader_info} [强度: {sec_info['score']:.1f} | 热度: {leader_emotion:.1f}] [首异: {time_str}]")
-                    if pattern:
-                        print(f"        [形态: {pattern}]")
+                    leader_pattern = sec_info.get('pattern_hint', '')
+                    leader_time = pd.Timestamp.fromtimestamp(sec_info['leader_first_ts']).strftime('%H:%M:%S') if sec_info['leader_first_ts']>0 else 'N/A'
                     
-                    # 跟风小弟: 显示分数和涨幅
+                    # [NEW] 打印龙头的涨跌与分差
+                    l_pct_diff = sec_info.get('leader_pct_diff', 0.0)
+                    l_score_diff = sec_info.get('leader_score_diff', 0.0)
+                    
+                    print(f"     -> 领涨龙头: {leader_info} [强度: {sec_info['score']:.1f} | 涨跌: {l_pct_diff:+.2f}% | 分差: {l_score_diff:+.1f}] [首异: {leader_time}]")
+                    if leader_pattern:
+                        print(f"        [形态: {leader_pattern}]")
+                    
+                    # 获取该板块下的所有跟风股，并打印更多细节（涨跌、分差）
                     f_parts = []
-                    for f in sec_info.get("followers", [])[:5]:
+                    for f in sec_info.get("followers", [])[:8]:
                         f_code = f['code']
                         f_em = 0.0
                         if hasattr(publisher, 'emotion_tracker'):
@@ -460,9 +501,23 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                         
                         f_ts = f.get('first_ts', 0)
                         f_time = pd.Timestamp.fromtimestamp(f_ts).strftime('%H:%M:%S') if f_ts > 0 else '?'
-                        f_parts.append(f"{f.get('name', 'N/A')} ({f_code}) [\033[92m{f.get('pct', 0.0):+.1f}%\033[0m 强:{f.get('score', 0.0):.1f}/热:{f_em:.1f}]")
+                        
+                        # [NEW] 提取 pct_diff (涨跌) 和 score_diff
+                        f_pct_diff = f.get('pct_diff', 0.0)
+                        f_score_diff = f.get('score_diff', 0.0)
+                        
+                        # 格式化输出：代码(名称) [现涨 变动涨跌/分差]
+                        diff_str = f"{f_pct_diff:+.2f}%/{f_score_diff:+.1f}"
+                        f_parts.append(f"{f.get('name', 'N/A')} ({f_code}) [\033[92m{f.get('pct', 0.0):+.1f}%\033[0m 变:{diff_str}]")
+                    
                     if f_parts:
-                        print(f"     -> 跟风小弟: {', '.join(f_parts)}")
+                        print(f"     -> 跟风股详情: {', '.join(f_parts)}")
+                    
+                    # [DATA INTEGRITY CHECK] 验证个股涨跌是否为 0
+                    if all(f.get('pct_diff', 0.0) == 0.0 for f in sec_info.get("followers", [])) and sec_info.get("followers"):
+                        print(f"     ❌ \033[91m[DATA ERROR]\033[0m 所有个股涨跌均为 0，请检查锚点逻辑！")
+                    else:
+                        print(f"     ✅ [DATA OK] 个股异动数据已成功记录")
                     
                     # [FULL-CHAIN] 跟单与操作建议 (跟单建议)
                     print(f"     ✅ 【跟单建议】: ", end="")
