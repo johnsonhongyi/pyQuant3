@@ -890,17 +890,16 @@ class BiddingMomentumDetector:
         score_diff = final_score - ts_obj.score_anchor
         
         # [NEW] 个股切片涨幅计算与重置逻辑
-        if ts_obj.price_anchor == 0.0 and cur_close > 0:
+        if ts_obj.price_anchor <= 0 and cur_close > 0:
             ts_obj.price_anchor = cur_close
             
         pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.price_anchor * 100.0 if ts_obj.price_anchor > 0 else 0.0
+        ts_obj.pct_diff = pct_diff
         
-        # 超过阈值后自动重置锚点 (对齐板块逻辑)
+        # 超过阈值后自动重置锚点 (对调板块逻辑)
         if abs(pct_diff) >= self.price_reset_threshold:
             ts_obj.price_anchor = cur_close
-            pct_diff = 0.0
-            
-        ts_obj.pct_diff = pct_diff
+            # logger.info(f"♻️ [Detector] Price anchor reset for {code}: {pct_diff:+.2f}%")
 
         with self._lock:
             # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
@@ -1038,6 +1037,20 @@ class BiddingMomentumDetector:
 
         new_active = {} if target_sectors is None else self.active_sectors.copy()
         
+        # 4. [NEW] 全局对照基准重置逻辑 (移动到循环外，每周期仅检查一次)
+        now = time.time()
+        if now - self.baseline_time >= self.comparison_interval:
+            logger.info(f"🔄 [Detector] Resetting comparison baseline: Interval={self.comparison_interval/60:.1f}m, Sector count={len(self.sector_anchors)}")
+            self.baseline_time = now
+            self.sector_anchors.clear()
+            for ts in self._tick_series.values():
+                ts.score_anchor = ts.score
+                ts.price_anchor = ts.current_price
+            
+            # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
+            target_sectors = None
+            new_active = {}
+        
         # 将 persistent dict 转换为 list 给计算逻辑使用
         sectors_to_update = target_sectors if target_sectors is not None else self._sector_active_stocks_persistent.keys()
         
@@ -1094,7 +1107,7 @@ class BiddingMomentumDetector:
             if len(all_member_codes) < 4:
                 if sector in new_active: del new_active[sector]
                 continue
-
+            
             # 提取龙头元数据供后续使用
             tags = []
             l_data = candidate_leader
@@ -1168,6 +1181,7 @@ class BiddingMomentumDetector:
             # 检测是否超过设定的比较间隔时间 (阈值限制)
             if now - self.baseline_time >= self.comparison_interval:
                 # 触发阈值刷新，重置基准时间与所有的基准分锚点
+                logger.info(f"🔄 [Detector] Resetting comparison baseline: Interval={self.comparison_interval/60:.1f}m, Sector count={len(self.sector_anchors)}")
                 self.baseline_time = now
                 self.sector_anchors.clear()
                 for ts in self._tick_series.values():
@@ -1182,6 +1196,8 @@ class BiddingMomentumDetector:
             # 3. 分阶段变动重置 (辅助参考)
             anchor = self.sector_anchors[sector]
             if abs(board_score - anchor) >= self.reset_threshold:
+                if self.enable_log:
+                    logger.info(f"♻️ [Detector] Sector anchor reset for {sector}: {anchor:.1f} -> {board_score:.1f}")
                 self.sector_anchors[sector] = board_score
                 anchor = board_score
             
@@ -1200,13 +1216,14 @@ class BiddingMomentumDetector:
                 'leader_high_day': l_data.get('high_day', 0),
                 'leader_low_day': l_data.get('low_day', 0),
                 'leader_last_high': l_data.get('last_high', 0),
-                'leader_last_low': l_data.get('low_day', 0), # Corrected from leader_last_low to low_day
+                'leader_last_low': l_data.get('last_low', 0),
                 'leader_first_ts': l_data['first_breakout_ts'],
                 'leader_score_val': l_data.get('score', 0.0),
                 'leader_score_diff': l_data.get('score_diff', 0.0),
+                'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
                 'pattern_hint': l_data['pattern_hint'],
                 'is_untradable': l_data['is_untradable'],
-                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'score_diff': s.get('score_diff', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
+                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'score_diff': s.get('score_diff', 0.0), 'pct_diff': s.get('pct_diff', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
                 'linked_concepts': linked_concepts[:3]
             }
 
@@ -1260,9 +1277,13 @@ class BiddingMomentumDetector:
                 if p:
                     new_map[p].add(code)
         
-        # [NEW] 激进清理：如果新图与旧图差异过大，或者旧图完全是乱序代码（如含有 000001, 000002 序列），强制清空缓存
-        if self.sector_map and len(new_map) > 50:
-            self._sector_active_stocks_persistent.clear()
+        # [REFINED] 激进清理改为温和差异判断：仅当新旧板块架构差异极大时重置
+        if self.sector_map and len(new_map) > 0:
+            diff_ratio = len(set(new_map.keys()) ^ set(self.sector_map.keys())) / max(len(new_map), 1)
+            # 如果板块名单变动超过 80%，可能切换了市场或数据源，清理缓存
+            if diff_ratio > 0.8:
+                logger.info(f"♻️ [Detector] Market context shifted (diff={diff_ratio:.1f}), resetting persistent cache")
+                self._sector_active_stocks_persistent.clear()
             
         self.sector_map = new_map
 

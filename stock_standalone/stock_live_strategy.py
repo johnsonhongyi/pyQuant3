@@ -723,7 +723,7 @@ class StockLiveStrategy:
                         
                     # --- [关键清理] 如果监控项标记为 recovered_holding 但外部(数据库)已平仓，则自动移除 ---
                     to_remove = []
-                    for key, stock in self._monitored_stocks.items():
+                    for key, stock in list(self._monitored_stocks.items()):
                         if stock.get('tags') == "recovered_holding":
                             # 提取 code (兼容 key 为 code_resample 的老格式)
                             s_code = stock.get('code') or key.split('_')[0]
@@ -732,7 +732,8 @@ class StockLiveStrategy:
                     
                     if to_remove:
                         for k in to_remove:
-                            del self._monitored_stocks[k]
+                            if k in self._monitored_stocks:
+                                del self._monitored_stocks[k]
                         logger.info(f"🧹 自动清理: 已移出 {len(to_remove)} 只已平仓的持仓股监控")
                         self._save_monitors()
 
@@ -868,7 +869,7 @@ class StockLiveStrategy:
             import json
             data = {}
 
-            for key, stock in self._monitored_stocks.items():
+            for key, stock in list(self._monitored_stocks.items()):
                 # --- 构建基础数据 ---
                 record = {
                     'name': stock.get('name'),
@@ -911,7 +912,7 @@ class StockLiveStrategy:
 
             # --- [新增] 同步到数据库，支持跨终端状态一致性 ---
             if hasattr(self, 'trading_logger'):
-                for key, stock in self._monitored_stocks.items():
+                for key, stock in list(self._monitored_stocks.items()):
                     code_from_key = key.split('_')[0]
                     resample_from_key = stock.get('resample', 'd')
                     self.trading_logger.log_voice_alert_config(
@@ -1117,7 +1118,7 @@ class StockLiveStrategy:
 
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
         # 将各股的最新决策与监理感知指标写回 df_all，以便前端实时显示
-        for key, stock in self._monitored_stocks.items():
+        for key, stock in list(self._monitored_stocks.items()):
             code = stock.get('code', key.split('_')[0])
             if code in df_all.index:
                 snap = stock.get('snapshot', {})

@@ -563,7 +563,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         threading.Thread(target=slow_tdx_link, daemon=True).start()
         print("🚀 联动任务已全部分发")
 
-def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None):
+def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None, skip_focus=False):
     existing_instance = QApplication.instance()
     app = existing_instance or QApplication(sys.argv)
     is_new_app = (existing_instance is None)
@@ -572,8 +572,9 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=No
     if existing_win is not None and hasattr(existing_win, 'update_plot') and existing_win.isVisible():
         try:
             existing_win.update_plot(df, signals, title, avg_series, time_labels, use_line, extra_lines)
-            existing_win.raise_()
-            existing_win.activateWindow()
+            if not skip_focus:
+                existing_win.raise_()
+                existing_win.activateWindow()
             win = existing_win
         except Exception as e:
             print(f"Reuse failed: {e}")

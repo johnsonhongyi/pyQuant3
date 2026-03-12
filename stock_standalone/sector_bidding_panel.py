@@ -206,20 +206,6 @@ class TimeAxisItem(pg.AxisItem):
         return ticks
 
 
-class NumericTableWidgetItem(QTableWidgetItem):
-    """自定义表格项，支持数值排序而不是字符串字典排序"""
-    def __lt__(self, other):
-        if not isinstance(other, QTableWidgetItem):
-            return super().__lt__(other)
-        try:
-            def get_val(item):
-                text = item.text().replace('%', '').replace('+', '').strip()
-                if '(' in text:
-                    text = text.split('(')[0].strip()
-                return float(text)
-            return get_val(self) < get_val(other)
-        except (ValueError, TypeError, IndexError):
-            return super().__lt__(other)
 
 class DetailedChartDialog(QDialog):
     """双击弹出的详细分时图窗口 (带成交量、多重参考线及全量实时数据)"""
@@ -1107,9 +1093,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             item_name.setData(Qt.ItemDataRole.UserRole, sn)
             item_name.setForeground(QColor(color))
             self.sector_table.setItem(i, 0, item_name)
-            
-            # 第二列：强度 (仅显示强度值)
-            from sector_bidding_panel import NumericTableWidgetItem
             
             diff = sdata.get('score_diff', 0.0)
             
