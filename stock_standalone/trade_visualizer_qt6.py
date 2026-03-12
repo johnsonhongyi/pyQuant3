@@ -1056,10 +1056,77 @@ class SBCTestThread(QThread):
             logger.error(f"{error_msg}\n{traceback.format_exc()}")
             self.error_occurred.emit(error_msg)
 
-
-
-
 def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    极限性能版：将 tick_df 聚合成“今天的一根日 K”
+    输出和原 tick_to_daily_bar 逻辑完全一致
+    """
+    if tick_df is None or tick_df.empty:
+        return pd.DataFrame()
+
+    df = tick_df
+
+    # --- 1. 取 ticktime ---
+    if isinstance(df.index, pd.MultiIndex) and 'ticktime' in df.index.names:
+        tick_time = pd.to_datetime(df.index.get_level_values('ticktime').values)
+    elif 'ticktime' in df.columns:
+        tick_time = pd.to_datetime(df['ticktime'].values)
+    else:
+        return pd.DataFrame()
+
+    dates = tick_time.normalize()
+    latest_date = dates.max()
+    mask = dates == latest_date
+    df = df.loc[mask]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # --- 2. 确定价格列 ---
+    price_col = 'close'
+    if price_col not in df.columns:
+        for c in ['price', 'trade']:
+            if c in df.columns:
+                price_col = c
+                break
+
+    # --- 3. 获取 OHLC ---
+    def get_val(keys, fallback_func, use_last=True):
+        for k in keys:
+            if k in df.columns:
+                valid = df[k].to_numpy()
+                valid = valid[valid > 0]
+                if valid.size > 0:
+                    return valid[-1] if use_last else valid[0]
+        return fallback_func()
+
+    open_p = get_val(['open', 'nopen'], lambda: df[price_col].to_numpy()[0], use_last=False)
+    high_p = get_val(['high', 'nhigh'], lambda: df[price_col].to_numpy().max())
+    low_p = get_val(['low', 'nlow'], lambda: df[price_col].to_numpy().min())
+    close_p = df[price_col].to_numpy()[-1]
+
+    # --- 4. 修正 High/Low 包络 Open/Close ---
+    high_p = max(high_p, open_p, close_p)
+    low_p = min(low_p, open_p, close_p)
+
+    volume = df['volume'].to_numpy()[-1] if 'volume' in df.columns else 0
+
+    bar = pd.DataFrame(
+        {
+            'open': [open_p],
+            'high': [high_p],
+            'low': [low_p],
+            'close': [close_p],
+            'volume': [volume]
+        },
+        index=[latest_date.strftime('%Y-%m-%d')]
+    )
+
+    logger.debug(f'Generated bar for {latest_date.strftime("%Y-%m-%d")}, close={close_p}')
+    return bar
+
+
+def tick_to_daily_bar_slow(tick_df: pd.DataFrame) -> pd.DataFrame:
     """
     将 tick_df（MultiIndex: code, ticktime）聚合成“今天的一根日 K”
     返回：
@@ -5713,7 +5780,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 注意：這裡直接調用渲染，確保模擬數據被帶入
             self._capture_view_state()
-            with timed_ctx("render_charts_detailed", warn_ms=100):
+            with timed_ctx("render_charts_detailed", warn_ms=50):
                 # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
                 self.render_charts(code, self.day_df, effective_tick_df)
 
@@ -5724,7 +5791,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
             self._capture_view_state()
-            with timed_ctx("render_charts_historical", warn_ms=100):
+            with timed_ctx("rrender_charts_detailed_historical", warn_ms=50):
                 self.render_charts(code, self.day_df, None)
 
         '''
@@ -5808,7 +5875,76 @@ class MainWindow(QMainWindow, WindowMixin):
         # free_time_resample = cct.get_work_time() and self.resample not in ['d']
         return need_ghost_bar 
 
+
     def on_realtime_update(self, code, tick_df, today_bar):
+        """实时更新（极限优化 + day_df 安全合并）"""
+        import time
+
+        self._tick_cache[code] = {
+            'tick_df': tick_df,
+            'today_bar': today_bar,
+            'ts': time.time()
+        }
+
+        if today_bar is None or today_bar.empty:
+            return
+
+        # --- 股票匹配检查 ---
+        if code != self.current_day_df_code:
+            return
+        if not self._debug_realtime and (not self.realtime or code != self.current_code):
+            return
+
+        # --- 索引统一 ---
+        today_idx = pd.to_datetime(today_bar.index[0]).strftime('%Y-%m-%d')
+        today_bar.index = [today_idx]
+
+        # 数值列精度
+        for col in ['open', 'high', 'low', 'close']:
+            if col in today_bar.columns:
+                today_bar[col] = today_bar[col].round(2)
+
+        today_bar['vol'] = today_bar['volume'] if 'volume' in today_bar.columns else 0
+
+        # --- 补全实时指标 ---
+        if not self.df_all.empty:
+            stock_row = None
+            if code in self.df_all.index:
+                stock_row = self.df_all.loc[code]
+            elif 'code' in self.df_all.columns:
+                filtered = self.df_all[self.df_all['code'] == code]
+                if not filtered.empty:
+                    stock_row = filtered.iloc[0]
+
+            if stock_row is not None:
+                for col in ['ma5d','ma10d','ma20d','ma60d','Rank','win','slope','macddif','macddea','macd']:
+                    if col in self.df_all.columns and col not in today_bar.columns:
+                        today_bar[col] = stock_row[col]
+
+        # --- 合并到 day_df ---
+        if today_idx in self.day_df.index:
+            # 安全列对齐更新
+            for col in self.day_df.columns:
+                if col in today_bar.columns:
+                    if col == 'open':
+                        # open 已有有效值时不覆盖
+                        if pd.notna(self.day_df.at[today_idx, col]) and self.day_df.at[today_idx, col] > 0:
+                            continue
+                    self.day_df.at[today_idx, col] = today_bar.at[today_idx, col]
+        else:
+            # 新增一行，列顺序和类型对齐
+            today_bar_aligned = today_bar.reindex(columns=self.day_df.columns, fill_value=0)
+            self.day_df.loc[today_idx] = today_bar_aligned.iloc[0]
+
+        # --- 渲染图表（节流） ---
+        now = time.time()
+        last_render = self._last_kline_render_time.get(code, 0)
+        if now - last_render >= self._render_throttle_interval:
+            with timed_ctx("render_charts_realtime", warn_ms=100):
+                self.render_charts(code, self.day_df, tick_df)
+                self._last_kline_render_time[code] = time.time()
+
+    def on_realtime_update_slow(self, code, tick_df, today_bar):
         """处理实时分时与幽灵 K 线更新"""
         # 0. 永远缓存最新数据
         self._tick_cache[code] = {
@@ -5893,7 +6029,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # logger.debug(f"[Throttle] Skipping render for {code} (Interval: {now-last_render:.2f}s)")
             return
 
-        with timed_ctx("render_charts_realtime", warn_ms=150):
+        with timed_ctx("render_charts_realtime_slow", warn_ms=100):
             self.render_charts(code, self.day_df, tick_df)
             # 更新最后渲染时间
             self._last_kline_render_time[code] = time.time()
@@ -7895,7 +8031,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.loader = None
 
         # ② 加载历史
-        with timed_ctx("DataLoaderThread", warn_ms=80):
+        with timed_ctx("DataLoaderThreadloader", warn_ms=30):
             # 如果开启策略模拟，则需要加载完整日线指标 (fastohlc=False)
             fastohlc_val = not getattr(self, 'show_strategy_simulation', False)
             self.loader = DataLoaderThread(
@@ -8464,7 +8600,6 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"[_check_market_gaps] Error: {e}")
 
-    # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
         """
         渲染完整图表...
@@ -8575,21 +8710,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.candle_item.setTheme(self.qt_theme)
             self.candle_item.setData(ohlc_data)
 
-        # # --- MA5/10/20 ---
-        # ma5 = day_df['close'].rolling(5).mean().values
-        # ma10 = day_df['close'].rolling(10).mean().values
-        # ma20 = day_df['close'].rolling(20).mean().values
-        # ma60 = day_df['close'].rolling(60).mean().values
-        
-        # for attr, series, color in zip(['ma5_curve','ma10_curve','ma20_curve'],
-        #                                [ma5,ma10,ma20],
-        #                                [ma_colors['ma5'], ma_colors['ma10'], ma_colors['ma20']]):
-        #     if not hasattr(self, attr) or getattr(self, attr) not in self.kline_plot.items:
-        #         setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=1)))
-        #     else:
-        #         getattr(self, attr).setData(x_axis, series)
-        #         getattr(self, attr).setPen(pg.mkPen(color, width=1))
-
         # --- MA5 / MA10 / MA20 / MA60 ---
         ma5  = day_df['close'].rolling(5).mean().values
         ma10 = day_df['close'].rolling(10).mean().values
@@ -8597,10 +8717,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # ma60 = day_df['close'].rolling(60).mean().values
         # ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
         # ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
-
         ma20 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=26)
         ma60 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=60)
-
         # MA60 颜色：亮蓝色（深浅主题都清晰）
         # ma60_color = QColor(0, 180, 255)
 
@@ -8732,32 +8850,6 @@ class MainWindow(QMainWindow, WindowMixin):
                         t.setPos(x_axis[i], highs[i] * 1.008)
                         t.show()
 
-                # with timed_ctx("draw_td_sequential", warn_ms=40):
-                #     for i in range(start, total):
-                #         td_cnt = buy[i] if buy[i] > 0 else sell[i]
-                #         if td_cnt == 0:
-                #             continue
-                #         if pool_idx >= len(pool):
-                #             break
-
-                #         t = pool[pool_idx]
-                #         pool_idx += 1
-
-                #         # 视觉节奏：颜色 + 字体
-                #         if td_cnt == 9:
-                #             t.setColor('#FFFF00')      # 明黄色
-                #             t.setFont(self.td_font_9)
-                #         elif td_cnt >= 7:
-                #             t.setColor('#FFD700')      # 金黄色
-                #             t.setFont(self.td_font_7p)
-                #         else:
-                #             t.setColor('#E6C200')      # 深黄色
-                #             t.setFont(self.td_font_norm)
-
-                #         t.setText(str(td_cnt))
-                #         t.setPos(x_axis[i], highs[i] * 1.008)
-                #         t.show()
-
             except Exception as e:
                 logger.debug(f"TD Sequential display error: {e}")
 
@@ -8822,7 +8914,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
         if self.show_strategy_simulation:
-            with timed_ctx("_run_strategy_simulation_signal", warn_ms=100):
+            with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
                 kline_signals.extend(self._run_strategy_simulation_new50(code, day_df, n_rows=50))
 
         # 2. 实盘日志历史信号 (CSV) - 引入缓存优化
@@ -9059,11 +9151,6 @@ class MainWindow(QMainWindow, WindowMixin):
             prices = _prices[valid_mask]
             x_ticks = _x_ticks[valid_mask]
 
-            # prices = tick_df['close'].values
-            # x_ticks = np.arange(len(prices))
-
-
-
             # ⭐ 准确获取昨日收盘价作为百分比基准 (解决百分比不对齐问题)
             pre_close = 0
             if 'llastp' in tick_df.columns and tick_df['llastp'].iloc[-1] > 0:
@@ -9148,24 +9235,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
 
-            # def safe_autoRange(vb, df, cols=['high','low']):
-            #     if df is None or df.empty:
-            #         return
-            #     visible = df[cols].dropna()
-            #     if visible.empty:
-            #         return
-            #     y_max, y_min = visible.max().max(), visible.min().min()
-            #     if y_max == y_min:
-            #         y_max += 1
-            #     vb.setRange(yRange=(y_min, y_max), padding=0)
-
-            # # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
-            # try:
-            #     self.tick_plot.autoRange()
-            # except (ValueError, RuntimeError) as e:
-                    # 防止 NaN 值导致 pyqtgraph 崩溃
-                    # logger.debug(f"tick_plot.autoRange() failed: {e}")
-
             # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
             try:
                 # 仅当有有效数据时才设置范围
@@ -9222,10 +9291,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 追加监理看板信息
             if not self.df_all.empty:
-                # Debug: print df_all columns
-                # print(f"[DEBUG] df_all columns: {self.df_all.columns.tolist()}")
-                # print(f"[DEBUG] Looking for code: {code}, df_all index: {self.df_all.index.tolist()[:5]}")
-
                 crow = None
                 # 尝试多种匹配方式：原样匹配、去掉市场前缀匹配
                 search_codes = [code]
@@ -9305,14 +9370,9 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'tick_axis'):
                 # 优先使用 explicit 'time' column
                 t_list = []
-                # if 'time' in tick_df.columns:
-                #     t_list = tick_df['time'].astype(str).tolist()
-                # elif isinstance(tick_df.index, pd.DatetimeIndex):
-                #     t_list = tick_df.index.strftime('%H:%M').tolist()
                 _times = tick_df.index.get_level_values('ticktime')
                 # 过滤 NaN
                 t_list = pd.to_datetime(_times).strftime('%H:%M:%S').tolist()
-                # t_list = pd.to_datetime(_times).strftime('%Y-%m-%d %H:%M:%S').tolist()
 
                 self.tick_axis.updateTimes(t_list)
 
@@ -9348,12 +9408,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 if tick_signals_to_draw:
                     self.signal_overlay.update_signals(tick_signals_to_draw, target='tick')
 
-
-            # if is_realtime_active and self.show_strategy_simulation:
-            #     if 'shadow_decision' in locals() and shadow_decision:
-            #         # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
-            #         pass
-        
         # --- 绘制热点/跟单标记 ---
         self._draw_hotspot_markers(code, x_axis, day_df)
         
@@ -9361,9 +9415,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self._draw_follow_lines(code, day_df)
         
         self._draw_signal_annotation(code, x_axis, day_df)
-
-
-
 
         # ----------------- 5. 数据同步与视角处理 -----------------
         # 同步归一化后的数据到 self.day_df
@@ -9763,6 +9814,69 @@ class MainWindow(QMainWindow, WindowMixin):
             return None
 
     def _run_strategy_simulation_new50(self, code, day_df, n_rows=50) -> list[SignalPoint]:
+        """
+        [极限性能版 v2] 历史策略模拟（保持结果一致）
+        """
+        try:
+            if day_df is None or len(day_df) < 10:
+                return []
+
+            # --- slice 不 copy ---
+            _df = day_df if n_rows == 0 else day_df.iloc[-n_rows:]
+
+            cols = _df.columns
+            col_idx_map = {c: i for i, c in enumerate(cols)}
+
+            target_cols = (
+                'ma5d','ma10d','ma20d','ma60d',
+                'lastp1d','lastv1d',
+                'macddif','macddea','macd',
+                'rsi','upper','cycle_stage'
+            )
+
+            # --- df_all 回填 ---
+            if not self.df_all.empty:
+
+                if code in self.df_all.index:
+                    stock_row = self.df_all.loc[code]
+                else:
+                    codes = self.df_all['code'].to_numpy()
+                    idx = np.flatnonzero(codes == code)
+                    stock_row = self.df_all.iloc[idx[-1]] if idx.size else None
+
+                if stock_row is not None:
+
+                    values = _df.values
+                    last_row = values[-1]
+
+                    row_values = stock_row.values
+                    row_cols = stock_row.index
+
+                    # 提前构建 set 加速判断
+                    row_col_set = set(row_cols)
+
+                    for col in target_cols:
+                        if col in col_idx_map and col in row_col_set:
+                            v = stock_row[col]
+                            if pd.notnull(v):
+                                last_row[col_idx_map[col]] = v
+
+            # --- 策略计算 ---
+            signals = self.strategy_controller.evaluate_historical_signals(code, _df)
+
+            # --- bar_index 偏移 ---
+            if n_rows and len(day_df) > n_rows:
+                offset = len(day_df) - n_rows
+                for sig in signals:
+                    sig.bar_index += offset
+
+            return signals
+
+        except Exception:
+            logger.exception(f"Strategy simulation failed for {code}")
+            return []
+
+    def _run_strategy_simulation_new50_slow(self, code, day_df, n_rows=50) -> list[SignalPoint]:
         """
         [极限性能版] 历史策略模拟（保持顺序，高速，最近 N 行）
         """

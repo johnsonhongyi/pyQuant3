@@ -457,7 +457,8 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 emotion_scores = publisher.emotion_tracker.scores
                 for ts in all_ts[:5]:
                     e_score = emotion_scores.get(ts.code, 0.0)
-                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - 结构: {ts.score:.1f}, 热度: {e_score:.1f}, 涨幅: {ts.current_pct:+.1f}%, \033[94m涨跌: {ts.pct_diff:+.2f}%\033[0m")
+                    c_stage = getattr(ts, 'cycle_stage', 2)
+                    print(f"  {ts.code} ({getattr(ts, 'name', 'N/A')}) - 结构: {ts.score:.1f}, 周期: {c_stage}, 热度: {e_score:.1f}, \033[94m涨跌: {ts.pct_diff:+.2f}%\033[0m")
                 print("-" * 60)
 
     

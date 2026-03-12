@@ -630,6 +630,39 @@ class TradingLogger:
         cur.close()
         return results
 
+    def get_signal_history_df_bug(self, start_date=None, end_date=None, resample=None, code=None, limit=None):
+        import pandas as pd
+        conn = self.db_manager.get_connection()
+        
+        cols = ["date", "code", "resample", "price", "signal"]
+        query = f"SELECT {', '.join(cols)} FROM signal_history WHERE 1=1"
+        params = []
+        
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
+        if code:
+            query += " AND code = ?"
+            params.append(code)
+        
+        query += " ORDER BY date DESC"
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        try:
+            df = pd.read_sql_query(query, conn, params=params)
+        except Exception as e:
+            logger.error(f"get_signal_history_df error: {e}")
+            df = pd.DataFrame()
+        
+        return df
+
     def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None):
         """获取信号历史并作为 DataFrame 返回"""
         try:

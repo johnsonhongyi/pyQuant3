@@ -24,11 +24,11 @@ logger = LoggerFactory.getLogger()
 
 def calc_cycle_stage_vect(df: pd.DataFrame) -> pd.Series:
     """
-    矢量化计算个股所处的周期阶段
+    矢量化计算个股所处的周期阶段 (增强版)
     1: 筑底/启动 (Bottom/Start) - 站上中长线，初次走强
-    2: 主升/健康 (Rising/Healthy) - 均线顺排，斜率向上
-    3: 脉冲/扩张 (Exhaustion/Overextended) - 乖离过大或破上轨
-    4: 见顶/回落 (Top/Falling) - 均线死叉或价格走弱
+    2: 主升/健康 (Rising/Healthy) - 均线顺排，斜率向上，量能配合
+    3: 脉冲/扩张 (Exhaustion/Overextended) - 乖离过大或破上轨 (风险区)
+    4: 见顶/回落 (Top/Falling) - 均线死叉或价格走弱 (减仓/退出区)
     """
     n = len(df)
     if n == 0: return pd.Series([], dtype=int)
@@ -40,31 +40,72 @@ def calc_cycle_stage_vect(df: pd.DataFrame) -> pd.Series:
     ma20 = df['ma20d'].values.astype('float32') if 'ma20d' in df.columns else np.zeros(n)
     ma60 = df['ma60d'].values.astype('float32') if 'ma60d' in df.columns else np.zeros(n)
     upper = df['upper1'].values.astype('float32') if 'upper1' in df.columns else np.zeros(n)
+    
+    # [NEW] 引入量能确认与多日趋势 (cct.compute_lastdays)
+    lookback = getattr(cct, 'compute_lastdays', 5)
+    
+    # [FIX] 优先使用原始成交量 vol，因为 volume 可能会被转换为虚拟量比信号
+    volume = df['vol'].values.astype('float32') if 'vol' in df.columns else df['volume'].values.astype('float32')
+    
+    # 计算多日成交量均值 (如果 df 是历史序列)
+    # [OPTIMIZE] 如果 df 中已经有 last6vol (或类似预计算列)，则直接使用
+    if 'last6vol' in df.columns:
+        vol_ma = df['last6vol'].values.astype('float32')
+        vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    elif n >= lookback:
+        vol_ma = pd.Series(volume).rolling(window=lookback, min_periods=1).mean().values
+        vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    elif 'lastv1d' in df.columns:
+        # [WIDE-FORMAT] 处理单行数据，包含历史量列 lastv1d, lastv2d...
+        # 尝试计算多日均量
+        vol_cols = [f'lastv{i}d' for i in range(1, lookback + 1) if f'lastv{i}d' in df.columns]
+        if vol_cols:
+            vol_ma = df[vol_cols].mean(axis=1).values.astype('float32')
+            vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+        else:
+            lastv1 = df['lastv1d'].values.astype('float32')
+            vol_ratio = volume / np.where(lastv1 > 0, lastv1, 1)
+    else:
+        vol_ratio = np.ones(n)
 
-    stages = np.full(n, 2, dtype=int) # 默认设为 Stage 2 (由于能进入池子的通常至少是主升趋势)
+    # 计算 MA20 斜率
+    ma20_slope = np.zeros(n)
+    if n >= lookback:
+        ma20_series = pd.Series(ma20)
+        ma20_slope = (ma20_series - ma20_series.shift(lookback)).replace(np.nan, 0).values
+    elif f'ma20{lookback}d' in df.columns:
+        # [WIDE-FORMAT] 使用历史 MA20 列计算斜率
+        ma20_slope = (ma20 - df[f'ma20{lookback}d'].values.astype('float32'))
+    elif 'ma201d' in df.columns:
+        ma20_slope = (ma20 - df['ma201d'].values.astype('float32'))
 
-    # 逻辑判定
-    # Stage 3: 脉冲扩张 (最高优先级，优先拦截风险)
-    # 条件：突破布林上轨 或 价格乖离 MA5 超过 8%
-    mask_stage3 = (upper > 0) & (close > upper * 1.01)
-    mask_stage3 |= (ma5 > 0) & (close > ma5 * 1.08)
+    stages = np.full(n, 2, dtype=int) # 默认设为 Stage 2
+
+    # 1. Stage 3: 脉冲扩张 (最高优先级 - 风险拦截)
+    bias5 = (close - ma5) / np.where(ma5 > 0, ma5, 1)
+    mask_stage3 = (upper > 0) & (close > upper * 1.005) # 突破布林上轨
+    mask_stage3 |= (bias5 > 0.08) # 5日乖离率 > 8%
     stages[mask_stage3] = 3
 
-    # Stage 4: 见顶回落
-    # 条件：跌破 MA5 且 MA5 开始下行，或 跌破 MA10
-    mask_stage4 = (ma5 > 0) & (close < ma5 * 0.995)
-    mask_stage4 |= (ma10 > 0) & (close < ma10 * 0.99)
+    # 2. Stage 4: 见顶回落 (次高优先级)
+    # 条件：跌破 MA5 且 MA5 下降，或 破 MA10
+    mask_stage4 = (ma5 > 0) & (close < ma5 * 0.992)
+    mask_stage4 |= (ma10 > 0) & (close < ma10 * 0.985)
+    # 如果 MA20 斜率为负且价格在 MA20 下方，也是 Stage 4
+    mask_stage4 |= (ma20 > 0) & (ma20_slope < 0) & (close < ma20)
     stages[mask_stage4] = 4
 
-    # Stage 1: 筑底启动 (低位刚站稳)
-    # 条件：处于 MA60 附近，或 MA20 刚刚走平向上，且均线未形成完全多排
-    is_bottom = (ma60 > 0) & (np.abs(close - ma60) / ma60 < 0.05)
-    is_rising_start = (ma20 > 0) & (close > ma20) & (ma5 < ma20 * 1.02)
-    mask_stage1 = is_bottom | is_rising_start
-    # Stage 1 优先级应低于 Stage 4 (如果既在底部又跌破均线，算 Stage 4/无价值)
-    stages[mask_stage1 & (stages != 4)] = 1
+    # 3. Stage 1: 筑底启动
+    # 条件：靠近 MA60 且 站上 MA20，且成交量有放大迹象 (vol_ratio > 1.1)
+    is_near_ma60 = (ma60 > 0) & (np.abs(close - ma60) / ma60 < 0.03)
+    is_initial_cross = (ma20 > 0) & (close > ma20) & (ma5 < ma20 * 1.02)
+    mask_stage1 = (is_near_ma60 | is_initial_cross) & (vol_ratio > 1.1) & (stages != 4) & (stages != 3)
+    stages[mask_stage1] = 1
 
-    # Stage 2: 保持默认 2 (主升/健康)，除非被上述覆盖
+    # 额外检查：空头排列
+    # 如果均线系统整体向下，即使价格暂时没破位也要警惕
+    mask_short_trend = (ma5 > 0) & (ma10 > ma5) & (ma20 > ma10)
+    stages[mask_short_trend & (stages != 3)] = 4
 
     return pd.Series(stages, index=df.index)
 
