@@ -209,8 +209,11 @@ class PercentAxisItem(pg.AxisItem):
 
 class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
-    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, refresh_func=None):
+    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, refresh_func=None, max_signals=20, max_vlines=12, max_hlines=5):
         super().__init__()
+        self.max_signals = max_signals
+        self.max_vlines = max_vlines
+        self.max_hlines = max_hlines
         if signals is not None and "SBC" not in title:
             title = f"SBC Pattern - {title}"
             
@@ -244,6 +247,13 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         btn_layout.addWidget(self.btn_link)
         
         btn_layout.addStretch()
+
+        self.btn_reset = QPushButton("重置 (R)")
+        self.btn_reset.setFixedWidth(70)
+        self.btn_reset.setStyleSheet("background-color: #333; color: #CCC; border: 1px solid #555;")
+        self.btn_reset.clicked.connect(self._on_reset_clicked)
+        btn_layout.addWidget(self.btn_reset)
+
         toolbar_layout.addLayout(btn_layout)
         self.layout_widget.addWidget(toolbar)
         
@@ -339,6 +349,14 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                         self.crosshair_label.setAnchor((0, 1))
                     self.crosshair_label.setPos(mouse_point.x(), y_val)
 
+    def _on_reset_clicked(self):
+        """重置显示内容自适应 (不改变窗口大小)"""
+        if self.pw:
+            self.pw.autoRange()
+            print("📊 视图已重置为自动自适应范围")
+
+    # --- 统一方法管理 (移除冗余重复定义) ---
+
     def update_plot(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, init=False):
         if signals is not None and "SBC" not in title:
             title = f"SBC Pattern - {title}"
@@ -409,49 +427,87 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             self.pw.plot(avg_x, avg_y, pen=pg.mkPen(QColor(255, 255, 255, 180), width=1.5, style=Qt.PenStyle.DashLine), name="VWAP")
         
         if extra_lines:
-            lc = extra_lines.get('last_close', 0)
-            lh = extra_lines.get('last_high', 0)
-            ll = extra_lines.get('last_low', 0)
-            if lc > 0:
-                l_pen = pg.mkPen(QColor(255, 255, 0, 255), width=2.5, style=Qt.PenStyle.SolidLine)
-                l = pg.InfiniteLine(angle=0, movable=False, pen=l_pen, label="LC:{value:.2f}", labelOpts={'position': 0.95, 'color': (255, 255, 0)})
-                l.setPos(lc); self.pw.addItem(l)
-            if lh > 0:
-                h_pen = pg.mkPen(QColor(255, 0, 255, 255), width=2.5, style=Qt.PenStyle.SolidLine)
-                h = pg.InfiniteLine(angle=0, movable=False, pen=h_pen, label="LH:{value:.2f}", labelOpts={'position': 0.85, 'color': (255, 0, 255)})
-                h.setPos(lh); self.pw.addItem(h)
-            if ll > 0:
-                lo = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(QColor(255, 50, 50, 200), width=2, style=Qt.PenStyle.DashLine), label="LL:{value:.2f}", labelOpts={'position': 0.75, 'color': (255, 50, 50)})
-                lo.setPos(ll); self.pw.addItem(lo)
-            h4 = extra_lines.get('high4', 0)
-            if h4 > 0:
-                h4l = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(QColor(0, 255, 0, 220), width=3, style=Qt.PenStyle.SolidLine), label="H4:{value:.2f}", labelOpts={'position': 0.65, 'color': (0, 255, 0)})
-                h4l.setPos(h4); self.pw.addItem(h4l)
-
-        if df is not None and not df.empty:
-            if extra_lines:
-                lh_ref = extra_lines.get('last_high', 0)
-                ll_ref = extra_lines.get('last_low', 0)
-                day_low = df['low'].min()
-                day_high = df['high'].max()
-                if lh_ref > 0 and day_low > lh_ref:
-                    self.pw.addItem(pg.LinearRegionItem([lh_ref, day_low], orientation=pg.LinearRegionItem.Horizontal, brush=QColor(0, 80, 255, 30), movable=False))
-                if ll_ref > 0 and day_high < ll_ref:
-                    self.pw.addItem(pg.LinearRegionItem([day_high, ll_ref], orientation=pg.LinearRegionItem.Horizontal, brush=QColor(255, 30, 0, 30), movable=False))
+            cur_price = df['close'].iloc[-1] if df is not None and not df.empty else 0
             
-            if not use_line and len(df) > 1:
-                lows = df['low'].values
-                highs = df['high'].values
-                for i in range(1, len(df)):
-                    if lows[i] > highs[i-1]:
-                        self.pw.addItem(pg.LinearRegionItem([highs[i-1], lows[i]], orientation=pg.LinearRegionItem.Horizontal, brush=QColor(0, 200, 255, 20), movable=False))
-                    elif highs[i] < lows[i-1]:
-                        self.pw.addItem(pg.LinearRegionItem([highs[i], lows[i-1]], orientation=pg.LinearRegionItem.Horizontal, brush=QColor(255, 50, 0, 20), movable=False))
-        
+            # [FIX] 分时图 (use_line=True) 恢复原本的清晰参考线，不去限制数量，确保分时交易有水位参考
+            if use_line:
+                # 恢复默认：完全不透明度和经典线宽
+                base_lines = [
+                    ('LC', extra_lines.get('last_close', 0), QColor(255, 255, 0, 255)),
+                    ('LH', extra_lines.get('last_high', 0),  QColor(255, 0, 255, 255)),
+                    ('LL', extra_lines.get('last_low', 0),   QColor(255, 50, 50, 220)),
+                    ('H4', extra_lines.get('high4', 0),      QColor(0, 255, 0, 255))
+                ]
+                candidates = [l for l in base_lines if l[1] > 0]
+            else:
+                # K线图 (use_line=False) 实施精简策略，只显示离现价最近的 N 条，且线条更淡
+                base_lines = [
+                    ('LC', extra_lines.get('last_close', 0), QColor(255, 255, 0, 120)),
+                    ('LH', extra_lines.get('last_high', 0),  QColor(255, 0, 255, 120)),
+                    ('LL', extra_lines.get('last_low', 0),   QColor(255, 50, 50, 120)),
+                    ('H4', extra_lines.get('high4', 0),      QColor(0, 255, 0, 120))
+                ]
+                candidates = [l for l in base_lines if l[1] > 0]
+                if len(candidates) > self.max_hlines:
+                    candidates.sort(key=lambda x: abs(x[1] - cur_price))
+                    candidates = candidates[:self.max_hlines]
+            
+            for label, price, color in candidates:
+                # 加载不同的样式权重
+                if use_line:
+                    width = 2.5 if label == 'LC' else 1.8
+                    style = Qt.PenStyle.SolidLine if label in ('LC', 'LH') else Qt.PenStyle.DashLine
+                else:
+                    width = 1.0 if label == 'LC' else 0.6
+                    style = Qt.PenStyle.SolidLine if label in ('LC', 'LH') else Qt.PenStyle.DashLine
+                
+                pen = pg.mkPen(color, width=width, style=style)
+                inf_line = pg.InfiniteLine(
+                    pos=price, angle=0, movable=False, pen=pen,
+                    label=f"{label}:{{value:.2f}}", 
+                    labelOpts={'position': 0.9, 'color': color}
+                )
+                self.pw.addItem(inf_line)
+
+        # [REFINED] 仅在 K 线图模式限制信号数量，分时图显示全部
+        if not use_line and signals and len(signals) > self.max_signals:
+            signals = signals[-self.max_signals:]
+
         self.overlay = SignalOverlay(self.pw)
         if signals: self.overlay.update_signals(signals, is_compact=is_compact)
             
-        self.pw.showGrid(x=True, y=True, alpha=0.3)
+        # [NEW] 自定义网格：分时图使用默认网格线，K线图使用自定义稀疏网格
+        if use_line:
+            self.pw.showGrid(x=True, y=True, alpha=0.2)
+        else:
+            self.pw.showGrid(x=False, y=True, alpha=0.05) # 极淡的横线
+            if time_labels:
+                v_pen = pg.mkPen(QColor(100, 100, 100, 60), width=0.8, style=Qt.PenStyle.DotLine)
+            
+            # [REFINED] 动态计算间隔：根据总时长和 max_vlines 自动调整竖线密度
+            # 常见间隔：1, 5, 15, 30, 60 分钟
+            total_minutes = len(time_labels) # 假设 1 tick/min 或类似
+            potential_intervals = [1, 5, 15, 30, 60, 120]
+            interval = 15
+            for pi in potential_intervals:
+                if (total_minutes / pi) <= self.max_vlines:
+                    interval = pi
+                    break
+
+            last_mark = None
+            for i, tl in enumerate(time_labels):
+                try:
+                    t_parts = str(tl).split(":")
+                    if len(t_parts) < 2: continue
+                    hh, mm = int(t_parts[0]), int(t_parts[1])
+                    # 按计算出的间隔绘制竖线
+                    if mm % interval == 0 and (hh, mm) != last_mark:
+                        v_line = pg.InfiniteLine(pos=i, angle=90, pen=v_pen, movable=False)
+                        self.pw.addItem(v_line)
+                        last_mark = (hh, mm)
+                except:
+                    continue
+
         self.pw.setLabel('left', 'Price')
         
         if time_labels and len(time_labels) >= 2:
@@ -481,10 +537,17 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         super().closeEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape: self.close()
-        else: super().keyPressEvent(event)
+        """统一按键处理：R 重置，Esc 退出"""
+        key = event.key()
+        if key == Qt.Key.Key_R:
+            self._on_reset_clicked()
+        elif key == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
 
     def _on_rearrange_clicked(self):
+        """调用全局重排逻辑"""
         try:
             try: from .qt_window_utils import tile_all_windows
             except ImportError: from qt_window_utils import tile_all_windows
@@ -563,7 +626,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         threading.Thread(target=slow_tdx_link, daemon=True).start()
         print("🚀 联动任务已全部分发")
 
-def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None, skip_focus=False):
+def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None, skip_focus=False, max_signals=20, max_vlines=12, max_hlines=5):
     existing_instance = QApplication.instance()
     app = existing_instance or QApplication(sys.argv)
     is_new_app = (existing_instance is None)
@@ -580,7 +643,7 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=No
             print(f"Reuse failed: {e}")
             
     if win is None:
-        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines, refresh_func=refresh_func)
+        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines, refresh_func=refresh_func, max_signals=max_signals, max_vlines=max_vlines, max_hlines=max_hlines)
         win.show()
 
     if is_new_app: app.exec()

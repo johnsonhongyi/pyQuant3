@@ -3942,7 +3942,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # [FIX] 如果是回放模式 (use_live=False)，通常不开启自动刷新，除非明确要求。
         # 这样可以解决用户反馈的“回放变成了实时模式”的问题。
-        is_realtime_req = self.realtime if use_live else False
+        # is_realtime_req = self.realtime if use_live else False
+        is_realtime_req = self.realtime
         
         # 创建并启动后台线程 (使用独立属性避免阻塞)
         self._sbc_req_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req)
