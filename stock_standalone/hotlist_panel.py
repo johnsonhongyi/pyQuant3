@@ -296,7 +296,7 @@ class HotlistPanel(QWidget, WindowMixin):
             "follow": "",
             "watchlist": ""
         }
-        
+        self._pattern_detector = None
         # [NEW] 热门板块缓存
         self._recent_hot_concepts_cache: set[str] = set()
         self._last_hot_concepts_sync = 0.0

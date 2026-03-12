@@ -432,6 +432,7 @@ class StockSelector:
                     'ma10': ma10,
                     'open': float(data.get('open', 0)),
                     'category': "|".join(stock_cats[:3]),
+                    'stage': int(data.get('cycle_stage', 2)), # 新增周期层级
                     'resample': resample
                 }
                 selected_records.append(record)

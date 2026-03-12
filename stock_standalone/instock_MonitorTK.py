@@ -86,6 +86,7 @@ from ext_data_viewer import ExtDataViewer
 from sys_utils import get_base_path
 from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
+import stock_indicator_help
 
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
@@ -628,6 +629,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
+        self.bind("<Control-slash>", lambda e: self.open_indicator_help())
 
         # [NEW] 每日复盘入口按钮
         try:
@@ -676,6 +678,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
             
         self._pulse_win = self._pulse_viewer_class(self, self) # Pass self as master and monitor_app
+
+    def open_indicator_help(self):
+        """Open the Indicator Help and Search window (Ctrl + /)"""
+        stock_indicator_help.show_help(self)
 
     def _process_dispatch_queue(self):
         """

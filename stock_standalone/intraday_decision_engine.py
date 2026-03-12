@@ -321,8 +321,12 @@ class IntradayDecisionEngine:
             # 【优化】如果卖出是因为"高开下杀放量"，且未返回均线，则执行
             return priority_result
 
-        # ---------- 基础止损止盈检查 (New: 增加 T+1 限制) ----------
-        if mode in ("full", "sell_only"):
+        # --- 周期区域判断 (New: User Recommendation) ---
+        self.cycle_stage = int(row.get('cycle_stage', 2)) # 默认主升
+        debug["周期阶段"] = self.cycle_stage # 1:启动 2:主升 3:脉冲 4:回落
+        
+        # --- 1. 实时买入决策判定 ---
+        if mode in ("full", "buy_only"):
             if is_t1_restricted:
                 debug["sell_skip"] = "T+1限制，跳过止损检测"
             else:
@@ -1689,6 +1693,23 @@ class IntradayDecisionEngine:
             if not vwap_trend_ok:
                  threshold = max(threshold, 0.8) # 趋势不好时，至少需要 0.8
             
+            # --- [NEW] 基于周期阶段的动态门槛调整 ---
+            if self.cycle_stage == 3: # 脉冲扩张阶段
+                threshold += 0.25 # 极大提高门槛 (e.g. 0.55 -> 0.80)
+                debug["cycle_penalty"] = "+0.25 (脉冲扩张阶段)"
+                # 尾盘禁止在扩张期买入
+                if int(now_time.strftime('%H%M')) >= 1400:
+                    debug["refuse_reason"] = "扩张期尾盘禁止开仓"
+                    return self._hold("扩张期尾盘拦截", debug)
+                    
+            elif self.cycle_stage == 4: # 见顶回落阶段
+                threshold = 0.95 # 几乎禁止买入
+                debug["cycle_penalty"] = "Threshold=0.95 (见顶回落阶段)"
+                
+            elif self.cycle_stage == 1: # 筑底启动阶段
+                threshold -= 0.05 # 略微降低门槛，鼓励试错
+                debug["cycle_bonus"] = "-0.05 (筑底启动阶段)"
+
             # 触发条件
             if buy_score >= threshold:
                 # 【新增】高位风险拦截：如果顶部信号评分过高 (>0.45)，禁止任何买入/补仓

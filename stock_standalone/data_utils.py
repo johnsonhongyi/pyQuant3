@@ -22,6 +22,52 @@ PIPE_NAME = r"\\.\pipe\my_named_pipe"
 PIPE_NAME_TK = r"\\.\pipe\instock_tk_pipe"
 logger = LoggerFactory.getLogger()
 
+def calc_cycle_stage_vect(df: pd.DataFrame) -> pd.Series:
+    """
+    矢量化计算个股所处的周期阶段
+    1: 筑底/启动 (Bottom/Start) - 站上中长线，初次走强
+    2: 主升/健康 (Rising/Healthy) - 均线顺排，斜率向上
+    3: 脉冲/扩张 (Exhaustion/Overextended) - 乖离过大或破上轨
+    4: 见顶/回落 (Top/Falling) - 均线死叉或价格走弱
+    """
+    n = len(df)
+    if n == 0: return pd.Series([], dtype=int)
+
+    # 提取必要数据
+    close = df['close'].values.astype('float32')
+    ma5 = df['ma5d'].values.astype('float32') if 'ma5d' in df.columns else np.zeros(n)
+    ma10 = df['ma10d'].values.astype('float32') if 'ma10d' in df.columns else np.zeros(n)
+    ma20 = df['ma20d'].values.astype('float32') if 'ma20d' in df.columns else np.zeros(n)
+    ma60 = df['ma60d'].values.astype('float32') if 'ma60d' in df.columns else np.zeros(n)
+    upper = df['upper1'].values.astype('float32') if 'upper1' in df.columns else np.zeros(n)
+
+    stages = np.full(n, 2, dtype=int) # 默认设为 Stage 2 (由于能进入池子的通常至少是主升趋势)
+
+    # 逻辑判定
+    # Stage 3: 脉冲扩张 (最高优先级，优先拦截风险)
+    # 条件：突破布林上轨 或 价格乖离 MA5 超过 8%
+    mask_stage3 = (upper > 0) & (close > upper * 1.01)
+    mask_stage3 |= (ma5 > 0) & (close > ma5 * 1.08)
+    stages[mask_stage3] = 3
+
+    # Stage 4: 见顶回落
+    # 条件：跌破 MA5 且 MA5 开始下行，或 跌破 MA10
+    mask_stage4 = (ma5 > 0) & (close < ma5 * 0.995)
+    mask_stage4 |= (ma10 > 0) & (close < ma10 * 0.99)
+    stages[mask_stage4] = 4
+
+    # Stage 1: 筑底启动 (低位刚站稳)
+    # 条件：处于 MA60 附近，或 MA20 刚刚走平向上，且均线未形成完全多排
+    is_bottom = (ma60 > 0) & (np.abs(close - ma60) / ma60 < 0.05)
+    is_rising_start = (ma20 > 0) & (close > ma20) & (ma5 < ma20 * 1.02)
+    mask_stage1 = is_bottom | is_rising_start
+    # Stage 1 优先级应低于 Stage 4 (如果既在底部又跌破均线，算 Stage 4/无价值)
+    stages[mask_stage1 & (stages != 4)] = 1
+
+    # Stage 2: 保持默认 2 (主升/健康)，除非被上述覆盖
+
+    return pd.Series(stages, index=df.index)
+
 def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd', virtual: bool = True) -> pd.Series:
     """计算成交量（量比或原始量）"""
     # 逻辑置换：优先使用 'vol'(镜像原始量) 进行计算。
@@ -301,6 +347,12 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
         top_all['win_upper1'] = 0
     if 'win_upper2' not in top_all.columns:
         top_all['win_upper2'] = 0
+    
+    # --- [NEW] 注入 cycle_stage (周期阶段) ---
+    try:
+        top_all['cycle_stage'] = calc_cycle_stage_vect(top_all)
+    except Exception as e:
+        logger.warning(f"calc_cycle_stage_vect failed: {e}")
 
     if N_count > 0:
         try:

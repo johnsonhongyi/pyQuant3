@@ -167,3 +167,4 @@ stock_standalone/JohnsonUtil/global.ini
 stock_standalone/多周期.py
 find_zeros.py
 inspect_*.py
+**/snapshots/*

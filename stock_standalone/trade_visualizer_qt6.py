@@ -65,6 +65,9 @@ from sys_utils import get_base_path
 BASE_DIR = get_base_path()
 visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
 intraday_pattern_config = cct.get_resource_file("intraday_pattern_config.json",BASE_DIR=BASE_DIR)
+from data_utils import (
+    calc_cycle_stage_vect
+)
 
 import re
 try:
@@ -969,6 +972,10 @@ class DataLoaderThread(QThread):
                                 fastohlc=self.fastohlc
                             )
                     if not day_df.empty:
+                        if 'ma60d' in day_df.columns:
+                            with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=800):
+                                day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
+                            # print(f"'ma60d' in day_df.columns : {'ma60d' in day_df.columns} day_df['cycle_stage']:{day_df['cycle_stage']}")
                         break
                 except Exception as e:
                     if attempt == 2:
@@ -9689,6 +9696,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"Autonomous supervision failed for {code}: {e}")
             return None
 
+
     def _run_realtime_strategy(self, code, day_df, tick_df):
         """
         [DEEP INTEGRATION v2] 实时策略决策
@@ -9719,7 +9727,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 nclose_val = float(tick_df['amount'].sum() / vol_sum) if vol_sum > 0 else current_price
             else:
                 nclose_val = current_price
-            
+                
             row = {
                 'code': code,
                 'trade': current_price,
@@ -9769,9 +9777,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 _df = day_df.iloc[-n_rows:].copy()
             cols = _df.columns.tolist()
 
-            target_cols = ['ma5d', 'ma10d', 'ma20d', 'ma60d', 
-                           'lastp1d', 'lastv1d', 'macddif', 'macddea', 'macd', 
-                           'rsi', 'upper']
+            target_cols = ['ma5d', 'ma10d', 'ma20d', 'ma60d', 'lastp1d', 'lastv1d', 'macddif', 'macddea', 'macd', 'rsi', 'upper','cycle_stage']
             target_cols = [c for c in target_cols if c in cols]
 
             # --- 快速从 df_all 回填最新指标（只最后一行） ---
@@ -9832,7 +9838,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
                 if not stock_row.empty:
                     # 将 df_all 中的指标值更新到最新的一行
-                    target_cols = ['ma5d', 'ma10d', 'ma20d', 'ma60d', 'lastp1d', 'lastv1d', 'macddif', 'macddea', 'macd', 'rsi', 'upper']
+                    target_cols = ['ma5d', 'ma10d', 'ma20d', 'ma60d', 'lastp1d', 'lastv1d', 'macddif', 'macddea', 'macd', 'rsi', 'upper','cycle_stage']
                     for col in target_cols:
                         if col in stock_row.columns:
                             val = stock_row[col].iloc[0]
