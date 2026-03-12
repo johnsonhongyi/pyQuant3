@@ -303,7 +303,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             f"[{code}] 买卖验证 — 结构性信号",
             avg_series=vwap_series,
             time_labels=time_labels,
-            use_line=True,  # 无论 live 还是 cache，数据都是高密度 Tick 分时，必须用线图
+            use_line=use_live,  # 无论 live 还是 cache，数据都是高密度 Tick 分时，必须用线图
             extra_lines=auto_extra,
             refresh_func=lambda: verify_with_real_data(code, use_live=use_live, show_viz=False, hdf5_lock=hdf5_lock, extra_lines=extra_lines)
         )
