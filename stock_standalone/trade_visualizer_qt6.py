@@ -11,6 +11,7 @@ from queue import Queue, Empty
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union, Callable
+from functools import partial
 import signal
 import pandas as pd
 import numpy as np
@@ -107,8 +108,6 @@ except ImportError as e:
 pg.setConfigOptions(antialias=True)
 # pg.setConfigOption('background', 'w')
 # pg.setConfigOption('foreground', 'k')
-
-import re
 
 PERIOD_COL_PATTERN = re.compile(r'per\d+d', re.IGNORECASE)
 
@@ -1008,15 +1007,18 @@ class DataLoaderThread(QThread):
 
 class SBCTestThread(QThread):
     """SBC 模式验证后台线程，防止 GUI 卡死"""
-    finished_data = pyqtSignal(dict)
+
+    finished_data = pyqtSignal(dict, object)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None):
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None, realtime=False, win_ref=None):
         super().__init__()
         self.code = code
         self.use_live = use_live
         self.hdf5_lock = hdf5_lock
         self.extra_lines = extra_lines
+        self.realtime = realtime
+        self.win_ref = win_ref
 
     def run(self):
         try:
@@ -1024,18 +1026,23 @@ class SBCTestThread(QThread):
                 import verify_sbc_pattern
             except ImportError:
                 from stock_standalone import verify_sbc_pattern
-            # 调用验证函数，不开启可视化(同步弹窗)，仅返回计算结果包
+
             result = verify_sbc_pattern.verify_with_real_data(
-                self.code, 
-                use_live=self.use_live, 
+                self.code,
+                use_live=self.use_live,
                 show_viz=False,
                 hdf5_lock=self.hdf5_lock,
                 extra_lines=self.extra_lines
             )
+
             if result and isinstance(result, dict):
-                self.finished_data.emit(result)
+                result["_realtime"] = self.realtime   # 带回GUI
+                result["_use_live"] = self.use_live   # 带回GUI
+                result["code"] = self.code           # 增加 code 标识
+                self.finished_data.emit(result, self.win_ref)
             else:
-                self.error_occurred.emit(f"未能获取 {self.code} 的验证数据或数据格式不正确")
+                self.error_occurred.emit(f"未能获取 {self.code} 的验证数据")
+
         except Exception as e:
             import traceback
             error_msg = f"SBC 线程执行失败: {str(e)}"
@@ -1102,9 +1109,9 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
         # Open: 优先官方 open，其次第一笔价
         open_p = get_val(df, ['open', 'nopen'], lambda: df[price_col].iloc[0], use_last=False)
         # High: 优先官方 high，其次统计最高价
-        high_p = get_val(df, ['high', 'nhigh'], lambda: df[high_col].max() if high_col in df.columns else df[price_col].max())
+        high_p = get_val(df, ['high', 'nhigh'], lambda: df[price_col].max())
         # Low: 优先官方 low，其次统计最低价
-        low_p = get_val(df, ['low', 'nlow'], lambda: df[low_col].min() if low_col in df.columns else df[price_col].min())
+        low_p = get_val(df, ['low', 'nlow'], lambda: df[price_col].min())
         # Close: 最后一笔价
         close_p = df[price_col].iloc[-1]
         
@@ -1293,7 +1300,6 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             df.drop(columns=col, inplace=True)
 
     return df
-
 
 
 from PyQt6 import QtCore, QtWidgets
@@ -2150,6 +2156,10 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 信号上下文 (用于 K线图标注和详情弹窗)
         self.active_signal_context = None
+        # -------------------------
+        # SBC 多窗口管理容器
+        # -------------------------
+        self._sbc_windows = {}  # win -> {"code":..., "extra_lines":..., "timer":..., "thread":...}
 
         # === Qt 版 BooleanVar 包装器，用于兼容 StockSender ===
         class QtBoolVar:
@@ -2224,7 +2234,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 定时检查队列 - 使用配置的数据更新频率
         refresh_interval_ms = int(cct.CFG.duration_sleep_time * 1000)  # 秒转毫秒
-        refresh_interval_ms = max(refresh_interval_ms, 2000)  # 最小 2 秒，避免过于频繁
+        self.refresh_interval_ms = max(refresh_interval_ms, 30000)  # 最小 2 秒，避免过于频繁
         # ⚡ 修正：GUI 轮询队列的频率应保持高频 (如 1s)，
         # 而抓取频率 (duration_sleep_time) 由后台进程控制。
         self.realtime_timer = QTimer()
@@ -3805,14 +3815,96 @@ class MainWindow(QMainWindow, WindowMixin):
                     getattr(self, 'tick_df', pd.DataFrame())
                 )
 
+    def _on_sbc_window_destroyed(self, win):
+        """窗口关闭时自动清理资源"""
+        if win in self._sbc_windows:
+            state = self._sbc_windows.pop(win)
+            if 'timer' in state and state['timer']:
+                state['timer'].stop()
+            if 'thread' in state and state['thread'] and state['thread'].isRunning():
+                state['thread'].quit()
+            logger.info(f"🗑️ SBC 窗口已关闭，自动停止刷新: {state.get('code')}")
+
+    def _start_sbc_realtime_refresh(self, data, win):
+        """启动特定窗口的实时刷新"""
+        if win in self._sbc_windows:
+             return
+             
+        code = data.get("code") or re.search(r"\[(\d+)\]", data.get("title", "")).group(1) if re.search(r"\[(\d+)\]", data.get("title", "")) else None
+        if not code: return
+
+        # 每 180 秒运行一次刷新 跟随duration_sleep_time
+        timer = QTimer(win)
+        timer.timeout.connect(partial(self._refresh_sbc_data, win))
+        timer.start(self.refresh_interval_ms)
+
+        self._sbc_windows[win] = {
+            "code": code,
+            "extra_lines": data.get("extra_lines"),
+            "timer": timer,
+            "thread": None,
+            "use_live": data.get("_use_live", True),
+            "realtime": data.get("_realtime", True)
+        }
+
+        # 窗口关闭自动清理
+        win.destroyed.connect(lambda: self._on_sbc_window_destroyed(win))
+
+    def _refresh_sbc_data(self, win):
+        """针对特定窗口刷新数据"""
+        try:
+            if sip.isdeleted(win) or not win.isVisible():
+                return
+
+            state = self._sbc_windows.get(win)
+            if not state: return
+
+            # 防止针对同一窗口的并发刷新
+            if state['thread'] and state['thread'].isRunning():
+                return
+
+            thread = SBCTestThread(
+                state['code'],
+                use_live=state.get('use_live', True),
+                hdf5_lock=getattr(self, "hdf5_lock", None),
+                extra_lines=state['extra_lines'],
+                realtime=state.get('realtime', True),
+                win_ref=win
+            )
+
+            thread.finished_data.connect(self._on_sbc_test_finished)
+            thread.error_occurred.connect(self._on_sbc_test_error)
+            state['thread'] = thread
+            thread.start()
+
+        except Exception as e:
+            logger.error(f"SBC 自动刷新失败: {e}")
+
     def _run_sbc_test(self, use_live: bool, code: Optional[str] = None):
         """
         [NEW] 调用 verify_sbc_pattern.py 逻辑验证指定或当前个股 of SBC 信号
         使用线程异步执行，防止 GUI 卡死
         """
-        # 检查是否已有线程正在运行
-        if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
-            QMessageBox.information(self, "请稍候", f"后台正在对 {self._sbc_thread.code} 进行验证，请等待完成后再试。")
+        target_code = code or self.current_code
+        if not target_code:
+            QMessageBox.warning(self, "未选中个股", "请先在主图或列表中选中/加载一只个股再执行测试。")
+            return
+
+        # 检查是否该代码已有线程正在运行 (允许不同代码并发)
+        active_threads = []
+        if hasattr(self, '_sbc_test_windows'):
+             for win in self._sbc_test_windows:
+                 state = self._sbc_windows.get(win)
+                 if state and state.get('code') == target_code and state.get('thread') and state['thread'].isRunning():
+                     active_threads.append(state['thread'])
+        
+        if not active_threads:
+            # 同时也检查主请求线程
+            if hasattr(self, '_sbc_req_thread') and self._sbc_req_thread and self._sbc_req_thread.isRunning() and self._sbc_req_thread.code == target_code:
+                active_threads.append(self._sbc_req_thread)
+
+        if active_threads:
+            QMessageBox.information(self, "请稍候", f"后台正在对 {target_code} 进行验证，请等待完成后再试。")
             return
 
         target_code = code or self.current_code
@@ -3848,54 +3940,79 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.warning(f"Failed to extract extra_lines for SBC test in GUI: {e}")
 
-        # 创建并启动后台线程
-        self._sbc_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines)
-        self._sbc_thread.finished_data.connect(self._on_sbc_test_finished)
-        self._sbc_thread.error_occurred.connect(self._on_sbc_test_error)
-        self._sbc_thread.start()
+        # [FIX] 如果是回放模式 (use_live=False)，通常不开启自动刷新，除非明确要求。
+        # 这样可以解决用户反馈的“回放变成了实时模式”的问题。
+        is_realtime_req = self.realtime if use_live else False
+        
+        # 创建并启动后台线程 (使用独立属性避免阻塞)
+        self._sbc_req_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req)
+        self._sbc_req_thread.finished_data.connect(self._on_sbc_test_finished)
+        self._sbc_req_thread.error_occurred.connect(self._on_sbc_test_error)
+        self._sbc_req_thread.start()
 
 
-    def _on_sbc_test_finished(self, data: dict):
+
+
+    def _on_sbc_test_finished(self, data: dict, win_ref=None):
         """线程完成后的回调，在 GUI 线程显示图表"""
         try:
+            if win_ref and sip.isdeleted(win_ref):
+                return
+
+            realtime = data.get("_realtime", False)
+            
             # 动态导入可视化函数
             try:
                 from stock_visual_utils import show_chart_with_signals
             except ImportError:
                 from stock_standalone.stock_visual_utils import show_chart_with_signals
-            
+
             # 管理窗口引用，防止被回收
             if not hasattr(self, '_sbc_test_windows'):
                 self._sbc_test_windows = []
-            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
-            
+
+            self._sbc_test_windows = [
+                w for w in self._sbc_test_windows if not sip.isdeleted(w) and w.isVisible()
+            ]
+
             is_multi = getattr(self, '_sbc_test_is_multi', False)
-            existing_win = self._sbc_test_windows[-1] if self._sbc_test_windows and not is_multi else None
             
+            # 确定要更新的窗口
+            existing_win = win_ref
+            if not existing_win and not is_multi and self._sbc_test_windows:
+                existing_win = self._sbc_test_windows[-1]
+
             # 使用返回的结果包调用可视化
             win = show_chart_with_signals(
                 data["viz_df"],
                 data["signals"],
                 data["title"],
-                avg_series=data["avg_series"],
-                time_labels=data["time_labels"],
-                use_line=data["use_line"] if getattr(self, 'realtime', False) else False,
+                avg_series=data.get("avg_series"),
+                time_labels=data.get("time_labels"),
+                use_line=data.get("use_line", False) if realtime else False,
                 extra_lines=data.get("extra_lines"),
-                existing_win=existing_win
+                existing_win=existing_win,
+                skip_focus=bool(win_ref) # 如果是自动刷新，不抢焦点
             )
-            
+
             if win and win not in self._sbc_test_windows:
                 self._sbc_test_windows.append(win)
                 logger.info(f"✅ SBC 可视化窗口已创建并激活: {data['title']}")
-                # 延时触发自动对齐
+                
+                # [NEW] 自动平铺窗口
                 try:
                     from .qt_window_utils import tile_all_windows
                     QTimer.singleShot(1000, tile_all_windows)
                 except Exception:
                     pass
-            
+
+            # ★ 启动或更新自动刷新管理
+            if realtime and win:
+                self._start_sbc_realtime_refresh(data, win)
+
         except Exception as e:
-            logger.error(f"SBC 可视化显示失败: {e}")
+            import traceback
+            logger.error(f"SBC 可视化显示失败: {e}\n{traceback.format_exc()}")
             self._on_sbc_test_error(f"渲染图表失败: {str(e)}")
 
     def _on_sbc_test_error(self, err_msg: str):
@@ -6996,7 +7113,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 if code:
                     # [NEW] 双击代码列同时执行 SBC 回放分析
                     self._run_sbc_test(True, code)
-                    
+
     def switch_stock_prev(self):
         """切换至上一只股票 (1.1/1.2 Context navigation)"""
         curr_row = self.stock_table.currentRow()
@@ -7088,7 +7205,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     last_val = self._alerted_signals.get(item.code, '')
                     if str(action) != last_val:
                         self._alerted_signals[item.code] = str(action)
-                        # ⚡ [SYNC] 不再直接播报，而是转发给 _on_signal_log，确保同步记录到日志面板后再播报
+                        alerts.append(f"{item.name}({action})")
+                        # ⚡ [SYNC] 转给 _on_signal_log，确保同步记录后再播报
                         self._on_signal_log(item.code, item.name, 'ALERT', action, is_high_priority=True)
         
         # 刷新热点面板表格
@@ -7096,21 +7214,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel._refresh_table()
 
         if alerts:
-            # ⚡ [REFORM] 不再直接播报，而是转发给 _on_signal_log，确保同步记录到日志面板后再播报
-            for item_code, item_name, action_str in zip(
-                [item.code for item in self.hotlist_panel.items if item.code in self._alerted_signals],
-                [item.name for item in self.hotlist_panel.items if item.code in self._alerted_signals],
-                [self._alerted_signals[item.code] for item in self.hotlist_panel.items if item.code in self._alerted_signals]
-            ):
-                # 只有新触发的才需要处理 (由 alerts 列表控制，逻辑略粗，直接用循环体里的判断更准)
-                pass
-
-            # 修正 _check_hotspot_alerts 逻辑：直接在遍历处转发
-            # (见下一步修改)
-            
+            alert_msg = " | ".join(alerts)
             # 状态栏提示 (如果界面存在)
             if self.isVisible():
-                self.show_status_message(f"🔔 {alert_msg}", 10000)
+                self.show_status_message(f"🔔 热点股异动: {alert_msg}", 10000)
             
             self._last_alert_time = now
 
@@ -10948,6 +11055,37 @@ class MainWindow(QMainWindow, WindowMixin):
         """窗口关闭统一退出清理"""
         self._closing = True
 
+        # 0.15️⃣ 停止 SBC 自动刷新 Timer
+        if hasattr(self, "_sbc_timer") and self._sbc_timer:
+            try:
+                self._sbc_timer.stop()
+                self._sbc_timer.deleteLater()
+            except:
+                pass
+            self._sbc_timer = None
+
+        # 0.16️⃣ 停止所有 SBC 线程
+        if hasattr(self, "_sbc_windows"):
+            for win, state in list(self._sbc_windows.items()):
+                thread = state.get('thread')
+                if thread and thread.isRunning():
+                    thread.quit()
+                    thread.wait(500)
+            self._sbc_windows.clear()
+        
+        if hasattr(self, "_sbc_req_thread") and self._sbc_req_thread and self._sbc_req_thread.isRunning():
+            self._sbc_req_thread.quit()
+            self._sbc_req_thread.wait(500)
+
+        # 0.25️⃣ 停止所有 Qt Timer
+        for attr in dir(self):
+            obj = getattr(self, attr)
+            if isinstance(obj, QTimer):
+                try:
+                    obj.stop()
+                except:
+                    pass
+
         # 0.1️⃣ 清理打开的 SBC 回放窗口
         if hasattr(self, '_sbc_test_windows'):
             for win in self._sbc_test_windows:
@@ -11034,13 +11172,23 @@ class MainWindow(QMainWindow, WindowMixin):
             self.refresh_flag.value = False
 
         # 2️⃣ 停止 realtime_process
+        # if getattr(self, 'realtime_process', None):
+        #     if self.realtime_process.is_alive():
+        #         self.realtime_process.join(timeout=3) # ⬅️ [FIX] 增加等待时间
+        #         if self.realtime_process.is_alive():
+        #             logger.info("realtime_process 强制终止")
+        #             self.realtime_process.terminate()
+        #             self.realtime_process.join(timeout=1)
+        #     self.realtime_process = None
         if getattr(self, 'realtime_process', None):
             if self.realtime_process.is_alive():
-                self.realtime_process.join(timeout=3) # ⬅️ [FIX] 增加等待时间
+                self.realtime_process.join(timeout=2)
                 if self.realtime_process.is_alive():
-                    logger.info("realtime_process 强制终止")
+                    logger.warning("realtime_process force terminate")
                     self.realtime_process.terminate()
                     self.realtime_process.join(timeout=1)
+                    if self.realtime_process.is_alive():
+                        logger.error("realtime_process still alive after terminate")
             self.realtime_process = None
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)

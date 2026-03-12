@@ -35,6 +35,17 @@ class StockSelector:
     # def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
     def __init__(self, df: Optional[pd.DataFrame] = None, resample: str = 'd'):
         self.data_path = r'g:\top_all.h5'
+        if not os.path.exists(self.data_path):
+             # 尝试在当前工程目录下寻找
+             local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'top_all.h5')
+             if os.path.exists(local_path):
+                 self.data_path = local_path
+             else:
+                 # 尝试在 CWD 寻找
+                 cwd_path = os.path.join(os.getcwd(), 'top_all.h5')
+                 if os.path.exists(cwd_path):
+                     self.data_path = cwd_path
+        
         # self.log_path = log_path # Deprecated: moved to SQLite
         self.df_all_realtime = df  # 实时数据引用
         self.resample = resample  # 周期标识: 'd', '3d', 'w', 'm'
