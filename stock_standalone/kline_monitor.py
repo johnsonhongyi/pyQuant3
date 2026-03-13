@@ -402,19 +402,25 @@ class KLineMonitor(tk.Toplevel):
 
         while not self.stop_event.is_set():
             try:
-                if cct.get_work_time():
-                    df = self.get_df_func()
-                    if df is not None and not df.empty:
-                        df = detect_signals(df)
-                        self.df_cache = df.copy()
-                        self.after(0, self.apply_filters)
+                if self.master and self.master.winfo_exists():
+                    if cct.get_work_time():
+                        df = self.get_df_func()
+                        if df is not None and not df.empty:
+                            df = detect_signals(df)
+                            self.df_cache = df.copy()
+                            self.after(0, self.apply_filters)
+                    else:
+                        if self.stop_event.wait(10):
+                            break
                 else:
-                    time.sleep(10)
-                if not self.stop_event.is_set():
-                    time.sleep(self.refresh_interval)
+                    break
+                    
+                if self.stop_event.wait(self.refresh_interval):
+                    break
             except Exception as e:
                 logger.error(f"[Monitor] 更新错误: {e}")
-                time.sleep(self.refresh_interval)
+                if self.stop_event.wait(self.refresh_interval):
+                    break
 
     def get_row_tags_kline(self, r: pd.Series, idx: Optional[Any] = None) -> List[str]:
         tags = []

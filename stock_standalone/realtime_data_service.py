@@ -1451,6 +1451,25 @@ class IntradayEmotionTracker:
                                                  self._signal_start_price[code_str] = price
                                          else:
                                              logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
+                                         
+                                         # ⭐ [NEW] 将信号外发到总线，以便仪表盘捕获
+                                         try:
+                                             from signal_bus import SignalBus
+                                             bus = SignalBus()
+                                             bus.publish(
+                                                 event_type=SignalBus.EVENT_PATTERN,
+                                                 source="IntradayEmotionTracker",
+                                                 payload={
+                                                     "code": code_str,
+                                                     "name": name_str,
+                                                     "pattern": "突破" if is_sbc_buy else "破位",
+                                                     "subtype": sig_text,
+                                                     "detail": f"{sig_text}: {r_time_str} ({avg_p:.2f})",
+                                                     "score": scores_dict[idx_val]
+                                                 }
+                                             )
+                                         except:
+                                             pass
                                  else:
                                      # 持续状态下仅保持状态描述
                                      sbc_signals.append("-".join(status))

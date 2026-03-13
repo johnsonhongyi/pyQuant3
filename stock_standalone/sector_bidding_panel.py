@@ -834,6 +834,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
         self.watchlist_table.setSortingEnabled(True) # [ADD] Enable table clicking/sorting
+        self.watchlist_table.horizontalHeader().setSortIndicator(4, Qt.SortOrder.DescendingOrder)
         self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
         self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
         self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)

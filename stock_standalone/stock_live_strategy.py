@@ -31,6 +31,8 @@ from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHu
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
 from signal_message_queue import SignalMessageQueue, SignalMessage # [NEW] Shadow Engine Support
 from td_sequence import calculate_td_sequence
+from signal_bus import get_signal_bus, SignalBus, publish_standard_signal
+from signal_standard import StandardSignal
 
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
@@ -104,6 +106,25 @@ def send_signal_to_visualizer_ipc(data: dict):
     Protocol: CODE|SIGNAL|{json}
     """
     try:
+        # --- 1. Publish to SignalBus (In-process) ---
+        sig_type = data.get('pattern', 'ALERT')
+        try:
+             std_sig = StandardSignal(
+                 code=data.get('code', ''),
+                 name=data.get('name', ''),
+                 type=SignalBus.EVENT_PATTERN if sig_type != 'ALERT' else SignalBus.EVENT_ALERT,
+                 subtype=sig_type,
+                 price=data.get('price', 0.0),
+                 timestamp=data.get('timestamp', datetime.datetime.now().strftime("%H:%M:%S")),
+                 detail=data.get('message', ''),
+                 source="LiveStrategy",
+                 is_high_priority=data.get('is_high_priority', False)
+             )
+             publish_standard_signal(std_sig)
+        except Exception as e:
+             logger.debug(f"SignalBus publish failed: {e}")
+
+        # --- 2. Original IPC Socket (Cross-process) ---
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(0.2) # 快速超时，避免阻塞策略
         # Visualizer 监听端口 26668
@@ -400,11 +421,12 @@ class StockLiveStrategy:
         self.executor = ThreadPoolExecutor(max_workers=4)
         self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
-        # --- 初始化记录器 (必须在 _load_monitors 之前) ---
+        # 初始化记录器 (必须在 _load_monitors 之前)
         self.trading_logger = TradingLogger()
         self.supervisor = StrategySupervisor(self.trading_logger) # type: ignore # ⭐ 注入盈利监理器
 
-        self.load_monitors()
+        # ⭐ [FIX] 将耗时的监控加载逻辑异步化，防止阻塞主界面启动 (Stuck Issue)
+        self.executor.submit(self.load_monitors)
         self.df: Optional[pd.DataFrame] = None
 
         # 初始化决策引擎（带止损止盈配置）
@@ -2930,7 +2952,7 @@ class StockLiveStrategy:
                     )
                     # logger.info(f'{decision["action"]}')
                     if decision["action"]  in ("VETO", "买入",'卖出'):
-                        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 {code} {action} - {log_msg}")
+                        logger.debug(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 {code} {action} - {log_msg}")
                     data['last_alert'] = now
                     self._save_monitors()
                     data['below_nclose_count'] = 0
@@ -3840,7 +3862,7 @@ class StockLiveStrategy:
             return
 
         # --- 2. 状态识别 (同步) ---
-        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险"])
+        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险", "卖出", "跌破", "风险", "SELL", "EXIT"])
         now_ts = time.time()
         
         # --- 3. UI 节流判定 (同步) ---
@@ -3869,7 +3891,10 @@ class StockLiveStrategy:
         try:
             # 优先使用内部线程池
             if hasattr(self, 'executor') and self.executor:
-                self.executor.submit(self._async_alert_worker, alert_ctx)
+                if not getattr(self, '_is_stopping', False):
+                    self.executor.submit(self._async_alert_worker, alert_ctx)
+                else:
+                    logger.debug(f"Skip alert submission during shutdown for {code}")
             else:
                 # 兜底方案
                 t = threading.Thread(target=self._async_alert_worker, args=(alert_ctx,), daemon=True)

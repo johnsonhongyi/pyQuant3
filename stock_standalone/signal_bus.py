@@ -17,9 +17,8 @@ from typing import Dict, List, Callable, Any, Optional, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
-import logging
-
-logger = logging.getLogger(__name__)
+from logger_utils import LoggerFactory
+logger = LoggerFactory.getLogger(__name__)
 
 # 尝试导入信号标准 (使用类型注解支持)
 try:
@@ -40,6 +39,11 @@ class BusEvent:
     payload: Dict[str, Any]
     signal: Optional['StandardSignal'] = None  # 使用字符串引用避免导入期循环或缺失问题
     
+    @property
+    def type(self) -> str:
+        """Alias for event_type to maintain backward compatibility"""
+        return self.event_type
+
     def __repr__(self):
         return f"BusEvent({self.event_type}, {self.source}, {self.timestamp.strftime('%H:%M:%S')})"
 
@@ -66,6 +70,7 @@ class SignalBus:
     EVENT_RISK = "risk"
     EVENT_HOTLIST = "hotlist"
     EVENT_PHASE = "phase"
+    EVENT_HEARTBEAT = "heartbeat"
     
     # 事件优先级（数字越大优先级越高）
     PRIORITY = {
@@ -85,10 +90,17 @@ class SignalBus:
                     instance._subscribers: Dict[str, List[Callable[[BusEvent], None]]] = {}
                     instance._history: List[BusEvent] = []
                     instance._max_history = 500
+                    instance._external_queue = None  # ⭐ [NEW] 外部队列用于跨进程中转
                     instance._initialized = True
                     cls._instance = instance
         return cls._instance
     
+    def set_external_queue(self, queue: Any) -> None:
+        """设置外部中转队列 (跨进程支持)"""
+        with self._lock:
+            self._external_queue = queue
+            logger.info(f"SignalBus: External bridge queue set (ID={id(queue) if queue else None})")
+
     def subscribe(self, event_type: str, handler: Callable[[BusEvent], None]) -> None:
         """订阅事件"""
         with self._lock:
@@ -96,7 +108,7 @@ class SignalBus:
                 self._subscribers[event_type] = []
             if handler not in self._subscribers[event_type]:
                 self._subscribers[event_type].append(handler)
-                logger.debug(f"SignalBus: {getattr(handler, '__name__', 'handler')} subscribed to {event_type}")
+                logger.info(f"SignalBus: {getattr(handler, '__name__', str(handler))} subscribed to {event_type}. Total subscribers: {len(self._subscribers[event_type])}")
     
     def unsubscribe(self, event_type: str, handler: Callable) -> bool:
         """取消订阅"""
@@ -104,6 +116,7 @@ class SignalBus:
             if event_type in self._subscribers:
                 try:
                     self._subscribers[event_type].remove(handler)
+                    logger.info(f"SignalBus: {getattr(handler, '__name__', str(handler))} unsubscribed from {event_type}")
                     return True
                 except ValueError:
                     pass
@@ -111,15 +124,7 @@ class SignalBus:
     
     def publish(self, event_type: str, source: str, payload: Dict[str, Any], 
                 signal: Optional['StandardSignal'] = None) -> BusEvent:
-        """
-        发布事件
-        
-        Args:
-            event_type: 事件类型
-            source: 事件来源
-            payload: 数据负载
-            signal: [Optional] 标准化信号对象
-        """
+        """发布事件"""
         event = BusEvent(
             event_type=event_type,
             timestamp=datetime.now(),
@@ -132,15 +137,27 @@ class SignalBus:
             self._history.append(event)
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
+            
+            # ⭐ [NEW] 如果设置了外部中转队列，则同时推送到队列
+            if self._external_queue:
+                try:
+                    # 将 event 序列化为 dict 或保持对象 (如果是 mp.Queue 支持的对象)
+                    # 为了安全，通常建议推送到 Queue 的是简单对象或 dataclass
+                    self._external_queue.put(event, block=False)
+                except Exception as e:
+                    logger.error(f"SignalBus: Failed to push to external queue: {e}")
         
         handlers = self._subscribers.get(event_type, [])
+        # 🛡️ 降级日志等级，避免 ERROR 洪泛
+        import os
+        logger.debug(f"📡 [BUS_TRACE] SignalBus({id(self)}, pid={os.getpid()}): Publishing {event_type} from {source}. Found {len(handlers)} handlers.")
+        
         for handler in handlers:
             try:
                 handler(event)
             except Exception as e:
                 logger.error(f"SignalBus handler error: {e} (source={source}, type={event_type})")
         
-        logger.debug(f"SignalBus: Published {event_type} from {source}")
         return event
 
     def get_history(self, event_type: Optional[str] = None, 
