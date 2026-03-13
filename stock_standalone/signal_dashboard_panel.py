@@ -140,12 +140,30 @@ class VolumeDetailsDialog(QDialog):
 
 logger = logging.getLogger(__name__)
 
+class RightClickPasteLineEdit(QLineEdit):
+    """支持右键直接粘贴并清除旧内容的输入框"""
+    def contextMenuEvent(self, event):
+        # 🚀 根据用户要求：右键直接触发“清除并粘贴”行为
+        self.custom_paste()
+
+    def custom_paste(self):
+        """清除现有内容并从剪贴板粘贴"""
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        if text:
+            self.clear()  # 确保如果有内容直接清除内容
+            self.setText(text)
+            self.setFocus()
+            # 设置光标到末尾
+            self.setCursorPosition(len(text))
+
 # 定义信号分类
 CATEGORY_MAP = {
-    "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break"],
+    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场"],
+    "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "破位"],
     "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure"],
-    "买入机会": ["BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"]
+    "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"]
 }
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -205,12 +223,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         super().__init__(parent)
         self.setWindowTitle("📊 策略信号仪表盘")
         # ⭐ [FIX] 允许更小的窗口尺寸，方便用户缩放
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(400, 300)
         
         # 数据缓存
         self._all_events: List[BusEvent] = []
         self._stock_stats: Dict[str, Dict] = {} # {code: {count: 0, last_msg: "", last_time: ""}}
         self._sector_heat: Dict[str, int] = {}  # {sector: count}
+        
+        # 🚀 [NEW] 初始化放量详情弹窗
+        self._vol_dialog = VolumeDetailsDialog(self)
+        self._vol_dialog.code_clicked.connect(
+            lambda c: self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": c, "name": ""}))
+        )
         
         # 窗口标志
         self.setWindowFlags(Qt.WindowType.Window)
@@ -243,7 +267,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._batch_timer = QTimer(self)
         self._batch_timer.timeout.connect(self._process_batch_signals)
         # 固定频率刷新，不随 sleep_time 变化太剧烈，确保 UI 响应
-        self._batch_timer.start(2000) 
+        self._batch_timer.start(3000) 
         
         # 市场大盘数据
         self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
@@ -286,7 +310,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """拦截窗口关闭事件"""
         logger.info("SignalDashboardPanel: closeEvent triggered.")
         # 保存持久化信息
-        self.save_window_position_qt(self, "signal_dashboard_panel")
+        self.save_window_position_qt_visual(self, "signal_dashboard_panel")
         self._save_ui_state()
         self.stop()
         event.accept()
@@ -298,8 +322,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # 1. Dashboard Header (仪表盘头部)
         self.header = QFrame()
-        # ⭐ [FIX] 改为最小高度，允许自适应缩放
-        self.header.setMinimumHeight(90)
+        # ⭐ [FIX] 改为更小的高度，允许自适应缩放
+        self.header.setMinimumHeight(60)
         self.header.setStyleSheet("""
             QFrame {
                 background-color: #1a1c2c;
@@ -351,9 +375,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             ("breakdown", "结构破位", "#87CEFA")  # LightSkyBlue
         ]:
             card = QFrame()
-            # ⭐ [FIX] 改为最小宽度，允许自适应缩放
-            card.setMinimumWidth(100)
-            card.setMaximumWidth(150)
+            # ⭐ [FIX] 更小的宽度下限
+            card.setMinimumWidth(60)
+            card.setMaximumWidth(200)
             card.setStyleSheet(f"""
                 QFrame {{
                     border: 1px solid {color}44; 
@@ -389,9 +413,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # --- 板块热力 ---
         sector_frame = QFrame()
-        # ⭐ [FIX] 改为最小宽度，防止在小窗口下占据太多空间
-        sector_frame.setMinimumWidth(180)
-        sector_frame.setMaximumWidth(300)
+        # ⭐ [FIX] 更小的宽度下限，防止在小窗口下占据太多空间
+        sector_frame.setMinimumWidth(100)
+        sector_frame.setMaximumWidth(350)
         sector_frame.setStyleSheet("background: transparent; border: none;")
         sector_lay = QVBoxLayout(sector_frame)
         h_lbl = QLabel("🔥 热门板块")
@@ -419,7 +443,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """)
         
         # 🚀 [NEW] 添加搜索框到标签栏右侧 (买入机会旁)
-        self.search_input = QLineEdit()
+        self.search_input = RightClickPasteLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索代码/名称...")
         self.search_input.setFixedWidth(180)
         self.search_input.setStyleSheet("""
@@ -444,7 +468,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tables: Dict[str, QTableWidget] = {}
         
         # 创建各分类表格
-        for tab_name in ["全部信号", "突破加速", "卖点预警", "结构破位", "买入机会"]:
+        for tab_name in ["全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会"]:
             table = self._create_signal_table()
             self.tables[tab_name] = table
             self.tabs.addTab(table, tab_name)
@@ -509,6 +533,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # 得分
         
         table.cellClicked.connect(self._on_cell_clicked)
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed) # ✅ 支持键盘上下键联动
         return table
 
@@ -678,10 +703,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(0, 5, NumericTableWidgetItem(count))
             table.setItem(0, 6, NumericTableWidgetItem(score))
             
-            # ✅ [NEW] 检查当前搜索过滤
+            # ✅ [NEW] 检查当前搜索过滤 (支持代码/名称/形态/详情)
             search_text = self.search_input.text().strip().lower()
             if search_text:
-                if search_text not in code.lower() and search_text not in name.lower():
+                is_match = (search_text in code.lower() or 
+                           search_text in name.lower() or 
+                           search_text in pattern.lower() or 
+                           search_text in detail.lower())
+                if not is_match:
                     table.setRowHidden(0, True)
             
             # 同步之前的颜色逻辑
@@ -707,14 +736,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             highlight_brush = QBrush(QColor(255, 255, 0, 60)) # 半透明黄
             for item in items:
-                if item: item.setBackground(highlight_brush)
+                if item:
+                    item.setBackground(highlight_brush)
                 
             def reset():
                 try:
                     transparent_brush = QBrush(QColor(0, 0, 0, 0))
                     for it in items:
-                        if it: it.setBackground(transparent_brush)
-                except: pass
+                        if it:
+                            it.setBackground(transparent_brush)
+                except:
+                    pass
                 
             QTimer.singleShot(800, reset)
         except:
@@ -738,13 +770,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         breakdown_count = 0
         
         for event in self._all_events:
-            p = str(event.payload.get('pattern', '')).lower()
-            d = str(event.payload.get('detail', '')).lower()
+            payload = event.payload
+            p = str(payload.get('pattern', payload.get('subtype', ''))).lower()
+            d = str(payload.get('detail', payload.get('message', ''))).lower()
             
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["突破加速"]): breakout_count += 1
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["卖点预警"]): risk_count += 1
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["结构破位"]): breakdown_count += 1
-            if "follow" in p or "跟单" in d: follow_count += 1
+            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["跟单信号"]): follow_count += 1
             
         # 更新卡片
         self.cards["follow"].setText(str(follow_count))
@@ -753,7 +786,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.cards["breakdown"].setText(str(breakdown_count))
         
         # 多空比: (突破 + 买入) / (风险 + 破位)
-        bull = breakout_count + len([e for e in self._all_events if any(kw.lower() in str(e.payload.get('pattern','')).lower() for kw in CATEGORY_MAP["买入机会"])])
+        all_bull = [e for e in self._all_events if any(kw.lower() in str(e.payload.get('pattern', e.payload.get('subtype', ''))).lower() or 
+                                                     kw.lower() in str(e.payload.get('detail', e.payload.get('message', ''))).lower() 
+                                                     for kw in CATEGORY_MAP["买入机会"])]
+        bull = breakout_count + len(all_bull)
         bear = risk_count + breakdown_count
         ratio = bull / max(1, bear)
         self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
@@ -850,20 +886,62 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.status_bar.setText(f"当前筛选板块: {sector_name} | 请在下方列表查看相关个股")
 
     def _on_cell_clicked(self, row, col):
+        """处理单击联动"""
         table = self.sender()
         if not isinstance(table, QTableWidget): return
         
-        code = table.item(row, 1).text()
-        name = table.item(row, 2).text()
-        pattern = table.item(row, 3).text()
-        detail = table.item(row, 4).text()
+        code_item = table.item(row, 1)
+        name_item = table.item(row, 2)
+        if code_item and name_item:
+            self.code_clicked.emit(code_item.text(), name_item.text())
+
+    def _on_cell_double_clicked(self, row, col):
+        """处理双击：根据点击的列执行精准复制与联动"""
+        table = self.sender()
+        if not isinstance(table, QTableWidget): return
         
-        # 如果双击的是详情列(4)，则弹出详情框
-        if col == 4:
-            dialog = SignalDetailDialog(code, name, pattern, detail, self)
-            dialog.exec()
+        # 🛡️ 防御性检查: 确保项目存在且非空
+        it_code = table.item(row, 1)
+        it_name = table.item(row, 2)
+        if not it_code or not it_name:
+            return
+            
+        code = it_code.text()
+        name = it_name.text()
+        clipboard = QApplication.clipboard()
+        
+        if col == 1: # 双击代码列 -> 复制代码
+            clipboard.setText(code)
+            self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
+            self.code_clicked.emit(code, name)
+            
+        elif col == 2: # 双击名称列 -> 复制名称 (修复用户反馈)
+            clipboard.setText(name)
+            self.status_bar.setText(f"📋 已复制名称: {name} ({code})")
+            self.code_clicked.emit(code, name)
+            
+        elif col == 3: # 形态/信号列 -> 复制形态
+            it_pattern = table.item(row, 3)
+            if it_pattern:
+                pattern_text = it_pattern.text()
+                clipboard.setText(pattern_text)
+                self.status_bar.setText(f"📋 已复制形态: {pattern_text}")
+                
+        elif col == 4: # 详情列 -> 复制文本 + 弹窗详情
+            it_detail = table.item(row, 4)
+            if it_detail:
+                detail_text = it_detail.text()
+                clipboard.setText(detail_text)
+                self.status_bar.setText(f"📋 已复制详情: {detail_text[:20]}...")
+                
+                # 弹出详情框
+                pattern = table.item(row, 3).text() if table.item(row, 3) else "ALERT"
+                dialog = SignalDetailDialog(code, name, pattern, detail_text, self)
+                dialog.exec()
         else:
-            # 否则触发代码联动信号
+            # 默认：复制代码并联动
+            clipboard.setText(code)
+            self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
             self.code_clicked.emit(code, name)
 
     def _on_search_text_changed(self, text):
@@ -885,14 +963,22 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         for row in range(current_table.rowCount()):
             code_item = current_table.item(row, 1)
             name_item = current_table.item(row, 2)
+            pattern_item = current_table.item(row, 3)
+            detail_item = current_table.item(row, 4)
             
             if not code_item or not name_item:
                 continue
                 
             code = code_item.text().lower()
             name = name_item.text().lower()
+            pattern = pattern_item.text().lower() if pattern_item else ""
+            detail = detail_item.text().lower() if detail_item else ""
             
-            if not search_text or search_text in code or search_text in name:
+            if (not search_text or 
+                search_text in code or 
+                search_text in name or 
+                search_text in pattern or 
+                search_text in detail):
                 current_table.setRowHidden(row, False)
             else:
                 current_table.setRowHidden(row, True)
@@ -917,9 +1003,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if code_item and name_item:
                 self.code_clicked.emit(code_item.text(), name_item.text())
 
-    def _on_selection_changed(self):
-        # ... logic ...
-        pass
+    # def _on_selection_changed(self):
+    #     # ... logic ...
+    #     pass
 
     def _save_ui_state(self):
         try:
