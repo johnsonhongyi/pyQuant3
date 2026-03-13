@@ -1,6 +1,5 @@
-# -*- coding:utf-8 -*-
+import os
 import time
-import json
 import gc
 import traceback
 from typing import Any, Optional, Union, Dict, List, Callable
@@ -577,6 +576,7 @@ def generate_simple_vect_features(df):
 def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
     """通过命名管道发送股票代码"""
     import win32file
+    import json
     if isinstance(code, dict):
         code = json.dumps(code, ensure_ascii=False)
     try:
@@ -609,6 +609,10 @@ def process_merged_sina_signal_eval(df, mode='A'):
     close_1d = df['lastp1d']
     amount_1d = df['lastv1d']
     eval_1d = df['EVAL_STATE'].fillna(9).astype(int)
+    # 1. 提取当前价格
+    curr_c = df['now'] if 'now' in df.columns else df['trade']
+    curr_l = df['low']
+    curr_o = df['open']
     ma_ref = df['ma5d'] # 假设 ma5d 是你的生命线
 
     # 2. 判定条件 (矢量化)
@@ -2310,7 +2314,10 @@ def _run_main_pipeline(
     with timed_ctx("sanitize", warn_ms=800):
 
         df_out = sanitize(clean_bad_columns(df_out))
-        queue.put(df_out)
+        try:
+            queue.put(df_out, block=True, timeout=10)
+        except Exception as e:
+            logger.warning(f"Queue put failed: {e}")
 
     return top_all, lastpTDX_DF
 
@@ -2473,6 +2480,7 @@ def fetch_and_process(
     logger = LoggerFactory.getLogger()
     if log_level is not None:
         logger.setLevel(log_level.value)
+    
     logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level} duration_sleep_time:{duration_sleep_time}")
     print(f'single:{single}')
     START_INIT = 0
@@ -2751,7 +2759,10 @@ def fetch_and_process(
                 'full_snapshot': top_all,
                 'filtered_ui_data': df_all
             }
-            queue.put(data_packet)
+            try:
+                queue.put(data_packet, block=True, timeout=10)
+            except Exception as e:
+                logger.warning(f"Queue put failed: {e}")
             gc.collect()
             cct.print_timing_summary()
             cct.df_memory_usage(df_all)

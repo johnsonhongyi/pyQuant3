@@ -53,6 +53,7 @@ from logger_utils import LoggerFactory, init_logging, with_log_level
 # from realtime_data_service import DataPublisher
 StockLiveStrategy = cct.LazyClass('stock_live_strategy', 'StockLiveStrategy')
 DataPublisher = cct.LazyClass('realtime_data_service', 'DataPublisher')
+SignalDashboardPanel = cct.LazyClass('signal_dashboard_panel', 'SignalDashboardPanel')
 # DataPublisher is now handled locally in the Main process for resource efficiency
 from monitor_utils import (
     load_display_config, save_display_config, save_monitor_list, 
@@ -542,6 +543,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 队列接收子进程数据
         self.queue = mp.Queue()
+        self.signal_bridge_queue = mp.Queue()  # ⭐ [NEW] 跨进程信号桥接队列
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -600,6 +602,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             self._use_incremental_update = False
             logger.info("ℹ️ 使用传统刷新模式")
+
+        # ⭐ [NEW] UI 性能优化与防抖
+        self._update_pos_timer = None
+        self._last_alert_time = 0
+        self._alert_count_per_sec = 0
         
         # 启动后台进程
         self._start_process()
@@ -679,6 +686,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
         self._pulse_win = self._pulse_viewer_class(self, self) # Pass self as master and monitor_app
 
+    def open_live_signal_viewer(self):
+        """打开实时信号仪表盘 (Alt+L)"""
+        try:
+            # 🛡️ Qt6 窗口由 PyQt6 驱动
+            if not hasattr(self, "_signal_dashboard_win") or self._signal_dashboard_win is None:
+                # 确保 Qt 环境已初始化
+                from PyQt6 import QtWidgets
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                
+                # 使用 LazyClass 加载或直接导入
+                from signal_dashboard_panel import SignalDashboardPanel
+                
+                self._signal_dashboard_win = SignalDashboardPanel()
+                # ✅ [FIX] 跨线程联动安全：将互操作封装进任务队列，由 Tkinter 主线程执行
+                self._signal_dashboard_win.code_clicked.connect(
+                    lambda c, n: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+                )
+                
+            self._signal_dashboard_win.show()
+            self._signal_dashboard_win.raise_()
+            self._signal_dashboard_win.activateWindow()
+            
+            toast_message(self, "实时信号仪表盘已启动")
+        except Exception as e:
+            logger.error(f"❌ 打开信号仪表盘失败: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("错误", f"启动信号仪表盘失败: {e}")
+
     def open_indicator_help(self):
         """Open the Indicator Help and Search window (Ctrl + /)"""
         stock_indicator_help.show_help(self)
@@ -686,9 +721,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _process_dispatch_queue(self):
         """
         [FIX] 专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
-        避免直接在 Qt 线程调用 Tkinter (self.after 也不行)。
+        同时驱动 Qt 事件循环，确保信号仪表盘等 Qt 窗口能实时更新。
         """
         try:
+            # 1. 驱动 Qt 事件循环 (如果存在)
+            # 使用 QApplication.instance() 获取当前进程中的 Qt App，更加健壮
+            from PyQt6 import QtWidgets
+            qt_app = QtWidgets.QApplication.instance()
+            if qt_app:
+                qt_app.processEvents()
+            elif hasattr(self, '_qt_app') and self._qt_app:
+                self._qt_app.processEvents()
+
             while True:
                 # 非阻塞获取任务
                 task = self.tk_dispatch_queue.get_nowait()
@@ -702,9 +746,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error in dispatch queue processing: {e}")
         finally:
-            # 100ms 后再次检查
+            # 50ms 后再次检查 (加快频率提高响应速度)
             if not getattr(self, '_is_closing', False):
-                self._schedule_after(100, self._process_dispatch_queue)
+                self._schedule_after(50, self._process_dispatch_queue)
 
     def _schedule_after(self, ms, func, *args):
         """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
@@ -778,7 +822,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         1: (win32con.MOD_ALT, 0x45, 'Alt+E'),  # E - 语音预警管理
         2: (win32con.MOD_ALT, 0x53, 'Alt+S'),  # S - 策略管理
         3: (win32con.MOD_ALT, 0x4B, 'Alt+K'),  # K - 每日复盘
-        # 4: (win32con.MOD_ALT, 0x51, 'Alt+Q'),  # Q - 实时信号
+        4: (win32con.MOD_ALT, 0x51, 'Alt+L'),  # Q - 实时信号仪表盘
         5: (win32con.MOD_ALT, 0x48, 'Alt+H'),  # H - 切换Hotlist
     }
 
@@ -864,7 +908,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
         self._hotkey_thread.start()
 
-        hotkey_list = "Alt+B/E/S/K/H"
+        hotkey_list = "Alt+B/E/S/K/L/H"
         if show_toast:
             self.status_var.set(f"✅ 全局快捷键已重新初始化: {hotkey_list}")
 
@@ -1388,6 +1432,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # 设置退出标志，阻止后台线程调用 Tkinter 方法
             self._is_closing = True
+            logger.info("🛑 [on_close] Application shutdown initiated...")
+            
+            if hasattr(self, 'executor') and self.executor:
+                try:
+                    logger.info("正在关闭主线程池...")
+                    # wait=False 确保不阻塞 GUI 退出
+                    self.executor.shutdown(wait=False)
+                except Exception as e:
+                    logger.debug(f"Executor shutdown error: {e}")
+
+            if getattr(self, 'live_strategy', None) is not None:
+                try:
+                    logger.info("正在停止 StockLiveStrategy...")
+                    self.live_strategy.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping live_strategy: {e}")
+
+            if getattr(self, '_signal_dashboard_win', None) is not None:
+                try:
+                    logger.info("正在关闭信号看板...")
+                    self._signal_dashboard_win.close()
+                except Exception as e:
+                    logger.debug(f"Dashboard close error: {e}")
+            
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
             
@@ -1481,11 +1549,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
 
             # 6. 保存并关闭所有 monitor_windows（概念前10窗口）
-            if hasattr(self, "live_strategy"):
+            strategy = getattr(self, "live_strategy", None)
+            if strategy:
                 try:
                     now_time = cct.get_now_time_int()
                     if now_time > 1500:
-                        self.live_strategy._save_monitors()
+                        strategy._save_monitors()
                         logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
                     else:
                         logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
@@ -1494,7 +1563,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 6.5 停止策略引擎后台任务 (包含语音线程和线程池)
                 try:
-                    self.live_strategy.stop()
+                    strategy.stop()
                 except Exception as e:
                     logger.warning(f"[on_close] self.live_strategy.stop 失败: {e}")
 
@@ -1596,13 +1665,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
                 
-                # 💥 [FIX] 在终止进程前，最后强制保存一次 DataPublisher 的 K 线缓存
-                if hasattr(self, 'realtime_service') and self.realtime_service:
-                    try:
-                        self.realtime_service.save_cache(force=True)
-                    except Exception as e:
-                        logger.warning(f"Final cache save before exit failed: {e}")
-
                 # ⭐ [FIX] 给更多时间让后台进程清理 (特别是 MinuteKlineCache 保存)
                 self.proc.join(timeout=5) 
                 if self.proc.is_alive():
@@ -1614,7 +1676,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if hasattr(self, "manager"):
                 try:
-                    # 10.5 退出前强制保存 K 线记录，确保数据清洗成果持久化
+                    # 10.5 退出前强制保存 K 线记录 (这一步最耗时，保留在最后一步，且只做一次)
                     if hasattr(self, "realtime_service") and self.realtime_service:
                         logger.info("正在执行 MinuteKlineCache 退出保存...")
                         self.realtime_service.save_cache(force=True)
@@ -1622,6 +1684,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 断开代理引用，防止 shutdown 时的 BrokenPipe
                     self.realtime_service = None
                     self.global_dict = None
+                    # ⭐ [FIX] 给 manager shutdown 一个超时，防止某些 proxy 无法断开导致 hang
                     self.manager.shutdown()
                 except Exception:
                     pass
@@ -2281,7 +2344,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", padx=2, pady=2).pack(side="left", padx=2)
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -2467,13 +2531,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         assert_main_thread("update_tree")
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return
+            
+        if getattr(self, '_is_closing', False):
+            return
+
+        
         
         try:
             if self.refresh_enabled:
                 
-                # If we are already processing data async, skip this cycle
-                if getattr(self, '_is_processing_tree_data', False):
-                    return
+                # [WATCHDOG] If we are stuck in processing for too long (>30s), force reset
+                is_stuck = getattr(self, '_is_processing_tree_data', False)
+                if is_stuck:
+                    now = time.time()
+                    last_processing_start = getattr(self, '_last_processing_start_time', 0)
+                    if last_processing_start > 0 and (now - last_processing_start) > 30:
+                        logger.warning(f"⚠️ [DataWatchdog] Detected stuck processing flag for {now - last_processing_start:.1f}s. Forcing reset.")
+                        self._is_processing_tree_data = False
+                    else:
+                        # [FIX] 即使正在处理中且未超时，也要重新调度下一次检查，否则主循环会在此中断！
+                        self._schedule_after(5000, self.update_tree)
+                        return
                 
                 latest_df = None
 
@@ -2485,24 +2563,73 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.error(f"Periodic cache save check failed: {e}")
 
                 # 🔄 优化：只取队列中最新的一个数据包，丢弃过时的增量
-                while not self.queue.empty():
-                    try:
-                        latest_df = self.queue.get_nowait()
-                    except queue.Empty:
-                        break
+                q_size = self.queue.qsize()
+                if q_size > 0:
+                    logger.debug(f"Queue size before processing: {q_size}")
+                    while not self.queue.empty():
+                        try:
+                            latest_df = self.queue.get_nowait()
+                        except queue.Empty:
+                            break
                 
                 if latest_df is not None:
+                    # ⭐ [RESTORED] 跨进程中转逻辑：在接收到数据后处理中转信号
+                    # 这样可以确保信号显示与数据刷新同步
+                    try:
+                        from signal_bus import get_signal_bus
+                        bus = get_signal_bus()
+                        if hasattr(self, 'signal_bridge_queue'):
+                            bridge_count = 0
+                            while not self.signal_bridge_queue.empty():
+                                try:
+                                    event = self.signal_bridge_queue.get_nowait()
+                                    if event:
+                                        # 在主流程中重新发布信号
+                                        bus.publish(
+                                            event_type=getattr(event, 'event_type', None) or getattr(event, 'type', 'unknown'),
+                                            source=f"{getattr(event, 'source', 'unknown')} (bridged)",
+                                            payload=getattr(event, 'payload', {}),
+                                            signal=getattr(event, 'signal', None)
+                                        )
+                                        bridge_count += 1
+                                    if bridge_count > 50: break
+                                except (queue.Empty, AttributeError):
+                                    break
+                            if bridge_count > 0:
+                                logger.debug(f"📡 [UpdateTree] Bridged {bridge_count} external signals.")
+                    except Exception as e:
+                        logger.error(f"Signal bridging in update_tree failed: {e}")
+
                     self._is_processing_tree_data = True
+                    self._last_processing_start_time = time.time()
+                    
                     # [PACKET] latest_df might be a dict {full_snapshot, filtered_ui_data}
                     # We pass it to the async handler
                     if not hasattr(self, 'executor'):
                         from concurrent.futures import ThreadPoolExecutor
                         self.executor = ThreadPoolExecutor(max_workers=5)
                     self.executor.submit(self._process_tree_data_async, latest_df)
+                else:
+                    # Check if subprocess is still alive
+                    if hasattr(self, 'proc') and self.proc is not None:
+                        if not self.proc.is_alive():
+                            logger.error("🛑 Subprocess fetch_and_process is DEAD. Attempting to restart...")
+                            self._start_process()
 
         except Exception as e:
             logger.error(f"Error starting tree update: {e}", exc_info=True)
+            self._is_processing_tree_data = False
         finally:
+            # 🚀 [NEW] 核心修复：手动泵 PyQt 事件循环
+            # 否则当主程序忙碌时，看板窗口会因得不到 CPU 时间而假死
+            try:
+                from PyQt6 import QtWidgets
+                qt_app = QtWidgets.QApplication.instance()
+                if qt_app:
+                    qt_app.processEvents()
+            except:
+                pass
+
             # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
 
@@ -2561,6 +2688,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _apply_tree_data_sync(self, df, cur_res):
         """Sync step: update internal state and Tkinter UI on the main thread."""
         try:
+            logger.debug(f"🔄 _apply_tree_data_sync started at {time.strftime('%H:%M:%S')}")
             self.df_all = df  # 直接引用，减少 copy
             has_update = True
             
@@ -2583,6 +2711,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # [REMOVED] Redundant publish (Consolidated to Strategy processing endpoint)
 
             self.update_all_top10_windows()
+            
+            # 🛡️ [CRITICAL] 绝对禁止在此处同步调用看板 UI 函数，防止跨框架死锁
+            # 看板已经在内部通过自己的 QTimer 异步处理信号
             
             # 🧹 周期性手动 GC
             if not hasattr(self, '_update_count'): self._update_count = 0
@@ -2611,7 +2742,86 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if hasattr(self, 'executor'):
                              self.executor.submit(self.live_strategy.process_data, self.df_all, getattr(self, 'concept_top5', None), target_res)
                         else:
-                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
+                             self.live_strategy.process_data(self.df_all, getattr(self, 'concept_top5', None), target_res)
+
+            # --- [NEW] 计算全盘统计概览 (上涨/下跌/放量) ---
+            if has_update and getattr(self, '_signal_dashboard_win', None):
+
+                try:
+                    df = self.df_all
+
+                    if not df.empty and 'trade' in df.columns and 'lastp1d' in df.columns:
+
+                        trade = df['trade'].values
+                        lastp = df['lastp1d'].values
+
+                        diff = trade - lastp
+
+                        up_count = int((diff > 0).sum())
+                        down_count = int((diff < 0).sum())
+                        flat_count = int((diff == 0).sum())
+
+                        vol_up_details = []
+                        if 'vol' in df.columns and 'lastv1d' in df.columns:
+                            vol = df['vol'].values
+                            lastv = df['lastv1d'].values
+                            
+                            # 获取涨幅 (如果有 'ratio' 或通过价格计算)
+                            pct_change = df['ratio'].values if 'ratio' in df.columns else (diff / lastp * 100)
+                            vol_ratio = vol / lastv
+                            
+                            vol_mask = vol_ratio > 1.5
+                            vol_up = int(vol_mask.sum())
+                            vol_down = int((vol < lastv).sum())
+                            
+                            if vol_up > 0:
+                                # 提取详细信息
+                                sub_df = df[vol_mask].head(30).copy()
+                                for code, row in sub_df.iterrows():
+                                    vol_up_details.append({
+                                        "code": str(code),
+                                        "name": str(row.get('name', '')),
+                                        "change": float(row.get('ratio', (row['trade']-row['lastp1d'])/row['lastp1d']*100 if 'lastp1d' in row and row['lastp1d']!=0 else 0)),
+                                        "ratio": float(row.get('vol', 0) / row.get('lastv1d', 1)) 
+                                    })
+                        elif 'volume' in df.columns:
+                            vr = df['volume']
+                            vol_mask = vr > 2.0
+                            vol_up = int(vol_mask.sum())
+                            vol_down = int((vr < 0.8).sum())
+                            if vol_up > 0:
+                                sub_df = df[vol_mask].head(30).copy()
+                                for code, row in sub_df.iterrows():
+                                    vol_up_details.append({
+                                        "code": str(code),
+                                        "name": str(row.get('name', '')),
+                                        "change": float(row.get('ratio', 0)),
+                                        "ratio": float(row.get('volume', 0))
+                                    })
+
+                        stats = {
+                            "up": up_count,
+                            "down": down_count,
+                            "flat": flat_count,
+                            "vol_up": vol_up,
+                            "vol_down": vol_down,
+                            "vol_details": vol_up_details # 改用更详细的列表
+                        }
+                        
+                        logger.info(f"📊 Market stats calculated: {up_count} up, {vol_up} vol_up. Pushing to dashboard.")
+                        # 1. 传统的 UI Dispatch (Tkinter)
+                        self.tk_dispatch_queue.put(
+                            lambda s=stats: self._signal_dashboard_win.update_market_stats(s)
+                        )
+                        # 2. 增加信号总线备份 (供订阅使用)
+                        try:
+                            from signal_bus import get_signal_bus, SignalBus
+                            get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", stats)
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
+
+                except Exception as e:
+                    logger.error(f"Error calculating market stats: {e}")
                 
             # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
             if has_update:
@@ -3529,18 +3739,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             df_filtered = df_filtered[s.astype(float) >= float(val[2:])]
                             continue
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
                     elif val.startswith("<="):
                         try:
                             df_filtered = df_filtered[s.astype(float) <= float(val[2:])]
                             continue
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
                     elif "~" in val:
                         try:
                             low, high = map(float, val.split("~"))
                             df_filtered = df_filtered[s.astype(float).between(low, high)]
                             continue
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
                     elif "%" in val:
                         pattern = val.replace("%", ".*")
                         df_filtered = df_filtered[s.astype(str).str.contains(pattern, regex=True)]
@@ -4839,8 +5052,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tk.Button(btn_frame, text="保存修改", command=lambda: save_edit()).pack(side="left", padx=10)
                 tk.Button(btn_frame, text="复制全部", command=copy_content).pack(side="left", padx=10)
                 tk.Button(btn_frame, text="关闭 (ESC)", command=d_win.destroy).pack(side="left", padx=10)
-                
+            
+            remarks = self.handbook.get_remarks(code)
+            remark_map = {r['time']: r['content'] for r in remarks}
+
             def on_double_click(event):
+                item = tree.selection()
+                if not item:
+                    return
+
+                values = tree.item(item[0], "values")
+                time_str = values[0]
+
+                full_content = remark_map.get(time_str)
+
+                if full_content:
+                    show_detail_window(time_str, full_content, event.x_root, event.y_root)
+
+            tree.bind("<Double-1>", on_double_click)
+
+            def on_double_click_slow(event):
                 item = tree.selection()
                 if not item: return
                 values = tree.item(item[0], "values")
@@ -5255,6 +5486,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         弹出添加预警监控的对话框 (优化版)
         """
+        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
+            messagebox.showwarning("提示", "实时监控模块尚未启动")
+            return
+
+        # 1. 唯一性检查
+        monitors = self.live_strategy.get_monitors()
+        existing_key = None
+        if code in monitors:
+            existing_key = code
+        else:
+            for k in monitors.keys():
+                if k.split('_')[0] == code:
+                    existing_key = k
+                    break
+        
+        if existing_key:
+            if not messagebox.askyesno("重复提示", f"{name}({code}) 已在监控列表中！\n\n是否继续添加新规则？\n(选'否'则取消)"):
+                return
+
         try:
             win = tk.Toplevel(self)
             win.title(f"添加语音预警 - {name} ({code})")
@@ -5804,11 +6054,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._mismatch_warned_codes.add(str(code))
 
     def _update_alert_positions(self):
-        """
-        重新排列所有报警弹窗。
-        优化点：使用 update_idletasks 确保所有窗口位置同时刷新，减少初始化时的视觉闪烁。
-        修改点：已放大的窗口（_is_enlarged）脱离自动网格布局，保留用户拖拽后的位置。
-        """
+        """⭐ [OPTIMIZED] 带有防抖功能的报警弹窗排列"""
+        if self._update_pos_timer is not None:
+            self.after_cancel(self._update_pos_timer)
+        self._update_pos_timer = self._schedule_after(100, self._update_alert_positions_real)
+
+    def _update_alert_positions_real(self):
+        """真正的重新排列逻辑"""
+        self._update_pos_timer = None
         if not hasattr(self, 'active_alerts'):
             self.active_alerts = []
             
@@ -6403,7 +6656,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # ⭐ 移除变大字体和激进颜色，恢复常规显示
                         if hasattr(w, 'msg_label'):
                             w.msg_label.config(fg="red" if count % 2 == 0 else "black")
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                     w.after(600, lambda: flash_loop(count+1))
                 
                 flash_loop()
@@ -6433,7 +6687,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         return
                     bg = "#ff5555" if count % 2 == 0 else w._original_bg
                     try: w.configure(bg=bg)
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                     w.after(250, lambda: flash_speech(count+1))
                 
                 flash_speech()
@@ -6446,12 +6701,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 w.is_flashing = False
                 if hasattr(w, '_original_bg'):
                     try: w.configure(bg=w._original_bg)
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                 
                 # 自动关闭计时器
                 if hasattr(w, 'safety_close_timer'):
                     try: self.after_cancel(w.safety_close_timer)
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                 
                 if not getattr(w, '_is_enlarged', False):
                     delay = max(30, int(alert_cooldown / 2)) * 1000
@@ -6520,7 +6777,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win.is_shaking = False
                     if hasattr(win, 'safety_close_timer'):
                         try: self.after_cancel(win.safety_close_timer)
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
                 
                 try:
                     curr_x, curr_y = win.winfo_x(), win.winfo_y()
@@ -7060,7 +7318,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to open StrategyManager: {e}")
             messagebox.showerror("错误", f"启动策略管理器失败: {e}")
 
-    def add_voice_monitor_dialog(self, code, name):
+    def add_voice_monitor_dialog_quick(self, code, name):
         """
         弹出对话框添加语音监控 (由外部调用，如 MarketPulseViewer)
         校验唯一性：如果已存在则提示合并或拒绝
@@ -7508,7 +7766,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             trades = self.live_strategy.trading_logger.get_trades()
                             is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' for t in trades)
-                        except: pass
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
                     
                     if is_holding:
                         # 💥 [优化] 提示语更明确：移除监控 = 停止跟踪 = 需要处理持仓
@@ -7753,7 +8012,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     try:
                         curr_price = float(row_data.get('trade', 0))
                         curr_change = float(row_data.get('changepercent', 0))
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                  
                  tk.Label(left_frame, text=f"当前价格: {curr_price:.2f}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
                  # tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10)).pack(pady=5, anchor="w")
@@ -7920,7 +8180,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Voice Monitor Manager Error: {e}")
             messagebox.showerror("错误", f"打开管理窗口失败: {e}")
 
-    def open_live_signal_viewer(self):
+    def open_live_signal_trace(self):
         """打开实时信号历史查询窗口 (PyQt6)"""
         if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
             try:
@@ -8516,7 +8776,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_tooltip_timer', None):
             try:
                 self.after_cancel(self._tooltip_timer)
-            except: pass
+            except Exception as e:
+                logger.error(f"Error in task: {e}")
             self._tooltip_timer = None
 
         # 2. 獲取代碼 (解析當前點擊的股票)
@@ -12574,7 +12835,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'save_window_position'):
                     try:
                         self.save_window_position(log_win, window_id)
-                    except: pass
+                    except Exception as e:
+                        logger.error(f"Error in task: {e}")
                 self._realtime_monitor_win = None
                 log_win.destroy()
 

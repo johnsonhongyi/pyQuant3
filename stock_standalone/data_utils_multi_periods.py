@@ -444,6 +444,7 @@ def generate_simple_vect_features(df):
 def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
     """通过命名管道发送股票代码"""
     import win32file
+    import json
     if isinstance(code, dict):
         code = json.dumps(code, ensure_ascii=False)
     try:
@@ -476,6 +477,10 @@ def process_merged_sina_signal_eval(df, mode='A'):
     close_1d = df['lastp1d']
     amount_1d = df['lastv1d']
     eval_1d = df['EVAL_STATE'].fillna(9).astype(int)
+    # 1. 提取当前价格和低点
+    curr_c = df['now'] if 'now' in df.columns else df['trade']
+    curr_l = df['low']
+    curr_o = df['open']
     ma_ref = df['ma5d'] # 假设 ma5d 是你的生命线
 
     # 2. 判定条件 (矢量化)
@@ -1267,7 +1272,10 @@ def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname
             logger.info(f"[数据包构建] multi_periods shapes={[(k, v.shape) for k, v in multi_top_all.items()]}")
             logger.info(f"[数据包构建] rank shape={rank_series.shape}, range={rank_series.min():.1f}-{rank_series.max():.1f}")
             
-            queue.put(output_packet)
+            try:
+                queue.put(output_packet, block=True, timeout=10)
+            except Exception as e:
+                logger.warning(f"Queue put failed: {e}")
 
             START_INIT = 1
             cct.print_timing_summary()
@@ -1583,7 +1591,12 @@ def fetch_and_process(
             # inside update_tree() to eliminate cross-process proxy overhead.
             with timed_ctx("format_floats", warn_ms=800):
                 df_all = format_floats(df_all)
-            queue.put(df_all)
+            
+            try:
+                queue.put(df_all, block=True, timeout=10)
+            except Exception as e:
+                logger.warning(f"Queue put failed: {e}")
+                
             gc.collect()
             cct.print_timing_summary()
             cct.df_memory_usage(df_all)
