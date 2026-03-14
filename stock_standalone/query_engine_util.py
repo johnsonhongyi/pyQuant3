@@ -17,6 +17,7 @@ class PandasQueryEngine:
     
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
+        self.last_error = ""
 
     @staticmethod
     def _greatest(*args):
@@ -78,6 +79,7 @@ class PandasQueryEngine:
 
     def execute(self, df: pd.DataFrame, query_str: str) -> pd.DataFrame:
         """执行查询的核心入口"""
+        self.last_error = ""
         if df is None or df.empty or not query_str.strip():
             return df
 
@@ -126,6 +128,7 @@ class PandasQueryEngine:
             return self._wrap_result(df, res)
 
         except Exception as e:
+            self.last_error = str(e)
             self.logger.warning(f"Query Execution Error: {e}")
             # 最后一级兜底：全文 exec
             try:

@@ -8,7 +8,7 @@ import gzip
 from datetime import datetime
 
 from typing import Optional, Any, Callable, Dict
-
+from tk_gui_modules.gui_config import (MINUTE_KLINE_VIEWER_HISTORY)
 # Handle multiple Qt bindings (PyQt6, PySide6, PyQt5)
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -180,15 +180,16 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.last6vol_map = last6vol_map if last6vol_map is not None else {}
         self.main_app = main_app # Reference to Tkinter app
         self.internal_dfs: Dict[str, pd.DataFrame] = {}
-        
         self.sender = None # For standalone linkage
         # 尝试初始化 StockSender (独立运行时联动外部通达信/行情软件)
-        try:
-            from JohnsonUtil.stock_sender import StockSender
-            self.sender = StockSender(callback=None)
-            print("[INFO] StockSender initialized for standalone linkage.")
-        except Exception as e:
-            print(f"[DEBUG] StockSender init skip/failed: {e}")
+        self._select_code = None
+        if not self.on_code_callback:
+            try:
+                from JohnsonUtil.stock_sender import StockSender
+                self.sender = StockSender(callback=None)
+                print("[INFO] StockSender initialized for standalone linkage.")
+            except Exception as e:
+                print(f"[DEBUG] StockSender init skip/failed: {e}")
 
         self.current_file: Optional[str] = None
         self.is_memory_mode: bool = False
@@ -198,7 +199,8 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self._is_querying = False 
         
         # 历史记录数据 - 存储在 datacsv 目录下
-        self.history_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datacsv", "minute_kline_viewer_history.json")
+        # self.history_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datacsv", "minute_kline_viewer_history.json")
+        self.history_file = MINUTE_KLINE_VIEWER_HISTORY
         self.file_history = []
         self.query_history = []
         self.load_history()
@@ -247,8 +249,14 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         try:
             self.save_window_position_qt_visual(self, "minute_kline_viewer")
             self.save_history()
+            
+            # 如果是从主程序启动，清理引用
+            if hasattr(self, 'main_app') and self.main_app:
+                if hasattr(self.main_app, '_kline_viewer_qt'):
+                    self.main_app._kline_viewer_qt = None
         except Exception as e:
             print(f"[WARN] Error in closeEvent: {e}")
+        
         event.accept()
 
     def keyPressEvent(self, event):
@@ -1330,7 +1338,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
     def _execute_linkage(self, code, source=""):
         """跨进程联动核心逻辑"""
-        if not code:
+        if not code or self._select_code == str(code):
             return
         if self.sender:
             try:
@@ -1341,7 +1349,8 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         if self.main_app and self.on_code_callback:
             try:
                 if hasattr(self.main_app, 'tk_dispatch_queue'):
-                    if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
+                    self._select_code = str(code)
+                    if self.main_app and getattr(self.main_app, "_vis_enabled_cache", False):
                         if hasattr(self.main_app, 'open_visualizer'):
                             self.main_app.tk_dispatch_queue.put(lambda: self.main_app.open_visualizer(str(code)))
                     self.main_app.tk_dispatch_queue.put(lambda: self.on_code_callback(str(code)))
@@ -1380,7 +1389,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                         self.on_code_callback(code)
                 
                 # 独立模式双击联动支持 (StockSender)
-                if self.sender and code:
+                elif self.sender and code:
                     try:
                         self.sender.send(str(code))
                     except Exception as se:

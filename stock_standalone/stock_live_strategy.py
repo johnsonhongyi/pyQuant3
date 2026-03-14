@@ -38,6 +38,7 @@ import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
 MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
 # pyttsx3 import removed - delegated to VoiceAnnouncer/AlertManager
+_ipc_lock = threading.Lock()
 
 try:
     from stock_selector import StockSelector
@@ -100,45 +101,43 @@ def normalize_speech_text(text: str) -> str:
 
     return text
 
-def send_signal_to_visualizer_ipc(data: dict):
-    """
-    发送信号到 Visualizer (IPC Socket)
-    Protocol: CODE|SIGNAL|{json}
-    """
-    try:
-        # --- 1. Publish to SignalBus (In-process) ---
-        sig_type = data.get('pattern', 'ALERT')
-        try:
-             std_sig = StandardSignal(
-                 code=data.get('code', ''),
-                 name=data.get('name', ''),
-                 type=SignalBus.EVENT_PATTERN if sig_type != 'ALERT' else SignalBus.EVENT_ALERT,
-                 subtype=sig_type,
-                 price=data.get('price', 0.0),
-                 timestamp=data.get('timestamp', datetime.datetime.now().strftime("%H:%M:%S")),
-                 detail=data.get('message', ''),
-                 source="LiveStrategy",
-                 is_high_priority=data.get('is_high_priority', False)
-             )
-             publish_standard_signal(std_sig)
-        except Exception as e:
-             logger.debug(f"SignalBus publish failed: {e}")
 
-        # --- 2. Original IPC Socket (Cross-process) ---
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2) # 快速超时，避免阻塞策略
-        # Visualizer 监听端口 26668
-        s.connect(('127.0.0.1', 26668))
-        
+def send_signal_to_visualizer_ipc(data: dict):
+
+    try:
+        # ---------- SignalBus ----------
+        sig_type = data.get('pattern', 'ALERT')
+
+        try:
+            std_sig = StandardSignal(
+                code=data.get('code', ''),
+                name=data.get('name', ''),
+                type=SignalBus.EVENT_PATTERN if sig_type != 'ALERT' else SignalBus.EVENT_ALERT,
+                subtype=sig_type,
+                price=data.get('price', 0.0),
+                timestamp=data.get('timestamp', datetime.datetime.now().strftime("%H:%M:%S")),
+                detail=data.get('message', ''),
+                source="LiveStrategy",
+                is_high_priority=data.get('is_high_priority', False)
+            )
+            publish_standard_signal(std_sig)
+        except Exception as e:
+            logger.debug(f"SignalBus publish failed: {e}")
+
+        # ---------- IPC ----------
         json_str = json.dumps(data)
-        # CommandListenerThread 协议: b"CODE" (4 bytes) + content
         msg = f"|SIGNAL|{json_str}"
-        s.send(b"CODE")
-        s.send(msg.encode('utf-8'))
-        s.close()
-    except Exception as e:
-        # logger.debug(f"IPC Signal Push failed (Visualizer offline?): {e}")
+
+        with _ipc_lock:   # 防止多线程同时 connect
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.2)
+                s.connect(('127.0.0.1', 26668))
+                s.sendall(b"CODE")
+                s.sendall(msg.encode('utf-8'))
+
+    except Exception:
         pass
+        
 
 # _voice_process_target removed (moved to alert_manager.py)
 
@@ -2100,13 +2099,14 @@ class StockLiveStrategy:
             logger.info(f"✅ [T+0 Executed] {name} ({code}) {action} 价格:{price} 理由:{reason}")
             # Optional: Add specific marker to SQLite target DB if necessary
             
-            # Send IPC message for visualizer rendering
-            if action == '加仓(T0买)':
-                sig_type = "T0_BUY"
-            else:
-                sig_type = "T0_SELL"
-            msg_data = {"code": code, "name": name, "price": price, "pattern": sig_type, "msg": reason, "time": datetime.datetime.now().strftime("%H:%M:%S")}
-            send_signal_to_visualizer_ipc(msg_data)
+            # [FIX] 仅当 UI 开启了可视化开关时才发送 IPC，避免无效消耗与 GIL 线程冲突
+            if self.master and getattr(self.master, "_vis_enabled_cache", False):
+                if action == '加仓(T0买)':
+                    sig_type = "T0_BUY"
+                else:
+                    sig_type = "T0_SELL"
+                msg_data = {"code": code, "name": name, "price": price, "pattern": sig_type, "msg": reason, "time": datetime.datetime.now().strftime("%H:%M:%S")}
+                send_signal_to_visualizer_ipc(msg_data)
         except Exception as e:
             logger.error(f"Execute T+0 trade failed {code}: {e}")
 
@@ -3748,20 +3748,21 @@ class StockLiveStrategy:
                             f"triggered {getattr(event,'pattern','')}. Detail: {getattr(event,'detail','')}"
                         )
 
-                        # # ⚡ [FIX] 推送给 Visualizer 信号日志 + 语音
-                        # try:
-                        #     ipc_data = {
-                        #         "code": event.code,
-                        #         "name": getattr(event, 'name', event.code),
-                        #         "pattern": "EXIT",  # 统一归类为离场信号
-                        #         "message": f"【跑路信号】{getattr(event, 'detail', '')}，建议止盈离场",
-                        #         "is_high_priority": True,
-                        #         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        #         "priority": 100
-                        #     }
-                        #     send_signal_to_visualizer_ipc(ipc_data)
-                        # except Exception as ipc_e:
-                        #     logger.error(f"Failed to send EXIT signal to visualizer: {ipc_e}")
+                        # ⚡ [FIX] 推送给 Visualizer 信号日志 + 语音 (需要开启 vis_var 且 master 允许)
+                        try:
+                            if self.master and getattr(self.master, "_vis_enabled_cache", False):
+                                ipc_data = {
+                                    "code": event.code,
+                                    "name": getattr(event, 'name', event.code),
+                                    "pattern": "EXIT",  # 统一归类为离场信号
+                                    "message": f"【跑路信号】{getattr(event, 'detail', '')}，建议止盈离场",
+                                    "is_high_priority": True,
+                                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "priority": 100
+                                }
+                                send_signal_to_visualizer_ipc(ipc_data)
+                        except Exception as ipc_e:
+                            logger.error(f"Failed to send EXIT signal to visualizer: {ipc_e}")
 
                     
         except Exception as e:
@@ -3957,11 +3958,13 @@ class StockLiveStrategy:
 
             # --- B. IPC 实时推送 ---
             try:
-                ipc_data = {
-                    "code": code, "name": name, "pattern": sig_type if 'sig_type' in locals() else "ALERT",
-                    "message": message, "is_high_priority": is_priority, "timestamp": now_str, "priority": 100 if is_priority else 50
-                }
-                send_signal_to_visualizer_ipc(ipc_data)
+                # [FIX] 仅当 UI 开启了可视化开关时才发送 IPC，避免无效消耗与 GIL 线程冲突
+                if self.master and getattr(self.master, "_vis_enabled_cache", False):
+                    ipc_data = {
+                        "code": code, "name": name, "pattern": sig_type if 'sig_type' in locals() else "ALERT",
+                        "message": message, "is_high_priority": is_priority, "timestamp": now_str, "priority": 100 if is_priority else 50
+                    }
+                    send_signal_to_visualizer_ipc(ipc_data)
             except Exception: pass
 
             # --- C. UI 回调 (执行外部注册函数) ---

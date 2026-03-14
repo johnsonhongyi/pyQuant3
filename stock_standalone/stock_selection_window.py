@@ -619,7 +619,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             if stock_code and hasattr(self, 'sender') and self.sender:
                 self.sender.send(stock_code)
             # ⭐ 可视化器联动
-            if stock_code and hasattr(self.master, 'vis_var') and self.master.vis_var.get():
+            if stock_code and  self.master and getattr(self.master, "_vis_enabled_cache", False):
                 if hasattr(self.master, 'open_visualizer'):
                     self.master.open_visualizer(str(stock_code))
 
