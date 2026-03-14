@@ -140,7 +140,8 @@ class IntradayDecisionEngine:
                     }
         
         # 💥 [NEW] 提前进行顶部信号检测，供后续全局使用
-        day_df = snapshot.get('day_df', pd.DataFrame())
+        day_df_raw = snapshot.get('day_df')
+        day_df = day_df_raw if (day_df_raw is not None and isinstance(day_df_raw, pd.DataFrame)) else pd.DataFrame()
         cache_dict = snapshot.setdefault('top_detector_cache', {})
         top_info = detect_top_signals(day_df, row, cache_dict=cache_dict) # 传入 row 作为当前 tick
         debug["top_score"] = top_info['score']

@@ -1622,7 +1622,7 @@ class DataPublisher:
             verbose=verbose
         )
         self.auto_switch_enabled = True
-        self.mem_threshold_mb = 1200.0 # 阈值调低至 1200MB
+        self.mem_threshold_mb = cct.threshold_mb # 阈值调低初始值至 1200MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
         # =========================
         # Persistent Cache Settings
@@ -1799,7 +1799,7 @@ class DataPublisher:
         self.kline_cache.set_mode(max_len=cache_len)
         logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Interval: {interval}s | Limit: {cache_len}K")
 
-    def set_auto_switch(self, enabled: bool, threshold_mb: float = 800.0, node_limit: int = 1000000):
+    def set_auto_switch(self, enabled: bool, threshold_mb: float = 1600, node_limit: int = 1000000):
         """设置自动切换规则"""
         self.auto_switch_enabled = enabled
         self.mem_threshold_mb = threshold_mb
@@ -1812,6 +1812,16 @@ class DataPublisher:
         """
         while True:
             time.sleep(300)  # Changed from 600 (10m) to 300 (5m) to match _save_interval
+            
+            # [Added] 交易日 & 15:30 前限制 (遵循用户特定时段维护量产效率)
+            if not cct.get_trade_date_status():
+                continue
+            
+            hhmm = int(datetime.now().strftime("%H%M"))
+            # 不执行策略的时间段：早于 9:45，午休，15:30 之后
+            if hhmm < 945 or (1130 <= hhmm < 1300) or hhmm >= 1530:
+                continue
+
             try:
                 # 无论是否有新数据，都在维护线程检查并执行周期性保存
                 self.save_cache(force=False)

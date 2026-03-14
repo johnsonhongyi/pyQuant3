@@ -1296,6 +1296,7 @@ class TradingHub:
 
                 elif total_score >= 0.7:  # [NEW GATE] 晋升门槛提高至 0.7
                     # 验证通过
+                    new_cs = (prev_cs or 0) + 1
                     c.execute("""
                         UPDATE hot_stock_watchlist
                         SET validation_status='VALIDATED',
@@ -1303,9 +1304,9 @@ class TradingHub:
                             new_high_flag=?, consecutive_strong=?, updated_at=?
                         WHERE id=?
                     """, (close, trend_score, volume_score,
-                          new_high, prev_cs + 1, now_str, wid))
+                          new_high, new_cs, now_str, wid))
                     results['validated'].append(f"{name}({code}) Score={total_score:.2f}")
-                    logger.info(f"[TradingHub] Watchlist VALIDATED: {code} {name} Score={total_score:.2f}")
+                    logger.info(f"[TradingHub] Watchlist VALIDATED: {code} {name} Score={total_score:.2f} (cs={new_cs})")
                 else:
                     # 继续观察
                     c.execute("""

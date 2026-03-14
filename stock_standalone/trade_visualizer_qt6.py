@@ -27,9 +27,10 @@ from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
     QRect, QPointF, QRectF
 )
+
 from PyQt6.QtGui import (
     QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, 
-    QActionGroup, QShortcut, QKeySequence
+    QActionGroup, QShortcut, QKeySequence,QFontMetrics
 )
 from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6 import sip
@@ -5196,7 +5197,29 @@ class MainWindow(QMainWindow, WindowMixin):
             # 这里的异常通常发生窗口关闭时，静默处理
             pass
 
-    def show_status_message(self, message, timeout=0):
+
+    def show_status_message(self, message: str, timeout: int = 0):
+        if not hasattr(self, "center_msg_label"):
+            return
+
+        if not message:
+            self.center_msg_label.clear()
+            self.center_msg_label.setVisible(False)
+            return
+
+        # 自动省略文本
+        fm = QFontMetrics(self.center_msg_label.font())
+        # Qt6 中 ElideRight 是 Qt.TextElideMode 枚举
+        message = fm.elidedText(message, Qt.TextElideMode.ElideRight, 600)
+
+        self.center_msg_label.setMaximumWidth(600)
+        self.center_msg_label.setText(message)
+        self.center_msg_label.setVisible(True)
+
+        if timeout > 0:
+            QTimer.singleShot(timeout, lambda: self.show_status_message(""))
+
+    def show_status_message_nolimit(self, message, timeout=0):
         """
         ⭐ [NEW] 在底部中间显示状态消息 (替代原 StatusBar)
         Args:
