@@ -92,7 +92,7 @@ class PandasQueryEngine:
             # 1. 如果别名本身就是列名且尚未在 context 中定义（覆盖系统保留字除外）
             if alias in df.columns and (alias not in ctx or ctx[alias] is None):
                 ctx[alias] = df[alias]
-                self.logger.info(f" [QueryEngine] Column '{alias}' injected directly.")
+                self.logger.debug(f" [QueryEngine] Column '{alias}' injected directly.")
                 continue
             
             # 2. 尝试从目标列表中找到第一个存在的列
@@ -100,18 +100,18 @@ class PandasQueryEngine:
             for target in target_list:
                 if target in df.columns:
                     ctx[alias] = df[target]
-                    self.logger.info(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
+                    self.logger.debug(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
                     break
         
         # 3. 动态计算特殊标记 (green/red)
         if 'green' not in ctx or ctx.get('green') is None:
             if 'close' in df.columns and 'open' in df.columns:
                 ctx['green'] = df['close'] < df['open']
-                self.logger.info(" [QueryEngine] Alias 'green' mapping to Computed (close < open)")
+                self.logger.debug(" [QueryEngine] Alias 'green' mapping to Computed (close < open)")
         if 'red' not in ctx or ctx.get('red') is None:
             if 'close' in df.columns and 'open' in df.columns:
                 ctx['red'] = df['close'] > df['open']
-                self.logger.info(" [QueryEngine] Alias 'red' mapping to Computed (close > open)")
+                self.logger.debug(" [QueryEngine] Alias 'red' mapping to Computed (close > open)")
             
         return ctx
             
