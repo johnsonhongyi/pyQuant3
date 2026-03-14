@@ -49,6 +49,12 @@ try:
 except ImportError:
     cct = None
 
+# Integrated Query Engine
+try:
+    from query_engine_util import query_engine
+except ImportError:
+    query_engine = None
+
 # Qt Constant Shims for PyQt6/PySide6/PyQt5 compatibility
 # PyQt6 uses nested namespaces (e.g., Qt.ItemDataRole.DisplayRole)
 # PyQt5 and others use flat namespaces (e.g., Qt.DisplayRole)
@@ -354,167 +360,16 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self._is_querying = False
 
     def _execute_query_logic(self, df: pd.DataFrame, query_str: str) -> pd.DataFrame:
-        """核心查询执行逻辑分离出来以便加锁控制"""
-        self.log(f"--- Applying Query on df ({len(df)} rows) ---")
-        try:
-            # 1. 预处理：支持多行结构、行尾注释，以及从赋值语句 (如 final_query = ...) 中提取表达式
-            # 鲁棒性增强：寻找可能的赋值语句，且支持前面有注释或空行
-            raw_input = query_str.strip()
-            
-            # 智能提取逻辑：尝试从赋值语句中剥离右侧内容
-            process_content = raw_input
-            
-            # 1a. 匹配三引号赋值 (如 final_query = """ ... """)
-            triple_match = re.search(r'^\s*\w+\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', raw_input, re.DOTALL | re.MULTILINE)
-            # 1b. 匹配普通单引号或括号赋值
-            assign_match = re.search(r'^\s*(\w+)\s*=\s*(.*)', raw_input, re.DOTALL | re.MULTILINE)
-            
-            if triple_match:
-                process_content = triple_match.group(1)
-            elif assign_match and assign_match.group(1).lower() not in ('result', 'signal', 'import', 'from'):
-                process_content = assign_match.group(2)
-
-            # 清洗行尾注释与换行，精简结构
-            lines = []
-            for line in process_content.splitlines():
-                # 移除 # 及其后的内容
-                code_part = line.split('#')[0].strip()
-                if code_part:
-                    lines.append(code_part)
-            
-            # 统一名称并压缩为单行表达式
-            cleaned_expr = " ".join(lines).replace('df_all', 'df')
-            
-            # 2. 准备基础上下文 (注入 SQL 风格函数支持)
-            def _greatest(*args):
-                if not args:
-                    return None
-                # 使用 np.maximum.reduce 实现高效的规约计算，处理多列时远快于循环
-                return np.maximum.reduce(args)
-            
-            def _least(*args):
-                if not args:
-                    return None
-                return np.minimum.reduce(args)
-
-            context = {
-                'df': df,
-                'pd': pd,
-                'np': np,
-                'result': None,
-                'signal': None,
-                'GREATEST': _greatest,
-                'LEAST': _least,
-                'ABS': np.abs,
-                'MAX': _greatest,
-                'MIN': _least,
-                'greatest': _greatest, # 支持小写
-                'least': _least,
-                'max': _greatest,
-                'min': _least,
-                'abs': np.abs
-            }
-            
-            # 3. 智能判断：检测是否为真正的 Python 脚本 (含有显式赋值 result/signal 或 import)
-            is_explicit_script = any(line.startswith(('result =', 'signal =', 'import ', 'from ')) for line in lines)
-            # 是否包含不支持的 SQL 函数 (强制跳过 Stage 1/2) - 使用不区分大小写的正则检测
-            has_sql_func = bool(re.search(r'\b(GREATEST|LEAST|ABS|MAX|MIN)\b', cleaned_expr, re.IGNORECASE))
-            
-            if is_explicit_script:
-                self.log("Mode: SCRIPT detected (assignment found)")
-                exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
-            else:
-                # 智能尝试链：df.query -> df.eval -> exec
-                # 表达式预处理：将 df 替换为 @df 以支持 pandas 变量引用
-                pd_expr = re.sub(r'\bdf\b', '@df', cleaned_expr)
-                
-                # 阶段 1 & 2 (仅在无 SQL 函数时尝试)
-                if not has_sql_func:
-                    try:
-                        self.log("Stage 1: Attempting df.query...")
-                        return df.query(pd_expr, local_dict=context, engine='python')
-                    except Exception as e1:
-                        self.log(f"Stage 1 Failed: {e1}")
-                        try:
-                            self.log("Stage 2: Attempting df.eval...")
-                            res = df.eval(pd_expr, engine='python', local_dict=context)
-                            if isinstance(res, pd.Series) and len(res) == len(df):
-                                if res.dtype == bool:
-                                    return df[res]
-                            elif isinstance(res, pd.DataFrame):
-                                return res
-                        except Exception as e2:
-                            self.log(f"Stage 2 Failed: {e2}")
-                else:
-                    self.log("SQL Functions detected: Skipping Stage 1 & 2 (Direct to Stage 3)")
-                
-                # 第三阶段: 终极 eval/exec (列名注入)
-                self.log("Stage 3: Preparing optimized scope...")
-                local_scope = context.copy()
-                
-                # 1. 智能别名注入：仅当 lastp0d 缺失时，尝试映射为 close (代表今日收盘/现价)
-                if 'lastp0d' not in df.columns and 'close' in df.columns:
-                    local_scope['lastp0d'] = df['close']
-                    self.log("Added alias: lastp0d -> close")
-                
-                # 2. 动态检测并注入表达式中提到的列 (避免注入成百上千个无关列)
-                # 使用正则寻找可能代表变量的词
-                pattern = re.compile(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b')
-                mentioned_words = set(pattern.findall(cleaned_expr))
-                
-                inject_count = 0
-                for col in df.columns:
-                    col_str = str(col)
-                    if col_str in mentioned_words:
-                        local_scope[col_str] = df[col]
-                        inject_count += 1
-                
-                self.log(f"Stage 3: Injected {inject_count} columns. Running calculation...")
-
-                try:
-                    # 将 and/or 替换为 &/| 以符合 pandas 向量化习惯
-                    exec_expr = re.sub(r'\band\b', '&', cleaned_expr)
-                    exec_expr = re.sub(r'\bor\b', '|', exec_expr)
-                    
-                    # [PERF] 使用 pd.eval 替代原生 eval。
-                    # 如果包含自定义注入函数 (如 GREATEST)，必须使用 'python' 引擎
-                    engine = 'python' if has_sql_func else 'numexpr'
-                    self.log(f"Stage 3 Executing via pd.eval(engine='{engine}')...")
-                    res = pd.eval(exec_expr, engine=engine, local_dict=local_scope)
-                    
-                    self.log("Stage 3: Vectorized calculation finished.")
-                    
-                    if isinstance(res, pd.Series) and len(res) == len(df):
-                        if res.dtype == bool:
-                            return df[res]
-                    if isinstance(res, pd.DataFrame):
-                        return res
-                except Exception as e3:
-                    self.log(f"Stage 3 Failed: {e3}")
-                    if "is not defined" in str(e3):
-                        missing_var = str(e3).split("'")[1]
-                        self.log(f"HINT: Missing Column or Function '{missing_var}'")
-                    
-                    # 兜底：原始脚本模式执行
-                    try:
-                        self.log("Stage 3 Fallback: Attempting full script exec...")
-                        exec(re.sub(r'\bdf_all\b', 'df', query_str), local_scope)
-                        if local_scope.get('result') is not None:
-                            return local_scope['result']
-                    except Exception as ef:
-                        self.log(f"Fallback Failed: {ef}")
-            
-            # 4. 提取最终结果
-            if context.get('result') is not None:
-                return context['result']
-            if context.get('signal') is not None and isinstance(context['signal'], pd.Series):
-                return df[context['signal']]
-            
-            self.log("Query completed. Returning df.")
+        """调用通用查询引擎执行逻辑"""
+        if not query_engine:
+            self.log("Error: query_engine_util not found. Use legacy or skip.")
             return df
-                            
+            
+        self.log(f"--- Applying Advanced Query on df ({len(df)} rows) ---")
+        try:
+            return query_engine.execute(df, query_str)
         except Exception as e:
-            self.log(f"Query Error: {e}")
+            self.log(f"Query Engine Error: {e}")
             self.statusBar().showMessage(f"Query Error: {e}")
             return df
 
