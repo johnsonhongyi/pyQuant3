@@ -107,6 +107,14 @@ try:
 except ImportError as e:
     print(f"Import Error: {e}. Please run this script from the stock_standalone directory.")
     sys.exit(1)
+    
+# Integrated Query Engine
+try:
+    from query_engine_util import query_engine
+    if query_engine:
+        query_engine.set_logger(logger)
+except ImportError:
+    query_engine = None
 
 # Configuration for pyqtgraph
 pg.setConfigOptions(antialias=True)
@@ -4626,7 +4634,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
             from stock_logic_utils import ensure_parentheses_balanced
             final_query = ensure_parentheses_balanced(query_str)
-            matched = df.query(final_query)
+            
+            if query_engine:
+                matched = query_engine.execute(df, final_query)
+            else:
+                matched = df.query(final_query)
             if matched.empty:
                 self.show_status_message(f"❌ 未找到匹配: {len(matched)}", 3000)
                 logger.error(f"❌ 未找到匹配: {keyword}")
@@ -10443,7 +10455,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- 2. 执行查询 ---
             final_query = ensure_parentheses_balanced(query_str)
-            matches = df_to_search.query(final_query)
+            if query_engine:
+                matches = query_engine.execute(df_to_search, final_query)
+            else:
+                matches = df_to_search.query(final_query)
             if matches.empty:
                 # # self.statusBar().showMessage("Results: 0")
                 # self.show_status_message("Results: 0", 2000)
