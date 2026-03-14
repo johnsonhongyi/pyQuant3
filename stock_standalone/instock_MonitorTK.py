@@ -115,6 +115,8 @@ from alert_manager import AlertManager
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
+if query_engine:
+    query_engine.set_logger(logger)
 # Windows API 常量
 LOGPIXELSX = 88
 DEFAULT_DPI = 96.0
@@ -11287,7 +11289,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 else:
                     # 仅在初次选中或 code 变化时自动检查整个历史
                     check_code(self.df_all, code, test_queries, parent=self)
-                
                 if onclick:
                     self.tree_scroll_to_code(code)
                     if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
@@ -12272,7 +12273,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
         else:
             # 执行强大且具备 SQL 映射、向量化降级的查询
-            df_filtered = query_engine.execute(self.df_all, combined_query)
+            try:
+                df_filtered = query_engine.execute(self.df_all, combined_query)
+            except Exception as e:
+                logger.exception(f"Query Engine Critical Crash: {e} | Query: {combined_query}")
+                self.status_var.set(f"❌ 引擎故障: {str(e)[:15]}")
+                return
 
         # 4. 结果处理与 UI 更新
         if df_filtered.empty or (len(df_filtered) == len(self.df_all) and combined_query):
@@ -12282,6 +12288,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 # 获取引擎内部的具体错误信息
                 err_info = query_engine.last_error if query_engine else "未知查询错误"
+                # 记录详细日志便于调试
+                logger.warning(f"Query Logic Error: {err_info} | Query: {combined_query}")
                 # 精简错误提示，防止撑开状态栏
                 short_err = (err_info[:25] + "...") if len(err_info) > 25 else err_info
                 self.status_var.set(f"⚠️ 语法错误: {short_err}")

@@ -19,16 +19,42 @@ class PandasQueryEngine:
         self.logger = logger or logging.getLogger(__name__)
         self.last_error = ""
 
+    def set_logger(self, logger: logging.Logger):
+        """支持主程序注入一致的 logger"""
+        self.logger = logger
+
     @staticmethod
     def _greatest(*args):
         if not args: return None
-        # 使用 numpy 原生规约，比 pd.concat([].max(axis=1)) 快几个数量级
-        return np.maximum.reduce(args)
+        # 使用 numpy 原生规约
+        try:
+            res = np.maximum.reduce(args)
+            # 如果输入中有 Series，确保返回 Series 以保持索引对齐，防止 "cannot evaluate scalar only bool ops"
+            for a in args:
+                if isinstance(a, pd.Series):
+                    return pd.Series(res, index=a.index, name=a.name)
+            return res
+        except Exception:
+            # 兜底方案：使用 pandas 缓慢但兼容性强的方法
+            try:
+                return pd.concat(args, axis=1).max(axis=1)
+            except Exception:
+                return None
 
     @staticmethod
     def _least(*args):
         if not args: return None
-        return np.minimum.reduce(args)
+        try:
+            res = np.minimum.reduce(args)
+            for a in args:
+                if isinstance(a, pd.Series):
+                    return pd.Series(res, index=a.index, name=a.name)
+            return res
+        except Exception:
+            try:
+                return pd.concat(args, axis=1).min(axis=1)
+            except Exception:
+                return None
 
     def _prepare_context(self, df: pd.DataFrame) -> Dict[str, Any]:
         """构建基础执行上下文"""
@@ -49,9 +75,49 @@ class PandasQueryEngine:
             'min': self._least,
             'abs': np.abs
         }
-        # 别名支持：lastp0d -> close (行情系统常见别名)
-        if 'lastp0d' not in df.columns and 'close' in df.columns:
-            ctx['lastp0d'] = df['close']
+        # 别名映射与智能注入
+        col_map = {
+            'lastp0d': ['close', 'lastp0d'],
+            'lastp1d': ['lastp1d', 'lastp'],
+            'lastp2d': ['lastp2d'],
+            'lastdu': ['lastdu4', 'lastdu1', 'lastdu'],
+            'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
+            'resist': ['upper', 'high4', 'max5', 'resist'],
+            'support': ['lower', 'low4', 'min5', 'support'],
+            'green': ['gren', 'green'],
+            'red': ['red']
+        }
+        
+        for alias, targets in col_map.items():
+            # 1. 如果别名本身就是列名且尚未在 context 中定义（覆盖系统保留字除外）
+            if alias in df.columns and (alias not in ctx or ctx[alias] is None):
+                ctx[alias] = df[alias]
+                self.logger.info(f" [QueryEngine] Column '{alias}' injected directly.")
+                continue
+            
+            # 2. 尝试从目标列表中找到第一个存在的列
+            target_list = [targets] if isinstance(targets, str) else targets
+            for target in target_list:
+                if target in df.columns:
+                    ctx[alias] = df[target]
+                    self.logger.info(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
+                    break
+        
+        # 3. 动态计算特殊标记 (green/red)
+        if 'green' not in ctx or ctx.get('green') is None:
+            if 'close' in df.columns and 'open' in df.columns:
+                ctx['green'] = df['close'] < df['open']
+                self.logger.info(" [QueryEngine] Alias 'green' mapping to Computed (close < open)")
+        if 'red' not in ctx or ctx.get('red') is None:
+            if 'close' in df.columns and 'open' in df.columns:
+                ctx['red'] = df['close'] > df['open']
+                self.logger.info(" [QueryEngine] Alias 'red' mapping to Computed (close > open)")
+            
+        return ctx
+            
+        # 兜底注入：如果 query 中提到了某些常见别名但没映射上，且 df 中有类似列，尝试自动映射
+        # (这部分通常由 execute 中的 mentioned_words 处理，但这里可以做显式映射)
+        
         return ctx
 
     def _preprocess_query(self, query_str: str) -> str:
@@ -129,7 +195,7 @@ class PandasQueryEngine:
 
         except Exception as e:
             self.last_error = str(e)
-            self.logger.warning(f"Query Execution Error: {e}")
+            self.logger.warning(f"Query Execution Error: {e} | Query: {query_str}")
             # 最后一级兜底：全文 exec
             try:
                 exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
@@ -139,11 +205,16 @@ class PandasQueryEngine:
 
     def _wrap_result(self, df: pd.DataFrame, res: Any) -> pd.DataFrame:
         """统一包装计算结果"""
+        if res is None:
+            return df
         if isinstance(res, pd.Series) and len(res) == len(df):
             if res.dtype == bool:
                 return df[res]
         if isinstance(res, pd.DataFrame):
             return res
+        # 如果返回的是 scalar bool，且为 False，返回空 DataFrame
+        if isinstance(res, (bool, np.bool_)):
+            return df if res else df.iloc[:0]
         return df
 
     def _extract_result(self, df: pd.DataFrame, context: Dict) -> pd.DataFrame:
