@@ -15,7 +15,7 @@ def detect_top_signals(day_df: pd.DataFrame, current_tick: Optional[dict[str, An
     :param cache_dict: Optional dictionary to cache expensive pandas re-calculations across ticks.
     :return: dict with score (0.0-1.0) and signals list.
     """
-    if day_df.empty or len(day_df) < 10:
+    if day_df is None or day_df.empty or len(day_df) < 10:
         return {'score': 0.0, 'signals': []}
 
     signals = []

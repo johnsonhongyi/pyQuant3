@@ -370,6 +370,7 @@ class StockLiveStrategy:
         self._alert_cooldown = alert_cooldown
         self.enabled = True
         self._is_stopping: bool = False
+        self._needs_monitor_save: bool = False # [NEW] Flag for batch saving
 
         self.config_file = "voice_alert_config.json"
         
@@ -413,6 +414,7 @@ class StockLiveStrategy:
         self._watchlist_validated_today: bool = False
         self._last_validation_date: str = ""
         self._last_rank_scan_date: str = ""
+        self._pending_hist_fetches: set = set() # [NEW] Track async history fetches
 
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
@@ -503,12 +505,13 @@ class StockLiveStrategy:
         self._is_stopping = True
         logger.info("Stopping StockLiveStrategy...")
         
-        # 1. 停止语音播报
+        # 1. 停止语音播报 (彻底关闭后台进程)
         if hasattr(self, "_voice") and self._voice:
             try:
-                self._voice.stop()
+                # ⭐ [FIX] 使用 shutdown 彻底终止 AlertManager 进程，解决退出卡住问题
+                self._voice.shutdown() 
             except Exception as e:
-                logger.error(f"Error stopping VoiceAnnouncer: {e}")
+                logger.error(f"Error shutting down VoiceAnnouncer: {e}")
                 
         # 2. 停止线程池 (不再接收新任务，不等待)
         if hasattr(self, "executor") and self.executor:
@@ -2569,7 +2572,8 @@ class StockLiveStrategy:
                             msg_star = f"🌟 [起跳新星]: {data['name']} {reason_star}站稳压力位! 量能 {curr_vol_ratio:.1f} 基因 {gem_score:.1f}"
                             messages.append(("PATTERN", msg_star))
                             snap['star_triggered_date'] = today_str # 锁定记录，防轰炸
-                            logger.info(f"🚀 BREAKOUT_STAR triggered: {code} {data['name']} | reason:{reason_star} vol:{curr_vol_ratio:.1f} (prev:{prev_vol_ratio:.1f}) ratio:{ratio_change} score:{gem_score:.1f}")
+                            # ⭐ [FIX] 将频繁触发的日志降级为 DEBUG
+                            logger.debug(f"🚀 BREAKOUT_STAR triggered: {code} {data['name']} | reason:{reason_star} vol:{curr_vol_ratio:.1f} (prev:{prev_vol_ratio:.1f}) ratio:{ratio_change} score:{gem_score:.1f}")
                 
                 # 维持原有状态链同步
                 data['prev_win_upper1'] = curr_win_u1
@@ -2655,7 +2659,8 @@ class StockLiveStrategy:
                         
                         # 3. 状态变更处理
                         if new_phase != curr_phase:
-                            logger.info(f"🔄 [Phase Change] {code} {curr_phase.value} -> {new_phase.value} ({phase_reason})")
+                            # ⭐ [FIX] 状态变更日志降级为 DEBUG，减少终端干扰
+                            logger.debug(f"🔄 [Phase Change] {code} {curr_phase.value} -> {new_phase.value} ({phase_reason})")
                             snap['trade_phase'] = new_phase.value
                             snap['phase_reason'] = phase_reason
                             
@@ -2952,9 +2957,12 @@ class StockLiveStrategy:
                     )
                     # logger.info(f'{decision["action"]}')
                     if decision["action"]  in ("VETO", "买入",'卖出'):
-                        logger.debug(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 {code} {action} - {log_msg}")
+                        # ⭐ [FIX] 移除或完全屏蔽此处的控制台输出，统一走 logging 管理
+                        # 如果需要查看，请在 logging 配置中开启 DEBUG
+                        pass
                     data['last_alert'] = now
-                    self._save_monitors()
+                    # ⭐ [FIX] 不在单股循环内保存文件，改为设置标记
+                    self._needs_monitor_save = True
                     data['below_nclose_count'] = 0
                     data['below_nclose_start'] = 0
                     data['below_last_close_count'] = 0
@@ -2967,6 +2975,10 @@ class StockLiveStrategy:
             import traceback
             logger.error(traceback.format_exc())
         finally:
+            # ⭐ [FIX] 在所有股票检查完后执行一次整体保存
+            if self._needs_monitor_save:
+                 self._save_monitors()
+                 self._needs_monitor_save = False
             self._is_checking = False
 
     def _check_strategies_simple(self, df):
@@ -3564,12 +3576,14 @@ class StockLiveStrategy:
                         ma_level = "MA级别" if "@MA" in detail else "日低"
                         high_priority_reason = f"[HIGH] 起点{ma_level}，换手{ratio:.1f}%"
                         event.is_high_priority = True
+                        # 仅对高优先级保留 INFO
                         logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
                     elif start_at_ma:
                         # 从 MA 附近启动但换手不足，标记为中等优先级（仅语音，不弹窗）
                         is_high_priority = False  # [FIX] 不触发UI弹窗
                         high_priority_reason = f"[MID] 起点{detail.split('走高')[0].split('@')[1] if '@' in detail else 'MA'}，换手不足"
-                        logger.info(f"⚠️ 中等优先级信号（仅语音）: {event.code} {event.name} - {high_priority_reason}")
+                        # 中等优先级降级为 DEBUG
+                        logger.debug(f"⚠️ 中等优先级信号（仅语音）: {event.code} {event.name} - {high_priority_reason}")
                     else:
                         # 起点不佳，静默丢弃UI弹窗
                         is_high_priority = False
@@ -3586,6 +3600,7 @@ class StockLiveStrategy:
             
             # === 日志记录 ===
             priority_tag = "🔥" if is_high_priority else "🔔"
+            # [REDUCED] 统一通过 debug 记录，不再干扰 INFO 控制台
             logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
             
             # === 语音播报控制 (增强版) ===
@@ -3780,32 +3795,41 @@ class StockLiveStrategy:
             return
             
         try:
-            # load_hdf_db 返回的是过滤后的 DF
-            # results = cct.to_mp_run_async(get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0,detect_calc_support=detect_calc_support)
-            # if len(codes) > 1:
-            #     results = cct.to_mp_run_async(tdd.get_tdx_Exp_day_to_df, codes, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
-            # 返回多维的数据
-            #     # newdays=0,detect_calc_support=detect_calc_support)
-            #     for code in codes:
-            #         self.daily_history_cache[code] = results.loc[code]
-            for code in codes:
-                df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
-                df_hist.rename(columns={"vol": "volume"}, inplace=True)
-                if df_hist is not None and not df_hist.empty:
-                    # 存入该股的历史数据 DataFrame
-                    # self.daily_history_cache[code] = df_hist
-                    if df_hist is not None and not df_hist.empty:
-                        # [NEW] Calculate TD Sequence
-                        try:
-                            df_hist = calculate_td_sequence(df_hist)
-                        except Exception as e:
-                            logger.error(f"TD Sequence calculation error for {code}: {e}")
-                            
-                        self.daily_history_cache[f'{code}_{resample}'] = df_hist
+            # ⭐ [FIX] 异步抓取逻辑：如果不在缓存且未在抓取中，则投递到并行线程池
+            for c in codes:
+                cache_key = f"{c}_{resample}"
+                if cache_key in self.daily_history_cache or cache_key in self._pending_hist_fetches:
+                    continue
+                
+                self._pending_hist_fetches.add(cache_key)
+                self.executor.submit(self._async_fetch_history, c, resample)
+                
             self.last_daily_history_refresh = now
-            logger.debug(f"Daily history cache refreshed for {len(codes)} stocks. caches: {len(self.daily_history_cache.keys())}")
+            # logger.debug(f"Daily history cache task submitted for {len(codes)} stocks.")
         except Exception as e:
-            logger.error(f"Failed to refresh daily history cache: {e}")
+            logger.error(f"Failed to submit daily history cache tasks: {e}")
+
+    def _async_fetch_history(self, code, resample):
+        """异步抓取单只股票历史数据"""
+        cache_key = f"{code}_{resample}"
+        try:
+            df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+            if df_hist is not None and not df_hist.empty:
+                df_hist.rename(columns={"vol": "volume"}, inplace=True)
+                # [NEW] Calculate TD Sequence
+                try:
+                    from td_sequence import calculate_td_sequence
+                    df_hist = calculate_td_sequence(df_hist)
+                except Exception as e:
+                    logger.debug(f"TD Sequence calculation error for {code}: {e}")
+                
+                self.daily_history_cache[cache_key] = df_hist
+                # logger.debug(f"✅ History cache updated: {cache_key}")
+        except Exception as e:
+            logger.debug(f"Failed to fetch history for {code}: {e}")
+        finally:
+            if cache_key in self._pending_hist_fetches:
+                self._pending_hist_fetches.remove(cache_key)
 
     @with_log_level(LoggerFactory.INFO)
     def _on_daily_pattern_detected(self, event: 'DailyPatternEvent') -> None:
@@ -4111,7 +4135,7 @@ class StockLiveStrategy:
                 if open_counts > 0:
                     self.batch_state = "IN_PROGRESS"
                     self._voice.say("目标股已建仓，进入持仓监控模式")
-                    logger.info(f"Auto Loop: State -> IN_PROGRESS. Holding {open_counts}")
+                    logger.debug(f"Auto Loop: State -> IN_PROGRESS. Holding {open_counts}")
                 else:
                     # 超时检查 (例如 60分钟无建仓，且非盘中休息)
                     # 简化：如果不买，一直监控，直到人工干预或第二天重置
@@ -4124,7 +4148,7 @@ class StockLiveStrategy:
                      # 全部清仓
                      self.batch_state = "IDLE"
                      self._voice.say("本轮目标全部清仓，正在优化下一批策略")
-                     logger.info("Auto Loop: All cleared. State -> IDLE")
+                     logger.debug("Auto Loop: All cleared. State -> IDLE")
                      # 可以在这里增加一个短暂冷却，避免瞬间重选
                      # self.batch_last_check = now + 60 
                      
@@ -4152,7 +4176,7 @@ class StockLiveStrategy:
             elif "StockSelector不可用" in msg:
                 pass
             else:
-                logger.info(f"Auto Loop: Import failed/skipped: {msg}")
+                logger.debug(f"Auto Loop: Import failed/skipped: {msg}")
         except Exception as e:
             logger.error(f"Async hotspot import failed: {e}")
         finally:

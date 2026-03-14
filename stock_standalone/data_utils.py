@@ -2049,10 +2049,15 @@ def _prepare_runtime_state(
     marketInit, marketblk
 ):
     if not flag.value:
-        for _ in range(5):
+        # Check if we should wait or exit
+        for _ in range(3): # Reduced from 5 to 3 for faster response
             if flag.value:
                 break
             time.sleep(1)
+        
+        if not flag.value:
+            # If still False after wait, return EXIT to break the main loop
+            return None, None, None, "EXIT"
         return None, None, None, "PAUSE"
 
     new_resample = g_values.getkey("resample") or "d"
@@ -2383,6 +2388,10 @@ def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname
                 marketInit, marketblk
             )
 
+            if state == "EXIT":
+                logger.info("Background Process: EXIT signal received, stopping loop.")
+                break
+
             if state in ("PAUSE", "RESET"):
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
@@ -2505,6 +2514,9 @@ def fetch_and_process(
         try:
             time_s = time.time()
             if not flag.value:   # 停止刷新
+                if g_values.getkey('state') == 'EXIT':
+                    logger.info("Background Process: EXIT state detected, breaking loop.")
+                    break
                 for _ in range(5):
                     if not flag.value: break
                     time.sleep(1)

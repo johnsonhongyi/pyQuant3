@@ -411,6 +411,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.qt_process = None         # [FIX] 初始化 qt_process 避免 send_df AttributeError
         self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
+        self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         # 4. 初始化 Realtime Data Service (异步加载以加快启动)
@@ -818,12 +819,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     _HOTKEY_ID_BASE = 0xBF00  # 避免与其他程序冲突
     _HOTKEY_MAP = {
         # id_offset: (modifier, vk_code, description)
-        0: (win32con.MOD_ALT, 0x42, 'Alt+B'),  # B - 关闭所有报警
-        1: (win32con.MOD_ALT, 0x45, 'Alt+E'),  # E - 语音预警管理
-        2: (win32con.MOD_ALT, 0x53, 'Alt+S'),  # S - 策略管理
-        3: (win32con.MOD_ALT, 0x4B, 'Alt+K'),  # K - 每日复盘
-        4: (win32con.MOD_ALT, 0x51, 'Alt+L'),  # Q - 实时信号仪表盘
-        5: (win32con.MOD_ALT, 0x48, 'Alt+H'),  # H - 切换Hotlist
+        0: (win32con.MOD_ALT, 0x42, "Alt+B"),  # B - 关闭所有报警
+        1: (win32con.MOD_ALT, 0x45, "Alt+E"),  # E - 语音预警管理
+        2: (win32con.MOD_ALT, 0x53, "Alt+S"),  # S - 策略管理
+        3: (win32con.MOD_ALT, 0x4B, "Alt+K"),  # K - 每日复盘
+        4: (win32con.MOD_ALT, 0x4C, "Alt+L"),  # Q - 实时信号仪表盘
+        5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H - 切换Hotlist
     }
 
     def setup_global_hotkey(self, show_toast=False):
@@ -1204,13 +1205,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, "_task_running", False):
             return
 
-        # ✅ 每日重置实时服务状态
-        # if self.realtime_service:
-        #     try:
-        #         self.realtime_service.reset_state()
-        #         logger.info("✅ RealtimeService daily reset triggered.")
-        #     except Exception as e:
-        #         logger.error(f"❌ RealtimeService reset failed: {e}")
+        # ✅ 每日自动保存 SectorBiddingPanel 历史数据
+        if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
+            try:
+                # 记录一下保存动作
+                if hasattr(self.sector_bidding_panel, 'detector'):
+                    self.sector_bidding_panel.detector.save_persistent_data()
+                    logger.info("✅ SectorBiddingPanel 每日历史数据自动保存完成")
+            except Exception as e:
+                logger.error(f"❌ SectorBiddingPanel 自动保存失败: {e}")
 
         if hasattr(self, "live_strategy"):
             try:
@@ -1434,6 +1437,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._is_closing = True
             logger.info("🛑 [on_close] Application shutdown initiated...")
             
+            try:
+                self.stop_refresh() # 设置 refresh_flag = False
+                if hasattr(self, 'viz_lifecycle_flag'):
+                    self.viz_lifecycle_flag.value = False
+                    logger.info("Early set viz_lifecycle_flag to False")
+            except Exception:
+                pass
+            
             if hasattr(self, 'executor') and self.executor:
                 try:
                     logger.info("正在关闭主线程池...")
@@ -1618,61 +1629,72 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.warning(f"搜索历史归档失败: {e}")
 
-            # 10. 停止后台进程与管理器 (关键顺序：先停进程，再停管理器)
-            self.stop_refresh()
-            # if getattr(self, 'qt_process', None):
-            #     self.qt_process.join(timeout=2)
-            #     if self.qt_process  and self.qt_process.is_alive():
-            #         logger.info("正在停止后台qt_process进程...")
-            #         self.qt_process.terminate()
-            #         self.qt_process.join()
-            #         self.qt_process = None
-            # ===== 3. 停掉后台线程 =====
-            if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
-                logger.info("正在停止 df_all 同步线程...")
-                # 线程是 daemon=True, 会随主线程退出，也可设置标志 self._df_sync_flag = False 来优雅退出
-                # self._df_sync_flag = False
-                self._df_sync_running = False
-                self._df_sync_thread.join(timeout=2)
-                if self.viz_command_queue:
-                    self.viz_command_queue = None
-                self._df_sync_thread = None
+            # 10. 停止后台进程与管理器 (关键顺序：优先停止数据生产和消费进程)
+            # Reordered following USER's instruction:
+            # 1. Stop backend scanning proc (Data Producer)
+            # 2. Stop Qt sub-process (Data Consumer)
+            # 3. Stop sync thread (Data Distributor)
+            # 4. Close queue / pipe (Resources)
+            
+            # 1. 停止后台数据扫描进程 (proc)
+            if hasattr(self, "proc") and self.proc.is_alive():
+                logger.info("正在停止后台数据扫描进程 (proc)...")
+                # self.stop_refresh() # 已经在开头设置过
+                self.proc.join(timeout=2.0) 
+                if self.proc.is_alive():
+                    # 如果 2 秒内没退出，则强制终止
+                    logger.warning("后台进程未能在预期内退出，正在强制终止...")
+                    self.proc.terminate()
+                    self.proc.join(timeout=1.0)
+                    logger.info("后台进程已强制终止")
+                else:
+                    logger.info("后台进程已安全退出")
+            self.proc = None
 
-            # 先停止 Qt 子进程
-            # 先停止 Qt 子进程 [FIX: Race Condition safe]
+            # 2. 停止 Qt 子进程 (qt_process)
             qtz_proc = getattr(self, 'qt_process', None)
             if qtz_proc is not None:
                 try:
                     if qtz_proc.is_alive():
-                        # 设置 stop_flag 让 Qt 子进程循环退出
-                        if hasattr(self, 'viz_lifecycle_flag'):
-                            self.viz_lifecycle_flag.value = False
-                            logger.info("Setting viz_lifecycle_flag to False (App Exit)")
+                        logger.info("正在停止 Qt 子进程 (qt_process)...")
+                        # self.viz_lifecycle_flag.value = False # 已经在开头设置过
                         
-                        # 兼容旧代码 (如果有)
-                        if hasattr(self, 'stop_flag'):
-                            self.stop_flag.value = False
-
-                        qtz_proc.join(timeout=2)
+                        qtz_proc.join(timeout=2.0)
                         if qtz_proc.is_alive():
                             qtz_proc.terminate()
-                            qtz_proc.join()
+                            qtz_proc.join(timeout=1.0)
+                            logger.info("Qt 子进程已强制终止")
+                        else:
+                            logger.info("Qt 子进程已安全退出")
                 except Exception as e:
                     logger.error(f"Error stopping qt_process: {e}")
-                
                 self.qt_process = None
-              
-            if hasattr(self, "proc") and self.proc.is_alive():
-                logger.info("正在停止后台数据扫描进程...")
-                
-                # ⭐ [FIX] 给更多时间让后台进程清理 (特别是 MinuteKlineCache 保存)
-                self.proc.join(timeout=5) 
-                if self.proc.is_alive():
-                    self.proc.terminate()
-                    self.proc.join(timeout=1.5)
-                    logger.info("后台进程已强制终止")
-                else:
-                    logger.info("后台进程已安全退出")
+
+            # 3. 停止 df_all 同步线程 (DFSyncThread)
+            if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+                logger.info("正在停止 df_all 同步线程...")
+                self._df_sync_running = False
+                self._df_sync_thread.join(timeout=2.0)
+                self._df_sync_thread = None
+
+            # 4. 关闭队列与管道资源
+            logger.info("正在清理队列与通信资源...")
+            if hasattr(self, 'viz_command_queue') and self.viz_command_queue:
+                try:
+                    self.viz_command_queue.close()
+                    # 防止 join_thread 导致阻塞 (如果子进程已死，内部 feeder 线程可能卡住)
+                    self.viz_command_queue.cancel_join_thread() 
+                except Exception:
+                    pass
+                self.viz_command_queue = None
+            
+            if hasattr(self, 'queue') and self.queue:
+                try:
+                    self.queue.close()
+                    self.queue.cancel_join_thread()
+                except Exception:
+                    pass
+                self.queue = None
 
             if hasattr(self, "manager"):
                 try:
@@ -1684,10 +1706,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 断开代理引用，防止 shutdown 时的 BrokenPipe
                     self.realtime_service = None
                     self.global_dict = None
-                    # ⭐ [FIX] 给 manager shutdown 一个超时，防止某些 proxy 无法断开导致 hang
-                    self.manager.shutdown()
-                except Exception:
-                    pass
+                    
+                    # ⭐ [FIX] 给 manager shutdown 一个较短超时，防止 GUI 线程被阻塞导致僵尸进程
+                    logger.info("正在关闭 SyncManager...")
+                    manager_thread = threading.Thread(target=self.manager.shutdown)
+                    manager_thread.start()
+                    manager_thread.join(timeout=1.5)
+                    if manager_thread.is_alive():
+                        logger.warning("SyncManager 关闭超时，强制跳过以继续退出流程。")
+                except Exception as e:
+                    logger.debug(f"Manager shutdown error ignored: {e}")
 
             # 11. 停止日志与销毁 (放在最后)
             try:
@@ -3025,6 +3053,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.voice_var = tk.BooleanVar(value=True) # 💥 默认开启语音
         self.realtime_var = tk.BooleanVar(value=True)
         self.vis_var = tk.BooleanVar(value=False)
+        # [FIX] 绑定监听以同步影子变量，防止后台线程直接调用 .get() 导致 GIL 崩溃
+        self.vis_var.trace_add('write', lambda *args: setattr(self, '_vis_enabled_cache', self.vis_var.get()))
         self.alert_popup_var = tk.BooleanVar(value=True) # 💥 默认开启报警弹窗
         checkbuttons_info = [
             ("Win", self.win_var),
@@ -3492,6 +3522,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ======================================================
                 # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
                 # ======================================================
+                # [FIX] 避免在后台线程直接调用 self.vis_var.get()，改为读取 master 的可见性状态 (非 UI 调用) 或变量快照
+                vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                
                 if not sent:
                     try:
                         # 1️⃣ pickle 单独计时
@@ -3519,7 +3552,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 只有当真正失败时才 Warning，避免没有 Visualizer 时的噪音
                         # logger.warning(f"[IPC] send failed: {e}")
                         pass
-                        if not self.vis_var.get():
+                        if not vis_enabled:
                             # self._df_first_send_done = True
                             sent = True
 
@@ -3535,7 +3568,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._df_first_send_done = sent
 
             # 状态刚从 False → True：立即进入慢速周期
-            if sent and not prev and self.vis_var.get():
+            vis_enabled = getattr(self, '_vis_enabled_cache', True)
+            if sent and not prev and vis_enabled:
                 logger.info("[send_df] first successful send")
 
             # ======================================================

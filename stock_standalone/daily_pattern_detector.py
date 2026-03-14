@@ -158,6 +158,10 @@ class DailyPatternDetector:
             
         events = []
         
+        # 确保 prev_rows 为可用的 DataFrame
+        if prev_rows is None or not isinstance(prev_rows, pd.DataFrame):
+            prev_rows = pd.DataFrame()
+
         # 1. 大阳突破 (Big Bull) - 盘中也可识别
         events.extend(self._check_big_bull(code, name, current_row, prev_rows))
         
@@ -314,7 +318,7 @@ class DailyPatternDetector:
         
         if pct >= 5.0 and amplitude > 0 and (body / amplitude) > 0.7:
             # 辅助：放量检测 (成交量 > 过去5日均量 * 1.5)
-            vol_ma5 = prev_df['volume'].tail(5).mean() if not prev_df.empty else 0
+            vol_ma5 = (prev_df['volume'].tail(5).mean() if (prev_df is not None and not prev_df.empty) else 0)
             detail = f"大阳涨{pct:.1f}%"
             score = pct * 10 
             
@@ -353,7 +357,7 @@ class DailyPatternDetector:
         
         volume = float(row.get('amount', 0))
         pct = float(row.get('percent', 0))
-        vol_ma5 = prev_df['amount'].tail(5).mean() if not prev_df.empty else 0
+        vol_ma5 = (prev_df['amount'].tail(5).mean() if (prev_df is not None and not prev_df.empty) else 0)
         # 条件：成交量 < 5日均量 60%, 且涨跌幅绝对值 < 1.5%
         if vol_ma5 > 0 and volume < vol_ma5 * 0.6 and abs(pct) < 1.5:
             return [DailyPatternEvent(

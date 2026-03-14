@@ -824,6 +824,7 @@ class GlobalConfig:
         self.trailing_stop_pct = self.get_with_writeback("general", "trailing_stop_pct", fallback=0.03, value_type="float")
         self.max_single_stock_ratio = self.get_with_writeback("general", "max_single_stock_ratio", fallback=0.3, value_type="float")
         self.min_position_ratio = self.get_with_writeback("general", "min_position_ratio", fallback=0.05, value_type="float")
+        self.threshold_mb = self.get_with_writeback("general", "threshold_mb", fallback=1800, value_type="float")
         self.risk_duration_threshold = self.get_with_writeback("general", "risk_duration_threshold", fallback=300, value_type="int")
         self.pending_alert_cycles = self.get_with_writeback("general", "pending_alert_cycles", fallback=10, value_type="int")
         self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="2 1", value_type="str")
@@ -1115,6 +1116,7 @@ take_profit_pct: float = CFG.take_profit_pct
 trailing_stop_pct: float = CFG.trailing_stop_pct
 max_single_stock_ratio: float = CFG.max_single_stock_ratio
 min_position_ratio: float = CFG.min_position_ratio
+threshold_mb: float = CFG.threshold_mb
 risk_duration_threshold: int = CFG.risk_duration_threshold
 code_startswith: str = CFG.code_startswith
 winlimit: int = CFG.winlimit

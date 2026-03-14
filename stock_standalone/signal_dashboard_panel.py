@@ -140,23 +140,6 @@ class VolumeDetailsDialog(QDialog):
 
 logger = logging.getLogger(__name__)
 
-class RightClickPasteLineEdit(QLineEdit):
-    """支持右键直接粘贴并清除旧内容的输入框"""
-    def contextMenuEvent(self, event):
-        # 🚀 根据用户要求：右键直接触发“清除并粘贴”行为
-        self.custom_paste()
-
-    def custom_paste(self):
-        """清除现有内容并从剪贴板粘贴"""
-        clipboard = QApplication.clipboard()
-        text = clipboard.text().strip()
-        if text:
-            self.clear()  # 确保如果有内容直接清除内容
-            self.setText(text)
-            self.setFocus()
-            # 设置光标到末尾
-            self.setCursorPosition(len(text))
-
 # 定义信号分类
 CATEGORY_MAP = {
     "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场"],
@@ -443,10 +426,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """)
         
         # 🚀 [NEW] 添加搜索框到标签栏右侧 (买入机会旁)
-        self.search_input = RightClickPasteLineEdit()
+        self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索代码/名称...")
         self.search_input.setFixedWidth(180)
         self.search_input.setStyleSheet("""
+            /* 右键黏贴功能,之前旧的RightClickPasteLineEdit功能有问题删除了,改成了QLineEdit() */
             QLineEdit {
                 background-color: #1a1c2c;
                 color: #ffffff;
@@ -462,6 +446,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 background-color: #25283d;
             }
         """)
+        # 🔗 [NEW] 支持右键菜单 (解决某些环境下原自定义控件的兼容性问题)
+        self.search_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.search_input.customContextMenuRequested.connect(self._on_search_context_menu)
+        
         self.search_input.textChanged.connect(self._on_search_text_changed)
         self.tabs.setCornerWidget(self.search_input, Qt.Corner.TopRightCorner)
         
@@ -896,53 +884,90 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.code_clicked.emit(code_item.text(), name_item.text())
 
     def _on_cell_double_clicked(self, row, col):
-        """处理双击：根据点击的列执行精准复制与联动"""
+        """双击表格单元格：按列功能复制或联动"""
+
         table = self.sender()
-        if not isinstance(table, QTableWidget): return
-        
-        # 🛡️ 防御性检查: 确保项目存在且非空
+        if not isinstance(table, QTableWidget):
+            return
+
+        # 防御：行越界
+        if row < 0 or row >= table.rowCount():
+            return
+
+        # 获取列名（避免列顺序变化）
+        header_item = table.horizontalHeaderItem(col)
+        header = header_item.text() if header_item else ""
+
+        # 获取基础数据
         it_code = table.item(row, 1)
         it_name = table.item(row, 2)
+
         if not it_code or not it_name:
             return
-            
-        code = it_code.text()
-        name = it_name.text()
+
+        code = (it_code.text() or "").strip()
+        name = (it_name.text() or "").strip()
+
         clipboard = QApplication.clipboard()
-        
-        if col == 1: # 双击代码列 -> 复制代码
-            clipboard.setText(code)
-            self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
-            self.code_clicked.emit(code, name)
-            
-        elif col == 2: # 双击名称列 -> 复制名称 (修复用户反馈)
-            clipboard.setText(name)
-            self.status_bar.setText(f"📋 已复制名称: {name} ({code})")
-            self.code_clicked.emit(code, name)
-            
-        elif col == 3: # 形态/信号列 -> 复制形态
-            it_pattern = table.item(row, 3)
-            if it_pattern:
-                pattern_text = it_pattern.text()
-                clipboard.setText(pattern_text)
-                self.status_bar.setText(f"📋 已复制形态: {pattern_text}")
-                
-        elif col == 4: # 详情列 -> 复制文本 + 弹窗详情
-            it_detail = table.item(row, 4)
-            if it_detail:
-                detail_text = it_detail.text()
-                clipboard.setText(detail_text)
-                self.status_bar.setText(f"📋 已复制详情: {detail_text[:20]}...")
-                
-                # 弹出详情框
-                pattern = table.item(row, 3).text() if table.item(row, 3) else "ALERT"
-                dialog = SignalDetailDialog(code, name, pattern, detail_text, self)
-                dialog.exec()
-        else:
-            # 默认：复制代码并联动
-            clipboard.setText(code)
-            self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
-            self.code_clicked.emit(code, name)
+
+        try:
+
+            # ---------- 代码列 ----------
+            if header == "代码":
+                clipboard.setText(code)
+                QApplication.processEvents()
+
+                self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
+                self.code_clicked.emit(code, name)
+
+            # ---------- 名称列 ----------
+            elif header == "名称":
+                clipboard.setText(name)
+                QApplication.processEvents()
+
+                self.status_bar.setText(f"📋 已复制名称: {name} ({code})")
+                self.code_clicked.emit(code, name)
+
+            # ---------- 形态列 ----------
+            elif header in ("形态", "信号", "Pattern"):
+                it_pattern = table.item(row, col)
+                if it_pattern:
+                    pattern_text = it_pattern.text().strip()
+                    clipboard.setText(pattern_text)
+                    QApplication.processEvents()
+
+                    self.status_bar.setText(f"📋 已复制形态: {pattern_text}")
+
+            # ---------- 详情列 ----------
+            elif header in ("详情", "Detail", "说明"):
+                it_detail = table.item(row, col)
+                if it_detail:
+                    detail_text = it_detail.text().strip()
+
+                    clipboard.setText(detail_text)
+                    QApplication.processEvents()
+
+                    self.status_bar.setText(f"📋 已复制详情: {detail_text[:30]}...")
+
+                    # 获取形态
+                    pattern = ""
+                    it_pattern = table.item(row, 3)
+                    if it_pattern:
+                        pattern = it_pattern.text()
+
+                    dialog = SignalDetailDialog(code, name, pattern, detail_text, self)
+                    dialog.exec()
+
+            # ---------- 默认行为 ----------
+            else:
+                clipboard.setText(code)
+                QApplication.processEvents()
+
+                self.status_bar.setText(f"📋 已复制代码: {code} ({name})")
+                self.code_clicked.emit(code, name)
+
+        except Exception as e:
+            logger.error(f"Double click handler error: {e}")
 
     def _on_search_text_changed(self, text):
         """⭐ [NEW] 处理搜索文本变化 - 增加防抖处理"""
@@ -982,6 +1007,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 current_table.setRowHidden(row, False)
             else:
                 current_table.setRowHidden(row, True)
+
+    def _on_search_context_menu(self, pos):
+        def paste_clipboard():
+            clipboard = QApplication.clipboard()
+            text = clipboard.text().strip()
+
+            if text:
+                self.search_input.setText(text)
+                self.status_bar.setText(f"📋 已从剪贴板自动粘贴搜索内容: {text}")
+            else:
+                menu = self.search_input.createStandardContextMenu()
+                menu.exec(self.search_input.mapToGlobal(pos))
+
+        QTimer.singleShot(30, paste_clipboard)
 
     def _on_selection_changed(self):
         """处理键盘上下键联动"""
