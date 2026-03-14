@@ -92,6 +92,12 @@ import stock_indicator_help
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
 
+# Integrated Query Engine
+try:
+    from query_engine_util import query_engine
+except ImportError:
+    query_engine = None
+
 from db_utils import *
 # from kline_monitor import KLineMonitor
 # from stock_selection_window import StockSelectionWindow
@@ -2304,8 +2310,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        # options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警", "重置快捷键"]
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -2344,7 +2349,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_kline_viewer_qt()
             elif action == "复盘数据":
                 self.open_market_pulse()
-                # self.open_strategy_backtest_view()
+            elif action == "实盘数据":
+                self.persistent_df_all_to_h5()
             # elif action == "重置快捷键":
             #     self.setup_global_hotkey(show_toast=True)
 
@@ -3661,6 +3667,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tip_var_status_flag.value = self.tip_var.get()
 
         logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()} tip_var_status_flag:{tip_var_status_flag.value}")
+
+    def persistent_df_all_to_h5(self):
+        """将全量数据持久化到 G 盘共享文件 (HDF5 格式)"""
+        if not hasattr(self, 'df_all') or self.df_all.empty:
+            toast_message(self, "❌ 数据为空，无法保存")
+            return
+        
+        try:
+            today = cct.get_today('')
+            h5_path = f"g:\\shared_df_all-{today}.h5"
+            
+            # [CRITICAL FIX] HDF5 table 格式严禁 mixed-type。
+            # 即使原本是 object，如果存在 int/str 混合，to_hdf 就会崩溃。
+            # 我们必须强制将这些列转为纯 string。
+            save_df = self.df_all.copy()
+            for col in save_df.columns:
+                if save_df[col].dtype == 'object':
+                    save_df[col] = save_df[col].astype(str)
+            
+            # 采用 table 格式以便查询，启用 blosc 高速压缩
+            save_df.to_hdf(h5_path, key='df', mode='w', format='table', complib='blosc', complevel=9)
+            
+            self.status_var.set(f"✅ 实盘数据已共享: {h5_path}")
+            logger.info(f"Persistent df_all to HDF5 success: {h5_path} (Rows: {len(self.df_all)})")
+            toast_message(self, "实盘数据持久化成功")
+        except Exception as e:
+            err_msg = str(e)
+            logger.error(f"Failed to persist df_all to HDF5: {err_msg}")
+            self.status_var.set(f"❌ 保存失败: {err_msg[:30]}...")
+            toast_message(self, f"保存失败: {err_msg[:20]}")
 
 
     # 选择历史查询
@@ -11219,6 +11255,76 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         font_size = font.pointSize()
         self._font_size = font_size
         logger.info(f"concepts_pg 默认字体大小: {font_size}")
+    def on_test_code(self, onclick=False):
+        """
+        测试当前选中的股票或全量数据是否符合历史记录中的查询规则。
+        重构：使用新的 PandasQueryEngine (query_engine) 执行。
+        """
+        code = self.query_manager.entry_query.get().strip()
+        result = getattr(self, "_Categoryresult", "")
+
+        # 1. 确定测试数据集 df_code
+        if code and code == result:
+            df_code = self.df_all
+        elif code and not (code.isdigit() and len(code) == 6):
+            df_code = self.df_all
+        elif code and code.isdigit() and len(code) == 6:
+            if self._select_on_test_code != code or onclick:
+                self._select_on_test_code = code
+                df_code = self.df_all.loc[self.df_all.index == code]
+                
+                # 保留原有 check_code 弹窗提示，现在传入整个 history 以进行全量诊断
+                from stock_logic_utils import check_code
+                test_queries = self.query_manager.current_history
+                if onclick:
+                    # 如果是手动点击，则优先检查当前搜索框，若为空则检查整个历史
+                    active_query = self.query_manager.entry_query.get().strip()
+                    # 如果 entry_query 匹配 6 位代码，说明用户在搜代码，此时应该用底部搜索框 search_var1 或者是 history
+                    if active_query.isdigit() and len(active_query) == 6:
+                        check_code(self.df_all, code, test_queries, parent=self)
+                    else:
+                        check_code(self.df_all, code, active_query, parent=self)
+                else:
+                    # 仅在初次选中或 code 变化时自动检查整个历史
+                    check_code(self.df_all, code, test_queries, parent=self)
+                
+                if onclick:
+                    self.tree_scroll_to_code(code)
+                    if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                        self.kline_monitor.tree_scroll_to_code_kline(code)
+            else:
+                df_code = self.df_all
+        else:
+            df_code = self.df_all
+
+        if df_code is None or df_code.empty:
+            return
+
+        # 2. 使用新的 query_engine 执行历史规则测试
+        from query_engine_util import query_engine
+        history = self.query_manager.current_history
+        
+        for record in history:
+            query_str = record.get("query", "").strip()
+            if not query_str:
+                record["hit"] = ""
+                continue
+            
+            try:
+                # 使用新引擎执行
+                res = query_engine.execute(df_code, query_str)
+                if isinstance(res, pd.DataFrame):
+                    record["hit"] = len(res)
+                elif isinstance(res, (pd.Series, np.ndarray, list)):
+                    record["hit"] = len(res)
+                else:
+                    record["hit"] = 1 if res else 0
+            except Exception as e:
+                logger.debug(f"Test query failed: {query_str}, err: {e}")
+                record["hit"] = 0
+
+        # 3. 刷新 UI
+        self.query_manager.refresh_tree()
 
         texts = []
         max_score = max(scores.max(), 1)
@@ -12119,16 +12225,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 可以加更多字段，如 trade、涨幅等
 
     def apply_search(self):
+        """[REFACTORED] 使用通用 PandasQueryEngine 执行搜索过滤"""
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
         
-        # [MODIFIED] Resolve display labels back to raw queries if maps exist
+        # 解析映射标签（如果有）
         if hasattr(self, 'search_map1'):
             val1 = self.search_map1.get(val1, val1)
         if hasattr(self, 'search_map2'):
             val2 = self.search_map2.get(val2, val2)
-
-        # val4 = self.search_var4.get().strip()
 
         if not val1 and not val2:
             self.status_var.set("搜索框为空")
@@ -12140,162 +12245,65 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         parts = []
         if val1: parts.append(f"({val1})")
         if val2: parts.append(f"({val2})")
-        # if val4: parts.append(f"({val4})")
-        
-        query = " and ".join(parts)
-        # # 如果新值和上次一样，就不触发
-        # if hasattr(self, "_last_value") and self._last_value == query:
-        #     return
-        self._last_value = query
+        combined_query = " and ".join(parts)
+        self._last_value = combined_query
 
+        # 1. 更新搜索历史
         try:
-            # 🔹 同步所有搜索框的历史
             if val1:
                 self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
             if val2:
                 self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
-            # if val4:
-            #     self.sync_history(val4, self.search_history4, self.search_combo4, "history4", "history4")
         except Exception as ex:
             logger.exception("更新搜索历史时出错: %s", ex)
 
-        # ================= 数据为空检查 =================
+        # 2. 数据有效性检查
         if self.df_all.empty:
             self.status_var.set("当前数据为空")
             return
 
-        # ====== 条件清理 ======
-        bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+        # 3. 执行查询 (全面移向新引擎)
+        if not query_engine:
+            logger.error("PandasQueryEngine not found! Using legacy fallback.")
+            try:
+                df_filtered = self.df_all.query(combined_query, engine='python')
+            except Exception as e:
+                self.status_var.set(f"查询失败: {e}")
+                return
+        else:
+            # 执行强大且具备 SQL 映射、向量化降级的查询
+            df_filtered = query_engine.execute(self.df_all, combined_query)
 
-        # 2️⃣ 替换掉原 query 中的这些部分
-        for bracket in bracket_patterns:
-            query = query.replace(f'and {bracket}', '')
-
-        conditions = [c.strip() for c in query.split('and')]
-        # logger.info(f'conditions {conditions}')
-        valid_conditions = []
-        removed_conditions = []
-        for cond in conditions:
-            cond_clean = cond.lstrip('(').rstrip(')')
-            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
-                if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
-                    ensure_cond = ensure_parentheses_balanced(cond)
-                    valid_conditions.append(ensure_cond)
-                    continue
-
-            # 提取条件中的列名
-            cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
-
-            # 所有列都必须存在才保留
-            if all(col in self.df_all.columns for col in cols_in_cond):
-                valid_conditions.append(cond_clean)
+        # 4. 结果处理与 UI 更新
+        if df_filtered.empty or (len(df_filtered) == len(self.df_all) and combined_query):
+            if df_filtered.empty:
+                self.status_var.set("❌ 无匹配结果")
+                return
             else:
-                removed_conditions.append(cond_clean)
-
-        # 去掉在 bracket_patterns 中出现的内容
-        removed_conditions = [
-            cond for cond in removed_conditions
-            if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
-        ]
-
-        # 打印剔除条件列表
-        if removed_conditions:
-            # # logger.info(f"剔除不存在的列条件: {removed_conditions}")
-            unique_conditions = tuple(sorted(set(removed_conditions)))
-            # 初始化缓存
-            if not hasattr(self, "_printed_removed_conditions"):
-                self._printed_removed_conditions = set()
-            # 只打印新的
-            if unique_conditions not in self._printed_removed_conditions:
-                logger.info(f"剔除不存在的列条件: {unique_conditions}")
-                self._printed_removed_conditions.add(unique_conditions)
-
-        if not valid_conditions:
-            self.status_var.set("没有可用的查询条件")
-            return
-        # logger.info(f'valid_conditions : {valid_conditions}')
-        # ====== 拼接 final_query 并检查括号 ======
-        final_query = ' and '.join(f"({c})" for c in valid_conditions)
-        # logger.info(f'final_query : {final_query}')
-        if bracket_patterns:
-            final_query += ' and ' + ' and '.join(bracket_patterns)
-        # logger.info(f'final_query : {final_query}')
-        left_count = final_query.count("(")
-        right_count = final_query.count(")")
-        if left_count != right_count:
-            if left_count > right_count:
-                final_query += ")" * (left_count - right_count)
-            elif right_count > left_count:
-                final_query = "(" * (right_count - left_count) + final_query
-
-        # ====== 决定 engine ======
-        df_filtered = pd.DataFrame()
-        query_engine = 'numexpr'
-        # if any('index.' in c.lower() for c in valid_conditions):
-        #     query_engine = 'python'
-        # 1️⃣ index 条件 → python
-        if any('index.' in c.lower() for c in valid_conditions):
-            query_engine = 'python'
+                # 获取引擎内部的具体错误信息
+                err_info = query_engine.last_error if query_engine else "未知查询错误"
+                # 精简错误提示，防止撑开状态栏
+                short_err = (err_info[:25] + "...") if len(err_info) > 25 else err_info
+                self.status_var.set(f"⚠️ 语法错误: {short_err}")
+                return
         
-        # 2️⃣ 字符串条件 → 禁止进 query
-        STR_OPS = ('.str.', 'contains(', 'startswith(', 'endswith(')
-        has_str_op = any(any(op in c.lower() for op in STR_OPS) for c in valid_conditions)
+        # 优化状态栏显示：匹配数/总数 | 查询缩略
+        rows_all = len(self.df_all)
+        rows_hit = len(df_filtered)
+        disp_query = combined_query[:30].replace('\n', ' ')
+        self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
+        self.status_var2.set("")
+        
+        # 异步刷新 Treeview 提高响应性
+        self._schedule_after(10, lambda: self.refresh_tree(df_filtered, force=True))
+        
+        self.on_test_code()
+        self.auto_refresh_detail_window()
+        self.update_category_result(df_filtered)
 
-        if has_str_op:
-            query_engine = 'python'   # 即便 python，也不能放进 query
-
-        # ====== 数据过滤 ======
-        try:
-
-            if val1.count('or') > 0 and val1.count('(') > 0:
-                if val2 :
-                    query_search = f"({val1}) and {val2}"
-                    logger.debug(f'query: {query_search} ')
-
-                else:
-                    query_search = f"({val1})"
-                    logger.debug(f'query: {query_search} ')
-                # if removed_conditions:
-                #     query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
-                #     logger.info(f'removed_query_search: {query_search} removed_conditions:{removed_conditions}')
-
-                # logger.info(f'apply_search {query_search.count("or")} or query: {query_search} ')
-                df_filtered = self.df_all.query(query_search, engine=query_engine)
-                self.refresh_tree(df_filtered)
-                self.status_var2.set('')
-                self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
-            else:
-                # 检查 category 列是否存在
-                if 'category' in self.df_all.columns:
-                    # 强制转换为字符串，避免 str.contains 报错
-                    if not pd.api.types.is_string_dtype(self.df_all['category']):
-                        self.df_all['category'] = self.df_all['category'].astype('string')
-                        # self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-                        # self.df_all['category'] = self.df_all['category'].astype(str)
-                        # 可选：去掉前后空格
-                        # self.df_all['category'] = self.df_all['category'].str.strip()
-                df_filtered = self.df_all.query(final_query, engine=query_engine)
-
-                # 假设 df 是你提供的涨幅榜表格
-                # result = counterCategory(df_filtered, 'category', limit=50, table=True)
-                # self._Categoryresult = result
-                # self.query_manager.entry_query.set(self._Categoryresult)
-                self._schedule_after(500, lambda: self.refresh_tree(df_filtered, force=True))
-                # 打印剔除条件列表
-                if removed_conditions:
-                    # logger.info(f"[剔除的条件列表] {removed_conditions}")
-                    # 显示到状态栏
-                    self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-                    self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                else:
-                    self.status_var2.set('')
-                    self.status_var.set(f"Row:{len(self.df_all)} 结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                logger.debug(f'final_query: {final_query}')
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"final_query: {final_query} query_check: {([c for c in self.df_all.columns if not c.isidentifier()])}")
-            logger.error(f"Query error: {e}")
-            self.status_var.set(f"查询错误: {e}")
+        if not hasattr(self, "_start_init_show_concept_detail_window"):
+            self.show_concept_detail_window()
+            self._start_init_show_concept_detail_window = True
         if df_filtered.empty:
             return
         self.on_test_code()

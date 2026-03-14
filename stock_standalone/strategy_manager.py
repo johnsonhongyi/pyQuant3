@@ -569,7 +569,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             if hasattr(self.master, 'sender') and self.master.sender:
                 self.master.sender.send(str(code))
             # ⭐ 可视化器联动
-            if hasattr(self.master, 'vis_var') and self.master.vis_var.get() and code:
+            if self.master and getattr(self.master, "_vis_enabled_cache", False) and code:
                 if hasattr(self.master, 'open_visualizer'):
                     self.master.open_visualizer(str(code))
 
@@ -1117,7 +1117,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             if hasattr(self.master, 'sender') and self.master.sender:
                 self.master.sender.send(str(code))
             # ⭐ 可视化器联动
-            if hasattr(self.master, 'vis_var') and self.master.vis_var.get() and code:
+            if self.master and getattr(self.master, "_vis_enabled_cache", False) and code:
                 if hasattr(self.master, 'open_visualizer'):
                     self.master.open_visualizer(str(code))
 

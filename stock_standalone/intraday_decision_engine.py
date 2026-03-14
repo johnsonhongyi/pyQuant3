@@ -1682,7 +1682,7 @@ class IntradayDecisionEngine:
                 # 尾盘禁止在扩张期买入
                 if int(now_time.strftime('%H%M')) >= 1400:
                     debug["refuse_reason"] = "扩张期尾盘禁止开仓"
-                    return self._hold("扩张期尾盘拦截", debug)
+                    return self._hold("扩张期尾盘拦截", debug, triggered=True)
                     
             elif self.cycle_stage == 4: # 见顶回落阶段
                 threshold = 0.95 # 几乎禁止买入
@@ -1698,7 +1698,7 @@ class IntradayDecisionEngine:
                 top_score = debug.get("top_score", 0)
                 if top_score > 0.45:
                     debug["refuse_reason"] = f"高位顶部预警({top_score})"
-                    return self._hold(f"高位风险拦截({top_score})", debug)
+                    return self._hold(f"高位风险拦截({top_score})", debug, triggered=True)
 
                 pos = min(buy_score, self.max_position)
                 
@@ -2397,10 +2397,11 @@ class IntradayDecisionEngine:
         return {"allow": True, "reason": "符合智能加仓环境"}
 
 
-    def _hold(self, reason: str, debug: dict[str, Any], position: float = 0.0) -> dict[str, Any]:
+    def _hold(self, reason: str, debug: dict[str, Any], position: float = 0.0, triggered: bool = False) -> dict[str, Any]:
         """返回持仓决策"""
         # logger.debug(f"Engine HOLD: {reason}")
         return {
+            "triggered": triggered,
             "action": "持仓" if position > 0 else "观望",
             "position": position,
             "reason": reason,

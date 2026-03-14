@@ -21,4 +21,5 @@ MONITOR_LIST_FILE_PATH: str = MONITOR_LIST_FILE
 VOICE_ALERT_CONFIG_FILE: str = _get_path("voice_alert_config.json", _base_dir)
 CONFIG_FILE: str = _get_path("display_cols.json", _base_dir)
 SEARCH_HISTORY_FILE: str = _get_path("search_history.json", _datacsv_dir)
+MINUTE_KLINE_VIEWER_HISTORY: str = _get_path("minute_kline_viewer_history.json", _datacsv_dir)
 ICON_PATH: str = _get_path("MonitorTK.ico", _base_dir)

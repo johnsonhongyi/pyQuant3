@@ -14,6 +14,8 @@ try:
 except ImportError:
     WindowMixin = None
 
+from query_engine_util import query_engine
+
 # 获取或创建日志记录器
 logger: logging.Logger = LoggerFactory.getLogger("instock_TK.StockLogic")
 
@@ -113,17 +115,33 @@ def remove_invalid_conditions(query: str, invalid_cols: list[str]) -> str:
 #     }
 #     return {t for t in tokens if not t.isupper() and t not in keywords}
 
+RESERVED_SQL_FUNCS = {
+    "GREATEST", "LEAST", "MAX", "MIN", "ABS", 
+    "greatest", "least", "max", "min", "abs",
+    "np", "pd", "df", "self"
+}
+
 
 
 
 def extract_columns(expr: str) -> set:
     tokens = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", expr)
     keywords = {"and", "or", "not", "True", "False"}
-    return {t for t in tokens if t not in keywords and not re.fullmatch(r"e\d+", t)}
+    return {t for t in tokens if t not in keywords and t not in RESERVED_SQL_FUNCS and not re.fullmatch(r"e\d+", t)}
 
 def eval_condition(row: dict, expr: str) -> Tuple[bool, Optional[str]]:
+    # 构建执行上下文，支持 SQL 风格函数
+    def _greatest(*args): return np.maximum.reduce(args) if args else None
+    def _least(*args): return np.minimum.reduce(args) if args else None
+    
+    eval_ctx = {
+        'GREATEST': _greatest, 'LEAST': _least, 'MAX': _greatest, 'MIN': _least, 'ABS': np.abs,
+        'greatest': _greatest, 'least': _least, 'max': _greatest, 'min': _least, 'abs': np.abs,
+        'np': np, 'pd': pd
+    }
     try:
-        return bool(eval(expr, {}, row)), None
+        # 在 eval 时，row 会作为 locals 被搜索，eval_ctx 作为 globals
+        return bool(eval(expr, eval_ctx, row)), None
     except Exception as e:
         return False, str(e)
 
@@ -195,20 +213,6 @@ def format_check_result(results: List[Dict[str, Any]]) -> str:
 
 
 
-# def check_code(df: pd.DataFrame, code: str, queries: List[Dict[str, Any]]) -> None:
-#     """
-#     高层封装函数：传入 DataFrame 和 code，自动显示检查报告
-#     """
-#     if code not in df.index:
-#         print(f"⚠️ 股票代码 {code} 不在 DataFrame 中")
-#         return
-
-#     df_code = df.loc[[code]]
-#     report = test_code_query(df_code, queries)
-#     # print(format_check_result(report))
-#     return report
-
-
 def check_code(
     df: pd.DataFrame,
     code: str,
@@ -225,25 +229,20 @@ def check_code(
             parent=parent
         )
         return None
-
     df_code = df.loc[[code]]
     # 使用 test_code_query 获取拆分后的结果
     report = test_code_query(df_code, queries)
     summary_text = format_check_result(report)
-
     # 创建自定义报告窗口
     win = tk.Toplevel(parent)
     win.title(f"股票检查报告 - {code}")
     bg_color = "#E3F2FD"  # 淡蓝色背景
     win.configure(bg=bg_color)
-    
     report_win_name = "check_report_win"
     w_win, h_win = 750, 500
-    
     # 尝试加载上次保存的位置大小
     loaded = False
     scale_factor = getattr(parent, 'scale_factor', 1.0)
-    
     if parent and hasattr(parent, 'load_window_position'):
         _, _, lx, ly = parent.load_window_position(win, report_win_name, default_width=w_win, default_height=h_win)
         if lx is not None:
@@ -254,15 +253,12 @@ def check_code(
         _, _, lx, ly = helper.load_window_position(win, report_win_name, default_width=w_win, default_height=h_win)
         if lx is not None:
             loaded = True
-        
     if not loaded:
         # 如果没有保存的位置，则按之前要求：使右下角对齐鼠标指针
         mx, my = win.winfo_pointerx(), win.winfo_pointery()
         win.geometry(f"{w_win}x{h_win}+{max(0, mx - w_win)}+{max(0, my - h_win)}")
-    
     if parent:
         win.transient(parent)
-
     def on_close_report():
         """关闭时保存位置"""
         if parent and hasattr(parent, 'save_window_position'):
@@ -272,26 +268,20 @@ def check_code(
             helper.scale_factor = scale_factor
             helper.save_window_position(win, report_win_name)
         win.destroy()
-        
     win.protocol("WM_DELETE_WINDOW", on_close_report)
-
     # 结果显示区域
     tk.Label(win, text="[ 检查结果摘要 ]", font=("微软雅黑", 10, "bold"), bg=bg_color).pack(anchor="w", padx=10, pady=5)
-    
     st = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=15)
     st.pack(fill="both", expand=True, padx=10, pady=5)
     st.insert(tk.END, summary_text)
     st.config(state=tk.DISABLED)
-
     def show_all_details():
         """显示所有字段的值 (按顺序 col: 值)"""
         details_win = tk.Toplevel(win)
         details_win.title(f"数据详情内容 - {code}")
         details_win.configure(bg=bg_color)
-        
         detail_win_name = "check_details_win"
         w_det, h_det = 500, 800
-        
         # 尝试加载位置
         loaded_det = False
         if parent and hasattr(parent, 'load_window_position'):
@@ -304,12 +294,10 @@ def check_code(
             _, _, lx, ly = helper.load_window_position(details_win, detail_win_name, default_width=w_det, default_height=h_det)
             if lx is not None:
                 loaded_det = True
-
         if not loaded_det:
             # 调整位置：使右下角对齐鼠标指针
             mx, my = details_win.winfo_pointerx(), details_win.winfo_pointery()
             details_win.geometry(f"{w_det}x{h_det}+{max(0, mx - w_det)}+{max(0, my - h_det)}")
-
         def on_close_details():
             if parent and hasattr(parent, 'save_window_position'):
                 parent.save_window_position(details_win, detail_win_name)
@@ -318,35 +306,27 @@ def check_code(
                 helper.scale_factor = scale_factor
                 helper.save_window_position(details_win, detail_win_name)
             details_win.destroy()
-            
         details_win.protocol("WM_DELETE_WINDOW", on_close_details)
-        
         row_dict = df.loc[code].to_dict()
-        
         # 提取查询中涉及的列以便高亮或优先显示
         used_cols = set()
         for r in report:
             if 'expr' in r:
                 used_cols.update(extract_columns(r['expr']))
-        
         lines = []
         if used_cols:
             lines.append(">>> 查询涉及的关键字段:")
             for c in sorted(list(used_cols)):
                 lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
             lines.append("-" * 40)
-            
         lines.append(">>> 所有字段列表 (DataFrame 顺序):")
         for c in df.columns:
             lines.append(f"{c}: {row_dict.get(c, 'N/A')}")
-            
         detail_text = "\n".join(lines)
-        
         dst = scrolledtext.ScrolledText(details_win, wrap=tk.WORD)
         dst.pack(fill="both", expand=True, padx=10, pady=10)
         dst.insert(tk.END, detail_text)
         dst.config(state=tk.DISABLED)
-        
         # 增加一个简单的查找/过滤功能
         filter_frame = tk.Frame(details_win, bg=bg_color)
         filter_frame.pack(fill="x", padx=10, pady=5)
@@ -354,7 +334,6 @@ def check_code(
         search_var = tk.StringVar()
         search_entry = tk.Entry(filter_frame, textvariable=search_var)
         search_entry.pack(side="left", fill="x", expand=True, padx=5)
-        
         def on_search(*args):
             query = search_var.get().lower()
             filtered_lines = [line for line in lines if query in line.lower()]
@@ -362,89 +341,48 @@ def check_code(
             dst.delete("1.0", tk.END)
             dst.insert(tk.END, "\n".join(filtered_lines))
             dst.config(state=tk.DISABLED)
-            
         search_var.trace_add("write", on_search)
-
     # 按钮栏
     btn_frame = tk.Frame(win, bg=bg_color)
     btn_frame.pack(fill="x", pady=10)
-    
     btn_details = tk.Button(btn_frame, text="显示详情", command=show_all_details, 
                             bg="#2196F3", fg="white", font=("微软雅黑", 9, "bold"))
     btn_details.pack(side="left", padx=20)
-    
     btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report)
     btn_close.pack(side="right", padx=20)
-
     # 确保窗口在前台
     win.lift()
     win.focus_force()
-
     return report
-
-
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """测试单只股票是否符合多个查询条件"""
+    """
+    测试单只股票（或小型数据集）是否符合多个查询条件。
+    重构：使用新的 PandasQueryEngine 执行，替代旧的复杂正则剥离逻辑。
+    """
     if not isinstance(df_code, pd.DataFrame) or df_code.empty:
         return []
-
     results: list[dict[str, Any]] = []
     for q in queries:
         expr: Any = q.get("query", "")
         if not isinstance(expr, str) or not expr:
             continue
-            
-        final_query: str = expr
-        query_engine: str = 'numexpr'
-        
-        if not (expr.isdigit() and len(expr) == 6):
-            bracket_patterns: list[str] = re.findall(r'\s+and\s+(\([^\(\)]*\))', expr)
-            temp_query: str = expr
-            for bracket in bracket_patterns:
-                temp_query = temp_query.replace(f'and {bracket}', '')
-
-            conditions: list[str] = [c.strip() for c in temp_query.split('and')]
-            valid_conditions: list[str] = []
-            removed_conditions: list[str] = []
-            
-            for cond in conditions:
-                cond_clean: str = cond.lstrip('(').rstrip(')')
-                if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or '==' in cond or 'or' in cond:
-                    if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
-                        valid_conditions.append(ensure_parentheses_balanced(cond))
-                        continue
-
-                cols_in_cond: list[str] = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
-                if all(col in df_code.columns for col in cols_in_cond):
-                    valid_conditions.append(cond_clean)
-                else:
-                    removed_conditions.append(cond_clean)
-
-            if not valid_conditions:
-                continue
-
-            final_query = ' and '.join(f"({c})" for c in valid_conditions)
-            if bracket_patterns:
-                final_query += ' and ' + ' and '.join(bracket_patterns)
-            
-            final_query = ensure_parentheses_balanced(final_query)
-
-            if 'or' in expr and '(' in expr:
-                final_query = expr
-                if removed_conditions:
-                    final_query = remove_invalid_conditions(final_query, removed_conditions)
-                query_engine = 'python' if 'index.' in final_query.lower() or '.str' in final_query else 'numexpr'
-            else:
-                if 'index.' in final_query.lower():
-                    query_engine = 'python'
-
         hit_count: int = 0
         try:
-            df_hit: pd.DataFrame = df_code.query(final_query, engine=query_engine)
-            hit_count = len(df_hit)
+            # 使用 PandasQueryEngine 执行引擎，它会自动处理 columns 注入和 eval/exec 降级
+            res = query_engine.execute(df_code, expr)
+            # 统计命中结果
+            if isinstance(res, pd.DataFrame):
+                hit_count = len(res)
+            elif isinstance(res, (pd.Series, np.ndarray, list)):
+                hit_count = len(res)
+            elif isinstance(res, (bool, np.bool_)):
+                hit_count = 1 if res else 0
+            else:
+                # 兜底：如果是数值/非空对象，视为命中
+                hit_count = 1 if res else 0
         except Exception as e:
-            logger.error(f"执行 query 出错: {final_query}, {e}")
-
+            logger.debug(f"test_code_against_queries failed for query [{expr}]: {e}")
+            hit_count = 0
         results.append({
             "query": expr,
             "note": q.get("note", ""),
@@ -452,14 +390,12 @@ def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any
             "hit": hit_count
         })
     return results
-
 def estimate_virtual_volume_simple(now=None):
     """估算当前时间已完成的成交量比例"""
     if now is None:
         now = datetime.now()
     t = now.time()
     minutes = t.hour * 60 + t.minute
-
     segments = [
         (9*60+30, 10*60, 0.25),
         (10*60, 11*60, 0.50),
@@ -467,10 +403,8 @@ def estimate_virtual_volume_simple(now=None):
         (13*60, 14*60, 0.78),
         (14*60, 15*60, 1.00),
     ]
-
     passed_ratio = 0.0
     prev_ratio = 0.0
-
     for start, end, ratio in segments:
         if minutes <= start:
             passed_ratio = prev_ratio
@@ -482,15 +416,12 @@ def estimate_virtual_volume_simple(now=None):
         prev_ratio = ratio
     else:
         passed_ratio = 1.0
-
     return max(passed_ratio, 0.05)
-
 def get_row_tags(latest_row: Union[pd.Series, dict[str, Any]]) -> list[str]:
     """
     根据最新行情数据返回 Treeview 行标签列表
     """
     row_tags: list[str] = []
-
     low: Any = latest_row.get("low")
     lastp1d: Any = latest_row.get("lastp1d")
     high: Any = latest_row.get("high")
@@ -498,43 +429,35 @@ def get_row_tags(latest_row: Union[pd.Series, dict[str, Any]]) -> list[str]:
     ma5d: Any = latest_row.get("ma5d")
     ma20d: Any = latest_row.get("ma20d")
     percent_val: Any = latest_row.get("percent", latest_row.get("per1d", 0))
-
     # 1️⃣ 红色：低点 > 昨收
     if pd.notna(low) and pd.notna(lastp1d):
         if low > lastp1d:
             row_tags.append("red_row")
-
     # 2️⃣ 橙色：高点或低点突破 high4
     if pd.notna(high) and pd.notna(high4):
         if high > high4 or (pd.notna(low) and low > high4):
             row_tags.append("orange_row")
-
     # 3️⃣ 紫色：弱势，低于 ma5d
     if pd.notna(high) and pd.notna(ma5d):
         if high < ma5d:
             row_tags.append("purple_row")
-
     # 4️⃣ 黄色：临界或预警，低于 ma20d
     if pd.notna(low) and pd.notna(ma20d):
         if low < ma20d:
             row_tags.append("yellow_row")
-
     # 5️⃣ 绿色：跌幅明显 <2% 且低于昨收
     if pd.notna(percent_val) and pd.notna(low) and pd.notna(lastp1d):
         if percent_val < 2 and low < lastp1d:
             row_tags.append("green_row")
     return row_tags
-
 def safe_prev_signal_array(df: Optional[pd.DataFrame]) -> np.ndarray:
     """
     生成 prev_signal_arr，确保不会因为 df 异常、空值、结构错误而崩溃。
     """
     if df is None or df.empty:
         return np.array([])
-
     if 'prev_signal' not in df.columns:
         df.loc[:, 'prev_signal'] = None
-
     raw_vals: list[Any] = df['prev_signal'].tolist()
     safe_vals: list[int] = []
     for v in raw_vals:
@@ -549,7 +472,6 @@ def safe_prev_signal_array(df: Optional[pd.DataFrame]) -> np.ndarray:
             continue
         safe_vals.append(0)
     return np.array(safe_vals)
-
 def toast_message(master, text, duration=1500):
     """短暂提示信息（浮层，不阻塞）"""
     toast = tk.Toplevel(master)

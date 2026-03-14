@@ -296,7 +296,7 @@ class KLineMonitor(tk.Toplevel):
                     self.master.sender.send(stock_code)
                     
                 # ⭐ 可视化器联动
-                if hasattr(self.master, 'vis_var') and self.master.vis_var.get():
+                if self.master and getattr(self.master, "_vis_enabled_cache", False):
                     if hasattr(self.master, 'open_visualizer'):
                          self.master.open_visualizer(str(stock_code))
         except Exception as e:
@@ -560,6 +560,11 @@ class KLineMonitor(tk.Toplevel):
 
         total = len(df)
         self.total_label.config(text=f"总数: {total}")
+        
+        # [FIX] 确保关键列存在，防止 KeyError
+        if "signal" not in df.columns: df["signal"] = ""
+        if "emotion" not in df.columns: df["emotion"] = ""
+        
         signal_counts = df["signal"].value_counts().to_dict()
         for sig, lbl in self.signal_labels.items():
             count = signal_counts.get(sig, 0)
@@ -591,9 +596,9 @@ class KLineMonitor(tk.Toplevel):
 
         df = self.df_cache.copy()
         for f in getattr(self, "filter_stack", []):
-            if f["type"] == "signal":
+            if f["type"] == "signal" and "signal" in df.columns:
                 df = df[df["signal"] == f["value"]]
-            elif f["type"] == "emotion":
+            elif f["type"] == "emotion" and "emotion" in df.columns:
                 df = df[df["emotion"] == f["value"]]
 
         query_text = ""

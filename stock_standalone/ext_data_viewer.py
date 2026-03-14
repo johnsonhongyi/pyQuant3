@@ -166,7 +166,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             
             # [NEW] 根据 vis_var 开关联动到可视化窗口
             parent = self.master
-            if hasattr(parent, 'vis_var') and parent.vis_var.get() and stock_code:
+            if parent and getattr(parent, "_vis_enabled_cache", False) and stock_code:
                 if hasattr(parent, 'open_visualizer'):
                     parent.open_visualizer(stock_code)
 
@@ -191,7 +191,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
                 
                 # [NEW] 根据 vis_var 开关联动到可视化窗口
                 parent = self.master
-                if hasattr(parent, 'vis_var') and parent.vis_var.get() and stock_code:
+                if parent and getattr(parent, "_vis_enabled_cache", False) and stock_code:
                     if hasattr(parent, 'open_visualizer'):
                         parent.open_visualizer(stock_code)
         elif button_type == "right":

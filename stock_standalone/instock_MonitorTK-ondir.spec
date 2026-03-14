@@ -29,6 +29,7 @@ a = Analysis(
         ("display_cols.json", "."),
         ("intraday_pattern_config.json", "."),
         ("datacsv/search_history.json", "."),
+        ("datacsv/minute_kline_viewer_history.json", "."),
         ("JSONData/stock_codes.conf", "JSONData"),
         ("JSONData/count.ini", "JSONData"),
         ("JohnsonUtil/global.ini", "JohnsonUtil"),
