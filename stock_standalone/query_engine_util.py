@@ -88,9 +88,21 @@ class PandasQueryEngine:
             'red': ['red']
         }
         
+        # 处理 MultiIndex 情况 (多周期联合)
+        is_multi = isinstance(df.columns, pd.MultiIndex)
+        
+        if is_multi:
+            # 自动解构二级索引：Level 0 为 Period, Level 1 为 Metric
+            # 生成 D_close, W_ma5 等变量
+            for (period, metric) in df.columns:
+                alias = f"{period}_{metric}"
+                if alias not in ctx:
+                    ctx[alias] = df[(period, metric)]
+            self.logger.info(f" [QueryEngine] MultiIndex detected. Injected {len(df.columns)} period-prefixed aliases.")
+
         for alias, targets in col_map.items():
-            # 1. 如果别名本身就是列名且尚未在 context 中定义（覆盖系统保留字除外）
-            if alias in df.columns and (alias not in ctx or ctx[alias] is None):
+            # 1. 优先尝试直接匹配 (如果是 MultiIndex，则不直接映射基础别名，除非主表已对齐)
+            if not is_multi and alias in df.columns and (alias not in ctx or ctx[alias] is None):
                 ctx[alias] = df[alias]
                 self.logger.debug(f" [QueryEngine] Column '{alias}' injected directly.")
                 continue
@@ -98,20 +110,39 @@ class PandasQueryEngine:
             # 2. 尝试从目标列表中找到第一个存在的列
             target_list = [targets] if isinstance(targets, str) else targets
             for target in target_list:
-                if target in df.columns:
-                    ctx[alias] = df[target]
-                    self.logger.debug(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
-                    break
+                if is_multi:
+                    # MultiIndex 下优先找第一个周期中的目标列
+                    found = False
+                    for period in df.columns.levels[0]:
+                        if (period, target) in df.columns:
+                            ctx[alias] = df[(period, target)]
+                            self.logger.debug(f" [QueryEngine] MultiIndex Alias: '{alias}' -> ('{period}', '{target}')")
+                            found = True
+                            break
+                    if found: break
+                else:
+                    if target in df.columns:
+                        ctx[alias] = df[target]
+                        self.logger.debug(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
+                        break
         
         # 3. 动态计算特殊标记 (green/red)
         if 'green' not in ctx or ctx.get('green') is None:
-            if 'close' in df.columns and 'open' in df.columns:
+            # MultiIndex 下寻找第一个周期的 close/open
+            if is_multi:
+                p0 = df.columns.levels[0][0]
+                if (p0, 'close') in df.columns and (p0, 'open') in df.columns:
+                    ctx['green'] = df[(p0, 'close')] < df[(p0, 'open')]
+            elif 'close' in df.columns and 'open' in df.columns:
                 ctx['green'] = df['close'] < df['open']
-                self.logger.debug(" [QueryEngine] Alias 'green' mapping to Computed (close < open)")
+        
         if 'red' not in ctx or ctx.get('red') is None:
-            if 'close' in df.columns and 'open' in df.columns:
+            if is_multi:
+                p0 = df.columns.levels[0][0]
+                if (p0, 'close') in df.columns and (p0, 'open') in df.columns:
+                    ctx['red'] = df[(p0, 'close')] > df[(p0, 'open')]
+            elif 'close' in df.columns and 'open' in df.columns:
                 ctx['red'] = df['close'] > df['open']
-                self.logger.debug(" [QueryEngine] Alias 'red' mapping to Computed (close > open)")
             
         return ctx
             
