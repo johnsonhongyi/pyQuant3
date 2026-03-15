@@ -548,10 +548,8 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.summary_table.setAlternatingRowColors(True)
         self.summary_table.setSelectionBehavior(_SelectRows)
         self.summary_table.setSortingEnabled(True)
-        self.summary_table.selectionModel().currentRowChanged.connect(
-            lambda curr, prev: self.on_summary_clicked(curr)
-        )
-        self.summary_table.clicked.connect(self.on_summary_clicked)
+        # 🛡️ 统一信号连接
+        self._connect_table_signals(self.summary_table, self.on_summary_clicked)
         
         # Detail Table
         self.detail_table = QTableView()
@@ -559,10 +557,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.detail_table.setAlternatingRowColors(True)
         self.detail_table.setSelectionBehavior(_SelectRows)
         self.detail_table.setSortingEnabled(True)
-        self.detail_table.selectionModel().currentRowChanged.connect(
-            lambda curr, prev: self.on_row_selection_linkage(curr)
-        )
-        self.detail_table.clicked.connect(self.on_row_selection_linkage)
+        self._connect_table_signals(self.detail_table, self.on_row_selection_linkage)
         
         self.upper_splitter.addWidget(self.summary_table)
         self.upper_splitter.addWidget(self.detail_table)
@@ -575,10 +570,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.full_results_table.setAlternatingRowColors(True)
         self.full_results_table.setSelectionBehavior(_SelectRows)
         self.full_results_table.setSortingEnabled(True)
-        self.full_results_table.selectionModel().currentRowChanged.connect(
-            lambda curr, prev: self.on_row_selection_linkage(curr)
-        )
-        self.full_results_table.clicked.connect(self.on_row_selection_linkage)
+        self._connect_table_signals(self.full_results_table, self.on_row_selection_linkage)
         
         # Add a label for the bottom area
         bottom_container = QWidget()
@@ -598,6 +590,34 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.statusBar().showMessage("Ready")
         self.resize(1100, 800)
         
+    def _connect_table_signals(self, table_view: QTableView, linkage_slot: Callable[[QModelIndex], Any]):
+        """
+        🛡️ 集中处理 TableView 的信号连接，确保 setModel 后信号依然存活
+        连接: 单击(clicked)、选择变更(currentRowChanged)
+        """
+        try:
+            # 1. 连接基础点击信号
+            try:
+                table_view.clicked.disconnect()
+            except Exception: pass
+            table_view.clicked.connect(linkage_slot)
+            
+            # 2. 连接双击信号 (确保 on_double_click 始终可用)
+            try:
+                table_view.doubleClicked.disconnect()
+            except Exception: pass
+            table_view.doubleClicked.connect(self.on_double_click)
+
+            # 3. 连接选择模型信号 (处理键盘上下键联动)
+            selection_model = table_view.selectionModel()
+            if selection_model:
+                try:
+                    selection_model.currentRowChanged.disconnect()
+                except Exception: pass
+                selection_model.currentRowChanged.connect(lambda curr, prev: linkage_slot(curr))
+        except Exception as e:
+            print(f"[DEBUG] _connect_table_signals error: {e}")
+
     def _smart_resize(self, table_view):
         """极致性能优化：使用 QFontMetrics 对前 100 行采样计算宽度，彻底杜绝 UI 挂起"""
         model = table_view.model()
@@ -935,15 +955,111 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
             elif ext == ".csv":
                 try:
-                    # 尝试读取 CSV，处理可能的 GBK 编码（国内常用）
-                    try:
-                        df = pd.read_csv(file_path, encoding='utf-8')
-                    except UnicodeDecodeError:
-                        df = pd.read_csv(file_path, encoding='gbk')
+                    # 🛡️ 智能表头与多周期数据处理
+                    import csv
+                    header_idx = 0
+                    encoding = 'utf-8'
                     
-                    # CSV 导入通常需要处理 code 列的补零
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    # 1. 探测编码与表头行
+                    def scout_csv(f_path, enc):
+                        lines = []
+                        with open(f_path, 'r', encoding=enc) as f:
+                            for i, line in enumerate(f):
+                                lines.append(line.strip())
+                                if i > 15: break
+                        return lines
+
+                    lines = []
+                    try:
+                        lines = scout_csv(file_path, 'utf-8')
+                        encoding = 'utf-8'
+                    except UnicodeDecodeError:
+                        lines = scout_csv(file_path, 'gbk')
+                        encoding = 'gbk'
+
+                    # 2. 寻找最佳表头行 (通过特征权值：同时包含 open/high/low/trade 的行优先级最高)
+                    header_idx = 0
+                    max_score = 0
+                    for i, line in enumerate(lines):
+                        low_line = line.lower()
+                        score = 0
+                        # 核心权重字段
+                        for kw in ['open', 'high', 'low', 'close', 'trade', 'volume']:
+                            if kw in low_line: score += 2
+                        # 次要权重字段
+                        if 'name' in low_line: score += 1
+                        if 'code' in low_line: score += 1
+                        
+                        if score > max_score:
+                            max_score = score
+                            header_idx = i
+                        # 如果分数很高，大概率就是表头了
+                        if score >= 6: 
+                            header_idx = i
+                            break
+                    
+                    # 3. 加载初始数据
+                    df = pd.read_csv(file_path, encoding=encoding, skiprows=header_idx, index_col=False)
+                    
+                    # 4. 修复表头偏移与 Unnamed 列问题
+                    if not df.empty:
+                        # 🛡️ 特殊处理：如果第一行数据仅包含 "code" 这种标记，说明它是占位行
+                        first_val_s = str(df.iloc[0, 0]).strip().lower()
+                        if first_val_s == 'code':
+                            # 将这个 "code" 标记作为第一列的正确列名
+                            if 'unnamed' in str(df.columns[0]).lower() or str(df.columns[0]) == '':
+                                df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+                            # 删掉这个占位行
+                            df = df.drop(df.index[0]).reset_index(drop=True)
+
+                        # 继续常规检查第一列代码
+                        if not df.empty:
+                            first_col_name = str(df.columns[0])
+                            first_val = str(df.iloc[0, 0]).split('.')[0]
+                            is_digit_code = bool(re.match(r'^\d{6}$', first_val))
+                            
+                            if is_digit_code:
+                                if 'unnamed' in first_col_name.lower() or first_col_name == '' or first_col_name == '0':
+                                    df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+
+                        # 情况 B: 处理用户提到的 "code 列被放在最后" 或偏移
+                        if 'code' not in df.columns or not bool(re.match(r'^\d{6}$', str(df['code'].iloc[0]).split('.')[0])):
+                            # 遍历所有列找 6 位数字列
+                            for col in df.columns:
+                                sample_val = str(df[col].iloc[0]).split('.')[0]
+                                if bool(re.match(r'^\d{6}$', sample_val)):
+                                    # 如果找到了 6 位数序列，且当前 code 列名被误用到其他列（如索引）
+                                    if 'code' in df.columns:
+                                        df.rename(columns={'code': 'original_index_or_other'}, inplace=True)
+                                    df.rename(columns={col: 'code'}, inplace=True)
+                                    break
+
+                    # 5. 清理“占位行”并确保 code 列在前
+                    if not df.empty and 'code' in df.columns:
+                        # 过滤非数字杂质
+                        df = df[df['code'].astype(str).str.match(r'^\d{5,6}')].copy()
+                        
+                        # 字段补全与补零
+                        df['code'] = df['code'].astype(str).str.split('.').str[0].str.zfill(6)
+                        
+                        # 将 code 移到第一列
+                        cols = ['code'] + [c for c in df.columns if c != 'code']
+                        df = df[cols]
+
+                    # 6. 其他字段名一致化
+                    if not df.empty:
+                        rename_map = {}
+                        for col in df.columns:
+                            col_lower = str(col).lower()
+                            if col_lower in ('股票名称', '名称') and 'name' not in df.columns:
+                                rename_map[col] = 'name'
+                        if rename_map:
+                            df.rename(columns=rename_map, inplace=True)
+                    
+                    # 处理重复列名
+                    if df.columns.duplicated().any():
+                        df = df.loc[:, ~df.columns.duplicated()]
+
                 except Exception as e:
                     self.statusBar().showMessage(f"CSV Load Error: {e}")
                     return
@@ -1114,9 +1230,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 
             model = DataFrameModel(summary)
             self.summary_table.setModel(model)
-            self.summary_table.selectionModel().currentRowChanged.connect(
-                lambda curr, prev: self.on_summary_clicked(curr)
-            )
+            self._connect_table_signals(self.summary_table, self.on_summary_clicked)
             self._smart_resize(self.summary_table)
         except Exception as e:
             print(f"DEBUG: update_summary Error: {e}")
@@ -1178,9 +1292,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 df_view = display_df
                 
             self.full_results_table.setModel(DataFrameModel(df_view))
-            self.full_results_table.selectionModel().currentRowChanged.connect(
-                lambda curr, prev: self.on_row_selection_linkage(curr)
-            )
+            self._connect_table_signals(self.full_results_table, self.on_row_selection_linkage)
             self._smart_resize(self.full_results_table)
             QApplication.processEvents() # 保持响应
         else:
@@ -1189,13 +1301,12 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             # 性能优化：无查询时底部表格不显示全量（除非极小），避免 UI 挂起
             if total_count < 500:
                 self.full_results_table.setModel(DataFrameModel(self.active_df))
+                self._connect_table_signals(self.full_results_table, self.on_row_selection_linkage)
                 self._smart_resize(self.full_results_table)
             else:
                 # 显示空表但保留列名，防止 IndexError 并清晰提示
                 self.full_results_table.setModel(DataFrameModel(pd.DataFrame(columns=self.active_df.columns)))
-                self.full_results_table.selectionModel().currentRowChanged.connect(
-                    lambda curr, prev: self.on_row_selection_linkage(curr)
-                )
+                self._connect_table_signals(self.full_results_table, self.on_row_selection_linkage)
         
         # 2. 更新顶部 stats_label (持久化主要统计)
         if hasattr(self, 'stats_label'):
@@ -1224,12 +1335,15 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             df_snapshot = df_snapshot[final_cols]
             
             self.detail_table.setModel(DataFrameModel(df_snapshot))
+            self._connect_table_signals(self.detail_table, self.on_row_selection_linkage)
             self._smart_resize(self.detail_table)
             self.statusBar().showMessage(f"Query Result: {match_count} rows", 3000)
         elif not query_str:
             self.detail_table.setModel(DataFrameModel(pd.DataFrame()))
+            self._connect_table_signals(self.detail_table, self.on_row_selection_linkage)
         else:
             self.detail_table.setModel(DataFrameModel(pd.DataFrame()))
+            self._connect_table_signals(self.detail_table, self.on_row_selection_linkage)
             self.statusBar().showMessage("No matches found.", 3000)
             
         self.log("UI Sync complete. System ready.")
@@ -1274,9 +1388,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 summary = summary.sort_values('count', ascending=False)
                 model = DataFrameModel(summary)
                 self.summary_table.setModel(model)
-                self.summary_table.selectionModel().currentRowChanged.connect(
-                    lambda curr, prev: self.on_summary_clicked(curr)
-                )
+                self._connect_table_signals(self.summary_table, self.on_summary_clicked)
                 self._smart_resize(self.summary_table)
         except Exception as e:
             print(f"DEBUG: on_filter Error: {e}")
@@ -1291,7 +1403,13 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             if not isinstance(model, DataFrameModel):
                 return
             
-            code = str(model._data.iloc[index.row(), 0])
+            # 🛡️ 优先通过列名定位 code，更健壮
+            df_data = model._data
+            if 'code' in df_data.columns:
+                code = str(df_data.iloc[index.row()]['code'])
+            else:
+                code = str(df_data.iloc[index.row(), 0])
+            
             df_full = self.active_df
             if df_full.empty:
                 return
@@ -1313,9 +1431,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
             new_model = DataFrameModel(detail_df)
             self.detail_table.setModel(new_model)
-            self.detail_table.selectionModel().currentRowChanged.connect(
-                lambda curr, prev: self.on_row_selection_linkage(curr)
-            )
+            self._connect_table_signals(self.detail_table, self.on_row_selection_linkage)
             self._smart_resize(self.detail_table)
             
             QApplication.processEvents()
@@ -1331,7 +1447,12 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         try:
             model = index.model()
             if isinstance(model, DataFrameModel):
-                code = str(model._data.iloc[index.row(), 0])
+                # 🛡️ 优先通过列名定位 code，更健壮
+                df_data = model._data
+                if 'code' in df_data.columns:
+                    code = str(df_data.iloc[index.row()]['code'])
+                else:
+                    code = str(df_data.iloc[index.row(), 0])
                 self._execute_linkage(code, source="table_nav")
         except Exception as e:
             print(f"DEBUG: on_row_selection_linkage error: {e}")
@@ -1340,6 +1461,10 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         """跨进程联动核心逻辑"""
         if not code or self._select_code == str(code):
             return
+            
+        # 🛡️ 记录当前选中，确保状态同步
+        self._select_code = str(code)
+
         if self.sender:
             try:
                 self.sender.send(str(code))
@@ -1349,7 +1474,6 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         if self.main_app and self.on_code_callback:
             try:
                 if hasattr(self.main_app, 'tk_dispatch_queue'):
-                    self._select_code = str(code)
                     if self.main_app and getattr(self.main_app, "_vis_enabled_cache", False):
                         if hasattr(self.main_app, 'open_visualizer'):
                             self.main_app.tk_dispatch_queue.put(lambda: self.main_app.open_visualizer(str(code)))
