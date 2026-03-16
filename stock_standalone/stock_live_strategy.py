@@ -414,12 +414,13 @@ class StockLiveStrategy:
         self._last_validation_date: str = ""
         self._last_rank_scan_date: str = ""
         self._pending_hist_fetches: set = set() # [NEW] Track async history fetches
+        self._df_lock: Optional[threading.Lock] = None # 🛡️ [NEW] From master app
 
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
         
         # 告警任务和后台扫描需要足够的并发工人，避免因 sleep/IO 阻塞导致任务积压
-        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.executor = ThreadPoolExecutor(max_workers=2)
         self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
         # 初始化记录器 (必须在 _load_monitors 之前)
@@ -1045,6 +1046,10 @@ class StockLiveStrategy:
         """
         if not self.enabled or df_all is None or df_all.empty:
             return
+            
+        # 🛡️ [FIX] 优先从 master 获取锁
+        if self._df_lock is None and self.master:
+            self._df_lock = getattr(self.master, '_df_lock', None)
 
         # 标记当前处理的周期
         self.current_resample = resample 
@@ -1053,9 +1058,12 @@ class StockLiveStrategy:
         now_int = cct.get_now_time_int()
         is_trading_active = (915 <= now_int <= 1505)
 
+        # 🛡️ [FIX] 内部逻辑应在本地拷贝上运行，避免直接操作共享 df_all 导致 BlockManager 损坏
+        df_internal = df_all.copy()
+
         # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
         if is_trading_active and (925 <= now_int <= 1505):
-             self.executor.submit(self._scan_hot_concepts, df_all, concept_top5, resample=resample)
+             self.executor.submit(self._scan_hot_concepts, df_internal, concept_top5, resample=resample)
         
         today_str = datetime.datetime.now().strftime('%Y-%m-%d')
         now_time_int = cct.get_now_time_int()
@@ -1063,15 +1071,15 @@ class StockLiveStrategy:
         # --- 1.2 [NEW] 每日热股跨日验证 (9:15-9:30 处理昨天入队的标的) ---
         if 915 <= now_time_int <= 930:
             if getattr(self, '_last_validation_date', '') != today_str:
-                self.executor.submit(self._daily_watchlist_validation, df_all)
+                self.executor.submit(self._daily_watchlist_validation, df_internal)
                 self._last_validation_date = today_str
 
         # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
         # 1. 开盘自动全扫描 (每日只需运行一次，不限时间，启动即扫)
         if not getattr(self, '_rank_scan_done_today', False):
             # 只有在非休市时间且有数据时才扫描
-            if not df_all.empty and cct.get_trade_date_status(): # 确保是交易日
-                 self.executor.submit(self._scan_rank_for_follow, df_all, concept_top5, top_n=100)
+            if not df_internal.empty and cct.get_trade_date_status(): # 确保是交易日
+                 self.executor.submit(self._scan_rank_for_follow, df_internal, concept_top5, top_n=100)
                  self._rank_scan_done_today = True
                  logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
             else:
@@ -1083,13 +1091,13 @@ class StockLiveStrategy:
             self._last_rank_scan_date = today_str
         
         # 2. 规则引擎监控 (Existing rules)
-        # self._check_risk_control(df_all)
+        # self._check_risk_control(df_internal)
         
         # [Phase 2] 入场监控：已整合至 _check_strategies -> _process_follow_queue
-        # self._monitor_follow_queue(df_all)
+        # self._monitor_follow_queue(df_internal)
 
         # 3. 策略判定
-        self._check_strategies(df_all, resample=resample)
+        self._check_strategies(df_internal, resample=resample)
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
         # import removed
@@ -1141,28 +1149,35 @@ class StockLiveStrategy:
              self.executor.submit(self._check_strategies, self.df, resample=resample)
 
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
-        # 将各股的最新决策与监理感知指标写回 df_all，以便前端实时显示
-        for key, stock in list(self._monitored_stocks.items()):
-            code = stock.get('code', key.split('_')[0])
-            if code in df_all.index:
-                snap = stock.get('snapshot', {})
-                df_all.at[code, 'last_action'] = snap.get('last_action', '')
-                df_all.at[code, 'last_reason'] = snap.get('last_reason', '')
-                df_all.at[code, 'shadow_info'] = snap.get('shadow_info', '')
-                df_all.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
-                df_all.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
-                df_all.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
-            elif 'code' in df_all.columns:
-                # 兼容 code 也在列里的情况
-                mask = df_all['code'] == code
-                if mask.any():
+        # 🛡️ [FIX] 关键数据回填必须受锁保护，防止 UI 线程索引时崩溃 (Gaps in blk ref_locs)
+        try:
+            if self._df_lock:
+                 self._df_lock.acquire()
+            
+            for key, stock in list(self._monitored_stocks.items()):
+                code = stock.get('code', key.split('_')[0])
+                if code in df_all.index:
                     snap = stock.get('snapshot', {})
-                    df_all.loc[mask, 'last_action'] = snap.get('last_action', '')
-                    df_all.loc[mask, 'last_reason'] = snap.get('last_reason', '')
-                    df_all.loc[mask, 'shadow_info'] = snap.get('shadow_info', '')
-                    df_all.loc[mask, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
-                    df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
-                    df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
+                    df_all.at[code, 'last_action'] = snap.get('last_action', '')
+                    df_all.at[code, 'last_reason'] = snap.get('last_reason', '')
+                    df_all.at[code, 'shadow_info'] = snap.get('shadow_info', '')
+                    df_all.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
+                    df_all.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
+                    df_all.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
+                elif 'code' in df_all.columns:
+                    # 兼容 code 也在列里的情况
+                    mask = df_all['code'] == code
+                    if mask.any():
+                        snap = stock.get('snapshot', {})
+                        df_all.loc[mask, 'last_action'] = snap.get('last_action', '')
+                        df_all.loc[mask, 'last_reason'] = snap.get('last_reason', '')
+                        df_all.loc[mask, 'shadow_info'] = snap.get('shadow_info', '')
+                        df_all.loc[mask, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
+                        df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
+                        df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
+        finally:
+            if self._df_lock:
+                 self._df_lock.release()
 
         # [REMOVED] DataHubService publish logic
         pass
