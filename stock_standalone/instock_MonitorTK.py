@@ -206,8 +206,10 @@ BASE_DIR = get_base_path()
 
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
+ARCHIVE_DIR_DATA = os.path.join(ARCHIVE_DIR, "data") # 正确的 archives/data 位置
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_DIR_DATA, exist_ok=True)
 
 
 if not icon_path:

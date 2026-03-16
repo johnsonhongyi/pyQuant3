@@ -451,7 +451,7 @@ class BiddingMomentumDetector:
 
     def save_persistent_data(self):
         """保存当前个股得分和板块强度到磁盘"""
-        if self.in_history_mode:
+        if self.in_history_mode or not cct.get_trade_date_status():
             # 此时处于历史复盘模式，不保存快照以防止覆盖真实数据
             return
 
