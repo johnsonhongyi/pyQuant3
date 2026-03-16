@@ -47,7 +47,17 @@ class IndicatorHelpWindow:
         
         self.tree.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
+        # ===== Treeview 行颜色 + 帮助说明 =====
+        # (tag_name, color, help_text)
 
+        self.tree_row_tags = [
+            ("red_row", "#ff3b30", "强势上涨：当日最低价 > 昨日收盘价，说明全天承接强"),
+            ("orange_row", "#ff8c00", "强势突破：最高价突破 recent high4，短线突破信号"),
+            ("green_row", "#00c853", "明显下跌：跌幅或最低价低于昨收，短线走弱"),
+            ("blue_row", "#444444", "弱势状态：价格低于 MA5，短线趋势偏空"),
+            ("purple_row", "#a855f7", "特殊信号：成交量异常或策略触发"),
+            ("yellow_row", "#ffd400", "临界预警：价格接近或跌破 MA20，需要关注趋势变化"),
+        ]
         # 指标数据源
         self.all_data = [
             ("cycle_stage", "【新增】周期阶段判定。1:筑底/启动, 2:主升/健康, 3:脉冲/扩张, 4:见顶/回落"),
@@ -74,7 +84,13 @@ class IndicatorHelpWindow:
             ("maxp", "15个周期内的波动幅度百分比"),
             ("bandwidth", "布林带宽度 (Bandwidth), 反映波动率"),
             ("turnoverratio", "换手率 (%)"),
-            ("couts", "信号触发计数 / 异动次数")
+            ("couts", "信号触发计数 / 异动次数"),
+            ("red_row", "强势上涨：当日最低价 > 昨收，全天承接强（红色 #ff3b30）"),
+            ("orange_row", "突破信号：最高价突破 recent high4（橙色 #ff8c00）"),
+            ("green_row", "明显下跌：跌幅或最低价低于昨收（绿色 #00c853）"),
+            ("blue_row", "弱势：价格低于 MA5（深灰 #444444）"),
+            ("purple_row", "特殊指标：成交量异常或策略触发（紫色 #a855f7）"),
+            ("yellow_row", "预警状态：接近或跌破 MA20（黄色 #ffd400）"),
         ]
         
         # [NEW] 绑定退出事件以保存位置

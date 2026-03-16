@@ -10341,12 +10341,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
-        win._tree_top10.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
-        win._tree_top10.tag_configure("orange_row", foreground="orange")  # 高位或突破
-        win._tree_top10.tag_configure("green_row", foreground="green")    # 跌幅明显
-        win._tree_top10.tag_configure("blue_row", foreground="#555555")      # 弱势或低于均线低于 ma5d
-        win._tree_top10.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
-        win._tree_top10.tag_configure("yellow_row", foreground="yellow")  # 临界或预警
+        win._tree_top10.tag_configure("red_row", foreground="#ff3b30")     # 强红：涨幅或低点大于前一日
+        win._tree_top10.tag_configure("orange_row", foreground="#ff8c00")  # 深橙：高位或突破
+        win._tree_top10.tag_configure("green_row", foreground="#00c853")   # 亮绿：跌幅明显
+        win._tree_top10.tag_configure("blue_row", foreground="#444444")    # 深灰：弱势或低于均线 (ma5d)
+        win._tree_top10.tag_configure("purple_row", foreground="#a855f7")  # 亮紫：成交量异常
+        win._tree_top10.tag_configure("yellow_row", foreground="#ffd400")  # 金黄：临界或预警ag_configure("yellow_row", foreground="yellow")  # 临界或预警
 
         win._concept_name = concept_name
         # 在创建窗口时保存定时器 id
@@ -10702,12 +10702,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 保存引用
         win._content_frame_top10 = frame
         win._tree_top10 = tree
-        win._tree_top10.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
-        win._tree_top10.tag_configure("orange_row", foreground="orange")  # 高位或突破
-        win._tree_top10.tag_configure("green_row", foreground="green")    # 跌幅明显
-        win._tree_top10.tag_configure("blue_row", foreground="#555555")      # 弱势或低于均线低于 ma5d
-        win._tree_top10.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
-        win._tree_top10.tag_configure("yellow_row", foreground="yellow")  # 临界或预警
+        win._tree_top10.tag_configure("red_row", foreground="#ff3b30")     # 强红：涨幅或低点大于前一日
+        win._tree_top10.tag_configure("orange_row", foreground="#ff8c00")  # 深橙：高位或突破
+        win._tree_top10.tag_configure("green_row", foreground="#00c853")   # 亮绿：跌幅明显
+        win._tree_top10.tag_configure("blue_row", foreground="#444444")    # 深灰：弱势或低于均线 (ma5d)
+        win._tree_top10.tag_configure("purple_row", foreground="#a855f7")  # 亮紫：成交量异常
+        win._tree_top10.tag_configure("yellow_row", foreground="#ffd400")  # 金黄：临界或预警
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -10966,17 +10966,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         tree = win._tree_top10
 
-        # # ✅ 先确保 tag 配置只做一次
-        # if not getattr(tree, "_tag_inited", False):
-        #     tree.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
-        #     tree.tag_configure("green_row", foreground="green")    # 跌幅明显
-        #     tree.tag_configure("orange_row", foreground="orange")  # 高位或突破
-        #     #tree.tag_configure("blue_row", foreground="#555555")    # 灰色弱势或低于均线  “purple”紫色、“magenta”品红/洋红 深灰（#555555）
-        #     #tree.tag_configure("purple_row", foreground="purple")  # 弱势 / 低于 ma5d
-        #     tree.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
-        #     tree.tag_configure("yellow_row", foreground="yellow")  # 临界或预警临界 / 低于 ma20d
-        #     tree._tag_inited = True
-
 
         # 清空旧行
         tree.delete(*tree.get_children())
@@ -11031,8 +11020,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 ),
                 tags=tuple(row_tags)
             )
-
-
             code_to_iid[code_row] = iid
 
         # --- 更新状态栏数量 ---
@@ -11052,29 +11039,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.focus(target_iid)
             # # 强制刷新 Treeview 渲染，再滚动
             win.update_idletasks()      # 确保 Treeview 已渲染
-            # tree.see(target_iid)
-
-            # 延迟滚动 + 高亮
-            # def scroll_and_highlight():
-            #     tree.see(target_iid)
-            #     self._highlight_tree_selection(tree, target_iid)
             def scroll_and_highlight():
                 tree.see(target_iid)
                 self._highlight_tree_selection(tree, target_iid)
-                # # 高亮后保持红色行
-                # for iid in tree.get_children():
-                #     tags = tree.item(iid, "tags")
-                #     if "red_row" in tags:
-                #         tree.item(iid, tags=tags)  # 强制刷新标签
 
 
             win.after(50, scroll_and_highlight)
             # 更新窗口索引和选中 code
             win._selected_index = children.index(target_iid)
             win.select_code = tree.item(target_iid, "values")[0]
-
-            # 高亮
-            # self._highlight_tree_selection(tree, target_iid)
 
         # --- 更新状态栏 ---
         if hasattr(win, "_status_label_top10"):
@@ -11144,14 +11117,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.bind("<FocusIn>", lambda e: tree.focus_set())
 
 
-    # def _highlight_tree_selection(self, tree, item):
-    #     """
-    #     Treeview 高亮选中行（背景蓝色，其他清除）
-    #     """
-    #     for iid in tree.get_children():
-    #         tree.item(iid, tags=())
-    #     tree.item(item, tags=("selected",))
-    #     tree.tag_configure("selected", background="#d0e0ff")
 
     def _highlight_tree_selection(self, tree, item):
         """
