@@ -427,6 +427,16 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             self.pw.plot(avg_x, avg_y, pen=pg.mkPen(QColor(255, 255, 255, 180), width=1.5, style=Qt.PenStyle.DashLine), name="VWAP")
         
         if extra_lines:
+            # [NEW] 绘制垂直参考线（如多日分割线）
+            if isinstance(extra_lines, dict) and 'v_lines' in extra_lines:
+                for vline in extra_lines['v_lines']:
+                    try:
+                        # 兼容 (pos, color, width, 'v') 或 (pos, color, width)
+                        pos, color, width = vline[:3]
+                        self.pw.addItem(pg.InfiniteLine(pos=pos, angle=90, pen=pg.mkPen(color, width=width)))
+                    except Exception:
+                        pass
+
             cur_price = df['close'].iloc[-1] if df is not None and not df.empty else 0
             
             # [FIX] 分时图 (use_line=True) 恢复原本的清晰参考线，不去限制数量，确保分时交易有水位参考
@@ -517,6 +527,10 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             ticks = [(i, time_labels[i]) for i in range(0, total, step)]
             if (total-1) not in [t[0] for t in ticks]: ticks.append((total-1, time_labels[total-1]))
             axis.setTicks([ticks, []])
+            # [FIX] 移除不支持的 tickTextAnchor 以修复崩溃。
+            # 使用精简后的日期格式 (%d %H:%M) 配合适度边距。
+            if total > 0:
+                self.pw.setXRange(-total * 0.04, total * 1.02, padding=0)
             
         # Re-attach Crosshair
         self.df_ref = df

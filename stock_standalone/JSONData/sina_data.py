@@ -2024,6 +2024,8 @@ class Sina:
     def process_tick_v_a_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         [NEW] 增强分时数据：将累积成交量转换为每笔增量，并合成成交额 (Amount/VWAP Basis)。
+        支持多日数据：按 code + date 分组计算增量和累计值，解决多日数据成交量断层问题。
+        每日的 09:25 - 15:01 数据为一组进行独立转换。
         """
         if df.empty:
             return df
@@ -2033,35 +2035,55 @@ class Sina:
         try:
             import datetime as _dt
             cutoff_time = _dt.time(9, 25, 0)
+            end_time = _dt.time(15, 0, 1)
+            
+            # 1. 提取时间戳序列
             if isinstance(df_work.index, pd.MultiIndex):
-                # ticktime 在第 1 层 (level 1)
-                tt_level = df_work.index.get_level_values('ticktime') if 'ticktime' in df_work.index.names \
+                # ticktime 通常在第 1 层 (level 1) 或通过名称获取
+                tt_val = df_work.index.get_level_values('ticktime') if 'ticktime' in df_work.index.names \
                            else df_work.index.get_level_values(1)
-                # 转换为 time 对象进行比较
-                tt_times = pd.DatetimeIndex(tt_level).time
-                mask = tt_times >= cutoff_time
-                df_work = df_work[mask]
             elif isinstance(df_work.index, pd.DatetimeIndex):
-                mask = df_work.index.time >= cutoff_time
-                df_work = df_work[mask]
+                tt_val = df_work.index
+            else:
+                # 尝试从常见列获取
+                tt_val = df_work.get('ticktime', df_work.get('time', df_work.get('Timestamp')))
+            
+            # 统一转换为 DatetimeIndex 或 Series[datetime64]
+            ts_series = pd.to_datetime(tt_val)
+            
+            if hasattr(ts_series, 'dt'):
+                # 处理 Series
+                tt_times = ts_series.dt.time
+                mask = (tt_times >= cutoff_time) & (tt_times <= end_time)
+                # 提取日期序列用于多日分组
+                group_date = ts_series[mask].dt.date.values
+            else:
+                # 处理 DatetimeIndex
+                tt_times = ts_series.time
+                mask = (tt_times >= cutoff_time) & (tt_times <= end_time)
+                # 提取日期序列
+                group_date = ts_series[mask].date
+            
+            # 2. 过滤有效时段 (09:25 - 15:00)
+            df_work = df_work[mask]
+            
             if df_work.empty:
                 return df_work
         except Exception as e:
-            log.warning(f"process_tick_v_a_data: 盘前清理失败，跳过: {e}")
-            df_work = df.copy()
+            log.warning(f"process_tick_v_a_data: 时间过滤/解析失败: {e}")
+            group_date = None
 
+        # 3. 提取股票代码 (确保 code 列存在用于分组)
         if 'code' not in df_work.columns:
             if isinstance(df_work.index, pd.MultiIndex):
-                # 如果 MultiIndex 中有 'code' level，则提取它
                 if 'code' in df_work.index.names:
                     df_work = df_work.reset_index('code')
                 else:
-                    # 假设 level 0 是 code
                     df_work.insert(0, 'code', df_work.index.get_level_values(0))
             else:
                 df_work.insert(0, 'code', df_work.index)
         
-        # 彻底消除索引名称与列名冲突 (Groupby 要求的确定性)
+        # 彻底消除索引名称与列名冲突
         if df_work.index.name == 'code':
             df_work.index.name = None
         if isinstance(df_work.index, pd.MultiIndex) and 'code' in df_work.index.names:
@@ -2073,26 +2095,38 @@ class Sina:
         col_price = 'close' if 'close' in df_work.columns else 'now'
         
         if col_vol not in df_work.columns or col_price not in df_work.columns:
-            return df
+            return df_work
 
-        # [OPTIMIZE] 极限向量化：替代慢速的 groupby().apply()
-        # 1. 计算每笔增量成交量 (tick_vol)
-        # 用 groupby().diff() 配合 fillna 处理每组的第一行
-        df_work['tick_vol'] = df_work.groupby('code')[col_vol].diff().fillna(df_work[col_vol]).clip(lower=0)
+        # 4. 准备分组键 (code + optional date)
+        if group_date is not None:
+            # 使用临时日期列确保 diff/cumsum 在每日内独立
+            df_work['_group_date'] = group_date
+            group_keys = ['code', '_group_date']
+        else:
+            group_keys = ['code']
+
+        # 5. [OPTIMIZE] 极限向量化：替代慢速的 groupby().apply()
+        # 计算每笔增量成交量 (tick_vol)
+        df_work['tick_vol'] = df_work.groupby(group_keys)[col_vol].diff().fillna(df_work[col_vol]).clip(lower=0)
         
-        # 2. 合成增量成交额与累计成交额
+        # 6. 合成成交额与累计成交额
         if 'amount' not in df_work.columns or (df_work['amount'] <= 0).all():
-            delta_a = df_work['tick_vol'] * df_work[col_price]
-            df_work['amount'] = delta_a.groupby(df_work['code']).cumsum()
+            # 使用临时列计算增量成交额，并通过 df_work.groupby 确保 'code' 等列可见
+            df_work['_delta_a'] = df_work['tick_vol'] * df_work[col_price]
+            df_work['amount'] = df_work.groupby(group_keys)['_delta_a'].cumsum()
+            df_work.drop(columns=['_delta_a'], inplace=True)
         
-        # 3. 计算合成均价 (VWAP 基准)
+        # 7. 计算合成均价 (VWAP)
         df_work['avg_price'] = (df_work['amount'] / df_work[col_vol]).fillna(df_work[col_price])
         
         if 'open' not in df_work.columns:
             # 粗略模拟开盘价（如果是分时轨迹）
-            df_work['open'] = df_work.groupby('code')[col_price].shift(1).fillna(df_work[col_price])
+            df_work['open'] = df_work.groupby(group_keys)[col_price].shift(1).fillna(df_work[col_price])
 
-        # 4. 恢复索引结构
+        # 8. 清理辅助列并恢复索引结构
+        if '_group_date' in df_work.columns:
+            df_work = df_work.drop(columns=['_group_date'])
+            
         df_processed = df_work.set_index('code', append=True).swaplevel()
         return df_processed
 
