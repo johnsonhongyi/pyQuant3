@@ -179,7 +179,7 @@ def fast_fill_from_tick(stock_df: pd.DataFrame, tick_df: pd.DataFrame,use_tick_v
 
     return df.reset_index(drop=True)
 
-def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\minute_kline_cache.pkl"):
+def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\minute_kline_cache.pkl", limit_time: int = None):
     """加载 Tick 或分钟线数据"""
     if use_live:
         stock_df = None
@@ -203,8 +203,8 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                 except ImportError:
                     from stock_standalone.JSONData import sina_data
                 sina = sina_data.Sina()
-                logger.info(f"📡 正在从 Sina 获取 {code} 实时数据...")
-                stock_df = sina.get_real_time_tick(code, enrich_data=True)
+                logger.info(f"📡 正在从 Sina 获取 {code} 实时数据 (limit_time={limit_time})...")
+                stock_df = sina.get_real_time_tick(code, l_limit_time=limit_time, enrich_data=True)
                 if stock_df is None or stock_df.empty:
                     logger.error(f"❌ 无法获取 {code} 实时数据")
                     return None
@@ -642,6 +642,8 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             'power_idx':   float(row.get('power_idx', 0)),
             'upper':       float(row.get('upper', 0)),
             'dist_h_l':    float(row.get('dist_h_l', 4.0)),
+            'lastp3d':     float(prev2_row['close']),
+            'lasth3d':     float(prev2_row['high']),
             'prev3_high_max': float(max(prev_row['high'], prev2_row['high'], prev3_row['high'])),
             'prev3_close_max': float(max(prev_row['close'], prev2_row['close'], prev3_row['close'])),
         }
@@ -743,6 +745,24 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         curr_emo_score = baseline_score
         EMA_ALPHA = 0.25 # 略微降低 EMA 权重，让初始结构溢价维持更久
         
+        # [NEW] 优化买点状态机 (Down-Rebound-Pullback-Breakout)
+        # 关注: 1. 是否小幅下跌 (Minor) 2. 是否处于焦灼期 (Congestion)
+        drop_3d = (bl_data['lastp3d'] - bl_data['lastp1d']) / bl_data['lastp3d'] if bl_data['lastp3d'] > 0 else 0
+        diffs = [abs(bl_data['lastp1d'] - bl_data['lastp2d']) / bl_data['lastp2d'], 
+                 abs(bl_data['lastp2d'] - bl_data['lastp3d']) / bl_data['lastp3d']]
+        
+        opt_state = {
+            "is_minor_decline": (0.01 < drop_3d < 0.08) and (max(diffs) < 0.05), # 跌幅 1%-8% 且无巨阴
+            "is_congested": (abs(drop_3d) < 0.02) or (max(diffs) < 0.01),      # 跌不动也涨不动，横盘焦灼
+            "is_strong_trend": bl_data.get('is_rising_struct', False),        # 是否主升结构
+            "down_vwap": False,
+            "morning_v_rebound": False,
+            "up_last_close": False,
+            "pullback": False,
+            "peak_after_rebound": 0.0,
+            "day_high_so_far": day_high
+        }
+
         for i, r in enumerate(tick_list):
             p = float(r.get('trade', 0))
             cur_high = float(r.get('high', p))
@@ -774,21 +794,32 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             # 价增分：涨幅贡献更加灵敏 (每 1% 约 4-5分)
             price_score = pct_now * 4.5
             
-            # 量能分：成交量/金额比贡献 (线性增长，不再是硬门槛)
-            # 例如 1.5倍量贡 4分, 3倍量贡献 16分, 5倍量贡献 32分
-            volume_score = (vol_ratio - 1.0) * 8.0 if vol_ratio > 1.0 else 0
+            # [NEW] 强化量能异动的得分 (抢先手的核心驱动力)
+            # vol_ratio 通常反映了当前 tick 相比日内平均量的倍率
+            volume_score = (vol_ratio - 1.0) * 10.0 if vol_ratio > 1.0 else 0
+            # 暴力放量额外加分
+            if vol_ratio > 3.0: volume_score += 10
             
             # 状态分：如果是强势结构或加速，额外加成
             status_bonus = 0
-            if "加速" in str(r.get('sbc_status', '')): status_bonus += 10
-            elif "强势" in str(r.get('sbc_status', '')): status_bonus += 5
+            status_str = str(r.get('sbc_status', ''))
+            if "加速" in status_str: status_bonus += 12
+            elif "强势" in status_str: status_bonus += 6
             
-            # 位置分：创新高或突破关键昨高
+            # 位置分：创新高或突破关键昨收/昨高
             pos_bonus = 0
             if p >= day_high: pos_bonus += 5
-            if p >= bl_data.get('yesterday_high', 0): pos_bonus += 3
+            if p >= bl_data.get('lasth1d', 0): pos_bonus += 8
+            if p >= bl_data.get('lastp1d', 0): pos_bonus += 3
             
             target_score = baseline_score + price_score + volume_score + status_bonus + pos_bonus
+            
+            # 连涨加分 (简单追踪最近 3 个 tick)
+            if i > 2:
+                prev_p = tick_list[i-1].get('trade', 0)
+                prev2_p = tick_list[i-2].get('trade', 0)
+                if p > prev_p > prev2_p:
+                    target_score += 10
             
             # EMA 平滑，防止分值剧烈跳变
             curr_emo_score = curr_emo_score * (1 - EMA_ALPHA) + target_score * EMA_ALPHA
@@ -843,6 +874,104 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                     last_signal_times["FOLLOW_STATUS"] = status
                     last_signal_times["LAST_BUY_PRICE"] = p
     
+            # (A.2) 🚀 Optimized Buy Pattern (SBC_OPT)
+            # 规则：多日下跌后 -> 早盘破均线 -> 反弹过昨收 -> 回落 -> 11:30前反弹上破均线
+            if i < 400:
+                t_str = get_tick_str(r)
+                is_early_morning = "09:30:00" <= t_str <= "10:15:00"
+                is_morning = "09:30:00" <= t_str <= "11:30:00"
+                
+                prev_day_high = opt_state["day_high_so_far"]
+                
+                # 1. 下破均线 (只要曾经低于均线即记录，主升浪回踩通常很快)
+                if not opt_state["down_vwap"] and is_morning and p < avg_price:
+                    opt_state["down_vwap"] = True
+                    if verbose: print(f"[{t_str}] ℹ️ [Pattern] 1. 下破均线 (p={p:.2f} < VWAP={avg_price:.2f})")
+
+                # [PROACTIVE] 主升浪 V转抢筹点 (针对 688787 类强势股)
+                if opt_state["is_strong_trend"] and opt_state["down_vwap"] and not opt_state["morning_v_rebound"]:
+                    # 针对主升浪结构，只要回踩后重新站上关键位 (昨收 & 均线)，且有成交量配合即触发
+                    is_reclaim = p > avg_price and p > bl_data['lastp1d']
+                    # 为防止假突破，要求 emo_score 有抬头迹象即可 (不需要等高门槛)
+                    if is_reclaim and is_early_morning:
+                        if curr_emo_score > 55.0 or vol_ratio > 2.0:
+                            if verbose: print(f"[{t_str}] 🎯🎯 🚀主升浪V转抢筹! p={p:.2f} 价格站稳 | 驱动分:{curr_emo_score:.1f}")
+                            signals.append(SignalPoint(
+                                code=code, timestamp=str(r.get('ticktime', t_str)), 
+                                bar_index=i, price=p, 
+                                signal_type=SignalType.BUY, source=SignalSource.STRATEGY_ENGINE, 
+                                reason="🚀主升浪: 强力回踩站回(抢筹)",
+                                debug_info={'strong_v': True, 'score': round(curr_emo_score + 15, 1)}
+                            ))
+                            opt_state["morning_v_rebound"] = True
+                            opt_state["up_last_close"] = True # 同步状态
+                
+                # 2. 反弹上破昨收
+                if opt_state["down_vwap"] and not opt_state["up_last_close"] and p > bl_data['lastp1d']:
+                    opt_state["up_last_close"] = True
+                    opt_state["peak_after_rebound"] = p
+                    if verbose: print(f"[{t_str}] ℹ️ [Pattern] 2. 反弹上破昨收 ({bl_data['lastp1d']:.2f})")
+                
+                # 3. 回落
+                if opt_state["up_last_close"] and not opt_state["pullback"]:
+                    # 只要价格从峰值回落 0.1% 或 2 个 tick 即视为回落迹象
+                    if p < opt_state["peak_after_rebound"] - 0.02:
+                        opt_state["pullback"] = True
+                        if verbose: print(f"[{t_str}] ℹ️ [Pattern] 3. 出现回落 (当前:{p:.2f} < 峰值:{opt_state['peak_after_rebound']:.2f})")
+                    else:
+                        opt_state["peak_after_rebound"] = max(opt_state["peak_after_rebound"], p)
+                
+                # 4. 触发判定 (加速异动 / 抢先手)
+                if opt_state["pullback"]:
+                    # [PROACTIVE] 异动买点判定逻辑：
+                    # a. 突破早盘反弹的高点 (Peak after rebound)
+                    # b. 处于异动敏感窗口 或 价格已极其接近昨日高点
+                    # c. 驱动分 (emotion_score) 明显抬升，代表量价配合
+                    
+                    is_break_peak = p > opt_state["peak_after_rebound"]
+                    # 降低驱动分门槛，优先看量能脉冲
+                    is_momentum = curr_emo_score > 60.0
+                    vol_surge = vol_ratio > 2.5
+                    
+                    # 异动窗口 (11:00起开始进入潜伏异动区，放宽到 11:35 防止午间最后变动漏掉)
+                    is_acc_window = ("11:00:00" <= t_str <= "11:35:00") or ("13:00:00" <= t_str <= "13:10:00")
+                    # 临近昨日高点 (99% 处即可视为异动)
+                    is_near_last_high = p > bl_data['lasth1d'] * 0.99
+                    
+                    if is_break_peak and (is_momentum or vol_surge) and (is_acc_window or is_near_last_high):
+                        # 根据前几日状态判定信号级别
+                        if opt_state["is_minor_decline"]:
+                            reason_str = "🚀SBC_異動: 小幅跌后异动(抢先手)"
+                            score_bonus = 5 # 结构加分
+                        elif opt_state["is_congested"]:
+                            reason_str = "🚀SBC_参考: 焦灼期放量突破(参考)"
+                            score_bonus = 0
+                        else:
+                            reason_str = "🚀SBC_異動: 日内异动脉冲"
+                            score_bonus = 2
+                        
+                        if verbose:
+                            print(f"[{t_str}] 🎯🎯 🚀🚀 {reason_str} p={p:.2f} | 驱动分:{curr_emo_score:.1f}")
+                        
+                        signals.append(SignalPoint(
+                            code=code, timestamp=str(r.get('ticktime', t_str)), 
+                            bar_index=i, price=p, 
+                            signal_type=SignalType.BUY, source=SignalSource.STRATEGY_ENGINE, 
+                            reason=reason_str,
+                            debug_info={'opt_pattern': True, 'score': round(curr_emo_score + score_bonus, 1)}
+                        ))
+                        # 触发后彻底锁定，防止单日内针对同一形态反复提示
+                        opt_state["pullback"] = False 
+                        opt_state["peak_after_rebound"] = 999999.0 # 提高峰值，等同于禁用当前形态逻辑
+                    
+                    # [COMPAT] 如果还是错过了异动，保留一个确认突破点作为补充（但权重降低或加标记）
+                    elif p > bl_data['lasth1d'] and p > prev_day_high:
+                         # 这里的逻辑可以保留也可以移除，为了专注“异动点”，我们优先看上面的触发项
+                         pass
+                
+                # 更新当前已知的最高价
+                opt_state["day_high_so_far"] = max(opt_state["day_high_so_far"], cur_high)
+
             # (B) 决策引擎动态评估 (卖出信号判定)
             decision = engine.evaluate_dynamic(base_eval, row_dict, snapshot)
             action = decision.get("action", "")

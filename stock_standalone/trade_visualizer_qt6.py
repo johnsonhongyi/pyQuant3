@@ -516,6 +516,8 @@ class TimeAxis(pg.AxisItem):
     def __init__(self, times, orientation='bottom'):
         super().__init__(orientation=orientation)
         self.times = list(times)
+        # [FIX] tickTextAnchor 不在 style keys 中，暂时移除以修复崩溃。
+        # 依靠精简后的日期格式 (%d %H:%M) 节省空间。
 
     def updateTimes(self, times):
         self.times = list(times)
@@ -550,16 +552,17 @@ class TimeAxis(pg.AxisItem):
 
         for val in values:
             try:
-                idx = int(val)
+                idx = int(round(val))
                 if idx < 0:
                     idx = 0
                 elif idx >= n:
                     idx = n - 1
                 
-                # 假设 times 里存的是 "HH:MM:SS" 或 "HH:MM"
                 t_str = str(self.times[idx])
-                # 只显示 HH:MM
-                if len(t_str) >= 5:
+                # [REFINED] 如果包含日期信息（检测空格或 '-' 且长度较大），则完整显示
+                if (' ' in t_str or '-' in t_str) and len(t_str) > 5:
+                    strs.append(t_str)
+                elif len(t_str) >= 5:
                     strs.append(t_str[:5])
                 else:
                     strs.append(t_str)
@@ -5489,6 +5492,46 @@ class MainWindow(QMainWindow, WindowMixin):
         price = data.get("price", 0.0)
         indicators_raw = data.get("indicators", "{}")
 
+        # 尝试从日线数据补充涨幅和振幅
+        ratio_str = "N/A"
+        amplitude_str = "N/A"
+        if not self.day_df.empty:
+            dt_key = date[:10] if len(date) >= 10 else date
+            if dt_key in self.day_df.index:
+                # 获取所在索引
+                try:
+                    idx = self.day_df.index.get_loc(dt_key)
+                    if isinstance(idx, slice):
+                        idx = idx.start
+                    elif hasattr(idx, '__iter__'):
+                        idx = idx[0]
+                    
+                    day_row = self.day_df.iloc[idx]
+                    ratio = day_row.get('p_change', day_row.get('percent', 0.0))
+                    high_p = day_row.get('high', 0)
+                    low_p = day_row.get('low', 0)
+                    close_p = day_row.get('close', 0)
+                    
+                    # 尝试寻找前一收盘价以计算准确振幅
+                    prev_close = 0
+                    if idx > 0:
+                        prev_close = self.day_df.iloc[idx-1].get('close', 0)
+                    
+                    if prev_close > 0:
+                        calc_ratio = (close_p / prev_close - 1) * 100
+                        if abs(ratio) < 0.001 and abs(calc_ratio) > 0.001:
+                            ratio = calc_ratio
+                        amplitude = (high_p - low_p) / prev_close * 100
+                    else:
+                        # 兜底反推
+                        p_c = close_p / (1 + ratio/100) if ratio != -100 else close_p
+                        amplitude = (high_p - low_p) / p_c * 100 if p_c > 0 else 0
+                        
+                    ratio_str = f"{ratio:+.2f}%"
+                    amplitude_str = f"{amplitude:.2f}%"
+                except:
+                    pass
+
         # 处理指标 JSON
         try:
             if isinstance(indicators_raw, str):
@@ -5506,6 +5549,10 @@ class MainWindow(QMainWindow, WindowMixin):
         except:
             ind_text = str(indicators_raw)
 
+        # 颜色逻辑
+        r_color = "#FF3333" if ratio > 2 else ("#00FF00" if ratio < 0 else "#FFFF00")
+        a_color = "#FF3333" if amplitude > 5 else "#FFFF00"
+
         # msg = (
         #     f"<b>日期:</b> {date}<br>"
         #     f"<b>动作:</b> <span style='color:red;'>{action}</span><br>"
@@ -5517,6 +5564,7 @@ class MainWindow(QMainWindow, WindowMixin):
         msg = (
             f"<div style='font-family: Microsoft YaHei; font-size: 10pt;'>"
             f"<p><b>📅 日期:</b> {date}</p>"
+            f"<p><b>📈 涨幅:</b> <span style='color:{r_color}; font-weight: bold;'>{ratio_str}</span>&nbsp;&nbsp;&nbsp;<b>🎢 振幅:</b> <span style='color:{a_color}; font-weight: bold;'>{amplitude_str}</span></p>"
             f"<p><b>🎬 动作:</b> <span style='color:red; font-size: 12pt;'>{action}</span></p>"
             f"<p><b>💰 价格:</b> <span style='color:#00FF00;'>{price:.2f}</span></p>"
             f"<p><b>📝 理由:</b> {reason}</p>"
@@ -5623,10 +5671,24 @@ class MainWindow(QMainWindow, WindowMixin):
         
         time_str = self.tick_times[idx] if idx < len(self.tick_times) else ""
         
+        pre_close = getattr(self, 'current_pre_close', 0)
+        pct = (price / pre_close - 1) * 100 if pre_close > 0 else 0
+        
+        # 获取当日分时累计振幅
+        y_max = getattr(self, 'tick_high_max', self.tick_prices.max() if self.tick_prices.size > 0 else 0)
+        y_min = getattr(self, 'tick_low_min', self.tick_prices.min() if self.tick_prices.size > 0 else 0)
+        amplitude = (y_max - y_min) / pre_close * 100 if pre_close > 0 else 0
+
+        # 颜色逻辑
+        p_color = "#FF3333" if pct > 2 else ("#00FF00" if pct < 0 else "#FFFF00")
+        a_color = "#FF3333" if amplitude > 5 else "#FFFF00"
+
         text = f"""
         <div style='color:#FFFFFF; font-family:monospace;'>
         P: <span style='color:#FF3333;'>{price:.2f}</span><br>
         A: <span style='color:#FFFF00;'>{avg_price:.2f}</span><br>
+        <span style='color:{p_color};'>涨: {pct:+.2f}%</span><br>
+        <span style='color:{a_color};'>振: {amplitude:.2f}%</span><br>
         T: {time_str}
         </div>
         """
@@ -5672,7 +5734,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.vline.setVisible(True)
         self.hline.setVisible(True)
 
-        # 准备显示文本
+        # 准备数据
         date_str = row.name.strftime('%Y-%m-%d') if hasattr(row.name, 'strftime') else str(row.name)
         open_p = row.get('open', 0)
         high_p = row.get('high', 0)
@@ -5680,9 +5742,33 @@ class MainWindow(QMainWindow, WindowMixin):
         close_p = row.get('close', 0)
         volume = row.get('amount', 0)
         volume_yi = volume / 100000000
-        ratio = row.get('p_change', row.get('percent', 0.0))
 
+        # ⭐ 核心逻辑：基于前一根 K 线计算涨幅和振幅 (解决 p_change 缺失问题)
+        ratio = row.get('p_change', row.get('percent', 0.0))
+        prev_close = 0
+        if idx > 0:
+            prev_row = self.day_df.iloc[idx - 1]
+            prev_close = prev_row.get('close', 0)
+        
+        if prev_close > 0:
+            calc_ratio = (close_p / prev_close - 1) * 100
+            # 如果存储的 ratio 为 0 而计算值非 0，优先用计算值（处理 history 数据缺 p_change 的情况）
+            if abs(ratio) < 0.001 and abs(calc_ratio) > 0.001:
+                ratio = calc_ratio
+            amplitude = (high_p - low_p) / prev_close * 100
+        else:
+            # 第一根 K 线，根据 ratio 反推昨收，或者用 0
+            if abs(ratio) > 0:
+                p_c = close_p / (1 + ratio/100)
+                amplitude = (high_p - low_p) / p_c * 100 if p_c > 0 else 0
+            else:
+                amplitude = 0
+
+        # 颜色逻辑：涨幅 > 2 红色, < 0 绿色, 其他黄色；振幅 > 5 红色, 其他黄色
         RED, WHITE = "#FF3333", "#FFFFFF"
+        ratio_color = RED if ratio > 2 else ("#00FF00" if ratio < 0 else "#FFFF00")
+        amplitude_color = RED if amplitude > 5 else "#FFFF00"
+        
         is_bullish = close_p > open_p
         open_color = RED if is_bullish else WHITE
         close_color = RED if (abs(close_p - high_p) < 0.01 or is_bullish) else WHITE
@@ -5691,10 +5777,14 @@ class MainWindow(QMainWindow, WindowMixin):
 
         text = f"""
         <table style='font-family:monospace; border-collapse:collapse;'>
-        <tr><td style='color:{WHITE}'>O:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>C:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
-        <tr><td style='color:{WHITE}'>L:</td><td style='text-align:right;color:{low_color}'>{low_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>H:</td><td style='text-align:right;color:{high_color}'>{high_p:.2f}</td></tr>
+        <tr><td style='color:{WHITE}'>开:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>收:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
+        <tr><td style='color:{WHITE}'>低:</td><td style='text-align:right;color:{low_color}'>{low_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>高:</td><td style='text-align:right;color:{high_color}'>{high_p:.2f}</td></tr>
         </table>
-        <div style='color:#FFFFFF; font-family:monospace;'>V:{volume_yi:6.2f}亿 R:{ratio:6.2f}%</div>
+        <div style='color:#FFFFFF; font-family:monospace;'>成交:{volume_yi:6.2f}亿</div>
+        <div style='font-family:monospace;'>
+            <span style='color:{WHITE}'>涨:</span><span style='color:{ratio_color}'>{ratio:+.2f}%</span>
+            <span style='color:{WHITE}; padding-left:8px;'>振:</span><span style='color:{amplitude_color}'>{amplitude:6.2f}%</span>
+        </div>
         <div style='color:#FFFFFF; font-family:monospace;'>{date_str}</div>
         """
         
@@ -7990,8 +8080,10 @@ class MainWindow(QMainWindow, WindowMixin):
             if x_count > 0:
                 x_min = 0
                 x_max = x_count - 1
-                x_padding = (x_max - x_min) * 0.02 if x_max > x_min else 1
-                vb.setXRange(x_min - x_padding, x_max + x_padding, padding=0)
+                # [FIX] 回归标准对齐后，恢复适度边距 (0.02)
+                x_pad_left = (x_max - x_min) * 0.04 if x_max > x_min else 1
+                x_pad_right = (x_max - x_min) * 0.01 if x_max > x_min else 1
+                vb.setXRange(x_min - x_pad_left, x_max + x_pad_right, padding=0)
             
         except Exception as e:
             logger.debug(f"[_reset_tick_view] Failed: {e}")
@@ -9434,25 +9526,52 @@ class MainWindow(QMainWindow, WindowMixin):
                     }
                     tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
 
-            # [FIX] 更新分时图时间轴
+            # [FIX] 更新分时图时间轴 (支持多日日期前缀)
             if hasattr(self, 'tick_axis'):
                 t_list = []
                 try:
-                    # 1. 优先使用已提取的 self.tick_times (来自 tick_df['time'])
+                    # 1. 获取原始时间序列
+                    raw_times = []
                     if hasattr(self, 'tick_times') and self.tick_times:
-                        t_list = [str(t) for t in self.tick_times]
-                    # 2. 其次尝试 Index Level
+                        raw_times = self.tick_times
                     elif 'ticktime' in tick_df.index.names:
-                        _times = tick_df.index.get_level_values('ticktime')
-                        t_list = pd.to_datetime(_times).strftime('%H:%M:%S').tolist()
-                    # 3. 最后直接使用 Index
+                        raw_times = tick_df.index.get_level_values('ticktime').tolist()
                     else:
-                        t_list = [str(t) for t in tick_df.index]
+                        raw_times = tick_df.index.tolist()
+
+                    # 2. 转换为 DatetimeIndex 以便检测日期变化
+                    ts_objs = pd.to_datetime(raw_times)
+                    if len(ts_objs) > 1 and ts_objs[0].date() != ts_objs[-1].date():
+                        # 多日模式：首根 K 线或日期变换时显示日期前缀
+                        last_date = None
+                        for t in ts_objs:
+                            if t.date() != last_date:
+                                t_list.append(t.strftime("%d %H:%M"))
+                                last_date = t.date()
+                            else:
+                                t_list.append(t.strftime("%H:%M"))
+                    else:
+                        # 单日模式：仅显示时间
+                        t_list = [t.strftime("%H:%M") if hasattr(t, 'strftime') else str(t)[:5] for t in ts_objs]
                 except Exception as te:
-                    logger.debug(f"Failed to extract tick times: {te}")
+                    logger.debug(f"Failed to extract extra tick times: {te}")
                     t_list = [str(i) for i in range(len(tick_df))]
 
                 self.tick_axis.updateTimes(t_list)
+
+                # [NEW] 强制显示第一个和中间均匀分布的刻度，确保开盘时间始终可见 (1.0)
+                total_t = len(t_list)
+                if total_t > 0:
+                    # 动态估算步数，保持界面整洁 (约 6-8 个刻度)
+                    step = max(1, total_t // 8)
+                    ticks = []
+                    for i in range(0, total_t, step):
+                        ticks.append((i, t_list[i]))
+                    # 确保包含最后一个数据点
+                    if (total_t - 1) not in [t[0] for t in ticks]:
+                        ticks.append((total_t - 1, t_list[-1]))
+                    
+                    self.tick_axis.setTicks([ticks, []])
 
             self.tick_plot.setTitle(tick_title)
             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)

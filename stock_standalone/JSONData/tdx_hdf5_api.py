@@ -2589,7 +2589,413 @@ if __name__ == "__main__":
         print(f'fname : {h5_fname}')
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
-    # hm5=get_tdx_all_MultiIndex_h5()
+
+
+    import numpy as np
+    import pandas as pd
+    from scipy.stats import linregress
+
+    import numpy as np
+    import pandas as pd
+
+    def intraday_ma_high_trend_extreme_v5(df, price_col='close', llastp_col='llastp', high_col='high', vol_col='volume'):
+        """
+        V6 极限性能版：彻底绕过索引提取，直接内存块操作。
+        预期耗时：比 V5 快 3-5 倍，通常在数百毫秒内完成。
+        """
+        # 1. 快速过滤 (只取成交量 > 0)
+        df = df[df[vol_col] > 0]
+        
+        # 2. 关键：一次性提取所有列的底层数组，避免重复查找列名
+        # 直接通过 .values 拿到 2D 数组或逐列提取，减少 DataFrame 封装开销
+        prices = df[price_col].values
+        highs = df[high_col].values
+        vols = df[vol_col].values
+        refs = df[llastp_col].values
+        
+        # 3. 极限识别边界：不使用 get_level_values(0)，直接用 MultiIndex 的 codes
+        # codes[0] 是 MultiIndex 第一个层级的整数索引映射，比提取字符串快 10 倍以上
+        multi_codes = df.index.codes[0]
+        
+        # 识别 code 变化位置
+        change_idx = np.where(multi_codes[1:] != multi_codes[:-1])[0] + 1
+        split_indices = np.concatenate(([0], change_idx, [len(multi_codes)]))
+        first_idx = split_indices[:-1]
+        last_idx = split_indices[1:] - 1
+        counts = np.diff(split_indices)
+
+        # 4. 纯 NumPy 矢量计算 (无任何 Pandas 介入)
+        # [涨幅与偏离度]
+        final_p = prices[last_idx]
+        open_r = refs[first_idx]
+        rets = (final_p - open_r) / (open_r + 1e-9)
+        
+        # [VWAP 计算]
+        pv_sum = np.add.reduceat(prices * vols, first_idx)
+        vol_sum = np.add.reduceat(vols, first_idx)
+        vwaps = pv_sum / (vol_sum + 1e-9)
+        bias = (final_p - vwaps) / (vwaps + 1e-9)
+
+        # [站上均线比例]
+        vwap_rep = np.repeat(vwaps, counts)
+        above_ratio = np.add.reduceat((prices > vwap_rep), first_idx) / counts
+
+        # [线性回归斜率 - 预计算 x 和 n 减少重复开销]
+        x_total = np.arange(len(multi_codes)) - np.repeat(first_idx, counts)
+        max_v_rep = np.repeat(np.maximum.reduceat(vols, first_idx), counts)
+        y_total = highs * (1 + vols / (max_v_rep + 1e-9))
+        
+        sx, sy = np.add.reduceat(x_total, first_idx), np.add.reduceat(y_total, first_idx)
+        sxy, sx2 = np.add.reduceat(x_total * y_total, first_idx), np.add.reduceat(x_total * x_total, first_idx)
+        
+        denom = (counts * sx2 - sx**2)
+        slopes = np.divide((counts * sxy - sx * sy), denom, out=np.zeros_like(sxy), where=denom != 0)
+
+        # 5. 结果组装 (此时才访问一次 index 拿到真正的 code 标签)
+        unique_codes = df.index.levels[0][multi_codes[first_idx]]
+        
+        res = pd.DataFrame({
+            'ret': rets,
+            'bias': bias,
+            'above': above_ratio,
+            'slope': slopes,
+            'is_up': slopes > 0
+        }, index=pd.Index(unique_codes, name='code'))
+
+        # 6. Rank 评分优化：手动加权
+        # 如果数据量极大，rank 会成为瓶颈。如果只选 Top，可以考虑先过滤再 rank
+        r_ret = res['ret'].rank(pct=True)
+        r_bias = res['bias'].rank(pct=True)
+        r_above = res['above'].rank(pct=True)
+        
+        res['combined_score'] = 0.5 * r_ret + 0.3 * r_bias + 0.2 * r_above
+        
+        return res[res['is_up']].sort_values('combined_score', ascending=False)
+
+
+    def intraday_ma_high_trend_multi_day(df, price_col='close', llastp_col='llastp', high_col='high', vol_col='volume', window=None):
+        """
+        极限矢量化最终版：
+        1. 自动处理多日分时数据 (Code + Date 联合分组)
+        2. 基于 Rank(分位数) 评分，消除股价绝对值影响
+        3. 修复涨幅基准 (最新价 vs 当日首行参考价)
+        """
+        # --- 1. 预处理 & 排序 ---
+        df = df[df[vol_col] > 0].copy()
+        # 确保按代码和时间严格排序，这是 reduceat 正确的前提
+        df = df.sort_index(level=[0, 1])
+        
+        # --- 2. 提取基础数据 (NumPy 裸阵) ---
+        codes = df.index.get_level_values(0).values
+        # 提取日期，用于处理多日分时合并的情况
+        times = df.index.get_level_values(1)
+        dates = times.date if hasattr(times, 'date') else times.values
+        
+        prices = df[price_col].values
+        highs = df[high_col].values
+        vols = df[vol_col].values
+        llastps = df[llastp_col].values
+
+        # --- 3. 识别分组边界 (核心：Code变化 OR 日期变化) ---
+        group_change = (codes[1:] != codes[:-1]) | (dates[1:] != dates[:-1])
+        change_idx = np.where(group_change)[0] + 1
+        split_indices = np.concatenate(([0], change_idx, [len(codes)]))
+        counts = np.diff(split_indices)
+        
+        # 每一组（单票单日）的首行和末行索引
+        first_idx = split_indices[:-1]
+        last_idx = split_indices[1:] - 1
+
+        # --- 4. 计算当日涨幅 (最新价 vs 当日参考价) ---
+        final_closes = prices[last_idx]
+        day_refs = llastps[first_idx]
+        daily_returns = np.divide((final_closes - day_refs), day_refs, 
+                                  out=np.zeros_like(final_closes), where=day_refs != 0)
+
+        # --- 5. 计算 VWAP 及 站上均线比例 ---
+        pv = prices * vols
+        sum_pv = np.add.reduceat(pv, first_idx)
+        sum_vol = np.add.reduceat(vols, first_idx)
+        vwap_per_group = np.divide(sum_pv, sum_vol, out=np.zeros_like(sum_pv), where=sum_vol != 0)
+        
+        # 广播 VWAP 到每个 Tick 比较
+        vwap_rep = np.repeat(vwap_per_group, counts)
+        above_mask = (prices > vwap_rep).astype(float)
+        ratio_above_ma = np.add.reduceat(above_mask, first_idx) / counts
+
+        # --- 6. 计算高点回归斜率 (Slope) ---
+        # x轴在组内归零：[0,1,2..., 0,1,2...]
+        x = np.arange(len(codes)) - np.repeat(first_idx, counts)
+        # y轴加权：high * (1 + vol/max_vol)
+        max_vols = np.repeat(np.maximum.reduceat(vols, first_idx), counts)
+        y = highs * (1 + vols / max_vols)
+
+        sum_x = np.add.reduceat(x, first_idx)
+        sum_y = np.add.reduceat(y, first_idx)
+        sum_xy = np.add.reduceat(x * y, first_idx)
+        sum_x2 = np.add.reduceat(x * x, first_idx)
+        
+        denom = (counts * sum_x2 - sum_x**2)
+        slope = np.divide((counts * sum_xy - sum_x * sum_y), denom, 
+                          out=np.zeros_like(sum_xy), where=denom != 0)
+
+        # --- 7. 汇总结果并进行 Rank 评分 ---
+        res_df = pd.DataFrame({
+            'date': dates[first_idx],
+            'daily_return': daily_returns,
+            'ratio_above_ma': ratio_above_ma,
+            'vwap_ma': vwap_per_group,
+            'high_slope': slope,
+            'high_trend': slope > 0,
+            # 偏离度：解决 300042 这种爆发股的关键指标
+            'price_bias': (final_closes - vwap_per_group) / vwap_per_group
+        }, index=pd.Index(codes[first_idx], name='code'))
+
+        # 百分位排名归一化 (0~1)
+        res_df['score_ret']   = res_df['daily_return'].rank(pct=True)
+        res_df['score_ratio'] = res_df['ratio_above_ma'].rank(pct=True)
+        res_df['score_bias']  = res_df['price_bias'].rank(pct=True)
+        res_df['score_slope'] = res_df['high_slope'].rank(pct=True)
+
+        # 计算趋势得分 (权重可调)
+        res_df['computed_score'] = (
+            0.4 * res_df['score_ratio'] + 
+            0.4 * res_df['score_bias'] + 
+            0.2 * res_df['score_slope']
+        )
+
+        # 最终组合得分 (趋势50% + 涨幅50%)
+        res_df['combined_score'] = (
+            0.5 * res_df['computed_score'] + 
+            0.5 * res_df['score_ret']
+        )
+
+        # --- 8. 过滤 & 排序 ---
+        # 只保留斜率向上的，并按得分从高到低排列
+        return res_df[res_df['high_trend']].sort_values(by='combined_score', ascending=False)
+
+
+    
+
+    def intraday_ma_high_trend_ultra_final(df, price_col='close', llastp_col='llastp', high_col='high', vol_col='volume', window=None):
+        """
+        极限性能版：NumPy 矢量化计算 + 自动归一化评分
+        """
+        # 1. 预处理：过滤成交量 > 0 并确保 code 连续排列
+        df = df[df[vol_col] > 0].copy()
+        if window:
+            df = df.groupby(level=0).tail(window)
+        
+        # 2. 提取 NumPy 数组 (脱离 Pandas 索引)
+        codes = df.index.get_level_values(0).values
+        prices = df[price_col].values
+        highs = df[high_col].values
+        vols = df[vol_col].values
+        llastps = df[llastp_col].values
+
+        # 3. 定位分组边界 (Split indices)
+        change_idx = np.where(codes[1:] != codes[:-1])[0] + 1
+        split_indices = np.concatenate(([0], change_idx, [len(codes)]))
+        counts = np.diff(split_indices)
+        
+        # 区间起始索引 (每只股票的第一行)
+        first_row_indices = split_indices[:-1]
+        # 4. 提取当日涨幅 (最后一行对比)
+        last_row_indices = split_indices[1:] - 1
+        
+
+        # 提取价格
+        final_closes = prices[last_row_indices]      # 当前最新价 (最后一行)
+        initial_references = llastps[first_row_indices] # 今日开盘参考价 (第一行)
+
+        final_llastps = llastps[last_row_indices]
+        # 避免分母为 0
+        # daily_returns = np.divide((final_closes - final_llastps), final_llastps, 
+        #                           out=np.zeros_like(final_closes), where=final_llastps != 0)
+
+        # 矢量计算涨幅：(最新价 - 初始价) / 初始价
+        daily_returns = np.divide((final_closes - initial_references), initial_references, 
+                                  out=np.zeros_like(final_closes), where=initial_references != 0)
+
+        # 5. 向量化计算 VWAP 和 Ratio
+        pv = prices * vols
+        sum_pv = np.add.reduceat(pv, split_indices[:-1])
+        sum_vol = np.add.reduceat(vols, split_indices[:-1])
+        vwap_per_stock = np.divide(sum_pv, sum_vol, out=np.zeros_like(sum_pv), where=sum_vol != 0)
+        
+        # 广播 VWAP 计算 Ratio
+        vwap_ma_all = np.repeat(vwap_per_stock, counts)
+        above_mask = (prices > vwap_ma_all).astype(float)
+        ratio_above_ma = np.add.reduceat(above_mask, split_indices[:-1]) / counts
+
+        # 6. 向量化线性回归 (Slope)
+        x = np.arange(len(codes)) - np.repeat(split_indices[:-1], counts)
+        max_vols_per_stock = np.maximum.reduceat(vols, split_indices[:-1])
+        y = highs * (1 + vols / np.repeat(max_vols_per_stock, counts))
+
+        sum_x = np.add.reduceat(x, split_indices[:-1])
+        sum_y = np.add.reduceat(y, split_indices[:-1])
+        sum_xy = np.add.reduceat(x * y, split_indices[:-1])
+        sum_x2 = np.add.reduceat(x * x, split_indices[:-1])
+        
+        denom = (sum_x2 - (sum_x**2 / counts))
+        slope = np.divide((sum_xy - (sum_x * sum_y / counts)), denom, 
+                          out=np.zeros_like(sum_xy), where=denom != 0)
+
+        # 7. 构造结果表并进行归一化评分
+        unique_codes = codes[split_indices[:-1]]
+        res_df = pd.DataFrame({
+            'daily_return': daily_returns,
+            'ratio_above_ma': ratio_above_ma,
+            'vwap_ma': vwap_per_stock,
+            'high_slope': slope,
+            'high_trend': slope > 0
+        }, index=pd.Index(unique_codes, name='code'))
+
+        # 归一化参数计算 (避免除0)
+        vwap_max = res_df['vwap_ma'].max() or 1.0
+        slope_max = res_df['high_slope'].abs().max() or 1.0
+
+        # 趋势得分计算
+        res_df['score_ratio'] = res_df['ratio_above_ma']
+        res_df['score_vwap'] = res_df['vwap_ma'] / vwap_max
+        res_df['score_slope'] = res_df['high_slope'].abs() / slope_max
+
+        res_df['computed_score'] = (
+            0.4 * res_df['score_ratio'] + 
+            0.4 * res_df['score_vwap'] + 
+            0.2 * res_df['score_slope']
+        )
+
+        # 最终组合得分
+        res_df['combined_score'] = (
+            0.5 * res_df['computed_score'] + 
+            0.5 * res_df['daily_return']
+        )
+
+        # 8. 过滤 & 排序：只保留高点上升的股票
+        return res_df[res_df['high_trend']].sort_values(by='combined_score', ascending=False)
+
+
+
+    def recover_tick_volume_vectorized(df, vol_col='volume'):
+        """
+        Function: recover_tick_volume_vectorized
+        Summary: gpt
+        Examples: InsertHere
+        Attributes: 
+            @param (df):InsertHere
+            @param (vol_col) default='volume': InsertHere
+        Returns: InsertHere
+        将累加成交量还原为每条 tick 当天独立成交量
+        df: MultiIndex(code, ticktime) DataFrame，volume 是累加量
+        返回新的 df，增加 'tick_volume'
+        """
+        df = df.copy()
+            
+        # 提取 MultiIndex 信息
+        codes = df.index.get_level_values(0).to_numpy()
+        times = df.index.get_level_values(1).to_numpy('datetime64[ns]')
+        vols = df[vol_col].to_numpy()
+        
+        tick_volume = np.zeros_like(vols, dtype=vols.dtype)
+        
+        # 找到每天的开始位置
+        days = times.astype('datetime64[D]')
+        new_day = np.concatenate([[True], days[1:] != days[:-1]])
+        
+        # 找到每只股票的分段
+        new_stock = np.concatenate([[True], codes[1:] != codes[:-1]])
+        
+        # 每个 segment (stock+day) 的起点索引
+        segment_start = new_day | new_stock
+        segment_idx = np.flatnonzero(segment_start)
+        
+        # 差分计算每段 tick 量
+        for i in range(len(segment_idx)):
+            start = segment_idx[i]
+            end = segment_idx[i+1] if i+1 < len(segment_idx) else len(vols)
+            segment = vols[start:end]
+            diff = np.diff(segment, prepend=0)
+            diff[0] = segment[0]  # 当天首条 tick
+            diff[diff < 0] = 0    # 避免负值
+            tick_volume[start:end] = diff
+        
+        df['tick_volume'] = tick_volume
+        return df
+
+    def recover_tick_volume_fast(df, vol_col='volume'):
+        """
+        Function: recover_tick_volume_fast
+        Summary: google
+        Examples: InsertHere
+        Attributes: 
+            @param (df):InsertHere
+            @param (vol_col) default='volume': InsertHere
+        Returns: InsertHere
+        极限矢量化版本：将累积成交量还原为每 Tick 成交量
+        """
+        # 1. 预处理：去重 (MultiIndex 下直接使用 index.duplicated)
+        df = df[~df.index.duplicated(keep='first')].copy()
+        # 2. 排序 (确保 diff 计算逻辑正确)
+        df = df.sort_index(level=[0, 1])
+        # 3. 全量差分计算
+        # 直接对整列 diff，首行会产生 NaN
+        df['tick_volume'] = df[vol_col].diff()
+        # 4. 关键：修复跨标的（Code）的首行数据
+        # 找出每个 code 的第一行位置
+        # is_first_tick 为 True 的地方，diff 的结果是错误的（它减去了上一个 code 的最后一行）
+        is_first_tick = (df.index.get_level_values(0) != np.roll(df.index.get_level_values(0), 1))
+        is_first_tick[0] = True # 第一行必然是首个 code
+        # 修复首行：将 diff 的 NaN 或错误值替换回原始累积量
+        df.loc[is_first_tick, 'tick_volume'] = df.loc[is_first_tick, vol_col]
+        # 5. 过滤：去重后可能产生的 <= 0 的成交量 (包含去0)
+        df = df[df['tick_volume'] > 0]
+        return df
+
+    def recover_tick_volume(df, vol_col='volume'):
+        """
+        将累加量 volume -> 每tick成交量，同时去重和去0
+        df: MultiIndex [code, ticktime] DataFrame
+        vol_col: 累加量列名
+        """
+        df = df.copy()
+
+        # 确保按 code 和时间排序
+        df = df.sort_index(level=[0, 1])
+
+        # 用 groupby 对每个股票分别处理
+        def recover(sub):
+            sub = sub.copy()
+            # 去重复 ticktime，保留第一次
+            sub = sub[~sub.index.duplicated(keep='first')]
+
+            # 还原每tick成交量
+            sub['tick_volume'] = sub[vol_col].diff().fillna(sub[vol_col])
+            # 去0成交量
+            sub = sub[sub['tick_volume'] > 0]
+
+            return sub
+
+        df = df.groupby(level=0, group_keys=False).apply(recover)
+        return df
+    with timed_ctx("get_tdx_all_MultiIndex_h5"):
+        dd=get_tdx_all_MultiIndex_h5()
+    with timed_ctx("recover_tick_volume_fast_Google"):
+        df=recover_tick_volume_fast(dd)
+    # with timed_ctx("recover_tick_volume_vectorized_GPT"):
+    #     df=recover_tick_volume_vectorized(dd)
+    # 使用示例
+    import warnings
+    warnings.filterwarnings("ignore")
+    with timed_ctx("intraday_ma_high_trend_fast_ultra_google"):
+        # df_result = intraday_ma_high_trend_ultra_final(df)
+        # df_result = intraday_ma_high_trend_multi_day(df)
+        df_result = intraday_ma_high_trend_extreme_v5(df)
+    print(df_result)
+    cct.print_timing_summary()
+    import ipdb;ipdb.set_trace()
+
     # with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
     # with tables.open_file(r"G:\sina_data.h5") as f: print(f)
     # h5=get_tdx_all_from_h5()
