@@ -2,6 +2,7 @@ import os
 import sys
 import requests
 import pandas as pd
+import numpy as np
 from pandas import HDFStore
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -1663,83 +1664,76 @@ def save_dataframe(df=None):
 
 
 
-# 使用之前定义的解析函数
-def parse_related_info(row):
-    """
-    根據異動類型解析「相關信息」欄位，並返回一個包含 (漲幅, 價格, 量) 的元組。
-    """
-    related_info = row['相关信息']
-    stock_type = row['板块']
-    
-    try:
-        # 將字串轉換為浮點數列表
-        values = [float(v.strip()) for v in related_info.split(',')]
-    except (ValueError, IndexError):
-        return None, None, None
-    
-    漲幅 = None
-    價格 = None
-    量 = None
-    
-    if stock_type in ['火箭发射', '快速反弹', '60日大幅上涨', '高台跳水', '竞价下跌']:
-        # 這幾種類型通常漲跌幅和價格在前面
-        if len(values) >= 3:
-            漲幅 = round(values[0] * 100, 1) # 漲跌幅在索引 0
-            價格 = values[1]                # 價格在索引 1
-            量 = 0.0
-    elif stock_type in ['大笔买入', '有大买盘', '有大卖盘']:
-        # 這幾種類型交易量在前面，漲跌幅在中間
-        if len(values) >= 4:
-            漲幅 = round(values[2] * 100, 1) # 漲跌幅在索引 2
-            價格 = values[1]                # 價格在索引 1
-            量_原始 = values[0]
-            # 量 = round(量_原始 / 100 / 10000, 2) # 將股數轉換為萬手
-            量 = round(量_原始 / 100 / 1000, 1) # 將股數轉換為千手
-    elif stock_type in ['封涨停板', '60日新高']:
-        # 這幾種類型價格在前，漲跌幅在最後
-        if len(values) >= 4:
-            漲幅 = round(values[3] * 100, 1) # 漲跌幅在索引 3
-            價格 = values[0]                # 價格在索引 0
-            量_原始 = values[1]
-            # 量 = round(量_原始 / 100 / 10000, 2) # 將股數轉換為萬手
-            量 = round(量_原始 / 100 / 1000, 1) # 將股數轉換為千手
-    elif stock_type in ['打开涨停板']:
-        # 漲跌幅在最後，價格在前面
-        if len(values) >= 2:
-            漲幅 = round(values[1] * 100, 1) # 漲跌幅在索引 1
-            價格 = values[0]                # 價格在索引 0
-            量 = 0.0
-    elif stock_type in ['60日新高']:
-        # 根據您提供的錯誤數據，60日新高似乎有另一種格式
-        if len(values) >= 3:
-            漲幅 = round(values[2] * 100, 1) # 漲幅在索引 2
-            價格 = values[1]                # 價格在索引 1
-            量 = 0.0
-    else:
-        # 其他未知的異動類型，返回 None
-        return None, None, None
-        
-    return 漲幅, 價格, 量
-
 def process_full_dataframe(df):
     """
-    處理原始 DataFrame，解析相關信息並計算出現次數。
+    處理原始 DataFrame，解析相關信息並計算出現次數（向量化優化）。
     """
-    # 步驟1: 應用解析函數並擴展列
-    # df = df[["时间", "代码", "名称", "板块", "相关信息"]]
-    if df is not None and not df.empty:
-        df = df.copy()
-        parsed_data = df.apply(parse_related_info, axis=1, result_type='expand')
-        df[['涨幅', '价格', '量']] = parsed_data
+    if df is None or df.empty:
+        return df
 
-        # 步驟2: 使用 fillna(0.0) 填充 NaN 值
-        df.loc[:,['涨幅', '价格', '量']] = df[['涨幅', '价格', '量']].astype(float).fillna(0.0)
+    df = df.copy()
+    
+    # 1. 拆分相关信息
+    # Handle cases where '相关信息' might not be a string
+    info_str = df['相关信息'].astype(str)
+    info_cols = info_str.str.split(',', expand=True)
+    
+    # Ensure at least 4 columns exist for easy indexing
+    for i in range(info_cols.shape[1], 4):
+        info_cols[i] = np.nan
+        
+    # Convert to float and fill NaN with 0.0
+    for col in range(4):
+        info_cols[col] = pd.to_numeric(info_cols[col], errors='coerce')
 
-        # 步驟3: 計算每個“代码”出現的次數
-        # df['count'] = df.groupby('代码')['代码'].transform('count')
-        df.loc[:, 'count'] = df.groupby('代码')['代码'].transform('count')
-        df = df[['时间', '代码', '名称','count', '板块','相关信息', '涨幅', '价格', '量']]
+    # Initialize target columns
+    df['涨幅'] = 0.0
+    df['价格'] = 0.0
+    df['量'] = 0.0
+
+    # 2. 定义分类掩码 (并网合并相同逻辑的板块)
+    # 类型 A: [涨幅(0), 价格(1)], 量=0
+    mask_a = df['板块'].isin(['火箭发射', '快速反弹', '60日大幅上涨', '高台跳水', '竞价下跌'])
+    
+    # 类型 B: [量(0), 价格(1), 涨幅(2)], 量 = val/100/1000
+    mask_b = df['板块'].isin(['大笔买入', '有大买盘', '有大卖盘'])
+    
+    # 类型 C: [价格(0), 量(1), _, 涨幅(3)], 量 = val/100/1000
+    mask_c = df['板块'].isin(['封涨停板', '60日新高'])
+    
+    # 类型 D: [价格(0), 涨幅(1)], 量=0
+    mask_d = df['板块'] == '打开涨停板'
+
+    # 向量化赋值
+    # Group A
+    idx_a = mask_a & info_cols[1].notna()
+    df.loc[idx_a, '涨幅'] = (info_cols.loc[idx_a, 0] * 100).round(1)
+    df.loc[idx_a, '价格'] = info_cols.loc[idx_a, 1]
+
+    # Group B
+    idx_b = mask_b & info_cols[2].notna()
+    df.loc[idx_b, '涨幅'] = (info_cols.loc[idx_b, 2] * 100).round(1)
+    df.loc[idx_b, '价格'] = info_cols.loc[idx_b, 1]
+    df.loc[idx_b, '量'] = (info_cols.loc[idx_b, 0] / 100000).round(1)
+
+    # Group C
+    idx_c = mask_c & info_cols[3].notna()
+    df.loc[idx_c, '涨幅'] = (info_cols.loc[idx_c, 3] * 100).round(1)
+    df.loc[idx_c, '价格'] = info_cols.loc[idx_c, 0]
+    df.loc[idx_c, '量'] = (info_cols.loc[idx_c, 1] / 100000).round(1)
+
+    # Group D
+    idx_d = mask_d & info_cols[1].notna()
+    df.loc[idx_d, '涨幅'] = (info_cols.loc[idx_d, 1] * 100).round(1)
+    df.loc[idx_d, '价格'] = info_cols.loc[idx_d, 0]
+
+    # 3. 計算每個“代码”出現的次數
+    df.loc[:, 'count'] = df.groupby('代码')['代码'].transform('count')
+    
+    # 4. 排序字段输出
+    df = df[['时间', '代码', '名称', 'count', '板块', '相关信息', '涨幅', '价格', '量']]
     return df
+
 
         
 def get_stock_changes(selected_type=None, stock_code=None):
@@ -4520,20 +4514,18 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
 
 
 
-def get_stock_changes_background(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes,initwork=False):
+def get_stock_changes_background(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes, initwork=False):
     """
-    获取股票异动数据，根据时间间隔判断是否从API获取。
-    Args:
-        selected_type (str): 板块类型。
-        stock_code (str): 股票代码。
-        update_interval_minutes (int): 更新周期（分钟）。
+    获取股票异动数据，优化后台抓取性能。
     """
     global realdatadf, last_updated_time
-    global loaded_df,start_init
+    global loaded_df, start_init
     global date_write_is_processed
-    global viewdf,stop_event,date_entry
+    global viewdf, stop_event, date_entry
+    
     current_time = datetime.now()
-    start_time=time.time()
+    start_time = time.time()
+    
     need_update = (
         loaded_df is None
         or realdatadf.empty
@@ -4541,47 +4533,43 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         or (not date_write_is_processed and get_now_time_int() > 1505)
     )
 
-
-    # if loaded_df is None  and (realdatadf.empty or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
     if need_update:
         with realdatadf_lock:
-            # 检查是否需要从API获取数据
             if last_updated_time is None or current_time - last_updated_time >= timedelta(minutes=update_interval_minutes):
-                # logger.info(last_updated_time is None , last_updated_time is None or current_time - last_updated_time , timedelta(minutes=update_interval_minutes))
                 logger.info(f"时间间隔已到，正在从API获取新数据...")
                 last_updated_time = current_time
-                # 模拟从 Eastmoney API 获取数据
-                time.sleep(0.2)
+                
+                # 收集所有结果，最后统一 concat
+                dfs = [realdatadf] if not realdatadf.empty else []
+                
                 for symbol in symbol_map.keys():
-                    # 构造模拟数据
-                    # 假设每次调用都返回一些新的和一些旧的数据
                     if not initwork and stop_event.is_set():
                         logger.info(f'backgroundworker线程停止运行')
                         last_updated_time = None
-                        realdatadf = pd.DataFrame()
-                        break
-                    old_data = realdatadf.copy()
+                        return pd.DataFrame() # 提前返回
+                        
                     temp_df = get_stock_changes(selected_type=symbol)
-                    if len(temp_df) < 10:
-                        continue
-                    realdatadf = pd.concat([realdatadf, temp_df], ignore_index=True)
+                    if temp_df is not None and not temp_df.empty:
+                        dfs.append(temp_df)
+                        logger.info(f"为 ({symbol}) 获取了新的异动数据，缓存中...")
                     
+                    time.sleep(0.5) # 稍微减小间隔，提高整体效率，但仍保留礼貌间隔
+
+                if dfs:
+                    realdatadf = pd.concat(dfs, ignore_index=True)
                     # 去除重复数据，保留最新的数据
                     realdatadf.drop_duplicates(subset=['时间','代码', '板块'], keep='last', inplace=True)
-                    logger.info(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf, start_init:{start_init}")
-                    if start_init == 0:
-                        toast_message(None,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
-                    time.sleep(5)
-                logger.info(f"time:{int(time.time() - start_time)}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
+                    logger.info(f"全部更新完成，共计 {len(realdatadf)} 条记录")
+                
                 if start_init == 0:
-                    toast_message(None,f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
-                logger.info(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
+                    toast_message(None, f"数据更新完成: {len(realdatadf)} 条")
             else:
-                logger.info(f"{current_time - last_updated_time}:未到更新时间，返回内存realdatadf数据。")
+                logger.info(f"{current_time - last_updated_time}:未到更新时间，使用内存数据。")
+
     if start_init == 0:
-        time.sleep(6)
-        refresh_cout = 0
+        time.sleep(1) # 适当减少初始化等待
         start_init = 1
+        
     return realdatadf
 
 def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
