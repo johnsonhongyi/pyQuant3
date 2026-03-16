@@ -130,10 +130,11 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
     # ⑥ 真正删除
     try:
         os.remove(fname)
-        MultiIndex_fname = get_ramdisk_path_func("sina_MultiIndex_data")
-        if os.path.exists(MultiIndex_fname):
-            os.remove(MultiIndex_fname)
-            logger.info(f"[CLEAN_OK] {today} 同步已清理过期文件: {MultiIndex_fname}")
+        # MultiIndex_fname = get_ramdisk_path_func("sina_MultiIndex_data")
+        # if os.path.exists(MultiIndex_fname):
+        #     os.remove(MultiIndex_fname)
+        #     logger.info(f"[CLEAN_OK] {today} 同步已清理过期文件: {MultiIndex_fname}")
+        
         # sina_data_fname = get_ramdisk_path_func("sina_data")
         # if os.path.exists(sina_data_fname):
         #     os.remove(sina_data_fname)

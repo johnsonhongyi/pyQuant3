@@ -2168,6 +2168,7 @@ class GlobalInputFilter(QtCore.QObject):
                 return True
             elif key == Qt.Key.Key_R:
                 self.main_window._reset_kline_view()
+                self.main_window._reset_tick_view() # ⭐ [NEW] R 键联动重置分时图
                 return True
             elif key == Qt.Key.Key_S:
                 self.main_window.show_supervision_details()
@@ -7917,12 +7918,79 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.warning(f"[_reset_kline_view] Failed: {e}")
             import traceback
             traceback.print_exc()
-            # 降级方案：简单的自动范围
             try:
                 vb = self.kline_plot.getViewBox()
                 vb.enableAutoRange(enable=True)
             except Exception:
                 pass
+
+    def _reset_tick_view(self, tick_df=None, pre_close=None):
+        """
+        ⭐ [NEW] 重置分时图 (Tick Plot) 视图范围
+        支持在 render_charts 中自动调用，或通过 R 键手动触发。
+        """
+        try:
+            # 1. 确定数据源与极限值
+            if tick_df is not None and not tick_df.empty:
+                prices = tick_df['close'].values
+                # 提取有效的 high/low 数据（过滤 NaN）
+                valid_high = tick_df['high'].dropna()
+                valid_low = tick_df['low'].dropna()
+                
+                if not valid_high.empty and not valid_low.empty:
+                    y_max = float(valid_high.max())
+                    y_min = float(valid_low.min())
+                else:
+                    y_max = prices.max() if prices.size > 0 else 0
+                    y_min = prices.min() if prices.size > 0 else 0
+                
+                x_count = len(tick_df)
+                
+                # 缓存状态供 R 键重置使用
+                self.tick_high_max = y_max
+                self.tick_low_min = y_min
+                self.tick_x_max = x_count - 1
+            else:
+                # 如果没传 df，使用缓存
+                y_max = getattr(self, 'tick_high_max', 0)
+                y_min = getattr(self, 'tick_low_min', 0)
+                x_max_idx = getattr(self, 'tick_x_max', 0)
+                x_count = x_max_idx + 1
+                if y_max == 0 and y_min == 0:
+                    return # 无数据可重置
+            
+            # 2. 确定昨日收盘价 (基准线)
+            if pre_close is None:
+                pre_close = getattr(self, 'current_pre_close', 0)
+            
+            if pre_close <= 0:
+                # 最后的兜底：如果完全没数据，不重置
+                if x_count == 0: return
+                pre_close = y_max if y_max > 0 else 1.0
+
+            # 3. 计算 Y 轴自适应范围
+            view_y_max = max(y_max, pre_close)
+            view_y_min = min(y_min, pre_close)
+            y_range = view_y_max - view_y_min
+            
+            if y_range <= 0: 
+                y_range = pre_close * 0.01
+            
+            padding = y_range * 0.1
+            
+            vb = self.tick_plot.getViewBox()
+            # 设置 Y 轴范围 (确保基准线和成交价都在视野内)
+            vb.setYRange(view_y_min - padding, view_y_max + padding, padding=0)
+            
+            # 4. 设置 X 轴范围 (时间轴)
+            if x_count > 0:
+                x_min = 0
+                x_max = x_count - 1
+                x_padding = (x_max - x_min) * 0.02 if x_max > x_min else 1
+                vb.setXRange(x_min - x_padding, x_max + x_padding, padding=0)
+            
+        except Exception as e:
+            logger.debug(f"[_reset_tick_view] Failed: {e}")
 
     def load_stock_by_code(self, code, name=None, **kwargs):
         """
@@ -9270,55 +9338,16 @@ class MainWindow(QMainWindow, WindowMixin):
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
 
-            # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
-            try:
-                # 仅当有有效数据时才设置范围
-                if tick_df is not None and not tick_df.empty:
-                    # 提取有效的 high/low 数据（过滤 NaN）
-                    valid_high = tick_df['high'].dropna()
-                    valid_low = tick_df['low'].dropna()
-                    
-                    if not valid_high.empty and not valid_low.empty:
-                        # 手动计算 Y 轴范围（避免 NaN 导致的 autoRange 错误）
-                        y_max = float(valid_high.max())
-                        y_min = float(valid_low.min())
-                        
-                        # 不再强制对称渲染，只要确保昨收基准线和今日最高/最低点都在可见范围内
-                        view_y_max = max(y_max, pre_close)
-                        view_y_min = min(y_min, pre_close)
-                        y_range = view_y_max - view_y_min
-                        
-                        # 防止 y_range 为 0 导致崩溃 (横盘时给 1% 空间)
-                        if y_range <= 0: y_range = pre_close * 0.01
-                        
-                        # 设置 10% padding 确保 label 不会被边缘切掉
-                        padding = y_range * 0.1
-                        
-                        # 获取 ViewBox
-                        vb = self.tick_plot.getViewBox()
-                        
-                        # 手动设置 Y 轴范围
-                        vb.setYRange(view_y_min - padding, view_y_max + padding, padding=0)
-                        
-                        # 手动设置 X 轴范围（避免调用 updateAutoRange）
-                        # 使用有效数据的索引范围
-                        if len(x_ticks) > 0:
-                            x_min = float(x_ticks[0])
-                            x_max = float(x_ticks[-1])
-                            x_padding = (x_max - x_min) * 0.02 if x_max > x_min else 1
-                            vb.setXRange(x_min - x_padding, x_max + x_padding, padding=0)
-                        
-                        logger.debug(f"tick_plot range set: X=[{x_ticks[0]:.0f}, {x_ticks[-1]:.0f}], Y=[{y_min:.2f}, {y_max:.2f}]")
-                    else:
-                        logger.debug("tick_plot range skipped: all NaN in high/low")
-                else:
-                    logger.debug("tick_plot range skipped: tick_df empty")
-            except (ValueError, RuntimeError, TypeError) as e:
-                # 防止 NaN 值或其他异常导致崩溃
-                logger.debug(f"tick_plot range setting failed: {e}")
+            self.current_pre_close = pre_close # ⭐ 保存基准价供 R 键使用
+
+            # ⭐ 使用统一的自适应方法调整视图，确保逻辑一致
+            self._reset_tick_view(tick_df=tick_df, pre_close=pre_close)
 
 
             # ⭐ 构建分时图标题（显式包含当日最高/最低及其涨幅）
+            y_max = getattr(self, 'tick_high_max', prices.max() if prices.size > 0 else 0)
+            y_min = getattr(self, 'tick_low_min', prices.min() if prices.size > 0 else 0)
+            
             high_pct = (y_max - pre_close) / pre_close * 100 if pre_close > 0 else 0
             low_pct = (y_min - pre_close) / pre_close * 100 if pre_close > 0 else 0
             
@@ -9403,11 +9432,21 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # [FIX] 更新分时图时间轴
             if hasattr(self, 'tick_axis'):
-                # 优先使用 explicit 'time' column
                 t_list = []
-                _times = tick_df.index.get_level_values('ticktime')
-                # 过滤 NaN
-                t_list = pd.to_datetime(_times).strftime('%H:%M:%S').tolist()
+                try:
+                    # 1. 优先使用已提取的 self.tick_times (来自 tick_df['time'])
+                    if hasattr(self, 'tick_times') and self.tick_times:
+                        t_list = [str(t) for t in self.tick_times]
+                    # 2. 其次尝试 Index Level
+                    elif 'ticktime' in tick_df.index.names:
+                        _times = tick_df.index.get_level_values('ticktime')
+                        t_list = pd.to_datetime(_times).strftime('%H:%M:%S').tolist()
+                    # 3. 最后直接使用 Index
+                    else:
+                        t_list = [str(t) for t in tick_df.index]
+                except Exception as te:
+                    logger.debug(f"Failed to extract tick times: {te}")
+                    t_list = [str(i) for i in range(len(tick_df))]
 
                 self.tick_axis.updateTimes(t_list)
 

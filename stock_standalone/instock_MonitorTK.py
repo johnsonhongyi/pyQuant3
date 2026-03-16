@@ -5447,9 +5447,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 txt_scroll.pack(side="right", fill="y")
                 
                 txt.insert("1.0", content)
-                txt.config(state="disabled") 
+                # txt.config(state="disabled")  # ⭐ [MOD] 允许编辑
                 
-                tk.Button(d_win, text="关闭 (ESC)", command=d_win.destroy).pack(pady=5)
+                def save_edit_all():
+                    new_content = txt.get("1.0", "end-1c").strip()
+                    if not new_content:
+                        messagebox.showwarning("提示", "内容不能为空", parent=d_win)
+                        return
+
+                    # 1. 查找对应的备注并更新
+                    target_ts = None
+                    # 注意：总览列表里可能有同名不同时间的，所以根据 code 和 time_str 定位
+                    for r in self.handbook.get_remarks(code):
+                        if r['time'] == time_str:
+                            target_ts = r['timestamp']
+                            break
+                    
+                    if target_ts:
+                        # 更新数据库
+                        self.handbook.update_remark(code, target_ts, new_content)
+                        
+                        # 2. 更新总览列表的 preview
+                        short = new_content.replace('\n', ' ')
+                        if len(short) > 60:
+                            short = short[:60] + "..."
+                        
+                        item = tree.selection()
+                        if item:
+                            # 确定选中的确实是当前正在编辑的这一行 (防止用户在编辑时切换了选中项)
+                            curr_vals = tree.item(item[0], "values")
+                            if curr_vals[0] == time_str and curr_vals[1] == code:
+                                tree.item(item[0], values=(time_str, code, name, short))
+                        
+                        toast_message(d_win, "成功：手札内容已更新")
+                        d_win.after(500, d_win.destroy)
+                    else:
+                        messagebox.showerror("错误", "无法定位原始记录，保存失败", parent=d_win)
+
+                btn_frame = tk.Frame(d_win)
+                btn_frame.pack(pady=5)
+                
+                tk.Button(btn_frame, text="保存修改", command=save_edit_all, bg="#e8f5e9").pack(side="left", padx=10)
+                tk.Button(btn_frame, text="退出 (Esc)", command=d_win.destroy).pack(side="left", padx=10)
 
             def delete_selected_handbook(event=None):
 
