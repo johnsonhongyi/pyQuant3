@@ -411,8 +411,10 @@ class KLineMonitor(tk.Toplevel):
                         self.df_cache = df.copy()
                         # 使用 after 切换到主线程更新 UI 是安全的，但这里要确保 self 还没销毁
                         try:
-                            self.after(0, self.apply_filters)
-                        except Exception:
+                            # [FIX] 使用 after 切换到主线程更新 UI 增加存活检查
+                            if self.winfo_exists():
+                                self.after(0, self.apply_filters)
+                        except (RuntimeError, tk.TclError):
                             break
                 else:
                     if self.stop_event.wait(10):
@@ -681,10 +683,14 @@ class KLineMonitor(tk.Toplevel):
                 pass
     def stop(self):
         """信号停止线程并等待结束"""
+        if self.stop_event.is_set():
+            return
         self.stop_event.set()
         if hasattr(self, "refresh_thread") and self.refresh_thread.is_alive():
             try:
                 # 尽量等待其退出，避免 GIL 冲突
-                self.refresh_thread.join(timeout=0.5)
-            except Exception:
-                pass
+                # 注意：如果主线程持有 GIL 且正在执行长时间任务，join 可能导致僵死
+                # 0.2s 足够后台循环感知到 stop_event
+                self.refresh_thread.join(timeout=0.2)
+            except Exception as e:
+                logger.debug(f"[KLineMonitor] Thread join error: {e}")
