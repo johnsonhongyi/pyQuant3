@@ -731,25 +731,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _process_dispatch_queue(self):
         """
-        [FIX] 专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
-        同时驱动 Qt 事件循环，确保信号仪表盘等 Qt 窗口能实时更新。
+        专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
+        任务执行仍在 Tk 主线程，Qt 事件循环不再在这里驱动。
         """
         try:
-            # 1. 驱动 Qt 事件循环 (如果存在)
-            # 使用 QApplication.instance() 获取当前进程中的 Qt App，更加健壮
-            from PyQt6 import QtWidgets
-            qt_app = QtWidgets.QApplication.instance()
-            if qt_app:
-                qt_app.processEvents()
-            elif hasattr(self, '_qt_app') and self._qt_app:
-                self._qt_app.processEvents()
-
             while True:
                 # 非阻塞获取任务
                 task = self.tk_dispatch_queue.get_nowait()
                 if callable(task):
                     try:
-                        task()
+                        task()  # 安全回到 Tk 主线程执行
                     except Exception as e:
                         logger.error(f"Error executing dispatched task: {e}\n{traceback.format_exc()}")
         except queue.Empty:
@@ -757,8 +748,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error in dispatch queue processing: {e}")
         finally:
-            # 50ms 后再次检查 (加快频率提高响应速度)
-            if not getattr(self, '_is_closing', False):
+            # 50ms 后再次检查队列 (增加多重关闭状态检查，彻底防止退出时的 GIL 异常)
+            is_closing = getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
+            if not is_closing:
                 self._schedule_after(50, self._process_dispatch_queue)
 
     def _schedule_after(self, ms, func, *args):
@@ -2672,15 +2664,78 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._schedule_after(5000, self.update_tree)
 
     def _process_tree_data_async(self, data_packet):
+
+        try:
+
+            if isinstance(data_packet, dict):
+                full_df = data_packet.get('full_snapshot')
+                df = data_packet.get('filtered_ui_data').copy()
+            else:
+                full_df = data_packet
+                df = data_packet.copy()
+
+            if hasattr(self, 'realtime_service') and self.realtime_service:
+
+                try:
+
+                    self.realtime_service.update_batch(full_df)
+
+                    if 'code' not in df.columns:
+                        df['code'] = df.index.astype(str)
+
+                    codes = df['code'].tolist()
+
+                    scores = self.realtime_service.get_emotion_scores(codes)
+
+                    df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
+
+                except Exception as e:
+                    logger.error(f"Main process realtime update error: {e}")
+
+            if getattr(self, 'sortby_col', None) is not None:
+
+                df = df.sort_values(
+                    by=self.sortby_col,
+                    ascending=getattr(self, 'sortby_col_ascend', False)
+                )
+
+            if not df.empty:
+
+                t = time.time()
+
+                df = detect_signals(df)
+
+                cur_res = self.global_values.getkey("resample") or 'd'
+
+                if 'resample' not in df.columns:
+                    df['resample'] = cur_res
+
+                logger.info(f'detect_signals async duration:{time.time()-t:.2f}')
+
+                ui_df = df.copy()
+
+                self._schedule_after(
+                    0,
+                    lambda d=ui_df, r=cur_res: self._apply_tree_data_sync(d, r)
+                )
+
+            else:
+                self._is_processing_tree_data = False
+
+        except Exception as e:
+            logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
+            self._is_processing_tree_data = False
+
+    def _process_tree_data_async_gil(self, data_packet):
         """Asynchronously process dataframe (detect signals) to avoid blocking Tkinter main loop."""
         try:
             # [PACKET SETUP] Handle dual snapshot or legacy single df
             if isinstance(data_packet, dict):
                 full_df = data_packet.get('full_snapshot')
-                df = data_packet.get('filtered_ui_data')
+                df = data_packet.get('filtered_ui_data').copy()
             else:
                 full_df = data_packet
-                df = data_packet
+                df = data_packet.copy()
 
             # 🔌 在主进程同步更新 DataPublisher (使用 Full Snapshot)
             if hasattr(self, 'realtime_service') and self.realtime_service:
@@ -2715,9 +2770,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info(f'detect_signals async duration time:{time.time()-time_s:.2f}')
                 
                 # Now that data crunching is done, schedule the UI update back on the main thread
-                self._schedule_after(0, lambda: self._apply_tree_data_sync(df, cur_res))
+                ui_df = df.copy()
+                self._schedule_after(0,lambda d=ui_df, r=cur_res: self._apply_tree_data_sync(d, r))
             else:
-                 self._is_processing_tree_data = False
+                self._is_processing_tree_data = False
 
         except Exception as e:
             logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)

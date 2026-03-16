@@ -8,6 +8,7 @@ from JohnsonUtil import LoggerFactory
 import logging
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
+import threading
 
 try:
     from tk_gui_modules.window_mixin import WindowMixin
@@ -496,6 +497,8 @@ class RealtimeSignalManager:
     state_df: pd.DataFrame
 
     def __init__(self) -> None:
+        # [FIX] 增加线程锁，确保跨线程计算信号时的状态一致性，防止 GIL 冲突
+        self._lock = threading.Lock()
         # 使用 DataFrame 存储状态以实现向量化更新
         self.state_df = pd.DataFrame(columns=[
             'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak'
@@ -525,32 +528,33 @@ class RealtimeSignalManager:
             df.set_index('code', inplace=True, drop=False)
 
         codes = df.index
-        # 快速更新 state_df，补齐缺失的股票
-        missing_codes = codes.difference(self.state_df.index)
-        if not missing_codes.empty:
-            new_states = pd.DataFrame({
-                'prev_now': df.loc[missing_codes, price_col],
-                'today_high': df.loc[missing_codes, 'high'],
-                'today_low': df.loc[missing_codes, 'low'],
-                'prev_signal': None,
-                'down_streak': 0
-            }, index=missing_codes)
-            self.state_df = pd.concat([self.state_df, new_states])
-            for c in missing_codes:
-                self.volume_history[c] = [df.at[c, 'volume']]
-
-        # 提取当前数据和历史状态数据
-        # [FIX] 兼容不同的现价列名 (now, trade, price, close)
-        price_col = 'now'
-        for col in ['now', 'trade', 'close']:
-            if col in df.columns:
-                price_col = col
-                break
         
+        with self._lock:
+            # 快速更新 state_df，补齐缺失的股票
+            missing_codes = codes.difference(self.state_df.index)
+            if not missing_codes.empty:
+                new_states = pd.DataFrame({
+                    'prev_now': df.loc[missing_codes, price_col],
+                    'today_high': df.loc[missing_codes, 'high'],
+                    'today_low': df.loc[missing_codes, 'low'],
+                    'prev_signal': None,
+                    'down_streak': 0
+                }, index=missing_codes)
+                self.state_df = pd.concat([self.state_df, new_states])
+                for c in missing_codes:
+                    self.volume_history[c] = [df.at[c, 'volume']]
+    
+            # 提取历史状态数据
+            state = self.state_df.loc[codes].copy()
+            # 提取成交量历史 (提前在持有锁时完成，防止后续向量化计算时被其他线程修改 dict)
+            avg_vol_list = []
+            for c in codes:
+                v_list = self.volume_history.get(c, [])
+                avg_vol_list.append(np.mean(v_list) if v_list else 0.0)
+            avg_vol_arr = np.array(avg_vol_list)
+        
+        # [FIX] 重新提取当前价格数组，用于后续向量化计算
         now_arr = df[price_col].values
-        
-        # 提取历史状态数据
-        state = self.state_df.loc[codes]
         
         high_arr = df['high'].values
         low_arr = df['low'].values
@@ -578,9 +582,8 @@ class RealtimeSignalManager:
         kdj_d = df.get('kdj_d', 50).values if 'kdj_d' in df.columns else np.full(len(df), 50.0)
         open_arr = df.get('open', now_arr).values if 'open' in df.columns else now_arr
 
-        # 向量化成交量异常判断 (此处由于涉及到 history，优化空间有限，但可以做简单的平均)
-        # ⚡ 优化：仅针对 1000+ 股票时，跳过过于复杂的历史成交量计算，使用简单的比例对比
-        avg_vol_arr = np.array([np.mean(self.volume_history[c]) for c in codes])
+        # 向量化成交量异常判断
+        # ⚡ 优化：使用预计算好的均值数组，避免在向量化逻辑中进行循环
         vol_boom_now = volume_arr > avg_vol_arr
 
         # 向量化逻辑判断
@@ -629,19 +632,21 @@ class RealtimeSignalManager:
                     ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break
         df.loc[sell_cond, 'signal'] = 'SELL'
 
-        # ⚡ 批量同步回 state_df (关键优化：避免 for 循环中的字典访问)
-        self.state_df.loc[codes, 'prev_now'] = now_arr
-        self.state_df.loc[codes, 'today_high'] = updated_today_high
-        self.state_df.loc[codes, 'today_low'] = updated_today_low
-        self.state_df.loc[codes, 'down_streak'] = updated_down_streak
-        self.state_df.loc[codes, 'prev_signal'] = df['signal'].values
-        
-        # 处理成交量历史（少量 loop 仍然必要，除非改用 fixed-size matrix）
-        for i, c in enumerate(codes):
-            v_hist = self.volume_history[c]
-            v_hist.append(volume_arr[i])
-            if len(v_hist) > 5:
-                v_hist.pop(0)
+        # ⚡ 批量同步回 state_df
+        with self._lock:
+            self.state_df.loc[codes, 'prev_now'] = now_arr
+            self.state_df.loc[codes, 'today_high'] = updated_today_high
+            self.state_df.loc[codes, 'today_low'] = updated_today_low
+            self.state_df.loc[codes, 'down_streak'] = updated_down_streak
+            self.state_df.loc[codes, 'prev_signal'] = df['signal'].values
+            
+            # 处理成交量历史
+            for i, c in enumerate(codes):
+                v_hist = self.volume_history.get(c, [])
+                v_hist.append(volume_arr[i])
+                if len(v_hist) > 5:
+                    v_hist.pop(0)
+                self.volume_history[c] = v_hist
 
         return df
 
