@@ -4410,7 +4410,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.cat_filter_input = QComboBox()
         self.cat_filter_input.setEditable(True)
         self.cat_filter_input.lineEdit().setPlaceholderText("板块过滤...")
-        self.cat_filter_input.setFixedWidth(130)
+        self.cat_filter_input.setFixedWidth(80)
         self.cat_filter_input.setToolTip("选择 history5 记录或输入名称过滤 (支持右键粘贴自动智能格式化)")
         self.cat_filter_input.setStyleSheet("""
             QComboBox {
@@ -4450,9 +4450,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.toolbar.addWidget(cat_clear_btn)
 
         # --- 添加右侧 Reset 按钮 ---
-        spacer = QWidget()        # 占位伸缩
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.toolbar.addWidget(spacer)  # 占满中间空间，把后面的按钮推到右边
+        # spacer = QWidget()        # 占位伸缩
+        # spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # self.toolbar.addWidget(spacer)  # 占满中间空间，把后面的按钮推到右边
+
+        spacer = QWidget()
+        spacer.setFixedWidth(20)
+        self.toolbar.addWidget(spacer)
 
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_kline_view)

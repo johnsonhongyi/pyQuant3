@@ -114,7 +114,8 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
             logger.info(f"⚠ 无法读取最近存档: {e}")
 
     # 构建归档文件名
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    # timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H")
     ext = os.path.splitext(src_file)[1]
     filename = f"{prefix}_{timestamp}{ext}"
     dest = os.path.join(archive_dir, filename)
