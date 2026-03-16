@@ -551,6 +551,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
+        self._df_lock = threading.Lock()  # 🛡️ [NEW] 保护 df_all 并发读写
 
         # 队列接收子进程数据
         self.queue = mp.Queue()
@@ -2782,8 +2783,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _apply_tree_data_sync(self, df, cur_res):
         """Sync step: update internal state and Tkinter UI on the main thread."""
         try:
-            logger.debug(f"🔄 _apply_tree_data_sync started at {time.strftime('%H:%M:%S')}")
-            self.df_all = df  # 直接引用，减少 copy
+            with self._df_lock:
+                self.df_all = df  # 直接引用，减少 copy
             has_update = True
             
             if hasattr(self, 'selector') and self.selector:
@@ -6899,8 +6900,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # 数据获取
             category_content = "暂无详细信息"
-            if code in self.df_all.index:
-                category_content = self.df_all.loc[code].get('category', '')
+            # 🛡️ [FIX] 线程安全地获取数据
+            # with self._df_lock:
+            #     if code in self.df_all.index:
+            #         category_content = self.df_all.loc[code].get('category', '')
+
+            with self._df_lock:
+                if code in self.df_all.index:
+                    category_content = self.df_all.at[code, 'category']
+                else:
+                    category_content = ''
             
             # 自动关闭逻辑判断 (是否有语音)
             has_voice = False
@@ -11354,76 +11363,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         font_size = font.pointSize()
         self._font_size = font_size
         logger.info(f"concepts_pg 默认字体大小: {font_size}")
-    def on_test_code(self, onclick=False):
-        """
-        测试当前选中的股票或全量数据是否符合历史记录中的查询规则。
-        重构：使用新的 PandasQueryEngine (query_engine) 执行。
-        """
-        code = self.query_manager.entry_query.get().strip()
-        result = getattr(self, "_Categoryresult", "")
-
-        # 1. 确定测试数据集 df_code
-        if code and code == result:
-            df_code = self.df_all
-        elif code and not (code.isdigit() and len(code) == 6):
-            df_code = self.df_all
-        elif code and code.isdigit() and len(code) == 6:
-            if self._select_on_test_code != code or onclick:
-                self._select_on_test_code = code
-                df_code = self.df_all.loc[self.df_all.index == code]
-                
-                # 保留原有 check_code 弹窗提示，现在传入整个 history 以进行全量诊断
-                from stock_logic_utils import check_code
-                test_queries = self.query_manager.current_history
-                if onclick:
-                    # 如果是手动点击，则优先检查当前搜索框，若为空则检查整个历史
-                    active_query = self.query_manager.entry_query.get().strip()
-                    # 如果 entry_query 匹配 6 位代码，说明用户在搜代码，此时应该用底部搜索框 search_var1 或者是 history
-                    if active_query.isdigit() and len(active_query) == 6:
-                        check_code(self.df_all, code, test_queries, parent=self)
-                    else:
-                        check_code(self.df_all, code, active_query, parent=self)
-                else:
-                    # 仅在初次选中或 code 变化时自动检查整个历史
-                    check_code(self.df_all, code, test_queries, parent=self)
-                if onclick:
-                    self.tree_scroll_to_code(code)
-                    if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
-                        self.kline_monitor.tree_scroll_to_code_kline(code)
-            else:
-                df_code = self.df_all
-        else:
-            df_code = self.df_all
-
-        if df_code is None or df_code.empty:
-            return
-
-        # 2. 使用新的 query_engine 执行历史规则测试
-        from query_engine_util import query_engine
-        history = self.query_manager.current_history
-        
-        for record in history:
-            query_str = record.get("query", "").strip()
-            if not query_str:
-                record["hit"] = ""
-                continue
-            
-            try:
-                # 使用新引擎执行
-                res = query_engine.execute(df_code, query_str)
-                if isinstance(res, pd.DataFrame):
-                    record["hit"] = len(res)
-                elif isinstance(res, (pd.Series, np.ndarray, list)):
-                    record["hit"] = len(res)
-                else:
-                    record["hit"] = 1 if res else 0
-            except Exception as e:
-                logger.debug(f"Test query failed: {query_str}, err: {e}")
-                record["hit"] = 0
-
-        # 3. 刷新 UI
-        self.query_manager.refresh_tree()
-
         texts = []
         max_score = max(scores.max(), 1)
         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
@@ -12402,13 +12341,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 异步刷新 Treeview 提高响应性
         self._schedule_after(10, lambda: self.refresh_tree(df_filtered, force=True))
         
-        self.on_test_code()
-        self.auto_refresh_detail_window()
-        self.update_category_result(df_filtered)
-
-        if not hasattr(self, "_start_init_show_concept_detail_window"):
-            self.show_concept_detail_window()
-            self._start_init_show_concept_detail_window = True
         if df_filtered.empty:
             return
         self.on_test_code()
