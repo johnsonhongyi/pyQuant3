@@ -420,7 +420,7 @@ class StockLiveStrategy:
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
         
         # 告警任务和后台扫描需要足够的并发工人，避免因 sleep/IO 阻塞导致任务积压
-        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
         # 初始化记录器 (必须在 _load_monitors 之前)

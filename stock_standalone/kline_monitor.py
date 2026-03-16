@@ -462,29 +462,50 @@ class KLineMonitor(tk.Toplevel):
             self.signal_history_indices = {sig: set() for sig in self.signal_types}
             self.last_signal_index = {sig: None for sig in self.signal_types}
 
+        # 🚀 [OPTIMIZED] 预先提取需要循环访问的数据，避免循环内 getattr
+        df_cols = df.columns.tolist()
+        has_code = "code" in df_cols
+        has_signal = "signal" in df_cols
+        has_now = "now" in df_cols
+        has_name = "name" in df_cols
+        has_percent = "percent" in df_cols
+        has_per1d = "per1d" in df_cols
+        has_volume = "volume" in df_cols
+        has_Rank = "Rank" in df_cols
+        has_score = "score" in df_cols
+        has_red = "red" in df_cols
+        has_emotion = "emotion" in df_cols
+
         for idx, r in df.iterrows():
-            code = r.get("code")
-            sig = str(r.get("signal", "") or "")
-            now_price = r.get("now", 0)
+            code = r["code"] if has_code else idx
+            sig = str(r["signal"] if has_signal else "") or ""
+            now_price = r["now"] if has_now else 0
 
             if code not in self.price_history:
                 self.price_history[code] = deque(maxlen=self.max_history_len)
             self.price_history[code].append(now_price)
 
-            ph = np.array(self.price_history[code])
+            ph = self.price_history[code]
             trend = "flat"
 
-            if len(ph) >= 3:
-                x = np.arange(len(ph))
-                y = ph
-                A = np.vstack([x, np.ones(len(x))]).T
-                slope, _ = np.linalg.lstsq(A, y, rcond=None)[0]
-                if slope > 0.01:
-                    trend = "up"
-                elif slope < -0.01:
-                    trend = "down"
-                else:
-                    trend = "flat"
+            # 🚀 [OPTIMIZED] 使用简单线性回归公式代替 np.linalg.lstsq (处理 3-10 个点极快)
+            n = len(ph)
+            if n >= 3:
+                # 简单斜率公式: n*sum(xy) - sum(x)*sum(y) / (n*sum(x^2) - sum(x)^2)
+                # 由于 x 是固定的 [0, 1, 2, ... n-1], sum(x) 和 sum(x^2) 可以预计算
+                x = np.arange(n)
+                y = np.array(ph)
+                
+                sum_x = x.sum()
+                sum_y = y.sum()
+                sum_xy = (x * y).sum()
+                sum_x2 = (x * x).sum()
+                
+                denominator = (n * sum_x2 - sum_x * sum_x)
+                if denominator != 0:
+                    slope = (n * sum_xy - sum_x * sum_y) / denominator
+                    if slope > 0.01: trend = "up"
+                    elif slope < -0.01: trend = "down"
 
             if code not in self.cumulative_signals:
                 self.cumulative_signals[code] = []
@@ -507,15 +528,15 @@ class KLineMonitor(tk.Toplevel):
             tag = self.get_row_tags_kline(r, idx=idx)
             processed.append({
                 "code": code,
-                "name": r.get("name",""),
+                "name": r["name"] if has_name else "",
                 "now": now_price,
-                "percent": r.get("percent",0) or r.get("per1d",0),
-                "volume": r.get("volume",0),
+                "percent": r["percent"] if has_percent else (r["per1d"] if has_per1d else 0),
+                "volume": r["volume"] if has_volume else 0,
                 "display_signal": display_signal,
-                "Rank": r.get("Rank", 0),
-                "score": r.get("score",0),
-                "red": r.get("red",0),
-                "emotion": r.get("emotion",""),
+                "Rank": r["Rank"] if has_Rank else 0,
+                "score": r["score"] if has_score else 0,
+                "red": r["red"] if has_red else 0,
+                "emotion": r["emotion"] if has_emotion else "",
                 "tag": tag
             })
         return processed

@@ -391,6 +391,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
         self._is_history_mode = False   # [NEW] 历史复盘模式标志
         self._history_date = ""         # [NEW] 历史数据日期
+        self._allow_real_close = False  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
@@ -434,8 +435,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.status_lbl.setText("🔄 准备首次数据评分映射...")
             QTimer.singleShot(500, self.manual_refresh)
 
+    def _on_btn_close_clicked(self):
+        """工具栏'关闭'按钮触发的彻底退出"""
+        self._allow_real_close = True
+        self.close()
+
     def closeEvent(self, event):
-        """Window close event, clean up threads gracefully."""
+        """
+        窗口关闭事件拦截：
+        1. 如果是通过右上角 X 或系统强制关闭，则仅隐藏窗口以保持后台监控。
+        2. 只有点击工具栏的'关闭'按钮才执行真正的清理逻辑并释放线程。
+        """
+        if not getattr(self, '_allow_real_close', False):
+            self.hide()
+            event.ignore()
+            return
+
         # 1. 先停止定时器，不产生新任务
         if hasattr(self, '_refresh_timer'):
             self._refresh_timer.stop()
@@ -627,10 +642,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.cb_log.stateChanged.connect(self._on_strategy_changed)
         bar_lay_2.addWidget(self.cb_log)
 
-        self.btn_hide = QPushButton("隐藏 ✖")
-        self.btn_hide.setFixedWidth(55)
-        self.btn_hide.clicked.connect(self.hide)
-        bar_lay_2.addWidget(self.btn_hide)
+        self.btn_close = QPushButton("关闭 ✖")
+        self.btn_close.setFixedWidth(55)
+        self.btn_close.clicked.connect(self._on_btn_close_clicked)
+        bar_lay_2.addWidget(self.btn_close)
 
         bar_lay_2.addWidget(self._sep())
 

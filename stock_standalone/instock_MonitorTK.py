@@ -2039,7 +2039,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # logger.info(f'concept_score[:10]:{concept_score[:10]}')
         self.concept_top5 = concept_score[:5]
-        return concept_score[:top_n]
+        return concept_score[:10]
 
 
 
@@ -9276,25 +9276,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def adjust_column_widths(self):
         """根据当前 self.current_df 和 tree 的列调整列宽（只作用在 display 的列）"""
-        # cols = list(self.tree["displaycolumns"]) if self.tree["displaycolumns"] else list(self.tree["columns"])
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return  # 已销毁，直接返回
+            
+        scaled_val = self.get_scaled_value()
+        
+        # ⚡ 性能优化项: 如果数据量太大，不执行这种极其耗时的全表列宽自动计算
+        if hasattr(self, 'current_df') and len(self.current_df) > 100:
+            # 仅采样前 50 行和最后 20 行进行计算，足以覆盖大多数情况
+            df_sample = pd.concat([self.current_df.head(50), self.current_df.tail(20)])
+        else:
+            df_sample = self.current_df if hasattr(self, 'current_df') else pd.DataFrame()
+
         cols = list(self.tree["columns"])
 
         # 遍历显示列并设置合适宽度
         for col in cols:
             # 跳过不存在于 df 的列
-            if col not in self.current_df.columns:
+            if df_sample.empty or col not in df_sample.columns:
                 # 仍要确保列有最小宽度
-                self.tree.column(col, width=int(50*self.get_scaled_value()))
+                self.tree.column(col, width=int(50 * scaled_val))
                 continue
-            # # 计算列中最大字符串长度
+            
+            # ⚡ 性能优化的计算方式：获取采样列值转换为字符串列表计算最大长度
             try:
-                max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
+                s_values = df_sample[col].astype(str).values
+                max_len = max(len(col), max([len(x) for x in s_values]) if len(s_values) > 0 else 0)
             except Exception:
                 max_len = len(col)
+                
             # 基础集约化：7像素/字符，最小宽45
-            width = int(min(max(max_len * 7, int(45 * self.get_scaled_value())), 350))
+            width = int(min(max(max_len * 7, int(45 * scaled_val)), 350))
 
             if col == 'name':
                 width = int(getattr(self, "_name_col_width", 120 * self.scale_factor))
@@ -9306,7 +9318,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 width = int(45 * self.scale_factor)
 
             self.tree.column(col, width=int(width))
-        logger.debug(f'adjust_column_widths done :{len(cols)}')
+        logger.debug(f'adjust_column_widths optimized done (rows:{len(df_sample)}) :{len(cols)}')
     # ----------------- 排序 ----------------- #
     def sort_by_column(self, col, reverse):
         if col not in self.current_df.columns:
@@ -10313,18 +10325,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "rank", "percent", "volume","red","win")
+        columns = ("code", "name", "rank", "percent", "dff", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
-        limit_col = ['volume','red','win']
+        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
+        limit_col = ['volume','red','win','dff']
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
-            width = 80 if col == ["name","code"] else (30 if col in limit_col else 50)
+            width = 80 if col in ["name","code"] else (30 if col in limit_col else 50)
             tree.column(col, anchor="center", width=width)
 
         # 保存引用，独立窗口不复用 _concept_top10_win
@@ -10670,7 +10682,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "rank", "percent", "volume","red","win")
+        columns = ("code", "name", "rank", "percent", "dff", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -10678,13 +10690,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         vsb.pack(side="right", fill="y")
 
         # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
-        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
-        limit_col = ['volume','red','win']
+        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
+        limit_col = ['volume','red','win','dff']
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
             # width = 80 if col == "name" else (40 if col == "rank" else 60)
-            width = 80 if col == ["name","code"] else (30 if col in limit_col else 40)
+            width = 80 if col in ["name","code"] else (30 if col in limit_col else 40)
             tree.column(col, anchor="center", width=width)
 
         # 保存引用
@@ -11012,6 +11024,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     latest_row.get("name", row.get("name", "")),
                     rank_str,
                     f"{percent:.2f}",
+                    f"{latest_row.get('dff', row.get('dff', 0)):.1f}",
                     f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
                     latest_row.get("red", row.get("red", 0)),
                     latest_row.get("win", row.get("win", 0)),
@@ -11211,7 +11224,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
 
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], rank_str, f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
+                        values=(code_row, row["name"], rank_str, f"{percent:.2f}", f"{row.get('dff',0):.1f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
