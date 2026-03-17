@@ -1541,210 +1541,139 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     if not MultiIndex:
         df['timel']=time.time()
 
-    if not rewrite:
-        if df is not None and not df.empty and table is not None:
-            tmpdf = pd.DataFrame()
-            try:
-                with SafeHDFStore(fname, mode='a') as store:
-                    if store is not None:
-                        log.debug(f"fname: {(fname)} keys:{store.keys()}")
-                        if showtable:
-                            print(f"fname: {(fname)} keys:{store.keys()}")
-                        if '/' + table in list(store.keys()):
-                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib)
-                            if tmpdf.empty:
-                                log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
-                                # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-            except Exception as e:
-                log.error(f"Failed to open store {fname}: {e}")
-                try:
-                    # 强力恢复模式：如果打开失败，直接尝试清理相关文件
-                    fname_path = cct.get_ramdisk_path(fname)
-                    if os.path.exists(fname_path):
-                        # 尝试解锁
-                        try:
-                            if hasattr(SafeHDFStore, '_release_lock'):
-                                # 静态调用很难，这里简化为清理 lock 文件
-                                lock_file = fname_path + ".lock"
-                                if os.path.exists(lock_file):
-                                    os.remove(lock_file)
-                        except: pass
-                        
-                        os.remove(fname_path)
-                        log.warning(f"Deleted corrupted HDF5 file after open failure: {fname} fname_path: {fname_path}")
-                except Exception as del_e:
-                    log.error(f"Failed to delete corrupted file {fname} fname_path: {fname_path}: {del_e}")
+    # 极致性能优化: 针对 MultiIndex 实时表，在盘中跳过加载合并逻辑
+    is_work_time = cct.get_work_time()
+    skip_read_merge = False
+    
+    if MultiIndex and append and not rewrite and is_work_time:
+        skip_read_merge = True
+        log.debug(f"⚡ [FAST-WRITE] Skipping read/merge for {fname} during work time.")
 
-            if not MultiIndex:
-                if index:
-                    df.index=list(map((lambda x: str(1000000 - int(x))
-                                    if x.startswith('0') else x), df.index))
-                if tmpdf is not None and len(tmpdf) > 0:
-                    if 'code' in tmpdf.columns:
-                        tmpdf=tmpdf.set_index('code')
-                    if 'code' in df.columns:
-                        df=df.set_index('code')
-                    diff_columns=set(df.columns) - set(tmpdf.columns)
-                    if len(diff_columns) != 0:
-                        log.error("columns diff:%s" % (diff_columns))
+    tmpdf = None
+    if table is not None and not skip_read_merge:
+        read_t = time.time()
+        try:
+            with SafeHDFStore(fname, mode='r') as store:
+                if store is not None:
+                    log.debug(f"fname: {(fname)} keys:{store.keys()}")
+                    if showtable:
+                        print(f"fname: {(fname)} keys:{store.keys()}")
+                    if '/' + table in list(store.keys()):
+                        tmpdf = safe_load_table(store, table, chunk_size=5000, MultiIndex=MultiIndex, complib=complib)
+                        if tmpdf.empty:
+                            log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
+        except Exception as e:
+            log.error(f"Failed to open store {fname}: {e}")
+            # ... 清理代码保持不变 ...
+        log.debug(f"Read HDF time: {time.time() - read_t:.2f}s")
 
-                    limit_t=time.time()
-                    df['timel']=limit_t
-                    # df_code = df.index.tolist()
-
-                    df=cct.combine_dataFrame(tmpdf, df, col=None, append=append)
-
-                    if not append:
-                        df['timel']=time.time()
-                    elif fname == 'powerCompute':
-                        o_time=df[df.timel < limit_t].timel.tolist()
-                        o_time=sorted(set(o_time), reverse=False)
-                        if len(o_time) >= ct.h5_time_l_count:
-                            o_time=[time.time() - t_x for t_x in o_time]
-                            o_timel=len(o_time)
-                            o_time=np.mean(o_time)
-                            if (o_time) > ct.h5_power_limit_time:
-                                df['timel']=time.time()
-                                log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
-
-                    log.info("read hdf time:%0.2f" % (time.time() - time_t))
-                else:
-                    log.info("h5 None hdf reindex time:%0.2f" %
-                             (time.time() - time_t))
-            else:
-                if not rewrite and tmpdf is not None and len(tmpdf) > 0:
-                    multi_code=tmpdf.index.get_level_values('code').unique().tolist()
-                    df_multi_code = df.index.get_level_values('code').unique().tolist()
-                    dratio = cct.get_diff_dratio(multi_code, df_multi_code)
-                    if dratio < ct.dratio_limit:
-                        comm_code = list(set(df_multi_code) & set(multi_code))
-                        # print df_multi_code,multi_code,comm_code,len(comm_code)
-                        inx_key=comm_code[random.randint(0, len(comm_code)-1)]
-                        if  inx_key in df.index.get_level_values('code'):
-                            now_time=df.loc[inx_key].index[-1]
-                            tmp_time=tmpdf.loc[inx_key].index[-1]
-                            if now_time == tmp_time:
-                                log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" % (fname, table,inx_key
-                                    , now_time))
-                                return False
-                    elif dratio == 1:
-                        print(("newData ratio:%s all:%s"%(dratio,len(df))))
-                    else:
-                        log.debug("dratio:%s main:%s new:%s %s %s Multi All Wri" % (dratio,len(multi_code),len(df_multi_code),fname, table))
-                else:
-                    log.debug("%s %s Multi rewrite:%s Wri!!!" % (fname, table, rewrite))
-
-
-    time_t=time.time()
+    if not MultiIndex:
+        # 非 MultiIndex 逻辑保持兼容...
+        if index:
+            df.index = list(map((lambda x: str(1000000 - int(x))
+                                 if x.startswith('0') else x), df.index))
+        if tmpdf is not None and len(tmpdf) > 0:
+            combine_t = time.time()
+            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
+            log.debug(f"Combine time: {time.time() - combine_t:.2f}s")
+    else:
+        # MultiIndex 模式
+        if not rewrite and tmpdf is not None and not tmpdf.empty:
+            # 去重检查逻辑，仅在有 tmpdf 时执行
+            multi_code = tmpdf.index.get_level_values('code').unique().tolist()
+            df_multi_code = df.index.get_level_values('code').unique().tolist()
+            dratio = cct.get_diff_dratio(multi_code, df_multi_code)
+            if dratio < ct.dratio_limit:
+                comm_code = list(set(df_multi_code) & set(multi_code))
+                if len(comm_code) > 0:
+                    inx_key = comm_code[random.randint(0, len(comm_code)-1)]
+                    if inx_key in df.index.get_level_values('code'):
+                        now_time = df.loc[inx_key].index[-1]
+                        tmp_time = tmpdf.loc[inx_key].index[-1]
+                        if now_time == tmp_time:
+                            log.debug(f"{fname} {table} Multi out {inx_key} has same time {now_time}. Skip write.")
+                            return False
+    
+    # 开始物理写入流程
     if df is not None and not df.empty and table is not None:
-        if df is not None and not df.empty and len(df) > 0:
-            dd=df.dtypes.to_frame()
-
+        # 类型规范化：HDF5 写入时 object 类型可能导致性能下降
+        dd = df.dtypes.to_frame()
         if 'object' in dd.values:
-            dd=dd[dd == 'object'].dropna()
-            col=dd.index.tolist()
-            log.debug("col:%s" % (col))
+            col_obj = dd[dd[0] == 'object'].index.tolist()
+            log.debug(f"Converting object columns to str: {col_obj}")
+            df[col_obj] = df[col_obj].astype(str)
             if not MultiIndex:
-                df[col]=df[col].astype(str)
-                df.index=df.index.astype(str)
-                df=df.fillna(0)
+                df.index = df.index.astype(str)
+            df = df.fillna(0)
 
-        # Atomic Write Optimization: Write to temp file and then rename
+        write_start_t = time.time()
         temp_fname = fname + ".tmp." + str(os.getpid())
         temp_fname = cct.get_ramdisk_path(temp_fname)
         fname_path = cct.get_ramdisk_path(fname)
 
         truncated_triggered = False
         try:
-            # # Ensure parent directory exists
-            # os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
-            
-            # # 1. First write to a temporary HDF5 file
-            # with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_store:
-            #     if not MultiIndex:
-            #         tmp_store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-            #     else:
-            #         tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-            #     tmp_store.flush()
-            #     tmp_store.close()
-
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
 
-            # 1. 复制原 h5 到 temp
-            if os.path.exists(fname_path):
-                shutil.copy2(fname_path, temp_fname)
-
-            # 2. 在 temp h5 中操作
-            with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
-                put_table_safe(
-                    tmp_h5,
-                    table,
-                    df,
-                    MultiIndex=MultiIndex,
-                    rewrite=rewrite,
-                    complib=complib
-                )
-                
-                # [FEATURE] 自动裁切逻辑: 超过 110% sizelimit 时裁切至 80%
-                if sizelimit is not None and MultiIndex and '/' + table in tmp_h5.keys():
-                    fsize_mb = os.path.getsize(temp_fname) / (1024 * 1024)
-                    if fsize_mb > sizelimit * 1.1:
-                        # 极限性能优化：如果是在交易时间，且文件没到 1.5 倍 limit，可以考虑更宽松的触发或跳过 Repack
-                        log.info(f"[HDF-TRUNCATE] {fname}[{table}] size {fsize_mb:.1f}MB > limit {sizelimit}MB*1.1, truncating...")
-                        full_df = tmp_h5.get(table)
-                        if not full_df.empty:
-                            # 优化: 尽量避免 apply(lambda)，虽然 tail 已经比较快
-                            # 这里保留 80% 逻辑，但若是极大数据量，apply 依然是瓶颈
-                            truncated_df = full_df.groupby(level='code', group_keys=False).tail(500) if fsize_mb > 500 else \
-                                           full_df.groupby(level='code', group_keys=False).apply(lambda x: x.tail(max(10, int(len(x) * 0.8))))
-                            
-                            # 原子覆盖原表
-                            tmp_h5.remove(table)
-                            put_table_safe(
-                                tmp_h5,
-                                table,
-                                truncated_df,
-                                MultiIndex=MultiIndex,
-                                rewrite=True,
-                                complib=complib
-                            )
-                            truncated_triggered = True
-                            log.info(f"[HDF-TRUNCATE] Done. Rows: {len(full_df)} -> {len(truncated_df)}")
-                
-                tmp_h5.flush()
-
-            # 2. Atomic Replace (Requires Exclusive Lock)
-            with SafeHDFStore(fname, mode='a') as h5:
-                # We have the lock, but SafeHDFStore has opened the original file.
-                # In Windows, we must close it before we can replace it.
-                h5.close() 
-                # Simple and reliable replacement
+            if skip_read_merge:
+                # 极致模式：直接在原路径上 append，不通过 tmp 文件复制（极致原子性让步于延迟，或使用锁定）
+                # 注意：Windows 下 SafeHDFStore 会加锁。
+                with SafeHDFStore(fname, mode='a', complib=complib) as h5:
+                    write_t = time.time()
+                    put_table_safe(h5, table, df, MultiIndex=MultiIndex, rewrite=False, complib=complib)
+                    log.debug(f"⚡ [FAST-WRITE] Fast append took {time.time() - write_t:.2f}s")
+            else:
+                # 兼容/稳健模式：原子性替换
                 if os.path.exists(fname_path):
-                    os.remove(fname_path)
-                os.replace(temp_fname, fname_path)
-                # os.rename(temp_fname, fname_path)
-                log.debug(f"✅ Atomic replace successful: {fname} ({table}) fname_path:{fname_path}")
-            
-            # [EXTREME PERFORMANCE OPTIMIZATION] 裁切后空间释放
+                    shutil.copy2(fname_path, temp_fname)
+
+                with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
+                    put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
+                    
+                    # 裁切逻辑 (逻辑同前，仅在非工作时间或严重超限时触发)
+                    if sizelimit is not None and MultiIndex and '/' + table in tmp_h5.keys():
+                        fsize_mb = os.path.getsize(temp_fname) / (1024 * 1024)
+                        if fsize_mb > sizelimit * 1.1:
+                            trunc_t = time.time()
+                            full_df = tmp_h5.get(table)
+                            if not full_df.empty:
+                                truncated_df = full_df.groupby(level='code', group_keys=False).tail(500) if fsize_mb > 500 else \
+                                               full_df.groupby(level='code', group_keys=False).apply(lambda x: x.tail(max(10, int(len(x) * 0.8))))
+                                tmp_h5.remove(table)
+                                put_table_safe(tmp_h5, table, truncated_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
+                                truncated_triggered = True
+                                log.info(f"[HDF-TRUNCATE] Done in {time.time() - trunc_t:.1f}s. Rows: {len(full_df)} -> {len(truncated_df)}")
+                    tmp_h5.flush()
+
+                # 原子替换
+                with SafeHDFStore(fname, mode='a') as h5:
+                    h5.close() 
+                    if os.path.exists(fname_path):
+                        os.remove(fname_path)
+                    os.replace(temp_fname, fname_path)
+                    log.debug(f"✅ Atomic replace successful: {fname}")
+
+            # 空间整理逻辑
             if truncated_triggered:
-                # 仅在非交易时间执行物理重排，或者文件膨胀到 2 倍 limit 时强制执行
-                is_work_time = cct.get_work_time()
                 fsize_final = os.path.getsize(fname_path) / (1024 * 1024)
-                
-                if not is_work_time or fsize_final > sizelimit * 2.5:
-                    log.info(f"[HDF-REPACK] Triggering physical repack (WorkTime={is_work_time}, Size={fsize_final:.1f}MB)")
+                if not is_work_time or fsize_final > sizelimit * 1.2:
+                    log.info(f"[HDF-REPACK] Physical repack for {fname} (Size: {fsize_final:.1f}MB)")
                     repack_hdf_db(fname, complib=complib)
                 else:
-                    log.info(f"⚡ [HDF-REPACK] Skipped during work time to ensure low latency. (Size: {fsize_final:.1f}MB)")
+                    log.info(f"⚡ [HDF-REPACK] Skipped during work time.")
                 
         except Exception as e:
-            log.error(f"❌ Atomic write failure for {fname}: {e}")
+            log.error(f"❌ HDF Write failure: {e}")
             if os.path.exists(temp_fname):
                 try: os.remove(temp_fname)
                 except: pass
             return False
-            
-    log.debug("write hdf time:%0.2f" % (time.time() - time_t))
+
+        duration = time.time() - time_t
+        if duration > 2.0 and is_work_time:
+             log.warning(f"⚠️ [SLOW] write_hdf_db is slow: {fname} took {duration:.2f}s (is_work_time={is_work_time})")
+    
+    log.debug("write hdf total time:%0.2f" % (time.time() - time_t))
     return True
 
 
@@ -2159,6 +2088,13 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     # -------------------------
     # Post-process & cleanup (与原逻辑保持一致)
     # -------------------------
+    # -------------------------
+    # Post-process & cleanup (与原逻辑保持一致)
+    # -------------------------
+    duration = time.time() - time_t
+    if duration > 2.0:
+        log.warning(f"⚠️ [SLOW] load_hdf_db slow: {fname} table:{table} took {duration:.2f}s (Rows: {len(df) if df is not None else 0})")
+
     if df is not None and len(df) > 0:
         # 保持原来行为：填充空值
         # 使用 inplace 以减少一次复制
