@@ -1409,7 +1409,7 @@ class Sina:
             h5_mi_table = 'all_' + str(limit_time_int)
             
             try:
-                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True)
+                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True, sizelimit=cct.sina_MultiIndex_limit)
                 log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
             except Exception as e:
                 log.error(f"HDF5 Write Error for {h5_mi_table}: {e}")
