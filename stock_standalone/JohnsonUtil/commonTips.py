@@ -839,6 +839,7 @@ class GlobalConfig:
         self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent', 'Rank', 'dff','per1d', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
         self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=800, value_type="int")
         self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=925, value_type="int")
+        self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=200, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
@@ -1128,6 +1129,7 @@ real_time_tick_limit: int = CFG.real_time_tick_limit
 real_time_cols: List[str] = CFG.real_time_cols
 start_init_tdx_time: int = CFG.start_init_tdx_time
 sina_MultiIndex_startTime: int = CFG.sina_MultiIndex_startTime
+sina_MultiIndex_limit: int = CFG.sina_MultiIndex_limit
 voice_rate: int = CFG.voice_rate
 voice_volume: float = CFG.voice_volume
 vis_column_map: Dict[str] = CFG.vis_column_map
@@ -8605,6 +8607,7 @@ if __name__ == '__main__':
     print(f"get_day_istrade_date('2026-02-27'): {get_day_istrade_date('2026-02-27')}")
     print(f'get_trade_date_status : {get_trade_date_status()}')
     print(get_ramdisk_path("minute_kline_cache.pkl"))
+    print(get_ramdisk_path("sina_MultiIndex_data_test.h5"))
     print(get_ramdisk_path("bidding_session_data.json.gz"))
     lastday = get_last_trade_date()
     last2day = get_last_trade_date(lastday)

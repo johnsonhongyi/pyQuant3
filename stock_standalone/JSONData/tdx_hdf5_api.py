@@ -175,7 +175,10 @@ class SafeHDFStore(pd.HDFStore):
             self.log.info(f"tdx_hd5: {self.fname}")
         else:
             self.fname = cct.get_ramdisk_path(self.fname_o)
-            self.basedir = self.fname.split(self.fname_o)[0]
+            if os.path.isabs(self.fname):
+                self.basedir = os.path.dirname(self.fname)
+            else:
+                self.basedir = self.fname.split(self.fname_o)[0]
             self.log.info(f"ramdisk_hd5: {self.fname}")
 
         if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
@@ -186,7 +189,7 @@ class SafeHDFStore(pd.HDFStore):
 
         if not os.path.exists(self.basedir):
             if RAMDISK_KEY < 1:
-                log.error("NO RamDisk Root:%s" % (baseDir))
+                log.error("NO RamDisk Root:%s" % (self.basedir))
                 RAMDISK_KEY += 1
         else:
             self.temp_file = self.fname + '_tmp'
@@ -1458,8 +1461,71 @@ def put_table_safe_src(h5, table, df, *,
             data_columns=index_col
         )
 
+def repack_hdf_db(fname, complib='blosc'):
+    """
+    通过 ptrepack 释放 HDF5 空间。
+    基于 SafeHDFStore 的配置进行重排。
+    """
+    fname_path = cct.get_ramdisk_path(fname)
+    if not os.path.exists(fname_path):
+        return False
+        
+    basedir = os.path.dirname(os.path.abspath(fname_path))
+    temp_file = fname_path + '_repack_tmp'
+    back_path = os.getcwd()
+    
+    # 构造命令模板 (参照 SafeHDFStore.__init__)
+    # ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --alignment=1024 --complevel=9 --complib=%s %s %s"
+    
+    try:
+        # 1. 准备临时文件 (Windows rename 往往需要先关闭所有句柄，此处假设调用者已关闭)
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        os.rename(fname_path, temp_file)
+        
+        # 2. 切换目录以执行相对路径命令 (安全性)
+        os.chdir(basedir)
+        temp_rel = os.path.relpath(temp_file, basedir)
+        fname_rel = os.path.relpath(fname_path, basedir)
+        
+        pt_cmd = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s" % (complib, temp_rel, fname_rel)
+        log.info(f'[HDF-REPACK] Executing: {pt_cmd}')
+        
+        p = subprocess.Popen(
+            pt_cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+        out, _ = p.communicate()
+        
+        if p.returncode != 0:
+            log.error(f"[HDF-REPACK] ptrepack failed: {out}")
+            # 失败回滚
+            if os.path.exists(temp_file) and not os.path.exists(fname_path):
+                os.rename(temp_file, fname_path)
+            return False
+            
+        # 3. 成功则清理
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        
+        old_size = os.path.getsize(temp_file if os.path.exists(temp_file) else fname_path) # 逻辑简化
+        new_size = os.path.getsize(fname_path)
+        log.info(f"✅ [HDF-REPACK] Success: {fname} physical size optimized.")
+        return True
+        
+    except Exception as e:
+        log.error(f"[HDF-REPACK] Error: {e}")
+        # 严重错误回滚
+        if os.path.exists(temp_file) and not os.path.exists(fname_path):
+            try: os.rename(temp_file, fname_path)
+            except: pass
+        return False
+    finally:
+        os.chdir(back_path)
 
-def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
+
+def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False, sizelimit=None):
 
     if 'code' in df.columns:
         df=df.set_index('code')
@@ -1588,6 +1654,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         temp_fname = cct.get_ramdisk_path(temp_fname)
         fname_path = cct.get_ramdisk_path(fname)
 
+        truncated_triggered = False
         try:
             # # Ensure parent directory exists
             # os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
@@ -1599,6 +1666,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             #     else:
             #         tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
             #     tmp_store.flush()
+            #     tmp_store.close()
 
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
 
@@ -1616,6 +1684,33 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     rewrite=rewrite,
                     complib=complib
                 )
+                
+                # [FEATURE] 自动裁切逻辑: 超过 110% sizelimit 时裁切至 80%
+                if sizelimit is not None and MultiIndex and '/' + table in tmp_h5.keys():
+                    fsize_mb = os.path.getsize(temp_fname) / (1024 * 1024)
+                    if fsize_mb > sizelimit * 1.1:
+                        # 极限性能优化：如果是在交易时间，且文件没到 1.5 倍 limit，可以考虑更宽松的触发或跳过 Repack
+                        log.info(f"[HDF-TRUNCATE] {fname}[{table}] size {fsize_mb:.1f}MB > limit {sizelimit}MB*1.1, truncating...")
+                        full_df = tmp_h5.get(table)
+                        if not full_df.empty:
+                            # 优化: 尽量避免 apply(lambda)，虽然 tail 已经比较快
+                            # 这里保留 80% 逻辑，但若是极大数据量，apply 依然是瓶颈
+                            truncated_df = full_df.groupby(level='code', group_keys=False).tail(500) if fsize_mb > 500 else \
+                                           full_df.groupby(level='code', group_keys=False).apply(lambda x: x.tail(max(10, int(len(x) * 0.8))))
+                            
+                            # 原子覆盖原表
+                            tmp_h5.remove(table)
+                            put_table_safe(
+                                tmp_h5,
+                                table,
+                                truncated_df,
+                                MultiIndex=MultiIndex,
+                                rewrite=True,
+                                complib=complib
+                            )
+                            truncated_triggered = True
+                            log.info(f"[HDF-TRUNCATE] Done. Rows: {len(full_df)} -> {len(truncated_df)}")
+                
                 tmp_h5.flush()
 
             # 2. Atomic Replace (Requires Exclusive Lock)
@@ -1629,6 +1724,18 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 os.replace(temp_fname, fname_path)
                 # os.rename(temp_fname, fname_path)
                 log.debug(f"✅ Atomic replace successful: {fname} ({table}) fname_path:{fname_path}")
+            
+            # [EXTREME PERFORMANCE OPTIMIZATION] 裁切后空间释放
+            if truncated_triggered:
+                # 仅在非交易时间执行物理重排，或者文件膨胀到 2 倍 limit 时强制执行
+                is_work_time = cct.get_work_time()
+                fsize_final = os.path.getsize(fname_path) / (1024 * 1024)
+                
+                if not is_work_time or fsize_final > sizelimit * 2.5:
+                    log.info(f"[HDF-REPACK] Triggering physical repack (WorkTime={is_work_time}, Size={fsize_final:.1f}MB)")
+                    repack_hdf_db(fname, complib=complib)
+                else:
+                    log.info(f"⚡ [HDF-REPACK] Skipped during work time to ensure low latency. (Size: {fsize_final:.1f}MB)")
                 
         except Exception as e:
             log.error(f"❌ Atomic write failure for {fname}: {e}")
