@@ -104,6 +104,7 @@ try:
     from JSONData import sina_data
     from tk_gui_modules.window_mixin import WindowMixin
     from dpi_utils import get_windows_dpi_scale_factor
+    from tdx_indicator_logic import calc_tdx_indicators
 except ImportError as e:
     print(f"Import Error: {e}. Please run this script from the stock_standalone directory.")
     sys.exit(1)
@@ -426,8 +427,9 @@ class CandlestickItem(pg.GraphicsObject):
             self.down_brush = pg.mkBrush(QColor(0, 150, 0))
             self.wick_pen = pg.mkPen(QColor(80, 80, 80))
 
-    def setData(self, data):
+    def setData(self, data, colors=None):
         self.data = np.asarray(data)
+        self.bar_colors = colors # Optional array of QColor or color strings
         self.generatePicture()
         self.prepareGeometryChange()
         self.update()
@@ -437,17 +439,27 @@ class CandlestickItem(pg.GraphicsObject):
         p = pg.QtGui.QPainter(self.picture)
         w = 0.4
 
-        for row in self.data:
+        has_custom_colors = hasattr(self, 'bar_colors') and self.bar_colors is not None and len(self.bar_colors) == len(self.data)
+
+        for i, row in enumerate(self.data):
             t, open_, close, low, high = row[:5]
-            if close >= open_:
-                pen = self.up_pen
-                brush = self.up_brush
+            
+            if has_custom_colors and self.bar_colors[i] is not None:
+                # Use custom color if provided for this bar
+                custom_color = pg.mkColor(self.bar_colors[i])
+                pen = pg.mkPen(custom_color)
+                brush = pg.mkBrush(custom_color)
             else:
-                pen = self.down_pen
-                brush = self.down_brush
+                # Default logic
+                if close >= open_:
+                    pen = self.up_pen
+                    brush = self.up_brush
+                else:
+                    pen = self.down_pen
+                    brush = self.down_brush
 
             # wick
-            p.setPen(self.wick_pen)
+            p.setPen(self.wick_pen if not has_custom_colors or self.bar_colors[i] is None else pen)
             p.drawLine(
                 pg.QtCore.QPointF(t, low),
                 pg.QtCore.QPointF(t, high)
@@ -2903,8 +2915,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ Load saved window position (Restores size and location)
         self._window_pos_loaded = False   # ⭐ 必须加
         self.load_splitter_state()
-        self._init_td_text_pool()
         self._init_tick_signal_pool()
+        self._init_custom_tdx_indicators_pool()
         
         self._init_hotlist_and_signal_log()
 
@@ -3690,18 +3702,6 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"Hotlist pattern check error: {e}")
 
 
-    def _init_td_text_pool(self, max_items=50):
-        self.td_text_pool = []
-
-        self.td_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
-        self.td_font_7p = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
-        self.td_font_norm = QtGui.QFont('Arial', 11, QtGui.QFont.Weight.Normal)
-
-        for _ in range(max_items):
-            t = pg.TextItem('', anchor=(0.5, 1))
-            t.hide()
-            self.kline_plot.addItem(t)
-            self.td_text_pool.append(t)
 
     def _init_tick_signal_pool(self, max_items=50):
         """
@@ -3718,6 +3718,27 @@ class MainWindow(QMainWindow, WindowMixin):
             t.hide()
             self.kline_plot.addItem(t)
             self.tick_signal_pool.append(t)
+
+    def _init_custom_tdx_indicators_pool(self, max_items=100):
+        """
+        初始化自定义通达信指标（九转、买卖）的对象池。
+        """
+        self.custom_indicator_pool = []
+        
+        # 字体预设
+        self.custom_font_signal = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
+        self.custom_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
+        
+        for _ in range(max_items):
+            t = pg.TextItem('', anchor=(0.5, 1))
+            t.hide()
+            self.kline_plot.addItem(t)
+            self.custom_indicator_pool.append(t)
+            
+        # 初始化翻转线曲线
+        if not hasattr(self, 'reversal_line_curve'):
+            self.reversal_line_curve = self.kline_plot.plot(pen=pg.mkPen(QColor(255, 255, 0), width=1.5), name="Reversal Line")
+            self.reversal_line_curve.hide() # 默认隐藏，由渲染逻辑控制
 
     def _update_tick_shadow_signal(self, code, tick_df, shadow_decision, x_axis=None):
         """
@@ -3886,15 +3907,27 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_td_sequential = checked
 
         # TD 图层还没初始化，直接返回
-        if not hasattr(self, 'td_text_pool'):
+        if not hasattr(self, 'custom_indicator_pool'):
             return
 
         if not checked:
-            # ❗ 只隐藏，不 remove
-            for t in self.td_text_pool:
+            # ❗ 隐藏所有标记
+            for t in self.custom_indicator_pool:
                 t.hide()
+            
+            # ❗ 隐藏翻转线
+            if hasattr(self, 'reversal_line_curve'):
+                self.reversal_line_curve.hide()
+
+            # ❗ 触发重新渲染以恢复 K 线默认颜色
+            if self.current_code:
+                self.render_charts(
+                    self.current_code,
+                    self.day_df,
+                    getattr(self, 'tick_df', pd.DataFrame())
+                )
         else:
-            # 开启时，重新渲染（会复用对象池）
+            # 开启时，重新渲染（会复用对象池，并计算指标）
             if self.current_code:
                 self.render_charts(
                     self.current_code,
@@ -5695,13 +5728,34 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_crosshair_label.setHtml(text)
         self.tick_crosshair_label.setVisible(True)
         
-        # 自动调整位置
-        vb = self.tick_plot.vb
-        view_range = vb.viewRange()
-        y_range = view_range[1]
-        label_y = y_price - (y_range[1] - y_range[0]) * 0.15
-        if label_y < y_range[0]: label_y = y_price + (y_range[1] - y_range[0]) * 0.15
-        self.tick_crosshair_label.setPos(idx, label_y)
+        # 自动调整位置，防止右边缘遮挡
+        view_range = self.tick_plot.vb.viewRange()
+        x_range, y_range = view_range[0], view_range[1]
+
+        # 阈值：如果索引接近右边缘 (最后 20% 区域)
+        boundary_x_right = x_range[0] + (x_range[1] - x_range[0]) * 0.8
+        
+        if idx > boundary_x_right:
+            self.tick_crosshair_label.setAnchor((1.1, 1.1)) # 靠右显示在左下
+        else:
+            self.tick_crosshair_label.setAnchor((-0.1, 1.1)) # 靠左显示在右下
+
+        # Y 轴避让：底部或顶部
+        if y_price < y_range[0] + (y_range[1] - y_range[0]) * 0.2:
+             self.tick_crosshair_label.setAnchor((self.tick_crosshair_label.anchor.x(), -0.1)) # 在鼠标下方
+        elif y_price > y_range[0] + (y_range[1] - y_range[0]) * 0.8:
+             self.tick_crosshair_label.setAnchor((self.tick_crosshair_label.anchor.x(), 1.1)) # 在鼠标上方 (默认)其实 anchor 的 y=1.1 是向上偏移
+             # [Correction] anchor (0, 1) usually means the label's top-left is at the POS? 
+             # No, pyqtgraph anchor: (0,0) is top-left, (1,1) is bottom-right.
+             # anchor (0, 1) means bottom-left of label is at position.
+             pass
+        
+        # 统一逻辑:
+        # X: 0 (显示在右), 1 (显示在左)
+        # Y: 1 (显示在平齐/略高), 0 (显示在下)
+        
+        # 修正 K线逻辑的 anchor_y 灵敏度并应用到分时
+        # 我们希望靠近顶端时显示在下方，靠近底端时显示在上方。
 
     def _hide_tick_crosshair(self):
         self.tick_vline.setVisible(False)
@@ -5799,22 +5853,33 @@ class MainWindow(QMainWindow, WindowMixin):
             
         self.crosshair_label.setHtml(text)
 
-        # 计算浮窗位置
+        # 自动调整浮窗位置，防止右边缘遮挡
         view_range = self.kline_plot.viewRange()
         x_range, y_range = view_range[0], view_range[1]
 
-        label_x = idx
-        label_y = y_price - (y_range[1] - y_range[0]) * 0.08
+        # 阈值：如果索引接近右边缘 (最后 25% 区域)
+        boundary_x_right = x_range[0] + (x_range[1] - x_range[0]) * 0.75
+        boundary_x_left = x_range[0] + (x_range[1] - x_range[0]) * 0.10
+        
+        anchor_x, anchor_y = 0.0, 1.1 # 默认左下角对齐鼠标 (显示在右上方)
 
-        if idx > (x_range[0] + x_range[1]) * 0.7:
-            label_x = idx - (x_range[1] - x_range[0]) * 0.12
-        elif idx < (x_range[0] + x_range[1]) * 0.3:
-            label_x = idx + (x_range[1] - x_range[0]) * 0.02
+        if idx > boundary_x_right:
+            # 靠右：显示在左侧
+            anchor_x = 1.1
+        elif idx < boundary_x_left:
+            # 靠左：显示在右侧
+            anchor_x = -0.1
+        else:
+            anchor_x = -0.05 # 微调
+            
+        # Y 轴避让：如果鼠标太靠上 (顶部 20% 区域)
+        if y_price > y_range[0] + (y_range[1] - y_range[0]) * 0.75:
+            anchor_y = -0.1 # 显示在鼠标下方
+        else:
+            anchor_y = 1.1 # 显示在鼠标上方
 
-        if y_price < (y_range[0] + y_range[1]) * 0.3:
-            label_y = y_price + (y_range[1] - y_range[0]) * 0.08
-
-        self.crosshair_label.setPos(label_x, label_y)
+        self.crosshair_label.setAnchor((anchor_x, anchor_y))
+        self.crosshair_label.setPos(idx, y_price)
         self.crosshair_label.setVisible(True)
 
     def zoom_kline(self, in_=True):
@@ -8951,104 +9016,118 @@ class MainWindow(QMainWindow, WindowMixin):
                 getattr(self, attr).setData(x_axis, series)
                 getattr(self, attr).setPen(pg.mkPen(color, width=2))
 
-        # 仅在开关开启时绘制
+        # --- Upgraded Tdx Indicators (九转, 买卖, 翻转线, K线染色) ---
         if getattr(self, 'show_td_sequential', True):
-
-            # --- TD Sequential (神奇九转) ---
             try:
-                from JSONData.tdx_data_Day import td_sequential_fast
-
-                # 1️⃣ 计算 TD Sequential（完整历史）
-                with timed_ctx("td_sequential_fast", warn_ms=100):
-                    df_td = td_sequential_fast(day_df)
-
-                # 2️⃣ 初始化对象池（第一次调用）
-                if not hasattr(self, 'td_text_pool'):
-                    self.td_text_pool = []
-
-                    # 字体缓存
-                    self.td_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
-                    self.td_font_7p = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
-                    self.td_font_norm = QtGui.QFont('Arial', 11, QtGui.QFont.Weight.Normal)
-
-                    # 预创建 TextItem，最大 50 个
-                    for _ in range(50):
-                        t = pg.TextItem('', anchor=(0.5, 1))
-                        t.hide()
-                        self.kline_plot.addItem(t)
-                        self.td_text_pool.append(t)
-
-                # 3️⃣ 仅在开关开启时绘制
-                if not getattr(self, 'show_td_sequential', True):
-                    # TD 关闭时，全部隐藏
-                    for t in self.td_text_pool:
-                        t.hide()
-                    return
-
-                # 4️⃣ 只显示最近 30 根 K
-                N = 30
-                total = len(df_td)
-                start = max(0, total - N)
-
-                # 5️⃣ 预取 numpy 避免 iloc
-                buy = df_td['td_buy_count'].values
-                sell = df_td['td_sell_count'].values
-                highs = day_df['high'].values
-
-                # 6️⃣ 对象池绘制
-                pool = self.td_text_pool
+                # 1. 计算核心指标
+                df_custom = calc_tdx_indicators(day_df)
+                
+                # 2. K 线染色 (VAR1:Red, VARD:Silver, 主力买:Yellow, 主力卖:Magenta)
+                custom_colors = []
+                is_red = df_custom['is_red_hold'].values
+                is_cyan = df_custom['is_cyan_watch'].values
+                main_buy = df_custom['main_buy'].values
+                main_sell = df_custom['main_sell'].values
+                
+                for i in range(len(df_custom)):
+                    if main_buy[i]:
+                        custom_colors.append('#00FFFF') # Yellow-Cyan (主力买入)
+                    elif main_sell[i]:
+                        custom_colors.append('#FF00FF') # Magenta (主力卖出)
+                    elif is_red[i]:
+                        custom_colors.append('#FF0000') # Red (红色持股)
+                    elif is_cyan[i]:
+                        custom_colors.append('#C0C0C0') # Silver (青色观望/灰色)
+                    else:
+                        custom_colors.append(None) # Default
+                
+                # 应用染色到 CandlestickItem
+                self.candle_item.setData(ohlc_data, colors=custom_colors)
+                
+                # 3. 绘制翻转线 (Reversal Line)
+                if hasattr(self, 'reversal_line_curve'):
+                    rev_data = df_custom['reversal_line'].values
+                    self.reversal_line_curve.setData(x_axis, rev_data)
+                    self.reversal_line_curve.show()
+                
+                # 4. 绘制标签 (九转序列 1-9, 主力买卖文字)
+                # 使用专门的对象池 custom_indicator_pool
+                pool = self.custom_indicator_pool
+                for t in pool: t.hide()
+                
                 pool_idx = 0
-
-                # 先隐藏全部
-                for t in pool:
-                    t.hide()
-
-                with timed_ctx("draw_td_sequential", warn_ms=40):
-                    for i in range(start, total):
-                        buy_cnt = buy[i]
-                        sell_cnt = sell[i]
-
-                        if buy_cnt == 0 and sell_cnt == 0:
-                            continue
-                        if pool_idx >= len(pool):
-                            break
-
+                N_view = 120 # 只显示最近 120 根
+                start_i = max(0, len(df_custom) - N_view)
+                
+                highs = day_df['high'].values
+                lows = day_df['low'].values
+                
+                up_labels = df_custom['td_up_label'].values
+                up_9 = df_custom['td_up_9'].values
+                dn_labels = df_custom['td_dn_label'].values
+                dn_9 = df_custom['td_dn_9'].values
+                
+                for i in range(start_i, len(df_custom)):
+                    if pool_idx >= len(pool): break
+                    
+                    # --- 九转标签 (1-9) ---
+                    # 放在 H * 1.05 或 L * 0.95 以免与买卖点重叠
+                    if up_labels[i] > 0:
                         t = pool[pool_idx]
-                        pool_idx += 1
-
-                        # 判断是 buy 还是 sell
-                        if buy_cnt > 0:
-                            td_cnt = buy_cnt
-                            # buy 用黄色系
-                            if td_cnt == 9:
-                                t.setColor('#FFFF00')      # 明黄色，买入信号
-                                t.setFont(self.td_font_9)
-                            elif td_cnt >= 7:
-                                t.setColor('#FFD700')      # 金黄色，买入强势
-                                t.setFont(self.td_font_7p)
-                            else:
-                                t.setColor('#E6C200')      # 深黄色，买入弱势
-                                t.setFont(self.td_font_norm)
-
-                        else:
-                            td_cnt = sell_cnt
-                            # sell 用绿色系
-                            if td_cnt == 9:
-                                t.setColor('#00FF00')      # 明绿色，卖出信号
-                                t.setFont(self.td_font_9)
-                            elif td_cnt >= 7:
-                                t.setColor('#32CD32')      # 亮绿色，卖出强势
-                                t.setFont(self.td_font_7p)
-                            else:
-                                t.setColor('#228B22')      # 深绿色，卖出弱势
-                                t.setFont(self.td_font_norm)
-
-                        t.setText(str(td_cnt))
-                        t.setPos(x_axis[i], highs[i] * 1.008)
+                        t.setText(str(int(up_labels[i])))
+                        t.setColor(QColor(0, 255, 0) if up_9[i] else QColor(255, 255, 0))
+                        t.setFont(self.custom_font_9 if up_9[i] else self.custom_font_signal)
+                        t.setPos(x_axis[i], highs[i] * 1.05)
                         t.show()
+                        pool_idx += 1
+                    elif dn_labels[i] > 0:
+                        t = pool[pool_idx]
+                        t.setText(str(int(dn_labels[i])))
+                        t.setColor(QColor(255, 255, 0) if dn_9[i] else QColor(0, 255, 0))
+                        t.setFont(self.custom_font_9 if dn_9[i] else self.custom_font_signal)
+                        t.setPos(x_axis[i], lows[i] * 0.95)
+                        t.show()
+                        pool_idx += 1
+                    
+                    if pool_idx >= len(pool): break
+                    
+                    # --- 主力买卖文字 (带斜向箭头) ---
+                    # 靠近 K 线: 买 L * 0.985, 卖 H * 1.015
+                    if main_buy[i]:
+                        t = pool[pool_idx]
+                        t.setText('↗主买') # 使用斜向上箭头
+                        t.setColor(QColor(0, 255, 255)) # Cyan
+                        t.setFont(self.custom_font_signal)
+                        t.setPos(x_axis[i], lows[i] * 0.95) # 稍微再下移一点
+                        t.show()
+                        pool_idx += 1
+                    elif main_sell[i]:
+                        t = pool[pool_idx]
+                        t.setText('主卖↘') # 使用斜向下箭头
+                        t.setColor(QColor(255, 0, 255)) # Magenta
+                        t.setFont(self.custom_font_signal)
+                        t.setPos(x_axis[i], highs[i] * 1.015) # 稍微再上移一点
+                        t.show()
+                        pool_idx += 1
+                        
 
             except Exception as e:
-                logger.debug(f"TD Sequential display error: {e}")
+                logger.error(f"Upgraded Tdx Indicators display error: {e}")
+                # logger.debug(traceback.format_exc())
+        else:
+            # --- [BUGFIX] 当九转开关关闭时，执行彻底清理 ---
+            # 1. 隐藏池中所有 TextItem
+            if hasattr(self, 'custom_indicator_pool'):
+                for t in self.custom_indicator_pool:
+                    t.hide()
+            
+            # 2. 隐藏翻转线
+            if hasattr(self, 'reversal_line_curve'):
+                self.reversal_line_curve.hide()
+            
+            # 3. 重置 K 线颜色为默认 (传入 colors=None)
+            if hasattr(self, 'candle_item'):
+                self.candle_item.setData(ohlc_data, colors=None)
 
         # [NEW] 绘制跳空缺口 (最近 5 个)
         self._draw_price_gaps(x_axis, day_df)
