@@ -2879,14 +2879,22 @@ if __name__ == "__main__":
 
 
     def recover_tick_volume_vectorized(df, vol_col='volume'):
-        """
-        Function: recover_tick_volume_vectorized
-        Summary: gpt
-        Examples: InsertHere
-        Attributes: 
-            @param (df):InsertHere
-            @param (vol_col) default='volume': InsertHere
-        Returns: InsertHere
+        """
+
+        Function: recover_tick_volume_vectorized
+
+        Summary: gpt
+
+        Examples: InsertHere
+
+        Attributes: 
+
+            @param (df):InsertHere
+
+            @param (vol_col) default='volume': InsertHere
+
+        Returns: InsertHere
+
         将累加成交量还原为每条 tick 当天独立成交量
         df: MultiIndex(code, ticktime) DataFrame，volume 是累加量
         返回新的 df，增加 'tick_volume'
@@ -2925,14 +2933,22 @@ if __name__ == "__main__":
         return df
 
     def recover_tick_volume_fast(df, vol_col='volume'):
-        """
-        Function: recover_tick_volume_fast
-        Summary: google
-        Examples: InsertHere
-        Attributes: 
-            @param (df):InsertHere
-            @param (vol_col) default='volume': InsertHere
-        Returns: InsertHere
+        """
+
+        Function: recover_tick_volume_fast
+
+        Summary: google
+
+        Examples: InsertHere
+
+        Attributes: 
+
+            @param (df):InsertHere
+
+            @param (vol_col) default='volume': InsertHere
+
+        Returns: InsertHere
+
         极限矢量化版本：将累积成交量还原为每 Tick 成交量
         """
         # 1. 预处理：去重 (MultiIndex 下直接使用 index.duplicated)
@@ -2992,7 +3008,7 @@ if __name__ == "__main__":
         # df_result = intraday_ma_high_trend_ultra_final(df)
         # df_result = intraday_ma_high_trend_multi_day(df)
         df_result = intraday_ma_high_trend_extreme_v5(df)
-    print(df_result)
+    print(df_result[:30])
     cct.print_timing_summary()
     import ipdb;ipdb.set_trace()
 
@@ -3002,8 +3018,8 @@ if __name__ == "__main__":
     
     # print(hm5.memory_usage(deep=True).sum() / 1024**2, "MB")
     # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
-    print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
     # print(f"sina_data:{check_hdf(h5_fname='tdx_all_df_300',h5_table='all')}")
+    print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
     sina = read_sina_df(h5_fname='sina_data',h5_table='all')
     df_diagnose(sina)
     import ipdb;ipdb.set_trace()
