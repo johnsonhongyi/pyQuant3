@@ -5909,7 +5909,6 @@ class MainWindow(QMainWindow, WindowMixin):
             today_bar = tick_to_daily_bar(effective_tick_df)
 
             # 注意：這裡直接調用渲染，確保模擬數據被帶入
-            self._capture_view_state()
             with timed_ctx("render_charts_detailed", warn_ms=50):
                 # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
                 self.render_charts(code, self.day_df, effective_tick_df)
@@ -5920,7 +5919,6 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
-            self._capture_view_state()
             with timed_ctx("rrender_charts_detailed_historical", warn_ms=50):
                 self.render_charts(code, self.day_df, None)
 
@@ -7883,7 +7881,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
-        if not hasattr(self, 'day_df') or self.day_df.empty:
+        if not hasattr(self, 'day_df') or self.day_df.empty or len(self.day_df) < 30:
             return
         try:
             vb = self.kline_plot.getViewBox()
@@ -9621,33 +9619,39 @@ class MainWindow(QMainWindow, WindowMixin):
         self._last_rendered_code = code
 
 
-        # 判断周期是否变化
+        # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
+        # 核心修复：立即同步周期状态，防止实时刷新误判为“切换周期”
         last_resample = getattr(self, "_last_resample", None)
-        is_resample_change = last_resample != self.resample  # None != '3d' 第一次会是 True
-        logger.debug(f"resample check: last={last_resample}, current={self.resample}, is_change={is_resample_change}")
-        
-        # 复合视角恢复标志
+        is_resample_change = last_resample != self.resample
+        if is_resample_change:
+            self._last_resample = self.resample
+            logger.debug(f"[VIEW] Resample changed detected: {last_resample} -> {self.resample}")
+
+        # 辅助状态判定
         has_captured_state = hasattr(self, '_prev_dist_left') and getattr(self, '_prev_y_zoom', None) is not None
         was_full_view = getattr(self, '_prev_is_full_view', False)
 
         if is_new_stock or is_resample_change or has_captured_state:
-            # [FIX] 只在真正发生变化时更新 _last_resample
-            if is_resample_change:
-                self._last_resample = self.resample
-                logger.debug(f"✅ Resample changed: {last_resample} → {self.resample}")
-            
             vb = self.kline_plot.getViewBox()
-            # 如果之前是"全览"状态，或者根本没有捕获状态，则执行 Reset (全览)
-            logger.debug(f'was_full_view: {was_full_view} has_captured_state: {has_captured_state}')
-            if was_full_view or not has_captured_state or is_resample_change:
+            new_total = len(day_df)
+
+            # 判定：是否应该应用记忆状态
+            # 1. 之前不是全显状态 2. 不是切换周期 3. 数据足够长（新股数据量必须能支撑记忆中的宽度）
+            should_apply_memory = has_captured_state and not was_full_view and not is_resample_change
+            if should_apply_memory:
+                prev_width = self._prev_dist_left - self._prev_dist_right
+                if new_total < prev_width:
+                    should_apply_memory = False
+                    logger.debug(f"[VIEW] New data ({new_total}) cannot accommodate memorized width ({prev_width}), forcing reset.")
+
+            if not should_apply_memory:
                 self._reset_kline_view(df=day_df)
             else:
-                # 处于“记忆”状态：用户之前可能缩放到了某个特定区域
-                new_total = len(day_df)
+                # 处于“记忆”状态：以右侧为基准还原视口
                 target_left = max(-1, new_total - self._prev_dist_left)
                 target_right = new_total - self._prev_dist_right
 
-                # 设置 X 轴，留出缓冲
+                # 设置 X 轴范围 (padding=0 确保绝对对齐)
                 vb.setRange(xRange=(target_left, target_right), padding=0)
 
                 # 适配 Y 轴
@@ -9655,27 +9659,23 @@ class MainWindow(QMainWindow, WindowMixin):
                 if not visible_new.empty:
                     new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
                     
-                    # [FIX] 如果是切换新股，我们保留 X 轴的缩放习惯（看末尾多少根），
-                    # 但 Y 轴由于价格量级可能完全不同（如 20 vs 400），不再使用上一只股票的比例，而是直接全量适配。
                     if is_new_stock:
                         y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
                         vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
-                        logger.debug(f"[VIEW] New stock {code} detected, resetting Y-range only.")
                     else:
-                        # 周期切换或增量刷新：尽量保持之前的 Y 轴缩放比例关系
                         new_rng = new_h - new_l if new_h > new_l else 1.0
                         p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
                         target_h = new_rng * p_zoom
                         target_y_center = new_l + (new_rng * p_center_rel)
                         vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
 
-                # 保持自适应开启
-                vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-                vb.setAutoVisible(y=True)
-
-            # 清理刚才使用的临时状态
+            # 统一清理临时的捕获状态
             for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
                 if hasattr(self, attr): delattr(self, attr)
+
+            # 保持自适应开启
+            vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            vb.setAutoVisible(y=True)
         # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
         # 如果不是新股切换，检查当前价格是否在视野内。如果偏离过大（例如缓存数据与实时数据价差巨大），强制回正
         if not (is_new_stock or is_resample_change or has_captured_state):
