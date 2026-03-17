@@ -1614,7 +1614,7 @@ class DataPublisher:
         self.high_performance = high_performance
         self.simulation_mode = simulation_mode
         self.verbose = verbose
-        
+        self._save_lock = threading.Lock()
         # 核心缓存组件 (传递 verbose)
         self.kline_cache = MinuteKlineCache(
             max_len=240 if high_performance else 1440,
@@ -2222,55 +2222,59 @@ class DataPublisher:
         """
         手动或周期性将当前 K 线缓存保存到磁盘快照
         :param force: 是否强制保存 (忽略时间间隔)
-        """
-        try:
-            if not hasattr(self, 'kline_cache') or not self.kline_cache:
-                return
-            
-            now = time.time()
-            # 只有在强制模式，或者时间间隔已到时才检查脏标记
-            if not force and (now - self._last_save_ts < self._save_interval):
-                return
-            
-            # 如果不脏，则只更新时间戳
-            if not self.kline_cache._is_dirty and self._last_save_ts > 0:
-                self._last_save_ts = now
-                return
-
-            with timed_ctx("save_kline_cache", warn_ms=1500):
-                save_cache_df = self.kline_cache.to_dataframe()
-                if not save_cache_df.empty:
-                    # [PROTECTION] 如果启动时加载失败，且当前数据量依然不足 (如 < 10000 行)，禁止自动保存覆盖
-                    current_rows = len(save_cache_df)
-                    if self._is_recovered_empty and current_rows < 10000:
-                        if now - self._last_save_ts > 1800: # 每 30 分钟才报一次警告
-                             logger.warning(f"⚠️ [Protection] Snapshot save SKIPPED: Recovered empty, and current rows({current_rows}) < 10000 threshold.")
-                             self._last_save_ts = now
-                        return
-
-                    # 1. 保存到本地磁盘进行恢复 (已在 cache_utils.py 中加持 min_rows_factor 保护)
-                    status = self.cache_slot.save_df(
-                        save_cache_df, 
-                        persist=True, 
-                        backup=self._enable_backup,
-                        min_rows_factor=0.5,
-                        force=force
-                    )
-                    
-                    if status:
-                        self._is_recovered_empty = False # 成功保存一次后，解除空加载警报
-                    
+        """
+        if self._save_lock.locked():
+            logger.warning("save_cache skipped: another save in progress")
+            return
+        with self._save_lock:
+            try:
+                if not hasattr(self, 'kline_cache') or not self.kline_cache:
+                    return
+                
+                now = time.time()
+                # 只有在强制模式，或者时间间隔已到时才检查脏标记
+                if not force and (now - self._last_save_ts < self._save_interval):
+                    return
+                
+                # 如果不脏，则只更新时间戳
+                if not self.kline_cache._is_dirty and self._last_save_ts > 0:
                     self._last_save_ts = now
-                    self.kline_cache._is_dirty = False
-                    self._last_save_status = "SUCCESS" if status else "FAILED"
-                    logger.info(f"💾 MinuteKlineCache snapshot saved. (Rows: {len(save_cache_df)}, Success: {status}, Force: {force})")
-                else:
-                    # 如果数据为空（可能被过滤了），也更新时间戳以避免频繁重试
-                    self._last_save_ts = now
-                    self._last_save_status = "EMPTY_SKIP"
-                    logger.debug("save_cache skipped: no data to save (maybe outside trading hours).")
-        except Exception as e:
-            logger.error(f"save_cache error: {e}")
+                    return
+
+                with timed_ctx("save_kline_cache", warn_ms=1500):
+                    save_cache_df = self.kline_cache.to_dataframe()
+                    if not save_cache_df.empty:
+                        # [PROTECTION] 如果启动时加载失败，且当前数据量依然不足 (如 < 10000 行)，禁止自动保存覆盖
+                        current_rows = len(save_cache_df)
+                        if self._is_recovered_empty and current_rows < 10000:
+                            if now - self._last_save_ts > 1800: # 每 30 分钟才报一次警告
+                                 logger.warning(f"⚠️ [Protection] Snapshot save SKIPPED: Recovered empty, and current rows({current_rows}) < 10000 threshold.")
+                                 self._last_save_ts = now
+                            return
+
+                        # 1. 保存到本地磁盘进行恢复 (已在 cache_utils.py 中加持 min_rows_factor 保护)
+                        status = self.cache_slot.save_df(
+                            save_cache_df, 
+                            persist=True, 
+                            backup=self._enable_backup,
+                            min_rows_factor=0.5,
+                            force=force
+                        )
+                        
+                        if status:
+                            self._is_recovered_empty = False # 成功保存一次后，解除空加载警报
+                        
+                        self._last_save_ts = now
+                        self.kline_cache._is_dirty = False
+                        self._last_save_status = "SUCCESS" if status else "FAILED"
+                        logger.info(f"💾 MinuteKlineCache snapshot saved. (Rows: {len(save_cache_df)}, Success: {status}, Force: {force})")
+                    else:
+                        # 如果数据为空（可能被过滤了），也更新时间戳以避免频繁重试
+                        self._last_save_ts = now
+                        self._last_save_status = "EMPTY_SKIP"
+                        logger.debug("save_cache skipped: no data to save (maybe outside trading hours).")
+            except Exception as e:
+                logger.error(f"save_cache error: {e}")
 
 
     def subscribe(self, code: str, callback: Callable[..., object]):
