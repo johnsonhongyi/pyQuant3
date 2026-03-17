@@ -55,7 +55,7 @@ class TickSeries:
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
                  'is_upper_band', 'is_new_high', 'momentum_score',
                  '_splitted_cats', '_total_vol', '_total_amt',
-                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'cycle_stage')
+                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -94,18 +94,20 @@ class TickSeries:
         self.score_diff: float = 0.0
         self.price_anchor: float = 0.0
         self.pct_diff: float = 0.0
+        self.price_diff: float = 0.0
+        self.dff: float = 0.0
         self.cycle_stage: int = 2
 
     def update_meta(self, row: pd.Series):
         """从 df_all 行更新元数据"""
-        # [FIX] 优先查找 llstp, llastp 或 pre_close 作为昨日收盘价
-        val_last = row.get('llastp', row.get('lastp1d', row.get('pre_close', row.get('llastp1d', 0.0))))
-        self.last_close = float(val_last) if not pd.isna(val_last) else 0.0
+        # [FIX] 优先使用 pre_close (通常是静态的昨收)，其次是上次成交价
+        # 避免在竞价阶段 llstp 可能返回当前虚拟撮合价导致涨幅恒为 0 的问题。
+        val_pre = row.get('pre_close', row.get('lastp1d', row.get('llastp1d', row.get('llstp', 0.0))))
+        self.last_close = float(val_pre) if not pd.isna(val_pre) else 0.0
         
-        # 如果依然没有获得有效的 last_close，尝试 nclose 但要小心它可能是现价
-        if self.last_close <= 0:
-            val_nclose = row.get('nclose', 0.0)
-            self.last_close = float(val_nclose) if not pd.isna(val_nclose) else 0.0
+        # 记录 open_price
+        val_open = row.get('open', 0.0)
+        self.open_price = float(val_open) if not pd.isna(val_open) else 0.0
 
         val_lasth = row.get('lasth1d', self.last_close)
         self.last_high = float(val_lasth) if not pd.isna(val_lasth) else 0.0
@@ -138,6 +140,8 @@ class TickSeries:
         # [FIX] 对可能为 NaN 的整数字段进行安全转换
         ral_val = row.get('ral', 0)
         self.ral = int(ral_val) if not pd.isna(ral_val) else 0
+        
+        self.dff = float(row.get('dff', 0.0)) if not pd.isna(row.get('dff')) else 0.0
         
         top0_val = row.get('top0', 0)
         self.top0 = int(top0_val) if not pd.isna(top0_val) else 0
@@ -450,12 +454,12 @@ class BiddingMomentumDetector:
         return cct.get_ramdisk_path("bidding_session_data.json.gz")
 
     def save_persistent_data(self):
-        """保存当前个股得分和板块强度到磁盘"""
+        """保存当前个股得分和板块强度到磁盘 (原子化强化版)"""
         if self.in_history_mode or not cct.get_trade_date_status():
-            # 此时处于历史复盘模式，不保存快照以防止覆盖真实数据
             return
 
         try:
+            # [Data Preparation ...]
             data = {
                 'timestamp': round(time.time(), 2),
                 'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if (ts.score > 0 or ts.momentum_score > 0)},
@@ -469,24 +473,17 @@ class BiddingMomentumDetector:
                                         for code, ts in self._tick_series.items() if ts.price_anchor > 0},
                 'watchlist': self.daily_watchlist
             }
-            # [REFINED] 防覆盖保护：
-            # 1. 如果没有活跃板块 且 没有重点股 且 没有显著得分的个股
-            # 我们跳过保存以防止覆盖掉之前有效的历史会话数据。
+            
             sd_count = len(data.get('sector_data', {}))
             wl_count = len(data.get('watchlist', {}))
-            
-            # 为了过滤浮点数残留，只统计得分超过 0.1 的个股
             significant_stocks = {code: s for code, s in data.get('stock_scores', {}).items() if s >= 0.1}
             ss_count = len(significant_stocks)
             
             if sd_count == 0 and wl_count == 0 and ss_count == 0:
-                logger.info("ℹ️ [Detector] 当前无活跃板块、重点股及显著个股分，跳过会话保存以保护历史数据。")
+                logger.debug("ℹ️ [Detector] No active signals to save.")
                 return
 
-            # [ENRICHED] 补充元数据：保存所有显著个股与活跃板块内个股的数据
             relevant_codes = set(significant_stocks.keys()) | set(data.get('watchlist', {}).keys()) | set(self.stock_selector_seeds.keys())
-            
-            # 加入所有活跃板块中的个股
             for sinfo in self.active_sectors.values():
                 relevant_codes.add(sinfo.get('leader'))
                 for f in sinfo.get('followers', []):
@@ -502,34 +499,35 @@ class BiddingMomentumDetector:
                         'reason': getattr(ts, 'pattern_hint', ''),
                         'category': ts.category,
                         'last_close': ts.last_close,
-                        'high_day': ts.high_day,
-                        'low_day': ts.low_day,
-                        'last_high': ts.last_high,
-                        'last_low': ts.last_low,
                         'klines': list(ts.klines)
-                    }
-                elif code in self.stock_selector_seeds:
-                    s_seed = self.stock_selector_seeds[code]
-                    meta_data[code] = {
-                        'name': s_seed.get('name', ''),
-                        'reason': s_seed.get('reason', '')
                     }
             data['meta_data'] = meta_data
 
-            path = self._get_persistence_path()
-            # 使用 gzip 压缩存储 JSON
-            with gzip.open(path, 'wt', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            # ⭐ [C-Reinforcement] 原子化写入：先写临时文件，然后 os.replace
+            def atomic_gz_save(target_path, data_dict):
+                temp_path = target_path + f".{os.getpid()}.tmp"
+                try:
+                    with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
+                        json.dump(data_dict, f, ensure_ascii=False)
+                    # Windows 下 os.replace 是原子性的 (如果目标未被打开)
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
+                    os.replace(temp_path, target_path)
+                    return True
+                except Exception as e:
+                    if os.path.exists(temp_path): os.remove(temp_path)
+                    raise e
+
+            main_path = self._get_persistence_path()
+            atomic_gz_save(main_path, data)
             
-            # [NEW] 同时保存一份带日期的快照用于复盘
             today_str = datetime.datetime.now().strftime('%Y%m%d')
             snapshot_path = self._get_persistence_path(snapshot_date=today_str)
-            with gzip.open(snapshot_path, 'wt', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            atomic_gz_save(snapshot_path, data)
 
-            logger.info(f"💾 [Detector] 会话数据已保存: {path} 及快照 {snapshot_path} ({ss_count} sig-stocks, {sd_count} sectors, {wl_count} watchlist)")
+            logger.info(f"💾 [Detector] Session data saved atomically ({ss_count} stocks, {sd_count} sectors)")
         except Exception as e:
-            logger.error(f"❌ [Detector] 保存会话数据失败: {e}")
+            logger.error(f"❌ [Detector] Atomic save failed: {e}")
 
     def load_persistent_data(self):
         """启动时从磁盘恢复得分和强度"""
@@ -1117,8 +1115,8 @@ class BiddingMomentumDetector:
         pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.last_close * 100.0 if ts_obj.last_close > 0 else 0.0
         ts_obj.pct_diff = pct_diff
         
-        # [REM] 移除 abs(pct_diff) >= 1.0% 的激进重置，防止数值瞬间回零。
-        # 观察逻辑由 _aggregate_sectors 的时间窗口统一管理。
+        # [NEW] 计算绝对涨跌额 (Price - LastClose)
+        ts_obj.price_diff = cur_close - ts_obj.last_close if ts_obj.last_close > 0 else 0.0
 
 
         with self._lock:
@@ -1190,7 +1188,9 @@ class BiddingMomentumDetector:
                         'top0': getattr(ts, 'top0', 0),
                         'top15': getattr(ts, 'top15', 0),
                         'score_diff': getattr(ts, 'score_diff', 0.0),
-                        'pct_diff': getattr(ts, 'pct_diff', 0.0)
+                        'pct_diff': getattr(ts, 'pct_diff', 0.0),
+                        'price_diff': getattr(ts, 'price_diff', 0.0),
+                        'dff': getattr(ts, 'dff', 0.0)
                     }
                     self._global_snap_cache[code] = data
                     
@@ -1431,9 +1431,33 @@ class BiddingMomentumDetector:
                 'leader_score_val': l_data.get('score', 0.0),
                 'leader_score_diff': l_data.get('score_diff', 0.0),
                 'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
+                'leader_price_diff': round(l_data.get('price_diff', 0.0), 2),
+                'leader_dff': round(l_data.get('dff', 0.0), 2),
                 'pattern_hint': l_data['pattern_hint'],
                 'is_untradable': l_data['is_untradable'],
-                'followers': [{'code': s['code'], 'name': s['name'], 'pct': s['pct'], 'score': s.get('score', 0.0), 'score_diff': s.get('score_diff', 0.0), 'pct_diff': s.get('pct_diff', 0.0), 'price': s.get('price', 0.0), 'first_ts': s['first_breakout_ts']} for s in stocks[1:15]],
+                'followers': [
+                    {
+                        'code': s['code'], 
+                        'name': s['name'], 
+                        'pct': s['pct'], 
+                        'score': s.get('score', 0.0), 
+                        'score_diff': s.get('score_diff', 0.0), 
+                        'pct_diff': s.get('pct_diff', 0.0), 
+                        'price_diff': s.get('price_diff', 0.0), 
+                        'dff': s.get('dff', 0.0), 
+                        'price': s.get('price', 0.0), 
+                        'first_ts': s['first_breakout_ts'],
+                        'pattern_hint': s.get('pattern_hint', ''),  
+                        'untradable': s.get('is_untradable', False),
+                        # [NEW] 这里的关键：补充绘制分时图所需的 K 线和基准数据
+                        'klines': s.get('klines', []),
+                        'last_close': s.get('last_close', 0.0),
+                        'high_day': s.get('high_day', 0.0),
+                        'low_day': s.get('low_day', 0.0),
+                        'last_high': s.get('last_high', 0.0),
+                        'last_low': s.get('last_low', 0.0)
+                    } for s in stocks[1:15]
+                ],
                 'linked_concepts': linked_concepts[:3]
             }
 

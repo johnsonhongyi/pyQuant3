@@ -88,8 +88,7 @@ class TrendDelegate(QStyledItemDelegate):
         prices = pdata['prices']
         last_close = pdata.get('last_close', 0)
         
-        # [REFINED] 支持 1 个点时的对比绘制
-        if not prices or (len(prices) < 2 and last_close <= 0):
+        if not prices and last_close <= 0:
             super().paint(painter, option, index)
             return
 
@@ -97,50 +96,70 @@ class TrendDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         rect = option.rect
-        margin_h, margin_v = 2, 2
+        margin_h, margin_v = 4, 4
         draw_rect = rect.adjusted(margin_h, margin_v, -margin_h, -margin_v)
         
         display_prices = list(prices)
-        if len(display_prices) == 1 and last_close > 0:
-            # 补齐一个昨收点以便画线
-            display_prices = [last_close] + display_prices
+        if not display_prices:
+            now_p = pdata.get('now_price', last_close)
+            if now_p > 0:
+                display_prices = [now_p, now_p]
+            else:
+                painter.restore()
+                return
+
+        if len(display_prices) == 1:
+            if last_close > 0:
+                display_prices = [last_close] + display_prices
+            else:
+                display_prices = [display_prices[0], display_prices[0]]
 
         p_min, p_max = min(display_prices), max(display_prices)
         if last_close > 0:
-            p_min = min(p_min, last_close)
-            p_max = max(p_max, last_close)
-        
-        p_avg = sum(display_prices) / len(display_prices)
-        rng = p_max - p_min if p_max > p_min else 1.0
+            p_min, p_max = min(p_min, last_close), max(p_max, last_close)
+            
+        rng = p_max - p_min if p_max > p_min else p_max * 0.01
+        if rng == 0: rng = 1.0
         
         def to_y(p):
-            return draw_rect.bottom() - (p - p_min) / rng * draw_rect.height()
+            # 将价格限制在绘图区内，保留 10% 的上下缓冲
+            val = (p - (p_min - rng*0.1)) / (rng * 1.2)
+            return draw_rect.bottom() - val * draw_rect.height()
 
-        # 1. 绘制昨收基准线 (蓝色)
+        # 1. 绘制昨收基准线 (蓝色虚线)
         if last_close > 0:
             y_lc = to_y(last_close)
-            painter.setPen(QPen(QColor(64, 156, 255), 1, Qt.PenStyle.DotLine))
+            painter.setPen(QPen(QColor(64, 156, 255, 180), 1, Qt.PenStyle.DotLine))
             painter.drawLine(draw_rect.left(), int(y_lc), draw_rect.right(), int(y_lc))
 
-        # 2. 绘制黄色均价线 (虚线)
+        # 2. 绘制黄色均价线 (点划线)
+        p_avg = sum(display_prices) / len(display_prices)
         y_avg = to_y(p_avg)
-        painter.setPen(QPen(QColor(255, 255, 0), 1, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor(255, 255, 0, 150), 1, Qt.PenStyle.DashDotLine))
         painter.drawLine(draw_rect.left(), int(y_avg), draw_rect.right(), int(y_avg))
 
-        # 3. 绘制价格走势线
+        # 3. 绘制价格走势线 (红/绿)
         base_ref = (last_close if last_close > 0 else display_prices[0])
-        pen_price = QPen(QColor(255, 68, 68) if display_prices[-1] >= base_ref else QColor(68, 255, 68), 1.5)
-        painter.setPen(pen_price)
+        pen_color = QColor(255, 68, 68) if display_prices[-1] >= base_ref else QColor(68, 255, 68)
+        painter.setPen(QPen(pen_color, 1.8))
         
-        step = draw_rect.width() / (len(display_prices) - 1)
-        for i in range(len(display_prices) - 1):
-            x1 = draw_rect.left() + i * step
-            y1 = to_y(display_prices[i])
-            x2 = draw_rect.left() + (i + 1) * step
-            y2 = to_y(display_prices[i+1])
-            painter.drawLine(QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2)))
+        if len(display_prices) >= 2:
+            step = draw_rect.width() / (len(display_prices) - 1)
+            for i in range(len(display_prices) - 1):
+                x1 = draw_rect.left() + i * step
+                y1 = to_y(display_prices[i])
+                x2 = draw_rect.left() + (i + 1) * step
+                y2 = to_y(display_prices[i+1])
+                painter.drawLine(QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2)))
+        elif len(display_prices) == 1:
+            y = to_y(display_prices[0])
+            painter.drawLine(draw_rect.left(), int(y), draw_rect.right(), int(y))
             
         painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(85, 30)
+
 
 
 class SBCTestThread(QThread):
@@ -193,6 +212,7 @@ class TimeAxisItem(pg.AxisItem):
             if 0 <= idx < len(self.ts_list):
                 ts = self.ts_list[idx]
                 try:
+                    from datetime import datetime
                     dt = datetime.fromtimestamp(ts)
                     # 如果跨度超过一天，显示日期；否则仅显示时间
                     if len(self.ts_list) > 240 or (self.ts_list[-1] - self.ts_list[0] > 86400):
@@ -207,10 +227,12 @@ class TimeAxisItem(pg.AxisItem):
 
 
 
-class DetailedChartDialog(QDialog):
+class DetailedChartDialog(QDialog, WindowMixin):
     """双击弹出的详细分时图窗口 (带成交量、多重参考线及全量实时数据)"""
     def __init__(self, code, name, klines, meta, parent=None):
         super().__init__(parent)
+        self.code_target = code # 为 WindowMixin 提供唯一标识
+        self.setWindowTitle(f"📊 分时详情: {name} ({code})")
         
         # 提取附加信息 (从 meta 或 DataPublisher 获取)
         pop = meta.get('popularity', 'N/A')
@@ -240,12 +262,52 @@ class DetailedChartDialog(QDialog):
         info_lay.addStretch()
         lay.addLayout(info_lay)
         
-        if not klines: return
+        # [NEW] Restore Geometry
+        self._restore_geometry()
         
-        # 提取数据，使用索引作为 X 轴坐标，原始时间戳用于轴标签
+        # [NEW] 补全模拟 K 线逻辑：竞价或刚开盘没有分钟 K 时，至少显示一段平线
+        if not klines:
+            last_c = meta.get('last_close', 0)
+            now_p = meta.get('now_price', last_c) 
+            # 尝试获取基准时间，历史模式下使用 snapshot 时间，实时模式下使用当前时间
+            base_ts = getattr(self.parent(), 'detector', None).baseline_time if self.parent() else time.time()
+            if base_ts <= 0: base_ts = time.time()
+
+            if now_p > 0:
+                # 模拟两个点形成一条直线，使用 Unix 时间戳
+                klines = [
+                    {'time': base_ts - 60, 'close': now_p, 'volume': 0},
+                    {'time': base_ts, 'close': now_p, 'volume': 0}
+                ]
+            elif last_c > 0:
+                klines = [
+                    {'time': base_ts - 60, 'close': last_c, 'volume': 0},
+                    {'time': base_ts, 'close': last_c, 'volume': 0}
+                ]
+            else:
+                return # 彻底没数据
+        
+        # [FIX] 如果只有一个点，模拟成两个点以确保护眼可见的线段
+        if len(klines) == 1:
+            k = klines[0]
+            k_prev = k.copy()
+            # 时间戳减去一分钟，如果是数值则减 60，如果是字符串则保持
+            if isinstance(k_prev.get('time'), (int, float)):
+                k_prev['time'] -= 60
+            klines = [k_prev, k]
+
+        # 提取数据，增强对非数字时间戳的兼容
         prices = [float(k.get('close', 0)) for k in klines]
         vols = [float(k.get('volume', 0)) for k in klines]
-        raw_times = [float(k.get('time', 0)) for k in klines]
+        
+        raw_times = []
+        for k in klines:
+            t_val = k.get('time', 0)
+            try:
+                raw_times.append(float(t_val))
+            except (ValueError, TypeError):
+                # 如果依然是字符串格式，尝试 fallback (虽然上面已修复，但此处做二重保险)
+                raw_times.append(time.time())
         times = list(range(len(prices)))
         
         # 使用自定义时间轴 (传入原始时间序列)
@@ -327,6 +389,45 @@ class DetailedChartDialog(QDialog):
                 # 放在底部
                 rect.setPos(0, y_min - (y_max - y_min)*0.05) 
                 self.pw.addItem(rect)
+                
+    # ── [FIX] Persistence Support ────────────────────────────────────
+    def _get_config_key(self):
+        # 窗口记忆 Key，按类名记忆，这样所有详情窗采用统一位置
+        return self.__class__.__name__
+
+    def _restore_geometry(self):
+        try:
+            if not os.path.exists(WINDOW_CONFIG_FILE): return
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            data = config.get(self._get_config_key(), {})
+            geom_hex = data.get("geometry")
+            if geom_hex:
+                self.restoreGeometry(QByteArray.fromHex(geom_hex.encode('ascii')))
+        except Exception: pass
+
+    def _save_geometry(self):
+        try:
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            
+            key = self._get_config_key()
+            if key not in config: config[key] = {}
+            
+            geometry = self.saveGeometry()
+            config[key]["geometry"] = bytes(geometry.toHex().data()).decode('ascii')
+            config[key]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception: pass
+
+    def closeEvent(self, event):
+        """关闭时保存位置信息"""
+        self._save_geometry()
+        super().closeEvent(event)
 
 class DataProcessWorker(QObject):
     """Worker object to process realtime data in a separate QThread."""
@@ -441,15 +542,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.close()
 
     def closeEvent(self, event):
-        """
-        窗口关闭事件拦截：
-        1. 如果是通过右上角 X 或系统强制关闭，则仅隐藏窗口以保持后台监控。
-        2. 只有点击工具栏的'关闭'按钮才执行真正的清理逻辑并释放线程。
-        """
-        if not getattr(self, '_allow_real_close', False):
-            self.hide()
-            event.ignore()
-            return
+        """处理窗口关闭事件，执行资源回收"""
+        # [FIX] 彻底移除 hide() 逻辑，允许正常退出
 
         # 1. 先停止定时器，不产生新任务
         if hasattr(self, '_refresh_timer'):
@@ -484,7 +578,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         super().closeEvent(event)
 
     def _save_ui_state(self):
-        """保存表格列宽、Splitter 状态等 UI 设置"""
+        """保存表格布局和状态"""
         try:
             scale = self._get_dpi_scale_factor()
             data_to_save = {}
@@ -800,13 +894,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         rlay.addWidget(self.leader_lbl)
 
         # 个股表（带排序）
-        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '涨跌', '分时走势', '形态暗示(安)']
+        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '涨跌', 'dff', '分时走势', '形态暗示(安)']
         self.stock_table = QTableWidget(0, len(COLS))
         self.stock_table.setHorizontalHeaderLabels(COLS)
         hdr = self.stock_table.horizontalHeader()
         if hdr:
             hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-            # hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+            # 🚀 [C-Reinforcement] 显式设置各列初始宽度与伸缩行为
+            self.stock_table.setColumnWidth(0, 65)  # 代码
+            self.stock_table.setColumnWidth(1, 75)  # 名称
+            self.stock_table.setColumnWidth(2, 60)  # 角色
+            self.stock_table.setColumnWidth(3, 65)  # 现价
+            self.stock_table.setColumnWidth(4, 75)  # 涨幅
+            self.stock_table.setColumnWidth(5, 120) # 涨跌 [p_diff (pct_slc)]
+            self.stock_table.setColumnWidth(6, 60)  # dff
+            self.stock_table.setColumnWidth(7, 95)  # 分时走势 (绘图列)
+            
+            # 最后一列“形态暗示”设置为自动拉伸，确前面的列位置固定
+            hdr.setSectionResizeMode(len(COLS)-1, QHeaderView.ResizeMode.Stretch)
+            
             hdr.sectionClicked.connect(self._on_header_clicked)
         self.stock_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -817,7 +923,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setAlternatingRowColors(True)
         self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
-        self.stock_table.setItemDelegateForColumn(6, TrendDelegate(self)) # 图形化走势
+        self.stock_table.setItemDelegateForColumn(7, TrendDelegate(self)) # [FIX] 对准分时走势列
         vh = self.stock_table.verticalHeader()
         if vh: vh.setDefaultSectionSize(32) # 紧凑行高
         rlay.addWidget(self.stock_table)
@@ -905,8 +1011,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # [FIX] 利用现有的 QThread (_worker) 安全执行，解决 "Timers can only be used with threads started with QThread"
             if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
+                # [NEW] 手动刷新时同时重置观测锚点，使用户能看到“从点击瞬间开始”的增量变化
+                self.detector.reset_observation_anchors()
                 self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
             else:
+                self.detector.reset_observation_anchors()
                 self._force_update_requested = True
                 if hasattr(self, '_worker'):
                     self._worker.finished.emit() # 无全量数据时只单纯触发刷新流程
@@ -921,10 +1030,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_refresh.setText("刷新 🔄")
 
     def _run_sbc_test(self, use_live: bool, code: str = None, extra_lines: dict = None):
-        """
-        [NEW] 调用 verify_sbc_pattern.py 逻辑验证选中个股 of SBC 信号
-        使用线程异步执行，防止 GUI 卡死
-        """
+        """调用 SBC 信号验证逻辑"""
         # 检查是否已有线程正在运行
         if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
             QMessageBox.information(self, "请稍候", f"后台正在对 {self._sbc_thread.code} 进行验证，请等待完成后再试。")
@@ -961,7 +1067,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         logger.info(f"⏳ SBC 信号测试已启动后台线程: {code} (Live Mode: {use_live})")
 
     def _on_sbc_test_finished(self, data: dict):
-        """线程完成后的回调，在 GUI 线程显示图表"""
+        """SBC 测试完成回调"""
         try:
             # 动态导入可视化函数
             try:
@@ -1352,6 +1458,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             'pct': leader_pct, 
             'price': leader_price,
             'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
+            'price_diff': data.get('leader_price_diff', 0.0),
+            'dff': data.get('leader_dff', 0.0),
             'klines': leader_klines,
             'last_close': data.get('leader_last_close', 0),
             'high_day': data.get('leader_high_day', 0),
@@ -1368,6 +1476,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'role': '📌跟随',
                 'pct': f['pct'], 'price': f['price'],
                 'pct_diff': f.get('pct_diff', 0.0),
+                'price_diff': f.get('price_diff', 0.0),
+                'dff': f.get('dff', 0.0),
                 'klines': self._follower_klines(f['code']),
                 'last_close': f.get('last_close', 0),
                 'high_day': f.get('high_day', 0),
@@ -1433,25 +1543,31 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                                    else QColor("#44CC44"))
             self.stock_table.setItem(i, 4, pct_item)
             
-            # [NEW] 涨跌列 (Column 5) - 切片相对涨幅
-            # 为了排序使用 NumericTableWidgetItem
-            diff_val = r.get('pct_diff', 0.0)
-            try:
-                diff_val = float(diff_val)
-            except (ValueError, TypeError):
-                diff_val = 0.0
-                
-            diff_item = NumericTableWidgetItem(f"{diff_val:+.2f}%")
-            if diff_val > 0.01:
+            # [NEW] 涨跌列 (Column 5) - 显示 [绝对额 (切片增量%)]
+            p_diff = r.get('price_diff', 0.0)
+            pct_slc = r.get('pct_diff', 0.0)
+            
+            # 格式：+0.15 (+0.5%)
+            diff_text = f"{p_diff:+.2f}"
+            
+            diff_item = NumericTableWidgetItem(diff_text)
+            if p_diff > 0.001 or pct_slc > 0.01:
                 diff_item.setForeground(QColor("#FF4444"))
-            elif diff_val < -0.01:
+            elif p_diff < -0.001 or pct_slc < -0.01:
                 diff_item.setForeground(QColor("#44CC44"))
             else:
                 diff_item.setForeground(QColor("#888888"))
-            diff_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            diff_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.stock_table.setItem(i, 5, diff_item)
 
-            # 更新分时走势列 (Column 6)，传递原始价格列表供 Delegate 绘制
+            # [NEW] dff 列 (Column 6)
+            dff_val = r.get('dff', 0.0)
+            dff_item = NumericTableWidgetItem(f"{dff_val:+.2f}")
+            if dff_val > 0: dff_item.setForeground(QColor("#FFCC00")) # 金色显示活跃度
+            elif dff_val < 0: dff_item.setForeground(QColor("#00FFFF"))
+            self.stock_table.setItem(i, 6, dff_item)
+
+            # 更新分时走势列 (Column 7)，传递原始价格列表供 Delegate 绘制
             k_prices = []
             for k in r['klines']:
                 try:
@@ -1462,14 +1578,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 except (ValueError, TypeError, AttributeError):
                     k_prices.append(0.0)
             
+            # 更新分时走势列 (Column 7) - 存储全量 klines 用于详情窗绘制
             k_item = QTableWidgetItem("")
             k_item.setData(Qt.ItemDataRole.UserRole, {
-                'prices': k_prices,
-                'last_close': r.get('last_close', 0)
+                'klines': r.get('klines', []),      # 核心：保留字典列表结构
+                'prices': k_prices,                # 兼容缩略图绘制逻辑
+                'last_close': r.get('last_close', 0),
+                'now_price': r.get('price', 0)
             })
-            # 关闭分时走势的编辑功能
             k_item.setFlags(k_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.stock_table.setItem(i, 6, k_item)
+            self.stock_table.setItem(i, 7, k_item)
 
             hint_str = r['hint']
             if r['untradable']:
@@ -1491,7 +1609,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             elif r['is_counter']:
                 hint_item.setForeground(QColor("#FFCC00"))
                 
-            self.stock_table.setItem(i, 7, hint_item)
+            self.stock_table.setItem(i, 8, hint_item)
 
             # 匹配之前选中的行
             if r['code'] == self._last_selected_code:
@@ -1770,8 +1888,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._copy_to_clipboard(name)
             return
 
-        # 双击功能只在分时走势 (Column 6) 上有效
-        if col != 6:
+        # 双击功能只在分时走势 (Column 7) 上有效
+        if col != 7:
             return
 
         # 💡 [ENHANCEMENT] 尝试从 realtime_service 获取全量 K 线 (n=240, 约一整天)
@@ -1794,20 +1912,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 meta['popularity'] = ext.get('rank', 'N/A')
                 meta['theme'] = ext.get('theme_name', ext.get('concept', 'N/A'))
 
-        # Fallback to detector session cache if service empty
-        if not klines:
-            klines = self._follower_klines(code)
-        
-        # 获取该行对应的基础价格元数据
-        k_item = self.stock_table.item(row, 5)
+        # 获取该行对应的基础价格元数据 (对应 _populate_table 中的 k_item 所在列 7)
+        k_item = self.stock_table.item(row, 7)
         if k_item:
             pdata = k_item.data(Qt.ItemDataRole.UserRole)
             if isinstance(pdata, dict):
+                # [FIX] 优先从表格缓存获取 K 线 (支持历史快照)
+                if not klines:
+                    klines = pdata.get('klines', [])
+                
                 meta['last_close'] = pdata.get('last_close', 0)
+                # 记录当前现价，以便在没有 K 线时补全
+                meta['now_price'] = pdata.get('prices')[-1] if pdata.get('prices') else 0
         
         with self.detector._lock:
             ts = self.detector._tick_series.get(code)
             if ts:
+                # [FIX] 如果依然没 K 线，尝试从 detector 内存获取
+                if not klines:
+                    klines = list(ts.klines)
+                
                 meta['high_day'] = ts.high_day
                 meta['low_day'] = ts.low_day
                 meta['last_high'] = ts.last_high

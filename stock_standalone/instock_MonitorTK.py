@@ -754,38 +754,135 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not is_closing:
                 self._schedule_after(50, self._process_dispatch_queue)
 
-    def _schedule_after(self, ms, func, *args):
-        """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
-        if getattr(self, '_is_closing', False):
-            return None
-        # ⭐ [FIX] 确保 _after_ids 已初始化 (防御性编程)
-        if not hasattr(self, '_after_ids'):
-            self._after_ids = []
+    # def _schedule_after(self, ms, func, *args):
+    #     """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
+    #     if getattr(self, '_is_closing', False):
+    #         return None
+    #     # ⭐ [FIX] 确保 _after_ids 已初始化 (防御性编程)
+    #     if not hasattr(self, '_after_ids'):
+    #         self._after_ids = []
             
+    #     try:
+    #         job_id = self.after(ms, func, *args)
+    #         if job_id:
+    #             self._after_ids.append(job_id)
+    #         return job_id
+    #     except Exception as e:
+    #         if not getattr(self, '_is_closing', False):
+    #             logger.warning(f"[_schedule_after] 任务调度失败: {e}")
+    #         return None
+
+    # def _cancel_all_after_jobs(self):
+    #     """取消所有待执行的 after 任务，防止程序退出后仍回调"""
+    #     count = 0
+    #     if hasattr(self, '_after_ids'):
+    #         for job_id in self._after_ids:
+    #             try:
+    #                 self.after_cancel(job_id)
+    #                 count += 1
+    #             except Exception:
+    #                 pass
+    #         self._after_ids.clear()
+    #     if count > 0:
+    #         logger.info(f"已取消 {count} 个待执行的 Tkinter 回调任务")
+
+
+    def _schedule_after(self, ms, func, *args, key=None, debounce=True):
+        """
+        高可靠 Tkinter after 调度器
+
+        特性:
+        - 同函数防抖 (默认)
+        - 不同函数可并行
+        - 支持 func+args 唯一任务
+        - 自动清理 job
+        - 退出安全
+
+        参数:
+        ms       延迟毫秒
+        func     回调函数
+        *args    回调参数
+        key      自定义任务key (可选)
+        debounce 是否防抖
+        """
+
+        if getattr(self, "_is_closing", False):
+            return None
+
+        # 初始化容器
+        if not hasattr(self, "_after_jobs"):
+            self._after_jobs = {}   # key -> job_id
+
+        if not hasattr(self, "_after_ids"):
+            self._after_ids = []    # 所有job记录
+
         try:
-            job_id = self.after(ms, func, *args)
+            # ---------- 任务key ----------
+            if key is None:
+                key = (func, args)
+
+            # ---------- 防抖 ----------
+            if debounce:
+                old_job = self._after_jobs.get(key)
+                if old_job:
+                    try:
+                        self.after_cancel(old_job)
+                    except Exception:
+                        pass
+
+            # ---------- 包装回调 ----------
+            def wrapper():
+                try:
+                    if getattr(self, "_is_closing", False):
+                        return
+                    func(*args)
+                except Exception as e:
+                    logger.exception(f"[after task error] {func.__name__}: {e}")
+                finally:
+                    # 执行完清理
+                    self._after_jobs.pop(key, None)
+
+            # ---------- 注册任务 ----------
+            job_id = self.after(ms, wrapper)
+
             if job_id:
                 self._after_ids.append(job_id)
+                self._after_jobs[key] = job_id
+
             return job_id
+
         except Exception as e:
-            if not getattr(self, '_is_closing', False):
-                logger.warning(f"[_schedule_after] 任务调度失败: {e}")
+            if not getattr(self, "_is_closing", False):
+                logger.warning(f"[_schedule_after] 调度失败: {e}")
             return None
 
     def _cancel_all_after_jobs(self):
-        """取消所有待执行的 after 任务，防止程序退出后仍回调"""
-        count = 0
-        if hasattr(self, '_after_ids'):
-            for job_id in self._after_ids:
+        """取消所有待执行的 Tkinter after 任务（安全版）"""
+
+        self._is_closing = True
+        cancelled = 0
+
+        # ---------- 取消 func-index 任务 ----------
+        if hasattr(self, "_after_jobs"):
+            for job_id in list(self._after_jobs.values()):
                 try:
                     self.after_cancel(job_id)
-                    count += 1
+                    cancelled += 1
+                except Exception:
+                    pass
+            self._after_jobs.clear()
+
+        # ---------- 取消历史记录任务 ----------
+        if hasattr(self, "_after_ids"):
+            for job_id in list(self._after_ids):
+                try:
+                    self.after_cancel(job_id)
                 except Exception:
                     pass
             self._after_ids.clear()
-        if count > 0:
-            logger.info(f"已取消 {count} 个待执行的 Tkinter 回调任务")
 
+        if cancelled:
+            logger.info(f"已取消 {cancelled} 个 Tkinter after 调度任务")
 
     def signal_handler(self, sig, frame):
         """捕获 Ctrl+C 信号"""
@@ -1251,33 +1348,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         finally:
             self._task_running = False
 
-    # def on_tree_cleanup_menu_right_click(self, event):
-    #     """树形视图右键菜单"""
-    #     # 创建右键菜单
-    #     menu = tk.Menu(self, tearoff=0)
-        
-    #     # 添加清理选项
-    #     cleanup_menu = tk.Menu(menu, tearoff=0)
-    #     cleanup_menu.add_command(label="清理1天前信号", 
-    #                             command=lambda: self._cleanup_signals_with_feedback(1))
-    #     cleanup_menu.add_command(label="清理2天前信号", 
-    #                             command=lambda: self._cleanup_signals_with_feedback(2))
-    #     cleanup_menu.add_command(label="清理3天前信号", 
-    #                             command=lambda: self._cleanup_signals_with_feedback(3))
-    #     cleanup_menu.add_command(label="清理5天前信号", 
-    #                             command=lambda: self._cleanup_signals_with_feedback(5))
-    #     cleanup_menu.add_command(label="清理7天前信号", 
-    #                             command=lambda: self._cleanup_signals_with_feedback(7))
-        
-    #     menu.add_cascade(label="信号清理", menu=cleanup_menu)
-    #     menu.add_separator()
-    #     menu.add_command(label="刷新", command=lambda: self._schedule_after(0, self.update_tree))
-        
-    #     # 显示菜单
-    #     try:
-    #         menu.tk_popup(event.x_root, event.y_root)
-    #     finally:
-    #         menu.grab_release()
     
     def _cleanup_signals_with_feedback(self, days: int):
         """执行信号清理并显示反馈"""
@@ -5870,50 +5940,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
 
-    # def on_voice_alert(self, code, name, msg):
-    #     """
-    #     处理语音报警触发: 弹窗显示股票详情 - 线程安全版本
-    #     """
-    #     # 线程安全:避免在后台线程中调用 Tkinter
-    #     try:
-    #         if threading.current_thread() is threading.main_thread():
-    #             self._show_alert_popup(code, name, msg)
-    #         else:
-    #             # 后台线程:忽略,避免 GIL 问题
-    #             pass
-    #     except Exception as e:
-    #         # 静默失败
-    #         pass
-
-    # def on_voice_speak_start(self, code):
-    #     """语音播报开始时的回调 (在后台线程调用) - 线程安全版本"""
-    #     if not code: 
-    #         return
-    #     # 使用线程安全的方式调度到主线程
-    #     try:
-    #         # 检查是否在主线程
-    #         if threading.current_thread() is threading.main_thread():
-    #             self._trigger_alert_visual_effects(code, start=True)
-    #         else:
-    #             # 后台线程:不直接调用 after,而是通过事件标志
-    #             # 避免 GIL 问题,简单忽略或使用其他机制
-    #             pass
-    #     except Exception as e:
-    #         # 静默失败,避免崩溃
-    #         pass
-
-    # def on_voice_speak_end(self, code):
-    #     """语音播报结束的回调 - 线程安全版本"""
-    #     if not code: 
-    #         return
-    #     try:
-    #         if threading.current_thread() is threading.main_thread():
-    #             self._trigger_alert_visual_effects(code, start=False)
-    #         else:
-    #             # 后台线程:简单忽略
-    #             pass
-    #     except Exception as e:
-    #         pass
     
     @with_log_level(LoggerFactory.INFO)
     def on_voice_alert(self, code, name, msg):
@@ -6483,113 +6509,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 pass
 
         threading.Thread(target=_post_logic, daemon=True).start()
-
-
-
-    # def _close_alert_old(self, win, is_manual=False):
-    #     """关闭弹窗并刷新布局，并停止关联的语音报警（冻结免疫版）"""
-
-    #     # =========================
-    #     # 1️⃣ UI 状态立即清理（只做内存操作）
-    #     # =========================
-    #     if hasattr(self, 'active_alerts') and win in self.active_alerts:
-    #         self.active_alerts.remove(win)
-
-    #     target_code = None
-    #     if hasattr(self, 'code_to_alert_win'):
-    #         for c, w in list(self.code_to_alert_win.items()):
-    #             if w is win:
-    #                 target_code = c
-    #                 del self.code_to_alert_win[c]
-    #                 break
-
-    #     # =========================
-    #     # 2️⃣ 立即销毁窗口（不等待任何策略 / 语音）
-    #     # =========================
-    #     try:
-    #         win.destroy()
-    #     except Exception:
-    #         pass
-
-    #     # =========================
-    #     # 3️⃣ 延迟 UI 重排（同函数内完成）
-    #     # =========================
-    #     self.after(50, self._update_alert_positions)
-
-    #     # =========================
-    #     # 4️⃣ 延迟处理策略 / 语音（关键）
-    #     #    ⚠️ 仍然在本函数内，不拆逻辑
-    #     # =========================
-    #     if not target_code or not getattr(self, 'live_strategy', None):
-    #         return
-
-    #     def _post_logic():
-    #         # ---- 手动关闭：只做延迟再报 ----
-    #         if is_manual:
-    #             try:
-    #                 self.live_strategy.snooze_alert(
-    #                     target_code,
-    #                     cycles=pending_alert_cycles
-    #                 )
-    #             except Exception:
-    #                 pass
-
-    #         # ---- 无论手动 / 自动，都必须 cancel 当前语音 ----
-    #         v = getattr(self.live_strategy, '_voice', None)
-    #         if v and hasattr(v, 'cancel_for_code'):
-    #             try:
-    #                 v.cancel_for_code(target_code)
-    #             except Exception:
-    #                 pass
-
-    #     # ⚠️ 核心：逻辑仍在 _close_alert，但不阻塞 Tk
-    #     self.after(10, _post_logic)
-
-
-    # def _close_alert_old(self, win, is_manual=False):
-    #     """关闭弹窗并刷新布局，并停止关联的语音报警"""
-    #        #偶发关闭时ui全部卡死
-    #     # ===== [修改点 1] =====
-    #     # 关闭时，立即从 active_alerts 移除（避免后续布局和引用错误）
-    #     if hasattr(self, 'active_alerts') and win in self.active_alerts:
-    #         self.active_alerts.remove(win)
-
-    #     # ===== [修改点 2] =====
-    #     # 统一在这里清理 code -> window 映射，并获取 target_code
-    #     target_code = None
-    #     if hasattr(self, 'code_to_alert_win'):
-    #         for c, w in list(self.code_to_alert_win.items()):
-    #             if w is win:
-    #                 target_code = c
-    #                 del self.code_to_alert_win[c]
-    #                 break
-
-    #     # ===== [修改点 3] =====
-    #     # 语音 / 策略处理逻辑统一放在一个块中，避免分支遗漏
-    #     if target_code and getattr(self, 'live_strategy', None):
-
-    #         # ===== [修改点 3.1] =====
-    #         # 手动关闭：只负责“延迟再报”，不负责停当前语音
-    #         if is_manual:
-    #             self.live_strategy.snooze_alert(
-    #                 target_code,
-    #                 cycles=pending_alert_cycles
-    #             )
-
-    #         # ===== [修改点 3.2 - 关键修复点] =====
-    #         # 无论手动 / 自动关闭，都必须立即 cancel 当前语音
-    #         # （这是 new 版本出问题的根因）
-    #         v = getattr(self.live_strategy, '_voice', None)
-    #         if v and hasattr(v, 'cancel_for_code'):
-    #             v.cancel_for_code(target_code)
-
-    #     # ===== [修改点 4] =====
-    #     # 在所有状态清理完成后，再销毁窗口
-    #     win.destroy()
-
-    #     # ===== [修改点 5] =====
-    #     # 立即重排弹窗位置（不使用 after，避免顺序错乱）
-    #     self._update_alert_positions()
 
 
 
@@ -7592,14 +7511,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._voice_monitor_win = win
             win.title("语音预警管理")
             window_id = "语音预警管理"
-            # --- 窗口定位 ---
-            # w, h = 800, 500
-            # sw = self.winfo_screenwidth()
-            # sh = self.winfo_screenheight()
-            # pos_x = (sw - w) // 2
-            # pos_y = (sh - h) // 2
-            # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
-            # win.bind("<Escape>", lambda e: win.destroy())
             self.load_window_position(win, window_id, default_width=800, default_height=500)
             # --- 顶部操作区域 ---
             top_frame = tk.Frame(win)
@@ -7659,15 +7570,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             columns = ("code", "name", "resample", "rule_type", "value", "create_price", "curr_price", "pnl", "rank", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
-            # 4. 底部状态栏用于显示计数
-            # --- 底部统计总计 ---
-            # status_frame = tk.Frame(win, relief="sunken", bd=1)
-            # status_frame.pack(side="bottom", fill="x")
-
-            # total_label = tk.Label(status_frame, text="总条目: 0", anchor="w", padx=10, font=("微软雅黑", 9))
-            # total_label.pack(side="left")
-
-
             # 刷新统计函数
             def refresh_stats():
                 total = len(tree.get_children())
@@ -8019,42 +7921,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      tree.after_idle(lambda: setattr(self, '_is_deleting', False))
 
 
-            # def delete_selected(event=None):
-            #     selected = tree.selection()
-            #     if not selected:
-            #         return
-                
-            #     # if not messagebox.askyesno("确认", "确定删除选中的规则吗?", parent=win):
-            #     #     return
-
-            #     # 这里直接删，为了顺手，可以不弹二次确认，或者仅在 list 选中时弹
-            #     # if not messagebox.askyesno("删除确认", "确定删除选中项?", parent=win):
-            #     #     return
-
-            #     for item in selected:
-            #          values = tree.item(item, "values")
-            #          code = values[0]
-            #          uid = values[6]
-            #          # 由于 uid 是 'code_idx'，但如果删除了前面的，后面的 idx 会变
-            #          # 最稳妥的是：倒序删除，或者重新加载。
-            #          # 我们的界面是单选还是多选？Treeview 默认多选。
-            #          # 简单处理：只处理第一个
-            #          # 简单处理：只处理第一个
-            #          # 处理特殊标记 'code_none'
-            #          if self.live_strategy:
-            #              if uid.endswith('_none'):
-            #                  # 如果没有规则，删除操作即移除该监控项
-            #                  self.live_strategy.remove_monitor(code)
-            #              else:
-            #                  try:
-            #                      idx = int(uid.split('_')[1])
-            #                      self.live_strategy.remove_rule(code, idx)
-            #                  except:
-            #                      pass
-            #          break # 仅删一个，防止索引错乱
-                
-            #     load_data()
-
             def on_voice_tree_select(event):
                 # 检查删除标志位
                 if getattr(self, '_is_deleting', False):
@@ -8130,7 +7996,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                          idx = int(suffix)
                      except:
                          idx = -1
-                 # logger.info(f'on_voice_edit_selected stock_code:{code} name:{name}')
                  
                  current_type = "price_up"
                  monitors = self.live_strategy.get_monitors()
@@ -8138,22 +8003,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      rules = monitors[composite_key]['rules']
                      if idx >= 0 and idx < len(rules):
                          current_type = rules[idx]['type']
-
-                 # 弹出编辑框 (UI 与 Add 保持一致)
-                 # edit_win = tk.Toplevel(win)
-                 # edit_win.title(f"编辑规则 - {name}")
-                 # edit_win_id = "编辑规则"
-                 # self.load_window_position(edit_win, edit_win_id, default_width=900, default_height=600)
-
-                 # main_frame = tk.Frame(edit_win)
-                 # main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-                 
-                 # left_frame = tk.Frame(main_frame) 
-                 # left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
-                 
-                 # right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=450)
-                 # right_frame.pack(side="right", fill="both", padx=(10, 0))
-                 # # right_frame.pack_propagate(False)
 
                  edit_win = tk.Toplevel(win)
                  edit_win.title(f"编辑规则 - {name}")
@@ -8178,7 +8027,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  )
                  right_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
                  right_frame.grid_propagate(False)
-                 # right_frame.minsize(350, 200)
 
 
                  # --- 左侧 ---

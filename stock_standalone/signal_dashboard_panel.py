@@ -22,13 +22,14 @@ from JohnsonUtil import commonTips as cct
 
 class VolumeDetailsDialog(QDialog):
     """持久化的放量详情弹窗"""
-    code_clicked = pyqtSignal(str) # 信号联动
+    code_clicked = pyqtSignal(str, str) # 信号联动 (代码, 名称)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🔥 今日异动放量个股 (Top 30)")
         self.resize(450, 600)
         self.setMinimumWidth(380)
+        self._is_updating = False # 更新标志
         
         # 窗口内置布局
         layout = QVBoxLayout(self)
@@ -82,25 +83,31 @@ class VolumeDetailsDialog(QDialog):
         
     def _on_item_clicked(self, item):
         if item:
-            code = self.table.item(item.row(), 0).text()
-            self.code_clicked.emit(code)
+            row = item.row()
+            code = self.table.item(row, 0).text()
+            name = self.table.item(row, 1).text()
+            self.code_clicked.emit(code, name)
             
     def _on_selection_changed(self):
         """处理键盘上下键选择变化"""
+        if self._is_updating: return
         items = self.table.selectedItems()
         if items:
-            # 取得选中行的第一个 Item (代码列)
+            # 取得选中行的 Item
             row = items[0].row()
             code_item = self.table.item(row, 0)
-            if code_item:
-                self.code_clicked.emit(code_item.text())
+            name_item = self.table.item(row, 1)
+            if code_item and name_item:
+                self.code_clicked.emit(code_item.text(), name_item.text())
             
     def update_data(self, details_list: List[dict]):
         """刷新数据内容"""
+        self._is_updating = True
         self.table.setSortingEnabled(False) # 写入数据时关闭排序避免错位
         self.table.setRowCount(0)
         if not details_list: 
             self.table.setSortingEnabled(True)
+            self._is_updating = False
             return
         
         self.table.setRowCount(len(details_list))
@@ -137,6 +144,7 @@ class VolumeDetailsDialog(QDialog):
             self.table.setItem(i, 3, r_item)
             
         self.table.setSortingEnabled(True) # 恢复自适应排序
+        self._is_updating = False
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +223,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         }
         
         self._vol_dialog = VolumeDetailsDialog(self)
-        self._vol_dialog.code_clicked.connect(
-            lambda c: self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": c, "name": ""}))
-        )
+        # 异动个股窗口联动信号连接
+        self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
         
         self.setWindowFlags(Qt.WindowType.Window)
         self._event_buffer: List[BusEvent] = []
@@ -374,9 +381,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._refresh_all_tables()
 
     def _on_heartbeat_received(self, event: BusEvent):
-        QTimer.singleShot(0, self, lambda: self._update_last_sync_time())
+        QTimer.singleShot(0, lambda: self._update_last_sync_time())
         if event.source == "market_stats" and isinstance(event.payload, dict):
-            QTimer.singleShot(0, self, lambda: self.update_market_stats(event.payload))
+            QTimer.singleShot(0, lambda: self.update_market_stats(event.payload))
 
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')} (实时)")
@@ -541,6 +548,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._vol_dialog.update_data(self._market_stats.get("vol_details", []))
         self._vol_dialog.show()
 
+    def _on_vol_code_clicked(self, code, name):
+        """处理异动放量窗口代码点击联动"""
+        # 1. 触发仪表盘对外的主联动信号 (代码与名称)
+        self.code_clicked.emit(code, name)
+        # 2. 发送内部总线事件，以便总线相关组件也能同步
+        self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": code, "name": name}))
+
     def _on_hot_sectors_clicked(self, event):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QAction
@@ -562,21 +576,61 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         code_item, name_item = table.item(row, 1), table.item(row, 2)
         if code_item and name_item: self.code_clicked.emit(code_item.text(), name_item.text())
 
+    # def _on_cell_double_clicked(self, row, col):
+    #     table = self.sender()
+    #     it_code, it_name = table.item(row, 1), table.item(row, 2)
+    #     if not it_code or not it_name: return
+    #     code, name = it_code.text().strip(), it_name.text().strip()
+    #     clipboard = QApplication.clipboard()
+    #     header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
+    #     if header == "代码": clipboard.setText(code)
+    #     elif header == "名称": clipboard.setText(name)
+    #     elif header in ("形态", "信号"): clipboard.setText(table.item(row, col).text())
+    #     elif header == "详情":
+    #         detail = table.item(row, col).text()
+    #         # clipboard.setText(detail)
+    #         SignalDetailDialog(code, name, table.item(row, 3).text(), detail, self).exec()
+    #         return
+    #     else: clipboard.setText(code)
+    #     self.status_bar.setText(f"📋 已复制: {clipboard.text()}")
+    #     self.code_clicked.emit(code, name)
+
     def _on_cell_double_clicked(self, row, col):
         table = self.sender()
-        it_code, it_name = table.item(row, 1), table.item(row, 2)
-        if not it_code or not it_name: return
-        code, name = it_code.text().strip(), it_name.text().strip()
+        it_code = table.item(row, 1)
+        it_name = table.item(row, 2)
+        it_current = table.item(row, col)
+        
+        if not it_code or not it_name or not it_current: 
+            return
+            
+        code = it_code.text().strip()
+        name = it_name.text().strip()
+        current_text = it_current.text().strip()
+        
         clipboard = QApplication.clipboard()
         header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
-        if header == "代码": clipboard.setText(code)
-        elif header == "名称": clipboard.setText(name)
-        elif header in ("形态", "信号"): clipboard.setText(table.item(row, col).text())
-        elif header == "详情":
-            detail = table.item(row, col).text()
-            clipboard.setText(detail)
-            SignalDetailDialog(code, name, table.item(row, 3).text(), detail, self).exec()
-        else: clipboard.setText(code)
+
+        if header == "详情":
+            # 仅弹窗，不执行复制逻辑
+            # 假设第3列是日期或时间，对应你代码中的 table.item(row, 3)
+            time_str = table.item(row, 3).text() if table.item(row, 3) else ""
+            dialog = SignalDetailDialog(code, name, time_str, current_text, self)
+            dialog.exec()
+            # 如果弹窗时也要通知其他组件，可以在这里也 emit
+            self.code_clicked.emit(code, name) 
+            return 
+
+        # --- 复制逻辑 ---
+        if header == "代码":
+            clipboard.setText(code)
+        elif header == "名称":
+            clipboard.setText(name)
+        elif header in ("形态", "信号"):
+            clipboard.setText(current_text)
+        else:
+            clipboard.setText(code)
+
         self.status_bar.setText(f"📋 已复制: {clipboard.text()}")
         self.code_clicked.emit(code, name)
 
