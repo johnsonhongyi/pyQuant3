@@ -2764,7 +2764,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.error(f"Main process realtime update error: {e}")
 
             if getattr(self, 'sortby_col', None) is not None:
-
+                if self.sortby_col == 'code':
+                    self.sortby_col = 'name'
                 df = df.sort_values(
                     by=self.sortby_col,
                     ascending=getattr(self, 'sortby_col_ascend', False)
