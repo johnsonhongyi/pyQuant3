@@ -736,6 +736,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
         任务执行仍在 Tk 主线程，Qt 事件循环不再在这里驱动。
         """
+        next_delay = 50 
         try:
             while True:
                 # 非阻塞获取任务
@@ -746,14 +747,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Error executing dispatched task: {e}\n{traceback.format_exc()}")
         except queue.Empty:
-            pass
+            next_delay = 200 # 📥 [OPTIMIZE] 队列为空时降低轮询频率 (200ms)
         except Exception as e:
             logger.error(f"Error in dispatch queue processing: {e}")
         finally:
-            # 50ms 后再次检查队列 (增加多重关闭状态检查，彻底防止退出时的 GIL 异常)
+            # 50ms (任务活跃) 或 200ms (空闲退避) 后再次检查队列
             is_closing = getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
             if not is_closing:
-                self._schedule_after(50, self._process_dispatch_queue)
+                self._schedule_after(next_delay, self._process_dispatch_queue)
 
     # def _schedule_after(self, ms, func, *args):
     #     """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
@@ -3551,6 +3552,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
         count = 0
         while self._df_sync_running:
+            # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
+            if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
+               and not getattr(self, '_force_full_sync_pending', False):
+                time.sleep(10)
+                continue
+
             if not hasattr(self, 'df_all') or self.df_all.empty:
                 logger.debug("[send_df] df_all is empty or missing, waiting...")
                 if count < 3:

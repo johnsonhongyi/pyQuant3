@@ -15,6 +15,7 @@ from stock_logic_utils import toast_message
 from history_manager import QueryHistoryManager
 from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 from JohnsonUtil import LoggerFactory
+from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(name="StrategyManager")
 
@@ -1517,8 +1518,9 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             # 刷新 Signal Logs
             self._refresh_signal_logs()
 
-        # 10秒刷新一次 (提高日志实时性)
-        self._update_job = self.after(10*1000, self._schedule_refresh)
+        # 📥 [OPTIMIZE] 刷新频率对齐数据周期 (cct.duration_sleep_time)
+        interval_ms = max(3000, int(getattr(cct, 'duration_sleep_time', 5) * 1000))
+        self._update_job = self.after(interval_ms, self._schedule_refresh)
 
     def on_close(self):
         self.save_window_position(self, "StrategyManager")
