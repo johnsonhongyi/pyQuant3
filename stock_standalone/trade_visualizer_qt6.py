@@ -2311,6 +2311,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
         self._signal_dedup_cache = {} # 信号去重缓存
         
+        # ⚡ [OPTIMIZATION] Signal calculation caches for extreme performance
+        self._strategy_cache = {} # code -> (input_key, signals)
+        self._sbc_cache = {}      # code -> (input_key, signals)
+        
         # 加载形态检测配置
         self.pattern_config = self._load_pattern_config()
 
@@ -8864,8 +8868,13 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def render_charts(self, code, day_df, tick_df):
         """
-        渲染完整图表...
+        [极限性能版] 渲染完整图表 (带有信号缓存与对象复用)
         """
+        # ⚡ [PERF] 缓存容量管理：防止长时间运行内存泄露
+        if len(self._sbc_cache) > 100:
+            self._sbc_cache.clear()
+            self._strategy_cache.clear()
+
         # print(f'self.right_splitter.count():{self.right_splitter.count()}\n')
         
         if day_df.empty:
@@ -8932,14 +8941,14 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if 'date' in day_df.columns:
             day_df = day_df.set_index('date')
-        logger.debug(f'day_df.index:\n {day_df.index[-3:]}')
+        logger.debug(f'day_df.index:\n {day_df.index[-2:]}')
         day_df = day_df.sort_index()
         
         # ⚡ [DEBUG] Check OHLC data integrity
         try:
             if not day_df.empty:
                 cols_to_check = [c for c in ['open', 'close', 'high', 'low'] if c in day_df.columns]
-                tail_data = day_df[cols_to_check].tail(3)
+                tail_data = day_df[cols_to_check].tail(2)
                 logger.debug(f"[RT] day_df OHLC tail:\n{tail_data}")
                 if day_df[cols_to_check].isnull().values.any():
                     logger.warning(f"[RT] day_df contains NaNs:\n{day_df[cols_to_check].isnull().sum()}")
@@ -9190,8 +9199,25 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
         if self.show_strategy_simulation:
-            with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
-                kline_signals.extend(self._run_strategy_simulation_new50(code, day_df, n_rows=50))
+            # ⚡ [OPTIMIZATION] Strategy Cache Check (Enhanced with Date & Precision)
+            today_str = datetime.now().strftime('%Y%m%d')
+            df_all_p = 0
+            if not self.df_all.empty and code in self.df_all.index:
+                # 价格精度对齐 (2位即可)，防止浮点数误差
+                df_all_p = round(float(self.df_all.loc[code, 'close']), 2) if 'close' in self.df_all.columns else 0
+            
+            last_day_p = round(float(day_df.iloc[-1]['close']), 2)
+            strat_key = (code, len(day_df), day_df.index[-1], last_day_p, df_all_p, today_str)
+            cached_strat = self._strategy_cache.get(code)
+            
+            if cached_strat and cached_strat[0] == strat_key:
+                kline_signals.extend(cached_strat[1])
+                # logger.debug(f"[PERF] Strategy Cache HIT for {code}")
+            else:
+                with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
+                    sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=50)
+                    kline_signals.extend(sim_signals)
+                    self._strategy_cache[code] = (strat_key, sim_signals)
 
         # 2. 实盘日志历史信号 (CSV) - 引入缓存优化
         import time
@@ -9273,15 +9299,31 @@ class MainWindow(QMainWindow, WindowMixin):
         # TODO: 以后将 sbc_tracker/baseline_loader 等都收纳到 sbc_core 内部
         self.all_today_sbc_signals = []
         if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
-            with timed_ctx("sbc_core_analysis", warn_ms=100):
-                try:
-                    # 委托 sbc_core 进行高性能批量分析
-                    sbc_results = sbc_core.run_sbc_analysis_core(code, day_df, tick_df, verbose=True)
-                    self.all_today_sbc_signals = sbc_results.get("signals", [])
-                    # ⭐ [FIX] 立即刷新视觉层数据
-                    self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
-                except Exception as e:
-                    logger.debug(f"SBC integration error: {e}")
+            # ⚡ [OPTIMIZATION] SBC Cache Check (Enhanced with Date & Precision)
+            today_str = datetime.now().strftime('%Y%m%d')
+            last_tick_p = round(float(tick_df['close'].iloc[-1]), 2) if 'close' in tick_df.columns else 0
+            sbc_key = (code, len(day_df), len(tick_df), last_tick_p, today_str)
+            
+            cached_sbc = self._sbc_cache.get(code)
+            if cached_sbc and cached_sbc[0] == sbc_key:
+                self.all_today_sbc_signals = cached_sbc[1]
+                # logger.debug(f"[PERF] SBC Cache HIT for {code}")
+            else:
+                with timed_ctx("sbc_core_analysis", warn_ms=100):
+                    try:
+                        # 委托 sbc_core 进行高性能批量分析
+                        sbc_results = sbc_core.run_sbc_analysis_core(
+                            code, day_df, tick_df, verbose=True,
+                            engine=self.decision_engine, # 复用引擎
+                            baseline_loader=self.sbc_baseline_loader # 复用加载器
+                        )
+                        self.all_today_sbc_signals = sbc_results.get("signals", [])
+                        self._sbc_cache[code] = (sbc_key, self.all_today_sbc_signals)
+                    except Exception as e:
+                        logger.debug(f"SBC integration error: {e}")
+            
+            # ⭐ [FIX] 立即刷新视觉层数据
+            self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
         else:
             # 性能优化：如果不显示或没数据，确保旧信号被清理
             self.signal_overlay.update_signals([], target='tick')
@@ -9343,7 +9385,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # -------------------------
 
         # --- Ghost Candle (实时占位) ---
-        logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys() if tick_df is not None and not tick_df.empty else "None"}')
+        logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys()[:10] if tick_df is not None and not tick_df.empty else "None"}')
         if is_realtime_active:
             # [FIX] Safe column choice
             price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
@@ -10149,6 +10191,7 @@ class MainWindow(QMainWindow, WindowMixin):
                                 last_row[col_idx_map[col]] = v
 
             # --- 策略计算 ---
+            # with timed_ctx("evaluate_historical_signals", warn_ms=30):
             signals = self.strategy_controller.evaluate_historical_signals(code, _df)
 
             # --- bar_index 偏移 ---

@@ -581,7 +581,7 @@ def get_tick_str(r):
 
 
 
-def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame, use_live: bool = False, verbose: bool = False):
+def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame, use_live: bool = False, verbose: bool = False, engine=None, baseline_loader=None):
     """
     SBC 信号分析核心逻辑 (高性能版本：数据全对齐 + 动态决策引擎 + 🚀&🔥全捕捉)
     """
@@ -667,7 +667,8 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             print(f"\n── {t_date_str} | \033[93m{code}\033[0m 昨收:{bl_data['lastp1d']:.2f} | 昨高:{bl_data['lasth1d']:.2f} | MA5:{bl_data['ma5d']:.2f} | MA10:{bl_data['ma10d']:.2f} ──")
             print(f"   [DEBUG] Engine Anchors: {{'yesterday_high': {bl_data['lasth1d']:.2f}, 'prev_high': {bl_data['lasth2d']:.2f}, 'ma60': {bl_data['ma60d']:.2f}, 'ma20': {bl_data['ma20d']:.2f}, 'last_low': {bl_data['last_low']:.2f}, 'last_close': {bl_data['lastp1d']:.2f}, 'last_close_p2': {bl_data['lastp2d']:.2f}, 'is_rising_struct上涨结构': {is_rising_struct}}}")
         
-        baseline_loader = DailyEmotionBaseline()
+        if baseline_loader is None:
+            baseline_loader = DailyEmotionBaseline()
         baseline_loader.calculate_baseline(pd.DataFrame([bl_data]))
     
     # 3. 准备分时数据并执行分析 (VWAP 计算)
@@ -709,7 +710,8 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
     
     # 5. 信号提取循环 (使用 evaluate_dynamic 极大提升遍历性能)
     signals = []
-    engine = IntradayDecisionEngine()
+    if engine is None:
+        engine = IntradayDecisionEngine()
     snapshot = {
         "cost_price": 0.0,
         "highest_since_buy": 0.0,

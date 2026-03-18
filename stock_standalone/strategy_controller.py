@@ -137,6 +137,92 @@ class StrategyController:
 
         
     def evaluate_historical_signals(self, code: str, day_df: pd.DataFrame) -> List[SignalPoint]:
+        signals: List[SignalPoint] = []
+        if day_df is None or day_df.empty:
+            return signals
+
+        try:
+            # 1. 批量运行策略 (保持不变，因为通常内部已向量化)
+            is_valid, msg = self.pullback_strat.validate_df(day_df)
+            if is_valid:
+                pb_results = self.pullback_strat.run(day_df)
+                if not pb_results.empty:
+                    # 优化：预先映射索引
+                    all_ts_map = {ts: i for i, ts in enumerate(day_df.index)}
+                    for timestamp, row in pb_results.iterrows():
+                        idx = all_ts_map.get(timestamp, 0)
+                        signals.append(self._create_signal_point(
+                            code=code, timestamp=timestamp, idx=idx,
+                            price=float(row['close']), stype=SignalType.BUY,
+                            source=SignalSource.STRATEGY_ENGINE,
+                            reason=f"强力回撤: {row.get('strong_score', 0)}",
+                            debug_info=None # 极限性能：除非必要，否则减少 dict 转换
+                        ))
+
+            # 2. 模拟盘中决策 (极限优化部分)
+            eval_window = 10
+            eval_df = day_df.tail(eval_window)
+            if eval_df.empty: return signals
+
+            # 预转换：将 DataFrame 转换为 NumPy 矩阵或 Records
+            # 获取列索引，避免字符串查找
+            col_map = {col: i for i, col in enumerate(eval_df.columns)}
+            c_idx = col_map.get('close')
+            s_idx = col_map.get('cycle_stage', -1)
+            
+            vals = eval_df.values
+            timestamps = eval_df.index.values
+            start_idx = len(day_df) - len(eval_df) # 直接计算基础偏移
+
+            snapshot = {'code': code, 'market_win_rate': 0.5, 'loss_streak': 0, 'highest_since_buy': 0.0}
+            last_action_str = ""
+
+            for i in range(len(vals)):
+                row_val = vals[i]
+                ts = timestamps[i]
+                curr_idx = start_idx + i
+                
+                # 构造 row_dict (如果决策引擎支持，直接传 row_val 性能更好)
+                # 这里是折中方案：只构造必要的 Key
+                close_v = float(row_val[c_idx])
+                row_dict = {
+                    'code': code,
+                    'trade': close_v,
+                    'close': close_v,
+                    'cycle_stage': int(row_val[s_idx]) if s_idx != -1 else 0
+                }
+                
+                # 优化：从前一行 vals 中获取 last_close，避免 iloc 查找
+                if i > 0:
+                    snapshot['last_close'] = snapshot['nclose'] = float(vals[i-1][c_idx])
+                elif curr_idx > 0:
+                    snapshot['last_close'] = snapshot['nclose'] = float(day_df.iloc[curr_idx-1]['close'])
+
+                decision = self.decision_engine.evaluate(row_dict, snapshot)
+                action_str = decision.get('action', '无')
+
+                if action_str != last_action_str and action_str in ("买入", "卖出", "止损", "止盈"): # 简化判断
+                    signals.append(self._create_signal_point(
+                        code=code, timestamp=ts, idx=curr_idx, price=close_v,
+                        stype=self._map_action_to_signal_type(action_str),
+                        source=SignalSource.STRATEGY_ENGINE,
+                        reason=decision.get('reason', '')
+                    ))
+                    last_action_str = action_str
+                    if action_str == "买入":
+                        snapshot['buy_price'] = snapshot['highest_since_buy'] = close_v
+                elif action_str not in ("买入", "卖出", "止损", "止盈"):
+                    last_action_str = ""
+
+                if snapshot.get('buy_price', 0) > 0:
+                    if close_v > snapshot['highest_since_buy']:
+                        snapshot['highest_since_buy'] = close_v
+
+        except Exception:
+            logger.exception(f"History loop fail")
+        return signals
+
+    def evaluate_historical_signals_slow(self, code: str, day_df: pd.DataFrame) -> List[SignalPoint]:
         """
         全量历史策略回放：集成所有规则
         """
