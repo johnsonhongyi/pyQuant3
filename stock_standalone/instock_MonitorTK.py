@@ -424,6 +424,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
+        self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
         # 4. 初始化 Realtime Data Service (异步加载以加快启动)
         try:
             # 启动 Manager 仅用于同步设置 (global_dict)
@@ -1121,6 +1122,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         监听来自可视化器的控制指令（如 REQ_FULL_SYNC）
         使用独立控制管道，短连接，强健容错
         """
+        # 🛡️ [FIX] 线程存活校验：防止产生大量冗余监听线程导致 GIL 崩溃
+        if hasattr(self, "_feedback_listener_thread") and self._feedback_listener_thread and self._feedback_listener_thread.is_alive():
+            # logger.debug("[Pipe] Feedback listener already running. Skipping redundant startup.")
+            return
+
         import win32pipe, win32file, pywintypes, winerror
         import json, threading, time
         from data_utils import PIPE_NAME_TK
@@ -1266,12 +1272,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
             self._df_sync_thread.start()
 
-        # ====== 启动控制监听线程 ======
-        threading.Thread(
+        self._feedback_listener_thread = threading.Thread(
             target=listener,
             name="PipeCtrlListener",
             daemon=True
-        ).start()
+        )
+        self._feedback_listener_thread.start()
 
 
     def _on_resize_finished(self):
@@ -2854,7 +2860,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """Sync step: update internal state and Tkinter UI on the main thread."""
         try:
             with self._df_lock:
-                self.df_all = df  # 直接引用，减少 copy
+                # self.df_all = df  # 直接引用，减少 copy
+                self.df_all = df.copy(deep=False)
             has_update = True
             
             if hasattr(self, 'selector') and self.selector:
@@ -2867,6 +2874,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._schedule_after(10000, self._check_ext_data_update)
                 self._schedule_after(30000, self.KLineMonitor_init)
                 self._schedule_after(60000, self.schedule_15_30_job)
+                self._schedule_after(5000, self._start_feedback_listener) # 🛡️ [FIX] 启动监听器，仅在初次同步后执行一次
 
             if getattr(self.search_var1, 'get', lambda: False)() or getattr(self.search_var2, 'get', lambda: False)():
                 self.apply_search()
@@ -2888,7 +2896,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
             # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
             if has_update and getattr(self, 'live_strategy', None) is not None:
-                self._schedule_after(2000, self._start_feedback_listener)
                 if not (915 < cct.get_now_time_int() < 920):
                     if getattr(self, '_live_strategy_first_run', False):
                         # 第一次：延迟执行
