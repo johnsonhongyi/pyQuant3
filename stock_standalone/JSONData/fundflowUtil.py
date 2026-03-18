@@ -16,12 +16,19 @@ log = LoggerFactory.log
 # from bs4 import BeautifulSoup
 
 
-sinaheader = {
+sinaheader_old = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
             'Host': 'vip.stock.finance.sina.com.cn',
             'Referer':'http://vip.stock.finance.sina.com.cn',
             'Connection': 'keep-alive',
             }
+
+sinaheader = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://finance.sina.com.cn",
+        "Connection": "keep-alive"
+    }
+
 def get_dfcfw_fund_flow_old(market):
     if market.startswith('http'):
         single = True

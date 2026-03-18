@@ -1112,6 +1112,7 @@ tdx_all_df_path: Optional[str] = CFG.get_path("tdx_all_df_path")
 compute_lastdays: int = CFG.compute_lastdays
 sina_limit_time: int = CFG.sina_limit_time
 sina_dd_limit_time: int = CFG.sina_dd_limit_time
+duration_sleep_time: int = CFG.duration_sleep_time
 stop_loss_pct: float = CFG.stop_loss_pct
 take_profit_pct: float = CFG.take_profit_pct
 trailing_stop_pct: float = CFG.trailing_stop_pct
@@ -4162,13 +4163,15 @@ def get_url_data_R(url, timeout=15,headers=None):
             data = data.decode('gbk')
     return data
 
-def get_url_data_requests(url, timeout=30, headers=None, retry=3):
+def get_url_data_requests(url, timeout=30, headers=None, retry=1):
     """
     使用 requests 获取 URL 内容，支持自定义 headers、超时和重试
     """
     if headers is None:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
+            'Referer': 'https://finance.sina.com.cn',
+            "Connection": "keep-alive"
         }
 
     for attempt in range(retry):
