@@ -5978,7 +5978,7 @@ class MainWindow(QMainWindow, WindowMixin):
             today_bar = tick_to_daily_bar(effective_tick_df)
 
             # 注意：這裡直接調用渲染，確保模擬數據被帶入
-            with timed_ctx("render_charts_detailed", warn_ms=50):
+            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=50):
                 # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
                 self.render_charts(code, self.day_df, effective_tick_df)
 
@@ -5988,7 +5988,7 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
-            with timed_ctx("rrender_charts_detailed_historical", warn_ms=50):
+            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=50):
                 self.render_charts(code, self.day_df, None)
 
         '''

@@ -390,6 +390,14 @@ class KLineMonitor(tk.Toplevel):
                 self.tree.yview_moveto(y[0])
         except Exception as e:
             logger.info(f"[Monitor] 排序错误:{e}")
+    
+    def _safe_apply_filters(self):
+        try:
+            # 真正的UI刷新逻辑
+            self.apply_filters()
+        finally:
+            # 无论成功失败，都要释放“锁”
+            self._ui_update_pending = False
 
     def refresh_loop(self):
         # ---------- 初次加载 ----------
