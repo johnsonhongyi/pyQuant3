@@ -217,7 +217,14 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             times = stock_df['time'].tolist()
 
     if times:
-        ts_objs = pd.to_datetime(times, unit='s' if isinstance(times[0], (int, float)) else None)
+        # [FIX] 统一处理 Unix 时间戳，强制转为本地时间显示 (Asia/Shanghai)
+        if isinstance(times[0], (int, float, np.integer, np.floating)):
+            # 检查毫秒级时间戳 (> 1e12)
+            t_unit = 'ms' if times[0] > 1e12 else 's'
+            ts_objs = pd.to_datetime(times, unit=t_unit, utc=True).tz_convert('Asia/Shanghai').tz_localize(None)
+        else:
+            ts_objs = pd.to_datetime(times)
+
         if len(ts_objs) > 1 and ts_objs[0].date() != ts_objs[-1].date():
             # 多日模式：日期变换时显示日期前缀
             last_date = None
@@ -235,7 +242,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     # 自动生成日期分割线 (Vertical Lines)
     day_separators = []
     if len(times) > 1:
-        ts_objs = pd.to_datetime(times, unit='s' if isinstance(times[0], (int, float)) else None)
+        # [FIX] 复用已有的 ts_objs 确保日期分割线对齐
         dates = ts_objs.date
         breaks = np.where(dates[1:] != dates[:-1])[0] + 1
         for pos in breaks:
@@ -246,11 +253,11 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     
     # 预先标记日期列用于分组
     if 'date' not in stock_df.columns:
-        # times 可能包含 datetime 对象或 Timestamp
-        if times and isinstance(times[0], (int, float, np.integer, np.floating)):
-            stock_df['date'] = pd.to_datetime([t/1000.0 if t > 1.5e12 else t for t in times], unit='s').strftime('%Y-%m-%d')
+        # [FIX] 统一使用 ts_objs 的结果，确保日期对齐本地时间
+        if times:
+            stock_df['date'] = ts_objs.strftime('%Y-%m-%d')
         else:
-            stock_df['date'] = pd.to_datetime(times).strftime('%Y-%m-%d')
+            stock_df['date'] = datetime.now().strftime('%Y-%m-%d')
         
     grouped = list(stock_df.groupby('date'))
     print(f"Analyzing {len(grouped)} day(s)...")
