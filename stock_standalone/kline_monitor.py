@@ -44,7 +44,7 @@ class KLineMonitor(tk.Toplevel):
 
         self.title("K线趋势实时监控")
         self.geometry("760x460")
-
+        self._ui_update_pending = False
         # ---- 状态栏 ----
         self.status_frame = tk.Frame(self, bg="#eee")
         self.status_frame.pack(fill="x")
@@ -392,40 +392,53 @@ class KLineMonitor(tk.Toplevel):
             logger.info(f"[Monitor] 排序错误:{e}")
 
     def refresh_loop(self):
+        # ---------- 初次加载 ----------
         try:
             df = self.get_df_func()
             if df is not None and not df.empty:
                 self.df_cache = df.copy()
-                self.after(0, self.apply_filters)
+
+                if not self._ui_update_pending:
+                    self._ui_update_pending = True
+                    self.after(0, self._safe_apply_filters)
+
         except Exception as e:
             logger.info(f"[Monitor] 初次更新错误:{e}")
 
-        while not self.stop_event.is_set():
+        # ---------- 主循环 ----------
+        while not self.stop_event.wait(cct.duration_sleep_time):
             try:
-                # [FIX] 避免在子线程中直接调用 winfo_exists()，这在 Windows 下会导致 GIL 崩溃 (ThreadState is NULL)
-                # 改为依赖 stop_event 或简单的 try-except 捕获来判断 UI 是否有效
-                if cct.get_work_time():
-                    df = self.get_df_func()
-                    if df is not None and not df.empty:
-                        df = detect_signals(df)
-                        self.df_cache = df.copy()
-                        # 使用 after 切换到主线程更新 UI 是安全的，但这里要确保 self 还没销毁
-                        try:
-                            # [FIX] 使用 after 切换到主线程更新 UI 增加存活检查
-                            if self.winfo_exists():
-                                self.after(0, self.apply_filters)
-                        except (RuntimeError, tk.TclError):
-                            break
-                else:
+                if not cct.get_work_time():
                     if self.stop_event.wait(10):
                         break
+                    continue
+
+                df = self.get_df_func()
+
+                if df is None or df.empty:
+                    continue
+
+                # ---------- 核心优化1：避免重复数据 ----------
+                if id(df) == self._last_df_id:
+                    continue
+
+                self._last_df_id = id(df)
+
+                # ---------- 计算 ----------
+                df = detect_signals(df)
+                self.df_cache = df.copy()
+
+                # ---------- 核心优化2：UI只触发一次 ----------
+                if not self._ui_update_pending:
+                    self._ui_update_pending = True
+                    try:
+                        self.after(0, self._safe_apply_filters)
+                    except (RuntimeError, tk.TclError):
+                        break
+
             except (RuntimeError, tk.TclError):
-                # 如果主线程 UI 已销毁，这里会抛出异常，直接退出循环
                 break
-            except Exception as e:
-                logger.error(f"[Monitor] 更新错误: {e}")
-                if self.stop_event.wait(self.refresh_interval):
-                    break
+
             except Exception as e:
                 logger.error(f"[Monitor] 更新错误: {e}")
                 if self.stop_event.wait(self.refresh_interval):

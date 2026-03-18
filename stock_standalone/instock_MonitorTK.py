@@ -2727,15 +2727,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error starting tree update: {e}", exc_info=True)
             self._is_processing_tree_data = False
         finally:
-            # 🚀 [NEW] 核心修复：手动泵 PyQt 事件循环
-            # 否则当主程序忙碌时，看板窗口会因得不到 CPU 时间而假死
-            try:
-                from PyQt6 import QtWidgets
-                qt_app = QtWidgets.QApplication.instance()
-                if qt_app:
-                    qt_app.processEvents()
-            except:
-                pass
+            # [FIX-GIL] 删除 qt_app.processEvents()——在 Tkinter 主线程中手动泵 PyQt 事件循环
+            # 会导致两个事件循环互抚GIL，PyQt 有自己的消息队列，无需外部驱动
 
             # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
@@ -2789,6 +2782,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 logger.info(f'detect_signals async duration:{time.time()-t:.2f}')
 
+                # [FIX-GIL] 提前主动整合 DataFrame 内存布局，避免 copy()时触发
+                # numpy vstack 重获 GIL 与主线程竞争
+                try:
+                    df._consolidate_inplace()
+                except Exception:
+                    pass
                 ui_df = df.copy()
 
                 self._schedule_after(
