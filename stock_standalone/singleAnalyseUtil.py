@@ -732,13 +732,13 @@ if __name__ == '__main__':
                 log.debug('into get_work_time:%s' % (int_time))
                 if 920 < int_time < 926:
                     while 1:
-                        cct.sleeprandom(60)
+                        cct.sleeprandom(cct.duration_sleep_time)
                         break
                 elif 926 < int_time < 930:
                     while 1:
-                        cct.sleep(60)
+                        cct.sleep(cct.duration_sleep_time)
                         if cct.get_now_time_int() < 931:
-                            cct.sleep(60)
+                            cct.sleep(cct.duration_sleep_time)
                             print(".", end=' ')
                         else:
                             # cct.sleep(random.randint(0, 30))
@@ -766,9 +766,9 @@ if __name__ == '__main__':
                 log.debug('into clean_duration:%s' % (int_time))
                 if (not cct.get_trade_date_status() or cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 2400):
                     while 1:
-                        if cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 1503:
+                        if cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 1505:
                             print(".", end=' ')
-                            cct.sleep(60)
+                            cct.sleep(cct.duration_sleep_time)
                         elif not cct.get_trade_date_status() or cct.get_now_time_int() < 2400:
                             print(".", end=' ')
                             print("write dm to file")
