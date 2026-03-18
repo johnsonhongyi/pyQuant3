@@ -367,8 +367,10 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
 
         if not init and self.pw is not None:
             self.pw.clear()
-            if hasattr(self, 'overlay'):
+            if hasattr(self, 'overlay') and self.overlay:
                 self.overlay.text_items.clear()
+            if self.vbv:
+                self.vbv.clear()
             
             if time_labels:
                 axis_bottom = self.pw.getAxis('bottom')
@@ -420,6 +422,42 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                     k_data.append([i, row['open'], row['close'], row['low'], row['high']])
                 self.candlestick = CandlestickItem(k_data)
                 self.pw.addItem(self.candlestick)
+
+            # [NEW] Render Volume - Integrated into main plot to match sector_bidding_panel
+            if 'volume' in df.columns:
+                vol = df['volume'].values.astype(float)
+                prices_close = df['close'].values
+                prices_open = df['open'].values if 'open' in df.columns else prices_close
+                
+                if len(vol) > 0:
+                    p_min, p_max = np.min(prices_close), np.max(prices_close)
+                    v_max = np.percentile(vol, 99) if len(vol) > 10 else np.max(vol)
+                    if v_max <= 0: v_max = 1
+                    
+                    # Scaling logic from sector_bidding_panel: occupy 20% of price range
+                    price_range = (p_max - p_min) if p_max > p_min else p_max * 0.1
+                    if price_range <= 0: price_range = 1.0
+                    vol_scale = price_range * 0.2 / v_max
+                    
+                    brushes = []
+                    pens = []
+                    c_up = '#FF4444'
+                    c_down = '#44CC44'
+                    for i in range(len(prices_close)):
+                        is_up = prices_close[i] >= prices_close[i-1] if i > 0 else prices_close[i] >= prices_open[i]
+                        color = c_up if is_up else c_down
+                        brushes.append(pg.mkBrush(color))
+                        pens.append(pg.mkPen(color, width=0.5))
+                    
+                    v_x = np.arange(len(vol))
+                    # Use a single BarGraphItem for performance (unlike bidding panel's loop)
+                    v_bars = pg.BarGraphItem(x=v_x, height=vol * vol_scale, width=0.7, brushes=brushes, pens=pens)
+                    # Positioned at bottom of price action
+                    v_bars.setPos(0, p_min - price_range * 0.05) 
+                    self.pw.addItem(v_bars)
+                    
+                    # Ensure Y range covers the bars
+                    self.pw.setYRange(p_min - price_range * 0.3, p_max + price_range * 0.1, padding=0)
         
         if avg_series is not None:
             avg_x = np.arange(len(avg_series))
