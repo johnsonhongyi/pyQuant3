@@ -90,6 +90,7 @@ class IntradayPatternDetector:
         'momentum_failure',     # 主升转弱 (之前是主升，现在破位)
         'strong_auction_open',  # 强力竞价 (高开+强结构+历史联动)
         'early_momentum_buy',   # 早盘极速抢筹 (高开高走/低开反转)
+        'tail_end_trap',        # 尾盘诱多陷阱 (14:00后无量拉升)
     ]
     
     # 形态中文名映射
@@ -114,11 +115,13 @@ class IntradayPatternDetector:
         'momentum_failure': '主升转弱',
         'strong_auction_open': '强力竞价',
         'early_momentum_buy': '早盘抢筹',
+        'tail_end_trap': '尾盘诱多',
     }
     
     # ⚡ [NEW] 信号优先级映射 (数值越小优先级越高)
     PRIORITY_MAP = {
         # 级别 1: 极端风险 (跑路/顶部)
+        'tail_end_trap': 5,
         'bull_trap_exit': 10,
         'top_signal': 15,
         # 级别 2: 趋势转弱 (破位/风险)
@@ -296,6 +299,10 @@ class IntradayPatternDetector:
         # ⚡ [NEW] 诱空反转 (诱空下杀后再拉升突破)
         if 'bear_trap_reversal' in self.enabled_patterns:
             events.extend(self._check_bear_trap_reversal(code, name, tick_df, day_row, prev_close))
+        
+        # ⚡ [NEW] 尾盘诱多陷阱 (Tail-end Trap)
+        if 'tail_end_trap' in self.enabled_patterns:
+            events.extend(self._check_tail_end_trap(code, name, day_row, prev_close, now_time))
         
         # 8. 缩量横盘 / 冲高回落 / 顶部信号
         if 'shrink_sideways' in self.enabled_patterns:
@@ -982,6 +989,7 @@ class IntradayPatternDetector:
         is_open_low = abs(open_p - day_low) / open_p < conf_mm["open_low_tolerance"] if open_p > 0 else False
         
         # 3. 判定历史连板/连阳晋级 (win 计数)
+        # 3. 判定历史连板/连阳晋级 (win 计数)
         win_val = day_row.get('win', 0)
         win_count = int(win_val) if not pd.isna(win_val) else 0
         win_msg = f" win {win_count} 进 {win_count+1}" if win_count > 0 else ""
@@ -1001,6 +1009,108 @@ class IntradayPatternDetector:
                 is_high_priority=True if is_open_low else False
             ))
                 
+        return events
+
+    def _check_bear_trap_reversal(self, code: str, name: str,
+                                  tick_df: Optional[pd.DataFrame],
+                                  day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
+        """
+        诱空反转 (昨日大跌/早盘杀跌 -> 今日止跌反转)
+        用户核心逻辑：昨日大跌，今日止跌是机会。
+        """
+        events = []
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        open_p = float(day_row.get('open', 0))
+        low_p = float(day_row.get('low', 0))
+        volume = float(day_row.get('volume', 0))
+        ratio = float(day_row.get('ratio', 0))
+        
+        if open_p <= 0 or curr_p <= 0 or prev_close <= 0:
+            return events
+            
+        # 1. 结构基础：获取历史数据
+        last_close = float(day_row.get('lastp1d', prev_close))
+        last_percent = (last_close - float(day_row.get('lastp2d', last_close))) / float(day_row.get('lastp2d', 1)) * 100
+        
+        # 2. 诱空特征识别
+        # 条件 A: 昨日大跌 (> 4%) 且今日低开走高
+        is_yesterday_crash = last_percent < -4.0
+        # 条件 B: 今日早盘杀跌但未创新低/迅速收回
+        kill_drop = (low_p - open_p) / open_p * 100 if open_p > 0 else 0
+        is_morning_shakeout = kill_drop < -2.0 and curr_p > open_p
+        
+        if not (is_yesterday_crash or is_morning_shakeout):
+            return events
+            
+        # 3. 止跌确认：站稳均价线 且 处于低位横盘后的放量突破
+        amount = float(day_row.get('amount', 0))
+        vol_raw = float(day_row.get('volume', 0))
+        vwap = amount / vol_raw if vol_raw > 0 else 0
+        
+        # 核心：14:00 左右的尾盘买点
+        now_time = datetime.now().time()
+        
+        # 逻辑：如果是昨日大跌后的今日止跌，或者早盘杀跌后的企稳
+        if curr_p > vwap and curr_p > open_p:
+            detail = ""
+            if is_yesterday_crash and curr_p > last_close * 0.985:
+                detail = f"昨日大跌{last_percent:.1f}%后今日强力止跌"
+            elif is_morning_shakeout and curr_p > vwap * 1.005:
+                detail = f"早盘诱空杀跌{kill_drop:.1f}%后收复均线"
+            
+            if detail:
+                curr_min = now_time.hour * 60 + now_time.minute
+                # 如果在 14:00 之后，且换手开始温和放大
+                is_safe_entry = curr_min >= 840 and ratio > 1.5
+                
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='bear_trap_reversal',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=curr_p,
+                    detail=f"🔥{'尾盘确认:' if is_safe_entry else '观察:'}{detail}",
+                    score=85 if is_safe_entry else 60,
+                    is_high_priority=is_safe_entry
+                ))
+                
+        return events
+
+    def _check_tail_end_trap(self, code: str, name: str, 
+                             day_row: pd.Series, prev_close: float,
+                             now_time: dt_time) -> List[PatternEvent]:
+        """
+        尾盘诱多陷阱检测 (Tail-end Pump Trap)
+        逻辑：14:00 后快速拉升但无量/破位均线/结构虚假
+        """
+        events = []
+        conf_t1 = self.config.get("t1_trap_defense", {})
+        start_min = conf_t1.get("tail_end_start_time", 840) # 14:00
+        
+        curr_min = now_time.hour * 60 + now_time.minute
+        if curr_min < start_min:
+            return events
+            
+        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+        open_p = float(day_row.get('open', 0))
+        volume = float(day_row.get('volume', 0)) # 这里通常是量比或相对量
+        
+        # 计算今日涨幅
+        pump_gain = (curr_p - open_p) / open_p * 100 if open_p > 0 else 0
+        
+        # 判定门槛
+        pump_thresh = conf_t1.get("trap_pump_threshold", 1.5)
+        vol_limit = conf_t1.get("trap_vol_ratio_limit", 1.2)
+        
+        # 如果尾盘大幅拉升但量能不足
+        if pump_gain > pump_thresh and volume < vol_limit:
+            events.append(PatternEvent(
+                code=code, name=name, pattern='tail_end_trap',
+                timestamp=datetime.now().strftime('%H:%M:%S'),
+                price=curr_p,
+                detail=f"⚠️尾盘诱多: 14:00后拉升{pump_gain:.1f}%但量能不足({volume:.1f})",
+                score=40, # 低分代表风险或负面
+                is_high_priority=True
+            ))
+            
         return events
 
     def _check_open_low_retest(self, code: str, name: str,

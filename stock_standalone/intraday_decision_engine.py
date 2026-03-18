@@ -812,7 +812,16 @@ class IntradayDecisionEngine:
         threshold = 0.50 if structure == "派发" else 0.65
         
         if n_pillars >= 2 and sell_score >= threshold:
-            return ("卖出", -max(sell_score, 0.5), " | ".join(p for p in reasons if "⚠️" not in p))
+            # ⭐ [NEW] 边界防御：早盘杀跌保护 (Shakeout Guard)
+            # 用户逻辑：早盘是低价连续结构，打的是 T+1 无法交易规则。所以除非极度破位，否则在 10:30 前不全仓杀跌。
+            now_time = dt.datetime.now().time()
+            if now_time < dt.datetime.strptime("10:30", "%H:%M").time():
+                if "日内破位主杀" not in reasons and sell_score < 0.85:
+                    sell_score *= 0.7
+                    reasons.append("🛡️ 早盘洗盘保护 (Shakeout Guard)")
+            
+            if sell_score >= threshold:
+                return ("卖出", -max(sell_score, 0.5), " | ".join(p for p in reasons if "⚠️" not in p))
         elif structure == "派发" and sell_score >= 0.45 and n_pillars >= 1:
             # 派发结构：单支柱豁免，门槛低
             return ("卖出", -0.5, " | ".join(p for p in reasons if "⚠️" not in p))
@@ -1424,11 +1433,17 @@ class IntradayDecisionEngine:
             buy_score = 0.0
             buy_reasons = []
             
-            # 风险熔断：如果是派发结构，严禁开盘高走买入
-            structure = debug.get("structure", "UNKNOWN")
-            if structure == "派发":
-                debug["realtime_skip"] = "派发结构禁买"
-                return result
+        # 风险熔断：如果是派发结构，严禁开盘高走买入
+        structure = debug.get("structure", "UNKNOWN")
+        if structure == "派发":
+            debug["realtime_skip"] = "派发结构禁买"
+            return result
+        
+        # ⭐ [NEW] 边界防御：尾盘诱多陷阱 (Tail-end Trap Defense)
+        # 如果检测到尾盘诱多，直接禁买，不进入评分环节
+        if snapshot.get("tail_end_trap", False):
+            debug["realtime_skip"] = "⚠️检测到尾盘诱多陷阱，禁止站岗"
+            return result
             
             # 趋势熔断：如果重心显著下移，禁止普通高开买入 (User Requirement)
             if not vwap_trend_ok:
@@ -1520,6 +1535,18 @@ class IntradayDecisionEngine:
                 # 如果超跌后今日站上均线，是一个极佳的反弹切入点
                 buy_score += 0.3
                 buy_reasons.append(f"超跌反弹({oversold_reason})")
+
+            # ⭐ [NEW] 条件 7.1: 诱空反转 (Shakeout Day Entry)
+            # 逻辑：早盘经历过杀跌，或者昨日大跌，今日尾盘确认止跌 (14:00 后)
+            if snapshot.get("bear_trap_reversal", False):
+                now_time = dt.datetime.now().time()
+                curr_min = now_time.hour * 60 + now_time.minute
+                if curr_min >= 840: # 14:00
+                    buy_score += 0.45
+                    buy_reasons.append("🔥诱空反转确认(Safe Entry)")
+                else:
+                    buy_score += 0.15 # 早盘仅作为观察加分
+                    buy_reasons.append("观察:诱空反转中")
 
             # 条件8: 大阳变盘点/惜售爆发检测 (Consolidation & Momentum Breakout)
             # Move definitions up to support Cond 9

@@ -159,9 +159,14 @@ class T1StrategyEngine:
         # 诱多特征1：现价跌破日内均价线 (均价线是多空分水岭，跌破意味着当日买入者亏损，极易形成恐慌踩踏)
         # 诱多特征2：跌破平盘线 (percent < 0)，弱势不补仓
         # 诱多特征3：长上影线杀跌 (从高点回落超过 4%)
+        # 诱多特征4：[NEW] 尾盘诱多陷阱 (Tail-end Trap)
         high_pct = (high - pre_close) / pre_close * 100 if pre_close > 0 else 0
-        if current_price < nclose * 0.995 or percent < 0.0 or (high_pct > 3.0 and (high - current_price)/high > 0.04):
-            return 'HOLD', "", 0.0
+        is_break_vwap = current_price < nclose * 0.995
+        is_tail_trap = snap.get('tail_end_trap', False)
+        
+        if is_break_vwap or percent < 0.0 or (high_pct > 3.0 and (high - current_price)/high > 0.04) or is_tail_trap:
+            reason = "跌破均线/昨收" if not is_tail_trap else "⚠️尾盘诱多陷阱"
+            return 'HOLD', reason, 0.0
 
         self.refresh_targets(code, snap, current_price)
         targets = self.target_cache.get(code)
@@ -208,6 +213,13 @@ class T1StrategyEngine:
                 nclose = float(row.get('nclose', 0))
                 if current_price >= nclose * 0.995: 
                     return 'ADD', f"主升浪回踩企稳 ({buy_target:.2f}) 顺势加仓", current_price
+
+        # --- 4. [NEW] 诱空反转确认加仓 (Shakeout Reversal) ---
+        if snap.get('bear_trap_reversal', False):
+            now_time = dt.datetime.now().time()
+            if now_time >= dt.time(14, 0): # 14:00 后确认
+                if current_price > nclose:
+                    return 'ADD', "🔥诱空反转尾盘确认, 此时加仓安全系数高", current_price
 
         return 'HOLD', "", 0.0
 
