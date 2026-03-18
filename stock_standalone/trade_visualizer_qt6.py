@@ -7955,7 +7955,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 1. 检测是否处于“全览”状态（即当前已经看完了绝大部分数据）
             # 如果左边缘接近 0 且右边缘接近末尾，则标记为 FullView
-            self._prev_is_full_view = (view_rect.left() <= 10 and view_rect.right() >= total - 5)
+            self._prev_is_full_view = (view_rect.left() <= 15 and view_rect.right() >= total - 5)
             logger.debug(f'total: {total} _prev_is_full_view: { self._prev_is_full_view }')
             # 2. 捕获两端相对于末尾的偏移根数
             self._prev_dist_left = total - view_rect.left()
@@ -8043,7 +8043,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # ========== 3. 计算 X 轴范围 ==========
             # 始终让最新数据在右侧可见
-            # ⭐ [FIX] 预留 2 根 K 线位置 (由 8 改回 2)
+            # ⭐ [FIX] 预留极少量的 K 线位置，确保右侧紧凑 (由 5 减小到 1)
             RIGHT_MARGIN = 2 
             x_max = total_bars + RIGHT_MARGIN
             x_min = max(-1, total_bars - visible_bars)
@@ -9727,8 +9727,19 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._reset_kline_view(df=day_df)
             else:
                 # 处于“记忆”状态：以右侧为基准还原视口
-                target_left = max(-1, new_total - self._prev_dist_left)
-                target_right = new_total - self._prev_dist_right
+                # ⭐ [FIX] 如果之前处于“最右侧”状态 (允许 1 根以内的细微偏差)，则强制锁定到最新的 margin
+                # 防止因浮点数误差累计导致的视口“慢跑”
+                is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
+                
+                if is_at_end:
+                     current_margin = 2 # 与 _reset_kline_view 保持一致
+                     target_right = new_total + current_margin
+                     # 保持之前的宽度 (zoom)
+                     prev_width = self._prev_dist_left - self._prev_dist_right
+                     target_left = target_right - prev_width
+                else:
+                     target_left = max(-1, new_total - self._prev_dist_left)
+                     target_right = new_total - self._prev_dist_right
 
                 # 设置 X 轴范围 (padding=0 确保绝对对齐)
                 vb.setRange(xRange=(target_left, target_right), padding=0)
