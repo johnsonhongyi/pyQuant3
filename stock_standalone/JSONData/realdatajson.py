@@ -1437,6 +1437,12 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
 
                     return dd
 
+    # 备选：如果需要获取指数，由于 'all' 默认只含个股，建议调用此专用方法
+    def get_major_indices(self, **kwargs) -> pd.DataFrame:
+        """获取主要指数 (上证, 深证, 创业板, 科创板)"""
+        import JSONData.sina_data as sina_data
+        return sina_data.Sina().get_major_indices()
+
     # --------- URL 构建 ---------
     url_list = []
     # SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}

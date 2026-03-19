@@ -225,9 +225,15 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
             height=18,
             font=("Microsoft YaHei", 9),
             bg="#f9f9f9",
-            wrap="word"
+            wrap="word",
+            cursor="hand2" # Change cursor globally for this area? Or just on tags
         )
         self.txt_sectors.pack(fill="y", expand=True)
+        # Configure hyperlink style
+        self.txt_sectors.tag_configure("link", foreground="#0056b3", underline=True)
+        self.txt_sectors.tag_bind("link", "<Button-1>", self.on_sector_click)
+        self.txt_sectors.tag_bind("link", "<Enter>", lambda e: self.txt_sectors.config(cursor="hand2"))
+        self.txt_sectors.tag_bind("link", "<Leave>", lambda e: self.txt_sectors.config(cursor="xterm"))
 
         # ===== 右侧主区域：市场温度 + 策略笔记 =====
         ctx_right = tk.Frame(top_frame)
@@ -409,7 +415,21 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
             self.date_var.set(self.current_date)
             
         # Trigger Engine
-        monitored = getattr(self.monitor_app.live_strategy, '_monitored_stocks', {}) if self.monitor_app.live_strategy else {}
+        monitored = {}
+        if self.monitor_app and hasattr(self.monitor_app, 'live_strategy') and self.monitor_app.live_strategy:
+            monitored = getattr(self.monitor_app.live_strategy, '_monitored_stocks', {})
+            
+        # Fallback: If monitored is empty, try to load from config file directly
+        if not monitored:
+            try:
+                config_path = "voice_alert_config.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        monitored = json.load(f)
+                    self.logger.info(f"Loaded {len(monitored)} monitored stocks from file fallback.")
+            except Exception as e:
+                self.logger.error(f"Fallback monitored load failed: {e}")
+
         self.engine.generate_daily_report(monitored, force_date=self.current_date)
         
         self.refresh_report(use_cache=True)
@@ -485,12 +505,15 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         # Hot Sectors
         hot_list = summary.get('hot_sectors', [])
-        sector_text = ""
-        for s in hot_list[:10]:
-             # s is [name, pct]
-             sector_text += f"{s[0]} : {s[1]}%\n"
         self.txt_sectors.delete("1.0", tk.END)
-        self.txt_sectors.insert(tk.END, sector_text)
+        for s in hot_list[:12]:
+             # s is [name, pct]
+             name = s[0]
+             pct = s[1]
+             # Insert name with link tag
+             start_idx = self.txt_sectors.index(tk.INSERT)
+             self.txt_sectors.insert(tk.END, f"{name}", "link")
+             self.txt_sectors.insert(tk.END, f" : {pct}%\n")
         
         # User Notes / Summary
         self.txt_summary.delete("1.0", tk.END)
@@ -540,7 +563,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
                 period,
                 s.get('sector', ''),
                 s.get('reason', ''),
-                "", # auto_reason placeholder
+                s.get('auto_reason', ''), # auto_reason
                 s.get('action_plan', '')
             )
             # Tag logic
@@ -552,6 +575,31 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self.lbl_stats.config(text=f"Total: {count}  |  Avg Score: {avg_score:.1f}")
 
         self.tree.tag_configure('hot', background='#ffe6e6') # Light red
+        self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
+
+    def on_sector_click(self, event):
+        """Handle click on sector names to open concept window."""
+        # Get the word under the click
+        index = self.txt_sectors.index(f"@{event.x},{event.y}")
+        # Find the full text in that line before the ":"
+        line_text = self.txt_sectors.get(f"{index} linestart", f"{index} lineend")
+        if ":" in line_text:
+            sector_name = line_text.split(":")[0].strip()
+            self.logger.info(f"Sector clicked: {sector_name}")
+            
+            # Link to main app method: show_concept_top10_window_simple
+            if self.monitor_app and hasattr(self.monitor_app, 'show_concept_top10_window_simple'):
+                # Check for dispatch queue to avoid GIL/thread issues
+                if hasattr(self.monitor_app, 'tk_dispatch_queue'):
+                    self.logger.info(f"Dispatching concept window open for: {sector_name}")
+                    self.monitor_app.tk_dispatch_queue.put(
+                        lambda: self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=True)
+                    )
+                else:
+                    # Fallback to direct call if no queue exists
+                    self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=True)
+            else:
+                self.logger.warning("monitor_app or show_concept_top10_window_simple not available")
         self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
 
     def save_notes(self):

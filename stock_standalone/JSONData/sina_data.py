@@ -326,6 +326,10 @@ class Sina:
             if len(self.stock_codes) < original_len:
                 log.info(f"Session过滤停牌/无效股: {original_len - len(self.stock_codes)} 只")
 
+        # if self.market_type == 'all' and len(self.stock_codes) > 5000:
+        #     code_index = self.set_stock_codes_index_init(['999999','399001','399006'], index=True,append_stock_codes=True)
+        #     log.debug(f'code_index  in self.stock_codes: { "sz399001" in self.stock_codes} count:{len(self.stock_codes)}')
+
     def _filter_suspended(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         统一检测并剔除停牌/无效股票，并更新内存缓存
@@ -391,10 +395,10 @@ class Sina:
         """获取所有实时数据 (优化 HDF5 加载逻辑)"""
         self.stockcode = StockCode()
         self.stock_code_path = self.stockcode.stock_code_path
+        self.market_type = 'all'
         all_codes = self.stockcode.get_stock_codes()
         self.load_stock_codes(all_codes)
         time_s = time.time()
-        self.market_type = 'all'
         # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
         # h5 = self._load_hdf_hist_unified(debug=False)
         # h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
@@ -1551,13 +1555,12 @@ class Sina:
             
         return df
 
-    def set_stock_codes_index_init(self, code: Union[str, List[str]], index: bool = False) -> List[str]:
+    def set_stock_codes_index_init(self, code: Union[str, List[str]], index: bool = False,append_stock_codes=False) -> List[str]:
         code_list: List[str]
         if not isinstance(code, list):
             code_list = code.split(',')
         else:
             code_list = code
-        
         code_l: List[str] = []
         if index:
             for x in code_list:
@@ -1565,8 +1568,28 @@ class Sina:
                     code_l.append(str(1000000 - int(x)).zfill(6))
                 else:
                     code_l.append(x)
-            self.stock_codes = [(
-                'sh%s' if stock_code.startswith(('0')) else 'sz%s') % stock_code for stock_code in code_l]
+            
+            self.stock_codes = []
+            for sc in code_l:
+                # 如果已经带有 sh/sz/bj 前缀，则直接使用
+                if sc.startswith(('sh', 'sz', 'bj')):
+                    self.stock_codes.append(sc)
+                # 000xxx 开头或通过 999 转换来的均为上证指数 (Sina)
+                elif sc.startswith('0'):
+                    self.stock_codes.append('sh%s' % sc)
+                # 399xxx 开头为深证指数
+                elif sc.startswith('399'):
+                    self.stock_codes.append('sz%s' % sc)
+                else:
+                    # 默认根据 startswith('0') 逻辑兜底或默认 sz
+                    prefix = 'sh' if sc.startswith('0') else 'sz'
+                    self.stock_codes.append('%s%s' % (prefix, sc))
+            # stock_codes_index = [('sh%s' if stock_code.startswith(('0')) else 'sz%s') % stock_code for stock_code in code_l]
+            # if not append_stock_codes or len(self.stock_codes) == 0 :
+            #     self.stock_codes  = stock_codes_index
+            # else:
+            #     self.stock_codes.extend(stock_codes_index)
+
         else:
             code_l = code_list
             self.stock_codes = [cct.code_to_symbol(stock_code) for stock_code in code_l]
@@ -1645,6 +1668,14 @@ class Sina:
             self.stock_data.append(response.text)
             self.dataframe = self.format_response_data(index)
         return self.dataframe
+
+    def get_major_indices(self) -> pd.DataFrame:
+        """获取主要大盘指数 (上证, 深证, 创业板, 科创50)"""
+        # 000001=上证, 399001=深证, 399006=创业板, 000688=科创50
+        codes = ['000001', '399001', '399006', '000688']
+        # codes = ['999999', '399001', '399006', '399005']
+
+        return self.get_stock_list_data(codes, index=True)
 
 
 
@@ -2234,6 +2265,7 @@ if __name__ == "__main__":
 
     # log.setLevel(LoggerFactory.DEBUG)
     sina = Sina()
+    dm = sina.all
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
@@ -2246,6 +2278,16 @@ if __name__ == "__main__":
     # df = sina.get_stock_code_data('000017')
 
     # print((sina.get_stock_code_data('300107').T))
+
+    # print df.lastbuy[-5:].to_frame().T
+    df = sina.get_stock_list_data(['999999','399001','399006'],index=True)
+    code_index = sina.set_stock_codes_index_init(['999999','399001','399006'], True)
+    ddd = sina.get_major_indices()
+    print(f'get_major_indices: {ddd}')
+    print(f'code_index: {code_index}')
+    print((df.name))
+    # df = sina.get_stock_code_data('999999',index=True)
+    print(f'index: {df}')
     code='603056'
     code='920082'
     # dd = sina.get_real_time_tick('300376')
@@ -2281,10 +2323,6 @@ if __name__ == "__main__":
         print(f'count:{len(df)}')
 
         
-    # print df.lastbuy[-5:].to_frame().T
-    print((sina.get_stock_list_data(['999999','399001','399006'],index=True).name))
-    # df = sina.get_stock_code_data('999999',index=True)
-    print((df.name))
 
     df = Sina().market('cyb')
     print((df.shape))

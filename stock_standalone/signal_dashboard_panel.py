@@ -11,7 +11,8 @@ from typing import Dict, List, Any
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
-    QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit
+    QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
+    QProgressBar, QGridLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray
 from PyQt6.QtGui import QColor, QFont, QBrush
@@ -288,10 +289,64 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.ls_ratio_label = QLabel("多空比: --")
         
         temp_lay.addWidget(self.temp_label)
+        
+        # [NEW] 市场温度进度条
+        self.temp_bar = QProgressBar()
+        self.temp_bar.setRange(0, 100)
+        self.temp_bar.setValue(50)
+        self.temp_bar.setTextVisible(False)
+        self.temp_bar.setFixedHeight(8)
+        self.temp_bar.setMinimumWidth(120)
+        self.temp_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #333;
+                border: none;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5bc0de, stop:0.5 #f0ad4e, stop:1 #d9534f);
+                border-radius: 4px;
+            }
+        """)
+        temp_lay.addWidget(self.temp_bar)
+        
+        self.market_breadth_label = QLabel("📊 上涨:-- 下跌:--")
+        self.vol_stat_label = QLabel("🚀 放量:--")
+        self.vol_stat_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vol_stat_label.mousePressEvent = self._on_market_breadth_clicked 
+        self.ls_ratio_label = QLabel("多空比: --")
+        
         temp_lay.addWidget(self.market_breadth_label)
         temp_lay.addWidget(self.vol_stat_label)
         temp_lay.addWidget(self.ls_ratio_label)
         header_layout.addWidget(temp_frame)
+        
+        # [NEW] 增加点击联动详情
+        temp_frame.setCursor(Qt.CursorShape.PointingHandCursor)
+        temp_frame.mousePressEvent = self._on_market_temp_clicked
+
+        header_layout.addSpacing(20)
+        
+        # [NEW] 指数网格显示
+        self.index_frame = QFrame()
+        self.index_frame.setMinimumWidth(150)
+        self.index_frame.setStyleSheet("background: #111; border: 0.5px solid #444; border-radius: 5px; padding: 2px;")
+        idx_grid = QGridLayout(self.index_frame)
+        idx_grid.setContentsMargins(5, 5, 5, 5)
+        idx_grid.setSpacing(5)
+        
+        self.idx_labels = {}
+        indices_list = [("sh000001", "上证"), ("sz399001", "深证"), ("sz399006", "创业"), ("sh000688", "科创")]
+        for i, (code, name) in enumerate(indices_list):
+            nl = QLabel(f"{name}")
+            nl.setStyleSheet("color: #aaa; font-size: 9pt;")
+            vl = QLabel("--%")
+            vl.setStyleSheet("color: #ddd; font-family: 'Consolas'; font-size: 10pt; font-weight: bold;")
+            idx_grid.addWidget(nl, i, 0)
+            idx_grid.addWidget(vl, i, 1)
+            self.idx_labels[name] = vl
+            
+        header_layout.addWidget(self.index_frame)
         
         header_layout.addSpacing(30)
         self.cards = {}
@@ -533,13 +588,54 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
         self.cards["risk"].setText(str(self._stats_counters["risk"]))
         self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
-        ratio = self._stats_counters["bull"] / max(1, self._stats_counters["bear"])
-        self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
-        temp = "冷清"
-        if ratio > 2.0: temp = "活跃"
-        if ratio > 5.0: temp = "狂热"
-        if ratio < 0.5: temp = "低迷"
-        self.temp_label.setText(f"市场温度: {temp} (采样{total})")
+        
+        # 优先使用从 monitor 传来的专业市场温度评分
+        prof_temp = self._market_stats.get('temperature')
+        if prof_temp is not None:
+            temp_val = float(prof_temp)
+            status = "冷清"
+            if temp_val > 80: status = "火热"
+            elif temp_val > 60: status = "活跃"
+            elif temp_val > 40: status = "平淡"
+            elif temp_val > 20: status = "低迷"
+            else: status = "冰点"
+            self.temp_label.setText(f"市场温度: {status} ({temp_val:.1f}°C)")
+            
+            # 动态改色
+            color = "#ddd"
+            if temp_val > 80: color = "#ff4444" # 红
+            elif temp_val > 60: color = "#ff8c00" # 橙
+            elif temp_val < 30: color = "#5bc0de" # 蓝
+            self.temp_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+            
+            # 更新进度条
+            if hasattr(self, 'temp_bar'):
+                self.temp_bar.setValue(int(temp_val))
+                # 调整进度条 chunk 颜色 (可选，目前使用渐变)
+        else:
+            # 降级使用信号比例计算
+            ratio = self._stats_counters["bull"] / max(1, self._stats_counters["bear"])
+            self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
+            temp = "冷清"
+            if ratio > 2.0: temp = "活跃"
+            if ratio > 5.0: temp = "狂热"
+            if ratio < 0.5: temp = "低迷"
+            self.temp_label.setText(f"市场温度: {temp} (采样{total})")
+            if hasattr(self, 'temp_bar'): self.temp_bar.setValue(min(100, int(ratio * 20)))
+
+        # 更新指数网格
+        indices_data = self._market_stats.get('indices', [])
+        if indices_data and hasattr(self, 'idx_labels'):
+            for idx_info in indices_data:
+                name = idx_info.get('name', '')
+                pct = idx_info.get('percent', 0.0)
+                # 寻找匹配的标签 (模糊匹配)
+                for label_key, label_widget in self.idx_labels.items():
+                    if label_key in name:
+                        color = "#ff4444" if pct > 0 else "#44ff44" if pct < 0 else "#aaa"
+                        label_widget.setText(f"{pct:+.2f}%")
+                        label_widget.setStyleSheet(f"color: {color}; font-family: 'Consolas'; font-size: 10pt; font-weight: bold;")
+
         sorted_sectors = sorted(self._sector_heat.items(), key=lambda x: x[1], reverse=True)
         top_3 = [f"{s}: {c}" for s, c in sorted_sectors[:3]]
         self.hot_sectors_label.setText(" | ".join(top_3) if top_3 else "暂无数据")
@@ -565,6 +661,31 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _on_market_breadth_clicked(self, event):
         self._vol_dialog.update_data(self._market_stats.get("vol_details", []))
         self._vol_dialog.show()
+
+    def _on_market_temp_clicked(self, event):
+        """点击温度计弹出专业复盘详情窗口"""
+        try:
+            # 通过主窗口弹出 MarketPulseViewer
+            main_window = getattr(self, 'parent_app', None)
+            if not main_window:
+                # 尝试从 QApplication 查找
+                for widget in QApplication.topLevelWidgets():
+                    if hasattr(widget, 'open_market_pulse'):
+                         main_window = widget
+                         break
+            
+            if main_window and hasattr(main_window, 'open_market_pulse'):
+                 # ✅ [FIX] 跨线程/环境调用安全：如果主窗口是 Tkinter，可能需要 dispatch
+                 if hasattr(main_window, 'tk_dispatch_queue'):
+                     main_window.tk_dispatch_queue.put(lambda: main_window.open_market_pulse())
+                 else:
+                     main_window.open_market_pulse()
+            else:
+                 # 备选：通知总线触发 (如果有相应监听)
+                 bus = get_signal_bus()
+                 bus.publish(SignalBus.EVENT_ALERT, "UI_ACTION", {"action": "open_market_pulse"})
+        except Exception as e:
+            logger.error(f"Failed to open MarketPulseViewer from dashboard: {e}")
 
     def _on_vol_code_clicked(self, code, name):
         """处理异动放量窗口代码点击联动"""

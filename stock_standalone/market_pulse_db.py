@@ -27,9 +27,21 @@ def init_pulse_db():
                 summary_text TEXT,
                 hot_sectors_json TEXT,  -- JSON list of top sectors
                 user_notes TEXT,
-                created_at TEXT
+                created_at TEXT,
+                breadth_json TEXT,      -- JSON dict of breadth stats
+                indices_json TEXT       -- JSON list of index performance
             )
         """)
+        
+        # Schema Migration: Add breadth_json and indices_json if not exists
+        cur.execute("PRAGMA table_info(daily_reports)")
+        columns = [col[1] for col in cur.fetchall()]
+        if "breadth_json" not in columns:
+            cur.execute("ALTER TABLE daily_reports ADD COLUMN breadth_json TEXT")
+            logger.info("[DB] Added column breadth_json to daily_reports.")
+        if "indices_json" not in columns:
+            cur.execute("ALTER TABLE daily_reports ADD COLUMN indices_json TEXT")
+            logger.info("[DB] Added column indices_json to daily_reports.")
         
         # 2. Daily Stocks Table: Individual stock details
         # Compound Primary Key: date + code
@@ -91,12 +103,14 @@ def save_daily_pulse(date_str, summary_data, stock_list):
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         cur.execute("""
-            INSERT INTO daily_reports (date, market_temperature, summary_text, hot_sectors_json, user_notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO daily_reports (date, market_temperature, summary_text, hot_sectors_json, user_notes, created_at, breadth_json, indices_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 market_temperature=excluded.market_temperature,
                 summary_text=excluded.summary_text,
                 hot_sectors_json=excluded.hot_sectors_json,
+                breadth_json=excluded.breadth_json,
+                indices_json=excluded.indices_json,
                 created_at=excluded.created_at
         """, (
             date_str,
@@ -104,7 +118,9 @@ def save_daily_pulse(date_str, summary_data, stock_list):
             summary_data.get('summary', ''),
             hot_sectors_json,
             summary_data.get('notes', ''),
-            created_at
+            created_at,
+            json.dumps(summary_data.get('breadth', {}), ensure_ascii=False),
+            json.dumps(summary_data.get('indices', []), ensure_ascii=False)
         ))
         
         # 2. Save Stocks (Batch Insert)
@@ -159,7 +175,9 @@ def get_report_by_date(date_str):
                 'summary_text': row[2],
                 'hot_sectors': json.loads(row[3]) if row[3] else [],
                 'user_notes': row[4],
-                'created_at': row[5]
+                'created_at': row[5],
+                'breadth': json.loads(row[6]) if len(row) > 6 and row[6] else {},
+                'indices': json.loads(row[7]) if len(row) > 7 and row[7] else []
             }
         
         # Get Stocks
