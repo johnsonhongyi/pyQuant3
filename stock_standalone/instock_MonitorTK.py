@@ -219,7 +219,7 @@ START_INIT = 0
 
 
 DEFAULT_DISPLAY_COLS = [
-    'name', 'trade', 'boll', 'dff', 'df2', 'couts',
+    'name', 'grade', 'trade', 'boll', 'dff', 'df2', 'couts',
     'percent', 'per1d', 'perc1d', 'ra', 'ral',
     'topR', 'volume', 'red', 'lastdu4', 'category', 'emotion_status'
 ]
@@ -9610,7 +9610,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """点击异动窗口中的股票代码"""
         if code != self.select_code:
             self.select_code = code
-            logger.info(f"select_code: {code}")
+            logger.debug(f"select_code: {code}")
             # ✅ 可改为打开详情逻辑，比如：
             # if hasattr(self, "show_stock_detail"):
             #     self.show_stock_detail(code)

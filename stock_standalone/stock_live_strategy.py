@@ -118,7 +118,9 @@ def send_signal_to_visualizer_ipc(data: dict):
                 timestamp=data.get('timestamp', datetime.datetime.now().strftime("%H:%M:%S")),
                 detail=data.get('message', ''),
                 source="LiveStrategy",
-                is_high_priority=data.get('is_high_priority', False)
+                is_high_priority=data.get('is_high_priority', False),
+                score=float(data.get('score', 0.0)),
+                grade=data.get('grade', '')
             )
             publish_standard_signal(std_sig)
         except Exception as e:
@@ -802,6 +804,7 @@ class StockLiveStrategy:
 
             self.stock_count: int = len(self._monitored_stocks)
             self._save_monitors() # ✅ 持久化修补后的价格到 JSON 和数据库
+            self._sync_grades_to_detectors() # [NEW] 同步评级数据到检测器
             logger.info(f"Loaded {self.stock_count} voice monitors (File: {self.config_file})")
 
         except Exception as e:
@@ -858,6 +861,7 @@ class StockLiveStrategy:
                             "amount_desc": row.get('amount', 0),
                             "status": str(row.get('status', '')),
                             "score": float(row.get('score', 0.0)),
+                            "grade": str(row.get('grade', '')),  # [NEW] 存入等级
                             "reason": str(row.get('reason', ''))
                         }
                     }
@@ -868,6 +872,7 @@ class StockLiveStrategy:
                     snap.update({
                         "status": str(row.get('status', snap.get('status', ''))),
                         "score": float(row.get('score', snap.get('score', 0.0))),
+                        "grade": str(row.get('grade', snap.get('grade', ''))), # [NEW] 更新等级
                         "reason": str(row.get('reason', snap.get('reason', '')))
                     })
             
@@ -875,6 +880,7 @@ class StockLiveStrategy:
             
             if added_count > 0:
                 self._save_monitors()
+                self._sync_grades_to_detectors() # [NEW] 同步到检测器
                 logger.info(f"逻辑日期 {logical_date}: 已导入 {added_count} 只强势股")
                 return f"成功导入 {added_count} 只标的 (日期:{logical_date})"
             else:
@@ -887,6 +893,26 @@ class StockLiveStrategy:
             return f"导入失败: {e}"
 
 
+
+    def _sync_grades_to_detectors(self):
+        """将当前监控股票的评级数据同步到形态检测器中"""
+        if not self._monitored_stocks:
+            return
+            
+        grades = {}
+        for key, stock in self._monitored_stocks.items():
+            code = stock.get('code', key.split('_')[0])
+            grade = stock.get('grade') or stock.get('snapshot', {}).get('grade', '')
+            if grade:
+                grades[code] = grade
+        
+        if getattr(self, 'pattern_detector', None):
+            self.pattern_detector.set_stock_grades(grades)
+            
+        if getattr(self, 'daily_pattern_detector', None):
+            self.daily_pattern_detector.set_stock_grades(grades)
+            
+        logger.debug(f"Synced {len(grades)} stock grades to detectors.")
 
     def _save_monitors(self):
         """保存配置（不包含派生字段，同时增加即时行情信息）"""
@@ -905,7 +931,8 @@ class StockLiveStrategy:
                     'create_price': stock.get('create_price', 0.0),
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
-                    'rule_type_tag': stock.get('rule_type_tag', "")
+                    'rule_type_tag': stock.get('rule_type_tag', ""),
+                    'grade': stock.get('grade', stock.get('snapshot', {}).get('grade', "")) # [NEW] 持久化等级
                 }
 
                 # --- 可选：添加行情快照 ---
@@ -2968,7 +2995,9 @@ class StockLiveStrategy:
                         combined_msgs,
                         action=str(action),
                         price=current_price,
-                        resample=resample
+                        resample=resample,
+                        score=snap.get('score', snap.get('max_score_today', 0.0)),
+                        grade=snap.get('grade', '')
                     )
                     # logger.info(f'{decision["action"]}')
                     if decision["action"]  in ("VETO", "买入",'卖出'):
@@ -3169,7 +3198,9 @@ class StockLiveStrategy:
                         combined_msg,
                         action=action,
                         price=current_price,
-                        resample=data.get('resample', 'd')
+                        resample=data.get('resample', 'd'),
+                        score=snap.get('score', 0.0),
+                        grade=snap.get('grade', '')
                     )
                         # action=final_action
 
@@ -3638,7 +3669,12 @@ class StockLiveStrategy:
             # [FIX] 所有需要播报的信号都通过 _trigger_alert 处理
             # _trigger_alert 会根据 msg 中的关键词判断是否触发UI弹窗
             if should_voice:
-                self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+                self._trigger_alert(
+                    event.code, event.name, msg, 
+                    action=action, price=event.price, 
+                    score=getattr(event, 'score', 0.0),
+                    grade=getattr(event, 'grade', '')  # [NEW] 显式传入评级
+                )
 
 
             
@@ -3867,7 +3903,12 @@ class StockLiveStrategy:
             
             # 触发报警
             logger.debug(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
-            # self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+            self._trigger_alert(
+                event.code, event.name, msg, 
+                action=action, price=event.price, 
+                score=event.score, 
+                grade=event.grade  # [NEW] 显式传入评级
+            )
             
             # 📅 [UNIFIED PIPELINE] 集成至统一观察池
             # 只有分值 >= 50 的形态才具备“金子”潜力，送入跨日验证闸门
@@ -3890,7 +3931,7 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Daily pattern callback failed: {e}")
 
-    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
+    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd', score: float = 0.0, grade: str = "") -> None:
         """触发报警 (异步分发器)"""
         # --- 1. 快速过滤 (同步执行，必须极快) ---
         if self.is_blacklisted(code):
@@ -3920,11 +3961,19 @@ class StockLiveStrategy:
             should_skip_ui = (self._ui_callback_throttle['count'] > 3 and not is_priority)
 
         # --- 4. 投递异步任务 (线程池) ---
+        # 获取股票等级 (从监控列表)
+        # 获取股票等级 (从监控列表)
+        monitor_grade = ""
+        if code in self._monitored_stocks:
+            monitor_grade = self._monitored_stocks[code].get('grade', '')
+
         # 打包上下文数据，防止主线程随后的循环修改局部变量（虽然这里是传参，但保险起见快照化关键信息）
         alert_ctx = {
             'code': code, 'name': name, 'message': message, 
             'action': action, 'price': price, 'resample': resample,
             'is_priority': is_priority, 'should_skip_ui': should_skip_ui,
+            'grade': grade or monitor_grade,
+            'score': score,
             'timestamp_str': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
@@ -3948,7 +3997,8 @@ class StockLiveStrategy:
             code, name, message = ctx['code'], ctx['name'], ctx['message']
             action, price, resample = ctx['action'], ctx['price'], ctx['resample']
             is_priority, should_skip_ui = ctx['is_priority'], ctx['should_skip_ui']
-            now_str = ctx['timestamp_str']
+            grade, now_str = ctx.get('grade', ''), ctx['timestamp_str']
+            score = ctx.get('score', 0.0)
 
             # --- A. 信号持久化 (Log/DB/Queue) ---
             try:
@@ -3962,7 +4012,8 @@ class StockLiveStrategy:
                 SignalMessageQueue().push(SignalMessage(
                     priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
                     timestamp=now_str, code=code, name=name, signal_type=sig_type,
-                    source="live_strategy", reason=message, score=0.0
+                    source="live_strategy", reason=message, score=score,
+                    grade=grade
                 ))
                 # 写入交易日志库
                 self.trading_logger.log_live_signal(
@@ -3977,7 +4028,10 @@ class StockLiveStrategy:
                 if self.master and getattr(self.master, "_vis_enabled_cache", False):
                     ipc_data = {
                         "code": code, "name": name, "pattern": sig_type if 'sig_type' in locals() else "ALERT",
-                        "message": message, "is_high_priority": is_priority, "timestamp": now_str, "priority": 100 if is_priority else 50
+                        "message": message, "is_high_priority": is_priority, "timestamp": now_str, 
+                        "priority": 100 if is_priority else 50,
+                        "grade": grade,
+                        "score": score
                     }
                     send_signal_to_visualizer_ipc(ipc_data)
             except Exception: pass
@@ -4271,6 +4325,12 @@ class StockLiveStrategy:
                 df = elite_df  # 使用精选标的
                 logger.info(f"✅ 使用精选标的: {len(df)} 只")
             
+            # --- [NEW] 注入走势评级 (S/A/B/C) ---
+            try:
+                df = selector.filter_strong_stocks(df)
+            except Exception as e:
+                logger.error(f"Failed to filter strong stocks (grading): {e}")
+            
             # 识别热点股 (确保 reason 列存在)
             if 'reason' in df.columns:
                 df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if '热点' in x else 0)
@@ -4362,10 +4422,12 @@ class StockLiveStrategy:
                     "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "create_price": current_price,
                     "tags": tag,
+                    "grade": row.get('grade', ''),
                     "snapshot": {
                         "score": row.get('score', 0),
                         "reason": row.get('reason', ''),
-                        "category": row.get('category', '')
+                        "category": row.get('category', ''),
+                        "tqi": row.get('tqi_score', 0)
                     }
                 }
                 

@@ -108,6 +108,8 @@ class TradingLogger:
                     amount REAL,
                     reason TEXT,
                     status TEXT,
+                    grade TEXT, -- 新增分级 (S, A, B, C)
+                    tqi REAL,   -- 新增趋势质量分
                     ma5 REAL,
                     ma10 REAL,
                     category TEXT,
@@ -174,6 +176,8 @@ class TradingLogger:
                 "ratio": "REAL",
                 "amount": "REAL",
                 "status": "TEXT",
+                "grade": "TEXT",  # ✅ [新增] 2024-03-19 分级支持
+                "tqi": "REAL",    # ✅ [新增] 2024-03-19 质量分支持
                 "ma5": "REAL",
                 "ma10": "REAL",
                 "category": "TEXT"
@@ -182,6 +186,11 @@ class TradingLogger:
             for col_name, col_type in check_cols.items():
                 if col_name not in existing_cols:
                     logger.error(f"DB Migration: Adding missing column '{col_name}' to selection_history")
+                    try:
+                        cur.execute(f"ALTER TABLE selection_history ADD COLUMN {col_name} {col_type}")
+                        logger.info(f"✅ DB Migration: Successfully added {col_name} to selection_history")
+                    except Exception as alt_e:
+                        logger.warning(f"⚠️ DB Migration failed for {col_name}: {alt_e}")
             # Migration for trade_records
             cur.execute("PRAGMA table_info(trade_records)")
             existing_trade_cols = [col[1] for col in cur.fetchall()]
@@ -269,8 +278,8 @@ class TradingLogger:
             
         try:
             self.db_manager.executemany("""
-                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, ma5, ma10, category, resample)
-                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :ma5, :ma10, :category, :resample)
+                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, grade, tqi, ma5, ma10, category, resample)
+                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :grade, :tqi, :ma5, :ma10, :category, :resample)
             """, records)
         except Exception as e:
             logger.error(f"Error logging selections: {e}")

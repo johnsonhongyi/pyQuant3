@@ -49,11 +49,19 @@ class TreeviewMixin:
         
         col_scaled = self.get_scaled_value() 
 
+        # 列名中文化映射
+        header_map = {
+            'code': '代码', 'name': '名称', 'grade': '等级',
+            'trade': '现价', 'percent': '涨幅', 'volume': '量比',
+            'amount': '成交额', 'category': '行业/题材', 'emotion_status': '情绪状态'
+        }
+
         for col in cols:
+            header_text = header_map.get(col, col)
             if sort_callback:
-                tree.heading(col, text=col, command=lambda _col=col: sort_callback(_col, False))
+                tree.heading(col, text=header_text, command=lambda _col=col: sort_callback(_col, False))
             else:
-                tree.heading(col, text=col)
+                tree.heading(col, text=header_text)
             
             # 基础拉伸设置为 True，除非特定列
             stretch = not getattr(self, 'dfcf_var', tk.BooleanVar(value=False)).get()

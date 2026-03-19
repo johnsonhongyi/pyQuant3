@@ -7,8 +7,10 @@ File: market_pulse_engine.py
 from JohnsonUtil import LoggerFactory
 from datetime import datetime
 import json
+import numpy as np
 import market_pulse_db
 from JohnsonUtil import commonTips as cct
+from JSONData.sina_data import Sina
 
 class DailyPulseEngine:
     def __init__(self, stock_selector=None):
@@ -64,6 +66,71 @@ class DailyPulseEngine:
                 plans.append("普通关注: 等待放量突破信号。")
                 
         return "\n".join(plans)
+
+    def _get_market_breadth(self):
+        """Calculate market-wide gainer/loser counts and ratio."""
+        if not self.selector:
+            return None
+            
+        df = None
+        if hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None:
+             df = self.selector.df_all_realtime
+        else:
+             try:
+                 df = self.selector.get_candidates_df() # Fallback
+             except: pass
+             
+        if df is None or df.empty:
+            return None
+            
+        # Filter valid percentages
+        valid_df = df[df['percent'].notna()]
+        up_count = int((valid_df['percent'] > 0).sum())
+        down_count = int((valid_df['percent'] < 0).sum())
+        flat_count = int((valid_df['percent'] == 0).sum())
+        total = up_count + down_count + flat_count
+        
+        up_ratio = up_count / total if total > 0 else 0.5
+        
+        return {
+            'up': up_count,
+            'down': down_count,
+            'flat': flat_count,
+            'total': total,
+            'up_ratio': round(up_ratio, 3)
+        }
+
+    def _get_index_status(self):
+        """Fetch major indices status (SH, SZ, CYB)."""
+        try:
+            sina = Sina()
+            # sh000001 (SSE), sz399001 (SZSE), sz399006 (ChiNext)
+            index_codes = ['sh000001', 'sz399001', 'sz399006']
+            # Sina class handles mapping internally if structured correctly
+            # But let's use the explicit method to be safe
+            df = sina.get_stock_code_data(index_codes)
+            
+            indices = []
+            if df is not None and not df.empty:
+                for code in index_codes:
+                    if code in df.index:
+                        row = df.loc[code]
+                        name = row.get('name', code)
+                        price = row.get('now', 0)
+                        prev_close = row.get('llastp', 0)
+                        pct = 0.0
+                        if prev_close > 0:
+                            pct = (price - prev_close) / prev_close * 100
+                        indices.append({
+                            'code': code,
+                            'name': name,
+                            'price': price,
+                            'percent': round(pct, 2)
+                        })
+            return indices
+        except Exception as e:
+            self.logger.error(f"Failed to get index status: {e}")
+            return []
 
     def generate_daily_report(self, monitored_stocks, force_date=None):
         """
@@ -197,24 +264,47 @@ class DailyPulseEngine:
                 high_score_count += 1
 
         # 3. Calculate Market Temperature
-        # Simple heuristic: Number of High Score Stocks + Hot Sectors Avg Pct
+        # Heuristic: Combination of Breadth, Index Performance, and Hot Sector Sentiment
+        breadth = self._get_market_breadth()
+        indices = self._get_index_status()
+        
+        # Base from stock sentiment (max weight reduction to avoid inflation)
+        # Instead of absolute count, use relative ready count
+        ready_pct = (high_score_count / len(processed_stocks) * 100) if processed_stocks else 0
         sector_heat = sum([s[1] for s in hot_sectors[:5]]) / 5 if hot_sectors else 0
-        temperature = min(100, (high_score_count * 2) + (sector_heat * 10) + 50)
+        
+        # 3.1 Index Impact (Average of major indices)
+        avg_index_pct = np.mean([idx['percent'] for idx in indices]) if indices else 0.0
+        
+        # 3.2 Breadth Impact
+        up_ratio = breadth['up_ratio'] if breadth else 0.5
+        
+        # PROFESSIONAL FORMULA:
+        # Base: (High Score Pct * 0.4) + (Sector Heat * 4)
+        # Adjustment: Index_Pct * 10 + (Up_Ratio - 0.5) * 60
+        base_temp = (ready_pct * 0.4) + (sector_heat * 4) + 30
+        correction = (avg_index_pct * 12) + (up_ratio - 0.5) * 60
+        
+        temperature = min(100, max(0, base_temp + correction))
         
         if temperature > 80:
-            summary = "市场情绪火热，主线清晰，适合重仓参与龙头。"
+            summary = "市场情绪火热，赚钱效应极佳，主线力量强劲。"
         elif temperature > 60:
-            summary = "市场温和向好，局部赚钱效应明显，精选前排。"
+            summary = "市场温和向好，局部机会活跃，适合积极博弈。"
         elif temperature > 40:
-            summary = "市场震荡分化，注意高低切换，防守为主。"
+            summary = "市场震荡分化，赚钱效应一般，控制仓位防守。"
+        elif temperature > 20:
+            summary = "市场持续低迷，空头占据核心，保持谨慎避险。"
         else:
-            summary = "市场情绪冰点，观望为主，等待新周期启动。"
+            summary = "市场极其冰冷，情绪触及冰点，建议空仓观望。"
             
         summary_data = {
             'temperature': round(temperature, 1),
             'summary': summary,
             'hot_sectors': hot_sectors,
-            'notes': '' # User can edit later
+            'breadth': breadth,     # Added
+            'indices': indices,      # Added
+            'notes': ''
         }
         
         # 4. Save to DB

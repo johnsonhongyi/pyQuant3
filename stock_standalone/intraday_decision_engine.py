@@ -692,6 +692,8 @@ class IntradayDecisionEngine:
             distance_from_high = (highest_today - price) / highest_today
             # 移除 4% 跌幅限制：结构破坏在下跌多少时都应该触发卖出
             pass
+        else:
+            distance_from_high = 0
         
         # ================================================================
         # 支柱 1 (P1): 趋势压力
@@ -700,12 +702,10 @@ class IntradayDecisionEngine:
         # - 派发/走弱形态
         # ================================================================
         p1_score = 0.0
-        if price > ma5 * 1.07:  # 乖离超过 7%，高位卖出时机
+        if ma5 > 0 and price > ma5 * 1.07:  # 乖离超过 7%，高位卖出时机
             p1_score += 0.35
-            if ma5 <= 0:
-                raise ValueError(f"MA5无效，数据异常! price={price}, row={ma5} snapshot={snapshot}")
             reasons.append(f"乖离过大({(price/ma5-1):.1%})")
-        elif price > ma5 * 1.04:  # 乖离 4-7%
+        elif ma5 > 0 and price > ma5 * 1.04:  # 乖离 4-7%
             p1_score += 0.15
             reasons.append("中度乖离")
             
@@ -875,12 +875,12 @@ class IntradayDecisionEngine:
                 return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
                 
             # 强拒绝 (Strong Rejection): 反弹触及均价线附近即被打回
-            distance_to_vwap = (nclose - high) / nclose
-            if 0 < distance_to_vwap < 0.005 and (high - price) / high > 0.015 and pnl_pct < -0.01:
+            distance_to_vwap = (nclose - high) / nclose if nclose > 0 else 1.0
+            if 0 < distance_to_vwap < 0.005 and high > 0 and (high - price) / high > 0.015 and pnl_pct < -0.01:
                 return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
                 
             # 极弱反弹 (Weak Rejection): 远离均线的小幅反弹，随后继续下跌
-            if distance_to_vwap > 0.015 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
+            if distance_to_vwap > 0.015 and high > 0 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
                 # 缩量且离均线很远的反弹失败
                 return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
                 
@@ -995,7 +995,7 @@ class IntradayDecisionEngine:
 
         # 6. 大开大合逻辑 (大幅振幅且回落)
         if nclose > 0:
-            daily_amplitude = (high - low) / nclose if nclose > 0 else 0
+            daily_amplitude = (high - low) / nclose
             if daily_amplitude > 0.08: # 振幅超过 8%
                 # 如果从高位回撤显著且低于均价
                 if high > 0 and (high - price) / high > 0.04 and price < nclose:
@@ -1153,6 +1153,8 @@ class IntradayDecisionEngine:
 
     def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple[str, float, str]:
         """均线决策"""
+        if ma5 <= 0:
+            return "持仓", 0, "MA5数据无效"
         bias = (price - ma5) / ma5
         if price > ma5 > ma10 and bias < 0.03: # 拓宽 bias 到 3%，防止波动剧烈导致信号丢失
             return "买入", 0.2 + bias, "站稳MA5，趋势延续"
@@ -1241,7 +1243,7 @@ class IntradayDecisionEngine:
                 result["reason"] = f"MA60突破加速(Red{red},Win{win})"
                 
                 # 如果刚突破 MA60 (比如价格离 MA60 很近)，额外加分
-                if (price - ma60) / ma60 < 0.03:
+                if ma60 > 0 and (price - ma60) / ma60 < 0.03:
                     result["bonus"] += 0.1
                     result["reason"] += "+刚逾MA60"
                     

@@ -219,7 +219,8 @@ def publish_standard_signal(signal: 'StandardSignal') -> BusEvent:
 
 def publish_pattern(source: str, code: str, name: str, pattern: str, 
                     price: float, detail: str = "", score: float = 0.0, 
-                    count: int = 1, is_high_priority: bool = False) -> BusEvent:
+                    count: int = 1, is_high_priority: bool = False,
+                    grade: str = "") -> BusEvent:
     """发布形态事件 (自动封装)"""
     if _HAS_STANDARD:
         signal = StandardSignal(
@@ -232,6 +233,7 @@ def publish_pattern(source: str, code: str, name: str, pattern: str,
             score=score,
             count=count,
             detail=detail,
+            grade=grade,
             source=source,
             is_high_priority=is_high_priority
         )
@@ -243,7 +245,7 @@ def publish_pattern(source: str, code: str, name: str, pattern: str,
         {
             "code": code, "name": name, "pattern": pattern, "price": price,
             "detail": detail, "score": score, "count": count, 
-            "is_high_priority": is_high_priority,
+            "is_high_priority": is_high_priority, "grade": grade,
             "timestamp": datetime.now().strftime("%H:%M:%S")
         }
     )
