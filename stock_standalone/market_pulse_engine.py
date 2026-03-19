@@ -104,8 +104,13 @@ class DailyPulseEngine:
         """Fetch major indices status (SH, SZ, CYB)."""
         try:
             sina = Sina()
-            # sh000001 (SSE), sz399001 (SZSE), sz399006 (ChiNext)
-            index_codes = ['sh000001', 'sz399001', 'sz399006']
+            # sh000001 (SSE), sz399001 (SZSE), sz399006 (ChiNext), sh000688 (KCB50)
+            index_codes = ['sh000001', 'sz399001', 'sz399006', 'sh000688']
+            nm_map = {
+                'sh000001': '上证指数', '999999': '上证指数',
+                'sz399001': '深证成指', 'sz399006': '创业板指',
+                'sh000688': '科创50', '999312': '科创50'
+            }
             # Sina class handles mapping internally if structured correctly
             # But let's use the explicit method to be safe
             df = sina.get_stock_code_data(index_codes)

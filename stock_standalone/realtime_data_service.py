@@ -2222,7 +2222,8 @@ class DataPublisher:
         """
         手动或周期性将当前 K 线缓存保存到磁盘快照
         :param force: 是否强制保存 (忽略时间间隔)
-        """
+        """
+
         if self._save_lock.locked():
             logger.warning("save_cache skipped: another save in progress")
             return
@@ -2233,7 +2234,7 @@ class DataPublisher:
                 
                 now = time.time()
                 # 只有在强制模式，或者时间间隔已到时才检查脏标记
-                if not force and (now - self._last_save_ts < self._save_interval):
+                if not force and ((now - self._last_save_ts < self._save_interval) or not cct.get_work_time()):
                     return
                 
                 # 如果不脏，则只更新时间戳

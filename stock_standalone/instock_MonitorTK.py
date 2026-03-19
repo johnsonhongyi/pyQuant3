@@ -627,6 +627,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_alert_time = 0
         self._alert_count_per_sec = 0
         
+        # ⭐ [NEW] 启动后自动打开信号仪表盘 (同步更新前)
+        self._schedule_after(500, self.open_live_signal_viewer)
+
         # 启动后台进程
         self._start_process()
 
@@ -726,6 +729,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 )
                 
             self._signal_dashboard_win.show()
+            self._dashboard_first_sync_done = False # ⚡ 强制触发立即同步数据
             self._signal_dashboard_win.raise_()
             self._signal_dashboard_win.activateWindow()
             
@@ -2924,125 +2928,130 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         else:
                              self.live_strategy.process_data(self.df_all, getattr(self, 'concept_top5', None), target_res)
 
-            # --- [NEW] 计算全盘统计概览 (上涨/下跌/放量) ---
-            if has_update and getattr(self, '_signal_dashboard_win', None):
+            # --- [NEW] 计算全盘统计概览 (上涨/下跌/指数/温度) ---
+            dashboard = getattr(self, '_signal_dashboard_win', None)
+            now = time.time()
+            # 触发同步的三个场景：1.盘中实时更新 2.看板首次打开 3.后台定期心跳补齐
+            if (has_update and dashboard) or \
+               (dashboard and not getattr(self, '_dashboard_first_sync_done', False)) or \
+               (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60):
+                
+                self._last_dashboard_sync_ts = now
+                if dashboard: self._dashboard_first_sync_done = True
+                
+                # 初始化默认值
+                up_count = down_count = flat_count = vol_down = vol_up = 0
+                vol_up_details = []
+                ready_pct = 0
+                breadth_data = {'up_ratio': 0.5}
+                indices_data = getattr(self, '_cached_indices_data', [])
 
                 try:
                     df = self.df_all
-
                     if not df.empty and 'trade' in df.columns and 'lastp1d' in df.columns:
-
-                        trade = df['trade'].values
-                        lastp = df['lastp1d'].values
-
+                        trade, lastp = df['trade'].values, df['lastp1d'].values
                         diff = trade - lastp
-
                         up_count = int((diff > 0).sum())
                         down_count = int((diff < 0).sum())
                         flat_count = int((diff == 0).sum())
 
-                        vol_up_details = []
                         if 'vol' in df.columns and 'lastv1d' in df.columns:
-                            vol = df['vol'].values
-                            lastv = df['lastv1d'].values
-                            
-                            # 获取涨幅 (如果有 'ratio' 或通过价格计算)
-                            pct_change = df['ratio'].values if 'ratio' in df.columns else (diff / lastp * 100)
-                            vol_ratio = vol / lastv
-                            
-                            vol_mask = vol_ratio > 1.5
-                            vol_up = int(vol_mask.sum())
-                            vol_down = int((vol < lastv).sum())
-                            
-                            if vol_up > 0:
-                                # 提取详细信息
-                                sub_df = df[vol_mask].head(30).copy()
-                                for code, row in sub_df.iterrows():
-                                    vol_up_details.append({
-                                        "code": str(code),
-                                        "name": str(row.get('name', '')),
-                                        "change": float(row.get('ratio', (row['trade']-row['lastp1d'])/row['lastp1d']*100 if 'lastp1d' in row and row['lastp1d']!=0 else 0)),
-                                        "ratio": float(row.get('vol', 0) / row.get('lastv1d', 1)) 
-                                    })
-                        elif 'volume' in df.columns:
-                            vr = df['volume']
-                            vol_mask = vr > 2.0
+                            vol, lastv = df['vol'].values, df['lastv1d'].values
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                vr = np.where(lastv > 0, vol / lastv, 0.0)
+                            # 按照之前的逻辑，放量阈值设为 1.5
+                            vol_mask = (vr > 1.5) & (diff > 0)
                             vol_up = int(vol_mask.sum())
                             vol_down = int((vr < 0.8).sum())
-                            if vol_up > 0:
-                                sub_df = df[vol_mask].head(30).copy()
+                            if vol_mask.any():
+                                sub_df = df[vol_mask].head(30)
                                 for code, row in sub_df.iterrows():
+                                    # 健壮的涨幅计算 fallback
+                                    chg = row.get('ratio', 0)
+                                    if chg == 0 and 'trade' in row and 'lastp1d' in row and row['lastp1d'] != 0:
+                                        chg = (row['trade'] - row['lastp1d']) / row['lastp1d'] * 100
+                                    
                                     vol_up_details.append({
-                                        "code": str(code),
-                                        "name": str(row.get('name', '')),
-                                        "change": float(row.get('ratio', 0)),
-                                        "ratio": float(row.get('volume', 0))
+                                        "code": str(code), "name": str(row.get('name', '')),
+                                        "change": float(chg), 
+                                        "ratio": float(vr[df.index.get_loc(code)])
                                     })
-                        # --- [NEW] Calculate Professional Market Temperature ---
-                        now = time.time()
-                        if now - self._last_index_fetch_ts > duration_sleep_time: # Fetch every 2 mins
-                            try:
-                                codes = ["999999", "399001", "399006", "000688"]
-                                from JSONData import sina_data
-                                sina = sina_data.Sina()
-                                idf = sina.get_stock_list_data(codes, index=True)
-                                if idf is not None and not idf.empty:
-                                    indices = []
-                                    nm_map = {"999999": "上证", "399001": "深证", "399006": "创业", "000688": "科创"}
-                                    for c, r in idf.iterrows():
-                                        p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
-                                        indices.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
-                                    self._cached_indices_data = indices
-                                    self._last_index_fetch_ts = now
-                            except Exception as e:
-                                logger.debug(f"Index fetch failed in stats loop: {e}")
-
-                        # Calculate ready_pct (stocks with score > 80)
-                        ready_pct = 0
+                        
                         if 'score' in df.columns:
-                            ready_pct = (df['score'] > 80).mean() * 100
-                        elif 'sum_perc' in df.columns:
-                            ready_pct = (df['sum_perc'] > 10).mean() * 100
-                            
+                            # ⚡ [CONSISTENCY] 使用密度逻辑：仅针对已扫描且有评估分数的股票计算比例
+                            # 这样可以对齐复盘引擎，并在扫描初期（样本少时）依然能反映正确的温度趋势
+                            scanned_df = df[df['score'] > 0]
+                            if not scanned_df.empty:
+                                ready_pct = (scanned_df['score'] > 80).mean() * 100
+                            else:
+                                ready_pct = 0
+                                
                         breadth_data = {'up_ratio': up_count / (up_count + down_count + flat_count) if (up_count + down_count + flat_count) > 0 else 0.5}
-                        
-                        try:
-                            temp, _ = DailyPulseEngine.calculate_professional_temperature(
-                                ready_pct=ready_pct,
-                                sector_heat=0, # Simplified for real-time
-                                breadth=breadth_data,
-                                indices=self._cached_indices_data
-                            )
-                            self._cached_market_temp = temp
-                        except Exception as e:
-                            logger.debug(f"Temp calculation failed: {e}")
 
-                        stats = {
-                            "up": up_count,
-                            "down": down_count,
-                            "flat": flat_count,
-                            "vol_down": vol_down,
-                            "vol_details": vol_up_details, # 改用更详细的列表
-                            "temperature": self._cached_market_temp,
-                            "indices": self._cached_indices_data,
-                            "breadth": breadth_data
-                        }
-                        
-                        logger.info(f"📊 Market stats calculated: {up_count} up, {vol_up} vol_up. Pushing to dashboard.")
-                        # 1. 传统的 UI Dispatch (Tkinter)
-                        self.tk_dispatch_queue.put(
-                            lambda s=stats: self._signal_dashboard_win.update_market_stats(s)
+                    # 2. 独立获取指数行情 (如有实时更新或超过30秒)
+                    if has_update or (now - getattr(self, '_last_index_fetch_ts', 0) > 30):
+                        try:
+                            codes = ["000001", "399001", "399006", "000688"]
+                            from JSONData import sina_data
+                            idf = sina_data.Sina().get_stock_list_data(codes, index=True)
+                            if idf is not None and not idf.empty:
+                                indices_data = []
+                                # 映射表适配内部代码 (999999=上证, 999312=科创)
+                                nm_map = {
+                                    "000001": "上证", "999999": "上证",
+                                    "399001": "深证", "399006": "创业", 
+                                    "000688": "科创", "999312": "科创"
+                                }
+                                for c, r in idf.iterrows():
+                                    p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
+                                    indices_data.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
+                                self._cached_indices_data = indices_data
+                                self._last_index_fetch_ts = now
+                            else:
+                                indices_data = getattr(self, '_cached_indices_data', [])
+                        except Exception as e:
+                            logger.debug(f"Index fetch failed: {e}")
+                            indices_data = getattr(self, '_cached_indices_data', [])
+                    else:
+                        indices_data = getattr(self, '_cached_indices_data', [])
+
+                    # 4. 计算热点板块热度 (Sector Heat)
+                    sector_heat = 0
+                    try:
+                        top5 = getattr(self, 'concept_top5', None)
+                        if top5 is not None:
+                            pcts = [float(item[1]) for item in top5 if len(item) > 1] if isinstance(top5, list) else []
+                            if not pcts and isinstance(top5, pd.DataFrame):
+                                pcts = top5['percent'].tolist() if 'percent' in top5.columns else []
+                            if pcts: sector_heat = sum(pcts) / len(pcts)
+                    except: pass
+
+                    # 3. 计算市场温度并推送 (存储到 cache 供其他窗口使用)
+                    try:
+                        temp, _ = DailyPulseEngine.calculate_professional_temperature(
+                            ready_pct=ready_pct, sector_heat=sector_heat, breadth=breadth_data, indices=indices_data
                         )
-                        # 2. 增加信号总线备份 (供订阅使用)
-                        try:
-                            from signal_bus import get_signal_bus, SignalBus
-                            get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", stats)
-                        except Exception as e:
-                            logger.error(f"Error in task: {e}")
+                        self._cached_market_temp = temp
+                    except: pass
 
+                    stats = {
+                        "up": up_count, "down": down_count, "flat": flat_count,
+                        "vol_down": vol_down, "vol_details": vol_up_details, "vol_up": vol_up,
+                        "temperature": getattr(self, '_cached_market_temp', 50.0),
+                        "indices": indices_data, "breadth": breadth_data
+                    }
+                    
+                    if dashboard:
+                        self.tk_dispatch_queue.put(lambda s=stats: self._signal_dashboard_win.update_market_stats(s))
+                    
+                    try:
+                        from signal_bus import get_signal_bus, SignalBus
+                        get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", stats)
+                    except: pass
+                    
                 except Exception as e:
-                    logger.error(f"Error calculating market stats: {e}")
-                
+                    logger.error(f"Error calculating market stats: {e}\n{traceback.format_exc()}")
+
             # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
             if has_update:
                 now_hm = cct.get_now_time_int()
