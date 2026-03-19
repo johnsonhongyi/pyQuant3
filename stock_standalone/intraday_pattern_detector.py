@@ -52,6 +52,7 @@ class PatternEvent:
     price: float
     detail: str        # 附加说明
     score: float = 0.0 # 可选评分
+    grade: str = ""    # [NEW] 评级字段
     count: int = 1     # 触发次数（第几次触发）
     is_high_priority: bool = False  # 是否高优先级
     signal: Optional[Any] = None # 标准化信号对象 (StandardSignal)
@@ -168,6 +169,7 @@ class IntradayPatternDetector:
         
         # 信号计数跟踪 (key: "code_pattern" -> count for today)
         self._signal_counts: Dict[str, int] = {}
+        self.stock_grades: Dict[str, str] = {}      # [NEW] 评级缓存
 
     def _load_config(self) -> Dict[str, Any]:
         """从 JSON 文件加载策略阈值配置"""
@@ -236,6 +238,10 @@ class IntradayPatternDetector:
         """禁用特定形态检测"""
         self.enabled_patterns.discard(pattern)
     
+    def set_stock_grades(self, grades: Dict[str, str]):
+        """设置股票评级映射表"""
+        self.stock_grades = grades
+
     def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame], 
                day_row: pd.Series, prev_close: float,
                current_time: Optional[dt_time] = None) -> List[PatternEvent]:
@@ -344,6 +350,9 @@ class IntradayPatternDetector:
             if count > 1:
                 ev.detail = f"{ev.detail} (第{count}次)"
             
+            # [NEW] 补全评级字段
+            ev.grade = self.stock_grades.get(code, "")
+            
             if should_notify:
                 notified_events.append(ev)
                 # 回调
@@ -365,6 +374,7 @@ class IntradayPatternDetector:
                             price=ev.price,
                             timestamp=ev.timestamp,
                             score=ev.score,
+                            grade=ev.grade, # [NEW] 补全评级字段
                             count=ev.count,
                             detail=ev.detail,
                             source="IntradayPatternDetector",
@@ -450,14 +460,16 @@ class IntradayPatternDetector:
                 code=code, name=name, pattern='gap_up',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=open_price,
-                detail=f"跳空高开 +{gap_pct:.1f}%"
+                detail=f"跳空高开 +{gap_pct:.1f}%",
+                grade=self.stock_grades.get(code, "")
             ))
         elif gap_pct >= conf["auction_high_threshold"] and 'auction_high_open' in self.enabled_patterns:
             events.append(PatternEvent(
                 code=code, name=name, pattern='auction_high_open',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=open_price,
-                detail=f"竞价高开 +{gap_pct:.1f}%"
+                detail=f"竞价高开 +{gap_pct:.1f}%",
+                grade=self.stock_grades.get(code, "")
             ))
 
         # --- [NEW] 强力竞价 (strong_auction_open) ---
@@ -483,7 +495,8 @@ class IntradayPatternDetector:
                     code=code, name=name, pattern='strong_auction_open',
                     timestamp=datetime.now().strftime('%H:%M:%S'),
                     price=open_price,
-                    detail=detail
+                    detail=detail,
+                    grade=self.stock_grades.get(code, "")
                 ))
         
         # --- [NEW] 早盘极速抢筹 (early_momentum_buy) ---
@@ -511,7 +524,8 @@ class IntradayPatternDetector:
                     timestamp=datetime.now().strftime('%H:%M:%S'),
                     price=current_price,
                     detail=f"早盘抢筹: {desc} 上穿均线(VWAP: {vwap:.2f})",
-                    is_high_priority=True
+                    is_high_priority=True,
+                    grade=self.stock_grades.get(code, "")
                 ))
         
         return events
@@ -599,7 +613,8 @@ class IntradayPatternDetector:
                 code=code, name=name, pattern='low_open_high_walk',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=current_price,
-                detail="".join(detail_parts)
+                detail="".join(detail_parts),
+                grade=self.stock_grades.get(code, "")
             ))
             
             # 记录触发状态 (用于后续突破确认)
@@ -618,7 +633,8 @@ class IntradayPatternDetector:
                     code=code, name=name, pattern='open_is_low',
                     timestamp=datetime.now().strftime('%H:%M:%S'),
                     price=current_price,
-                    detail="开盘最低,持续上行"
+                    detail="开盘最低,持续上行",
+                    grade=self.stock_grades.get(code, "")
                 ))
         
         if 'open_is_low_volume' in self.enabled_patterns:

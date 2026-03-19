@@ -301,8 +301,8 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         # 核心升级：QTableWidget 以支持精准行定位与同步高亮
         self.log_table = QTableWidget()
-        self.log_table.setColumnCount(5)
-        self.log_table.setHorizontalHeaderLabels(["时间", "性质", "代码", "名称", "信号内容"])
+        self.log_table.setColumnCount(6)
+        self.log_table.setHorizontalHeaderLabels(["时间", "评级", "性质", "代码", "名称", "信号内容"])
         
         # 稳健性修正
         v_header = self.log_table.verticalHeader()
@@ -321,10 +321,11 @@ class SignalLogPanel(QWidget, WindowMixin):
         h_header = self.log_table.horizontalHeader()
         if h_header:
             h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # 时间
-            h_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # 性质
-            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # 代码
-            h_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 名称
-            h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)          # 内容 (自适应拉伸)
+            h_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # 评级
+            h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # 性质
+            h_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 代码
+            h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # 名称
+            h_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)          # 内容 (自适应拉伸)
             h_header.setStretchLastSection(True) # 确保最后一列占满剩余空间
         
         # [FIX] 全局背景深色，修复空白区域白色问题
@@ -353,7 +354,7 @@ class SignalLogPanel(QWidget, WindowMixin):
 
     def _on_cell_clicked(self, row, col):
         """点击表格单元格联动"""
-        code_item = self.log_table.item(row, 2)
+        code_item = self.log_table.item(row, 3)
         if not code_item: return
         code = code_item.text()
         
@@ -409,10 +410,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         col = item.column()
         
         # 获取基础信息
-        code_str = self.log_table.item(row, 2).text()
+        code_str = self.log_table.item(row, 3).text()
         
-        # ⚡ [NEW] 双击代码列 (Col 2) -> 复制到剪贴板
-        if col == 2:
+        # ⚡ [NEW] 双击代码列 (Col 3) -> 复制到剪贴板
+        if col == 3:
             try:
                 QApplication.clipboard().setText(code_str)
                 self.status_label.setText(f"📋 已复制: {code_str}")
@@ -423,11 +424,13 @@ class SignalLogPanel(QWidget, WindowMixin):
 
         # 其他列或复制失败 -> 弹出详情对话框 (保持原逻辑)
         time_str = self.log_table.item(row, 0).text()
-        type_str = self.log_table.item(row, 1).text()
-        name_str = self.log_table.item(row, 3).text()
-        msg_str = self.log_table.item(row, 4).text()
+        grade_str = self.log_table.item(row, 1).text()
+        type_str = self.log_table.item(row, 2).text()
+        name_str = self.log_table.item(row, 4).text()
+        msg_str = self.log_table.item(row, 5).text()
         
         detail = f"<b>时间:</b> {time_str}<br>"
+        detail += f"<b>评级:</b> {grade_str}<br>"
         detail += f"<b>性质:</b> {type_str}<br>"
         detail += f"<b>股票:</b> {name_str} ({code_str})<br><br>"
         detail += f"<b>信号详情:</b><br>{msg_str}"
@@ -470,7 +473,7 @@ class SignalLogPanel(QWidget, WindowMixin):
 
     # ... (skip _validate_data) ...
 
-    def append_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
+    def append_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False, grade: str = ''):
         """添加日志条目，包含校验与去重"""
         if self._paused:
             return
@@ -578,11 +581,17 @@ class SignalLogPanel(QWidget, WindowMixin):
                 
             # 找到现有行，更新内容和时间
             self.log_table.item(found_row, 0).setText(now_str)
-            self.log_table.item(found_row, 1).setText(new_pattern)
-            self.log_table.item(found_row, 4).setText(display_msg)
+            self.log_table.item(found_row, 1).setText(grade if grade else self.log_table.item(found_row, 1).text())
+            self.log_table.item(found_row, 2).setText(new_pattern)
+            self.log_table.item(found_row, 5).setText(display_msg)
+            
+            # 更新评级颜色
+            grade_item = self.log_table.item(found_row, 1)
+            if grade == 'S': grade_item.setForeground(QColor("#FF1493"))
+            elif grade == 'A': grade_item.setForeground(QColor("#FF8C00"))
             
             # 更新颜色为最新形态颜色
-            for i in range(5):
+            for i in [0, 2, 3, 4, 5]:
                 item = self.log_table.item(found_row, i)
                 if item:
                     item.setForeground(text_color)
@@ -603,8 +612,21 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.log_table.insertRow(row)
         
         # 单元格填充
+        item_grade = QTableWidgetItem(grade)
+        if grade == 'S': 
+            item_grade.setForeground(QColor("#FF1493"))
+            font = item_grade.font()
+            font.setBold(True)
+            item_grade.setFont(font)
+        elif grade == 'A': 
+            item_grade.setForeground(QColor("#FF8C00"))
+            font = item_grade.font()
+            font.setBold(True)
+            item_grade.setFont(font)
+
         items = [
             QTableWidgetItem(now_str),
+            item_grade,
             QTableWidgetItem(pattern_cn),
             QTableWidgetItem(code),
             QTableWidgetItem(name),
@@ -612,8 +634,9 @@ class SignalLogPanel(QWidget, WindowMixin):
         ]
         
         for i, item in enumerate(items):
-            item.setForeground(text_color)
-            if i == 2 or i == 3: # 代码和名称加粗
+            if i != 1: # grade 已经单独设色
+                item.setForeground(text_color)
+            if i == 3 or i == 4: # 代码和名称加粗
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
@@ -652,8 +675,8 @@ class SignalLogPanel(QWidget, WindowMixin):
             if not items:
                 return False
                 
-            # 2. 筛选出位于 "代码" 列 (Col 2) 的项
-            code_items = [it for it in items if it.column() == 2]
+            # 2. 筛选出位于 "代码" 列 (Col 3) 的项
+            code_items = [it for it in items if it.column() == 3]
             if not code_items:
                 return False
             
@@ -670,7 +693,7 @@ class SignalLogPanel(QWidget, WindowMixin):
                 # 遍历查找匹配消息的
                 for it in code_items:
                     row = it.row()
-                    msg_item = self.log_table.item(row, 4)
+                    msg_item = self.log_table.item(row, 5)
                     if msg_item and (message_snippet in msg_item.text() or msg_item.text() in message_snippet):
                         target_item = it
                         break

@@ -355,8 +355,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         layout.addWidget(self.last_update_label)
 
     def _create_signal_table(self) -> QTableWidget:
-        table = QTableWidget(0, 7)
-        table.setHorizontalHeaderLabels(["时间", "代码", "名称", "形态/信号", "详情", "次数", "得分"])
+        table = QTableWidget(0, 8)
+        table.setHorizontalHeaderLabels(["时间", "评级", "代码", "名称", "形态/信号", "详情", "次数", "得分"])
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -364,7 +364,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -444,13 +444,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         code, name = payload.get('code', ''), payload.get('name', '')
         pattern = payload.get('pattern', payload.get('subtype', 'ALERT'))
         detail = payload.get('detail', payload.get('message', ''))
+        import pandas as pd
         score = payload.get('score', 0.0)
+        if pd.isna(score) or score is None:
+            score = 0.0
+            
+        grade = str(payload.get('grade', '') or '')
         time_str = event.timestamp.strftime("%H:%M:%S")
         count = self._stock_stats.get(code, {}).get("count", 1)
-        self._insert_row(self.tables["全部信号"], time_str, code, name, pattern, detail, count, score)
+        self._insert_row(self.tables["全部信号"], time_str, code, name, pattern, detail, count, score, grade)
         for cat, patterns in CATEGORY_MAP.items():
             if any(p.lower() in pattern.lower() or p.lower() in detail.lower() for p in patterns):
-                self._insert_row(self.tables[cat], time_str, code, name, pattern, detail, count, score)
+                self._insert_row(self.tables[cat], time_str, code, name, pattern, detail, count, score, grade)
 
     def _get_item_color(self, pattern, detail):
         if "SELL" in pattern or "风险" in detail: return QColor("#00FF00")
@@ -458,30 +463,43 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if "跟单" in detail: return QColor("#FFD700")
         return QColor("#ffffff")
 
-    def _insert_row(self, table, time_str, code, name, pattern, detail, count, score):
+    def _insert_row(self, table, time_str, code, name, pattern, detail, count, score, grade=''):
         was_sorting = table.isSortingEnabled()
         table.setSortingEnabled(False)
         try:
             existing_row = -1
             for r in range(min(50, table.rowCount())):
-                item = table.item(r, 1)
+                item = table.item(r, 2)
                 if item and item.text() == code:
                     existing_row = r
                     break
             if existing_row >= 0: table.removeRow(existing_row)
             table.insertRow(0)
+            
+            # 评级设色
+            grade_item = QTableWidgetItem(grade)
+            grade_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if grade == 'S': 
+                grade_item.setForeground(QBrush(QColor("#FF1493")))
+                f = grade_item.font(); f.setBold(True); grade_item.setFont(f)
+            elif grade == 'A': 
+                grade_item.setForeground(QBrush(QColor("#FF8C00")))
+                f = grade_item.font(); f.setBold(True); grade_item.setFont(f)
+
             table.setItem(0, 0, QTableWidgetItem(time_str))
-            table.setItem(0, 1, QTableWidgetItem(code))
-            table.setItem(0, 2, QTableWidgetItem(name))
-            table.setItem(0, 3, QTableWidgetItem(pattern))
-            table.setItem(0, 4, QTableWidgetItem(detail))
-            table.setItem(0, 5, NumericTableWidgetItem(count))
-            table.setItem(0, 6, NumericTableWidgetItem(score))
+            table.setItem(0, 1, grade_item)
+            table.setItem(0, 2, QTableWidgetItem(code))
+            table.setItem(0, 3, QTableWidgetItem(name))
+            table.setItem(0, 4, QTableWidgetItem(pattern))
+            table.setItem(0, 5, QTableWidgetItem(detail))
+            table.setItem(0, 6, NumericTableWidgetItem(str(count)))
+            table.setItem(0, 7, NumericTableWidgetItem(str(int(score))))
+            
             search_text = self.search_input.text().strip().lower()
-            if search_text and not any(search_text in str(table.item(0, i).text()).lower() for i in range(5) if table.item(0, i)):
+            if search_text and not any(search_text in str(table.item(0, i).text()).lower() for i in [0, 2, 3, 4, 5] if table.item(0, i)):
                 table.setRowHidden(0, True)
             color = self._get_item_color(pattern, detail)
-            for i in range(7):
+            for i in [0, 2, 3, 4, 5, 6, 7]:
                 it = table.item(0, i)
                 if it: it.setForeground(color)
             self._flash_row(table, 0)
@@ -573,7 +591,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_cell_clicked(self, row, col):
         table = self.sender()
-        code_item, name_item = table.item(row, 1), table.item(row, 2)
+        code_item, name_item = table.item(row, 2), table.item(row, 3)
         if code_item and name_item: self.code_clicked.emit(code_item.text(), name_item.text())
 
     # def _on_cell_double_clicked(self, row, col):
@@ -597,8 +615,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_cell_double_clicked(self, row, col):
         table = self.sender()
-        it_code = table.item(row, 1)
-        it_name = table.item(row, 2)
+        it_code = table.item(row, 2)
+        it_name = table.item(row, 3)
         it_current = table.item(row, col)
         
         if not it_code or not it_name or not it_current: 
@@ -613,8 +631,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         if header == "详情":
             # 仅弹窗，不执行复制逻辑
-            # 假设第3列是日期或时间，对应你代码中的 table.item(row, 3)
-            time_str = table.item(row, 3).text() if table.item(row, 3) else ""
+            # 假设第4列是日期或时间，对应你代码中的 table.item(row, 4)
+            time_str = table.item(row, 4).text() if table.item(row, 4) else ""
             dialog = SignalDetailDialog(code, name, time_str, current_text, self)
             dialog.exec()
             # 如果弹窗时也要通知其他组件，可以在这里也 emit
@@ -646,7 +664,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tabs.currentWidget()
         if not isinstance(table, QTableWidget): return
         for row in range(table.rowCount()):
-            match = any(search_text in str(table.item(row, i).text()).lower() for i in range(5) if table.item(row, i))
+            match = any(search_text in str(table.item(row, i).text()).lower() for i in [0, 2, 3, 4, 5] if table.item(row, i))
             table.setRowHidden(row, not match)
 
     def _on_search_context_menu(self, pos):
@@ -656,7 +674,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if getattr(self, '_is_updating_ui', False): return
         table = self.sender()
         items = table.selectedItems()
-        if items: self.code_clicked.emit(table.item(items[0].row(), 1).text(), table.item(items[0].row(), 2).text())
+        if items: self.code_clicked.emit(table.item(items[0].row(), 2).text(), table.item(items[0].row(), 3).text())
 
     def _save_ui_state(self):
         try:

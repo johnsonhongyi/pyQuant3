@@ -128,6 +128,7 @@ class DailyPatternEvent:
     price: float
     detail: str
     score: float = 0.0
+    grade: str = ""   # [NEW] 评级字段
     signal: Optional[Any] = None # 标准化信号对象 (StandardSignal)
 
 class DailyPatternDetector:
@@ -148,6 +149,11 @@ class DailyPatternDetector:
 
     def __init__(self):
         self.on_pattern: Optional[Callable[[DailyPatternEvent], None]] = None
+        self.stock_grades: Dict[str, str] = {} # [NEW] 评级缓存
+
+    def set_stock_grades(self, grades: Dict[str, str]):
+        """设置股票评级映射表表"""
+        self.stock_grades = grades
 
     def update(self, code: str, name: str, current_row: Any, prev_rows: Any) -> List[DailyPatternEvent]:
         """
@@ -218,6 +224,11 @@ class DailyPatternDetector:
                 # logger.error(f"Realtime structure check error: {e}")
                 pass
         
+        # 补充评级信息
+        grade = self.stock_grades.get(code, "")
+        for ev in events:
+            ev.grade = grade
+
         # 触发回调并发布到信号总线
         for ev in events:
             # 尝试生成标准化信号
@@ -232,6 +243,7 @@ class DailyPatternDetector:
                     price=ev.price,
                     timestamp=ev.date if ev.date else "",
                     score=ev.score,
+                    grade=getattr(ev, 'grade', ''),  # [NEW] 补全评级字段
                     detail=ev.detail,
                     source="DailyPatternDetector"
                 )

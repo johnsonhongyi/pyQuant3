@@ -14,6 +14,7 @@ class StandardSignal:
     score: float = 0.0         # 信号强度评分 (通常 0.0 - 1.0)
     count: int = 1             # 日内触发次数 (迭代计数)
     detail: str = ""           # 文本描述
+    grade: str = ""            # [NEW] 走势评级 (S/A/B/C)
     
     # 状态上下文
     phase: str = "UNKNOWN"     # 当前持仓阶段 (SCOUT, ACCUMULATE, etc.)
@@ -35,6 +36,7 @@ class StandardSignal:
             "score": self.score,
             "count": self.count,
             "detail": self.detail,
+            "grade": self.grade,
             "phase": self.phase,
             "source": self.source,
             "is_high_priority": self.is_high_priority,

@@ -233,13 +233,43 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         ctx_right = tk.Frame(top_frame)
         ctx_right.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
-        # --- 市场温度 ---
-        temp_frame = tk.Frame(ctx_right)
-        temp_frame.pack(fill="x", anchor="w")
+        # --- 市场温度 & 大盘背景 (Professional Header) ---
+        temp_frame = tk.Frame(ctx_right, bg="#f8f9fa", pady=10, highlightthickness=1, highlightbackground="#dee2e6")
+        temp_frame.pack(fill="x", pady=(0, 10))
 
-        tk.Label(temp_frame, text="市场温度:", font=("Microsoft YaHei", 12)).pack(anchor="w")
-        self.lbl_temp = tk.Label(temp_frame, text="0°C", font=("Arial", 26, "bold"), fg="gray")
-        self.lbl_temp.pack(anchor="w", pady=(0, 10))
+        # 1. Temperature Gauge
+        temp_box = tk.Frame(temp_frame, bg="#f8f9fa")
+        temp_box.pack(side="left", padx=15)
+        tk.Label(temp_box, text="市场温度", font=("Microsoft YaHei", 9), bg="#f8f9fa", fg="#6c757d").pack()
+        self.lbl_temp = tk.Label(temp_box, text="0°C", font=("Arial", 28, "bold"), bg="#f8f9fa", fg="#adb5bd")
+        self.lbl_temp.pack()
+
+        # 2. Market Breadth Bar
+        breadth_box = tk.Frame(temp_frame, bg="#f8f9fa")
+        breadth_box.pack(side="left", padx=20)
+        tk.Label(breadth_box, text="市场涨跌家数比 (Breadth)", font=("Microsoft YaHei", 9), bg="#f8f9fa", fg="#6c757d").pack()
+        
+        # Breadth Canvas for Visual Bar
+        self.breadth_canvas = tk.Canvas(breadth_box, width=200, height=18, bg="#e9ecef", highlightthickness=0)
+        self.breadth_canvas.pack(pady=5)
+        self.lbl_breadth_stats = tk.Label(breadth_box, text="↑ 0  |  ↓ 0", font=("Microsoft YaHei", 9, "bold"), bg="#f8f9fa")
+        self.lbl_breadth_stats.pack()
+
+        # 3. Index Status Grid
+        index_box = tk.Frame(temp_frame, bg="#f8f9fa")
+        index_box.pack(side="left", fill="both", expand=True, padx=10)
+        
+        indices_inner = tk.Frame(index_box, bg="#f8f9fa")
+        indices_inner.pack(expand=True)
+        
+        self.idx_labels = {}
+        for i, name in enumerate(["上证指数", "深证成指", "创业板指"]):
+            f = tk.Frame(indices_inner, bg="#f8f9fa", padx=10)
+            f.grid(row=0, column=i)
+            tk.Label(f, text=name, font=("Microsoft YaHei", 8), bg="#f8f9fa", fg="#6c757d").pack()
+            lbl = tk.Label(f, text="0.00%", font=("Consolas", 11, "bold"), bg="#f8f9fa", fg="#555")
+            lbl.pack()
+            self.idx_labels[name] = lbl
 
         # --- 策略分析 & 笔记 ---
         tk.Label(ctx_right, text="策略分析 & 交易笔记 (User Notes):", font=("Microsoft YaHei", 10)).pack(anchor="w")
@@ -395,7 +425,63 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         # 1. Update Context
         temp = summary.get('temperature', 0)
-        self.lbl_temp.config(text=f"{temp:.0f}°C", fg="red" if temp > 60 else "blue")
+        # Professional Color Scale: Cold (Blue) -> Moderate (Orange/Gray) -> Hot (Red)
+        temp_color = "#6c757d" # Default
+        if temp > 75: temp_color = "#d9534f" # Red
+        elif temp > 55: temp_color = "#f0ad4e" # Orange
+        elif temp < 30: temp_color = "#5bc0de" # Blue (Cold)
+        
+        self.lbl_temp.config(text=f"{temp:.0f}°C", fg=temp_color)
+        
+        # Update Breadth Bar
+        breadth = summary.get('breadth')
+        if breadth:
+            up = breadth.get('up', 0)
+            down = breadth.get('down', 0)
+            flat = breadth.get('flat', 0)
+            total = breadth.get('total', 1)
+            
+            # Draw Bar
+            self.breadth_canvas.delete("all")
+            w = 200
+            up_w = (up / total) * w
+            flat_w = (flat / total) * w
+            # Red for Up, Green for Down in A-share context
+            self.breadth_canvas.create_rectangle(0, 0, up_w, 20, fill="#f2dede", outline="") # Tinted Red
+            self.breadth_canvas.create_rectangle(up_w, 0, up_w + flat_w, 20, fill="#eeeeee", outline="") # Gray
+            self.breadth_canvas.create_rectangle(up_w + flat_w, 0, w, 20, fill="#dff0d8", outline="") # Tinted Green
+            
+            # Foreground stronger bars
+            self.breadth_canvas.create_rectangle(0, 6, min(up_w, 2), 12, fill="#d9534f", outline="")
+            self.breadth_canvas.create_rectangle(w - min((w-(up_w+flat_w)), 2), 6, w, 12, fill="#5cb85c", outline="")
+
+            self.lbl_breadth_stats.config(
+                text=f"↑ {up}  |  ↓ {down}  ({flat})", 
+                fg="#d9534f" if up > down else "#5cb85c"
+            )
+
+        # Update Indices Performance
+        indices = summary.get('indices', [])
+        idx_map = {idx['name']: idx for idx in indices}
+        # Display Names Mapping
+        display_names = {"上证指数": ["上证指数", "sh000001", "sh000001"], 
+                         "深证成指": ["深证成指", "sz399001", "sz399001"], 
+                         "创业板指": ["创业板指", "sz399006", "sz399006"]}
+        
+        for name, lbl in self.idx_labels.items():
+            # Search for best match in index data
+            found = None
+            for idx_data in indices:
+                if name in idx_data['name'] or idx_data['name'] in name:
+                    found = idx_data
+                    break
+            
+            if found:
+                pct = found['percent']
+                color = "#d9534f" if pct > 0 else "#5cb85c" if pct < 0 else "#6c757d"
+                lbl.config(text=f"{pct:+.2f}%", fg=color)
+            else:
+                 lbl.config(text="N/A", fg="#ccc")
         
         # Hot Sectors
         hot_list = summary.get('hot_sectors', [])

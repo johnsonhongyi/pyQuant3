@@ -33,6 +33,7 @@ class SignalMessage:
     count: int = field(default=1, compare=False)  # 当日触发计数（热度）
     consecutive_days: int = field(default=1, compare=False)  # 连续天数
     rank: int = field(default=0, compare=False) # [NEW] 当时排名
+    grade: str = field(default='', compare=False) # [NEW] 走势评级 (S/A/B/C)
     # 扩展字段，不参与比较
     extra: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -101,7 +102,8 @@ class SignalMessageQueue:
                     created_date TEXT,
                     count INTEGER DEFAULT 1,
                     consecutive_days INTEGER DEFAULT 1,
-                    rank INTEGER DEFAULT 0
+                    rank INTEGER DEFAULT 0,
+                    grade TEXT
                 )
             """)
             
@@ -139,6 +141,10 @@ class SignalMessageQueue:
 
             try:
                 c.execute("ALTER TABLE signal_message ADD COLUMN rank INTEGER DEFAULT 0")
+            except sqlite3.OperationalError: pass
+            
+            try:
+                c.execute("ALTER TABLE signal_message ADD COLUMN grade TEXT")
             except sqlite3.OperationalError: pass
             
             conn.commit()
@@ -180,7 +186,8 @@ class SignalMessageQueue:
                     evaluated=bool(row['evaluated']),
                     count=row['count'] if 'count' in row.keys() else 1,
                     consecutive_days=row['consecutive_days'] if 'consecutive_days' in row.keys() else 1,
-                    rank=row['rank'] if 'rank' in row.keys() else 0
+                    rank=row['rank'] if 'rank' in row.keys() else 0,
+                    grade=row['grade'] if 'grade' in row.keys() else ''
                 )
                 # 放入队列
                 self._queue.put(msg) 
@@ -314,11 +321,11 @@ class SignalMessageQueue:
             self.db_manager.execute_update("""
                 INSERT INTO signal_message (
                     timestamp, code, name, signal_type, source, 
-                    priority, score, reason, evaluated, count, consecutive_days, rank, created_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    priority, score, reason, evaluated, count, consecutive_days, rank, grade, created_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 msg.timestamp, msg.code, msg.name, msg.signal_type, msg.source,
-                msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, created_date
+                msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, msg.grade, created_date
             ))
         except Exception as e:
             logger.error(f"Failed to persist signal: {e}")
@@ -340,10 +347,10 @@ class SignalMessageQueue:
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
             self.db_manager.execute_update("""
                 UPDATE signal_message
-                SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, created_date = ?
+                SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, grade = ?, created_date = ?
                 WHERE code = ? AND signal_type = ?
             """, (
-                msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, created_date,
+                msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, msg.grade, created_date,
                 msg.code, msg.signal_type
             ))
         except Exception as e:
@@ -533,9 +540,9 @@ class SignalMessageQueue:
             else:
                 # 不存在：插入新记录
                 c.execute("""
-                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1))
+                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days, grade)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1, ''))
                 # logger.debug(f"✅ Live signal saved to DB: {code} - {pattern}")
             
             conn.commit()

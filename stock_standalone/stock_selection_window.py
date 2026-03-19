@@ -191,7 +191,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # --- Main List ---
         # Columns
-        columns = ("code", "name", "status", "score", "rank", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
+        columns = ("code", "name", "grade", "tqi", "status", "score", "rank", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -213,7 +213,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         # Headings
         headers = {
-            "code": "代码", "name": "名称", "status": "类型", "score": "分值", "rank": "Rank",
+            "code": "代码", "name": "名称", "grade": "等级", "tqi": "质量分", "status": "类型", "score": "分值", "rank": "Rank",
             "price": "现价", "percent": "涨幅%", "昨日涨幅": "昨日%", "ratio": "量比", "amount": "成交额",
             "连阳涨幅": "连阳", "win": "胜率", "volume": "成交量",
             "category": "板块/概念",
@@ -227,6 +227,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # Column Configurations
         self.tree.column("code", width=70, minwidth=60, stretch=False)
         self.tree.column("name", width=80, minwidth=70, stretch=False)
+        self.tree.column("grade", width=40, minwidth=35, stretch=False)
+        self.tree.column("tqi", width=45, minwidth=40, stretch=False)
         self.tree.column("status", width=60, minwidth=50, stretch=False)
         self.tree.column("score", width=50, minwidth=40, stretch=False)
         self.tree.column("rank", width=40, minwidth=30, stretch=False)
@@ -247,6 +249,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.tag_configure("selected", background="#dcedc8")  # Light Green
         self.tree.tag_configure("ignored", background="#ffcdd2")   # Light Red
         self.tree.tag_configure("pending", background="#ffffff")   # White
+        self.tree.tag_configure("grade_S", foreground="#e91e63", font=("Arial", 9, "bold")) # Pink/Red for S
+        self.tree.tag_configure("grade_A", foreground="#f57c00", font=("Arial", 9, "bold")) # Orange for A
 
         self.tree.bind("<ButtonRelease-1>", self.on_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
@@ -422,7 +426,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     if icon:
                         display_name = f"{icon} {display_name}"
 
-                # 格式化 Rank 为整数显示
+                # 格式化各个字段，增强对 None/NaN 的健壮性
                 score_val = row.get('score', 0)
                 score_str = str(int(score_val)) if pd.notna(score_val) else "0"
 
@@ -432,9 +436,25 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 rank_val = row.get('Rank', 0)
                 rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
 
+                grade = row.get('grade', 'C')
+                if grade == "S": all_tags.append("grade_S")
+                elif grade == "A": all_tags.append("grade_A")
+
+                tqi_val = row.get('tqi', 0)
+                tqi_str = f"{tqi_val:.0f}" if pd.notna(tqi_val) else "0"
+                
+                pct_val = row.get('percent', 0)
+                pct_str = f"{pct_val:.2f}" if pd.notna(pct_val) else "0.00"
+                
+                yest_pct_val = row.get('昨日涨幅', 0)
+                yest_pct_str = f"{yest_pct_val:.2f}" if pd.notna(yest_pct_val) else "0.00"
+                
+                ratio_val = row.get('ratio', 0)
+                ratio_str = f"{ratio_val:.2f}" if pd.notna(ratio_val) else "0.00"
+
                 self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], display_name, row.get('status', ''), score_str, rank_str, row['price'], 
-                    f"{row['percent']:.2f}", f"{row.get('昨日涨幅', 0):.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
+                    row['code'], display_name, grade, tqi_str, row.get('status', ''), score_str, rank_str, row['price'], 
+                    pct_str, yest_pct_str, ratio_str, amount_str,
                     row.get('连阳涨幅', 0), win_str, row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
                 ), tags=tuple(all_tags))
@@ -512,13 +532,22 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         counter = Counter(all_tags)
         # 获取 Top 3 理由
         top3 = counter.most_common(3)
-        
-        total = len(self.df_candidates)
+        stats_str = ""
         if top3:
             stats_str = " | ".join([f"{tag}({count})" for tag, count in top3])
-            new_title = f"{base_title} - [共{total}条 | 理由频次: {stats_str}]"
+            
+        # 获取等级分布
+        if 'grade' in self.df_candidates.columns:
+            grades = self.df_candidates['grade'].value_counts()
+            grade_str = " | ".join([f"{g}:{grades.get(g, 0)}" for g in ["S", "A", "B"] if g in grades])
         else:
-            new_title = f"{base_title} - [共{total}条]"
+            grade_str = "N/A"
+        
+        total = len(self.df_candidates)
+        if stats_str:
+            new_title = f"{base_title} - [共{total}条 | 等级: {grade_str} | 理由期次: {stats_str}]"
+        else:
+            new_title = f"{base_title} - [共{total}条 | 等级: {grade_str}]"
             
         self.title(new_title)
 
