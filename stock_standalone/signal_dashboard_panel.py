@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
     QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
-    QProgressBar, QGridLayout
+    QProgressBar, QGridLayout, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray
 from PyQt6.QtGui import QColor, QFont, QBrush
@@ -152,10 +152,31 @@ logger = logging.getLogger(__name__)
 # 定义信号分类
 CATEGORY_MAP = {
     "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场"],
-    "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破"],
-    "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "破位"],
-    "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure"],
+    "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
+    "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告"],
+    "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"]
+}
+
+# 信号类型中文化与聚合映射
+SIGNAL_TYPE_MAP = {
+    "ALL": "全部信号",
+    "Fast-Track": "极速跟单",
+    "MOMENTUM": "强势动能",
+    "SBC-Breakout": "结构突破",
+    "SBC-Breakdown": "结构破位",
+    "BREAKOUT_STAR": "起跳新星",
+    "PATTERN": "形态异动",
+    "ALERT": "预警信号"
+}
+
+SIGNAL_TYPE_KEYWORDS = {
+    "Fast-Track": ["Fast-Track", "跟单"],
+    "MOMENTUM": ["MOMENTUM", "超级动能", "动能", "加速"],
+    "SBC-Breakout": ["SBC-Breakout", "突破", "强势结构", "趋势加速", "突破"],
+    "SBC-Breakdown": ["SBC-Breakdown", "破位", "结构破位", "跌破", "风险", "破位"],
+    "BREAKOUT_STAR": ["BREAKOUT_STAR", "起跳新星"],
+    "PATTERN": ["PATTERN", "形态", "信号"],
 }
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -215,38 +236,40 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.setMinimumSize(400, 300)
         
         # 数据缓存
+        # --- 1. 数据结构初始化 ---
         self._all_events: List[BusEvent] = []
         self._stock_stats: Dict[str, Dict] = {} 
         self._sector_heat: Dict[str, int] = {}  
-        
         self._stats_counters = {
             "follow": 0, "breakout": 0, "risk": 0, "breakdown": 0, "bull": 0, "bear": 0
         }
-        
-        self._vol_dialog = VolumeDetailsDialog(self)
-        # 异动个股窗口联动信号连接
-        self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
-        
-        self.setWindowFlags(Qt.WindowType.Window)
-        self._event_buffer: List[BusEvent] = []
+        self._signal_type_counts = {k: 0 for k in SIGNAL_TYPE_MAP.keys()}
+        self._signal_type_counts["ALL"] = 0
+        self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._is_updating_ui = False
+        self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
         
+        # --- 2. 组件与窗口初始化 ---
+        self._vol_dialog = VolumeDetailsDialog(self)
+        self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
+        self.setWindowFlags(Qt.WindowType.Window)
+        
+        # --- 3. UI 渲染 (依赖上述数据结构) ---
         self._init_ui()
         self.load_window_position_qt(self, "signal_dashboard_panel", default_width=1100, default_height=750)
         self._restore_ui_state()
+        
+        # --- 4. 定时器与总线连接 ---
         self._setup_bus_connection()
+        self.sig_bus_event.connect(self._safe_process_event)
         
         self._stats_timer = QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats_display)
         self._stats_timer.start(2000)
         
-        self.sig_bus_event.connect(self._safe_process_event)
-        
         self._batch_timer = QTimer(self)
         self._batch_timer.timeout.connect(self._process_batch_signals)
-        self._batch_timer.start(3000) 
-        
-        self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
+        self._batch_timer.start(3000)
 
     def stop(self):
         if hasattr(self, '_stats_timer') and self._stats_timer: self._stats_timer.stop()
@@ -259,7 +282,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             bus.unsubscribe(SignalBus.EVENT_RISK, self._on_signal_received)
             bus.unsubscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
         except: pass
-        self._event_buffer.clear()
+        self._table_update_buffer.clear()
         
     def closeEvent(self, event):
         self.save_window_position_qt_visual(self, "signal_dashboard_panel")
@@ -392,11 +415,40 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #333; background: #0d121f; } QTabBar::tab { background: #1a1c2c; color: #888; padding: 8px 20px; border: 1px solid #333; } QTabBar::tab:selected { background: #2a2d42; color: #fff; border-bottom-color: #00ff88; }")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索代码/名称...")
-        self.search_input.setFixedWidth(180)
+        self.search_input.setFixedWidth(150)
         self.search_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.search_input.customContextMenuRequested.connect(self._on_search_context_menu)
         self.search_input.textChanged.connect(self._on_search_text_changed)
-        self.tabs.setCornerWidget(self.search_input, Qt.Corner.TopRightCorner)
+        
+        # [NEW] 信号类型下拉过滤
+        self.type_filter = QComboBox()
+        self.type_filter.setFixedWidth(130)
+        self.type_filter.setStyleSheet("QComboBox { background: #1a1c2c; color: #fff; border: 1px solid #333; padding: 2px 5px; } QComboBox QAbstractItemView { background: #1a1c2c; color: #fff; selection-background-color: #2a2d42; }")
+        self._refresh_type_filter_items()
+        self.type_filter.currentTextChanged.connect(lambda: self._on_search_text_changed(self.search_input.text()))
+        
+        # 搜索与过滤容器
+        search_lay = QHBoxLayout()
+        search_lay.setContentsMargins(5, 5, 5, 5)
+        search_lay.addWidget(self.type_filter)
+        search_lay.addWidget(self.search_input)
+        
+        # [NEW] 重置按钮
+        self.reset_btn = QPushButton("♻️ 重置")
+        self.reset_btn.setFixedWidth(70)
+        self.reset_btn.setStyleSheet("QPushButton { background: #333; color: #aaa; border: 1px solid #444; border-radius: 4px; padding: 3px; font-weight: bold; } QPushButton:hover { background: #444; color: #fff; border-color: #666; }")
+        self.reset_btn.clicked.connect(self._reset_signals)
+        search_lay.addWidget(self.reset_btn)
+        
+        # 组装右上角控制区域 (类型过滤 + 搜索 + 重置)
+        corner_widget = QWidget()
+        corner_lay = QHBoxLayout(corner_widget)
+        corner_lay.setContentsMargins(0, 0, 10, 0)
+        corner_lay.setSpacing(8)
+        corner_lay.addWidget(self.type_filter)
+        corner_lay.addWidget(self.search_input)
+        corner_lay.addWidget(self.reset_btn)
+        self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
         self.tables: Dict[str, QTableWidget] = {}
         for tab_name in ["全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会"]:
             table = self._create_signal_table()
@@ -404,10 +456,41 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.tabs.addTab(table, tab_name)
         self.tabs.currentChanged.connect(lambda: self._on_search_text_changed(self.search_input.text()))
         layout.addWidget(self.tabs)
-        self.status_bar = QLabel("就绪")
-        layout.addWidget(self.status_bar)
+        
+        # --- 底部状态栏布局优化 ---
+        self.status_container = QFrame()
+        self.status_container.setStyleSheet("QFrame { background-color: #1a1c2c; border-top: 1px solid #333; } QLabel { color: #888; font-size: 9pt; }")
+        status_layout = QHBoxLayout(self.status_container)
+        status_layout.setContentsMargins(10, 2, 10, 2)
+        status_layout.setSpacing(15)
+
+        self.status_label = QLabel("就绪")
         self.last_update_label = QLabel("--:--:--")
-        layout.addWidget(self.last_update_label)
+        self.stats_info_label = QLabel("跟单: 0 | 突破: 0 | 风险: 0 | 破位: 0 | 全部: 0")
+        self.stats_info_label.setStyleSheet("color: #00ff88; font-family: 'Consolas';")
+
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.last_update_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.stats_info_label)
+
+        layout.addWidget(self.status_container)
+        
+    def _refresh_type_filter_items(self):
+        """刷新下拉框项目（带计数）"""
+        current_text = self.type_filter.currentText()
+        # 提取分类名称 (不含括号)
+        current_cat = current_text.split(' (')[0] if ' (' in current_text else current_text
+        
+        self.type_filter.blockSignals(True)
+        self.type_filter.clear()
+        for eng_key, ch_name in SIGNAL_TYPE_MAP.items():
+            count = self._signal_type_counts.get(eng_key, 0)
+            item_text = f"{ch_name} ({count})" if eng_key != "ALL" else f"{ch_name} ({self._signal_type_counts['ALL']})"
+            self.type_filter.addItem(item_text, eng_key)
+            if ch_name == current_cat:
+                self.type_filter.setCurrentText(item_text)
+        self.type_filter.blockSignals(False)
 
     def _create_signal_table(self) -> QTableWidget:
         table = QTableWidget(0, 8)
@@ -446,21 +529,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _on_signal_received(self, event: BusEvent):
         self.sig_bus_event.emit(event)
 
-    def _safe_process_event(self, event: BusEvent):
-        if isinstance(event, BusEvent): self._event_buffer.append(event)
-
-    def _process_batch_signals(self):
-        if not self._event_buffer: return
-        MAX_PER_BATCH = 10
-        events_to_process = self._event_buffer[:MAX_PER_BATCH]
-        del self._event_buffer[:MAX_PER_BATCH]
-        self._is_updating_ui = True
-        try:
-            for event in events_to_process: self._process_event(event, update_ui=self.isVisible())
-            self._update_last_sync_time()
-            self.status_bar.setText(f"就绪 | 统计采样: 最近 {len(self._all_events)} 条信号")
-        except: pass
-        finally: self._is_updating_ui = False
 
     def _categorize_and_count(self, event: BusEvent, increment: bool = True):
         delta = 1 if increment else -1
@@ -480,14 +548,85 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if "breakout" in event._cached_cats: self._stats_counters["bull"] += delta
         if "risk" in event._cached_cats or "breakdown" in event._cached_cats: self._stats_counters["bear"] += delta
 
+        # [NEW] 统计信号类型用于下拉框
+        raw_type = str(payload.get('pattern', payload.get('subtype', 'ALERT')))
+        matched_type = "ALERT"
+        for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+            if any(kw.lower() in raw_type.lower() for kw in keywords):
+                matched_type = eng_key
+                break
+        
+        self._signal_type_counts[matched_type] = max(0, self._signal_type_counts.get(matched_type, 0) + delta)
+        self._signal_type_counts["ALL"] = max(0, self._signal_type_counts["ALL"] + delta)
+        
+        # 实时触发下拉框更新 (节流)
+        if increment: 
+            QTimer.singleShot(100, self._refresh_type_filter_items)
+
+    def _safe_process_event(self, event: BusEvent):
+        """线程安全地接管总线事件，先更新内存统计，再将 UI 更新推入缓冲"""
+        try:
+            # 1. 立即更新内存统计与计数 (满足实时性)
+            self._process_event(event, update_ui=False)
+            
+            # 2. 推入 UI 更新缓冲 (满足稳定性)
+            self._table_update_buffer.append(event)
+            
+            # 3. 如果是高优信号，缩短批次等待，尽快显示 (可选)
+            # if event.payload.get('is_high_priority'): QTimer.singleShot(500, self._process_batch_signals)
+        except Exception as e:
+            logger.error(f"Error in _safe_process_event: {e}")
+
+    def _process_batch_signals(self):
+        """批量处理 UI 更新，确保滚动条稳定"""
+        if not self._table_update_buffer:
+            return
+            
+        events_to_process = self._table_update_buffer[:]
+        self._table_update_buffer.clear()
+        
+        # 记录当前各表格的滚动状态
+        scroll_states = {}
+        for name, table in self.tables.items():
+            scroll_states[name] = {
+                'value': table.verticalScrollBar().value(),
+                'at_top': table.verticalScrollBar().value() == 0,
+                'selected': [(r.topRow(), r.bottomRow()) for r in table.selectedRanges()]
+            }
+        
+        # 批量插入
+        self._is_updating_ui = True
+        try:
+            for event in events_to_process: # 按到达顺序插入到第0行，最终批次中最新的在最前
+                self._append_to_tables(event)
+        finally:
+            self._is_updating_ui = False
+            
+        # 恢复/修正滚动位置
+        for name, table in self.tables.items():
+            state = scroll_states.get(name)
+            if not state: continue
+            
+            # 如果之前不在顶部，向下偏移新插入的行数以保持视图静止
+            if not state['at_top']:
+                new_val = state['value'] + len(events_to_process)
+                table.verticalScrollBar().setValue(new_val)
+            
+            # 恢复选择 (如有必要，这里简单回放，也可增加偏移量逻辑)
+            # for (top, bottom) in state['selected']:
+            #     table.setRangeSelected(QTableWidgetSelectionRange(top + len(events_to_process), ..., ...), True)
+
     def _process_event(self, event: BusEvent, update_ui=True):
+        payload = event.payload
+        code = payload.get('code', '')
+        # 🛡️ [GUARD] 必须有有效的股票代码才处理，防止空信号进入列表
+        if not (isinstance(code, str) and code.isdigit() and len(code) == 6): return
+        
         self._all_events.append(event)
         self._categorize_and_count(event, increment=True)
         if len(self._all_events) > 1000:
             self._categorize_and_count(self._all_events.pop(0), increment=False)
-        payload = event.payload
-        code = payload.get('code', '')
-        if not (isinstance(code, str) and code.isdigit() and len(code) == 6): return
+        
         sector = payload.get('sector', '其它')
         if sector: self._sector_heat[sector] = self._sector_heat.get(sector, 0) + 1
         if code not in self._stock_stats: self._stock_stats[code] = {"count": 0, "name": payload.get('name', '')}
@@ -497,6 +636,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _append_to_tables(self, event: BusEvent):
         payload = event.payload
         code, name = payload.get('code', ''), payload.get('name', '')
+        if not code or not name: return # 🛡️ 进一步兜底校验
         pattern = payload.get('pattern', payload.get('subtype', 'ALERT'))
         detail = payload.get('detail', payload.get('message', ''))
         import pandas as pd
@@ -511,6 +651,36 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         for cat, patterns in CATEGORY_MAP.items():
             if any(p.lower() in pattern.lower() or p.lower() in detail.lower() for p in patterns):
                 self._insert_row(self.tables[cat], time_str, code, name, pattern, detail, count, score, grade)
+
+    def _on_search_text_changed(self, text):
+        search_text = text.lower()
+        # 获取当前选中的原始类型 key (从 UserData 子午线)
+        target_type_key = self.type_filter.currentData() or "ALL"
+        
+        table = self.tabs.currentWidget()
+        if not isinstance(table, QTableWidget): return
+        
+        for r in range(table.rowCount()):
+            row_visible = True
+            
+            # 1. 文本搜索 (代码/名称)
+            if search_text:
+                code_item = table.item(r, 2)
+                name_item = table.item(r, 3)
+                if code_item and name_item:
+                    row_visible = (search_text in code_item.text().lower() or 
+                                  search_text in name_item.text().lower())
+            
+            # 2. 类型过滤
+            if row_visible and target_type_key != "ALL":
+                pattern_item = table.item(r, 4)
+                if pattern_item:
+                    raw_pattern = str(pattern_item.data(Qt.ItemDataRole.UserRole) or pattern_item.text())
+                    # [FIX] 使用关键词映射判定归属，解决中英文过滤不统一问题
+                    keywords = SIGNAL_TYPE_KEYWORDS.get(target_type_key, [target_type_key])
+                    row_visible = any(kw.lower() in raw_pattern.lower() for kw in keywords)
+            
+            table.setRowHidden(r, not row_visible)
 
     def _get_item_color(self, pattern, detail):
         if "SELL" in pattern or "风险" in detail: return QColor("#00FF00")
@@ -531,6 +701,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if existing_row >= 0: table.removeRow(existing_row)
             table.insertRow(0)
             
+            # 形态/信号 (中文化展示)
+            display_pattern = pattern
+            for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+                if any(kw.lower() in pattern.lower() for kw in keywords):
+                    display_pattern = SIGNAL_TYPE_MAP.get(eng_key, pattern)
+                    break
+            
+            p_item = QTableWidgetItem(display_pattern)
+            p_item.setData(Qt.ItemDataRole.UserRole, pattern) # 存储原始 pattern 用于过滤
+            
             # 评级设色
             grade_item = QTableWidgetItem(grade)
             grade_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -545,7 +725,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(0, 1, grade_item)
             table.setItem(0, 2, QTableWidgetItem(code))
             table.setItem(0, 3, QTableWidgetItem(name))
-            table.setItem(0, 4, QTableWidgetItem(pattern))
+            table.setItem(0, 4, p_item) # [FIX] 使用翻译后的项，且带原始数据用于过滤
             table.setItem(0, 5, QTableWidgetItem(detail))
             table.setItem(0, 6, NumericTableWidgetItem(str(count)))
             table.setItem(0, 7, NumericTableWidgetItem(str(int(score))))
@@ -639,9 +819,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         sorted_sectors = sorted(self._sector_heat.items(), key=lambda x: x[1], reverse=True)
         top_3 = [f"{s}: {c}" for s, c in sorted_sectors[:3]]
         self.hot_sectors_label.setText(" | ".join(top_3) if top_3 else "暂无数据")
+        
+        # 更新底部统计信息
+        follow = self._stats_counters.get("follow", 0)
+        breakout = self._stats_counters.get("breakout", 0)
+        risk = self._stats_counters.get("risk", 0)
+        breakdown = self._stats_counters.get("breakdown", 0)
+        total = self._signal_type_counts.get("ALL", 0)
+        self.stats_info_label.setText(f"跟单: {follow} | 突破: {breakout} | 风险: {risk} | 破位: {breakdown} | 全部: {total}")
 
     def update_market_stats(self, stats: dict):
         try:
+            from PyQt6 import QtWidgets
+            app = QtWidgets.QApplication.instance()
+            if app: app.processEvents() # ⚡ [MINIMAL HEARTBEAT] 每次接收统计时驱动一次循环，确保 UI 活跃
+            
             self._market_stats.update(stats)
             if hasattr(self, '_vol_dialog') and self._vol_dialog.isVisible(): self._vol_dialog.update_data(stats.get("vol_details", []))
             self.market_breadth_label.setText(f"📊 上涨:{stats.get('up', 0)} 下跌:{stats.get('down', 0)}")
@@ -694,6 +886,36 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 2. 发送内部总线事件，以便总线相关组件也能同步
         self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": code, "name": name}))
 
+    def _on_search_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu()
+        clear_act = menu.addAction("清除内容")
+        test_act = menu.addAction("🚀 发送并验证自检信号 (Fast-Track)")
+        
+        action = menu.exec(self.search_input.mapToGlobal(pos))
+        if action == clear_act:
+            self.search_input.clear()
+        elif action == test_act:
+            self._emit_test_signal()
+            
+    def _emit_test_signal(self):
+        """[SELF-TEST] 发送一个模拟的 Fast-Track 信号用于自检"""
+        try:
+            from signal_bus import get_signal_bus, SignalBus
+            bus = get_signal_bus()
+            bus.publish(
+                event_type=SignalBus.EVENT_ALERT,
+                source="SelfTest",
+                payload={
+                    "code": "000001", "name": "自检样本", "action": "突破/跟单", 
+                    "pattern": "Fast-Track", "detail": "这是一条自检测试信号，验证总线与看板连通性",
+                    "score": 99.0, "grade": "S"
+                }
+            )
+            self.status_label.setText("✅ 自检信号已发出，请检查 [极速跟单] 分类")
+        except Exception as e:
+            self.status_label.setText(f"❌ 自检失败: {e}")
+
     def _on_hot_sectors_clicked(self, event):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QAction
@@ -708,7 +930,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _filter_by_sector(self, sector_name):
         self.tabs.setCurrentIndex(0)
-        self.status_bar.setText(f"当前筛选板块: {sector_name}")
+        self.status_label.setText(f"当前筛选板块: {sector_name}")
 
     def _on_cell_clicked(self, row, col):
         table = self.sender()
@@ -765,12 +987,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             clipboard.setText(code)
         elif header == "名称":
             clipboard.setText(name)
-        elif header in ("形态", "信号"):
+        elif header in ("形态", "信号", "形态/信号", "评级", "次数", "得分", "时间"):
             clipboard.setText(current_text)
         else:
             clipboard.setText(code)
 
-        self.status_bar.setText(f"📋 已复制: {clipboard.text()}")
+        self.status_label.setText(f"📋 已复制: {clipboard.text()}")
         self.code_clicked.emit(code, name)
 
     def _on_search_text_changed(self, text):
@@ -822,6 +1044,41 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     val = QByteArray.fromHex(state.encode())
                     for t in self.tables.values(): t.horizontalHeader().restoreState(val)
         except: pass
+
+    def _reset_signals(self):
+        """重置所有信号数据与统计，开始新监控周期"""
+        # 1. 清空基础数据结构
+        self._all_events.clear()
+        self._table_update_buffer.clear()
+        self._stock_stats.clear()
+        self._sector_heat.clear()
+        
+        # 2. 重置计数器
+        for k in self._stats_counters: self._stats_counters[k] = 0
+        for k in self._signal_type_counts: self._signal_type_counts[k] = 0
+        self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
+        
+        # 3. 清空 UI 表格
+        for table in self.tables.values():
+            table.setRowCount(0)
+            
+        # 4. 重置 UI 标签与卡片 (进入“等待同步”状态)
+        for key, lbl in self.cards.items():
+            lbl.setText("0")
+            
+        self.temp_label.setText("市场温度: 等待数据...")
+        self.temp_bar.setValue(0)
+        self.market_breadth_label.setText("📊 上涨:-- 下跌:--")
+        self.vol_stat_label.setText("🚀 放量:--")
+        self.ls_ratio_label.setText("多空比: --")
+        self.hot_sectors_label.setText("等待数据...")
+        self.last_update_label.setText("最后更新: 等待同步...")
+        self.stats_info_label.setText("跟单: 0 | 突破: 0 | 风险: 0 | 破位: 0 | 全部: 0")
+        
+        # 5. 刷新下拉框计数
+        self._refresh_type_filter_items()
+        self.status_label.setText("📊 信号面板已重置，等待新行情数据流入...")
+        logger.info("SignalDashboard: User manual reset triggered.")
 
 if __name__ == "__main__":
     import sys

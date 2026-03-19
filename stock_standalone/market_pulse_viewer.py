@@ -269,7 +269,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         indices_inner.pack(expand=True)
         
         self.idx_labels = {}
-        for i, name in enumerate(["上证指数", "深证成指", "创业板指"]):
+        for i, name in enumerate(["上证指数", "深证成指", "创业板指", "科创50"]):
             f = tk.Frame(indices_inner, bg="#f8f9fa", padx=10)
             f.grid(row=0, column=i)
             tk.Label(f, text=name, font=("Microsoft YaHei", 8), bg="#f8f9fa", fg="#6c757d").pack()

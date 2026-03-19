@@ -1748,6 +1748,18 @@ class StockLiveStrategy:
                         from trading_hub import TrackedSignal
                         track_sig = TrackedSignal(**sig)
                         hub.add_to_follow_queue(track_sig)
+                        
+                        # 🚀 [NEW] 同时触发总线报警，确保信号看板实时可见
+                        # 使用明确的 action 和包含 "突破" 的 message 以触发正确的分类
+                        self._trigger_alert(
+                            code=cand['code'], 
+                            name=cand['name'], 
+                            message=f"🚀 [Fast-Track] 极强异动突破, 直通实盘跟单: {cand['daily_patterns']}",
+                            action="突破/跟单",
+                            price=cand['price'],
+                            score=float(cand['priority'])
+                        )
+                        
                         logger.info(f"🚀 [Fast-Track] 盘中极强信号直接进入实盘跟单队列: {cand['code']} {cand['name']}")
                     except Exception as e:
                         logger.error(f"Failed to fast-track {cand['code']}: {e}")
@@ -3666,15 +3678,15 @@ class StockLiveStrategy:
                 should_voice = True
                 msg = f"{event.name} {pattern_cn} 已触发{event.count}次"
             
-            # [FIX] 所有需要播报的信号都通过 _trigger_alert 处理
-            # _trigger_alert 会根据 msg 中的关键词判断是否触发UI弹窗
-            if should_voice:
-                self._trigger_alert(
-                    event.code, event.name, msg, 
-                    action=action, price=event.price, 
-                    score=getattr(event, 'score', 0.0),
-                    grade=getattr(event, 'grade', '')  # [NEW] 显式传入评级
-                )
+            # [FIX] 所有信号都通过 _trigger_alert 处理，确保仪表盘可见
+            # 只有满足 should_voice 条件的才触发语音/弹窗，其余仅静默发布到总线
+            self._trigger_alert(
+                event.code, event.name, msg, 
+                action=action, price=event.price, 
+                score=getattr(event, 'score', 0.0),
+                grade=getattr(event, 'grade', ''),
+                silent=not should_voice  # [NEW] 非播报信号设为静默
+            )
 
 
             
@@ -3931,8 +3943,11 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Daily pattern callback failed: {e}")
 
-    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd', score: float = 0.0, grade: str = "") -> None:
-        """触发报警 (异步分发器)"""
+    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd', score: float = 0.0, grade: str = "", silent: bool = False) -> None:
+        """触发报警 (异步分发器)
+        Args:
+            silent: 若为 True, 则仅记录和发送至总线/IPC，不触发 UI 弹窗和语音播报
+        """
         # --- 1. 快速过滤 (同步执行，必须极快) ---
         if self.is_blacklisted(code):
             if hasattr(self, 'trading_logger'):
@@ -3999,6 +4014,7 @@ class StockLiveStrategy:
             is_priority, should_skip_ui = ctx['is_priority'], ctx['should_skip_ui']
             grade, now_str = ctx.get('grade', ''), ctx['timestamp_str']
             score = ctx.get('score', 0.0)
+            silent = ctx.get('silent', False) # [NEW] 获取静默标志
 
             # --- A. 信号持久化 (Log/DB/Queue) ---
             try:
@@ -4037,14 +4053,14 @@ class StockLiveStrategy:
             except Exception: pass
 
             # --- C. UI 回调 (执行外部注册函数) ---
-            if self.alert_callback and not should_skip_ui:
+            if self.alert_callback and not should_skip_ui and not silent:
                 try:
                     self.alert_callback(code, name, message)
                 except Exception as e:
                     logger.error(f"Async Alert callback error: {e}")
 
             # --- D. 语音播报 ---
-            if self.voice_enabled:
+            if self.voice_enabled and not silent:
                 # 语义清理
                 clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
                 import re
@@ -4052,7 +4068,7 @@ class StockLiveStrategy:
                 seen = set()
                 unique_parts = [p.strip() for p in raw_parts if p.strip() and p.strip() not in seen and not seen.add(p.strip())] # type: ignore
                 concise_msg = "，".join(unique_parts[:3])
-
+                
                 leading_tag = ""
                 if "连阳" in message: leading_tag = "强势连阳，"
                 elif "热点" in message: leading_tag = "热点龙头，"

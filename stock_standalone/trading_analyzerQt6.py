@@ -196,6 +196,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             self.sector_table.setHorizontalHeaderLabels(["排名", "板块名称", "频次", "平均强度", "最新强度", "最新日期"])
             self.sector_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             self.sector_table.cellClicked.connect(self.on_sector_clicked)
+            # [NEW] 支持键盘上下键联动
+            self.sector_table.currentCellChanged.connect(self.on_sector_clicked_changed)
             left_layout.addWidget(self.sector_table)
             splitter.addWidget(left_widget)
             
@@ -216,6 +218,10 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             right_layout.addWidget(self.stock_table)
             splitter.addWidget(right_widget)
             
+
+            self.selector_cache = pd.DataFrame()
+            self.selector_cache_ts = None  # 可选：时间戳
+            self._last_sector = None  # 防止重复触发
             # 设置分栏比例
             splitter.setSizes([450, 750])
             
@@ -234,6 +240,47 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         self.save_window_position_qt(self, "HotSectorDialog_Geometry")
         super().closeEvent(event)
+
+    def get_selector_cache(self):
+        """
+        selector 缓存（60秒自动刷新）
+        """
+        if not self.selector:
+            return pd.DataFrame()
+
+        need_refresh = False
+        if self.selector_cache.empty:
+            need_refresh = True
+        elif self.selector_cache_ts:
+            if (datetime.now() - self.selector_cache_ts).seconds > 1800:
+                need_refresh = True
+
+        if need_refresh:
+            try:
+                df = self.selector.get_candidates_df()
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df = df.drop_duplicates(subset=['code'])  # ✅ 防重复核心
+                    self.selector_cache = df
+                    self.selector_cache_ts = datetime.now()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"[Selector Cache Error]: {e}")
+
+        return self.selector_cache
+
+    def refresh_selector_cache(self):
+        if not self.selector:
+            return
+        
+        try:
+            df = self.selector.get_candidates_df()
+            if df is not None and not df.empty:
+                self.selector_cache = df.copy()
+                self.selector_cache_ts = datetime.now()
+        except Exception as e:
+            print(f"[Selector Cache Error]: {e}")
 
     def load_data(self):
         days = self.days_spin.value()
@@ -331,6 +378,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             self.sector_table.resizeColumnsToContents()
             self.stock_label.setText(f"分析完成: 找到 {len(result)} 个热点板块 (近 {days} 天)")
             
+            QTimer.singleShot(0, self.refresh_selector_cache)
+
         except Exception as e:
             self.stock_label.setText(f"数据库查询失败: {e}")
             
@@ -342,8 +391,171 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
         QApplication.processEvents()
         
         self.find_leading_stocks(sector_name)
-        
+    
+    # def on_sector_clicked_changed(self, row, col, prev_row, prev_col):
+    #     """
+    #     键盘上下键切换行时触发联动
+    #     """
+    #     if row < 0 or row == prev_row:
+    #         return
+    #     # 复用点击逻辑
+    #     self.on_sector_clicked(row, col)
+    def on_sector_clicked_changed(self, row, col, prev_row, prev_col):
+        if row < 0 or row == prev_row:
+            return
+
+        name_item = self.sector_table.item(row, 1)
+        if not name_item:
+            return
+
+        sector_name = name_item.text()
+
+        # ✅ 防重复触发（关键）
+        if sector_name == self._last_sector:
+            return
+
+        self._last_sector = sector_name
+
+        self.on_sector_clicked(row, col)
+
     def find_leading_stocks(self, sector_name):
+        try:
+            # ========================
+            # 1. 55188 数据
+            # ========================
+            if self.parent() and hasattr(self.parent(), 'df_all') and not self.parent().df_all.empty:
+                df = self.parent().df_all
+            else:
+                df = load_cache()
+
+            scraper_list = pd.DataFrame()
+
+            if not df.empty:
+                mask = (
+                    df['theme_name'].astype(str).str.contains(sector_name, na=False) |
+                    df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
+                    df['sector'].astype(str).str.contains(sector_name, na=False)
+                )
+
+                scraper_list = df[mask].copy()
+
+                if not scraper_list.empty:
+                    scraper_list['source'] = "55188抓取"
+
+                    if 'theme_logic' in scraper_list.columns and 'hot_reason' in scraper_list.columns:
+                        scraper_list['display_logic'] = scraper_list['theme_logic'].fillna('') + " / " + scraper_list['hot_reason'].fillna('')
+                    elif 'theme_logic' in scraper_list.columns:
+                        scraper_list['display_logic'] = scraper_list['theme_logic']
+                    else:
+                        scraper_list['display_logic'] = ""
+
+                    # ✅ 去重（防止原始数据重复）
+                    scraper_list = scraper_list.drop_duplicates(subset=['code'])
+
+            # ========================
+            # 2. selector（缓存版）
+            # ========================
+            selector_list = pd.DataFrame()
+
+            candidates = self.get_selector_cache()
+
+            if not candidates.empty:
+                c_mask = (
+                    candidates['category'].astype(str).str.contains(sector_name, na=False) |
+                    candidates['name'].astype(str).str.contains(sector_name, na=False)
+                )
+
+                selector_list = candidates[c_mask].copy()
+
+                if not selector_list.empty:
+                    selector_list['source'] = "选股系统"
+                    selector_list['display_logic'] = selector_list['reason'] if 'reason' in selector_list.columns else "强势推荐"
+
+                    # ✅ 排序 + 去重
+                    if 'score' in selector_list.columns:
+                        selector_list = selector_list.sort_values('score', ascending=False)
+
+                    selector_list = selector_list.drop_duplicates(subset=['code'])
+
+            # ========================
+            # 3. 合并（互补逻辑）
+            # ========================
+            top_selector = selector_list.head(5) if not selector_list.empty else pd.DataFrame()
+
+            if not top_selector.empty and not scraper_list.empty:
+                codes_in_selector = top_selector['code'].tolist()
+                scraper_remains = scraper_list[~scraper_list['code'].isin(codes_in_selector)]
+                final_df = pd.concat([top_selector, scraper_remains], ignore_index=True)
+            elif not top_selector.empty:
+                final_df = top_selector
+            elif not scraper_list.empty:
+                final_df = scraper_list
+            else:
+                final_df = pd.DataFrame()
+
+            if final_df.empty:
+                self.stock_label.setText(f"板块 {sector_name}: 未找到关联个股")
+                self.stock_table.setRowCount(0)
+                return
+
+            # ========================
+            # 4. UI 填充
+            # ========================
+            self.stock_table.setSortingEnabled(False)
+            self.stock_table.setRowCount(len(final_df))
+
+            for i, (_, row) in enumerate(final_df.iterrows()):
+                code_val = str(row.get('code', ''))
+                self.stock_table.setItem(i, 0, QTableWidgetItem(code_val))
+
+                name_val = str(row.get('name', code_val))
+                self.stock_table.setItem(i, 1, QTableWidgetItem(name_val))
+
+                price = row.get('price', 0)
+                self.stock_table.setItem(i, 2, NumericTableWidgetItem(price))
+
+                pct = row.get('change_pct', row.get('percent', 0))
+                try:
+                    if pct is None or (isinstance(pct, float) and np.isnan(pct)):
+                        pct_val = 0.0
+                    else:
+                        f_pct = float(pct)
+                        pct_val = f_pct if abs(f_pct) > 1 else f_pct * 100
+
+                    self.stock_table.setItem(i, 3, NumericTableWidgetItem(round(pct_val, 2)))
+                except:
+                    self.stock_table.setItem(i, 3, QTableWidgetItem(str(pct)))
+
+                zhuli = row.get('zhuli_rank', row.get('net_ratio', '-'))
+                if pd.isna(zhuli):
+                    zhuli = "-"
+                self.stock_table.setItem(i, 4, QTableWidgetItem(str(zhuli)))
+
+                src = row.get('source', '未知')
+                self.stock_table.setItem(i, 5, QTableWidgetItem(src))
+
+                if src == "选股系统":
+                    score = row.get('score', 0)
+                    date_score = f"评分:{score:.1f}"
+                else:
+                    date_score = row.get('date', datetime.now().strftime('%m-%d'))
+
+                self.stock_table.setItem(i, 6, QTableWidgetItem(str(date_score)))
+
+                logic = row.get('display_logic', '')
+                self.stock_table.setItem(i, 7, QTableWidgetItem(str(logic)))
+
+            self.stock_table.setSortingEnabled(True)
+            self.stock_table.resizeColumnsToContents()
+
+            self.stock_label.setText(
+                f"板块 {sector_name}: {len(final_df)}只 (精选{len(top_selector)})"
+            )
+
+        except Exception as e:
+            print(f"[find_leading_stocks error]: {e}")
+
+    def find_leading_stocks_old(self, sector_name):
         try:
             # 1. 加载 55188 缓存数据
             if self.parent() and hasattr(self.parent(), 'df_all') and not self.parent().df_all.empty:
@@ -491,9 +703,9 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                      if hasattr(self.parent(), 'update_send_status'):
                          self.parent().update_send_status(f"已发送 {code}")
                      
-                     # 尝试联动主界面的 scroll 信号
-                     if hasattr(self.parent(), 'scroll_to_code_signal'):
-                         self.parent().scroll_to_code_signal.emit(code)
+                     # # 尝试联动主界面的 scroll 信号
+                     # if hasattr(self.parent(), 'scroll_to_code_signal'):
+                     #     self.parent().scroll_to_code_signal.emit(code)
             
                  elif hasattr(self.parent(), 'sender') and self.parent().sender:
                       # Fallback
