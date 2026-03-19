@@ -393,10 +393,10 @@ class KLineMonitor(tk.Toplevel):
     
     def _safe_apply_filters(self):
         try:
-            # 真正的UI刷新逻辑
             self.apply_filters()
+        except Exception as e:
+            logger.error(f"UI错误: {e}")
         finally:
-            # 无论成功失败，都要释放“锁”
             self._ui_update_pending = False
 
     def refresh_loop(self):
@@ -406,50 +406,70 @@ class KLineMonitor(tk.Toplevel):
             if df is not None and not df.empty:
                 self.df_cache = df.copy()
 
+                # 初始化变化检测key
+                self._last_key = (df.index[-1], df['close'].iloc[-1])
+
                 if not self._ui_update_pending:
                     self._ui_update_pending = True
                     self.after(0, self._safe_apply_filters)
 
         except Exception as e:
-            logger.info(f"[Monitor] 初次更新错误:{e}")
+            logger.error(f"[Monitor] 初次更新错误: {e}")
 
         # ---------- 主循环 ----------
-        while not self.stop_event.wait(cct.duration_sleep_time):
+        while not self.stop_event.is_set():
             try:
-                if not cct.get_work_time():
-                    if self.stop_event.wait(10):
-                        break
+                # ---- 状态判断（只调用一次，避免时间边界问题）----
+                is_work = cct.get_work_time()
+                sleep_time = cct.duration_sleep_time if is_work else 10
+
+                # ---- 可中断等待 ----
+                if self.stop_event.wait(sleep_time):
+                    break
+
+                # ---- 非交易时间直接跳过 ----
+                if not is_work:
                     continue
 
+                # ---------- 获取数据 ----------
                 df = self.get_df_func()
 
                 if df is None or df.empty:
                     continue
 
-                # ---------- 核心优化1：避免重复数据 ----------
-                if id(df) == self._last_df_id:
+                # ---------- 核心优化1：数据变化检测 ----------
+                try:
+                    key = (df.index[-1], df['close'].iloc[-1])
+                except Exception:
+                    # 防止索引异常
                     continue
 
-                self._last_df_id = id(df)
+                if key == getattr(self, "_last_key", None):
+                    continue
+
+                self._last_key = key
 
                 # ---------- 计算 ----------
                 df = detect_signals(df)
                 self.df_cache = df.copy()
 
-                # ---------- 核心优化2：UI只触发一次 ----------
+                # ---------- 核心优化2：UI节流 ----------
                 if not self._ui_update_pending:
                     self._ui_update_pending = True
                     try:
                         self.after(0, self._safe_apply_filters)
+
                     except (RuntimeError, tk.TclError):
                         break
 
             except (RuntimeError, tk.TclError):
+                # UI 已销毁
                 break
 
             except Exception as e:
                 logger.error(f"[Monitor] 更新错误: {e}")
-                if self.stop_event.wait(self.refresh_interval):
+                # 错误短等待（避免死循环打满CPU）
+                if self.stop_event.wait(5):
                     break
 
     def get_row_tags_kline(self, r: pd.Series, idx: Optional[Any] = None) -> List[str]:
