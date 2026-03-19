@@ -156,13 +156,35 @@ class DailyPulseEngine:
         processed_stocks = []
         high_score_count = 0
         
+        # Merge input monitored stocks with selector candidates if needed
+        # This solves the "Empty Action Radar" issue when no live monitor is active
+        combined_stocks = monitored_stocks.copy()
+        if len(combined_stocks) < 10 and self.selector:
+            try:
+                candidates_df = self.selector.get_candidates_df()
+                if candidates_df is not None and not candidates_df.empty:
+                    # Filter for high quality candidates (score > 80)
+                    high_quality = candidates_df[candidates_df['score'] > 80].head(30)
+                    for code, row in high_quality.iterrows():
+                        if code not in combined_stocks:
+                            # Construct minimal data dummy
+                            combined_stocks[code] = {
+                                'name': row.get('name', ''),
+                                'price': row.get('trade', row.get('price', 0)),
+                                'create_price': 0, # Not joined yet
+                                'snapshot': row.to_dict()
+                            }
+            except Exception as e:
+                self.logger.error(f"Failed to merge candidates: {e}")
+
         # Get period from selector if available, default to 'd'
         current_period = 'd'
         if self.selector and hasattr(self.selector, 'resample'):
              current_period = 'd'
         if self.selector and hasattr(self.selector, 'resample'):
             current_period = self.selector.resample
-        for code, data in monitored_stocks.items():
+            
+        for code, data in combined_stocks.items():
             snapshot = data.get('snapshot', {})
             score = snapshot.get('score', 0)
             win_rate = snapshot.get('win_rate', 0)
@@ -222,6 +244,11 @@ class DailyPulseEngine:
                         if not reason:
                              reason = rec.get('reason', rec.get('user_reason', ''))
 
+                        # Extract technicals for action plan
+                        if 'ma5d' not in snapshot and 'ma5' in rec: snapshot['ma5d'] = rec['ma5']
+                        if 'upper' not in snapshot and 'upper' in rec: snapshot['upper'] = rec['upper']
+                        if 'win' not in snapshot and 'win' in rec: snapshot['win'] = rec['win']
+
                         # Update price from real-time source if snapshot has no live price
                         # This facilitates "Real-time reading" requirement
                         rt_price = rec.get('trade', rec.get('price', 0))
@@ -273,19 +300,8 @@ class DailyPulseEngine:
         ready_pct = (high_score_count / len(processed_stocks) * 100) if processed_stocks else 0
         sector_heat = sum([s[1] for s in hot_sectors[:5]]) / 5 if hot_sectors else 0
         
-        # 3.1 Index Impact (Average of major indices)
-        avg_index_pct = np.mean([idx['percent'] for idx in indices]) if indices else 0.0
-        
-        # 3.2 Breadth Impact
-        up_ratio = breadth['up_ratio'] if breadth else 0.5
-        
-        # PROFESSIONAL FORMULA:
-        # Base: (High Score Pct * 0.4) + (Sector Heat * 4)
-        # Adjustment: Index_Pct * 10 + (Up_Ratio - 0.5) * 60
-        base_temp = (ready_pct * 0.4) + (sector_heat * 4) + 30
-        correction = (avg_index_pct * 12) + (up_ratio - 0.5) * 60
-        
-        temperature = min(100, max(0, base_temp + correction))
+        # Base from stock sentiment (max weight reduction to avoid inflation)
+        temperature, summary = self.calculate_professional_temperature(ready_pct, sector_heat, breadth, indices)
         
         if temperature > 80:
             summary = "市场情绪火热，赚钱效应极佳，主线力量强劲。"
@@ -296,7 +312,7 @@ class DailyPulseEngine:
         elif temperature > 20:
             summary = "市场持续低迷，空头占据核心，保持谨慎避险。"
         else:
-            summary = "市场极其冰冷，情绪触及冰点，建议空仓观望。"
+            summary = "市场冰冷到极点，风险溢出显著，建议空仓观望。"
             
         summary_data = {
             'temperature': round(temperature, 1),
@@ -311,6 +327,39 @@ class DailyPulseEngine:
         market_pulse_db.save_daily_pulse(today, summary_data, processed_stocks)
         
         return summary_data, processed_stocks
+
+
+    @staticmethod
+    def calculate_professional_temperature(ready_pct, sector_heat, breadth, indices):
+        """Standalone reusable temperature calculation."""
+        import numpy as np
+        # 3.1 Index Impact (Average of major indices)
+        avg_index_pct = np.mean([idx['percent'] for idx in indices]) if indices else 0.0
+        
+        # 3.2 Breadth Impact
+        up_ratio = breadth.get('up_ratio', 0.5) if breadth else 0.5
+        
+        # PROFESSIONAL FORMULA:
+        # Base: (High Score Pct * 0.4) + (Sector Heat * 3) + 35
+        # Adjustment: Index_Pct * 12 + (Up_Ratio - 0.5) * 60
+        base_temp = (ready_pct * 0.4) + (sector_heat * 3) + 35
+        correction = (avg_index_pct * 12) + (up_ratio - 0.5) * 60
+        
+        temperature = min(100, max(0, base_temp + correction))
+        
+        summary = ""
+        if temperature > 80:
+            summary = "市场火热"
+        elif temperature > 60:
+            summary = "市场活跃"
+        elif temperature > 40:
+            summary = "市场平淡"
+        elif temperature > 20:
+            summary = "市场低迷"
+        else:
+            summary = "市场冰点"
+            
+        return float(temperature), summary
 
     def get_history(self, date_str):
         """Retrieve historical report."""

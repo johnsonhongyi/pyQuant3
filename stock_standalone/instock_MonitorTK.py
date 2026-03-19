@@ -53,6 +53,7 @@ from logger_utils import LoggerFactory, init_logging, with_log_level
 # from realtime_data_service import DataPublisher
 StockLiveStrategy = cct.LazyClass('stock_live_strategy', 'StockLiveStrategy')
 DataPublisher = cct.LazyClass('realtime_data_service', 'DataPublisher')
+DailyPulseEngine = cct.LazyClass('market_pulse_engine', 'DailyPulseEngine')
 SignalDashboardPanel = cct.LazyClass('signal_dashboard_panel', 'SignalDashboardPanel')
 # DataPublisher is now handled locally in the Main process for resource efficiency
 from monitor_utils import (
@@ -588,6 +589,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.live_strategy = None
         self._schedule_after(3000, self._init_live_strategy)
         
+        # [NEW] For Market Temperature Sync
+        self._last_index_fetch_ts = 0.0
+        self._cached_indices_data = []
+        self._cached_market_temp = 50.0
+        
         # ✅ 初始化 55188 数据更新监听状态
         self.last_ext_data_ts_local = 0
         # self.after(10000, self._check_ext_data_update)
@@ -713,6 +719,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 from signal_dashboard_panel import SignalDashboardPanel
                 
                 self._signal_dashboard_win = SignalDashboardPanel()
+                self._signal_dashboard_win.parent_app = self # ✅ [NEW] 记录主窗口引用
                 # ✅ [FIX] 跨线程联动安全：将互操作封装进任务队列，由 Tkinter 主线程执行
                 self._signal_dashboard_win.code_clicked.connect(
                     lambda c, n: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
@@ -2971,14 +2978,54 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         "change": float(row.get('ratio', 0)),
                                         "ratio": float(row.get('volume', 0))
                                     })
+                        # --- [NEW] Calculate Professional Market Temperature ---
+                        now = time.time()
+                        if now - self._last_index_fetch_ts > duration_sleep_time: # Fetch every 2 mins
+                            try:
+                                codes = ["999999", "399001", "399006", "000688"]
+                                from JSONData import sina_data
+                                sina = sina_data.Sina()
+                                idf = sina.get_stock_list_data(codes, index=True)
+                                if idf is not None and not idf.empty:
+                                    indices = []
+                                    nm_map = {"999999": "上证", "399001": "深证", "399006": "创业", "000688": "科创"}
+                                    for c, r in idf.iterrows():
+                                        p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
+                                        indices.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
+                                    self._cached_indices_data = indices
+                                    self._last_index_fetch_ts = now
+                            except Exception as e:
+                                logger.debug(f"Index fetch failed in stats loop: {e}")
+
+                        # Calculate ready_pct (stocks with score > 80)
+                        ready_pct = 0
+                        if 'score' in df.columns:
+                            ready_pct = (df['score'] > 80).mean() * 100
+                        elif 'sum_perc' in df.columns:
+                            ready_pct = (df['sum_perc'] > 10).mean() * 100
+                            
+                        breadth_data = {'up_ratio': up_count / (up_count + down_count + flat_count) if (up_count + down_count + flat_count) > 0 else 0.5}
+                        
+                        try:
+                            temp, _ = DailyPulseEngine.calculate_professional_temperature(
+                                ready_pct=ready_pct,
+                                sector_heat=0, # Simplified for real-time
+                                breadth=breadth_data,
+                                indices=self._cached_indices_data
+                            )
+                            self._cached_market_temp = temp
+                        except Exception as e:
+                            logger.debug(f"Temp calculation failed: {e}")
 
                         stats = {
                             "up": up_count,
                             "down": down_count,
                             "flat": flat_count,
-                            "vol_up": vol_up,
                             "vol_down": vol_down,
-                            "vol_details": vol_up_details # 改用更详细的列表
+                            "vol_details": vol_up_details, # 改用更详细的列表
+                            "temperature": self._cached_market_temp,
+                            "indices": self._cached_indices_data,
+                            "breadth": breadth_data
                         }
                         
                         logger.info(f"📊 Market stats calculated: {up_count} up, {vol_up} vol_up. Pushing to dashboard.")
@@ -10223,7 +10270,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             self.load_window_position(win, window_name, default_width=420, default_height=340)
         except Exception:
-            win.geometry("420x340")
+            win.geometry("300x280")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -11081,13 +11128,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not item:
             return
 
-        # 清除旧的 tag 高亮
-        for iid in tree.get_children():
-            tree.item(iid, tags=())
-
-        # 设置选中行 tag
-        tree.item(item, tags=("selected",))
-        tree.tag_configure("selected", background="#d0e0ff")
+        # 高亮选中行，同时保留原有颜色标签（如 red_row）
+        self._highlight_tree_selection(tree, item)
 
         # 设置 selection / focus 让键盘上下键能继续用
         tree.selection_set(item)
