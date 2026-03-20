@@ -264,8 +264,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                     self.selector_cache = df
                     self.selector_cache_ts = datetime.now()
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                # import traceback
+                # traceback.print_exc()
                 print(f"[Selector Cache Error]: {e}")
 
         return self.selector_cache
@@ -420,12 +420,13 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
 
     def find_leading_stocks(self, sector_name):
         try:
-            # ========================
-            # 1. 55188 数据
-            # ========================
-            if self.parent() and hasattr(self.parent(), 'df_all') and not self.parent().df_all.empty:
+            # 1. 优先使用父窗口 (TradingGUI) 已经结合好的 df_all (含指标+题材)
+            df = pd.DataFrame()
+            if self.parent() and hasattr(self.parent(), 'df_all'):
                 df = self.parent().df_all
-            else:
+            
+            # 2. 如果没有父窗口数据，回退到原始缓存 (自测模式)
+            if df is None or df.empty:
                 df = load_cache()
 
             scraper_list = pd.DataFrame()
@@ -727,7 +728,7 @@ class TradingGUI(QWidget, WindowMixin):
     # 声明信号
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
-    def __init__(self, logger_path: Optional[str] = None, sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None):
+    def __init__(self, logger_path: Optional[str] = None, sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None, df_all=None):
         super().__init__()
         from JohnsonUtil import commonTips as cct
         if logger_path is None:
@@ -740,16 +741,66 @@ class TradingGUI(QWidget, WindowMixin):
         self.logger = TradingLogger(logger_path)
         self.analyzer = TradingAnalyzer(self.logger)
         
-        # Load comprehensive stock list for name lookups
+        # Load comprehensive stock list for name lookups (Combine with cache)
+        # ✅ [UNIFIED-DATA] 如果传入了实时指标数据，不仅要 copy，还要与含有题材的 cache 结合
+        cache_df = pd.DataFrame()
         try:
-            self.df_all = load_cache()
-        except Exception as e:
-            print(f"Failed to load initial cache: {e}")
-            self.df_all = pd.DataFrame()
+            cache_df = load_cache()
+        except:
+            pass
+        
+        if df_all is not None and not df_all.empty:
+            # 补齐题材元数据并全量同步指标
+            rt_df = df_all.copy()
+            # [FIX] 避免 index 名与 column 名冲突
+            if rt_df.index.name == 'code':
+                rt_df.index.name = 'code_rt_idx'
+            if 'code' not in rt_df.columns:
+                rt_df['code'] = rt_df.index.astype(str)
+            rt_df['code'] = rt_df['code'].apply(lambda x: str(x).zfill(6))
+
+            if not cache_df.empty:
+                # [FIX] 避免 index 名与 column 名冲突
+                if cache_df.index.name == 'code':
+                    cache_df.index.name = 'code_cache_idx'
+                if 'code' not in cache_df.columns:
+                    cache_df['code'] = cache_df.index.astype(str)
+                cache_df['code'] = cache_df['code'].apply(lambda x: str(x).zfill(6))
+                
+                # [SYNC-PRIORITY] 定义需要同步的核心指标
+                sync_cols = ['trade', 'price', 'percent', 'change_pct', 'vol', 'amount', 'ratio', 'high', 'low', 'open', 'lastp1d']
+                sync_cols = [c for c in sync_cols if c in rt_df.columns]
+                
+                # 剔除缓存中的旧指标列
+                cache_df_clean = cache_df.drop(columns=[c for c in sync_cols if c in cache_df.columns])
+                
+                theme_cols = ['code', 'theme_name', 'hot_tag', 'sector', 'theme_logic', 'hot_reason']
+                theme_cols = [c for c in theme_cols if c in cache_df.columns and c not in sync_cols]
+                
+                # 合并
+                combined_df = pd.merge(rt_df, cache_df[theme_cols], on='code', how='left', suffixes=('', '_cache'))
+                
+                # [RENAME-MAP] 应对 volume (量比) 与 vol (成交量) 的歧义
+                if 'volume' in combined_df.columns:
+                    combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
+                if 'vol' in combined_df.columns:
+                    combined_df['volume'] = combined_df['vol']
+                    if 'amount' not in combined_df.columns:
+                        combined_df['amount'] = combined_df['vol']
+                
+                self.df_all = combined_df
+            else:
+                self.df_all = rt_df
+        else:
+            self.df_all = cache_df
 
         self.selector = selector
         if self.selector is None:
             self.selector = StockSelector(df=self.df_all)
+        else:
+            # ✅ [SYNC] 确保传入的 selector 使用最新的实时结合数据
+            if hasattr(self.selector, 'df_all_realtime'):
+                self.selector.df_all_realtime = self.df_all
         self.live_strategy = live_strategy
 
         self.main_layout = QVBoxLayout()
@@ -1884,6 +1935,18 @@ if __name__ == "__main__":
     # 设置全局字体
     from PyQt6.QtGui import QFont
     app.setFont(QFont("Microsoft YaHei", 9))
-    gui = TradingGUI()
+    
+    # [NEW] 模式 1: 独立运行自测模式 - 尝试获取实时全盘数据
+    test_df = pd.DataFrame()
+    try:
+        from instock_MonitorTK import test_single_thread
+        # 调用主程序内置的单线程采集函数获取实时 df_all
+        test_df = test_single_thread(single=True, resample='d')
+        if test_df is not None and not test_df.empty:
+            print(f"Standalone Test Mode: Loaded {len(test_df)} stocks via test_single_thread")
+    except Exception as e:
+        print(f"Standalone Test Mode: Failed to load real-time data: {e}")
+        
+    gui = TradingGUI(df_all=test_df)
     gui.show()
     sys.exit(app.exec())

@@ -763,11 +763,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _update_stats_display(self):
         total = len(self._all_events)
-        if total == 0: return
-        self.cards["follow"].setText(str(self._stats_counters["follow"]))
-        self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
-        self.cards["risk"].setText(str(self._stats_counters["risk"]))
-        self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
+        # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
+        if total > 0:
+            self.cards["follow"].setText(str(self._stats_counters["follow"]))
+            self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
+            self.cards["risk"].setText(str(self._stats_counters["risk"]))
+            self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
+        
         
         # 优先使用从 monitor 传来的专业市场温度评分
         prof_temp = self._market_stats.get('temperature')
@@ -793,28 +795,50 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.temp_bar.setValue(int(temp_val))
                 # 调整进度条 chunk 颜色 (可选，目前使用渐变)
         else:
-            # 降级使用信号比例计算
-            ratio = self._stats_counters["bull"] / max(1, self._stats_counters["bear"])
+            # 降级使用信号比例计算 (修正以匹配专业风格)
+            total_bull = self._stats_counters.get("bull", 0)
+            total_bear = self._stats_counters.get("bear", 0)
+            
+            # [FIX] 如果信号样本不足，参考全市场涨跌比
+            market_up = self._market_stats.get('up', 0)
+            market_down = self._market_stats.get('down', 0)
+            
+            if total_bull + total_bear < 5 and market_up + market_down > 100:
+                ratio = market_up / max(1, market_down)
+                # 依然保持多空比字样，内部使用全盘比值
+            else:
+                ratio = total_bull / max(1, total_bear)
+                
             self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
-            temp = "冷清"
-            if ratio > 2.0: temp = "活跃"
-            if ratio > 5.0: temp = "狂热"
-            if ratio < 0.5: temp = "低迷"
-            self.temp_label.setText(f"市场温度: {temp} (采样{total})")
-            if hasattr(self, 'temp_bar'): self.temp_bar.setValue(min(100, int(ratio * 20)))
+            
+            temp_status = "冰点"
+            color = "#5bc0de" # 蓝色
+            if ratio > 1.5: 
+                temp_status = "活跃"; color = "#ff8c00"
+            elif ratio > 0.8: 
+                temp_status = "平淡"; color = "#ddd"
+            elif ratio > 0.3: 
+                temp_status = "低迷"; color = "#6c757d"
+                
+            self.temp_label.setText(f"市场温度: {temp_status} (采样比例)")
+            self.temp_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+            if hasattr(self, 'temp_bar'): 
+                self.temp_bar.setValue(min(100, int(ratio * 40)))
 
-        # 更新指数网格
+        # 更新指数网格 (独立于信号数)
         indices_data = self._market_stats.get('indices', [])
         if indices_data and hasattr(self, 'idx_labels'):
             for idx_info in indices_data:
                 name = idx_info.get('name', '')
                 pct = idx_info.get('percent', 0.0)
-                # 寻找匹配的标签 (模糊匹配)
+                # 寻找匹配的标签 (简单匹配即可)
+                name_key = name.replace("指数", "")
                 for label_key, label_widget in self.idx_labels.items():
-                    if label_key in name:
+                    if label_key in name_key or name_key in label_key:
                         color = "#ff4444" if pct > 0 else "#44ff44" if pct < 0 else "#aaa"
                         label_widget.setText(f"{pct:+.2f}%")
                         label_widget.setStyleSheet(f"color: {color}; font-family: 'Consolas'; font-size: 10pt; font-weight: bold;")
+                        break
 
         sorted_sectors = sorted(self._sector_heat.items(), key=lambda x: x[1], reverse=True)
         top_3 = [f"{s}: {c}" for s, c in sorted_sectors[:3]]
@@ -839,7 +863,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.market_breadth_label.setText(f"📊 上涨:{stats.get('up', 0)} 下跌:{stats.get('down', 0)}")
             self.vol_stat_label.setText(f"🚀 放量:{stats.get('vol_up', 0)}")
             self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')}")
-        except: pass
+            
+            # [FIX] 显式触发全局统计刷新，确保温度计和指数网格即时更新
+            self._update_stats_display()
+        except Exception as e:
+            logger.debug(f"Update market stats failed: {e}")
 
     def _on_card_clicked(self, key):
         mapping = {"follow": "全部信号", "breakout": "突破加速", "risk": "卖点预警", "breakdown": "结构破位"}

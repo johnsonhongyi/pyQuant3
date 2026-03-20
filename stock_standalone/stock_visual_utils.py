@@ -369,8 +369,8 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             self.pw.clear()
             if hasattr(self, 'overlay') and self.overlay:
                 self.overlay.text_items.clear()
-            if self.vbv:
-                self.vbv.clear()
+            # if self.vbv:
+            #     self.vbv.clear()
             
             if time_labels:
                 axis_bottom = self.pw.getAxis('bottom')

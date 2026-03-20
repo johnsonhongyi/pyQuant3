@@ -69,24 +69,78 @@ class StockSelector:
         # self.logger.setLevel(logging.INFO)
 
     def load_data(self) -> pd.DataFrame:
-        """加载数据：优先使用传入的实时数据，否则读取 top_all.h5"""
-        if self.df_all_realtime is not None and not self.df_all_realtime.empty:
-            self.logger.info(f"使用实时传入的数据进行筛选: {len(self.df_all_realtime)} 条")
-            # 这里的 df_all 已经是 DataFrame 了，直接返回（或者 copy 以防修改原数据）
-            return self.df_all_realtime.copy()
-
+        """[COMBINED] 加载数据：结合基础元数据与实时传入的指标数据"""
+        # 1. 加载基础数据 (含 HDF5 或 缓存)
+        base_df = pd.DataFrame()
         try:
-            if not os.path.exists(self.data_path):
-                self.logger.error(f"数据文件不存在: {self.data_path}")
-                return pd.DataFrame()
-            
-            # 读取 HDF5
-            df = pd.read_hdf(self.data_path, 'top_all')
-            self.logger.info(f"成功加载数据: {len(df)} 条")
-            return df
+            if os.path.exists(self.data_path):
+                base_df = pd.read_hdf(self.data_path, 'top_all')
         except Exception as e:
-            self.logger.error(f"加载数据失败: {e}")
-            return pd.DataFrame()
+            self.logger.error(f"加载基础 HDF5 数据失败: {e}")
+
+        if base_df.empty:
+            # 尝试从 scraper 缓存加载作为备选基础
+            try:
+                from scraper_55188 import load_cache
+                base_df = load_cache()
+            except Exception as e:
+                self.logger.warning(f"加载 scraper 缓存作为基础数据失败: {e}")
+
+        # 2. 如果没有实时数据，直接返回基础数据
+        if self.df_all_realtime is None or self.df_all_realtime.empty:
+            return base_df
+
+        # 3. 如果没有基础数据，直接使用实时数据
+        if base_df.empty:
+            return self.df_all_realtime.copy()
+        
+        # 4. 结合逻辑：以实时数据 (rt_df) 为准，补齐/更新指标
+        try:
+            rt_df = self.df_all_realtime.copy()
+            # [FIX] 避免 index 名与 column 名冲突
+            if rt_df.index.name == 'code':
+                rt_df.index.name = 'code_rt_idx'
+                
+            if 'code' not in rt_df.columns:
+                rt_df['code'] = rt_df.index.astype(str)
+            
+            if base_df.index.name == 'code':
+                base_df.index.name = 'code_base_idx'
+                
+            if 'code' not in base_df.columns:
+                base_df['code'] = base_df.index.astype(str)
+            
+            # 确保 code 格式一致 (6位)
+            base_df['code'] = base_df['code'].apply(lambda x: str(x).zfill(6))
+            rt_df['code'] = rt_df['code'].apply(lambda x: str(x).zfill(6))
+            
+            # [SYNC-PRIORITY] 定义需要从实时数据中强制同步/覆盖的指标列
+            sync_cols = ['trade', 'price', 'percent', 'change_pct', 'vol', 'amount', 'ratio', 'high', 'low', 'open', 'lastp1d']
+            sync_cols = [c for c in sync_cols if c in rt_df.columns]
+            
+            # 剔除基础数据中的旧列，防止 merge 产生重复或后缀列
+            base_df_clean = base_df.drop(columns=[c for c in sync_cols if c in base_df.columns])
+            
+            self.logger.info(f"结合实时数据：同步 {len(sync_cols)} 个核心指标")
+            combined_df = pd.merge(base_df_clean, rt_df[['code'] + sync_cols], on='code', how='left')
+            
+            # [RENAME-MAP] 响应用户反馈：处理 volume (量比) 与 vol (成交量) 的歧义
+            # 如果 combined_df 中已有 volume (来自 base_df 且未被 drop)，它可能是量比，需保留为 vol_ratio
+            if 'volume' in combined_df.columns:
+                combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
+            
+            # 将实时采集的 vol 映射为 volume (成交量) 和 amount (如果缺失)
+            if 'vol' in combined_df.columns:
+                combined_df['volume'] = combined_df['vol']
+                if 'amount' not in combined_df.columns:
+                    # 兜底：如果 amount 缺失，使用 vol 作为临时 amount (若 vol 已经是额) 或根据价格估算
+                    combined_df['amount'] = combined_df['vol']
+            
+            return combined_df
+        except Exception as e:
+            self.logger.error(f"结合数据集失败: {e}")
+            
+        return base_df
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """补充必要的计算指标 (明确调用数据中心计算链)"""
@@ -106,9 +160,15 @@ class StockSelector:
                 df['percent'] = df['change_pct']
             return df
             
-        # [FIX] 兼容实时数据的列名 (实时数据常使用 'trade' 表示现价)
-        if 'close' not in df.columns and 'trade' in df.columns:
-            df['close'] = df['trade']
+        # [FIX] 兼容实时数据的列名 (实时数据常使用 'trade' 或 'price' 表示现价)
+        if 'close' not in df.columns:
+            if 'trade' in df.columns:
+                df['close'] = df['trade']
+            elif 'price' in df.columns:
+                df['close'] = df['price']
+        
+        if 'percent' not in df.columns and 'change_pct' in df.columns:
+            df['percent'] = df['change_pct']
 
         # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
         # resample 使用实例化时传入的参数
@@ -150,7 +210,7 @@ class StockSelector:
         # 1. 涨跌比 (Up-Down Ratio) - 更多涨，更少跌
         up_count = pd.Series(0, index=df.index)
         # 获取现价列
-        curr_p = df['trade'] if 'trade' in df.columns else df['close']
+        curr_p = df['trade'] if 'trade' in df.columns else (df['price'] if 'price' in df.columns else df.get('close', 0.0))
         
         # 比较: 现价 vs 昨收, 昨收 vs 前收...
         up_count += (curr_p > df['lastp1d']).astype(int) if 'lastp1d' in df.columns else 0
@@ -268,8 +328,8 @@ class StockSelector:
             data['code'] = code_str
             
             # 兼容字段：优先使用 per1d (今日涨幅)
-            price = float(data.get('trade', data.get('close', 0)))
-            pct = float(data.get('per1d', data.get('percent', data.get('pct', 0))))
+            price = float(data.get('price', data.get('trade', data.get('close', 0))))
+            pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
             lastp1d = float(data.get('lastp1d', 0))
             if pct == 0 and lastp1d > 0:
                 pct = round((price - lastp1d) / lastp1d * 100, 2)

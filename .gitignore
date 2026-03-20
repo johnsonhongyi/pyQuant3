@@ -169,3 +169,4 @@ find_zeros.py
 inspect_*.py
 **/snapshots/*
 stock_standalone/test_greatest_impl.py
+tmp/*.py

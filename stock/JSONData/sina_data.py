@@ -695,8 +695,21 @@ class Sina:
 #                if isinstance(code,str) and code.startswith('999'):
 #                    code = '000001'
 #                    code_l = code.split()
-            self.stock_codes = [(
-                'sh%s' if stock_code.startswith(('0')) else 'sz%s') % stock_code for stock_code in code_l]
+            self.stock_codes = []
+            for sc in code_l:
+                # 如果已经带有 sh/sz/bj 前缀，则直接使用
+                if sc.startswith(('sh', 'sz', 'bj')):
+                    self.stock_codes.append(sc)
+                # 000xxx 开头或通过 999 转换来的均为上证指数 (Sina)
+                elif sc.startswith('0'):
+                    self.stock_codes.append('sh%s' % sc)
+                # 399xxx 开头为深证指数
+                elif sc.startswith('399'):
+                    self.stock_codes.append('sz%s' % sc)
+                else:
+                    # 默认根据 startswith('0') 逻辑兜底或默认 sz
+                    prefix = 'sh' if sc.startswith('0') else 'sz'
+                    self.stock_codes.append('%s%s' % (prefix, sc))
 
         else:
             code_l = code
@@ -724,6 +737,10 @@ class Sina:
 #                log.info("not index hdf5 data:%s"%(len(h5)))
 #                return h5
         self.stock_data = []
+        if len(self.stock_codes) == 0:
+            log.error("self.stock_codes is empty for code:%s" % code)
+            return pd.DataFrame()
+            
         self.url = self.sina_stock_api + ','.join(self.stock_codes)
         log.info("stock_list:%s" % self.url[:30])
         response = requests.get(self.url,headers=self.sinaheader)
@@ -915,8 +932,12 @@ class Sina:
         # df = pd.DataFrame.from_dict(stock_dict,columns=ct.SINA_Total_Columns)
         if len(list_s) == 0:
             log.error("Sina Url error:%s"%(self.sina_stock_api + ','.join(self.stock_codes[:2])))
+            return pd.DataFrame()
 
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
+        if df.empty:
+            return df
+            
         dt = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt)]
 

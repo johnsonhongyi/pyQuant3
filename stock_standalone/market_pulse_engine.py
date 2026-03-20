@@ -113,7 +113,7 @@ class DailyPulseEngine:
             }
             # Sina class handles mapping internally if structured correctly
             # But let's use the explicit method to be safe
-            df = sina.get_stock_code_data(index_codes)
+            df = sina.get_stock_code_data(index_codes, index=True)
             
             indices = []
             if df is not None and not df.empty:
