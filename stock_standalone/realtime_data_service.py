@@ -1811,7 +1811,7 @@ class DataPublisher:
         后台维护任务：每 5 分钟检查一次内存和数据量
         """
         while True:
-            time.sleep(300)  # Changed from 600 (10m) to 300 (5m) to match _save_interval
+            time.sleep(5400)  # Changed from 600 (10m) to 300 (5m) to match _save_interval
             
             # [Added] 交易日 & 15:30 前限制 (遵循用户特定时段维护量产效率)
             if not cct.get_trade_date_status():

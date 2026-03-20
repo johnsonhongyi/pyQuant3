@@ -2879,6 +2879,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, 'selector') and self.selector:
                 self.selector.df_all_realtime = self.df_all
                 self.selector.resample = cur_res
+            
+            # ✅ [SYNC] 同步更新到 Qt6 交易分析工具，使其具备实时指标数据
+            if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:
+                self._trading_gui_qt6.df_all = self.df_all
 
             if not hasattr(self, "_restore_done"):
                 self._restore_done = True
@@ -6000,7 +6004,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info("RealtimeDataService injected into StockLiveStrategy.")
             
             # 注册报警回调
-            self.live_strategy.set_alert_callback(self.on_voice_alert)
+            # self.live_strategy.set_alert_callback(self.on_voice_alert)
+            self.live_strategy.set_alert_callback(self._safe_on_voice_alert)
             # 注册语音开始播放的回调，用于同步闪烁
             if hasattr(self.live_strategy, '_voice'):
                 self.live_strategy._voice.on_speak_start = self.on_voice_speak_start
@@ -6010,19 +6015,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
 
-    
-    @with_log_level(LoggerFactory.INFO)
-    def on_voice_alert(self, code, name, msg):
+    def _safe_on_voice_alert(self, code, name, msg):
         """
-        处理语音报警触发: 弹窗显示股票详情
+        【唯一入口】策略线程调用此函数，将任务安全投递给主线程
         """
-        # 如果禁用了弹窗，则只在此处拦截 UI 创建，语音由策略端独立触发
-        if not getattr(self, 'alert_popup_var', None) or not self.alert_popup_var.get():
+        try:
+            # 直接投递给最终的显示函数，不再中间转手
+            self._schedule_after(0, self._on_voice_alert_ui, code, name, msg)
+        except Exception:
+            # 捕获可能的线程退出异常或 RuntimeError
+            pass
+
+    def _on_voice_alert_ui(self, code, name, msg):
+        """
+        【UI 线程执行】执行真正的逻辑判断和弹窗
+        """
+        # 1. 快速判断拦截
+        alert_var = getattr(self, 'alert_popup_var', None)
+        if not alert_var or not alert_var.get():
             logger.info(f"Alert popup suppressed for {code} ({name}) by user setting.")
-            return
-            
-        # 必须回到主线程操作 GUI
-        self._schedule_after(0, lambda: self._show_alert_popup(code, name, msg))
+            return # 仅在 INFO 级别以上才记录，减少 IO 开销
+
+        # 2. 执行弹窗 (此处已在主线程)
+        try:
+            self._show_alert_popup(code, name, msg)
+        except Exception as e:
+            logger.error(f"Popup error: {e}")
+
+    # 废弃 on_voice_alert，或者让它只负责日志记录，不负责逻辑
+
+    # @with_log_level(LoggerFactory.INFO)
+    # def on_voice_alert(self, code, name, msg):
+    #     """
+    #     处理语音报警触发: 弹窗显示股票详情
+    #     """
+    #     # 如果禁用了弹窗，则只在此处拦截 UI 创建，语音由策略端独立触发
+    #     if not getattr(self, 'alert_popup_var', None) or not self.alert_popup_var.get():
+    #         logger.info(f"Alert popup suppressed for {code} ({name}) by user setting.")
+    #         return
+        
+    #     self._show_alert_popup(code, name, msg)
+    #     # 必须回到主线程操作 GUI
+    #     # self._schedule_after(0, lambda: self._show_alert_popup(code, name, msg))
 
     def open_blacklist_manager(self):
         """打开黑名单管理窗口 (增强版: 逻辑优化 + 布局精简)"""
@@ -7403,7 +7437,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     sender=self.sender,
                     on_tree_scroll_to_code=self.tree_scroll_to_code,
                     selector=getattr(self, 'selector', None),
-                    live_strategy=getattr(self, 'live_strategy', None)
+                    live_strategy=getattr(self, 'live_strategy', None),
+                    df_all=getattr(self, 'df_all', None)
                 )
                 
             self._trading_gui_qt6.show()
@@ -10279,7 +10314,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             self.load_window_position(win, window_name, default_width=420, default_height=340)
         except Exception:
-            win.geometry("300x280")
+            win.geometry("230x160")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):

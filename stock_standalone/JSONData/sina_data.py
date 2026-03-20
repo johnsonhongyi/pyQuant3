@@ -1242,10 +1242,13 @@ class Sina:
         # df = pd.DataFrame.from_dict(stock_dict,columns=ct.SINA_Total_Columns)
         if len(list_s) == 0:
             log.error("Sina Url error:%s" % (self.sina_stock_api + ','.join(self.stock_codes[:2])))
+            return pd.DataFrame() # Robust check for empty results
+
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
 
-
         # 2. 确保 ticktime 是完整的 YYYY-MM-DD HH:MM:SS 格式
+        if df.empty:
+             return df
         df['dt'] = df['dt'].astype(str).str[:10]
         tt_raw = df['ticktime'].astype(str)
         # 如果长度为 8 (HH:MM:SS)，则补齐日期前缀
@@ -1268,6 +1271,9 @@ class Sina:
                 errors='coerce'
             )
         
+        if df.empty:
+             return df
+             
         dt_v = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt_v)]
 
@@ -1602,7 +1608,10 @@ class Sina:
             log.info("find index hdf5 data:%s" % (len(h5)))
             h5 = self.combine_lastbuy(h5)
             return h5
-        self.stock_data = []
+        if len(self.stock_codes) == 0:
+            log.error("self.stock_codes is empty for code:%s" % code)
+            return pd.DataFrame()
+            
         self.url = self.sina_stock_api + ','.join(self.stock_codes)
         log.info("stock_list:%s" % self.url[:30])
         response = requests.get(self.url, headers=self.sinaheader)
