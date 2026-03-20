@@ -102,8 +102,8 @@ class TickSeries:
         """从 df_all 行更新元数据"""
         # [FIX] 优先使用 pre_close (通常是静态的昨收)，其次是上次成交价
         # 避免在竞价阶段 llstp 可能返回当前虚拟撮合价导致涨幅恒为 0 的问题。
-        val_pre = row.get('pre_close', row.get('lastp1d', row.get('llastp1d', row.get('llstp', 0.0))))
-        self.last_close = float(val_pre) if not pd.isna(val_pre) else 0.0
+        val_pre = row.get('pre_close', row.get('llastp', row.get('lastp1d', row.get('llastp1d', row.get('llstp', 0.0)))))
+        self.last_close = float(val_pre) if not pd.isna(val_pre) and val_pre > 0 else 0.0
         
         # 记录 open_price
         val_open = row.get('open', 0.0)
@@ -184,10 +184,12 @@ class TickSeries:
 
     def load_history(self, klines: List[dict]):
         """初始化冷启历史数据"""
+        self.klines.clear()
         self._total_vol = 0.0
         self._total_amt = 0.0
-        self.klines.clear()
-        for k in klines[-self.klines.maxlen:]:
+        # 过滤无效数据并推入
+        valid_klines = [k for k in klines if k and 'close' in k]
+        for k in valid_klines[-self.klines.maxlen:]:
             self.push_kline(k)
 
     @property
@@ -382,24 +384,26 @@ class BiddingMomentumDetector:
                 else:
                     self._tick_series[code].update_meta(pd.Series(row._asdict()))
 
-        # 对新 code：拉历史 K 线做冷启，然后注册订阅
-        if self.realtime_service and new_codes:
-            for code in new_codes:
+        # 对新 code 或 K线为空的 code：拉历史 K 线做冷启
+        target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
+        target_codes = list(set(target_codes)) # 去重
+        
+        if self.realtime_service and target_codes:
+            for code in target_codes:
                 try:
-                    hist = self.realtime_service.get_minute_klines(code, n=30)
-                    with self._lock:
-                        if code in self._tick_series:
-                            self._tick_series[code].load_history(hist)
-                except Exception as e:
-                    logger.warning(f"[Detector] 历史K线加载失败 {code}: {e}")
-
-                if code not in self._subscribed:
-                    try:
-                        # [Modified] Simulation mode also needs subscription to populate TickSeries.klines
+                    # [REFINED] 仅在真的为空时才拉取，避免重复拉取浪费性能
+                    ts = self._tick_series.get(code)
+                    if ts and not ts.klines:
+                        hist = self.realtime_service.get_minute_klines(code, n=30)
+                        if hist:
+                            with self._lock:
+                                ts.load_history(hist)
+                                
+                    if code not in self._subscribed:
                         self.realtime_service.subscribe(code, self._on_tick)
                         self._subscribed.add(code)
-                    except Exception as e:
-                        logger.warning(f"[Detector] 订阅失败 {code}: {e}")
+                except Exception as e:
+                    logger.warning(f"[Detector] 历史K线加载/订阅失败 {code}: {e}")
 
     def get_active_sectors(self) -> List[Dict[str, Any]]:
         """
@@ -499,7 +503,11 @@ class BiddingMomentumDetector:
                         'reason': getattr(ts, 'pattern_hint', ''),
                         'category': ts.category,
                         'last_close': ts.last_close,
-                        'klines': list(ts.klines)
+                        'open_price': ts.open_price,
+                        'high_day': ts.high_day,
+                        'low_day': ts.low_day,
+                        'now_price': ts.current_price, # 这里的 current_price 会取最新的
+                        # [OPTIMIZED] 分时数据不保存，节省关闭时的 IO 耗时，冷启动通过实时拉取恢复
                     }
             data['meta_data'] = meta_data
 
@@ -519,15 +527,21 @@ class BiddingMomentumDetector:
                     raise e
 
             main_path = self._get_persistence_path()
-            atomic_gz_save(main_path, data)
-            
-            today_str = datetime.datetime.now().strftime('%Y%m%d')
-            snapshot_path = self._get_persistence_path(snapshot_date=today_str)
-            atomic_gz_save(snapshot_path, data)
+            if atomic_gz_save(main_path, data):
+                today_str = datetime.datetime.now().strftime('%Y%m%d')
+                snapshot_path = self._get_persistence_path(snapshot_date=today_str)
+                # [OPTIMIZED] 如果主路径与快照路径不同，直接复制已压好的文件，避免重复耗时的 JSON+GZIP
+                if main_path != snapshot_path:
+                    import shutil
+                    try:
+                        shutil.copy2(main_path, snapshot_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to copy snapshot: {e}")
+                        atomic_gz_save(snapshot_path, data)
 
-            logger.info(f"💾 [Detector] Session data saved atomically ({ss_count} stocks, {sd_count} sectors)")
+            logger.info(f"💾 [Detector] Session data saved ({ss_count} stocks, {sd_count} sectors)")
         except Exception as e:
-            logger.error(f"❌ [Detector] Atomic save failed: {e}")
+            logger.error(f"❌ [Detector] Persistence save failed: {e}")
 
     def load_persistent_data(self):
         """启动时从磁盘恢复得分和强度"""
@@ -607,6 +621,23 @@ class BiddingMomentumDetector:
                 
             # 恢复重点表
             self.daily_watchlist = data.get('watchlist', {})
+
+            meta_data = data.get('meta_data', {})
+            for code, m in meta_data.items():
+                if code not in self._tick_series:
+                    self._tick_series[code] = TickSeries(code)
+                ts = self._tick_series[code]
+                ts.last_close = m.get('last_close', ts.last_close)
+                ts.open_price = m.get('open_price', ts.open_price)
+                ts.high_day = m.get('high_day', ts.high_day)
+                ts.low_day = m.get('low_day', ts.low_day)
+                ts.now_price = m.get('now_price', ts.now_price)
+                ts.name = m.get('name', ts.name)
+                ts.category = m.get('category', ts.category)
+                ts.score = m.get('score', ts.score)
+                ts.first_breakout_ts = m.get('first_breakout_ts', ts.first_breakout_ts)
+                ts.pattern_hint = m.get('pattern_hint', ts.pattern_hint)
+                ts.momentum_score = m.get('momentum_score', ts.momentum_score)
             
             logger.info(f"♻️ [Detector] 会话数据已恢复: {len(stock_scores)} 只个股, {len(self.active_sectors)} 个板块")
         except Exception as e:
@@ -1112,11 +1143,13 @@ class BiddingMomentumDetector:
         # 2. 计算增量涨幅 (百分点变动)
         # 使用 last_close 作为核心基准，这样 pct_diff 指代的是“自基准时间后的累计涨幅增量”
         # 例如：基准时刻涨幅2.0%，当前2.5%，则 pct_diff = +0.50%
+        # [FIX] 变动基准改为 price_anchor (切片价格)
         pct_diff = (cur_close - ts_obj.price_anchor) / ts_obj.last_close * 100.0 if ts_obj.last_close > 0 else 0.0
         ts_obj.pct_diff = pct_diff
         
-        # [NEW] 计算绝对涨跌额 (Price - LastClose)
-        ts_obj.price_diff = cur_close - ts_obj.last_close if ts_obj.last_close > 0 else 0.0
+        # [NEW] 计算绝对涨跌额 (自切片锚点以来的位移)
+        # [FIX] 涨跌额也改为相对于 price_anchor
+        ts_obj.price_diff = cur_close - ts_obj.price_anchor if ts_obj.price_anchor > 0 else 0.0
 
 
         with self._lock:
@@ -1179,7 +1212,7 @@ class BiddingMomentumDetector:
                         'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
                         'last_low': ts.last_low, 'first_breakout_ts': ts.first_breakout_ts, 
                         'pattern_hint': getattr(ts, 'pattern_hint', ""),
-                        'klines': list(ts.klines), # [Phase 4] 必须包含 K 线用于 UI 渲染
+                        'klines': list(ts.klines) if ts.klines else (self.realtime_service.get_minute_klines(code, n=30) if self.realtime_service else []), # [Phase 4] 必须包含 K 线用于 UI 渲染
                         'is_untradable': getattr(ts, 'is_untradable', False),
                         'is_counter_trend': getattr(ts, 'is_counter_trend', False),
                         'is_accumulating': getattr(ts, 'is_accumulating', False),
@@ -1421,7 +1454,7 @@ class BiddingMomentumDetector:
                 'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_price': l_data.get('price', 0.0),
-                'leader_klines': list(l_ts.klines)[-35:] if l_ts else [],
+                'leader_klines': list(l_ts.klines)[-35:] if (l_ts and l_ts.klines) else (self.realtime_service.get_minute_klines(leader_code, n=35) if self.realtime_service else []),
                 'leader_last_close': l_data.get('last_close', 0),
                 'leader_high_day': l_data.get('high_day', 0),
                 'leader_low_day': l_data.get('low_day', 0),

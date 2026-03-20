@@ -134,8 +134,13 @@ class SignalOverlay:
             
             is_buy = any(kw in sig_type_str for kw in ["BUY", "FOLLOW", "买入", "加仓"]) and "EXIT" not in sig_type_str
             label_color = QColor(255, 120, 120) if is_buy else QColor(120, 255, 120)
-            anchor = (0.5, 1.2) if is_buy else (0.5, -0.5)
             
+            # [FIX] 使用较大幅度的 anchor 来模拟固定像素偏移的效果，避免不同版本兼容性
+            if is_buy:
+                anchor_val = (0.5, -0.5) 
+            else:
+                anchor_val = (0.5, 1.5)
+
             debug_info = getattr(sig, 'debug_info', {}) if not isinstance(sig, dict) else sig.get('debug_info', {})
             score_text = ""
             if is_buy and 'buy_score' in debug_info:
@@ -148,32 +153,39 @@ class SignalOverlay:
                 reason_text = f" | {action_name}"
             else:
                 if reason:
+                    # [REFINED] 常用词汇精简，去除冗余买卖字眼（因为 action_name 已包含）
                     reason_clean = reason.replace("强势结构", "强势") \
                                          .replace("均线上-创多日高-", "") \
                                          .replace("诱空转多-", "") \
                                          .replace("趋势加速", "加速") \
                                          .replace("冠军核心回踩", "回踩") \
                                          .replace("突破回踩", "回踩") \
-                                         .replace("分时新高", "新高")
+                                         .replace("分时新高", "新高") \
+                                         .replace("买入", "").replace("卖出", "").replace("加仓", "").replace("减仓", "") \
+                                         .replace(".", "").replace("(", "").replace(")", "").strip()
                     if is_emoji:
                         reason_clean = reason_clean.replace(symbol, "").strip()
-                    max_chars = 8
+                    
+                    # 极简模式：限制 8 个字符
+                    max_chars = 8 
                     if len(reason_clean) > max_chars:
-                        lines = [reason_clean[i:i+max_chars] for i in range(0, len(reason_clean), max_chars)]
-                        reason_final = "<br/>".join(lines)
+                        # reason_final = reason_clean[:max_chars] + ".."
+                        reason_final = reason_clean[:max_chars]
+                        
                     else:
                         reason_final = reason_clean
 
                     if is_emoji:
-                        reason_text = f" | {symbol} {action_name}: {reason_final}"
+                        reason_text = f" | {symbol} {action_name}: {reason_final}" if reason_final else f" | {symbol} {action_name}"
                     else:
-                        reason_text = f" | {action_name}: {reason_final}"
+                        reason_text = f" | {action_name}: {reason_final}" if reason_final else f" | {action_name}"
                 else:
                     reason_text = f" | {action_name}"
 
             bg_brush = pg.mkBrush(20, 20, 20, 220)
             border_pen = pg.mkPen(label_color, width=1)
-            text = pg.TextItem(anchor=anchor, fill=bg_brush, border=border_pen)
+            text = pg.TextItem(anchor=anchor_val, fill=bg_brush, border=border_pen)
+            
             weight = "font-weight: bold;" if not is_buy else ""
             text.setHtml(f'<div style="color: {label_color.name()}; font-size: 9pt; {weight}; padding: 2px;">{y_pos:.2f}{score_text}{reason_text}</div>')
             text.setPos(x_pos, y_pos)

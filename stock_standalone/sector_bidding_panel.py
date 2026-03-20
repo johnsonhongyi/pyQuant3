@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
 import pyqtgraph as pg
+import numpy as np
 
 from tk_gui_modules.window_mixin import WindowMixin
 try:
@@ -138,7 +139,29 @@ class TrendDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(255, 255, 0, 150), 1, Qt.PenStyle.DashDotLine))
         painter.drawLine(draw_rect.left(), int(y_avg), draw_rect.right(), int(y_avg))
 
-        # 3. 绘制价格走势线 (红/绿)
+        # 3. 绘制微型成交量柱状图 (底部 25% 区域)
+        vols = pdata.get('volumes', [])
+        if vols:
+            v_max = np.percentile(vols, 98) if len(vols) > 5 else max(vols)
+            if v_max <= 0: v_max = 1.0
+            v_rect = draw_rect.adjusted(0, int(draw_rect.height() * 0.75), 0, 0)
+            
+            v_step = v_rect.width() / max(1, len(vols) - 1) if len(vols) > 1 else v_rect.width()
+            for i, v in enumerate(vols):
+                vh = (v / v_max) * v_rect.height()
+                vx = v_rect.left() + i * v_step
+                vy = v_rect.bottom() - vh
+                
+                # 颜色逻辑：对应价格升降
+                is_up = True
+                if i > 0 and i < len(display_prices):
+                    is_up = display_prices[i] >= display_prices[i-1]
+                
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 68, 68, 120) if is_up else QColor(68, 255, 68, 120))
+                painter.drawRect(int(vx), int(vy), max(1, int(v_step - 1)), int(vh))
+
+        # 4. 绘制价格走势线 (红/绿)
         base_ref = (last_close if last_close > 0 else display_prices[0])
         pen_color = QColor(255, 68, 68) if display_prices[-1] >= base_ref else QColor(68, 255, 68)
         painter.setPen(QPen(pen_color, 1.8))
@@ -319,11 +342,60 @@ class DetailedChartDialog(QDialog, WindowMixin):
         self.pw.showGrid(x=True, y=True, alpha=0.3)
         lay.addWidget(self.pw)
         
-        last_close = meta.get('last_close', 0)
-        high_day = meta.get('high_day', 0)
-        low_day = meta.get('low_day', 0)
-        last_high = meta.get('last_high', 0)
-        last_low = meta.get('last_low', 0)
+        # 存储初始数据和元信息
+        self.meta = meta
+        self.name = name
+        self._current_klines_len = 0
+        
+        # 初始渲染
+        self._render_chart(klines)
+        
+        # [NEW] Restore Geometry
+        self._restore_geometry()
+        
+        # [NEW] 动态定时刷新
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.update_live_data)
+        
+        # 使用配置中的刷新间隔 (s -> ms)
+        try:
+            interval = float(getattr(cct.CFG, 'duration_sleep_time', 5.0))
+            if interval < 1.0: interval = 1.0
+        except:
+            interval = 5.0
+        self._refresh_timer.start(int(interval * 1000)) 
+
+    def _render_chart(self, klines):
+        """核心渲染逻辑，支持重用"""
+        if not klines: return
+        self._current_klines_len = len(klines)
+        
+        # 清理旧图形
+        self.pw.clear()
+        
+        # 提取数据
+        prices = [float(k.get('close', 0)) for k in klines]
+        vols = [float(k.get('volume', k.get('vol', 0))) for k in klines]
+        
+        raw_times = []
+        for k in klines:
+            t_val = k.get('time', 0)
+            try:
+                raw_times.append(float(t_val))
+            except (ValueError, TypeError):
+                raw_times.append(time.time())
+        times = list(range(len(prices)))
+        
+        # 更新时间轴
+        axis_bottom = self.pw.getAxis('bottom')
+        if hasattr(axis_bottom, 'ts_list'):
+            axis_bottom.ts_list = raw_times
+        
+        last_close = self.meta.get('last_close', 0)
+        high_day = self.meta.get('high_day', 0)
+        low_day = self.meta.get('low_day', 0)
+        last_high = self.meta.get('last_high', 0)
+        last_low = self.meta.get('last_low', 0)
 
         # 比例与美化优化：Y轴范围
         y_min = min(prices) if prices else 0
@@ -336,7 +408,9 @@ class DetailedChartDialog(QDialog, WindowMixin):
         
         if y_max > y_min:
             padding = (y_max - y_min) * 0.1
-            self.pw.setYRange(y_min - padding, y_max + padding, padding=0)
+        else:
+            padding = y_min * 0.05 if y_min > 0 else 1.0
+        self.pw.setYRange(y_min - padding, y_max + padding, padding=0)
         
         # 1. 昨收/昨日最高/最低参考线
         if last_close > 0:
@@ -372,23 +446,56 @@ class DetailedChartDialog(QDialog, WindowMixin):
         avg_price = [sum(prices[:i+1])/(i+1) for i in range(len(prices))]
         self.pw.plot(times, avg_price, pen=pg.mkPen('#FFFF00', width=1.5, style=Qt.PenStyle.DashLine), name="均价")
         
-        # 4. 成交量
-        p_min, p_max = min(prices), max(prices)
         # 4. 成交量 (在主图下方叠加，自动缩放)
-        if vols:
-            p_min, p_max = min(prices), max(prices)
-            v_max = max(vols) if vols else 1
-            # 占据底部 20% 的空间
-            vol_scale = (p_max - p_min) * 0.2 / v_max if p_max > p_min else 0.1
+        if vols and len(prices) > 0:
+            prices_np = np.array(prices)
+            vols_np = np.array(vols)
             
+            p_min_real, p_max_real = np.min(prices_np), np.max(prices_np)
+            price_range = (p_max_real - p_min_real) if p_max_real > p_min_real else p_max_real * 0.05
+            if price_range <= 0: price_range = 1.0
+            
+            # 使用 99 分位数或最大值
+            v_max = np.percentile(vols_np, 99) if len(vols_np) > 10 else np.max(vols_np)
+            if v_max <= 0: v_max = 1
+            
+            v_scale = price_range * 0.2 / v_max
+            
+            brushes = []
+            pens = []
             for i in range(len(times)):
-                # 颜色：红升绿降
-                color = '#FF4444' if i > 0 and prices[i] >= prices[i-1] else '#44CC44'
-                # 注意：目前 X 轴是索引 (0,1,2...), width 设为 0.6 即可
-                rect = pg.BarGraphItem(x=[times[i]], height=[vols[i] * vol_scale], width=0.6, brush=color, pen=color)
-                # 放在底部
-                rect.setPos(0, y_min - (y_max - y_min)*0.05) 
-                self.pw.addItem(rect)
+                is_up = prices[i] >= prices[i-1] if i > 0 else prices[i] >= (last_close if last_close > 0 else prices[0])
+                c = '#FF4444' if is_up else '#44CC44'
+                brushes.append(pg.mkBrush(c))
+                pens.append(pg.mkPen(c, width=0.5))
+            
+            v_bars = pg.BarGraphItem(x=times, height=vols_np * v_scale, width=0.7, brushes=brushes, pens=pens)
+            v_bars.setPos(0, y_min - price_range * 0.05) 
+            self.pw.addItem(v_bars)
+            
+    def update_live_data(self):
+        """保持详情弹窗动态更新"""
+        try:
+            parent = self.parent()
+            if not parent or not hasattr(parent, 'detector'): return
+            
+            # 从探测器中拉取最新数据
+            ts = parent.detector._tick_series.get(self.code_target)
+            if not ts or not ts.klines: return
+            
+            new_klines = list(ts.klines)
+            if len(new_klines) > self._current_klines_len:
+                # 只有数据量变动才重绘
+                self._render_chart(new_klines)
+                
+                # 更新标题（如果价格变动）
+                last_c = self.meta.get('last_close', 0)
+                curr_p = new_klines[-1].get('close', 0)
+                if last_c > 0:
+                    pc = (curr_p - last_c) / last_c * 100
+                    self.setWindowTitle(f"📊 {self.name} ({self.code_target}) | 实时涨幅:{pc:+.2f}%")
+        except Exception as e:
+            logger.debug(f"[DetailDialog] Refresh failed: {e}")
                 
     # ── [FIX] Persistence Support ────────────────────────────────────
     def _get_config_key(self):
@@ -543,8 +650,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def closeEvent(self, event):
         """处理窗口关闭事件，执行资源回收"""
-        # [FIX] 彻底移除 hide() 逻辑，允许正常退出
+        if not self._allow_real_close:
+            self.hide()
+            event.ignore()
+            return
 
+        # --- 以下是真正关闭时的资源回收和保存 ---
         # 1. 先停止定时器，不产生新任务
         if hasattr(self, '_refresh_timer'):
             self._refresh_timer.stop()
@@ -560,7 +671,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self, '_worker_thread') and self._worker_thread is not None:
             thread = self._worker_thread
             if thread.isRunning():
-                thread.quit()   # 请求事件循环退出（process_data 是普通 while，需要 _is_running 来退出）
+                thread.quit()   # 请求事件循环退出
                 if not thread.wait(3000):
                     # 超时则强制终止
                     logger.warning("[SectorBiddingPanel] Worker thread did not stop in time, terminating...")
@@ -573,9 +684,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._save_geometry()
         self._save_ui_state()
         if hasattr(self, 'detector'):
+            # 这里是真正关闭，我们保存数据
             self.detector.save_persistent_data()
             
-        super().closeEvent(event)
+        event.accept()
 
     def _save_ui_state(self):
         """保存表格布局和状态"""
@@ -1581,8 +1693,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 更新分时走势列 (Column 7) - 存储全量 klines 用于详情窗绘制
             k_item = QTableWidgetItem("")
             k_item.setData(Qt.ItemDataRole.UserRole, {
-                'klines': r.get('klines', []),      # 核心：保留字典列表结构
-                'prices': k_prices,                # 兼容缩略图绘制逻辑
+                'klines': r.get('klines', []),      
+                'prices': k_prices,
+                'volumes': [float(k.get('volume', k.get('vol', 0))) for k in r.get('klines', [])],
                 'last_close': r.get('last_close', 0),
                 'now_price': r.get('price', 0)
             })
@@ -1820,8 +1933,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _follower_klines(self, code: str) -> List[dict]:
         with self.detector._lock:
             ts = self.detector._tick_series.get(code)
-            # 延长样本长度到 35，以便 Sparkline 能看到更长趋势
-            return list(ts.klines)[-35:] if ts else []
+            klines = list(ts.klines)[-35:] if ts else []
+            
+        # [FIX] 如果 TickSeries 为空（可能由于冷启动尚未同步），尝试从实时服务拉取
+        if not klines and self.detector.realtime_service:
+            klines = self.detector.realtime_service.get_minute_klines(code, n=35)
+            # 如果拉取到了，顺便同步给 TickSeries 以便后续性能更好
+            if klines and ts:
+                with self.detector._lock:
+                    ts.load_history(klines)
+        return klines
 
     def _render_kline_sparkline(self, klines: List[dict]) -> str:
         """简单的文本趋势图渲染 (增强版：支持更长趋势和相对均价指示)"""

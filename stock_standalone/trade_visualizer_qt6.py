@@ -1042,7 +1042,7 @@ class SBCTestThread(QThread):
     finished_data = pyqtSignal(dict, object)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None, realtime=False, win_ref=None):
+    def __init__(self, code: str, use_live: bool, hdf5_lock=None, extra_lines=None, realtime=False, win_ref=None, concise: bool = True):
         super().__init__()
         self.code = code
         self.use_live = use_live
@@ -1050,6 +1050,7 @@ class SBCTestThread(QThread):
         self.extra_lines = extra_lines
         self.realtime = realtime
         self.win_ref = win_ref
+        self.concise = concise
 
     def run(self):
         try:
@@ -1063,7 +1064,8 @@ class SBCTestThread(QThread):
                 use_live=self.use_live,
                 show_viz=False,
                 hdf5_lock=self.hdf5_lock,
-                extra_lines=self.extra_lines
+                extra_lines=self.extra_lines,
+                concise=self.concise
             )
 
             if result and isinstance(result, dict):
@@ -4070,7 +4072,15 @@ class MainWindow(QMainWindow, WindowMixin):
         is_realtime_req = self.realtime
         
         # 创建并启动后台线程 (使用独立属性避免阻塞)
-        self._sbc_req_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req)
+        # [MODIFIED] 默认极简模式 (True)
+        concise_mode = getattr(self, 'concise_mode', True)
+        
+        # Alt 键进入“全显示”模式 (False)
+        if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+            concise_mode = False
+            logger.info("SBC Test: Alt detected, switching to FULL display mode.")
+            
+        self._sbc_req_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req, concise=concise_mode)
         self._sbc_req_thread.finished_data.connect(self._on_sbc_test_finished)
         self._sbc_req_thread.error_occurred.connect(self._on_sbc_test_error)
         self._sbc_req_thread.start()
@@ -12058,6 +12068,13 @@ if __name__ == "__main__":
             help="Initial stock code"
         )
 
+        parser.add_argument(
+            "-full",
+            "--full",
+            action="store_true",
+            help="Show full signal reasons (don't truncate to 8 chars)"
+        )
+
         return parser.parse_args()
 
 
@@ -12072,20 +12089,26 @@ if __name__ == "__main__":
 
     realtime = args.realtime
     initial_code = args.code
+    
+    # [MODIFIED] 极简模式开关：默认开启 (True), 除非指定 --full
+    full_mode = getattr(args, 'full', False)
+    short_mode = not full_mode
 
     logger.info(
         f"Starting app | code={initial_code} "
-        f"log={args.log_level} debug_realtime={realtime}"
+        f"log={args.log_level} debug_realtime={realtime} short={short_mode}"
     )
 
     try:
-        main(
+        main_win_ref = main(
             initial_code=initial_code,
             stop_flag=stop_flag,
             log_level=log_level,
             debug_realtime=realtime,
             command_queue=None  # CLI 启动模式下暂无外部队列
         )
+        if main_win_ref:
+            main_win_ref.concise_mode = short_mode
     except KeyboardInterrupt:
         logger.info("Application terminated by user (Ctrl+C).")
         if stop_flag:

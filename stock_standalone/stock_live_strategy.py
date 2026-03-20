@@ -1864,7 +1864,7 @@ class StockLiveStrategy:
                 trigger_msg = ""
                 
                 # --- [NEW] D. 持仓 T+交易监控 (ENTERED 状态) ---
-                if status == 'ENTERED':
+                if status == 'ENTERED' and is_trading_time:
                     high = float(row.get('high', 0.0))
                     pre_close = float(row.get('lastp1d', 0.0))
                     if current_price > 0 and pre_close > 0:

@@ -782,12 +782,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             elif temp_val > 20: status = "低迷"
             else: status = "冰点"
             self.temp_label.setText(f"市场温度: {status} ({temp_val:.1f}°C)")
+            summary = self._market_stats.get('summary', '')
+            if summary:
+                self.temp_label.setToolTip(summary)
+                self.status_label.setText(f"🌡️ {summary}") # 同时在底部状态栏提示
             
             # 动态改色
             color = "#ddd"
-            if temp_val > 80: color = "#ff4444" # 红
-            elif temp_val > 60: color = "#ff8c00" # 橙
-            elif temp_val < 30: color = "#5bc0de" # 蓝
+            if temp_val > 80: color = "#ff4444" 
+            elif temp_val > 60: color = "#ff8c00" 
+            elif temp_val < 30: color = "#5bc0de" 
             self.temp_label.setStyleSheet(f"color: {color}; font-weight: bold;")
             
             # 更新进度条
@@ -799,15 +803,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             total_bull = self._stats_counters.get("bull", 0)
             total_bear = self._stats_counters.get("bear", 0)
             
-            # [FIX] 如果信号样本不足，参考全市场涨跌比
             market_up = self._market_stats.get('up', 0)
             market_down = self._market_stats.get('down', 0)
             
-            if total_bull + total_bear < 5 and market_up + market_down > 100:
+            # [FIX] 优先使用全市场涨跌比，因为它更稳定且反映大盘真实深度
+            if market_up + market_down > 100:
                 ratio = market_up / max(1, market_down)
-                # 依然保持多空比字样，内部使用全盘比值
-            else:
+            elif total_bull + total_bear > 0:
                 ratio = total_bull / max(1, total_bear)
+            else:
+                ratio = 0.5 # 默认对等
                 
             self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
             
