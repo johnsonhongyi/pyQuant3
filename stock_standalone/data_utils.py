@@ -371,7 +371,7 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     # 确保 vol 列镜像原始成交量。
     # 判定准则：如果 vol 列不存在，或者 volume 列显示出明显的原始成交量特征（通常远大于100）
 
-    if 'vol' not in top_all.columns or (top_all['volume'] > 500).any():
+    if 'vol' not in top_all.columns or (top_all['volume'] > 5000).any():
         top_all['vol'] = top_all['volume'] 
         
     top_all['amount'] = top_all['vol'] * top_all['close']

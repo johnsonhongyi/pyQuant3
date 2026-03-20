@@ -115,7 +115,23 @@ class StockSelector:
             rt_df['code'] = rt_df['code'].apply(lambda x: str(x).zfill(6))
             
             # [SYNC-PRIORITY] 定义需要从实时数据中强制同步/覆盖的指标列
-            sync_cols = ['trade', 'price', 'percent', 'change_pct', 'vol', 'amount', 'ratio', 'high', 'low', 'open', 'lastp1d']
+            # sync_cols = ['trade', 'price', 'percent', 'change_pct', 'vol', 'amount', 'ratio', 'high', 'low', 'open', 'lastp1d', 'last6vol', 'lastbuy',
+            #         'volume', 'close', 'buy', 'lastp', 'llastp', 'couts'
+            #         ]
+            sync_cols = [
+                # --- 同步 / 展示 ---
+                'trade', 'price', 'percent', 'change_pct',
+                'vol', 'amount', 'ratio', 'high', 'low', 'open',
+                'lastp1d', 'last6vol', 'lastbuy','category',
+
+                # --- calc_indicators 输入依赖 ---
+                'volume', 'close', 'buy', 'lastp', 'llastp', 'couts',
+
+                # --- calc_indicators 生成 ---
+                'cycle_stage',
+                'win_upper1', 'win_upper2',
+                'dff', 'dff2',
+            ]
             sync_cols = [c for c in sync_cols if c in rt_df.columns]
             
             # 剔除基础数据中的旧列，防止 merge 产生重复或后缀列
@@ -129,9 +145,18 @@ class StockSelector:
                 combined_df.set_index('code', inplace=True, drop=False)
 
             # [RENAME-MAP] 响应用户反馈：处理 volume (量比) 与 vol (成交量) 的歧义
-            if 'volume' in combined_df.columns:
-                combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
+            # if 'volume' in combined_df.columns:
+            #     combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
+
+            # if 'last6vol' in combined_df.columns:
+            #     combined_df.columns:['vol_ratio'] = np.where(combined_df['last6vol'] > 0,combined_df['volume'] / combined_df['last6vol'],0.0).round(1)
             
+            if {'last6vol', 'volume'}.issubset(combined_df.columns):
+                ratio = combined_df['volume'] / combined_df['last6vol']
+                combined_df['vol_ratio'] = ratio.replace([np.inf, -np.inf], 0).fillna(0).round(1)
+            else:
+                combined_df['vol_ratio'] = 0.0
+
             # 将实时采集的 vol 映射为 volume (成交量) 和 amount (如果缺失)
             if 'vol' in combined_df.columns:
                 combined_df['volume'] = combined_df['vol']
@@ -149,7 +174,7 @@ class StockSelector:
         """补充必要的计算指标 (明确调用数据中心计算链)"""
         if df.empty:
             return df
-            
+
         # 确保基础数值转换
         cols_to_fix = ['close', 'open', 'high', 'low', 'volume', 'amount']
         for col in cols_to_fix:
@@ -175,10 +200,10 @@ class StockSelector:
 
         # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
         # resample 使用实例化时传入的参数
-        try:
-            df = data_utils.calc_indicators(df, self.logger, resample=self.resample)
-        except Exception as e:
-            self.logger.warning(f"data_utils.calc_indicators skipped: {e}")
+        # try:
+        #     df = data_utils.calc_indicators(df, self.logger, resample=self.resample)
+        # except Exception as e:
+        #     self.logger.warning(f"data_utils.calc_indicators skipped: {e}")
         
         return df
 
@@ -330,7 +355,7 @@ class StockSelector:
             # [SAFETY] 明确从 column 中获取 code，防止 index 被重置后使用 RangeIndex 导致代码/名称不对应
             code_str = str(row.get('code', idx)).zfill(6)
             data['code'] = code_str
-            
+
             # [USER-REQ] 计算量比：成交量 / 近6日均量 (last6vol)
             last6v = float(data.get('last6vol', 0))
             vol_raw = float(data.get('vol', data.get('volume', 0)))
