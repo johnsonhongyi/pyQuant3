@@ -943,13 +943,13 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                     if is_break_peak and (is_momentum or vol_surge) and (is_acc_window or is_near_last_high):
                         # 根据前几日状态判定信号级别
                         if opt_state["is_minor_decline"]:
-                            reason_str = "🚀SBC_異動: 小幅跌后异动(抢先手)"
+                            reason_str = "🚀小幅跌后异动(抢先手)"
                             score_bonus = 5 # 结构加分
                         elif opt_state["is_congested"]:
-                            reason_str = "🚀SBC_参考: 焦灼期放量突破(参考)"
+                            reason_str = "🚀焦灼期放量突破(参考)"
                             score_bonus = 0
                         else:
-                            reason_str = "🚀SBC_異動: 日内异动脉冲"
+                            reason_str = "🚀日内异动脉冲"
                             score_bonus = 2
                         
                         if verbose:

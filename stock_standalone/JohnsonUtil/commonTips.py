@@ -815,6 +815,7 @@ class GlobalConfig:
         self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
         self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=120, value_type="int")
+        self.stock_select_limit = self.get_with_writeback("general", "stock_select_limit", fallback=300, value_type="int")
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
         self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=180, value_type="int")
         self.sina_limit_time = self.get_with_writeback("general", "sina_limit_time", fallback=30, value_type="int")
@@ -1113,6 +1114,7 @@ compute_lastdays: int = CFG.compute_lastdays
 sina_limit_time: int = CFG.sina_limit_time
 sina_dd_limit_time: int = CFG.sina_dd_limit_time
 duration_sleep_time: int = CFG.duration_sleep_time
+stock_select_limit: int = CFG.stock_select_limit
 stop_loss_pct: float = CFG.stop_loss_pct
 take_profit_pct: float = CFG.take_profit_pct
 trailing_stop_pct: float = CFG.trailing_stop_pct

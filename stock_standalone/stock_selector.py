@@ -124,8 +124,11 @@ class StockSelector:
             self.logger.info(f"结合实时数据：同步 {len(sync_cols)} 个核心指标")
             combined_df = pd.merge(base_df_clean, rt_df[['code'] + sync_cols], on='code', how='left')
             
+            # [FIX] 重新设置索引为 code，确保 downstream 逻辑（如 iterrows）取到的是代码而非 RangeIndex
+            if 'code' in combined_df.columns:
+                combined_df.set_index('code', inplace=True, drop=False)
+
             # [RENAME-MAP] 响应用户反馈：处理 volume (量比) 与 vol (成交量) 的歧义
-            # 如果 combined_df 中已有 volume (来自 base_df 且未被 drop)，它可能是量比，需保留为 vol_ratio
             if 'volume' in combined_df.columns:
                 combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
             
@@ -322,11 +325,17 @@ class StockSelector:
 
         selected_records = []
 
-        for code, row in df_active.iterrows():
+        for idx, row in df_active.iterrows():
             data = row.to_dict()
-            code_str = str(code).zfill(6)
+            # [SAFETY] 明确从 column 中获取 code，防止 index 被重置后使用 RangeIndex 导致代码/名称不对应
+            code_str = str(row.get('code', idx)).zfill(6)
             data['code'] = code_str
             
+            # [USER-REQ] 计算量比：成交量 / 近6日均量 (last6vol)
+            last6v = float(data.get('last6vol', 0))
+            vol_raw = float(data.get('vol', data.get('volume', 0)))
+            vol_ratio_l6 = vol_raw / last6v if last6v > 0 else 0.0
+
             # 兼容字段：优先使用 per1d (今日涨幅)
             price = float(data.get('price', data.get('trade', data.get('close', 0))))
             pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
@@ -363,9 +372,9 @@ class StockSelector:
 
                 # 2. 突破历史高点判断
                 upper1d = float(data.get('upper1', 0))
+                
                 if upper1d > 0 and price > upper1d:
-                    ratio = float(data.get('ratio', 1.0))
-                    if ratio > 1.5: # 适度放量突破
+                    if vol_ratio_l6 > 1.5: # 适度放量突破
                         score += 25
                         reason.append("放量突破")
                     else:
@@ -701,7 +710,7 @@ class StockSelector:
                     'change_pct': pct, # 兼容别名
                     'zhuli_rank': data.get('zhuli_rank', '-'), # 增加主力排名
                     'ratio': ratio,
-                    'volume': float(data.get('volume', 0)),
+                    'volume': round(vol_ratio_l6, 1), # [USER-REQ] 显示 Volume/last6vol 的量比
                     'amount': amount,
                     'reason': final_reason,
                     'status': status_tag,
@@ -721,10 +730,10 @@ class StockSelector:
             # 理由去重
             df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
             
-            # [CRITICAL] 仅保留前 200 名优质标的
-            df_selected = df_selected.head(200)
+            # [CRITICAL] 仅保留前 300 名优质标的
+            df_selected = df_selected.head(cct.stock_select_limit)
             
-            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (Threshold >= 80, Top 200 Limiter)")
+            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (Threshold >= 80, Top {cct.stock_select_limit} Limiter)")
             
             # 保存日志
             self.save_selection_log(df_selected)

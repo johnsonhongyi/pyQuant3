@@ -99,7 +99,7 @@ def fetch_daily_data(code, days=150, hdf5_lock=None):
             code, dl=days, resample=resample, fastohlc=False)
     return raw
 
-def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None, extra_lines = None, days: int = 1, verbose: bool = False):
+def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz: bool = True, hdf5_lock = None, extra_lines = None, days: int = 1, verbose: bool = False, concise: bool = True):
     source_name = "Sina Realtime" if use_live else "Cache PKL"
     print(f"\n🚀 [实战验证] 回放 {code} — 当卖则卖·当买则买 (Source: {source_name})")
     print("=" * 60)
@@ -281,6 +281,18 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
                     all_signals.append(s)
     print_timing_summary(2)
     signals = all_signals
+    
+    # [NEW] 极简版本：默认开启，剔除多余标点，限 10 字符
+    if concise:
+        for s in signals:
+            if hasattr(s, 'reason') and s.reason:
+                # 剔除多余符号 . ( )
+                clean_reason = s.reason.replace(".", "").replace("(", "").replace(")", "")
+                if len(clean_reason) > 10:
+                    s.reason = clean_reason[:10]
+                else:
+                    s.reason = clean_reason
+    
     # 统计数据 - 使用 name 进行比对，防止枚举对象不一致
     buy_cnt  = sum(1 for s in signals if s.signal_type.name in ["BUY", "FOLLOW"])
     sell_cnt = sum(1 for s in signals if s.signal_type.name in ["SELL", "EXIT_FOLLOW", "STOP_LOSS"])
@@ -333,7 +345,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             time_labels=time_labels,
             use_line=use_live,  # 无论 live 还是 cache，数据都是高密度 Tick 分时，必须用线图
             extra_lines=auto_extra,
-            refresh_func=lambda: verify_with_real_data(code, use_live=use_live, show_viz=False, hdf5_lock=hdf5_lock, extra_lines=extra_lines, days=days)
+            refresh_func=lambda: verify_with_real_data(code, use_live=use_live, show_viz=False, hdf5_lock=hdf5_lock, extra_lines=extra_lines, days=days, concise=concise)
         )
     else:
         # 返回数据包，供 GUI 线程异步渲染
@@ -355,7 +367,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-viz", action="store_true", help="Disable visualization for benchmarking")
     parser.add_argument("--days", type=int, default=1, help="Number of days to display (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--full", action="store_true", help="Full signal names (don't truncate to 8 chars)")
     args = parser.parse_args()
     
     use_live = not args.cache
-    verify_with_real_data(args.code, use_live=use_live, show_viz=not args.no_viz, days=args.days, verbose=args.verbose)
+    verify_with_real_data(args.code, use_live=use_live, show_viz=not args.no_viz, days=args.days, verbose=args.verbose, concise=not args.full)
