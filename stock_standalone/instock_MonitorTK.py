@@ -1498,8 +1498,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             hub = get_trading_hub()
             results = hub.cleanup_stale_signals(max_days=days, current_prices=price_map)
             
-            # 统计总数
-            total_cleaned = sum(len(v) for v in results.values())
+            # 统计总数 (处理结果中既有列表也有整数的情况，如 PURGED_WATCHLIST)
+            total_cleaned = sum(v if isinstance(v, int) else len(v) for v in results.values())
             
             if total_cleaned > 0:
                 # 构建详细报告
@@ -1509,10 +1509,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
                     report.append("")
                 
-                
                 if results.get("STALE_SIGNAL"):
                     report.append("【长期未动已标记为 STALE】")
                     report.extend([f" • {item}" for item in results["STALE_SIGNAL"]])
+                    report.append("")
+
+                if results.get("PURGED_WATCHLIST", 0) > 0:
+                    report.append(f"【观察池 - 物理清理】已删除 {results['PURGED_WATCHLIST']} 条过期或冗余记录")
 
                 # 显示详细日志弹窗
                 log_win = tk.Toplevel(self)
@@ -1579,7 +1582,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             results = hub.cleanup_stale_signals(max_days=999, current_prices=price_map, check_breakout=True)
             
             # 统计总数
-            total_cleaned = sum(len(v) for v in results.values())
+            total_cleaned = sum(v if isinstance(v, int) else len(v) for v in results.values())
             
             if total_cleaned > 0:
                 report = []
@@ -1588,6 +1591,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     report.extend([f" • {item}" for item in results["CANCEL_SIGNAL"]])
                     report.append("")
                 
+                if results.get("PURGED_WATCHLIST", 0) > 0:
+                    report.append(f"【观察池 - 物理清理】已删除 {results['PURGED_WATCHLIST']} 条过期或冗余记录")
 
                 log_win = tk.Toplevel(self)
                 log_win.title(f"强制清理完成 - 共处理 {total_cleaned} 项")
@@ -2806,7 +2811,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     self._is_processing_tree_data = True
                     self._last_processing_start_time = time.time()
-                    
+                    logger.debug(f"📡 [UpdateTree] signal_bus")
                     # [PACKET] latest_df might be a dict {full_snapshot, filtered_ui_data}
                     # We pass it to the async handler
                     if not hasattr(self, 'executor'):
@@ -2900,59 +2905,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
             self._is_processing_tree_data = False
 
-    def _process_tree_data_async_gil(self, data_packet):
-        """Asynchronously process dataframe (detect signals) to avoid blocking Tkinter main loop."""
-        try:
-            # [PACKET SETUP] Handle dual snapshot or legacy single df
-            if isinstance(data_packet, dict):
-                full_df = data_packet.get('full_snapshot')
-                df = data_packet.get('filtered_ui_data').copy()
-            else:
-                full_df = data_packet
-                df = data_packet.copy()
-
-            # 🔌 在主进程同步更新 DataPublisher (使用 Full Snapshot)
-            if hasattr(self, 'realtime_service') and self.realtime_service:
-                try:
-                    # 使用 full_df 确保缓存完整性，即使 UI 过滤了该 stock
-                    self.realtime_service.update_batch(full_df)
-                    
-                    # [NEW] 获取实时情绪分 (High Performance) - 使用 UI df 进行展示映射
-                    # 确保有 code 列用于映射
-                    if 'code' not in df.columns:
-                        df['code'] = df.index.astype(str)
-                    
-                    codes = df['code'].tolist()
-                    scores = self.realtime_service.get_emotion_scores(codes)
-                    df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
-
-                except Exception as e:
-                    logger.error(f"Main process realtime update error: {e}")
-
-            if getattr(self, 'sortby_col', None) is not None:
-                # Need to read sortby_col safely, it's modified in main thread
-                df = df.sort_values(by=self.sortby_col, ascending=getattr(self, 'sortby_col_ascend', False))
-            
-            if not df.empty:
-                time_s = time.time()
-                df = detect_signals(df)
-                
-                cur_res = self.global_values.getkey("resample") or 'd'
-                if 'resample' not in df.columns:
-                    df['resample'] = cur_res
-                    
-                logger.info(f'detect_signals async duration time:{time.time()-time_s:.2f}')
-                
-                # Now that data crunching is done, schedule the UI update back on the main thread
-                ui_df = df.copy()
-                self._schedule_after(0,lambda d=ui_df, r=cur_res: self._apply_tree_data_sync(d, r))
-            else:
-                self._is_processing_tree_data = False
-
-        except Exception as e:
-            logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
-            self._is_processing_tree_data = False
-
     def _apply_tree_data_sync(self, df, cur_res):
         """Sync step: update internal state and Tkinter UI on the main thread."""
         with timed_ctx("apply_tree_data_sync_timed",warn_ms=2000):
@@ -2982,7 +2934,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.apply_search()
                 else:
                     self.refresh_tree(self.df_all)
-                
+                logger.debug(f'_apply_tree_data_sync_update_all_top10_windows')
                 # [REMOVED] Redundant publish (Consolidated to Strategy processing endpoint)
     
                 self.update_all_top10_windows()
@@ -3154,7 +3106,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception as e:
                             logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
                             self.sector_bidding_panel = None
-    
+                    
                     # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
                     panel = getattr(self, "sector_bidding_panel", None)
                     if panel is not None:
@@ -3180,7 +3132,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self.last_vis_var_status = None
                     # -------------------------
                     self.status_var2.set(f'queue update: {self.format_next_time()}')
-                    
+                    logger.debug(f'queue update: {self.format_next_time()}')
                     # 打印性能统计摘要
                     # cct.print_timing_summary()
     
@@ -9242,7 +9194,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not hasattr(self, "_last_adjust_cols") or self._last_adjust_cols != self.current_cols or getattr(self, "_update_count", 0) % 20 == 0:
             self.adjust_column_widths()
             self._last_adjust_cols = list(self.current_cols)
-        
+        logger.debug(f'refresh_tree_finish')
         # 更新状态栏
         self.update_status()
     
@@ -11007,6 +10959,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             concept_name = getattr(self._concept_top10_win, "_concept_name", None)
             if concept_name:
                 self._fill_concept_top10_content(self._concept_top10_win, concept_name)
+        logger.debug(f'update_all_top10_windows_finish')
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
         """

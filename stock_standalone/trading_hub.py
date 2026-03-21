@@ -667,7 +667,7 @@ class TradingHub:
                     if should_cleanup:
                         c.execute("UPDATE follow_queue SET status='CANCELLED', notes=COALESCE(notes,'')||' | 自动清理:'||?, updated_at=? WHERE id=?",
                                  (reason, now.strftime('%Y-%m-%d %H:%M:%S'), q_id))
-                        results["CANCEL_SIGNAL"].append(f"{name}({code}) - {reason}")
+                        results["CANCEL_SIGNAL"].append(f"{name}( {code} ) - {reason}")
                         logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} CANCELLED ({reason})")
 
                 elif status == 'ENTERED':
@@ -675,7 +675,7 @@ class TradingHub:
                     if days_elapsed > stale_limit:
                         c.execute("UPDATE follow_queue SET status='STALE', notes=COALESCE(notes,'')||' | 自动清理:过期', updated_at=? WHERE id=?",
                                  (now.strftime('%Y-%m-%d %H:%M:%S'), q_id))
-                        results["STALE_SIGNAL"].append(f"{name}({code}) - 过期")
+                        results["STALE_SIGNAL"].append(f"{name}( {code} ) - 过期")
                         logger.info(f"[TradingHub] Auto-cleanup Signal: {code} {name} STALE (>2d)")
 
             # 2. 队列容量压缩 (限额 100 只)
@@ -708,7 +708,7 @@ class TradingHub:
                     reason = "队列扩容清理(限额100)"
                     c.execute("UPDATE follow_queue SET status='CANCELLED', notes=COALESCE(notes,'')||' | '||?, updated_at=? WHERE id=?",
                              (reason, now.strftime('%Y-%m-%d %H:%M:%S'), r_id))
-                    results["CANCEL_SIGNAL"].append(f"{r_name}({r_code}) - {reason} [{r_status}]")
+                    results["CANCEL_SIGNAL"].append(f"{r_name}( {r_code} ) - {reason} [{r_status}]")
                     logger.info(f"[TradingHub] Queue Limit Cleanup: {r_code} {r_name} CANCELLED")
 
             # 4. [NEW] 清理 hot_stock_watchlist (观察池)
@@ -1291,7 +1291,7 @@ class TradingHub:
                         WHERE id=?
                     """, (drop_reason, close, trend_score, volume_score,
                           new_high, prev_cs, now_str, wid))
-                    results['dropped'].append(f"{name}({code}) - {drop_reason}")
+                    results['dropped'].append(f"{name}( {code} ) - {drop_reason}")
                     logger.info(f"[TradingHub] Watchlist DROP: {code} {name} - {drop_reason}")
 
                 elif total_score >= 0.7:  # [NEW GATE] 晋升门槛提高至 0.7
@@ -1305,7 +1305,7 @@ class TradingHub:
                         WHERE id=?
                     """, (close, trend_score, volume_score,
                           new_high, new_cs, now_str, wid))
-                    results['validated'].append(f"{name}({code}) Score={total_score:.2f}")
+                    results['validated'].append(f"{name}( {code} ) Score={total_score:.2f}")
                     logger.info(f"[TradingHub] Watchlist VALIDATED: {code} {name} Score={total_score:.2f} (cs={new_cs})")
                 else:
                     # 继续观察
@@ -1315,7 +1315,7 @@ class TradingHub:
                             new_high_flag=0, consecutive_strong=0, updated_at=?
                         WHERE id=?
                     """, (close, trend_score, volume_score, now_str, wid))
-                    results['watching'].append(f"{name}({code}) Score={total_score:.2f}")
+                    results['watching'].append(f"{name}( {code} ) Score={total_score:.2f}")
 
             conn.commit()
             logger.info(f"[TradingHub] Watchlist validation: "
@@ -1475,7 +1475,7 @@ class TradingHub:
                 # ==== 弱势判断 ====
                 if is_pump_dump:
                     reason = f"冲高回落(高点+{high_pct:.1f}%但收阴)"
-                    results['weak'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    results['weak'].append(f"{name}( {code} ) {reason} pnl={pnl_pct:+.1f}%")
                     # 更新 notes 记录降级原因
                     new_notes = f"{notes or ''} | 弱势:{reason}"
                     c.execute("UPDATE follow_queue SET notes=?, updated_at=? WHERE id=?",
@@ -1484,7 +1484,7 @@ class TradingHub:
 
                 elif ma10 > 0 and close < ma10:
                     reason = f"跌破MA10({ma10:.2f})"
-                    results['weak'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    results['weak'].append(f"{name}( {code} ) {reason} pnl={pnl_pct:+.1f}%")
                     new_notes = f"{notes or ''} | 弱势:{reason}"
                     c.execute("UPDATE follow_queue SET notes=?, updated_at=? WHERE id=?",
                               (new_notes, now_str, fid))
@@ -1493,7 +1493,7 @@ class TradingHub:
                 # ==== 警告 ====
                 elif ma5 > 0 and close < ma5 and vol_ratio < 1.0:
                     reason = f"跌破MA5+缩量(量比={vol_ratio:.1f})"
-                    results['warning'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    results['warning'].append(f"{name}( {code} ) {reason} pnl={pnl_pct:+.1f}%")
                     logger.info(f"[TradingHub] WARNING: {code} {name} - {reason}")
 
                 # ==== 强势 ====
@@ -1504,7 +1504,7 @@ class TradingHub:
                     if upper > 0 and close >= upper * 0.98:
                         flags.append("Upper上轨")
                     reason = "+".join(flags) if flags else "趋势正常"
-                    results['strong'].append(f"{name}({code}) {reason} pnl={pnl_pct:+.1f}%")
+                    results['strong'].append(f"{name}( {code} ) {reason} pnl={pnl_pct:+.1f}%")
 
             conn.commit()
             logger.info(f"[TradingHub] Holding evaluation: "
