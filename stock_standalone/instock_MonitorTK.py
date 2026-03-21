@@ -36,6 +36,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 from tkinter import filedialog,Menu,simpledialog
 # import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
+try:
+    from PyQt6 import QtWidgets
+except ImportError:
+    QtWidgets = None
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
@@ -745,10 +749,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _process_dispatch_queue(self):
         """
         专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
-        任务执行仍在 Tk 主线程，Qt 事件循环不再在这里驱动。
+        在处理任务的同时，顺带泵一下 PyQt 的事件循环，确保两者共存不卡顿。
         """
         next_delay = 50 
         try:
+            # ⚡ [FIX] 泵 PyQt 事件循环，确保信号仪表盘等 Qt 窗口不卡死
+            if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
+                QtWidgets.QApplication.processEvents()
+                
             while True:
                 # 非阻塞获取任务
                 task = self.tk_dispatch_queue.get_nowait()
@@ -2906,7 +2914,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 🧹 周期性手动 GC
             if not hasattr(self, '_update_count'): self._update_count = 0
             self._update_count += 1
-            if self._update_count % 10 == 0:
+            if self._update_count % 50 == 0:
                 gc.collect()
                 
             # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
@@ -3604,8 +3612,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
         ipc_host, ipc_port = '127.0.0.1', 26668
         last_send_time = 0
-        min_interval = 0.2  # 最小发送间隔 200ms
-        max_jitter = 0.1    # 随机抖动 0~100ms
+        min_interval = 0.8  # ✅ [OPTIMIZE] 提高发送间隔到 800ms，减少 GIL 竞争
+        max_jitter = 0.2    # 随机抖动
         logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
         count = 0
         while self._df_sync_running:
@@ -3651,8 +3659,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         else:
                             msg_type = 'UPDATE_DF_DIFF'
                             payload_to_send = df_diff
-                            # --- 3️⃣ 内存日志 ---
-                            mem = df_diff.memory_usage(deep=True).sum()
+                            # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
+                            mem = 0 # df_diff.memory_usage(deep=True).sum()
 
                     except ValueError as e:
                         # debug 输出索引和列的不一致
@@ -3667,14 +3675,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         # 为了不中断，可以直接把全量当作 diff
                         payload_to_send = df_ui
-                        # --- 3️⃣ 内存日志 ---
-                        mem = df_ui.memory_usage(deep=True).sum()
+                        # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
+                        mem = 0 # df_ui.memory_usage(deep=True).sum()
                         msg_type = 'UPDATE_DF_ALL'
 
                 else:
                     payload_to_send = df_ui
-                    # --- 3️⃣ 内存日志 ---
-                    mem = df_ui.memory_usage(deep=True).sum()
+                    # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
+                    mem = 0 # df_ui.memory_usage(deep=True).sum()
                     msg_type = 'UPDATE_DF_ALL'
 
                 # 更新缓存
@@ -9138,8 +9146,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 保存完整数据
         self.current_df = df
         
-        # 调整列宽
-        self.adjust_column_widths()
+        # 调整列宽 (⚡ [OPTIMIZE] 降低调整频率，仅在列变动或每20次刷新时调整)
+        if not hasattr(self, "_last_adjust_cols") or self._last_adjust_cols != self.current_cols or getattr(self, "_update_count", 0) % 20 == 0:
+            self.adjust_column_widths()
+            self._last_adjust_cols = list(self.current_cols)
         
         # 更新状态栏
         self.update_status()
@@ -10922,35 +10932,47 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 如果 df_concept 为 None，则从 self.df_all 动态获取
         if df_concept is None:
             df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-        if df_concept.empty:
+        # ✅ [OPTIMIZE] 增加数据指纹校验，避免无意义的 UI 重绘
+        df_hash = hash(tuple(df_concept.index)) + hash(len(df_concept))
+        if getattr(win, "_last_fill_hash", None) == df_hash:
             return
+        win._last_fill_hash = df_hash
+        
+        # 清空旧行
+        tree.delete(*tree.get_children())
 
-        # 排序状态
+        # 排序状态获取
         win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
-        sort_col = win._top10_sort_state["col"]
-        ascending = win._top10_sort_state["asc"]
-        if sort_col in df_concept.columns:
-            df_concept = df_concept.sort_values(sort_col, ascending=ascending)
-
-        # 限制显示前 N 条
-        df_display = df_concept.head(limit).copy()
+        sort_col, ascending = win._top10_sort_state["col"], win._top10_sort_state["asc"]
+        
+        # 准备显示数据
+        df_display = df_concept.sort_values(sort_col, ascending=ascending).head(limit) if sort_col in df_concept.columns else df_concept.head(limit)
+        
         tree._full_df = df_concept.copy()
         tree._display_limit = limit
-        tree.config(height=5)
-        # 插入 Treeview 并建立 code -> iid 映射
+        tree.config(height=min(10, len(df_display)) if len(df_display) > 0 else 5)
+        
+        # 批量插入 (使用 itertuples 提升速度)
         code_to_iid = {}
-        for idx, (code_row, row) in enumerate(df_display.iterrows()):
+        for idx, row in enumerate(df_display.itertuples()):
+            code_row = row.Index
             iid = str(idx)
-            latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
-            percent = latest_row.get("percent")
+            # Row data (from itertuples namedtuple 'Pandas')
+            row_dict = row._asdict()
+            
+            # 获取最新的实时行情
+            latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else pd.Series(row_dict)
+            if isinstance(latest_row, pd.DataFrame):
+                latest_row = latest_row.iloc[0]
+                
+            percent = latest_row.get("percent", row_dict.get("percent", 0))
             # === 行条件判断 ===
-            # row_tags = []
             row_tags = get_row_tags(latest_row)
 
             if pd.isna(percent) or percent == 0:
-                percent = latest_row.get("per1d", row.get("per1d", 0))
+                percent = latest_row.get("per1d", row_dict.get("per1d", 0))
 
-            rank_val = latest_row.get("Rank", row.get("Rank", 0))
+            rank_val = latest_row.get("Rank", row_dict.get("Rank", 0))
             rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
 
             tree.insert(
@@ -10959,13 +10981,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 iid=iid,
                 values=(
                     code_row,
-                    latest_row.get("name", row.get("name", "")),
+                    latest_row.get("name", row_dict.get("name", "")),
                     rank_str,
                     f"{percent:.2f}",
-                    f"{latest_row.get('dff', row.get('dff', 0)):.1f}",
-                    f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
-                    latest_row.get("red", row.get("red", 0)),
-                    latest_row.get("win", row.get("win", 0)),
+                    f"{latest_row.get('dff', row_dict.get('dff', 0)):.1f}",
+                    f"{latest_row.get('volume', row_dict.get('volume', 0)):.1f}",
+                    latest_row.get("red", row_dict.get("red", 0)),
+                    latest_row.get("win", row_dict.get("win", 0)),
                 ),
                 tags=tuple(row_tags)
             )

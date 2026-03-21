@@ -2220,6 +2220,14 @@ class StockLiveStrategy:
             monitored_snapshot = dict(self._monitored_stocks) # 浅拷贝，防止迭代中变动
             filtered_keys = [k for k, v in monitored_snapshot.items() if v.get('resample', 'd') == resample]
             valid_keys = [k for k in filtered_keys if k.split('_')[0] in df.index]
+            # --- [NEW] 批量同步实时数据 (情绪、V型反转等) ---
+            all_emotion_scores = {}
+            if self.realtime_service:
+                try:
+                    all_emotion_scores = self.realtime_service.get_emotion_scores(valid_keys)
+                except Exception as e:
+                    logger.debug(f"Batch fetch emotion scores failed: {e}")
+
             now = time.time()  # 使用时间戳，与 last_alert 等保持类型一致
             for key in valid_keys:
                 try:
@@ -2236,7 +2244,7 @@ class StockLiveStrategy:
 
                 # ---------- 冷却判断 ----------
                 if now - last_alert < self._alert_cooldown:
-                    logger.debug(f"{code} 冷却中，跳过检查")
+                    # logger.debug(f"{code} 冷却中，跳过检查")
                     continue
 
                 # [SAFEGUARD] Ensure row is a dict and handle potential duplicate indices
@@ -2251,14 +2259,11 @@ class StockLiveStrategy:
                     current_nclose = float(row.get('nclose', 0.0))
                     current_change = float(row.get('percent', 0.0))
                     volume_change = float(row.get('volume', 0.0))
-                    if volume_change > 500: volume_change = 1.0 # 防御处理：若数值巨大则视为原始成交量，量比回退至 1.0
+                    if volume_change > 1000: volume_change = 1.0 # 防御处理
                     ratio_change = float(row.get('ratio', 0.0))
-                    # ma5d_change, ma10d_change 仅获取确保存在，但不直接使用
-                    _ = float(row.get('ma5d', 0.0))
-                    _ = float(row.get('ma10d', 0.0))
                     current_high = float(row.get('high', 0.0))
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"{code} 行情数据异常: {e}")
+                    # logger.warning(f"{code} 行情数据异常: {e}")
                     continue
 
                 # ---------- 历史 snapshot 与 持仓同步 ----------
@@ -2269,7 +2274,6 @@ class StockLiveStrategy:
                     snap['cost_price'] = trade.get('buy_price', 0)
                     snap['buy_date'] = trade.get('buy_date', '')
                     snap['buy_reason'] = trade.get('buy_reason', '')
-                    # 追踪买入后最高价 (用于移动止盈)
                     if current_price > float(snap.get('highest_since_buy', 0.0)): # type: ignore
                         snap['highest_since_buy'] = current_price
                 
@@ -2284,20 +2288,18 @@ class StockLiveStrategy:
                 snap['win_upper2'] = row.get('win_upper2', snap.get('win_upper2', 0))
 
                 # --- 实时情绪与形态注入 (Realtime Signal Injection) ---
+                # 使用预取的批量情绪分
+                rt_emotion = all_emotion_scores.get(code, 0)
+                snap['rt_emotion'] = rt_emotion
+                
                 if self.realtime_service:
-                    # 55188 全量数据已在循环外同步 (self.ext_data_55188)
-                    
                     try:
-                        # 1. 注入实时情绪 (0-100)
-                        rt_emotion = self.realtime_service.get_emotion_score(code)
-                        snap['rt_emotion'] = rt_emotion
-                        
-                        # 2. 注入 V 型反转信号 (True/False)
+                        # 2. 注入 V 型反转信号 (保持单条，因为检测逻辑较重且目前无批量接口)
                         v_shape = self.realtime_service.get_v_shape_signal(code)
                         snap['v_shape_signal'] = v_shape
                         if v_shape:
-                             logger.debug(f"⚡ {code} 触发 V 型反转信号")
-                        
+                            logger.debug(f"⚡ {code} 触发 V 型反转信号")
+                            
                         # 3. 注入 55188 外部数据 (人气、主力、题材)
                         ext_55188 = self.realtime_service.get_55188_data(code)
                         if ext_55188:
@@ -2314,9 +2316,8 @@ class StockLiveStrategy:
                             snap['zhuli_rank'] = 999
                             snap['net_ratio_ext'] = 0
                             snap['sector_score'] = 0.0
-                            
                     except Exception as e:
-                        logger.error(f"Realtime Service Injection Error: {e}")
+                        logger.error(f"Realtime Service Injection Error for {code}: {e}")
 
                 # --- ⭐ 日内形态检测 ---
                 if hasattr(self, 'pattern_detector'):

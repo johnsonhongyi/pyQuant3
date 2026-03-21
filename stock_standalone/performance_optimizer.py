@@ -48,6 +48,7 @@ class TreeviewIncrementalUpdater:
         self._full_refresh_interval = 50  # 每50次增量更新后做一次全量刷新
         self._chunked_insert_pending = False  # 是否有分块插入正在进行
         self._pending_callback: Optional[callable] = None  # 分块完成后的回调
+        self._values_cache: Dict[str, tuple] = {}  # ✅ [NEW] code -> values缓存，避免读取Treeview
         
     def update(self, df: pd.DataFrame, force_full: bool = False) -> Tuple[int, int, int]:
         """
@@ -234,6 +235,7 @@ class TreeviewIncrementalUpdater:
                     row_data = None
             
             rows_data.append((code, values, row_data))
+            # 更新缓存（仅在准备数据时，真正更新在 update 方法中）
         
         prep_time = time.time() - prep_start
         if prep_time > 0.1:
@@ -398,6 +400,7 @@ class TreeviewIncrementalUpdater:
             if code in self._item_map:
                 self.tree.delete(self._item_map[code])
                 del self._item_map[code]
+                if code in self._values_cache: del self._values_cache[code]  # ✅ [NEW] 清理缓存
                 deleted += 1
         
         # 2. 使用快速方法准备数据（避免 iterrows）
@@ -450,15 +453,17 @@ class TreeviewIncrementalUpdater:
         if rows_to_add:
             added = self._batch_add_rows(rows_to_add)
         
-        # 4. 逐行更新（通常数量少，简化处理）
+        # 4. 逐行更新（通常数量少，向内存缓存对比）
         updated = 0
         for code, values, iid in rows_to_update:
             try:
-                old_values = self.tree.item(iid, "values")
+                # ✅ [OPTIMIZE] 使用内存缓存而非 tree.item 读取 (极其耗时)
+                old_values = self._values_cache.get(code)
                 
-                # 只有值变化时才更新
-                if tuple(values) != tuple(old_values):
+                # 只有当缓存不存在或值变化时才更新
+                if old_values is None or tuple(values) != old_values:
                     self.tree.item(iid, values=values)
+                    self._values_cache[code] = tuple(values)  # 更新缓存
                     updated += 1
             except Exception as e:
                 logger.debug(f"Update row failed: {e}")
@@ -498,6 +503,7 @@ class TreeviewIncrementalUpdater:
             for code, values, row_data in rows_to_add:
                 iid = self.tree.insert("", "end", values=values)
                 self._item_map[code] = iid
+                self._values_cache[code] = tuple(values)  # ✅ [NEW] 存入缓存
                 
                 # 应用颜色标记
                 if row_data and self.feature_marker and self.feature_marker.enable_colors:
