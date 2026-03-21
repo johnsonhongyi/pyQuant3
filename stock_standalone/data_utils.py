@@ -2775,8 +2775,8 @@ def fetch_and_process(
                 queue.put(data_packet, block=True, timeout=10)
             except Exception as e:
                 logger.warning(f"Queue put failed: {e}")
-            gc.collect()
-            cct.print_timing_summary()
+            gc.collect(0)
+            # cct.print_timing_summary()
             cct.df_memory_usage(df_all)
 
             logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops','w_upper']]}")
@@ -2862,6 +2862,7 @@ def fetch_and_process(
             START_INIT = 1
 
             if single:
+                cct.print_timing_summary()
                 break   
 
             for _ in range(int(loop_sleep_time / sleep_step)):

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QGridLayout, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray
+import threading
 from PyQt6.QtGui import QColor, QFont, QBrush
 
 from tk_gui_modules.window_mixin import WindowMixin
@@ -248,6 +249,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
+        self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
         
         # --- 2. 组件与窗口初始化 ---
         self._vol_dialog = VolumeDetailsDialog(self)
@@ -261,7 +263,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # --- 4. 定时器与总线连接 ---
         self._setup_bus_connection()
-        self.sig_bus_event.connect(self._safe_process_event)
+        # ⭐ [FIX] 显式指定 QueuedConnection，确保跨线程信号在 GUI 线程处理
+        self.sig_bus_event.connect(self._safe_process_event, Qt.ConnectionType.QueuedConnection)
         
         self._stats_timer = QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats_display)
@@ -570,7 +573,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._process_event(event, update_ui=False)
             
             # 2. 推入 UI 更新缓冲 (满足稳定性)
-            self._table_update_buffer.append(event)
+            with self._data_lock: # ⭐ [FIX] 使用锁保护缓冲区写入
+                self._table_update_buffer.append(event)
             
             # 3. 如果是高优信号，缩短批次等待，尽快显示 (可选)
             # if event.payload.get('is_high_priority'): QTimer.singleShot(500, self._process_batch_signals)
@@ -582,8 +586,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if not self._table_update_buffer:
             return
             
-        events_to_process = self._table_update_buffer[:]
-        self._table_update_buffer.clear()
+        with self._data_lock: # ⭐ [FIX] 使用锁保护缓冲区读取
+            events_to_process = self._table_update_buffer[:]
+            self._table_update_buffer.clear()
         
         # 记录当前各表格的滚动状态
         scroll_states = {}
@@ -628,9 +633,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._categorize_and_count(self._all_events.pop(0), increment=False)
         
         sector = payload.get('sector', '其它')
-        if sector: self._sector_heat[sector] = self._sector_heat.get(sector, 0) + 1
-        if code not in self._stock_stats: self._stock_stats[code] = {"count": 0, "name": payload.get('name', '')}
-        self._stock_stats[code]["count"] += 1
+        with self._data_lock: # ⭐ [FIX] 使用锁保护统计数据更新
+            if sector: self._sector_heat[sector] = self._sector_heat.get(sector, 0) + 1
+            if code not in self._stock_stats: self._stock_stats[code] = {"count": 0, "name": payload.get('name', '')}
+            self._stock_stats[code]["count"] += 1
+        
         if update_ui: self._append_to_tables(event)
 
     def _append_to_tables(self, event: BusEvent):
@@ -765,10 +772,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         total = len(self._all_events)
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
         if total > 0:
-            self.cards["follow"].setText(str(self._stats_counters["follow"]))
-            self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
-            self.cards["risk"].setText(str(self._stats_counters["risk"]))
-            self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
+            with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
+                self.cards["follow"].setText(str(self._stats_counters["follow"]))
+                self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
+                self.cards["risk"].setText(str(self._stats_counters["risk"]))
+                self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
         
         
         # 优先使用从 monitor 传来的专业市场温度评分
