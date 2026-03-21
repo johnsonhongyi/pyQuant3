@@ -473,8 +473,9 @@ class StockLiveStrategy:
         self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
         # 初始化记录器 (必须在 _load_monitors 之前)
-        self.trading_logger = TradingLogger()
-        self.supervisor = StrategySupervisor(self.trading_logger) # type: ignore # ⭐ 注入盈利监理器
+        # [OPTIMIZE] Delay TradingLogger and TradingHub init to background to avoid startup hang
+        self.trading_logger = None 
+        self.supervisor = None
 
         # ⭐ [FIX] 将耗时的监控加载逻辑异步化，防止阻塞主界面启动 (Stuck Issue)
         self.executor.submit(self.load_monitors)
@@ -614,9 +615,6 @@ class StockLiveStrategy:
         if hasattr(self, '_voice') and self._voice:
             if self.voice_enabled:
                 self._voice.resume()
-            else:
-                self._voice.pause()
-                
         logger.info(f"Voice announcer enabled = {self.voice_enabled} (Synced to VoiceAnnouncer)")
 
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
@@ -666,11 +664,20 @@ class StockLiveStrategy:
         return action, position_ratio
 
     def load_monitors(self):
-        """加载配置并进行结构修复，同时从数据库同步持仓状态"""
-        self._monitored_stocks = {}
-
+        """[OPTIMIZED] 从 JSON 和数据库后台加载监控列表 (Background Thread)"""
+        import json
         try:
-            import json
+            # 1. 首先在后台初始化记录器与监理器 (涉及数据库 I/O)
+            if self.trading_logger is None:
+                self.trading_logger = TradingLogger()
+                self.supervisor = StrategySupervisor(self.trading_logger) # type: ignore
+                logger.info("✅ TradingLogger & StrategySupervisor initialized in background.")
+            
+            # 2. 预热 TradingHub (触发数据库表创建与 WAL 设置)
+            hub = get_trading_hub()
+            logger.info("✅ TradingHub initialized in background.")
+            
+            self._monitored_stocks = {}
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     raw_data = json.load(f)
@@ -2232,6 +2239,11 @@ class StockLiveStrategy:
             import time
             now = time.time()  # [FIX] Initialize now variable early
 
+            # [NEW] 确保记录器已初始化 (已经在 load_monitors 后台完成)
+            if self.trading_logger is None:
+                # logger.debug("TradingLogger not ready, skipping strategy check...")
+                return
+
             # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
             trades_info = self.trading_logger.get_trades()
             open_trades = {(t['code'], t.get('resample', 'd')): t for t in trades_info if t['status'] == 'OPEN'}
@@ -2411,6 +2423,7 @@ class StockLiveStrategy:
                         self.pattern_detector.update(
                             code=code,
                             name=data.get('name', ''),
+                            tick_df=None, # [FIX] 显式传递 None 满足签名要求
                             # tick_df 为 None 时，内部通常会尝试 from day_row 获取必要字段
                             day_row=row,
                             prev_close=prev_close

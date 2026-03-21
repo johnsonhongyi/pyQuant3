@@ -242,8 +242,8 @@ class IntradayPatternDetector:
         """设置股票评级映射表"""
         self.stock_grades = grades
 
-    def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame], 
-               day_row: pd.Series, prev_close: float,
+    def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame] = None, 
+               day_row: pd.Series = None, prev_close: float = 0,
                current_time: Optional[dt_time] = None) -> List[PatternEvent]:
         """
         每次收到新分时数据后调用
