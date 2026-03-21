@@ -92,10 +92,17 @@ class MinuteKlineCache:
             # 强制标准化 code
             code_clean = str(code).strip().zfill(6)
             for item in dq:
-                # 直接通过 __slots__ 提取数据，避免 as_dict() 方法调用开销
-                item_data = {s: getattr(item, s) for s in item.__slots__}
-                item_data['code'] = code_clean
-                data.append(item_data)
+                # 显式构造字典以提升在数百万行数据时的速度
+                data.append({
+                    'time': item.time,
+                    'open': item.open,
+                    'high': item.high,
+                    'low': item.low,
+                    'close': item.close,
+                    'volume': item.volume,
+                    'cum_vol_start': item.cum_vol_start,
+                    'code': code_clean
+                })
         
         if not data:
             return pd.DataFrame()
@@ -1722,7 +1729,7 @@ class DataPublisher:
                         logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
 
                 if not cached_df.empty:
-                    with timed_ctx("from_dataframe", warn_ms=800):
+                    with timed_ctx("from_dataframe_timed", warn_ms=800):
                         self.kline_cache.from_dataframe(cached_df)
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False

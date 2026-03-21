@@ -1122,9 +1122,11 @@ class StockLiveStrategy:
         
         # [Phase 2] 入场监控：已整合至 _check_strategies -> _process_follow_queue
         # self._monitor_follow_queue(df_internal)
-
+        from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
         # 3. 策略判定
-        self._check_strategies(df_internal, resample=resample)
+        with timed_ctx(f"check_strategies__timed_{len(df_internal)}", warn_ms=10):
+            self._check_strategies(df_internal, resample=resample)
+        print_timing_summary()
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
         # import removed
@@ -2228,6 +2230,13 @@ class StockLiveStrategy:
                 except Exception as e:
                     logger.debug(f"Batch fetch emotion scores failed: {e}")
 
+            # --- [优化] 极速提取行数据，替代耗时的 df.loc 和 to_dict ---
+            codes_to_fetch = list(set([k.split('_')[0] for k in valid_keys]))
+            df_subset = df[df.index.isin(codes_to_fetch)]
+            if not df_subset.index.is_unique:
+                df_subset = df_subset[~df_subset.index.duplicated(keep='last')]
+            pre_fetched_rows = df_subset.to_dict(orient='index')
+
             now = time.time()  # 使用时间戳，与 last_alert 等保持类型一致
             for key in valid_keys:
                 try:
@@ -2247,10 +2256,11 @@ class StockLiveStrategy:
                     # logger.debug(f"{code} 冷却中，跳过检查")
                     continue
 
-                # [SAFEGUARD] Ensure row is a dict and handle potential duplicate indices
-                row_raw = df.loc[code]
-                row_series = row_raw.iloc[0] if isinstance(row_raw, pd.DataFrame) else row_raw
-                row = row_series.to_dict()
+                # [SAFEGUARD] 极速字典访问，替代原先循环内的 df.loc
+                row = pre_fetched_rows.get(code)
+                if row is None:
+                    continue
+                    
                 messages = []  # [Fix] 提前初始化 messages，供日/日内形态检测使用
 
                 # ---------- 安全获取行情数据 ----------
@@ -2326,8 +2336,8 @@ class StockLiveStrategy:
                         self.pattern_detector.update(
                             code=code,
                             name=data.get('name', ''),
-                            tick_df=None,   # 暂无分时数据，使用 day_row 即可
-                            day_row=row_series,
+                            # tick_df 为 None 时，内部通常会尝试从 day_row 获取必要字段
+                            day_row=row,
                             prev_close=prev_close
                         )
                     except Exception as e:
@@ -2762,7 +2772,7 @@ class StockLiveStrategy:
                 shadow_decision = self.shadow_engine.evaluate(row, snap)
                 
                 # --- ⭐ 盈利监理重磅拦截 (Supervision Veto) ---
-                is_vetoed, veto_reason = self.supervisor.veto(code, decision, row_series, snap)
+                is_vetoed, veto_reason = self.supervisor.veto(code, decision, row, snap)
                     
 
 
@@ -2945,47 +2955,6 @@ class StockLiveStrategy:
                         ratio = 0
                     messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
-                # ---------- 调试输出 ----------
-                # logger.debug(f"{code} DEBUG: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.2f}")
-                
-                # if messages:
-                #     # ---------- 去重 & 合并 ----------
-                #     priority_order = ["RISK", "RULE", "POSITION", "PATTERN"]
-                #     priority_rank = {k:i for i,k in enumerate(priority_order)}
-                #     unique_msgs = {}
-                #     last_duplicate = {}
-                #     for mtype, msg in messages:
-                #         if isinstance(msg, pd.Series):
-                #             msg = msg.iloc[0] if not msg.empty else ""
-                #         msg = str(msg)
-                        
-                #         if msg not in unique_msgs:
-                #             unique_msgs[msg] = mtype
-                #         else:
-                #             last_duplicate[msg] = mtype  # 保留重复在最后
-                #     t1_prefix = "[T+1限制] " if is_t1_restricted else ""
-                #     combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
-
-                #     log_msg = combined_msgs.replace('\n', ' | ')
-                #     logger.debug(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
-                #     # 确保 action 是字符串或 None，避免 Series 导致 trigger_alert 失败
-                #     if isinstance(action, pd.Series):
-                #         action = action.iloc[0] if not action.empty else "HOLD"
-                #     self._trigger_alert(code, data['name'], combined_msgs, action=str(action), price=current_price, resample=resample)
-                    
-                #     # [RESTORED] Console feedback with Siren emoji
-                #     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🚨 触发报警: {code} {action} - {log_msg}")
-                    
-                #     data['last_alert'] = now
-                    
-                #     # [RESTORED] Periodic save of monitors to persist alert state
-                #     self._save_monitors()
-
-                #     data['below_nclose_count'] = 0
-                #     data['below_nclose_start'] = 0
-                #     data['below_last_close_count'] = 0
-                #     data['below_last_close_start'] = 0
-
                 if messages:
                     priority_order = ["RISK","RULE","POSITION","PATTERN"]
                     unique_msgs = []
@@ -3032,12 +3001,24 @@ class StockLiveStrategy:
             import traceback
             logger.error(traceback.format_exc())
         finally:
+            self._is_checking = False
             # ⭐ [FIX] 在所有股票检查完后执行一次整体保存
             if self._needs_monitor_save:
                  self._save_monitors()
                  self._needs_monitor_save = False
-            self._is_checking = False
-
+            
+            # 强化内存回收：采用多轮运行后清理机制，大幅减轻运行压力
+            import gc
+            if not hasattr(self, '_strategy_round_count'):
+                self._strategy_round_count = 0
+            self._strategy_round_count += 1
+            
+            # 每经历 50 轮全市场并发检查，执行一次第 2 代 GC
+            if self._strategy_round_count % 50 == 0:
+                gc.collect(2)
+            else:
+                gc.collect(0) # 耗时极低 (<1ms)，防止垃圾进入下一代
+            
     def _check_strategies_simple(self, df):
         try:
             now = time.time()
