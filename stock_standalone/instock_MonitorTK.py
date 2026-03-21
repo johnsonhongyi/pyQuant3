@@ -791,108 +791,82 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not is_closing:
                 self._schedule_after(next_delay, self._process_dispatch_queue)
 
-    # def _process_dispatch_queue_base(self):
-    #     from PyQt6.QtCore import QEventLoop  # Qt6
-    #     next_delay = 50 
-
-    #     try:
-    #         # 1️⃣ 先处理 Tk 队列（优先级最高）
-    #         while True:
-    #             task = self.tk_dispatch_queue.get_nowait()
-    #             if callable(task):
-    #                 try:
-    #                     task()
-    #                 except Exception as e:
-    #                     logger.error(f"Error executing dispatched task: {e}\n{traceback.format_exc()}")
-
-    #     except queue.Empty:
-    #         next_delay = 200
-
-    #     except Exception as e:
-    #         logger.error(f"Error in dispatch queue processing: {e}")
-
-    #     finally:
-    #         # 2️⃣ 再 pump Qt（低优先级 + 限时）
-    #         try:
-    #             if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
-    #                 QtWidgets.QApplication.processEvents(
-    #                     QEventLoop.ProcessEventsFlag.AllEvents,
-    #                     5  # ⭐ 限制 5ms，关键
-    #                 )
-    #         except Exception as e:
-    #             logger.debug(f"Qt processEvents error: {e}")
-
-    #         # 3️⃣ 调度下一轮
-    #         is_closing = getattr(self, '_is_closing', False) or (
-    #             getattr(self, '_app_exiting', None) and self._app_exiting.is_set()
-    #         )
-
-    #         if not is_closing:
-    #             self._schedule_after(next_delay, self._process_dispatch_queue)
-
-    # def _process_dispatch_queue(self):
-    #     """
-    #     专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
-    #     在处理任务的同时，顺带泵一下 PyQt 的事件循环，确保两者共存不卡顿。
-    #     """
-    #     next_delay = 50 
-    #     try:
-    #         # ⚡ [FIX] 泵 PyQt 事件循环，确保信号仪表盘等 Qt 窗口不卡死
-    #         if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
-    #             QtWidgets.QApplication.processEvents()
-                
-    #         while True:
-    #             # 非阻塞获取任务
-    #             task = self.tk_dispatch_queue.get_nowait()
-    #             if callable(task):
-    #                 try:
-    #                     task()  # 安全回到 Tk 主线程执行
-    #                 except Exception as e:
-    #                     logger.error(f"Error executing dispatched task: {e}\n{traceback.format_exc()}")
-    #     except queue.Empty:
-    #         next_delay = 200 # 📥 [OPTIMIZE] 队列为空时降低轮询频率 (200ms)
-    #     except Exception as e:
-    #         logger.error(f"Error in dispatch queue processing: {e}")
-    #     finally:
-    #         # 50ms (任务活跃) 或 200ms (空闲退避) 后再次检查队列
-    #         is_closing = getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
-    #         if not is_closing:
-    #             self._schedule_after(next_delay, self._process_dispatch_queue)
-
-    # def _schedule_after(self, ms, func, *args):
-    #     """包装 self.after 以便追踪所有 Job ID，方便在退出时统一取消"""
-    #     if getattr(self, '_is_closing', False):
-    #         return None
-    #     # ⭐ [FIX] 确保 _after_ids 已初始化 (防御性编程)
-    #     if not hasattr(self, '_after_ids'):
-    #         self._after_ids = []
-            
-    #     try:
-    #         job_id = self.after(ms, func, *args)
-    #         if job_id:
-    #             self._after_ids.append(job_id)
-    #         return job_id
-    #     except Exception as e:
-    #         if not getattr(self, '_is_closing', False):
-    #             logger.warning(f"[_schedule_after] 任务调度失败: {e}")
-    #         return None
-
-    # def _cancel_all_after_jobs(self):
-    #     """取消所有待执行的 after 任务，防止程序退出后仍回调"""
-    #     count = 0
-    #     if hasattr(self, '_after_ids'):
-    #         for job_id in self._after_ids:
-    #             try:
-    #                 self.after_cancel(job_id)
-    #                 count += 1
-    #             except Exception:
-    #                 pass
-    #         self._after_ids.clear()
-    #     if count > 0:
-    #         logger.info(f"已取消 {count} 个待执行的 Tkinter 回调任务")
-
-
     def _schedule_after(self, ms, func, *args, key=None, debounce=True):
+        if getattr(self, "_is_closing", False): return None
+
+        # 初始化必要的容器和变量
+        if not hasattr(self, "_after_jobs"): self._after_jobs = {}
+        if not hasattr(self, "_last_task_finish_time"): 
+            self._last_task_finish_time = time.time() # 初始化为启动时间
+
+        created_at = time.time()
+        expected_run_at = created_at + (ms / 1000.0) # 理论上的物理执行时刻
+
+        # --- 名称清洗逻辑 (保持你要求的精简版) ---
+        def get_clean_name(f, k):
+            if isinstance(k, str): return k
+            inner_f = f
+            while isinstance(inner_f, functools.partial): inner_f = inner_f.func
+            raw = getattr(inner_f, '__qualname__', getattr(inner_f, '__name__', str(inner_f)))
+            raw = raw.replace('<locals>.', '').replace('.<lambda>', '')
+            raw = re.sub(r' at 0x[0-9A-Fa-f]+', '', raw)
+            return raw.replace('<function ', '').replace('>', '').strip()
+
+        display_name = get_clean_name(func, key)
+        task_key = key if key else (func, args)
+
+        # 防抖处理
+        if debounce:
+            old_job = self._after_jobs.get(task_key)
+            if old_job:
+                try: self.after_cancel(old_job)
+                except: pass
+
+        # ---------- 包装回调 ----------
+        def wrapper():
+            now = time.time()
+            
+            # ⭐ [补偿逻辑]：获取主线程上次空闲的时刻
+            # 如果上个任务刚结束，那么 reference_time 就会变成上个任务的结束时间
+            last_finish = getattr(self, "_last_task_finish_time", now)
+            reference_time = max(expected_run_at, last_finish)
+            
+            # 纯净卡顿 = 现在 - (预期时间 或 上个任务结束时间 中更晚的一个)
+            pure_latency = (now - reference_time) * 1000
+            # 总排队时长 (包含历史积压)
+            total_backlog = (now - expected_run_at) * 1000
+            
+            self._last_latency = pure_latency 
+
+            # 这里的 5000ms 是你设定的阈值
+            if pure_latency > 5000:
+                logger.error(
+                    f"🐢 发现新阻塞: [{display_name}] "
+                    f"纯净卡顿:{pure_latency:.0f}ms (总积压:{total_backlog:.0f}ms, 延时设定:{ms}ms)"
+                )
+
+            # 执行耗时诊断 (保留你的逻辑)
+            exec_start = time.time()
+            try:
+                if getattr(self, "_is_closing", False): return
+                func(*args)
+                
+                duration = (time.time() - exec_start) * 1000
+                if duration > 3000:
+                    logger.error(f"⚡ 运行沉重: [{display_name}] 自身耗时:{duration:.2f}ms")
+                    
+            except Exception as e:
+                logger.exception(f"❌ [after error] {display_name}: {e}")
+            finally:
+                # ⭐ [关键更新]：记录当前任务结束时间，给下一个任务做参考
+                self._last_task_finish_time = time.time()
+                self._after_jobs.pop(task_key, None)
+
+        job_id = self.after(ms, wrapper)
+        self._after_jobs[task_key] = job_id
+        return job_id
+
+    def _schedule_after_base(self, ms, func, *args, key=None, debounce=True):
         """
         高可靠 Tkinter after 调度器
 
@@ -935,17 +909,74 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception:
                         pass
 
+            # --- ⭐ 核心：深度名称清洗函数 ---
+            def get_clean_name(f, k):
+                # 1. 如果有显式的字符串 Key，直接用 Key
+                if isinstance(k, str):
+                    return k
+                    
+                # 2. 递归剥离 partial
+                inner_f = f
+                while isinstance(inner_f, functools.partial):
+                    inner_f = inner_f.func
+                    
+                # 3. 获取原始路径 (__qualname__ 比 __name__ 更能体现类属关系)
+                raw = getattr(inner_f, '__qualname__', getattr(inner_f, '__name__', str(inner_f)))
+                
+                # 4. 强力正则清洗
+                # a) 移除 <locals>.
+                raw = raw.replace('<locals>.', '')
+                # b) 移除 0x... 内存地址及其前缀
+                raw = re.sub(r' at 0x[0-9A-Fa-f]+', '', raw)
+                # c) 移除 .<lambda> 后缀 (让 lambda 归属于它的上级函数)
+                raw = raw.replace('.<lambda>', '')
+                # d) 移除 <function ...> 包装
+                raw = raw.replace('<function ', '').replace('>', '')
+                
+                return raw.strip()
+
+            # 预先计算显示名称
+            display_name = get_clean_name(func, key)
+            
+            # 确保 Key 唯一标识任务
+            task_key = key if key else (func, args)
+
+            # --- 防抖逻辑 ---
+            if debounce:
+                old_job = self._after_jobs.get(task_key)
+                if old_job:
+                    try: self.after_cancel(old_job)
+                    except: pass
+
+            created_at = time.time()
             # ---------- 包装回调 ----------
             def wrapper():
+                now = time.time()
+                # 调度延迟 (主线程排队时间)
+                actual_total_elapsed = (now - created_at) * 1000
+                latency = actual_total_elapsed - ms
+                self._last_latency = latency 
+                
+                if latency > 5000:
+                    logger.warning(
+                        f"调度阻塞: [{display_name}] 延时设定:{ms}ms, 卡顿:{latency:.0f}ms"
+                        # f"调度阻塞: [{display_name}] 预计:{ms}ms, 实际等待:{actual_total_elapsed:.0f}ms (卡顿:{latency:.0f}ms)"
+                    )
+                    
+                # 执行耗时诊断 (函数运行时间)
+                exec_start = time.time()
                 try:
-                    if getattr(self, "_is_closing", False):
-                        return
+                    if getattr(self, "_is_closing", False): return
                     func(*args)
+                    
+                    duration = (time.time() - exec_start) * 1000
+                    if duration > 2000:
+                        logger.warning(f"⚡ 运行沉重: [{display_name}] 自身耗时:{duration:.2f}ms")
+                        
                 except Exception as e:
-                    logger.exception(f"[after task error] {func.__name__}: {e}")
+                    logger.exception(f"❌ [after error] {display_name}: {e}")
                 finally:
-                    # 执行完清理
-                    self._after_jobs.pop(key, None)
+                    self._after_jobs.pop(task_key, None)
 
             # ---------- 注册任务 ----------
             job_id = self.after(ms, wrapper)
