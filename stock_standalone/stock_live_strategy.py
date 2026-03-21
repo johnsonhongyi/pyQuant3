@@ -13,11 +13,12 @@ import multiprocessing as mp
 import pandas as pd
 import re
 import socket
-from queue import Empty
+import queue
+from queue import Empty, Full
 from typing import Any, Optional, Callable, Dict, List, Union
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-
+from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
@@ -38,7 +39,9 @@ import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
 MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
 # pyttsx3 import removed - delegated to VoiceAnnouncer/AlertManager
-_ipc_lock = threading.Lock()
+_ipc_queue = queue.Queue(maxsize=1000)  # ⭐ [NEW] IPC 异步发送队列
+_ipc_sender_thread: Optional[threading.Thread] = None
+_ipc_sender_stop = threading.Event()
 
 try:
     from stock_selector import StockSelector
@@ -102,10 +105,57 @@ def normalize_speech_text(text: str) -> str:
     return text
 
 
+def _ipc_sender_worker():
+    """ dedicada worker thread for sending IPC signals to the visualizer """
+    IPC_HOST = '127.0.0.1'
+    IPC_PORT = 26668
+    logger.info(f"🚀 IPC Sender worker started (Target: {IPC_HOST}:{IPC_PORT})")
+    
+    while not _ipc_sender_stop.is_set():
+        try:
+            # 阻塞获取任务，带超时以便检查 _ipc_sender_stop
+            data = _ipc_queue.get(timeout=1.0)
+            if data == "__STOP__":
+                break
+            
+            json_str = json.dumps(data)
+            msg = f"|SIGNAL|{json_str}"
+            
+            # 建立连接并发送
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5) # 稍微放宽一点连接超时
+                try:
+                    s.connect((IPC_HOST, IPC_PORT))
+                    s.sendall(b"CODE")
+                    s.sendall(msg.encode('utf-8'))
+                except (socket.timeout, ConnectionRefusedError):
+                    # 如果 Visualizer 没开，默默丢弃或简单记录
+                    # logger.debug("Visualizer IPC offline, signal dropped.")
+                    pass
+                except Exception as e:
+                    logger.debug(f"IPC Send Error: {e}")
+            
+            _ipc_queue.task_done()
+            
+        except Empty:
+            continue
+        except Exception as e:
+            logger.error(f"IPC Worker Error: {e}")
+            time.sleep(1)
+
+    logger.info("IPC Sender worker exited.")
+
 def send_signal_to_visualizer_ipc(data: dict):
+    """ Standardized signals for IPC and SignalBus """
+    global _ipc_sender_thread
 
     try:
-        # ---------- SignalBus ----------
+        # 1. Start IPC sender thread if not already running
+        if _ipc_sender_thread is None or not _ipc_sender_thread.is_alive():
+            _ipc_sender_thread = threading.Thread(target=_ipc_sender_worker, daemon=True, name="IPCSenderWorker")
+            _ipc_sender_thread.start()
+
+        # 2. ---------- SignalBus (Main process only) ----------
         sig_type = data.get('pattern', 'ALERT')
 
         try:
@@ -126,19 +176,16 @@ def send_signal_to_visualizer_ipc(data: dict):
         except Exception as e:
             logger.debug(f"SignalBus publish failed: {e}")
 
-        # ---------- IPC ----------
-        json_str = json.dumps(data)
-        msg = f"|SIGNAL|{json_str}"
-
-        with _ipc_lock:   # 防止多线程同时 connect
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.2)
-                s.connect(('127.0.0.1', 26668))
-                s.sendall(b"CODE")
-                s.sendall(msg.encode('utf-8'))
-
-    except Exception:
-        pass
+        # 3. ---------- IPC (Queue it for Async worker) ----------
+        try:
+            _ipc_queue.put(data, block=False) # Non-blocking put
+        except Full:
+            # If queue is somehow full, drop the least important (oldest) signal? 
+            # Or just wait a tiny bit? For now, we drop to ensure strategy doesn't lag.
+            logger.warning("IPC Queue full! Dropping signal to prevent lag.")
+            
+    except Exception as e:
+        logger.debug(f"send_signal_to_visualizer_ipc error: {e}")
         
 
 # _voice_process_target removed (moved to alert_manager.py)
@@ -522,8 +569,15 @@ class StockLiveStrategy:
             except TypeError:
                 # Python 3.8 不支持 cancel_futures
                 self.executor.shutdown(wait=False)
-            except Exception as e:
-                logger.error(f"Error shutting down executor: {e}")
+
+        # 3. ⭐ [NEW] 停止 IPC 发送线程
+        try:
+            global _ipc_sender_stop, _ipc_sender_thread
+            if '_ipc_sender_stop' in globals():
+                _ipc_sender_stop.set()
+                _ipc_queue.put("__STOP__") # 唤醒并终止
+        except Exception as e:
+            logger.debug(f"Error stopping IPC sender: {e}")
 
         logger.info("StockLiveStrategy stopped.")
 
@@ -2214,8 +2268,7 @@ class StockLiveStrategy:
                     self.last_follow_sync_ts = now
                 except Exception as e:
                     logger.error(f"Sync follow queue failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+            
             # --- [NEW] 检查跟单队列触发 ---
             self._process_follow_queue(df, resample)
             # --- [优化] 线程安全地获取监控键名列表 ---
@@ -2231,13 +2284,28 @@ class StockLiveStrategy:
                     logger.debug(f"Batch fetch emotion scores failed: {e}")
 
             # --- [优化] 极速提取行数据，替代耗时的 df.loc 和 to_dict ---
-            codes_to_fetch = list(set([k.split('_')[0] for k in valid_keys]))
+            codes_to_fetch_raw = list(set([k.split('_')[0] for k in valid_keys]))
+            import pandas as pd
+            if pd.api.types.is_integer_dtype(df.index.dtype):
+                codes_to_fetch = [int(c) for c in codes_to_fetch_raw if c.isdigit()]
+            else:
+                codes_to_fetch = codes_to_fetch_raw
+            
+            # 1. 批量连续亏损次数预取 (解决 loop_feedback_db_losses 5s 瓶颈)
+            all_loss_streaks = {}
+            try:
+                all_loss_streaks = self.trading_logger.get_batch_consecutive_losses(codes_to_fetch, resample=resample)
+            except Exception as e:
+                logger.debug(f"Batch fetch loss streaks failed: {e}")
+
+            # 2. 股票基础行情字典化
             df_subset = df[df.index.isin(codes_to_fetch)]
             if not df_subset.index.is_unique:
                 df_subset = df_subset[~df_subset.index.duplicated(keep='last')]
             pre_fetched_rows = df_subset.to_dict(orient='index')
 
             now = time.time()  # 使用时间戳，与 last_alert 等保持类型一致
+            start_loop_timer = time.perf_counter()
             for key in valid_keys:
                 try:
                     # 再次防御性检查 Key 存在性
@@ -2256,8 +2324,15 @@ class StockLiveStrategy:
                     # logger.debug(f"{code} 冷却中，跳过检查")
                     continue
 
-                # [SAFEGUARD] 极速字典访问，替代原先循环内的 df.loc
+                # [SAFEGUARD] 极速字典访问 (支持 int/str 鲁棒性校验)
                 row = pre_fetched_rows.get(code)
+                if row is None:
+                    try:
+                        # 兼容处理：尝试数字索引匹配
+                        if code.isdigit():
+                            row = pre_fetched_rows.get(int(code))
+                    except: pass
+                
                 if row is None:
                     continue
                     
@@ -2336,7 +2411,7 @@ class StockLiveStrategy:
                         self.pattern_detector.update(
                             code=code,
                             name=data.get('name', ''),
-                            # tick_df 为 None 时，内部通常会尝试从 day_row 获取必要字段
+                            # tick_df 为 None 时，内部通常会尝试 from day_row 获取必要字段
                             day_row=row,
                             prev_close=prev_close
                         )
@@ -2371,8 +2446,6 @@ class StockLiveStrategy:
 
                     except Exception as e:
                         logger.debug(f"Daily pattern detect error for {code}: {e}")
-                        import traceback
-                        traceback.print_exc()
 
                 # --- 注入板块与系统风险状态 ---
                 # 从 _last_sector_status 中获取
@@ -2395,13 +2468,7 @@ class StockLiveStrategy:
                         snap['sector_leader_pullback'] = p_drop
                 
                 # --- 注入日线中轴趋势数据 (Daily Midline Trend) ---
-                # Midline = (High + Low) / 2
-                # 计算过去 2 天的中轴线趋势
                 try:
-                    # 获取昨日和前日数据 (需要有 last_high, last_low 等数据列，或者从 row 中获取如果存在)
-                    # 假设 df 中有 last_high, last_low, last2_high, last2_low
-                    # 如果没有，尝试用 nclose 近似或跳过
-                    
                     # 昨中轴
                     last_h = float(row.get('last_high', 0))
                     last_l = float(row.get('last_low', 0))
@@ -2420,27 +2487,23 @@ class StockLiveStrategy:
 
                     # 今日实施中轴 (动态)
                     if current_high > 0:
-                         # 注意: low 只有在收盘确定，盘中 low 可能不准，这里用 当前价作为临时低点参考? 
-                         # 不，盘中 low 也是实时更新的
                          current_low = float(row.get('low', 0))
                          if current_low > 0:
                              snap['today_midline'] = (current_high + current_low) / 2
                     
                     # 简单的趋势判断标记
-                    if snap['yesterday_midline'] < snap['day_before_midline']:
+                    if snap.get('yesterday_midline', 0) < snap.get('day_before_midline', 0):
                         snap['midline_falling'] = True
                     else:
                         snap['midline_falling'] = False
                         
-                    if snap['yesterday_midline'] > snap['day_before_midline']:
+                    if snap.get('yesterday_midline', 0) > snap.get('day_before_midline', 0):
                         snap['midline_rising'] = True
                     else:
                          snap['midline_rising'] = False
 
                 except Exception as e:
                     logger.debug(f"Midline calc error for {code}: {e}")
-
-
                     # 默认值
                     snap['rt_emotion'] = 50
                     snap['v_shape_signal'] = False
@@ -2449,15 +2512,8 @@ class StockLiveStrategy:
                     snap['net_ratio_ext'] = 0
 
                 # --- 策略进化：注入反馈记忆 (Feedback Injection) ---
-                # 1. 记仇机制：查询该股最近连续亏损次数
-                if 'loss_streak' not in snap: # 避免每秒查库，简单缓存(实际应有过期机制，这里简化)
-                     # 只有当 snapshot 里没有或者是新的一天时才查(略复杂，这里暂且每次循环查，因为 execute 轻量)
-                     # 为了性能考虑，其实应该每分钟只更新一次。这里暂且假设 sqlite 够快。
-                     # Better: 在外层定时更新 self.blacklist_cache
-                     pass
-                
-                # 实时查询 (耗时较小，Sqlite PK查询极快)
-                snap['loss_streak'] = self.trading_logger.get_consecutive_losses(code, days=15, resample=resample)
+                # 1. 记仇机制：使用预取的亏损次数 (O(1))
+                snap['loss_streak'] = all_loss_streaks.get(code, 0)
                 
                 # 2. 环境感知：查询最近市场胜率 (分周期缓存)
                 if not hasattr(self, '_sentiments'):
@@ -2649,7 +2705,10 @@ class StockLiveStrategy:
                         # --- 3.1 读取实时情绪 ---
                         rt_emotion = self.realtime_service.get_emotion_score(code)
                         snap['rt_emotion'] = snap.get('rt_emotion', 0) + rt_emotion
+                    except Exception as e:
+                        logger.debug(f"rt_emotion fetch error: {e}")
 
+                    try:
                         # --- 3.2 V-Shape K线形态 ---
                         klines = self.realtime_service.get_minute_klines(code, n=30)
                         if len(klines) >= 15:
@@ -2699,13 +2758,13 @@ class StockLiveStrategy:
                                             logger.debug(f"V-Shape {code} skipped: no anomaly pattern")
                                     except Exception as e:
                                         logger.error(f"Failed to add V-Shape to queue: {e}")
-
                     except Exception as e:
-                        logger.debug(f"Realtime service fetch error: {e}")
+                        logger.debug(f"v_shape_check error: {e}")
 
                 # 定义默认 shadow_decision，防止后续引用报错
                 shadow_decision = {"action": "HOLD", "reason": "", "debug": {}}
                 
+                # ---------- 决策引擎 ----------
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
 
@@ -2733,14 +2792,20 @@ class StockLiveStrategy:
                             messages.append(("RULE", f"状态变更: {curr_phase.value}->{new_phase.value} {phase_reason}"))
                             
                             # [Visualization] Persist Phase to DB (via Notes) for HotlistPanel
+                            # ⭐ [High Performance] 异步写入 DB，避免阻塞 321 股大循环 (解决 200ms 抖动)
                             try:
-                                hub = get_trading_hub()
-                                # Prepend Phase to notes
-                                new_note = f"[{new_phase.value}] {phase_reason}"
-                                hub.update_follow_status(code, notes=new_note)
+                                import threading
+                                def _async_db_sync(c, n):
+                                    try:
+                                        h = get_trading_hub()
+                                        h.update_follow_status(c, notes=n)
+                                    except: pass
+                                
+                                t = threading.Thread(target=_async_db_sync, args=(code, new_note), daemon=True)
+                                t.start()
                                 snap['phase_synced_ts'] = time.time()
                             except Exception as db_e:
-                                logger.error(f"Failed to update phase to DB: {db_e}")
+                                logger.debug(f"Failed to start async phase sync: {db_e}")
                             
                             # 如果是 EXIT，强制叠加卖出信号
                             if new_phase == TradePhase.EXIT:
@@ -2992,9 +3057,13 @@ class StockLiveStrategy:
                     data['below_nclose_count'] = 0
                     data['below_nclose_start'] = 0
                     data['below_last_close_count'] = 0
-                    data['below_last_close_start'] = 0
-                else:
+                if not messages:
                     logger.debug(f"{code} data: {messages}")
+            
+            # 手刻统计：循环总体耗时
+            cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
+            if cost_loop_ms > 100:
+                logger.warning(f"[SLOW] loop_total_execution cost={cost_loop_ms:.2f} ms")
 
         except Exception as e:
             logger.error(f"Strategy Check Error: {e}")
@@ -3532,6 +3601,8 @@ class StockLiveStrategy:
         else:
             logger.warning(f"Failed to remove rule: {code} not found")
         return False
+
+
     def test_alert(self, text="这是一个测试报警"):
         """测试报警功能 (强制绕过全局开关以验证引擎)"""
         logger.info(f"🔔 Forced Test Alert: {text}")
@@ -3844,7 +3915,7 @@ class StockLiveStrategy:
             # ⭐ [FIX] 异步抓取逻辑：如果不在缓存且未在抓取中，则投递到并行线程池
             for c in codes:
                 cache_key = f"{c}_{resample}"
-                if cache_key in self.daily_history_cache or cache_key in self._pending_hist_fetches:
+                if cache_key in self._pending_hist_fetches:
                     continue
                 
                 self._pending_hist_fetches.add(cache_key)
@@ -3859,7 +3930,12 @@ class StockLiveStrategy:
         """异步抓取单只股票历史数据"""
         cache_key = f"{code}_{resample}"
         try:
-            df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+            # 还原为稳健的 dl 获取方式
+            dl = 70
+            if resample in ct.Resample_LABELS_Days:
+                dl = ct.Resample_LABELS_Days[resample]
+                
+            df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=dl, resample=resample, fastohlc=True)
             if df_hist is not None and not df_hist.empty:
                 df_hist.rename(columns={"vol": "volume"}, inplace=True)
                 # [NEW] Calculate TD Sequence

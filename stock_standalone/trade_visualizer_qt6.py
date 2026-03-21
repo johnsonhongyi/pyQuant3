@@ -988,7 +988,7 @@ class DataLoaderThread(QThread):
             for attempt in range(3):
                 try:
                     with QMutexLocker(self.mutex_lock):
-                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt}", warn_ms=800):
+                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt}", warn_ms=3800):
                             day_df = tdd.get_tdx_Exp_day_to_df(
                                 self.code, 
                                 dl=Resample_LABELS_Days[self.resample], 
@@ -997,7 +997,7 @@ class DataLoaderThread(QThread):
                             )
                     if not day_df.empty:
                         if 'ma60d' in day_df.columns:
-                            with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=800):
+                            with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=1800):
                                 day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
                             # print(f"'ma60d' in day_df.columns : {'ma60d' in day_df.columns} day_df['cycle_stage']:{day_df['cycle_stage']}")
                         break
@@ -1011,7 +1011,7 @@ class DataLoaderThread(QThread):
             for attempt in range(3):
                 try:
                     with QMutexLocker(self.mutex_lock):
-                        with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=800):
+                        with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=1800):
                             tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
                     if not tick_df.empty:
                         break
@@ -1026,7 +1026,7 @@ class DataLoaderThread(QThread):
 
             self._search_code = self.code
             self._resample = self.resample
-            with timed_ctx("emit", warn_ms=800):
+            with timed_ctx("emit", warn_ms=1800):
                 self.data_loaded.emit(self.code, day_df, tick_df)
 
         except Exception:
@@ -1291,12 +1291,12 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
             # ⭐ 核心逻辑：如果是切股后的第一笔，或者处于交易时间，则执行抓取
             is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 925)
             if is_work_time or debug_realtime or force_fetch:
-                with timed_ctx("realtime_worker_process", warn_ms=800):
+                with timed_ctx("realtime_worker_process", warn_ms=1800):
                     tick_df = s.get_real_time_tick(code, enrich_data=True)
                     # logger.debug(f'tick_df: {tick_df[:3]}')
                     # tick_df = drop_tick_all_zero(tick_df)
                 if tick_df is not None and not tick_df.empty:
-                    with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
+                    with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=1800):
                         today_bar = tick_to_daily_bar(tick_df)
                         # print(f'today_bar:{today_bar}')
                         try:
@@ -2331,6 +2331,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⚡ [NEW] 用户交互锁定计时：记录用户最后一次操作界面的时间
         # 用于播报反馈同步时判断是否强行滚动 (避免“拉回”效应)
         self._last_ui_interaction_time = 0
+        
+        # ⚡ [NEW] IPC Signal Debouncing Buffer
+        self._ipc_signal_buffer = []
+        self._ipc_signal_timer = QTimer(self)
+        self._ipc_signal_timer.setSingleShot(True)
+        self._ipc_signal_timer.timeout.connect(self._flush_ipc_signals)
 
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
@@ -3422,7 +3428,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 切回详细信息格式
             detailed_msg = f"[{timestamp}] {name}({code}) {pattern_cn}: {message}"
             
-            logger.info(f"⚡ [SIGNAL LOG] {code} {name} {pattern_cn}")
+            logger.debug(f"⚡ [SIGNAL LOG] {code} {name} {pattern_cn}")
 
             # 1. 播报语音 - ⚠️ 已重构：改为由 signal_log_panel.log_added 驱动
             # 此处不再执行 speak，确保只有成功记录到日志的信息才会被播报。
@@ -3635,15 +3641,18 @@ class MainWindow(QMainWindow, WindowMixin):
             if content.startswith("SIGNAL|"):
                 try:
                     json_str = content[7:]
-                    # logger.debug(f"[IPC DEBUG] Processing SIGNAL payload: {json_str[:50]}...")
                     data = json.loads(json_str)
-                    # 转发给 _update_signal_log_from_ipc
-                    # data 应该是 list of signals 或 single signal dict
+                    
+                    # ⚡ [DEBOUNCE] 加入缓冲区并启动定时器
                     if isinstance(data, dict):
-                        self._update_signal_log_from_ipc([data])
+                        self._ipc_signal_buffer.append(data)
                     elif isinstance(data, list):
-                        self._update_signal_log_from_ipc(data)
-                    logger.debug(f"IPC SIGNAL processed: {len(data) if isinstance(data, list) else 1} items")
+                        self._ipc_signal_buffer.extend(data)
+                    
+                    # 200ms 防抖，批量处理密集信号
+                    self._ipc_signal_timer.start(200)
+                    
+                    # logger.debug(f"IPC SIGNAL buffered: {len(data) if isinstance(data, list) else 1} items")
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")
                     
@@ -3670,11 +3679,22 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Error processing IPC command: {e}")
 
+    def _flush_ipc_signals(self):
+        """批量处理缓冲区中的 IPC 信号"""
+        if not self._ipc_signal_buffer:
+            return
+            
+        signals_to_process = self._ipc_signal_buffer.copy()
+        self._ipc_signal_buffer.clear()
+        
+        # logger.debug(f"[IPC] Flushing {len(signals_to_process)} buffered signals")
+        self._update_signal_log_from_ipc(signals_to_process)
+
     def _update_signal_log_from_ipc(self, data_list: list):
         from signal_message_queue import SignalMessage
         from signal_log_panel import SignalLogPanel
         """处理通过 IPC 推送的信号数据列表 (供测试套件或外部程序使用)"""
-        logger.info(f"[IPC] Processing {len(data_list)} signals from IPC")
+        logger.debug(f"[IPC] Processing {len(data_list)} signals from IPC")
         for data in data_list:
             try:
                 # 提取核心参数，兼容 PatternEvent, StandardSignal 和 SignalMessage 格式
@@ -5988,7 +6008,7 @@ class MainWindow(QMainWindow, WindowMixin):
             today_bar = tick_to_daily_bar(effective_tick_df)
 
             # 注意：這裡直接調用渲染，確保模擬數據被帶入
-            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=50):
+            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=400):
                 # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
                 self.render_charts(code, self.day_df, effective_tick_df)
 
@@ -5998,7 +6018,7 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
-            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=50):
+            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=400):
                 self.render_charts(code, self.day_df, None)
 
         '''
@@ -9224,7 +9244,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 kline_signals.extend(cached_strat[1])
                 # logger.debug(f"[PERF] Strategy Cache HIT for {code}")
             else:
-                with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
+                with timed_ctx("_run_strategy_simulation_signal", warn_ms=150):
                     sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=50)
                     kline_signals.extend(sim_signals)
                     self._strategy_cache[code] = (strat_key, sim_signals)
@@ -9234,7 +9254,7 @@ class MainWindow(QMainWindow, WindowMixin):
         now_ts = time.time()
         # 每 30 秒重新加载一次历史信号 CSV
         if now_ts - getattr(self, '_hist_df_last_load', 0) > 30:
-            with timed_ctx("get_signal_history_df", warn_ms=50):
+            with timed_ctx("get_signal_history_df", warn_ms=150):
                 self._hist_df_cache = self.logger.get_signal_history_df()
                 if not self._hist_df_cache.empty:
                     self._hist_df_cache['code'] = self._hist_df_cache['code'].astype(str)
@@ -9279,7 +9299,7 @@ class MainWindow(QMainWindow, WindowMixin):
         is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and tick_df is not None and not tick_df.empty
         
         if is_realtime_active:
-            with timed_ctx("_run_realtime_strategy", warn_ms=100):
+            with timed_ctx("_run_realtime_strategy", warn_ms=200):
                 shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
                 if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
                     # 优先使用 close, 其次 trade, 最后 price
@@ -9319,7 +9339,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.all_today_sbc_signals = cached_sbc[1]
                 # logger.debug(f"[PERF] SBC Cache HIT for {code}")
             else:
-                with timed_ctx("sbc_core_analysis", warn_ms=100):
+                with timed_ctx("sbc_core_analysis", warn_ms=200):
                     try:
                         # 委托 sbc_core 进行高性能批量分析
                         sbc_results = sbc_core.run_sbc_analysis_core(

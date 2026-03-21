@@ -3,6 +3,7 @@ from datetime import datetime
 import threading
 import gc
 import pandas as pd
+import numpy as np
 import sqlite3
 from collections import deque, defaultdict
 from typing import Any, Optional, cast
@@ -135,127 +136,118 @@ class MinuteKlineCache:
 
     def from_dataframe(self, df: Optional[pd.DataFrame], merge: bool = False):
         """
-        从 DataFrame 恢复缓存数据（性能优化版，可直接替换）
+        从 DataFrame 恢复缓存数据（极限性能优化版：NumPy 边界探测 + zip 批量实例化）
         """
         if df is None or df.empty:
             return
 
         try:
-            # 仅记录原始行数用于日志，避免双 copy
+            # 1. 预处理与向量化过滤 (不再全文 copy)
             raw_len = len(df)
-
-            # 只 copy 一次
-            df = df.copy()
-
             cols = df.columns
-
-            # code 规范化（只做一次）
+            
+            # [Optimization] 提前准备必要列，减少后续 DataFrame 索引开销
+            required_cols = ['code', 'time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start']
+            avail_cols = [c for c in required_cols if c in cols]
+            df = df[avail_cols].copy() # 仅 copy 筛选过的子集
+            
+            # code 规范化（核心：如果已经是 str 则跳过 astype）
             if 'code' in cols:
-                df['code'] = (
-                    df['code']
-                    .astype(str)
-                    .str.strip()
-                    .str.zfill(6)
-                )
+                if not pd.api.types.is_string_dtype(df['code']):
+                    df['code'] = df['code'].astype(str)
+                # 尽量避免频繁使用 .str 访问器
+                df['code'] = df['code'].str.strip().str.zfill(6)
 
             # time 规范化
             if 'time' in cols:
-                # int32 足够，速度和内存都更优
-                df['time'] = df['time'].astype('int32')
-
-                # --- [FIX] 加载时修复: 剔除非交易时段数据 ---
-                seconds_from_midnight = (df['time'] + 28800) % 86400
+                times_arr = df['time'].values.astype('int32')
+                
+                # --- [FIX] 全向量化时间准入判定 ---
+                # UTC+8 转换 (28800s)
+                seconds_from_midnight = (times_arr + 28800) % 86400
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
 
-                # --- [FIX] 加载时修复: 剔除竞价阶段模拟数据 (9:15-9:24) ---
-                # 历史日（非今天）一律剔除 9:15-9:24
-                # 今天的数据，如果当前已经过了 9:25，也一律剔除
+                # 使用 NumPy 逻辑加速过滤
                 now_dt = datetime.now()
                 now_hhmm = now_dt.hour * 100 + now_dt.minute
                 
-                # 使用 timestamp 快速判别今天 (UTC+8)
-                df_date_val = ((df['time'] + 28800) // 86400).astype(int)
-                today_date_val = int((time.time() + 28800) // 86400)
-                
-                is_today = (df_date_val == today_date_val)
-                # 准入规则 (情绪数据优化版)：
-                # 1. 9:25 及之后的成交数据全保留 (跨天分析、分时趋势的核心)
-                # 2. 9:15-9:24 (以及 9:26-9:29) 的模拟数据：
-                #    - 如果是【今天】且【目前还在开盘前】(now_hhmm < 930)，暂时保留用于主力意图预判。
-                #    - 一旦【跨入 9:30 以后】或加载【历史日期】，直接过滤 9:15-9:24 及其他非 9:25 的开盘前模拟数据。
+                day_val = (times_arr + 28800) // 86400
+                today_val = int((time.time() + 28800) // 86400)
+                is_today = (day_val == today_val)
+
                 mask_real = (hhmm >= 925)
-                # 只有 9:25 是真实的集合竞价结果，其他 (9:15-9:24, 9:26-9:29) 均为情绪数据
                 is_auction_result = (hhmm == 925)
                 mask_bidding_live = is_today & (hhmm >= 915) & (hhmm < 930) & (now_hhmm < 930)
                 
-                # 最终准入：要么是 9:25 之后(含9:25)的真实数据，要么是正在实盘竞价中的情绪数据
-                mask_am = mask_real | mask_bidding_live
+                mask_am = (mask_real | mask_bidding_live) & (hhmm <= 1131)
                 mask_pm = (hhmm >= 1300) & (hhmm <= 1505)
                 
-                df = df[(mask_am & (hhmm <= 1131)) | mask_pm]
+                final_mask = mask_am | mask_pm
                 
-                # 特殊二次过滤：如果是 9:30 以后加载今天的数据，强制剔除非 9:25 的 pre-9:30 数据
-                if is_today.any() and now_hhmm >= 930:
-                    df = df[~((df['code'].isin(df[is_today]['code'])) & (hhmm >= 915) & (hhmm < 930) & (~is_auction_result))]
+                # 如果是 9:30 以后加载今天的数据，过滤掉 9:15-9:24 模拟数据
+                if now_hhmm >= 930:
+                    today_sim_mask = is_today & (hhmm >= 915) & (hhmm < 930) & (~is_auction_result)
+                    final_mask &= (~today_sim_mask)
+                
+                df = df[final_mask]
 
-                # 排序 + 去重
-                df = (
-                    df
-                    .sort_values(['code', 'time'], kind='mergesort')
-                    .drop_duplicates(subset=['code', 'time'], keep='last')
-                )
+            if df.empty:
+                return
 
-            # [REFINED] Only clear if not merging
+            # 2. 排序与去重 (mergesort 保证稳定性，但这里 code 已排序)
+            df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
+
+            # 3. 提取底层 NumPy 数组实现“极限迭代”
+            codes = df['code'].values
+            times = df['time'].values
+            opens = df['open'].values
+            highs = df['high'].values
+            lows = df['low'].values
+            closes = df['close'].values
+            vols = df['volume'].values
+            cums = df['cum_vol_start'].values
+
+            # 探测股票代码变更边界
+            change_idx = np.where(codes[:-1] != codes[1:])[0] + 1
+            boundaries = np.concatenate(([0], change_idx, [len(df)]))
+
+            # 4. 局部变量加速
             if not merge:
                 self.clear()
-
-            # 局部变量加速
+            
             shared_cache = self._shared_cache
             max_len = self._max_len
-
-            # 提前绑定属性访问，减少 getattr 开销
-            from operator import attrgetter
-            get_time   = attrgetter('time')
-            get_open   = attrgetter('open')
-            get_high   = attrgetter('high')
-            get_low    = attrgetter('low')
-            get_close  = attrgetter('close')
-            get_volume = attrgetter('volume')
-            get_cum    = attrgetter('cum_vol_start')
-
-            # 按 code 分组重建（不再二次排序）
-            for code, group in df.groupby('code', sort=False):
-                kl_list = []
-
-                # itertuples 是目前 pandas -> Python 最快路径
-                for r in group.itertuples(index=False):
-                    try:
-                        kl_list.append(
-                            KLineItem(
-                                time=get_time(r),
-                                open=get_open(r),
-                                high=get_high(r),
-                                low=get_low(r),
-                                close=get_close(r),
-                                volume=get_volume(r),
-                                cum_vol_start=get_cum(r),
-                            )
-                        )
-                    except Exception:
-                        # 与原逻辑一致，跳过坏行
-                        continue
+            
+            # --- 核心循环 (NumPy Slicing + Python zip) ---
+            # zip(*arrays) 配合 list comprehension 是 Python 最快的对象实例化路径
+            for i in range(len(boundaries) - 1):
+                s_idx, e_idx = boundaries[i], boundaries[i+1]
+                code = str(codes[s_idx])
                 
-                # 初始加载裁切
+                # Slicing creates lightweight views in NumPy
+                kl_list = [
+                    KLineItem(t, o, h, l, cl, v, cv)
+                    for t, o, h, l, cl, v, cv in zip(
+                        times[s_idx:e_idx],
+                        opens[s_idx:e_idx],
+                        highs[s_idx:e_idx],
+                        lows[s_idx:e_idx],
+                        closes[s_idx:e_idx],
+                        vols[s_idx:e_idx],
+                        cums[s_idx:e_idx]
+                    )
+                ]
+                
                 if len(kl_list) > max_len:
                     kl_list = kl_list[-max_len:]
-                shared_cache[str(code)] = kl_list
+                shared_cache[code] = kl_list
 
             self._is_dirty = True
             self._is_restored = True
 
             logger.info(
-                f"♻️ MinuteKlineCache restored: {len(shared_cache)} stocks. "
+                f"♻️ MinuteKlineCache Optimized Restore: {len(boundaries)-1} stocks. "
                 f"[Rows: {raw_len} -> Cleaned: {len(df)}]"
             )
 
@@ -1729,7 +1721,7 @@ class DataPublisher:
                         logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
 
                 if not cached_df.empty:
-                    with timed_ctx("from_dataframe_timed", warn_ms=800):
+                    with timed_ctx("from_dataframe_timed", warn_ms=6000):
                         self.kline_cache.from_dataframe(cached_df)
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False

@@ -2955,7 +2955,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _apply_tree_data_sync(self, df, cur_res):
         """Sync step: update internal state and Tkinter UI on the main thread."""
-        with timed_ctx("apply_tree_data_sync_timed",warn_ms=300):
+        with timed_ctx("apply_tree_data_sync_timed",warn_ms=2000):
             try:
                 with self._df_lock:
                     # self.df_all = df  # 直接引用，减少 copy
@@ -6106,10 +6106,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         【唯一入口】策略线程调用此函数，将任务安全投递给主线程
         """
         try:
-            # 直接投递给最终的显示函数，不再中间转手
-            self._schedule_after(0, self._on_voice_alert_ui, code, name, msg)
+            # [FIX] 严禁在子线程直接调用 after，改用 dispatch_queue 投递
+            if hasattr(self, 'tk_dispatch_queue'):
+                task = lambda: self._on_voice_alert_ui(code, name, msg)
+                self.tk_dispatch_queue.put(task)
+            else:
+                # 兼容模式
+                self._schedule_after(0, self._on_voice_alert_ui, code, name, msg)
         except Exception:
-            # 捕获可能的线程退出异常或 RuntimeError
             pass
 
     def _on_voice_alert_ui(self, code, name, msg):
@@ -6119,7 +6123,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 1. 快速判断拦截
         alert_var = getattr(self, 'alert_popup_var', None)
         if not alert_var or not alert_var.get():
-            logger.info(f"Alert popup suppressed for {code} ({name}) by user setting.")
+            logger.debug(f"Alert popup suppressed for {code} ({name}) by user setting.")
             return # 仅在 INFO 级别以上才记录，减少 IO 开销
 
         # 2. 执行弹窗 (此处已在主线程)
@@ -6335,10 +6339,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 调度到主线程执行闪烁和震动
         try:
-            # ⭐ [DEBUG] 记录收到语音事件的代码，帮助定位联动问题
-            logger.debug(f"[Linkage] on_voice_speak_start received code: {code} (type: {type(code)})")
-            self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
-        except RuntimeError:
+            # ⭐ [FIX] 使用 dispatch_queue 确保主线程执行视觉效果
+            if hasattr(self, 'tk_dispatch_queue'):
+                task = lambda: self._trigger_alert_visual_effects(str(code), start=True)
+                self.tk_dispatch_queue.put(task)
+            else:
+                self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
+        except Exception:
             pass  # 主循环已停止，忽略
 
     def on_voice_speak_end(self, code):
@@ -6347,10 +6354,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 检查程序是否正在退出
         if getattr(self, '_is_closing', False): return
         try:
-            logger.debug(f"[Linkage] on_voice_speak_end received code: {code}")
-            self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=False))
-        except RuntimeError:
-            pass  # 主循环已停止，忽略
+            if hasattr(self, 'tk_dispatch_queue'):
+                task = lambda: self._trigger_alert_visual_effects(str(code), start=False)
+                self.tk_dispatch_queue.put(task)
+            else:
+                self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=False))
+        except Exception:
+            pass
 
 
     def _trigger_alert_visual_effects(self, code, start=True, retry_count=0):

@@ -138,31 +138,39 @@ class StockSender:
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
     def send(self, stock_code):
-        # print(f'send :{stock_code}')
-        threading.Thread(target=self._send_thread, args=(stock_code,)).start()
+        # [FIX] 在主线程预先提取所有 Tkinter 变量的值，防止子线程访问触发 GIL 崩溃
+        flags = {
+            'tdx': self._get_flag(self.tdx_var),
+            'ths': self._get_flag(self.ths_var),
+            'dfcf': self._get_flag(self.dfcf_var)
+        }
+        threading.Thread(target=self._send_thread, args=(stock_code, flags)).start()
 
-    def _send_thread(self, stock_code):
+    def _send_thread(self, stock_code, flags):
         """
         发送股票代码到各客户端
-        兼容 tk.BooleanVar / bool
+        使用预先提取的 flags 快照
         """
+        tdx_enabled = flags.get('tdx', False)
+        ths_enabled = flags.get('ths', False)
+        dfcf_enabled = flags.get('dfcf', False)
 
         # === TDX ===
-        if self._get_flag(self.tdx_var):
+        if tdx_enabled:
             self.send_to_tdx(stock_code)
             self.tdx_status = f"TDX-> 已发送 {stock_code}"
         else:
             self.tdx_status = "TDX-> 未选中"
 
         # === THS ===
-        if self._get_flag(self.ths_var):
+        if ths_enabled:
             self.send_to_ths(stock_code)
             self.ths_status = f"THS-> 已发送 {stock_code}"
         else:
             self.ths_status = "THS-> 未选中"
 
         # === 东方财富 ===
-        if self._get_flag(self.dfcf_var):
+        if dfcf_enabled:
             self.send_to_dfcf(stock_code)
             self.dfcf_status = f"DC-> 已发送 {stock_code}"
         else:

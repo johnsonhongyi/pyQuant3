@@ -1003,6 +1003,48 @@ class TradingLogger:
             logger.error(f"get_consecutive_losses error: {e}")
             return 0
 
+    def get_batch_consecutive_losses(self, codes: list[str], days: int = 15, resample: str = 'd') -> dict[str, int]:
+        """
+        [高性能] 批量获取多只股票的最近连续亏损次数
+        返回值: {code: loss_count}
+        """
+        if not codes: return {}
+        try:
+            conn = self.db_manager.get_connection()
+            cur = conn.cursor()
+            # 1. 一次性查出所有相关股票最近 N 天的已平仓记录
+            placeholders = ','.join(['?'] * len(codes))
+            query = f"""
+                SELECT code, profit FROM trade_records 
+                WHERE code IN ({placeholders}) AND resample=? AND status='CLOSED' AND date(buy_date) >= date('now', ?)
+                ORDER BY code, sell_date DESC
+            """
+            params = list(codes) + [resample, f'-{days} days']
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            cur.close()
+            
+            # 2. 内存中按 code 分组计算连续亏损
+            # 注意: ORDER BY code, sell_date DESC 保证了同一只股票的记录是连续且按时间倒序的
+            results = {code: 0 for code in codes}
+            current_code = None
+            consecutive_flag = True
+            
+            for code, profit in rows:
+                if code != current_code:
+                    current_code = code
+                    consecutive_flag = True
+                
+                if consecutive_flag:
+                    if profit < 0:
+                        results[code] += 1
+                    else:
+                        consecutive_flag = False
+            return results
+        except Exception as e:
+            logger.error(f"get_batch_consecutive_losses error: {e}")
+            return {code: 0 for code in codes}
+
     def get_market_sentiment(self, days: int = 5, resample: Optional[str] = None) -> float:
         """
         获取最近 N 天的全市场交易胜率 (用于感知市场环境)
