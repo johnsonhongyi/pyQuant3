@@ -867,9 +867,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def update_market_stats(self, stats: dict):
         try:
-            from PyQt6 import QtWidgets
-            app = QtWidgets.QApplication.instance()
-            if app: app.processEvents() # ⚡ [MINIMAL HEARTBEAT] 每次接收统计时驱动一次循环，确保 UI 活跃
+            # from PyQt6 import QtWidgets
+            # app = QtWidgets.QApplication.instance()
+            # if app: app.processEvents() # ⚡ [MINIMAL HEARTBEAT] 每次接收统计时驱动一次循环，确保 UI 活跃
             
             self._market_stats.update(stats)
             if hasattr(self, '_vol_dialog') and self._vol_dialog.isVisible(): self._vol_dialog.update_data(stats.get("vol_details", []))

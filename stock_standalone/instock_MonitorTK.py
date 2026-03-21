@@ -746,10 +746,55 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """Open the Indicator Help and Search window (Ctrl + /)"""
         stock_indicator_help.show_help(self)
 
+    # def _process_dispatch_queue(self):
+    #     from PyQt6.QtCore import QEventLoop
+    #     next_delay = 50 
+
+    #     try:
+    #         # 1. 限时处理 Tk 任务，防止某个坏任务卡死主线程
+    #         import time
+    #         start_t = time.perf_counter()
+            
+    #         while not self.tk_dispatch_queue.empty():
+    #             # 增加安全阀：单次循环处理任务不超过 10ms，防止任务堆积导致 UI 假死
+    #             if time.perf_counter() - start_t > 0.01: 
+    #                 next_delay = 10 # 任务太多，缩短下一次唤醒时间
+    #                 break
+                    
+    #             try:
+    #                 task = self.tk_dispatch_queue.get_nowait()
+    #                 if callable(task):
+    #                     task() 
+    #             except queue.Empty:
+    #                 next_delay = 200
+    #                 break
+    #             except Exception as e:
+    #                 # 定位具体是哪个任务报错，不中断循环
+    #                 logger.error(f"Task Execution Error: {e}\n{traceback.format_exc()}")
+
+    #     except Exception as e:
+    #         logger.error(f"Dispatch Queue Critical Error: {e}")
+
+    #     finally:
+    #         # 2. 泵送 Qt 事件（带 5ms 严格超时控制）
+    #         try:
+    #             if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
+    #                 # ProcessEventsFlag.AllEvents 确保 UI 刷新、鼠标点击都能处理
+    #                 QtWidgets.QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+    #         except Exception as e:
+    #             logger.debug(f"Qt Pump Error: {e}")
+
+    #         # 3. 检查关闭状态并调度
+    #         is_closing = getattr(self, '_is_closing', False) or \
+    #                      (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
+
+    #         if not is_closing:
+    #             self._schedule_after(next_delay, self._process_dispatch_queue)
+
     def _process_dispatch_queue(self):
         from PyQt6.QtCore import QEventLoop
         next_delay = 50 
-
+        processed_count = 0 
         try:
             # 1. 限时处理 Tk 任务，防止某个坏任务卡死主线程
             import time
@@ -757,14 +802,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             while not self.tk_dispatch_queue.empty():
                 # 增加安全阀：单次循环处理任务不超过 10ms，防止任务堆积导致 UI 假死
-                if time.perf_counter() - start_t > 0.01: 
-                    next_delay = 10 # 任务太多，缩短下一次唤醒时间
-                    break
+                time_used = time.perf_counter() - start_t
+                if time_used > 0.1:
+                    # 记录一下是因为超时退出的，还是跑完了退出的
+                    if not self.tk_dispatch_queue.empty():
+                        logger.error(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {self.tk_dispatch_queue.qsize()} 个在排队")
+                        next_delay = 5 
+                        break
                     
+                # --- 在 _process_dispatch_queue 的 while 循环内部 ---
                 try:
                     task = self.tk_dispatch_queue.get_nowait()
                     if callable(task):
-                        task() 
+                        # 1. 提取任务的真实身份
+                        t_func = task
+                        if isinstance(task, functools.partial):
+                            t_func = task.func
+                        
+                        # 尝试获取函数名，如果是 lambda，尝试看它的闭包或 repr
+                        t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(task)))
+                        t_name = t_name.split(' at ')[0].replace('<locals>.', '')
+
+                        task_start = time.perf_counter()
+                        
+                        # 2. 执行任务
+                        task()
+                        
+                        # 3. 统计单个任务耗时
+                        task_dur = (time.perf_counter() - task_start) * 1000
+                        if task_dur > 2000: # 超过 0.5 秒就报出它的“真名”
+                             logger.error(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
+                             
+                    processed_count += 1
                 except queue.Empty:
                     next_delay = 200
                     break
@@ -790,6 +859,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if not is_closing:
                 self._schedule_after(next_delay, self._process_dispatch_queue)
+
 
     def _schedule_after(self, ms, func, *args, key=None, debounce=True):
         if getattr(self, "_is_closing", False): return None
