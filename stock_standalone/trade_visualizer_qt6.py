@@ -1674,6 +1674,10 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         # 键盘导航联动
         table.currentCellChanged.connect(self._on_current_cell_changed)
         
+        # 启用右键菜单
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(lambda pos, t=table: self._on_table_right_click(t, pos))
+        
         # ⭐ 启用列排序功能
         table.setSortingEnabled(True)
         return table
@@ -1686,6 +1690,61 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         """键盘导航联动"""
         if current_row >= 0:
             self._link_signal(current_row, self.sender())
+
+    def _on_table_right_click(self, table, pos):
+        """[NEW] 策略信号队列右键菜单：支持发送到通达信异动联动等快捷操作"""
+        item = table.itemAt(pos)
+        if not item:
+            return
+            
+        row = table.row(item)
+        code_item = table.item(row, 1)
+        if not code_item:
+            return
+            
+        code = code_item.text()
+        
+        # 尝试提取附加数据
+        name_item = table.item(row, 2)
+        name = name_item.text() if name_item else ""
+        
+        menu = QtWidgets.QMenu(self)
+        
+        # 1. 发送到通达信
+        send_action = menu.addAction("📤 发送到通达信")
+        send_action.triggered.connect(lambda: self._send_to_tdx(code, name))
+        
+        # 2. 发送到异动联动
+        send_linkage_action = menu.addAction("📤 发送到异动联动")
+        send_linkage_action.triggered.connect(lambda: self._send_to_linkage(code))
+        
+        menu.exec(table.mapToGlobal(pos))
+        
+    def _send_to_linkage(self, code):
+        """调用主窗口的异动联动功能"""
+        try:
+            if hasattr(self.parent_window, '_on_send_to_signal_linkage'):
+                # 尝试获取该股票的完整数据行
+                row_data = None
+                if hasattr(self.parent_window, 'df_all') and not self.parent_window.df_all.empty and code in self.parent_window.df_all.index:
+                    row_data = self.parent_window.df_all.loc[code]
+                self.parent_window._on_send_to_signal_linkage(code, row_data)
+                logger.info(f"SignalBoxDialog: Called _on_send_to_signal_linkage for {code}")
+            else:
+                logger.warning("SignalBoxDialog: Main window has no _on_send_to_signal_linkage method.")
+        except Exception as e:
+            logger.error(f"SignalBoxDialog: Error sending to linkage: {e}")
+        
+    def _send_to_tdx(self, code, name=""):
+        """调用主窗口的 sender 实例发送股票到通达信"""
+        try:
+            if hasattr(self.parent_window, "sender") and hasattr(self.parent_window.sender, "send"):
+                self.parent_window.sender.send(code)
+                logger.info(f"SignalBoxDialog: Sent {code} {name} to Tdx Link via sender.send()")
+            else:
+                logger.warning("SignalBoxDialog: Main window has no sender/send method initialized.")
+        except Exception as e:
+            logger.error(f"SignalBoxDialog: Error sending to Tdx: {e}")
 
     def _link_signal(self, row, table):
         """执行联动逻辑"""
@@ -7327,9 +7386,9 @@ class MainWindow(QMainWindow, WindowMixin):
         
         menu.addSeparator()
         
-        # 发送到通达信
-        send_action = menu.addAction("📤 发送到通达信")
-        send_action.triggered.connect(lambda: self._on_send_to_tdx(stock_code, row))
+        # 发送到异动联动
+        send_action = menu.addAction("📤 发送到异动联动")
+        send_action.triggered.connect(lambda: self._on_send_to_signal_linkage(stock_code, row))
         
         menu.addSeparator()
         
@@ -7367,14 +7426,14 @@ class MainWindow(QMainWindow, WindowMixin):
         row = self.df_all.loc[stock_code] if (hasattr(self, 'df_all') and not self.df_all.empty and stock_code in self.df_all.index) else None
         hotlist_action.triggered.connect(lambda: self._on_add_to_hotlist_from_menu(stock_code, stock_name, row))
         
-        # 发送到通达信
-        send_action = menu.addAction("📤 发送到通达信")
-        send_action.triggered.connect(lambda: self._on_send_to_tdx(stock_code, row))
+        # 发送到异动联动
+        send_action = menu.addAction("📤 发送到异动联动")
+        send_action.triggered.connect(lambda: self._on_send_to_signal_linkage(stock_code, row))
 
         menu.exec(self.filter_tree.mapToGlobal(pos))
 
-    def _on_send_to_tdx(self, stock_code, row):
-        """发送到通达信"""
+    def _on_send_to_signal_linkage(self, stock_code, row):
+        """发送到异动联动"""
         if row is not None:
             success = self.push_stock_info(stock_code, row)
             if success:
@@ -8023,6 +8082,61 @@ class MainWindow(QMainWindow, WindowMixin):
             target_width: 强制使用的图表宽度（像素），用于布局加载时的预计算
         """
         try:
+            # 防止复位时引起的死循环重绘
+            if not getattr(self, '_is_resetting_charts', False):
+                is_from_button = isinstance(df, bool)
+                if is_from_button or force:
+                    # [FIX] 点击 reset 按键或要求 force 复位时，清理 K 线图基础数据解决图像重影问题
+                    logger.debug("Manual reset triggered, clearing charts to fix ghosting...")
+                    self._is_resetting_charts = True
+                    try:
+                        # [FIX] 摒弃 .clear()，改用靶向移除。防止销毁依赖初始化的 tick_pct_axis 轴对象和网格
+                        def clean_plot(plot, keep_items):
+                            for item in list(plot.items):
+                                if item not in keep_items and not isinstance(item, (pg.AxisItem, pg.GridItem)):
+                                    try:
+                                        plot.removeItem(item)
+                                    except Exception: pass
+                                    
+                        keep_kline = [getattr(self, a) for a in ['vline', 'hline', 'crosshair_label'] if hasattr(self, a)]
+                        keep_tick = [getattr(self, a) for a in ['tick_vline', 'tick_hline', 'tick_crosshair_label', 'tick_axis', 'tick_pct_axis'] if hasattr(self, a)]
+                        
+                        clean_plot(self.kline_plot, keep_kline)
+                        clean_plot(self.tick_plot, keep_tick)
+                        if hasattr(self, 'volume_plot'):
+                            keep_vol = [getattr(self, 'vol_date_axis')] if hasattr(self, 'vol_date_axis') else []
+                            clean_plot(self.volume_plot, keep_vol)
+                            
+                        # 彻底移除所有相关的缓存属性，强制重建
+                        clear_attrs = ['candle_item', 'vol_up_item', 'vol_down_item',
+                                    'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
+                                    'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ppre_avg_line', 'ghost_candle',
+                                    'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_box_pool',
+                                    'hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p', 'anno_arrow_p', 'anno_label_p']
+                        for attr in clear_attrs:
+                            if hasattr(self, attr):
+                                delattr(self, attr)
+                                
+                        # 重新初始化信号覆盖层 (SignalOverlay自己携带了ScatterItem的增添逻辑)
+                        self.signal_overlay = SignalOverlay(self.kline_plot, self.tick_plot)
+                        self.signal_overlay.set_on_click_handler(self.on_signal_clicked)
+                        
+                        # 重建自定义指标对象池 (如九转, 买卖文字池等)
+                        if hasattr(self, '_init_custom_tdx_indicators_pool'):
+                            self._init_custom_tdx_indicators_pool()
+
+                        # 获取正确数据用于重新渲染
+                        df_to_use = getattr(self, 'day_df', None) if df is None or isinstance(df, bool) else df
+                        if hasattr(self, 'current_code') and df_to_use is not None and not df_to_use.empty:
+                            self.render_charts(self.current_code, df_to_use, getattr(self, 'tick_df', pd.DataFrame()))
+                    except Exception as e:
+                        logger.error(f"Error during chart reset clear: {e}")
+                    finally:
+                        self._is_resetting_charts = False
+                    # [FIX] 无论 render_charts 内部是否触发了自动复位，此处必须允许放行
+                    # 因为通过点击按键触发的情况下（无新股切换、无周期切换等），render_charts 的第5步通常会被跳过
+                    # 放行后下方的 _reset_kline_view 原生逻辑会被执行，重新校准自适应视图
+
             # 1. 净化 df 参数
             # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
             if df is None or isinstance(df, bool):
