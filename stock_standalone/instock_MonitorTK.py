@@ -2270,15 +2270,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info(f"[INFO] {code} 无概念数据。")
             return []
 
-        # [OPTIMIZE] 使用 Pandas 向量化操作加速概念聚合，处理 5000+ 行数据时比循环快 50 倍以上
-        df_tmp = df_all_orig[['category']].copy()
+        # [OPTIMIZE] 增强热点追踪：引入均线趋势指标（MA5/20/60）
+        required_cols = ['category', 'ma5d', 'ma20d', 'ma60d', 'close']
+        # 兜底确保列存在
+        available_cols = [c for c in required_cols if c in df_all_orig.columns]
+        df_tmp = df_all_orig[available_cols].copy()
         df_tmp['percent'] = percent_series
         
         # 1. 拆分并展开 category 列，同时清洗
-        # 预先处理 NaN 和非字符串
         df_tmp['category'] = df_tmp['category'].fillna('').astype(str)
         df_exploded = df_tmp.assign(category=df_tmp['category'].str.split(';')).explode('category')
         df_exploded['category'] = df_exploded['category'].str.strip()
+        
+        # 预计算每只个股的趋势状态
+        if 'ma5d' in df_exploded.columns and 'ma60d' in df_exploded.columns:
+            # 强势大结构：MA5 > MA20 > MA60 且在 MA60 上
+            df_exploded['is_bullish'] = (df_exploded['ma5d'] > df_exploded['ma20d']) & \
+                                        (df_exploded['ma20d'] > df_exploded['ma60d']) & \
+                                        (df_exploded['close'] > df_exploded['ma60d'])
+            # 站在生命线上：Close > MA60
+            df_exploded['is_above_60'] = df_exploded['close'] > df_exploded['ma60d']
+        else:
+            df_exploded['is_bullish'] = False
+            df_exploded['is_above_60'] = True # 降级处理
         
         # 2. 快速过滤无效概念 (空字符串、'0' 等)
         df_exploded = df_exploded[
@@ -2287,17 +2301,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             (df_exploded['category'] != 'nan')
         ]
         
-        # 3. 按概念分组统计
-        g = df_exploded.groupby('category')['percent']
+        # 3. 按概念分组统计 (包含趋势指标列)
+        g = df_exploded.groupby('category')
         counts = g.size()
-        # 4. 过滤成员数不足 2 的概念并转换为字典（放宽过滤以包含更多小热点）
+        # 4. 过滤成员数不足 2 的概念 (过滤杂音)
         valid_mask = counts >= 2
         valid_concept_names = counts[valid_mask].index
         
         concept_dict = {}
+        concept_stats = {} # 存储每个板块的趋势统计 (如均线多头占比)
         for name in valid_concept_names:
-            group_vals = g.get_group(name).tolist()
-            concept_dict[name] = group_vals
+            grp = g.get_group(name)
+            concept_dict[name] = grp['percent'].tolist()
+            # 计算趋势占比 (均线多头占比)
+            bullish_ratio = grp['is_bullish'].mean() if 'is_bullish' in grp.columns else 0
+            above_60_ratio = grp['is_above_60'].mean() if 'is_above_60' in grp.columns else 1.0
+            concept_stats[name] = (bullish_ratio, above_60_ratio)
 
         # --- 按得分排序逻辑继续 ---
 
@@ -2323,13 +2342,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if follow_ratio < 0.5 and abs(avg_percent) > 2:
                 follow_ratio = 0.5
                 
+            # --- [STRATEGIC] 引入趋势权重算法 ---
+            bullish_ratio, above_60_ratio = concept_stats.get(c, (0, 1.0))
+            
+            # 1. 基础得分 (实时关联度)
             score = avg_percent * follow_ratio
+            
+            # 2. 趋势加成 (电力、电池等长效热点补偿)
+            # 强势结构占比每增加 10%，得分加成 15%
+            trend_multiplier = 1.0 + (bullish_ratio * 1.5)
+            
+            # 3. 破位惩罚 (拦截加速下跌中的反弹骗线)
+            # 如果板块内超过 70% 都在 60 日线下，判定为不可持续
+            if above_60_ratio < 0.3:
+                trend_multiplier *= 0.3 # 剧烈打折
+                
+            score *= trend_multiplier
+            
             # 保留两位小数
             score = round(score, 2)
             avg_percent = round(avg_percent, 2)
             follow_ratio = round(follow_ratio, 2)
             
-            concept_score.append((c, score, avg_percent, follow_ratio))
+            concept_score.append((c, score, avg_percent, follow_ratio, bullish_ratio))
 
         # --- 排序并返回 ---
         # 根据外部传入的 reverse 参数决定：上涨(True)则看领涨，下跌(False)则看跌势最强。
@@ -2338,6 +2373,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         scores = np.array([c[1] for c in concept_score])
         avg_percents = np.array([c[2] for c in concept_score])
         follow_ratios = np.array([c[3] for c in concept_score])
+        bullish_ratios = np.array([c[4] for c in concept_score])
         # 仅在工作日 9:25 后第一次刷新时重置
         now = datetime.now()
         now_t = int(now.strftime("%H%M"))
@@ -11461,6 +11497,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         scores = np.array([c[1] for c in top_concepts])
         avg_percents = np.array([c[2] for c in top_concepts])
         follow_ratios = np.array([c[3] for c in top_concepts])
+        bullish_ratios = np.array([c[4] for c in top_concepts]) if len(top_concepts) > 0 and len(top_concepts[0]) > 4 else np.zeros(len(top_concepts))
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
         # logger.info(f'concepts : {concepts} unique_code: {unique_code} ')
@@ -11521,8 +11558,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         plot.setLabel('left', '概念')
 
         y = np.arange(len(concepts))
-        color_map = pg.colormap.get('CET-R1')
-        brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+        # [OPTIMIZE] 适配 A 股红涨绿跌色彩逻辑
+        brushes = []
+        max_abs = max(np.abs(scores).max(), 1)
+        for s in scores:
+            if s >= 0:
+                # 红色 (涨): 强度随数值增加
+                intensity = int(min(255, 150 + (s/max_abs)*105))
+                brushes.append(pg.mkBrush((intensity, 50, 50, 200)))
+            else:
+                # 绿色 (跌): 强度随跌幅增加
+                intensity = int(min(255, 120 + (abs(s)/max_abs)*135))
+                brushes.append(pg.mkBrush((40, intensity, 40, 200)))
         bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
         plot.addItem(bars)
 
@@ -11532,11 +11579,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._font_size = font_size
         logger.info(f"concepts_pg 默认字体大小: {font_size}")
         texts = []
-        max_score = max(scores.max(), 1)
+        max_abs_score = max(np.abs(scores).max(), 1)
         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
-            text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
-            # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
-            text.setPos(score + 0.03 * max_score, y[i])
+            # [OPTIMIZE] 内容精简 + HTML 颜色 (白色增强对比度)
+            # anchor: (0, 0.5) 是左对齐, (1, 0.5) 是右对齐
+            # 若 score 为负, 文字应在柱子左侧, 故使用右对齐 anchor
+            cur_anchor = (1, 0.5) if score < 0 else (0, 0.5)
+            # 偏移量取最大绝对值的 2%
+            offset = 0.02 * max_abs_score
+            cur_pos = score - offset if score < 0 else score + offset
+            
+            # [OPTIMIZE] 显示趋势强度 [B XX%]
+            b_ratio = bullish_ratios[i] if i < len(bullish_ratios) else 0
+            b_tag = f" <span style='color: #FFD700;'>[B{int(b_ratio*100)}%]</span>" if b_ratio > 0 else ""
+            
+            text_val = f"<span style='color: white; font-weight: bold;'>{avg:+.2f}%{b_tag}</span>"
+            text = pg.TextItem(html=text_val, anchor=cur_anchor)
+            text.setPos(cur_pos, y[i])
             plot.addItem(text)
             texts.append(text)
             # logger.info(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
@@ -11747,19 +11806,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
                 arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
 
-                # 更新文字内容
-                text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
+                # [OPTIMIZE] 动态更新标注逻辑 (适配负值且精简内容)
+                max_abs_score = max(np.abs(scores).max(), 1)
+                
+                # 精简内容: 仅显示 avg 涨跌箭头与数值
+                text_html = f"<span style='color: white; font-weight: bold;'>{arrow_avg} {avg:+.2f}%</span>"
+                text.setHtml(text_html)
 
-                # ✅ 安全地设置字体大小（不调用 text.font()）
-                text.setFont(QtGui.QFont("Microsoft YaHei", self._font_size))
-
-                # 更新坐标
-                x = (scores[i] + 0.03 * max_score) * self.dpi_scale
-                y_pos = y[i] * self.dpi_scale
-                text.setPos(x, y_pos)
-                # 设置位置
-                # text.setPos(score + 0.03 * max_score, y[i])
-                text.setAnchor((0, 0.5))  # 垂直居中
+                # 动态锚点与偏移
+                cur_anchor = (1, 0.5) if score < 0 else (0, 0.5)
+                offset = 0.02 * max_abs_score
+                cur_x = (score - offset if score < 0 else score + offset) * self.dpi_scale
+                
+                text.setPos(cur_x, y[i] * self.dpi_scale)
+                text.setAnchor(cur_anchor)
             plot.update()
 
         # 定时轮询 DPI / 屏幕变化
@@ -11841,7 +11901,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         "concepts": [c_name],
                         "avg_percents": np.array([avg_percents[i]]),
                         "scores": np.array([scores[i]]),
-                        "follow_ratios": np.array([follow_ratios[i]])
+                        "follow_ratios": np.array([follow_ratios[i]]),
+                        "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW] 初始存储趋势占比
                     }
                     self._global_concept_init_data[c_name] = base_data
                 win._init_prev_concepts_data[c_name] = base_data
@@ -11854,7 +11915,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         "concepts": [c_name],
                         "avg_percents": np.array([avg_percents[i]]),
                         "scores": np.array([scores[i]]),
-                        "follow_ratios": np.array([follow_ratios[i]])
+                        "follow_ratios": np.array([follow_ratios[i]]),
+                        "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW]
                     }
                     self._global_concept_prev_data[c_name] = prev_data
                 win._prev_concepts_data[c_name] = prev_data
@@ -11880,7 +11942,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def update_single_pg_bar(self, win, score, avg, concept, color):
         import pyqtgraph as pg
         from PyQt6 import QtWidgets, QtCore, QtGui
-    def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios, force=False):
+    def update_pg_plot(self, w_dict, code, top_n, concepts, scores, avg_percents, follow_ratios, bullish_ratios, force=False):
         """
         更新 PyQtGraph 条形图窗口（NoSQL 多 concept 版本），保证排序对齐：
         1. 每个 concept 独立保存初始分数和上次刷新分数。
@@ -11956,28 +12018,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if prev_data:
                         self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
 
-            # --- 窗口初始化各自 concept 数据 ---
+            # --- 窗口初始化各自 concept 数据 (三级缓存机制：窗口缓存 -> 全局缓存 -> 初始化) ---
             for i, c_name in enumerate(concepts):
-                if c_name not in win._init_prev_concepts_data:
+                # 1. 获取/初始化初始基准 (Initial Benchmark)
+                if c_name in win._init_prev_concepts_data:
+                    base_data = win._init_prev_concepts_data[c_name]
+                else:
                     base_data = self._global_concept_init_data.get(c_name)
                     if base_data is None:
                         base_data = {
                             "concepts": [c_name],
                             "avg_percents": np.array([avg_percents[i]]),
                             "scores": np.array([scores[i]]),
-                            "follow_ratios": np.array([follow_ratios[i]])
+                            "follow_ratios": np.array([follow_ratios[i]]),
+                            "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW]
                         }
                         self._global_concept_init_data[c_name] = base_data
                     win._init_prev_concepts_data[c_name] = base_data
 
-                if c_name not in win._prev_concepts_data:
+                # 2. 获取/初始化实时备份 (Previous Data)
+                if c_name in win._prev_concepts_data:
+                    prev_data = win._prev_concepts_data[c_name]
+                else:
                     prev_data = self._global_concept_prev_data.get(c_name)
                     if prev_data is None:
                         prev_data = {
                             "concepts": [c_name],
                             "avg_percents": np.array([avg_percents[i]]),
                             "scores": np.array([scores[i]]),
-                            "follow_ratios": np.array([follow_ratios[i]])
+                            "follow_ratios": np.array([follow_ratios[i]]),
+                            "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW]
                         }
                         self._global_concept_prev_data[c_name] = prev_data
                     win._prev_concepts_data[c_name] = prev_data
@@ -11994,7 +12064,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         break
                     if (abs(prev_data["avg_percents"][0] - avg_percents[i]) > 1e-6 or
                         abs(prev_data["scores"][0] - scores[i]) > 1e-6 or
-                        abs(prev_data["follow_ratios"][0] - follow_ratios[i]) > 1e-6):
+                        abs(prev_data.get("bullish_ratios", [0])[0] - bullish_ratios[i]) > 1e-6):
                         data_changed = True
                         break
 
@@ -12015,13 +12085,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             max_score = max(scores) if len(scores) > 0 else 1
 
             # --- 主 BarGraphItem（使用排序后的 scores 和 y） ---
-            # ✅ [OPTIMIZE] 颜色逻辑优化：正分绿色(涨势)，负分红色(跌势)
+            # [OPTIMIZE] 适配 A 股红涨绿跌色彩逻辑
             brushes = []
+            max_abs_score = max(np.abs(scores).max(), 1)
             for s in scores:
                 if s >= 0:
-                    brushes.append(pg.mkBrush(0, 255, 0, 180)) # 绿色
+                    intensity = int(min(255, 150 + (s/max_abs_score)*105))
+                    brushes.append(pg.mkBrush((intensity, 40, 40, 180))) # 红色 (涨)
                 else:
-                    brushes.append(pg.mkBrush(255, 0, 0, 180)) # 红色
+                    intensity = int(min(255, 120 + (abs(s)/max_abs_score)*135))
+                    brushes.append(pg.mkBrush((40, intensity, 40, 180))) # 绿色 (跌)
             
             main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
             plot.addItem(main_bars)
@@ -12040,7 +12113,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     delta_bars_list.append(None)
                     continue
 
-                color = (0, 255, 0, 150) if delta > 0 else (255, 0, 0, 150)
+                color = (255, 50, 50, 150) if delta > 0 else (50, 255, 50, 150) # 红涨绿跌
                 x0 = base_score if delta > 0 else score
                 bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(delta)], brushes=[pg.mkBrush(color)])
                 plot.addItem(bar)
@@ -12048,26 +12121,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             w_dict["delta_bars"] = delta_bars_list
             # logger.info(f'texts: {texts}')
             # --- 更新文字显示（顺序保持和 y 对齐） ---
-            app_font = QtWidgets.QApplication.font()
-            font_family = app_font.family()
             for i, text in enumerate(texts):
                 score = scores[i]
                 delta = score - win._init_prev_concepts_data[concepts[i]]["scores"][0]
+                arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
 
-                if delta > 0:
-                    arrow = "↑"
-                    color = "green"
-                elif delta < 0:
-                    arrow = "↓"
-                    color = "red"
-                else:
-                    arrow = "→"
-                    color = "gray"
+                # [OPTIMIZE] 标注精简 + 趋势增强 [B XX%]
+                b_ratio = bullish_ratios[i] if i < len(bullish_ratios) else 0
+                b_tag = f" <span style='color: #FFD700;'>[B{int(b_ratio*100)}%]</span>" if b_ratio > 0 else ""
+                
+                text_html = f"<span style='color: white; font-size: 9pt; font-weight: bold;'>{arrow}{abs(delta):.1f} | {avg_percents[i]:+.2f}%{b_tag}</span>"
+                text.setHtml(text_html)
 
-                text.setText(f"{arrow}{delta:.1f} score:{score:.2f}\navg:{avg_percents[i]:.2f}%")
-                text.setColor(QtGui.QColor(color))
-                text.setPos(score + 0.03 * max_score, y[i])
-                text.setAnchor((0, 0.5))
+                # 动态布局：正值向右看齐, 负值向左看齐 (解决遮挡问题)
+                cur_anchor = (1, 0.5) if score < 0 else (0, 0.5)
+                # 偏移量取最大绝对值的 2%
+                offset = 0.02 * max_abs_score
+                cur_x = (score - offset if score < 0 else score + offset) * self.dpi_scale
+                
+                text.setPos(cur_x, y[i] * self.dpi_scale)
+                text.setAnchor(cur_anchor)
 
             plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
@@ -12077,6 +12150,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             plot._data_ref["scores"] = scores
             plot._data_ref["avg_percents"] = avg_percents
             plot._data_ref["follow_ratios"] = follow_ratios
+            plot._data_ref["bullish_ratios"] = bullish_ratios
             plot._data_ref["bars"] = main_bars
             plot._data_ref["brushes"] = brushes
 
@@ -12087,7 +12161,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     "concepts": [c_name],
                     "avg_percents": np.array([avg_percents[i]]),
                     "scores": np.array([scores[i]]),
-                    "follow_ratios": np.array([follow_ratios[i]])
+                    "follow_ratios": np.array([follow_ratios[i]]),
+                    "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW] 存储趋势占比
                 }
 
             # --- 增量条闪烁 ---
@@ -12141,6 +12216,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             scores = np.array([c[1] for c in top_concepts_sorted])
             avg_percents = np.array([c[2] for c in top_concepts_sorted])
             follow_ratios = np.array([c[3] for c in top_concepts_sorted])
+            bullish_ratios = np.array([c[4] for c in top_concepts_sorted]) if len(top_concepts_sorted) > 0 and len(top_concepts_sorted[0]) > 4 else np.zeros(len(top_concepts_sorted))
 
             # --- 校验概念列表是否为空 ---
             if len(concepts) == 0:
@@ -12153,7 +12229,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # logger.info(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
             logger.info(f'更新图形: {unique_code} : {concepts}')
             # --- 更新图形 ---
-            self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios, force=force)
+            self.update_pg_plot(w_dict, code, top_n, concepts, scores, avg_percents, follow_ratios, bullish_ratios, force=force)
 
             logger.info(f"[Auto] 已自动刷新 {code}")
 
