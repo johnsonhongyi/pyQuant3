@@ -429,7 +429,15 @@ def get_row_tags(latest_row: Union[pd.Series, dict[str, Any]]) -> list[str]:
     high4: Any = latest_row.get("high4")
     ma5d: Any = latest_row.get("ma5d")
     ma20d: Any = latest_row.get("ma20d")
+    ma60d: Any = latest_row.get("ma60d") # [NEW] 引入趋势基准
+    close: Any = latest_row.get("close", latest_row.get("trade", 0))
     percent_val: Any = latest_row.get("percent", latest_row.get("per1d", 0))
+
+    # 🚀 [TREND] 强势结构识别：均线顺向排列 MA5 > MA20 > MA60 且价格在 60 日线上
+    if pd.notna(ma5d) and pd.notna(ma20d) and pd.notna(ma60d):
+        if ma5d > ma20d > ma60d and close > ma60d:
+            row_tags.append("bullish_trend")
+
     # 1️⃣ 红色：低点 > 昨收
     if pd.notna(low) and pd.notna(lastp1d):
         if low > lastp1d:

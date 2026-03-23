@@ -38,6 +38,7 @@ class StockFeatureMarker:
         # 特殊标记
         'starred': {'bg': '#ffffcc', 'fg': '#666600'},       # 黄色(收藏)
         'alert': {'bg': '#ffdddd', 'fg': '#990000'},         # 红色(报警)
+        'bullish_trend': {'bg': '#FFF0F5', 'fg': '#800080'}, # [NEW] 淡紫/深红趋势高亮
     }
     
     # 图标配置
@@ -50,6 +51,7 @@ class StockFeatureMarker:
         'new_low': '⬇️',
         'starred': '⭐',
         'alert': '⚠️',
+        'bullish_trend': '🚀',   # [NEW] 强势波段标识
     }
     
     def __init__(self, tree, enable_colors=True):
@@ -72,6 +74,8 @@ class StockFeatureMarker:
                 background=colors.get('bg', ''),
                 foreground=colors.get('fg', '')
             )
+        # [NEW] 🚀 确保强势趋势样式在所有列表(主表/Top10)中均全局生效
+        self.tree.tag_configure("bullish_trend", background="#FFF0F5", font=("Arial", 10, "bold"))
         
         logger.info(f"✅ 已配置{len(self.COLORS)}种标记颜色")
     
@@ -118,10 +122,14 @@ class StockFeatureMarker:
             tags.append('high_volume')
         
         # 3. 概念热点判断(如果有category字段)
-        category = row_data.get('category', '')
-        if category and self._is_hot_concept(category):
-            tags.append('hot_concept')
-        
+        # 4. [NEW] 趋势排列判断
+        ma5 = row_data.get('ma5d')
+        ma20 = row_data.get('ma20d')
+        ma60 = row_data.get('ma60d')
+        if ma5 and ma20 and ma60:
+            if ma5 > ma20 > ma60 and row_data.get('price', 0) > ma60:
+                tags.append('bullish_trend')
+                
         return tags
     
     def _is_hot_concept(self, category: str) -> bool:
@@ -183,9 +191,14 @@ class StockFeatureMarker:
         if lastdu4 >= 3:
             icons.append(self.ICONS['starred'])
 
-        # 8. 预警/破位 (⚠️)
-        if price > 0 and low4 > 0 and price < low4:
-            icons.append(self.ICONS['alert'])
+        # 9. [NEW] 🚀 均线趋势识别 (MA5 > MA20 > MA60)
+        ma5 = row_data.get('ma5d')
+        ma20 = row_data.get('ma20d')
+        ma60 = row_data.get('ma60d')
+        if ma5 and ma20 and ma60:
+            if ma5 > ma20 > ma60 and price > ma60:
+                # 注入火箭图标，并确保排在较前位置（优先级高）
+                icons.insert(0, self.ICONS['bullish_trend'])
             
         return ''.join(icons)
     
