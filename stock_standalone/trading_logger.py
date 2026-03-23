@@ -460,7 +460,7 @@ class TradingLogger:
             try:
                 from JohnsonUtil import commonTips as cct
                 if not cct.get_work_time():
-                    logger.warning(f"TradeLogger: 非交易时间，拒绝记录交易 ({code} {action})")
+                    logger.debug(f"TradeLogger: 非交易时间，拒绝记录交易 ({code} {action})")
                     return
             except Exception as check_e:
                 logger.debug(f"TradeLogger: 交易日检查失败 (fallback to allow): {check_e}")

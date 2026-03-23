@@ -833,7 +833,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if time_used > 0.1:
                     # 记录一下是因为超时退出的，还是跑完了退出的
                     if not self.tk_dispatch_queue.empty():
-                        logger.error(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {self.tk_dispatch_queue.qsize()} 个在排队")
+                        delay_task = self.tk_dispatch_queue.qsize()
+                        if delay_task > 20 or processed_count > 10:
+                            logger.error(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {delay_task} 个在排队")
+                        else:
+                            logger.debug(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {delay_task} 个在排队")
                         next_delay = 5 
                         break
                     
@@ -6498,6 +6502,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
         except Exception:
             pass  # 主循环已停止，忽略
+
+        
+    # def on_voice_speak_start(self, code):
+    #     if not code or getattr(self, '_is_closing', False):
+    #         return
+
+    #     def task():
+    #         self.flash_taskbar()
+    #         self._trigger_alert_visual_effects(str(code), start=True)
+
+    #     if hasattr(self, 'tk_dispatch_queue'):
+    #         self.tk_dispatch_queue.put(task)
+    #     else:
+    #         self._schedule_after(0, task)
 
     def on_voice_speak_end(self, code):
         """语音播报结束的回调"""
