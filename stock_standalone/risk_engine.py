@@ -130,7 +130,7 @@ class RiskEngine:
                 state['below_nclose_count'] = 0
             
             if state['below_nclose_count'] >= self.below_nclose_trigger:
-                signals.append(("RISK", f"[Risk] 卖出 {name} 连续低于今日均价 {nclose:.2f} (当前 {price:.2f})"))
+                signals.append(("RISK", f"卖出 {name} 连续低于今日均价 {nclose:.2f} (当前 {price:.2f})"))
                 state['below_nclose_count'] = 0  # 触发后重置
         
         # ---------- 昨日收盘风控 ----------
@@ -147,7 +147,7 @@ class RiskEngine:
                 state['below_last_close_count'] = 0
             
             if state['below_last_close_count'] >= self.below_last_close_trigger:
-                signals.append(("RISK", f"[Risk] 减仓 {name} 连续低于昨日收盘 {last_close:.2f} (当前 {price:.2f})"))
+                signals.append(("RISK", f"减仓 {name} 连续低于昨日收盘 {last_close:.2f} (当前 {price:.2f})"))
                 state['below_last_close_count'] = 0  # 触发后重置
         
         return signals
@@ -353,7 +353,7 @@ class RiskEngine:
             格式化的消息字符串
         """
         ratio_str = f"{ratio * 100:.0f}%" if ratio > 0 else "清仓"
-        return f"[Risk] {name} {action} 当前价 {price:.2f} 建议仓位 {ratio_str} | {reason}"
+        return f"{name} {action} 当前价 {price:.2f} 建议仓位 {ratio_str} | {reason}"
 
     def get_risk_state(self, code: str) -> Dict[str, Any]:
         """

@@ -3015,7 +3015,7 @@ class StockLiveStrategy:
                     # 防止 NaN 转换为整数失败
                     if pd.isna(pos_val):
                         pos_val = 0
-                    messages.append(("POSITION", f'[Decision] {data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
+                    messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
 
                 # 💥 [NEW] 提取指标并增强报警消息
                 td_setup = decision["debug"].get("td_setup", 0)

@@ -205,7 +205,7 @@ HIGH_PRIORITY_KEYWORDS = [
     "低开高走", "放量突破", "[HIGH]", "高优先级"
 ]
 # 保留原有部分辅助关键词
-HIGH_PRIORITY_KEYWORDS.extend(["卖出", "清仓", "止损", "离场", "减仓", "减持"])
+# HIGH_PRIORITY_KEYWORDS.extend(["卖出", "清仓", "止损", "离场", "减仓", "减持"])
 
 sort_cols: list[str]
 sort_keys: list[str]
