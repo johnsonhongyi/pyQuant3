@@ -3015,15 +3015,15 @@ class StockLiveStrategy:
                     # 防止 NaN 转换为整数失败
                     if pd.isna(pos_val):
                         pos_val = 0
-                    messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
+                    messages.append(("POSITION", f'[Decision] {data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
 
                 # 💥 [NEW] 提取指标并增强报警消息
                 td_setup = decision["debug"].get("td_setup", 0)
                 top_score = decision["debug"].get("top_score", 0.0)
                 if td_setup >= 8:
-                    messages.append(("RULE", f"TD序列: 已达到 {td_setup} (接近见顶风险)"))
+                    messages.append(("RULE", f"[Signal] TD序列: 已达到 {td_setup} (接近见顶风险)"))
                 if top_score > 0.6:
-                    messages.append(("RISK", f"顶部风险评分: {top_score:.2f} (高位建议减仓)"))
+                    messages.append(("RISK", f"[Signal] 顶部风险评分: {top_score:.2f} (高位建议减仓)"))
 
                 # ---------- 风控调整仓位 ----------
                 action, ratio = self._risk_engine.adjust_position(data, decision["action"], decision["position"])
@@ -3031,7 +3031,7 @@ class StockLiveStrategy:
                     # 防止 NaN 转换失败
                     if pd.isna(ratio):
                         ratio = 0
-                    messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
+                    messages.append(("POSITION", f'[Risk] {data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
                 if messages:
                     priority_order = ["RISK","RULE","POSITION","PATTERN"]

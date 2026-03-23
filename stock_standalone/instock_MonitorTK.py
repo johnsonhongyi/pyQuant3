@@ -197,9 +197,15 @@ saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # -------------------- 常量 -------------------- #
 MAX_ALERT_POPUP_QUEUE = 20  # 单批次弹窗队列最大长度
 MAX_TOTAL_ALERTS = 50       # 总报警窗口数量上限
-# HIGH_PRIORITY_KEYWORDS = ["低开高走", "放量突破", "[HIGH]", "高优先级", "核心", "热点龙头", "主升", "连阳", "强势", "回踩", "突破", "买入", "信号", "持有", "仓位", "护航", "主升浪", "卖出", "清仓", "止损", "离场", "减仓", "减持"]
-# HIGH_PRIORITY_KEYWORDS = ["低开高走","低开走高", "放量突破", "高优先级", "热点龙头", "主升",  "强势", "买入", "主升浪", "卖出", "清仓", "止损", "离场", "减仓", "减持"]
-HIGH_PRIORITY_KEYWORDS = ["低开高走","低开走高", "放量突破","[HIGH]", "高优先级", "买入", "卖出", "清仓", "止损", "离场", "减仓", "减持"]
+# --- 信号分级与优先级配置 (Enhanced for Trend Tracking) ---
+HIGH_PRIORITY_KEYWORDS = [
+    "🚀", "强势结构", "SBC", "🔥", "趋势加速", "[ALPHA]", "[DRAGON]",
+    "突破", "启动", "主升", "连阳", "强力反转", "量价齐升", "反包",
+    "买入", "加仓", "核心热点", "龙头", "封板",
+    "低开高走", "放量突破", "[HIGH]", "高优先级"
+]
+# 保留原有部分辅助关键词
+HIGH_PRIORITY_KEYWORDS.extend(["卖出", "清仓", "止损", "离场", "减仓", "减持"])
 
 sort_cols: list[str]
 sort_keys: list[str]
@@ -492,6 +498,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame.pack(fill="x", padx=5, pady=1)
 
         self.st_key_sort = self.global_values.getkey("st_key_sort") or st_key_sort
+        
+        # 🚀 [NEW] 全局概念看板缓存初始化 (Hotfix for UnboundLocalError)
+        self._global_concept_init_data = {}
+        self._global_concept_prev_data = {}
+        self._concept_data_loaded = False
 
         # ====== 底部状态栏 ======
         status_frame = tk.Frame(self, relief="sunken", bd=1)
@@ -938,7 +949,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 func(*args)
                 
                 duration = (time.time() - exec_start) * 1000
-                if duration > 3000:
+                # ⭐ [FIX] 针对语音播报弹窗逻辑，豁免耗时提示（避免 TTS 同步阻塞引发的虚假告警）
+                # 由于用户担心异步化引发 GIL 问题，此处采用“白名单静默”策略
+                if duration > 3000 and "_create_single_alert_popup" not in display_name:
                     logger.error(f"⚡ 运行沉重: [{display_name}] 自身耗时:{duration:.2f}ms")
                     
             except Exception as e:
@@ -6939,8 +6952,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.debug(f"队列中已有同股请求，更新消息: {code}")
                 return
         
-        self._alert_queue.append([code, name, msg])
-        logger.debug(f"弹窗请求加入队列: {code}, 队列长度: {len(self._alert_queue)}")
+        item = [code, name, msg]
+        # ⭐ [ENHANCEMENT] 优先级插队逻辑：真趋势信号 (🚀, SBC 等) 优先弹出，不等待杂音队列
+        is_priority = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
+        if is_priority:
+            self._alert_queue.insert(0, item)
+            # ⭐ [FIX] 报警溯源增强：将多行消息拆分记录，确保每行都有行号标识
+            msg_lines = msg.split('\n')
+            logger.info(f"🚀 高价值信号插队置顶: {code} {msg_lines[0]} (队列:{len(self._alert_queue)})")
+            for line in msg_lines[1:]:
+                if line.strip():
+                    logger.info(f"   ∟ {code} 详情: {line.strip()}")
+        else:
+            self._alert_queue.append(item)
+            # ⭐ [FIX] 日志溯源增强：分行摘要，防止长文本换行导致元数据丢失
+            msg_snip = msg.split('\n')[0][:50]
+            logger.debug(f"弹窗请求加入队列: {code} {msg_snip}... 队列长度: {len(self._alert_queue)}")
         
         # 启动队列处理（如果未运行）
         if not self._alert_queue_processing:
@@ -7042,12 +7069,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # ===== 直接创建完整弹窗 =====
             win = tk.Toplevel(self)
+            win.stock_code = code # [NEW] 补全核心属性识别
+            win.stock_name = name # [NEW] 补全核心属性识别
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.geometry("400x180")
-            win.configure(bg="#fff")
-            win.stock_code = code
-            win.is_high_priority = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
+            # ⭐ [ENHANCEMENT] 高优先级报警应用金色/淡红背景，增强视觉差异
+            is_high = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
+            bg_color = "#FFF9E6" if is_high else "#fff" # 金边浅黄背景，更柔和但醒目
+            border_color = "#FFD700" if is_high else "#ccc" # 纯金边框
+            
+            win.configure(bg=bg_color)
+            win.is_high_priority = is_high
             
             # ===== [MODIFIED] 视觉特效逻辑：变色提示优先级，震动同步语音 =====
             def start_priority_flashing(current_msg=None, w=win):
@@ -9420,7 +9453,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'hv': row.get('hv', 0),
                         'lv': row.get('lv', 0),
                         'llowvol': row.get('llowvol', 0),
-                        'lastdu4': row.get('lastdu4', 0)
+                        'lastdu4': row.get('lastdu4', 0),
+                        # [NEW] 补全趋势识别关键字段
+                        'ma5d': row.get('ma5d', 0),
+                        'ma20d': row.get('ma20d', 0),
+                        'ma60d': row.get('ma60d', 0)
                     }
                     
                     # 获取图标
@@ -12020,36 +12057,50 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # --- 窗口初始化各自 concept 数据 (三级缓存机制：窗口缓存 -> 全局缓存 -> 初始化) ---
             for i, c_name in enumerate(concepts):
+                base_data = None
+                prev_data = None
+                
+                # 索引安全保护
+                try:
+                    curr_score = scores[i]
+                    curr_avg = avg_percents[i]
+                    curr_follow = follow_ratios[i]
+                    curr_bullish = bullish_ratios[i] if i < len(bullish_ratios) else 0
+                except (IndexError, KeyError):
+                    continue
+
                 # 1. 获取/初始化初始基准 (Initial Benchmark)
                 if c_name in win._init_prev_concepts_data:
                     base_data = win._init_prev_concepts_data[c_name]
                 else:
-                    base_data = self._global_concept_init_data.get(c_name)
+                    global_init = getattr(self, "_global_concept_init_data", {})
+                    base_data = global_init.get(c_name)
                     if base_data is None:
                         base_data = {
                             "concepts": [c_name],
-                            "avg_percents": np.array([avg_percents[i]]),
-                            "scores": np.array([scores[i]]),
-                            "follow_ratios": np.array([follow_ratios[i]]),
-                            "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW]
+                            "avg_percents": np.array([curr_avg]),
+                            "scores": np.array([curr_score]),
+                            "follow_ratios": np.array([curr_follow]),
+                            "bullish_ratios": np.array([curr_bullish])
                         }
-                        self._global_concept_init_data[c_name] = base_data
+                        global_init[c_name] = base_data
                     win._init_prev_concepts_data[c_name] = base_data
 
                 # 2. 获取/初始化实时备份 (Previous Data)
                 if c_name in win._prev_concepts_data:
                     prev_data = win._prev_concepts_data[c_name]
                 else:
-                    prev_data = self._global_concept_prev_data.get(c_name)
+                    global_prev = getattr(self, "_global_concept_prev_data", {})
+                    prev_data = global_prev.get(c_name)
                     if prev_data is None:
                         prev_data = {
                             "concepts": [c_name],
-                            "avg_percents": np.array([avg_percents[i]]),
-                            "scores": np.array([scores[i]]),
-                            "follow_ratios": np.array([follow_ratios[i]]),
-                            "bullish_ratios": np.array([bullish_ratios[i]]) # [NEW]
+                            "avg_percents": np.array([curr_avg]),
+                            "scores": np.array([curr_score]),
+                            "follow_ratios": np.array([curr_follow]),
+                            "bullish_ratios": np.array([curr_bullish])
                         }
-                        self._global_concept_prev_data[c_name] = prev_data
+                        global_prev[c_name] = prev_data
                     win._prev_concepts_data[c_name] = prev_data
 
             # --- 检查是否需要刷新（数据完全一致时跳过） ---
@@ -12062,9 +12113,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if prev_data is None:
                         data_changed = True
                         break
+                    
+                    # 越界安全比对
+                    curr_bullish = bullish_ratios[i] if i < len(bullish_ratios) else 0
+                    
                     if (abs(prev_data["avg_percents"][0] - avg_percents[i]) > 1e-6 or
                         abs(prev_data["scores"][0] - scores[i]) > 1e-6 or
-                        abs(prev_data.get("bullish_ratios", [0])[0] - bullish_ratios[i]) > 1e-6):
+                        abs(prev_data.get("bullish_ratios", [0])[0] - curr_bullish) > 1e-6):
                         data_changed = True
                         break
 
@@ -12128,7 +12183,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # [OPTIMIZE] 标注精简 + 趋势增强 [B XX%]
                 b_ratio = bullish_ratios[i] if i < len(bullish_ratios) else 0
-                b_tag = f" <span style='color: #FFD700;'>[B{int(b_ratio*100)}%]</span>" if b_ratio > 0 else ""
+                b_tag = f" <span style='color: #FF69B4; font-weight: bold;'>[B{int(b_ratio*100)}%]</span>" if b_ratio > 0 else ""
                 
                 text_html = f"<span style='color: white; font-size: 9pt; font-weight: bold;'>{arrow}{abs(delta):.1f} | {avg_percents[i]:+.2f}%{b_tag}</span>"
                 text.setHtml(text_html)

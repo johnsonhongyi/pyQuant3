@@ -977,13 +977,19 @@ class IntradayPatternDetector:
         # 1. 当前必须在均线上方
         is_above_vwap = curr_p >= vwap * conf_mm["vwap_tolerance"]
         
+        # ⭐ [ENHANCEMENT] 结构性强度保护：如果依然在 MA5 之上，或处于新高 1% 范围内，视为强势震荡而非转弱
+        ma5_curr = float(day_row.get('ma5', day_row.get('ma5d', 0)))
+        max_5d = float(day_row.get('max5', day_row.get('high5', 0)))
+        # 如果价格依然在 MA5 之上 0.3% 或 处于 5 日最高价的 0.8% 范围内，认为结构未坏
+        is_structurally_strong = (ma5_curr > 0 and curr_p > ma5_curr * 1.003) or (max_5d > 0 and curr_p >= max_5d * 0.992)
+        
         key = f"{code}_master_momentum_state"
         if key not in self._cache:
             self._cache[key] = {'ever_broken': False, 'failure_signaled': False}
         state = self._cache[key]
 
-        # 核心逻辑：一旦跌破，标记永久失效
-        if not is_above_vwap:
+        # 核心逻辑：一旦跌破且结构不再走强，才标记永久失效
+        if not is_above_vwap and not is_structurally_strong:
             if not state['ever_broken']:
                 state['ever_broken'] = True
                 # [NEW] 触发一次“主升转弱”信号
@@ -992,7 +998,7 @@ class IntradayPatternDetector:
                         code=code, name=name, pattern='momentum_failure',
                         timestamp=datetime.now().strftime('%H:%M:%S'),
                         price=curr_p,
-                        detail=f"主升转弱: 跌破均线支撑({vwap:.2f}), 注意跑路!",
+                        detail=f"主升转弱: 跌破均线支撑({vwap:.2f})且结构走弱, 注意观察!",
                         is_high_priority=True
                     ))
             return events
