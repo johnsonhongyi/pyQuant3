@@ -2205,7 +2205,7 @@ def check_code_vect_sum_opt(code,top_all,resample='d'):
     print(f'data: resample: {resample} \n')
     print(f'code: {code_list}  ---------------------------')
 
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
 
 
 def get_vect_daily_data(top_all,code_list):

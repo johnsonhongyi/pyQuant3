@@ -139,7 +139,7 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
         # if os.path.exists(sina_data_fname):
         #     os.remove(sina_data_fname)
         #     logger.info(f"[CLEAN_OK] {today} 同步已清理过期文件: {sina_data_fname}")
-        logger.info(f"[CLEAN_OK] {today} 已清理过期文件: {fname} : {MultiIndex_fname}")
+        logger.info(f"[CLEAN_OK] {today} 已清理过期文件: {fname}")
     except Exception as e:
         logger.error(f"[CLEAN_ERR] 删除失败: {fname}, err={e}")
         return False

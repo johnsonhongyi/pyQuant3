@@ -1721,7 +1721,7 @@ class DataPublisher:
                         logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
 
                 if not cached_df.empty:
-                    with timed_ctx("from_dataframe_timed", warn_ms=6000):
+                    with timed_ctx("from_dataframe_timed", warn_ms=5000):
                         self.kline_cache.from_dataframe(cached_df)
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False
