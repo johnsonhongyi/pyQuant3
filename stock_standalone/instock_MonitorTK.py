@@ -691,6 +691,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # ⭐ 启动完成计时
         init_elapsed = time.time() - self._init_start_time
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
+
+        # 🚀 [NEW] 初始化完成联动：如果 vis 开启，自动打开可视化窗口，避免后续“冷启动”引发 GIL 崩溃
+        if hasattr(self, 'vis_var') and self.vis_var.get():
+            # # 获取初始化时可能已有的首行代码
+            # target_code = getattr(self, "select_code", None)
+            # if not target_code:
+            #     first_item = self.tree.get_children()
+            #     if first_item:
+            #         target_code = self.tree.item(first_item[0], "values")[0]
+            
+            # if target_code:
+            #     # 延迟 2 秒启动，确保主窗口数据已完成第一轮加载并渲染
+            #     self._schedule_after(30000, lambda: self.open_visualizer(target_code))
+            self._schedule_after(45000, lambda: self.open_visualizer('000001'))
+            
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
 
@@ -11155,11 +11170,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.selection_set(target_iid)
             tree.focus(target_iid)
             # # 强制刷新 Treeview 渲染，再滚动
-            win.update_idletasks()      # 确保 Treeview 已渲染
             def scroll_and_highlight():
-                tree.see(target_iid)
-                self._highlight_tree_selection(tree, target_iid)
-
+                try:
+                    if tree.winfo_exists() and tree.exists(target_iid):
+                        tree.see(target_iid)
+                        self._highlight_tree_selection(tree, target_iid)
+                except Exception as e:
+                    # 静默处理：项可能在 50ms 延迟期间被删除或刷新
+                    pass
 
             win.after(50, scroll_and_highlight)
             # 更新窗口索引和选中 code

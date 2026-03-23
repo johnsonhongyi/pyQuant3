@@ -883,7 +883,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.debug(f"Update market stats failed: {e}")
 
     def _on_card_clicked(self, key):
-        mapping = {"follow": "全部信号", "breakout": "突破加速", "risk": "卖点预警", "breakdown": "结构破位"}
+        mapping = {"follow": "跟单信号", "breakout": "突破加速", "risk": "卖点预警", "breakdown": "结构破位"}
         tab_name = mapping.get(key)
         if tab_name:
             for i in range(self.tabs.count()):

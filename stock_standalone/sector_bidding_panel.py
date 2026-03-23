@@ -2078,20 +2078,37 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not host: return
         
         try:
-            # 1. 尝试联动主界面的 scroll 信号
-            if hasattr(host, 'scroll_to_code_signal'):
-                host.scroll_to_code_signal.emit(code)
-            
-            # 2. 尝试直接调用 tree_scroll_to_code (常见于 Qt 版)
-            if hasattr(host, 'tree_scroll_to_code'):
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: host.tree_scroll_to_code(code, vis=True))
-    
-            # 3. 如果主界面有 sender 对象，通过它发送 (兼容旧版)
-            if hasattr(host, 'sender') and host.sender:
-                host.sender.send(code)
+            # 🚀 [NEW] 核心修复：判断可视化窗口是否已打开，避免点击冷启动导致的 GIL 锁
+            # 注意：qt_process 存量检测可以在当前线程执行
+            is_viz_open = False
+            if hasattr(host, 'qt_process') and host.qt_process and host.qt_process.is_alive():
+                is_viz_open = True
+
+            def _do_linkage_in_main_thread():
+                # 1. 尝试联动主界面的 scroll 信号 (兼容专用版)
+                if hasattr(host, 'scroll_to_code_signal'):
+                    host.scroll_to_code_signal.emit(code)
+                
+                # 2. 尝试直接调用 tree_scroll_to_code (常见于 Tk/Qt 主界面)
+                if hasattr(host, 'tree_scroll_to_code'):
+                    # 关键修改：只有可视化已运行且正常时，才传递 vis=True
+                    # 避免在联动时动态启动新进程触发 GIL Crash
+                    host.tree_scroll_to_code(code, vis=is_viz_open)
         
-            # 4. [FIX] 根据来源恢复焦点，点击哪里光标留在哪里
+                # 3. 如果主界面有 sender 对象，通过它发送 (处理 TDX/THS 联动)
+                # 在主线程调用以保证安全提取 Tk 变量并防止剪贴板竞争
+                if hasattr(host, 'sender') and host.sender:
+                    host.sender.send(code)
+
+            # 🛡️ 深度防护：优先通过 Tkinter 调度队列转发，确保完全运行在 Tk 主线程
+            if hasattr(host, 'tk_dispatch_queue'):
+                host.tk_dispatch_queue.put_nowait(_do_linkage_in_main_thread)
+            else:
+                # 兜底方案：使用 Qt 异步定时器 (适用于纯 Qt 宿主或旧版本)
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, _do_linkage_in_main_thread)
+        
+            # 4. [FIX] 交互优化：根据来源恢复焦点，点击哪里光标留在哪里
             if focus_widget and focus_widget.isVisible():
                 focus_widget.setFocus()
             elif not focus_widget and self.stock_table.isVisible():
@@ -2100,7 +2117,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 更新状态记录
             self._last_selected_code = code
-            logger.debug(f"[SectorPanel] Linked code: {code}")
+            logger.debug(f"[SectorPanel] Linked code: {code} (viz_active:{is_viz_open})")
                  
         except Exception as e:
             logger.error(f"Error linking code {code}: {e}")
