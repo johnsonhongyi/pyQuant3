@@ -651,6 +651,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
         self.tk_dispatch_queue = queue.Queue()
+        self._is_pumping_events = False # 🚀 [NEW] 重入守卫
         self._process_dispatch_queue()
 
 
@@ -874,19 +875,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Dispatch Queue Critical Error: {e}")
 
         finally:
-            # 2. 泵送 Qt 事件（带 5ms 严格超时控制）
+            # 2. 泵送 Qt 事件（带 5ms 严格超时控制，增加重入守卫防止 GIL 崩溃）
             try:
-                if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
-                    # ProcessEventsFlag.AllEvents 确保 UI 刷新、鼠标点击都能处理
-                    QtWidgets.QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+                if QtWidgets and not getattr(self, '_is_pumping_events', False) and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
+                    self._is_pumping_events = True
+                    try:
+                        # ProcessEventsFlag.AllEvents 确保 UI 刷新、鼠标点击都能处理
+                        QtWidgets.QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+                    finally:
+                        self._is_pumping_events = False
             except Exception as e:
                 logger.debug(f"Qt Pump Error: {e}")
+                self._is_pumping_events = False
 
             # 3. 检查关闭状态并调度
             is_closing = getattr(self, '_is_closing', False) or \
                          (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
             if not is_closing:
+                # ⭐ [STABILITY] 自调度避让：如果刚干完重活，退避时间增加，减少解释器抖动
+                if next_delay < 50 and processed_count > 10:
+                    next_delay = 50 
                 self._schedule_after(next_delay, self._process_dispatch_queue)
 
 
@@ -3642,7 +3651,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._last_visualizer_code = code
         self._last_visualizer_time = now
-
+        # ===== 初始化和定时线程 =====
+        self._df_sync_running = True
+        
         def _do_open_visualizer(resample_val):
             try:
                 ipc_host, ipc_port = '127.0.0.1', 26668
