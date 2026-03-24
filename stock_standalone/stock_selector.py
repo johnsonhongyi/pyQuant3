@@ -126,11 +126,11 @@ class StockSelector:
 
                 # --- calc_indicators 输入依赖 ---
                 'volume', 'close', 'buy', 'lastp', 'llastp', 'couts',
-
-                # --- calc_indicators 生成 ---
-                'cycle_stage',
-                'win_upper1', 'win_upper2',
-                'dff', 'dff2',
+                
+                # --- [NEW] 重心与历史因子同步 (用于超短结构) ---
+                'lasth1d', 'lastl1d', 'lasto1d', 'lastp2d',
+                'lasth2d', 'lastl2d', 'lasto2d', 'lastp3d',
+                'ma5d', 'ma51d',
             ]
             sync_cols = [c for c in sync_cols if c in rt_df.columns]
             
@@ -615,13 +615,50 @@ class StockSelector:
                     score += 25 * decay
                     reason.append("反包启动")
 
-                # 5. [Negative Scoring] 冲高回落保护
-                high_p = float(data.get('high', 0))
-                if high_p > price:
-                    upper_shadow = (high_p - price) / (high_p - lastp1d + 0.01) if lastp1d > 0 else 0
-                    if upper_shadow > 0.4: # 上影线过长
-                        score -= 30
-                        reason.append("冲高回落(结构转弱)")
+                # 6. ⭐ [NEW] 超短结构 (Short-term Ultra Structure)
+                # 逻辑：两日均为阳线 + 重心逐日抬高(HH/LL) + 收盘递增 + 站稳 MA5 + (今日或昨日振幅 > 5%)
+                low_p = float(data.get('low', 0))
+                open_p = float(data.get('open', 0))
+                lasto1d = float(data.get('lasto1d', 0))
+                lasth1d = float(data.get('lasth1d', 0))
+                lastl1d = float(data.get('lastl1d', 0))
+                lasth2d = float(data.get('lasth2d', 0))
+                lastl2d = float(data.get('lastl2d', 0))
+                lastp2d = float(data.get('lastp2d', 0))
+                
+                # A. 阳线与收盘递增
+                is_today_red = (price > open_p)
+                is_yesterday_red = (lastp1d > lasto1d)
+                is_price_rising = (price > lastp1d) and (lastp1d > lastp2d)
+                
+                # B. 重心抬高结构 (Rising Structure: HH & LL)
+                # 今日 vs 昨日
+                is_today_hhll = (high_p > lasth1d) and (low_p > lastl1d)
+                # 昨日 vs 前日
+                is_yesterday_hhll = (lasth1d > lasth2d) and (lastl1d > lastl2d)
+                
+                # C. MA5 支撑
+                is_on_ma5 = (price > ma5) if ma5 > 0 else False
+                
+                # D. 振幅门槛 (其中一日 > 5%)
+                amp_today = (high_p - low_p) / lastp1d if lastp1d > 0 else 0
+                amp_yesterday = (lasth1d - lastl1d) / lastp2d if lastp2d > 0 else 0
+                has_high_amp = (amp_today > 0.05) or (amp_yesterday > 0.05)
+                
+                if is_today_red and is_yesterday_red and is_price_rising and is_on_ma5 and has_high_amp:
+                    if is_today_hhll and is_yesterday_hhll:
+                        score += 120
+                        reason.append("超短结构(重心抬高)")
+                    else:
+                        score += 80
+                        reason.append("超短结构(双阳振幅)")
+                        
+                    if amp_today > 0.05 and amp_yesterday > 0.05:
+                        score += 20
+                        reason.append("双阳双振")
+                    elif amp_today > 0.08:
+                        score += 10
+                        reason.append("今日强弹性")
             except Exception:
                 pass
 

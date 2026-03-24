@@ -263,6 +263,10 @@ class VoiceAnnouncer:
         """停止所有当前正在播放的语音"""
         self.manager.stop_current_speech()
 
+    def stop_current_speech(self, key: Optional[str] = None) -> None:
+        """[Proxy] 委派给 AlertManager 的中断接口，兼容 MonitorTK 调用习惯"""
+        self.manager.stop_current_speech(key=key)
+
     def cancel_for_code(self, code: str) -> None:
         """针对特定品种取消语音播报（精准中断）"""
         self.manager.stop_current_speech(key=code)

@@ -1710,6 +1710,9 @@ class DataPublisher:
         self.ext_data_55188 = pd.DataFrame()
         self.last_ext_update_ts = 0.0
 
+        # [NEW] Thread control
+        self._stop_event = threading.Event()
+
         # Start maintenance thread
         self.maintenance_thread = threading.Thread(target=self._maintenance_task, daemon=True)
         self.maintenance_thread.start()
@@ -1782,6 +1785,18 @@ class DataPublisher:
         except Exception as e:
             logger.error(f"Reset failed: {e}")
 
+    def stop(self):
+        """
+        [NEW] 停止所有后台守护线程，并清理资源。
+        此方法供外部(如 MonitorTK) 在退出时调用，以协助 SyncManager 平稳关闭。
+        """
+        if not hasattr(self, "_stop_event") or self._stop_event.is_set():
+            return
+            
+        logger.info("🛑 DataPublisher stopping background tasks...")
+        self._stop_event.set()
+        # 由于是 daemon 线程，此处无需 join 阻塞，让逻辑感知 event 后自然终结即可
+
     def set_paused(self, paused: bool):
         """设置服务暂停状态"""
         self.paused = paused
@@ -1830,8 +1845,10 @@ class DataPublisher:
         """
         后台维护任务：每 5 分钟检查一次内存和数据量
         """
-        while True:
-            time.sleep(5400)  # Changed from 600 (10m) to 300 (5m) to match _save_interval
+        while not self._stop_event.is_set():
+            # 使用 wait(timeout) 替代 time.sleep，可立即响应停止信号
+            if self._stop_event.wait(300):
+                break
             
             # [Added] 交易日 & 15:30 前限制 (遵循用户特定时段维护量产效率)
             if not cct.get_trade_date_status():
@@ -1920,7 +1937,7 @@ class DataPublisher:
         后台抓取任务：定期抓取 55188 数据
         仅在交易时段运行，遇到封禁迹象自动“翻倍延迟” (Exponential Backoff)
         """
-        while True:
+        while not self._stop_event.is_set():
             try:
                 is_trading = cct.get_work_time_duration()
                 now = time.time()
@@ -1962,7 +1979,9 @@ class DataPublisher:
                 self.last_ext_update_ts = time.time()
                 logger.error(f"Scraper task error: {e}. Backoff delay: {self.current_scraper_wait}s.")
             
-            time.sleep(10) # 维持心跳检查频率
+            # 维持心跳检查频率
+            if self._stop_event.wait(10):
+                break
         
     def recover_from_hdf5(self) -> pd.DataFrame:
         """
