@@ -112,11 +112,10 @@ from collections import Counter, OrderedDict, deque
 import hashlib
 # import keyboard  # pip install keyboard  # ⚡ 已替换为 Win32 RegisterHotKey API
 # import trade_visualizer_qt6 as qtviz  # ⚡ 移至局部作用域
-from alert_manager import get_alert_manager
 from sys_utils import assert_main_thread
 import struct, pickle
 from queue import Full
-from alert_manager import AlertManager
+from alert_manager import AlertManager,get_alert_manager
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
@@ -237,7 +236,6 @@ DEFAULT_DISPLAY_COLS = [
 
 tip_var_status_flag = mp.Value('b', False)  # boolean
 
-from alerts_manager import AlertManager, open_alert_center, set_global_manager, check_alert
 # def ___toast_message(master, text, duration=1500):
 #     """短暂提示信息（浮层，不阻塞）"""
 #     toast = tk.Toplevel(master)
@@ -892,8 +890,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._schedule_after(next_delay, self._process_dispatch_queue)
 
 
-    def _schedule_after(self, ms, func, *args, key=None, debounce=True):
+    def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
         if getattr(self, "_is_closing", False): return None
+
+        # 如果绑定了 widget 且其已销毁，直接取消调度
+        if bind_widget and not bind_widget.winfo_exists():
+            return None
 
         # 初始化必要的容器和变量
         if not hasattr(self, "_after_jobs"): self._after_jobs = {}
@@ -903,7 +905,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         created_at = time.time()
         expected_run_at = created_at + (ms / 1000.0) # 理论上的物理执行时刻
 
-        # --- 名称清洗逻辑 (保持你要求的精简版) ---
+        # --- 名称清洗逻辑 ---
         def get_clean_name(f, k):
             if isinstance(k, str): return k
             inner_f = f
@@ -946,10 +948,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     f"纯净卡顿:{pure_latency:.0f}ms (总积压:{total_backlog:.0f}ms, 延时设定:{ms}ms)"
                 )
 
-            # 执行耗时诊断 (保留你的逻辑)
             exec_start = time.time()
             try:
                 if getattr(self, "_is_closing", False): return
+                
+                # ⭐ [关键加固]：如果绑定了 widget，执行前必须确认其依然存在
+                if bind_widget and not bind_widget.winfo_exists():
+                    # logger.debug(f"Skip after task [{display_name}] as bind_widget is gone.")
+                    return
+
                 func(*args)
                 
                 duration = (time.time() - exec_start) * 1000
@@ -969,7 +976,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._after_jobs[task_key] = job_id
         return job_id
 
-    def _schedule_after_base(self, ms, func, *args, key=None, debounce=True):
+    def _schedule_after_base(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
         """
         高可靠 Tkinter after 调度器
 
@@ -987,8 +994,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         key      自定义任务key (可选)
         debounce 是否防抖
         """
-
         if getattr(self, "_is_closing", False):
+            return None
+
+        # 预先检查绑定
+        if bind_widget and not bind_widget.winfo_exists():
             return None
 
         # 初始化容器
@@ -1070,6 +1080,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 exec_start = time.time()
                 try:
                     if getattr(self, "_is_closing", False): return
+                    
+                    # ⭐ [关键加固]：如果绑定了 widget，执行前必须确认其依然存在
+                    if bind_widget and not bind_widget.winfo_exists():
+                        return
+                        
                     func(*args)
                     
                     duration = (time.time() - exec_start) * 1000
@@ -1828,10 +1843,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             logger.info("程序正在退出，执行保存与清理...")
             self.vis_var.set(False)
-            # 1. 保存预警规则
-            if hasattr(self, 'alert_manager'):
-                self.alert_manager.save_all()
-                logger.info("预警规则已保存")
                 
             # 2. 存档交易日志 (TradingLogger)
             try:
@@ -2021,19 +2032,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     # 10.5 退出前强制保存 K 线记录 (这一步最耗时，保留在最后一步，且只做一次)
                     if hasattr(self, "realtime_service") and self.realtime_service:
-                        logger.info("正在执行 MinuteKlineCache 退出保存...")
+                        logger.info("正在执行 MinuteKlineCache 退出保存并停止后台任务...")
+                        # 先停止后台线程，减少 I/O 冲突
+                        try:
+                            self.realtime_service.stop()
+                        except:
+                            pass
+                        
                         self.realtime_service.save_cache(force=True)
 
-                    # 断开代理引用，防止 shutdown 时的 BrokenPipe
+                    # ⭐ [CRITICAL] 彻底断开代理引用，防止 shutdown 时的 BrokenPipe 或资源挂起
+                    # 在 Windows 下，SyncManager 销毁前必须确保主进程不再持有任何代理
                     self.realtime_service = None
                     self.global_dict = None
+                    self.manager_dict = None # 额外清理
                     
                     # ⭐ [FIX] 给 manager shutdown 一个较短超时，防止 GUI 线程被阻塞导致僵尸进程
-                    logger.info("正在关闭 SyncManager...")
-                    manager_thread = threading.Thread(target=self.manager.shutdown)
-                    manager_thread.start()
-                    manager_thread.join(timeout=1.5)
-                    if manager_thread.is_alive():
+                    logger.info("正在关闭 SyncManager (带 1.5s 超限机制)...")
+                    # 使用线程异步尝试关闭，避免主线程在此无限等待
+                    shutdown_thread = threading.Thread(target=self.manager.shutdown, daemon=True)
+                    shutdown_thread.start()
+                    shutdown_thread.join(timeout=1.5)
+                    
+                    if shutdown_thread.is_alive():
                         logger.warning("SyncManager 关闭超时，强制跳过以继续退出流程。")
                 except Exception as e:
                     logger.debug(f"Manager shutdown error ignored: {e}")
@@ -2422,93 +2443,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.concept_top5 = concept_score[:5]
         return concept_score[:10]
 
-
-
-    def open_alert_editorAuto(self, stock_info, new_rule=False):
-        code = stock_info.get("code")
-        name = stock_info.get("name")
-        price = stock_info.get("price", 0.0)
-        change = stock_info.get("change", 0.0)
-        volume = stock_info.get("volume", 0)
-
-        # 如果是新建规则，检查是否已有历史报警
-        rules = self.alert_manager.get_rules(code)
-        if new_rule or not rules:
-            rules = [
-                {"field": "价格", "op": ">=", "value": price, "enabled": True, "delta": 1},
-                {"field": "涨幅", "op": ">=", "value": change, "enabled": True, "delta": 1},
-                {"field": "量", "op": ">=", "value": volume, "enabled": True, "delta": 100}
-            ]
-            self.alert_manager.set_rules(code, rules)
-
-        # 创建 Toplevel 编辑窗口，自动填充规则
-        editor = tk.Toplevel(self)
-        editor.title(f"设置报警规则 - {name} {code}")
-        editor.geometry("500x300")
-        editor.focus_force()
-        editor.grab_set()
-
-        # 创建规则 Frame 并渲染 rules
-        # ...（这里可以复用你现有 add_rule、保存/删除按钮逻辑）
-
-
-    def open_alert_editor(parent, stock_info=None, new_rule=True):
-        """
-        打开报警规则编辑窗口
-        :param parent: 主窗口
-        :param stock_info: 选中的股票信息 (tuple/list)，比如 (code, name, price, ...)
-        :param new_rule: True=新建规则，False=编辑规则
-        """
-        win = tk.Toplevel(parent)
-        win.title("新建报警规则" if new_rule else "编辑报警规则")
-        win.geometry("400x300")
-
-        # 如果 stock_info 有内容，在标题里显示
-        stock_str = ""
-        if stock_info:
-            try:
-                code, name = stock_info[0], stock_info[1]
-                stock_str = f"{code} {name}"
-            except Exception:
-                stock_str = str(stock_info)
-        if stock_str:
-            # tk.Label(win, text=f"股票: {stock_str}", font=("Arial", 12, "bold")).pack(pady=1)
-            tk.Label(win, text=f"股票: {stock_str}", font=self.default_font_bold).pack(pady=1)
-
-        # 报警条件输入区
-        frame = tk.Frame(win)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        tk.Label(frame, text="条件类型:").grid(row=0, column=0, sticky="w")
-        cond_type_var = tk.StringVar(value="价格大于")
-        cond_type_entry = ttk.Combobox(frame, textvariable=cond_type_var,
-                                       values=["价格大于", "价格小于", "涨幅超过", "跌幅超过"], state="readonly")
-        cond_type_entry.grid(row=0, column=1, sticky="ew")
-
-        tk.Label(frame, text="阈值:").grid(row=1, column=0, sticky="w")
-        threshold_var = tk.StringVar(value="")
-        threshold_entry = tk.Entry(frame, textvariable=threshold_var)
-        threshold_entry.grid(row=1, column=1, sticky="ew")
-
-        # 保存按钮
-        def save_rule():
-            rule = {
-                "stock": stock_str,
-                "cond_type": cond_type_var.get(),
-                "threshold": threshold_var.get()
-            }
-            logger.info(f"保存报警规则: {rule}")
-            stock_code = rule.get("stock")  # 或者从 UI 里获取选中的股票代码
-            logger.info(f'stock_code:{stock_code}')
-            parent.alert_manager.save_rule(stock_code['name'],rule)  # 保存到 AlertManager
-            messagebox.showinfo("成功", "规则已保存")
-            win.destroy()
-
-        btn_frame = tk.Frame(win)
-        btn_frame.pack(fill="x", pady=10)
-        tk.Button(btn_frame, text="保存", command=save_rule).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="取消", command=win.destroy).pack(side="left", padx=5)
-
     def _build_ui(self, ctrl_frame):
 
         # Market 下拉菜单
@@ -2585,9 +2519,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
         self._last_resample = self.resample_combo.get().strip()
-        # 在初始化时（StockMonitorApp.__init__）创建并注册：
-        self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
-        set_global_manager(self.alert_manager)  
 
         # ✅ 关键：同步一次状态
         on_market_select()
@@ -2688,7 +2619,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -2711,8 +2642,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.save_data_to_csv()
             elif action == "读取存档":
                 self.load_data_from_csv()
-            elif action == "报警中心":
-                open_alert_center(self)
             elif action == "覆写TDX":
                 self.write_to_blk(append=False)
             elif action == "手札总览":
@@ -3382,27 +3311,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"推送 stock_info 出错: {e} {row}")
             return False
 
-
-    def open_alert_rule_new(self):
-        """新建报警规则"""
-        stock_info = getattr(self, "selected_stock_info", None)
-
-        if not stock_info:
-            auto_close_message("提示", "请先选择一个股票！")
-            return
-        
-        # new_rule=True 表示创建新规则
-        self.open_alert_editor(stock_info=stock_info, new_rule=True)
-
-    def open_alert_rule_edit(self):
-        """编辑报警规则"""
-        stock_info = getattr(self, "selected_stock_info", None)
-
-        if not stock_info:
-            messagebox.showwarning("提示", "请先选择一只股票")
-            return
-        self.open_alert_editor(self, stock_info=stock_info, new_rule=False)
-
     def on_tree_select(self, event):
         selected_item = self.tree.selection()
         if not selected_item:
@@ -3735,115 +3643,91 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_visualizer_code = code
         self._last_visualizer_time = now
 
-        if not hasattr(self, 'qt_process'):
-            self.qt_process = None
-
-        # ===== 初始化和定时线程 =====
-        self._df_sync_running = True
-
-        ipc_host, ipc_port = '127.0.0.1', 26668
-        sent = False
-
-        real_time_cols = list(cct.real_time_cols) if hasattr(cct, 'real_time_cols') else []
-        strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
-        # 🛡️ 确保核心字段始终包含，即使用户配置中缺失
-        required_visualizer_cols = ['code', 'name', 'percent', 'dff','per1d', 'Rank', 'win', 'slope', 'volume', 'power_idx']
-        
-        # 使用去重的方式合并列
-        ui_cols = []
-        has_percent = any(c.lower() == 'percent' for c in real_time_cols)
-        source_cols = real_time_cols if len(real_time_cols) > 4 and has_percent else required_visualizer_cols
-        for c in (source_cols + required_visualizer_cols + strategy_cols):
-            if c not in ui_cols:
-                ui_cols.append(c)
-
-        # --- 0️⃣ 获取当前周期参数 ---
-        resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
-
-        sent = False
-        
-        # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 (最快) ---
-        if self.qt_process is not None and self.qt_process.is_alive():
-             try:
-                 if self.viz_command_queue is not None:
-                     self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
-                     logger.debug(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
-                     sent = True
-                     # 交互提示
-                     if hasattr(self, 'status_bar'):
-                         self.status_bar.config(text=f"正在切换可视化: {code} ...")
-                         self.update_idletasks()
-             except Exception as e:
-                 logger.error(f"Queue send failed: {e}")
-
-        # --- 2️⃣ 如果内部队列没发送(可能是外部进程或队列错)，尝试 Socket ---
-        if not sent:
+        def _do_open_visualizer(resample_val):
             try:
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client_socket.settimeout(0.5) # 缩短超时，避免界面卡顿
-                client_socket.connect((ipc_host, ipc_port))
-                # 发送格式: CODE|代码|key1=val1|key2=val2
-                ipc_msg = f"CODE|{code}|resample={resample}"
-                client_socket.send(ipc_msg.encode('utf-8'))
-                client_socket.close()
-                logger.debug(f"Socket: Sent {ipc_msg} to visualizer")
-                sent = True
-            except (ConnectionRefusedError, OSError):
-                pass
+                ipc_host, ipc_port = '127.0.0.1', 26668
+                resample = resample_val
+                sent = False
+
+                # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 ---
+                if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
+                    try:
+                        if self.viz_command_queue is not None:
+                            self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
+                            logger.debug(f"Queue: Sent SWITCH_CODE {code}")
+                            sent = True
+                    except Exception as e:
+                        logger.error(f"Queue send failed: {e}")
+
+                # --- 2️⃣ 如果内部队列没发送，尝试 Socket ---
+                if not sent:
+                    try:
+                        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        client_socket.settimeout(0.3) # 进一步缩短
+                        client_socket.connect((ipc_host, ipc_port))
+                        ipc_msg = f"CODE|{code}|resample={resample}"
+                        client_socket.send(ipc_msg.encode('utf-8'))
+                        client_socket.close()
+                        sent = True
+                    except:
+                        pass
+
+                # --- 3️⃣ 如果仍未发送，启动新进程 ---
+                if not sent:
+                    if not hasattr(self, 'qt_process') or self.qt_process is None or not self.qt_process.is_alive():
+                        # 在后台线程直接启动，不经过 _schedule_after 以免阻塞 UI (因其内部包含 sleep)
+                        self._start_visualizer_process(code, resample)
             except Exception as e:
-                logger.warning(f"Socket connection check failed: {e}")
+                logger.error(f"Async open_visualizer error: {e}")
 
-        # --- 3️⃣ 启动 Qt 可视化进程（如果既没活着也没人听） ---
-        if not sent:
-            try:
-                # 只有当进程确实不存在或已死时才启动
-                if self.qt_process is None or not self.qt_process.is_alive():
-                    # 初始化指令队列
-                    if self.viz_command_queue is None:
-                        self.viz_command_queue = mp.Queue()
-                    
-                    # [FIX] 每次启动前强制重置生命周期标志为 True (防止上次退出残留 False)
-                    if hasattr(self, 'viz_lifecycle_flag'):
-                        self.viz_lifecycle_flag.value = True
-                        logger.debug(f"[Visualizer] Resetting viz_lifecycle_flag to True. Addr: {id(self.viz_lifecycle_flag)}")
-                    
-                    # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
-                    # load_stock_by_code handles the | split automatically
-                    initial_payload = f"{code}|resample={resample}"
-                    import trade_visualizer_qt6 as qtviz
-                    self.qt_process = mp.Process(
-                        target=qtviz.main, 
-                        # [FIX] 使用 viz_lifecycle_flag
-                        # args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
-                        # debug info
-                        args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
-                        daemon=False
-                    )
-                    self.qt_process.start()
-                    print(f"Launched QT GUI process via Queue for {initial_payload}")
-                    time.sleep(1)  # 给 Qt 初始化时间
-                    if hasattr(self, '_df_first_send_done'):
-                        self._df_first_send_done = False
-                else:
-                     # 理论上不应该走到这里，因为前面检查过 alive 并尝试了 queue
-                     # 但以防万一 queue 失败了但进程还活着... 还是尝试 queue 吧
-                     if self.viz_command_queue is not None:
-                         self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
-            except Exception as e:
-                logger.error(f"Failed to start Qt visualizer: {e}")
-                traceback.print_exc()
-                return
+        # 提前在 UI 线程获取关键参数，防止后台线程访问 Tk 导致崩溃
+        resample_now = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
+        threading.Thread(target=lambda: _do_open_visualizer(resample_now), daemon=True).start()
+        
+        # 交互提示（UI 线程）
+        if hasattr(self, 'status_bar'):
+            self.status_bar.config(text=f"🚀 可视化指令已发出: {code}")
 
-            if not hasattr(self, '_df_first_send_done'):
-                self._df_first_send_done = False
-
-            if not hasattr(self, '_df_first_send_done'):
-                self._df_first_send_done = False
+    def _start_visualizer_process(self, code, resample=None):
+        """独立方法：在子线程中安全启动 Qt 可视化进程"""
+        try:
+            if resample is None:
+                resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
             
-        # 启动同步线程（只启动一次）
-        if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
-            self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
-            self._df_sync_thread.start()
+            # 初始化指令队列
+            if not hasattr(self, 'viz_command_queue') or self.viz_command_queue is None:
+                self.viz_command_queue = mp.Queue()
+            
+            # [FIX] 每次启动前强制重置生命周期标志为 True (防止上次退出残留 False)
+            if hasattr(self, 'viz_lifecycle_flag'):
+                self.viz_lifecycle_flag.value = True
+                logger.debug(f"[Visualizer] Resetting viz_lifecycle_flag to True.")
+            
+            # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
+            initial_payload = f"{code}|resample={resample}"
+            import trade_visualizer_qt6 as qtviz
+            self.qt_process = mp.Process(
+                target=qtviz.main, 
+                args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
+                daemon=False
+            )
+            self.qt_process.start()
+            logger.info(f"Launched QT GUI process via Queue for {initial_payload}")
+            
+            # 给 Qt 初始化时间
+            time.sleep(1)
+            
+            if hasattr(self, '_df_first_send_done'):
+                self._df_first_send_done = False
+                
+            # 启动/确认同步线程
+            if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+                self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
+                self._df_sync_thread.start()
+
+        except Exception as e:
+            logger.error(f"Failed to start Qt visualizer: {e}")
+            traceback.print_exc()
 
     def send_df(self, initial=True):
         """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
@@ -6721,10 +6605,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 获取当前几何信息（不使用 update_idletasks 避免阻塞）
         # [修复] 必须确保窗口几何信息已更新，否则 geometry() 返回 1x1 导致错位
-        try:
-            win.update_idletasks()
-        except:
-            pass
+        # [已移除] win.update_idletasks() - 避免频繁刷新导致的 UI 阻塞
 
         def do_shake(orig_wh, orig_x, orig_y):
             # 检查窗口是否存在且是否应继续晃动
@@ -6755,9 +6636,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             geom = win.geometry()
             parts = geom.split('+')
             if len(parts) == 3:
-                wh = parts[0]
-                x = int(parts[1])
                 y = int(parts[2])
+                # [Optimization] 只有真正需要变化时才启动循环
                 do_shake(wh, x, y)
         except:
             # 如果获取几何信息失败，则不执行晃动
@@ -7047,13 +6927,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return False
 
     def _get_alert_manager(self):
-        """获取缓存的 AlertManager 实例，避免重复导入和实例化"""
-        if not hasattr(self, '_cached_alert_manager'):
+        """获取语音/报警管理器实例，集成自 live_strategy"""
+        if hasattr(self, 'live_strategy') and self.live_strategy:
+            return getattr(self.live_strategy, '_voice', None)
+        return None
+
+    def _async_update_alert_details(self, code, win):
+        """[NEW/RESTORE] 后台异步获取板块详情并更新 UI，实现秒出体验"""
+        if not win or not win.winfo_exists():
+            return
+
+        def _fetch_task():
             try:
-                self._cached_alert_manager = get_alert_manager()
-            except ImportError:
-                self._cached_alert_manager = None
-        return self._cached_alert_manager
+                cat_info = "获取中..."
+                # 🛡️ 尽早锁定以减少竞争时间
+                with self._df_lock:
+                    if hasattr(self, 'df_all') and code in self.df_all.index:
+                        cat_info = self.df_all.at[code, 'category']
+                    else:
+                        cat_info = "暂无详细信息"
+
+                # 判定窗口是否依然存活，通过绑定的 after 安全更新 UI
+                self._schedule_after(0, _update_ui, cat_info, bind_widget=win)
+            except Exception as e:
+                logger.error(f"Async detail fetch error for {code}: {e}")
+
+        def _update_ui(info):
+            if not win.winfo_exists(): return
+            try:
+                if hasattr(win, 'text_box'):
+                    win.text_box.config(state="normal")
+                    win.text_box.delete("1.0", "end")
+                    win.text_box.insert("1.0", info)
+                    win.text_box.config(state="disabled")
+                
+                # 更新标识符
+                if hasattr(win, 'is_high_priority') and win.is_high_priority:
+                     win.configure(highlightbackground="#FFD700", highlightthickness=2)
+            except:
+                pass
+
+        # 启动后台线程执行耗时的 DF 查询
+        threading.Thread(target=_fetch_task, daemon=True).start()
     
     def _create_single_alert_popup(self, code, name, msg):
         """实际创建单个弹窗（从队列调用）"""
@@ -7232,9 +7147,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if not has_voice:
                 delay = max(60, int(alert_cooldown / 2)) * 1000
-                self._schedule_after(delay, lambda: self._close_alert(win))
+                self._schedule_after(delay, lambda: self._close_alert(win), bind_widget=win)
             else:
-                win.safety_close_timer = self._schedule_after(180000, lambda: self._close_alert(win))
+                win.safety_close_timer = self._schedule_after(180000, lambda: self._close_alert(win), bind_widget=win)
 
             # UI 面板构造
             win._orig_width, win._orig_height = 400, 180
@@ -7263,8 +7178,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win.is_shaking = False
                     if hasattr(win, 'safety_close_timer'):
                         try: self.after_cancel(win.safety_close_timer)
-                        except Exception as e:
-                            logger.error(f"Error in task: {e}")
+                        except: pass
                 
                 try:
                     curr_x, curr_y = win.winfo_x(), win.winfo_y()
@@ -7367,11 +7281,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             msg_label.pack(fill="x", pady=2)
             win.msg_label = msg_label
             
-            # 详情文本
             text_box = tk.Text(frame, height=4, font=("Arial", 10), bg="#f5f5f5", relief="flat")
             text_box.pack(fill="both", expand=True, pady=5)
-            text_box.insert("1.0", category_content)
+            text_box.insert("1.0", "⌛ 加载详情中...")
             text_box.config(state="disabled")
+            win.text_box = text_box # 挂载供异步更新
+            
+            # 🚀 启动异步详情加载 (回归方案的关键一步)
+            self._async_update_alert_details(code, win)
             
             # [REMOVED] 不在创建时震动，仅在 Voice 回调中震动
             
