@@ -20,6 +20,7 @@ import shutil
 import traceback
 import threading
 import multiprocessing as mp
+from queue import Queue, Empty
 from multiprocessing.managers import BaseManager, SyncManager
 class StockManager(SyncManager): pass
 import ctypes
@@ -428,7 +429,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         self.visualizer_process = None # Track visualizer process
         self.qt_process = None         # [FIX] 初始化 qt_process 避免 send_df AttributeError
-        self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
+        self.viz_conn = None  # ⭐ [FIX] 使用 Pipe 代替 Queue，避免 GIL 崩溃
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
         self.sync_version = 0          # ⭐ 数据同步序列号
@@ -568,9 +569,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.current_df = pd.DataFrame()
         self._df_lock = threading.Lock()  # 🛡️ [NEW] 保护 df_all 并发读写
 
-        # 队列接收子进程数据
-        self.queue = mp.Queue()
-        self.signal_bridge_queue = mp.Queue()  # ⭐ [NEW] 跨进程信号桥接队列
+        # 队列接收子进程数据 (Resolved mp.Queue GIL Crash)
+        self.queue = Queue()
+        self.signal_bridge_queue = Queue()  # ⭐ [NEW] 跨进程信号桥接队列
+        self.viz_conn = mp.Pipe()           # ⭐ [NEW] 跨进程指令 Pipe (parent_conn, child_conn)
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -703,19 +705,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         init_elapsed = time.time() - self._init_start_time
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
 
-        # 🚀 [NEW] 初始化完成联动：如果 vis 开启，自动打开可视化窗口，避免后续“冷启动”引发 GIL 崩溃
-        if hasattr(self, 'vis_var') and self.vis_var.get():
-            # # 获取初始化时可能已有的首行代码
-            # target_code = getattr(self, "select_code", None)
-            # if not target_code:
-            #     first_item = self.tree.get_children()
-            #     if first_item:
-            #         target_code = self.tree.item(first_item[0], "values")[0]
+        # # 🚀 [NEW] 初始化完成联动：如果 vis 开启，自动打开可视化窗口，避免后续“冷启动”引发 GIL 崩溃
+        # if hasattr(self, 'vis_var') and self.vis_var.get():
+        #     # # 获取初始化时可能已有的首行代码
+        #     # target_code = getattr(self, "select_code", None)
+        #     # if not target_code:
+        #     #     first_item = self.tree.get_children()
+        #     #     if first_item:
+        #     #         target_code = self.tree.item(first_item[0], "values")[0]
             
-            # if target_code:
-            #     # 延迟 2 秒启动，确保主窗口数据已完成第一轮加载并渲染
-            #     self._schedule_after(30000, lambda: self.open_visualizer(target_code))
-            self._schedule_after(45000, lambda: self.open_visualizer('000001'))
+        #     # if target_code:
+        #     #     # 延迟 2 秒启动，确保主窗口数据已完成第一轮加载并渲染
+        #     #     self._schedule_after(30000, lambda: self.open_visualizer(target_code))
+        #     self._schedule_after(45000, lambda: self.open_visualizer('000001'))
             
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
@@ -864,7 +866,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                              logger.error(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
                              
                     processed_count += 1
-                except queue.Empty:
+                except Empty:
                     next_delay = 200
                     break
                 except Exception as e:
@@ -876,14 +878,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         finally:
             # 2. 泵送 Qt 事件（带 5ms 严格超时控制，增加重入守卫防止 GIL 崩溃）
+            # ⭐ [STABILITY] 在 Windows 混合 GUI 环境下，processEvents 可能因用户交互（如拖动窗口）导致 GIL 状态错误。
             try:
-                if QtWidgets and not getattr(self, '_is_pumping_events', False) and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
-                    self._is_pumping_events = True
-                    try:
-                        # ProcessEventsFlag.AllEvents 确保 UI 刷新、鼠标点击都能处理
-                        QtWidgets.QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
-                    finally:
-                        self._is_pumping_events = False
+                if QtWidgets and not getattr(self, '_is_pumping_events', False):
+                    qt_app = QtWidgets.QApplication.instance()
+                    if qt_app:
+                        # 检查是否有可见的 Qt 窗口，若无则无需处理事件，减少冲突
+                        has_visible_qt = any(w.isVisible() for w in qt_app.topLevelWidgets() if not w.isWindow())
+                        if has_visible_qt:
+                            self._is_pumping_events = True
+                            try:
+                                # ExcludeUserInputEvents: 排除鼠标按键等用户输入，只处理 UI 重绘和信号，避免拖拽过程中的碰撞
+                                flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                                qt_app.processEvents(flags, 5)
+                            finally:
+                                self._is_pumping_events = False
             except Exception as e:
                 logger.debug(f"Qt Pump Error: {e}")
                 self._is_pumping_events = False
@@ -1995,19 +2004,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 4. Close queue / pipe (Resources)
             
             # 1. 停止后台数据扫描进程 (proc)
-            if hasattr(self, "proc") and self.proc.is_alive():
-                print("正在停止后台数据扫描进程 (proc)...")
-                # self.stop_refresh() # 已经在开头设置过
-                self.proc.join(timeout=0.2) 
-                if self.proc.is_alive():
-                    # 如果 0.2 秒内没退出，则强制终止
-                    print("后台进程未能在预期内退出，正在强制终止...")
-                    self.proc.terminate()
-                    self.proc.join(timeout=0.1)
-                    print("后台进程已强制终止")
-                else:
-                    print("后台进程已安全退出")
-            self.proc = None
+                if hasattr(self, "proc") and self.proc is not None and self.proc.is_alive():
+                    print("正在停止后台数据扫描线程 (proc)...")
+                    # self.stop_refresh() # 已经在开头设置过
+                    self.proc.join(timeout=0.3) 
+                    if self.proc.is_alive():
+                        # 线程不支持 terminate，由于是 daemon=True，可以由系统回收，
+                        # 只要 refresh_flag 已设为 False，主循环就会自然退出。
+                        print("后台线程正在异步退出中...")
+                    else:
+                        print("后台线程已安全退出")
+                self.proc = None
 
             # 2. 停止 Qt 子进程 (qt_process)
             qtz_proc = getattr(self, 'qt_process', None)
@@ -2038,21 +2045,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 4. 关闭队列与管道资源
             logger.info("正在清理队列与通信资源...")
-            if hasattr(self, 'viz_command_queue') and self.viz_command_queue:
+            if hasattr(self, 'viz_conn') and self.viz_conn:
                 try:
-                    self.viz_command_queue.close()
-                    # 防止 join_thread 导致阻塞 (如果子进程已死，内部 feeder 线程可能卡住)
-                    self.viz_command_queue.cancel_join_thread() 
+                    self.viz_conn[0].close()
+                    self.viz_conn[1].close()
                 except Exception:
                     pass
-                self.viz_command_queue = None
+                self.viz_conn = None
             
             if hasattr(self, 'queue') and self.queue:
-                try:
-                    self.queue.close()
-                    self.queue.cancel_join_thread()
-                except Exception:
-                    pass
+                # queue.Queue has no close()
                 self.queue = None
 
             if hasattr(self, "manager"):
@@ -2880,17 +2882,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
         
         # self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, self.blkname , self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
-        self.proc = mp.Process(
+        self.proc = threading.Thread(
             target=fetch_and_process,
             args=(self.global_dict, self.queue, self.blkname, 
                   self.refresh_flag, self.log_level, self.detect_calc_support, 
                   marketInit, marketblk, duration_sleep_time),
             kwargs={
                 "status_callback": tip_var_status_flag  # 注意不用括号，传函数
-            }
+            },
+            name="DataFetchThread",
+            daemon=True
         )
-        # self.proc.daemon = True
-        self.proc.daemon = False 
         self.proc.start()
 
     def stop_refresh(self):
@@ -2957,7 +2959,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     while not self.queue.empty():
                         try:
                             latest_df = self.queue.get_nowait()
-                        except queue.Empty:
+                        except Empty:
                             break
                 
                 if latest_df is not None:
@@ -3555,8 +3557,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 2. 发送扫描指令
         # open_visualizer 会初始化 viz_command_queue
-        if hasattr(self, 'viz_command_queue') and self.viz_command_queue:
-             self.viz_command_queue.put(('CMD_SCAN_CONSOLIDATION', {}))
+        if hasattr(self, 'viz_conn') and self.viz_conn:
+             self.viz_conn[0].send(('CMD_SCAN_CONSOLIDATION', {}))
              logger.info("Sent CMD_SCAN_CONSOLIDATION to Visualizer")
              if hasattr(self, 'status_var'):
                 self.status_var.set("已发送策略扫描指令...")
@@ -3701,8 +3703,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 ---
                 if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
                     try:
-                        if self.viz_command_queue is not None:
-                            self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
+                        if self.viz_conn is not None:
+                            self.viz_conn[0].send(('SWITCH_CODE', {'code': code, 'resample': resample}))
                             logger.debug(f"Queue: Sent SWITCH_CODE {code}")
                             sent = True
                     except Exception as e:
@@ -3743,25 +3745,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if resample is None:
                 resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
             
-            # 初始化指令队列
-            if not hasattr(self, 'viz_command_queue') or self.viz_command_queue is None:
-                self.viz_command_queue = mp.Queue()
+            # 初始化指令 Pipe
+            if not hasattr(self, 'viz_conn') or self.viz_conn is None:
+                self.viz_conn = mp.Pipe()
             
             # [FIX] 每次启动前强制重置生命周期标志为 True (防止上次退出残留 False)
             if hasattr(self, 'viz_lifecycle_flag'):
                 self.viz_lifecycle_flag.value = True
                 logger.debug(f"[Visualizer] Resetting viz_lifecycle_flag to True.")
             
-            # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
+            # 启动进程：传入 code|resample, stop_flag, log_level, debug, conn
             initial_payload = f"{code}|resample={resample}"
             import trade_visualizer_qt6 as qtviz
             self.qt_process = mp.Process(
                 target=qtviz.main, 
-                args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
+                args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_conn[1]), 
                 daemon=False
             )
             self.qt_process.start()
-            logger.info(f"Launched QT GUI process via Queue for {initial_payload}")
+            logger.info(f"Launched QT GUI process via Pipe for {initial_payload}")
             
             # 给 Qt 初始化时间
             time.sleep(1)
@@ -3878,31 +3880,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 }
 
                 # ======================================================
-                # ⭐ 4️⃣ 主通道：Queue (优先)
-                # ======================================================
-                used_queue = False
-                # 关键修正：必须检查 qt_process.is_alive()。
-                # 如果内联进程关闭，Queue 对象虽在但无人读取，会导致数据堆积且外部 IPC 无法生效。
-                # 只有进程活着，Queue 通信才有意义。
-                if self.viz_command_queue is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
+                # ⭐ 4️⃣ 主通道：Pipe (无后台线程，避免 GIL 崩溃)
+                if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
                     try:
-                        with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
-                            self.viz_command_queue.put_nowait(
-                                ('UPDATE_DF_DATA', sync_package)
-                            )
-                        logger.debug(f"[Queue] {msg_type} sent (ver={self.sync_version})")
+                        self.viz_conn[0].send(
+                            ('UPDATE_DF_DATA', sync_package)
+                        )
+                        logger.debug(f"[Pipe] {msg_type} sent (ver={self.sync_version})")
                         sent = True
-                        used_queue = True
-
-                    except Full:
-                        logger.warning("[Queue] full, fallback to IPC")
-
+                    except (EOFError, BrokenPipeError, ConnectionResetError):
+                         logger.warning("[Pipe] connection lost, fallback to Socket")
+                         self.viz_conn = None
                     except Exception as e:
-                        logger.exception(f"[Queue] send failed: {e}")
+                         logger.error(f"[Pipe] send failed: {e}")
 
-                # 诊断：如果有内部进程但没走 Queue
+                # 诊断：如果有内部进程但没走 Pipe
                 if not sent and self.qt_process is not None and self.qt_process.is_alive():
-                     logger.warning(f"[send_df] Internal process alive but Queue skipped/failed! queue_obj={self.viz_command_queue is not None}")
+                     logger.warning(f"[send_df] Internal process alive but Pipe skipped/failed!")
 
                 # ======================================================
                 # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
@@ -7674,16 +7668,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def open_trading_analyzer_qt6(self):
-        """打开 Qt6 版本的交易分析工具"""
+        """[COMPAT] 打开 Qt6 版本的交易分析工具 (兼容 PyInstaller 打包)"""
         from PyQt6 import QtWidgets
         from trading_analyzerQt6 import TradingGUI
+        import sys
+        
         try:
-            # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
+            # 🛡️ 宿主进程内直接实例化，但必须确保不阻塞 Tk 事件循环
             if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
-                # 确保 Qt 环境已初始化
+                # 1. 确保 QApplication 环境已初始化 (全局唯一)
                 if not QtWidgets.QApplication.instance():
                     self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
+                # 2. 传递核心引用
                 self._trading_gui_qt6 = TradingGUI(
                     sender=self.sender,
                     on_tree_scroll_to_code=self.tree_scroll_to_code,
@@ -7692,11 +7689,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df_all=getattr(self, 'df_all', None)
                 )
                 
+                # 3. 监听关闭事件
+                self._trading_gui_qt6.finished.connect(lambda: setattr(self, "_trading_gui_qt6", None))
+            
             self._trading_gui_qt6.show()
             self._trading_gui_qt6.raise_()
             self._trading_gui_qt6.activateWindow()
             
-            toast_message(self, "交易分析工具(Qt6) 已启动")
+            # 🛡️ 关键：在 Tk 线程中强制处理一下 Qt 事件，防止初始化时的重型 UI 绘制卡住宿主
+            QtWidgets.QApplication.processEvents()
+            
+            toast_message(self, "交易分析工具(Qt6) 已就绪")
         except Exception as e:
             logger.error(f"Failed to open TradingGUI Qt6: {e}")
             messagebox.showerror("错误", f"启动 Qt6 分析工具失败: {e}")
@@ -10483,19 +10486,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_top10_window_simple.items():
             if v.get("code") == unique_code and v.get("win") is not None and v.get("win").winfo_exists():
-                # 已存在，聚焦并显示TK
-                logger.info(f'已存在，聚焦并显示TK:{unique_code}')
-                v["win"].deiconify()      # 如果窗口最小化了，恢复
-                v["win"].lift()           # 提到最前
-                v["win"].focus_force()    # 获得焦点
-                if hasattr(v["win"], "_tree_top10"):
-                    v["win"]._tree_top10.selection_set(v["win"]._tree_top10.get_children()[0])  # 选中第一行（可选）
-                    v["win"]._tree_top10.focus_set() # 获得焦点
-                v["win"].attributes("-topmost", True)
-                if hasattr(self, '_schedule_after'):
-                    self._schedule_after(100, lambda: v["win"].attributes("-topmost", False))
+                # 已存在，显示并根据需要聚焦
+                win_exist = v["win"]
+                # logger.info(f'已存在，显示TK:{unique_code} (focus_force={focus_force})')
+                win_exist.deiconify()      # 如果窗口最小化了，恢复
+                
+                if focus_force:
+                    win_exist.lift()           # 提到最前
+                    win_exist.focus_force()    # 获得焦点
+                    win_exist.attributes("-topmost", True)
+                    # 临时置顶后恢复，防止永久遮挡
+                    win_exist.after(100, lambda: win_exist.attributes("-topmost", False))
                 else:
-                    v["win"].after(100, lambda: v["win"].attributes("-topmost", False))
+                    # 不强制聚焦，仅提升层级确保可见
+                    win_exist.lift()
+                
+                if hasattr(win_exist, "_tree_top10"):
+                    try:
+                        children = win_exist._tree_top10.get_children()
+                        if children:
+                            win_exist._tree_top10.selection_set(children[0])
+                            # win_exist._tree_top10.focus_set()
+                    except Exception:
+                        pass
                 return  # 不创建新窗口
 
         # --- 新窗口 ---
@@ -10784,15 +10797,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
         if focus_force:
-            logger.info(f'已存在，focus_force聚焦并显示TK:{unique_code}')
-            win.transient(self)              # 关联主窗口（非常关键）
+            # logger.info(f'新创建，focus_force聚焦并显示TK:{unique_code}')
+            win.transient(self)              # 关联主窗口
             win.attributes("-topmost", True) # 临时置顶
-            win.deiconify()                  # 确保不是最小化
+            win.deiconify()
             win.lift()
             win.focus_force()    # 获得焦点
             if hasattr(win, "tree"):
-                tree.selection_set(tree.get_children()[0])  # 选中第一行（可选）
-                tree.focus_set()
+                win.tree.selection_set(win.tree.get_children()[0])
+                win.tree.focus_set()
+        else:
+            # 不强制聚焦，仅确保窗口可见
+            win.deiconify()
+            win.lift()
 
 
             # 延迟激活焦点（绕过 Windows 限制）
@@ -12961,8 +12978,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # unique_code = f"{concept_name or ''}_{code or ''}"
                     unique_code = f"{concept_name or ''}_"
 
-                    # 创建窗口
-                    win = self.show_concept_top10_window_simple(concept_name, code=code, auto_update=True, interval=30,focus_force=True)
+                    # 创建窗口 (取消 focus_force=True 以免干扰主流程)
+                    win = self.show_concept_top10_window_simple(concept_name, code=code, auto_update=True, interval=30, focus_force=False)
 
                     # 注册回监控字典
                     self._pg_top10_window_simple[unique_code] = {

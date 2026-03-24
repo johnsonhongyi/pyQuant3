@@ -401,11 +401,15 @@ class RobustQueueListener(QueueListener):
         except (EOFError, BrokenPipeError, ConnectionResetError):
             pass
 
+import queue
+
 def _ensure_listener_started(log_f, show_detail=True):
     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
 
-    if _GLOBAL_QUEUE is None and os.getpid() == _MAIN_PID:
-        _GLOBAL_QUEUE = multiprocessing.Queue(-1)
+    # ⭐ [STABILITY] 在 Windows 混合 GUI 环境下，multiprocessing.Queue 的 feeder 线程会引发 GIL 崩溃。
+    # 我们改为每个进程使用各自独立的 queue.Queue（线程安全且无后台 feeder 线程）。
+    if _GLOBAL_QUEUE is None:
+        _GLOBAL_QUEUE = queue.Queue(-1)
 
         # ================= Console handler（彩色） =================
         ch = logging.StreamHandler()

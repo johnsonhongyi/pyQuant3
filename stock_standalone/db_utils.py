@@ -52,13 +52,14 @@ class SQLiteConnectionManager:
             logger.error(f"Failed to enable WAL mode for {self.db_path}: {e}")
 
     def get_connection(self) -> sqlite3.Connection:
-        """Get a thread-local connection"""
+        """获取线程本地连接，并开启内存映射加速"""
         if not hasattr(self.local, 'conn'):
             self.local.conn = sqlite3.connect(self.db_path, timeout=30.0)
-            # [NEW] 加强并发等待时间，5000毫秒轮询等锁
             self.local.conn.execute("PRAGMA busy_timeout=5000;")
-            # Enable foreign keys by default if needed, or other pragmas
-            # self.local.conn.execute("PRAGMA foreign_keys = ON;") 
+            # [PERF] 极限加速：开启 64MB 缓存和 256MB 内存映射读取
+            self.local.conn.execute("PRAGMA cache_size=-64000;")
+            self.local.conn.execute("PRAGMA mmap_size=268435456;")
+            self.local.conn.execute("PRAGMA temp_store=MEMORY;")
         return self.local.conn
 
     def close_thread_connection(self):
@@ -123,16 +124,9 @@ def get_indb_df(days=10):
     return indf
 
 def _get_concept_db_conn():
-    """统一的 concept DB 连接，注入 WAL 和 并发控制 PRAGMA"""
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA wal_autocheckpoint=100;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-    except Exception as e:
-        logger.warning(f"Failed to set PRAGMA on {DB_PATH}: {e}")
-    return conn
+    """获取连接（统一采用 ConnectionManager）"""
+    manager = SQLiteConnectionManager.get_instance(DB_PATH)
+    return manager.get_connection()
 
 def init_concept_db():
     """初始化概念数据 SQLite 数据库"""

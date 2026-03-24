@@ -621,11 +621,11 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
                 if hasattr(self.monitor_app, 'tk_dispatch_queue'):
                     self.logger.info(f"Dispatching concept window open for: {sector_name}")
                     self.monitor_app.tk_dispatch_queue.put(
-                        lambda: self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=True)
+                        lambda: self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=False)
                     )
                 else:
                     # Fallback to direct call if no queue exists
-                    self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=True)
+                    self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=False)
             else:
                 self.logger.warning("monitor_app or show_concept_top10_window_simple not available")
         self.tree.tag_configure('warm', background='#fff9e6') # Light yellow

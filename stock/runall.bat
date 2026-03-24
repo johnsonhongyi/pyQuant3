@@ -19,7 +19,7 @@ echo 当前目录: %WORKDIRTK%
 if exist "%WORKDIRTK%\instock_MonitorTK.exe" (
     echo 启动 EXE: instock_MonitorTK.exe
     rem start cmd /k  "%WORKDIRTK%\instock_MonitorTK.exe"
-    start "" wt new-tab cmd /k "%WORKDIRTK%\instock_MonitorTK.exe"
+    start "" wt new-tab cmd /k "cd /d D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist && instock_MonitorTK.exe"
 ) else if exist "%WORKDIRTK%\instock_MonitorTK.py" (
     echo 启动 Python: instock_MonitorTK
     start cmd /k  python "%WORKDIRTK%\instock_MonitorTK.py"

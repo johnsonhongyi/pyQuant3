@@ -14,7 +14,7 @@ import pandas as pd
 import re
 import socket
 import queue
-from queue import Empty, Full
+from queue import Queue, Empty, Full
 from typing import Any, Optional, Callable, Dict, List, Union
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -39,7 +39,7 @@ import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
 MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
 # pyttsx3 import removed - delegated to VoiceAnnouncer/AlertManager
-_ipc_queue = queue.Queue(maxsize=1000)  # ⭐ [NEW] IPC 异步发送队列
+ipc_queue = Queue(maxsize=1000)  # ⭐ [NEW] IPC 异步发送队列 (Resolved mp.Queue GIL Crash)
 _ipc_sender_thread: Optional[threading.Thread] = None
 _ipc_sender_stop = threading.Event()
 
@@ -114,7 +114,7 @@ def _ipc_sender_worker():
     while not _ipc_sender_stop.is_set():
         try:
             # 阻塞获取任务，带超时以便检查 _ipc_sender_stop
-            data = _ipc_queue.get(timeout=1.0)
+            data = ipc_queue.get(timeout=1.0)
             if data == "__STOP__":
                 break
             
@@ -135,7 +135,7 @@ def _ipc_sender_worker():
                 except Exception as e:
                     logger.debug(f"IPC Send Error: {e}")
             
-            _ipc_queue.task_done()
+            ipc_queue.task_done()
             
         except Empty:
             continue
@@ -178,7 +178,7 @@ def send_signal_to_visualizer_ipc(data: dict):
 
         # 3. ---------- IPC (Queue it for Async worker) ----------
         try:
-            _ipc_queue.put(data, block=False) # Non-blocking put
+            ipc_queue.put(data, block=False) # Non-blocking put
         except Full:
             # If queue is somehow full, drop the least important (oldest) signal? 
             # Or just wait a tiny bit? For now, we drop to ensure strategy doesn't lag.
