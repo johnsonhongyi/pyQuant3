@@ -170,7 +170,8 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
             continue
 
         # 逐子条件拆分
-        sub_conditions = [x.strip() for x in expr.split("and")]
+        # sub_conditions = [x.strip() for x in expr.split("and")]
+        sub_conditions = [x.strip() for x in re.split(r'\band\b', expr)]
         sub_results = []
         all_ok = True
         for cond in sub_conditions:

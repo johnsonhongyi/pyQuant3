@@ -5,11 +5,11 @@ Alert Manager - 混合终极版
 2. 响应循环：在隔离周期内使用 iterate() (保证点击删除/关闭秒级中断)
 3. 多级 BEEP：高优先级报警带有显著蜂鸣提示
 """
-import multiprocessing as mp
 import threading
+import queue
+from queue import Queue, Empty, Full
 import time
 import logging
-from queue import Empty
 from typing import Optional, Any, Dict
 import re
 import os
@@ -35,10 +35,10 @@ def normalize_speech_text(text: str) -> str:
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
     return text
 
-def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, cancel_q: mp.Queue, current_key_arr: mp.Array, active_codes_arr: mp.Array, last_sync_time: mp.Value, feedback_queue: mp.Queue = None):
+def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: threading.Event, cancel_q: Queue, current_state: dict, feedback_queue: Queue = None):
     """
-    语音播报后台进程 - 强化版
-    支持通过 cancel_q 跳过队列，并通过 current_key_arr 标记当前状态
+    语音播报后台线程 (Resolved mp.Queue GIL Crash)
+    支持通过 cancel_q 跳过队列，并通过 current_state 标记当前状态
     """
     from datetime import datetime
     import pyttsx3
@@ -56,7 +56,7 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
     )
     handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker-%(process)d] %(message)s', '%Y-%m-%d %H:%M:%S'))
     
-    w_logger = logging.getLogger("VoiceWorkerProcess")
+    w_logger = logging.getLogger("VoiceWorkerThread")
     w_logger.setLevel(logging.DEBUG)
     if not w_logger.handlers:
         w_logger.addHandler(handler)
@@ -155,9 +155,8 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             worker_log(f"Handling: {safe_msg[:40]}... (Key: {key})")
 
             # 标记当前播报品种
-            if current_key_arr:
-                try: current_key_arr.value = (str(key) if key else "").encode('utf-8')[:31]
-                except: pass
+            if current_state is not None:
+                current_state['key'] = str(key) if key else ""
 
             if pythoncom:
                 try: pythoncom.CoInitialize()
@@ -169,18 +168,15 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
                 except: break
             if key and key in cancelled_set:
                 worker_log(f"Final JIT Skip: {key}")
-                if current_key_arr: current_key_arr.value = b""
+                if current_state: current_state['key'] = ""
                 cancelled_set.discard(key)
                 continue
 
             # ⭐ 联动核心 2：存在性核验 (如果设置了活跃列表，且当前代码不在其中，则跳过)
-            if active_codes_arr and key:
+            if current_state and key:
                 try:
-                    # 严谨读取共享内存字符串 (去除填充的空字符)
-                    active_str = active_codes_arr.value.decode('utf-8').split('\x00')[0]
-                    sync_t = last_sync_time.value
-                    
-                    if active_str:
+                    active_str = current_state.get('active_codes', '')
+                    if active_str and active_str != "NONE":
                         # 屏幕上有窗口，检查当前代码是否在其中
                         active_list = [c.strip() for c in active_str.split(',') if c.strip()]
                         if key not in active_list:
@@ -215,8 +211,8 @@ def _voice_worker(q: mp.Queue, stop_event: mp.Event, interrupt_event: mp.Event, 
             except Exception as e:
                 worker_log(f"Engine Cycle Error: {e}")
             finally:
-                if current_key_arr:
-                    try: current_key_arr.value = b""
+                if current_state:
+                    try: current_state['key'] = ""
                     except: pass
                 if pythoncom:
                     try: pythoncom.CoUninitialize()
@@ -246,25 +242,21 @@ class AlertManager:
         self.enabled: bool = True
         self.voice_enabled: bool = voice_enabled
         
-        # 通信原语
-        self.voice_queue: mp.Queue = mp.Queue() 
-        self.cancel_queue: mp.Queue = mp.Queue() # [NEW] 用于取消排队中的
-        self.feedback_queue: mp.Queue = mp.Queue() # [NEW] 用于反馈开始/结束事件
-        self.stop_event: mp.Event = mp.Event()
-        self.interrupt_event: mp.Event = mp.Event()
+        # 通信原语 (Resolved mp.Queue GIL Crash)
+        self.voice_queue: Queue = Queue() 
+        self.cancel_queue: Queue = Queue() # [NEW] 用于取消排队中的
+        self.feedback_queue: Queue = Queue() # [NEW] 用于反馈开始/结束事件
+        self.stop_event: threading.Event = threading.Event()
+        self.interrupt_event: threading.Event = threading.Event()
         
         # Callbacks
         self.on_speak_start = None
         self.on_speak_end = None
         
-        # [NEW] 共享状态：当前正在播报的 Key
-        self.current_key = mp.Array('c', 32)
-        # [NEW] 共享状态：当前可视窗口的品种代码列表 (逗号分隔)
-        self.active_codes_arr = mp.Array('c', 1024)
-        # [NEW] 共享状态：最后一次同步活跃列表的时间戳
-        self.last_sync_time = mp.Value('d', 0.0)
+        # [NEW] 共享状态 (Threading 下直接共享 dict)
+        self.current_state = {'key': '', 'active_codes': '', 'last_sync_time': 0.0}
         
-        self.process: Optional[mp.Process] = None 
+        self.process: Optional[threading.Thread] = None 
         self.cooldowns: Dict[str, float] = {}
         self.global_last_alert: float = 0
         
@@ -272,18 +264,18 @@ class AlertManager:
         self._start_feedback_listener()
         
     def start(self):
-        """启动或重启语音线程"""
+        """启动或重启语音线程 (Resolved mp.Queue GIL Crash)"""
         if self.process is None or not self.process.is_alive():
             self.stop_event.clear()
             self.interrupt_event.clear()
             
-            self.process = mp.Process(
+            self.process = threading.Thread(
                 target=_voice_worker, 
-                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue, self.current_key, self.active_codes_arr, self.last_sync_time, self.feedback_queue),
+                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue, self.current_state, self.feedback_queue),
                 daemon=True,
-                name="AlertVoiceWorker"
+                name="AlertVoiceWorkerThread"
             )
-            logger.info("Alert voice worker (Enhanced Linkage) started.")
+            logger.info("Alert voice worker (Enhanced Linkage) started as THREAD.")
             self.process.start()
 
     def _start_feedback_listener(self):
@@ -314,7 +306,7 @@ class AlertManager:
 
     def sync_active_codes(self, codes_list):
         """同步 UI 端的活跃窗口代码列表"""
-        if not hasattr(self, 'active_codes_arr'): return
+        if not hasattr(self, 'current_state'): return
         try:
             if not codes_list:
                 # 如果列表为空，则标记为 NONE，表示明确的“无窗状态”
@@ -322,8 +314,9 @@ class AlertManager:
             else:
                 codes_str = ",".join(map(str, codes_list))
             
-            self.active_codes_arr.value = codes_str.encode('utf-8')[:1023]
-            self.last_sync_time.value = time.time()
+            # 直接写入共享字典
+            self.current_state['active_codes'] = codes_str
+            self.current_state['last_sync_time'] = time.time()
         except:
             pass
 
@@ -425,10 +418,10 @@ class AlertManager:
         """系统完全退出"""
         self.stop_event.set()
         if self.process and self.process.is_alive():
-            self.process.join(timeout=0.3)
+            self.stop_event.set() # 信号线程退出
+            self.process.join(timeout=0.5)
             if self.process and self.process.is_alive():
-                try: self.process.terminate()
-                except: pass
+                logger.debug("Alert worker thread still alive, will be collected by daemon")
         logger.info("Alert system stopped.")
 
     def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):

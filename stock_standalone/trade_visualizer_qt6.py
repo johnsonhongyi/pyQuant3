@@ -7,7 +7,9 @@ import json
 import socket
 import logging
 import platform
-from queue import Queue, Empty
+import threading
+import queue
+from queue import Queue, Empty, Full
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union, Callable
@@ -92,9 +94,7 @@ logger = LoggerFactory.getLogger()
 # Ensure project root is in path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
-from multiprocessing import Process, Queue
-import queue  # 这个一定要加，用于捕获 Empty 异常
-from multiprocessing import Event
+from multiprocessing import Process, Event
 import multiprocessing as mp
 # 全局或窗口属性
 stop_event = Event()
@@ -290,29 +290,30 @@ class VoiceProcess:
     """
     def __init__(self, parent=None):  # 接受 parent 参数保持兼容性
         import multiprocessing as mp
-        self.queue = mp.Queue()
-        self.feedback_queue = mp.Queue() # 新增反馈队列
-        self.stop_flag = mp.Value('b', True)  # boolean, True = running
-        self.abort_event = mp.Event() # 新增：强制中止事件
-        self.pause_event = mp.Event() # [NEW] 暂停事件
+        from queue import Queue
+        self.queue = Queue()
+        self.feedback_queue = Queue() # 新增反馈队列
+        self.stop_flag = mp.Value('b', True)  # boolean, True = running (using mp.Value for compatibility)
+        self.abort_event = threading.Event() # 改为 threading.Event
+        self.pause_event = threading.Event() # 改为 threading.Event
         self.pause_event.set()        # 初始为非暂停状态
         self.process = None
         self.pause_for_sync = False  # 保留接口兼容性（但多进程下无需使用）
 
     def start(self):
-        """启动语音播报进程"""
-        import multiprocessing as mp
+        """启动语音播报线程 (Resolved mp.Queue GIL Crash)"""
         if self.process is None or not self.process.is_alive():
             self.stop_flag.value = True
             self.abort_event.clear()
             self.pause_event.set() # 确保不处于暂停
-            self.process = mp.Process(
+            self.process = threading.Thread(
                 target=_voice_worker, 
                 args=(self.queue, self.stop_flag, self.feedback_queue, self.abort_event, self.pause_event),
-                daemon=False # ⚡ [STABILITY] 改为非守护进程，依靠 stop() 优雅退出，防止 COM 引起的 Access Violation
+                name="VoiceWorkerThread",
+                daemon=True
             )
             self.process.start()
-            logger.info("✅ 语音播报进程已启动 (PID: %s)", self.process.pid)
+            logger.info("✅ 语音播报线程已启动")
 
     def speak(self, text, meta=None):
         """添加文本及元数据到播报队列"""
@@ -369,25 +370,17 @@ class VoiceProcess:
                 break
                 
         if self.process and self.process.is_alive():
-            # ⚡ [STABILITY] 先尝试优雅关闭，给足时间以便 COM 组件释放
-            self.process.join(timeout=2.0)
+            # self.process.join(timeout=2.0)
+            self.stop_flag.value = False
+            self.abort_event.set()
+            self.process.join(timeout=0.5)
             if self.process.is_alive():
-                logger.warning("Voice worker timed out on join, terminating...")
-                try:
-                    self.process.terminate()
-                    self.process.join(timeout=1.0)
-                except:
-                    pass
+                logger.debug("Voice worker thread still alive, will be collected by daemon")
         
         # ⚡ [NEW] 彻底关闭进程池/队列
-        try:
-            self.queue.close()
-            self.feedback_queue.close()
-        except:
-            pass
-            
+        # NOTE: queue.Queue has no close()
         self.process = None
-        logger.info("✅ Voice worker process shutdown complete")
+        logger.info("✅ Voice worker thread shutdown complete")
 
     def wait(self, timeout_ms=2000):
         """等待进程完成（兼容旧接口）"""
@@ -1302,7 +1295,7 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
                         try:
                             queue.put_nowait((code, tick_df, today_bar))
                             force_fetch = False # 成功抓取一次后清除强制标记
-                        except queue.Full:
+                        except Full:
                             pass
         except Exception as e:
             import traceback
@@ -2297,7 +2290,7 @@ class RealtimeWorker(QObject):
 
 
 class MainWindow(QMainWindow, WindowMixin):
-    def __init__(self, stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+    def __init__(self, stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
         super().__init__()
         # 初始化语音线程
         self.voice_thread = VoiceThread(self)
@@ -2338,7 +2331,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 使用独立开关初始化 StockSender
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=None)
-        self.command_queue = command_queue  # ⭐ 新增：内部指令队列
+        self.command_conn = command_conn    # ⭐ 使用 Pipe 代替 Queue，避免 GIL 崩溃
         # WindowMixin 要求: scale_factor
         self._debug_realtime = debug_realtime   # 临时调试用
         self.scale_factor = get_windows_dpi_scale_factor()
@@ -2420,20 +2413,24 @@ class MainWindow(QMainWindow, WindowMixin):
         logger.info(f"[Visualizer] Realtime UI poll timer started at 1000ms")
         logger.info(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
 
-        # ⭐ 新增：指令队列轮询 (处理来自 MonitorTK 的直连指令)
-        if self.command_queue:
-            logger.info(f"[Visualizer] Command queue detected: {self.command_queue}")
+        # ⭐ 新增：指令 Pipe 轮询 (处理来自 MonitorTK 的直连指令)
+        if hasattr(self, 'command_conn') and self.command_conn:
+            logger.info(f"[Visualizer] Command Pipe connection detected.")
             self.command_timer = QTimer()
             self.command_timer.timeout.connect(self._poll_command_queue)
             self.command_timer.start(200)  # 200ms 轮询一次，保证响应速度
         else:
-            logger.warning("[Visualizer] No command queue detected! Sync from MonitorTK may fail.")
+            logger.warning("[Visualizer] No command Pipe detected! Sync from MonitorTK may fail.")
 
         # 🎤 [NEW] 语音反馈监听定时器：实现声画同步定位
         self.voice_feedback_timer = QTimer()
         self.voice_feedback_timer.timeout.connect(self._poll_voice_feedback)
         self.voice_feedback_timer.start(500) # 每 500ms 检查一次播报进度
 
+        # ⚡ [NEW] Lifecycle check (Self-terminate if parent signals exit)
+        self.lifecycle_timer = QTimer(self)
+        self.lifecycle_timer.timeout.connect(self._check_lifecycle)
+        self.lifecycle_timer.start(2000) # 每 2s 检查一次生命周期标志
         self.day_df = pd.DataFrame()
         self.df_all = pd.DataFrame()
 
@@ -2486,7 +2483,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_theme_selector()
         self._init_tdx()
         self._init_real_time()
-        self._init_layout_menu()  # ⭐ 新增：布局预设菜单
         self._init_layout_menu()  # ⭐ 新增：布局预设菜单
         self._init_theme_menu()   # ⭐ 新增：主题背景菜单
         self._init_voice_toolbar() # ⭐ 新增：语音控制栏
@@ -2997,6 +2993,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.horizontalHeader().sectionResized.connect(self._on_column_resized_debounced)
         if hasattr(self, 'filter_tree'):
             self.filter_tree.header().sectionResized.connect(self._on_column_resized_debounced)
+
+    def _check_lifecycle(self):
+        """定期检查父进程设置的生命周期标志，若为 False 则自毁 (防止进程残留)"""
+        if hasattr(self, 'stop_flag') and self.stop_flag is not None:
+            if not self.stop_flag.value:
+                logger.info("[Lifecycle] 检测到 stop_flag 为 False，Visualizer 正在自启退出程序...")
+                self.close()
+                # 保险：3秒后若还没关，强制退出
+                QTimer.singleShot(3000, lambda: sys.exit(0))
 
     def _load_pattern_config(self) -> Dict[str, Any]:
         """加载形态检测配置"""
@@ -5211,12 +5216,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 try: self.realtime_task_queue.get_nowait()
                 except: break
                 
-            self.realtime_process = Process(
+            self.realtime_process = threading.Thread(
                 target=realtime_worker_process,
                 args=(self.realtime_task_queue, self.realtime_queue, self.rt_worker_stop_flag, self.log_level, self._debug_realtime),
-                daemon=False
+                name="RealtimeUpdateWorkerThread",
+                daemon=True
             )
             self.realtime_process.start()
+            logger.info("✅ 实时数据更新线程已启动 (Resolved mp.Queue GIL Crash)")
 
         # 3. 发送新任务
         logger.debug(f"[RealtimeProcess] Switching task to {code}")
@@ -5228,13 +5235,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def _stop_realtime_process(self):
-        if self.realtime_process:
-            # 停止常驻进程 (使用专用 flag)
-            self.rt_worker_stop_flag.value = False
-            self.realtime_process.join(timeout=0.5)
-            if self.realtime_process.is_alive():
-                self.realtime_process.terminate()
-                logger.debug("[RealtimeProcess] Force terminated (timeout)")
+            if self.realtime_process and self.realtime_process.is_alive():
+                self.rt_worker_stop_flag.value = False
+                self.realtime_process.join(timeout=0.5)
+                if self.realtime_process.is_alive():
+                    # Thread can't be terminated, just warn and let daemon handle it
+                    logger.debug("[RealtimeProcess] Thread still alive, will be collected by daemon")
             self.realtime_process = None
 
     def _poll_realtime_queue(self):
@@ -5251,7 +5257,7 @@ class MainWindow(QMainWindow, WindowMixin):
             try:
                 code, tick_df, today_bar = self.realtime_queue.get_nowait()
                 updates_batch[code] = (tick_df, today_bar)
-            except queue.Empty:
+            except Empty:
                 break
             except (EOFError, OSError):
                 logger.warning("Realtime queue closed unexpectedly")
@@ -5434,127 +5440,54 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"[apply_df_diff] Error: {e}")
 
     def _poll_command_queue(self):
-        """轮询内部指令队列 (消费所有积压，只取最新数据)"""
-        # ⭐ [FIX] 僵尸进程自杀机制：检查退出标志
-        # MonitorTK 在 on_close 时会将 stop_flag 设为 False
+        """轮询内部指令 Pipe"""
         if hasattr(self, 'stop_flag') and self.stop_flag and not self.stop_flag.value:
             logger.info("[Visualizer] Stop flag detected (False), initiating self-destruct...")
             self.close()
-            # 确保 Qt 循环结束
             QApplication.quit()
             return
 
-        if not self.command_queue:
+        if not hasattr(self, 'command_conn') or not self.command_conn:
             return
+
         try:
-            latest_full_df = None
-            df_diffs = []
-            
-            # 🔄 移除 unreliable 的 empty() 检查，直接进入消费循环
-            while True:
-                try:
-                    cmd_data = self.command_queue.get_nowait()
-                except Empty: # queue.Empty
-                    break
-                except EOFError:
-                    break
+            # ⭐ [STABILITY] 使用 Pipe.poll() + recv()，无后台 feeder 线程
+            while self.command_conn.poll():
+                cmd_data = self.command_conn.recv()
+                if not cmd_data: break
+                
+                cmd_type, payload = cmd_data
+                logger.debug(f"[Visualizer] Received command: {cmd_type}")
+                
+                if cmd_type == 'SWITCH_CODE':
+                    code = payload.get('code')
+                    res = payload.get('resample', 'd')
+                    if code:
+                        self.load_stock_by_code(code, resample=res)
+                
+                elif cmd_type == 'UPDATE_DF_DATA':
+                    pkg = payload
+                    if not isinstance(pkg, dict):
+                        continue
                     
-                if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
-                    cmd, val = cmd_data
-                    if cmd == 'SWITCH_CODE':
-                        if isinstance(val, dict):
-                            logger.debug(f"Queue CMD: Switching to {val.get('code')} with params {val}")
-                            # [FIX] 避免 multiple values for argument 'code'
-                            params = val.copy()
-                            code = params.pop('code', None)
-                            if code:
-                                self.load_stock_by_code(code, **params)
-                        else:
-                            logger.debug(f"Queue CMD: Switching to {val}")
-                            self.load_stock_by_code(val)
-
-                    elif cmd == 'UPDATE_DF_ALL':
-                        if isinstance(val, pd.DataFrame):
-                            # 全量覆盖 → 丢弃之前的增量
-                            latest_full_df = val
-                            df_diffs.clear()
-
-                    elif cmd == 'UPDATE_DF_DIFF':
-                        if isinstance(val, pd.DataFrame):
-                            df_diffs.append(val)
-                    
-                    elif cmd == 'UPDATE_DF_DATA' and isinstance(val, dict):
-                        m_type = val.get('type')
-                        payload = val.get('data')
-                        ver = val.get('ver', 0)
-
-                        if m_type == 'UPDATE_DF_ALL':
-                            self.expected_sync_version = ver
-                            latest_full_df = payload
-                            df_diffs.clear()
-                            logger.debug(f"[Queue] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
-                        elif m_type == 'UPDATE_DF_DIFF':
-                            if self.expected_sync_version == -1:
-                                # 还没有全量包，丢弃增量并请求同步
-                                logger.warning("[Queue] Received DIFF before ALL. Requesting full sync.")
-                                self._request_full_sync()
-                            elif ver == self.expected_sync_version + 1:
-                                self.expected_sync_version = ver
-                                df_diffs.append(payload)
-                            else:
-                                logger.warning(f"[Queue] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
-                                self._request_full_sync()
-                                # 终止本轮增量应用，等待全量同步
-                                df_diffs.clear()
-                                break
-                    
-                    elif cmd == 'CMD_SCAN_CONSOLIDATION':
-                        # 触发策略扫描
-                        logger.debug("Queue CMD: Triggering Consolidation Scan...")
-                        # 确保 SignalBoxDialog 已显示
-                        self._show_signal_box()
-                        # 延迟以确保窗口初始化完成
-                        QTimer.singleShot(500, self.signal_box_dialog.on_scan_consolidation)
-
-            # --- 处理最新全量数据 ---
-            if latest_full_df is not None:
-                logger.info(f"[Queue] Applying full sync ({len(latest_full_df)} rows)...")
-                self._process_df_all_update(latest_full_df)
-
-            # --- 处理增量数据 ---
-            for diff_df in df_diffs:
-                logger.info(f"[Queue] Applying df diff ({len(diff_df)} rows)...")
-                self.apply_df_diff(diff_df)
-
+                    p_type = pkg.get('type')
+                    if p_type == 'UPDATE_DF_ALL':
+                        self.update_df_all(pkg.get('data'))
+                    elif p_type == 'UPDATE_DF_DIFF':
+                        self.apply_df_diff(pkg.get('data'))
+                    elif 'code' in pkg and 'data' in pkg:
+                        # 兼容单股更新模式
+                        self.on_realtime_update(pkg['code'], pkg['data'], pkg.get('today_bar'))
+                
+                elif cmd_type == 'CMD_SCAN_CONSOLIDATION':
+                    if hasattr(self, 'on_scan_triggered'):
+                        self.on_scan_triggered()
+                        
+        except (EOFError, BrokenPipeError, ConnectionResetError):
+            logger.warning("[Visualizer] Command pipe closed.")
+            self.command_conn = None
         except Exception as e:
-            logger.warning(f"Poll command queue failed: {e}")
-
-    # def _poll_command_queue_ALL(self):
-    #     """轮询内部指令队列 (优化：消费所有积压，只取最新全量数据)"""
-    #     if not self.command_queue:
-    #         return
-    #
-    #     try:
-    #         latest_df = None
-    #         while not self.command_queue.empty():
-    #             cmd_data = self.command_queue.get_nowait()
-    #             if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
-    #                 cmd, val = cmd_data
-    #                 if cmd == 'SWITCH_CODE':
-    #                     logger.info(f"Queue CMD: Switching to {val}")
-    #                     self.load_stock_by_code(val)
-    #                 elif cmd == 'UPDATE_DF_ALL':
-    #                     # 记录最新的全量数据，跳过中间过时的
-    #                     if isinstance(val, pd.DataFrame):
-    #                         latest_df = val
-    #
-    #         # 处理最鲜活的一份数据
-    #         if latest_df is not None:
-    #             logger.debug(f"Queue CMD: Instant sync df_all ({len(latest_df)} rows)")
-    #             self.update_df_all(latest_df)
-    #
-    #     except Exception as e:
-    #         logger.debug(f"Poll command queue failed: {e}")
+            logger.error(f"[Visualizer] Failed to poll command pipe: {e}")
 
     def push_stock_info(self,stock_code, row):
         """
@@ -5922,8 +5855,12 @@ class MainWindow(QMainWindow, WindowMixin):
         low_color = RED if abs(open_p - low_p) < 0.01 else WHITE
         high_color = RED if is_bullish else WHITE
 
+        # MA 颜色配置 (通达信风格)
+        C_MA5, C_MA10, C_MA20, C_MA60 = "#00FF00", "#FFA500", "#FFFF00", "#00B4FF"
+        ma5_v, ma10_v, ma20_v, ma60_v = row.get('ma5', 0), row.get('ma10', 0), row.get('ma20', 0), row.get('ma60', 0)
+
         text = f"""
-        <table style='font-family:monospace; border-collapse:collapse;'>
+        <table style='font-family:monospace; border-collapse:collapse; width:100%;'>
         <tr><td style='color:{WHITE}'>开:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>收:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
         <tr><td style='color:{WHITE}'>低:</td><td style='text-align:right;color:{low_color}'>{low_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>高:</td><td style='text-align:right;color:{high_color}'>{high_p:.2f}</td></tr>
         </table>
@@ -5932,7 +5869,14 @@ class MainWindow(QMainWindow, WindowMixin):
             <span style='color:{WHITE}'>涨:</span><span style='color:{ratio_color}'>{ratio:+.2f}%</span>
             <span style='color:{WHITE}; padding-left:8px;'>振:</span><span style='color:{amplitude_color}'>{amplitude:6.2f}%</span>
         </div>
-        <div style='color:#FFFFFF; font-family:monospace;'>{date_str}</div>
+        <hr style='margin:2px 0;'>
+        <div style='font-family:monospace;'>
+            <span style='color:{C_MA5}'>M5:{ma5_v:.2f}</span>
+            <span style='color:{C_MA10}; padding-left:8px;'>M10:{ma10_v:.2f}</span><br>
+            <span style='color:{C_MA20}'>M20:{ma20_v:.2f}</span>
+            <span style='color:{C_MA60}; padding-left:8px;'>M60:{ma60_v:.2f}</span>
+        </div>
+        <div style='color:#FFFFFF; font-family:monospace; margin-top:2px;'>{date_str}</div>
         """
         
         # 1.3: 检查是否有信号透视信息
@@ -8110,6 +8054,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         # 彻底移除所有相关的缓存属性，强制重建
                         clear_attrs = ['candle_item', 'vol_up_item', 'vol_down_item',
                                     'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
+                                    'ema20_trend_curve', 'ema20_up_curve',
                                     'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ppre_avg_line', 'ghost_candle',
                                     'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_box_pool',
                                     'hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p', 'anno_arrow_p', 'anno_label_p']
@@ -9132,8 +9077,15 @@ class MainWindow(QMainWindow, WindowMixin):
         # ma60 = day_df['close'].rolling(60).mean().values
         # ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
         # ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
-        ma20 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=26)
+
+        ma20 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=20)
         ma60 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=60)
+        
+        # 保存指标到 day_df 以便十字光标获取 (跟通达信一致)
+        day_df['ma5'] = ma5
+        day_df['ma10'] = ma10
+        day_df['ma20'] = ma20
+        day_df['ma60'] = ma60
         # MA60 颜色：亮蓝色（深浅主题都清晰）
         # ma60_color = QColor(0, 180, 255)
 
@@ -9153,6 +9105,50 @@ class MainWindow(QMainWindow, WindowMixin):
                 curve = getattr(self, attr)
                 curve.setData(x_axis, series)
                 curve.setPen(pen)
+
+        # --- Trend-Colored EMA20 (A:EMA(C,20) COLORGREEN,LINETHICK3; ...) ---
+        try:
+            # Ensure pure numpy arrays for safe computation and rolling
+            # close_arr = np.asarray(day_df['close'].values, dtype=np.float64)
+            # ema20_trend = np.asarray(tdd.ema_tdx_numpy(close_arr, timeperiod=20), dtype=np.float64)
+            ema20_trend = ma20
+
+            # B:=A<REF(A,1); IF(B-1,A,DRAWNULL) COLORYELLOW,LINETHICK3;
+            # 解释：下跌为绿色，上涨(或持平)为黄色
+            ema20_prev = np.roll(ema20_trend, 1)
+            if len(ema20_prev) > 0:
+                ema20_prev[0] = ema20_trend[0]
+            # B 是 A < REF(A, 1) (即正在下跌)
+            # 所以上涨时绘制黄色 overlay
+            is_up = ema20_trend >= ema20_prev
+
+            # 为了保证线段连续性，在上涨的第一根点，需要向前连接一个点。
+            is_up_shifted = np.roll(is_up, -1)
+            if len(is_up_shifted) > 0:
+                is_up_shifted[-1] = False  # 最后一根点不需要位移
+            is_up_inc = is_up | is_up_shifted
+
+            ema20_up = np.where(is_up_inc, ema20_trend, np.nan)
+
+            green_pen_w3 = pg.mkPen(QColor(0, 255, 0), width=3)
+            yellow_pen_w3 = pg.mkPen(QColor(255, 255, 0), width=3)
+
+            # 1. Base Green Line
+            if not hasattr(self, 'ema20_trend_curve') or self.ema20_trend_curve not in self.kline_plot.items:
+                self.ema20_trend_curve = self.kline_plot.plot(x_axis, ema20_trend, pen=green_pen_w3, name="EMA20_Trend")
+            else:
+                self.ema20_trend_curve.setData(x_axis, ema20_trend)
+                self.ema20_trend_curve.setPen(green_pen_w3)
+
+            # 2. Yellow Overlay (Up-trend)
+            # 使用 connect='finite' 自动处理 NaN
+            if not hasattr(self, 'ema20_up_curve') or self.ema20_up_curve not in self.kline_plot.items:
+                self.ema20_up_curve = self.kline_plot.plot(x_axis, ema20_up, pen=yellow_pen_w3, connect='finite', name="EMA20_Up")
+            else:
+                self.ema20_up_curve.setData(x_axis, ema20_up)
+                self.ema20_up_curve.setPen(yellow_pen_w3)
+        except Exception as e:
+            logger.error(f"[EMA20_Trend] 绘制失败，跳过: {e}")
 
 
 
@@ -11780,13 +11776,10 @@ class MainWindow(QMainWindow, WindowMixin):
         #     self.realtime_process = None
         if getattr(self, 'realtime_process', None):
             if self.realtime_process.is_alive():
-                self.realtime_process.join(timeout=2)
+                self.rt_worker_stop_flag.value = False
+                self.realtime_process.join(timeout=0.5)
                 if self.realtime_process.is_alive():
-                    logger.warning("realtime_process force terminate")
-                    self.realtime_process.terminate()
-                    self.realtime_process.join(timeout=1)
-                    if self.realtime_process.is_alive():
-                        logger.error("realtime_process still alive after terminate")
+                    logger.warning("realtime_process still alive, will be collected by daemon")
             self.realtime_process = None
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
@@ -11806,6 +11799,10 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug("Stopping main DataLoaderThread...")
             self.loader.stop()          # 通知线程退出
             self.loader.wait()          # ⬅️ 阻塞直到 run() 结束（关键）
+            # if not self.loader.wait(2000):
+            #     logger.warning("Main DataLoaderThread did not stop, terminating...")
+            #     self.loader.terminate()
+            
             self.loader.deleteLater()   # 交给 Qt 事件循环安全释放
             self.loader = None
         
@@ -11814,6 +11811,9 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug("Stopping CommandListenerThread...")
             self.command_listener_thread.stop()
             self.command_listener_thread.wait()   # ⬅️ 同样必须等待
+            # if not self.command_listener_thread.wait(2000):
+            #     logger.warning("CommandListenerThread did not stop, terminating...")
+            #     self.command_listener_thread.terminate()
             self.command_listener_thread.deleteLater()
             self.command_listener_thread = None
             
@@ -12004,7 +12004,7 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
     import pyqtgraph as pg
     pg.setConfigOptions(antialias=True)
     # ⭐ 启用底层故障捕捉，以便锁定 QThread Destroyed 等 C++ 报错
@@ -12036,6 +12036,9 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     # ------------------ 3. Secondary ------------------
     if not is_primary_instance:
         code_to_send = initial_code if initial_code else (sys.argv[1] if len(sys.argv) > 1 else None)
+        # ⭐ [FIX] 解析 "CODE|resample=X" 格式，只发送纯股票代码
+        if code_to_send and '|' in str(code_to_send):
+            code_to_send = str(code_to_send).split('|', 1)[0].strip()
         if code_to_send:
             # 尝试多次连接，保证 Primary 还没完全 accept 也能发
             for _ in range(5):
@@ -12055,7 +12058,7 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     ret = 1
     try:
         app = QApplication(sys.argv)
-        window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
+        window = MainWindow(stop_flag, log_level, debug_realtime, command_conn=command_conn)
         
         # ⭐ [Refactor] 将 ListenerThread 移入 window 内部管理，确保统一清理
         window.command_listener_thread = CommandListenerThread(server_socket)
@@ -12065,15 +12068,29 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
         window.command_listener_thread.start()
 
         start_code = initial_code
+        # ⭐ [FIX] 解析 instock_MonitorTK 传入的 "CODE|resample=X" 格式
+        start_resample = None
+        if start_code and '|' in str(start_code):
+            parts = str(start_code).split('|', 1)
+            start_code = parts[0].strip()
+            # 解析 resample 参数
+            for p in parts[1:]:
+                if p.startswith('resample='):
+                    start_resample = p.split('=', 1)[1].strip()
+            logger.info(f"[main] Parsed payload: code={start_code} resample={start_resample}")
+        
+        if start_resample:
+            window.resample = start_resample
 
         # ------------------ 5. 显示 GUI ------------------
         window.show()
+        # [FIX] 延迟加载确保窗口已经正确完成矩阵计算，防止初次启动时K线 Scatter 图标由于0x0视口丢失
         if start_code is not None:
-            window.load_stock_by_code(start_code)
+            QTimer.singleShot(50, lambda: window.load_stock_by_code(start_code))
         elif len(sys.argv) > 1:
-            start_code = sys.argv[1]
-            if len(start_code) in (6, 8):
-                window.load_stock_by_code(start_code)
+            start_code_cli = sys.argv[1]
+            if len(start_code_cli) in (6, 8):
+                QTimer.singleShot(50, lambda: window.load_stock_by_code(start_code_cli))
 
         # [FIX] Connect aboutToQuit to ensure cleanup happens while event loop is still running
         app.aboutToQuit.connect(window.close)
@@ -12093,7 +12110,7 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
         sys.exit(ret)
 
 
-def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
     # ⭐ 启用底层故障捕捉
     try:
         import faulthandler
@@ -12137,7 +12154,7 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
 
     # --- 3. Primary Instance: 启动 GUI ---
     app = QApplication(sys.argv)
-    window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
+    window = MainWindow(stop_flag, log_level, debug_realtime, command_conn=command_conn)
     start_code = initial_code
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)
@@ -12151,12 +12168,13 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
 
     window.show()
     # 如果 exe 启动时带了参数
+    # [FIX] 延迟加载确保窗口已经正确完成矩阵计算，防止初次启动时K线 Scatter 图标由于0x0视口丢失
     if start_code is not None:
-        window.load_stock_by_code(start_code)
+        QTimer.singleShot(150, lambda: window.load_stock_by_code(start_code))
     elif len(sys.argv) > 1:
-        start_code = sys.argv[1]
-        if len(start_code) in (6, 8):
-            window.load_stock_by_code(start_code)
+        start_code_cli = sys.argv[1]
+        if len(start_code_cli) in (6, 8):
+            QTimer.singleShot(150, lambda: window.load_stock_by_code(start_code_cli))
     ret = app.exec()  # 阻塞 Qt 主循环
     # 确保所有后台进程被杀
     stop_flag.value = False
@@ -12239,7 +12257,7 @@ if __name__ == "__main__":
             stop_flag=stop_flag,
             log_level=log_level,
             debug_realtime=realtime,
-            command_queue=None  # CLI 启动模式下暂无外部队列
+            command_conn=None  # CLI 启动模式下暂无外部队列
         )
         if main_win_ref:
             main_win_ref.concise_mode = short_mode
