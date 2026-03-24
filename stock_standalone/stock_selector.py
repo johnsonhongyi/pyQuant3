@@ -751,6 +751,10 @@ class StockSelector:
                 selected_records.append(record)
 
         df_selected = pd.DataFrame(selected_records)
+        if df_selected.empty:
+            # [FIX] 即使为空，也要确保返回标准列结构，特别是 category
+            return pd.DataFrame(columns=['date', 'code', 'name', 'score', 'price', 'percent', 'ratio', 'volume', 'amount', 'reason', 'status', 'grade', 'tqi', 'ma5', 'ma10', 'category', 'resample'])
+
         if not df_selected.empty:
             # 理由去重
             df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
@@ -820,6 +824,18 @@ class StockSelector:
                     self.logger.info(f"检测到今日已运行过策略 (DB [{self.resample}]), 加载存量数据: {len(df_today)} 条")
                     if 'code' in df_today.columns:
                         df_today['code'] = df_today['code'].apply(lambda x: str(x).zfill(6))
+                    
+                    # [FIX] 如果从 DB 加载的数据缺失 category，且我们有实时数据，进行补齐
+                    if 'category' not in df_today.columns and self.df_all_realtime is not None and not self.df_all_realtime.empty:
+                        self.logger.info("补齐存量数据中的 category 列 (From Real-time)")
+                        rt_cats = self.df_all_realtime[['category']].copy()
+                        if rt_cats.index.name != 'code':
+                             # 尝试找 code 列
+                             if 'code' in self.df_all_realtime.columns:
+                                 rt_cats.index = self.df_all_realtime['code'].apply(lambda x: str(x).zfill(6))
+                        
+                        df_today = pd.merge(df_today, rt_cats, left_on='code', right_index=True, how='left')
+                    
                     return df_today
             except Exception as e:
                 self.logger.error(f"读取今日历史数据失败: {e}, 将重新运行策略")

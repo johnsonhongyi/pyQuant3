@@ -4363,7 +4363,8 @@ class StockLiveStrategy:
             self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop")
 
         try:
-            selector = StockSelector()
+            # [FIX] 传入 self.df (即实时行情 df_all)，确保板块 category 信息可获取
+            selector = StockSelector(df=getattr(self, 'df', None))
             date_str = cct.get_today()
             # 获取全部候选
             df = selector.get_candidates_df(logical_date=date_str)
@@ -4412,11 +4413,9 @@ class StockLiveStrategy:
                 df = elite_df  # 使用精选标的
                 logger.info(f"✅ 使用精选标的: {len(df)} 只")
             
-            # --- [NEW] 注入走势评级 (S/A/B/C) ---
-            try:
-                df = selector.filter_strong_stocks(df)
-            except Exception as e:
-                logger.error(f"Failed to filter strong stocks (grading): {e}")
+            # --- [DELETED] 冗余的二次过滤 ---
+            # df = selector.filter_strong_stocks(df) 
+            # 前面的 get_candidates_df 内部已调用过 filter_strong_stocks，且 elite_df 是其子集，不需要再次过滤。
             
             # 识别热点股 (确保 reason 列存在)
             if 'reason' in df.columns:
@@ -4426,7 +4425,16 @@ class StockLiveStrategy:
 
             selected_codes = []
             final_top5_df = pd.DataFrame()
-
+            
+            # [FIX] 防御性检查：确保 df 不为空且包含 category 列
+            if df.empty:
+                logger.warning("Auto Loop: No candidates left after elite filtering.")
+                return "无标的"
+            
+            if 'category' not in df.columns:
+                logger.warning("Auto Loop: 'category' column missing in candidates. Adding empty column.")
+                df['category'] = ''
+            
             # --- 策略演进：一个板块一只股 ---
             if concept_top5 and len(concept_top5) > 0:
                 logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
