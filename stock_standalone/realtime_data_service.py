@@ -79,6 +79,9 @@ class MinuteKlineCache:
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
         self._supplemented_codes = set()
+        # [NEW] 限频日志计数器
+        self._day_log_cycle_count = 0  # 今日已打印异常的周期数
+        self._last_log_date = ""        # 上次打印日志的日期
 
     def __len__(self) -> int:
         return len(self._shared_cache)
@@ -360,6 +363,15 @@ class MinuteKlineCache:
 
         updated_codes: set[str] = set()
         
+        # [NEW] 限频日志逻辑：每日重置
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        if self._last_log_date != today_str:
+            self._day_log_cycle_count = 0
+            self._last_log_date = today_str
+        
+        cycle_err_logged = False # 标记本周期是否已打印过错误
+        cycle_err_count = 0      # 本周期已打印的错误数
+        
         # [OPTIMIZATION] 预先裁剪 DataFrame 列，减少 itertuples 遍历时的对象开销
         core_cols = ['code']
         # 识别价格列
@@ -464,11 +476,16 @@ class MinuteKlineCache:
                     dt_obj = datetime.fromtimestamp(ts)
                     now_dt = datetime.fromtimestamp(now_ts)
                     if dt_obj.date() != now_dt.date():
-                        # 特殊处理：如果是 15:00 左右的数据，通常是昨日残留，设为 WARNING 以减噪
-                        if 1455 <= hhmm <= 1505:
-                            logger.warning(f"⚠️ [{code}] Residual data skipped: tick_date={dt_obj.date()}, val={val}")
-                        else:
-                            logger.error(f"❌ [{code}] DATE MISMATCH: tick_date={dt_obj.date()}, today={now_dt.date()} (val={val}, col={time_col_found})")
+                        # [NEW] 限频日志打印逻辑
+                        if self._day_log_cycle_count < 3 and cycle_err_count < 3:
+                            # 特殊处理：如果是 15:00 左右的数据，通常是昨日残留，设为 WARNING 以减噪
+                            if 1455 <= hhmm <= 1505:
+                                logger.warning(f"⚠️ [{code}] Residual data skipped: tick_date={dt_obj.date()}, val={val}")
+                            else:
+                                logger.error(f"❌ [{code}] DATE MISMATCH: tick_date={dt_obj.date()}, today={now_dt.date()} (val={val}, col={time_col_found})")
+                            
+                            cycle_err_count += 1
+                            cycle_err_logged = True
                         continue
                     
                     # --- [FIX] 防御盘后冗余数据进入缓存 ---
@@ -489,6 +506,10 @@ class MinuteKlineCache:
                 
             except Exception:
                 continue
+
+        # [NEW] 如果本周期有打印过错误，增加每日周期计数
+        if cycle_err_logged:
+            self._day_log_cycle_count += 1
 
         # 触发订阅回调
         if subscribers:
