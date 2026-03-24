@@ -187,7 +187,8 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
             "expr": expr,
             "ok": all_ok,
             "reason": "pass" if all_ok else "condition_failed",
-            "sub_conditions": sub_results
+            "sub_conditions": sub_results,
+            "full_data": row
         })
 
     return results
@@ -199,17 +200,29 @@ def format_check_result(results: List[Dict[str, Any]]) -> str:
         lines.append(f"  表达式: {r['expr']}")
         lines.append(f"  是否通过: {'✅ 是' if r['ok'] else '❌ 否'}")
 
-        if not r["ok"]:
-            if "missing" in r:
-                lines.append("  缺失字段:")
-                for c in r["missing"]:
-                    lines.append(f"    - {c}")
-            elif "sub_conditions" in r:
-                lines.append("  失败子条件:")
-                for sub in r["sub_conditions"]:
-                    if not sub["ok"]:
-                        lines.append(f"    - {sub['condition']} → 当前值: {sub['values']}")
+        if "missing" in r:
+            lines.append("  缺失字段:")
+            for c in r["missing"]:
+                lines.append(f"    - {c}")
+        elif "sub_conditions" in r:
+            # 1. 显示该表达式中涉及的所有字段当前数值
+            involved_cols = sorted(list(extract_columns(r['expr'])))
+            if involved_cols and "full_data" in r:
+                lines.append("  当前涉及字段数值:")
+                row_data = r["full_data"]
+                for col in involved_cols:
+                    val = row_data.get(col, "N/A")
+                    lines.append(f"    - {col}: {val}")
+            
+            # 2. 显示子条件执行详情
+            lines.append("  子条件执行详情:")
+            for sub in r["sub_conditions"]:
+                status = "✅" if sub["ok"] else "❌"
+                lines.append(f"    {status} {sub['condition']} → 当前值: {sub['values']}")
+        
+        lines.append("-" * 30)
         lines.append("")
+
     return "\n".join(lines)
 
 

@@ -2339,8 +2339,9 @@ def get_tdx_Exp_day_to_df_lday(
         df['low60'] = df.close.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min() if len(df) >= tdx_max_int_end*2 else df.close.min()
 
         # lastdu4
+            # (df.high.rolling(4).max() - df.low.rolling(4).min()) / df.close.rolling(4).mean() * 100
         df['lastdu4'] = (
-            (df.high.rolling(4).max() - df.low.rolling(4).min()) / df.close.rolling(4).mean() * 100
+            (df.high.rolling(4).max() - df.low.rolling(4).min()) / df.low.rolling(4).min() * 100
         ).round(1).fillna(0)
 
         # high4 / hmax60 已有，保留
@@ -5310,7 +5311,7 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     )
     green_cout = df2[green_mask]
 
-    df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+    df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['low'].rolling(4).mean() * 100).round(1)
     dfupper = df[-ct.bollupperT:]
     upperT = dfupper['high'][(dfupper['high'] > 0) & (dfupper['high'] > dfupper['upper'])]
     upperL = dfupper['low'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
