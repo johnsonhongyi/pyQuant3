@@ -1778,6 +1778,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
+        # 🛡️ [NEW] 退出保险：15秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
+        def failsafe_exit():
+            print("\n🚨 [Failsafe] Shutdown timeout reached (15s). Forcing physical exit...")
+            os._exit(0)
+            
+        exit_timer = threading.Timer(15.0, failsafe_exit)
+        exit_timer.daemon = True
+        exit_timer.start()
+
         try:
             # 设置退出标志，阻止后台线程调用 Tkinter 方法
             self._is_closing = True
@@ -1816,6 +1825,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
             
+            # 🛡️ [NEW] 显式关闭语音引擎，防止后台播放导致进程无法退出
+            try:
+                from alert_manager import get_alert_manager
+                print("正在停止语音报警引擎...")
+                get_alert_manager().stop()
+            except Exception:
+                pass
+
             # 关闭竞价窗口
             if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
                 try:
@@ -1979,17 +1996,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # 1. 停止后台数据扫描进程 (proc)
             if hasattr(self, "proc") and self.proc.is_alive():
-                logger.info("正在停止后台数据扫描进程 (proc)...")
+                print("正在停止后台数据扫描进程 (proc)...")
                 # self.stop_refresh() # 已经在开头设置过
-                self.proc.join(timeout=2.0) 
+                self.proc.join(timeout=0.2) 
                 if self.proc.is_alive():
-                    # 如果 2 秒内没退出，则强制终止
-                    logger.warning("后台进程未能在预期内退出，正在强制终止...")
+                    # 如果 0.2 秒内没退出，则强制终止
+                    print("后台进程未能在预期内退出，正在强制终止...")
                     self.proc.terminate()
-                    self.proc.join(timeout=1.0)
-                    logger.info("后台进程已强制终止")
+                    self.proc.join(timeout=0.1)
+                    print("后台进程已强制终止")
                 else:
-                    logger.info("后台进程已安全退出")
+                    print("后台进程已安全退出")
             self.proc = None
 
             # 2. 停止 Qt 子进程 (qt_process)
@@ -1997,25 +2014,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if qtz_proc is not None:
                 try:
                     if qtz_proc.is_alive():
-                        logger.info("正在停止 Qt 子进程 (qt_process)...")
+                        print("正在停止 Qt 可视化子进程 (qt_process)...")
                         # self.viz_lifecycle_flag.value = False # 已经在开头设置过
                         
-                        qtz_proc.join(timeout=2.0)
+                        qtz_proc.join(timeout=0.2)
                         if qtz_proc.is_alive():
+                            print("Qt 子进程未响，正在强制终止...")
                             qtz_proc.terminate()
-                            qtz_proc.join(timeout=1.0)
-                            logger.info("Qt 子进程已强制终止")
+                            qtz_proc.join(timeout=0.1)
+                            print("Qt 子进程已强制终止")
                         else:
-                            logger.info("Qt 子进程已安全退出")
+                            print("Qt 子进程已安全退出")
                 except Exception as e:
-                    logger.error(f"Error stopping qt_process: {e}")
+                    print(f"Error stopping qt_process: {e}")
                 self.qt_process = None
 
             # 3. 停止 df_all 同步线程 (DFSyncThread)
             if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
-                logger.info("正在停止 df_all 同步线程...")
+                print("正在停止 df_all 同步线程...")
                 self._df_sync_running = False
-                self._df_sync_thread.join(timeout=2.0)
+                self._df_sync_thread.join(timeout=0.2)
                 self._df_sync_thread = None
 
             # 4. 关闭队列与管道资源
@@ -2050,32 +2068,52 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         
                         self.realtime_service.save_cache(force=True)
 
-                    # ⭐ [CRITICAL] 彻底断开代理引用，防止 shutdown 时的 BrokenPipe 或资源挂起
-                    # 在 Windows 下，SyncManager 销毁前必须确保主进程不再持有任何代理
+                    # ⭐ [FIX] 彻底断开代理引用，防止 shutdown 时的 BrokenPipe 或资源挂起
                     self.realtime_service = None
                     self.global_dict = None
                     self.manager_dict = None # 额外清理
                     
-                    # ⭐ [FIX] 给 manager shutdown 一个较短超时，防止 GUI 线程被阻塞导致僵尸进程
-                    logger.info("正在关闭 SyncManager (带 1.5s 超限机制)...")
-                    # 使用线程异步尝试关闭，避免主线程在此无限等待
-                    shutdown_thread = threading.Thread(target=self.manager.shutdown, daemon=True)
-                    shutdown_thread.start()
-                    shutdown_thread.join(timeout=1.5)
+                    # ⭐ [FIX] 改为异步非阻塞关闭，不再 join 等待，防止 GIL 死锁导致主线程挂起
+                    print("正在触发 SyncManager 异步关闭...")
+                    logger.info("正在关闭 SyncManager (异步非阻塞模式)...")
                     
-                    if shutdown_thread.is_alive():
-                        logger.warning("SyncManager 关闭超时，强制跳过以继续退出流程。")
+                    def async_shutdown(mgr):
+                        try:
+                            mgr.shutdown()
+                            print("SyncManager 异步关闭完成。")
+                        except Exception as e:
+                            print(f"SyncManager 异步关闭异常: {e}")
+
+                    shutdown_thread = threading.Thread(target=async_shutdown, args=(self.manager,), daemon=True)
+                    shutdown_thread.start()
+                    # 不再调用 join(1.5)，直接进入下一步 destroy
+                    
                 except Exception as e:
+                    print(f"Manager shutdown sequence error: {e}")
                     logger.debug(f"Manager shutdown error ignored: {e}")
 
             # 11. 停止日志与销毁 (放在最后)
             try:
                 from JohnsonUtil.LoggerFactory import stopLogger
+                print("正在停止日志服务...")
                 stopLogger() 
             except Exception: 
                 pass
 
-            self.destroy()
+            print("正在销毁主窗口并强制退出...")
+            # 取消退出保险（如果还没触发的话）
+            exit_timer.cancel()
+            
+            # 首先尝试正常销毁
+            try:
+                self.destroy()
+            except:
+                pass
+                
+            # ⭐ [CRITICAL] 物理强杀进程，跳过 Python 的 atexit 挂起和非 daemon 线程等待
+            # 只有走到这一步，才说明所有保存工作（如 K 线快照）已安全落地
+            print("🛑 [Physical Exit] Bye.")
+            os._exit(0)
             
         except Exception as e:
             logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
