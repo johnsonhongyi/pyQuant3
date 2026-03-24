@@ -455,6 +455,9 @@ class KLineMonitor(tk.Toplevel):
 
                 # ---------- 核心优化2：UI节流 ----------
                 if not self._ui_update_pending:
+                    # 🚀 [STABILITY] 执行调度前必须检查 UI 存活状态，防止 GIL 崩溃
+                    if not self.winfo_exists():
+                        break
                     self._ui_update_pending = True
                     try:
                         self.after(0, self._safe_apply_filters)

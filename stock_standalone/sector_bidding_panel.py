@@ -1610,15 +1610,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     filtered_rows.append(r)
             rows = filtered_rows
 
-        # 应用排序
+        # 应用排序 (Manual Sort)
         col = self._sort_col
         rev = not self._sort_asc
-        if col == 3:    # 现价
-            rows.sort(key=lambda r: r['price'], reverse=rev)
+        
+        if col == 0:    # 代码
+            rows.sort(key=lambda r: r.get('code', ''), reverse=rev)
+        elif col == 1:  # 名称
+            rows.sort(key=lambda r: r.get('name', ''), reverse=rev)
+        elif col == 2:  # 角色
+            rows.sort(key=lambda r: r.get('role', ''), reverse=rev)
+        elif col == 3:  # 现价
+            rows.sort(key=lambda r: r.get('price', 0.0), reverse=rev)
         elif col == 4:  # 涨幅
-            rows.sort(key=lambda r: r['pct'], reverse=rev)
-        elif col == 5:  # 涨跌 (切片涨幅)
-            rows.sort(key=lambda r: r['pct_diff'], reverse=rev)
+            rows.sort(key=lambda r: r.get('pct', 0.0), reverse=rev)
+        elif col == 5:  # 涨跌 (切片涨跌/价格差值)
+            # 优先按价格差值排序，更直观
+            rows.sort(key=lambda r: r.get('price_diff', 0.0), reverse=rev)
+        elif col == 6:  # dff (切片力度)
+            rows.sort(key=lambda r: r.get('dff', 0.0), reverse=rev)
+        
+        # 💡 [ENHANCEMENT] 如果用户没有主动点击排序，默认将龙头置顶
+        # (这仅在上述 col 匹配不到或强制恢复时生效)
+        # if col == -1: ...
         # 龙头始终置顶
         # [FIX] 减少闪烁并保持选择状态
         self.stock_table.setUpdatesEnabled(False)

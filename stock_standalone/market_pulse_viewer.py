@@ -433,7 +433,32 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self.engine.generate_daily_report(monitored, force_date=self.current_date)
         
         self.refresh_report(use_cache=True)
-        messagebox.showinfo("Success", "今日战报已生成/刷新！")
+        # messagebox.showinfo("Success", "今日战报已生成/刷新！")
+        toast_message(self, "今日战报已生成/刷新！", 3000)
+
+
+
+    def _auto_fit_columns(self):
+        """根据内容自动调整列宽"""
+        f = tkfont.Font(font='Arial 9') 
+        cols = self.tree["columns"]
+        for col in cols:
+            header_text = self.tree.heading(col)["text"]
+            max_w = f.measure(header_text) + 20
+            
+            all_items = self.tree.get_children()
+            sample_items = all_items[:50] # 采样前50行
+            for item in sample_items:
+                cell_val = str(self.tree.set(item, col))
+                max_w = max(max_w, f.measure(cell_val) + 20)
+            
+            # 限制合理范围
+            if col in ["action_plan", "reason", "auto_reason"]:
+                max_w = min(max_w, 400)
+            else:
+                max_w = min(max_w, 150)
+            
+            self.tree.column(col, width=max_w)
 
     def refresh_report(self, use_cache=True):
         """Load data from DB and update UI."""
@@ -576,6 +601,9 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
 
         self.tree.tag_configure('hot', background='#ffe6e6') # Light red
         self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
+        
+        # [NEW] 数据填充后自动调整列宽
+        self.after(100, self._auto_fit_columns)
 
     def on_sector_click(self, event):
         """Handle click on sector names to open concept window."""
