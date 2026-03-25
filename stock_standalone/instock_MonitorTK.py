@@ -6411,22 +6411,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pass
 
     def on_voice_speak_start(self, code):
-        """语音播报开始的回调"""
+        """语音播报开始的回调 (主线程同步版)"""
         if not code: return
         # 检查程序是否正在退出
         if getattr(self, '_is_closing', False): return
         
-        # ⭐ [FIX] 触发任务栏闪烁，帮助用户找到主窗口焦点
-        self.flash_taskbar()
-        
-        # 调度到主线程执行闪烁和震动
+        # ⭐ [FIX] 使用 dispatch_queue 将逻辑封装并投递到主线程执行，确保 after() 调用的线程安全性
+        def sync_task():
+            # A. 确保容器存在
+            if not hasattr(self, '_voice_start_jobs'): 
+                self._voice_start_jobs = {}
+            
+            # B. 幂等性：如果该代码之前的启动任务还在排队（极端情况），先通过 ID 取消它
+            old_job = self._voice_start_jobs.get(str(code))
+            if old_job:
+                try: self.after_cancel(old_job)
+                except: pass
+
+            # C. 定义实际触发视觉效果的子任务
+            def trigger_visual():
+                if str(code) in self._voice_start_jobs:
+                    del self._voice_start_jobs[str(code)]
+                self._trigger_alert_visual_effects(str(code), start=True)
+            
+            # D. 执行任务栏闪烁
+            self.flash_taskbar()
+            
+            # E. [DIRECT] 恢复即时播报同步，移除长延时，仅留极短缓冲以适配 Tcl 调度
+            self._voice_start_jobs[str(code)] = self.after(20, trigger_visual)
+
         try:
-            # ⭐ [FIX] 使用 dispatch_queue 确保主线程执行视觉效果
             if hasattr(self, 'tk_dispatch_queue'):
-                task = lambda: self._trigger_alert_visual_effects(str(code), start=True)
-                self.tk_dispatch_queue.put(task)
+                self.tk_dispatch_queue.put(sync_task)
             else:
-                self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=True))
+                self._schedule_after(0, sync_task)
         except Exception:
             pass  # 主循环已停止，忽略
 
@@ -6449,12 +6467,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not code: return
         # 检查程序是否正在退出
         if getattr(self, '_is_closing', False): return
+        
+        def sync_stop():
+            # ⭐ [FIX] 彻底解决播报完还在晃动的关键：中途撤销尚未触发的启动任务
+            if hasattr(self, '_voice_start_jobs'):
+                old_job = self._voice_start_jobs.get(str(code))
+                if old_job:
+                    try: 
+                        self.after_cancel(old_job)
+                        # logger.debug(f"[Linkage] Cancelled pending start for {code} as it finished early")
+                    except: pass
+                    del self._voice_start_jobs[str(code)]
+            
+            # 执行停止震动逻辑
+            self._trigger_alert_visual_effects(str(code), start=False)
+
         try:
             if hasattr(self, 'tk_dispatch_queue'):
-                task = lambda: self._trigger_alert_visual_effects(str(code), start=False)
-                self.tk_dispatch_queue.put(task)
+                self.tk_dispatch_queue.put(sync_stop)
             else:
-                self._schedule_after(0, lambda: self._trigger_alert_visual_effects(str(code), start=False))
+                self._schedule_after(0, sync_stop)
         except Exception:
             pass
 
@@ -6469,7 +6501,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         win = None
         if not hasattr(self, 'code_to_alert_win'): return
-        # ⭐ [MODIFIED] 联动增强：快速创建逻辑
+        # ⭐ [RE-INITIALIZED] 联动增强：快速创建逻辑 (Fast-track)
+        # 解决播报时窗口还在队列中导致的不同步问题，确保“播后即震”的直观感
         if not win:
              # A. 正常代码匹配
              for k, w in self.code_to_alert_win.items():
@@ -6478,14 +6511,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      win = w
                      break
              
-             # B. [NEW] 如果代码还在就绪队列中，立即"插队"创建，避免语音超前 UI 太久导致的 Mismatch
+             # B. [RESTORED] 快速插队创建
              if not win and start:
                  for i, item in enumerate(self._alert_queue):
                      q_code = str(item[0]).strip()
                      if q_code == code or q_code.startswith(code) or code.startswith(q_code):
-                         # ⭐ [FIX] 插队创建时也要尊重 50 窗口限制
                          if self._recycle_alert_window(code):
-                             logger.info(f"[Linkage] Fast-track window creation for: {code}")
+                             logger.info(f"[Linkage] Fast-track UI creation for voice sync: {code}")
                              q_code, q_name, q_msg = self._alert_queue.pop(i)
                              self._create_single_alert_popup(q_code, q_name, q_msg)
                              win = self.code_to_alert_win.get(q_code)
@@ -6529,8 +6561,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win.stop_visual_effects()
         elif start:
             # ⭐ [FIX] 窗口可能正在创建中,实现重试机制
-            MAX_RETRIES = 5  # 增加到 5 次
-            RETRY_DELAY_MS = 150  # 增加到 150ms
+            MAX_RETRIES = 12  # 增加到 12 次 (约 2.4 秒)
+            RETRY_DELAY_MS = 200  # 增加到 200ms
             
             if retry_count < MAX_RETRIES:
                 # 延迟后重试
@@ -6545,11 +6577,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f"[Linkage] Mismatch: Voice speaking code '{code}', but no matching alert window found. ({available_count} windows registered)")
                     self._mismatch_warned_codes.add(str(code))
 
-    def _update_alert_positions(self):
+    def _update_alert_positions(self, immediate=False):
         """⭐ [OPTIMIZED] 带有防抖功能的报警弹窗排列"""
         if self._update_pos_timer is not None:
             self.after_cancel(self._update_pos_timer)
-        self._update_pos_timer = self._schedule_after(100, self._update_alert_positions_real)
+            self._update_pos_timer = None
+        
+        if immediate:
+            self._update_alert_positions_real()
+        else:
+            self._update_pos_timer = self._schedule_after(100, self._update_alert_positions_real)
 
     def _update_alert_positions_real(self):
         """真正的重新排列逻辑"""
@@ -6611,6 +6648,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 current_height = alert_height
                 
                 win.geometry(f"{current_width}x{current_height}+{x}+{y}")
+                # ⭐ 关键修复：如果在震动，同步更新震动锚点，防止窗口被拉回左上角/旧位置
+                if getattr(win, 'is_shaking', False):
+                    win._shake_orig_x = x
+                    win._shake_orig_y = y
+                    win._shake_orig_wh = f"{current_width}x{current_height}"
+                    
                 # 确保窗口是可见的（如果之前被隐藏了）
                 if not win.winfo_ismapped():
                     win.deiconify() 
@@ -6646,17 +6689,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 标记正在震动
         win.is_shaking = True
         
-        # 获取当前几何信息（不使用 update_idletasks 避免阻塞）
-        # [修复] 必须确保窗口几何信息已更新，否则 geometry() 返回 1x1 导致错位
-        # [已移除] win.update_idletasks() - 避免频繁刷新导致的 UI 阻塞
-
-        def do_shake(orig_wh, orig_x, orig_y):
+        def do_shake():
             # 检查窗口是否存在且是否应继续晃动
             if not win.winfo_exists() or not getattr(win, 'is_shaking', False):
                 # 停止晃动时，尝试将窗口恢复到原始位置（如果可能）
-                # 关键修复：如果窗口已被双击放大，则绝不恢复到旧的 orig_wh
                 if win.winfo_exists() and not getattr(win, '_is_enlarged', False):
                      try:
+                         orig_wh = getattr(win, '_shake_orig_wh', "400x180")
+                         orig_x = getattr(win, '_shake_orig_x', win.winfo_x())
+                         orig_y = getattr(win, '_shake_orig_y', win.winfo_y())
                          win.geometry(f"{orig_wh}+{orig_x}+{orig_y}")
                      except: 
                          pass
@@ -6666,24 +6707,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             dx = random.randint(-distance, distance)
             dy = random.randint(-distance, distance)
             try:
-                # 应用新的位置
+                # ⭐ [Dynamic Anchor] 使用动态更新的锚点位置（由 _update_alert_positions_real 维护）
+                orig_wh = getattr(win, '_shake_orig_wh', "400x180")
+                orig_x = getattr(win, '_shake_orig_x', win.winfo_x())
+                orig_y = getattr(win, '_shake_orig_y', win.winfo_y())
                 win.geometry(f"{orig_wh}+{orig_x + dx}+{orig_y + dy}")
             except: 
                 pass
             
-            # 安排下一次晃动。使用新的 interval_ms 参数控制频率。
-            win.after(interval_ms, lambda: do_shake(orig_wh, orig_x, orig_y))
+            # 安排下一次晃动
+            win.after(interval_ms, lambda: do_shake())
 
-        # 捕获初始位置
+        # 捕获初始位置并填充锚点
         try:
             geom = win.geometry()
-            parts = geom.split('+')
-            if len(parts) == 3:
-                y = int(parts[2])
-                # [Optimization] 只有真正需要变化时才启动循环
-                do_shake(wh, x, y)
-        except:
-            # 如果获取几何信息失败，则不执行晃动
+            # [FIXED] 更加鲁棒的几何信息解析，支持正负坐标
+            import re
+            m = re.match(r"(\d+x\d+)([+-]-?\d+)([+-]-?\d+)", geom)
+            if m:
+                win._shake_orig_wh = m.group(1)
+                win._shake_orig_x = int(m.group(2))
+                win._shake_orig_y = int(m.group(3))
+                do_shake()
+            else:
+                # 备选方案
+                win._shake_orig_wh = f"{win.winfo_width()}x{win.winfo_height()}"
+                win._shake_orig_x = win.winfo_x()
+                win._shake_orig_y = win.winfo_y()
+                do_shake()
+        except Exception:
             pass
 
 
@@ -7043,13 +7095,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if code in self.code_to_alert_win:
                     del self.code_to_alert_win[code]
             
-            # ===== 直接创建完整弹窗 =====
+            # ===== 直接创建完整弹窗并预计算位置 (防止闪烁) =====
             win = tk.Toplevel(self)
             win.stock_code = code # [NEW] 补全核心属性识别
             win.stock_name = name # [NEW] 补全核心属性识别
             win.overrideredirect(True)
             win.attributes("-topmost", True)
-            win.geometry("400x180")
+            
+            # ⭐ [FIX] 预计算初始诞生位置，确保窗口从出现起就位于正确的排序坑位，解决"不停排序"的视觉抖动
+            cur_idx = len([w for w in getattr(self, 'active_alerts', []) if w.winfo_exists()])
+            alert_w, alert_h = 400, 180
+            m_gap = 10
+            sc_w = self.winfo_screenwidth()
+            sc_h = self.winfo_screenheight()
+            m_cols = max(1, (sc_w - m_gap) // (alert_w + m_gap))
+            
+            c_col = cur_idx % m_cols
+            c_row = cur_idx // m_cols
+            init_x = sc_w - (c_col + 1) * (alert_w + m_gap)
+            init_y = sc_h - 100 - (c_row + 1) * (alert_h + m_gap) # 100 为任务栏避让高度
+            
+            win.geometry(f"{alert_w}x{alert_h}+{init_x}+{init_y}")
+            # 初始化震动锚点，确保即使由于重试机制立即震动，也不会跑偏
+            win._shake_orig_x, win._shake_orig_y = init_x, init_y
+            win._shake_orig_wh = f"{alert_w}x{alert_h}"
             # ⭐ [ENHANCEMENT] 高优先级报警应用金色/淡红背景，增强视觉差异
             is_high = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
             bg_color = "#FFF9E6" if is_high else "#fff" # 金边浅黄背景，更柔和但醒目
