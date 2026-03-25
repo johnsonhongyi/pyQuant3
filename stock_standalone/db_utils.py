@@ -142,7 +142,7 @@ def init_concept_db():
         )
     """)
     conn.commit()
-    conn.close()
+    # [FIX] Never call conn.close() here as it is managed by thread-local connection pool
 
 def save_concept_pg_data(win, concept_name):
     """保存每个概念当天数据到 SQLite，自动转换所有 NumPy 类型，并保留浮点数两位小数"""
@@ -170,8 +170,7 @@ def save_concept_pg_data(win, concept_name):
         base_data = getattr(win, "_init_prev_concepts_data", {}).get(concept_name)
         prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
         if base_data is None:
-            logger.info(f'[save_concept_pg_data] base_data is None for {concept_name}')
-            conn.close()
+            # logger.info(f'[save_concept_pg_data] base_data is None for {concept_name}')
             return
 
         init_serial = to_serializable(base_data)
@@ -192,7 +191,7 @@ def save_concept_pg_data(win, concept_name):
         ))
 
         conn.commit()
-        conn.close()
+        # [FIX] Removed conn.close()
         logger.info(f"[保存成功] {concept_name} 数据已写入 SQLite")
     except Exception as e:
         traceback.print_exc()
@@ -214,8 +213,7 @@ def save_concept_pg_data_simple(win, concept_name):
         prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
 
         if not base_data:
-            logger.info(f"[保存失败] {concept_name} base_data is None")
-            conn.close()
+            # logger.info(f"[保存失败] {concept_name} base_data is None")
             return
 
         init_data = {
@@ -243,7 +241,7 @@ def save_concept_pg_data_simple(win, concept_name):
               json.dumps(prev_data_dict, ensure_ascii=False)))
 
         conn.commit()
-        conn.close()
+        # [FIX] Removed conn.close()
         logger.info(f"[保存成功] {concept_name} 数据已写入 SQLite")
     except Exception as e:
         traceback.print_exc()
@@ -258,7 +256,7 @@ def load_concept_pg_data_no_serializable(concept_name):
         cur.execute("SELECT init_data, prev_data FROM concept_data WHERE date=? AND concept_name=?",
                     (date_str, concept_name))
         row = cur.fetchone()
-        conn.close()
+        # [FIX] Removed conn.close()
         if not row:
             return None, None
         init_data = json.loads(row[0]) if row[0] else None
@@ -277,7 +275,7 @@ def load_all_concepts_pg_data():
         cur = conn.cursor()
         cur.execute("SELECT concept_name, init_data, prev_data FROM concept_data WHERE date=?", (date_str,))
         rows = cur.fetchall()
-        conn.close()
+        # [FIX] Removed conn.close()
         for concept_name, init_json, prev_json in rows:
             try:
                 init_data = json.loads(init_json) if init_json else {}

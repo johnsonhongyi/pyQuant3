@@ -7666,40 +7666,50 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 初始加载
         refresh_summary()
 
-
     def open_trading_analyzer_qt6(self):
         """[COMPAT] 打开 Qt6 版本的交易分析工具 (兼容 PyInstaller 打包)"""
         from PyQt6 import QtWidgets
         from trading_analyzerQt6 import TradingGUI
         import sys
-        
+        import threading
+
         try:
-            # 🛡️ 宿主进程内直接实例化，但必须确保不阻塞 Tk 事件循环
-            if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
-                # 1. 确保 QApplication 环境已初始化 (全局唯一)
-                if not QtWidgets.QApplication.instance():
-                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-                
-                # 2. 传递核心引用
-                self._trading_gui_qt6 = TradingGUI(
-                    sender=self.sender,
-                    on_tree_scroll_to_code=self.tree_scroll_to_code,
-                    selector=getattr(self, 'selector', None),
-                    live_strategy=getattr(self, 'live_strategy', None),
-                    df_all=getattr(self, 'df_all', None)
-                )
-                
-                # 3. 监听关闭事件
-                self._trading_gui_qt6.finished.connect(lambda: setattr(self, "_trading_gui_qt6", None))
-            
+            # 防止重复创建
+            if getattr(self, "_trading_gui_qt6", None) is not None:
+                self._trading_gui_qt6.show()
+                self._trading_gui_qt6.raise_()
+                self._trading_gui_qt6.activateWindow()
+                return
+
+            # --- 初始化 QApplication（全局唯一） ---
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                self._qt_app = QtWidgets.QApplication([])  # ❗避免 sys.argv 干扰 Tk
+
+            # --- 创建 Qt 窗口（在 Tk 线程中） ---
+            # on_tree_scroll_to_code=self.tree_scroll_to_code,
+
+            self._trading_gui_qt6 = TradingGUI(
+                on_code_callback=self.on_code_click,
+                main_app=self,
+                selector=getattr(self, 'selector', None),
+                live_strategy=getattr(self, 'live_strategy', None),
+                df_all=getattr(self, 'df_all', None)
+            )
+
             self._trading_gui_qt6.show()
             self._trading_gui_qt6.raise_()
             self._trading_gui_qt6.activateWindow()
-            
-            # 🛡️ 关键：在 Tk 线程中强制处理一下 Qt 事件，防止初始化时的重型 UI 绘制卡住宿主
+
+            # --- 关键：避免初始化阻塞 UI ---
             QtWidgets.QApplication.processEvents()
-            
+
+            # --- 提示 ---
             toast_message(self, "交易分析工具(Qt6) 已就绪")
+
+            # --- 可选：轻量延迟处理事件（避免瞬时卡顿） ---
+            threading.Timer(0.1, lambda: QtWidgets.QApplication.processEvents()).start()
+
         except Exception as e:
             logger.error(f"Failed to open TradingGUI Qt6: {e}")
             messagebox.showerror("错误", f"启动 Qt6 分析工具失败: {e}")
@@ -10582,7 +10592,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 使用 unique_code 构造唯一的窗口保存名
         window_name = f"concept_top10_window-{unique_code}"
         try:
-            self.load_window_position(win, window_name, default_width=420, default_height=340)
+            self.load_window_position(win, window_name, default_width=160, default_height=230)
         except Exception:
             win.geometry("230x160")
 

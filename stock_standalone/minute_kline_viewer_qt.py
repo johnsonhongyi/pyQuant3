@@ -1487,42 +1487,18 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
     def on_double_click(self, index: QModelIndex):
         """处理双击事件"""
         try:
-            print(f"[DEBUG] on_double_click: index.row()={index.row()}")
-            
-            if self.active_df.empty:
-                print("[DEBUG] on_double_click: active_df is empty")
-                return
-                
             model = index.model()
             if isinstance(model, DataFrameModel):
                 row_data = model._data.iloc[index.row()]
                 code = str(row_data.get('code', row_data.iloc[0]))
-                print(f"[DEBUG] on_double_click: code={code}")
                 
-                if self.on_code_callback:
-                    print(f"[DEBUG] on_double_click: scheduling on_code_callback({code}) via Tkinter Dispatch Queue")
-                    # 🛡️ 使用 tk_dispatch_queue 将调用调度到 Tkinter 主线程 (避免 GIL 崩溃)
-                    if self.main_app and hasattr(self.main_app, 'tk_dispatch_queue'):
-                        self.main_app.tk_dispatch_queue.put(lambda: self.on_code_callback(code))
-                    elif self.main_app and hasattr(self.main_app, 'after'):
-                        # Fallback (Unsafe, legacy)
-                        print("[WARN] No dispatch queue found, falling back to unsafe .after()")
-                        self.main_app.after(0, lambda c=code: self.on_code_callback(c))
-                    else:
-                        # 回退：直接调用（可能在独立模式下运行）
-                        self.on_code_callback(code)
+                # [UNIFIED-LINKAGE] 使用统一联动逻辑
+                self._execute_linkage(code, source="double_click")
                 
-                # 独立模式双击联动支持 (StockSender)
-                elif self.sender and code:
-                    try:
-                        self.sender.send(str(code))
-                    except Exception as se:
-                        print(f"[WARN] StockSender double-click send failed: {se}")
-
-                else:
-                    # Use it as triggering a refresh of detail if clicked in summary
-                    if model is self.summary_table.model():
-                        self.on_summary_clicked(index)
+                # 如果是从摘要表双击，额外触发一下右侧详情刷新
+                if model is self.summary_table.model():
+                    self.on_summary_clicked(index)
+                    
         except Exception as e:
             print(f"[ERROR] on_double_click: {e}")
             import traceback
