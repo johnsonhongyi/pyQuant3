@@ -836,6 +836,7 @@ class GlobalConfig:
         self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='True', value_type="str")
         self.sina_dd_limit_day = self.get_with_writeback("general", "sina_dd_limit_day", fallback='0', value_type="str")
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback=10, value_type="int")
+        self.limit_alert_monitor = self.get_with_writeback("general", "limit_alert_monitor", fallback=30, value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback=10, value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback=300, value_type="int")
         self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent', 'Rank', 'dff','per1d', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
@@ -1129,6 +1130,7 @@ winlimit: int = CFG.winlimit
 loglevel: str = CFG.loglevel
 cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
+limit_alert_monitor: int = CFG.limit_alert_monitor
 loop_counter_limit: int = CFG.loop_counter_limit
 real_time_tick_limit: int = CFG.real_time_tick_limit
 real_time_cols: List[str] = CFG.real_time_cols

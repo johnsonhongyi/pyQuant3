@@ -160,6 +160,10 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
         try:
             super().__init__(parent)
             self.selector = selector
+            self.on_code_callback = getattr(parent, 'on_code_callback', None)
+            self.main_app = getattr(parent, 'main_app', None)
+            self.sender = getattr(parent, 'sender', None)
+            self._select_code = None
             self.setWindowTitle("板块热点分析")
             self.scale_factor = get_windows_dpi_scale_factor()
             self.resize(1000, 600)
@@ -260,7 +264,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                 df = self.selector.get_candidates_df()
                 if df is not None and not df.empty:
                     df = df.copy()
-                    df = df.drop_duplicates(subset=['code'])  # ✅ 防重复核心
+                    # ✅ 防重复核心并重置索引，解决 'Reindexing only valid with uniquely valued Index objects'
+                    df = df.drop_duplicates(subset=['code']).reset_index(drop=True)
                     self.selector_cache = df
                     self.selector_cache_ts = datetime.now()
             except Exception as e:
@@ -429,6 +434,12 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             if df is None or df.empty:
                 df = load_cache()
 
+            if not df.empty:
+                # [FIX] 彻底重置索引，解决 'Reindexing only valid with uniquely valued Index objects'
+                df = df.copy().reset_index(drop=True)
+                # 剔除 code 列可能的异常（虽然 reset_index 应该处理好，但确保唯一性更安全）
+                # df = df.drop_duplicates(subset=['code']) # 可选，但慎重
+
             scraper_list = pd.DataFrame()
 
             if not df.empty:
@@ -450,8 +461,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                     else:
                         scraper_list['display_logic'] = ""
 
-                    # ✅ 去重（防止原始数据重复）
-                    scraper_list = scraper_list.drop_duplicates(subset=['code'])
+                    # ✅ 去重且重置索引（防止原始数据重复触发 Reindexing 错误）
+                    scraper_list = scraper_list.drop_duplicates(subset=['code']).reset_index(drop=True)
 
             # ========================
             # 2. selector（缓存版）
@@ -476,7 +487,7 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                     if 'score' in selector_list.columns:
                         selector_list = selector_list.sort_values('score', ascending=False)
 
-                    selector_list = selector_list.drop_duplicates(subset=['code'])
+                    selector_list = selector_list.drop_duplicates(subset=['code']).reset_index(drop=True)
 
             # ========================
             # 3. 合并（互补逻辑）
@@ -554,6 +565,9 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             )
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+
             print(f"[find_leading_stocks error]: {e}")
 
     def find_leading_stocks_old(self, sector_name):
@@ -695,25 +709,35 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
         if col > 1: return
         
         code_item = self.stock_table.item(row, 0)
-        if code_item and self.parent():
+        if code_item:
              code = code_item.text()
-             try:
-                 # Try to call parent's sender if available
-                 if hasattr(self.parent(), '_safe_send_stock'):
-                     self.parent()._safe_send_stock(code)
-                     if hasattr(self.parent(), 'update_send_status'):
-                         self.parent().update_send_status(f"已发送 {code}")
-                     
-                     # # 尝试联动主界面的 scroll 信号
-                     # if hasattr(self.parent(), 'scroll_to_code_signal'):
-                     #     self.parent().scroll_to_code_signal.emit(code)
+             self._execute_linkage(code, source="hot_sector")
+
+    def _execute_linkage(self, code, source=""):
+        """跨进程联动核心逻辑"""
+        if not code or self._select_code == str(code):
+            return
             
-                 elif hasattr(self.parent(), 'sender') and self.parent().sender:
-                      # Fallback
-                      self.parent().sender.send(code)
-                      
-             except Exception as e:
-                 print(f"Error sending/linking code: {e}")
+        # 🛡️ 记录当前选中，确保状态同步
+        self._select_code = str(code)
+
+        if self.sender:
+            try:
+                self.sender.send(str(code))
+            except Exception:
+                pass
+        
+        if self.main_app and self.on_code_callback:
+            try:
+                if hasattr(self.main_app, 'tk_dispatch_queue'):
+                    if self.main_app and getattr(self.main_app, "_vis_enabled_cache", False):
+                        if hasattr(self.main_app, 'open_visualizer'):
+                            self.main_app.tk_dispatch_queue.put(lambda: self.main_app.open_visualizer(str(code)))
+                    self.main_app.tk_dispatch_queue.put(lambda: self.on_code_callback(str(code)))
+                else:
+                    self.on_code_callback(str(code))
+            except Exception:
+                pass
 
     def on_stock_cell_changed(self, row, col, prev_row, prev_col):
         """
@@ -728,7 +752,7 @@ class TradingGUI(QWidget, WindowMixin):
     # 声明信号
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
-    def __init__(self, logger_path: Optional[str] = None, sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None, df_all=None):
+    def __init__(self, logger_path: Optional[str] = None, on_code_callback=None, main_app=None, on_open_visualizer=None, selector=None, live_strategy=None, df_all=None):
         super().__init__()
         from JohnsonUtil import commonTips as cct
         if logger_path is None:
@@ -778,10 +802,13 @@ class TradingGUI(QWidget, WindowMixin):
                 theme_cols = [c for c in theme_cols if c in cache_df.columns and c not in sync_cols]
                 
                 # 合并
-                combined_df = pd.merge(rt_df, cache_df[theme_cols], on='code', how='left', suffixes=('', '_cache'))
-                
+                combined_df = pd.merge(rt_df, cache_df[theme_cols].drop_duplicates(subset=['code']), on='code', how='left', suffixes=('', '_cache'))
+                # [FIX] 彻底去重防止后续 reindexing 报错
+                combined_df = combined_df.drop_duplicates(subset=['code']).reset_index(drop=True)
+
                 # [RENAME-MAP] 应对 volume (量比) 与 vol (成交量) 的歧义
-                if 'volume' in combined_df.columns:
+                # 只在不存在 vol_ratio 时再 rename
+                if 'volume' in combined_df.columns and 'vol_ratio' not in combined_df.columns:
                     combined_df.rename(columns={'volume': 'vol_ratio'}, inplace=True)
                 if 'vol' in combined_df.columns:
                     combined_df['volume'] = combined_df['vol']
@@ -790,9 +817,9 @@ class TradingGUI(QWidget, WindowMixin):
                 
                 self.df_all = combined_df
             else:
-                self.df_all = rt_df
+                self.df_all = rt_df.drop_duplicates(subset=['code']).reset_index(drop=True)
         else:
-            self.df_all = cache_df
+            self.df_all = cache_df.drop_duplicates(subset=['code']).reset_index(drop=True)
 
         self.selector = selector
         if self.selector is None:
@@ -930,24 +957,24 @@ class TradingGUI(QWidget, WindowMixin):
         self.report_area.setVisible(False)
         self.main_layout.addWidget(self.report_area)
 
-        self.on_tree_scroll_to_code = on_tree_scroll_to_code 
-
+        self.on_code_callback = on_code_callback
+        self.main_app = main_app
+        self._select_code = None
+        
         # 绑定信号
         self.scroll_to_code_signal.connect(self._safe_scroll_to_code)
         self.send_status_signal.connect(self._safe_update_send_status)
         
-        # === 股票发送器 ===
-        if sender is not None:
-            self.sender = sender
-            if hasattr(self.sender, "callback"):
-                original_cb = self.sender.callback
-                def safe_callback(status_dict):
-                    self.send_status_signal.emit(status_dict)
-                    if callable(original_cb):
-                        original_cb(status_dict)
-                self.sender.callback = safe_callback
-        else:
-            self.sender = StockSender(callback=None)
+        # === 股票发送器 (独立运行时联动外部通达信/行情软件) ===
+        from JohnsonUtil.stock_sender import StockSender
+        self.sender = StockSender(callback=None)
+        if hasattr(self.sender, "callback"):
+            original_cb = self.sender.callback
+            def safe_callback(status_dict):
+                self.send_status_signal.emit(status_dict)
+                if callable(original_cb):
+                    original_cb(status_dict)
+            self.sender.callback = safe_callback
 
         # 表格点击与切换信号
         _ = self.table.cellClicked.connect(self.on_table_row_clicked)
@@ -1740,8 +1767,8 @@ class TradingGUI(QWidget, WindowMixin):
         self.detail_tree_widget = DetailTreeWindow(stock_code, stock_name, parent=self)
         self.detail_tree_widget.show()
         
-        # 联动后台发送
-        self.tree_scroll_to_code(stock_code)
+        # [UNIFIED-LINKAGE] 联动后台发送
+        self._execute_linkage(stock_code, source="double_click")
 
     def trigger_db_cleanup(self):
         """弹出确认选项，然后执行非交易日脏数据清理。"""
@@ -1793,9 +1820,35 @@ class TradingGUI(QWidget, WindowMixin):
                     "filter_code": self.stock_input.currentText().strip(),
                     "selected_code": stock_code
                 })
-            # use safe send via queue
-            if hasattr(self, 'sender') and self.sender:
-                self._safe_send_stock(stock_code)
+            # [UNIFIED-LINKAGE] use standardized execute_linkage
+            self._execute_linkage(stock_code, source="table_nav")
+
+
+    def _execute_linkage(self, code, source=""):
+        """跨进程联动核心逻辑"""
+        if not code or self._select_code == str(code):
+            return
+            
+        # 🛡️ 记录当前选中，确保状态同步
+        self._select_code = str(code)
+
+        if self.sender:
+            try:
+                self.sender.send(str(code))
+            except Exception:
+                pass
+        
+        if self.main_app and self.on_code_callback:
+            try:
+                if hasattr(self.main_app, 'tk_dispatch_queue'):
+                    if self.main_app and getattr(self.main_app, "_vis_enabled_cache", False):
+                        if hasattr(self.main_app, 'open_visualizer'):
+                            self.main_app.tk_dispatch_queue.put(lambda: self.main_app.open_visualizer(str(code)))
+                    self.main_app.tk_dispatch_queue.put(lambda: self.on_code_callback(str(code)))
+                else:
+                    self.on_code_callback(str(code))
+            except Exception:
+                pass
 
 
     def _get_stock_code_from_row(self, row: int) -> str:
@@ -1844,15 +1897,15 @@ class TradingGUI(QWidget, WindowMixin):
 
     def _safe_scroll_to_code(self, stock_code):
         """Qt 主线程执行"""
-        if self.on_tree_scroll_to_code and callable(self.on_tree_scroll_to_code):
+        if self.on_code_callback and callable(self.on_code_callback):
             try:
                 self.stock_input.blockSignals(True)
                 self.stock_input.setCurrentText(stock_code)
                 self.stock_input.blockSignals(False)
                 self.refresh_table() # 强制更新以响应外来联动
-                self.on_tree_scroll_to_code(stock_code,vis=True)
+                # self.on_code_callback(stock_code) # 这里是外部进来的，不需要再发出去，或者根据需要处理
             except Exception as e:
-                print(f"on_tree_scroll_to_code error: {e}")
+                print(f"on_code_callback error: {e}")
         else:
             # 降级方案：如果是独立的，尝试更新输入框
             self.stock_input.blockSignals(True)
