@@ -278,7 +278,7 @@ class BiddingMomentumDetector:
         self.baseline_time: float = time.time()  # 阈值的初始基准时间
         # sector -> anchor_score
         self.sector_anchors: Dict[str, float] = {}
-        self.reset_threshold: float = 10.0 # 变动超过 10 分自动重置锚点
+        # [REMOVED] Jump reset threshold no longer needed.
         
         # [NEW] 个股切片涨幅重置阈值 (1.0%)
         self.price_reset_threshold: float = 1.0
@@ -1292,8 +1292,10 @@ class BiddingMomentumDetector:
         
         # 4. [NEW] 全局对照基准重置逻辑 (移动到循环外，每周期仅检查一次)
         now = time.time()
-        if now - self.baseline_time >= self.comparison_interval:
-            self.reset_observation_anchors()
+        # [OPTIMIZE] 当在非交易时间不要重置基准数据，保留最后的涨跌变化
+        if self.is_active_session() and not self.in_history_mode:
+            if now - self.baseline_time >= self.comparison_interval:
+                self.reset_observation_anchors()
             
             # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
 
@@ -1436,14 +1438,7 @@ class BiddingMomentumDetector:
                 
             score_diff = board_score - self.sector_anchors[sector]
             
-            # 3. 分阶段变动重置 (辅助参考)
             anchor = self.sector_anchors[sector]
-            if abs(board_score - anchor) >= self.reset_threshold:
-                if self.enable_log:
-                    logger.info(f"♻️ [Detector] Sector anchor reset for {sector}: {anchor:.1f} -> {board_score:.1f}")
-                self.sector_anchors[sector] = board_score
-                anchor = board_score
-            
             staged_diff = board_score - anchor
 
             new_active[sector] = {

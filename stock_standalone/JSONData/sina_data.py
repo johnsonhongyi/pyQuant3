@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import threading
 
 sys.path.append("..")
 # import pandas as pd
@@ -243,6 +244,10 @@ class StockCode:
 # -*- encoding: utf-8 -*-
 all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
 
+# ⚡ [GLOBAL CACHE] 本进程全局缓存，加速 Sina 跨实例访问 (1.2)
+_SINA_HDF5_MEM_CACHE: Dict[str, Dict[str, Any]] = {}
+_HDF_LOAD_LOCK = threading.Lock()  # ⚡ [NEW] 全局加载锁，防止并发重写 (1.3)
+_HDF_LOADING = {}  # ⚡ [NEW] 记录正在加载的任务，避免惊群效应 (1.3)
 
 class Sina:
     """新浪免费行情获取"""
@@ -303,6 +308,7 @@ class Sina:
         self.stock_code_path = None
         self.stock_list = []
         self.request_num = 0
+        # self.agg_cache 已经在 init 中通过 GlobalValues() 实例化
 
     def get_int_time(self, timet: float) -> int:
         return int(time.strftime("%H:%M:%S", time.localtime(timet))[:6].replace(':', ''))
@@ -1882,10 +1888,7 @@ class Sina:
         debug: bool = False
     ) -> pd.DataFrame:
         """
-        统一的 HDF5 历史轨迹加载逻辑（带全架构共享缓存）。
-        fname: HDF5 文件名 (不含路径)
-        table: 数据库表名 (默认根据 sina_limit_time 生成)
-        limit_time: 缓存有效期 (秒)，默认使用 cct.real_time_tick_limit
+        统一的 HDF5 历史轨迹加载逻辑 (Level 5.5: Flattened Single-Flight IO Loader with Ready Barrier)。
         """
         if table is None:
             table = 'all_' + str(int(cct.sina_limit_time))
@@ -1894,35 +1897,89 @@ class Sina:
 
         cache_key_df = f'unified_h5_hist_{table}'
         cache_key_time = f'unified_h5_hist_time_{table}'
-
         now_time = time.time()
-        
-        # 1. 尝试从单例缓存获取 (GlobalValues)
-        h5_hist = self.agg_cache.getkey(cache_key_df)
-        last_time = self.agg_cache.getkey(cache_key_time)
 
-        # 2. 判断是否过时或缺失
-        need_load = (
-            h5_hist is None or 
-            last_time is None or 
-            (now_time - float(last_time) > limit_time and cct.get_work_time_duration())
-        )
+        # 1. [Memory Cache Check] - 无锁快查
+        item = _SINA_HDF5_MEM_CACHE.get(table)
+        if item and item.get('ready'):
+            last_t = float(item.get('last_time', 0))
+            if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
+                return item['df']
 
-        if need_load:
+        # 2. [Concurrency Control] - 角色分配 (Loader vs Waiter)
+        is_loader = False
+        event = None
+        with _HDF_LOAD_LOCK:
+            # 2.1 双检锁 (Double-check inside lock)
+            item = _SINA_HDF5_MEM_CACHE.get(table)
+            if item and item.get('ready'):
+                last_t = float(item.get('last_time', 0))
+                if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
+                    return item['df']
+
+            # 2.2 确定角色
+            if table in _HDF_LOADING:
+                event = _HDF_LOADING[table]
+                is_loader = False
+            else:
+                event = threading.Event()
+                _HDF_LOADING[table] = event
+                is_loader = True
+
+        if not is_loader:
+            # ⚡ [WAITER PATH] - 阻塞并在唤醒后通过 Ready Barrier 验证
             if debug:
-                log.debug(f"[UnifiedCache] Loading HDF5: {fname}/{table}")
-            with timed_ctx(f"load_h5_{table}", warn_ms=1000):
-                h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
+                log.info(f"[SingleFlight] Waiter blocking for {table} ...")
             
-            if h5_hist is not None and not h5_hist.empty:
-                # 写入共享缓存，使所有 Sina 实例能看到
-                self.agg_cache.setkey(cache_key_df, h5_hist)
-                self.agg_cache.setkey(cache_key_time, now_time)
-        else:
-            if debug:
-                log.debug(f"[UnifiedCache] Cache Hit: {table} (Age: {now_time - float(last_time):.1f}s)")
+            event.wait(timeout=60)
+            
+            # 再次查内存，验证 Ready 标志
+            item = _SINA_HDF5_MEM_CACHE.get(table)
+            if item and item.get('ready'):
+                return item['df']
+            else:
+                # 极端情况：非 Ready 状态，返回空交由下轮重试
+                return pd.DataFrame()
 
-        return h5_hist if h5_hist is not None else pd.DataFrame()
+        # ⚡ [LOADER PATH] - 进入 IO 执行 (Level 6: Production Stable)
+        try:
+            if debug:
+                log.info(f"[SingleFlight] Loader starting IO: {table}")
+            
+            h5_hist = self.agg_cache.getkey(cache_key_df)
+            last_time = self.agg_cache.getkey(cache_key_time)
+
+            need_load = (
+                h5_hist is None or 
+                last_time is None or 
+                (time.time() - float(last_time) > limit_time and cct.get_work_time_duration())
+            )
+
+            if need_load:
+                with timed_ctx(f"load_h5_{table}", warn_ms=1000):
+                    h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
+                
+                if h5_hist is not None and not h5_hist.empty:
+                    self.agg_cache.setkey(cache_key_df, h5_hist)
+                    self.agg_cache.setkey(cache_key_time, time.time())
+            
+            # ⚡ [1. CACHE WRITE] 先写缓存和 Ready 标志 (确保数据可见性)
+            if h5_hist is not None and not h5_hist.empty:
+                _SINA_HDF5_MEM_CACHE[table] = {
+                    'df': h5_hist, 
+                    'last_time': time.time(),
+                    'ready': True 
+                }
+            
+            return h5_hist if h5_hist is not None else pd.DataFrame()
+
+        finally:
+            # ⚡ [2. STATE CLEANUP] 先清理加载状态，[3. SIGNAL] 最后唤醒 Waiters
+            # 必须在 finally 中单次唤醒，确保 Waiters 醒来时 Loading 状态已同步清理
+            with _HDF_LOAD_LOCK:
+                if _HDF_LOADING.get(table) == event:
+                    del _HDF_LOADING[table]
+            event.set() 
 
     def get_sina_MultiIndex_data(self):
         """兼容性包装：使用统一缓存获取 MultiIndex 数据"""
