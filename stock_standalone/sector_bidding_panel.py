@@ -557,10 +557,14 @@ class DataProcessWorker(QObject):
                 try:
                     # [HEARTBEAT] 后台数据处理心跳
                     if self.detector.enable_log:
-                        logger.info(f"💓 [Worker] Processing heartbeat: Queue size={len(self.df_queue)}")
+                        logger.info(f"💓 [Worker] Processing heartbeat: Queue size={len(self.df_queue)}. DF Shape: {df.shape}")
                         
                     self.detector.register_codes(df)
                     self.detector.update_scores()
+                    
+                    # [NEW] 记录版本，让 UI 知道有新数据算完了
+                    setattr(self.detector, 'data_version', getattr(self.detector, 'data_version', 0) + 1)
+                    
                     self.finished.emit()
                 except Exception as e:
                     logger.error(f"[SectorBiddingPanel Worker] Error: {e}")
@@ -1298,18 +1302,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             return
             
         # 2. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
+        sectors = self.detector.get_active_sectors()
+        
+        # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
         if self._worker.df_queue:
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
                 self.status_lbl.setStyleSheet("color: #FFD700; font-weight: bold;")
-        
-        sectors = self.detector.get_active_sectors()
-        
+
         if not sectors:
             # 如果目前没有活跃板块，在状态栏提示
             if hasattr(self, 'status_lbl') and not self._worker.df_queue:
-                self.status_lbl.setText("📝 目前无满足门槛的活跃板块")
+                self.status_lbl.setText("📝 目前无满足门槛的活跃板块 (或正在计算中)")
                 self.status_lbl.setStyleSheet("color: #AAAAAA;")
+            
+            # [STABILITY] 数据为空时也要清理旧表
+            self.sector_table.setRowCount(0)
             return
         
         now_str = datetime.now().strftime("%H:%M:%S")
