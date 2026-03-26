@@ -20,6 +20,7 @@ import pandas as pd
 import json
 import os
 import gzip
+import numpy as np
 from JohnsonUtil import commonTips as cct
 
 if TYPE_CHECKING:
@@ -464,7 +465,11 @@ class BiddingMomentumDetector:
             full_path = os.path.abspath(os.path.join(path, f"bidding_{snapshot_date}.json.gz"))
             return full_path
             
-        return cct.get_ramdisk_path("bidding_session_data.json.gz")
+        ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+        if ram_path:
+            return os.path.abspath(ram_path)
+        # Final fallback - current directory snapshots if ramdisk is broken
+        return os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
 
     def save_persistent_data(self, force=False):
         """保存当前个股得分和板块强度到磁盘 (原子化强化版)"""
@@ -479,18 +484,27 @@ class BiddingMomentumDetector:
 
         try:
             # [Data Preparation ...]
+            # [OPTIMIZED] 深度清理数据，不保存分时 K 线，减小磁盘占用和提升保存速度
+            def _clean_data(obj):
+                if isinstance(obj, dict):
+                    # 关键：剔除 K 线数据，它们在启动时或显示时可以动态拉取
+                    return {k: _clean_data(v) for k, v in obj.items() if k != 'klines'}
+                elif isinstance(obj, list):
+                    return [_clean_data(item) for item in obj]
+                return obj
+
             data = {
                 'timestamp': round(time.time(), 2),
                 'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if (ts.score > 0 or ts.momentum_score > 0)},
                 'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in self._tick_series.items() if ts.momentum_score > 0},
-                'sector_data': {name: info for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
+                'sector_data': {name: _clean_data(info) for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
                 'stock_score_anchors': {code: round(ts.score_anchor, 2) 
                                         for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
                 'baseline_time': round(self.baseline_time, 2),
                 'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
                 'stock_price_anchors': {code: round(ts.price_anchor, 4) 
                                         for code, ts in self._tick_series.items() if ts.price_anchor > 0},
-                'watchlist': self.daily_watchlist
+                'watchlist': _clean_data(self.daily_watchlist)
             }
             
             sd_count = len(data.get('sector_data', {}))
@@ -528,17 +542,34 @@ class BiddingMomentumDetector:
 
             # ⭐ [C-Reinforcement] 原子化写入：先写临时文件，然后 os.replace
             def atomic_gz_save(target_path, data_dict):
+                def np_handler(obj):
+                    if isinstance(obj, (np.integer, np.int32, np.int64)):
+                        return int(obj)
+                    if isinstance(obj, (np.floating, np.float32, np.float64)):
+                        return float(obj)
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    return str(obj) # Fallback
+
                 temp_path = target_path + f".{os.getpid()}.tmp"
                 try:
                     with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
-                        json.dump(data_dict, f, ensure_ascii=False)
-                    # Windows 下 os.replace 是原子性的 (如果目标未被打开)
+                        json.dump(data_dict, f, ensure_ascii=False, default=np_handler)
+                    
+                    # [STABILITY] Windows file replacement
                     if os.path.exists(target_path):
-                        os.remove(target_path)
+                        try:
+                            # 尝试删除旧文件，防止 replace 时权限冲突
+                            os.remove(target_path)
+                        except Exception as e:
+                            logger.error(f"[atomic_gz_save] remove error: {e}")
+                    
                     os.replace(temp_path, target_path)
                     return True
                 except Exception as e:
-                    if os.path.exists(temp_path): os.remove(temp_path)
+                    if os.path.exists(temp_path):
+                        try: os.remove(temp_path)
+                        except: pass
                     raise e
 
             main_path = self._get_persistence_path()
@@ -546,13 +577,18 @@ class BiddingMomentumDetector:
                 today_str = datetime.datetime.now().strftime('%Y%m%d')
                 snapshot_path = self._get_persistence_path(snapshot_date=today_str)
                 # [OPTIMIZED] 如果主路径与快照路径不同，直接复制已压好的文件，避免重复耗时的 JSON+GZIP
-                if main_path != snapshot_path:
+                if os.path.normpath(main_path) != os.path.normpath(snapshot_path):
                     import shutil
                     try:
+                        # 确保快照所在的目录存在
+                        os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
                         shutil.copy2(main_path, snapshot_path)
+                        logger.info(f"📸 [Detector] Snapshot copied to {snapshot_path}")
                     except Exception as e:
-                        logger.warning(f"Failed to copy snapshot: {e}")
+                        logger.warning(f"Failed to copy snapshot from {main_path} to {snapshot_path}: {e}")
                         atomic_gz_save(snapshot_path, data)
+                else:
+                    logger.debug(f"[Detector] Snapshot path identical to main path: {main_path}")
 
             logger.info(f"💾 [Detector] Session data saved to {main_path} ({ss_count} stocks, {sd_count} sectors)")
             if snapshot_path != main_path:

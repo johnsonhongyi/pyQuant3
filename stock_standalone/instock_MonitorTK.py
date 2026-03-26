@@ -1583,17 +1583,60 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # ✅ 每日自动保存 SectorBiddingPanel 历史数据
-        # [REFINED] 如果面板不存在，先初始化以加载最新信号，然后强行保存快照
+        # [REFINED] 如果面板不存在，先初始化（确保在主线程执行）以加载最新信号，然后强行保存快照
         if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
             try:
-                from sector_bidding_panel import SectorBiddingPanel
-                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                logger.info("📡 [15:30 Task] Auto-initializing SectorBiddingPanel for EOD snapshot.")
+                import queue
+                wait_q = queue.Queue()
+                def _init_panel_task():
+                    try:
+                        from sector_bidding_panel import SectorBiddingPanel
+                        if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
+                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                            logger.info("📡 [15:30 Task] Auto-initialized SectorBiddingPanel on Main thread.")
+                            
+                            # ⭐ 立即喂入当日最终行情数据，确保 detector 有数可存
+                            if hasattr(self, 'df_all') and not self.df_all.empty:
+                                logger.info(f"📊 [15:30 Task] Feeding EOD data: {len(self.df_all)} stocks. Cols: {list(self.df_all.columns[:10])}...")
+                                # 为保万一，在主线程喂数前做一次列映射兼容
+                                df_feed = self.df_all.copy()
+                                if 'code' not in df_feed.columns and df_feed.index.name == 'code':
+                                    df_feed = df_feed.reset_index()
+                                
+                                self.sector_bidding_panel.on_realtime_data_arrived(df_feed, force_update=True)
+                                logger.info("📊 [15:30 Task] Fed data to SectorBiddingPanel successfully.")
+                            else:
+                                logger.warning("⚠️ [15:30 Task] df_all still empty, Panel will be blank!")
+                    except Exception as ex:
+                        logger.error(f"Inner init error: {ex}")
+                    finally:
+                        wait_q.put(True)
+
+                if hasattr(self, "tk_dispatch_queue"):
+                    # [NEW] 启动面板前，先确保 df_all 已经拉到数据 (重启时的冷启动保护)
+                    retry_cnt = 0
+                    while (not hasattr(self, 'df_all') or self.df_all.empty) and retry_cnt < 10:
+                        logger.info(f"⏳ [15:30 Task] Waiting for df_all data (retry {retry_cnt})...")
+                        time.sleep(1)
+                        retry_cnt += 1
+
+                    self.tk_dispatch_queue.put(_init_panel_task)
+                    try:
+                        wait_q.get(timeout=10)
+                    except queue.Empty:
+                        logger.warning("🕒 [15:30 Task] SectorBiddingPanel init timeout")
+                else:
+                    # Fallback if queue not ready
+                    from sector_bidding_panel import SectorBiddingPanel
+                    self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+
             except Exception as e:
                 logger.error(f"Failed to auto-init SectorBiddingPanel in task: {e}")
 
         if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
             try:
+                # 💡 在保存前，如果刚刚初始化，可能 worker 还在处理数据，稍微等待一下
+                # 但由于 save_persistent_data 是同步的，我们直接尝试保存
                 if hasattr(self.sector_bidding_panel, 'detector'):
                     # 💡 使用 force=True 确保在收盘后也能保存，即使 get_trade_date_status 判断不匹配
                     self.sector_bidding_panel.detector.save_persistent_data(force=True)
@@ -3292,14 +3335,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     
                     # 在竞价/尾盘时段自动弹出面板（仅初始化一次）
                     if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
-                        try:
-                            from sector_bidding_panel import SectorBiddingPanel
-                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                            self.sector_bidding_panel.show()
-                            logger.info("📡 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
-                        except Exception as e:
-                            logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
-                            self.sector_bidding_panel = None
+                        def _auto_open_panel():
+                            try:
+                                from sector_bidding_panel import SectorBiddingPanel
+                                if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
+                                    self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                                    self.sector_bidding_panel.show()
+                                    # 立即推送一次数据
+                                    if hasattr(self, 'df_all') and not self.df_all.empty:
+                                        self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                                    logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
+                            except Exception as e:
+                                logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
+                                self.sector_bidding_panel = None
+                        
+                        if hasattr(self, "tk_dispatch_queue"):
+                            self.tk_dispatch_queue.put(_auto_open_panel)
+                        else:
+                            self.after(0, _auto_open_panel)
                     
                     # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
                     panel = getattr(self, "sector_bidding_panel", None)
@@ -5977,6 +6030,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except:
                 pass
 
+
     def add_voice_monitor_dialog(self, code, name):
         """
         弹出添加预警监控的对话框 (优化版)
@@ -6424,17 +6478,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pass
 
     def on_voice_speak_start(self, code):
-        """语音播报开始的回调 (主线程同步版)"""
-        if not code: return
-        # 检查程序是否正在退出
-        if getattr(self, '_is_closing', False): return
-        
-        # ⭐ [FIX] 使用 dispatch_queue 将逻辑封装并投递到主线程执行，确保 after() 调用的线程安全性
+        """[Enhanced] 语音开始播放时的回调，用于触发窗口视觉效果（震动+闪烁）"""
+        if not code or getattr(self, '_is_closing', False):
+            return
+
         def sync_task():
             # A. 确保容器存在
-            if not hasattr(self, '_voice_start_jobs'): 
+            if not hasattr(self, '_voice_start_jobs'):
                 self._voice_start_jobs = {}
-            
+
             # B. 幂等性：如果该代码之前的启动任务还在排队（极端情况），先通过 ID 取消它
             old_job = self._voice_start_jobs.get(str(code))
             if old_job:
@@ -6446,10 +6498,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if str(code) in self._voice_start_jobs:
                     del self._voice_start_jobs[str(code)]
                 self._trigger_alert_visual_effects(str(code), start=True)
-            
+
             # D. 执行任务栏闪烁
             self.flash_taskbar()
-            
+
             # E. [DIRECT] 恢复即时播报同步，移除长延时，仅留极短缓冲以适配 Tcl 调度
             self._voice_start_jobs[str(code)] = self.after(20, trigger_visual)
 
@@ -6459,7 +6511,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 self._schedule_after(0, sync_task)
         except Exception:
-            pass  # 主循环已停止，忽略
+            pass
 
         
     # def on_voice_speak_start(self, code):
@@ -6515,14 +6567,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win = None
         if not hasattr(self, 'code_to_alert_win'): return
         # ⭐ [RE-INITIALIZED] 联动增强：快速创建逻辑 (Fast-track)
-        # 解决播报时窗口还在队列中导致的不同步问题，确保“播后即震”的直观感
+        # A. 优先尝试精确匹配 (Speed Boost)
+        search_code = str(code).strip()
+        win = self.code_to_alert_win.get(search_code)
+        
         if not win:
-             # A. 正常代码匹配
+             # B. 模糊遍历匹配 (处理 .SH/SZ 等情况)
              for k, w in self.code_to_alert_win.items():
-                 str_k, str_c = str(k).strip(), str(code).strip()
-                 if str_k == str_c or str_k.startswith(str_c) or str_c.startswith(str_k):
-                     win = w
-                     break
+                 str_k = str(k).strip()
+                 if search_code in str_k or str_k in search_code:
+                     if w.winfo_exists():
+                         win = w
+                         break
              
              # B. [RESTORED] 快速插队创建
              if not win and start:
@@ -6842,9 +6898,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             active_windows = list(getattr(self, 'active_alerts', []))
             valid_codes = []
             for w in active_windows:
-                # # 取消 safety timer（如果已经触发）
-                # if hasattr(w, 'safety_close_timer'):
-                #     self.after_cancel(w.safety_close_timer)
                 if hasattr(w, 'stock_code') and w.winfo_exists():
                     valid_codes.append(str(w.stock_code))
             
@@ -7110,6 +7163,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # ===== 直接创建完整弹窗并预计算位置 (防止闪烁) =====
             win = tk.Toplevel(self)
+            self.code_to_alert_win[code] = win # ⭐ [CRITICAL] 提前注册，确保震动联动能搜到
             win.stock_code = code # [NEW] 补全核心属性识别
             win.stock_name = name # [NEW] 补全核心属性识别
             win.overrideredirect(True)
@@ -7132,10 +7186,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 初始化震动锚点，确保即使由于重试机制立即震动，也不会跑偏
             win._shake_orig_x, win._shake_orig_y = init_x, init_y
             win._shake_orig_wh = f"{alert_w}x{alert_h}"
+            # ⭐ [ENHANCEMENT] 卖出类信号使用绿色风格
+            sell_keywords = ["卖出", "清仓", "止损", "离场", "减仓", "减持", "风险", "高抛"]
+            is_sell_signal = any(kw in msg for kw in sell_keywords)
+            win.is_sell_signal = is_sell_signal # 挂载标记
+
             # ⭐ [ENHANCEMENT] 高优先级报警应用金色/淡红背景，增强视觉差异
             is_high = any(kw in msg for kw in HIGH_PRIORITY_KEYWORDS)
-            bg_color = "#FFF9E6" if is_high else "#fff" # 金边浅黄背景，更柔和但醒目
-            border_color = "#FFD700" if is_high else "#ccc" # 纯金边框
+            
+            if is_sell_signal:
+                bg_color = "#F1F8E9"  # 极浅绿背景
+                border_color = "#4CAF50" # 绿色边框
+                title_bg = "#4CAF50"  # 绿色标题栏
+            else:
+                bg_color = "#FFF9E6" if is_high else "#fff" # 金边浅黄背景，更柔和但醒目
+                border_color = "#FFD700" if is_high else "#ccc" # 纯金边框
+                title_bg = "#e57373" # 默认红/粉色标题栏
             
             win.configure(bg=bg_color)
             win.is_high_priority = is_high
@@ -7157,8 +7223,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     return
                 w._priority_flash_active = True
                 
-                flash_color = "#ffff00" # 亮黄色
-                alt_color = "#ffaa00"   # 亮橘色
+                if getattr(w, 'is_sell_signal', False):
+                    flash_color = "#ccff90" # 亮浅绿
+                    alt_color = "#81c784"   # 柔和绿
+                else:
+                    flash_color = "#ffff00" # 亮黄色
+                    alt_color = "#ffaa00"   # 亮橘色
                 def flash_loop(count=0):
                     if not w.winfo_exists(): 
                         w._priority_flash_active = False
@@ -7203,7 +7273,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 def flash_speech(count=0):
                     if not w.winfo_exists() or not getattr(w, 'is_shaking', False):
                         return
-                    bg = "#ff5555" if count % 2 == 0 else w._original_bg
+                    # [MODIFIED] 卖出信号使用绿色闪烁，买入/普通信号使用红色闪烁
+                    if getattr(win, 'is_sell_signal', False):
+                        flash_c = "#a5d6a7" # 绿色提示
+                    else:
+                        flash_c = "#ff5555" # 红色提示
+                        
+                    bg = flash_c if count % 2 == 0 else w._original_bg
                     try: w.configure(bg=bg)
                     except Exception as e:
                         logger.error(f"Error in task: {e}")
@@ -7243,7 +7319,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 布局管理
             self.active_alerts.append(win)
             self._update_alert_positions()
-            self.code_to_alert_win[code] = win
+            # self.code_to_alert_win[code] = win # 已移至上方
             self._schedule_after(10, self._update_voice_active_codes)
             
             # 数据获取
@@ -7318,15 +7394,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             win.toggle_size = toggle_size
 
-            # 标题栏
-            title_bar = tk.Frame(win, bg="#e57373", height=32, cursor="hand2")
+            # 标题栏 [COLOR_MODIFIED]
+            title_bar = tk.Frame(win, bg=title_bg, height=32, cursor="hand2")
             title_bar.pack(fill="x", side="top")
             title_bar.pack_propagate(False)
             
             def stop_shake(event=None):
                 win.is_shaking = False
             
-            title_label = tk.Label(title_bar, text=f"🔔 {name} ({code})", bg="#e57373", fg="white", font=("Microsoft YaHei", 10, "bold"), anchor="w", padx=8)
+            title_label = tk.Label(title_bar, text=f"🔔 {name} ({code})", bg=title_bg, fg="white", font=("Microsoft YaHei", 10, "bold"), anchor="w", padx=8)
             title_label.pack(side="left", fill="x", expand=True)
             
             title_bar.bind("<Double-Button-1>", toggle_size)
@@ -7350,12 +7426,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             title_bar.bind("<B1-Motion>", do_move)
             title_label.bind("<B1-Motion>", do_move)
             
-            # 关闭按钮
-            close_btn = tk.Label(title_bar, text="✖", bg="#e57373", fg="white", font=("Arial", 12, "bold"), cursor="hand2", padx=8)
+            # 关闭按钮 [COLOR_MODIFIED]
+            close_btn = tk.Label(title_bar, text="✖", bg=title_bg, fg="white", font=("Arial", 12, "bold"), cursor="hand2", padx=8)
             close_btn.pack(side="right")
             close_btn.bind("<Button-1>", lambda e: self._close_alert(win, is_manual=True))
-            close_btn.bind("<Enter>", lambda e: close_btn.configure(bg="#c62828"))
-            close_btn.bind("<Leave>", lambda e: close_btn.configure(bg="#e57373"))
+            close_btn.bind("<Enter>", lambda e: close_btn.configure(bg="#c62828" if not is_sell_signal else "#2e7d32"))
+            close_btn.bind("<Leave>", lambda e: close_btn.configure(bg=title_bg))
 
             # 内容框架
             frame = tk.Frame(win, bg="#fff", padx=8, pady=5)
@@ -7401,8 +7477,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee", width=8, pady=2).pack(side="right", padx=5)
             
-            # 消息标签
-            msg_label = tk.Label(frame, text=f"⚠️ {msg}", font=("Microsoft YaHei", 11, "bold"), fg="#d32f2f", bg="#fff", wraplength=380, anchor="w", justify="left")
+            # 消息标签 [COLOR_MODIFIED]
+            msg_fg = "#2e7d32" if is_sell_signal else "#d32f2f"
+            msg_label = tk.Label(frame, text=f"⚠️ {msg}", font=("Microsoft YaHei", 11, "bold"), fg=msg_fg, bg="#fff", wraplength=380, anchor="w", justify="left")
             msg_label.pack(fill="x", pady=2)
             win.msg_label = msg_label
             
@@ -12877,7 +12954,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #     self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
         # else:
         #     logger.info("监控已在运行中。")
-        logger.info("启动K线监控...")
+        # logger.info("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
             self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=duration_sleep_time,history3=lambda: self.search_history3,logger=logger)
             # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)
@@ -12894,7 +12971,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.kline_monitor.deiconify()
                 self.kline_monitor.lift()
                 self.kline_monitor.focus_force()
-
+        logger.info("启动K线监控OK...")
         # 在这里可以启动你的实时监控逻辑，例如:
         # 1. 调用获取数据的线程
         # 2. 计算MACD/BOLL/EMA等指标
