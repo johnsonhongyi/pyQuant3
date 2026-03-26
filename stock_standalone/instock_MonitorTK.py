@@ -3246,9 +3246,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self._cached_market_temp = temp
                             self._cached_market_summary = summary
     
+                            ls_ratio = round(up_count / down_count, 2) if down_count > 0 else float(up_count) if up_count > 0 else 1.0
+                            
                             # 5. 组装结果并通过队列推送回 UI
                             final_stats = {
                                 "up": up_count, "down": down_count, "flat": flat_count,
+                                "ls_ratio": ls_ratio,
                                 "vol_down": vol_down, "vol_up": vol_up, "vol_details": vol_up_details,
                                 "temperature": temp, "summary": summary, "indices": indices_data, "breadth": breadth_data
                             }

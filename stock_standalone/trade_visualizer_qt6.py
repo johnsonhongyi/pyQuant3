@@ -952,12 +952,13 @@ class DataLoaderThread(QThread):
     _search_code: Optional[str]
     _resample: Optional[str]
 
-    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True) -> None:
+    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True, sina=None) -> None:
         super().__init__()
         self.code = code
         self.resample = resample
         self.mutex_lock = mutex_lock # 存储锁对象
         self.fastohlc = fastohlc
+        self.sina = sina # [NEW] Use shared Sina instance
         self._search_code = None
         self._resample = None
 
@@ -1005,7 +1006,10 @@ class DataLoaderThread(QThread):
                 try:
                     with QMutexLocker(self.mutex_lock):
                         with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=1800):
-                            tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
+                            # tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
+                            s = self.sina if self.sina else sina_data.Sina()
+                            tick_df = s.get_real_time_tick(self.code, enrich_data=True)
+                            # logger.debug(f'get_real_time_tick_att{attempt} get_real_time_tick : {tick_df[:3]}')
                     if not tick_df.empty:
                         break
                 except Exception as e:
@@ -1256,12 +1260,12 @@ def drop_tick_all_zero(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[mask_valid]
 
 
-def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_realtime=False, interval=None):
+def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_realtime=False, interval=None, sina_instance=None):
     """多进程常驻拉取实时数据"""
     if interval is None:
         interval = getattr(cct.CFG, 'duration_sleep_time', 5)
     
-    s = sina_data.Sina()
+    s = sina_instance if sina_instance else sina_data.Sina()
     current_code = None
     force_fetch = False
     
@@ -1286,7 +1290,7 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
             if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=1800):
                     tick_df = s.get_real_time_tick(code, enrich_data=True)
-                    # logger.debug(f'tick_df: {tick_df[:3]}')
+                    # logger.debug(f'realtime_worker_process tick_df: {tick_df[:3]}')
                     # tick_df = drop_tick_all_zero(tick_df)
                 if tick_df is not None and not tick_df.empty:
                     with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=1800):
@@ -2254,7 +2258,7 @@ class GlobalInputFilter(QtCore.QObject):
 class RealtimeWorker(QObject):
     data_updated = pyqtSignal(object, object, object)  # code, tick_df, today_bar
 
-    def __init__(self, mutex, interval_ms=3000):
+    def __init__(self, mutex, interval_ms=3000, sina=None):
         super().__init__()
         self._mutex = mutex
         self._timer = QTimer(self)
@@ -2262,7 +2266,7 @@ class RealtimeWorker(QObject):
         self._timer.timeout.connect(self._poll)
         self._code = None
         self._running = False
-        self._sina = sina_data.Sina()
+        self._sina = sina if sina else sina_data.Sina()
 
     def start(self, code):
         self._code = code
@@ -2297,6 +2301,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_thread.start()
         self.last_voice_ts = "" # 记录最后一次播报的信号时间
         self._voice_paused = False # [NEW] 独立的语音暂停标志
+        self.sina = sina_data.Sina() # [NEW] Centralized Sina instance for the main process
         
         # [FIX] 内部实时进程专用的停止标志，避免污染全局 stop_flag
         self.rt_worker_stop_flag = mp.Value('b', True)
@@ -5218,7 +5223,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
             self.realtime_process = threading.Thread(
                 target=realtime_worker_process,
-                args=(self.realtime_task_queue, self.realtime_queue, self.rt_worker_stop_flag, self.log_level, self._debug_realtime),
+                args=(self.realtime_task_queue, self.realtime_queue, self.rt_worker_stop_flag, self.log_level, self._debug_realtime, None, self.sina),
                 name="RealtimeUpdateWorkerThread",
                 daemon=True
             )
@@ -7669,7 +7674,7 @@ class MainWindow(QMainWindow, WindowMixin):
                             logger.debug("[IPC] Voice thread RESUMED after full sync")
                         logger.debug("[_safe_process] END, _is_processing_full_sync reset to False")
                         
-                QtCore.QTimer.singleShot(10, _safe_process)
+                QtCore.QTimer.singleShot(50, _safe_process)
                 return
                 
             if m_type == 'UPDATE_DF_DIFF':
@@ -8393,7 +8398,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 code,
                 self.hdf5_mutex,
                 resample=self.resample,
-                fastohlc=fastohlc_val
+                fastohlc=fastohlc_val,
+                sina=self.sina # Pass shared instance
             )
         with timed_ctx("data_loaded", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)

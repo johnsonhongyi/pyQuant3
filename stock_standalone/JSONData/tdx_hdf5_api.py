@@ -29,6 +29,7 @@ import tables
 import psutil
 import shutil
 import errno
+import threading
 
 from contextlib import contextmanager
 
@@ -1173,100 +1174,205 @@ def quarantine_hdf_file(fname, reason, rebuild_func=None):
             log.error(f"Rebuild failed for {fname}: {e}")
 
 
-def safe_load_table(store, table_name, chunk_size=1000,
-                    MultiIndex=False, complib='blosc',complevel=9,
-                    readonly=False):
+# 全局锁（进程内）
+_global_hdf_lock = threading.Lock()
+
+def safe_load_table(
+    store,
+    table_name,
+    chunk_size=2000,
+    max_chunks=20,          # ✅ 限制 fallback 范围（关键）
+    enable_fallback=False,   # ✅ 默认关闭 fallback（生产建议）
+    **kwargs   # ✅ 兼容旧参数（关键）
+):
+
     """
-    安全读取 HDF5 table：
-    - metadata / UnImplemented → 直接失败
-    - HDF5ExtError → 尝试 chunk 读取
+    安全读取 HDF5 table（稳定版）：
+    - 主路径：整表读取
+    - fallback：有限 chunk 读取（默认关闭）
+    - 不 rebuild
+    - 强制去重
     """
-
-    # ---------- 1. 尝试整表读取 ----------
-    try:
-        df = store[table_name]
-        return df[~df.index.duplicated(keep='first')]
-
-    # ---------- 2. 结构级损坏（不可恢复） ----------
-    except (AttributeError, KeyError, TypeError) as e:
-        log.critical(
-            f"HDF STRUCTURE BROKEN: {table_name}, "
-            f"type={type(e).__name__}, err={e}"
-        )
-        raise e
-
-    # ---------- HDF5 底层错误 ----------
-    except tables.exceptions.HDF5ExtError as e:
-        log.error(
-            f"{table_name} HDF5ExtError: {e}, "
-            f"attempting chunked read..."
-        )
-        # ↓ 继续走 chunk fallback
-
-    # ---------- 4. 文件级物理损坏 ----------
-    except (OSError, IOError, UnicodeDecodeError) as e:
-        log.critical(
-            f"HDF FILE BROKEN: {table_name}, "
-            f"type={type(e).__name__}, err={e}"
-        )
+    # if kwargs:
+    #     log.debug(f"[IGNORED PARAMS] {kwargs}")
+        
+    if store is None:
         return pd.DataFrame()
 
-    # ---------- 5. chunk fallback ----------
-    dfs = []
-    start = 0
-
-    try:
-        storer = store.get_storer(table_name)
-        if not storer.is_table:
-            log.error(f"{table_name} is not table format")
-            return pd.DataFrame()
-    except Exception as e:
-        log.error(f"get_storer failed for {table_name}: {e}")
-        return pd.DataFrame()
-
-    while True:
+    with _global_hdf_lock:
+        # ---------- 1. 快速路径（主路径） ----------
         try:
-            df_chunk = store.select(
-                table_name,
-                start=start,
-                stop=start + chunk_size
-            )
-            if df_chunk.empty:
-                break
-            dfs.append(df_chunk)
-            start += chunk_size
+            df = store[table_name]
+            if df is None or df.empty:
+                return pd.DataFrame()
 
-        except tables.exceptions.HDF5ExtError:
-            log.warning(
-                f"Skipping corrupted chunk "
-                f"{start}-{start + chunk_size}"
-            )
-            start += chunk_size
+            # 去重 + 防御
+            df = df[~df.index.duplicated(keep='first')]
+            return df
 
+        # ---------- 2. 结构错误 ----------
+        except (AttributeError, KeyError, TypeError) as e:
+            log.critical(f"[HDF STRUCT BROKEN] {table_name}: {e}")
+            return pd.DataFrame()
+
+        # ---------- 3. HDF5底层错误 ----------
+        except tables.exceptions.HDF5ExtError as e:
+            log.error(f"[HDF5 ERROR] {table_name}: {e}")
+
+            # ❗生产环境直接返回（最安全）
+            if not enable_fallback:
+                return pd.DataFrame()
+
+        # ---------- 4. IO级错误 ----------
+        except (OSError, IOError) as e:
+            log.critical(f"[HDF FILE ERROR] {table_name}: {e}")
+            return pd.DataFrame()
+
+        # ---------- 5. fallback（严格受控） ----------
+        dfs = []
+        start = 0
+        chunks_read = 0
+
+        try:
+            storer = store.get_storer(table_name)
+            if not getattr(storer, "is_table", False):
+                log.error(f"{table_name} is not table format")
+                return pd.DataFrame()
         except Exception as e:
-            log.error(
-                f"Fatal error reading chunk {start}: {e}"
-            )
-            break
+            log.error(f"get_storer failed: {table_name}, {e}")
+            return pd.DataFrame()
 
-    if not dfs:
-        log.error(f"All chunks of {table_name} are unreadable")
-        return pd.DataFrame()
+        while chunks_read < max_chunks:
+            try:
+                df_chunk = store.select(
+                    table_name,
+                    start=start,
+                    stop=start + chunk_size
+                )
 
-    df = pd.concat(dfs)
-    df = df[~df.index.duplicated(keep='first')]
+                if df_chunk is None or df_chunk.empty:
+                    break
 
-    # ---------- 6. 是否重建 ----------
-    if not readonly:
-        log.warning(f"Rebuilding table {table_name} from chunks")
-        rebuild_table(
-            store, table_name, df,
-            MultiIndex=MultiIndex,
-            complib=complib,
-            complevel=complevel
-        )
+                dfs.append(df_chunk)
 
-    return df
+            except tables.exceptions.HDF5ExtError:
+                log.warning(f"skip bad chunk {start}-{start + chunk_size}")
+
+            except Exception as e:
+                log.error(f"fatal chunk error @{start}: {e}")
+                break
+
+            start += chunk_size
+            chunks_read += 1
+
+        if not dfs:
+            return pd.DataFrame()
+
+        try:
+            df = pd.concat(dfs, copy=False)
+        except Exception as e:
+            log.error(f"concat failed: {table_name}, {e}")
+            return pd.DataFrame()
+
+        # ---------- 6. 最终清洗 ----------
+        df = df[~df.index.duplicated(keep='first')]
+
+        return df
+
+# def safe_load_table(store, table_name, chunk_size=1000,
+#                     MultiIndex=False, complib='blosc',complevel=9,
+#                     readonly=False):
+#     """
+#     安全读取 HDF5 table：
+#     - metadata / UnImplemented → 直接失败
+#     - HDF5ExtError → 尝试 chunk 读取
+#     """
+
+#     # ---------- 1. 尝试整表读取 ----------
+#     try:
+#         df = store[table_name]
+#         return df[~df.index.duplicated(keep='first')]
+
+#     # ---------- 2. 结构级损坏（不可恢复） ----------
+#     except (AttributeError, KeyError, TypeError) as e:
+#         log.critical(
+#             f"HDF STRUCTURE BROKEN: {table_name}, "
+#             f"type={type(e).__name__}, err={e}"
+#         )
+#         raise e
+
+#     # ---------- HDF5 底层错误 ----------
+#     except tables.exceptions.HDF5ExtError as e:
+#         log.error(
+#             f"{table_name} HDF5ExtError: {e}, "
+#             f"attempting chunked read..."
+#         )
+#         # ↓ 继续走 chunk fallback
+
+#     # ---------- 4. 文件级物理损坏 ----------
+#     except (OSError, IOError, UnicodeDecodeError) as e:
+#         log.critical(
+#             f"HDF FILE BROKEN: {table_name}, "
+#             f"type={type(e).__name__}, err={e}"
+#         )
+#         return pd.DataFrame()
+
+#     # ---------- 5. chunk fallback ----------
+#     dfs = []
+#     start = 0
+
+#     try:
+#         storer = store.get_storer(table_name)
+#         if not storer.is_table:
+#             log.error(f"{table_name} is not table format")
+#             return pd.DataFrame()
+#     except Exception as e:
+#         log.error(f"get_storer failed for {table_name}: {e}")
+#         return pd.DataFrame()
+
+#     while True:
+#         try:
+#             df_chunk = store.select(
+#                 table_name,
+#                 start=start,
+#                 stop=start + chunk_size
+#             )
+#             if df_chunk.empty:
+#                 break
+#             dfs.append(df_chunk)
+#             start += chunk_size
+
+#         except tables.exceptions.HDF5ExtError:
+#             log.warning(
+#                 f"Skipping corrupted chunk "
+#                 f"{start}-{start + chunk_size}"
+#             )
+#             start += chunk_size
+
+#         except Exception as e:
+#             log.error(
+#                 f"Fatal error reading chunk {start}: {e}"
+#             )
+#             break
+
+#     if not dfs:
+#         log.error(f"All chunks of {table_name} are unreadable")
+#         return pd.DataFrame()
+
+#     df = pd.concat(dfs)
+#     df = df[~df.index.duplicated(keep='first')]
+
+#     # ---------- 6. 是否重建 ----------
+#     # if not readonly:
+#     #     log.warning(f"Rebuilding table {table_name} from chunks")
+#     #     rebuild_table(
+#     #         store, table_name, df,
+#     #         MultiIndex=MultiIndex,
+#     #         complib=complib,
+#     #         complevel=complevel
+#     #     )
+
+#     return df
 
 def rebuild_table(store, table_name, new_df, *,
                   MultiIndex=False,

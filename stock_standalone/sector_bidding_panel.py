@@ -2417,6 +2417,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if file_path:
             if self.detector.load_from_snapshot(file_path):
                 self._is_history_mode = True
+                self.detector.in_history_mode = True
                 # 从文件名尝试提取日期 bidding_20260312.json.gz
                 match = re.search(r'bidding_(\d+)', os.path.basename(file_path))
                 self._history_date = match.group(1) if match else "Unknown"
@@ -2442,6 +2443,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_back_to_live_clicked(self):
         """切回实时模式"""
         self._is_history_mode = False
+        self.detector.in_history_mode = False
         self.btn_live.setVisible(False)
         self.btn_history.setStyleSheet("")
         self.btn_refresh.setEnabled(True)
