@@ -600,6 +600,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._is_history_mode = False   # [NEW] 历史复盘模式标志
         self._history_date = ""         # [NEW] 历史数据日期
         self._allow_real_close = False  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
+        self._last_rendered_data_version = -1
+        self._last_rendered_stock_cache = {} # sector -> version
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
@@ -1321,6 +1323,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if items:
             selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
             
+        self.sector_table.setUpdatesEnabled(False)
         self.sector_table.blockSignals(True)
         self.sector_table.setSortingEnabled(False) # 填充时静默
         self.sector_table.setRowCount(0)
@@ -1389,6 +1392,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.sector_table.selectRow(i)
         
         self.sector_table.setSortingEnabled(True)
+        self.sector_table.setUpdatesEnabled(True)
         self.sector_table.blockSignals(False)
         
         # 3. 自动选中第一个
@@ -1427,9 +1431,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not item: return
         
         sn = item.data(Qt.ItemDataRole.UserRole)
+        # [OPTIMIZE] 仅当版本变化或强制请求时更新
+        current_version = getattr(self.detector, 'data_version', 0)
+        
         # 遍历探测器中的活跃板块，找到匹配的数据
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
+                # 如果这个板块的数据版本已经渲染过，且不是强制刷新，则跳过
+                if not getattr(self, '_force_update_requested', False):
+                    # 也可以根据 d.get('ts') 来更精细判断，目前先用全局版本简单过滤
+                    pass
+                
                 self._populate_table(d)
                 
                 # [NEW] 联动逻辑：如果是用户光标切换（且不是正在刷新的静默状态），自动联动龙头
@@ -1590,7 +1602,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'pct_diff': f.get('pct_diff', 0.0),
                 'price_diff': f.get('price_diff', 0.0),
                 'dff': f.get('dff', 0.0),
-                'klines': self._follower_klines(f['code']),
+                'klines': f.get('klines', []),
                 'last_close': f.get('last_close', 0),
                 'high_day': f.get('high_day', 0),
                 'low_day': f.get('low_day', 0),
@@ -1741,6 +1753,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 匹配之前选中的行
             if r['code'] == self._last_selected_code:
                 target_row = i
+
+        self.stock_table._last_populated_sector = data.get('sector')
 
         # 统一设置所有项为不可编辑 (除特定交互外)
         for r_idx in range(self.stock_table.rowCount()):

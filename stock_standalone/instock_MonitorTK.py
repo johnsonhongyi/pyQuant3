@@ -1583,12 +1583,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # ✅ 每日自动保存 SectorBiddingPanel 历史数据
+        # [REFINED] 如果面板不存在，先初始化以加载最新信号，然后强行保存快照
+        if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
+            try:
+                from sector_bidding_panel import SectorBiddingPanel
+                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                logger.info("📡 [15:30 Task] Auto-initializing SectorBiddingPanel for EOD snapshot.")
+            except Exception as e:
+                logger.error(f"Failed to auto-init SectorBiddingPanel in task: {e}")
+
         if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
             try:
-                # 记录一下保存动作
                 if hasattr(self.sector_bidding_panel, 'detector'):
-                    self.sector_bidding_panel.detector.save_persistent_data()
-                    logger.info("✅ SectorBiddingPanel 每日历史数据自动保存完成")
+                    # 💡 使用 force=True 确保在收盘后也能保存，即使 get_trade_date_status 判断不匹配
+                    self.sector_bidding_panel.detector.save_persistent_data(force=True)
+                    logger.info("✅ SectorBiddingPanel 每日历史数据自动保存完成 (Force=True)")
             except Exception as e:
                 logger.error(f"❌ SectorBiddingPanel 自动保存失败: {e}")
 
@@ -3094,6 +3103,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # self.df_all = df  # 直接引用，减少 copy
                     self.df_all = df.copy(deep=False)
                 has_update = True
+                self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
                 if hasattr(self, 'selector') and self.selector:
                     self.selector.df_all_realtime = self.df_all
@@ -10817,34 +10827,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
-        def auto_refresh():
-            if not win.winfo_exists():
-                # 窗口已经关闭，取消定时器
-                if getattr(win, "_auto_refresh_id", None):
-                    win.after_cancel(win._auto_refresh_id)
-                    win._auto_refresh_id = None
-                return
-
-            if chk_auto.get():
-                # 仅工作时间刷新
-                if not cct.get_work_time():
-                    pass
-                else:
-                    try:
-                        concept_name = getattr(win, "_concept_name", None)
-                        if not concept_name:
-                            logger.info('win._concept_name  : None')
-                            return
-                        df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-                        self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
-                    except Exception as e:
-                        logger.info(f"[WARN] 自动刷新失败: {e}")
-
-            # 安全地重新注册下一次刷新
-            win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
-
-        # 启动循环
-        auto_refresh()
+        # --- [REMOVED] Individual timers removed to prevent freezing.
+        # Updates are now centralized in _apply_tree_data_sync -> update_all_top10_windows
 
         def _on_close():
             try:
@@ -11152,34 +11136,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
-        def auto_refresh():
-            if not win.winfo_exists():
-                # 窗口已经关闭，取消定时器
-                if getattr(win, "_auto_refresh_id", None):
-                    win.after_cancel(win._auto_refresh_id)
-                    win._auto_refresh_id = None
-                return
-
-            if chk_auto.get():
-                # 仅工作时间刷新
-                if not cct.get_work_time():
-                    pass
-                else:
-                    try:
-                        concept_name = getattr(win, "_concept_name", None)
-                        if not concept_name:
-                            logger.info('win._concept_name  : None')
-                            return
-                        df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-                        self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
-                    except Exception as e:
-                        logger.info(f"[WARN] 自动刷新失败: {e}")
-
-            # 安全地重新注册下一次刷新
-            win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
-
-        # 启动循环
-        auto_refresh()
+        # --- [REMOVED] Individual timers removed for performance.
+        # Updates are now centralized.
 
 
         def _on_close():
@@ -11254,17 +11212,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 1. 刷新独立窗口字典
         if hasattr(self, "_pg_top10_window_simple"):
             for k, v in list(self._pg_top10_window_simple.items()):
-                win = v.get("win")
-                if win and win.winfo_exists():
-                    concept_name = getattr(win, "_concept_name", None)
-                    if concept_name:
-                        self._fill_concept_top10_content(win, concept_name)
+                    win = v.get("win")
+                    # 检查是否开启了自动刷新
+                    if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
+                        concept_name = getattr(win, "_concept_name", None)
+                        if concept_name:
+                            self._fill_concept_top10_content(win, concept_name)
 
         # 2. 刷新复用窗口
-        if hasattr(self, "_concept_top10_win") and self._concept_top10_win and self._concept_top10_win.winfo_exists():
-            concept_name = getattr(self._concept_top10_win, "_concept_name", None)
-            if concept_name:
-                self._fill_concept_top10_content(self._concept_top10_win, concept_name)
+        if hasattr(self, "_concept_top10_win"):
+            win = self._concept_top10_win
+            # 检查是否开启了自动刷新
+            if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
+                concept_name = getattr(win, "_concept_name", None)
+                if concept_name:
+                    self._fill_concept_top10_content(win, concept_name)
         logger.debug(f'update_all_top10_windows_finish')
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
@@ -11277,17 +11239,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree = win._tree_top10
 
 
-        # ✅ [OPTIMIZE] 增加数据指纹校验，避免无意义的 UI 重绘
         # 如果 df_concept 为 None，则从 self.df_all 动态获取
         if df_concept is None:
-            # 优化：预先拆分名称，避免重复操作
+            # ✅ [OPTIMIZE] 缓存板块筛选索引，避免高频 str.contains 重复扫描
             pure_name = concept_name.split('(')[0]
-            df_concept = self.df_all[self.df_all['category'].str.contains(pure_name, na=False)]
+            if not hasattr(self, "_concept_index_cache"): self._concept_index_cache = {}
+            
+            # 使用 concept 名称 + df_all 的长度和第一个代码作为缓存键 (粗略判断数据源是否变化)
+            current_data_key = (len(self.df_all), self.df_all.index[0] if not self.df_all.empty else None)
+            cache_entry = self._concept_index_cache.get(pure_name)
+            
+            if cache_entry and cache_entry['key'] == current_data_key:
+                df_concept = self.df_all.loc[cache_entry['indices']]
+            else:
+                df_concept = self.df_all[self.df_all['category'].str.contains(pure_name, na=False)]
+                self._concept_index_cache[pure_name] = {
+                    'key': current_data_key,
+                    'indices': df_concept.index
+                }
             
         df_hash = hash(tuple(df_concept.index)) + hash(len(df_concept))
-        if getattr(win, "_last_fill_hash", None) == df_hash:
+        # 增加数据版本的检测，确保价格等数值变化也能触发更新
+        data_version = getattr(self, "_data_update_version", 0)
+        
+        if getattr(win, "_last_fill_hash", None) == df_hash and \
+           getattr(win, "_last_fill_version", -1) == data_version:
             return
+            
         win._last_fill_hash = df_hash
+        win._last_fill_version = data_version
         
         # 只有在哈希变化时才清空旧行并重绘
         tree.delete(*tree.get_children())

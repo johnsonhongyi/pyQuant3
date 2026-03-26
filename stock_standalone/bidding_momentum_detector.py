@@ -98,60 +98,63 @@ class TickSeries:
         self.dff: float = 0.0
         self.cycle_stage: int = 2
 
-    def update_meta(self, row: pd.Series):
-        """从 df_all 行更新元数据"""
-        # [FIX] 优先使用 pre_close (通常是静态的昨收)，其次是上次成交价
-        # 避免在竞价阶段 llstp 可能返回当前虚拟撮合价导致涨幅恒为 0 的问题。
-        val_pre = row.get('pre_close', row.get('llastp', row.get('lastp1d', row.get('llastp1d', row.get('llstp', 0.0)))))
-        self.last_close = float(val_pre) if not pd.isna(val_pre) and val_pre > 0 else 0.0
-        
-        # 记录 open_price
-        val_open = row.get('open', 0.0)
-        self.open_price = float(val_open) if not pd.isna(val_open) else 0.0
+    def update_meta(self, row: Any):
+        """
+        从 df_all 行更新元数据。
+        优化：输入可以是 dict, NamedTuple 或 pd.Series。避开昂贵的 pd.Series 构造。
+        """
+        # 手动适配 dict/Series 的 .get() 或 NamedTuple 的属性获取
+        def _val(key, default=0.0):
+            if isinstance(row, dict): return row.get(key, default)
+            return getattr(row, key, default)
 
-        val_lasth = row.get('lasth1d', self.last_close)
-        self.last_high = float(val_lasth) if not pd.isna(val_lasth) else 0.0
+        v_pre = _val('pre_close', _val('llastp', _val('lastp1d', _val('llastp1d', _val('llstp', 0.0)))))
+        self.last_close = float(v_pre) if v_pre and v_pre > 0 else 0.0
         
-        val_lastl = row.get('lastl1d', self.last_close)
-        self.last_low = float(val_lastl) if not pd.isna(val_lastl) else 0.0
+        v_open = _val('open', 0.0)
+        self.open_price = float(v_open) if v_open else 0.0
+
+        v_lasth = _val('lasth1d', self.last_close)
+        self.last_high = float(v_lasth) if v_lasth else 0.0
         
-        val_open = row.get('open', 0.0)
-        self.open_price = float(val_open) if not pd.isna(val_open) else 0.0
+        v_lastl = _val('lastl1d', self.last_close)
+        self.last_low = float(v_lastl) if v_lastl else 0.0
         
         # [FIX] 捕获实时价格
-        val_now = row.get('now', row.get('trade', row.get('price', row.get('nclose', self.now_price))))
-        self.now_price = float(val_now) if not pd.isna(val_now) else 0.0
+        v_now = _val('now', _val('trade', _val('price', _val('nclose', self.now_price))))
+        self.now_price = float(v_now) if v_now else 0.0
         
-        val_high = row.get('high', 0.0)
-        self.high_day = float(val_high) if not pd.isna(val_high) else 0.0
+        v_high = _val('high', 0.0)
+        self.high_day = float(v_high) if v_high else 0.0
         
-        val_low = row.get('low', 0.0)
-        self.low_day = float(val_low) if not pd.isna(val_low) else 0.0
+        v_list_low = _val('low', 0.0)
+        self.low_day = float(v_list_low) if v_list_low else 0.0
         
-        val_ma20 = row.get('ma20d', 0.0)
-        self.ma20 = float(val_ma20) if not pd.isna(val_ma20) else 0.0
+        v_ma20 = _val('ma20d', 0.0)
+        self.ma20 = float(v_ma20) if v_ma20 else 0.0
         
-        val_ma60 = row.get('ma60d', 0.0)
-        self.ma60 = float(val_ma60) if not pd.isna(val_ma60) else 0.0
-        self.category = str(row.get('category', ''))
-        self.name = str(row.get('name', self.code))
-        self.lastdu = float(row.get('lastdu', 0.0))
-        self.lastdu4 = float(row.get('lastdu4', 0.0))
-        # [FIX] 对可能为 NaN 的整数字段进行安全转换
-        ral_val = row.get('ral', 0)
-        self.ral = int(ral_val) if not pd.isna(ral_val) else 0
+        v_ma60 = _val('ma60d', 0.0)
+        self.ma60 = float(v_ma60) if v_ma60 else 0.0
         
-        self.dff = float(row.get('dff', 0.0)) if not pd.isna(row.get('dff')) else 0.0
+        self.category = str(_val('category', ''))
+        self.name = str(_val('name', self.code))
+        self.lastdu = float(_val('lastdu', 0.0))
+        self.lastdu4 = float(_val('lastdu4', 0.0))
         
-        top0_val = row.get('top0', 0)
-        self.top0 = int(top0_val) if not pd.isna(top0_val) else 0
+        r_val = _val('ral', 0)
+        self.ral = int(r_val) if r_val else 0
         
-        top15_val = row.get('top15', 0)
-        self.top15 = int(top15_val) if not pd.isna(top15_val) else 0
+        v_dff = _val('dff', 0.0)
+        self.dff = float(v_dff) if v_dff else 0.0
+        
+        v_top0 = _val('top0', 0)
+        self.top0 = int(v_top0) if v_top0 else 0
+        
+        v_top15 = _val('top15', 0)
+        self.top15 = int(v_top15) if v_top15 else 0
 
-        # [NEW] 从 DataRow 提取周期阶段
-        stage_val = row.get('cycle_stage', row.get('cycle_stage_vect', 2))
-        self.cycle_stage = int(stage_val) if not pd.isna(stage_val) else 2
+        v_stage = _val('cycle_stage', _val('cycle_stage_vect', 2))
+        self.cycle_stage = int(v_stage) if v_stage else 2
 
         self._splitted_cats = None # 重置缓存
 
@@ -254,6 +257,9 @@ class BiddingMomentumDetector:
         # 最终结果：sector → {leader, followers, score, ts, ...}
         self.active_sectors: Dict[str, Dict[str, Any]] = {}
 
+        # [NEW] 数据更新版本号 (用于 UI 判定是否需要重绘)
+        self.data_version = 0
+        
         # 上次板块 GC 时间戳
         self._last_gc_ts: float = 0.0
         # [NEW] 上次刷新时间戳 (用于控制刷新频率)
@@ -374,15 +380,15 @@ class BiddingMomentumDetector:
             code = str(getattr(row, 'code', '')).strip().zfill(6)
             if code == '000000' or not code: continue
             
+            row_data = row._asdict()
             with self._lock:
                 if code not in self._tick_series:
                     ts_obj = TickSeries(code)
-                    # 将 row 转为 dict 并丢弃可能干扰的 Index
-                    ts_obj.update_meta(pd.Series(row._asdict()))
+                    ts_obj.update_meta(row_data)
                     self._tick_series[code] = ts_obj
                     new_codes.append(code)
                 else:
-                    self._tick_series[code].update_meta(pd.Series(row._asdict()))
+                    self._tick_series[code].update_meta(row_data)
 
         # 对新 code 或 K线为空的 code：拉历史 K 线做冷启
         target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
@@ -450,16 +456,25 @@ class BiddingMomentumDetector:
     # ------------------------------------------------------------------ 持久化
     def _get_persistence_path(self, snapshot_date: str = None) -> str:
         # 使用 JohnsonUtil 中的 ramdisk 路径获取方法，统一管理
+        base = cct.get_base_path()
         if snapshot_date:
-            path = os.path.join(cct.get_base_path(), "snapshots")
+            path = os.path.join(base, "snapshots")
             if not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
-            return os.path.join(path, f"bidding_{snapshot_date}.json.gz")
+            full_path = os.path.abspath(os.path.join(path, f"bidding_{snapshot_date}.json.gz"))
+            return full_path
+            
         return cct.get_ramdisk_path("bidding_session_data.json.gz")
 
-    def save_persistent_data(self):
+    def save_persistent_data(self, force=False):
         """保存当前个股得分和板块强度到磁盘 (原子化强化版)"""
-        if self.in_history_mode or not cct.get_trade_date_status():
+        # [NEW] 增加 force 参数，用于每日 15:30 强行保存
+        if self.in_history_mode:
+            logger.debug("[Detector] Skip save in history mode.")
+            return
+            
+        if not force and not cct.get_trade_date_status():
+            logger.debug("[Detector] Skip save: Not a trade date.")
             return
 
         try:
@@ -539,7 +554,9 @@ class BiddingMomentumDetector:
                         logger.warning(f"Failed to copy snapshot: {e}")
                         atomic_gz_save(snapshot_path, data)
 
-            logger.info(f"💾 [Detector] Session data saved ({ss_count} stocks, {sd_count} sectors)")
+            logger.info(f"💾 [Detector] Session data saved to {main_path} ({ss_count} stocks, {sd_count} sectors)")
+            if snapshot_path != main_path:
+                logger.info(f"📸 [Detector] Snapshot saved to {snapshot_path}")
         except Exception as e:
             logger.error(f"❌ [Detector] Persistence save failed: {e}")
 
@@ -1491,6 +1508,7 @@ class BiddingMomentumDetector:
 
         with self._lock:
             self.active_sectors = new_active
+            self.data_version += 1
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
