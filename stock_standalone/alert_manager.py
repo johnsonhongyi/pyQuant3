@@ -345,7 +345,7 @@ class AlertManager:
         # 3️⃣ 如果正在播报，快速触发“软中断”
         # 关键点：不杀进程，让 worker 自然走到 runAndWait() 结束
         if key is None or current == str(key):
-            logger.info(f"Soft-interrupt speech (key={key}, current={current})")
+            logger.debug(f"Soft-interrupt speech (key={key}, current={current})")
 
             # 利用 cancel 机制 + 清空 current_key
             try:

@@ -626,6 +626,15 @@ class HotlistPanel(QWidget, WindowMixin):
         refresh_btn.clicked.connect(self._refresh_pnl)
         header_layout.addWidget(refresh_btn)
         
+        # [NEW] 联动自动显示切换按钮 (🔗)
+        self.linkage_btn = QPushButton("🔗")
+        self.linkage_btn.setToolTip("开启/关闭跟通达信等软件联动跳转 (深色=开启, 红色=停止)")
+        self.linkage_btn.setCheckable(True)
+        self.linkage_btn.setChecked(True) # 默认值，会被 sync_linkage_state 覆盖
+        self.linkage_btn.clicked.connect(self._on_toggle_linkage)
+        self._update_linkage_button_style()
+        header_layout.addWidget(self.linkage_btn)
+        
         # 关闭按钮
         close_btn = QPushButton("✕")
         close_btn.setToolTip("关闭 (Alt+H)")
@@ -736,6 +745,49 @@ class HotlistPanel(QWidget, WindowMixin):
             logger.info("▶ Voice resumed via HotlistPanel")
             
         self._update_voice_button_style()
+
+    def sync_linkage_state(self, enabled: bool):
+        """[NEW] 同步联动开关状态 (供主窗口调用)"""
+        if hasattr(self, 'linkage_btn'):
+            self.linkage_btn.blockSignals(True)
+            self.linkage_btn.setChecked(enabled)
+            self.linkage_btn.blockSignals(False)
+            self._update_linkage_button_style()
+
+    def _on_toggle_linkage(self, checked):
+        """[NEW] 联动开关点击响应"""
+        mw = self._find_main_window()
+        if mw and hasattr(mw, 'on_toggle_linkage'):
+            mw.on_toggle_linkage(checked)
+        self._update_linkage_button_style()
+
+    def _update_linkage_button_style(self):
+        """[NEW] 更新联动按钮样式"""
+        if not hasattr(self, 'linkage_btn'): return
+        checked = self.linkage_btn.isChecked()
+        if checked:
+            self.linkage_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #FFD700;
+                    border: 1px solid #444;
+                    border-radius: 3px;
+                    font-size: 10pt;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 215, 0, 30);
+                }
+            """)
+        else:
+            self.linkage_btn.setStyleSheet("""
+                QPushButton {
+                    background: #600;
+                    color: white;
+                    border: 1px solid #f00;
+                    border-radius: 3px;
+                    font-size: 10pt;
+                }
+            """)
 
     def _update_voice_button_style(self):
         """更新语音按钮样式"""

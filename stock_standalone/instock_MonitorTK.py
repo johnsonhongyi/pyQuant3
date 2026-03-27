@@ -38,9 +38,11 @@ from tkinter import ttk, messagebox, font as tkfont
 from tkinter import filedialog,Menu,simpledialog
 # import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
 try:
-    from PyQt6 import QtWidgets
+    from PyQt6 import QtWidgets, QtCore, QtGui
+    from PyQt6.QtCore import QTimer, pyqtSignal, QThread, QObject, QEventLoop, Qt
+    from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 except ImportError:
-    QtWidgets = None
+    QtWidgets = QtCore = QtGui = None
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
@@ -820,13 +822,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #             self._schedule_after(next_delay, self._process_dispatch_queue)
 
     def _process_dispatch_queue(self):
-        from PyQt6.QtCore import QEventLoop
-        next_delay = 50 
+        """[STABILITY] 主循环：定期清空 Tkinter 任务队列并驱动 PyQt 事件循环"""
+        # 🛡️ 极端退出守卫：防止 GIL 释放后的非法 re-entry
+        if getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set()):
+            return
+            
+        now = time.perf_counter()
+        next_delay = 100
         processed_count = 0 
         try:
-            # 1. 限时处理 Tk 任务，防止某个坏任务卡死主线程
-            import time
-            start_t = time.perf_counter()
+            # 1. 限时处理 Tk 任务
+            start_t = now
             
             while not self.tk_dispatch_queue.empty():
                 # 增加安全阀：单次循环处理任务不超过 10ms，防止任务堆积导致 UI 假死
@@ -877,25 +883,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Dispatch Queue Critical Error: {e}")
 
         finally:
-            # 2. 泵送 Qt 事件（带 5ms 严格超时控制，增加重入守卫防止 GIL 崩溃）
-            # ⭐ [STABILITY] 在 Windows 混合 GUI 环境下，processEvents 可能因用户交互（如拖动窗口）导致 GIL 状态错误。
+            # 2. 泵送 Qt 事件（带平滑防抖，防止高频泵气导致的 GIL 争用）
             try:
-                if QtWidgets and not getattr(self, '_is_pumping_events', False):
+                # 限制泵气频率（例如 50ms 一次），除非队列积压
+                last_pump = getattr(self, '_last_qt_pump_t', 0)
+                if QtWidgets and (now - last_pump > 0.05) and not getattr(self, '_is_pumping_events', False) and not getattr(self, '_is_closing', False):
                     qt_app = QtWidgets.QApplication.instance()
                     if qt_app:
-                        # 检查是否有可见的 Qt 窗口，若无则无需处理事件，减少冲突
-                        has_visible_qt = any(w.isVisible() for w in qt_app.topLevelWidgets() if not w.isWindow())
-                        if has_visible_qt:
+                        # 指标：如果有可见窗口或看板存在，则必须泵气
+                        has_active = len(qt_app.topLevelWidgets()) > 0
+                        if has_active:
                             self._is_pumping_events = True
+                            self._last_qt_pump_t = now
                             try:
-                                # ExcludeUserInputEvents: 排除鼠标按键等用户输入，只处理 UI 重绘和信号，避免拖拽过程中的碰撞
+                                # 只处理信号和必要的重绘事件，移除 timeout 避免 re-entry 崩溃
                                 flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-                                qt_app.processEvents(flags, 5)
+                                qt_app.processEvents(flags)
                             finally:
                                 self._is_pumping_events = False
             except Exception as e:
-                logger.debug(f"Qt Pump Error: {e}")
-                self._is_pumping_events = False
+                pass # 忽略泵气过程中的瞬时异常
 
             # 3. 检查关闭状态并调度
             is_closing = getattr(self, '_is_closing', False) or \
@@ -2166,7 +2173,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
             # ⭐ [CRITICAL] 物理强杀进程，跳过 Python 的 atexit 挂起和非 daemon 线程等待
             # 只有走到这一步，才说明所有保存工作（如 K 线快照）已安全落地
-            print("🛑 [Physical Exit] Bye.")
+            print("正在最终清理 PyQt 与后台线程资源...")
+            time.sleep(0.5) # 稍微加长缓冲，确保 QThread/ThreadPool 真正释放 GIL
+            
+            # 停止日志服务 (最后一步)
+            try:
+                from JohnsonUtil.LoggerFactory import stopLogger
+                print("程序运行结束，Bye.")
+                stopLogger() 
+            except Exception: 
+                pass
+
             os._exit(0)
             
         except Exception as e:
@@ -3140,200 +3157,84 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _apply_tree_data_sync(self, df, cur_res):
         """Sync step: update internal state and Tkinter UI on the main thread."""
-        with timed_ctx("apply_tree_data_sync_timed",warn_ms=2000):
+        with timed_ctx("apply_tree_data_sync_timed", warn_ms=1000):
             try:
+                # 1. [CORE] 更新主内存数据
                 with self._df_lock:
-                    # self.df_all = df  # 直接引用，减少 copy
-                    self.df_all = df.copy(deep=False)
+                    self.df_all = df
                 has_update = True
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
                 if hasattr(self, 'selector') and self.selector:
                     self.selector.df_all_realtime = self.df_all
                     self.selector.resample = cur_res
+
+                # 2. [CORE] 刷新主表格 (Treeview)
+                if getattr(self.search_var1, 'get', lambda: False)() or getattr(self.search_var2, 'get', lambda: False)():
+                    self.apply_search()
+                else:
+                    self.refresh_tree(self.df_all)
                 
-                # ✅ [SYNC] 同步更新到 Qt6 交易分析工具，使其具备实时指标数据
+                # 3. [SYNC] 第一时间同步分发数据给其它核心组件
+                # ⭐ 竞价/尾盘面板同步：只要面板存在，不论是否可见，都把数据灌进去
+                panel = getattr(self, "sector_bidding_panel", None)
+                if panel is not None:
+                    try:
+                        # 🛡️ 后台同步：必须使用 copy 防止 DataFrame 竞态
+                        panel.on_realtime_data_arrived(self.df_all.copy())
+                    except Exception as e:
+                        logger.error(f"Failed to sync for SectorBiddingPanel: {e}")
+
+                # 子窗口同步
+                self.update_all_top10_windows()
+                
+                # 交易 GUI 同步
                 if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:
                     self._trading_gui_qt6.df_all = self.df_all
-    
+                
+                # 4. [HOUSEKEEPING] 窗口恢复与后台任务初始化
                 if not hasattr(self, "_restore_done"):
                     self._restore_done = True
                     self._schedule_after(2000, self.restore_all_monitor_windows)
                     self._schedule_after(10000, self._check_ext_data_update)
                     self._schedule_after(30000, self.KLineMonitor_init)
                     self._schedule_after(60000, self.schedule_15_30_job)
-                    self._schedule_after(5000, self._start_feedback_listener) # 🛡️ [FIX] 启动监听器，仅在初次同步后执行一次
-    
-                if getattr(self.search_var1, 'get', lambda: False)() or getattr(self.search_var2, 'get', lambda: False)():
-                    self.apply_search()
-                else:
-                    self.refresh_tree(self.df_all)
-                logger.debug(f'_apply_tree_data_sync_update_all_top10_windows')
-                # [REMOVED] Redundant publish (Consolidated to Strategy processing endpoint)
-    
-                self.update_all_top10_windows()
-                
-                # 🛡️ [CRITICAL] 绝对禁止在此处同步调用看板 UI 函数，防止跨框架死锁
-                # 看板已经在内部通过自己的 QTimer 异步处理信号
-                
+                    self._schedule_after(5000, self._start_feedback_listener)
+
                 # 🧹 周期性手动 GC
                 if not hasattr(self, '_update_count'): self._update_count = 0
                 self._update_count += 1
                 if self._update_count % 50 == 0:
                     gc.collect()
                     
-                # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
-                if has_update and getattr(self, 'live_strategy', None) is not None:
+                # 5. [STRATEGY] 实时策略检查 (异步或延迟)
+                if getattr(self, 'live_strategy', None) is not None:
+                    # 避免在 9:15-9:20 刚开盘时段过度并发
                     if not (915 < cct.get_now_time_int() < 920):
-                        if getattr(self, '_live_strategy_first_run', False):
-                            # 第一次：延迟执行
+                        target_res = 'd'
+                        if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
+                            target_res = self.global_values.getkey("resample")
+                            
+                        # 第一次运行：延迟执行
+                        if getattr(self, '_live_strategy_first_run', True):
                             self._live_strategy_first_run = False
-                            target_res = 'd'
-                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
-                                target_res = self.global_values.getkey("resample")
                             self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
                         else:
-                            # 后续：立即执行
-                            target_res = 'd'
-                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
-                                target_res = self.global_values.getkey("resample")
-    
-                            # Call this asynchronously so it doesn't block the UI *again*
+                            # 后续：通过线程池异步执行，不阻塞 UI 刷新
                             if hasattr(self, 'executor'):
                                  self.executor.submit(self.live_strategy.process_data, self.df_all, getattr(self, 'concept_top5', None), target_res)
                             else:
                                  self.live_strategy.process_data(self.df_all, getattr(self, 'concept_top5', None), target_res)
     
-                # --- [NEW] 计算全盘统计概览 (上涨/下跌/指数/温度) ---
-                dashboard = getattr(self, '_signal_dashboard_win', None)
-                now = time.time()
-                # 触发同步的三个场景：1.盘中实时更新 2.看板首次打开 3.后台定期心跳补齐
-                if (has_update and dashboard) or \
-                   (dashboard and not getattr(self, '_dashboard_first_sync_done', False)) or \
-                   (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60):
-                    
-                    self._last_dashboard_sync_ts = now
-                    if dashboard: self._dashboard_first_sync_done = True
-                    
-                    # [OPTIMIZATION] 开启异步聚合，防止指数获取(网络IO)或大规模计算阻塞主 UI 线程
-                    def _async_stats_aggregation():
-                        try:
-                            from market_pulse_engine import DailyPulseEngine
-                            from JSONData import sina_data
-                            import numpy as np
-                            import traceback
-                            
-                            # 1. 基础数据准备 (在线程内安全快照)
-                            df = self.df_all.copy() if hasattr(self, 'df_all') else None
-                            if df is None or df.empty: return
-                            
-                            up_count = down_count = flat_count = vol_down = vol_up = 0
-                            vol_up_details = []
-                            ready_pct = 0
-                            breadth_data = {'up_ratio': 0.5}
-                            
-                            if 'trade' in df.columns and 'lastp1d' in df.columns:
-                                trade, lastp = df['trade'].values, df['lastp1d'].values
-                                diff = trade - lastp
-                                up_count = int((diff > 0).sum())
-                                down_count = int((diff < 0).sum())
-                                flat_count = int((diff == 0).sum())
-    
-                                if 'vol' in df.columns and 'lastv1d' in df.columns:
-                                    vol, lastv = df['vol'].values, df['lastv1d'].values
-                                    with np.errstate(divide='ignore', invalid='ignore'):
-                                        vr = np.where(lastv > 0, vol / lastv, 0.0)
-                                    vol_mask = (vr > 1.5) & (diff > 0)
-                                    vol_up = int(vol_mask.sum())
-                                    vol_down = int((vr < 0.8).sum())
-                                    if vol_mask.any():
-                                        sub_df = df[vol_mask].head(30)
-                                        for idx, row in sub_df.iterrows():
-                                            chg = row.get('ratio', 0)
-                                            if chg == 0 and 'trade' in row and 'lastp1d' in row and row['lastp1d'] != 0:
-                                                chg = (row['trade'] - row['lastp1d']) / row['lastp1d'] * 100
-                                            vol_up_details.append({
-                                                "code": str(idx), "name": str(row.get('name', '')),
-                                                "change": float(chg), "ratio": float(vr[df.index.get_loc(idx)])
-                                            })
-                                
-                                if 'score' in df.columns:
-                                    scanned_df = df[df['score'] > 0]
-                                    if not scanned_df.empty:
-                                        sample_count = len(scanned_df)
-                                        ready_pct = (scanned_df['score'] > 85).mean() * 100
-                                        if sample_count < 20: ready_pct = ready_pct * (sample_count / 20)
-                                
-                                breadth_data = {'up_ratio': up_count / (up_count + down_count + flat_count) if (up_count + down_count + flat_count) > 0 else 0.5}
-    
-                            # 2. 指数行情 (网络 IO，后台执行)
-                            indices_data = []
-                            idx_codes = ["000001", "399001", "399006", "000688"]
-                            try:
-                                idf = sina_data.Sina().get_stock_list_data(idx_codes, index=True)
-                                if idf is not None and not idf.empty:
-                                    nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "000688": "科创", "999312": "科创"}
-                                    for c, r in idf.iterrows():
-                                        p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
-                                        indices_data.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
-                                    self._cached_indices_data = indices_data
-                            except:
-                                indices_data = getattr(self, '_cached_indices_data', [])
-    
-                            # 3. 板块热度
-                            sector_heat = 0
-                            top5 = getattr(self, 'concept_top5', None)
-                            if top5 is not None:
-                                try:
-                                    if isinstance(top5, list):
-                                        pcts = [float(item[1]) for item in top5[:5] if len(item) > 1]
-                                    elif isinstance(top5, pd.DataFrame):
-                                        pcts = top5['percent'].head(5).tolist() if 'percent' in top5.columns else []
-                                    if pcts: sector_heat = sum(pcts) / len(pcts)
-                                except: pass
-    
-                            # 4. 专业温度计算
-                            temp, summary = DailyPulseEngine.calculate_professional_temperature(
-                                ready_pct=ready_pct, sector_heat=sector_heat, breadth=breadth_data, indices=indices_data
-                            )
-                            self._cached_market_temp = temp
-                            self._cached_market_summary = summary
-    
-                            ls_ratio = round(up_count / down_count, 2) if down_count > 0 else float(up_count) if up_count > 0 else 1.0
-                            
-                            # 5. 组装结果并通过队列推送回 UI
-                            final_stats = {
-                                "up": up_count, "down": down_count, "flat": flat_count,
-                                "ls_ratio": ls_ratio,
-                                "vol_down": vol_down, "vol_up": vol_up, "vol_details": vol_up_details,
-                                "temperature": temp, "summary": summary, "indices": indices_data, "breadth": breadth_data
-                            }
-                            
-                            # 推送看板 UI (PyQt)
-                            if dashboard:
-                                self.tk_dispatch_queue.put(lambda s=final_stats: self._signal_dashboard_win.update_market_stats(s))
-                            
-                            # 推送总线 (其它系统)
-                            try:
-                                from signal_bus import get_signal_bus, SignalBus
-                                get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", final_stats)
-                            except: pass
-                            
-                        except Exception as e:
-                            logger.error(f"Async stats aggregation failed: {e}\n{traceback.format_exc()}")
-                    
-                    # 提交给线程池执行，不阻塞主线程
-                    if hasattr(self, 'executor'):
-                        self.executor.submit(_async_stats_aggregation)
-                    else:
-                        threading.Thread(target=_async_stats_aggregation, daemon=True).start()
-    
+                # 6. [STATS] 计算全盘统计概览 (异步聚合)
+                self._aggregate_market_dashboard_stats(has_update)
+
                 # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
                 if has_update:
                     now_hm = cct.get_now_time_int()
                     is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
-    
-                    # 在竞价/尾盘时段自动弹出面板（仅初始化一次）
+
+                    # [AUTO-OPEN] 在竞价/尾盘时段自动弹出面板（仅初始化一次）
                     if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
                         def _auto_open_panel():
                             try:
@@ -3341,7 +3242,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
                                     self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
                                     self.sector_bidding_panel.show()
-                                    # 立即推送一次数据
+                                    # 初始弹出时推送一次，后续由主循环持续推送
                                     if hasattr(self, 'df_all') and not self.df_all.empty:
                                         self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
                                     logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
@@ -3353,17 +3254,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.tk_dispatch_queue.put(_auto_open_panel)
                         else:
                             self.after(0, _auto_open_panel)
-                    
-                    # 只要面板存在且可见，持续推送数据（register_codes 内部防重复订阅）
-                    panel = getattr(self, "sector_bidding_panel", None)
-                    if panel is not None:
-                        try:
-                            # 确保发送给竞价面板的是经过 `detect_signals` 完全检测完毕的数据
-                            # 我们已经将 `on_realtime_data_arrived` 改造为非阻塞的消息入列操作
-                            panel.on_realtime_data_arrived(self.df_all.copy())
-                        except Exception as e:
-                            logger.error(f"Failed to push data to Sector Bidding Panel: {e}")
-    
+
                 if has_update:
                     if getattr(self, '_last_resample', None) != self.global_values.getkey("resample"):
                         if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
@@ -3382,11 +3273,141 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f'queue update: {self.format_next_time()}')
                     # 打印性能统计摘要
                     # cct.print_timing_summary()
-    
+
             except Exception as e:
                 logger.error(f"Error applying tree data: {e}", exc_info=True)
             finally:
                 self._is_processing_tree_data = False
+
+    def _aggregate_market_dashboard_stats(self, has_update: bool):
+        """[EXTRA] 计算全盘统计概览 (上涨/下跌/指数/温度)，通过主线程分步执行或线程池"""
+        if getattr(self, '_is_closing', False):
+            return
+            
+        # 预先导入，避免线程内 import 触发 GIL 异常
+        try:
+            from market_pulse_engine import DailyPulseEngine
+            from JSONData import sina_data
+        except ImportError:
+            return
+
+        try:
+            dashboard = getattr(self, '_signal_dashboard_win', None)
+            now = time.time()
+            # Throttling: 实时同步每 60 秒一次，或看板首次打开时强制同步
+            if (dashboard and not getattr(self, '_dashboard_first_sync_done', False)) or \
+               (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60):
+                
+                self._last_dashboard_sync_ts = now
+                if dashboard: self._dashboard_first_sync_done = True
+                
+                def _async_stats_aggregation():
+                    try:
+                        from market_pulse_engine import DailyPulseEngine
+                        from JSONData import sina_data
+                        import numpy as np
+                        import traceback
+                        
+                        df = self.df_all.copy() if hasattr(self, 'df_all') else None
+                        if df is None or df.empty: return
+                        
+                        up_count = down_count = flat_count = vol_down = vol_up = 0
+                        vol_up_details = []
+                        ready_pct = 0
+                        breadth_data = {'up_ratio': 0.5}
+                        
+                        if 'trade' in df.columns and 'lastp1d' in df.columns:
+                            trade, lastp = df['trade'].values, df['lastp1d'].values
+                            diff = trade - lastp
+                            up_count = int((diff > 0).sum())
+                            down_count = int((diff < 0).sum())
+                            flat_count = int((diff == 0).sum())
+
+                            if 'vol' in df.columns and 'lastv1d' in df.columns:
+                                vol, lastv = df['vol'].values, df['lastv1d'].values
+                                with np.errstate(divide='ignore', invalid='ignore'):
+                                    vr = np.where(lastv > 0, vol / lastv, 0.0)
+                                vol_mask = (vr > 1.5) & (diff > 0)
+                                vol_up = int(vol_mask.sum())
+                                vol_down = int((vr < 0.8).sum())
+                                if vol_mask.any():
+                                    sub_df = df[vol_mask].head(30)
+                                    for idx, row in sub_df.iterrows():
+                                        chg = row.get('ratio', 0)
+                                        if chg == 0 and 'trade' in row and 'lastp1d' in row and row['lastp1d'] != 0:
+                                            chg = (row['trade'] - row['lastp1d']) / row['lastp1d'] * 100
+                                        vol_up_details.append({
+                                            "code": str(idx), "name": str(row.get('name', '')),
+                                            "change": float(chg), "ratio": float(vr[df.index.get_loc(idx)])
+                                        })
+                            
+                            if 'score' in df.columns:
+                                scanned_df = df[df['score'] > 0]
+                                if not scanned_df.empty:
+                                    sample_count = len(scanned_df)
+                                    ready_pct = (scanned_df['score'] > 85).mean() * 100
+                                    if sample_count < 20: ready_pct = ready_pct * (sample_count / 20)
+                            
+                            breadth_data = {'up_ratio': up_count / (up_count + down_count + flat_count) if (up_count + down_count + flat_count) > 0 else 0.5}
+
+                        # 2. 指数行情
+                        indices_data = []
+                        idx_codes = ["000001", "399001", "399006", "000688"]
+                        try:
+                            idf = sina_data.Sina().get_stock_list_data(idx_codes, index=True)
+                            if idf is not None and not idf.empty:
+                                nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "000688": "科创", "999312": "科创"}
+                                for c, r in idf.iterrows():
+                                    p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
+                                    indices_data.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
+                                self._cached_indices_data = indices_data
+                        except:
+                            indices_data = getattr(self, '_cached_indices_data', [])
+
+                        top5 = getattr(self, 'concept_top5', None)
+                        sector_heat = 0
+                        if top5 is not None:
+                            try:
+                                if isinstance(top5, list):
+                                    pcts = [float(item[1]) for item in top5[:5] if len(item) > 1]
+                                elif isinstance(top5, pd.DataFrame):
+                                    pcts = top5['percent'].head(5).tolist() if 'percent' in top5.columns else []
+                                if pcts: sector_heat = sum(pcts) / len(pcts)
+                            except: pass
+
+                        temp, summary = DailyPulseEngine.calculate_professional_temperature(
+                            ready_pct=ready_pct, sector_heat=sector_heat, breadth=breadth_data, indices=indices_data
+                        )
+                        self._cached_market_temp = temp
+                        self._cached_market_summary = summary
+
+                        ls_ratio = round(up_count / down_count, 2) if down_count > 0 else float(up_count) if up_count > 0 else 1.0
+                        
+                        final_stats = {
+                            "up": up_count, "down": down_count, "flat": flat_count, "ls_ratio": ls_ratio,
+                            "vol_down": vol_down, "vol_up": vol_up, "vol_details": vol_up_details,
+                            "temperature": temp, "summary": summary, "indices": indices_data, "breadth": breadth_data
+                        }
+                        
+                        if dashboard:
+                            self.tk_dispatch_queue.put(lambda s=final_stats: self._signal_dashboard_win.update_market_stats(s))
+                        
+                        try:
+                            from signal_bus import get_signal_bus, SignalBus
+                            get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", final_stats)
+                        except: pass
+                        
+                    except Exception as e:
+                        logger.error(f"Async stats aggregation failed: {e}")
+                
+                if hasattr(self, 'executor'):
+                    self.executor.submit(_async_stats_aggregation)
+                else:
+                    threading.Thread(target=_async_stats_aggregation, daemon=True).start()
+        except:
+            pass
+
+    
 
     def push_stock_info(self,stock_code, row):
         """

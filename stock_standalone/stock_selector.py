@@ -356,15 +356,17 @@ class StockSelector:
             code_str = str(row.get('code', idx)).zfill(6)
             data['code'] = code_str
 
+            # [REORDER] 预先提取核心指标，防止 UnboundLocalError
+            price = float(data.get('price', data.get('trade', data.get('close', 0))))
+            pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
+            ratio = float(data.get('ratio', 0)) # 核心量比
+            lastp1d = float(data.get('lastp1d', 0))
+
             # [USER-REQ] 计算量比：成交量 / 近6日均量 (last6vol)
             last6v = float(data.get('last6vol', 0))
             vol_raw = float(data.get('vol', data.get('volume', 0)))
             vol_ratio_l6 = vol_raw / last6v if last6v > 0 else 0.0
 
-            # 兼容字段：优先使用 per1d (今日涨幅)
-            price = float(data.get('price', data.get('trade', data.get('close', 0))))
-            pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
-            lastp1d = float(data.get('lastp1d', 0))
             if pct == 0 and lastp1d > 0:
                 pct = round((price - lastp1d) / lastp1d * 100, 2)
             data['percent'] = pct # 回填以供后续评估使用
@@ -372,44 +374,73 @@ class StockSelector:
             reason = []
             score = 0
             
-            # --- 预设默认值避免 UnboundError ---
-            ma5 = ma10 = ma20 = 0.0
-            # price, pct, amount 已在上方提取并存入变量及 data['percent']
-            ratio = float(data.get('ratio', 1.0))
-            is_pullback = False
-
             # A. 趋势判断
             try:
                 # price, pct, amount 已在上方提取
+                ma5 = float(data.get('ma5d', 0))
+                ma10 = float(data.get('ma10d', 0))
+                ma20 = float(data.get('ma20d', 0))
+                ma60 = float(data.get('ma60d', 0))
                 
-                # 1. 均线状态：三线顺排是强势基础
-                if ma5 > 0 and ma10 > 0 and ma20 > 0:
-                    if ma5 > ma10 > ma20:
-                        score += 15
+                # [NEW] 振幅与波动率 (上蹿下跳特征)
+                high_p = float(data.get('high', 0))
+                low_p = float(data.get('low', 0))
+                amplitude = (high_p - low_p) / lastp1d * 100 if lastp1d > 0 else 0
+                
+                # [NEW] 破位检测 (Broken Wave Detection)
+                is_broken = False
+                if ma20 > 0 and price < ma20 * 0.985: # 跌穿 20 日线 1.5% 以上
+                    is_broken = True
+                if ma60 > 0 and price < ma60 * 0.98: # 跌穿 60 日线 (生命线)
+                    is_broken = True
+                
+                # 对已破位且仍有跌势的个股进行严厉惩罚 (除非是极速反弹的情形)
+                if is_broken and pct < 2.0:
+                    score -= 100
+                    reason.append("趋势破位")
+                
+                # 1. 均线状态：三线顺排是强势基础 (主升浪核心)
+                if ma5 > 0 and ma10 > 0 and ma20 > 0 and ma60 > 0:
+                    if ma5 > ma10 > ma20 > ma60: # 完美多头排列
+                        score += 40 # 权重提升 from 15
+                        reason.append("主升浪结构")
+                    elif ma5 > ma10 > ma20:
+                        score += 20
                         reason.append("三线多排")
-                    elif ma5 > ma10:
-                        score += 5
-                        reason.append("均线多排")
-                else:
-                    if ma5 > ma10:
-                        score += 5
-                        reason.append("均线多排")
-
-                # 2. 突破历史高点判断
-                upper1d = float(data.get('upper1', 0))
                 
+                # 均线斜率 (上涨力度)
+                ma5_1d = float(data.get('ma51d', 0))
+                if ma5 > 0 and ma5_1d > 0 and ma5 > ma5_1d:
+                    score += 15
+                    reason.append("均线向上")
+
+                # 2. 突破高点判断
+                upper1d = float(data.get('upper1', 0))
+                last_h1d = float(data.get('last_h1d', data.get('lastp1d', 0))) # 兼容快照与历史数据
+                last_h2d = float(data.get('last_h2d', 0))
+                
+                is_breaking_high = False
                 if upper1d > 0 and price > upper1d:
-                    if vol_ratio_l6 > 1.5: # 适度放量突破
-                        score += 25
-                        reason.append("放量突破")
+                    is_breaking_high = True
+                    reason.append("突破上轨")
+                elif last_h1d > 0 and price > last_h1d * 1.01:
+                    is_breaking_high = True
+                    reason.append("突破昨日高点")
+                elif last_h2d > 0 and price > last_h2d:
+                    is_breaking_high = True
+                    reason.append("突破前两日高点")
+
+                if is_breaking_high:
+                    if vol_ratio_l6 > 1.8 or ratio > 1.8: # 强放量突破
+                        score += 50 # from 40
+                        reason.append("强势放量启动")
                     else:
-                        score += 10
-                        reason.append("尝试突破")
+                        score += 20 # from 15
+                        reason.append("尝试启动突破")
 
                 # 3. 动能：连涨逻辑
                 limit_days = getattr(cct, 'compute_lastdays', 5)
                 consecutive_rise = 0
-                lastp1d = float(data.get('lastp1d', 0))
                 if lastp1d > 0 and price > lastp1d:
                     consecutive_rise += 1
                     for d in range(1, limit_days):
@@ -421,19 +452,26 @@ class StockSelector:
                             break
                 
                 if consecutive_rise >= 3:
-                    score += consecutive_rise * 6 # 提升权重 from 5 to 6
+                    score += consecutive_rise * 8 # 提升权重
                     reason.append(f"{consecutive_rise}连阳")
                     if consecutive_rise >= 5:
-                        score += 15 # 大主升波 bonus
+                        score += 20 # 大主升波 bonus
                         reason.append("主升波段")
                 
-                # 4. 回调买点 (缩量企稳)
+                # 4. 波动率加分 (上蹿下跳 = 弹性好)
+                if amplitude > 8.0:
+                    score += 25
+                    reason.append("高弹性/暴量")
+                elif amplitude > 5.0:
+                    score += 15
+                    reason.append("活跃波动")
+                
+                # 5. 回调买点 (缩量企稳)
                 is_pullback = False
-                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.015: # 稍微放宽回调幅度
-                    ratio = float(data.get('ratio', 1.0))
+                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.02: # 稍微放宽回调幅度
                     if ratio < 1.1 and price >= ma5: # 缩量且守住 MA5
-                        score += 20
-                        reason.append("缩量企稳")
+                        score += 30 # from 20
+                        reason.append("强势缩量回踩")
                         is_pullback = True
                 
                 # 5. 资金强度 (成交额权重)
@@ -445,11 +483,9 @@ class StockSelector:
                     score += 10 # from 5 to 10
 
             except Exception as e:
-                self.logger.error(f"Error filtering {code}: {e}")
+                self.logger.error(f"Error filtering {code_str}: {e}")
 
-            # B. 今日涨跌与量能精细判断
-            pct = float(data.get('percent', 0))
-            ratio = float(data.get('ratio', 0))
+            # B. 今日涨跌与量能精细判断 (pct, ratio已在上面提取)
             
             # 优选 3% - 8% 的稳健涨幅，避免已涨停难以介入，也避免冲高回落
             if 3.0 <= pct <= 8.5:
@@ -604,9 +640,9 @@ class StockSelector:
                         score += 30 * decay
                         reason.append("低开反包(强)")
                     # 高开高走 (加速)
-                    elif opened > lastp1d * 1.005 and price > opened:
-                        score += 20 * decay
-                        reason.append("高开加速")
+                    elif opened > lastp1d * 1.01 and price > opened:
+                        score += 40 * decay
+                        reason.append("高开加速突破")
 
                 # [NEW] 反包新高结构
                 last_high1d = float(data.get('lasth1d', 0))
@@ -686,34 +722,49 @@ class StockSelector:
                 elif ma10 > 0 and ma10 > ma60 * 0.99 and price > ma60 * 0.98 and price < ma60 * 1.05:
                     is_ma60_support = True
 
+            # [NEW] 启动浪结构定义 (Launch Wave): 
+            # 1. 突破关键均线或近期高点 且 放量
+            # 2. 之前处于震荡或底部 (TQI 并不极高)
+            is_launch_confirm = any("突破" in r or "启动" in r for r in reason)
+            is_launch_wave = False
+            if is_launch_confirm and (ratio > 1.5 or vol_ratio_l6 > 1.5) and pct > 3.0:
+                 is_launch_wave = True
+            
             # 核心过滤器: 
             # 1. 顺势加速类: TQI 极高
             # 2. 抄底反转类: MA60 支撑且分值达 80 
-            # 3. 主升爆点类: 高分触发 (score >= 80) 或 横盘突破关键词直通 (豁免压力位)
-            # 修正: 如果是主升突破，即使 ma10 < ma60 也不拦截 (因为是突破中)
+            # 3. 主升爆点类: 高分触发 (score >= 80) 或 启动浪关键词直通
             if ((((tqi >= 60 and up_r >= 0.7 and stage in (2, 3)) or (up_r >= 0.8 and stage == 2)) or 
                  (score >= 80 and not is_ma60_resistance) or 
-                 (score >= 50 and is_expansion_breakout)) and (not is_ma60_resistance or is_expansion_breakout)):
+                 (score >= 50 and is_launch_confirm)) and (not is_ma60_resistance or is_launch_confirm)):
                 
-                # 分级调优: 满足形态分 130 或 TQI 极致则为 S
-                
-                # 分级调优: 满足形态分 130 或 TQI 极致则为 S
-                # 封顶逻辑: 过热或诱多风险下，等级封顶为 B
-                if score >= 130 or (tqi >= 80 and up_r >= 0.85):
+                # 分级调优
+                if is_broken:
+                    grade = "D"
+                    status_tag = "趋势破位"
+                elif score >= 140 or (tqi >= 80 and up_r >= 0.85):
                     grade = "S"
-                    status_tag = "极强启动" if is_ma60_support else "主升加速"
-                elif score >= 85 or (tqi >= 60 and up_r >= 0.7):
+                    if is_launch_wave and tqi < 50: # TQI 还不高说明是真正“刚启动”
+                         status_tag = "启动浪加速"
+                    else:
+                         status_tag = "主升加速" if not is_pullback else "强势回踩"
+                    
+                elif score >= 90 or (tqi >= 60 and up_r >= 0.7):
                     grade = "A"
-                    status_tag = "上升中继" if not is_ma60_support else "趋势回归(A)"
-                elif score >= 50 or tqi >= 45:
+                    status_tag = "启动浪" if is_launch_wave else ("上升中继" if not is_ma60_support else "趋势回归")
+                elif score >= 60 or tqi >= 45:
                     grade = "B"
-                    status_tag = "低位转强"
+                    status_tag = "蓄势待发"
                 else:
                     grade = "C"
                     status_tag = "震荡蓄势"
                 
-                score += 30 # S/A/B 通用奖分
-                reason.append(f"{grade}级:趋势确认")
+                if not is_broken:
+                    score += 30 # S/A/B 通用奖分 (趋势对齐)
+                    if is_launch_wave:
+                        score += 20 # 启动浪额外奖励
+                        reason.append("捕捉:启动浪结构")
+                    reason.append(f"{grade}级:趋势对齐")
             # 回踩支撑处理 (正向激励)
             elif is_ma60_support:
                 grade = "A" if (tqi >= 40 or up_r >= 0.6) else "B"

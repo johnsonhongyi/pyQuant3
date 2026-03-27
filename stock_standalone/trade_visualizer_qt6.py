@@ -1270,17 +1270,22 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
     force_fetch = False
     
     while stop_flag.value:
-        # 1. 检查是否有新任务（切换股票）
+        # 1. 检查是否有新任务（切换股票，不阻塞）
         try:
             new_code = task_queue.get_nowait()
             if new_code:
                 current_code = new_code
-                force_fetch = True # 切换股票后强制拉取一次
+                force_fetch = True
         except Empty:
             pass
 
         if not current_code:
-            time.sleep(1)
+            try:
+                # 只在空闲时阻塞等待第一个任务，提升响应速度并利于退出 (1s)
+                current_code = task_queue.get(timeout=1.0)
+                force_fetch = True
+            except Empty:
+                pass
             continue
 
         try:
@@ -1304,21 +1309,24 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
         except Exception as e:
             import traceback
             traceback.print_exc()
-            time.sleep(interval)  # 避免无限抛异常占用 CPU
+            # 异常发生时也检查 stop_flag
+            if stop_flag and stop_flag.value:
+                # 细化异常冷却等待，支持提前退出
+                err_backoff = time.time() + interval
+                while time.time() < err_backoff and stop_flag.value:
+                    time.sleep(0.5)
         if stop_flag.value:
-            # 使用配置的 interval 作为冷却时间
-            for _ in range(int(interval)):
-                if not stop_flag.value:
-                    break
-                # 冷却期间也要检查是否有切股任务
+            # 优化冷却机制：更频繁地检查停止标志和新任务，增强退出响应性 (KISS)
+            end_wait_time = time.time() + interval
+            while time.time() < end_wait_time and stop_flag.value:
                 try:
                     nc = task_queue.get_nowait()
                     if nc:
                         current_code = nc
-                        break # 立即切股，不等待冷却
+                        break # 立即切股
                 except Empty:
                     pass
-                time.sleep(1)
+                time.sleep(0.2) # 将原来的 1s sleep 细化为 0.2s，确保退出时能快速响应
 
     print("[IPC] realtime_worker_process exited cleanly")
 
@@ -2351,6 +2359,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tdx_enabled = True  # 保留兼容，同步到 tdx_var
         self.ths_enabled = True  # THS 开关状态
         self.show_td_sequential = True  # 神奇九转默认开启
+        self.tk_linkage_auto_display = True # [NEW] 联动自动显示开关 (用户需求：停止接收tk的联动不自动显示的功能)
         self.realtime = True  # 默认开启
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
@@ -3136,9 +3145,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.signal_log_panel.log_table.itemSelectionChanged.connect(self._on_signal_log_user_interaction)
 
         # [FIX] Force Apply Pending Voice State (Override any earlier reset)
-        if hasattr(self, 'hotlist_panel') and hasattr(self, '_pending_hotlist_voice_paused'):
-            self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
-            logger.info(f"StartUp: Final Voice State Enforced: {self._pending_hotlist_voice_paused}")
+        if hasattr(self, 'hotlist_panel'):
+            if hasattr(self, '_pending_hotlist_voice_paused'):
+                self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
+                logger.info(f"StartUp: Final Voice State Enforced: {self._pending_hotlist_voice_paused}")
+            # [NEW] Sync Linkage Toggle State
+            if hasattr(self, 'tk_linkage_auto_display'):
+                self.hotlist_panel.sync_linkage_state(self.tk_linkage_auto_display)
         
         # 3. 热点检测：不再使用独立定时器，由主数据刷新周期驱动
         #    在 IPC 数据包接收后或手动调用 _check_hotlist_patterns()
@@ -3727,19 +3740,28 @@ class MainWindow(QMainWindow, WindowMixin):
                     
             # 2. 普通股票代码: 6位数字
             elif len(content) == 6 and content.isdigit():
-                self.load_stock_by_code(content)
+                if getattr(self, 'tk_linkage_auto_display', True):
+                    self.load_stock_by_code(content)
+                else:
+                    logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {content}")
                 # self.activateWindow() # 收到代码时激活窗口 (联动时不抢焦点)
             
             # 2.5 带有参数管道符的格式: 600598|resample=d
             elif "|" in content and content.split('|')[0].strip().isdigit() and len(content.split('|')[0].strip()) == 6:
-                self.load_stock_by_code(content)
+                if getattr(self, 'tk_linkage_auto_display', True):
+                    self.load_stock_by_code(content)
+                else:
+                    logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {content}")
                 # self.activateWindow()
                 
             # 3. 带名称的股票代码: 000001,平安银行 (兼容旧格式)
             elif "," in content:
                 parts = content.split(",")
                 if len(parts) >= 1 and len(parts[0]) == 6:
-                    self.load_stock_by_code(parts[0])
+                    if getattr(self, 'tk_linkage_auto_display', True):
+                        self.load_stock_by_code(parts[0])
+                    else:
+                        logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {parts[0]}")
                     # self.activateWindow()
             
             else:
@@ -3923,10 +3945,10 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # self.toolbar.addSeparator()
 
-        # 系统级全局快捷键开关
+        # 系统级全局快捷键开关 (初始化状态)
         self.global_shortcuts_enabled = False  # 默认关闭（仅 App-wide）
         self.system_hotkeys_registered = False
-        
+
         if KEYBOARD_AVAILABLE:
             self.gs_action = QAction("GlobalKeys", self)
             self.gs_action.setCheckable(True)
@@ -3939,6 +3961,22 @@ class MainWindow(QMainWindow, WindowMixin):
             label = QLabel(" [系统快捷键不可用] ")
             label.setStyleSheet("color: gray; font-size: 10px;")
             self.toolbar.addWidget(label)
+
+        self.toolbar.addSeparator()
+
+        # [NEW] 信号日志 Action (移至工具栏，更便捷)
+        self.log_action = QAction("📋 日志", self)
+        self.log_action.setToolTip("显示/隐藏信号日志窗口 (Alt+L)")
+        self.log_action.triggered.connect(self._toggle_signal_log)
+        self.toolbar.addAction(self.log_action)
+
+        # [NEW] 联动自动显示 Action (集中放置在日志右边)
+        self.linkage_action = QAction("🔗 联动", self)
+        self.linkage_action.setCheckable(True)
+        self.linkage_action.setToolTip("开启/关闭跟通达信等软件联动跳转 (开启=显示, 停止=不跳)")
+        self.linkage_action.setChecked(self.tk_linkage_auto_display)
+        self.linkage_action.triggered.connect(self.on_toggle_linkage)
+        self.toolbar.addAction(self.linkage_action)
 
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
@@ -3972,6 +4010,25 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_strategy_simulation = checked
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def on_toggle_linkage(self, checked):
+        """切换联动不自动显示开关 (同步全系统状态)"""
+        self.tk_linkage_auto_display = checked
+        msg = "开启" if checked else "停止"
+        logger.info(f"🔄 Linkage auto-display {msg}")
+        
+        # 1. 同步工具栏按钮状态 (如果是由热点窗口触发)
+        if hasattr(self, 'linkage_action'):
+            self.linkage_action.blockSignals(True)
+            self.linkage_action.setChecked(checked)
+            self.linkage_action.blockSignals(False)
+            
+        # 2. 同步热点面板状态
+        if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+            self.hotlist_panel.sync_linkage_state(checked)
+            
+        # 3. 持久化存储
+        self._save_visualizer_config()
 
     def _on_rearrange_clicked(self):
         """Trigger global window tiling across all PyQuant windows."""
@@ -5239,14 +5296,16 @@ class MainWindow(QMainWindow, WindowMixin):
         QTimer.singleShot(3000, self._poll_realtime_queue)  # 双重保险，由于 network 可能有延迟
 
 
-    def _stop_realtime_process(self):
-            if self.realtime_process and self.realtime_process.is_alive():
-                self.rt_worker_stop_flag.value = False
-                self.realtime_process.join(timeout=0.5)
-                if self.realtime_process.is_alive():
-                    # Thread can't be terminated, just warn and let daemon handle it
-                    logger.debug("[RealtimeProcess] Thread still alive, will be collected by daemon")
-            self.realtime_process = None
+    def _stop_realtime_process(self, timeout=2.0):
+        """[STABILITY] 安全停止实时数据线程，确保 Join 成功，防止退出时 Access Violation"""
+        if self.realtime_process and self.realtime_process.is_alive():
+            logger.info("Stopping [RealtimeUpdateWorkerThread]...")
+            self.rt_worker_stop_flag.value = False
+            # 增加等待时间到 2s 以上，因为 worker 内部有 sleep(1) 或类似逻辑
+            self.realtime_process.join(timeout=timeout)
+            if self.realtime_process.is_alive():
+                logger.warning(f"realtime_process still alive after {timeout}s, will be collected by daemon")
+        self.realtime_process = None
 
     def _poll_realtime_queue(self):
         # 顺便清理不再运行的旧线程
@@ -11322,6 +11381,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 logger.info(f"StartUp: Loaded Voice Config. Paused={is_paused}")
 
+            # 3.9 联动自动显示状态 (恢复)
+            if 'tk_linkage_auto_display' in window_config:
+                self.tk_linkage_auto_display = bool(window_config.get('tk_linkage_auto_display', True))
+                logger.info(f"StartUp: Loaded Linkage Config. AutoDisplay={self.tk_linkage_auto_display}")
+
 
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
             
@@ -11418,6 +11482,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.8 热点语音播报状态
             if hasattr(self, 'hotlist_panel'):
                 window_config['hotlist_voice_paused'] = self.hotlist_panel._voice_paused
+            
+            # 3.10 联动自动显示状态
+            if hasattr(self, 'tk_linkage_auto_display'):
+                window_config['tk_linkage_auto_display'] = self.tk_linkage_auto_display
                 
             # --- 4. 列宽配置 ---
             col_widths = old_config.get('column_widths', {})
@@ -11767,26 +11835,15 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.info("Sent VIZ_EXIT to Monitor.")
         except Exception as e:
             logger.warning(f"Failed to send VIZ_EXIT to Monitor: {e}")
-        self._stop_realtime_process()
+        # 1.1️⃣ 停止实时数据处理线程 (集中管理)
+        self._stop_realtime_process(timeout=3.0) # 退出时给予更充分的等待时间
+        
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
 
-        # 2️⃣ 停止 realtime_process
-        # if getattr(self, 'realtime_process', None):
-        #     if self.realtime_process.is_alive():
-        #         self.realtime_process.join(timeout=3) # ⬅️ [FIX] 增加等待时间
-        #         if self.realtime_process.is_alive():
-        #             logger.info("realtime_process 强制终止")
-        #             self.realtime_process.terminate()
-        #             self.realtime_process.join(timeout=1)
-        #     self.realtime_process = None
-        if getattr(self, 'realtime_process', None):
-            if self.realtime_process.is_alive():
-                self.rt_worker_stop_flag.value = False
-                self.realtime_process.join(timeout=0.5)
-                if self.realtime_process.is_alive():
-                    logger.warning("realtime_process still alive, will be collected by daemon")
-            self.realtime_process = None
+        if hasattr(self, 'stop_flag'):
+            self.stop_flag.value = False
+        logger.info(f'[FinalClean] exit status stop_flag: {self.stop_flag.value}')
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
         # 先清理垃圾回收站中的线程
