@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
 import time
@@ -582,12 +583,22 @@ class SignalOverlay:
         self.kline_plot = kline_plot
         self.tick_plot = tick_plot
 
+        # [FIX] 针对极速切换导致的“信号对象覆盖残留”：主动搜寻并移除带有特征标记的旧散点
+        for item in list(kline_plot.items):
+             if isinstance(item, pg.ScatterPlotItem) and getattr(item, '_is_signal_overlay', False):
+                 kline_plot.removeItem(item)
+        for item in list(tick_plot.items):
+             if isinstance(item, pg.ScatterPlotItem) and getattr(item, '_is_signal_overlay', False):
+                tick_plot.removeItem(item)
+
         # K线信号散点 (pxMode=True 保证缩放时图标大小不变)
         self.kline_scatter = pg.ScatterPlotItem(pxMode=True, zValue=100)
+        self.kline_scatter._is_signal_overlay = True # 特征标记用于清理
         self.kline_plot.addItem(self.kline_scatter)
 
         # 分时图信号散点
         self.tick_scatter = pg.ScatterPlotItem(pxMode=True, zValue=101)
+        self.tick_scatter._is_signal_overlay = True # 特征标记用于清理
         self.tick_plot.addItem(self.tick_scatter)
 
         # 按图表分开管理文本，防止跨图表覆盖
@@ -3085,7 +3096,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # 注册非事件捕获型快捷键
         for key_seq, desc, handler in self.shortcut_map:
             if handler and key_seq != "Space": # Space in keyPressEvent
-                # 所有键统一注册为 QShortcut，并在 on_toggle_global_keys 中集中管理冲突
+                # ⭐ [FIX] 如果该按键已经作为 Menu Action (Alt+H/L/V) 注册过，则跳过 QShortcut
+                # 防止在 ApplicationShortcut 上下文中触发两次导致逻辑失效
+                if key_seq in ["Alt+H", "Alt+L", "Alt+V"]:
+                    logger.debug(f"[Shortcut] Skip redundant QShortcut for {key_seq}, handled by QAction")
+                    continue
+                    
                 sc = QShortcut(QKeySequence(key_seq), self)
                 # 所有组合键默认为 App-wide（应用程序级别）
                 # 即使子窗口（信号盒子、帮助窗口）激活时也能响应
@@ -3834,6 +3850,11 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         初始化分时图影子信号对象池，用于复用 TextItem 避免频繁 add/remove。
         """
+        # [FIX] 自清理旧池数据，防止残留
+        if hasattr(self, 'tick_signal_pool') and self.tick_signal_pool:
+            for t in self.tick_signal_pool:
+                try: self.kline_plot.removeItem(t)
+                except: pass
         self.tick_signal_pool = []
 
         # 字体缓存
@@ -3850,6 +3871,11 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         初始化自定义通达信指标（九转、买卖）的对象池。
         """
+        # [FIX] 彻底移除旧池对象，防止幽灵重影残留 (针对极速刷新导致的对象失联)
+        if hasattr(self, 'custom_indicator_pool') and self.custom_indicator_pool:
+            for t in self.custom_indicator_pool:
+                try: self.kline_plot.removeItem(t)
+                except: pass
         self.custom_indicator_pool = []
         
         # 字体预设
@@ -6570,39 +6596,46 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_hotspot_menu()
 
     def _init_hotspot_menu(self):
-        """初始化热点跟踪与信号日志菜单"""
+        """初始化热点跟踪与信号日志菜单 (优化版：集成了快捷键逻辑)"""
         if hasattr(self, '_hotspot_action'):
             return
 
         menubar = self.menuBar()
         # 1. 热点跟踪
         self._hotspot_action = QAction("🔥 热点跟踪(Alt+H)", self)
-        self._hotspot_action.setShortcut("") 
+        self._hotspot_action.setShortcut(QKeySequence("Alt+H")) 
         self._hotspot_action.triggered.connect(self._toggle_hotlist_panel)
+        # 即使窗口在前台，也允许全局生效 (Application-level)
+        self._hotspot_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         menubar.addAction(self._hotspot_action)
-
-        # 2. 信号日志 - 新增
+ 
+        # 2. 信号日志
         self._signal_log_action = QAction("📋 信号日志(Alt+L)", self)
-        self._signal_log_action.setShortcut("")
+        self._signal_log_action.setShortcut(QKeySequence("Alt+L"))
         self._signal_log_action.triggered.connect(self._toggle_signal_log)
+        self._signal_log_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         menubar.addAction(self._signal_log_action)
         
-        # 3. 语音播报 (移至 MenuBar)
-        # 补救措施：确保 Pending 状态被应用
-        if hasattr(self, '_pending_hotlist_voice_paused') and hasattr(self, 'hotlist_panel'):
-             self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
+        # 3. 语音播报
+        is_paused = getattr(self, '_voice_paused', False)
         
-        # 默认根据当前状态开启
-        is_paused = False
+        # 补齐已存在的面板状态
         if hasattr(self, 'hotlist_panel'):
-             is_paused = self.hotlist_panel._voice_paused
+             self.hotlist_panel._voice_paused = is_paused
+        
+        # ⚠️ [FIX] 如果启动时状态为关闭，需立即同步给语音线程
+        if is_paused and hasattr(self, 'voice_thread') and self.voice_thread:
+            self.voice_thread.pause()
+            logger.info("StartUp: Voice system initialized to PAUSED state.")
              
         text = "🔇 热点播报: 关(Alt+V)" if is_paused else "🔊 热点播报: 开(Alt+V)"
         self.voice_action = QAction(text, self)
-        self.voice_action.setShortcut("") 
+        self.voice_action.setShortcut(QKeySequence("Alt+V"))
+        self.voice_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
         self.voice_action.triggered.connect(self._toggle_hotlist_voice)
         menubar.addAction(self.voice_action)
+
 
     def _apply_widget_theme(self, widget: pg.GraphicsLayoutWidget):
         """应用主题到 GraphicsLayoutWidget"""
@@ -6712,31 +6745,47 @@ class MainWindow(QMainWindow, WindowMixin):
         """语音控制已集成到 MenuBar (_init_hotspot_menu)，此处保留空方法以兼容旧调用"""
         pass
 
-    def _toggle_hotlist_voice(self):
-        """切换主语音状态 (Stop/Mute) - 原有功能不变，停止播放并清空队列"""
+    def _toggle_hotlist_voice(self, checked=False):
+        """切换主语音状态 (Stop/Mute) - 直接通过核心变量切换并持久化"""
         if not hasattr(self, 'voice_thread'):
             return
 
-        # 获取当前静音状态 (这里假设我们用一个本地变量或者检查 voice_thread 状态)
-        # 为了保持 UI 同步，我们可以检查 voice_action 的文本
-        is_muted = "开" in self.voice_action.text() # 如果当前是"开"，说明点击后要关
+        # [REFACTORED] 核心状态翻转，不再基于 UI 文本猜测
+        new_is_paused = not getattr(self, '_voice_paused', False)
         
-        if is_muted:
-            # 🔇 关闭：停止当前并清空队列
-            self.voice_thread.abort()
-            # self.voice_action.setText("🔇 播报: 关")
-            self.voice_action.setText("🔇 热点播报: 关(Alt+V)")
-            logger.info("🔇 语音播报已关闭 (队列已清空)")
+        if new_is_paused:
+            # 🔇 关闭：暂停播报并立即中止当前
+            self.voice_thread.pause()
+            text = "🔇 热点播报: 关(Alt+V)"
+            logger.info("🔇 语音播报已关闭")
         else:
             # 🔊 开启
-            # self.voice_action.setText("🔊 播报: 开")
-            self.voice_action.setText("🔊 热点播报: 开(Alt+V)")
+            text = "🔊 热点播报: 开(Alt+V)"
             # 确保不处于暂停状态
             self.voice_thread.resume()
             logger.info("🔊 语音播报已开启")
             
-        # ⭐ [IPC] 反向同步给主进程
-        # self._send_voice_state_to_main_app(enabled=is_muted)
+        # 1. 立即更新 UI 文本
+        if hasattr(self, 'voice_action'):
+            self.voice_action.setText(text)
+
+        # 2. ⭐ 更新核心变量 (唯一真相源)
+        self._voice_paused = new_is_paused
+        
+        # 3. 同步到面板对象
+        if hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel._voice_paused = new_is_paused
+            # 如果面板也开着，强制让它更新一下按钮样式
+            if hasattr(self.hotlist_panel, '_update_voice_button_style'):
+                try:
+                    self.hotlist_panel._update_voice_button_style()
+                except: pass
+            
+        # 4. ⭐ 立即持久化 (关键)
+        self._save_visualizer_config()
+
+        # 5. [IPC] 反向同步给主进程
+        self._send_voice_state_to_main_app(enabled=(new_is_paused))
 
     def _send_voice_state_to_main_app(self, enabled=True):
         """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""
@@ -8147,17 +8196,12 @@ class MainWindow(QMainWindow, WindowMixin):
                         if hasattr(self, '_init_custom_tdx_indicators_pool'):
                             self._init_custom_tdx_indicators_pool()
 
-                        # 获取正确数据用于重新渲染
+                        # 获取正确数据
                         df_to_use = getattr(self, 'day_df', None) if df is None or isinstance(df, bool) else df
-                        if hasattr(self, 'current_code') and df_to_use is not None and not df_to_use.empty:
-                            self.render_charts(self.current_code, df_to_use, getattr(self, 'tick_df', pd.DataFrame()))
                     except Exception as e:
                         logger.error(f"Error during chart reset clear: {e}")
                     finally:
                         self._is_resetting_charts = False
-                    # [FIX] 无论 render_charts 内部是否触发了自动复位，此处必须允许放行
-                    # 因为通过点击按键触发的情况下（无新股切换、无周期切换等），render_charts 的第5步通常会被跳过
-                    # 放行后下方的 _reset_kline_view 原生逻辑会被执行，重新校准自适应视图
 
             # 1. 净化 df 参数
             # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
@@ -8241,6 +8285,13 @@ class MainWindow(QMainWindow, WindowMixin):
             
             logger.debug(f"[_reset_kline_view] sizes:{sizes} Reset: bars={total_bars}, visible={visible_bars}, xRange=({x_min:.0f}, {x_max:.0f}), width={chart_pixel_width}px")
             
+            # ========== 7. 触发补偿渲染 ==========
+            # 仅当手动点击重置按钮（df 为 bool）或 force 时触发重绘。
+            # 若是从 render_charts 内部调用的，由于那里不中断，不需要在此补偿，防止双重渲染。
+            if (isinstance(df, bool) or force) and hasattr(self, 'current_code'):
+                 if not getattr(self, '_is_painting', False):
+                     self.render_charts(self.current_code, df if isinstance(df, pd.DataFrame) else getattr(self, 'day_df', pd.DataFrame()), getattr(self, 'tick_df', pd.DataFrame()))
+
         except Exception as e:
             logger.warning(f"[_reset_kline_view] Failed: {e}")
             import traceback
@@ -9090,8 +9141,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 vb = self.kline_plot.getViewBox()
                 new_total = len(day_df)
 
-                # 判定：是否应该应用记忆状态
-                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change
+                # 判定：是否应该应用记忆状态 (切换股票或周期时通常强制重置)
+                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change and not is_new_stock
                 if should_apply_memory:
                     prev_width = self._prev_dist_left - self._prev_dist_right
                     if new_total < prev_width:
@@ -9099,11 +9150,14 @@ class MainWindow(QMainWindow, WindowMixin):
                         logger.debug(f"[VIEW] New data ({new_total}) cannot accommodate memorized width ({prev_width}), forcing reset.")
 
                 if not should_apply_memory:
-                    # ⭐ 重置视角 (内部会清理绘图区域并 re-init pool)
-                    self._reset_kline_view(df=day_df)
-                    # 由于 _reset_kline_view 内部已经触发了递归 render_charts，
-                    # 本次渲染应当直接返回，避免在同一帧内重复绘制引起闪烁
-                    # return 
+                    # ⭐ [FIX] 新股切换时强制执行物理重置，且不执行 return！
+                    # 保证后续绘图逻辑（均线、九转等）能完整跑完流程，且此时坐标系已由 _reset_kline_view 设置就位
+                    self._is_painting = True # 标记防止重置函数内再次触发递归
+                    try:
+                        self._reset_kline_view(df=day_df, force=True)
+                    finally:
+                        self._is_painting = False
+                    # 👈 注意：此处不再 return，流程继续走完
                 else:
                     # 处于“记忆”状态：以右侧为基准还原视口
                     is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
@@ -9143,23 +9197,34 @@ class MainWindow(QMainWindow, WindowMixin):
                 vb.setAutoVisible(y=True)
 
             # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
+            # [UPGRADE] 智能判定：仅当用户处于“观测最新行情”状态时，才在价格出圈时自动纠偏
             if not (is_new_stock or is_resample_change or has_captured_state):
                  if not day_df.empty:
                      last_c = day_df['close'].iloc[-1]
+                     total_bars = len(day_df)
                      vb = self.kline_plot.getViewBox()
-                     view_range = vb.viewRange()
+                     view_range = vb.viewRange() # [[x_min, x_max], [y_min, y_max]]
+                     
                      if len(view_range) > 1:
+                         x_min, x_max = view_range[0]
                          y_min, y_max = view_range[1]
                          height = y_max - y_min
-                         if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
-                             logger.info(f"[AutoRange] Price {last_c:.2f} out of view, forcing Y-AutoRange/Reset")
-                             vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-                             vb.setAutoVisible(y=True)
-                             if height > 0 and (last_c > y_max + height*2 or last_c < y_min - height*2):
-                                 logger.warning(f"[AutoRange] Extreme price gap, forcing full reset")
-                                 self._reset_kline_view(df=day_df)
-                             else:
-                                 vb.autoRange()
+                         
+                         # 判定是否正在看历史：如果视口右边距距离最新 K 线超过 15 根，判定为“查看历史”
+                         is_looking_history = x_max < (total_bars - 15)
+                         
+                         # 如果不是在看历史，且价格出圈了，才执行自适应
+                         if not is_looking_history:
+                             if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
+                                 logger.info(f"[AutoRange] Price {last_c:.2f} out of view, forcing Y-AutoRange/Reset")
+                                 vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                                 vb.setAutoVisible(y=True)
+                                 # 极端出圈（比如突然跳空翻倍）则彻底重置，小幅出圈则 autoRange 即可
+                                 if height > 0 and (last_c > y_max + height*2 or last_c < y_min - height*2):
+                                     logger.warning(f"[AutoRange] Extreme price gap, forcing full reset")
+                                     self._reset_kline_view(df=day_df)
+                                 else:
+                                     vb.autoRange()
 
         # --- 标题 (含监理看板) ---
         self._update_plot_title(code, day_df, tick_df)
@@ -11306,8 +11371,33 @@ class MainWindow(QMainWindow, WindowMixin):
             if 'custom_bg_chart' in window_config:
                 self.custom_bg_chart = window_config.get('custom_bg_chart')
             
-            # 初始应用一次主题样式
+            # --- [NEW] 在应用主题前，先从配置中加载关键状态 ---
+            # 3.7 热点语音播报状态 (提前恢复)
+            if 'hotlist_voice_paused' in window_config:
+                is_p = bool(window_config.get('hotlist_voice_paused', False))
+                self._pending_hotlist_voice_paused = is_p
+                # ⭐ [FIX] 立即同步给主变量，确保后续逻辑（如 _init_hotspot_menu）能拿到正确值
+                self._voice_paused = is_p
+                logger.info(f"StartUp: Pre-loaded Voice Config. Paused={is_p}")
+
+            # 3.9 联动自动显示状态 (提前恢复)
+            if 'tk_linkage_auto_display' in window_config:
+                self.tk_linkage_auto_display = bool(window_config.get('tk_linkage_auto_display', True))
+                logger.debug(f"StartUp: Pre-loaded Linkage Config. AutoDisplay={self.tk_linkage_auto_display}")
+
+            # 初始应用一次主题样式 (会调用 _init_hotspot_menu)
             self.apply_qt_theme()
+
+            # --- [NEW] 同步 UI Action 状态（菜单项刚被创建，需根据恢复的状态同步文字/选中态） ---
+            if hasattr(self, 'linkage_action'):
+                self.linkage_action.blockSignals(True)
+                self.linkage_action.setChecked(self.tk_linkage_auto_display)
+                self.linkage_action.blockSignals(False)
+            
+            if hasattr(self, 'voice_action'):
+                 is_p = getattr(self, '_pending_hotlist_voice_paused', False)
+                 text = "🔇 热点播报: 关(Alt+V)" if is_p else "🔊 热点播报: 开(Alt+V)"
+                 self.voice_action.setText(text)
             
             # --- 4. 列宽配置 ---
             self.saved_col_widths = config.get('column_widths', {})
@@ -11391,40 +11481,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.filter_action.setChecked(is_filter_visible)
                 self.filter_action.blockSignals(False)
 
-            # 3.7 热点语音播报状态 (恢复)
-            if 'hotlist_voice_paused' in window_config:
-                is_paused = bool(window_config.get('hotlist_voice_paused', False))
-                # 暂存状态
-                self._pending_hotlist_voice_paused = is_paused
-                
-                if hasattr(self, 'hotlist_panel'):
-                    self.hotlist_panel._voice_paused = is_paused
-                
-                # Update UI
-                if hasattr(self, 'voice_action'):
-                    if is_paused:
-                        self.voice_action.setText("🔇 热点播报: 关(Alt+V)")
-                    else:
-                        self.voice_action.setText("🔊 热点播报: 开(Alt+V)")
-                
-                logger.info(f"StartUp: Loaded Voice Config. Paused={is_paused}")
-
-            # 3.9 联动自动显示状态 (恢复)
-            if 'tk_linkage_auto_display' in window_config:
-                enabled = bool(window_config.get('tk_linkage_auto_display', True))
-                self.tk_linkage_auto_display = enabled
-                logger.info(f"StartUp: Loaded Linkage Config. AutoDisplay={enabled}")
-                
-                # ⭐ [FIX] 必须在这里同步 UI 按钮和面板状态，否则启动后界面与变量不一致
-                if hasattr(self, 'linkage_action'):
-                    self.linkage_action.blockSignals(True)
-                    self.linkage_action.setChecked(enabled)
-                    self.linkage_action.blockSignals(False)
-                
-                if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
-                    self.hotlist_panel.sync_linkage_state(enabled)
-
-
+            # [REDUNDANT REMOVED] 3.7 & 3.9 逻辑已上移至 apply_qt_theme 之前
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
             
         except Exception as e:
@@ -11518,8 +11575,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 window_config['show_td_sequential'] = self.show_td_sequential
             
             # 3.8 热点语音播报状态
-            if hasattr(self, 'hotlist_panel'):
-                window_config['hotlist_voice_paused'] = self.hotlist_panel._voice_paused
+            # 使用 MainWindow 自己的标志位作为第一优先级，它在整个生命周期最可靠
+            # [FIX] 如果面板存在，先按面板的状态更新一次保证最后的操作被捕捉
+            if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                self._voice_paused = self.hotlist_panel._voice_paused
+            
+            is_p = getattr(self, '_voice_paused', False)
+            window_config['hotlist_voice_paused'] = is_p
+            logger.info(f"[SaveConfig] Voice Paused: {is_p}")
             
             # 3.10 联动自动显示状态
             if hasattr(self, 'tk_linkage_auto_display'):
