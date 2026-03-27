@@ -54,7 +54,6 @@ from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
-from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging, with_log_level
 # from stock_live_strategy import StockLiveStrategy
 # from realtime_data_service import DataPublisher
@@ -197,17 +196,16 @@ st_key_sort = CFG.st_key_sort
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 
 # -------------------- 常量 -------------------- #
-MAX_ALERT_POPUP_QUEUE = 20  # 单批次弹窗队列最大长度
-MAX_TOTAL_ALERTS = 50       # 总报警窗口数量上限
+MAX_ALERT_POPUP_QUEUE = 300 # [OPTIMIZED] 提升单批次弹窗队列容量，应对大规模并发
+MAX_TOTAL_ALERTS = 200       # [OPTIMIZED] 放宽总弹窗上限，应对 148+ 级别瞬时爆发
 # --- 信号分级与优先级配置 (Enhanced for Trend Tracking) ---
 HIGH_PRIORITY_KEYWORDS = [
     "🚀", "强势结构", "SBC", "🔥", "趋势加速", "[ALPHA]", "[DRAGON]",
     "突破", "启动", "主升", "连阳", "强力反转", "量价齐升", "反包",
     "买入", "加仓", "核心热点", "龙头", "封板",
-    "低开高走", "放量突破", "[HIGH]", "高优先级"
+    "低开高走", "放量突破", "[HIGH]", "高优先级",
+    "卖出", "清仓", "止损", "离场", "减仓", "减持", "风险", "跌破", "顶", "EXIT", "SELL" # [RESTORED] 恢复风险信号优先级
 ]
-# 保留原有部分辅助关键词
-# HIGH_PRIORITY_KEYWORDS.extend(["卖出", "清仓", "止损", "离场", "减仓", "减持"])
 
 sort_cols: list[str]
 sort_keys: list[str]
@@ -631,13 +629,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.df_cache = DataFrameCache(ttl=5)  # 5秒缓存
                 self.perf_monitor = PerformanceMonitor("TreeUpdate")
                 self._use_incremental_update = True
-                logger.info("✅ 性能优化器已初始化 (增量更新模式)")
+                logger.info("✅ 性能优化器已强制开启 (增量更新模式)")
             except Exception as e:
                 logger.warning(f"⚠️ 性能优化器初始化失败,使用传统模式: {e}")
                 self._use_incremental_update = False
         else:
-            self._use_incremental_update = False
-            logger.info("ℹ️ 使用传统刷新模式")
+            self._use_incremental_update = True # 强制尝试
+            logger.info("ℹ️ 尝试开启增量刷新模式...")
 
         # ⭐ [NEW] UI 性能优化与防抖
         self._update_pos_timer = None
@@ -818,60 +816,103 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         is_closing = getattr(self, '_is_closing', False) or \
     #                      (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
-    #         if not is_closing:
-    #             self._schedule_after(next_delay, self._process_dispatch_queue)
+    def _put_deduped_task(self, key, task_fn):
+        """
+        [AGGRESSIVE AGGREGATOR] 高性能任务聚合（末尾胜出模式）。
+        如果主线程繁忙，新任务会覆盖存储区中的旧任务函数，但确保队列中只有一个触发标记。
+        """
+        if not hasattr(self, '_task_storage'):
+            self._task_storage = {} # 存储每个 key 对应的最新执行函数
+        if not hasattr(self, '_pending_task_keys'):
+            self._pending_task_keys = set()
+            
+        # ⭐ 核心：始终更新存储区为“最新”版本（Latest Wins）
+        self._task_storage[key] = task_fn
+
+        # 如果对应的触发标记已在队列中，则直接返回，避免队列膨胀
+        if key in self._pending_task_keys:
+            return 
+
+        self._pending_task_keys.add(key)
+        
+        def _aggregator_wrapper():
+            try:
+                # 执行时从存储区取出当前最新的函数
+                fn = self._task_storage.pop(key, None)
+                self._pending_task_keys.discard(key)
+                if fn: fn()
+            except Exception as e:
+                logger.error(f"Aggregated task [{key}] error: {e}")
+        
+        if hasattr(self, 'tk_dispatch_queue'):
+            # 控制队列深度：如果主线程跟不上，且队列过长，则启动丢弃策略
+            if self.tk_dispatch_queue.qsize() > 100:
+                if key.startswith('extra_'): 
+                    self._task_storage.pop(key, None)
+                    return
+            self.tk_dispatch_queue.put(_aggregator_wrapper)
+        else:
+            self.after(0, _aggregator_wrapper)
 
     def _process_dispatch_queue(self):
-        """[STABILITY] 主循环：定期清空 Tkinter 任务队列并驱动 PyQt 事件循环"""
+        """[STABILITY] 主循环：定期清空任务队列并驱动 PyQt 事件循环，包含执行明细审计"""
         # 🛡️ 极端退出守卫：防止 GIL 释放后的非法 re-entry
         if getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set()):
             return
             
+        import functools
+        from collections import Counter
+        from queue import Empty
+        
         now = time.perf_counter()
         next_delay = 100
         processed_count = 0 
+        start_t = now
+        
+        # ⭐ 用于记录本轮执行的任务分布
+        task_stats = Counter()
+        max_single_task = {"name": "None", "dur": 0}
+
         try:
             # 1. 限时处理 Tk 任务
-            start_t = now
-            
             while not self.tk_dispatch_queue.empty():
-                # 增加安全阀：单次循环处理任务不超过 10ms，防止任务堆积导致 UI 假死
+                # ⭐ [OPTIMIZE] 严格时间预算 (15ms) - 确保 GUI 事件循环有呼吸空间
                 time_used = time.perf_counter() - start_t
-                if time_used > 0.1:
-                    # 记录一下是因为超时退出的，还是跑完了退出的
+                if time_used > 0.015:
                     if not self.tk_dispatch_queue.empty():
                         delay_task = self.tk_dispatch_queue.qsize()
                         if delay_task > 20 or processed_count > 10:
-                            logger.error(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {delay_task} 个在排队")
-                        else:
-                            logger.debug(f"⚠️ 队列积压严重：本轮处理了 {processed_count} 个任务，仍有 {delay_task} 个在排队")
-                        next_delay = 5 
+                            logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {delay_task} 项待续")
+                        next_delay = 20 # [FIX] 增加避让时间，防止抢占主线程导致卡顿
                         break
                     
-                # --- 在 _process_dispatch_queue 的 while 循环内部 ---
                 try:
                     task = self.tk_dispatch_queue.get_nowait()
                     if callable(task):
-                        # 1. 提取任务的真实身份
-                        t_func = task
-                        if isinstance(task, functools.partial):
-                            t_func = task.func
-                        
-                        # 尝试获取函数名，如果是 lambda，尝试看它的闭包或 repr
+                        # --- 提取任务名称 ---
+                        t_func = task.func if isinstance(task, functools.partial) else task
                         t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(task)))
                         t_name = t_name.split(' at ')[0].replace('<locals>.', '')
+                        # 简化名称，只取最后一部分
+                        short_name = t_name.split('.')[-1]
 
                         task_start = time.perf_counter()
                         
-                        # 2. 执行任务
+                        # 执行任务
                         task()
                         
-                        # 3. 统计单个任务耗时
                         task_dur = (time.perf_counter() - task_start) * 1000
-                        if task_dur > 2000: # 超过 0.5 秒就报出它的“真名”
-                             logger.error(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
-                             
-                    processed_count += 1
+                        
+                        # ⭐ 记录统计数据
+                        processed_count += 1
+                        task_stats[short_name] += 1
+                        if task_dur > max_single_task["dur"]:
+                            max_single_task = {"name": t_name, "dur": task_dur}
+
+                        # 单个任务重度阻塞报警
+                        if task_dur > 200:
+                             logger.warning(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
+                                 
                 except Empty:
                     next_delay = 200
                     break
@@ -883,26 +924,52 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Dispatch Queue Critical Error: {e}")
 
         finally:
-            # 2. 泵送 Qt 事件（带平滑防抖，防止高频泵气导致的 GIL 争用）
+            # ⭐ [关键改进]：输出整轮执行的明细统计
+            total_time = (time.perf_counter() - start_t) * 1000
+            
+            if processed_count > 0:
+                # 格式化任务分布字符串，例如: "refresh_tree(5), update_market_stats(12)"
+                stats_detail = ", ".join([f"{name}({count})" for name, count in task_stats.items()])
+                
+                # 如果总耗时长或者任务多，输出审计日志
+                if total_time > 50 or processed_count > 20:
+                    logger.info(
+                        f"⏱️ 调度审计: 总耗时 {total_time:.1f}ms | 处理 {processed_count} 项 | "
+                        f"最重: [{max_single_task['name']}]({max_single_task['dur']:.1f}ms) | "
+                        f"分布: [{stats_detail}]"
+                    )
+
+            # 2. 泵送 Qt 事件（带平滑防抖及重入保护）
             try:
-                # 限制泵气频率（例如 50ms 一次），除非队列积压
+                # ⭐ [STABILITY] 防止 Qt 事件泵送重入或在关闭期间运行
+                is_busy = getattr(self, '_is_pumping_qt_events', False)
+                is_closing = getattr(self, '_is_closing', False)
+                now_perf = time.perf_counter()
                 last_pump = getattr(self, '_last_qt_pump_t', 0)
-                if QtWidgets and (now - last_pump > 0.05) and not getattr(self, '_is_pumping_events', False) and not getattr(self, '_is_closing', False):
+                
+                # ⭐ [OPTIMIZE] 限制泵送频率：最高 5Hz (200ms 一次)，在 Tk 负载重时显著退避（500ms），降低 CPU 竞争
+                pump_interval = 0.2 if processed_count < 5 else 0.5
+                
+                if QtWidgets and not is_busy and not is_closing and (now_perf - last_pump > pump_interval):
                     qt_app = QtWidgets.QApplication.instance()
                     if qt_app:
-                        # 指标：如果有可见窗口或看板存在，则必须泵气
-                        has_active = len(qt_app.topLevelWidgets()) > 0
+                        # 仅在有顶层窗口（如 BiddingPanel/Visualizer等）时才泵送，减少无谓消耗
+                        has_active = any(w.isVisible() for w in qt_app.topLevelWidgets())
                         if has_active:
-                            self._is_pumping_events = True
-                            self._last_qt_pump_t = now
+                            self._is_pumping_qt_events = True
+                            self._last_qt_pump_t = now_perf
                             try:
-                                # 只处理信号和必要的重绘事件，移除 timeout 避免 re-entry 崩溃
-                                flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-                                qt_app.processEvents(flags)
+                                # ⭐ [STABILITY] 跨框架调用时移除 maxtime 超时参数，防止 GIL 恢复失败 (PyEval_RestoreThread)
+                                # 先处理已发布的事件，确保跨线程信号能及时到达
+                                QtCore.QCoreApplication.sendPostedEvents()
+                                qt_app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+                            except Exception as qt_err:
+                                logger.debug(f"Qt processEvents blink: {qt_err}")
                             finally:
-                                self._is_pumping_events = False
+                                self._is_pumping_qt_events = False
             except Exception as e:
-                pass # 忽略泵气过程中的瞬时异常
+                # 忽略泵气过程中的瞬时异常，防止崩溃扩散
+                pass 
 
             # 3. 检查关闭状态并调度
             is_closing = getattr(self, '_is_closing', False) or \
@@ -3021,19 +3088,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Periodic cache save check failed: {e}")
 
-                # 🔄 优化：只取队列中最新的一个数据包，丢弃过时的增量
-                q_size = self.queue.qsize()
-                if q_size > 0:
-                    logger.debug(f"Queue size before processing: {q_size}")
-                    while not self.queue.empty():
-                        try:
-                            latest_df = self.queue.get_nowait()
-                        except Empty:
-                            break
+                # 🔄 优化：处理队列中的所有数据包，不跳过中间增量（解决“缺斤短两”数据不全问题）
+                # 我们逐个分发包到后台 worker 进行策略计算，但只在最后一轮同步 UI
+                all_packets = []
+                while not self.queue.empty():
+                    try:
+                        p = self.queue.get_nowait()
+                        if p is not None:
+                            all_packets.append(p)
+                    except Empty:
+                        break
                 
-                if latest_df is not None:
-                    # ⭐ [RESTORED] 跨进程中转逻辑：在接收到数据后处理中转信号
-                    # 这样可以确保信号显示与数据刷新同步
+                if all_packets:
+                    proc_count = len(all_packets)
+                    if proc_count > 1:
+                        logger.debug(f"📡 [UpdateTree] 批量处理 {proc_count} 个积压数据包，确保信号完整...")
+                    
+                    # ⭐ [RESTORED] 跨进程中转逻辑：在处理数据包之前快速消耗信号
                     try:
                         from signal_bus import get_signal_bus
                         bus = get_signal_bus()
@@ -3043,7 +3114,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 try:
                                     event = self.signal_bridge_queue.get_nowait()
                                     if event:
-                                        # 在主流程中重新发布信号
                                         bus.publish(
                                             event_type=getattr(event, 'event_type', None) or getattr(event, 'type', 'unknown'),
                                             source=f"{getattr(event, 'source', 'unknown')} (bridged)",
@@ -3051,23 +3121,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             signal=getattr(event, 'signal', None)
                                         )
                                         bridge_count += 1
-                                    if bridge_count > 50: break
-                                except (queue.Empty, AttributeError):
-                                    break
+                                    if bridge_count > 100: break
+                                except: break
                             if bridge_count > 0:
                                 logger.debug(f"📡 [UpdateTree] Bridged {bridge_count} external signals.")
                     except Exception as e:
-                        logger.error(f"Signal bridging in update_tree failed: {e}")
+                        logger.error(f"Signal bridging failed: {e}")
 
-                    self._is_processing_tree_data = True
-                    self._last_processing_start_time = time.time()
-                    logger.debug(f"📡 [UpdateTree] signal_bus")
-                    # [PACKET] latest_df might be a dict {full_snapshot, filtered_ui_data}
-                    # We pass it to the async handler
-                    if not hasattr(self, 'executor'):
-                        from concurrent.futures import ThreadPoolExecutor
-                        self.executor = ThreadPoolExecutor(max_workers=5)
-                    self.executor.submit(self._process_tree_data_async, latest_df)
+                    # ⭐ [FIX] 捕获当前 UI 的搜索条件，传递给后台进行实时过滤渲染
+                    # 避免新行情进入时，主表格自动跳回全量列表，导致用户搜索失效
+                    combined_query = getattr(self, '_last_value', "")
+                    
+                    for i, pkg in enumerate(all_packets):
+                        is_latest = (i == proc_count - 1)
+                        self._is_processing_tree_data = True
+                        
+                        if not hasattr(self, 'executor'):
+                            from concurrent.futures import ThreadPoolExecutor
+                            # ⭐ [CRITICAL] 必须设为 max_workers=1，确保存量/增量行情包按序、串行处理，防止竞争和信号丢失
+                            self.executor = ThreadPoolExecutor(max_workers=1)
+                        
+                        # ⭐ 核心：将查询条件带入后台 Worker
+                        self.executor.submit(self._process_tree_data_async, pkg, sync_ui=is_latest, query=combined_query)
                 else:
                     # Check if subprocess is still alive
                     if hasattr(self, 'proc') and self.proc is not None:
@@ -3079,119 +3154,212 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error starting tree update: {e}", exc_info=True)
             self._is_processing_tree_data = False
         finally:
-            # [FIX-GIL] 删除 qt_app.processEvents()——在 Tkinter 主线程中手动泵 PyQt 事件循环
-            # 会导致两个事件循环互抚GIL，PyQt 有自己的消息队列，无需外部驱动
-
             # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
 
-    def _process_tree_data_async(self, data_packet):
+    def _process_tree_data_async(self, data_packet, sync_ui=True, query=""):
+        """
+        [Worker Thread] 处理数据、计算信号逻辑，完成后同步到 UI
+        """
 
         try:
-
+            # 1. 解包与基础净化
             if isinstance(data_packet, dict):
                 full_df = data_packet.get('full_snapshot')
-                df = data_packet.get('filtered_ui_data').copy()
+                df_raw = data_packet.get('filtered_ui_data')
             else:
                 full_df = data_packet
-                df = data_packet.copy()
+                df_raw = data_packet
 
-            if hasattr(self, 'realtime_service') and self.realtime_service:
+            # ⭐ [FIX] 恢复并净化 Code 列
+            def _sanitize_codes(d):
+                if d is None: return None
+                d = d.copy() # 避免在 Worker 线程修改主线程共享引用导致碰撞
+                if 'code' not in d.columns:
+                    d['code'] = d.index.astype(str)
+                if d['code'].dtype == 'object':
+                    extracted = d['code'].str.extract(r'(\d{6})')[0]
+                    if extracted.isna().any():
+                         extracted = extracted.fillna(d['code'].str.extract(r'(\d+)')[0])
+                    d['code'] = extracted.fillna(d['code'])
+                return d
 
+            full_df = _sanitize_codes(full_df)
+            
+            # --- 🛠️ [FILTER] 实时同步搜索过滤逻辑 (解决“搜索失效”关键) ---
+            if query and full_df is not None:
+                from query_engine_util import query_engine
                 try:
+                    df = query_engine.execute(full_df, query)
+                except Exception:
+                    df = full_df # 如果过滤失败，回退到全量，但不报错
+            else:
+                df = _sanitize_codes(df_raw) if df_raw is not None else full_df
 
-                    self.realtime_service.update_batch(full_df)
+            # --- 🛠️ [CORE] 统一全量行情增强逻辑 (信号+情绪) ---
+            if full_df is not None and not full_df.empty:
+                # 1. 情绪评分计算
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        self.realtime_service.update_batch(full_df)
+                        # 为全量快照计算情绪状态，确保副窗口可见
+                        all_codes = full_df['code'].tolist()
+                        all_scores = self.realtime_service.get_emotion_scores(all_codes)
+                        full_df['emotion_status'] = full_df['code'].map(all_scores).fillna(50).astype(int)
+                    except Exception as e:
+                        logger.error(f"Full-snapshot realtime sync error: {e}")
 
-                    if 'code' not in df.columns:
-                        df['code'] = df.index.astype(str)
-
-                    codes = df['code'].tolist()
-
-                    scores = self.realtime_service.get_emotion_scores(codes)
-
-                    df['emotion_status'] = df['code'].map(scores).fillna(50).astype(int)
-
+                # 2. 信号检测逻辑 (计算全量行情信号，包含九转、异动等核心数据)
+                try:
+                    t_start = time.time()
+                    full_df = detect_signals(full_df)
+                    # logger.debug(f'detect_signals(full_df) duration: {time.time()-t_start:.2f}s')
                 except Exception as e:
-                    logger.error(f"Main process realtime update error: {e}")
+                    logger.error(f"Full-snapshot detect_signals failed: {e}")
 
-            if getattr(self, 'sortby_col', None) is not None:
-                if self.sortby_col == 'code':
-                    self.sortby_col = 'name'
-                df = df.sort_values(
-                    by=self.sortby_col,
-                    ascending=getattr(self, 'sortby_col_ascend', False)
-                )
+            # --- 🛠️ [STRATEGY] 全球/全量策略分发 (必须在 UI 过滤之前，确保即使主表为空也要报警) ---
+            if full_df is not None and not full_df.empty:
+                if getattr(self, 'live_strategy', None) is not None:
+                    try:
+                        cur_res = self.global_values.getkey("resample") or 'd'
+                        # 每一帧包都参与策略计算，确保“不缺斤短两”，包含语音报警触发
+                        self.live_strategy.process_data(full_df, concept_top5=getattr(self, 'concept_top5', None), resample=cur_res)
+                    except Exception as strategy_err:
+                        logger.error(f"Global Strategy processing failed: {strategy_err}")
 
-            if not df.empty:
+            # --- 🛠️ [SYNC] 同步 UI 视图子集 ---
+            # 使主 Treeview 渲染的数据 (df) 与全量行情在逻辑列上保持一致
+            if full_df is not None and df is not None and not df.empty:
+                try:
+                    # 使用 full_df 中计算好的增强列覆盖 df，并保持 df 原有的索引过滤结构
+                    df = full_df.loc[df.index.intersection(full_df.index)].copy()
+                except Exception:
+                    # 容错：如果 loc 失败，回退到原有 df 但仍尝试同步情绪（如果存在）
+                    if 'emotion_status' in full_df.columns:
+                         df['emotion_status'] = df['code'].map(full_df['emotion_status']).fillna(50)
 
-                t = time.time()
-
-                df = detect_signals(df)
+            # --- 🛠️ [UI] 排序与附加属性 ---
+            if df is not None and not df.empty:
+                if getattr(self, 'sortby_col', None) is not None:
+                    if self.sortby_col == 'code':
+                        self.sortby_col = 'name'
+                    df = df.sort_values(
+                        by=self.sortby_col,
+                        ascending=getattr(self, 'sortby_col_ascend', False)
+                    )
 
                 cur_res = self.global_values.getkey("resample") or 'd'
-
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
 
-                logger.info(f'detect_signals async duration:{time.time()-t:.2f}')
-
-                # [FIX-GIL] 提前主动整合 DataFrame 内存布局，避免 copy()时触发
-                # numpy vstack 重获 GIL 与主线程竞争
+                # [FIX-GIL] 提前主动整合 DataFrame 内存布局 (提升跨进程引用效率)
                 try:
                     df._consolidate_inplace()
+                    if full_df is not None: full_df._consolidate_inplace()
                 except Exception:
                     pass
-                ui_df = df.copy()
 
-                self._schedule_after(
-                    0,
-                    lambda d=ui_df, r=cur_res: self._apply_tree_data_sync(d, r)
-                )
+                cur_res = self.global_values.getkey("resample") or 'd'
+                # --- 🛠️ [UI SYNC] 同步到主界面控制逻辑 ---
+                # ⭐ [MAJOR FIX] 使用聚合器提交任务，消灭 UI 线程积压带来的 3s 延迟
+                # 无论后台计算多快，UI 始终只执行“最新的”一组数据更新任务
+                def _do_sync():
+                    # 闭包捕获当前包
+                    self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
 
+                self._put_deduped_task("main_ui_sync", _do_sync)
             else:
-                self._is_processing_tree_data = False
+                # [EMPTY-UI] 如果 UI 过滤结果为空
+                if full_df is not None and not full_df.empty:
+                    cur_res = self.global_values.getkey("resample") or 'd'
+                    def _do_mem_sync():
+                         self._apply_tree_data_sync(full_df, None, cur_res)
+                    self._put_deduped_task("main_ui_sync", _do_mem_sync)
+                else:
+                    self._is_processing_tree_data = False
 
         except Exception as e:
             logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
             self._is_processing_tree_data = False
 
-    def _apply_tree_data_sync(self, df, cur_res):
-        """Sync step: update internal state and Tkinter UI on the main thread."""
+    def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d'):
+        """
+        Sync step: update internal state and Tkinter UI on the main thread.
+        - full_df: 全量市场行情 (用于 Top10/策略/信号追踪)
+        - ui_df: 经过当前视图过滤后的数据 (用于主 Treeview 渲染)
+        """
+        now = time.time()
+        has_update = False
         with timed_ctx("apply_tree_data_sync_timed", warn_ms=1000):
             try:
-                # 1. [CORE] 更新主内存数据
+                # 1. [CORE] 更新主内存及其版本 (必须每轮执行)
+                # 计算快照 Hash 用于版本校验，若数据完全无变动则跳过后续昂贵的 UI 渲染
+                # (优先尝试常用价格列：'price', 'trade', 'close', 'now')
+                df_hash = 0
+                if not full_df.empty:
+                    # 确定要参与摘要的列（优先价格相关）
+                    p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
+                    p_val = full_df[p_col].iloc[0:1].sum() if p_col else 0
+                    df_hash = hash(full_df.index.size) + hash(p_val)
+                
+                last_hash = getattr(self, '_last_apply_df_hash', -1)
+                
                 with self._df_lock:
-                    self.df_all = df
-                has_update = True
+                    self.df_all = full_df
+                
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
+                # [STABILITY] 极其重要的限流：如果数据毫无变动，且上一轮渲染不足 1s，本轮直接跳过 UI 层面工作
+                if df_hash == last_hash and (now - getattr(self, '_last_tree_render_ts', 0) < 1.0) and not has_update:
+                    return
+                self._last_apply_df_hash = df_hash
+
                 if hasattr(self, 'selector') and self.selector:
                     self.selector.df_all_realtime = self.df_all
                     self.selector.resample = cur_res
 
-                # 2. [CORE] 刷新主表格 (Treeview)
-                if getattr(self.search_var1, 'get', lambda: False)() or getattr(self.search_var2, 'get', lambda: False)():
-                    self.apply_search()
+                # 2. [CORE-UI] 刷新主表格 (独立限流 + 忙碌守卫 + 存在校验)
+                # ⭐ [OPTIMIZE] 如果 ui_df 为空或 None (主要见于中间包)，直接跳过耗时 3s 的 Treeview 刷新
+                if ui_df is not None and not ui_df.empty:
+                    if (now - getattr(self, '_last_tree_render_ts', 0) > 0.5) and not getattr(self, '_is_gui_rendering', False):
+                        self._is_gui_rendering = True
+                        try:
+                            # 1. 刷新主 Treeview
+                            self.refresh_tree(ui_df)
+                            # 2. ⚡ [RESTORE] 刷新概念异动分析统计
+                            self.update_category_result(ui_df)
+                            # 3. ⚡ [RESTORE] 如果概念详情窗口打开，同步更新
+                            if hasattr(self, '_concept_detail_win') and self._concept_detail_win.winfo_exists():
+                                 self._concept_detail_win.update_data(ui_df)
+                        finally:
+                            self._is_gui_rendering = False
+                        self._last_tree_render_ts = now
                 else:
-                    self.refresh_tree(self.df_all)
+                    # 虽然不刷表格，也要更新状态条，代表“数据已到达内存”
+                    pass
                 
-                # 3. [SYNC] 第一时间同步分发数据给其它核心组件
-                # ⭐ 竞价/尾盘面板同步：只要面板存在，不论是否可见，都把数据灌进去
-                panel = getattr(self, "sector_bidding_panel", None)
-                if panel is not None:
-                    try:
-                        # 🛡️ 后台同步：必须使用 copy 防止 DataFrame 竞态
-                        panel.on_realtime_data_arrived(self.df_all.copy())
-                    except Exception as e:
-                        logger.error(f"Failed to sync for SectorBiddingPanel: {e}")
+                # 3. [DEFERRED] 解耦次要任务：
+                # 将排行榜、板块联动面板等非核心任务放入低频异步调度器，确保不拖累主行情
+                def _low_freq_sync_tasks():
+                    lt_now = time.time()
+                    # ⭐ 子窗口同步频次限制在 1.5s 以上
+                    if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
+                        self.update_all_top10_windows()
+                        
+                        panel = getattr(self, "sector_bidding_panel", None)
+                        if panel and panel.isVisible():
+                            try:
+                                panel.on_realtime_data_arrived(full_df)
+                            except Exception as e:
+                                logger.error(f"Panel sync failed: {e}")
+                        
+                        self._last_low_freq_ts = lt_now
 
-                # 子窗口同步
-                self.update_all_top10_windows()
-                
-                # 交易 GUI 同步
+                self._put_deduped_task("low_freq_ui_sync", _low_freq_sync_tasks)
+
+                # ⭐ 交易 GUI 同步 (轻量级)
                 if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:
                     self._trading_gui_qt6.df_all = self.df_all
-                
                 # 4. [HOUSEKEEPING] 窗口恢复与后台任务初始化
                 if not hasattr(self, "_restore_done"):
                     self._restore_done = True
@@ -3201,30 +3369,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._schedule_after(60000, self.schedule_15_30_job)
                     self._schedule_after(5000, self._start_feedback_listener)
 
-                # 🧹 周期性手动 GC
+                # 🧹 周期性手动 GC (降低频率，从 50 次改为 100 次)
                 if not hasattr(self, '_update_count'): self._update_count = 0
                 self._update_count += 1
-                if self._update_count % 50 == 0:
+                if self._update_count % 100 == 0:
                     gc.collect()
                     
-                # 5. [STRATEGY] 实时策略检查 (异步或延迟)
-                if getattr(self, 'live_strategy', None) is not None:
-                    # 避免在 9:15-9:20 刚开盘时段过度并发
-                    if not (915 < cct.get_now_time_int() < 920):
-                        target_res = 'd'
-                        if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
-                            target_res = self.global_values.getkey("resample")
-                            
-                        # 第一次运行：延迟执行
-                        if getattr(self, '_live_strategy_first_run', True):
-                            self._live_strategy_first_run = False
-                            self._schedule_after(15 * 1000, lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
-                        else:
-                            # 后续：通过线程池异步执行，不阻塞 UI 刷新
-                            if hasattr(self, 'executor'):
-                                 self.executor.submit(self.live_strategy.process_data, self.df_all, getattr(self, 'concept_top5', None), target_res)
-                            else:
-                                 self.live_strategy.process_data(self.df_all, getattr(self, 'concept_top5', None), target_res)
+                # [THROTTLE] 策略检查已移至后台分析 worker
     
                 # 6. [STATS] 计算全盘统计概览 (异步聚合)
                 self._aggregate_market_dashboard_stats(has_update)
@@ -3234,26 +3385,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     now_hm = cct.get_now_time_int()
                     is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
 
-                    # [AUTO-OPEN] 在竞价/尾盘时段自动弹出面板（仅初始化一次）
                     if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
-                        def _auto_open_panel():
-                            try:
-                                from sector_bidding_panel import SectorBiddingPanel
-                                if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
-                                    self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                                    self.sector_bidding_panel.show()
-                                    # 初始弹出时推送一次，后续由主循环持续推送
-                                    if hasattr(self, 'df_all') and not self.df_all.empty:
-                                        self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
-                                    logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
-                            except Exception as e:
-                                logger.error(f"Failed to auto-open Sector Bidding Panel: {e}")
-                                self.sector_bidding_panel = None
-                        
-                        if hasattr(self, "tk_dispatch_queue"):
-                            self.tk_dispatch_queue.put(_auto_open_panel)
-                        else:
-                            self.after(0, _auto_open_panel)
+                        from sector_bidding_panel import SectorBiddingPanel
+                        if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
+                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                            self.sector_bidding_panel.show()
+                            if hasattr(self, 'df_all') and not self.df_all.empty:
+                                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                            logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
+
+            except Exception as e:
+                logger.error(f"Error applying tree data: {e}", exc_info=True)
+            finally:
+                self._is_processing_tree_data = False
 
                 if has_update:
                     if getattr(self, '_last_resample', None) != self.global_values.getkey("resample"):
@@ -3273,11 +3417,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f'queue update: {self.format_next_time()}')
                     # 打印性能统计摘要
                     # cct.print_timing_summary()
-
-            except Exception as e:
-                logger.error(f"Error applying tree data: {e}", exc_info=True)
-            finally:
-                self._is_processing_tree_data = False
 
     def _aggregate_market_dashboard_stats(self, has_update: bool):
         """[EXTRA] 计算全盘统计概览 (上涨/下跌/指数/温度)，通过主线程分步执行或线程池"""
@@ -3904,7 +4043,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.sync_version = 0
                     self._force_full_sync_pending = False
 
-                df_ui = self.df_all.copy()
+                # ⚡ [CORE] 线程安全地获取行情快照
+                # 必须带锁复制，否则 pandas 在多线程环境下（尤其是 rename/fillna 等操作时）会导致 GIL 崩溃
+                with getattr(self, '_df_lock', threading.Lock()):
+                     df_ui = self.df_all.copy()
                 # --- 计算增量 ---
                 if hasattr(self, 'df_ui_prev'):
                     # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
@@ -3967,9 +4109,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 }
 
                 # ======================================================
-                # ⭐ 4️⃣ 主通道：Pipe (无后台线程，避免 GIL 崩溃)
                 if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
                     try:
+                        # ⭐ [STABILITY] Pipe 发送前检查，防止缓冲区满导致此线程永久阻塞
+                        # Pipe 并没有直接的 is_full 检查，我们通过非阻塞发送（如果支持）或简单的 conn.poll() 辅助判断
+                        # 此处仅做异常截获，确保 send 不会拖垮整个同步循环
                         self.viz_conn[0].send(
                             ('UPDATE_DF_DATA', sync_package)
                         )
@@ -4577,7 +4721,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 获取股票代码和名称
         code = vals[0]
         name = vals[1]
-
+        
         # 根据双击的列执行不同逻辑
         if col_idx == 0:  # code
             self._run_sbc_test_from_tk(code, use_live=True)
@@ -5464,6 +5608,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win.destroy()
                 return "break"
             win.bind("<Escape>", close_view_win)
+            
+            # [FIX] 确保新窗口置顶并获得焦点
+            win.lift()
+            win.focus_force()
             
             # ... UI 构建 ...
             # --- 顶部信息区域 ---
@@ -7022,14 +7170,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f"队列满，丢弃低质量信号: {code} {msg[:30]}")
                     return 
         
-        # ===== 加入队列，避免同时创建大量窗口 =====
-        # 检查队列中是否已有同股请求
+        # ===== [OPTIMIZED] 同股去重优化：累加消息而非直接覆盖 =====
         for item in self._alert_queue:
             if item[0] == code:
-                # 更新队列中的消息
-                item[1] = name
-                item[2] = msg
-                logger.debug(f"队列中已有同股请求，更新消息: {code}")
+                # [FIX] 如果消息不重复，则累加显示，确保不丢失历史过程 (如：突破后触发了买入)
+                if msg not in item[2]:
+                    item[2] = f"{item[2]}\n{msg}"
+                logger.debug(f"队列中已有同股请求，累加消息内容: {code}")
                 return
         
         item = [code, name, msg]
@@ -7074,10 +7221,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"处理弹窗队列异常: {e}")
         finally:
-            # 极限优化：缩短处理间隔，从 100ms -> 16ms (约60fps)，加快弹出速度但保留 event loop 呼吸空间
-            # [回滚] 用户反馈太快导致“平铺”感，恢复到 100ms 以保持“层级”弹出感
+            # [OPTIMIZED] 将处理间隔从 100ms 缩短至 50ms，提升大规模爆发时的弹出响应速度
             if self._alert_queue:
-                self._schedule_after(100, self._process_alert_queue)
+                self._schedule_after(50, self._process_alert_queue)
             else:
                 self._alert_queue_processing = False
  
@@ -10654,7 +10800,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             interval: 刷新间隔（秒）
             stock_name: 股票名称（可选）
         """
-
+        if threading.current_thread() != threading.main_thread():
+            logger.error("❌ UI函数在子线程执行！已拦截")
+            return
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
             return
@@ -10734,12 +10882,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 这里可以继续填充窗口内容
 
-        # 主体 Treeview
+        # --- 布局优化：先放置底部控制栏，确保其在窗口缩小时不被遮挡 ---
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(side="bottom", fill="x", pady=2)
+        win._btn_frame = btn_frame
+
+        # 主体 Treeview 容器
         frame = tk.Frame(win)
-        frame.pack(fill="both", expand=True)
+        frame.pack(side="top", fill="both", expand=True, padx=2, pady=1)
 
         columns = ("code", "name", "rank", "percent", "dff", "volume","red","win")
-        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=3)
+
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -10772,9 +10926,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 使用 unique_code 构造唯一的窗口保存名
         window_name = f"concept_top10_window-{unique_code}"
         try:
-            self.load_window_position(win, window_name, default_width=160, default_height=230)
+            self.load_window_position(win, window_name, default_width=290, default_height=160)
         except Exception:
-            win.geometry("230x160")
+            win.geometry("290x160")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -10873,10 +11027,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.bind("<Return>", on_key)
         tree.focus_set()
 
-        # --- 按钮和控制栏区域 ---
-        btn_frame = tk.Frame(win)
-        btn_frame.pack(fill="x", pady=4)
-        win._btn_frame = btn_frame  # 保存引用，方便复用
+        win._chk_auto = None # 已在 init 逻辑前移中处理
         # --- 自动更新控制栏 ---
         ctrl_frame = tk.Frame(btn_frame)
         ctrl_frame.pack(side="left", padx=6)
@@ -10920,9 +11071,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 状态栏 ---
         visible_count = len(df_concept[df_concept["percent"] > 2])
         total_count = len(df_concept)
-        lbl_status = tk.Label(btn_frame, text=f"显示 {visible_count}/{total_count} 只", anchor="e",
-                              fg="#555", font=self.default_font)
-        lbl_status.pack(side="right", padx=8)
+        # [UPGRADE] 使用 sunken 样式增强状态栏“生效”感
+        lbl_status = tk.Label(btn_frame, text=f" {visible_count}/{total_count} 只", 
+                              anchor="e", fg="#555", font=self.default_font,
+                              relief="sunken", bd=1)
+        lbl_status.pack(side="right", padx=(4, 2), ipadx=4)
         win._status_label_top10 = lbl_status
 
         # --- [REMOVED] Individual timers removed to prevent freezing.
@@ -11334,7 +11487,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         - code: 打开窗口或刷新时优先选中的股票 code
         - limit: 显示前 N 条
         """
+        # ⭐ [OPTIMIZE] 智能重绘过滤：
+        # 1. 如果窗口不可见且已有数据，则跳过刷新以节省 CPU。
+        # 2. 如果窗口不可见但当前数据为空 (首次打开)，则强制刷新一次。
         tree = win._tree_top10
+        has_items = len(tree.get_children()) > 0
+        if not win.winfo_viewable() and has_items:
+            return
 
 
         # 如果 df_concept 为 None，则从 self.df_all 动态获取

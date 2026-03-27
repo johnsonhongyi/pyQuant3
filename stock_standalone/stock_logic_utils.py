@@ -284,6 +284,11 @@ def check_code(
             helper.save_window_position(win, report_win_name)
         win.destroy()
     win.protocol("WM_DELETE_WINDOW", on_close_report)
+    
+    # [FIX] ESC 关闭报告
+    win.bind("<Escape>", lambda e: on_close_report())
+    win.lift()
+    win.focus_force()
     # 结果显示区域
     tk.Label(win, text="[ 检查结果摘要 ]", font=("微软雅黑", 10, "bold"), bg=bg_color).pack(anchor="w", padx=10, pady=5)
     st = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=15)
@@ -322,6 +327,11 @@ def check_code(
                 helper.save_window_position(details_win, detail_win_name)
             details_win.destroy()
         details_win.protocol("WM_DELETE_WINDOW", on_close_details)
+        
+        # [FIX] ESC 关闭详情
+        details_win.bind("<Escape>", lambda e: on_close_details())
+        details_win.lift()
+        details_win.focus_force()
         row_dict = df.loc[code].to_dict()
         # 提取查询中涉及的列以便高亮或优先显示
         used_cols = set()

@@ -606,21 +606,31 @@ class SignalOverlay:
         plot.addItem(t)
         return t
 
-    def clear(self):
-        """清理所有信号标记 (回收对象到池)"""
-        self.kline_scatter.clear()
-        self.tick_scatter.clear()
-        # 兼容处理未转换的情况
-        if isinstance(self.text_items, list):
+    def clear(self, target='all'):
+        """清理信号标记 (回收对象到池)
+        :param target: 'all', 'kline', 'tick'
+        """
+        if target in ('all', 'kline'):
+            self.kline_scatter.clear()
+            if not isinstance(self.text_items, list):
+                for item in self.text_items['kline']:
+                    item.hide()
+                    self._text_pool['kline'].append(item)
+                self.text_items['kline'].clear()
+
+        if target in ('all', 'tick'):
+            self.tick_scatter.clear()
+            if not isinstance(self.text_items, list):
+                for item in self.text_items['tick']:
+                    item.hide()
+                    self._text_pool['tick'].append(item)
+                self.text_items['tick'].clear()
+
+        # 兼容旧版 list 模式
+        if isinstance(self.text_items, list) and target == 'all':
             for item in self.text_items:
                 item.hide()
             self.text_items.clear()
-        else:
-            for t in ['kline', 'tick']:
-                for item in self.text_items[t]:
-                    item.hide()
-                    self._text_pool[t].append(item)
-                self.text_items[t].clear()
 
     # def update_signals_old(self, signals: list[SignalPoint], target='kline', y_visuals=None):
     #     """
@@ -3964,11 +3974,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.toolbar.addSeparator()
 
-        # [NEW] 信号日志 Action (移至工具栏，更便捷)
-        self.log_action = QAction("📋 日志", self)
-        self.log_action.setToolTip("显示/隐藏信号日志窗口 (Alt+L)")
-        self.log_action.triggered.connect(self._toggle_signal_log)
-        self.toolbar.addAction(self.log_action)
+        # # [NEW] 信号日志 Action (移至工具栏，更便捷)
+        # self.log_action = QAction("📋 日志", self)
+        # self.log_action.setToolTip("显示/隐藏信号日志窗口 (Alt+L)")
+        # self.log_action.triggered.connect(self._toggle_signal_log)
+        # self.toolbar.addAction(self.log_action)
 
         # [NEW] 联动自动显示 Action (集中放置在日志右边)
         self.linkage_action = QAction("🔗 联动", self)
@@ -4017,7 +4027,7 @@ class MainWindow(QMainWindow, WindowMixin):
         msg = "开启" if checked else "停止"
         logger.info(f"🔄 Linkage auto-display {msg}")
         
-        # 1. 同步工具栏按钮状态 (如果是由热点窗口触发)
+        # 1. 同步工具栏按钮状态
         if hasattr(self, 'linkage_action'):
             self.linkage_action.blockSignals(True)
             self.linkage_action.setChecked(checked)
@@ -5527,7 +5537,10 @@ class MainWindow(QMainWindow, WindowMixin):
                     code = payload.get('code')
                     res = payload.get('resample', 'd')
                     if code:
-                        self.load_stock_by_code(code, resample=res)
+                        if getattr(self, 'tk_linkage_auto_display', True):
+                            self.load_stock_by_code(code, resample=res)
+                        else:
+                            logger.debug(f"[IPC/Pipe] Linkage auto-display disabled, skipped: {code}")
                 
                 elif cmd_type == 'UPDATE_DF_DATA':
                     pkg = payload
@@ -7759,7 +7772,7 @@ class MainWindow(QMainWindow, WindowMixin):
                                     self.voice_thread.resume()
                                     logger.debug("[IPC] Voice thread RESUMED after large DIFF")
 
-                    QtCore.QTimer.singleShot(0, _safe_apply_diff)
+                    QtCore.QTimer.singleShot(50, _safe_apply_diff)
                 else:
                     logger.warning(f"[IPC] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
                     self._request_full_sync()
@@ -7792,7 +7805,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.voice_thread.pause_for_sync = False
                         self.voice_thread.resume()
                         logger.debug("[IPC] Voice thread RESUMED (UPDATE_DF_ALL)")
-            QtCore.QTimer.singleShot(10, _safe_process)
+            QtCore.QTimer.singleShot(50, _safe_process)
         elif msg_type == "UPDATE_DF_DIFF":
             # diff 更新通常较小，可以直接处理
             QtCore.QTimer.singleShot(0, lambda: self.apply_df_diff(df))
@@ -9050,6 +9063,104 @@ class MainWindow(QMainWindow, WindowMixin):
                     delattr(self, attr)
             return
 
+        # ----------------- 0. 数据同步与视角处理 (🛡️ 提前至渲染前，解决重置擦除问题) -----------------
+        # 核心修复：必须在绘制任何新图形前完成 Sync 和 Reset，否则 _reset_kline_view 会擦除已绘制的内容
+        is_resetting = getattr(self, '_is_resetting_charts', False)
+        is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
+        
+        # 同步归一化后的数据到 self.day_df
+        # [CRITICAL] 必须提前同步，让后续的指标计算基于最新的 self.day_df
+        self.day_df = day_df
+        self._last_rendered_code = code
+
+        # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
+        last_resample = getattr(self, "_last_resample", None)
+        is_resample_change = last_resample != self.resample
+        if is_resample_change:
+            self._last_resample = self.resample
+            logger.debug(f"[VIEW] Resample changed detected: {last_resample} -> {self.resample}")
+
+        # 辅助状态判定
+        has_captured_state = hasattr(self, '_prev_dist_left') and getattr(self, '_prev_y_zoom', None) is not None
+        was_full_view = getattr(self, '_prev_is_full_view', False)
+
+        # 只有在非递归渲染时才执行 Reset 逻辑
+        if not is_resetting:
+            if is_new_stock or is_resample_change or has_captured_state:
+                vb = self.kline_plot.getViewBox()
+                new_total = len(day_df)
+
+                # 判定：是否应该应用记忆状态
+                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change
+                if should_apply_memory:
+                    prev_width = self._prev_dist_left - self._prev_dist_right
+                    if new_total < prev_width:
+                        should_apply_memory = False
+                        logger.debug(f"[VIEW] New data ({new_total}) cannot accommodate memorized width ({prev_width}), forcing reset.")
+
+                if not should_apply_memory:
+                    # ⭐ 重置视角 (内部会清理绘图区域并 re-init pool)
+                    self._reset_kline_view(df=day_df)
+                    # 由于 _reset_kline_view 内部已经触发了递归 render_charts，
+                    # 本次渲染应当直接返回，避免在同一帧内重复绘制引起闪烁
+                    # return 
+                else:
+                    # 处于“记忆”状态：以右侧为基准还原视口
+                    is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
+                    
+                    if is_at_end:
+                         current_margin = 2 # 与 _reset_kline_view 保持一致
+                         target_right = new_total + current_margin
+                         prev_width = self._prev_dist_left - self._prev_dist_right
+                         target_left = target_right - prev_width
+                    else:
+                         target_left = max(-1, new_total - self._prev_dist_left)
+                         target_right = new_total - self._prev_dist_right
+
+                    # 设置 X 轴范围
+                    vb.setRange(xRange=(target_left, target_right), padding=0)
+
+                    # 适配 Y 轴
+                    visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
+                    if not visible_new.empty:
+                        new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
+                        if is_new_stock:
+                            y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
+                            vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
+                        else:
+                            new_rng = new_h - new_l if new_h > new_l else 1.0
+                            p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
+                            target_h = new_rng * p_zoom
+                            target_y_center = new_l + (new_rng * p_center_rel)
+                            vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
+
+                # 统一清理临时的捕获状态
+                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
+                    if hasattr(self, attr): delattr(self, attr)
+
+                # 保持自适应开启
+                vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                vb.setAutoVisible(y=True)
+
+            # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
+            if not (is_new_stock or is_resample_change or has_captured_state):
+                 if not day_df.empty:
+                     last_c = day_df['close'].iloc[-1]
+                     vb = self.kline_plot.getViewBox()
+                     view_range = vb.viewRange()
+                     if len(view_range) > 1:
+                         y_min, y_max = view_range[1]
+                         height = y_max - y_min
+                         if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
+                             logger.info(f"[AutoRange] Price {last_c:.2f} out of view, forcing Y-AutoRange/Reset")
+                             vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                             vb.setAutoVisible(y=True)
+                             if height > 0 and (last_c > y_max + height*2 or last_c < y_min - height*2):
+                                 logger.warning(f"[AutoRange] Extreme price gap, forcing full reset")
+                                 self._reset_kline_view(df=day_df)
+                             else:
+                                 vb.autoRange()
+
         # --- 标题 (含监理看板) ---
         self._update_plot_title(code, day_df, tick_df)
 
@@ -9236,6 +9347,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 1. 计算核心指标
                 df_custom = calc_tdx_indicators(day_df)
                 
+                if df_custom.empty:
+                    logger.warning(f"[INDICATOR] calc_tdx_indicators returned empty for {code}")
+                    return
+                
                 # 2. K 线染色 (VAR1:Red, VARD:Silver, 主力买:Yellow, 主力卖:Magenta)
                 custom_colors = []
                 is_red = df_custom['is_red_hold'].values
@@ -9266,11 +9381,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # 4. 绘制标签 (九转序列 1-9, 主力买卖文字)
                 # 使用专门的对象池 custom_indicator_pool
+                # ⚡ [SAFETY CHECK] 确保池中的项目确实在 Plot 的 Items 中，防止因其他地方的 .clear() 或重置导致的脱靶
                 pool = self.custom_indicator_pool
-                for t in pool: t.hide()
+                scene_items = set(self.kline_plot.items)
+                for t in pool:
+                    if t not in scene_items:
+                        self.kline_plot.addItem(t)
+                        # logger.debug(f"[FIX] Re-adding indicator item to plot scene")
+                    t.hide()
                 
                 pool_idx = 0
-                N_view = 120 # 只显示最近 120 根
+                N_view = 500 # ⚡ [FIX] 由 120 扩容至 500，确保全览模式下九转不消失
                 start_i = max(0, len(df_custom) - N_view)
                 
                 highs = day_df['high'].values
@@ -9399,7 +9520,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.vol_ma5_curve.setPen(pg.mkPen(vol_ma_color, width=1.5))
 
         # --- [升级] 信号标记渲染 ---
-        self.signal_overlay.clear()
+        # ⚡ [SAFETY CHECK] 确保 SignalOverlay 的 ScatterItem 确实在 Plot 的 Items 中
+        if hasattr(self, 'signal_overlay'):
+            s_items = set(self.kline_plot.items)
+            if self.signal_overlay.kline_scatter not in s_items:
+                self.kline_plot.addItem(self.signal_overlay.kline_scatter)
+            
+            t_items = set(self.tick_plot.items)
+            if self.signal_overlay.tick_scatter not in t_items:
+                self.tick_plot.addItem(self.signal_overlay.tick_scatter)
+                
+        self.signal_overlay.clear(target='kline')
         kline_signals = []
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
@@ -9420,7 +9551,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 # logger.debug(f"[PERF] Strategy Cache HIT for {code}")
             else:
                 with timed_ctx("_run_strategy_simulation_signal", warn_ms=150):
-                    sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=50)
+                    sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=0) # ⚡ [FIX] 由 50 改为 0，防止早盘信号消失
                     kline_signals.extend(sim_signals)
                     self._strategy_cache[code] = (strat_key, sim_signals)
 
@@ -9937,110 +10068,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         self._draw_signal_annotation(code, x_axis, day_df)
 
-        # ----------------- 5. 数据同步与视角处理 -----------------
-        # 同步归一化后的数据到 self.day_df
-        self.day_df = day_df
-
-        is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
-        self._last_rendered_code = code
-
-
-        # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
-        # 核心修复：立即同步周期状态，防止实时刷新误判为“切换周期”
-        last_resample = getattr(self, "_last_resample", None)
-        is_resample_change = last_resample != self.resample
-        if is_resample_change:
-            self._last_resample = self.resample
-            logger.debug(f"[VIEW] Resample changed detected: {last_resample} -> {self.resample}")
-
-        # 辅助状态判定
-        has_captured_state = hasattr(self, '_prev_dist_left') and getattr(self, '_prev_y_zoom', None) is not None
-        was_full_view = getattr(self, '_prev_is_full_view', False)
-
-        if is_new_stock or is_resample_change or has_captured_state:
-            vb = self.kline_plot.getViewBox()
-            new_total = len(day_df)
-
-            # 判定：是否应该应用记忆状态
-            # 1. 之前不是全显状态 2. 不是切换周期 3. 数据足够长（新股数据量必须能支撑记忆中的宽度）
-            should_apply_memory = has_captured_state and not was_full_view and not is_resample_change
-            if should_apply_memory:
-                prev_width = self._prev_dist_left - self._prev_dist_right
-                if new_total < prev_width:
-                    should_apply_memory = False
-                    logger.debug(f"[VIEW] New data ({new_total}) cannot accommodate memorized width ({prev_width}), forcing reset.")
-
-            if not should_apply_memory:
-                self._reset_kline_view(df=day_df)
-            else:
-                # 处于“记忆”状态：以右侧为基准还原视口
-                # ⭐ [FIX] 如果之前处于“最右侧”状态 (允许 1 根以内的细微偏差)，则强制锁定到最新的 margin
-                # 防止因浮点数误差累计导致的视口“慢跑”
-                is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
-                
-                if is_at_end:
-                     current_margin = 2 # 与 _reset_kline_view 保持一致
-                     target_right = new_total + current_margin
-                     # 保持之前的宽度 (zoom)
-                     prev_width = self._prev_dist_left - self._prev_dist_right
-                     target_left = target_right - prev_width
-                else:
-                     target_left = max(-1, new_total - self._prev_dist_left)
-                     target_right = new_total - self._prev_dist_right
-
-                # 设置 X 轴范围 (padding=0 确保绝对对齐)
-                vb.setRange(xRange=(target_left, target_right), padding=0)
-
-                # 适配 Y 轴
-                visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
-                if not visible_new.empty:
-                    new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
-                    
-                    if is_new_stock:
-                        y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
-                        vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
-                    else:
-                        new_rng = new_h - new_l if new_h > new_l else 1.0
-                        p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
-                        target_h = new_rng * p_zoom
-                        target_y_center = new_l + (new_rng * p_center_rel)
-                        vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
-
-            # 统一清理临时的捕获状态
-            for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
-                if hasattr(self, attr): delattr(self, attr)
-
-            # 保持自适应开启
-            vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-            vb.setAutoVisible(y=True)
-        # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
-        # 如果不是新股切换，检查当前价格是否在视野内。如果偏离过大（例如缓存数据与实时数据价差巨大），强制回正
-        if not (is_new_stock or is_resample_change or has_captured_state):
-             # 检查最后一条 K 线是否可见
-             if not day_df.empty:
-                 last_c = day_df['close'].iloc[-1]
-                 vb = self.kline_plot.getViewBox()
-                 y_min, y_max = vb.viewRange()[1]
-                 
-                 # 容差 20% (稍微宽松一点，避免频繁跳动)
-                 height = y_max - y_min
-                 
-                 # [FIX] 如果价格偏离当前视口过大，或者视口没有高度，强制进行自动范围调整
-                 # 特别是针对从 20 跳到 400 这种极端情况，常规的 enableAutoRange 可能不够及时或被其他设置抵消
-                 if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
-                     logger.info(f"[AutoRange] Price {last_c:.2f} out of view [{y_min:.2f}, {y_max:.2f}], forcing Y-AutoRange/Reset")
-                     
-                     # 1. 尝试最温和的自动范围开启
-                     vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-                     vb.setAutoVisible(y=True)
-                     
-                     # 2. 如果偏离实在太离谱 (超过 2 倍高度)，说明之前的缩放完全不适用了，直接调用 Reset 恢复默认视角
-                     if height > 0 and (last_c > y_max + height*2 or last_c < y_min - height*2):
-                         logger.warning(f"[AutoRange] Extreme price gap detected, forcing full reset for {code}")
-                         self._reset_kline_view(df=day_df)
-                     else:
-                         # 否则，尝试强制更新一次范围
-                         vb.autoRange()
+        # (已移动至函数起始部分)
 
         # ----------------- 6. 更新实时决策面板 (Phase 7) -----------------
         if is_realtime_active and 'shadow_decision' in locals() and shadow_decision:
@@ -11383,8 +11411,18 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 3.9 联动自动显示状态 (恢复)
             if 'tk_linkage_auto_display' in window_config:
-                self.tk_linkage_auto_display = bool(window_config.get('tk_linkage_auto_display', True))
-                logger.info(f"StartUp: Loaded Linkage Config. AutoDisplay={self.tk_linkage_auto_display}")
+                enabled = bool(window_config.get('tk_linkage_auto_display', True))
+                self.tk_linkage_auto_display = enabled
+                logger.info(f"StartUp: Loaded Linkage Config. AutoDisplay={enabled}")
+                
+                # ⭐ [FIX] 必须在这里同步 UI 按钮和面板状态，否则启动后界面与变量不一致
+                if hasattr(self, 'linkage_action'):
+                    self.linkage_action.blockSignals(True)
+                    self.linkage_action.setChecked(enabled)
+                    self.linkage_action.blockSignals(False)
+                
+                if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                    self.hotlist_panel.sync_linkage_state(enabled)
 
 
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")

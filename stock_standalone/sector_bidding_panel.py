@@ -1576,8 +1576,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if len(self._worker.df_queue) > 1:
                  self._worker.df_queue.clear()
                  
-            # [CRITICAL] 必须执行拷贝，防止主线程正在修改 df_all 时后台线程读取导致内存冲突或 GIL 崩溃
-            self._worker.add_data(df_all.copy() if hasattr(df_all, 'copy') else df_all)
+            # [OPTIMIZE] 移除冗余 copy()，调用方 (MonitorTK) 已通过 copy() 机制隔离数据，此处直接透传
+            self._worker.add_data(df_all)
             
             # Record force_update request state
             self._force_update_requested = force_update

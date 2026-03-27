@@ -34,7 +34,12 @@ def calc_tdx_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or 'close' not in df.columns:
         return df
 
+    # ⚡ [STABILITY] 增强容错：处理实时更新中可能出现的 NaN
     res = df.copy()
+    for col in ['open', 'high', 'low', 'close']:
+        if col in res.columns:
+            res[col] = res[col].ffill().fillna(0)
+
     c = res['close'].values
     h = res['high'].values
     l = res['low'].values

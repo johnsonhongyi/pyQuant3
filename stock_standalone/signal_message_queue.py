@@ -49,7 +49,7 @@ class SignalMessageQueue:
     _instance = None
     _lock = Lock()
     
-    MAX_SIZE = 60
+    MAX_SIZE = 120 # [OPTIMIZED] 提升缓存容量，防止高频行情下信号在 UI 列表中被过快挤掉
     FOLLOW_LIMIT = 5
 
     def __new__(cls):

@@ -84,6 +84,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
         self.load_data()
 
+        # [FIX] ESC 关闭窗口
+        self.bind("<Escape>", lambda e: self._on_close(window_id))
+        self.lift()
+        self.focus_force()
+
         # 绑定关闭事件以保存位置
         self.protocol("WM_DELETE_WINDOW", lambda: self._on_close(window_id))
 

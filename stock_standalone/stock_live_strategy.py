@@ -1139,6 +1139,14 @@ class StockLiveStrategy:
         if not self.enabled or df_all is None or df_all.empty:
             return
             
+        # ----------------- Throttling -----------------
+        # 限制频率: 至少间隔 2s 处理一次，避免 UI 线程密集调用并在后台线程积压任务
+        import time
+        now = time.time()
+        if now - getattr(self, '_last_process_time', 0.0) < 2.0:
+            return
+        self._last_process_time = now
+
         # 🛡️ [FIX] 优先从 master 获取锁
         if self._df_lock is None and self.master:
             self._df_lock = getattr(self.master, '_df_lock', None)
@@ -1151,7 +1159,9 @@ class StockLiveStrategy:
         is_trading_active = (915 <= now_int <= 1505)
 
         # 🛡️ [FIX] 内部逻辑应在本地拷贝上运行，避免直接操作共享 df_all 导致 BlockManager 损坏
+        # [OPTIMIZE] Only copy once and use this for all background checks
         df_internal = df_all.copy()
+        self.df = df_internal # Alias for back-filling
 
         # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
         if is_trading_active and (925 <= now_int <= 1505):
@@ -1186,12 +1196,11 @@ class StockLiveStrategy:
         # self._check_risk_control(df_internal)
         
         # [Phase 2] 入场监控：已整合至 _check_strategies -> _process_follow_queue
-        # self._monitor_follow_queue(df_internal)
-        from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
-        # 3. 策略判定
-        with timed_ctx(f"check_strategies__timed_{len(df_internal)}", warn_ms=10):
-            self._check_strategies(df_internal, resample=resample)
-        print_timing_summary()
+        # --- ⭐ [关键] 异步触发策略判定 (增加防重入保护) ---
+        # 置于此位，确保即使在非交易时段（调试或重播时）也能正确执行策略检查
+        if not self._is_checking:
+             self.executor.submit(self._check_strategies, df_internal, resample=resample)
+
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
         # import removed
@@ -1215,16 +1224,6 @@ class StockLiveStrategy:
              # 非交易时间停止策略计算
              return
 
-        # 限制频率: 至少间隔 1s 处理一次，避免 UI 线程密集调用导致积压
-        import time
-        now = time.time()
-        if now - self._last_process_time < 2.0:
-            return
-        
-        self._last_process_time = now
-        
-        # 异步执行
-        self.df = df_all.copy()
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
 
         if self.auto_loop_enabled:
@@ -1238,40 +1237,40 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.error(f"Sector Monitor Check Failed: {e}")
 
-        # --- [关键] 异步触发策略判定 (增加防重入保护) ---
-        if not self._is_checking:
-             self.executor.submit(self._check_strategies, self.df, resample=resample)
-
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
-        # 🛡️ [FIX] 关键数据回填必须受锁保护，防止 UI 线程索引时崩溃 (Gaps in blk ref_locs)
-        try:
-            if self._df_lock:
-                 self._df_lock.acquire()
-            
-            for key, stock in list(self._monitored_stocks.items()):
-                code = stock.get('code', key.split('_')[0])
-                if code in df_all.index:
-                    snap = stock.get('snapshot', {})
-                    df_all.at[code, 'last_action'] = snap.get('last_action', '')
-                    df_all.at[code, 'last_reason'] = snap.get('last_reason', '')
-                    df_all.at[code, 'shadow_info'] = snap.get('shadow_info', '')
-                    df_all.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
-                    df_all.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
-                    df_all.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
-                elif 'code' in df_all.columns:
-                    # 兼容 code 也在列里的情况
-                    mask = df_all['code'] == code
-                    if mask.any():
-                        snap = stock.get('snapshot', {})
-                        df_all.loc[mask, 'last_action'] = snap.get('last_action', '')
-                        df_all.loc[mask, 'last_reason'] = snap.get('last_reason', '')
-                        df_all.loc[mask, 'shadow_info'] = snap.get('shadow_info', '')
-                        df_all.loc[mask, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
-                        df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
-                        df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
-        finally:
-            if self._df_lock:
-                 self._df_lock.release()
+        # 🛡️ [OPTIMIZE] 批量收集更新，最小化锁持有时间，防止 UI 线程在 acquire 时卡住
+        updates_data = []
+        monitored_list = list(self._monitored_stocks.items())
+        
+        # 1. 锁外收集数据
+        for key, stock in monitored_list:
+            code = stock.get('code', key.split('_')[0])
+            if code in df_all.index:
+                snap = stock.get('snapshot', {})
+                # 收集非空核心字段
+                updates_data.append((code, {
+                    'last_action': snap.get('last_action', ''),
+                    'last_reason': snap.get('last_reason', ''),
+                    'shadow_info': snap.get('shadow_info', ''),
+                    'market_win_rate': snap.get('market_win_rate', 0.5),
+                    'loss_streak': snap.get('loss_streak', 0),
+                    'vwap_bias': snap.get('vwap_bias', 0.0)
+                }))
+
+        # 2. 锁内极速回填
+        if updates_data:
+            try:
+                if self._df_lock:
+                     self._df_lock.acquire()
+                
+                # [OPTIMIZE] 使用 .loc 批量更新列 (比循环 .at 快)
+                # 只有当数据量极大时才需进一步切分，目前 monitored_stocks 通常 < 100
+                for code, fields in updates_data:
+                    for col, val in fields.items():
+                        df_all.at[code, col] = val
+            finally:
+                if self._df_lock:
+                     self._df_lock.release()
 
         # [REMOVED] DataHubService publish logic
         pass
@@ -4033,7 +4032,11 @@ class StockLiveStrategy:
             return
 
         # --- 2. 状态识别 (同步) ---
-        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险", "卖出", "跌破", "风险", "SELL", "EXIT"])
+        is_priority = any(kw in message for kw in [
+            "连阳", "主升", "突破", "热点", "核心", "TD序列", "顶部风险", "卖出", "跌破", "风险", "SELL", "EXIT",
+            "起跳新星", "🌟", "PATTERN", "形态", "V_SHAPE", "RULE", "POSITION",
+            "买入", "加仓", "BUY", "ADD", "突破中心", "异动", "强势", "涨停", "封板" # [ADDED] 补充买入与核心强势词汇
+        ])
         now_ts = time.time()
         
         # --- 3. UI 节流判定 (同步) ---
@@ -4048,7 +4051,9 @@ class StockLiveStrategy:
                 self._ui_callback_throttle['last_t'] = now_ts
                 self._ui_callback_throttle['count'] = 1
             
-            should_skip_ui = (self._ui_callback_throttle['count'] > 3 and not is_priority)
+            # ⭐ [OPTIMIZE] 显著放宽非优先信号的节流阈值 (10 -> 30)，由于 UI 队列已扩容，此处可以投递更多任务进行缓冲
+            # 这样在 148 条并发下，核心信号 100% 弹出，普通信号也能保留大量采样
+            should_skip_ui = (self._ui_callback_throttle['count'] > 30 and not is_priority)
 
         # --- 4. 投递异步任务 (线程池) ---
         # 获取股票等级 (从监控列表)
