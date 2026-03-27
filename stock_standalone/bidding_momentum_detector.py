@@ -473,14 +473,45 @@ class BiddingMomentumDetector:
 
     def save_persistent_data(self, force=False):
         """保存当前个股得分和板块强度到磁盘 (原子化强化版)"""
-        # [NEW] 增加 force 参数，用于每日 15:30 强行保存
         if self.in_history_mode:
             logger.debug("[Detector] Skip save in history mode.")
             return
-            
-        if not force and not cct.get_trade_date_status():
+
+        is_trade_day = cct.get_trade_date_status()
+        if not force and not is_trade_day:
             logger.debug("[Detector] Skip save: Not a trade date.")
             return
+
+        # [NEW] [TIME-CHECK] 交易日 9:45 前不存盘，避免竞价杂波覆盖昨日收盘精华
+        if not force and is_trade_day:
+            now = datetime.datetime.now()
+            if now.hour < 9 or (now.hour == 9 and now.minute < 45):
+                # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:45).")
+                return
+
+        # [NEW] [CONTENT-CHECK] 如果完全没有板块数据，通常意味着是无效会话或初次启动，不存盘以防止覆盖有效历史
+        if not force and not self.active_sectors:
+            # logger.debug("[Detector] Skip save: No active sector data recorded.")
+            return
+
+        # [NEW] [DATA-PROTECTION] 防止收盘后的重复写入导致数据损坏或有效数据被空数据覆盖
+        main_path = self._get_persistence_path()
+        if not force and os.path.exists(main_path):
+            try:
+                now = datetime.datetime.now()
+                # 如果当前时间已经是晚上 (15:30以后)，且文件是今天下午存的
+                if now.hour >= 15:
+                    mtime = os.path.getmtime(main_path)
+                    f_dt = datetime.datetime.fromtimestamp(mtime)
+                    # 检查是否是今天的 14:50-16:00 存的 (收盘数据保护区)
+                    if f_dt.date() == now.date() and 14 <= f_dt.hour <= 16:
+                        # 检查当前内存中是否有足够多的活跃数据，如果没有（比如刚误开启），则坚决不覆盖
+                        sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
+                        if sig_count < 5: # 门槛：少于5只活跃股认为当前是空会话/误操作
+                            logger.info(f"🛡️ [Detector] Found valid market-close data ({f_dt.strftime('%H:%M')}). Skipping overwrite with empty session.")
+                            return
+            except Exception as e:
+                logger.debug(f"Persistence check error: {e}")
 
         try:
             # [Data Preparation ...]
@@ -611,6 +642,9 @@ class BiddingMomentumDetector:
             today_str = now_dt.strftime('%Y-%m-%d')
 
             is_expired = False
+            # [NEW] 虽然未过期，但我们仍需记录文件的日期，以便之后进行 9:15 的跨日重置判断
+            self._concept_data_date = file_dt.date()
+            
             try:
                 # 获取从文件日期到今天的交易日列表 (使用 cct 中已初始化的 lazy-loaded 实例)
                 trade_days = cct.a_trade_calendar.get_trade_days_interval(file_date_str, today_str)
@@ -1312,18 +1346,25 @@ class BiddingMomentumDetector:
         now_dt = datetime.datetime.now()
         today = now_dt.date()
         now_t = now_dt.hour * 100 + now_dt.minute
-    # [REMOVED] Daily reset prevents multi-day analysis. 
-    # Use cross-day logic if specific data cleaning is needed, otherwise rely on memory management.
-    # if self._concept_data_date != today:
-    #     self._concept_data_date = today
-    #     self._concept_first_phase_done = False
-    #     self._concept_second_phase_done = False
-    #     self.daily_watchlist.clear()
-    #     if hasattr(self, "_sector_active_stocks_persistent"):
-    #         self._sector_active_stocks_persistent.clear()
-    #     logger.info(f"[Detector] {today} Day Transition - Multi-day support active")
-
         now_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+
+        # [RE-ENABLED] 自动清理跨日数据，确保早盘竞价开始时看板是干净的
+        if self._concept_data_date != today:
+            # 如果是交易日，且已经过了 9:15，我们强制清理一次上一交易日的残余数据
+            if cct.get_day_istrade_date(str(today)):
+                if now_t >= 915:
+                    logger.info(f"📅 [Detector] {today} Day Transition Detected (Bidding started) - Cleaning stale session data")
+                    self._concept_data_date = today
+                    self.daily_watchlist.clear()
+                    self._sector_active_stocks_persistent.clear()
+                    self.active_sectors.clear()
+                    # 同时也彻底清理个股评分，防止早期无 K 线导致评分不刷新的问题
+                    for ts in self._tick_series.values():
+                        ts.score = 0.0
+                        ts.momentum_score = 0.0
+                        ts.first_breakout_ts = 0.0
+                        ts.pattern_hint = ""
+                    self.reset_observation_anchors()
 
         # --- 更新全量 Watchlist (仅针对有变动的个股) ---
         codes_for_watchlist = active_codes if active_codes is not None else snap.keys()

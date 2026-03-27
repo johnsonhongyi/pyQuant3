@@ -9,11 +9,11 @@ from typing import Any, List, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
-    QDoubleSpinBox, QSplitter, QListWidget, QListWidgetItem,
+    QDoubleSpinBox, QSpinBox, QSplitter, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
-    QMessageBox, QFileDialog
+    QMessageBox, QFileDialog, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
@@ -293,8 +293,10 @@ class DetailedChartDialog(QDialog, WindowMixin):
             last_c = meta.get('last_close', 0)
             now_p = meta.get('now_price', last_c) 
             # 尝试获取基准时间，历史模式下使用 snapshot 时间，实时模式下使用当前时间
-            base_ts = getattr(self.parent(), 'detector', None).baseline_time if self.parent() else time.time()
-            if base_ts <= 0: base_ts = time.time()
+            parent = self.parent() if hasattr(self, 'parent') else None
+            detector = getattr(parent, 'detector', None) if parent else None
+            base_ts = getattr(detector, 'baseline_time', time.time()) if detector else time.time()
+            if not base_ts or base_ts <= 0: base_ts = time.time()
 
             if now_p > 0:
                 # 模拟两个点形成一条直线，使用 Unix 时间戳
@@ -458,9 +460,8 @@ class DetailedChartDialog(QDialog, WindowMixin):
             # 使用 99 分位数或最大值
             v_max = np.percentile(vols_np, 99) if len(vols_np) > 10 else np.max(vols_np)
             if v_max <= 0: v_max = 1
-            
-            v_scale = price_range * 0.2 / v_max
-            
+            v_scale = (price_range * 0.2) / v_max
+
             brushes = []
             pens = []
             for i in range(len(times)):
@@ -472,23 +473,17 @@ class DetailedChartDialog(QDialog, WindowMixin):
             v_bars = pg.BarGraphItem(x=times, height=vols_np * v_scale, width=0.7, brushes=brushes, pens=pens)
             v_bars.setPos(0, y_min - price_range * 0.05) 
             self.pw.addItem(v_bars)
-            
+
     def update_live_data(self):
         """保持详情弹窗动态更新"""
         try:
             parent = self.parent()
             if not parent or not hasattr(parent, 'detector'): return
-            
-            # 从探测器中拉取最新数据
             ts = parent.detector._tick_series.get(self.code_target)
             if not ts or not ts.klines: return
-            
             new_klines = list(ts.klines)
             if len(new_klines) > self._current_klines_len:
-                # 只有数据量变动才重绘
                 self._render_chart(new_klines)
-                
-                # 更新标题（如果价格变动）
                 last_c = self.meta.get('last_close', 0)
                 curr_p = new_klines[-1].get('close', 0)
                 if last_c > 0:
@@ -496,10 +491,9 @@ class DetailedChartDialog(QDialog, WindowMixin):
                     self.setWindowTitle(f"📊 {self.name} ({self.code_target}) | 实时涨幅:{pc:+.2f}%")
         except Exception as e:
             logger.debug(f"[DetailDialog] Refresh failed: {e}")
-                
-    # ── [FIX] Persistence Support ────────────────────────────────────
+
+    # ── [FIX] Persistence Support (DetailedChartDialog) ───────────────
     def _get_config_key(self):
-        # 窗口记忆 Key，按类名记忆，这样所有详情窗采用统一位置
         return self.__class__.__name__
 
     def _restore_geometry(self):
@@ -519,22 +513,307 @@ class DetailedChartDialog(QDialog, WindowMixin):
             if os.path.exists(WINDOW_CONFIG_FILE):
                 with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-            
             key = self._get_config_key()
             if key not in config: config[key] = {}
-            
             geometry = self.saveGeometry()
             config[key]["geometry"] = bytes(geometry.toHex().data()).decode('ascii')
             config[key]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
             with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception: pass
 
     def closeEvent(self, event):
-        """关闭时保存位置信息"""
         self._save_geometry()
         super().closeEvent(event)
+
+
+class HistoricalTrackerWorker(QThread):
+    """异步多日追踪工作线程：聚合历史异动并分析板块龙头的‘强弱链接’"""
+    finished = pyqtSignal(list)
+    progress = pyqtSignal(str)
+
+    def __init__(self, snapshot_paths, realtime_service):
+        super().__init__()
+        self.snapshot_paths = snapshot_paths
+        self.realtime_service = realtime_service
+
+    def run(self):
+        try:
+            all_candidate_dict = {} # code -> data
+            sector_stats = {}       # name -> {hits, codes}
+            
+            # STEP 1: 聚合历史快照中的异动个股
+            for path in self.snapshot_paths:
+                match = re.search(r'bidding_(\d+)', os.path.basename(path))
+                date_str = match.group(1) if match else "Unknown"
+                self.progress.emit(f"📁 聚合 {date_str} 的竞价快照...")
+                
+                temp_detector = BiddingMomentumDetector(realtime_service=self.realtime_service, simulation_mode=True)
+                if not temp_detector.load_from_snapshot(path): continue
+
+                for code, snap in temp_detector._global_snap_cache.items():
+                    if snap.get('score', 0) >= 3.6 or snap.get('pct', 0) > 8.5:
+                        sn = snap.get('sector', 'N/A')
+                        if sn not in sector_stats: sector_stats[sn] = {'hits': 0, 'codes': set()}
+                        sector_stats[sn]['hits'] += 1
+                        sector_stats[sn]['codes'].add(code)
+                        
+                        if code not in all_candidate_dict:
+                            all_candidate_dict[code] = {
+                                'code': code, 'name': snap.get('name', code), 'sector': sn,
+                                'hist_hits': 1, 'hist_scores': {date_str: snap.get('score', 0)},
+                                'hist_price': float(snap.get('price', 0.0)),
+                                'curr_price': 0.0, 'roi': 0.0, 'curr_score': 0.0, 'momentum': 0.0,
+                                'pattern': '--', 'label': '', 'is_main': False, 'klines': [],
+                                'potential_score': 0.0, 'meta': snap
+                            }
+                        else:
+                            all_candidate_dict[code]['hist_hits'] += 1
+                            all_candidate_dict[code]['hist_scores'][date_str] = snap.get('score', 0)
+
+            # STEP 2: 深度刷新实时行情并执行“重点”判定
+            all_codes = list(all_candidate_dict.keys())
+            self.progress.emit(f"📡 深度扫描 {len(all_codes)} 只历史强势股的实时强度...")
+            
+            for code in all_codes:
+                item = all_candidate_dict[code]
+                if self.realtime_service:
+                    klines = self.realtime_service.kline_cache.get_klines(code, n=120)
+                    if klines:
+                        item['klines'] = klines
+                        item['curr_price'] = klines[-1].get('close', 0.0)
+                        p_start = klines[-20].get('close', item['curr_price']) if len(klines) >= 20 else klines[0].get('close', item['curr_price'])
+                        item['momentum'] = (item['curr_price'] / p_start - 1) * 100 if p_start > 0 else 0
+                        item['curr_score'] = self.realtime_service.emotion_tracker.get_score(code)
+                    
+                    if item['hist_price'] <= 0 and klines:
+                        item['hist_price'] = float(klines[0].get('close', 0))
+                    if item['hist_price'] > 0 and item['curr_price'] > 0:
+                        item['roi'] = (item['curr_price'] / item['hist_price'] - 1) * 100
+                    if item['sector'] == 'N/A' or not item['sector']:
+                        e_data = self.realtime_service.get_55188_data(code)
+                        if e_data: item['sector'] = e_data.get('theme_name', e_data.get('concept', 'N/A'))
+
+            # STEP 3: 板块效应与龙、一致性判定
+            results = list(all_candidate_dict.values())
+            sector_leaders = {}
+            for item in results:
+                p_score = item['curr_score'] * 0.4 + item['hist_hits'] * 12.0 + item['momentum'] * 2.5
+                if 2.0 < item['roi'] < 10.0: p_score += 15
+                item['potential_score'] = p_score
+                s = item['sector']
+                if s not in sector_leaders or p_score > all_candidate_dict[sector_leaders[s]]['potential_score']:
+                    sector_leaders[s] = item['code']
+
+            for item in results:
+                s = item['sector']
+                is_leader = (item['code'] == sector_leaders.get(s))
+                phase = "震荡蓄势"
+                if is_leader:
+                    item['label'] = "🏆"
+                    if item['momentum'] > 1.0: phase = "强势加速"
+                    elif item['momentum'] < -0.8: phase = "龙头分歧/炸板"
+                else:
+                    item['label'] = "📌"
+                    l_code = sector_leaders.get(s)
+                    l_mom = all_candidate_dict[l_code]['momentum'] if l_code else 0
+                    if l_mom > 0.8 and item['momentum'] > 0.5: phase = "板块共振一致"
+                    elif l_mom < -1.0 and item['momentum'] > 0.3: phase = "逆势补涨"
+                    elif l_mom < -1.0: phase = "板块集体退潮"
+                
+                if item['roi'] < -5 and item['momentum'] > 0.5 and item['hist_hits'] >= 3:
+                    phase = "核心龙回头"
+                    item['potential_score'] += 20
+                item['pattern'] = f"[{s}] {phase}"
+                if is_leader or "共振" in phase or "加速" in phase:
+                    item['potential_score'] += 15
+                    item['is_main'] = True
+
+            results.sort(key=lambda x: x['potential_score'], reverse=True)
+            self.finished.emit(results)
+        except Exception as e:
+            logger.error(f"HistoricalTracker Error: {e}")
+            self.progress.emit(f"❌ 分析出错: {str(e)}")
+
+
+class HistoricalTrackerDialog(QDialog, WindowMixin):
+    """历史多日追踪对比窗口 (增强型：支持键盘上下联动)"""
+    def __init__(self, all_snap_paths, realtime_service, parent=None):
+        super().__init__(parent)
+        self.all_snap_paths = all_snap_paths
+        self.realtime_service = realtime_service
+        self.code_target = "multi_day_track"
+        self._all_results = []
+        self._is_populating = False
+        
+        self.setWindowTitle("🔍 最近多日强势股自动追踪对比")
+        self.resize(1280, 800)
+        self._init_ui()
+        self._restore_geometry()
+        self._start_analysis(3)
+
+    def _init_ui(self):
+        lay = QVBoxLayout(self)
+        tool_lay = QHBoxLayout()
+        tool_lay.addWidget(QLabel("📅 分析多日:"))
+        self.spin_days = QSpinBox()
+        self.spin_days.setRange(1, min(10, len(self.all_snap_paths)))
+        self.spin_days.setValue(3)
+        self.spin_days.setFixedWidth(50)
+        tool_lay.addWidget(self.spin_days)
+        
+        self.btn_reanalyze = QPushButton("🚀 刷新追踪")
+        self.btn_reanalyze.setStyleSheet("background-color: #2c3e50; color: white; padding: 4px 10px; font-weight: bold;")
+        self.btn_reanalyze.clicked.connect(lambda: self._start_analysis(self.spin_days.value()))
+        tool_lay.addWidget(self.btn_reanalyze)
+        tool_lay.addStretch()
+        
+        self.status_bar = QLabel("🚀 准备就绪")
+        self.status_bar.setStyleSheet("color: #ff9900; font-weight: bold;")
+        tool_lay.addWidget(self.status_bar)
+        lay.addLayout(tool_lay)
+        
+        self.table = QTableWidget(0, 10)
+        self.table.setHorizontalHeaderLabels(['代码', '名称', '命中次数', '所属板块', '分值(历史)', '分值(当前)', '追踪基准', '现价', 'ROI', '形态/效应'])
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
+        
+        self.table.cellClicked.connect(self._on_row_clicked)
+        self.table.cellDoubleClicked.connect(self._on_row_dblclick)
+        self.table.currentItemChanged.connect(self._on_current_changed)
+        lay.addWidget(self.table)
+        
+        btm_lay = QHBoxLayout()
+        tip = QLabel("💡 提示：🏆龙头 📌跟随。支持键盘 ↑ ↓ 联动主面板。")
+        tip.setStyleSheet("color: #888; font-style: italic;")
+        btm_lay.addWidget(tip)
+        btm_lay.addStretch()
+        
+        self.btn_rearrange = QPushButton("🔳 铺满窗口")
+        self.btn_rearrange.clicked.connect(self._on_rearrange_clicked)
+        btm_lay.addWidget(self.btn_rearrange)
+        lay.addLayout(btm_lay)
+
+    def _start_analysis(self, days: int):
+        target_snaps = self.all_snap_paths[:days]
+        self.status_bar.setText(f"⏳ 正在聚合板块效应与强弱链接...")
+        self.btn_reanalyze.setEnabled(False)
+        self.worker = HistoricalTrackerWorker(target_snaps, self.realtime_service)
+        self.worker.finished.connect(self._on_data_ready)
+        self.worker.progress.connect(lambda t: self.status_bar.setText(t))
+        self.worker.start()
+
+    def _on_data_ready(self, data):
+        self._all_results = data
+        self._is_populating = True
+        self.status_bar.setText(f"✅ 完成！精选 {len(data)} 只种子股。")
+        self.btn_reanalyze.setEnabled(True)
+        self.table.setUpdatesEnabled(False)
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        for i, item in enumerate(data):
+            self.table.insertRow(i)
+            code, label = item['code'], item.get('label', '')
+            c_item = QTableWidgetItem(f"{label}{code}")
+            if label == "🏆": c_item.setForeground(QColor("#FF4444")); f = c_item.font(); f.setBold(True); c_item.setFont(f)
+            self.table.setItem(i, 0, c_item)
+            self.table.setItem(i, 1, QTableWidgetItem(item.get('name', '--')))
+            hit_item = NumericTableWidgetItem(str(item['hist_hits']))
+            hit_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if item['hist_hits'] >= 3: hit_item.setForeground(QColor("#FFCC00"))
+            self.table.setItem(i, 2, hit_item)
+            self.table.setItem(i, 3, QTableWidgetItem(item.get('sector', 'N/A')))
+            
+            # [RESTORED] Column 4: History Score (Most Recent)
+            scores = item.get('hist_scores', {})
+            last_date = sorted(scores.keys())[-1] if scores else "?"
+            h_score = scores.get(last_date, 0.0)
+            self.table.setItem(i, 4, NumericTableWidgetItem(f"{h_score:.1f}"))
+            
+            self.table.setItem(i, 5, NumericTableWidgetItem(f"{item['curr_score']:.1f}"))
+            self.table.setItem(i, 6, NumericTableWidgetItem(f"{item['hist_price']:.2f}"))
+            self.table.setItem(i, 7, NumericTableWidgetItem(f"{item['curr_price']:.2f}"))
+            roi = item['roi']
+            roi_item = NumericTableWidgetItem(f"{roi:+.2f}%")
+            if roi > 0: roi_item.setForeground(QColor("#FF4444"))
+            elif roi < 0: roi_item.setForeground(QColor("#44CC44"))
+            self.table.setItem(i, 8, roi_item)
+            pat_item = QTableWidgetItem(item['pattern'])
+            if item['is_main']: pat_item.setForeground(QColor("#FF9900"))
+            self.table.setItem(i, 9, pat_item)
+        self.table.setSortingEnabled(True)
+        self.table.setUpdatesEnabled(True)
+        self.table.sortItems(2, Qt.SortOrder.DescendingOrder)
+        self._is_populating = False
+
+    def _on_current_changed(self, current, previous):
+        if self._is_populating or not current or not self.table.hasFocus(): return
+        item = self.table.item(current.row(), 0)
+        if item:
+            code = re.sub(r'[^\d]', '', item.text())
+            QTimer.singleShot(50, lambda: self.parent()._link_code(code, focus_widget=self.table))
+
+    def _on_row_clicked(self, row, col):
+        if col > 1: return
+        item = self.table.item(row, 0)
+        if item:
+            code = re.sub(r'[^\d]', '', item.text())
+            self.parent()._link_code(code, focus_widget=self.table)
+
+    def _on_row_dblclick(self, row, col):
+        item = self.table.item(row, 0)
+        if not item: return
+        code = re.sub(r'[^\d]', '', item.text())
+        target = next((d for d in self._all_results if d['code'] == code), None)
+        if target:
+            meta = target.get('meta', {}).copy()
+            meta.update({'last_close': target.get('hist_price', 0.0), 'theme': target.get('sector', 'N/A')})
+            dialog = DetailedChartDialog(target['code'], target['name'], target['klines'], meta, self)
+            dialog.exec()
+
+    def _on_rearrange_clicked(self):
+        if self.parent() and hasattr(self.parent(), '_on_rearrange_clicked'):
+            self.parent()._on_rearrange_clicked()
+
+    # ── [FIX] Persistence Support (HistoricalTrackerDialog) ──────────
+    def _get_config_key(self):
+        return self.__class__.__name__
+
+    def _restore_geometry(self):
+        try:
+            if not os.path.exists(WINDOW_CONFIG_FILE): return
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            data = config.get(self._get_config_key(), {})
+            geom_hex = data.get("geometry")
+            if geom_hex:
+                self.restoreGeometry(QByteArray.fromHex(geom_hex.encode('ascii')))
+        except Exception: pass
+
+    def _save_geometry(self):
+        try:
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            key = self._get_config_key()
+            if key not in config: config[key] = {}
+            geometry = self.saveGeometry()
+            config[key]["geometry"] = bytes(geometry.toHex().data()).decode('ascii')
+            config[key]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception: pass
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        super().closeEvent(event)
+
+
+
 
 class DataProcessWorker(QObject):
     """Worker object to process realtime data in a separate QThread."""
@@ -545,13 +824,19 @@ class DataProcessWorker(QObject):
         self.detector = detector
         self.df_queue = []
         self._is_running = True
+        self._force_recalc = False # [NEW] 强制重算标志
         
     def add_data(self, df):
         self.df_queue.append(df)
         
+    def trigger_recalc(self):
+        """强制触发一次全量评分重算"""
+        self._force_recalc = True
+
     def process_data(self):
         """Continuously process data from the queue."""
         while self._is_running:
+            # 1. 如果有新数据包，优先处理数据包
             if self.df_queue:
                 df = self.df_queue.pop(0)
                 try:
@@ -564,15 +849,30 @@ class DataProcessWorker(QObject):
                     
                     # [NEW] 记录版本，让 UI 知道有新数据算完了
                     setattr(self.detector, 'data_version', getattr(self.detector, 'data_version', 0) + 1)
+                    self._force_recalc = False # 数据到达本身就是一次刷新
                     
                     self.finished.emit()
                 except Exception as e:
                     logger.error(f"[SectorBiddingPanel Worker] Error: {e}")
+            
+            # 2. 如果没新数据，但用户点击了“手动刷新”，强制执行一次全量评分 (sweep)
+            elif self._force_recalc:
+                try:
+                    if self.detector.enable_log:
+                        logger.info("⚡ [Worker] Manual force sweep recalculation triggered")
+                    
+                    self.detector.update_scores()
+                    setattr(self.detector, 'data_version', getattr(self.detector, 'data_version', 0) + 1)
+                    self._force_recalc = False
+                    self.finished.emit()
+                except Exception as e:
+                    logger.error(f"[SectorBiddingPanel Worker] Force recalc error: {e}")
+            
             else:
                 QThread.msleep(50)
         # Emit finished again when loop exits to ensure thread knows it can quit
         self.finished.emit()
-                
+        
     def stop(self):
         self._is_running = False
 
@@ -580,7 +880,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
 
     # ------------------------------------------------------------------ init
-    def __init__(self, main_window: Any):
+    def __init__(self, main_window: Any, allow_real_close: bool = False):
         # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
         # Ensure DataHub is ready in the Bidding Panel process
         # self.data_hub = DataHubService.get_instance()
@@ -603,7 +903,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
         self._is_history_mode = False   # [NEW] 历史复盘模式标志
         self._history_date = ""         # [NEW] 历史数据日期
-        self._allow_real_close = False  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
+        self._allow_real_close = allow_real_close  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
         self._last_rendered_data_version = -1
         self._last_rendered_stock_cache = {} # sector -> version
 
@@ -619,6 +919,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._worker_thread.start()
 
         self._init_ui()
+        # [FIX] Implementation of geometry methods locally
         self._restore_geometry()
         self._restore_ui_state()
 
@@ -865,6 +1166,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_history.setFixedWidth(85)
         self.btn_history.clicked.connect(self._on_history_load_clicked)
         bar_lay_2.addWidget(self.btn_history)
+
+        self.btn_track = QPushButton("🔍 历史追踪")
+        self.btn_track.setFixedWidth(85)
+        self.btn_track.setStyleSheet("background-color: #2a3a4a; color: #ff9900;")
+        self.btn_track.setToolTip("选择快照并对比当前走势，寻找 10 个潜力结构")
+        self.btn_track.clicked.connect(self._on_history_track_clicked)
+        bar_lay_2.addWidget(self.btn_track)
 
         self.btn_live = QPushButton("实时 📡")
         self.btn_live.setFixedWidth(65)
@@ -1124,19 +1432,27 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("扫描中...")
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText("⏳ 正在后台重新扫描数据及板块...")
+                lbl_text = "⏳ [实时模式] 正在计算评分映射..." if not self._is_history_mode else f"📁 [历史模式: {self._history_date}] 刷新..."
+                self.status_lbl.setText(lbl_text)
                 self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
             
+            # [NEW] [TIME-CHECK] 检查是否需要清理早盘跨日数据
+            # 这样用户如果发现早盘数据没清，点一下手动刷新也能强制清理
+            if hasattr(self, 'detector'):
+                self.detector.update_scores() # 这会触发 detector 内的 check_time 逻辑
+            
             # [FIX] 利用现有的 QThread (_worker) 安全执行，解决 "Timers can only be used with threads started with QThread"
-            if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
+            if hasattr(self, '_worker'):
                 # [NEW] 手动刷新时同时重置观测锚点，使用户能看到“从点击瞬间开始”的增量变化
                 self.detector.reset_observation_anchors()
-                self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
-            else:
-                self.detector.reset_observation_anchors()
                 self._force_update_requested = True
-                if hasattr(self, '_worker'):
-                    self._worker.finished.emit() # 无全量数据时只单纯触发刷新流程
+                
+                if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
+                    # 如果有实盘数据，推入队列
+                    self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
+                else:
+                    # 否则触发全量 sweep
+                    self._worker.trigger_recalc()
             
             # 使用 QTimer 设置按钮防抖恢复
             QTimer.singleShot(2500, lambda: self.btn_refresh.setEnabled(True))
@@ -1260,7 +1576,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if len(self._worker.df_queue) > 1:
                  self._worker.df_queue.clear()
                  
-            self._worker.add_data(df_all)
+            # [CRITICAL] 必须执行拷贝，防止主线程正在修改 df_all 时后台线程读取导致内存冲突或 GIL 崩溃
+            self._worker.add_data(df_all.copy() if hasattr(df_all, 'copy') else df_all)
             
             # Record force_update request state
             self._force_update_requested = force_update
@@ -2462,6 +2779,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             else:
                 QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏或格式不正确。")
 
+    def _on_history_track_clicked(self):
+        """[NEW] 自动选择最近几日的快照进行强势股追踪分析"""
+        snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
+        if not os.path.exists(snapshots_dir):
+            os.makedirs(snapshots_dir, exist_ok=True)
+            
+        # 自动获取所有快照文件
+        all_snaps = [os.path.join(snapshots_dir, f) for f in os.listdir(snapshots_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
+        all_snaps.sort(reverse=True) # 最近的在前
+        
+        # 剔除过于小的文件（可能是损坏的）
+        valid_snaps = [s for s in all_snaps if os.path.getsize(s) > 10240]
+        
+        if not valid_snaps:
+            QMessageBox.information(self, "未找到数据", "snapshots/ 目录下未找到有效的历史快照文件。")
+            return
+            
+        rs = getattr(self.main_window, 'realtime_service', None)
+        # 传入所有快照，供 Dialog 自由选择
+        dialog = HistoricalTrackerDialog(valid_snaps, rs, self)
+        dialog.show()
+
+
     def _on_back_to_live_clicked(self):
         """切回实时模式"""
         self._is_history_mode = False
@@ -2556,14 +2896,13 @@ if __name__ == "__main__":
     class MockMainWindow:
         def __init__(self):
             self.realtime_service = None
-
     app = QApplication(sys.argv)
     
     # 尝试设置美观的暗色风格 (如果系统支持)
     app.setStyle('Fusion')
     
     mock_win = MockMainWindow()
-    window = SectorBiddingPanel(main_window=mock_win)
+    window = SectorBiddingPanel(main_window=mock_win, allow_real_close=True)
     window.show()
     
     sys.exit(app.exec())
