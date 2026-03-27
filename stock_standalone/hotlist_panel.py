@@ -678,9 +678,9 @@ class HotlistPanel(QWidget, WindowMixin):
         
         # 暂停语音按钮
         self.pause_voice_btn = QPushButton("🔊")
-        self.pause_voice_btn.setFixedSize(28, 22)
+        self.pause_voice_btn.setFixedSize(32, 22)
         self.pause_voice_btn.setCheckable(True)
-        self.pause_voice_btn.setToolTip("点击暂停/恢复语音播报")
+        self.pause_voice_btn.setToolTip("开启/关闭热点信号语音播报(Alt+V)")
         self.pause_voice_btn.clicked.connect(self.toggle_voice)
         self._update_voice_button_style() # Use existing update logic
         
@@ -702,12 +702,10 @@ class HotlistPanel(QWidget, WindowMixin):
         self._sync_timer.start(1000)
 
     def _sync_voice_ui(self):
-        """同步语音按钮状态"""
+        """主动从主窗口同步语音状态"""
         main_window = self._find_main_window()
-        if main_window and hasattr(main_window, 'voice_thread'):
-            vt = main_window.voice_thread
-            # 如果处于暂停状态
-            is_paused = not vt.pause_event.is_set()
+        if main_window and hasattr(main_window, '_voice_paused'):
+            is_paused = main_window._voice_paused
             if self._voice_paused != is_paused:
                 self._voice_paused = is_paused
                 self._update_voice_button_style()
@@ -733,16 +731,28 @@ class HotlistPanel(QWidget, WindowMixin):
             return
 
         self._voice_paused = not self._voice_paused
-        # [FIX] 同步到主窗口标志位
+        # [FIX] 同步到主窗口标志位 (唯一真相源)
         main_window._voice_paused = self._voice_paused
         
         if self._voice_paused:
             main_window.voice_thread.pause()
-
             logger.info("⏸ Voice paused via HotlistPanel")
         else:
             main_window.voice_thread.resume()
             logger.info("▶ Voice resumed via HotlistPanel")
+            
+        # ⭐ [NEW] 同步更新主窗口菜单文本与 Action 状态
+        if hasattr(main_window, 'voice_action'):
+             text = "🔇 热点播报: 关(Alt+V)" if self._voice_paused else "🔊 热点播报: 开(Alt+V)"
+             main_window.voice_action.setText(text)
+             
+        # ⭐ [NEW] 立即触发主窗口配置保存
+        if hasattr(main_window, '_save_visualizer_config'):
+             main_window._save_visualizer_config()
+
+        # ⭐ [NEW] 也同步给主进程 (IPC)
+        if hasattr(main_window, '_send_voice_state_to_main_app'):
+             main_window._send_voice_state_to_main_app(enabled=( self._voice_paused))
             
         self._update_voice_button_style()
 
@@ -790,29 +800,32 @@ class HotlistPanel(QWidget, WindowMixin):
             """)
 
     def _update_voice_button_style(self):
-        """更新语音按钮样式"""
+        """更新语音按钮样式 (与主视图 ActionBar 保持一致)"""
         if self._voice_paused:
-            self.pause_voice_btn.setText("▶")
-            self.pause_voice_btn.setToolTip("恢复播报")
+            self.pause_voice_btn.setText("🔇")
+            self.pause_voice_btn.setToolTip("语音播报: 已关闭")
             self.pause_voice_btn.setStyleSheet("""
                 QPushButton {
                     background: #600;
+                    color: white;
                     border: 1px solid #f00;
                     border-radius: 3px;
-                    color: white;
                     font-size: 10pt;
                 }
             """)
         else:
-            self.pause_voice_btn.setText("⏸")
-            self.pause_voice_btn.setToolTip("暂停播报")
+            self.pause_voice_btn.setText("🔊")
+            self.pause_voice_btn.setToolTip("语音播报: 开启中")
             self.pause_voice_btn.setStyleSheet("""
                 QPushButton {
                     background: transparent;
-                    border: 1px solid #444;
-                    border-radius: 3px;
                     color: #FFD700;
+                    border: 1px solid #555;
+                    border-radius: 3px;
                     font-size: 10pt;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 215, 0, 30);
                 }
             """)
 
