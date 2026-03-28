@@ -2104,6 +2104,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             except Exception as e:
                                 logger.info(f"关闭 Qt 窗口 {key} 出错: {e}")
                     self._pg_windows.clear()
+                    
+                    # ⭐ [FIX] 彻底清理 PyQt 资源避免 QThreadStorage 报错
+                    qt_app = QtWidgets.QApplication.instance()
+                    if qt_app:
+                        logger.info("正在清理 PyQt 事件循环与资源...")
+                        # 1. 尝试让所有 pending 的 destroy 事件处理完
+                        qt_app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 500)
+                        
+                        # 2. 如果当前有正在运行的 QThread，尝试定位并等待 (需配合可视化组件的引用)
+                        # 这里作为通用保护，尝试触发一次全局的清理
+                        for widget in qt_app.topLevelWidgets():
+                            try: widget.close()
+                            except: pass
+                        
+                        # 处理最后一批清理
+                        qt_app.processEvents()
+                        
+                        # 3. 如果我们持有引用，解除它
+                        if hasattr(self, '_qt_app'):
+                            self._qt_app = None
+                            
                 except Exception as e:
                     logger.warning(f"关闭 Qt 监控窗口异常: {e}")
 
@@ -3297,10 +3318,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # (优先尝试常用价格列：'price', 'trade', 'close', 'now')
                 df_hash = 0
                 if not full_df.empty:
-                    # 确定要参与摘要的列（优先价格相关）
+                    # [OPTIMIZE] 哈希指纹改进：取首、中、尾多点价格采样，避免单点更新漏跳
                     p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
-                    p_val = full_df[p_col].iloc[0:1].sum() if p_col else 0
-                    df_hash = hash(full_df.index.size) + hash(p_val)
+                    if p_col:
+                        n = len(full_df)
+                        sample_idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
+                        p_val = full_df[p_col].iloc[sample_idx].sum()
+                        df_hash = hash(n) ^ hash(p_val)
+                    else:
+                        df_hash = hash(full_df.index.size)
                 
                 last_hash = getattr(self, '_last_apply_df_hash', -1)
                 
@@ -3310,8 +3336,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
                 # [STABILITY] 极其重要的限流：如果数据毫无变动，且上一轮渲染不足 1s，本轮直接跳过 UI 层面工作
-                if df_hash == last_hash and (now - getattr(self, '_last_tree_render_ts', 0) < 1.0) and not has_update:
+                if df_hash == last_hash and (now - getattr(self, '_last_tree_render_ts', 0) < 1.0):
                     return
+                
+                # ⭐ [RESTORE] 激活数据更新标志位 (确保下一步联动恢复能触发)
+                if df_hash != last_hash:
+                    has_update = True
+                
                 self._last_apply_df_hash = df_hash
 
                 if hasattr(self, 'selector') and self.selector:
@@ -3324,13 +3355,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if (now - getattr(self, '_last_tree_render_ts', 0) > 0.5) and not getattr(self, '_is_gui_rendering', False):
                         self._is_gui_rendering = True
                         try:
-                            # 1. 刷新主 Treeview
+                            # 1. 刷新主 Treeview (核心任务)
                             self.refresh_tree(ui_df)
-                            # 2. ⚡ [RESTORE] 刷新概念异动分析统计
-                            self.update_category_result(ui_df)
-                            # 3. ⚡ [RESTORE] 如果概念详情窗口打开，同步更新
-                            if hasattr(self, '_concept_detail_win') and self._concept_detail_win.winfo_exists():
-                                 self._concept_detail_win.update_data(ui_df)
                         finally:
                             self._is_gui_rendering = False
                         self._last_tree_render_ts = now
@@ -3338,14 +3364,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 虽然不刷表格，也要更新状态条，代表“数据已到达内存”
                     pass
                 
-                # 3. [DEFERRED] 解耦次要任务：
-                # 将排行榜、板块联动面板等非核心任务放入低频异步调度器，确保不拖累主行情
+                # 将排行榜、板块联动面板、概念统计等非核心/非实时任务放入低频异步调度器
                 def _low_freq_sync_tasks():
                     lt_now = time.time()
-                    # ⭐ 子窗口同步频次限制在 1.5s 以上
+                    # ⭐ 异步任务同步频次限制在 1.5s 以上
                     if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
                         self.update_all_top10_windows()
                         
+                        # [OPTIMIZE] 将耗时的概念列表统计移至此处异步处理
+                        if ui_df is not None and not ui_df.empty:
+                            self.update_category_result(ui_df)
+                            if hasattr(self, '_concept_detail_win') and self._concept_detail_win.winfo_exists():
+                                 self._concept_detail_win.update_data(ui_df)
+
                         panel = getattr(self, "sector_bidding_panel", None)
                         if panel and panel.isVisible():
                             try:
@@ -3369,16 +3400,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._schedule_after(60000, self.schedule_15_30_job)
                     self._schedule_after(5000, self._start_feedback_listener)
 
-                # 🧹 周期性手动 GC (降低频率，从 50 次改为 100 次)
+                # 🧹 周期性手动 GC (根据反馈：按 50 次更新触发一次，降低卡顿)
                 if not hasattr(self, '_update_count'): self._update_count = 0
                 self._update_count += 1
-                if self._update_count % 100 == 0:
+                if self._update_count % 50 == 0:
                     gc.collect()
+                    logger.debug(f"🧹 [GC] Periodical cycle triggered at update #{self._update_count}")
                     
                 # [THROTTLE] 策略检查已移至后台分析 worker
     
-                # 6. [STATS] 计算全盘统计概览 (异步聚合)
-                self._aggregate_market_dashboard_stats(has_update)
+                # 6. [STATS] 计算全盘统计概览 (增加 3s 级限流)
+                if now - getattr(self, '_last_aggregate_ts', 0) > 3.0:
+                    self._aggregate_market_dashboard_stats(has_update)
+                    self._last_aggregate_ts = now
 
                 # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
                 if has_update:
@@ -3402,16 +3436,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if has_update:
                     if getattr(self, '_last_resample', None) != self.global_values.getkey("resample"):
                         if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
-                            logger.debug(f'[send_df] resample:{self._last_resample} to {self.global_values.getkey("resample")} change force full send init df_first_send_done to False now:{self._df_first_send_done}')
                             if hasattr(self, 'df_ui_prev'):
-                                del self.df_ui_prev  # 删除缓存，模拟初始化
+                                del self.df_ui_prev
                             self._last_resample = self.global_values.getkey("resample")
-                            if getattr(self, 'viz_command_queue', None):
-                                self.viz_command_queue = None
                             self._df_first_send_done = False
-                            if getattr(self, 'last_vis_var_status', None):
-                                self.vis_var.set(True)
+                            
+                            if getattr(self, 'last_vis_var_status', None) is not None:
+                                self.vis_var.set(self.last_vis_var_status)
+                                self._vis_enabled_cache = self.last_vis_var_status # 同步至后台缓存
                                 self.last_vis_var_status = None
+                                logger.info(f"✅ [Restore] has_update triggered restoration to {self.vis_var.get()}")
                     # -------------------------
                     self.status_var2.set(f'queue update: {self.format_next_time()}')
                     logger.debug(f'queue update: {self.format_next_time()}')
@@ -4260,12 +4294,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self.live_strategy.scan_hot_concepts_status:
                     self.live_strategy.set_scan_hot_concepts(status=False)
                     logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
-        if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False):
-            # logger.debug(f'change _df_first_send_done:{self._df_first_send_done}')
-            logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
+        # [SAFEGUARD] 监测用户“手动”取消勾选行为：如果勾选断开且没有待恢复任务，才重置标志
+        if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False) \
+           and getattr(self, 'last_vis_var_status', None) is None:
+            logger.debug(f"[send_df] User manually unchecked vis: resetting first_send_done")
             if hasattr(self, 'df_ui_prev'):
-                del self.df_ui_prev  # 删除缓存，模拟初始化
-
+                del self.df_ui_prev
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()

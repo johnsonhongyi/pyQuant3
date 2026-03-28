@@ -1063,7 +1063,10 @@ class DailyEmotionBaseline:
                     'lastv1d': lastv1d,
                     'lastl1d': lastl1d,
                     'is_active_anomaly': is_active_anomaly,
-                    'is_acceleration': is_acceleration
+                    'is_acceleration': is_acceleration,
+                    # [NEW] 10. SBC_OPT 结构上下文
+                    'is_minor_decline': getattr(row, 'is_minor_decline', False),
+                    'is_congested': getattr(row, 'is_congested', False)
                 }
 
                 # 安全等级基础分 (0-5)
@@ -1161,6 +1164,7 @@ class IntradayEmotionTracker:
         self._cumulative_amt = {}
         self._intraday_high = {}
         self._signal_start_price = {} # {code: start_price}
+        self._opt_states = {}       # {code: opt_dict}
         self._last_date = {}        # {code: day_num} 用于处理跨天重置累积量
         self._code_to_name = {}     # [Phase 4] 系统内部名称映射兜底
         # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
@@ -1179,6 +1183,7 @@ class IntradayEmotionTracker:
         self._cumulative_amt.clear()
         self._intraday_high.clear()
         self._signal_start_price.clear()
+        self._opt_states.clear()
         self._last_date.clear()
         # self._code_to_name.clear() # 通常名称不随数据清除
 
@@ -1340,6 +1345,7 @@ class IntradayEmotionTracker:
                             self._last_vol[code_str] = 0.0
                             self._cumulative_amt[code_str] = 0.0
                             self._intraday_high[code_str] = 0.0
+                            self._opt_states[code_str] = {} # 跨天重置状态机
                             self._last_date[code_str] = r_day_num
 
                         anchors = baseline_tracker.get_anchor(code_str)
@@ -1429,9 +1435,65 @@ class IntradayEmotionTracker:
                             # 更新日内高点
                             if r_high > i_high: self._intraday_high[code_str] = r_high
 
+                            # --- 🚀 [NEW] SBC_OPT 复合形态追踪 ---
+                            # 逻辑核心：模拟 sbc_core.run_sbc_analysis_core 里的状态机
+                            opt_state = self._opt_states.setdefault(code_str, {
+                                "down_vwap": False, "up_last_close": False, "pullback": False, 
+                                "peak_after_rebound": 0.0, "morning_v_rebound": False
+                            })
+                            # 解析时间 (HH:MM) 用于各阶段窗口判定
+                            t_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1][:5]
+                            is_morning = "09:30" <= t_str <= "11:35"
+                            is_early = "09:30" <= t_str <= "10:15"
+                            
+                            sbc_opt_buy = False
+                            sbc_opt_reason = ""
+                            
+                            # 1. 下破均线 (只要曾经低于均线即记录)
+                            if not opt_state.get("down_vwap") and is_morning and price < avg_p:
+                                opt_state["down_vwap"] = True
+
+                            # [PROACTIVE] 主升浪 V转抢筹点 (针对 002361 类强势股)
+                            is_strong = anchors.get('is_rising_struct') or anchors.get('was_limit_up')
+                            if is_strong and opt_state.get("down_vwap") and not opt_state.get("morning_v_rebound"):
+                                if (price > avg_p) and (price > last_c) and is_early:
+                                    if final_scores[idx_val] > 54.0 or vol_r > 1.7:
+                                        sbc_opt_buy = True
+                                        sbc_opt_reason = "🚀主升浪:强力回踩站回"
+                                        opt_state["morning_v_rebound"] = True
+                                        opt_state["up_last_close"] = True # 同步
+                            
+                            # 2. 反弹上破昨收
+                            if opt_state.get("down_vwap") and not opt_state.get("up_last_close") and price > last_c:
+                                opt_state["up_last_close"] = True
+                                opt_state["peak_after_rebound"] = price
+                            
+                            # 3. 回落
+                            if opt_state.get("up_last_close") and not opt_state.get("pullback"):
+                                if price < opt_state["peak_after_rebound"] - 0.02:
+                                    opt_state["pullback"] = True
+                                else:
+                                    opt_state["peak_after_rebound"] = max(opt_state["peak_after_rebound"], price)
+                            
+                            # 4. 触发判定 (加速异动 / 突破昨日峰值)
+                            if opt_state.get("pullback") and not sbc_opt_buy:
+                                is_break_peak = price > opt_state["peak_after_rebound"]
+                                is_acc_win = ("11:00" <= t_str <= "11:35") or ("13:00" <= t_str <= "13:10")
+                                is_near_high = price > (y_high * 0.99) if y_high > 0 else False
+                                
+                                if is_break_peak and (final_scores[idx_val] > 60.0 or vol_r > 2.5) and (is_acc_win or is_near_high):
+                                    if anchors.get('is_minor_decline'): sbc_opt_reason = "🚀小幅跌后异动抢筹"
+                                    elif anchors.get('is_congested'): sbc_opt_reason = "🚀焦灼期放量突破"
+                                    else: sbc_opt_reason = "🚀日内异动脉冲"
+                                    
+                                    sbc_opt_buy = True
+                                    opt_state["pullback"] = False # 锁定形态
+                                    opt_state["peak_after_rebound"] = 999999.0
+                            
                             # 综合判定：SBC (Structural Breakout Champion)
                             is_rising = anchors.get('is_rising_struct', False)
-                            is_sbc_buy = ("均线上" in status and ("创多日高" in status or "诱空转多" in status or "强势启动" in status or "强启动" in status)) or ("🔥趋势加速" in status)
+                            is_sbc_buy = (("均线上" in status and ("创多日高" in status or "诱空转多" in status or "强势启动" in status or "强启动" in status)) 
+                                         or ("🔥趋势加速" in status) or sbc_opt_buy)
                             is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             
                             is_sbc = is_sbc_buy or is_sbc_sell
@@ -1445,10 +1507,20 @@ class IntradayEmotionTracker:
 
                                  # 只有在从“非SBC”转为“SBC”时标记图标
                                  if not prev_sbc:
-                                     sig_text = "🚀强势结构"
-                                     if "🔥趋势加速" in status:
-                                         sig_text = "🔥趋势加速"
-                                     elif not is_sbc_buy: # 如果不是买点，那就是破位
+                                     # [STACK] 聚合多重启动因子，增强信号冲击力 (挖掘启动核心)
+                                     if is_sbc_buy:
+                                         reasons = [sbc_opt_reason] if sbc_opt_reason else []
+                                         # 叠加 status 里的关键强势标签
+                                         major_tags = ("创多日高", "强势启动", "强启动", "5D突破", "30D突破", "🔥趋势加速", "大回归突破", "诱空转多")
+                                         for tag in status:
+                                             if tag in major_tags and tag not in reasons:
+                                                 reasons.append(tag)
+                                         
+                                         sep = " + " if reasons else ""
+                                         sig_text = " + ".join(reasons) if reasons else "🚀强势结构"
+                                         if not any(sig_text.startswith(icon) for icon in ("🚀", "🔥", "⚠️")):
+                                             sig_text = "🚀" + sig_text
+                                     else:
                                          sig_text = "⚠️结构破位"
                                      
                                      sbc_signals.append(sig_text)
@@ -1472,7 +1544,6 @@ class IntradayEmotionTracker:
                                          else:
                                              logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
                                          
-                                         # ⭐ [NEW] 将信号外发到总线，以便仪表盘捕获
                                          try:
                                              from signal_bus import SignalBus
                                              bus = SignalBus()
@@ -1482,6 +1553,9 @@ class IntradayEmotionTracker:
                                                  payload={
                                                      "code": code_str,
                                                      "name": name_str,
+                                                     "price": price,
+                                                     "time": r_time_str,
+                                                     "action": "BUY" if is_sbc_buy else "SELL",
                                                      "pattern": "突破" if is_sbc_buy else "破位",
                                                      "subtype": sig_text,
                                                      "detail": f"{sig_text}: {r_time_str} ({avg_p:.2f})",

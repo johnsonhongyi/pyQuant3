@@ -30,7 +30,7 @@ from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
     QRect, QPointF, QRectF
 )
-
+import time
 from PyQt6.QtGui import (
     QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, 
     QActionGroup, QShortcut, QKeySequence,QFontMetrics
@@ -2330,6 +2330,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_thread.start()
         self.last_voice_ts = "" # 记录最后一次播报的信号时间
         self._voice_paused = False # [NEW] 独立的语音暂停标志
+        self.verbose_log_enabled = False # [NEW] 控制台详细日志开关
         self.sina = sina_data.Sina() # [NEW] Centralized Sina instance for the main process
         
         # [FIX] 内部实时进程专用的停止标志，避免污染全局 stop_flag
@@ -2505,6 +2506,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._cache_code_info = {}   # 标题信息缓存
         self._last_rendered_code = ""
         self._last_rendered_resample = ""
+        self._last_stock_switch_time = 0  # ⭐ 新增：记录最后一次切股时间，用于视口沉降保护
         
         # ⚡ [OPTIMIZATION] 图表渲染节流控制器
         # code -> last_render_timestamp
@@ -6636,6 +6638,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_action.triggered.connect(self._toggle_hotlist_voice)
         menubar.addAction(self.voice_action)
 
+        # [NEW] 📜 日志开关 (记忆加载)
+        is_log_on = getattr(self, 'verbose_log_enabled', False)
+        log_text = "📜 日志: 开" if is_log_on else "📜 日志: 关"
+        self.log_toggle_action = QAction(log_text, self)
+        self.log_toggle_action.setStatusTip("开启/关闭控制台详细信号计算日志")
+        self.log_toggle_action.triggered.connect(self._toggle_verbose_log)
+        menubar.addAction(self.log_toggle_action)
+
 
     def _apply_widget_theme(self, widget: pg.GraphicsLayoutWidget):
         """应用主题到 GraphicsLayoutWidget"""
@@ -6777,44 +6787,68 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel._voice_paused = new_is_paused
             # 如果面板也开着，强制让它更新一下按钮样式
             if hasattr(self.hotlist_panel, '_update_voice_button_style'):
-                try:
-                    self.hotlist_panel._update_voice_button_style()
-                except: pass
-            
-        # 4. ⭐ 立即持久化 (关键)
-        self._save_visualizer_config()
+                self.hotlist_panel._update_voice_button_style()
+                
+        # 4. 同步给语音线程
+        if hasattr(self, 'voice_thread') and self.voice_thread:
+            if new_is_paused:
+                self.voice_thread.pause()
+            else:
+                self.voice_thread.resume()
 
-        # 5. [IPC] 反向同步给主进程
-        self._send_voice_state_to_main_app(enabled=(new_is_paused))
+        # 5. [OPTIMIZED] 采用延迟保存，防止主线程 IO 导致的 UI 卡死
+        QTimer.singleShot(1000, self._save_visualizer_config)
+
+        # 6. [IPC] 反向同步给主程序监控进程 (确保互斥同步)
+        enabled = not new_is_paused
+        self._send_voice_state_to_main_app(enabled=enabled)
+
+    def _toggle_verbose_log(self):
+        """切换详细计算日志显示并触发延迟持久化 (避免主线程卡死)"""
+        self.verbose_log_enabled = not self.verbose_log_enabled
+        log_text = "📜 日志: 开" if self.verbose_log_enabled else "📜 日志: 关"
+        if hasattr(self, 'log_toggle_action'):
+             self.log_toggle_action.setText(log_text)
+        
+        # 立即记录日志，但延迟保存文件
+        logger.info(f"SBC Verbose Log: {'ENABLED' if self.verbose_log_enabled else 'DISABLED'}")
+        
+        # 使用定时器延迟保存，防止连续点击造成 IO 阻塞
+        QTimer.singleShot(1000, self._save_visualizer_config)
 
     def _send_voice_state_to_main_app(self, enabled=True):
-        """通过命名管道同步语音状态给主程序 (实现进程间互斥)"""
-        import win32pipe, win32file, pywintypes
-        import json
-        
-        try:
-            # 这里的 PIPE_NAME_TK 是在 data_utils 中定义的，并被 instock_MonitorTK 监听
+        """[ASYNC SAFE] 将语音状态同步给主监控，绝不阻塞 UI 主线程"""
+        # 使用闭包逻辑，在 QTimer.singleShot 中执行
+        def do_sync():
+            import win32pipe, win32file, pywintypes, json, win32event
             pipe_name = r'\\.\pipe\instock_tk_pipe'
-            handle = win32file.CreateFile(
-                pipe_name,
-                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0, None, win32file.OPEN_EXISTING, 0, None
-            )
-            
-            payload = json.dumps({
-                "cmd": "SET_VOICE_STATE",
-                "enabled": enabled,
-                "source": "Visualizer"
-            })
-            
-            win32file.WriteFile(handle, payload.encode('utf-8'))
-            win32file.CloseHandle(handle)
-            logger.info(f"Sent SET_VOICE_STATE(enabled={enabled}) to Main App")
-        except pywintypes.error as e:
-            # 管道不存在或没被监听很正常，不需要报错
-            logger.debug(f"Main App pipe not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to sync voice state to main app: {e}")
+            try:
+                # 设定极短超时 10ms，如果管道忙或不响应，直接放弃，绝不等待
+                try:
+                    win32pipe.WaitNamedPipe(pipe_name, 10)
+                except pywintypes.error:
+                    return # 管道不存在或忙，不阻塞主线程
+                
+                handle = win32file.CreateFile(
+                    pipe_name,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0, None, win32file.OPEN_EXISTING, 0, None
+                )
+                
+                payload = json.dumps({
+                    "cmd": "SET_VOICE_STATE",
+                    "enabled": enabled,
+                    "source": "Visualizer"
+                })
+                
+                win32file.WriteFile(handle, payload.encode('utf-8'))
+                win32file.CloseHandle(handle)
+                # logger.debug(f"IPC: Sent SET_VOICE_STATE({enabled})")
+            except Exception:
+                pass # 任何异常都不报，确保主线程安全性
+        
+        # 核心：通过 0ms 定时器将任务推送到事件循环末尾，实现事实上的异步
+        QTimer.singleShot(0, do_sync)
 
     def _update_app_bg(self, color):
         self.custom_bg_app = color
@@ -8156,6 +8190,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if not getattr(self, '_is_resetting_charts', False):
                 is_from_button = isinstance(df, bool)
                 if is_from_button or force:
+                    # [MANUAL VIEW LOCK CLEAR] Clear the lock when a forced reset occurs.
+                    self._manual_view_lock = False
                     # [FIX] 点击 reset 按键或要求 force 复位时，清理 K 线图基础数据解决图像重影问题
                     logger.debug("Manual reset triggered, clearing charts to fix ghosting...")
                     self._is_resetting_charts = True
@@ -8437,6 +8473,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
         self.current_code = code
+        self._last_stock_switch_time = time.time()  # 记录切股时间
         self.select_resample = self.resample
         self.tick_prices = np.array([])
         self.tick_avg_prices = np.array([])
@@ -8975,14 +9012,17 @@ class MainWindow(QMainWindow, WindowMixin):
     def _install_viewbox_guard(self, plot: pg.PlotItem):
         vb = plot.getViewBox()
         
-        def on_range_changed(vb_self, range):
-            # 强制锁定 X 轴
-            vb_self.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-            # Y 轴保持自动
-            vb_self.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        def on_manual_range_changed(vb_self, extents):
+            # [VIEW LOCK] 当用户通过鼠标/滚轮手动改变视口时，施加锁定，抵御后续的数据 tick 更新带来的强制重绘
+            if not getattr(self, '_is_resetting_charts', False):
+                self._manual_view_lock = True
         
-        # 连接一次，后续 addItem 不会破坏这个 hook
-        vb.sigRangeChanged.connect(on_range_changed)
+        try:
+            # 断开旧的强制干预机制，因为它会不断强制恢复 Y 轴 AutoRange（与用户意图冲突）
+            # 新增手动缩放监听，一旦用户缩放，就阻止实时数据刷新的 ViewBox 强制跳转
+            vb.sigRangeChangedManually.connect(on_manual_range_changed)
+        except Exception as e:
+            logger.debug(f"[_install_viewbox_guard] Hook setup failed: {e}")
 
     def _check_market_gaps(self):
         """
@@ -9097,30 +9137,26 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if day_df.empty:
             # [FIX] 只有当 code 发生变化且数据为空时才彻底清理。
-            # 如果是同一只股由于某种原因触发了空渲染，我们选择保留旧图，防止“闪没”
             if self.current_day_df_code != code:
                 self.kline_plot.setTitle(f"{code} - No Data")
                 self.tick_plot.setTitle("No Tick Data")
-                # 清理旧图形，防止切股后还有残留
                 self.kline_plot.clear()
             self.tick_plot.clear()
             if hasattr(self, 'volume_plot'):
                 self.volume_plot.clear()
-            # 清除缓存的 Items
-            for attr in ['candle_item', 'date_axis', 'vol_up_item', 'vol_down_item',
-                        'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
-                        'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ghost_candle']:
-                if hasattr(self, attr):
-                    delattr(self, attr)
             return
 
+        # ⚡ [CRITICAL] 提前数据标准化与排序，确保后续所有逻辑基于一致的坐标系
+        day_df = _normalize_dataframe(day_df)
+        if 'date' in day_df.columns:
+            day_df = day_df.set_index('date')
+        day_df = day_df.sort_index()
+
         # ----------------- 0. 数据同步与视角处理 (🛡️ 提前至渲染前，解决重置擦除问题) -----------------
-        # 核心修复：必须在绘制任何新图形前完成 Sync 和 Reset，否则 _reset_kline_view 会擦除已绘制的内容
         is_resetting = getattr(self, '_is_resetting_charts', False)
         is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
         
-        # 同步归一化后的数据到 self.day_df
-        # [CRITICAL] 必须提前同步，让后续的指标计算基于最新的 self.day_df
+        # 同步归一化后的数据
         self.day_df = day_df
         self._last_rendered_code = code
 
@@ -9195,10 +9231,16 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 保持自适应开启
                 vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
                 vb.setAutoVisible(y=True)
-
+            import time
             # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
-            # [UPGRADE] 智能判定：仅当用户处于“观测最新行情”状态时，才在价格出圈时自动纠偏
-            if not (is_new_stock or is_resample_change or has_captured_state):
+            # [UPGRADE] 智能判定：仅当用户处于“观测最新行情”状态时，且不在切股冷却期，才在价格出圈时自动纠偏
+            current_time = time.time()
+            is_cooling_down = (current_time - getattr(self, '_last_stock_switch_time', 0)) < 1.0
+
+            # [VIEW LOCK] 如果处于用户手动缩放锁定期，则不再执行自适应纠偏，直到主动 reset
+            is_user_locked = getattr(self, '_manual_view_lock', False)
+
+            if not (is_new_stock or is_resample_change or has_captured_state or is_cooling_down or is_user_locked):
                  if not day_df.empty:
                      last_c = day_df['close'].iloc[-1]
                      total_bars = len(day_df)
@@ -9267,12 +9309,7 @@ class MainWindow(QMainWindow, WindowMixin):
             tick_avg_color = QColor(255, 140, 0)
             pre_close_color = '#FF0000'
 
-        day_df = _normalize_dataframe(day_df)
-
-        if 'date' in day_df.columns:
-            day_df = day_df.set_index('date')
-        logger.debug(f'day_df.index:\n {day_df.index[-2:]}')
-        day_df = day_df.sort_index()
+        pre_close_color = '#FF0000'
         
         # ⚡ [DEBUG] Check OHLC data integrity
         try:
@@ -9710,18 +9747,33 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.all_today_sbc_signals = cached_sbc[1]
                 # logger.debug(f"[PERF] SBC Cache HIT for {code}")
             else:
-                with timed_ctx("sbc_core_analysis", warn_ms=200):
+                with timed_ctx("sbc_core_analysis", warn_ms=50):
                     try:
-                        # 委托 sbc_core 进行高性能批量分析
+                        # 委托 sbc_core 进行高性能批量分析 (日期感知流)
                         sbc_results = sbc_core.run_sbc_analysis_core(
-                            code, day_df, tick_df, verbose=True,
-                            engine=self.decision_engine, # 复用引擎
-                            baseline_loader=self.sbc_baseline_loader # 复用加载器
+                            code, day_df, tick_df, verbose=self.verbose_log_enabled,
+                            engine=self.decision_engine, 
+                            baseline_loader=self.sbc_baseline_loader
                         )
                         self.all_today_sbc_signals = sbc_results.get("signals", [])
+                        
+                        # [SYNC] 将分时买点信号同步映射到 K 线层，实现跨维显示
+                        for s in self.all_today_sbc_signals:
+                            s_ts = s.timestamp
+                            s_date = s_ts[:10] if isinstance(s_ts, str) else datetime.fromtimestamp(s_ts).strftime('%Y-%m-%d')
+                            k_idx = self._find_date_index(day_df, s_date)
+                            if k_idx != -1 and s.signal_type in (SignalType.BUY, SignalType.FOLLOW):
+                                ks = SignalPoint(
+                                    code=s.code, timestamp=s.timestamp, 
+                                    bar_index=k_idx, price=day_df['close'].iloc[k_idx],
+                                    signal_type=s.signal_type, reason=s.reason,
+                                    source=s.source, debug_info=s.debug_info
+                                )
+                                kline_signals.append(ks)
                         self._sbc_cache[code] = (sbc_key, self.all_today_sbc_signals)
                     except Exception as e:
-                        logger.debug(f"SBC integration error: {e}")
+                        import traceback
+                        logger.debug(f"SBC integration error: {e}\n{traceback.format_exc()}")
             
             # ⭐ [FIX] 立即刷新视觉层数据
             self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
@@ -11380,6 +11432,16 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._voice_paused = is_p
                 logger.info(f"StartUp: Pre-loaded Voice Config. Paused={is_p}")
 
+            # [NEW] 3.7.2 📜 详细日志开关加载
+            if 'verbose_log_enabled' in window_config:
+                is_log = bool(window_config.get('verbose_log_enabled', False))
+                self.verbose_log_enabled = is_log
+                logger.info(f"StartUp: Pre-loaded Verbose Log Config. Enabled={is_log}")
+                # 同步 UI 状态
+                if hasattr(self, 'log_toggle_action'):
+                    log_text = "📜 日志: 开(Alt+L)" if is_log else "📜 日志: 关(Alt+L)"
+                    self.log_toggle_action.setText(log_text)
+
             # 3.9 联动自动显示状态 (提前恢复)
             if 'tk_linkage_auto_display' in window_config:
                 self.tk_linkage_auto_display = bool(window_config.get('tk_linkage_auto_display', True))
@@ -11582,6 +11644,9 @@ class MainWindow(QMainWindow, WindowMixin):
             
             is_p = getattr(self, '_voice_paused', False)
             window_config['hotlist_voice_paused'] = is_p
+            
+            # [NEW] 📜 详细日志开关保存
+            window_config['verbose_log_enabled'] = getattr(self, 'verbose_log_enabled', False)
             logger.info(f"[SaveConfig] Voice Paused: {is_p}")
             
             # 3.10 联动自动显示状态
