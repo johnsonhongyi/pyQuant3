@@ -9747,7 +9747,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.all_today_sbc_signals = cached_sbc[1]
                 # logger.debug(f"[PERF] SBC Cache HIT for {code}")
             else:
-                with timed_ctx("sbc_core_analysis", warn_ms=50):
+                with timed_ctx("sbc_core_analysis", warn_ms=100):
                     try:
                         # 委托 sbc_core 进行高性能批量分析 (日期感知流)
                         sbc_results = sbc_core.run_sbc_analysis_core(

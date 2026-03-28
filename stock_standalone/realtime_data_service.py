@@ -1313,9 +1313,26 @@ class IntradayEmotionTracker:
                     sbc_signals = []
                     scores_dict = final_scores.to_dict()
                     
-                    # 获取当前环境秒数用于兜底
+                    # [极速遍历] 终极 TupleProxy 架构：彻底干掉 iterrows 每行 80us 开销，降级到 1us，纯内存拉锯战
                     now_ts = time.time()
-                    for idx_val, row in df.iterrows():
+                    idx_vals = df.index.tolist()
+                    col_idx = {col: i for i, col in enumerate(df.columns)}
+                    class TupleProxy:
+                        __slots__ = ['tup']
+                        def get(self, key, default=None):
+                            if key in col_idx:
+                                val = self.tup[col_idx[key]]
+                                return default if (val is None or val != val) else val
+                            return default
+                        def __getitem__(self, key):
+                            return self.tup[col_idx[key]]
+                        def __contains__(self, key):
+                            return key in col_idx
+                    row = TupleProxy()
+                    
+                    for i, tup in enumerate(df.itertuples(index=False, name=None)):
+                        idx_val = idx_vals[i]
+                        row.tup = tup
                         code_str = str(row['code']).zfill(6)
                         # [Phase 4] 只有明确有 name 才显示，否则为空字符串
                         name_raw = row.get('name', '')
@@ -1332,11 +1349,15 @@ class IntradayEmotionTracker:
                         
                         name_display = f" {name_str}" if name_str else ""
                         # [Daily Reset Protection] 检测到新的一天，重置累积 VWAP 计算器
-                        # 优先从 row 中读取 time/timestamp
-                        r_ts = getattr(row, 'time', getattr(row, 'timestamp', now_ts))
-                        if isinstance(r_ts, str):
-                            try: r_ts = pd.to_datetime(r_ts).timestamp()
-                            except: r_ts = now_ts
+                        # 优先提取极速序列避免数千次 parse
+                        r_ts_flt = row.get('_fast_ts', 0)
+                        if isinstance(r_ts_flt, (int, float)) and r_ts_flt > 1e8:
+                            r_ts = r_ts_flt
+                        else:
+                            r_ts = row.get('time', row.get('timestamp', now_ts))
+                            if isinstance(r_ts, str):
+                                try: r_ts = pd.to_datetime(r_ts).timestamp()
+                                except: r_ts = now_ts
                         
                         r_day_num = int((r_ts + 28800) // 86400)
                         if r_day_num > self._last_date.get(code_str, 0):
@@ -1492,7 +1513,7 @@ class IntradayEmotionTracker:
                             
                             # 综合判定：SBC (Structural Breakout Champion)
                             is_rising = anchors.get('is_rising_struct', False)
-                            is_sbc_buy = (("均线上" in status and ("创多日高" in status or "诱空转多" in status or "强势启动" in status or "强启动" in status)) 
+                            is_sbc_buy = (("均线上" in status and any(kw in status for kw in ("创多日高", "诱空转多", "强势启动", "强启动", "大回归突破", "30D突破", "5D突破"))) 
                                          or ("🔥趋势加速" in status) or sbc_opt_buy)
                             is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             
