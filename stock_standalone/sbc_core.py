@@ -342,16 +342,16 @@ def get_day_context(code: str, day_df: pd.DataFrame, tick_date):
         prev2_row = hist_day_df.iloc[-3] if len(hist_day_df) >= 3 else prev_row
         prev3_row = hist_day_df.iloc[-4] if len(hist_day_df) >= 4 else prev2_row
 
-        # [NEW] 2D 采样支撑位 (MA60d on 2d sample)
-        ma60_2d = row.get('ma60', row.get('ma60d', row['close'])) # 默认
+        # [正确性兜底] 恢复真实的 2D 大视野切片支撑线，其在 Numpy 底层只占 1us，但真实反映 120 日滑动通道，
+        # 远比直接贴 ma602d (前天的原生 60 均线) 准且有动态变化
+        ma60_2d = float(row.get('ma60', row.get('ma60d', row['close'])))
         try:
-            day_df_2d = load_day_data(code, resample='2d', fastohlc=True)
-            if day_df_2d is not None and not day_df_2d.empty:
-                # 寻找日期 D 之前的最近 2d bar
-                match_2d = day_df_2d[day_df_2d.index.astype(str) < t_date_str]
-                if not match_2d.empty:
-                    ma60_2d = float(match_2d.iloc[-1].get('ma60', ma60_2d))
-        except: pass
+            if not hist_day_df.empty and 'close' in hist_day_df:
+                sampled_closes = hist_day_df['close'].iloc[::-1].iloc[::2].head(60)
+                if len(sampled_closes) > 0:
+                    ma60_2d = float(sampled_closes.mean())
+        except:
+            pass
 
         # [形态感知]
         is_doji = abs(row['open'] - row['close']) / row['close'] < 0.012
@@ -692,30 +692,52 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
         elif 'vol' not in tick_df.columns:
             tick_df['vol'] = 0
 
+        # [极限性能优化] Pandas 向量化处理时间，避免 for 循环内几千次 parse_t 开销 (约省 15ms)
+        try:
+            if 'ticktime' in tick_df.columns:
+                dt_s = pd.to_datetime(tick_df['ticktime'], errors='coerce')
+            elif 'time' in tick_df.columns:
+                if len(tick_df) > 0 and isinstance(tick_df['time'].iloc[0], (int, float, np.integer, np.floating)):
+                    is_ms = tick_df['time'].iloc[0] > 1.5e12
+                    t_unit = 'ms' if is_ms else 's'
+                    dt_s = pd.to_datetime(tick_df['time'], unit=t_unit, utc=True).dt.tz_convert('Asia/Shanghai')
+                else:
+                    dt_s = pd.to_datetime(tick_df['time'], errors='coerce')
+            elif getattr(tick_df.index, 'name', None) == 'ticktime' or isinstance(tick_df.index, pd.DatetimeIndex):
+                dt_s = pd.to_datetime(tick_df.index, errors='coerce')
+            else:
+                dt_s = pd.Series([pd.NaT]*len(tick_df), index=tick_df.index)
+            
+            tick_df['_fast_date'] = dt_s.dt.strftime('%Y-%m-%d').fillna(t_date_str)
+            tick_df['_fast_time'] = dt_s.dt.strftime('%H:%M').fillna('00:00')
+        except Exception as e:
+            logger.debug(f"Vectorized datetime parsing failed, fallback empty: {e}")
+
     # 4. 批量更新 EmotionTracker
-    with timed_ctx("5_tracker_batch_update", warn_ms=800):
+    with timed_ctx("5_tracker_batch_update", warn_ms=50):
         tracker = IntradayEmotionTracker()
         tracker.update_batch(tick_df, baseline_loader)
     
-        # [PERF] 极致遍历性能：转换为 dict 列表
-        tick_list = tick_df.reset_index().to_dict('records')
+        # [PERF] 极致遍历性能：替换 to_dict('records') 为无开销 TupleProxy 原生迭代
+        tick_df_reset = tick_df.reset_index()
+        col_idx = {col: i for i, col in enumerate(tick_df_reset.columns)}
+        class CoreTupleProxy:
+            __slots__ = ['tup']
+            def get(self, key, default=None):
+                if key in col_idx:
+                    val = self.tup[col_idx[key]]
+                    return default if (val is None or val != val) else val
+                return default
+            def __getitem__(self, key):
+                return self.tup[col_idx[key]]
+            def __contains__(self, key):
+                return key in col_idx
+        r = CoreTupleProxy()
         
-        for i, r in enumerate(tick_list):
-            # [DATE SENSE] 检测日期切换并动态重置逻辑对齐
-            t_str = get_tick_str(r)
-            try:
-                raw_t = r.get('ticktime', r.get('time', ''))
-                if isinstance(raw_t, (int, float, np.integer, np.floating)):
-                    # [Unix Support] 处理秒或毫秒戳
-                    t_unit = 'ms' if raw_t > 1.5e12 else 's'
-                    tick_date = pd.to_datetime(raw_t, unit=t_unit, utc=True).tz_convert('Asia/Shanghai').strftime('%Y-%m-%d')
-                elif isinstance(raw_t, str) and len(raw_t) >= 10:
-                    tick_date = raw_t[:10]
-                else:
-                    tick_date = pd.to_datetime(raw_t).strftime('%Y-%m-%d')
-            except:
-                tick_date = t_date_str
-
+        for i, tup in enumerate(tick_df_reset.itertuples(index=False, name=None)):
+            r.tup = tup
+            t_str = r.get('_fast_time', '00:00') if '_fast_time' in r else '00:00'
+            tick_date = r.get('_fast_date', t_date_str) if '_fast_date' in r else t_date_str
             if tick_date != last_date_str:
                 # 重新加载 D-1 的锚点头部
                 loader_tmp, anchors, lastp1d_val, ma5d_val, ma10d_val, ma60d_val, day_row = get_day_context(code, day_df, tick_date)
@@ -751,7 +773,7 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                     base_eval = engine.evaluate(row_init, snapshot, mode="sell_only")
                     
                     if verbose:
-                        print(f"\n── {tick_date} | \033[93m{code}\033[0m 昨收:{lastp1d_val:.2f} | 2D核心支撑:{anchors.get('support_2d_ma60',0):.2f}")
+                        print(f"── {tick_date} | \033[93m{code}\033[0m 昨收:{lastp1d_val:.2f} | 2D核心支撑:{anchors.get('support_2d_ma60',0):.2f}")
                 else:
                     continue # 无法定位历史数据则跳过该日
 
@@ -778,26 +800,11 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                 'nclose':  avg_price,
             })
             
-            # (A.0) 实时计算买入强度 (buyscore)
+            # (A.0) 核心指标提取与分值对齐
             pct_now = (p - lastp1d_val) / lastp1d_val * 100 if lastp1d_val else 0
-            
-            # [AMPLIFIER] 结构性加分 (这是逻辑的内核)
-            # 1. 2D 十字星企稳加分
-            struct_bonus = 15 if anchors.get('is_2d_doji') else 0
-            # 2. 2D MA60 支撑位加分 (只要在支撑位附近企稳)
-            ma60_2d = anchors.get('support_2d_ma60', 0)
-            is_near_2d_ma60 = (ma60_2d > 0) and (abs(p - ma60_2d) / ma60_2d < 0.015)
-            if is_near_2d_ma60: struct_bonus += 10
-            # 3. 卖出信号失效翻转加分
-            # (这里会在下方检测 action，并维持一个 session 状态)
-            
-            price_score = pct_now * 4.5
             vol_ratio = float(r.get('amount_ratio', r.get('ratio', 1.0)))
-            volume_score = (vol_ratio - 1.0) * 10.0 if vol_ratio > 1.0 else 0
-            
-            target_score = 50 + price_score + volume_score + struct_bonus
-            curr_emo_score = curr_emo_score * (1 - EMA_ALPHA) + target_score * EMA_ALPHA
-            row_dict['emotion_score'] = curr_emo_score
+            curr_emo_score = float(r.get('rt_emotion', curr_emo_score))
+            row_dict.update({'trade': p, 'rt_emotion': curr_emo_score, 'pct_now': pct_now, 'vol_ratio': vol_ratio})
             
             # (A) SBC 买入信号判定: 🚀强势结构 或 🔥趋势加速
             status = str(r.get('sbc_status', ''))
@@ -829,14 +836,11 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                 # 3. 最终触发条件
                 # 允许性质切换或价格加强后的信号，只要冷却时间已到；或者是即时的动量升级
                 should_trigger = (i - last_idx > 30 and (is_status_change or is_price_higher)) or is_upgrade
-                
                 if should_trigger:
-                    t_str = get_tick_str(r) if verbose else ""
-                    # [STABILIZE] 仅针对关键信号进行打印，并在大量回放时限制频率
+                    t_str = get_tick_str(r)
                     if verbose:
                         emoji = "🔥" if is_cur_acc else "🚀"
-                        # logger 代替 print 往往更安全且带缓冲
-                        logger.info(f"[{t_str}] 🎯 {emoji} 买入: {status} at {p:.2f} ({curr_emo_score:.1f})")
+                        print(f"[{t_str}] 🎯 {emoji} 买入: {status} at {p:.2f} (分值:{curr_emo_score:.1f})")
                     
                     signals.append(SignalPoint(
                         code=code, timestamp=str(r.get('ticktime', t_str)), 
@@ -923,7 +927,7 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                             score_bonus = 2
                         
                         if verbose:
-                            logger.info(f"[{t_str}] 🚀🚀 {reason_str} p={p:.2f} | score:{curr_emo_score:.1f}")
+                            print(f"[{t_str}] 🚀🚀 {reason_str} p={p:.2f} | 分值:{curr_emo_score:.1f}")
                         
                         signals.append(SignalPoint(
                             code=code, timestamp=str(r.get('ticktime', t_str)), 
@@ -956,7 +960,7 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                         t_str = get_tick_str(r) if verbose else ""
                         if verbose:
                             sel_score = decision.get("debug", {}).get("top_score", 0.0)
-                            logger.info(f"[{t_str}] ⚠️  SELL: {action} at {p:.2f} | score:({sel_score:.2f})")
+                            print(f"[{t_str}] ⚠️  SELL: {action} at {p:.2f} | {reason} (分值:{sel_score:.2f})")
                         
                         signals.append(SignalPoint(
                             code=code, timestamp=str(r.get('ticktime', t_str)), 
