@@ -248,37 +248,15 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         for pos in breaks:
             day_separators.append((pos, 'gray', 0.8, 'v'))
 
-    # ── 3. 分析逻辑 (使用 sbc_core 核心) ───────────────────────────────────
-    all_signals = []
-    
-    # 预先标记日期列用于分组
-    if 'date' not in stock_df.columns:
-        # [FIX] 统一使用 ts_objs 的结果，确保日期对齐本地时间
-        if times:
-            stock_df['date'] = ts_objs.strftime('%Y-%m-%d')
-        else:
-            stock_df['date'] = datetime.now().strftime('%Y-%m-%d')
-        
-    grouped = list(stock_df.groupby('date'))
-    print(f"Analyzing {len(grouped)} day(s)...")
+    # ── 3. 分析逻辑 (使用 sbc_core 核心，支持全量投喂模式) ───────────────────────────────────
     with timed_ctx("sbc_core_analysis", warn_ms=100):
-        for tick_date, df_day in grouped:
-            # 调用 sbc_core 核心逻辑 (包含 Baseline 提取、SBC 判定、决策引擎评估)
-            res = sbc_core.run_sbc_analysis_core(code, day_df, df_day, use_live=use_live, verbose=verbose)
-            # res = sbc_core.run_sbc_analysis_core_slow(code, day_df, df_day, verbose=True)
-            
-            day_signals = res.get('signals', [])
-            # 获取 df_day 在原始 stock_df 中的位置索引偏移
-            day_start_idx = stock_df.index.get_loc(df_day.index[0])
-            
-            if isinstance(day_signals, list):
-                for s in day_signals:
-                    # 避免对 None 或非 SignalPoint 对象操作 (如果是 dict 也兼容处理)
-                    if hasattr(s, 'bar_index'):
-                        s.bar_index += day_start_idx
-                    elif isinstance(s, dict) and 'bar_index' in s:
-                        s['bar_index'] += day_start_idx
-                    all_signals.append(s)
+        # [ALIGN] 全部投喂，内部日期识别
+        res = sbc_core.run_sbc_analysis_core(
+            code, day_df, stock_df, use_live=use_live, verbose=verbose,
+            engine=None, # 让 core 内部自动初始化逻辑引擎
+            baseline_loader=None
+        )
+        all_signals = res.get('signals', [])
     print_timing_summary(2)
     signals = all_signals
     
@@ -298,6 +276,28 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     sell_cnt = sum(1 for s in signals if s.signal_type.name in ["SELL", "EXIT_FOLLOW", "STOP_LOSS"])
     print(f"\n{'='*60}")
     print(f"✅ 回放完成: {buy_cnt} 个买点  |  {sell_cnt} 个卖出点")
+
+    # [NEW] 跨维投影：将分时买入点复制到 K 线层 (用于弹出窗口顶部的 K 绘图)
+    # 给信号点打上 'is_kline' 标签，供可视化工具区分渲染
+    kline_projection = []
+    for s in signals:
+        if s.signal_type.name in ["BUY", "FOLLOW"]:
+            s_ts = s.timestamp
+            # 解析日期字符串
+            s_date = s_ts[:10] if isinstance(s_ts, str) else datetime.fromtimestamp(s_ts).strftime('%Y-%m-%d')
+            # 在日线数据中定位
+            if s_date in day_df.index:
+                k_idx = day_df.index.get_loc(s_date)
+                # 创建投影克隆 (浅拷贝)
+                import copy
+                ks = copy.copy(s)
+                ks.bar_index = k_idx
+                ks.price = day_df['close'].iloc[k_idx]
+                ks.is_kline = True  # ⭐ 关键标识：告诉绘图引擎这是画在 K 线层面的
+                kline_projection.append(ks)
+    
+    # 最终发送给可视化的是全量信号 (分时层信号 + K线层投影信号)
+    all_viz_signals = signals + kline_projection
 
 
     # 计算 VWAP 曲线
@@ -339,7 +339,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     # 5. 可视化
     if show_viz:
         return show_chart_with_signals(
-            viz_df, signals,
+            viz_df, all_viz_signals,
             f"[{code}] 买卖验证 — 结构性信号",
             avg_series=vwap_series,
             time_labels=time_labels,
@@ -351,7 +351,7 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         # 返回数据包，供 GUI 线程异步渲染
         return {
             "viz_df": viz_df,
-            "signals": signals,
+            "signals": all_viz_signals,
             "title": f"[{code}] 买卖验证 — 结构性信号",
             "avg_series": vwap_series,
             "time_labels": time_labels,
