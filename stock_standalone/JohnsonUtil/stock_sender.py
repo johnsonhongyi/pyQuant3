@@ -381,6 +381,7 @@ class StockSender:
                 message_code = int(stock_code)
             except ValueError:
                 message_code = 0
+
             if isinstance(stock_code, dict):
                 stock_code = stock_code['content']
                 stock_code = stock_code.strip()
@@ -389,6 +390,8 @@ class StockSender:
                 if str(message_type) == 'stock':
                     if str(stock_code)[0] in ['0','3','1']:
                         codex = '6' + str(stock_code)
+                    elif str(stock_code)[:3] in ['999']:
+                        codex = '7' + str(stock_code)
                     elif str(stock_code)[0] in ['6','5']:
                         codex = '7' + str(stock_code)
                     # elif str(stock_code)[0] == '9':

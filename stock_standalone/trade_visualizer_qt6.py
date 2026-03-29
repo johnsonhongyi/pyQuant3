@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
     QFrame, QMessageBox, QAbstractItemView, QPushButton, QComboBox, 
     QToolBar, QMenu, QSizePolicy, QStyle, QLineEdit, QCheckBox,
-    QTreeWidget, QTreeWidgetItem
+    QTreeWidget, QTreeWidgetItem, QWidgetAction
 )
 from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
@@ -973,6 +973,22 @@ class DataLoaderThread(QThread):
     _search_code: Optional[str]
     _resample: Optional[str]
 
+    # [NEW] 极简极限性能缓存模式
+    # _df_cache: {(code, resample, fastohlc): (df, timestamp, size)}
+    _df_cache: Dict[tuple, tuple] = {}  
+    _df_cache_keys: List[tuple] = []    # FIFO 队列
+    _total_cache_memory: int = 0        # 当前总内存占用 (bytes)
+    
+    # _tick_cache: {code: (df, timestamp, size)}
+    _tick_cache: Dict[str, tuple] = {}  
+    _tick_cache_keys: List[str] = []    # FIFO 队列
+    _total_tick_memory: int = 0         # 当前分时总内存占用
+    
+    _cache_lock = threading.Lock()
+    MAX_CACHE_COUNT = 100
+    MAX_CACHE_MEMORY = 5 * 1024 * 1024       # 5MB 限制
+    MAX_TICK_CACHE_MEMORY = 5 * 1024 * 1024  # 5MB 限制
+
     def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True, sina=None) -> None:
         super().__init__()
         self.code = code
@@ -998,9 +1014,6 @@ class DataLoaderThread(QThread):
 
     def run(self) -> None:
         try:
-            # ⭐ [NEW] 极简早期退出检查
-            if self._is_interrupted: return
-
             # 使用 QMutexLocker 自动管理锁定和解锁
             if self._search_code == self.code and self._resample == self.resample:
                 return  # 数据已经加载过，不重复
@@ -1008,11 +1021,34 @@ class DataLoaderThread(QThread):
             day_df = pd.DataFrame()
             tick_df = pd.DataFrame()
 
-            # 1. Fetch Daily Data (Historical) with Retry
-            for attempt in range(3):
-                if self._is_interrupted: return # ⭐ 循环内检查
-                try:
-                    with QMutexLocker(self.mutex_lock):
+            is_work_time = cct.get_work_time()
+
+            # 1. Fetch Daily Data (Historical) with Session Awareness
+            cache_key = (self.code, self.resample, self.fastohlc)
+            # day_ttl = 3600 # 交易时间 10 分钟 TTL，非交易时间永久有效
+            
+            with DataLoaderThread._cache_lock:
+                if cache_key in DataLoaderThread._df_cache:
+                    val = DataLoaderThread._df_cache[cache_key]
+                    if len(val) == 3:
+                        cached_df, ts, _ = val
+                    else:
+                        cached_df, ts = val # 兼容旧结构
+                    # 智能 TTL 判断：
+                    # 1. 如果当前日期不同于缓存产生日期 -> 必须重新获取 (交易日变化)
+                    # 2. 如果在交易时间 -> 检查 10 分钟 TTL
+                    # 3. 如果在非交易时间 -> 永久有效 (直至日期变化)
+                    cache_date = datetime.fromtimestamp(ts).date()
+                    current_date = datetime.now().date()
+                    if cache_date == current_date:
+                        # if not is_work_time or (time.time() - ts < day_ttl):
+                            day_df = cached_df
+                            logger.debug(f"[DataLoaderThread] Day Cache Hit: {self.code} (Work:{is_work_time})")
+            
+            if day_df.empty:
+                for attempt in range(3):
+                    if self._is_interrupted: return # ⭐ 循环内检查
+                    try:
                         with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=100):
                             day_df = tdd.get_tdx_Exp_day_to_df(
                                 self.code, 
@@ -1020,38 +1056,104 @@ class DataLoaderThread(QThread):
                                 resample=self.resample, 
                                 fastohlc=self.fastohlc
                             )
-                    if not day_df.empty:
-                        if 'ma60d' in day_df.columns:
-                            with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=1800):
-                                day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
-                            # print(f"'ma60d' in day_df.columns : {'ma60d' in day_df.columns} day_df['cycle_stage']:{day_df['cycle_stage']}")
-                        break
-                except Exception as e:
-                    if attempt == 2:
-                        logger.warning(f"Final attempt failed for day_df {self.code}: {e}")
-                    else:
-                        time.sleep(0.05 * (attempt + 1))
+                        if not day_df.empty:
+                            # [NEW] 存入缓存并执行 FIFO 驱逐 (极限性能模式)
+                            df_size = day_df.memory_usage().sum()
+                            with DataLoaderThread._cache_lock:
+                                # 处理重复 Key (虽然概率低)
+                                if cache_key in DataLoaderThread._df_cache:
+                                    val = DataLoaderThread._df_cache.pop(cache_key)
+                                    old_size = val[2] if len(val) == 3 else 0
+                                    DataLoaderThread._total_cache_memory -= old_size
+                                    if cache_key in DataLoaderThread._df_cache_keys:
+                                        DataLoaderThread._df_cache_keys.remove(cache_key)
+
+                                DataLoaderThread._df_cache[cache_key] = (day_df, time.time(), df_size)
+                                DataLoaderThread._df_cache_keys.append(cache_key)
+                                DataLoaderThread._total_cache_memory += df_size
+                                
+                                # FIFO 驱逐逻辑 (数量或内存超限)
+                                while len(DataLoaderThread._df_cache_keys) > DataLoaderThread.MAX_CACHE_COUNT or \
+                                      DataLoaderThread._total_cache_memory > DataLoaderThread.MAX_CACHE_MEMORY:
+                                    old_key = DataLoaderThread._df_cache_keys.pop(0)
+                                    val = DataLoaderThread._df_cache.pop(old_key)
+                                    old_size = val[2] if len(val) == 3 else 0
+                                    DataLoaderThread._total_cache_memory -= old_size
+                                    logger.debug(f"[DataLoaderThread] Cache Evicted: {old_key} size: {old_size/1024:.1f}KB, remaining: {DataLoaderThread._total_cache_memory/1024/1024:.2f}MB")
+
+                            if 'ma60d' in day_df.columns:
+                                with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=1800):
+                                    day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
+                            break
+                    except Exception as e:
+                        import traceback;traceback.print_exc()
+                        if attempt == 2:
+                            logger.warning(f"Final attempt failed for day_df {self.code}: {e}")
+                        else:
+                            time.sleep(0.05 * (attempt + 1))
             
             # ⭐ [NEW] 阶段间检查
             if self._is_interrupted: return
 
-            # 2. Fetch Realtime/Tick Data (Intraday) with Retry
-            for attempt in range(3):
-                if self._is_interrupted: return # ⭐ 循环内检查
-                try:
-                    with QMutexLocker(self.mutex_lock):
+            # 2. Fetch Realtime/Tick Data (Intraday) with Cache (5s Interval)
+            # [NEW] 极限性能分时缓存逻辑
+            tick_key = self.code
+            tick_interval = getattr(cct.CFG, 'duration_sleep_time', 5)
+            is_work_time = cct.get_work_time()
+            
+            with DataLoaderThread._cache_lock:
+                if tick_key in DataLoaderThread._tick_cache:
+                    val = DataLoaderThread._tick_cache[tick_key]
+                    if len(val) == 3:
+                        cached_tick_df, ts, _ = val
+                    else:
+                        cached_tick_df, ts = val
+                    # 智能判断：日期变更或超时则失效
+                    cache_date = datetime.fromtimestamp(ts).date()
+                    current_date = datetime.now().date()
+                    if cache_date == current_date:
+                        # 判断是否过有效期 (若不在交易时间，缓存永不过期直到次日)
+                        if not is_work_time or (time.time() - ts < tick_interval):
+                            tick_df = cached_tick_df
+                            logger.debug(f"[DataLoaderThread] Tick Cache Hit: {self.code} (WorkTime:{is_work_time})")
+            
+            if tick_df.empty:
+                for attempt in range(3):
+                    if self._is_interrupted: return # ⭐ 循环内检查
+                    try:
                         with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=1800):
                             # tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
                             s = self.sina if self.sina else sina_data.Sina()
                             tick_df = s.get_real_time_tick(self.code, enrich_data=True)
                             # logger.debug(f'get_real_time_tick_att{attempt} get_real_time_tick : {tick_df[:3]}')
-                    if not tick_df.empty:
-                        break
-                except Exception as e:
-                    if attempt == 2:
-                        logger.warning(f"Final attempt failed for tick_df {self.code}: {e}")
-                    else:
-                        time.sleep(0.05 * (attempt + 1))
+                        if not tick_df.empty:
+                            # 存入缓存
+                            df_size = tick_df.memory_usage().sum()
+                            with DataLoaderThread._cache_lock:
+                                if tick_key in DataLoaderThread._tick_cache:
+                                    val = DataLoaderThread._tick_cache.pop(tick_key)
+                                    old_size = val[2] if len(val) == 3 else 0
+                                    DataLoaderThread._total_tick_memory -= old_size
+                                    if tick_key in DataLoaderThread._tick_cache_keys:
+                                        DataLoaderThread._tick_cache_keys.remove(tick_key)
+                                
+                                DataLoaderThread._tick_cache[tick_key] = (tick_df, time.time(), df_size)
+                                DataLoaderThread._tick_cache_keys.append(tick_key)
+                                DataLoaderThread._total_tick_memory += df_size
+                                
+                                # Tick FIFO
+                                while len(DataLoaderThread._tick_cache_keys) > DataLoaderThread.MAX_CACHE_COUNT or \
+                                      DataLoaderThread._total_tick_memory > DataLoaderThread.MAX_TICK_CACHE_MEMORY:
+                                    old_key = DataLoaderThread._tick_cache_keys.pop(0)
+                                    val = DataLoaderThread._tick_cache.pop(old_key)
+                                    old_size = val[2] if len(val) == 3 else 0
+                                    DataLoaderThread._total_tick_memory -= old_size
+                            break
+                    except Exception as e:
+                        if attempt == 2:
+                            logger.warning(f"Final attempt failed for tick_df {self.code}: {e}")
+                        else:
+                            time.sleep(0.05 * (attempt + 1))
 
             if day_df.empty and tick_df.empty:
                 logger.error(f"Failed to load any data for {self.code} after retries")
@@ -1194,7 +1296,7 @@ def tick_to_daily_bar_slow(tick_df: pd.DataFrame) -> pd.DataFrame:
     if tick_df is None or tick_df.empty:
         return pd.DataFrame()
 
-    df = tick_df.copy()
+    df = tick_df
     # === 1. 取 ticktime ===
     if isinstance(df.index, pd.MultiIndex) and 'ticktime' in df.index.names:
         tick_time = pd.to_datetime(df.index.get_level_values('ticktime'))
@@ -4716,28 +4818,6 @@ class MainWindow(QMainWindow, WindowMixin):
         cat_clear_btn.clicked.connect(self._on_cat_filter_clear)
         self.toolbar.addWidget(cat_clear_btn)
 
-        # --- [NEW] 指数快捷按钮 ---
-        self.toolbar.addSeparator()
-        # nm_map = {"999999": "上证", "399001": "深证", "399006": "创业"}
-        for code, name in {"999999": "上证", "399001": "深证", "399006": "创业"}.items():
-            btn = QPushButton(name)
-            btn.setFixedWidth(40)
-            btn.setToolTip(f"一键直达 {name} ({code})")
-            btn.clicked.connect(lambda checked, c=code: self.load_stock_by_code(c))
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2D2D2D;
-                    color: #FFCC00;
-                    border: 1px solid #555;
-                    border-radius: 3px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #444444;
-                    border: 1px solid #FFCC00;
-                }
-            """)
-            self.toolbar.addWidget(btn)
 
         # --- 添加右侧 Reset 按钮 ---
         # spacer = QWidget()        # 占位伸缩
@@ -6701,6 +6781,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.log_toggle_action.setStatusTip("开启/关闭控制台详细信号计算日志")
         self.log_toggle_action.triggered.connect(self._toggle_verbose_log)
         menubar.addAction(self.log_toggle_action)
+
+        # --- [NEW] 指数快捷按钮 (使用标准 Action 以确保在菜单栏顶层可见) ---
+        index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","588930":"科创ETF"}
+        for code, name in index_map.items():
+            act = QAction(name, self)
+            act.setToolTip(f"一键直达 {name} ({code})")
+            # 使用 partial 或 lambda 绑定 code
+            act.triggered.connect(partial(self.load_stock_by_code, code))
+            menubar.addAction(act)
 
 
     def _apply_widget_theme(self, widget: pg.GraphicsLayoutWidget):

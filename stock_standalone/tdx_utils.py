@@ -212,6 +212,10 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
         code_startswith = tuple(x.strip().strip("'").strip('"') for x in code_startswith.split(',') if x.strip())
 
     last_code = None
+    last_time = 0
+    # 增加微小启动延迟，确保外部信号接收端（UI）已完成初始化绑定
+    await asyncio.sleep(0.2)
+    
     while True:
         try:
             # 剪贴板操作在 Windows 下是阻塞的且容易冲突，使用 to_thread 提高并发性
@@ -222,16 +226,14 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
                 parts = text.split()
                 if parts:
                     code = parts[0]
+                    now = time.time()
                     if len(code) == 6 and isDigit(code) and code.startswith(code_startswith):
-                        if code != last_code:
+                        # 如果代码变更，或者同一个代码在 2 秒后再次拷贝，则触发
+                        if code != last_code or (now - last_time > 2.0):
                             yield code
-                            if not keep_clipboard:
-                                try:
-                                    await asyncio.to_thread(pyperclip.copy, '')
-                                    logger.debug("📋 Clipboard cleared after detection")
-                                except Exception as e:
-                                    logger.warning(f"Failed to clear clipboard: {e}")
                             last_code = code
+                            last_time = now
+                            # 注意：这里不再清空剪贴板，确保用户可以黏贴到其他地方
         except Exception:
             # 捕获剪贴板锁定异常，稍后重试
             await asyncio.sleep(timesleep)

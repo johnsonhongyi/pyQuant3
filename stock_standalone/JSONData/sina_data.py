@@ -508,7 +508,7 @@ class Sina:
         self.stock_with_exchange_list = [cct.code_to_symbol(code) for code in self.stock_codes]
         
         # ⚡ [NEW] 强制补充大盘指数新浪码 (sh000001, sh000688等)，确保 API 必刷且回写至 HDF5
-        all_index_symbols = ['sh000001', 'sz399001', 'sz399006', 'sz399005', 'sh000688']
+        all_index_symbols = ['sh000001', 'sz399001', 'sz399006', 'sz399005', 'sh000688' ,'bj899050','sz159915','sh588930']
         for index_symbol in all_index_symbols:
             if index_symbol not in self.stock_with_exchange_list:
                 self.stock_with_exchange_list.append(index_symbol)
