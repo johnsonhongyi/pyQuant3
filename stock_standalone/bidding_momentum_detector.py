@@ -303,8 +303,8 @@ class BiddingMomentumDetector:
         # [NEW] 模式保护
         self.in_history_mode = False
 
-        # 初始加载一次昨日选股结果
-        self._load_stock_selector_data()
+        # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
+        # self._load_stock_selector_data()
 
     def _load_stock_selector_data(self):
         """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
@@ -938,7 +938,9 @@ class BiddingMomentumDetector:
             if seed_info.get('reason'):
                 with self._lock:
                     if code in self._tick_series:
-                        self._tick_series[code].pattern_hint = f"[{seed_info['reason'].split('|')[0]}]"
+                        # [FIX] 增加 延续 显式标记，让看板一眼看出是昨日主线
+                        reason_short = seed_info['reason'].split('|')[0]
+                        self._tick_series[code].pattern_hint = f"[延续|{reason_short}]"
 
         if ma20 > 0 and cur_close > ma20:
             cycle_score += 1.0  # 基础牛熊分
@@ -978,7 +980,12 @@ class BiddingMomentumDetector:
             
             with self._lock:
                 if code in self._tick_series:
-                    self._tick_series[code].pattern_hint = detail
+                    # [FIX] 避免覆盖掉 [延续] 等历史种子标记
+                    existing = self._tick_series[code].pattern_hint or ""
+                    if "[延续" in existing:
+                        self._tick_series[code].pattern_hint = f"{existing.split(']')[0]}] | {detail}"
+                    else:
+                        self._tick_series[code].pattern_hint = detail
             
             # [Added] 逆势带头逻辑
             if cur_pct > 3.0 and hasattr(self, 'last_market_avg') and self.last_market_avg < -0.5:
@@ -1110,6 +1117,10 @@ class BiddingMomentumDetector:
             bidding_score += 2.0
             if high_open_pct > 5.0: bidding_score += 1.5
         
+        # [NEW] 种子股延续性评分：昨日强势股如果今日也稳定，在竞价排序中拥有高优先级
+        if seed_info and high_open_pct > 0.5:
+            bidding_score += 3.0
+
         # 逆势/强势：今日开盘即站在昨日最高价之上
         if day_open > ts_obj.last_high and ts_obj.last_high > 0:
             bidding_score += 2.0
@@ -1459,7 +1470,20 @@ class BiddingMomentumDetector:
             if len(all_member_codes) < 4:
                 if sector in new_active: del new_active[sector]
                 continue
-            
+
+            # [NEW] 提前计算 board_score，避免后续标签逻辑出现 UnboundLocalError
+            # 计算群体热度加成
+            s_top0_sum = sum(1 for s in stocks if s.get('top0', 0) > 0)
+            s_top15_sum = sum(1 for s in stocks if s.get('top15', 0) > 0)
+            hotness_multiplier = min(2.0, 1.0 + (s_top0_sum * 0.1) + (s_top15_sum * 0.03))
+
+            # [REFINED] 极严格过滤：模仿 TK 去弱留强逻辑
+            # 以群体效应 (avg_pct * follow_ratio) 为核心依据。
+            tk_correlation_score = avg_pct * follow_ratio * 4.0 
+
+            # 最终板分公式：(板块均值加权 + 联动比例加权 + 个股强势溢价) * 热度系数
+            board_score = (avg_pct * 0.8 + follow_ratio * 4.0 + (candidate_leader['score'] * 0.05) + tk_correlation_score) * hotness_multiplier
+
             # 提取龙头元数据供后续使用
             tags = []
             l_data = candidate_leader
@@ -1475,25 +1499,16 @@ class BiddingMomentumDetector:
                     if leader_pct > 3.0: tags.append("竞价抢筹")
                     elif leader_pct < -3.0: tags.append("竞价恐慌")
                 if 1300 <= now_t <= 1310: tags.append("午后异动")
+                
+                # [NEW] 主流延续性标签：如果龙头是昨日选股器选出的强势股，且板块强势
+                if leader_code in self.stock_selector_seeds and board_score > 5.5:
+                    tags.append("🔥 延续")
 
-            # 计算群体热度加成
-            s_top0_sum = sum(1 for s in stocks if s.get('top0', 0) > 0)
-            s_top15_sum = sum(1 for s in stocks if s.get('top15', 0) > 0)
-            hotness_multiplier = min(2.0, 1.0 + (s_top0_sum * 0.1) + (s_top15_sum * 0.03))
-
-            # [REFINED] 极严格过滤：模仿 TK 去弱留强逻辑
-            # 以群体效应 (avg_pct * follow_ratio) 为核心依据。
-            tk_correlation_score = avg_pct * follow_ratio * 4.0 
-            
             # 基础门槛：即便个股分高，如果联动性极其平淡 (低于 15%) 且平均涨幅低，排除该板块。
             # 这是“369个活跃板块”缩减到“15-30个”的关键。
             if follow_ratio < 0.15 and avg_pct < 1.5:
                  if sector in new_active: del new_active[sector]
                  continue
-            
-            # 最终板分公式：(板块均值加权 + 联动比例加权 + 个股强势溢价) * 热度系数
-            # 目标产出区间 0-10，对标 TK 强度分析
-            board_score = (avg_pct * 0.8 + follow_ratio * 4.0 + (candidate_leader['score'] * 0.05) + tk_correlation_score) * hotness_multiplier
             
             # [NEW] 标记板块类型
             sector_type = "📈 跟随"
