@@ -850,6 +850,15 @@ class DataProcessWorker(QObject):
 
     def process_data(self):
         """子线程主循环（生产稳定版）"""
+        # [NEW] 1. 延迟初始化：将耗时的种子加载与持久化恢复移至后台线程执行，解决启动阻塞（491ms问题）
+        try:
+            if hasattr(self.detector, '_load_stock_selector_data'):
+                logger.info("📡 [Worker] Background initial loading for BiddingMomentumDetector...")
+                self.detector._load_stock_selector_data()
+                logger.info("📡 [Worker] Background loading completed.")
+        except Exception as e:
+            logger.error(f"❌ [Worker] Failed to load detector persistent data: {e}")
+
         logger.info("🚀 [Worker] Data processing loop started.")
 
         while self._is_running:
@@ -932,6 +941,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.main_window = main_window
         rs = getattr(main_window, 'realtime_service', None)
         self.detector = BiddingMomentumDetector(realtime_service=rs)
+
+        # [NEW] 1. 本地化联动：尝试初始化 StockSender
+        try:
+            from JohnsonUtil.stock_sender import StockSender
+            # 使用默认变量，兼容 Tk/Qt 灵活包装
+            self.sender = StockSender(callback=None)
+            logger.info("📡 [SectorPanel] StockSender initialized for standalone linkage.")
+        except Exception as e:
+            logger.warning(f"⚠️ [SectorPanel] StockSender init failed (Expected on fresh env): {e}")
+            self.sender = None
 
         # 排序状态：(col_index, ascending)
         self._sort_col = 4             # 默认按涨幅排序
@@ -2679,6 +2698,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # 在主线程调用以保证安全提取 Tk 变量并防止剪贴板竞争
                 if hasattr(host, 'sender') and host.sender:
                     host.sender.send(code)
+                elif hasattr(self, 'sender') and self.sender:
+                    # [NEW] 当独立运行或主窗口不具备 sender 时，使用本地 sender 联动
+                    self.sender.send(code)
 
             # 🛡️ 深度防护：优先通过 Tkinter 调度队列转发，确保完全运行在 Tk 主线程
             if hasattr(host, 'tk_dispatch_queue'):
