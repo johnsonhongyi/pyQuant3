@@ -982,6 +982,12 @@ class DataLoaderThread(QThread):
         self.sina = sina # [NEW] Use shared Sina instance
         self._search_code = None
         self._resample = None
+        self._is_interrupted = False  # [NEW] 中断标志位
+
+    def stop_logic(self):
+        """[NEW] 外部调用以标记该线程已陈旧，应尽快停止"""
+        self._is_interrupted = True
+        logger.debug(f"[DataLoaderThread] Thread for {self.code} flagged as interrupted.")
 
     def stop(self):
         """退出数据加载线程"""
@@ -992,6 +998,9 @@ class DataLoaderThread(QThread):
 
     def run(self) -> None:
         try:
+            # ⭐ [NEW] 极简早期退出检查
+            if self._is_interrupted: return
+
             # 使用 QMutexLocker 自动管理锁定和解锁
             if self._search_code == self.code and self._resample == self.resample:
                 return  # 数据已经加载过，不重复
@@ -1001,9 +1010,10 @@ class DataLoaderThread(QThread):
 
             # 1. Fetch Daily Data (Historical) with Retry
             for attempt in range(3):
+                if self._is_interrupted: return # ⭐ 循环内检查
                 try:
                     with QMutexLocker(self.mutex_lock):
-                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt}", warn_ms=3800):
+                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=100):
                             day_df = tdd.get_tdx_Exp_day_to_df(
                                 self.code, 
                                 dl=Resample_LABELS_Days[self.resample], 
@@ -1022,8 +1032,12 @@ class DataLoaderThread(QThread):
                     else:
                         time.sleep(0.05 * (attempt + 1))
             
+            # ⭐ [NEW] 阶段间检查
+            if self._is_interrupted: return
+
             # 2. Fetch Realtime/Tick Data (Intraday) with Retry
             for attempt in range(3):
+                if self._is_interrupted: return # ⭐ 循环内检查
                 try:
                     with QMutexLocker(self.mutex_lock):
                         with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=1800):
@@ -2426,6 +2440,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self._ipc_signal_timer.setSingleShot(True)
         self._ipc_signal_timer.timeout.connect(self._flush_ipc_signals)
 
+        # ⚡ [NEW] IPC Code Debouncing (防止 Monitor 快速翻页拉死 Visualizer)
+        self._ipc_code_debounce_ms = 50       # [NEW] 联动代码切股防抖 (毫秒)，原 100
+        self._ipc_signal_debounce_ms = 200    # [NEW] 信号批量处理防抖 (毫秒)
+        self._pending_ipc_code = None
+        self._ipc_code_debounce_timer = QTimer(self)
+        self._ipc_code_debounce_timer.setSingleShot(True)
+        self._ipc_code_debounce_timer.timeout.connect(self._flush_ipc_code_load)
+
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
         self.command_listener_thread: Optional[CommandListenerThread] = None
@@ -3760,7 +3782,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         self._ipc_signal_buffer.extend(data)
                     
                     # 200ms 防抖，批量处理密集信号
-                    self._ipc_signal_timer.start(200)
+                    self._ipc_signal_timer.start(self._ipc_signal_debounce_ms)
                     
                     # logger.debug(f"IPC SIGNAL buffered: {len(data) if isinstance(data, list) else 1} items")
                 except Exception as e:
@@ -3769,34 +3791,45 @@ class MainWindow(QMainWindow, WindowMixin):
             # 2. 普通股票代码: 6位数字
             elif len(content) == 6 and content.isdigit():
                 if getattr(self, 'tk_linkage_auto_display', True):
-                    self.load_stock_by_code(content)
+                    # ⭐ [DEBOUNCE] 代码切换防抖控制
+                    self._pending_ipc_code = content
+                    self._ipc_code_debounce_timer.start(self._ipc_code_debounce_ms) 
                 else:
                     logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {content}")
-                # self.activateWindow() # 收到代码时激活窗口 (联动时不抢焦点)
             
             # 2.5 带有参数管道符的格式: 600598|resample=d
             elif "|" in content and content.split('|')[0].strip().isdigit() and len(content.split('|')[0].strip()) == 6:
                 if getattr(self, 'tk_linkage_auto_display', True):
-                    self.load_stock_by_code(content)
+                    # ⭐ [DEBOUNCE] 代码切换防抖控制
+                    self._pending_ipc_code = content
+                    self._ipc_code_debounce_timer.start(self._ipc_code_debounce_ms)
                 else:
                     logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {content}")
-                # self.activateWindow()
                 
             # 3. 带名称的股票代码: 000001,平安银行 (兼容旧格式)
             elif "," in content:
                 parts = content.split(",")
                 if len(parts) >= 1 and len(parts[0]) == 6:
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        self.load_stock_by_code(parts[0])
+                        # ⭐ [DEBOUNCE] 代码切换防抖控制
+                        self._pending_ipc_code = parts[0]
+                        self._ipc_code_debounce_timer.start(self._ipc_code_debounce_ms)
                     else:
                         logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {parts[0]}")
-                    # self.activateWindow()
             
             else:
                 logger.warning(f"Unknown IPC command content: {content}")
                 
         except Exception as e:
             logger.error(f"Error processing IPC command: {e}")
+
+    def _flush_ipc_code_load(self):
+        """[NEW] 批量/降频后的代码加载执行"""
+        if self._pending_ipc_code:
+            code = self._pending_ipc_code
+            self._pending_ipc_code = None
+            logger.debug(f"[IPC] Debounced loading: {code}")
+            self.load_stock_by_code(code)
 
     def _flush_ipc_signals(self):
         """批量处理缓冲区中的 IPC 信号"""
@@ -4682,6 +4715,29 @@ class MainWindow(QMainWindow, WindowMixin):
         cat_clear_btn.setFixedWidth(40)
         cat_clear_btn.clicked.connect(self._on_cat_filter_clear)
         self.toolbar.addWidget(cat_clear_btn)
+
+        # --- [NEW] 指数快捷按钮 ---
+        self.toolbar.addSeparator()
+        # nm_map = {"999999": "上证", "399001": "深证", "399006": "创业"}
+        for code, name in {"999999": "上证", "399001": "深证", "399006": "创业"}.items():
+            btn = QPushButton(name)
+            btn.setFixedWidth(40)
+            btn.setToolTip(f"一键直达 {name} ({code})")
+            btn.clicked.connect(lambda checked, c=code: self.load_stock_by_code(c))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2D2D2D;
+                    color: #FFCC00;
+                    border: 1px solid #555;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #444444;
+                    border: 1px solid #FFCC00;
+                }
+            """)
+            self.toolbar.addWidget(btn)
 
         # --- 添加右侧 Reset 按钮 ---
         # spacer = QWidget()        # 占位伸缩
@@ -7031,9 +7087,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
                 logger.debug("[TableUpdate] Clearing table...")
                 self.stock_table.setRowCount(0) # 显式清空
-                # ⚡ [UI FIX] 减少处理事件频率，仅在大规模清空时处理一次
-                if n_rows > 1000:
-                    QtGui.QGuiApplication.processEvents()
                 
                 self.stock_table.setRowCount(n_rows)
                 self._table_item_map = {}
@@ -8536,11 +8589,19 @@ class MainWindow(QMainWindow, WindowMixin):
         # [FIX] 设置 Loading 状态同时清理标题缓存, 确保数据加载完成后能强制刷新标题
         # (否则切换周期时因 code 没变, _update_plot_title 会误判为标题无需更新)
         self.kline_plot.setTitle(f"Loading {code}...")
-        self._last_full_title = None 
+        # ⭐ [NEW] 加载守卫 (Loading Guard)
+        # 如果当前 loader 已经在加载这一只股票且周期相同，则无需重复开启新线程
+        if hasattr(self, 'loader') and self.loader is not None and self.loader.isRunning():
+            if self.loader.code == code and self.loader.resample == self.resample:
+                logger.debug(f"[DataLoaderThread] Guard: Already loading {code} ({self.resample}), skipped.")
+                return
 
         # ⭐ 清理旧的 DataLoaderThread，使用回收站机制防止闪推
         if hasattr(self, 'loader') and self.loader is not None:
             if self.loader.isRunning():
+                # [NEW] 显式中断旧线程逻辑，释放 HDF5 锁
+                self.loader.stop_logic()
+                
                 logger.debug(f"[DataLoaderThread] Moving active thread to scavenger: {id(self.loader)}")
                 try:
                     self.loader.data_loaded.disconnect()  # 重要：断开信号，防止旧数据乱跳
@@ -8561,7 +8622,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 fastohlc=fastohlc_val,
                 sina=self.sina # Pass shared instance
             )
-        with timed_ctx("data_loaded", warn_ms=50):
+        with timed_ctx(f"data_loaded {code}", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)
         with timed_ctx("start", warn_ms=80):
             self.loader.start()

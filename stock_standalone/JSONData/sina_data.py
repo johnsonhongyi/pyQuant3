@@ -278,6 +278,9 @@ class Sina:
         # (r',([\.\d]+)' * 29,))   #\n特例A (4)
         self.grep_stock_detail = re.compile(
             r'(\d+)=([^\n][^,]+.)%s%s' % (r',([\.\d]+)' * 29, r',(\d{4}-\d{2}-\d{2}),(\d{2}:\d{2}:\d{2})'))
+        # 新增指数解析正则 (带字母前缀)
+        self.grep_index_detail = re.compile(
+            r'([a-z]{2}\d+)=([^\n][^,]+.)%s%s' % (r',([\.\d]+)' * 29, r',(\d{4}-\d{2}-\d{2}),(\d{2}:\d{2}:\d{2})'))
         # r'(\d+)=([^\n][^,]+.)%s' % (r',([\.\d]+)' * 29,))
         # 去除\n特例A(3356)
         # self.grep_stock_detail = re.compile(r'(00\d{4}|30\d{4}|60\d{4})=([^\n][^,]+.)%s' % (r',([\.\d]+)' * 29,))   #去除\n特例A(股票2432)
@@ -411,6 +414,12 @@ class Sina:
         # 确保 sina_limit_time 是 int
         sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=None, limit_time=sina_limit_time_int)
+        
+        # 核心修正：如果请求包含关键指数（999999），但载入的缓存中缺失该代码，则强制执行实时抓取以同步 HDF5
+        if h5 is not None and len(h5) > 0:
+            if '999999' not in h5.index.tolist():
+                log.info("Sina.all: Cache missing index 999999, forcing live refresh to sync HDF5.")
+                h5 = None
         # import ipdb;ipdb.set_trace()
 
         if h5 is not None and len(h5) > 0:
@@ -484,10 +493,9 @@ class Sina:
                     # 竞价阶段单独限频更严格（例如6秒）
                     if ((auction_time and l_time < sina_limit_time_int) or (not auction_time and return_hdf_status)):
                         log.info("Return HDF5 data early (recent:%s)" % self.format_age(l_time))
-                        # 统一 ticktime 格式
-                        # h5.loc[:, 'ticktime'] = h5['ticktime'].astype(str).apply(
-                        #     lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}"
-                        # )
+                        # ⚡ [FIX] 如果从 HDF5 返回，必须将数据注入到内存缓存，否则子市场请求会抛空异常并强制去读取极其耗时的 HDF5 历史重建
+                        if self.agg_cache.getkey('agg_metrics') is None or self.agg_cache.getkey('agg_metrics').empty:
+                            self.agg_cache.setkey('agg_metrics', h5.copy())
                         return self._sanitize_indicators(self.combine_lastbuy(h5))
 
 
@@ -498,6 +506,12 @@ class Sina:
 
         # 2. 从网络获取最新数据
         self.stock_with_exchange_list = [cct.code_to_symbol(code) for code in self.stock_codes]
+        
+        # ⚡ [NEW] 强制补充大盘指数新浪码 (sh000001, sh000688等)，确保 API 必刷且回写至 HDF5
+        all_index_symbols = ['sh000001', 'sz399001', 'sz399006', 'sz399005', 'sh000688']
+        for index_symbol in all_index_symbols:
+            if index_symbol not in self.stock_with_exchange_list:
+                self.stock_with_exchange_list.append(index_symbol)
         
         # 补回分片请求逻辑
         self.stock_list = []
@@ -967,13 +981,15 @@ class Sina:
         time_s = time.time()
         if df is None or len(df) == 0:
             log.warning("Failed to fetch fresh data from Sina")
-            return self._filter_suspended(h5) if h5 is not None else pd.DataFrame()
+            return pd.DataFrame()
 
         # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
         agg_data = self.agg_cache.getkey('agg_metrics')
         cache_needs_rebuild = False
         if agg_data is None or agg_data.empty:
             cache_needs_rebuild = True
+        elif self.market_type != 'all' and agg_data is not None and not agg_data.empty:
+            cache_needs_rebuild = False
         else:
             # 质量校验：如果 0.0 比例过高，强制重建
             for c_check in ['nlow', 'nhigh']:
@@ -985,7 +1001,7 @@ class Sina:
                         break
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
         now_int = cct.get_now_time_int()
-        if cache_needs_rebuild or 925 < now_int <= 1030 :
+        if cache_needs_rebuild or (self.market_type == 'all' and 925 < now_int <= 1030):
             log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
@@ -995,19 +1011,27 @@ class Sina:
             df_final = self._rebuild_agg_cache(h5_hist, df)
             # 此时内存缓存已由 _rebuild_agg_cache 设置好
         else:
-            # 正常更新逻辑：先更新增量，再合并
-            h5_mi_fname = 'sina_MultiIndex_data'
-            l_limit_time = int(cct.sina_limit_time)
-            h5_mi_table = 'all_' + str(l_limit_time)
-            # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
-            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
-            self._update_agg_cache(df,h5_hist)
-            agg_data = self.agg_cache.getkey('agg_metrics')
-            df_final = cct.combine_dataFrame(df, agg_data)
-            if 'nhigh' not in df_final.columns:
-                df_final['nhigh'] = df_final['close']
-            if 'nclose' not in df_final.columns:
-                df_final['nclose'] = df_final['close']
+            if self.market_type != 'all':
+                # ⚡ [PERF_PATH] 子市场请求极速路径：直接复用共享内存，严禁扫盘 HDF5
+                df_final = cct.combine_dataFrame(df, agg_data)
+                if 'nhigh' not in df_final.columns:
+                    df_final['nhigh'] = df_final['close']
+                if 'nclose' not in df_final.columns:
+                    df_final['nclose'] = df_final['close']
+            else:
+                # 正常更新逻辑：先更新增量，再合并 (仅限 all 流程)
+                h5_mi_fname = 'sina_MultiIndex_data'
+                l_limit_time = int(cct.sina_limit_time)
+                h5_mi_table = 'all_' + str(l_limit_time)
+                # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
+                h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+                self._update_agg_cache(df,h5_hist)
+                agg_data = self.agg_cache.getkey('agg_metrics')
+                df_final = cct.combine_dataFrame(df, agg_data)
+                if 'nhigh' not in df_final.columns:
+                    df_final['nhigh'] = df_final['close']
+                if 'nclose' not in df_final.columns:
+                    df_final['nclose'] = df_final['close']
         # 5. 合并 lastbuy 并持久化
         df_final = self.combine_lastbuy(df_final)
         # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
@@ -1202,12 +1226,13 @@ class Sina:
         result = self.grep_stock_detail.finditer(stocks_detail)
         # stock_dict = dict()
         list_s = []
+        # 1. 解析个股 (旧逻辑)
         for stock_match_object in result:
+            # 兼容旧逻辑且防止误匹配指数行 (如 sh000001 的数字部分)
+            start_pos = stock_match_object.start()
+            if start_pos >= 2 and stocks_detail[start_pos-2:start_pos].isalpha():
+                continue
             stock = stock_match_object.groups()
-            # fn=(lambda x:x)
-            # list.append(map(fn,stock))
-            # df = pd.DataFrame(list,columns=ct.SINA_Total_Columns)
-            #     list_s.append({'code'})
             list_s.append(
                 {'code': stock[0],
                  'name': stock[1],
@@ -1218,10 +1243,8 @@ class Sina:
                  'low': float(stock[6]),
                  'buy': float(stock[7]),
                  'sell': float(stock[8]),
-                 'volume': int(stock[9]),       # 成交量
-                 'turnover': float(stock[10]),  # 交易额/亿
-                 # 'turnover': round(float(stock[10])/1000/1000/100,1),  # 交易额/亿
-                 # 'amount': float(stock[10]),
+                 'volume': int(stock[9]),
+                 'turnover': float(stock[10]),
                  'b1_v': int(stock[11]),
                  'b1': float(stock[12]),
                  'b2_v': int(stock[13]),
@@ -1244,6 +1267,54 @@ class Sina:
                  'a5': float(stock[30]),
                  'dt': (stock[31]),
                  'ticktime': (stock[32])})
+                 
+        # 2. 新增指数解析轨道 (不干扰数字匹配)
+        idx_result = self.grep_index_detail.finditer(stocks_detail)
+        for idx_match_object in idx_result:
+            idx_stock = idx_match_object.groups()
+            symbol = idx_stock[0]
+            # 统一映射映射
+            if symbol == 'sh000001':
+                code = '999999'
+            elif symbol == 'sh000688':
+                code = '999688'
+            else:
+                code = symbol[2:]
+                
+            list_s.append(
+                {'code': code,
+                 'name': idx_stock[1],
+                 'open': float(idx_stock[2]),
+                 'close': float(idx_stock[3]),
+                 'now': float(idx_stock[4]),
+                 'high': float(idx_stock[5]),
+                 'low': float(idx_stock[6]),
+                 'buy': float(idx_stock[7]),
+                 'sell': float(idx_stock[8]),
+                 'volume': int(idx_stock[9]),
+                 'turnover': float(idx_stock[10]),
+                 'b1_v': int(idx_stock[11]),
+                 'b1': float(idx_stock[12]),
+                 'b2_v': int(idx_stock[13]),
+                 'b2': float(idx_stock[14]),
+                 'b3_v': int(idx_stock[15]),
+                 'b3': float(idx_stock[16]),
+                 'b4_v': int(idx_stock[17]),
+                 'b4': float(idx_stock[18]),
+                 'b5_v': int(idx_stock[19]),
+                 'b5': float(idx_stock[20]),
+                 'a1_v': int(idx_stock[21]),
+                 'a1': float(idx_stock[22]),
+                 'a2_v': int(idx_stock[23]),
+                 'a2': float(idx_stock[24]),
+                 'a3_v': int(idx_stock[25]),
+                 'a3': float(idx_stock[26]),
+                 'a4_v': int(idx_stock[27]),
+                 'a4': float(idx_stock[28]),
+                 'a5_v': int(idx_stock[29]),
+                 'a5': float(idx_stock[30]),
+                 'dt': (idx_stock[31]),
+                 'ticktime': (idx_stock[32])})
 #        print list_s
         # df = pd.DataFrame.from_dict(stock_dict,columns=ct.SINA_Total_Columns)
         if len(list_s) == 0:
@@ -1281,7 +1352,9 @@ class Sina:
              return df
              
         dt_v = df.dt.value_counts().index[0]
-        df = df[(df.dt >= dt_v)]
+        # 宽容过滤：主日期外，额外保留映射后的指数代码段
+        index_codes = ['999999', '399001', '399006', '399678', '399005', '999688']
+        df = df[(df.dt >= dt_v) | (df['code'].isin(index_codes))]
 
         df.rename(columns={'close': 'llastp'}, inplace=True)
         df['b1_vv'] = df['b1_v'].map(lambda x: int(x / 100 / 10000))
@@ -1320,8 +1393,12 @@ class Sina:
         df = df.fillna(0)
         df = df.set_index('code')
         if index:
+            # 强化映射防护：仅对特定指数代码段执行反向映射，且防止 999999 被二次反转
             df.index = list(map((lambda x: str(1000000 - int(x))
-                            if x.startswith('0') else x), df.index))
+                            if (x.startswith('00000') and x != '999999') else x), df.index))
+        # 确认指数在列 (用于 Debug)
+        if '999999' in df.index:
+            log.info("Sina.format_response_data: Index 999999 successfully generated and indexed.")
         log.info("hdf:all %s %s" % (len(df), len(self.stock_codes)))
         
         # --- 分别处理轨迹数据(mi)和实时数据(dd) ---
@@ -1686,10 +1763,8 @@ class Sina:
 
     def get_major_indices(self) -> pd.DataFrame:
         """获取主要大盘指数 (上证, 深证, 创业板, 科创50)"""
-        # 000001=上证, 399001=深证, 399006=创业板, 000688=科创50
-        codes = ['000001', '399001', '399006', '000688']
-        # codes = ['999999', '399001', '399006', '399005']
-
+        # 使用映射后的全 6 位代码
+        codes = ['999999', '399001', '399006', '999688']
         return self.get_stock_list_data(codes, index=True)
 
 
@@ -2332,6 +2407,19 @@ if __name__ == "__main__":
     # log.setLevel(LoggerFactory.DEBUG)
     sina = Sina()
     dm = sina.all
+    import ipdb;ipdb.set_trace()
+    
+
+    for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
+        # for ma in ['sh']:
+        df = Sina().market(ma)
+        # print df.loc['600581']
+        # print len(sina.all)
+        print(("market:%s" % (ma)))
+        print(f'count:{len(df)}')
+    import ipdb;ipdb.set_trace()
+
+
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
@@ -2344,7 +2432,8 @@ if __name__ == "__main__":
     # df = sina.get_stock_code_data('000017')
 
     # print((sina.get_stock_code_data('300107').T))
-
+    import ipdb;ipdb.set_trace()
+    
     # print df.lastbuy[-5:].to_frame().T
     df = sina.get_stock_list_data(['999999','399001','399006'],index=True)
     code_index = sina.set_stock_codes_index_init(['999999','399001','399006'], True)

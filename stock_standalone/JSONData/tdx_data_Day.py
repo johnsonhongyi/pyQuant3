@@ -2028,10 +2028,12 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
         df = df.reset_index(drop=True)
 
     # --- BOLLINGER BANDS ---
-    bb = ta.bbands(df['close'], length=20, std=2, mamode='sma')
-    df['lower'] = bb['BBL_20_2.0']
-    df['upper'] = bb['BBU_20_2.0']
-    df['ene'] = bb['BBM_20_2.0']
+    import talib
+    upperband, middleband, lowerband = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+    df['lower'] = lowerband
+    df['upper'] = upperband
+    df['ene'] = middleband
+
     df['bandwidth'] = df['upper'] - df['lower']
     df['bollpect'] = (df['close'] - df['lower']) / df['bandwidth'] * 100
     df['boll_sq'] = ((df['close'] - df['ene']) / df['bandwidth'] * 100).round(2)
@@ -2041,20 +2043,21 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
 
     df = boll_trend_breakout(df)
     # --- MACD ---
-    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    df['macddif'] = macd['MACD_12_26_9']
-    df['macddea'] = macd['MACDs_12_26_9']
-    df['macd'] = macd['MACDh_12_26_9']
+    macddif, macddea, macd = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+    df['macddif'] = macddif
+    df['macddea'] = macddea
+    df['macd'] = macd
+
     for i in range(1, 7):
         df[f'macdlast{i}'] = df['macd'].shift(i - 1)
 
     # --- RSI ---
-    df['rsi'] = ta.rsi(df['close'], length=rsi_period)
+    df['rsi'] = talib.RSI(df['close'], timeperiod=rsi_period)
 
     # --- KDJ ---
-    kdj = ta.stoch(high=df['high'], low=df['low'], close=df['close'], k=3, d=3, smooth_k=3)
-    df['kdj_k'] = kdj['STOCHk_3_3_3']
-    df['kdj_d'] = kdj['STOCHd_3_3_3']
+    kdj_k, kdj_d = talib.STOCH(df['high'], df['low'], df['close'], fastk_period=9, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
+    df['kdj_k'] = kdj_k
+    df['kdj_d'] = kdj_d
     df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
 
     # ========== 均线与支撑压力 ==========
@@ -2135,7 +2138,6 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     if detect_calc_support:
         df = detect_local_extremes_filtered(df)
         df = calc_support_resistance_vec(df)
-    # with timed_ctx("td_sequential_13d", warn_ms=50):
     td_sig = td_sequential_13d(df)
     # with timed_ctx("td_sequential_fast", warn_ms=50):
     #     td_sig2 = td_sequential_fast(df)
@@ -2469,12 +2471,14 @@ def get_tdx_Exp_day_to_df(
     # =========================
     # 5. 核心指标（极速）
     # =========================
-
-    df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
-    df = compute_lastdays_percent(
-        df, lastdays=lastdays,
-        resample=resample, normalized=normalized
-    )
+    with timed_ctx("get_tdx_macd", warn_ms=50):
+        df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+    
+    with timed_ctx("compute_lastdays_percent", warn_ms=100):
+        df = compute_lastdays_percent(
+            df, lastdays=lastdays,
+            resample=resample, normalized=normalized
+        )
 
     # =========================
     # 6. fib / maxp
@@ -6106,7 +6110,8 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         # safe_SMA(df, 'close', 20, 'ma20d')
         # safe_SMA(df, 'close', 60, 'ma60d')
 
-        df['truer'] = ta.true_range(df.high, df.low, df.close)
+        import talib
+        df['truer'] = talib.TRANGE(df.high, df.low, df.close)
 
 
         df = compute_cross_indicators(df, [('ma5d', 'ma10d', 'op')], [('upper', 'ma5d', 'topU', 'eneU')])
@@ -6139,48 +6144,6 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
             # df.index = pd.to_datetime(df.pop('date'), errors='coerce')
 
     return df
-
-        # compare_first_rows(df, df_aug, lastdays=lastdays,n=1)
-        # compare_shifted_df(df, df_aug, lastdays=lastdays)
-
-        # cols = [
-        #         'lasto1d','lastl1d','lastp1d','per1d',
-        #         'lasto2d','lastl2d','lastp2d','per2d',
-        #         'lasto3d','lastl3d','lastp3d','per3d',
-        #         'lasto4d','lastl4d','lastp4d','per4d',
-        #         'lasto5d','lastl5d','lastp5d','per5d',
-        #         'lasto6d','lastl6d','lastp6d','per6d'
-        #     ]
-
-        # # df_cols_only = df.loc[:, cols][-1:]
-        # # df_checked = check_conditions_auto(df_cols_only)
-        # # df['MainU'] = df_checked.MainU.values[0]
-
-
-        # # # 1. 保留最后一行需要检查的列
-        # # df_cols_only = df.loc[:, cols].iloc[[-1]]  # 用 iloc[[-1]] 返回 DataFrame 而非 Series
-
-        # # 2. 调用自动检查函数
-
-        # df_checked = check_conditions_auto(df[-1:])
-
-        # # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
-        # # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
-
-        # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
-        # # 列表 → 逗号分隔字符串
-        # # df.loc[df.index[-1], 'MainU'] = ','.join(map(str, df_checked.loc[df_checked.index[-1], 'MainU']))
-        # # print(df.MainU)
-        # # import ipdb;ipdb.set_trace()
-
-
-        # new_row_df = pd.DataFrame([df_temp]) 
-        # df = pd.concat([df, new_row_df], ignore_index=True)
-            # df['perc%sd' % da] = (df['perlastp'][-da:].sum())
-        # df['lastv9m'] = df['vol'][-lastdays:].mean()
-            # df['mean%sd' % da] = df['meann'][-da]
-
-
 
 
 def get_tdx_exp_low_or_high_price(code, dt=None, ptype='close', dl=None, end=None):
@@ -7321,6 +7284,12 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         if initTdxdata > 2:
             print("All_OUT:%s " % (initTdxdata), end=' ')
         print(("DLTDXE:%0.2f" % (time.time() - time_t)), end=' ')
+
+    # 统一清理浮点数精度（保留 2 位小数，摒弃无意义的计算尾缀）
+    if not df.empty:
+        float_cols = df.select_dtypes(include=['float64', 'float32']).columns
+        df[float_cols] = df[float_cols].round(2)
+
     return df
 
 
@@ -7896,8 +7865,12 @@ if __name__ == '__main__':
 
     code = '003009'
     resample = 'd'
-    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    with timed_ctx(f"extract_all_features {code}", warn_ms=50):
+        df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
 
+    cct.print_timing_summary()
+    # sina = get_sina_data_df('920274')
+    
     # time_s = time.time()
     # signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
     # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
@@ -7912,11 +7885,12 @@ if __name__ == '__main__':
         dt = extract_vect_daily_df(df,lastdays=cct.compute_lastdays)
     cct.print_timing_summary()
     # sina = get_sina_data_df('920274')
+    import ipdb;ipdb.set_trace()
 
     # realtime_signal = evaluate_realtime_signal_tick(sina,all_features)
     # print(f'evaluate_realtime_signal_tick: {realtime_signal}')
 
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
 
     # generate_df_vect_daily_features = generate_df_vect_daily_features(df,lastdays=cct.compute_lastdays)
     # # pd.DataFrame(generate_df_vect_daily_features).set_index('code')
@@ -7940,7 +7914,7 @@ if __name__ == '__main__':
     # dm = sina_data.Sina().market('all').loc['000002']
     # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
     df = get_tdx_append_now_df_api('001236', dl=5)
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
 
     # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
@@ -7964,11 +7938,11 @@ if __name__ == '__main__':
     print(f'df3d: {df3d.ma60d[-5:]}')
     print(f'df1w: {df1w.ma60d[-5:]}')
     print(f'df1m: {df1m.ma60d[-5:]}')
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
 
     resample = '3d'
     try:
-        df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+        df2=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     except Exception as e:
         print("执行异常:\n", traceback.format_exc())
     else:
@@ -7980,12 +7954,12 @@ if __name__ == '__main__':
     dd2 = get_tdx_Exp_day_to_df(code, dl=480,resample='m')
     dd3 = get_tdx_Exp_day_to_df(code, dl=60,resample='d')
     cct.print_timing_summary()
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
     duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
-    df = get_tdx_Exp_day_to_df_lday(code, dl=1) 
+    dflday = get_tdx_Exp_day_to_df_lday(code, dl=1) 
     dm = get_tdx_Exp_day_to_df_lday(code, dl=480,resample='m')
-    print(f'df_txt:{dd} df_day:{df}')
-    import ipdb;ipdb.set_trace()
+    print(f'df_txt:{dd} df_day:{dflday}')
+    # import ipdb;ipdb.set_trace()
 
     # code_l=['920274','300342','300696', '603091', '605167']
     # # code_l=['920274']
@@ -7999,14 +7973,14 @@ if __name__ == '__main__':
     code = '399001'
     df2 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
     # df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
-    import ipdb;ipdb.set_trace()
-    df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    # import ipdb;ipdb.set_trace()
+    df_power=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     
    
     # compute_lastdays_percent_profile(df, lastdays=5)
     evtdf = evaluate_trading_signal(df)
     print(f"evtdf: {evtdf[['open', 'close','upper','EVAL_STATE','trade_signal']].tail(60)}")
-    import ipdb;ipdb.set_trace(),
+    # import ipdb;ipdb.set_trace(),
 
     print(f'check code: {code}  boll_Signal: {df.boll_signal}')
 
@@ -8046,7 +8020,7 @@ if __name__ == '__main__':
     # print write_tdx_tushare_to_file('300055')
     # print write_tdx_sina_data_to_file('300055')
     '''
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
     # df=search_Tdx_multi_data_duration()
     #test Jupyter bug
     code_list = sina_data.Sina().market('all').index.tolist()
@@ -8126,7 +8100,7 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd} ')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='601028'
+    code='601088'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
@@ -8135,10 +8109,9 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
 
 
-
     df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d',lastday=None )
     
-    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
+    dfw = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
     print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
     print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
     print(f'd per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
@@ -8216,6 +8189,7 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api_tofile('001236')
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
+
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
     print(f'df2 lastp1d:{df2.lastp1d}')
     print(f'code:{code}')
@@ -8245,7 +8219,7 @@ if __name__ == '__main__':
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:])
     print(f'macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
     # write_to_all()
     
 
@@ -8262,72 +8236,15 @@ if __name__ == '__main__':
     # df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
     df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_month, start=None,end=None, newdays=0, resample='m')
 
-    # import ipdb;ipdb.set_trace()
-
-    # df3 = get_tdx_exp_low_or_high_power(code,dl=60)
-    # print(df3.macd)
-    # df1 = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d').sort_index(ascending=True)
-    # diff, dea, macd3 = custom_macd(df1.close)
-
-    # df = get_tdx_power_now_df(code,dl=60, start=None,end=None).sort_index(ascending=True)
-    # macd = df.ta.macd(fast=12,slow=26,signal=9)
-    # import ipdb;ipdb.set_trace()
-
-    # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
-    # df[(df.close > df.upper) & (df.upper > 0) ]
-    # import ipdb;ipdb.set_trace()
-
-    # df = get_tdx_Exp_day_to_df(code,dl=60, end='2023-10-13', newdays=0, resample='d')
     df = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # df2 = get_tdx_append_now_df_api_tofile(code)
-    print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
+    print("code:%s boll:%s"%(code,df.boll[0]))
 
     resample = 'w'
     df = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)
-    print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
-    # import ipdb;ipdb.set_trace()
-
-    # df2 = get_tdx_Exp_day_to_df(code,dl=134, end=None, newdays=0, resample=resample,lastdays=1)
-
-    # get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False)
-    # df3 = compute_jump_du_count(df2, lastdays=9, resample='d')
-
-    # df = get_tdx_exp_low_or_high_power(code, dl=30, newdays=0, resample=resample)
-    # df3 =  get_tdx_exp_all_LastDF_DL([code],  dt=60, ptype='low', filter='y', power=ct.lastPower, resample=resample)
-
-    # df3 = get_tdx_append_now_df_api_tofile(code,newdays=0, start=None, end=None, type='f', df=None, dl=10, power=False)
-
-    # type D:\MacTools\WinTools\new_tdx\T0002\export\forwardp\SH688020.txt
-
-
-    # Write_market_all_day_mp('all')
-
-
-    # print df2.shape,df2.cumin
-    # print get_kdate_data('000859', start='2023-01-01', end='', ktype='D')
-    # write_tdx_tushare_to_file(code)
-   
-    # df = get_tdx_Exp_day_to_df(code, dl=ct.PowerCountdl,end=None, newdays=0, resample='d')
-    # print df.perc1d[-1:],df.perc2d[-1:],df.perc3d[-1:],df.perc4d[-1:],df.perc5d[-1:]
-    # print df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(9))]][:1]
-
-    # df3 = df.sort_index(ascending=True)
-    # print "cumin:",df[:2].cumin.values,df[:2].cumaxe.values,df[:2].cumins.values,df[:2].cumine.values,df[:2].cumaxc.values, df[:2].cmean.values
-
-    # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
-    # # df4 = df2.sort_index(ascending=True)
-    # print "cumin:",df2[:2].cumin.values,df2[:2].cumaxe.values,df2[:2].cumins.values,df2[:2].cumine.values,df2[:2].cumaxc.values, df2[:2].cmean.values
-
-    # print get_tdx_day_to_df_last('999999', type=1)
-    # sys.exit(0)
-    # log.setLevel(LoggerFactory.INFO)
-    # print Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-    # print Write_tdx_all_to_hdf(tdx_index_code_list, h5_fname='tdx_all_df', h5_table='all', dl=300,index=True)
-    # print Write_sina_to_tdx(tdx_index_code_list,index=True)
-    # print cct.get_ramdisk_path('tdx')
-
-    # code_list = sina_data.Sina().market('cyb').index.tolist()
-    # code_list.extend(tdx_index_code_list)
+    # print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
+    # print("code:%s boll:%s df2:%s"%(code,df.boll[0]))
+    
     time_s = time.time()
 
 
