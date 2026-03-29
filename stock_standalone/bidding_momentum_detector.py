@@ -477,41 +477,46 @@ class BiddingMomentumDetector:
             logger.debug("[Detector] Skip save in history mode.")
             return
 
+        # [REFINED] 强化交易日校验
         is_trade_day = cct.get_trade_date_status()
+        # 🛡️ 二重校验：补齐可能的 GlobalValues 缓存刷新不及时问题
+        if not cct.get_day_istrade_date():
+            is_trade_day = False
+
         if not force and not is_trade_day:
-            logger.debug("[Detector] Skip save: Not a trade date.")
+            # logger.debug("[Detector] Skip save: Not a trade date.")
             return
 
-        # [NEW] [TIME-CHECK] 交易日 9:45 前不存盘，避免竞价杂波覆盖昨日收盘精华
+        # [NEW] [TIME-CHECK] 交易日 9:45 前不存盘，防止早上冷启动时覆盖昨日完美快照
+        now = datetime.datetime.now()
         if not force and is_trade_day:
-            now = datetime.datetime.now()
             if now.hour < 9 or (now.hour == 9 and now.minute < 45):
                 # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:45).")
                 return
 
-        # [NEW] [CONTENT-CHECK] 如果完全没有板块数据，通常意味着是无效会话或初次启动，不存盘以防止覆盖有效历史
+        # [NEW] [QUALITY-PROTECTION] 盘后或非交易日的数据质量比对保护
+        main_path = self._get_persistence_path()
+        if os.path.exists(main_path):
+            try:
+                mtime = os.path.getmtime(main_path)
+                f_dt = datetime.datetime.fromtimestamp(mtime)
+                
+                # 情况 A：盘后且已有今日数据
+                # 情况 B：非交易日且已有近期(2天内)数据
+                # 如果当前 Session 信号极少，说明是误动或新开机，严禁覆盖
+                if now.hour >= 15 or not is_trade_day:
+                    current_sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
+                    # 磁盘文件较新且内存几乎无数据
+                    if current_sig_count < 5 and (now - f_dt).days <= 2:
+                        logger.info(f"🛡️ [Detector] Session empty ({current_sig_count} sigs). Protecting existing data from {f_dt.strftime('%m-%d %H:%M')}.")
+                        return
+            except Exception as e:
+                logger.debug(f"Persistence quality check error: {e}")
+
+        # [NEW] [CONTENT-CHECK] 如果完全没有板块数据，通常意味着是无效会话，不存盘
         if not force and not self.active_sectors:
             # logger.debug("[Detector] Skip save: No active sector data recorded.")
             return
-
-        # [NEW] [DATA-PROTECTION] 防止收盘后的重复写入导致数据损坏或有效数据被空数据覆盖
-        main_path = self._get_persistence_path()
-        if not force and os.path.exists(main_path):
-            try:
-                now = datetime.datetime.now()
-                # 如果当前时间已经是晚上 (15:30以后)，且文件是今天下午存的
-                if now.hour >= 15:
-                    mtime = os.path.getmtime(main_path)
-                    f_dt = datetime.datetime.fromtimestamp(mtime)
-                    # 检查是否是今天的 14:50-16:00 存的 (收盘数据保护区)
-                    if f_dt.date() == now.date() and 14 <= f_dt.hour <= 16:
-                        # 检查当前内存中是否有足够多的活跃数据，如果没有（比如刚误开启），则坚决不覆盖
-                        sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
-                        if sig_count < 5: # 门槛：少于5只活跃股认为当前是空会话/误操作
-                            logger.info(f"🛡️ [Detector] Found valid market-close data ({f_dt.strftime('%H:%M')}). Skipping overwrite with empty session.")
-                            return
-            except Exception as e:
-                logger.debug(f"Persistence check error: {e}")
 
         try:
             # [Data Preparation ...]
