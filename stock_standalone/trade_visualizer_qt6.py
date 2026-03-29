@@ -1049,7 +1049,7 @@ class DataLoaderThread(QThread):
                 for attempt in range(3):
                     if self._is_interrupted: return # ⭐ 循环内检查
                     try:
-                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=100):
+                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=300):
                             day_df = tdd.get_tdx_Exp_day_to_df(
                                 self.code, 
                                 dl=Resample_LABELS_Days[self.resample], 
@@ -1082,7 +1082,7 @@ class DataLoaderThread(QThread):
                                     logger.debug(f"[DataLoaderThread] Cache Evicted: {old_key} size: {old_size/1024:.1f}KB, remaining: {DataLoaderThread._total_cache_memory/1024/1024:.2f}MB")
 
                             if 'ma60d' in day_df.columns:
-                                with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=1800):
+                                with timed_ctx(f"get_tdx_Exp_day_to_df_att_cycle_stage{attempt}", warn_ms=300):
                                     day_df['cycle_stage'] = calc_cycle_stage_vect(day_df)
                             break
                     except Exception as e:
@@ -1121,7 +1121,7 @@ class DataLoaderThread(QThread):
                 for attempt in range(3):
                     if self._is_interrupted: return # ⭐ 循环内检查
                     try:
-                        with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=1800):
+                        with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=800):
                             # tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
                             s = self.sina if self.sina else sina_data.Sina()
                             tick_df = s.get_real_time_tick(self.code, enrich_data=True)
@@ -6252,7 +6252,7 @@ class MainWindow(QMainWindow, WindowMixin):
             today_bar = tick_to_daily_bar(effective_tick_df)
 
             # 注意：這裡直接調用渲染，確保模擬數據被帶入
-            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=400):
+            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=600):
                 # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
                 self.render_charts(code, self.day_df, effective_tick_df)
 
@@ -6262,7 +6262,7 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
-            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=400):
+            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=600):
                 self.render_charts(code, self.day_df, None)
 
         '''
@@ -6945,7 +6945,7 @@ class MainWindow(QMainWindow, WindowMixin):
         QTimer.singleShot(1000, self._save_visualizer_config)
 
         # 6. [IPC] 反向同步给主程序监控进程 (确保互斥同步)
-        enabled = not new_is_paused
+        enabled = new_is_paused
         self._send_voice_state_to_main_app(enabled=enabled)
 
     def _toggle_verbose_log(self):
@@ -9802,7 +9802,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 kline_signals.extend(cached_strat[1])
                 # logger.debug(f"[PERF] Strategy Cache HIT for {code}")
             else:
-                with timed_ctx("_run_strategy_simulation_signal", warn_ms=150):
+                with timed_ctx("_run_strategy_simulation_signal", warn_ms=200):
                     sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=0) # ⚡ [FIX] 由 50 改为 0，防止早盘信号消失
                     kline_signals.extend(sim_signals)
                     self._strategy_cache[code] = (strat_key, sim_signals)
@@ -9812,7 +9812,7 @@ class MainWindow(QMainWindow, WindowMixin):
         now_ts = time.time()
         # 每 30 秒重新加载一次历史信号 CSV
         if now_ts - getattr(self, '_hist_df_last_load', 0) > 30:
-            with timed_ctx("get_signal_history_df", warn_ms=150):
+            with timed_ctx("get_signal_history_df", warn_ms=200):
                 self._hist_df_cache = self.logger.get_signal_history_df()
                 if not self._hist_df_cache.empty:
                     self._hist_df_cache['code'] = self._hist_df_cache['code'].astype(str)
@@ -9857,7 +9857,7 @@ class MainWindow(QMainWindow, WindowMixin):
         is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and tick_df is not None and not tick_df.empty
         
         if is_realtime_active:
-            with timed_ctx("_run_realtime_strategy", warn_ms=200):
+            with timed_ctx("_run_realtime_strategy", warn_ms=300):
                 shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
                 if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
                     # 优先使用 close, 其次 trade, 最后 price
@@ -9897,7 +9897,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.all_today_sbc_signals = cached_sbc[1]
                 # logger.debug(f"[PERF] SBC Cache HIT for {code}")
             else:
-                with timed_ctx("sbc_core_analysis", warn_ms=100):
+                with timed_ctx("sbc_core_analysis", warn_ms=200):
                     try:
                         # 委托 sbc_core 进行高性能批量分析 (日期感知流)
                         sbc_results = sbc_core.run_sbc_analysis_core(
@@ -12033,12 +12033,32 @@ class MainWindow(QMainWindow, WindowMixin):
 
         except Exception as e:
             logger.error(f"Failed to load layout preset {index}: {e}")
+    
+    def wait_all_threads(self, timeout=2):
+        import threading
 
+        main = threading.current_thread()
+
+        for t in threading.enumerate():
+            if t is main:
+                continue
+
+            # ❗跳过 DummyThread
+            if isinstance(t, threading._DummyThread):
+                logger.warning(f"[SKIP DummyThread] {t.name}")
+                continue
+
+            logger.error(f"[WAIT] {t.name}")
+
+            t.join(timeout)
+
+            if t.is_alive():
+                logger.error(f"[STILL ALIVE] {t.name}")
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
-
+        
         # 0.15️⃣ 停止 SBC 自动刷新 Timer
         if hasattr(self, "_sbc_timer") and self._sbc_timer:
             try:
@@ -12070,7 +12090,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 except:
                     pass
 
-        # 0.1️⃣ 清理打开的 SBC 回放窗口
+        # 0.31️⃣ 清理打开的 SBC 回放窗口
         if hasattr(self, '_sbc_test_windows'):
             for win in self._sbc_test_windows:
                 try:
@@ -12080,7 +12100,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     pass
             self._sbc_test_windows.clear()
 
-        # 0.️⃣ 立即停止语音进程 (防止退出过程中继续播报噪音)
+        # 0.️4 立即停止语音进程 (防止退出过程中继续播报噪音)
 
         if hasattr(self, 'voice_thread') and self.voice_thread:
             logger.info("Closing Voice Broadcast system...")
@@ -12088,7 +12108,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.voice_thread.stop()
             except Exception as e:
                 logger.error(f"Error stopping voice_thread: {e}")
-
+        
+        
         # [User Request] 退出时清理 History Manager
         if hasattr(self, 'history_manager_process') and self.history_manager_process and self.history_manager_process.is_alive():
             try:
@@ -12211,7 +12232,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     except Exception as e:
                         logger.warning(f"Error stopping thread {id(t)}: {e}")
                 t.deleteLater()
-
+        #0.5 5️⃣ 等线程全部结束（这一步必须提前）
+        self.wait_all_threads()
         # 当 GUI 关闭时，触发 stop_event
         stop_event.set()
 

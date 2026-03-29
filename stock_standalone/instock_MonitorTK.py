@@ -141,6 +141,10 @@ if sys.platform.startswith('win'):
 # from trading_analyzerQt6 import TradingGUI
 # from minute_kline_viewer_qt import KlineBackupViewer
 
+# 全局退出计数 (3次 Ctrl+C 自动强制退出)
+_exit_ctrl_c_count = 0
+_exit_ctrl_c_time = 0
+
 # ✅ 性能优化模块导入
 try:
     from performance_optimizer import (
@@ -1232,7 +1236,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def signal_handler(self, sig, frame):
         """捕获 Ctrl+C 信号"""
-        self.ask_exit()
+        global _exit_ctrl_c_count, _exit_ctrl_c_time
+        now = time.time()
+        # 3 秒内连续按 3 次 Ctrl+C，强制退出
+        if now - _exit_ctrl_c_time > 3:
+            _exit_ctrl_c_count = 0
+            
+        _exit_ctrl_c_count += 1
+        _exit_ctrl_c_time = now
+
+        if _exit_ctrl_c_count >= 3:
+            print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+            logger.info("检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+            os._exit(0)
+        else:
+            # 第一次或非连续，正常询问
+            self.ask_exit()
+            # 对话框关闭后（可能是取消），重置计数，防止影响后续
+            _exit_ctrl_c_count = 0
         
     def send_command_to_visualizer(self, cmd_str):
         """
@@ -14281,7 +14302,8 @@ if __name__ == "__main__":
         # mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    
+    _exit_ctrl_c_count = 0
+    _exit_ctrl_c_time = 0
     # ✅ 命令行触发数据库修复 - 必须在最开始检查,避免初始化其他组件
     if args.repair_db is not None:
         from db_repair_tool import DatabaseRepairTool
@@ -14528,7 +14550,18 @@ if __name__ == "__main__":
                         print("执行异常:\n", traceback.format_exc())
 
             except KeyboardInterrupt:
-                print("\nKeyboardInterrupt, 输入 'quit' 退出")
+                now = time.time()
+                if now - _exit_ctrl_c_time > 3:
+                    _exit_ctrl_c_count = 0
+                    
+                _exit_ctrl_c_count += 1
+                _exit_ctrl_c_time = now
+
+                if _exit_ctrl_c_count >= 3:
+                    print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                    os._exit(0)
+                else:
+                    print(f"\nKeyboardInterrupt ({_exit_ctrl_c_count}/3), 输入 'quit' 退出")
             except EOFError:
                 print("\nEOF, 退出调试模式")
                 break
@@ -14559,4 +14592,16 @@ if __name__ == "__main__":
         app.mainloop()
     except KeyboardInterrupt:
         # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
-        app.ask_exit()
+        now = time.time()
+        if now - _exit_ctrl_c_time > 3:
+            _exit_ctrl_c_count = 0
+            
+        _exit_ctrl_c_count += 1
+        _exit_ctrl_c_time = now
+
+        if _exit_ctrl_c_count >= 3:
+            print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+            os._exit(0)
+        else:
+            app.ask_exit()
+            _exit_ctrl_c_count = 0
