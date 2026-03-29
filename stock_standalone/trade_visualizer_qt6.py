@@ -12036,22 +12036,16 @@ class MainWindow(QMainWindow, WindowMixin):
     
     def wait_all_threads(self, timeout=2):
         import threading
-
         main = threading.current_thread()
-
         for t in threading.enumerate():
             if t is main:
                 continue
-
             # ❗跳过 DummyThread
             if isinstance(t, threading._DummyThread):
                 logger.warning(f"[SKIP DummyThread] {t.name}")
                 continue
-
             logger.error(f"[WAIT] {t.name}")
-
             t.join(timeout)
-
             if t.is_alive():
                 logger.error(f"[STILL ALIVE] {t.name}")
 
