@@ -815,66 +815,108 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
 
 
 
+from queue import Queue, Empty
+import time
+
 class DataProcessWorker(QObject):
     """Worker object to process realtime data in a separate QThread."""
-    finished = pyqtSignal()
-    
+
+    data_updated = pyqtSignal(object)
+    stopped = pyqtSignal()
+
     def __init__(self, detector):
         super().__init__()
         self.detector = detector
-        self.df_queue = []
+        # 线程安全队列
+        self.df_queue = Queue()
+        # 用队列替代 bool（彻底线程安全）
+        self.force_queue = Queue()
         self._is_running = True
-        self._force_recalc = False # [NEW] 强制重算标志
-        
-    def add_data(self, df):
-        self.df_queue.append(df)
-        
-    def trigger_recalc(self):
-        """强制触发一次全量评分重算"""
-        self._force_recalc = True
 
-    def process_data(self):
-        """Continuously process data from the queue."""
-        while self._is_running:
-            # 1. 如果有新数据包，优先处理数据包
-            if self.df_queue:
-                df = self.df_queue.pop(0)
-                try:
-                    # [HEARTBEAT] 后台数据处理心跳
-                    if self.detector.enable_log:
-                        logger.info(f"💓 [Worker] Processing heartbeat: Queue size={len(self.df_queue)}. DF Shape: {df.shape}")
-                        
-                    self.detector.register_codes(df)
-                    self.detector.update_scores()
-                    
-                    # [NEW] 记录版本，让 UI 知道有新数据算完了
-                    setattr(self.detector, 'data_version', getattr(self.detector, 'data_version', 0) + 1)
-                    self._force_recalc = False # 数据到达本身就是一次刷新
-                    
-                    self.finished.emit()
-                except Exception as e:
-                    logger.error(f"[SectorBiddingPanel Worker] Error: {e}")
-            
-            # 2. 如果没新数据，但用户点击了“手动刷新”，强制执行一次全量评分 (sweep)
-            elif self._force_recalc:
-                try:
-                    if self.detector.enable_log:
-                        logger.info("⚡ [Worker] Manual force sweep recalculation triggered")
-                    
-                    self.detector.update_scores()
-                    setattr(self.detector, 'data_version', getattr(self.detector, 'data_version', 0) + 1)
-                    self._force_recalc = False
-                    self.finished.emit()
-                except Exception as e:
-                    logger.error(f"[SectorBiddingPanel Worker] Force recalc error: {e}")
-            
-            else:
-                QThread.msleep(50)
-        # Emit finished again when loop exits to ensure thread knows it can quit
-        self.finished.emit()
-        
+    def add_data(self, df):
+        """外部线程安全调用"""
+        self.df_queue.put(df)
+
+    def trigger_recalc(self):
+        """线程安全强制刷新"""
+        # 防止重复堆积刷新信号，先清空再放最新的
+        while not self.force_queue.empty():
+            try: self.force_queue.get_nowait()
+            except Empty: break
+        self.force_queue.put(True)
+
     def stop(self):
         self._is_running = False
+
+    def process_data(self):
+        """子线程主循环（生产稳定版）"""
+        logger.info("🚀 [Worker] Data processing loop started.")
+
+        while self._is_running:
+            df = None
+            has_done_work = False
+
+            try:
+                # ⚡ 快速响应（超时时间设为 0.05s）
+                # 这一步会自动让出 GIL，对系统非常友好
+                try:
+                    df = self.df_queue.get(timeout=0.05)
+                except Empty:
+                    pass
+
+                # 1. 处理数据（关键优化：丢弃旧包，防堆积）
+                if df is not None:
+                    # 🔥 丢弃逻辑：如果有更新的数据在排队，只取最后一个
+                    count = 0
+                    while not self.df_queue.empty():
+                        try:
+                            df = self.df_queue.get_nowait()
+                            count += 1
+                        except Empty:
+                            break
+                    
+                    if count > 0 and self.detector.enable_log:
+                        logger.debug(f"⏩ [Worker] Skipped {count} stale data frames.")
+
+                    # 执行核心计算
+                    self.detector.register_codes(df)
+                    self.detector.update_scores()
+
+                    v = getattr(self.detector, "data_version", 0) + 1
+                    setattr(self.detector, "data_version", v)
+
+                    self.data_updated.emit(df)
+                    has_done_work = True
+
+                # 2. 强制刷新判定
+                force = False
+                try:
+                    force = self.force_queue.get_nowait()
+                except Empty:
+                    force = False
+
+                if force:
+                    if self.detector.enable_log:
+                        logger.info("⚡ [Worker] Force recalculation")
+
+                    self.detector.update_scores()
+
+                    v = getattr(self.detector, "data_version", 0) + 1
+                    setattr(self.detector, "data_version", v)
+
+                    self.data_updated.emit(None)
+                    has_done_work = True
+
+            except Exception as e:
+                logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
+
+            # 3. 最后的保险：防止在数据极高频时榨干 CPU
+            # 如果连续处理了任务，微小休眠 1ms 让系统调度一下
+            if has_done_work:
+                time.sleep(0.001) 
+
+        logger.info("🏁 [Worker] Loop exited safely.")
+        self.stopped.emit()
 
 class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
@@ -910,13 +952,37 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
         
+        # # Async Data Processing Worker - MUST be before UI init
+        # self._worker_thread = QThread()  # No parent - managed manually
+        # self._worker = DataProcessWorker(self.detector)
+        # self._worker.moveToThread(self._worker_thread)
+        # self._worker_thread.started.connect(self._worker.process_data)
+        # self._worker.finished.connect(self._on_worker_finished)
+        # self._worker_thread.start()
+
+
         # Async Data Processing Worker - MUST be before UI init
-        self._worker_thread = QThread()  # No parent - managed manually
+        self._worker_thread = QThread()  # no parent
+
         self._worker = DataProcessWorker(self.detector)
         self._worker.moveToThread(self._worker_thread)
+
+        # 启动
         self._worker_thread.started.connect(self._worker.process_data)
-        self._worker.finished.connect(self._on_worker_finished)
+
+        # 正确的停止信号
+        self._worker.stopped.connect(self._worker_thread.quit)
+
+        # 线程结束后清理
+        self._worker_thread.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+
+        # UI层回调
+        # [FIX] 连接数据处理信号到刷新函数，而不是停止信号
+        self._worker.data_updated.connect(self._on_worker_finished)
+
         self._worker_thread.start()
+
 
         self._init_ui()
         # [FIX] Implementation of geometry methods locally
@@ -1432,26 +1498,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("扫描中...")
             if hasattr(self, 'status_lbl'):
-                lbl_text = "⏳ [实时模式] 正在计算评分映射..." if not self._is_history_mode else f"📁 [历史模式: {self._history_date}] 刷新..."
+                lbl_text = "⏳ [实时模式] 正在异步计算评分映射..." if not self._is_history_mode else f"📁 [历史模式: {self._history_date}] 刷新..."
                 self.status_lbl.setText(lbl_text)
                 self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
             
-            # [NEW] [TIME-CHECK] 检查是否需要清理早盘跨日数据
-            # 这样用户如果发现早盘数据没清，点一下手动刷新也能强制清理
-            if hasattr(self, 'detector'):
-                self.detector.update_scores() # 这会触发 detector 内的 check_time 逻辑
+            # [FIX] 移除主线程耗时计算，统一交给后台线程处理
+            # if hasattr(self, 'detector'):
+            #     self.detector.update_scores() # 这会触发 detector 内的 check_time 逻辑
             
-            # [FIX] 利用现有的 QThread (_worker) 安全执行，解决 "Timers can only be used with threads started with QThread"
+            # [FIX] 利用现有的 QThread (_worker) 安全执行
             if hasattr(self, '_worker'):
-                # [NEW] 手动刷新时同时重置观测锚点，使用户能看到“从点击瞬间开始”的增量变化
                 self.detector.reset_observation_anchors()
                 self._force_update_requested = True
                 
                 if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
-                    # 如果有实盘数据，推入队列
+                    # 如果有实盘数据，推入队列，触发计算
                     self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
                 else:
-                    # 否则触发全量 sweep
+                    # 否则触发全量异步 sweep
                     self._worker.trigger_recalc()
             
             # 使用 QTimer 设置按钮防抖恢复
@@ -1567,22 +1631,48 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         return None
 
-    def on_realtime_data_arrived(self, df_all, force_update=False):
-        """主线程调用，将数据推入后台线程列队避免卡顿 UI"""
-        if self._is_history_mode:
-            return # [NEW] 历史模式下拦截实时数据
-        try:
-            # Drop obsolete frames if we are piling up
-            if len(self._worker.df_queue) > 1:
-                 self._worker.df_queue.clear()
+    # def on_realtime_data_arrived(self, df_all, force_update=False):
+    #     """主线程调用，将数据推入后台线程列队避免卡顿 UI"""
+    #     if self._is_history_mode:
+    #         return # [NEW] 历史模式下拦截实时数据
+    #     try:
+    #         # Drop obsolete frames if we are piling up
+    #         if len(self._worker.df_queue) > 1:
+    #              self._worker.df_queue.clear()
                  
-            # [OPTIMIZE] 移除冗余 copy()，调用方 (MonitorTK) 已通过 copy() 机制隔离数据，此处直接透传
+    #         # [OPTIMIZE] 移除冗余 copy()，调用方 (MonitorTK) 已通过 copy() 机制隔离数据，此处直接透传
+    #         self._worker.add_data(df_all)
+            
+    #         # Record force_update request state
+    #         self._force_update_requested = force_update
+            
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
+
+    def on_realtime_data_arrived(self, df_all, force_update=False):
+        """主线程调用，将数据推入后台线程避免卡顿 UI"""
+        
+        if self._is_history_mode:
+            return
+
+        try:
+            # ✔ 丢弃旧数据（正确方式）
+            while True:
+                try:
+                    self._worker.df_queue.get_nowait()
+                except Empty:
+                    break
+
+            # 推入最新数据
             self._worker.add_data(df_all)
-            
-            # Record force_update request state
+
             self._force_update_requested = force_update
-            
+
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
 
     def _on_worker_finished(self):
@@ -1613,136 +1703,273 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
 
     # ------------------------------------------------------------------ UI refresh
+    # def _refresh_sector_list(self):
+    #     # 1. 安全检查，防止初始化过程中的过早调用
+    #     if not hasattr(self, '_worker') or self._worker is None:
+    #         return
+            
+    #     # 2. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
+    #     sectors = self.detector.get_active_sectors()
+        
+    #     # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
+    #     if self._worker.df_queue:
+    #         if hasattr(self, 'status_lbl'):
+    #             self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
+    #             self.status_lbl.setStyleSheet("color: #FFD700; font-weight: bold;")
+
+    #     if not sectors:
+    #         # 如果目前没有活跃板块，在状态栏提示
+    #         if hasattr(self, 'status_lbl') and not self._worker.df_queue:
+    #             self.status_lbl.setText("📝 目前无满足门槛的活跃板块 (或正在计算中)")
+    #             self.status_lbl.setStyleSheet("color: #AAAAAA;")
+            
+    #         # [STABILITY] 数据为空时也要清理旧表
+    #         self.sector_table.setRowCount(0)
+    #         return
+        
+    #     now_str = datetime.now().strftime("%H:%M:%S")
+    #     if hasattr(self, 'status_lbl'):
+    #         self.status_lbl.setText(f"✅ 刷新完成 ({now_str}) | 活跃板块: {len(sectors)}")
+    #         self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        
+    #     # 1. 记录当前选中的板块名，以便在刷新后恢复
+    #     selected_sector = ""
+    #     items = self.sector_table.selectedItems()
+    #     if items:
+    #         selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+            
+    #     self.sector_table.setUpdatesEnabled(False)
+    #     self.sector_table.blockSignals(True)
+    #     self.sector_table.setSortingEnabled(False) # 填充时静默
+    #     self.sector_table.setRowCount(0)
+        
+    #     # 2. 填充表格
+    #     for i, sdata in enumerate(sectors):
+    #         sn = sdata['sector']
+    #         sc = sdata['score']
+    #         tags = sdata.get('tags', '')
+    #         lp = sdata.get('leader_pct', 0)
+    #         ln = sdata.get('leader_name', '未知')
+            
+    #         # 选择颜色和图标
+    #         if sc >= 15: # 归一化后的新门槛
+    #             color = "#FF3333" # 强攻红
+    #             icon_char = "🔥"
+    #         elif sc >= 8:
+    #             color = "#FF9900" # 蓄势橙
+    #             icon_char = "⚡"
+    #         else:
+    #             color = "#AAAAAA" # 观测灰
+    #             icon_char = "📊"
+
+    #         self.sector_table.insertRow(i)
+            
+    #         # 第一列：板块名 (带图标)
+    #         item_name = QTableWidgetItem(f"{icon_char} {sn}")
+    #         item_name.setData(Qt.ItemDataRole.UserRole, sn)
+    #         item_name.setForeground(QColor(color))
+    #         self.sector_table.setItem(i, 0, item_name)
+            
+    #         diff = sdata.get('score_diff', 0.0)
+            
+    #         item_score = NumericTableWidgetItem(f"{sc:.1f}")
+    #         item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    #         item_score.setForeground(QColor(color))
+    #         self.sector_table.setItem(i, 1, item_score)
+            
+    #         # 第三列：涨跌 (独立列，显示增量并支持排序)
+    #         diff_text = f"{diff:+.1f}" if diff != 0 else "0.0"
+    #         item_diff = NumericTableWidgetItem(diff_text)
+    #         item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+    #         # 颜色逻辑：如果有显著增长变红，显著下跌变绿
+    #         if diff > 0.1:
+    #             item_diff.setForeground(QColor("#FF4444"))
+    #         elif diff < -0.1:
+    #             item_diff.setForeground(QColor("#44CC44"))
+    #         else:
+    #             item_diff.setForeground(QColor(color))
+                
+    #         self.sector_table.setItem(i, 2, item_diff)
+            
+    #         # 第四列：龙头股 (名+幅)
+    #         item_leader = QTableWidgetItem(f"{ln} ({lp:+.1f}%)")
+    #         item_leader.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    #         self.sector_table.setItem(i, 3, item_leader)
+            
+    #         # 第五列：状态标签
+    #         item_tag = QTableWidgetItem(tags)
+    #         item_tag.setFont(QFont("Microsoft YaHei", 8))
+    #         self.sector_table.setItem(i, 4, item_tag)
+
+    #         # 恢复之前的选择
+    #         if sn == selected_sector:
+    #             self.sector_table.selectRow(i)
+        
+    #     self.sector_table.setSortingEnabled(True)
+    #     self.sector_table.setUpdatesEnabled(True)
+    #     self.sector_table.blockSignals(False)
+        
+    #     # 3. 自动选中第一个
+    #     if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
+    #         self.sector_table.selectRow(0)
+        
+    #     # 🚦 [FIX] 强制触发：无论是否 auto_select，只要有选中项，都重刷一次右侧个股表
+    #     # 否则如果板块选择没变，右侧数据（现价/涨幅）就不会随刷新周期更新
+    #     if self.sector_table.selectedItems():
+    #         self._on_sector_table_selection_changed()
+        
+    #     # 4. 更新状态栏
+    #     sub_cnt = len(self.detector._subscribed)
+    #     sess = self._session_str()
+        
+    #     # [NEW] Render total hits if search is active
+    #     if hasattr(self, '_active_search_query') and self._active_search_query:
+    #         self.status_lbl.setText(f"[{sess}] 过滤模式 | 关键字: {self._active_search_query}")
+    #     else:
+    #         if hasattr(self, 'status_lbl'):
+    #             self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
+
+    #     # 5. [NEW] 更新底部重点表
+    #     self._populate_watchlist()
+
     def _refresh_sector_list(self):
-        # 1. 安全检查，防止初始化过程中的过早调用
+        # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
             return
-            
-        # 2. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
-        sectors = self.detector.get_active_sectors()
-        
-        # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
-        if self._worker.df_queue:
+
+        # 2. 状态判断：不再直接访问 Queue（关键修复）
+        qsize = self._worker.df_queue.qsize() if self._worker else 0
+
+        if qsize > 0:
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
-                self.status_lbl.setStyleSheet("color: #FFD700; font-weight: bold;")
+                self.status_lbl.setText(
+                    f"📡 正在拉取个股分时 (队列: {qsize})..."
+                )
+                self.status_lbl.setStyleSheet(
+                    "color: #FFD700; font-weight: bold;"
+                )
+
+        # 3. 获取板块数据
+        sectors = self.detector.get_active_sectors()
 
         if not sectors:
-            # 如果目前没有活跃板块，在状态栏提示
-            if hasattr(self, 'status_lbl') and not self._worker.df_queue:
+            if hasattr(self, 'status_lbl') and qsize == 0:
                 self.status_lbl.setText("📝 目前无满足门槛的活跃板块 (或正在计算中)")
                 self.status_lbl.setStyleSheet("color: #AAAAAA;")
-            
-            # [STABILITY] 数据为空时也要清理旧表
+
             self.sector_table.setRowCount(0)
             return
-        
+
         now_str = datetime.now().strftime("%H:%M:%S")
         if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText(f"✅ 刷新完成 ({now_str}) | 活跃板块: {len(sectors)}")
+            self.status_lbl.setText(
+                f"✅ 刷新完成 ({now_str}) | 活跃板块: {len(sectors)}"
+            )
             self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
-        
-        # 1. 记录当前选中的板块名，以便在刷新后恢复
+
+        # 4. 记住选中项
         selected_sector = ""
         items = self.sector_table.selectedItems()
         if items:
-            selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-            
+            selected_sector = self.sector_table.item(
+                items[0].row(), 0
+            ).data(Qt.ItemDataRole.UserRole)
+
+        # 5. 表格刷新（冻结 UI）
         self.sector_table.setUpdatesEnabled(False)
         self.sector_table.blockSignals(True)
-        self.sector_table.setSortingEnabled(False) # 填充时静默
+        self.sector_table.setSortingEnabled(False)
         self.sector_table.setRowCount(0)
-        
-        # 2. 填充表格
+
+        # 6. 填充数据
         for i, sdata in enumerate(sectors):
             sn = sdata['sector']
             sc = sdata['score']
             tags = sdata.get('tags', '')
             lp = sdata.get('leader_pct', 0)
             ln = sdata.get('leader_name', '未知')
-            
-            # 选择颜色和图标
-            if sc >= 15: # 归一化后的新门槛
-                color = "#FF3333" # 强攻红
+
+            if sc >= 15:
+                color = "#FF3333"
                 icon_char = "🔥"
             elif sc >= 8:
-                color = "#FF9900" # 蓄势橙
+                color = "#FF9900"
                 icon_char = "⚡"
             else:
-                color = "#AAAAAA" # 观测灰
+                color = "#AAAAAA"
                 icon_char = "📊"
 
             self.sector_table.insertRow(i)
-            
-            # 第一列：板块名 (带图标)
+
             item_name = QTableWidgetItem(f"{icon_char} {sn}")
             item_name.setData(Qt.ItemDataRole.UserRole, sn)
             item_name.setForeground(QColor(color))
             self.sector_table.setItem(i, 0, item_name)
-            
+
             diff = sdata.get('score_diff', 0.0)
-            
+
             item_score = NumericTableWidgetItem(f"{sc:.1f}")
             item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_score.setForeground(QColor(color))
             self.sector_table.setItem(i, 1, item_score)
-            
-            # 第三列：涨跌 (独立列，显示增量并支持排序)
+
             diff_text = f"{diff:+.1f}" if diff != 0 else "0.0"
             item_diff = NumericTableWidgetItem(diff_text)
             item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            # 颜色逻辑：如果有显著增长变红，显著下跌变绿
+
             if diff > 0.1:
                 item_diff.setForeground(QColor("#FF4444"))
             elif diff < -0.1:
                 item_diff.setForeground(QColor("#44CC44"))
             else:
                 item_diff.setForeground(QColor(color))
-                
+
             self.sector_table.setItem(i, 2, item_diff)
-            
-            # 第四列：龙头股 (名+幅)
+
             item_leader = QTableWidgetItem(f"{ln} ({lp:+.1f}%)")
-            item_leader.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            item_leader.setTextAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
             self.sector_table.setItem(i, 3, item_leader)
-            
-            # 第五列：状态标签
+
             item_tag = QTableWidgetItem(tags)
             item_tag.setFont(QFont("Microsoft YaHei", 8))
             self.sector_table.setItem(i, 4, item_tag)
 
-            # 恢复之前的选择
             if sn == selected_sector:
                 self.sector_table.selectRow(i)
-        
+
+        # 7. 恢复 UI
         self.sector_table.setSortingEnabled(True)
         self.sector_table.setUpdatesEnabled(True)
         self.sector_table.blockSignals(False)
-        
-        # 3. 自动选中第一个
+
+        # 8. 默认选中
         if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
-        
-        # 🚦 [FIX] 强制触发：无论是否 auto_select，只要有选中项，都重刷一次右侧个股表
-        # 否则如果板块选择没变，右侧数据（现价/涨幅）就不会随刷新周期更新
+
+        # 9. 联动刷新
         if self.sector_table.selectedItems():
             self._on_sector_table_selection_changed()
-        
-        # 4. 更新状态栏
+
+        # 10. 状态栏最终更新
         sub_cnt = len(self.detector._subscribed)
         sess = self._session_str()
-        
-        # [NEW] Render total hits if search is active
+
         if hasattr(self, '_active_search_query') and self._active_search_query:
-            self.status_lbl.setText(f"[{sess}] 过滤模式 | 关键字: {self._active_search_query}")
+            self.status_lbl.setText(
+                f"[{sess}] 过滤模式 | 关键字: {self._active_search_query}"
+            )
         else:
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
+                self.status_lbl.setText(
+                    f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}"
+                )
 
-        # 5. [NEW] 更新底部重点表
+        # 11. 重点表刷新
         self._populate_watchlist()
-
+        
     # ------------------------------------------------------------------ sector select
     def _on_sector_table_selection_changed(self):
         """板块表选中项变更 → 刷新个股列表"""

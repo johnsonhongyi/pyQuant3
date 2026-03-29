@@ -1730,14 +1730,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
             try:
-                # 💡 在保存前，如果刚刚初始化，可能 worker 还在处理数据，稍微等待一下
-                # 但由于 save_persistent_data 是同步的，我们直接尝试保存
-                if hasattr(self.sector_bidding_panel, 'detector'):
-                    # 💡 使用 force=True 确保在收盘后也能保存，即使 get_trade_date_status 判断不匹配
-                    self.sector_bidding_panel.detector.save_persistent_data(force=True)
-                    logger.info("✅ SectorBiddingPanel 每日历史数据自动保存完成 (Force=True)")
+                # 🛡️ [FIX] 增加交易日判定，防止非交易日强制保存导致数据被空 session 覆盖
+                if cct.get_trade_date_status():
+                    if hasattr(self.sector_bidding_panel, 'detector'):
+                        # 💡 使用 force=True 确保在收盘后也能保存
+                        self.sector_bidding_panel.detector.save_persistent_data(force=True)
+                        logger.info("✅ [15:30 Task] SectorBiddingPanel 每日历史数据自动保存完成 (TradeDay=True)")
+                else:
+                    logger.info("ℹ️ [15:30 Task] Skip SectorBiddingPanel save: Not a trade date.")
             except Exception as e:
-                logger.error(f"❌ SectorBiddingPanel 自动保存失败: {e}")
+                logger.error(f"❌ [15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
 
         if hasattr(self, "live_strategy"):
             try:
