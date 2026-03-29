@@ -743,16 +743,17 @@ class HotlistPanel(QWidget, WindowMixin):
             
         # ⭐ [NEW] 同步更新主窗口菜单文本与 Action 状态
         if hasattr(main_window, 'voice_action'):
-             text = "🔇 热点播报: 关(Alt+V)" if self._voice_paused else "🔊 热点播报: 开(Alt+V)"
-             main_window.voice_action.setText(text)
+            text = "🔇 热点播报: 关(Alt+V)" if self._voice_paused else "🔊 热点播报: 开(Alt+V)"
+            main_window.voice_action.setText(text)
              
         # ⭐ [NEW] 立即触发主窗口配置保存
         if hasattr(main_window, '_save_visualizer_config'):
-             main_window._save_visualizer_config()
+            main_window._save_visualizer_config()
 
         # ⭐ [NEW] 也同步给主进程 (IPC)
         if hasattr(main_window, '_send_voice_state_to_main_app'):
-             main_window._send_voice_state_to_main_app(enabled=( self._voice_paused))
+            enabled = self._voice_paused
+            main_window._send_voice_state_to_main_app(enabled=enabled)
             
         self._update_voice_button_style()
 

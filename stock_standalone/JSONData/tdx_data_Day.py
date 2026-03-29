@@ -2437,10 +2437,13 @@ def get_tdx_Exp_day_to_df(
     # 3. 清洗 & 裁剪
     # =========================
     num_cols = cols[1:]
+    df = df.copy()  # ⭐关键隔离
     df[num_cols] = df[num_cols].apply(pd.to_numeric, errors='coerce')
-    df.dropna(inplace=True)
+    # df.dropna(inplace=True)
+    df = df.dropna()
     df = df[(df.open != 0) & (df.amount != 0)]
-    df.drop_duplicates(subset='date', inplace=True)
+    df = df.drop_duplicates(subset='date')
+    # df.drop_duplicates(subset='date', inplace=True)
 
     if df.empty:
         return pd.DataFrame()
