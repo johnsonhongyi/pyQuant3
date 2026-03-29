@@ -5266,8 +5266,13 @@ def code_to_symbol(code: str) -> str:
             if code[:1] in ['5', '6']:
                 code = 'sh%s' % code
             elif code[:2] in ['99']:
-                code = 'sh%s' % code
-            elif code[:2] in ['43', '83', '87', '92']:
+                if code == '999688':
+                    code = 'sh000688'
+                # elif code == '999999':
+                #     code = 'sh000001'
+                else:
+                    code = 'sh%s' % code
+            elif code[:2] in ['43', '83', '87', '89', '92']:
                 code = 'bj%s' % code
             else:
                 code = 'sz%s' % code

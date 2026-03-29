@@ -7863,7 +7863,10 @@ if __name__ == '__main__':
     
     time_s = time.time()
 
-    code = '003009'
+    code = '899050'
+    # code = '159915'
+    code = '999688'
+    code = '588930'
     resample = 'd'
     with timed_ctx(f"extract_all_features {code}", warn_ms=50):
         df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
