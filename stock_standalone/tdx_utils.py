@@ -211,10 +211,10 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
         # 兼容 "'00','30'..." 格式
         code_startswith = tuple(x.strip().strip("'").strip('"') for x in code_startswith.split(',') if x.strip())
 
-    last_code = None
-    last_time = 0
+    last_emit_code = None   # ⭐ 新增
+    # last_time = 0
     # 增加微小启动延迟，确保外部信号接收端（UI）已完成初始化绑定
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.3)
     
     while True:
         try:
@@ -229,10 +229,9 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
                     now = time.time()
                     if len(code) == 6 and isDigit(code) and code.startswith(code_startswith):
                         # 如果代码变更，或者同一个代码在 2 秒后再次拷贝，则触发
-                        if code != last_code or (now - last_time > 2.0):
+                        if code != last_emit_code:
                             yield code
-                            last_code = code
-                            last_time = now
+                            last_emit_code = code
                             # 注意：这里不再清空剪贴板，确保用户可以黏贴到其他地方
         except Exception:
             # 捕获剪贴板锁定异常，稍后重试

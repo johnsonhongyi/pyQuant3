@@ -665,7 +665,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 📋 启动后台剪贴板监听服务 (包含自动查重逻辑，避免重复发送当前已选中代码)
         self.clipboard_monitor = start_clipboard_listener(
             self.sender, 
-            ignore_func=lambda code: code == getattr(self, 'select_code', None),
+            ignore_func=lambda code: code.strip() == str(getattr(self, 'select_code', '')).strip(),
             on_new_code=self._on_clipboard_code_visualizer
         )
 
@@ -1930,6 +1930,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("清理失败", f"强制清理过程中出现错误:\n{str(e)}")
             logger.error(f"[UI] 全量队列强制清理失败: {e}\n{traceback.format_exc()}")
 
+    def wait_all_threads(self, timeout=2):
+        import threading
+        main = threading.current_thread()
+        for t in threading.enumerate():
+            if t is main:
+                continue
+            # ❗跳过 DummyThread
+            if isinstance(t, threading._DummyThread):
+                logger.warning(f"[SKIP DummyThread] {t.name}")
+                continue
+            logger.error(f"[WAIT] {t.name}")
+            t.join(timeout)
+            if t.is_alive():
+                logger.error(f"[STILL ALIVE] {t.name}")
 
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
@@ -2262,6 +2276,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     print(f"Manager shutdown sequence error: {e}")
                     logger.debug(f"Manager shutdown error ignored: {e}")
 
+
+            self.wait_all_threads()
             # 11. 停止日志与销毁 (放在最后)
             try:
                 from JohnsonUtil.LoggerFactory import stopLogger
@@ -3945,7 +3961,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _on_clipboard_code_visualizer(self, stock_code):
-
+        
         self.after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
 
 
