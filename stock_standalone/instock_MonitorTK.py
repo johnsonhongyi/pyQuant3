@@ -3568,7 +3568,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             idf = sina_data.Sina().get_stock_list_data(idx_codes, index=True)
                             if idf is not None and not idf.empty:
-                                nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "000688": "科创", "999312": "科创"}
+                                nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "999688": "科创", "999312": "科创"}
                                 for c, r in idf.iterrows():
                                     p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
                                     indices_data.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
@@ -7392,7 +7392,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         
                         existing_win.lift()
                         existing_win.attributes("-topmost", True)
-                        existing_win.update()
+                        # existing_win.update()
                         # [FIXED] 不在复用时震动，仅在 Voice 回调中震动
                         logger.debug(f"复用已有弹窗并购同步提醒: {code}")
                         return
@@ -7554,7 +7554,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.is_flashing = False
             
             # 立即启动优先级颜色提示（如果需要）
-            self._schedule_after(50, lambda: (start_priority_flashing(w=win), win.update() if win.winfo_exists() else None))
+            # self._schedule_after(50, lambda: (start_priority_flashing(w=win), win.update() if win.winfo_exists() else None))
+            self._schedule_after(50, lambda: start_priority_flashing(w=win) if win.winfo_exists() else None)
 
             # 布局管理
             self.active_alerts.append(win)

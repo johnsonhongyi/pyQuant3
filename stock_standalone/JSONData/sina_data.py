@@ -2407,8 +2407,21 @@ if __name__ == "__main__":
     # log.setLevel(LoggerFactory.DEBUG)
     sina = Sina()
     dm = sina.all
+    idx_codes = ["000001", "399001", "399006", "000688"]
+    # dff = sina.get_stock_list_data(idx_codes, index=True)
+    indices_data=[]
+    try:
+        idf = sina.get_stock_list_data(idx_codes, index=True)
+        if idf is not None and not idf.empty:
+            nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "999688": "科创", "999312": "科创"}
+            for c, r in idf.iterrows():
+                p = round((r.now-r.llastp)/r.llastp*100, 2) if r.llastp > 0 else 0.0
+                indices_data.append({'name': nm_map.get(str(c), str(c)), 'percent': p})
+            _cached_indices_data = indices_data
+    except:
+        indices_data = []
+    print(f'indices_data: {indices_data}')
     import ipdb;ipdb.set_trace()
-    
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
