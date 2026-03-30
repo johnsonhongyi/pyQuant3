@@ -2360,81 +2360,81 @@ def get_all_fetch_df(market = 'all', resample= 'd',detect_val = False,status_cal
         df_all = format_floats(df_all)
     return df_all
     
-def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
-# def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
-                      flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
-                      marketInit: str = "all", marketblk: str = "boll",
-                      duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
-    logger = LoggerFactory.getLogger()
-    if log_level:
-        logger.setLevel(log_level.value)
+# def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+# # def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+#                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+#                       marketInit: str = "all", marketblk: str = "boll",
+#                       duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+#     logger = LoggerFactory.getLogger()
+#     if log_level:
+#         logger.setLevel(log_level.value)
 
-    g_values = cct.GlobalValues(shared_dict)
-    resample = g_values.getkey("resample") or "d"
-    market = g_values.getkey("market", marketInit)
-    st_key_sort = g_values.getkey("st_key_sort", "3 0")
+#     g_values = cct.GlobalValues(shared_dict)
+#     resample = g_values.getkey("resample") or "d"
+#     market = g_values.getkey("market", marketInit)
+#     st_key_sort = g_values.getkey("st_key_sort", "3 0")
 
-    top_all = pd.DataFrame()
-    lastpTDX_DF = pd.DataFrame()
-    START_INIT = 0
+#     top_all = pd.DataFrame()
+#     lastpTDX_DF = pd.DataFrame()
+#     START_INIT = 0
 
-    while True:
-        try:
-            time_s = time.time()
+#     while True:
+#         try:
+#             time_s = time.time()
 
-            resample, market, st_key_sort, state = _prepare_runtime_state(
-                logger, g_values, flag,
-                resample, market, st_key_sort,
-                marketInit, marketblk
-            )
+#             resample, market, st_key_sort, state = _prepare_runtime_state(
+#                 logger, g_values, flag,
+#                 resample, market, st_key_sort,
+#                 marketInit, marketblk
+#             )
 
-            if state == "EXIT":
-                logger.info("Background Process: EXIT signal received, stopping loop.")
-                break
+#             if state == "EXIT":
+#                 logger.info("Background Process: EXIT signal received, stopping loop.")
+#                 break
 
-            if state in ("PAUSE", "RESET"):
-                top_all = pd.DataFrame()
-                lastpTDX_DF = pd.DataFrame()
-                START_INIT = 0
-                continue
+#             if state in ("PAUSE", "RESET"):
+#                 top_all = pd.DataFrame()
+#                 lastpTDX_DF = pd.DataFrame()
+#                 START_INIT = 0
+#                 continue
 
-            if (
-                cct.get_trade_date_status()
-                and START_INIT > 0
-                and 830 <= cct.get_now_time_int() <= 915
-            ):
-                if _handle_init_tdx(
-                    logger, g_values, market, resample,
-                    flag, duration_sleep_time, ramdisk_dir
-                ):
-                    top_all = pd.DataFrame()
-                    lastpTDX_DF = pd.DataFrame()
-                    START_INIT = 0
-                continue
+#             if (
+#                 cct.get_trade_date_status()
+#                 and START_INIT > 0
+#                 and 830 <= cct.get_now_time_int() <= 915
+#             ):
+#                 if _handle_init_tdx(
+#                     logger, g_values, market, resample,
+#                     flag, duration_sleep_time, ramdisk_dir
+#                 ):
+#                     top_all = pd.DataFrame()
+#                     lastpTDX_DF = pd.DataFrame()
+#                     START_INIT = 0
+#                 continue
 
-            if START_INIT > 0 and not cct.get_work_time():
-                time.sleep(5)
-                continue
+#             if START_INIT > 0 and not cct.get_work_time():
+#                 time.sleep(5)
+#                 continue
 
-            top_all, lastpTDX_DF = _run_main_pipeline(
-                logger, g_values, queue,
-                market, resample, st_key_sort,
-                lastpTDX_DF, top_all,
-                detect_calc_support_var
-            )
+#             top_all, lastpTDX_DF = _run_main_pipeline(
+#                 logger, g_values, queue,
+#                 market, resample, st_key_sort,
+#                 lastpTDX_DF, top_all,
+#                 detect_calc_support_var
+#             )
 
-            START_INIT = 1
-            cct.print_timing_summary()
-            cct.df_memory_usage(top_all)
-            logger.info(
-                    f"init_tdx 总用时: {time.time() - time_s:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
-                )
-            time.sleep(1)
+#             START_INIT = 1
+#             cct.print_timing_summary()
+#             cct.df_memory_usage(top_all)
+#             logger.info(
+#                     f"init_tdx 总用时: {time.time() - time_s:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
+#                 )
+#             time.sleep(1)
 
-        except Exception as e:
-            logger.error(f"[fetch_and_process:init_loop] 初始化阶段异常: {type(e).__name__}: {e}")
-            logger.error(f"完整堆栈:\n{traceback.format_exc()}")
-            time.sleep(duration_sleep_time)
+#         except Exception as e:
+#             logger.error(f"[fetch_and_process:init_loop] 初始化阶段异常: {type(e).__name__}: {e}")
+#             logger.error(f"完整堆栈:\n{traceback.format_exc()}")
+#             time.sleep(duration_sleep_time)
 
 def get_status(status_callback):
     """
@@ -2510,15 +2510,45 @@ def fetch_and_process(
     last_status = get_status(status_callback)
     loop_counter = 0  # 循环计数
     df_all = None
+    force_init_latch = False  # ⭐ [Cut 2] 跨 loop 锁存信号，防止被中间的 continue 吞掉
     while True:
+        loop_counter += 1
         try:
             time_s = time.time()
+            now_int = cct.get_now_time_int()
+            today = cct.get_today()
+
+            # 🚀 [统一状态守卫] 归一化判定，避免分布式逻辑
+            init_done = (
+                g_values.getkey("tdx.init.done") is True
+                and g_values.getkey("tdx.init.date") == today
+            )
+
+            # --- [INIT CHECK] 诊断日志 ---
+            if loop_counter % 20 == 0:
+                logger.debug(
+                    f"[INIT CHECK] now={now_int} START_INIT={START_INIT} "
+                    f"done={g_values.getkey('tdx.init.done')} "
+                    f"date={g_values.getkey('tdx.init.date')}"
+                )
+
+            # ⭐ [Cut 1] force_init 触发器 (确保不被前面的 elif 吞掉)
+            force_init = False
+            if (
+                cct.get_trade_date_status()
+                and START_INIT > 0
+                and cct.start_init_tdx_time <= now_int <= 900
+                and not init_done
+            ):
+                logger.info(f"[INIT-FORCE] 兜底触发 init now={now_int}")
+                force_init = True
+                force_init_latch = True  # 开启锁存，由 elif 消费
             if not flag.value:   # 停止刷新
                 if g_values.getkey('state') == 'EXIT':
                     logger.info("Background Process: EXIT state detected, breaking loop.")
                     break
                 for _ in range(5):
-                    if not flag.value: break
+                    if flag.value: break
                     time.sleep(1)
                 continue
             elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
@@ -2537,7 +2567,17 @@ def fetch_and_process(
                 st_key_sort = g_values.getkey("st_key_sort")
             elif get_status(status_callback) != last_status:
                 last_status = get_status(status_callback)
-            elif cct.get_trade_date_status() and START_INIT > 0 and cct.start_init_tdx_time <= cct.get_now_time_int() <= 900:
+            elif (
+                (force_init or force_init_latch or (
+                    cct.get_trade_date_status()
+                    and START_INIT > 0
+                    and cct.start_init_tdx_time <= cct.get_now_time_int() <= 900
+                ))
+                and not init_done
+            ):
+                # 🚀 [消费语义] 立即释放锁存信号，确保边沿触发
+                force_init_latch = False 
+                
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
                 # 1️⃣ 清理（未完成 → 不允许 init）
@@ -2552,12 +2592,11 @@ def fetch_and_process(
                     continue
                 else:
                     logger.debug(f"{today} 清理已完成，进入init_tdx")
-                    time.sleep(5)
+                    for _ in range(5):
+                        if not flag.value: break
+                        time.sleep(1)
                     
-                if (
-                    g_values.getkey("tdx.init.done") is True
-                    and g_values.getkey("tdx.init.date") == today
-                ):
+                if init_done:
                     continue
 
                 # 2️⃣ 再次确认时间（防止跨 09:15）
@@ -2605,6 +2644,7 @@ def fetch_and_process(
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
                 g_values.setkey("tdx.init.done", True)
                 g_values.setkey("tdx.init.date", today)
+                force_init_latch = False  # ⭐ [Cut 6] 初始化完成，释放锁存器
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
                 logger.info(
@@ -2618,7 +2658,7 @@ def fetch_and_process(
                     time.sleep(1)
                 continue
 
-            elif START_INIT > 0 and (not cct.get_work_time()):
+            elif START_INIT > 0 and (not cct.get_work_time()) and cct.get_now_time_int() > 900:
                 for _ in range(5):
                     if not flag.value or get_status(status_callback) != last_status:
                         break
@@ -2852,6 +2892,12 @@ def fetch_and_process(
                 break   
 
             for _ in range(int(loop_sleep_time / sleep_step)):
+                # ⭐ [Cut 4] 防止在长时间 sleep 中错过 init 窗口
+                _now = cct.get_now_time_int()
+                if cct.get_trade_date_status() and cct.start_init_tdx_time <= _now <= 900:
+                    logger.debug(f"[SLEEP BREAK] 命中 init 窗口 now={_now}")
+                    break
+
                 if any(cond() for cond in stop_conditions):
                     break
                 time.sleep(sleep_step)

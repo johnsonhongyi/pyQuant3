@@ -6411,7 +6411,7 @@ class MainWindow(QMainWindow, WindowMixin):
         now = time.time()
         last_render = self._last_kline_render_time.get(code, 0)
         if now - last_render >= self._render_throttle_interval:
-            with timed_ctx("render_charts_realtime", warn_ms=100):
+            with timed_ctx("render_charts_realtime", warn_ms=200):
                 self.render_charts(code, self.day_df, tick_df)
                 self._last_kline_render_time[code] = time.time()
 
@@ -6500,7 +6500,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # logger.debug(f"[Throttle] Skipping render for {code} (Interval: {now-last_render:.2f}s)")
             return
 
-        with timed_ctx("render_charts_realtime_slow", warn_ms=100):
+        with timed_ctx("render_charts_realtime_slow", warn_ms=200):
             self.render_charts(code, self.day_df, tick_df)
             # 更新最后渲染时间
             self._last_kline_render_time[code] = time.time()

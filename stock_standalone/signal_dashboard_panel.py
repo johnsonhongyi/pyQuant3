@@ -275,17 +275,33 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._batch_timer.start(3000)
 
     def stop(self):
-        if hasattr(self, '_stats_timer') and self._stats_timer: self._stats_timer.stop()
-        if hasattr(self, '_batch_timer') and self._batch_timer: self._batch_timer.stop()
-        if hasattr(self, '_search_timer') and self._search_timer: self._search_timer.stop()
+        """停止所有计时器和订阅，释放资源"""
+        try:
+            if hasattr(self, '_stats_timer') and self._stats_timer: 
+                self._stats_timer.stop()
+        except Exception: pass
+        
+        try:
+            if hasattr(self, '_batch_timer') and self._batch_timer: 
+                self._batch_timer.stop()
+        except Exception: pass
+        
+        try:
+            if hasattr(self, '_search_timer') and self._search_timer: 
+                self._search_timer.stop()
+        except Exception: pass
+        
         try:
             bus = get_signal_bus()
-            bus.unsubscribe(SignalBus.EVENT_PATTERN, self._on_signal_received)
-            bus.unsubscribe(SignalBus.EVENT_ALERT, self._on_signal_received)
-            bus.unsubscribe(SignalBus.EVENT_RISK, self._on_signal_received)
-            bus.unsubscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
-        except: pass
-        self._table_update_buffer.clear()
+            if bus:
+                bus.unsubscribe(SignalBus.EVENT_PATTERN, self._on_signal_received)
+                bus.unsubscribe(SignalBus.EVENT_ALERT, self._on_signal_received)
+                bus.unsubscribe(SignalBus.EVENT_RISK, self._on_signal_received)
+                bus.unsubscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
+        except Exception: pass
+        
+        if hasattr(self, '_table_update_buffer'):
+            self._table_update_buffer.clear()
         
     def closeEvent(self, event):
         self.save_window_position_qt_visual(self, "signal_dashboard_panel")
@@ -898,16 +914,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _on_market_temp_clicked(self, event):
         """点击温度计弹出专业复盘详情窗口 - 异步稳定版"""
         try:
-            # 1. 优先使用信号总线 (SignalBus) - 这是最安全的跨框架通信方式
-            # 它不需要关心 main_window 是谁，只需要发出指令，由主程序去监听并执行
+            # 1. 发布到总线作为日志/追踪 (不使用 return，因为主程序暂无监听器，仅作解耦记录)
             bus = get_signal_bus()
             if bus:
-                # 这里的事件名称确保主程序有对应的监听
                 bus.publish(SignalBus.EVENT_ALERT, "UI_ACTION", {"action": "open_market_pulse"})
                 logger.info("📡 [UI] MarketPulse opening request published via SignalBus")
-                return # 成功发布后直接返回，避免后续逻辑干扰
 
-            # 2. 备选：如果总线不可用，再尝试寻找主窗口直接分发
+            # 2. 寻找主窗口并进行安全分发 (这是目前最可靠的跨框架打开方式)
             main_window = getattr(self, 'parent_app', None)
             if not main_window:
                 for widget in QApplication.topLevelWidgets():
@@ -916,17 +929,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         break
             
             if main_window:
-                # ✅ [关键适配] 使用 after 或 dispatch 确保操作在目标框架的“主时间片”执行
-                if hasattr(main_window, 'tk_dispatch_queue'):
-                    # 如果是 Tkinter 环境，入队处理
+                # ✅ [关键适配] 使用 tk_dispatch_queue 确保在 Tkinter 主线程执行，彻底规避 GIL 锁问题
+                if hasattr(main_window, 'tk_dispatch_queue') and main_window.tk_dispatch_queue:
+                    # 优先级最高：如果主程序提供了专门的 Tk 任务调度队列
                     main_window.tk_dispatch_queue.put(lambda: main_window.open_market_pulse())
                 elif hasattr(main_window, 'after'):
-                    # 如果是 Tkinter 对象但没队列，直接用 after
+                    # 备选：如果主程序是 Tkinter 对象但没有扩展队列
                     main_window.after(10, lambda: main_window.open_market_pulse())
                 else:
-                    # 如果是纯 Qt 环境，建议通过 QTimer 触发，避免当前 Tk 线程直接闯入 Qt 逻辑
-                    from PyQt5.QtCore import QTimer
+                    # 纯 Qt 或其它环境：通过 QTimer 异步触发，避免当前调用栈冲突
+                    from PyQt6.QtCore import QTimer
                     QTimer.singleShot(10, lambda: main_window.open_market_pulse())
+            else:
+                logger.warning("⚠️ [UI] Failed to find main_window for open_market_pulse")
                     
         except Exception as e:
             logger.error(f"Failed to open MarketPulseViewer: {e}")
