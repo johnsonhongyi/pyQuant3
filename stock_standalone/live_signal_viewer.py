@@ -74,10 +74,11 @@ class LiveSignalViewer(QWidget, WindowMixin):
     status_msg_signal = pyqtSignal(str)          # (message)
     window_closed_signal = pyqtSignal()          # 窗口关闭通知
 
-    def __init__(self, parent=None, on_select_callback=None, sender=None):
+    def __init__(self, parent=None, on_select_callback=None, sender=None, main_app=None):
         super().__init__(parent)
         self.setWindowTitle("实时信号历史轨迹查询")
         self.on_select_callback = on_select_callback
+        self.main_app = main_app
         
         # 1. 基础配置
         self.scale_factor = get_windows_dpi_scale_factor()
@@ -100,8 +101,11 @@ class LiveSignalViewer(QWidget, WindowMixin):
         # 2. UI 构造
         self._init_ui()
         
+        # 🛡️ 记录当前选中，确保状态同步
+        self._select_code = None
+        
         # 3. 绑定信号 (核心：解决 GIL 引起的 Thread Safety 问题)
-        self.stock_selected_signal.connect(self._safe_execute_callback)
+        self.stock_selected_signal.connect(self._execute_linkage)
         self.status_msg_signal.connect(self.status_label.setText)
         
         # 4. 加载位置 (WindowMixin)
@@ -537,31 +541,43 @@ class LiveSignalViewer(QWidget, WindowMixin):
             name = name_item.text().strip()
             self.stock_selected_signal.emit(code, name, select_win)
 
-    def _safe_execute_callback(self, code, name, select_win=False):
-        """核心：在 GUI 信号处理中安全执行回调，避免 GIL 冲突"""
-        # 清理空格，防止 Pandas 查询或 TDX 联动出错
-        code = str(code).strip()
-        name = str(name).strip()
+    def _execute_linkage(self, code, name="", select_win=False):
+        """核心：跨进程/框架联动逻辑 (整合自 KlineBackupViewer 模式)"""
+        if not code or self._select_code == str(code):
+            return
+            
+        # 🛡️ 记录当前选中，确保状态同步
+        self._select_code = str(code)
         
-        self.status_label.setText(f"🚀 已联动主程序: {code} {name} (Push:{select_win})")
-        # 1. 触发外部(Tkinter/Process)回调
-        if self.on_select_callback:
+        # 🚀 联动主程序状态反馈
+        msg = f"🚀 已联动主程序: {code} {name} (Push:{select_win})"
+        self.status_label.setText(msg)
+
+        # 2. 核心：通过主程序分发队列进行 UI 指令下发 (防 GIL 锁模式)
+        if self.main_app and self.on_select_callback:
             try:
-                # 传入 select_win 参数
-                self.on_select_callback(code, name, select_win=select_win)
+                # 🛡️ 优先检查是否有分发队列 (与 KlineBackupViewer 一致)
+                if self.main_app and hasattr(self.main_app, 'tk_dispatch_queue'):
+                    # A. 联动可视化：如果开启了 vis 标志，且主程序支持 open_visualizer，则同步开启
+                    if getattr(self.main_app, "_vis_enabled_cache", False):
+                        if hasattr(self.main_app, 'open_visualizer'):
+                            self.main_app.tk_dispatch_queue.put(lambda c=code: self.main_app.open_visualizer(str(c)))
+                    
+                    # B. 联动主界面：执行主调回调 (如 on_code_click)
+                    # 尝试多种调用签名以兼容不同的联动入口
+                    self.main_app.tk_dispatch_queue.put(lambda c=code: self.on_select_callback(str(c)))
+                else:
+                    # C. 直接降级调用
+                    self.on_select_callback(str(code))
             except Exception as e:
-                print(f"Callback error (LiveSignalViewer): {e}")
-        
-        # 2. 模拟发送指令 (联动通达信或其他软件端口)
-        # 使用 callable 或是 hasattr 检查
-        if self.sender:
-            try:
-                if hasattr(self.sender, 'send_code'):
-                    self.sender.send_code({'code': code, 'name': name})
-                elif hasattr(self.sender, 'send'):
-                    self.sender.send(code)
-            except Exception as e:
-                print(f"Sender error (LiveSignalViewer): {e}")
+                print(f"Linkage execute error (LiveSignalViewer): {e}")
+        else:         # 1. 独立运行时的外部发送器联动
+            if self.sender:
+                try:
+                    self.sender.send(str(code))
+                    print(f"[INFO] LiveSignalViewer standalone link sent: {code}")
+                except Exception:
+                    pass
 
     # def keyPressEvent(self, a0):
     #     """处理特殊功能按键 (回车定位)"""
@@ -600,9 +616,9 @@ class LiveSignalViewer(QWidget, WindowMixin):
         link_action.triggered.connect(lambda: self.stock_selected_signal.emit(code, name, False))
         menu.addAction(link_action)
 
-        jump_action = QAction("🚀 定位股票 (触发推送)", self)
-        jump_action.triggered.connect(lambda: self.stock_selected_signal.emit(code, name, True))
-        menu.addAction(jump_action)
+        # jump_action = QAction("🚀 定位股票 (触发推送)", self)
+        # jump_action.triggered.connect(lambda: self.stock_selected_signal.emit(code, name, True))
+        # menu.addAction(jump_action)
         
         menu.addSeparator()
         
