@@ -928,62 +928,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Dispatch Queue Critical Error: {e}")
 
         finally:
-            # ⭐ [关键改进]：输出整轮执行的明细统计
+            # 1. 性能审计：仅在重负载时计算明细，节省 CPU
             total_time = (time.perf_counter() - start_t) * 1000
-            
-            if processed_count > 0:
-                # 格式化任务分布字符串，例如: "refresh_tree(5), update_market_stats(12)"
-                stats_detail = ", ".join([f"{name}({count})" for name, count in task_stats.items()])
-                
-                # 如果总耗时长或者任务多，输出审计日志
-                if total_time > 50 or processed_count > 20:
+            if processed_count > 0 and (total_time > 50 or processed_count > 20):
+                try:
+                    stats_detail = ", ".join([f"{name}({count})" for name, count in task_stats.items()])
+                    max_task_name = max_single_task.get('name', 'Unknown')
+                    max_task_dur = max_single_task.get('dur', 0)
+                    
                     logger.info(
-                        f"⏱️ 调度审计: 总耗时 {total_time:.1f}ms | 处理 {processed_count} 项 | "
-                        f"最重: [{max_single_task['name']}]({max_single_task['dur']:.1f}ms) | "
-                        f"分布: [{stats_detail}]"
+                        f"⏱️ 调度审计: 耗时 {total_time:.1f}ms | 处理 {processed_count} 项 | "
+                        f"最重: [{max_task_name}]({max_task_dur:.1f}ms) | 分布: [{stats_detail}]"
                     )
+                except Exception: pass
 
-            # 2. 泵送 Qt 事件（带平滑防抖及重入保护）
-            try:
-                # ⭐ [STABILITY] 防止 Qt 事件泵送重入或在关闭期间运行
-                is_busy = getattr(self, '_is_pumping_qt_events', False)
-                is_closing = getattr(self, '_is_closing', False)
-                now_perf = time.perf_counter()
-                last_pump = getattr(self, '_last_qt_pump_t', 0)
-                
-                # ⭐ [OPTIMIZE] 限制泵送频率：最高 5Hz (200ms 一次)，在 Tk 负载重时显著退避（500ms），降低 CPU 竞争
-                pump_interval = 0.2 if processed_count < 5 else 0.5
-                
-                if QtWidgets and not is_busy and not is_closing and (now_perf - last_pump > pump_interval):
-                    qt_app = QtWidgets.QApplication.instance()
-                    if qt_app:
-                        # 仅在有顶层窗口（如 BiddingPanel/Visualizer等）时才泵送，减少无谓消耗
-                        has_active = any(w.isVisible() for w in qt_app.topLevelWidgets())
-                        if has_active:
-                            self._is_pumping_qt_events = True
-                            self._last_qt_pump_t = now_perf
-                            try:
-                                # ⭐ [STABILITY] 跨框架调用时移除 maxtime 超时参数，防止 GIL 恢复失败 (PyEval_RestoreThread)
-                                # 先处理已发布的事件，确保跨线程信号能及时到达
-                                QtCore.QCoreApplication.sendPostedEvents()
-                                qt_app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-                            except Exception as qt_err:
-                                logger.debug(f"Qt processEvents blink: {qt_err}")
-                            finally:
-                                self._is_pumping_qt_events = False
-            except Exception as e:
-                # 忽略泵气过程中的瞬时异常，防止崩溃扩散
-                pass 
+            # 2. 【核心改动】移除所有泵送 Qt 的逻辑
+            # 不再调用 sendPostedEvents 和 processEvents
+            # 也不再检查 has_active 窗口，让 Qt 框架通过其自身的 loop 运行
 
-            # 3. 检查关闭状态并调度
+            # 3. 智能调度：根据负载动态调整下次执行时间
             is_closing = getattr(self, '_is_closing', False) or \
                          (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
             if not is_closing:
-                # ⭐ [STABILITY] 自调度避让：如果刚干完重活，退避时间增加，减少解释器抖动
-                if next_delay < 50 and processed_count > 10:
-                    next_delay = 50 
-                self._schedule_after(next_delay, self._process_dispatch_queue)
+                # 如果检测到执行时间过长（超过100ms），将下次调度延时加倍，给 UI 喘息机会
+                safe_delay = next_delay
+                if total_time > 100:
+                    safe_delay = max(safe_delay, 100) 
+                elif processed_count > 15:
+                    safe_delay = max(safe_delay, 50)
+
+                self._schedule_after(safe_delay, self._process_dispatch_queue)
 
 
     def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
