@@ -335,11 +335,11 @@ def send_with_visualizer(func):
 #                     import time
 #                     start = time.time()
 #                     while not voice.wait_for_safe(timeout=0.1):
-#                         QtWidgets.QApplication.processEvents()
+            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
 #                         if time.time() - start > 5.0:
 #                             break
 #                 else:
-#                     QtWidgets.QApplication.processEvents()
+            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
 #                     import time
 #                     time.sleep(0.05)
         
@@ -356,6 +356,15 @@ def send_with_visualizer(func):
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
+        # 🛡️ [RECOVERY] 提升 Windows 定时器精度，减少线程切换时的调度抖动 (解决 0x18 访问冲突的先决条件)
+        if sys.platform.startswith('win'):
+            try:
+                import ctypes
+                ctypes.windll.winmm.timeBeginPeriod(1)
+                logger.info("✅ Windows 定时器频率已优化 (1ms)")
+            except Exception as e:
+                logger.warning(f"⚠️ 优化定时器频率失败: {e}")
+
         # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
         # Ensure DataHub is ready before any data processing starts
         # self.data_hub = DataHubService.get_instance()
@@ -808,15 +817,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         logger.error(f"Dispatch Queue Critical Error: {e}")
 
     #     finally:
-    #         # 2. 泵送 Qt 事件（带 5ms 严格超时控制）
-    #         try:
-    #             if QtWidgets and (hasattr(self, '_qt_app') or QtWidgets.QApplication.instance()):
-    #                 # ProcessEventsFlag.AllEvents 确保 UI 刷新、鼠标点击都能处理
-    #                 QtWidgets.QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
-    #         except Exception as e:
-    #             logger.debug(f"Qt Pump Error: {e}")
-
-    #         # 3. 检查关闭状态并调度
+    #         # 2. 检查关闭状态并调度
     #         is_closing = getattr(self, '_is_closing', False) or \
     #                      (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
@@ -856,7 +857,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     return
             self.tk_dispatch_queue.put(_aggregator_wrapper)
         else:
-            self.after(0, _aggregator_wrapper)
+            self._schedule_after(0, _aggregator_wrapper)
 
     def _process_dispatch_queue(self):
         """[STABILITY] 主循环：定期清空任务队列并驱动 PyQt 事件循环，包含执行明细审计"""
@@ -943,7 +944,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception: pass
 
             # 2. 【核心改动】移除所有泵送 Qt 的逻辑
-            # 不再调用 sendPostedEvents 和 processEvents
+            # 隔离驱动：禁止在此时由 Tkinter 驱动 Qt 事件循环
+            pass
             # 也不再检查 has_active 窗口，让 Qt 框架通过其自身的 loop 运行
 
             # 3. 智能调度：根据负载动态调整下次执行时间
@@ -1043,7 +1045,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._last_task_finish_time = time.time()
                 self._after_jobs.pop(task_key, None)
 
-        job_id = self.after(ms, wrapper)
+        job_id = self._schedule_after(ms, wrapper)
         self._after_jobs[task_key] = job_id
         return job_id
 
@@ -1941,6 +1943,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._is_closing = True
             logger.info("🛑 [on_close] Application shutdown initiated...")
             
+            # 🚀 [CORE FIX] 安全清理 Qt 资源，防止残留事件循环触发回调
+            try:
+                from PyQt6 import QtWidgets
+                qt_app = QtWidgets.QApplication.instance()
+                if qt_app:
+                    logger.info("Cleaning up Qt application windows...")
+                    qt_app.closeAllWindows()
+            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
+                    # 靠 os._exit(0) 物理关闭
+            except Exception as e:
+                logger.debug(f"Qt cleanup error: {e}")
+
             try:
                 self.stop_refresh() # 设置 refresh_flag = False
                 if hasattr(self, 'viz_lifecycle_flag'):
@@ -2127,7 +2141,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if qt_app:
                         logger.info("正在清理 PyQt 事件循环与资源...")
                         # 1. 处理最后一批清理
-                        qt_app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 500)
+            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
                         
                         # 2. 遍历顶级窗口进行销毁
                         for widget in qt_app.topLevelWidgets():
@@ -2138,7 +2152,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             except: pass
                         
                         # 处理销毁后的事件
-                        qt_app.processEvents()
+            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
                         
                         # 3. 如果我们持有引用，解除它
                         if hasattr(self, '_qt_app'):
@@ -3946,7 +3960,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _on_clipboard_code_visualizer(self, stock_code):
         
-        self.after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
+        self._schedule_after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
 
 
     def _handle_clipboard_code_visualizer(self, stock_code):
@@ -6727,7 +6741,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.flash_taskbar()
 
             # E. [DIRECT] 恢复即时播报同步，移除长延时，仅留极短缓冲以适配 Tcl 调度
-            self._voice_start_jobs[str(code)] = self.after(20, trigger_visual)
+            self._voice_start_jobs[str(code)] = self._schedule_after(20, trigger_visual)
 
         try:
             if hasattr(self, 'tk_dispatch_queue'):
@@ -8083,14 +8097,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._trading_gui_qt6.raise_()
             self._trading_gui_qt6.activateWindow()
 
-            # --- 关键：避免初始化阻塞 UI ---
-            QtWidgets.QApplication.processEvents()
-
             # --- 提示 ---
             toast_message(self, "交易分析工具(Qt6) 已就绪")
-
-            # --- 可选：轻量延迟处理事件（避免瞬时卡顿） ---
-            threading.Timer(0.1, lambda: QtWidgets.QApplication.processEvents()).start()
 
         except Exception as e:
             logger.error(f"Failed to open TradingGUI Qt6: {e}")
@@ -8120,9 +8128,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     main_app=self
                 )
             
-            # 处理 Qt 事件以确保窗口正确显示
-            QtWidgets.QApplication.processEvents()
-                
             self._kline_viewer_qt.show()
             self._kline_viewer_qt.raise_()
             self._kline_viewer_qt.activateWindow()
@@ -10062,7 +10067,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.after_cancel(self._search_job)
         
         # 3 秒后触发 apply_search
-        self._search_job = self.after(3000, self.apply_search)
+        self._search_job = self._schedule_after(3000, self.apply_search)
 
     def _format_history_list(self, history_list, mapping_dict):
         """Helper to format history items with notes and update mapping"""
@@ -10350,17 +10355,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"[update_category_result] 更新概念信息出错: {e}", exc_info=True)
 
     def on_code_click(self, code):
-        """点击异动窗口中的股票代码"""
-        if code != self.select_code:
-            self.select_code = code
-            logger.debug(f"select_code: {code}")
-            # ✅ 可改为打开详情逻辑，比如：
-            # if hasattr(self, "show_stock_detail"):
-            #     self.show_stock_detail(code)
-            self.sender.send(code)
-            # Auto-launch Visualizer if enabled
-            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
-                self.open_visualizer(code)
+        """点击异动窗口中的股票代码 - 线程安全异步版"""
+        if not code: return
+        
+        def _async_logic():
+            try:
+                if code != getattr(self, 'select_code', None):
+                    self.select_code = code
+                    logger.debug(f"select_code activated: {code}")
+                    self.sender.send(code)
+                    # 联动 Visualizer (如果启用)
+                    if hasattr(self, 'vis_var') and self.vis_var.get():
+                        self.open_visualizer(code)
+            except Exception as e:
+                logger.error(f"Error in on_code_click async logic: {e}")
+
+        # 🚀 [CORE FIX] 无论调用者是谁，都切回主线程并延迟 10ms 执行，防止 UI 死锁
+        self._schedule_after(10, _async_logic)
     # --- 类内部方法 ---
     def show_concept_detail_window(self):
         """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
@@ -11036,7 +11047,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
             sel = tree.selection()
             if sel:
-                select_row_by_item(sel[0])
+                self._schedule_after(20, lambda: select_row_by_item(sel[0]))
 
         tree.bind("<<TreeviewSelect>>", on_click)
 
@@ -11361,7 +11372,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
             sel = tree.selection()
             if sel:
-                select_row_by_item(sel[0])
+                self._schedule_after(20, lambda: select_row_by_item(sel[0]))
 
         tree.bind("<<TreeviewSelect>>", on_click)
 
@@ -13315,28 +13326,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # === 行选择逻辑 ===
         def on_tree_select(event):
             sel = tree.selection()
-            if not sel:
-                return
+            if not sel: return
             vals = tree.item(sel[0], "values")
-            if not vals:
-                return
+            if not vals: return
             code = str(vals[0]).zfill(6)
-            self.sender.send(code)
-            # Auto-launch Visualizer if enabled
-            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
-                self.open_visualizer(code)
+            # 🚀 [ASYNC] 延迟 10ms 执行，确保当前行选择动作先释放主循环
+            self._schedule_after(10, lambda: self.on_code_click(code))
 
         def on_single_click(event):
             row_id = tree.identify_row(event.y)
-            if not row_id:
-                return
+            if not row_id: return
             vals = tree.item(row_id, "values")
-            if not vals:
-                return
+            if not vals: return
             code = str(vals[0]).zfill(6)
-            self.sender.send(code)
-            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
-                self.open_visualizer(code)
+            # 🚀 [ASYNC] 延迟 10ms 执行
+            self._schedule_after(10, lambda: self.on_code_click(code))
 
         def on_double_click(event):
             item = tree.focus()
