@@ -2623,6 +2623,7 @@ def fetch_and_process(
                     if not flag.value or get_status(status_callback) != last_status:
                         break
                     time.sleep(1)
+                print(".", end=' ')
                 continue
             else:
                 logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
@@ -2805,21 +2806,6 @@ def fetch_and_process(
 
             loop_sleep_time = cfg_sleep
 
-            # 3. 动态决定 Loop Sleep Time
-            # if is_trading_time:
-            #     # 交易时段：优先满足数据源频率 (sina_limit)，确保高颗粒度
-            #     # 取 min(sina_limit, cfg_sleep)，防止配置过大导致漏数据
-            #     loop_sleep_time = min(sina_limit, cfg_sleep)
-            #     if loop_sleep_time < 5: 
-            #         loop_sleep_time = 5 # 最小保护
-                
-            #     # 开盘前夕 (9:15-9:25) 加速刷新 (可选优化)
-            #     if 915 <= now_int < 925:
-            #        loop_sleep_time = min(loop_sleep_time, 15)
-            # else:
-            #     # 非交易时段：使用低频刷新，降低资源消耗
-            #     loop_sleep_time = cfg_sleep
-
             if logger.level <= LoggerFactory.INFO:
                logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
 
@@ -2842,10 +2828,12 @@ def fetch_and_process(
             # 周期性心跳日志 - 每 10 秒输出一次状态
             heartbeat_interval = 10  # 秒
             sleep_elapsed = 0
+            START_INIT = 1
+
             if logger.level <= LoggerFactory.INFO:
                 logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
-                logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+                logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
                 print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
                 print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
@@ -2857,9 +2845,7 @@ def fetch_and_process(
                     f"shape: {top_temp.shape}\n"
                     f"detect_calc_support: {detect_val}"
                 )
-                print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
-
-            START_INIT = 1
+                print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
 
             if single:
                 cct.print_timing_summary()
@@ -2872,6 +2858,7 @@ def fetch_and_process(
                 sleep_elapsed += sleep_step
                 # 每 heartbeat_interval 秒输出一次心跳
                 if sleep_elapsed % heartbeat_interval == 0:
+                    print("*", end=' ')
                     logger.debug(f"[心跳] resample={resample} 等待中... {sleep_elapsed}/{int(loop_sleep_time)}s flag={flag.value}")
         except Exception as e:
             logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
