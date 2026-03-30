@@ -787,39 +787,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """Open the Indicator Help and Search window (Ctrl + /)"""
         stock_indicator_help.show_help(self)
 
-    # def _process_dispatch_queue(self):
-    #     from PyQt6.QtCore import QEventLoop
-    #     next_delay = 50 
-
-    #     try:
-    #         # 1. 限时处理 Tk 任务，防止某个坏任务卡死主线程
-    #         import time
-    #         start_t = time.perf_counter()
-            
-    #         while not self.tk_dispatch_queue.empty():
-    #             # 增加安全阀：单次循环处理任务不超过 10ms，防止任务堆积导致 UI 假死
-    #             if time.perf_counter() - start_t > 0.01: 
-    #                 next_delay = 10 # 任务太多，缩短下一次唤醒时间
-    #                 break
-                    
-    #             try:
-    #                 task = self.tk_dispatch_queue.get_nowait()
-    #                 if callable(task):
-    #                     task() 
-    #             except queue.Empty:
-    #                 next_delay = 200
-    #                 break
-    #             except Exception as e:
-    #                 # 定位具体是哪个任务报错，不中断循环
-    #                 logger.error(f"Task Execution Error: {e}\n{traceback.format_exc()}")
-
-    #     except Exception as e:
-    #         logger.error(f"Dispatch Queue Critical Error: {e}")
-
-    #     finally:
-    #         # 2. 检查关闭状态并调度
-    #         is_closing = getattr(self, '_is_closing', False) or \
-    #                      (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
     def _put_deduped_task(self, key, task_fn):
         """
@@ -962,92 +929,260 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 self._schedule_after(safe_delay, self._process_dispatch_queue)
 
-
     def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
-        if getattr(self, "_is_closing", False): return None
+        """
+        【工业融合最终版 v4】
+        Qt + Tk 双层防抖 + 安全队列 + 统一task_key
 
-        # 如果绑定了 widget 且其已销毁，直接取消调度
-        if bind_widget and not bind_widget.winfo_exists():
+        核心优化：
+        - Qt只做“意图过滤”，不做执行清理
+        - Tk负责生命周期清理（唯一权威）
+        - 去除 safe_call 内 pop（避免竞态）
+        - task_key 全局唯一一致
+        """
+
+        import time
+        import threading
+        import queue
+
+        # -------------------------
+        # 1. 生命周期保护
+        # -------------------------
+        if getattr(self, "_is_closing", False):
             return None
 
-        # 初始化必要的容器和变量
-        if not hasattr(self, "_after_jobs"): self._after_jobs = {}
-        if not hasattr(self, "_last_task_finish_time"): 
-            self._last_task_finish_time = time.time() # 初始化为启动时间
+        if not hasattr(self, "_after_jobs"):
+            self._after_jobs = {}
 
-        created_at = time.time()
-        expected_run_at = created_at + (ms / 1000.0) # 理论上的物理执行时刻
+        if not hasattr(self, "_qt_debounce_map"):
+            self._qt_debounce_map = {}
 
-        # --- 名称清洗逻辑 ---
-        def get_clean_name(f, k):
-            if isinstance(k, str): return k
-            inner_f = f
-            while isinstance(inner_f, functools.partial): inner_f = inner_f.func
-            raw = getattr(inner_f, '__qualname__', getattr(inner_f, '__name__', str(inner_f)))
-            raw = raw.replace('<locals>.', '').replace('.<lambda>', '')
-            raw = re.sub(r' at 0x[0-9A-Fa-f]+', '', raw)
-            return raw.replace('<function ', '').replace('>', '').strip()
+        if not hasattr(self, "_last_task_finish_time"):
+            self._last_task_finish_time = time.time()
 
-        display_name = get_clean_name(func, key)
-        task_key = key if key else (func, args)
+        # -------------------------
+        # 2. queue 初始化
+        # -------------------------
+        if not hasattr(self, "tk_dispatch_queue"):
+            self.tk_dispatch_queue = queue.Queue()
 
-        # 防抖处理
+            if hasattr(self, "after"):
+                try:
+                    self.after(10, self._process_dispatch_queue)
+                except:
+                    pass
+
+        # -------------------------
+        # 3. widget safety
+        # -------------------------
+        if bind_widget is not None:
+            try:
+                if not bind_widget.winfo_exists():
+                    return None
+            except:
+                return None
+
+        # -------------------------
+        # 4. 统一 task_key（唯一权威）
+        # -------------------------
+        try:
+            task_key = key if key is not None else (func.__qualname__, id(func), len(args))
+        except:
+            task_key = (str(func), len(args))
+
+        # -------------------------
+        # 5. Qt / Worker线程：意图层防抖
+        # -------------------------
+        if threading.current_thread() is not threading.main_thread():
+
+            if debounce:
+                now = time.time()
+
+                # TTL清理（避免内存增长）
+                if len(self._qt_debounce_map) > 5000:
+                    self._qt_debounce_map.clear()
+
+                last_time = self._qt_debounce_map.get(task_key)
+
+                if last_time is not None:
+                    # 100ms时间窗防抖
+                    if now - last_time < 0.1:
+                        return "qt_debounce_drop"
+
+                # 写入最新时间
+                self._qt_debounce_map[task_key] = now
+
+            def safe_call():
+                # ⚠️ 不再做 pop（避免竞态）
+                try:
+                    if bind_widget is not None:
+                        if not bind_widget.winfo_exists():
+                            return
+                    return func(*args)
+                except Exception as e:
+                    if hasattr(self, "logger"):
+                        self.logger.error(f"❌ Async Task Error [{task_key}]: {e}")
+
+            self.tk_dispatch_queue.put(safe_call)
+            return "redirected"
+
+        # -------------------------
+        # 6. Tk执行层 debounce
+        # -------------------------
         if debounce:
             old_job = self._after_jobs.get(task_key)
             if old_job:
-                try: self.after_cancel(old_job)
-                except: pass
+                try:
+                    self.after_cancel(old_job)
+                except:
+                    pass
 
-        # ---------- 包装回调 ----------
+        # -------------------------
+        # 7. wrapper
+        # -------------------------
         def wrapper():
-            now = time.time()
-            
-            # ⭐ [补偿逻辑]：获取主线程上次空闲的时刻
-            # 如果上个任务刚结束，那么 reference_time 就会变成上个任务的结束时间
-            last_finish = getattr(self, "_last_task_finish_time", now)
-            reference_time = max(expected_run_at, last_finish)
-            
-            # 纯净卡顿 = 现在 - (预期时间 或 上个任务结束时间 中更晚的一个)
-            pure_latency = (now - reference_time) * 1000
-            # 总排队时长 (包含历史积压)
-            total_backlog = (now - expected_run_at) * 1000
-            
-            self._last_latency = pure_latency 
+            if getattr(self, "_is_closing", False):
+                return
 
-            # 这里的 5000ms 是你设定的阈值
-            if pure_latency > 5000:
-                logger.error(
-                    f"🐢 发现新阻塞: [{display_name}] "
-                    f"纯净卡顿:{pure_latency:.0f}ms (总积压:{total_backlog:.0f}ms, 延时设定:{ms}ms)"
-                )
-
-            exec_start = time.time()
-            try:
-                if getattr(self, "_is_closing", False): return
-                
-                # ⭐ [关键加固]：如果绑定了 widget，执行前必须确认其依然存在
-                if bind_widget and not bind_widget.winfo_exists():
-                    # logger.debug(f"Skip after task [{display_name}] as bind_widget is gone.")
+            if bind_widget is not None:
+                try:
+                    if not bind_widget.winfo_exists():
+                        return
+                except:
                     return
 
+            try:
                 func(*args)
-                
-                duration = (time.time() - exec_start) * 1000
-                # ⭐ [FIX] 针对语音播报弹窗逻辑，豁免耗时提示（避免 TTS 同步阻塞引发的虚假告警）
-                # 由于用户担心异步化引发 GIL 问题，此处采用“白名单静默”策略
-                if duration > 3000 and "_create_single_alert_popup" not in display_name:
-                    logger.error(f"⚡ 运行沉重: [{display_name}] 自身耗时:{duration:.2f}ms")
-                    
             except Exception as e:
-                logger.exception(f"❌ [after error] {display_name}: {e}")
+                if hasattr(self, "logger"):
+                    self.logger.exception(f"❌ after执行异常: {e}")
             finally:
-                # ⭐ [关键更新]：记录当前任务结束时间，给下一个任务做参考
                 self._last_task_finish_time = time.time()
                 self._after_jobs.pop(task_key, None)
 
-        job_id = self._schedule_after(ms, wrapper)
-        self._after_jobs[task_key] = job_id
-        return job_id
+        # -------------------------
+        # 8. Tk schedule
+        # -------------------------
+        try:
+            job_id = self.after(ms, wrapper)
+            self._after_jobs[task_key] = job_id
+            return job_id
+        except:
+            return None
+            
+    def _schedule_after_v3(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
+        """
+        【最终稳定工业版 v3 - 2026.03.30】
+        特性：
+        1. 跨线程重定向：Qt/Worker 线程调用自动进入 Queue，防止 GIL 崩溃 (0x18)。
+        2. 闭环防抖：子线程“意图层”去重 + 主线程“执行层”去重，双重减压。
+        3. 参数指纹：支持 DataFrame/List 等不可哈希对象。
+        4. 物理隔离：双重 widget.exists 校验，彻底杜绝 Zombie Call。
+        """
+        import time
+        import threading
+        import functools
+
+        # 1. 基础状态保护
+        if getattr(self, "_is_closing", False): return None
+        if not hasattr(self, "_after_jobs"): self._after_jobs = {}
+        if not hasattr(self, "_last_task_finish_time"): self._last_task_finish_time = time.time()
+
+        # 2. 调度队列自动补齐 (防止因初始化顺序导致的调度丢失)
+        if not hasattr(self, "tk_dispatch_queue"):
+            import queue
+            self.tk_dispatch_queue = queue.Queue()
+            if hasattr(self, "after"):
+                try: self.after(10, self._process_dispatch_queue)
+                except: pass
+
+        # 3. Widget 生命周期校验 (前置)
+        if bind_widget is not None:
+            try:
+                if not bind_widget.winfo_exists(): return None
+            except: return None
+
+        # 4. 稳定 task_key 生成
+        if key is not None:
+            task_key = key
+        else:
+            try:
+                # 组合指纹：函数名 + 函数内存地址 + 参数长度 (避开对象内容哈希)
+                task_key = (func.__qualname__, id(func), len(args))
+            except:
+                task_key = (str(func), len(args))
+
+        # 5. 【跨线程分支】Qt / Worker 线程逻辑
+        if threading.current_thread() is not threading.main_thread():
+            if debounce:
+                if not hasattr(self, "_qt_debounce_map"): self._qt_debounce_map = {}
+                # 自动清理过旧的 map，防止内存静默增长
+                if len(self._qt_debounce_map) > 5000: self._qt_debounce_map.clear()
+                
+                if task_key in self._qt_debounce_map:
+                    return "qt_debounce_drop"
+                # 记录当前请求的时间戳作为 Ticket
+                self._qt_debounce_map[task_key] = time.time()
+
+            def safe_call():
+                try:
+                    # ❗ 关键：任务开始执行，立即释放意图锁，允许下一轮信号进入
+                    if hasattr(self, "_qt_debounce_map"):
+                        self._qt_debounce_map.pop(task_key, None)
+                    
+                    # 物理确认 widget 依然存在
+                    if bind_widget is not None and not bind_widget.winfo_exists():
+                        return
+
+                    # 执行真正的业务逻辑
+                    return func(*args)
+                except Exception as e:
+                    if hasattr(self, 'logger'): self.logger.error(f"❌ Async Task Exec Error [{task_key}]: {e}")
+                finally:
+                    pass
+
+            try:
+                self.tk_dispatch_queue.put(safe_call)
+                return "redirected"
+            except:
+                return None
+
+        # 6. 【主线程分支】Tk 调度层防抖 (Execution Debounce)
+        if debounce:
+            old_job = self._after_jobs.get(task_key)
+            if old_job:
+                try:
+                    # 取消尚未执行的计时任务
+                    self.after_cancel(old_job)
+                except: pass
+
+        # 7. 任务执行包装器
+        def wrapper():
+            if getattr(self, "_is_closing", False): return
+            
+            # 执行前最后一刻的 widget 状态确认
+            if bind_widget is not None:
+                try:
+                    if not bind_widget.winfo_exists(): return
+                except: return
+
+            try:
+                func(*args)
+            except Exception as e:
+                if hasattr(self, "logger"):
+                    self.logger.exception(f"❌ after 执行异常: {e}")
+            finally:
+                self._last_task_finish_time = time.time()
+                self._after_jobs.pop(task_key, None)
+
+        # 8. 物理调度
+        try:
+            job_id = self.after(ms, wrapper)
+            self._after_jobs[task_key] = job_id
+            return job_id
+        except Exception:
+            # 捕获 Tcl 解释器销毁瞬间的异常
+            return None
 
     def _schedule_after_base(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
         """
