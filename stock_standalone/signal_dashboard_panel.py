@@ -896,29 +896,40 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._vol_dialog.show()
 
     def _on_market_temp_clicked(self, event):
-        """点击温度计弹出专业复盘详情窗口"""
+        """点击温度计弹出专业复盘详情窗口 - 异步稳定版"""
         try:
-            # 通过主窗口弹出 MarketPulseViewer
+            # 1. 优先使用信号总线 (SignalBus) - 这是最安全的跨框架通信方式
+            # 它不需要关心 main_window 是谁，只需要发出指令，由主程序去监听并执行
+            bus = get_signal_bus()
+            if bus:
+                # 这里的事件名称确保主程序有对应的监听
+                bus.publish(SignalBus.EVENT_ALERT, "UI_ACTION", {"action": "open_market_pulse"})
+                logger.info("📡 [UI] MarketPulse opening request published via SignalBus")
+                return # 成功发布后直接返回，避免后续逻辑干扰
+
+            # 2. 备选：如果总线不可用，再尝试寻找主窗口直接分发
             main_window = getattr(self, 'parent_app', None)
             if not main_window:
-                # 尝试从 QApplication 查找
                 for widget in QApplication.topLevelWidgets():
                     if hasattr(widget, 'open_market_pulse'):
-                         main_window = widget
-                         break
+                        main_window = widget
+                        break
             
-            if main_window and hasattr(main_window, 'open_market_pulse'):
-                 # ✅ [FIX] 跨线程/环境调用安全：如果主窗口是 Tkinter，可能需要 dispatch
-                 if hasattr(main_window, 'tk_dispatch_queue'):
-                     main_window.tk_dispatch_queue.put(lambda: main_window.open_market_pulse())
-                 else:
-                     main_window.open_market_pulse()
-            else:
-                 # 备选：通知总线触发 (如果有相应监听)
-                 bus = get_signal_bus()
-                 bus.publish(SignalBus.EVENT_ALERT, "UI_ACTION", {"action": "open_market_pulse"})
+            if main_window:
+                # ✅ [关键适配] 使用 after 或 dispatch 确保操作在目标框架的“主时间片”执行
+                if hasattr(main_window, 'tk_dispatch_queue'):
+                    # 如果是 Tkinter 环境，入队处理
+                    main_window.tk_dispatch_queue.put(lambda: main_window.open_market_pulse())
+                elif hasattr(main_window, 'after'):
+                    # 如果是 Tkinter 对象但没队列，直接用 after
+                    main_window.after(10, lambda: main_window.open_market_pulse())
+                else:
+                    # 如果是纯 Qt 环境，建议通过 QTimer 触发，避免当前 Tk 线程直接闯入 Qt 逻辑
+                    from PyQt5.QtCore import QTimer
+                    QTimer.singleShot(10, lambda: main_window.open_market_pulse())
+                    
         except Exception as e:
-            logger.error(f"Failed to open MarketPulseViewer from dashboard: {e}")
+            logger.error(f"Failed to open MarketPulseViewer: {e}")
 
     def _on_vol_code_clicked(self, code, name):
         """处理异动放量窗口代码点击联动"""
