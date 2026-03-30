@@ -8360,7 +8360,7 @@ class MainWindow(QMainWindow, WindowMixin):
                                     'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
                                     'ema20_trend_curve', 'ema20_up_curve',
                                     'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ppre_avg_line', 'ghost_candle',
-                                    'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_box_pool',
+                                    'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_items_pool',
                                     'hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p', 'anno_arrow_p', 'anno_label_p']
                         for attr in clear_attrs:
                             if hasattr(self, attr):
@@ -9105,7 +9105,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def _clear_price_gaps(self):
-        pass # ... existing code ...
         """清理价格缺口 - 仅隐藏版本"""
         if hasattr(self, 'gap_items_pool'):
             for item in self.gap_items_pool:
@@ -9113,7 +9112,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def _draw_price_gaps(self, x_axis, day_df):
-        """在 K 线图上绘制最近 5 个跳空缺口 - 对象池版"""
+        """在 K 线图上绘制最近 5 个跳空缺口 - 带有回补计算过滤"""
         if not hasattr(self, 'gap_items_pool'):
             self.gap_items_pool = []
             for _ in range(10):
@@ -9132,26 +9131,47 @@ class MainWindow(QMainWindow, WindowMixin):
             highs, lows = day_df['high'].values, day_df['low'].values
             total = len(day_df)
             found_gaps = []
-            scan_start = max(1, total - 20)
+            
+            # [UPGRADE] 根据用户反馈，仅扫描最近 30 根 K 线
+            scan_start = max(1, total - 30)
 
             for i in range(scan_start, total):
                 prev_high, prev_low = highs[i-1], lows[i-1]
                 curr_high, curr_low = highs[i], lows[i]
                 
+                # 1. 向上跳空 (Jump-Up)
                 if curr_low > prev_high:
-                    gap_start_p, gap_end_p = prev_high, curr_low
-                elif curr_high < prev_low:
-                    gap_start_p, gap_end_p = curr_high, prev_low 
-                else: continue
+                    # 计算未回补区间：后续所有最低价的最小值作为上沿
+                    sub_lows = lows[i+1:]
+                    # 逻辑：如果后续有更低的价格，缺口上沿会下移；如果跌破 prev_high，缺口完全回补
+                    current_unfilled_top = np.min(sub_lows) if sub_lows.size > 0 else curr_low
+                    gap_bottom = prev_high
+                    
+                    if current_unfilled_top > gap_bottom:
+                        found_gaps.append((i, gap_bottom, current_unfilled_top))
                 
-                found_gaps.append((i, gap_start_p, gap_end_p))
+                # 2. 向下跳空 (Jump-Down)
+                elif curr_high < prev_low:
+                    # 计算未回补区间：后续所有最高价的最大值作为下沿
+                    sub_highs = highs[i+1:]
+                    current_unfilled_bottom = np.max(sub_highs) if sub_highs.size > 0 else curr_high
+                    gap_top = prev_low
+
+                    if gap_top > current_unfilled_bottom:
+                        found_gaps.append((i, current_unfilled_bottom, gap_top))
             
+            # 仅显示最近 5 个有效（未完全回补）的缺口
             targets = found_gaps[-5:]
             for i, (idx, low, high) in enumerate(targets):
                 if i >= len(self.gap_items_pool): break
                 x_start = x_axis[idx] - 0.4
                 x_end = len(day_df) + 500 
                 item = self.gap_items_pool[i]
+                
+                # [SELF-HEALING] 确保 Item 在绘制前处于场景中
+                if item not in self.kline_plot.items:
+                    self.kline_plot.addItem(item)
+                
                 item.setRect(x_start, low, x_end - x_start, high - low)
                 item.setVisible(True)
 

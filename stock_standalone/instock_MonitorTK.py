@@ -9098,39 +9098,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", f"打开管理窗口失败: {e}")
 
     def open_live_signal_trace(self):
-        """打开实时信号历史查询窗口 (PyQt6)"""
-        if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
-            try:
-                # 检查窗口是否仍然有效
+        """打开实时信号历史轨迹查询窗口 (PyQt6)"""
+
+        try:
+            # 🛠️ 窗口复用与失效重放
+            if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
+                try:
+                    # 检查窗口是否仍然有效且未被析构
+                    self._live_signal_viewer.show()
+                    self._live_signal_viewer.raise_()
+                    self._live_signal_viewer.activateWindow()
+                    self._live_signal_viewer.refresh_data() # 自动刷新
+                    return
+                except Exception:
+                    # 引用失效(如跨框架句柄异常)，重置引用以允许重新创建
+                    self._live_signal_viewer = None
+            else:
+                from live_signal_viewer import LiveSignalViewer
+                # 🚀 按照 KlineBackupViewer 模式进行对齐初始化
+                # 使用 self.on_code_click 作为唯一联动入口，解决 tree_scroll_to_code 带来的 GIL 锁问题
+                self._live_signal_viewer = LiveSignalViewer(
+                    on_select_callback=self.on_code_click, # 核心对齐：统一代码点击联动
+                    sender=getattr(self, 'sender', None),
+                    main_app=self,                         # 借鉴架构对齐
+                )
+                
                 self._live_signal_viewer.show()
                 self._live_signal_viewer.raise_()
                 self._live_signal_viewer.activateWindow()
-                self._live_signal_viewer.refresh_data() # 自动刷新
-                return
-            except Exception:
-                self._live_signal_viewer = None
-
-        try:
-            from live_signal_viewer import LiveSignalViewer
+                
+                logger.info("LiveSignalViewer initialized with stable linkage.")
+                toast_message(self, "实时信号查询已启动")
             
-            # 回调函数：联动主界面 (采用 tree_scroll_to_code 模式，与 trading_analyzer 一致)
-            def on_select(code, name,select_win=False,vis=True):
-                try:
-                    # 使用线程安全的 tree_scroll_to_code
-                    # select_win=True 会触发 TDX 推送和手札记录
-                    # vis=True 会同步联动 K 线可视化，与用户期望的一致
-                    self.tree_scroll_to_code(code, select_win=select_win, vis=vis)
-                    logger.debug(f"LiveSignalViewer linked: {code} {name}")
-                except Exception as e:
-                    logger.error(f"LiveSignalViewer linkage error: {e}")
-
-            self._live_signal_viewer = LiveSignalViewer(on_select_callback=on_select, sender=getattr(self, 'sender', None))
-            self._live_signal_viewer.show()
-            logger.info("LiveSignalViewer opened.")
         except Exception as e:
-            logger.error(f"Failed to open LiveSignalViewer: {e}")
-            from tkinter import messagebox
-            messagebox.showerror("错误", f"打开实时信号查询窗口失败: {e}")
+            logger.error(f"Failed to open LiveSignalViewer: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("错误", f"启动信号查询窗口失败: {e}")
 
     def open_stock_selection_window(self):
         from stock_selection_window import StockSelectionWindow
