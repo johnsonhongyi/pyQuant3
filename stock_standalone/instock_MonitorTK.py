@@ -1907,17 +1907,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("清理失败", f"强制清理过程中出现错误:\n{str(e)}")
             logger.error(f"[UI] 全量队列强制清理失败: {e}\n{traceback.format_exc()}")
 
-    def wait_all_threads(self, timeout=2):
+    def wait_all_threads(self, timeout=0.5):
         import threading
         main = threading.current_thread()
         for t in threading.enumerate():
-            if t is main:
+            # ❗ 跳过当前主线程以及所有守护线程 (daemon=True)
+            # 守护线程会在 os._exit(0) 时被系统自动回收，无需显式等待
+            if t is main or t.daemon:
                 continue
-            # ❗跳过 DummyThread
+            # ❗ 跳过 DummyThread
             if isinstance(t, threading._DummyThread):
                 logger.warning(f"[SKIP DummyThread] {t.name}")
                 continue
-            logger.error(f"[WAIT] {t.name}")
+            logger.info(f"[WAIT] Non-daemon thread: {t.name}")
             t.join(timeout)
             if t.is_alive():
                 logger.error(f"[STILL ALIVE] {t.name}")
@@ -1965,7 +1967,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if getattr(self, '_signal_dashboard_win', None) is not None:
                 try:
                     logger.info("正在关闭信号看板...")
-                    self._signal_dashboard_win.close()
+                    # 🛡️ 增加类型判定，防止跨线程销毁冲突
+                    if hasattr(self._signal_dashboard_win, 'close'):
+                        self._signal_dashboard_win.close()
+                    self._signal_dashboard_win = None # 立即解引用
                 except Exception as e:
                     logger.debug(f"Dashboard close error: {e}")
             
@@ -1987,6 +1992,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # [NEW] 允许真正关闭，触发 panel 内部的资源回收与数据保存
                     self.sector_bidding_panel._allow_real_close = True
                     self.sector_bidding_panel.close()
+                    self.sector_bidding_panel = None # 立即解引用
                 except Exception as e:
                     logger.warning(f"关闭竞价窗口异常: {e}")
 
@@ -2109,9 +2115,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         win = win_info.get("win")
                         if win is not None:
                             try:
-                                if hasattr(win, "on_close") and callable(win.on_close):
-                                    win.on_close()
-                                else:
+                                # 🛡️ 优先检查 close 方法，不再尝试非标准的 on_close
+                                if hasattr(win, "close"):
                                     win.close()
                             except Exception as e:
                                 logger.info(f"关闭 Qt 窗口 {key} 出错: {e}")
@@ -2121,16 +2126,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     qt_app = QtWidgets.QApplication.instance()
                     if qt_app:
                         logger.info("正在清理 PyQt 事件循环与资源...")
-                        # 1. 尝试让所有 pending 的 destroy 事件处理完
+                        # 1. 处理最后一批清理
                         qt_app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 500)
                         
-                        # 2. 如果当前有正在运行的 QThread，尝试定位并等待 (需配合可视化组件的引用)
-                        # 这里作为通用保护，尝试触发一次全局的清理
+                        # 2. 遍历顶级窗口进行销毁
                         for widget in qt_app.topLevelWidgets():
-                            try: widget.close()
+                            try:
+                                if widget != self: # 避免操作到自己（虽然 self 是 Tk 对象）
+                                    widget.close()
+                                    widget.deleteLater()
                             except: pass
                         
-                        # 处理最后一批清理
+                        # 处理销毁后的事件
                         qt_app.processEvents()
                         
                         # 3. 如果我们持有引用，解除它
