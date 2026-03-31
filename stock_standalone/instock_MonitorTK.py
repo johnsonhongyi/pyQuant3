@@ -368,7 +368,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
         # Ensure DataHub is ready before any data processing starts
         # self.data_hub = DataHubService.get_instance()
-        pass
         
         # ⭐ 启动计时
         self._init_start_time = time.time()
@@ -384,9 +383,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 初始化 tk.Tk()
         super().__init__()
         
-        # 初始化退出与任务追踪系统 (必须放在最前面)
+        # 初始化退出与任务追踪 system (必须放在最前面)
         self._is_closing = False
         self._after_ids = []
+        self._last_dispatch_kick = 0  
+        self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
         
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
         self.main_window = self   
@@ -831,6 +832,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 🛡️ 极端退出守卫：防止 GIL 释放后的非法 re-entry
         if getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set()):
             return
+
+        # ✅ [FIX] 标记为运行中，防止冗余 Watchdog 任务重叠执行
+        self._dispatch_running = True
             
         import functools
         from collections import Counter
@@ -845,19 +849,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         task_stats = Counter()
         max_single_task = {"name": "None", "dur": 0}
 
+        # ✅ [FIX] 每轮硬上限：防止主线程被单次 dispatch 独占
+        MAX_TASKS_PER_CYCLE = 5
+        # ✅ [FIX] 软时间预算：20ms
+        TIME_BUDGET_S = 0.020
+
         try:
-            # 1. 限时处理 Tk 任务
-            while not self.tk_dispatch_queue.empty():
-                # ⭐ [OPTIMIZE] 严格时间预算 (15ms) - 确保 GUI 事件循环有呼吸空间
+            # 1. 限时处理 Tk 任务（双重截止：时间 + 任务数）
+            # ✅ [FIX] 放弃 empty() 检查，改用 try...get_nowait() 异常驱动
+            while processed_count < MAX_TASKS_PER_CYCLE:
+
+                # [FIX v1] 前置时间检查
                 time_used = time.perf_counter() - start_t
-                if time_used > 0.015:
-                    if not self.tk_dispatch_queue.empty():
-                        delay_task = self.tk_dispatch_queue.qsize()
-                        if delay_task > 20 or processed_count > 10:
-                            logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {delay_task} 项待续")
-                        next_delay = 20 # [FIX] 增加避让时间，防止抢占主线程导致卡顿
-                        break
-                    
+                if time_used > TIME_BUDGET_S:
+                    next_delay = 20
+                    break
+
                 try:
                     task = self.tk_dispatch_queue.get_nowait()
                     if callable(task):
@@ -865,7 +872,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         t_func = task.func if isinstance(task, functools.partial) else task
                         t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(task)))
                         t_name = t_name.split(' at ')[0].replace('<locals>.', '')
-                        # 简化名称，只取最后一部分
                         short_name = t_name.split('.')[-1]
 
                         task_start = time.perf_counter()
@@ -884,20 +890,42 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 单个任务重度阻塞报警
                         if task_dur > 200:
                              logger.warning(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
-                                 
+
+                        # ✅ [FIX v2 - 核心] 后置耗时检查 ——
+                        # 如果单任务本身就很慢，立即结束本轮循环，归还控制权
+                        time_after_task = time.perf_counter() - start_t
+                        if time_after_task > TIME_BUDGET_S:
+                            remaining = self.tk_dispatch_queue.qsize()
+                            if remaining > 20:
+                                logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {remaining} 项待续")
+                            next_delay = 20
+                            break
+                                
                 except Empty:
                     next_delay = 200
                     break
                 except Exception as e:
-                    # 定位具体是哪个任务报错，不中断循环
-                    logger.error(f"Task Execution Error: {e}\n{traceback.format_exc()}")
+                    # 🛡️ 定位具体是哪个任务报错，不中断循环
+                    task_label = getattr(task, '__qualname__', str(task)[:80]) if 'task' in dir() else 'unknown'
+                    logger.error(f"[_process_dispatch_queue] Task执行异常 [{task_label}]: {e}\n{traceback.format_exc()}")
+                except BaseException as e:
+                    logger.critical(f"[_process_dispatch_queue] BaseException in task: {type(e).__name__}: {e}")
+                    raise
+
+            # 积压提示
+            remaining_after = self.tk_dispatch_queue.qsize()
+            if remaining_after > 20 and processed_count > 0:
+                logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {remaining_after} 项待续")
 
         except Exception as e:
             logger.error(f"Dispatch Queue Critical Error: {e}")
 
         finally:
-            # 1. 性能审计：仅在重负载时计算明细，节省 CPU
             total_time = (time.perf_counter() - start_t) * 1000
+            
+            # ✅ [FIX] 任务执行完毕，释放运行状态位
+            self._dispatch_running = False
+            
             if processed_count > 0 and (total_time > 50 or processed_count > 20):
                 try:
                     stats_detail = ", ".join([f"{name}({count})" for name, count in task_stats.items()])
@@ -910,24 +938,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     )
                 except Exception: pass
 
-            # 2. 【核心改动】移除所有泵送 Qt 的逻辑
-            # 隔离驱动：禁止在此时由 Tkinter 驱动 Qt 事件循环
-            pass
-            # 也不再检查 has_active 窗口，让 Qt 框架通过其自身的 loop 运行
-
             # 3. 智能调度：根据负载动态调整下次执行时间
             is_closing = getattr(self, '_is_closing', False) or \
                          (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
 
             if not is_closing:
-                # 如果检测到执行时间过长（超过100ms），将下次调度延时加倍，给 UI 喘息机会
                 safe_delay = next_delay
                 if total_time > 100:
-                    safe_delay = max(safe_delay, 100) 
+                    safe_delay = max(safe_delay, 50) 
                 elif processed_count > 15:
                     safe_delay = max(safe_delay, 50)
 
-                self._schedule_after(safe_delay, self._process_dispatch_queue)
+                # ✅ [FIX v3 - 灵魂修复] 必须绕过 _schedule_after 调度，改用 self.after
+                # 防止由于 _schedule_after 的 debounce 机制导致调度中断
+                try:
+                    self.after(safe_delay, self._process_dispatch_queue)
+                except Exception as e:
+                    logger.error(f"Heartbeat schedule failed: {e}")
+
 
     def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
         """
@@ -995,9 +1023,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # -------------------------
         if threading.current_thread() is not threading.main_thread():
 
+            # 🚑 [FIX] 分级背压保护：防止极端行情下的内存爆炸
+            # 如果主循环来不及消费导致积压超过 2000 项，仅允许关键任务进入。
+            try:
+                q_size = self.tk_dispatch_queue.qsize()
+                if q_size > 2000:
+                    # 获取识别指纹
+                    task_fingerprint = str(key if key is not None else func).lower()
+                    
+                    # 核心业务名单（select, click, signal, order 等关键链路禁止丢弃）
+                    is_critical = any(k in task_fingerprint for k in ("select", "click", "signal", "order", "init", "close"))
+                    
+                    if not is_critical:
+                        if time.time() - getattr(self, '_last_drop_log', 0) > 5:
+                            logger.warning(f"🚨 [Soft-Backpressure] 队列积压({q_size})，丢弃低优先级任务: [{task_fingerprint[:50]}]")
+                            self._last_drop_log = time.time()
+                        return "queue_drop_low_priority"
+            except: pass
+
+            # 🚑 [FIX] 协作式限流 Watchdog：
+            # 只有在主脉搏【静止】且超过限流步长（50ms）时，才由 Worker 尝试拉起。
+            now_t = time.time()
+            if not getattr(self, "_dispatch_running", False) and (now_t - getattr(self, "_last_dispatch_kick", 0) > 0.05):
+                self._last_dispatch_kick = now_t
+                if hasattr(self, "after"):
+                    try:
+                        self.after(100, self._process_dispatch_queue)
+                    except Exception:
+                        pass
+
             if debounce:
                 now = time.time()
-
                 # TTL清理（避免内存增长）
                 if len(self._qt_debounce_map) > 5000:
                     self._qt_debounce_map.clear()
@@ -1016,12 +1072,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⚠️ 不再做 pop（避免竞态）
                 try:
                     if bind_widget is not None:
-                        if not bind_widget.winfo_exists():
+                        try:
+                            if not bind_widget.winfo_exists():
+                                return
+                        except Exception:
                             return
                     return func(*args)
                 except Exception as e:
-                    if hasattr(self, "logger"):
-                        self.logger.error(f"❌ Async Task Error [{task_key}]: {e}")
+                    # 🛡️ [BUG FIX] 直接用模块级 logger，不依赖 self.logger
+                    logger.error(f"❌ [_schedule_after_v4] Async Task Error [{task_key}]: {e}\n{traceback.format_exc()}")
 
             self.tk_dispatch_queue.put(safe_call)
             return "redirected"
@@ -1054,8 +1113,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 func(*args)
             except Exception as e:
-                if hasattr(self, "logger"):
-                    self.logger.exception(f"❌ after执行异常: {e}")
+                # 🛡️ [BUG FIX] 直接用模块级 logger，不依赖 self.logger
+                logger.error(f"❌ [_schedule_after] after执行异常 [{task_key}]: {e}\n{traceback.format_exc()}")
             finally:
                 self._last_task_finish_time = time.time()
                 self._after_jobs.pop(task_key, None)
@@ -1070,253 +1129,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except:
             return None
             
-    def _schedule_after_v3(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
-        """
-        【最终稳定工业版 v3 - 2026.03.30】
-        特性：
-        1. 跨线程重定向：Qt/Worker 线程调用自动进入 Queue，防止 GIL 崩溃 (0x18)。
-        2. 闭环防抖：子线程“意图层”去重 + 主线程“执行层”去重，双重减压。
-        3. 参数指纹：支持 DataFrame/List 等不可哈希对象。
-        4. 物理隔离：双重 widget.exists 校验，彻底杜绝 Zombie Call。
-        """
-        import time
-        import threading
-        import functools
-
-        # 1. 基础状态保护
-        if getattr(self, "_is_closing", False): return None
-        if not hasattr(self, "_after_jobs"): self._after_jobs = {}
-        if not hasattr(self, "_last_task_finish_time"): self._last_task_finish_time = time.time()
-
-        # 2. 调度队列自动补齐 (防止因初始化顺序导致的调度丢失)
-        if not hasattr(self, "tk_dispatch_queue"):
-            import queue
-            self.tk_dispatch_queue = queue.Queue()
-            if hasattr(self, "after"):
-                try: self.after(10, self._process_dispatch_queue)
-                except: pass
-
-        # 3. Widget 生命周期校验 (前置)
-        if bind_widget is not None:
-            try:
-                if not bind_widget.winfo_exists(): return None
-            except: return None
-
-        # 4. 稳定 task_key 生成
-        if key is not None:
-            task_key = key
-        else:
-            try:
-                # 组合指纹：函数名 + 函数内存地址 + 参数长度 (避开对象内容哈希)
-                task_key = (func.__qualname__, id(func), len(args))
-            except:
-                task_key = (str(func), len(args))
-
-        # 5. 【跨线程分支】Qt / Worker 线程逻辑
-        if threading.current_thread() is not threading.main_thread():
-            if debounce:
-                if not hasattr(self, "_qt_debounce_map"): self._qt_debounce_map = {}
-                # 自动清理过旧的 map，防止内存静默增长
-                if len(self._qt_debounce_map) > 5000: self._qt_debounce_map.clear()
-                
-                if task_key in self._qt_debounce_map:
-                    return "qt_debounce_drop"
-                # 记录当前请求的时间戳作为 Ticket
-                self._qt_debounce_map[task_key] = time.time()
-
-            def safe_call():
-                try:
-                    # ❗ 关键：任务开始执行，立即释放意图锁，允许下一轮信号进入
-                    if hasattr(self, "_qt_debounce_map"):
-                        self._qt_debounce_map.pop(task_key, None)
-                    
-                    # 物理确认 widget 依然存在
-                    if bind_widget is not None and not bind_widget.winfo_exists():
-                        return
-
-                    # 执行真正的业务逻辑
-                    return func(*args)
-                except Exception as e:
-                    if hasattr(self, 'logger'): self.logger.error(f"❌ Async Task Exec Error [{task_key}]: {e}")
-                finally:
-                    pass
-
-            try:
-                self.tk_dispatch_queue.put(safe_call)
-                return "redirected"
-            except:
-                return None
-
-        # 6. 【主线程分支】Tk 调度层防抖 (Execution Debounce)
-        if debounce:
-            old_job = self._after_jobs.get(task_key)
-            if old_job:
-                try:
-                    # 取消尚未执行的计时任务
-                    self.after_cancel(old_job)
-                except: pass
-
-        # 7. 任务执行包装器
-        def wrapper():
-            if getattr(self, "_is_closing", False): return
-            
-            # 执行前最后一刻的 widget 状态确认
-            if bind_widget is not None:
-                try:
-                    if not bind_widget.winfo_exists(): return
-                except: return
-
-            try:
-                func(*args)
-            except Exception as e:
-                if hasattr(self, "logger"):
-                    self.logger.exception(f"❌ after 执行异常: {e}")
-            finally:
-                self._last_task_finish_time = time.time()
-                self._after_jobs.pop(task_key, None)
-
-        # 8. 物理调度
-        try:
-            job_id = self.after(ms, wrapper)
-            self._after_jobs[task_key] = job_id
-            return job_id
-        except Exception:
-            # 捕获 Tcl 解释器销毁瞬间的异常
-            return None
-
-    def _schedule_after_base(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
-        """
-        高可靠 Tkinter after 调度器
-
-        特性:
-        - 同函数防抖 (默认)
-        - 不同函数可并行
-        - 支持 func+args 唯一任务
-        - 自动清理 job
-        - 退出安全
-
-        参数:
-        ms       延迟毫秒
-        func     回调函数
-        *args    回调参数
-        key      自定义任务key (可选)
-        debounce 是否防抖
-        """
-        if getattr(self, "_is_closing", False):
-            return None
-
-        # 预先检查绑定
-        if bind_widget and not bind_widget.winfo_exists():
-            return None
-
-        # 初始化容器
-        if not hasattr(self, "_after_jobs"):
-            self._after_jobs = {}   # key -> job_id
-
-        if not hasattr(self, "_after_ids"):
-            self._after_ids = []    # 所有job记录
-
-        try:
-            # ---------- 任务key ----------
-            if key is None:
-                key = (func, args)
-
-            # ---------- 防抖 ----------
-            if debounce:
-                old_job = self._after_jobs.get(key)
-                if old_job:
-                    try:
-                        self.after_cancel(old_job)
-                    except Exception:
-                        pass
-
-            # --- ⭐ 核心：深度名称清洗函数 ---
-            def get_clean_name(f, k):
-                # 1. 如果有显式的字符串 Key，直接用 Key
-                if isinstance(k, str):
-                    return k
-                    
-                # 2. 递归剥离 partial
-                inner_f = f
-                while isinstance(inner_f, functools.partial):
-                    inner_f = inner_f.func
-                    
-                # 3. 获取原始路径 (__qualname__ 比 __name__ 更能体现类属关系)
-                raw = getattr(inner_f, '__qualname__', getattr(inner_f, '__name__', str(inner_f)))
-                
-                # 4. 强力正则清洗
-                # a) 移除 <locals>.
-                raw = raw.replace('<locals>.', '')
-                # b) 移除 0x... 内存地址及其前缀
-                raw = re.sub(r' at 0x[0-9A-Fa-f]+', '', raw)
-                # c) 移除 .<lambda> 后缀 (让 lambda 归属于它的上级函数)
-                raw = raw.replace('.<lambda>', '')
-                # d) 移除 <function ...> 包装
-                raw = raw.replace('<function ', '').replace('>', '')
-                
-                return raw.strip()
-
-            # 预先计算显示名称
-            display_name = get_clean_name(func, key)
-            
-            # 确保 Key 唯一标识任务
-            task_key = key if key else (func, args)
-
-            # --- 防抖逻辑 ---
-            if debounce:
-                old_job = self._after_jobs.get(task_key)
-                if old_job:
-                    try: self.after_cancel(old_job)
-                    except: pass
-
-            created_at = time.time()
-            # ---------- 包装回调 ----------
-            def wrapper():
-                now = time.time()
-                # 调度延迟 (主线程排队时间)
-                actual_total_elapsed = (now - created_at) * 1000
-                latency = actual_total_elapsed - ms
-                self._last_latency = latency 
-                
-                if latency > 5000:
-                    logger.warning(
-                        f"调度阻塞: [{display_name}] 延时设定:{ms}ms, 卡顿:{latency:.0f}ms"
-                        # f"调度阻塞: [{display_name}] 预计:{ms}ms, 实际等待:{actual_total_elapsed:.0f}ms (卡顿:{latency:.0f}ms)"
-                    )
-                    
-                # 执行耗时诊断 (函数运行时间)
-                exec_start = time.time()
-                try:
-                    if getattr(self, "_is_closing", False): return
-                    
-                    # ⭐ [关键加固]：如果绑定了 widget，执行前必须确认其依然存在
-                    if bind_widget and not bind_widget.winfo_exists():
-                        return
-                        
-                    func(*args)
-                    
-                    duration = (time.time() - exec_start) * 1000
-                    if duration > 2000:
-                        logger.warning(f"⚡ 运行沉重: [{display_name}] 自身耗时:{duration:.2f}ms")
-                        
-                except Exception as e:
-                    logger.exception(f"❌ [after error] {display_name}: {e}")
-                finally:
-                    self._after_jobs.pop(task_key, None)
-
-            # ---------- 注册任务 ----------
-            job_id = self.after(ms, wrapper)
-
-            if job_id:
-                self._after_ids.append(job_id)
-                self._after_jobs[key] = job_id
-
-            return job_id
-
-        except Exception as e:
-            if not getattr(self, "_is_closing", False):
-                logger.warning(f"[_schedule_after] 调度失败: {e}")
-            return None
 
     def _cancel_all_after_jobs(self):
         """取消所有待执行的 Tkinter after 任务（安全版）"""

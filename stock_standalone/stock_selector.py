@@ -889,49 +889,55 @@ class StockSelector:
     def get_candidates_df(self, force: bool = False, logical_date: Optional[str] = None, resample: Optional[str] = None) -> pd.DataFrame:
         """
         获取筛选结果。
-        :param force: 是否强制重新运行策略。如果为 False，则优先从数据库加载今日已存数据。
+        :param force: 是否强制重新运行策略。如果为 False，则优先从数据库加载存量数据。
         :param logical_date: 逻辑日期，格式 'YYYY-MM-DD'。如果提供，则使用此日期进行数据查询；否则使用系统当前日期。
         :param resample: 如果提供，则覆盖实例的周期标识。
         """
         if resample:
             self.resample = resample
         
-        today = logical_date if logical_date else datetime.datetime.now().strftime("%Y-%m-%d")
-        
-        # 非强制模式下，先检查今日是否有存量数据 (From SQLite)
+        target_date = logical_date if logical_date else datetime.datetime.now().strftime("%Y-%m-%d")
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        is_today = (target_date == today_str)
+
+        # 1. 尝试从数据库加载 (SQLite)
         if not force and self.db_logger:
             try:
-                # 注意：这里可能需要更新 get_selections_df 以支持 resample
-                df_today = self.db_logger.get_selections_df(date=today, resample=self.resample)
+                df_history = self.db_logger.get_selections_df(date=target_date, resample=self.resample)
                 
                 # 如果返回的是 list (pandas import fail)，转 df
-                if isinstance(df_today, list):
-                    df_today = pd.DataFrame(df_today)
+                if isinstance(df_history, list):
+                    df_history = pd.DataFrame(df_history)
 
-                if not df_today.empty:
-                    self.logger.info(f"检测到今日已运行过策略 (DB [{self.resample}]), 加载存量数据: {len(df_today)} 条")
-                    if 'code' in df_today.columns:
-                        df_today['code'] = df_today['code'].apply(lambda x: str(x).zfill(6))
+                if not df_history.empty:
+                    self.logger.info(f"加载历史选股记录 (DB [{self.resample}]), 日期: {target_date}, 数量: {len(df_history)} 条")
+                    if 'code' in df_history.columns:
+                        df_history['code'] = df_history['code'].apply(lambda x: str(x).zfill(6))
                     
-                    # [FIX] 如果从 DB 加载的数据缺失 category，且我们有实时数据，进行补齐
-                    if 'category' not in df_today.columns and self.df_all_realtime is not None and not self.df_all_realtime.empty:
-                        self.logger.info("补齐存量数据中的 category 列 (From Real-time)")
+                    # 如果记录缺失 category，且我们有实时数据且日期是今天，尝试补齐
+                    if is_today and 'category' not in df_history.columns and self.df_all_realtime is not None and not self.df_all_realtime.empty:
+                        self.logger.info("补齐今日数据中的 category 列 (From Real-time)")
                         rt_cats = self.df_all_realtime[['category']].copy()
                         if rt_cats.index.name != 'code':
-                             # 尝试找 code 列
                              if 'code' in self.df_all_realtime.columns:
                                  rt_cats.index = self.df_all_realtime['code'].apply(lambda x: str(x).zfill(6))
                         
-                        df_today = pd.merge(df_today, rt_cats, left_on='code', right_index=True, how='left')
+                        df_history = pd.merge(df_history, rt_cats, left_on='code', right_index=True, how='left')
                     
-                    return df_today
+                    return df_history
             except Exception as e:
-                self.logger.error(f"读取今日历史数据失败: {e}, 将重新运行策略")
+                self.logger.error(f"读取历史数据失败: {e}")
 
-        # 运行策略逻辑
+        # 2. 如果不是今天，且数据库没数据，不运行实时策略（因为实时策略用的是当前价格）
+        if not is_today:
+            self.logger.warning(f"指定日期 {target_date} 无历史记录，且非今日，跳过实时策略计算。")
+            return pd.DataFrame()
+
+        # 3. 运行今日实时策略逻辑
+        self.logger.info(f"正在运行实时选股策略 (日期: {today_str}, 周期: {self.resample})")
         df = self.load_data()
         df = self.calculate_indicators(df)
-        df_res = self.filter_strong_stocks(df, today=today)
+        df_res = self.filter_strong_stocks(df, today=today_str)
         return df_res
 
 if __name__ == '__main__':

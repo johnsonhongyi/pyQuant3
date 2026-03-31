@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from stock_live_strategy import StockLiveStrategy
     from stock_selector import StockSelector
 
+try:
+    from tkcalendar import DateEntry
+    HAS_CALENDAR = True
+except ImportError:
+    HAS_CALENDAR = False
+
 class StockSelectionWindow(tk.Toplevel, WindowMixin):
     """
     策略选股确认视窗
@@ -56,8 +62,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.df_candidates: pd.DataFrame = pd.DataFrame()
         self.df_full_candidates: pd.DataFrame = pd.DataFrame()  # 缓存完整的候选股数据
         self._data_loaded: bool = False  # 标记数据是否已从策略加载
-        self._last_hotspots: list[tuple[str, float, float, float]] = []   # 缓存热点数据，避免重复刷新UI
         self.hotspots_frame: Optional[tk.Frame] = None
+        
+        self.current_date = datetime.now().strftime("%Y-%m-%d")
         
         self._init_ui()
         
@@ -162,6 +169,30 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # tk.Button(toolbar, text="🗑️", command=self.delete_current_history, width=2, fg="red").pack(side="left", padx=1)
         tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3, font=("Segoe UI Emoji", 10), pady=0).pack(side="left", padx=1)
         tk.Button(toolbar, text="🗑️", command=self.delete_current_history, width=2, fg="red", font=("Segoe UI Emoji", 10), pady=0).pack(side="left", padx=1)
+
+        # Date Selector
+        tk.Frame(toolbar, width=10).pack(side="left") # Spacer
+        tk.Label(toolbar, text="日期:", font=("Arial", 10, "bold")).pack(side="left", padx=2)
+        
+        if HAS_CALENDAR:
+            self.date_entry = DateEntry(toolbar, width=12, background='darkblue', 
+                                      foreground='white', borderwidth=2, 
+                                      date_pattern='yyyy-mm-dd',
+                                      state='readonly')
+            self.date_entry.set_date(datetime.now())
+            self.date_entry.pack(side="left", padx=2)
+            self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
+            # Make the entire entry clickable
+            self.date_entry.bind("<Button-1>", lambda e: self.date_entry.drop_down())
+        else:
+            self.date_var = tk.StringVar(value=self.current_date)
+            self.date_tk_entry = tk.Entry(toolbar, textvariable=self.date_var, width=11)
+            self.date_tk_entry.pack(side="left", padx=2)
+            tk.Button(toolbar, text="Go", command=self.on_date_changed, width=3).pack(side="left")
+
+        # Quick Navigation
+        tk.Button(toolbar, text="◀", command=lambda: self.shift_date(-1), width=2).pack(side="left", padx=1)
+        tk.Button(toolbar, text="▶", command=lambda: self.shift_date(1), width=2).pack(side="left", padx=1)
 
         tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=10, pady=5)
 
@@ -294,7 +325,24 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # Spacer at the end of the group
             tk.Frame(self.hotspots_frame, width=10).pack(side="left")
 
-    def load_data(self, force: bool = False):
+    def load_data(self, force: bool = False, target_date: Optional[str] = None):
+        """
+        加载/运行选股策略
+        :param force: 是否强制重新运行
+        :param target_date: 指定查询日期
+        """
+        if not self.selector:
+            return
+
+        query_date = target_date if target_date else self.current_date
+        is_today = (query_date == datetime.now().strftime("%Y-%m-%d"))
+        
+        # 视觉反馈：如果是历史数据，修改窗口标题或状态
+        if not is_today:
+            self.title(f"策略选股 & 人工复核 [历史模式: {query_date}]")
+        else:
+            self.title("策略选股 & 人工复核")
+
         self._update_hotspots()
         # Clear items in batch for performance
         children = self.tree.get_children()
@@ -303,22 +351,22 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
         try:
             # --- Load Data Phase ---
-            # 如果不是强制加载，且数据已经加载过一次，则跳过耗时的策略计算
-            if not force and self._data_loaded and not self.df_full_candidates.empty:
+            # 如果不是强制加载，且数据已经加载过一次，且日期匹配，则使用缓存
+            # 注意：历史模式下，逻辑日期变更必须触发重新加载
+            if not force and self._data_loaded and not self.df_full_candidates.empty and getattr(self, '_last_query_date', None) == query_date:
                 # 使用缓存数据
                 pass
             else:
-                if self.selector:
-                    self.df_full_candidates = self.selector.get_candidates_df(force=force)
-                else:
-                    self.df_full_candidates = pd.DataFrame()
-                
+                self.df_full_candidates = self.selector.get_candidates_df(force=force, logical_date=query_date)
                 self._data_loaded = True
+                self._last_query_date = query_date
                 
-                # 在首次加载或强制刷新时初始化用户标注列 (如果策略返回了数据)
+                # 初始化用户标注列
                 if not self.df_full_candidates.empty:
-                    self.df_full_candidates['user_status'] = "待定"
-                    self.df_full_candidates['user_reason'] = ""
+                    if 'user_status' not in self.df_full_candidates.columns:
+                        self.df_full_candidates['user_status'] = "待定"
+                    if 'user_reason' not in self.df_full_candidates.columns:
+                        self.df_full_candidates['user_reason'] = ""
 
             # --- Filter & Display Phase ---
             if self.df_full_candidates.empty:
@@ -627,6 +675,35 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         """点击热点按钮快速筛选"""
         self.concept_filter_var.set(name)
         self.on_filter_search()
+
+    def on_date_changed(self, event=None):
+        """日期发生变化"""
+        if HAS_CALENDAR:
+            self.current_date = self.date_entry.get_date().strftime("%Y-%m-%d")
+        else:
+            self.current_date = self.date_var.get()
+        
+        # 切换日期时，自动加载该日期的历史记录 (非强制运行策略)
+        self.load_data(force=False, target_date=self.current_date)
+
+    def shift_date(self, delta: int):
+        """快速切换日期"""
+        try:
+            curr = datetime.strptime(self.current_date, "%Y-%m-%d")
+            # 使用 timedelta 替代 pd.Timedelta 以减少依赖 (虽然 pandas 已经导入了)
+            from datetime import timedelta
+            target = curr + timedelta(days=delta)
+            target_str = target.strftime("%Y-%m-%d")
+            
+            if HAS_CALENDAR:
+                self.date_entry.set_date(target)
+            else:
+                self.date_var.set(target_str)
+            
+            self.current_date = target_str
+            self.load_data(force=False, target_date=self.current_date)
+        except Exception as e:
+            self.logger.error(f"Shift date failed: {e}")
 
     def on_filter_search(self, event: Optional[Any] = None):
         """执行查询并记录历史"""
