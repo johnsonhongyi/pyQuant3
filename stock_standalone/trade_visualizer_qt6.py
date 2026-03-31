@@ -363,6 +363,10 @@ class VoiceProcess:
         self.stop_flag.value = False
         self.abort_event.set() # 立即中止当前播报
         
+        # ⚡ [FIX] 如果处于暂停状态，必须恢复，否则线程会死在 pause_event.wait()
+        if hasattr(self, 'pause_event'):
+            self.pause_event.set()
+        
         # 清空队列，防止进程卡在 put/get 上
         while not self.queue.empty():
             try:
@@ -371,17 +375,14 @@ class VoiceProcess:
                 break
                 
         if self.process and self.process.is_alive():
-            # self.process.join(timeout=2.0)
-            self.stop_flag.value = False
-            self.abort_event.set()
-            self.process.join(timeout=0.5)
+            # 给予短暂重合时间，不要阻塞主线程太久
+            self.process.join(timeout=1.0)
             if self.process.is_alive():
-                logger.debug("Voice worker thread still alive, will be collected by daemon")
+                logger.warning("⚠️ Voice worker thread still alive, will be collected by daemon")
         
-        # ⚡ [NEW] 彻底关闭进程池/队列
-        # NOTE: queue.Queue has no close()
+        # ⚡ [NEW] 彻底清理
         self.process = None
-        logger.info("✅ Voice worker thread shutdown complete")
+        logger.info("✅ Voice worker thread shutdown signal sent")
 
     def wait(self, timeout_ms=2000):
         """等待进程完成（兼容旧接口）"""
@@ -12054,20 +12055,30 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Failed to load layout preset {index}: {e}")
     
-    def wait_all_threads(self, timeout=2):
+    def wait_all_threads(self, timeout=1.5):
+        """
+        优雅等待所有子线程结束。
+        优化：降低超时时间，且对已知后台驻留线程不再报错为 ERROR。
+        """
         import threading
         main = threading.current_thread()
         for t in threading.enumerate():
             if t is main:
                 continue
-            # ❗跳过 DummyThread
-            if isinstance(t, threading._DummyThread):
-                logger.warning(f"[SKIP DummyThread] {t.name}")
+            # ❗跳过 DummyThread 及已知的后台守护线程名
+            if isinstance(t, threading._DummyThread) or t.name == "MainThread":
                 continue
-            logger.error(f"[WAIT] {t.name}")
+                
+            if t.daemon:
+                # 守护线程通常不需要显式 join，logger 降级为 debug
+                logger.debug(f"[JOIN-DAEMON] {t.name}")
+                t.join(0.2) # 给个极短时间
+                continue
+
+            logger.info(f"[WAIT] Joining thread: {t.name}")
             t.join(timeout)
             if t.is_alive():
-                logger.error(f"[STILL ALIVE] {t.name}")
+                logger.warning(f"[STILL ALIVE] {t.name} - will be terminated by OS")
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""

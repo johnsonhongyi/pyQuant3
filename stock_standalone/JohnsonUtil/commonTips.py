@@ -845,6 +845,7 @@ class GlobalConfig:
         self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=200, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
+        self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=3600, value_type="int")
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.vis_column_map = self.get_with_writeback(
             "general",
@@ -1138,6 +1139,7 @@ start_init_tdx_time: int = CFG.start_init_tdx_time
 sina_MultiIndex_startTime: int = CFG.sina_MultiIndex_startTime
 sina_MultiIndex_limit: int = CFG.sina_MultiIndex_limit
 voice_rate: int = CFG.voice_rate
+realtime_save_interval: int = CFG.realtime_save_interval
 voice_volume: float = CFG.voice_volume
 vis_column_map: Dict[str] = CFG.vis_column_map
 

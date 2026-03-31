@@ -82,7 +82,7 @@ class MinuteKlineCache:
         # [NEW] 限频日志计数器
         self._day_log_cycle_count = 0  # 今日已打印异常的周期数
         self._last_log_date = ""        # 上次打印日志的日期
-
+        
     def __len__(self) -> int:
         return len(self._shared_cache)
 
@@ -1745,9 +1745,8 @@ class DataPublisher:
         cache_path = cct.get_ramdisk_path("minute_kline_cache.pkl")
         self._cache_path = str(cache_path) if cache_path else "" 
         self._last_save_ts = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
-        self._save_interval = 300 # 每 5 分钟备份一次到磁盘
+        self._save_interval = int(getattr(cct.CFG, 'realtime_save_interval', 1800)) # 每 30 分钟备份一次到磁盘
         self._enable_backup = enable_backup # 是否启用 .bak 文件备份 (Ramdisk 空间紧张默认关闭)
-
         self.cache_slot: DataFrameCacheSlot = DataFrameCacheSlot(
                 cache_file=self._cache_path,
                 fp_file=None,
@@ -1951,7 +1950,7 @@ class DataPublisher:
             
             hhmm = int(datetime.now().strftime("%H%M"))
             # 不执行策略的时间段：早于 9:45，午休，15:30 之后
-            if hhmm < 945 or (1130 <= hhmm < 1300) or hhmm >= 1530:
+            if hhmm < 945 or (1130 <= hhmm < 1300) or hhmm >= 1600:
                 continue
 
             try:
@@ -2360,6 +2359,7 @@ class DataPublisher:
 
         if self._save_lock.locked():
             logger.warning("save_cache skipped: another save in progress")
+            time.sleep(1)
             return
         with self._save_lock:
             try:

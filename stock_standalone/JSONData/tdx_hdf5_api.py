@@ -1786,7 +1786,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     except: pass
 
                     
-                    max_retry = 3
+                    max_retry = 6  # 增加重试次数，应对高频读写冲突
                     for r in range(max_retry):
                         try:
                             # 优先直接使用 os.replace (原子操作)
@@ -1795,16 +1795,28 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             log.debug(f"✅ Atomic replace successful: {fname} (attempt {r+1})")
                             break
                         except Exception as re:
+                            # 针对 [WinError 5] 等权限错误，采用指数退避策略
+                            wait_time = 0.3 * (2 ** r) + random.uniform(0, 0.2)
                             if r == max_retry - 1:
-                                log.error(f"Final replace attempt failed: {re}")
+                                log.error(f"Final replace attempt failed after {max_retry} retries: {re}")
                                 break
-                            log.warning(f"Replace retry {r+1} failed ({re}), trying removal and waiting...")
-                            try:
-                                if os.path.exists(fname_path):
-                                    os.remove(fname_path)
-                            except: pass
-                            time.sleep(0.5)
+                            log.warning(f"Replace retry {r+1}/{max_retry} failed ({re}), waiting {wait_time:.2f}s...")
+                            
+                            # 深度清理句柄
                             gc.collect()
+                            try:
+                                import tables
+                                tables.file._open_files.close_all()
+                            except: pass
+                            
+                            # 若前三次 replace 都失败，尝试强制删除原文件以打破死锁
+                            if r >= 3:
+                                try:
+                                    if os.path.exists(fname_path):
+                                        os.remove(fname_path)
+                                except: pass
+                            
+                            time.sleep(wait_time)
                 
                 if not success:
                     # 关键：如果替换失败，报错并退出，但不删除 temp_fname，防止数据彻底丢失
