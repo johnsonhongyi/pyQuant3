@@ -1376,15 +1376,20 @@ def search_ths_data(code,category=False):
     # # table=cct.format_for_print2(data).get_string(header=False)
     # table =cct.format_for_print(data,header=False)
 
-    if isinstance(code,list):
-        # code_ths=[cct.code_to_symbol_ths(co) for co in code_l]
-        comm_code = list(set(code) & set(df.index.tolist()))
-    else:
-        # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
-        comm_code = code
-    # if category:
-    #     df=df.loc[:,['category']]
-    return df.loc[comm_code]
+
+    codes = code if isinstance(code, list) else [code]
+    codes = [c for c in codes if c in df.index]
+    return df.loc[codes]
+    
+    # if isinstance(code,list):
+    #     # code_ths=[cct.code_to_symbol_ths(co) for co in code_l]
+    #     comm_code = list(set(code) & set(df.index.tolist()))
+    # else:
+    #     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+    #     comm_code = code
+    # # if category:
+    # #     df=df.loc[:,['category']]
+    # return df.loc[comm_code] if comm_code in df.index else pd.DataFrame()
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
     fpath = get_wencai_filepath(market)
