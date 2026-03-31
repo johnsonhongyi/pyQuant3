@@ -156,10 +156,16 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         if HAS_CALENDAR:
             self.date_entry = DateEntry(ctrl_frame, width=12, background='darkblue', 
                                       foreground='white', borderwidth=2, 
-                                      date_pattern='yyyy-mm-dd')
+                                      date_pattern='yyyy-mm-dd',
+                                      state='readonly') # Prevent typing, force calendar use
             self.date_entry.set_date(datetime.now())
             self.date_entry.pack(side="left", padx=5)
             self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
+            # [FIX] Make the entire entry clickable to open the calendar
+            self.date_entry.bind("<Button-1>", lambda e: self.date_entry.drop_down())
+            
+            # [NEW] Highlight dates with existing data
+            self.after(500, self._highlight_available_dates)
         else:
             self.date_var = tk.StringVar(value=self.current_date)
             self.date_entry = tk.Entry(ctrl_frame, textvariable=self.date_var, width=12)
@@ -407,10 +413,35 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self.refresh_report(use_cache=True)
 
     def force_generate_today(self):
-        """Force regeneration of today's report from live data."""
-        self.current_date = datetime.now().strftime("%Y-%m-%d")
+        """Force regeneration of today's report from live data with smart date resolution."""
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        
+        # 智能日期决策：如果是交易日且在 09:15 分之后，使用今天；否则使用上一个交易日
+        try:
+            is_trade_day = cct.get_day_istrade_date(today_str)
+            now_time = cct.get_now_time_int() # HHMM 格式
+            
+            if is_trade_day and now_time >= 915:
+                # 交易日且已开盘或盘后
+                target_date = today_str
+            else:
+                # 非交易日或交易日盘前，自动回溯到上一个交易日
+                target_date = cct.get_last_trade_date(today_str)
+                
+            self.current_date = target_date
+            # self.logger.info(f"Force generate: Resolved target date to {target_date} (Today: {today_str}, Time: {now_time}, TradeDay: {is_trade_day})")
+            
+        except Exception as e:
+            # self.logger.error(f"Error resolving trading date: {e}")
+            self.current_date = today_str
+
+        # 更新 UI 控件状态
         if HAS_CALENDAR:
-            self.date_entry.set_date(datetime.now())
+            try:
+                self.date_entry.set_date(datetime.strptime(self.current_date, "%Y-%m-%d"))
+            except Exception:
+                pass
         else:
             self.date_var.set(self.current_date)
             
@@ -434,7 +465,39 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         self.refresh_report(use_cache=True)
         # messagebox.showinfo("Success", "今日战报已生成/刷新！")
-        toast_message(self, "今日战报已生成/刷新！", 3000)
+        toast_message(self, f"今日战报[{self.current_date}]已生成/刷新！", 3000)
+        
+        # Refresh calendar highlights after generating new data
+        if HAS_CALENDAR:
+            self._highlight_available_dates()
+
+    def _highlight_available_dates(self):
+        """Fetch all dates with data and highlight them in the calendar."""
+        if not HAS_CALENDAR or not hasattr(self, 'date_entry'):
+            return
+            
+        try:
+            dates = self.engine.get_available_dates()
+            if not dates:
+                return
+                
+            cal = self.date_entry._calendar
+            # Remove existing events to avoid duplicates if refreshed
+            cal.calevent_remove('all', 'has_data')
+            
+            for date_str in dates:
+                try:
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    # Create an event for the date
+                    cal.calevent_create(date_obj, 'Market Data Available', 'has_data')
+                except Exception as e:
+                    self.logger.error(f"Error parsing date {date_str}: {e}")
+            
+            # Configure the tag to show Red background
+            cal.tag_config('has_data', background='#ff4444', foreground='white')
+            # self.logger.info(f"Highlighted {len(dates)} dates in calendar.")
+        except Exception as e:
+            self.logger.error(f"Failed to highlight calendar: {e}")
 
 
 

@@ -2658,7 +2658,7 @@ def fetch_and_process(
                     time.sleep(1)
                 continue
 
-            elif START_INIT > 0 and (not cct.get_work_time()) and cct.get_now_time_int() > 900:
+            elif START_INIT > 0 and not cct.get_work_time():
                 for _ in range(5):
                     if not flag.value or get_status(status_callback) != last_status:
                         break

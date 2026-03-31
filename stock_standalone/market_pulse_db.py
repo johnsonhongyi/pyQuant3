@@ -213,3 +213,17 @@ def update_user_notes(date_str, notes):
     except Exception as e:
         logger.error(f"[DB Note Update Error] {e}")
         return False
+
+def get_all_recorded_dates():
+    """Retrieve a list of all dates that have a record in the daily_reports table."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    dates = []
+    try:
+        cur.execute("SELECT date FROM daily_reports")
+        dates = [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DB Date Query Error] {e}")
+    finally:
+        conn.close()
+    return dates
