@@ -1,4 +1,5 @@
 {
     "python.linting.pylintEnabled": true,
-    "python.pythonPath": "/Users/Johnson/anaconda/bin/python"
+    "python.pythonPath": "/Users/Johnson/anaconda/bin/python",
+    "python.languageServer": "None"
 }

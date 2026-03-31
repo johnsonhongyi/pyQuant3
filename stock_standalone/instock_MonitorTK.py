@@ -3323,17 +3323,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 避免新行情进入时，主表格自动跳回全量列表，导致用户搜索失效
                     combined_query = getattr(self, '_last_value', "")
                     
-                    for i, pkg in enumerate(all_packets):
-                        is_latest = (i == proc_count - 1)
-                        self._is_processing_tree_data = True
-                        
-                        if not hasattr(self, 'executor'):
-                            from concurrent.futures import ThreadPoolExecutor
-                            # ⭐ [CRITICAL] 必须设为 max_workers=1，确保存量/增量行情包按序、串行处理，防止竞争和信号丢失
-                            self.executor = ThreadPoolExecutor(max_workers=1)
-                        
-                        # ⭐ 核心：将查询条件带入后台 Worker
-                        self.executor.submit(self._process_tree_data_async, pkg, sync_ui=is_latest, query=combined_query)
+                    # ⭐ [OPTIMIZE] 性能核心优化：跳帧 (Skip-frames) 策略
+                    # 如果 Queue 中积压了多个数据包，我们只取出最新的一个进行全量信号检测、策略计算和 UI 同步。
+                    # 因为每一个包都是全量快照 (Full Snapshot)，历史包的重复计算不仅浪费 CPU，还会导致 UI 响应产生严重堆叠延迟。
+                    if proc_count > 1:
+                        logger.warning(f"🚀 [UpdateTree] 性能预警：检测到 {proc_count} 个积压包，仅处理最新帧以恢复响应...")
+                    
+                    latest_pkg = all_packets[-1]
+                    self._is_processing_tree_data = True
+                    
+                    if not hasattr(self, 'executor'):
+                        from concurrent.futures import ThreadPoolExecutor
+                        # ⭐ 保持 max_workers=1 确保任务按序执行，但通过跳帧减少排队总数
+                        self.executor = ThreadPoolExecutor(max_workers=1)
+                    
+                    # 提交最新的包，执行全量同步
+                    self.executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query)
                 else:
                     # Check if subprocess is still alive
                     if hasattr(self, 'proc') and self.proc is not None:
