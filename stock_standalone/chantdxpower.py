@@ -1274,8 +1274,10 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # 4. [NEW] 绘制中枢 (Zhongshu) 蓝色方块
         for zs in zs_list:
             try:
-                t_start = int(time.mktime((zs['start'] + datetime.timedelta(hours=8)).timetuple()) * 1000000000)
-                t_end = int(time.mktime((zs['end'] + datetime.timedelta(hours=8)).timetuple()) * 1000000000)
+                dt_start = chanK.index[zs['start']]
+                dt_end = chanK.index[zs['end']]
+                t_start = int(time.mktime((dt_start + datetime.timedelta(hours=8)).timetuple()) * 1000000000)
+                t_end = int(time.mktime((dt_end + datetime.timedelta(hours=8)).timetuple()) * 1000000000)
                 try:
                     start_x = x_date_list.index(t_start)
                     end_x = x_date_list.index(t_end)
