@@ -3,6 +3,9 @@ from tkinter import ttk, messagebox
 import os
 import json
 from datetime import datetime
+import threading
+import queue
+import time
 from typing import Optional, Any, TYPE_CHECKING
 from collections import Counter
 import pandas as pd
@@ -198,7 +201,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         tk.Button(toolbar, text="◀", command=lambda: self.shift_date(-1), width=2).pack(side="left", padx=1)
         tk.Button(toolbar, text="▶", command=lambda: self.shift_date(1), width=2).pack(side="left", padx=1)
 
-        tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=10, pady=5)
+        tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
+
+        # 🔍 Multi-day Tracking Button
+        tk.Button(toolbar, text="🔍 追踪", command=self.on_history_track_clicked, bg="#2a3a4a", fg="#ff9900", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
 
 
         tk.Button(toolbar, text="✅[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=1)
@@ -294,6 +300,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         self.tree.bind("<ButtonRelease-1>", self.on_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Double-1>", self.on_double_click) # 🚀 [NEW] 双击联动标记
         self.tree.bind("<Button-3>", self.show_context_menu)
 
     def _update_hotspots(self):
@@ -776,14 +783,30 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         item_id = selection[0]
         values = self.tree.item(item_id, "values")
         if values:
-            stock_code = values[0]
-            # 发送联动
-            if stock_code and hasattr(self, 'sender') and self.sender:
+            stock_code = str(values[0]).zfill(6)
+            
+            # 1. 基础联动 (通达信/同花顺)
+            if hasattr(self, 'sender') and self.sender:
                 self.sender.send(stock_code)
-            # ⭐ 可视化器联动
-            if stock_code and  self.master and getattr(self.master, "_vis_enabled_cache", False):
-                if hasattr(self.master, 'open_visualizer'):
-                    self.master.open_visualizer(str(stock_code))
+            
+            # 2. 可视化器联动 (基础跳转与时间同步)
+            if self.master and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+                if hasattr(self.master, 'link_to_visualizer'):
+                     # 🚀 [NEW] 用户需求：单击触发深度联动。如果是历史复盘 (非今天)，则强制同步时间
+                     query_date = self.current_date
+                     today_str = datetime.now().strftime("%Y-%m-%d")
+                     
+                     if query_date != today_str:
+                         # 历史复盘模式：同步日期
+                         self.master.link_to_visualizer(stock_code, query_date)
+                         logger.info(f"SelectionWindow: Linked {stock_code} at {query_date} (History Mode)")
+                     else:
+                         # 今日实时模式：仅切换股票
+                         self.master.open_visualizer(stock_code)
+
+    def on_double_click(self, event):
+        """🚀 [SIMPLIFIED] 双击现与单击逻辑对齐，复用联动逻辑"""
+        self.on_select(event)
 
     # === 行选择逻辑 ===
     # def on_tree_select(self,event):
@@ -1012,11 +1035,318 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             menu.post(event.x_root, event.y_root)
     
 
-    def tree_scroll_to_code(self, code: str):
-        """定位股票代码 (通过筛选器)"""
-        if hasattr(self, 'master') and hasattr(self.master, 'tree_scroll_to_code'):
-            self.master.tree_scroll_to_code(code,select_win=True)
-        # elif hasattr(self, 'concept_filter_var'):
-        #     self.concept_filter_var.set(code)
-        #     self.on_filter_search()
+
+    def on_history_track_clicked(self):
+        """打开多日选股追踪对比窗口"""
+        if not self.selector:
+            messagebox.showwarning("提示", "未初始化选股器，无法追踪。")
+            return
+        
+        # 记录弹窗状态，避免复选导致重复
+        if hasattr(self, '_history_track_win') and self._history_track_win.winfo_exists():
+            self._history_track_win.lift()
+            self._history_track_win.focus_force()
+            return
+
+        self._history_track_win = HistoricalSelectionTrackerDialog(self, self.selector)
+        self._history_track_win.focus_set()
+
+# ==============================================================================
+# --- 选股多日追踪对比专用类 ---
+# ==============================================================================
+
+class HistoricalSelectionTrackerWorker(threading.Thread):
+    """异步选股追踪工作线程：聚合历史选股结论并分析当前的 ROI 与连贯性"""
+    def __init__(self, days, selector, main_window, callback_queue):
+        super().__init__()
+        self.days = days
+        self.selector = selector
+        self.main_window = main_window
+        self.callback_queue = callback_queue
+        self.daemon = True
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            # 1. 获取所有有数据的日期
+            all_dates = self.selector.get_selection_dates()
+            if not all_dates:
+                self.callback_queue.put(('finished', []))
+                return
+            
+            target_dates = all_dates[:self.days]
+            # 🚀 [FIX] 从远及近遍历，确保 base_price 是该时间段内“首次出现”的价格
+            target_dates_rev = list(reversed(target_dates))
+            self.callback_queue.put(('progress', f"正在从 {target_dates_rev[0]} 开始聚合 {len(target_dates_rev)} 天记录..."))
+            
+            # code -> {base_p, hits, name, sector, scores, dates}
+            stats = {}
+            for i, d_str in enumerate(target_dates_rev):
+                if self._stop_event.is_set(): return
+                
+                # normalize date
+                d_obj = pd.to_datetime(d_str).strftime("%Y-%m-%d")
+                self.callback_queue.put(('progress', f"📂 读取 [{d_obj}] ({i+1}/{len(target_dates_rev)})..."))
+                
+                df = self.selector.get_candidates_df(logical_date=d_obj)
+                if df.empty: continue
+                
+                for _, row in df.iterrows():
+                    code = row['code']
+                    p = float(row.get('price', 0))
+                    
+                    if code not in stats:
+                        stats[code] = {
+                            'code': code, 'name': row.get('name', '--'),
+                            'sector': row.get('category', 'N/A'),
+                            'hits': 1, 'base_price': p,
+                            'max_score': float(row.get('score', 0)),
+                            'dates': [d_obj]
+                        }
+                    else:
+                        stats[code]['hits'] += 1
+                        stats[code]['max_score'] = max(stats[code]['max_score'], float(row.get('score', 0)))
+                        stats[code]['dates'].append(d_obj)
+                        # 如果初始基准价无效，尝试补齐
+                        if stats[code]['base_price'] <= 0 and p > 0:
+                            stats[code]['base_price'] = p
+
+            # 2. 获取实时行情对比
+            all_codes = list(stats.keys())
+            self.callback_queue.put(('progress', f"📡 刷新 {len(all_codes)} 只个股的实时对比数据..."))
+            
+            # 尝试从主控的实时库中获取
+            realtime_df = getattr(self.selector, 'df_all_realtime', pd.DataFrame())
+            
+            results = []
+            for code, item in stats.items():
+                curr_p = item['base_price']
+                curr_pct = 0.0
+                
+                if not realtime_df.empty and code in realtime_df.index:
+                    row_rt = realtime_df.loc[code]
+                    curr_p = float(row_rt.get('price', row_rt.get('close', item['base_price'])))
+                    curr_pct = float(row_rt.get('percent', 0))
+                
+                # 计算 ROI (相对于选股基准价)
+                roi = (curr_p / item['base_price'] - 1) * 100 if item['base_price'] > 0 else 0
+                item['curr_price'] = curr_p
+                item['curr_pct'] = curr_pct
+                item['roi'] = roi
+                
+                # 简单形态/暗示
+                phase = "震荡"
+                if roi > 8: phase = "强势跃迁"
+                elif roi > 2: phase = "温和上行"
+                elif roi < -5: phase = "回撤分歧"
+                
+                item['pattern'] = f"{phase} (命中:{item['hits']})"
+                
+                # 排序权重: 命中数 * 10 + ROI * 2
+                item['potential_score'] = item['hits'] * 10.0 + roi * 2.0
+                results.append(item)
+
+            results.sort(key=lambda x: x['potential_score'], reverse=True)
+            self.callback_queue.put(('finished', results))
+            
+        except Exception as e:
+            logger.error(f"SelectionTracker Error: {e}")
+            self.callback_queue.put(('error', str(e)))
+
+class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
+    """选股多日追踪对比弹窗 (Tkinter 版)"""
+    def __init__(self, parent, selector):
+        super().__init__(parent)
+        self.parent_win = parent
+        self.selector = selector
+        self.master_win = parent.master
+        
+        self.title("🔍 选股多日追踪对比 (由近及远)")
+        self.geometry("1100x650")
+        self.load_window_position(self, "选股历史追踪", default_width=1100, default_height=650)
+        
+        self._all_results = []
+        self._is_populating = False
+        self._queue = queue.Queue()
+        self._worker = None
+
+        self._init_ui()
+        self.after(200, lambda: self._start_analysis())
+        
+        # 定时检查队列数据
+        self._check_queue_id = self.after(300, self._process_queue)
+        
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _init_ui(self):
+        # 1. Toolbar
+        toolbar = tk.Frame(self, pady=5)
+        toolbar.pack(fill="x", padx=10)
+        
+        tk.Label(toolbar, text="📅 分析天数:").pack(side="left")
+        self.spin_days = tk.Spinbox(toolbar, from_=1, to=100, width=5)
+        self.spin_days.delete(0, "end")
+        self.spin_days.insert(0, "5")
+        self.spin_days.pack(side="left", padx=5)
+        
+        self.btn_refresh = tk.Button(toolbar, text="🚀 开启分析", command=self._start_analysis, bg="#2c3e50", fg="white", font=("Arial", 9, "bold"))
+        self.btn_refresh.pack(side="left", padx=5)
+
+        # 快速周期按钮
+        for text, days in [("1周", 5), ("2周", 10), ("1月", 22)]:
+            btn = tk.Button(toolbar, text=text, command=lambda d=days: self._quick_set_days(d), 
+                            bg="#ecf0f1", fg="#2c3e50", font=("Arial", 9), padx=5)
+            btn.pack(side="left", padx=1)
+        
+        tk.Label(toolbar, text="🔍 筛选:").pack(side="left", padx=(20, 2))
+        self.search_var = tk.StringVar()
+        self.entry_search = tk.Entry(toolbar, textvariable=self.search_var, width=15)
+        self.entry_search.pack(side="left", padx=2)
+        self.search_var.trace_add("write", lambda *args: self._apply_filter())
+        
+        self.status_lbl = tk.Label(toolbar, text="准备就绪", fg="#ff9900", font=("Arial", 9, "bold"))
+        self.status_lbl.pack(side="right", padx=10)
+
+        # 2. Results Table
+        columns = ("code", "name", "hits", "sector", "base_price", "curr_price", "roi", "pattern")
+        headers = {
+            "code": "代码", "name": "名称", "hits": "次数", "sector": "板块",
+            "base_price": "历史基准价", "curr_price": "现价", "roi": "ROI", "pattern": "形态暗示/状态"
+        }
+        
+        tree_frame = tk.Frame(self)
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
+        
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        
+        for col, text in headers.items():
+            self.tree.heading(col, text=text, command=lambda c=col: self._sort_tree(c, True))
+            self.tree.column(col, anchor="center", width=80)
+        
+        self.tree.column("pattern", width=250, anchor="w", stretch=True)
+        self.tree.column("sector", width=120)
+        
+        # Tags
+        self.tree.tag_configure("plus", foreground="#e91e63", font=("Arial", 9, "bold")) # 红涨
+        self.tree.tag_configure("minus", foreground="#388e3c", font=("Arial", 9, "bold")) # 绿跌
+        self.tree.tag_configure("high_hits", background="#e8f5e9") # 高命中背景
+        
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<Double-1>", lambda e: self._on_select(e, force_link=True))
+
+    def _quick_set_days(self, days: int):
+        """快捷设置天数并启动分析"""
+        self.spin_days.delete(0, "end")
+        self.spin_days.insert(0, str(days))
+        self._start_analysis()
+
+    def _start_analysis(self):
+        if self._worker and self._worker.is_alive():
+            return
+        
+        try:
+            days = int(self.spin_days.get())
+        except: days = 5
+        
+        self.btn_refresh.config(state="disabled", text="分析中...")
+        self.tree.delete(*self.tree.get_children())
+        self._all_results = []
+        
+        main_win = getattr(self.parent_win, 'master', self.parent_win)
+        self._worker = HistoricalSelectionTrackerWorker(days, self.selector, main_win, self._queue)
+        self._worker.start()
+
+    def _process_queue(self):
+        """主线程定时处理 worker 推来的信号"""
+        try:
+            while True:
+                msg_type, data = self._queue.get_nowait()
+                if msg_type == 'progress':
+                    self.status_lbl.config(text=data)
+                elif msg_type == 'finished':
+                    self._on_data_ready(data)
+                elif msg_type == 'error':
+                    self.status_lbl.config(text=f"❌ 运行出错", fg="red")
+                    messagebox.showerror("分析错误", data)
+                    self.btn_refresh.config(state="normal", text="🚀 开启分析")
+                self._queue.task_done()
+        except queue.Empty:
+            pass
+        finally:
+            if self.winfo_exists():
+                self._check_queue_id = self.after(200, self._process_queue)
+
+    def _on_data_ready(self, results):
+        self._all_results = results
+        self.status_lbl.config(text=f"✅ 完成！共追踪 {len(results)} 只个股", fg="#00cc00")
+        self.btn_refresh.config(state="normal", text="🚀 重新统计")
+        self._apply_filter()
+
+    def _apply_filter(self):
+        self.tree.delete(*self.tree.get_children())
+        query = self.search_var.get().lower()
+        
+        for item in self._all_results:
+            if query and query not in item['code'] and query not in item['name'] and query not in item['sector'].lower():
+                continue
+            
+            roi = item['roi']
+            tag = "plus" if roi > 0 else ("minus" if roi < 0 else "")
+            
+            all_tags = [tag]
+            if item['hits'] >= 3: all_tags.append("high_hits")
+            
+            self.tree.insert("", "end", iid=item['code'], values=(
+                item['code'], item['name'], item['hits'], item['sector'],
+                f"{item['base_price']:.2f}", f"{item['curr_price']:.2f}",
+                f"{roi:+.2f}%", item['pattern']
+            ), tags=tuple(all_tags))
+
+    def _on_select(self, event, force_link=False):
+        sel = self.tree.selection()
+        if not sel: return
+        
+        code = sel[0]
+        # 联动主界面
+        if hasattr(self.parent_win, 'tree_scroll_to_code'):
+             self.parent_win.tree_scroll_to_code(code)
+        
+        # 🚀 [NEW] 核心联动逻辑：同步历史追踪标记
+        if self.master_win and hasattr(self.master_win, 'link_to_visualizer'):
+            # 找到该股最近一次出现在选股历史中的日期
+            target = next((d for d in self._all_results if d['code'] == code), None)
+            if target and target['dates']:
+                # 🚀 [FIX] 从远及近遍历后，索引 0 即为该统计区间内的“最早”入选日期 (基准锚点)
+                first_date = target['dates'][0] 
+                self.master_win.link_to_visualizer(code, first_date)
+                logger.info(f"[HistoryTrack] Linked {code} at {first_date} (Historical selection benchmark)")
+
+    def _on_close(self):
+        if self._worker: self._worker.stop()
+        if hasattr(self, '_check_queue_id'): self.after_cancel(self._check_queue_id)
+        self.save_window_position(self, "选股历史追踪")
+        self.destroy()
+
+    def _sort_tree(self, col, reverse):
+        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        try:
+            l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
+        except:
+            l.sort(reverse=reverse)
+        for index, (val, k) in enumerate(l):
+            self.tree.move(k, '', index)
+        self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
 

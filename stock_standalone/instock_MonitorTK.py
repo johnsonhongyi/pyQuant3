@@ -433,6 +433,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._last_visualizer_code = None
         self._last_visualizer_time = 0
+        self._last_linkage_data = None # 存储 (code, timestamp) 用于联动去重
         self._visualizer_debounce_sec = 0.5  # 防抖 0.5 秒
 
         self._concept_dict_global = {}
@@ -1337,75 +1338,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             300,
             self._on_resize_finished
         )
-
-    # def listener():
-    #     logger.info(f"[Pipe] Feedback listener ready on {PIPE_NAME_TK}")
-
-    #     while True:
-    #         pipe = None
-    #         try:
-    #             pipe = win32pipe.CreateNamedPipe(
-    #                 PIPE_NAME_TK,
-    #                 win32pipe.PIPE_ACCESS_DUPLEX,
-    #                 win32pipe.PIPE_TYPE_MESSAGE |
-    #                 win32pipe.PIPE_READMODE_MESSAGE |
-    #                 win32pipe.PIPE_WAIT,
-    #                 win32pipe.PIPE_UNLIMITED_INSTANCES,
-    #                 65536, 65536,
-    #                 0,
-    #                 None
-    #             )
-
-    #             win32pipe.ConnectNamedPipe(pipe, None)
-
-    #             while True:
-    #                 res, data = win32file.ReadFile(pipe, 65536)
-    #                 if res != 0 or not data:
-    #                     break
-
-    #                 msg = data.decode("utf-8")
-    #                 logger.info(f"[Pipe] recv: {msg}")
-
-    #                 try:
-    #                     obj = json.loads(msg)
-    #                 except Exception:
-    #                     obj = None
-
-    #                 if obj and obj.get("cmd") == "REQ_FULL_SYNC":
-    #                     logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
-    #                     self._force_full_sync_pending = True
-    #                     self._df_first_send_done = False
-                    
-    #                 elif obj and obj.get("cmd") == "VIZ_EXIT":
-    #                     logger.info(f'[Pipe] Visualizer exited. Cleaning up qt_process state.')
-    #                     self.qt_process = None
-    #                     self.viz_command_queue = None
-    #                     if hasattr(self, 'viz_stop_flag'):
-    #                         self.viz_stop_flag.value = True # Reset for next launch
-                    
-    #                 elif obj and obj.get("cmd") == "ADD_MONITOR":
-    #                     code = obj.get("code")
-    #                     if code:
-    #                         logger.info(f'[Pipe] Feedback listener cmd ADD_MONITOR: {code}')
-    #                         try:
-    #                             current_list = list(self.global_dict.get('extra_monitor_codes', []))
-    #                             if code not in current_list:
-    #                                 current_list.append(code)
-    #                                 self.global_dict['extra_monitor_codes'] = current_list
-    #                                 logger.info(f"✅ Added {code} to extra_monitor_codes")
-    #                                 # 同时也触发一次强制全量同步，确保新代码能飞速出现在可视化器中
-    #                                 self._force_full_sync_pending = True
-    #                         except Exception as e:
-    #                             logger.error(f"Failed to update extra_monitor_codes: {e}")
-
-    #         except Exception as e:
-    #             logger.debug(f"[Pipe] listener error: {e}")
-    #             time.sleep(1)
-
-    #         finally:
-    #             if pipe:
-    #                 win32pipe.DisconnectNamedPipe(pipe)
-    #                 win32file.CloseHandle(pipe)
 
     def _start_feedback_listener(self):
         """
@@ -3922,18 +3854,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
             self.open_visualizer(stock_code)
 
-    def open_visualizer(self, code):
+    def open_visualizer(self, code, timestamp=None):
         
         if not code and self._last_resample != self.global_values.getkey("resample"):
             return
 
-        if self.vis_select_code == code:
+        # 如果有联动数据，强制发送，不走防抖
+        is_linkage = timestamp is not None
+        
+        # ⭐ [NEW] 联动去重：如果 code 和 timestamp 与上次一致，拦截发送
+        if is_linkage:
+            link_key = (str(code), str(timestamp))
+            if getattr(self, '_last_linkage_data', None) == link_key:
+                # logger.debug(f"TIME_LINK deduplicated for {code} at {timestamp}")
+                return
+            self._last_linkage_data = link_key
+        
+        if not is_linkage and self.vis_select_code == code:
             return
         else:
             self.vis_select_code = code
+            
         now = time.time()
-        # 防抖：同一 code 在 0.5 秒内不重复发送
-        if self._last_visualizer_code == code and (now - self._last_visualizer_time) < self._visualizer_debounce_sec:
+        # 防抖：同一 code 在 0.5 秒内不重复发送 (联动消息除外)
+        if not is_linkage and self._last_visualizer_code == code and (now - self._last_visualizer_time) < self._visualizer_debounce_sec:
             return
 
         self._last_visualizer_code = code
@@ -3951,8 +3895,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
                     try:
                         if self.viz_conn is not None:
-                            self.viz_conn[0].send(('SWITCH_CODE', {'code': code, 'resample': resample}))
-                            logger.debug(f"Queue: Sent SWITCH_CODE {code}")
+                            if is_linkage:
+                                # 🚀 [SIMPLIFIED] 只传递代码和日期
+                                payload = {'code': code, 'resample': resample, 'timestamp': timestamp}
+                                self.viz_conn[0].send(('TIME_LINK', payload))
+                                logger.debug(f"[IPC] Sent TIME_LINK for {code} at {timestamp}")
+                            else:
+                                self.viz_conn[0].send(('SWITCH_CODE', {'code': code, 'resample': resample}))
+                                logger.debug(f"Queue: Sent SWITCH_CODE {code}")
                             sent = True
                     except Exception as e:
                         logger.error(f"Queue send failed: {e}")
@@ -3963,7 +3913,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         client_socket.settimeout(0.3) # 进一步缩短
                         client_socket.connect((ipc_host, ipc_port))
-                        ipc_msg = f"CODE|{code}|resample={resample}"
+                        if is_linkage:
+                            # 🚀 [IPC UPGRADE] Socket 通道也适配联动协议
+                            ipc_msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
+                            logger.debug(f"[IPC/Socket] Sent TIME_LINK for {code} at {timestamp}")
+                        else:
+                            ipc_msg = f"CODE|{code}|resample={resample}"
+                        
                         client_socket.send(ipc_msg.encode('utf-8'))
                         client_socket.close()
                         sent = True
@@ -3985,6 +3941,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 交互提示（UI 线程）
         if hasattr(self, 'status_bar'):
             self.status_bar.config(text=f"🚀 可视化指令已发出: {code}")
+
+    def link_to_visualizer(self, code, timestamp):
+        """🚀 [SIMPLIFIED] 跨工具联动接口：仅传日期"""
+        if not code or not timestamp:
+            return
+        
+        # 如果可视化尚未打开，则尝试开启
+        if not (hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()):
+            if hasattr(self, 'vis_var') and self.vis_var.get():
+                self.open_visualizer(code, timestamp=timestamp)
+        else:
+            # 已打开，直接通过 IPC 发送联动指令
+            self.open_visualizer(code, timestamp=timestamp)
+
 
     def _start_visualizer_process(self, code, resample=None):
         """独立方法：在子线程中安全启动 Qt 可视化进程"""
@@ -7276,10 +7246,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return False
 
     def _get_alert_manager(self):
-        """获取语音/报警管理器实例，集成自 live_strategy"""
+        """获取语音/报警管理器实例，集成自 live_strategy，并增加可视化联动"""
+        am = None
         if hasattr(self, 'live_strategy') and self.live_strategy:
-            return getattr(self.live_strategy, '_voice', None)
-        return None
+            am = getattr(self.live_strategy, '_voice', None)
+        
+        if am and not getattr(am, '_linked_to_viz', False):
+             # 🚀 [SIMPLIFIED] 语音播报时自动触发可视化标记
+             am.on_speak_start = lambda code: self.after_idle(lambda: self._on_alert_speak_visual_link(code))
+             am._linked_to_viz = True
+        return am
+
+    def _on_alert_speak_visual_link(self, code):
+        """🚀 [SIMPLIFIED] 报警联动：仅传日期"""
+        if not code: return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.link_to_visualizer(code, timestamp)
 
     def _async_update_alert_details(self, code, win):
         """[NEW/RESTORE] 后台异步获取板块详情并更新 UI，实现秒出体验"""

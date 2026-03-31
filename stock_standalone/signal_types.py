@@ -19,6 +19,7 @@ class SignalType(Enum):
     FOLLOW = "跟单"         # 热点跟单
     EXIT_FOLLOW = "离场"    # 跟单离场
     WATCH = "观察"          # 热点观察池
+    LINKAGE = "联动"        # IPC 联动标记
 
 class SignalSource(Enum):
     MANUAL = "手动"
@@ -95,4 +96,5 @@ SIGNAL_VISUAL_CONFIG = {
     # SignalType.FOLLOW: {"symbol": 'star', "size": 20, "color": (255, 215, 0)}, # Gold Star for Follow
     SignalType.EXIT_FOLLOW: {"symbol": 'x', "size": 18, "color": (0, 255, 0)}, # Green X for Exit
     SignalType.WATCH: {"symbol": 'o', "size": 14, "color": (147, 112, 219)}, # MediumPurple for Watch
+    SignalType.LINKAGE: {"symbol": '📍', "size": 22, "color": (255, 255, 0)}, # Yellow Pin for Linkage
 }

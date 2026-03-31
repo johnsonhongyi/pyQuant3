@@ -231,7 +231,7 @@ class StockSelector:
         
         try:
             conn = sqlite3.connect(self.db_logger.db_path)
-            query = "SELECT DISTINCT date FROM selection_history"
+            query = "SELECT DISTINCT date FROM selection_history ORDER BY date DESC"
             df_hist = pd.read_sql_query(query, conn)
             conn.close()
             return df_hist['date'].tolist()
