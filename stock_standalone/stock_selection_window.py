@@ -182,8 +182,12 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.date_entry.set_date(datetime.now())
             self.date_entry.pack(side="left", padx=2)
             self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
-            # Make the entire entry clickable
-            self.date_entry.bind("<Button-1>", lambda e: self.date_entry.drop_down())
+            
+            # ✅ [FIX] 使整个输入框区域可点击打开日历 (不仅是小箭头)
+            self.date_entry.bind("<Button-1>", lambda e: self._show_calendar(), add="+")
+            
+            # ✅ [NEW] 初始化日历高亮 (离线数据)
+            self.after(500, self._refresh_calendar_highlights)
         else:
             self.date_var = tk.StringVar(value=self.current_date)
             self.date_tk_entry = tk.Entry(toolbar, textvariable=self.date_var, width=11)
@@ -683,6 +687,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         else:
             self.current_date = self.date_var.get()
         
+        # ✅ [USER-REQ] 切换日期时自动清空板块/关键字筛选，以显示该日全量数据
+        if hasattr(self, 'concept_filter_var'):
+            self.concept_filter_var.set("")
+
         # 切换日期时，自动加载该日期的历史记录 (非强制运行策略)
         self.load_data(force=False, target_date=self.current_date)
 
@@ -700,10 +708,53 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             else:
                 self.date_var.set(target_str)
             
+            # ✅ [USER-REQ] 切换日期时自动清空板块筛选
+            if hasattr(self, 'concept_filter_var'):
+                self.concept_filter_var.set("")
+
             self.current_date = target_str
             self.load_data(force=False, target_date=self.current_date)
         except Exception as e:
             self.logger.error(f"Shift date failed: {e}")
+
+    def _show_calendar(self):
+        """打开日历下拉框"""
+        if hasattr(self, 'date_entry'):
+            self.date_entry.drop_down()
+
+    def _refresh_calendar_highlights(self):
+        """根据数据库记录在日历上高亮显示有数据的日期"""
+        if not HAS_CALENDAR or not hasattr(self, 'date_entry') or not self.selector:
+            return
+            
+        try:
+            # 获取所有有数据的日期
+            dates = self.selector.get_selection_dates()
+            if not dates:
+                return
+            
+            # 获取 DateEntry 内部的 Calendar 实例
+            cal = self.date_entry._calendar
+            
+            # 清除之前的事件标签 (如果有)
+            cal.calevent_remove('all', 'has_data')
+            
+            # 配置高亮样式: 红色背景 (代表该日有选股数据)
+            cal.tag_config('has_data', background='red', foreground='white')
+            
+            for date_str in dates:
+                try:
+                    # 转换字符串为 datetime 对象
+                    dt = datetime.strptime(str(date_str).split()[0], "%Y-%m-%d")
+                    # 创建无文本事件供着色
+                    cal.calevent_create(dt, 'Selection', 'has_data')
+                except Exception as e:
+                    # print(f"Invalid date format: {date_str}, {e}")
+                    continue
+            
+            logger.info(f"✅ 选股日历已高亮 {len(dates)} 个日期")
+        except Exception as e:
+            logger.warning(f"⚠️ 刷新日历高亮失败: {e}")
 
     def on_filter_search(self, event: Optional[Any] = None):
         """执行查询并记录历史"""

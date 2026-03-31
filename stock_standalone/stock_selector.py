@@ -224,6 +224,20 @@ class StockSelector:
         except Exception as e:
             self.logger.error(f"获取历史选股统计失败: {e}")
             return {}
+    def get_selection_dates(self) -> List[str]:
+        """获取所有有选股记录的日期列表"""
+        if self.db_logger is None:
+            return []
+        
+        try:
+            conn = sqlite3.connect(self.db_logger.db_path)
+            query = "SELECT DISTINCT date FROM selection_history"
+            df_hist = pd.read_sql_query(query, conn)
+            conn.close()
+            return df_hist['date'].tolist()
+        except Exception as e:
+            self.logger.error(f"获取选股历史日期统计失败: {e}")
+            return []
 
     def _calc_trend_quality(self, df: pd.DataFrame) -> pd.DataFrame:
         """

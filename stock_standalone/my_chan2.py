@@ -530,33 +530,30 @@ def con2Cxianduan(stock, k_data, chanK, frsBiType, biIdx, end_date, cur_ji=1):
 
 def parse2ChanZS(biIdx, chanK):
     """
-    中枢识别: 连续三笔有重叠价格区间
+    中枢识别: 连续三笔的价格重叠区间 (三笔共有)
     :param biIdx: 分笔索引列表
     :param chanK: 缠论 K 线 DataFrame
-    :return: zs_list [{"start":, "end":, "zd":, "zg":, "bi_count":}]
+    :return: zs_list [{"start":, "end":, "zd":, "zg":, "bi_start_idx":, "bi_end_idx":}]
     """
     zs_list = []
-    if len(biIdx) < 3:
+    if len(biIdx) < 4:
         return zs_list
         
-    def get_bi_range(idx1, idx2, chanK):
-        # 笔的价格区间
-        p1 = chanK['high'][idx1] if chanK['high'][idx1] > chanK['high'][idx2] else chanK['high'][idx2]
-        p2 = chanK['low'][idx1] if chanK['low'][idx1] < chanK['low'][idx2] else chanK['low'][idx2]
-        # 但更严谨的缠论定义：笔是连接两个分型的
-        # 我们用 biIdx[i] 和 biIdx[i+1] 之间的价格极值
+    def get_bi_min_max(idx1, idx2, chanK):
+        # 笔的价格区间是始末两个极值点的价格范围
         h = max(chanK['high'][idx1], chanK['high'][idx2])
         l = min(chanK['low'][idx1], chanK['low'][idx2])
         return l, h
 
     i = 0
-    while i <= len(biIdx) - 3:
-        # 取连续三笔
-        l1, h1 = get_bi_range(biIdx[i], biIdx[i+1], chanK)
-        l2, h2 = get_bi_range(biIdx[i+1], biIdx[i+2], chanK)
-        l3, h3 = get_bi_range(biIdx[i+2], biIdx[i+3] if i+3 < len(biIdx) else biIdx[i+2], chanK) # 若只有三笔，最后一笔用原点
+    while i <= len(biIdx) - 4:
+        # 构成中枢的三笔: biIdx[i]->i+1, i+1->i+2, i+2->i+3
+        l1, h1 = get_bi_min_max(biIdx[i], biIdx[i+1], chanK)
+        l2, h2 = get_bi_min_max(biIdx[i+1], biIdx[i+2], chanK)
+        l3, h3 = get_bi_min_max(biIdx[i+2], biIdx[i+3], chanK)
 
-        # 重叠区间 ZD, ZG
+        # 重叠区间 (交集): 三笔都包含的部分
+        # ZD (最高低点), ZG (最低高点)
         zd = max(l1, l2, l3)
         zg = min(h1, h2, h3)
         
@@ -564,25 +561,25 @@ def parse2ChanZS(biIdx, chanK):
             # 构成中枢
             zs = {
                 'start': biIdx[i],
-                'end': biIdx[i+3] if i+3 < len(biIdx) else biIdx[i+2],
+                'end': biIdx[i+3],
                 'zd': zd,
                 'zg': zg,
                 'bi_start_idx': i,
-                'bi_end_idx': i+2
+                'bi_end_idx': i+3
             }
-            # 扩展中枢: 检查后续笔是否仍在 zd, zg 范围内
-            j = i + 3
+            # 扩展中枢: 检查后续笔是否能触及 [zd, zg] 区间
+            j = i + 4
             while j < len(biIdx):
-                lj, hj = get_bi_range(biIdx[j-1], biIdx[j], chanK)
-                # 只要这笔与当前中枢区间有重叠，就属于同一个中枢的延伸
+                lj, hj = get_bi_min_max(biIdx[j-1], biIdx[j], chanK)
+                # 只要这笔与当前中枢区间有交点，即视为中枢延伸
                 if max(zd, lj) < min(zg, hj):
                     zs['end'] = biIdx[j]
-                    zs['bi_end_idx'] = j - 1
+                    zs['bi_end_idx'] = j
                     j += 1
                 else:
                     break
             zs_list.append(zs)
-            i = j - 1 # 跳过已进入中枢的笔，寻找下一个独立中枢
+            i = j - 1 # 跳过已进入中枢的笔
         else:
             i += 1
             
