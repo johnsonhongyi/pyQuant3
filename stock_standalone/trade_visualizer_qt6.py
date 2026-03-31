@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
     QFrame, QMessageBox, QAbstractItemView, QPushButton, QComboBox, 
     QToolBar, QMenu, QSizePolicy, QStyle, QLineEdit, QCheckBox,
-    QTreeWidget, QTreeWidgetItem, QWidgetAction
+    QTreeWidget, QTreeWidgetItem, QWidgetAction, QGraphicsRectItem
 )
 from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
@@ -97,6 +97,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 from multiprocessing import Process, Event
 import multiprocessing as mp
+import my_chan2
 # 全局或窗口属性
 stop_event = Event()
 try:
@@ -2517,7 +2518,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_process = None
         self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
         self._signal_dedup_cache = {} # 信号去重缓存
-        
+
+        # --- ⚡ [NEW] 缠论分析状态与渲染对象 ---
+        self.show_chan = True
+        self.chan_bi_pen = pg.mkPen(color='#00FFFF', width=1.5)  # 青色分笔
+        # self.chan_bi_curve = pg.PlotDataItem(pen=self.chan_bi_pen, connect='finite', zValue=80)
+        # self.kline_plot.addItem(self.chan_bi_curve)
+
         # ⚡ [OPTIMIZATION] Signal calculation caches for extreme performance
         self._strategy_cache = {} # code -> (input_key, signals)
         self._sbc_cache = {}      # code -> (input_key, signals)
@@ -4016,6 +4023,30 @@ class MainWindow(QMainWindow, WindowMixin):
                 except: pass
         self.custom_indicator_pool = []
         
+        # --- ⚡ [NEW] 缠论对象池初始化 ---
+        if not hasattr(self, 'chan_bi_curve'):
+            self.chan_bi_curve = pg.PlotDataItem(pen=self.chan_bi_pen, connect='finite', zValue=80)
+            self.kline_plot.addItem(self.chan_bi_curve)
+        
+        if not hasattr(self, 'chan_xd_curve'):
+            self.chan_xd_curve = pg.PlotDataItem(connect='finite', zValue=90) # 线段层级更高
+            self.kline_plot.addItem(self.chan_xd_curve)
+
+        # 中枢矩形池
+        if hasattr(self, 'chan_zs_pool'):
+             for item in self.chan_zs_pool:
+                 try: self.kline_plot.removeItem(item)
+                 except: pass
+        self.chan_zs_pool = []
+        for _ in range(30): # 预分配 30 个中枢
+            item = QGraphicsRectItem()
+            item.setPen(pg.mkPen(color=(0, 255, 255, 100), width=1))
+            item.setBrush(pg.mkBrush(color=(0, 255, 255, 30)))
+            item.setZValue(70)
+            item.hide()
+            self.kline_plot.addItem(item)
+            self.chan_zs_pool.append(item)
+
         # 字体预设
         self.custom_font_signal = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
         self.custom_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
@@ -4099,6 +4130,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.td_action.setToolTip("显示/隐藏神奇九转指标")
         self.td_action.triggered.connect(self.on_toggle_td_sequential)
         self.toolbar.addAction(self.td_action)
+
+        # [NEW] 缠论分析 Action
+        self.chan_action = QAction("缠论", self)
+        self.chan_action.setCheckable(True)
+        self.chan_action.setChecked(self.show_chan)
+        self.chan_action.setToolTip("显示/隐藏缠论分析（分笔、中枢）")
+        self.chan_action.triggered.connect(self.on_toggle_chan)
+        self.toolbar.addAction(self.chan_action)
 
         # [NEW] SBC 回放 Action
         self.sbc_replay_action = QAction("SBC回放", self)
@@ -4260,6 +4299,21 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.day_df,
                     getattr(self, 'tick_df', pd.DataFrame())
                 )
+
+    def on_toggle_chan(self, checked):
+        """切换缠论分析显示"""
+        self.show_chan = checked
+        if not checked:
+            if hasattr(self, 'chan_bi_curve'):
+                self.chan_bi_curve.clear()
+            if hasattr(self, 'chan_xd_curve'):
+                self.chan_xd_curve.clear()
+            if hasattr(self, 'chan_zs_pool'):
+                for item in self.chan_zs_pool:
+                    item.hide()
+        
+        if self.current_code:
+            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
 
     def _on_sbc_window_destroyed(self, win):
         """窗口关闭时自动清理资源"""
@@ -8899,10 +8953,110 @@ class MainWindow(QMainWindow, WindowMixin):
             self.anno_arrow_p.show()
             self.anno_label_p.show()
             logger.debug(f"[Annotation] Updated signal annotation for {code}: {short_msg}")
+
+            # --- ⚡ [NEW] 缠论分析展示 ---
+            if getattr(self, 'show_chan', True):
+                try:
+                    # 1. 核心计算 (Numba 加速) - 返回 (chanK, results) 元组
+                    with timed_ctx(f"my_chan2_get_chan_analysis_fast_{code}", warn_ms=50):
+                        chanK, results = my_chan2.get_chan_analysis_fast(day_df)
+                    
+                    # 0. 准备 X 轴日期映射
+                    date_to_x = {d: i for i, d in enumerate(day_df.index)}
+                    
+                    # ⚡ [NEW] 主题感知配色方案
+                    is_dark = getattr(self, 'qt_theme', 'dark') == 'dark'
+                    if is_dark:
+                        bi_pen = pg.mkPen(color=(0, 255, 255), width=1.5)         # Cyan
+                        xd_pen = pg.mkPen(color=(255, 165, 0), width=3.0)         # Gold/Orange
+                        zs_pen = pg.mkPen(color=(0, 255, 255, 220), width=2.0)    # Thicker Cyan
+                        zs_brush = pg.mkBrush(color=(0, 255, 255, 40))           # Semi-transparent Cyan
+                    else:
+                        bi_pen = pg.mkPen(color=(0, 100, 255), width=2.0)        # Darker Blue
+                        xd_pen = pg.mkPen(color=(205, 133, 63), width=3.5)       # BurlyWood/DarkOrange
+                        zs_pen = pg.mkPen(color=(0, 100, 255, 230), width=2.5)   # Extra Thicker Blue
+                        zs_brush = pg.mkBrush(color=(0, 100, 255, 35))           # Low opacity blue
+
+                    # ⚡ [SELF-HEALING] 确保绘图项在场景中且 zValue 置顶
+                    scene_items = set(self.kline_plot.items)
+                    if hasattr(self, 'chan_bi_curve'):
+                        if self.chan_bi_curve not in scene_items:
+                            self.kline_plot.addItem(self.chan_bi_curve)
+                        self.chan_bi_curve.setZValue(100)
+                    
+                    if hasattr(self, 'chan_xd_curve'):
+                        if self.chan_xd_curve not in scene_items:
+                            self.kline_plot.addItem(self.chan_xd_curve)
+                        self.chan_xd_curve.setZValue(110) # 线段最顶
+                    
+                    # 2. 渲染分笔 (Bi)
+                    bi_idxs = results.get('biIdx', [])
+                    if bi_idxs and hasattr(self, 'chan_bi_curve'):
+                        bi_x, bi_y = [], []
+                        first_bi_type = results.get('frsBiType', 0)
+                        curr_type = -first_bi_type if first_bi_type != 0 else -1 
+                        
+                        for idx in bi_idxs:
+                            dt = chanK.index[idx]
+                            if dt in date_to_x:
+                                bi_x.append(date_to_x[dt])
+                                val = chanK['high'].iloc[idx] if curr_type == 1 else chanK['low'].iloc[idx]
+                                bi_y.append(val)
+                                curr_type = -curr_type
+                        
+                        self.chan_bi_curve.setData(x=bi_x, y=bi_y)
+                        self.chan_bi_curve.setPen(bi_pen)
+                        self.chan_bi_curve.show()
+                    elif hasattr(self, 'chan_bi_curve'):
+                        self.chan_bi_curve.hide()
+
+                    # 2.1 渲染线段 (Xianduan)
+                    xd_idxs = results.get('xdIdxs', [])
+                    if xd_idxs and hasattr(self, 'chan_xd_curve'):
+                        xd_x, xd_y = [], []
+                        xd_type = results.get('xdType', 0) # 1: 向上段, -1: 向下段
+                        curr_xd_type = -xd_type if xd_type != 0 else -1
+                        
+                        for idx in xd_idxs:
+                            dt = chanK.index[idx]
+                            if dt in date_to_x:
+                                xd_x.append(date_to_x[dt])
+                                val = chanK['high'].iloc[idx] if curr_xd_type == 1 else chanK['low'].iloc[idx]
+                                xd_y.append(val)
+                                curr_xd_type = -curr_xd_type
+                                
+                        self.chan_xd_curve.setData(x=xd_x, y=xd_y)
+                        self.chan_xd_curve.setPen(xd_pen)
+                        self.chan_xd_curve.show()
+                    elif hasattr(self, 'chan_xd_curve'):
+                        self.chan_xd_curve.hide()
+                        
+                    # 3. 渲染中枢 (Zhongshu) - 复用对象池
+                    zs_list = results.get('zs_list', [])
+                    if hasattr(self, 'chan_zs_pool'):
+                        for i, item in enumerate(self.chan_zs_pool):
+                            if item not in scene_items:
+                                self.kline_plot.addItem(item)
+                            item.setZValue(90) # 中枢放在线条下方
+                            
+                            if i < len(zs_list):
+                                zs = zs_list[i]
+                                x_s = date_to_x.get(chanK.index[zs['start']], zs['start'])
+                                x_e = date_to_x.get(chanK.index[zs['end']], zs['end'])
+                                
+                                rect_x = x_s - 0.4
+                                rect_w = (x_e - x_s) + 0.8
+                                item.setRect(pg.QtCore.QRectF(rect_x, zs['zd'], rect_w, zs['zg'] - zs['zd']))
+                                item.setPen(zs_pen)
+                                item.setBrush(zs_brush)
+                                item.show()
+                            else:
+                                item.hide()
+                except Exception as e:
+                    logger.error(f"Chan analysis rendering error: {e}")
             
         except Exception as e:
             logger.error(f"Failed to draw signal annotation: {e}")
-
 
     def _clear_hotspot_markers(self):
         """清理旧的热点标记 - 仅隐藏版本"""
@@ -9739,6 +9893,111 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # [NEW] 绘制跳空缺口 (最近 5 个)
         self._draw_price_gaps(x_axis, day_df)
+
+        # --- ⚡ [NEW] 缠论分析展示 ---
+        if getattr(self, 'show_chan', True):
+            try:
+                # 1. 核心计算 (Numba 加速) - 返回 (chanK, results) 元组
+                chanK, results = my_chan2.get_chan_analysis_fast(day_df)
+                
+                # 0. 准备 X 轴日期映射
+                date_to_x = {d: i for i, d in enumerate(day_df.index)}
+                
+                # ⚡ [NEW] 主题感知配色方案 - 缠论组件
+                is_dark = getattr(self, 'qt_theme', 'dark') == 'dark'
+                if is_dark:
+                    bi_pen = pg.mkPen(color=(0, 255, 255), width=1.5)         # Cyan (分笔)
+                    xd_pen = pg.mkPen(color=(255, 255, 0), width=3.5)         # Bright Yellow (线段 - 加宽)
+                    zs_pen = pg.mkPen(color=(0, 255, 255, 220), width=2.0)    # Cyan (中枢边框)
+                    zs_brush = pg.mkBrush(color=(0, 255, 255, 40))           # Cyan (中枢填充)
+                else:
+                    bi_pen = pg.mkPen(color=(0, 100, 255), width=2.0)        # Dark Blue
+                    xd_pen = pg.mkPen(color=(255, 140, 0), width=4.0)        # Deep Orange/Gold (亮色模式下纯黄太淡，改用深金黄)
+                    zs_pen = pg.mkPen(color=(0, 100, 255, 230), width=2.5)   # Light Blue
+                    zs_brush = pg.mkBrush(color=(0, 100, 255, 35))           # Light Blue
+
+                # ⚡ [SELF-HEALING] 确保绘图项在场景中且 zValue 置顶
+                scene_items = set(self.kline_plot.items)
+                if hasattr(self, 'chan_bi_curve'):
+                    if self.chan_bi_curve not in scene_items:
+                        self.kline_plot.addItem(self.chan_bi_curve)
+                    self.chan_bi_curve.setZValue(100)
+                
+                if hasattr(self, 'chan_xd_curve'):
+                    if self.chan_xd_curve not in scene_items:
+                        self.kline_plot.addItem(self.chan_xd_curve)
+                    self.chan_xd_curve.setZValue(110) # 线段最顶
+                
+                # 2. 渲染分笔 (Bi)
+                bi_idxs = results.get('biIdx', [])
+                if bi_idxs and hasattr(self, 'chan_bi_curve'):
+                    bi_x, bi_y = [], []
+                    first_bi_type = results.get('frsBiType', 0)
+                    curr_type = -first_bi_type if first_bi_type != 0 else -1 
+                    
+                    for idx in bi_idxs:
+                        dt = chanK.index[idx]
+                        if dt in date_to_x:
+                            bi_x.append(date_to_x[dt])
+                            val = chanK['high'].iloc[idx] if curr_type == 1 else chanK['low'].iloc[idx]
+                            bi_y.append(val)
+                            curr_type = -curr_type
+                    
+                    self.chan_bi_curve.setData(x=bi_x, y=bi_y)
+                    self.chan_bi_curve.setPen(bi_pen)
+                    self.chan_bi_curve.show()
+                elif hasattr(self, 'chan_bi_curve'):
+                    self.chan_bi_curve.hide()
+
+                # 2.1 渲染线段 (Xianduan)
+                xd_idxs = results.get('xdIdxs', [])
+                if xd_idxs and hasattr(self, 'chan_xd_curve'):
+                    xd_x, xd_y = [], []
+                    xd_type = results.get('xdType', 0) # 1: 向上段, -1: 向下段
+                    curr_xd_type = -xd_type if xd_type != 0 else -1
+                    
+                    for idx in xd_idxs:
+                        dt = chanK.index[idx]
+                        if dt in date_to_x:
+                            xd_x.append(date_to_x[dt])
+                            val = chanK['high'].iloc[idx] if curr_xd_type == 1 else chanK['low'].iloc[idx]
+                            xd_y.append(val)
+                            curr_xd_type = -curr_xd_type
+                            
+                    self.chan_xd_curve.setData(x=xd_x, y=xd_y)
+                    self.chan_xd_curve.setPen(xd_pen)
+                    self.chan_xd_curve.show()
+                elif hasattr(self, 'chan_xd_curve'):
+                    self.chan_xd_curve.hide()
+                    
+                # 3. 渲染中枢 (Zhongshu) - 复用对象池
+                zs_list = results.get('zs_list', [])
+                if hasattr(self, 'chan_zs_pool'):
+                    for i, item in enumerate(self.chan_zs_pool):
+                        if item not in scene_items:
+                            self.kline_plot.addItem(item)
+                        item.setZValue(90) # 中枢放在线条下方
+                        
+                        if i < len(zs_list):
+                            zs = zs_list[i]
+                            x_s = date_to_x.get(chanK.index[zs['start']], zs['start'])
+                            x_e = date_to_x.get(chanK.index[zs['end']], zs['end'])
+                            
+                            rect_x = x_s - 0.4
+                            rect_w = (x_e - x_s) + 0.8
+                            item.setRect(pg.QtCore.QRectF(rect_x, zs['zd'], rect_w, zs['zg'] - zs['zd']))
+                            item.setPen(zs_pen)
+                            item.setBrush(zs_brush)
+                            item.show()
+                        else:
+                            item.hide()
+            except Exception as e:
+                logger.error(f"Chan analysis rendering error: {e}")
+        else:
+            if hasattr(self, 'chan_bi_curve'): self.chan_bi_curve.hide()
+            if hasattr(self, 'chan_xd_curve'): self.chan_xd_curve.hide()
+            if hasattr(self, 'chan_zs_pool'):
+                for item in self.chan_zs_pool: item.hide()
 
 
         # ----------------- 绘制 Volume -----------------
