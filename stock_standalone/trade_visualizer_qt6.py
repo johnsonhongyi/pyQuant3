@@ -700,12 +700,14 @@ class SignalOverlay:
 
     #     scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, data=data)
 
-    def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None):
+    def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None, day_df=None, linkage_date=None):
         """
         更新信号显示
         :param signals: SignalPoint 列表
         :param target: 'kline' 或 'tick'
         :param y_visuals: 可选的视觉 Y 坐标列表 (用于对齐 K 线上下方)
+        :param day_df: [NEW] K线数据，用于计算距今时间
+        :param linkage_date: [REFINED] 只有当信号匹配此日期时才显示 D+N 标签
         """
         import math
 
@@ -807,6 +809,38 @@ class SignalOverlay:
                 txt.setPos(x_pos, y_pos)
                 self.text_items[target].append(txt)
 
+            # [REFINED] 距今相关信息显示 (仅在 K 线图且明确联动匹配该信号点时展示)
+            if target == 'kline' and day_df is not None and not day_df.empty:
+                try:
+                    total_len = len(day_df)
+                    days_ago = total_len - 1 - int(x_pos)
+                    # 🚀 [REFINED] 极致精简：只有当信号日期与“联动目标日期”匹配时，由于联动板需要 D+N 参考，才显示标签
+                    # 这样可以解决图中 D+ 漫天飞的问题，只显示您关注的那一个点的相对时间
+                    is_match_link = False
+                    if linkage_date:
+                        t_str = str(sig.timestamp).split(' ')[0]
+                        l_str = str(linkage_date).split(' ')[0]
+                        if t_str == l_str:
+                            is_match_link = True
+                    
+                    if days_ago >= 0 and is_match_link:
+                        ago_lbl = self._get_text_item(target)
+                        # 文字精简：D+N 或 Today
+                        text = f"D+{int(days_ago)}" if days_ago > 0 else "Today"
+                        # 颜色：采用中性灰
+                        color = "#AAAAAA"
+                        
+                        # 放置在图标下方 (买入类/关注类) 或上方 (卖出类)
+                        is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.FOLLOW, SignalType.WATCH)
+                        anchor = (0.5, -1.2) if is_buy else (0.5, 2.2)
+                        
+                        ago_lbl.setHtml(f'<div style="font-size: 8pt; color: {color};">{text}</div>')
+                        ago_lbl.setAnchor(anchor)
+                        ago_lbl.setPos(x_pos, y_pos)
+                        self.text_items[target].append(ago_lbl)
+                except Exception:
+                    pass
+
         # 最后统一更新 scatter
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, pen=pens, data=data)
 
@@ -905,7 +939,7 @@ class CommandListenerThread(QThread):
                         except Exception as e:
                             logger.error(f"[IPC] DATA Packet process error: {e}")
 
-                    elif prefix == b"CODE":
+                    elif prefix in (b"CODE", b"TIME", b"SIGN"):
                         # --- CODE 模式：短文本指令 (CODE|...) ---
                         try:
                             # 尝试非阻塞读取剩余内容 (加大缓冲区防止JSON截断)
@@ -2493,6 +2527,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.log_level = log_level
         self.resample = 'd'
         self.qt_theme = 'dark'  # 默认使用黑色主题
+        self.active_time_linkage = {}  # 🚀 [NEW] 存储外部 IPC 联动的时间标记数据 {"code":..., "timestamp":..., "label":..., "price":...}
         self.custom_bg_app = None    # 用户自定义界面背景色
         self.custom_bg_chart = None  # 用户自定义图表背景色
         self.show_bollinger = True
@@ -2636,9 +2671,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self._hist_df_cache = pd.DataFrame()
         self._hist_df_last_load = 0  # 上次加载时间
         self._cache_code_info = {}   # 标题信息缓存
+        self._last_stock_switch_time = 0
         self._last_rendered_code = ""
         self._last_rendered_resample = ""
-        self._last_stock_switch_time = 0  # ⭐ 新增：记录最后一次切股时间，用于视口沉降保护
+        
+        # ⚡ [OPTIMIZATION] 信号历史缓存：锁定当前股票的预过滤信号列表
+        self._current_stock_signals = []
+        self._last_signals_stock_code = ""
+        self._cached_date_map = {}
         
         # ⚡ [OPTIMIZATION] 图表渲染节流控制器
         # code -> last_render_timestamp
@@ -3897,7 +3937,33 @@ class MainWindow(QMainWindow, WindowMixin):
                     # logger.debug(f"IPC SIGNAL buffered: {len(data) if isinstance(data, list) else 1} items")
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")
-                    
+            
+            # [NEW] 1.5 联动指令: TIME_LINK|code|timestamp|resample=...
+            elif content.startswith("TIME_LINK|"):
+                parts = content.split("|")
+                if len(parts) >= 3:
+                     link_code = parts[1].zfill(6)
+                     timestamp = parts[2]
+                     res = 'd'
+                     for p in parts[3:]:
+                         if p.startswith("resample="):
+                             res = p.split("=")[1]
+                     
+                     # ⚡ [DEBOUNCE] 映射到统一的联动处理逻辑 (将 Socket 指令放入防抖队列)
+                     self.active_time_linkage = {
+                         'code': link_code,
+                         'timestamp': timestamp,
+                         'label': 'Socket 联动',
+                         'price': None,
+                         'auto_scroll': True
+                     }
+                     logger.info(f"[IPC/Socket] Buffered TIME_LINK for {link_code} at {timestamp}")
+                     
+                     if getattr(self, 'tk_linkage_auto_display', True):
+                         # ⭐ 使用统一的防抖计时器，避免 Socket 洪水导致卡顿
+                         self._pending_ipc_code = content 
+                         self._ipc_code_debounce_timer.start(self._ipc_code_debounce_ms)
+            
             # 2. 普通股票代码: 6位数字
             elif len(content) == 6 and content.isdigit():
                 if getattr(self, 'tk_linkage_auto_display', True):
@@ -3934,12 +4000,30 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Error processing IPC command: {e}")
 
     def _flush_ipc_code_load(self):
-        """[NEW] 批量/降频后的代码加载执行"""
+        """[NEW] 批量/降频后的代码加载执行 (支持常规切换与联动解析)"""
         if self._pending_ipc_code:
-            code = self._pending_ipc_code
+            payload = self._pending_ipc_code
             self._pending_ipc_code = None
-            logger.debug(f"[IPC] Debounced loading: {code}")
-            self.load_stock_by_code(code)
+            
+            # 解析可能的复合指令 (如 TIME_LINK|000001|2023-10-27)
+            target_code = payload
+            target_res = None
+            
+            if '|' in payload:
+                parts = payload.split('|')
+                # 情况 A: TIME_LINK|code|ts|res=...
+                if payload.startswith("TIME_LINK|") and len(parts) >= 2:
+                    target_code = parts[1].zfill(6)
+                    for p in parts[2:]:
+                         if p.startswith("resample="): target_res = p.split('=')[1]
+                # 情况 B: code|res=...
+                elif parts[0].strip().isdigit() and len(parts[0].strip()) == 6:
+                    target_code = parts[0].strip()
+                    for p in parts[1:]:
+                         if p.startswith("resample="): target_res = p.split('=')[1]
+
+            logger.debug(f"[IPC] Debounced loading target: {target_code} (res={target_res})")
+            self.load_stock_by_code(target_code, resample=target_res)
 
     def _flush_ipc_signals(self):
         """批量处理缓冲区中的 IPC 信号"""
@@ -5317,7 +5401,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 更新信号覆盖层
             if hasattr(self, 'signal_overlay') and self.signal_overlay:
-                self.signal_overlay.update_signals(signals, target='kline')
+                link_date = self.active_time_linkage.get('timestamp') if hasattr(self, 'active_time_linkage') else None
+                self.signal_overlay.update_signals(signals, target='kline', day_df=self.day_df, linkage_date=link_date)
 
             logger.info(f"[刷新信号] {self.current_code} 生成 {len(signals)} 个信号")
         except Exception as e:
@@ -5733,7 +5818,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"[apply_df_diff] Error: {e}")
 
     def _poll_command_queue(self):
-        """轮询内部指令 Pipe"""
+        """轮询内部指令 Pipe (优化版：合并同轮重复切换)"""
         if hasattr(self, 'stop_flag') and self.stop_flag and not self.stop_flag.value:
             logger.info("[Visualizer] Stop flag detected (False), initiating self-destruct...")
             self.close()
@@ -5743,47 +5828,92 @@ class MainWindow(QMainWindow, WindowMixin):
         if not hasattr(self, 'command_conn') or not self.command_conn:
             return
 
+        # ⭐ [BATCH] 本轮 poll 周期内的指令暂存：只保留最后一条生效的切换类指令
+        last_switch_payload = None
+        last_link_payload = None
+
         try:
-            # ⭐ [STABILITY] 使用 Pipe.poll() + recv()，无后台 feeder 线程
             while self.command_conn.poll():
                 cmd_data = self.command_conn.recv()
                 if not cmd_data: break
                 
                 cmd_type, payload = cmd_data
-                logger.debug(f"[Visualizer] Received command: {cmd_type}")
+                # logger.debug(f"[Visualizer] Polled command: {cmd_type}")
                 
                 if cmd_type == 'SWITCH_CODE':
-                    code = payload.get('code')
-                    res = payload.get('resample', 'd')
-                    if code:
-                        if getattr(self, 'tk_linkage_auto_display', True):
-                            self.load_stock_by_code(code, resample=res)
-                        else:
-                            logger.debug(f"[IPC/Pipe] Linkage auto-display disabled, skipped: {code}")
-                
+                    last_switch_payload = payload
+                    last_link_payload = None # 切换优先级高于或覆盖联动
+                elif cmd_type == 'TIME_LINK':
+                    last_link_payload = payload
+                    # last_switch_payload = None # 联动通常携带切换意图
                 elif cmd_type == 'UPDATE_DF_DATA':
-                    pkg = payload
-                    if not isinstance(pkg, dict):
-                        continue
-                    
-                    p_type = pkg.get('type')
-                    if p_type == 'UPDATE_DF_ALL':
-                        self.update_df_all(pkg.get('data'))
-                    elif p_type == 'UPDATE_DF_DIFF':
-                        self.apply_df_diff(pkg.get('data'))
-                    elif 'code' in pkg and 'data' in pkg:
-                        # 兼容单股更新模式
-                        self.on_realtime_update(pkg['code'], pkg['data'], pkg.get('today_bar'))
-                
+                    # 数据更新具有增量性，仍然即时处理以保证数据一致性
+                    self._handle_update_df_data(payload)
                 elif cmd_type == 'CMD_SCAN_CONSOLIDATION':
                     if hasattr(self, 'on_scan_triggered'):
                         self.on_scan_triggered()
-                        
+
+            # --- 统一执行本轮最后的有效切换意图 ---
+            if last_link_payload:
+                code = last_link_payload.get('code')
+                timestamp = last_link_payload.get('timestamp')
+                if code and timestamp:
+                    self.active_time_linkage = {
+                        'code': str(code).zfill(6),
+                        'timestamp': str(timestamp),
+                        'label': '联动标记',
+                        'price': None,
+                        'auto_scroll': True
+                    }
+                    logger.debug(f"[IPC] Consolidated TIME_LINK for {code} at {timestamp}")
+                    if getattr(self, 'tk_linkage_auto_display', True):
+                        self.load_stock_by_code(code, skip_tdx=True)
+            
+            elif last_switch_payload:
+                code = last_switch_payload.get('code')
+                res = last_switch_payload.get('resample', 'd')
+                if code:
+                    if getattr(self, 'tk_linkage_auto_display', True):
+                        logger.info(f"[IPC] Consolidated SWITCH_CODE for {code}")
+                        self.load_stock_by_code(code, resample=res)
+
+            # 🚀 [NEW] 同时轮询内部语音反馈队列，实现自发联动标记
+            if hasattr(self, 'voice_thread') and hasattr(self.voice_thread, 'feedback_queue'):
+                try:
+                    while not self.voice_thread.feedback_queue.empty():
+                        fb_data = self.voice_thread.feedback_queue.get_nowait()
+                        if isinstance(fb_data, dict) and 'code' in fb_data:
+                            code = fb_data.get('code')
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            self.active_time_linkage = {
+                                'code': str(code).zfill(6),
+                                'timestamp': timestamp,
+                                'label': "实时监控播报",
+                                'price': None
+                            }
+                            # 🚀 [NEW] 程序内联联动优化
+                            if self.current_code == code:
+                                logger.info(f"[Internal] Re-rendering linkage marker for {code}")
+                                self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+                except Exception as e:
+                    logger.debug(f"Poll voice feedback failed: {e}")
+
         except (EOFError, BrokenPipeError, ConnectionResetError):
             logger.warning("[Visualizer] Command pipe closed.")
             self.command_conn = None
         except Exception as e:
             logger.error(f"[Visualizer] Failed to poll command pipe: {e}")
+
+    def _handle_update_df_data(self, payload):
+        """内部助手：处理行情数据包更新"""
+        if not isinstance(payload, dict): return
+        p_type = payload.get('type')
+        if p_type == 'UPDATE_DF_ALL':
+            self.update_df_all(payload.get('data'))
+        elif p_type == 'UPDATE_DF_DIFF':
+            self.apply_df_diff(payload.get('data'))
+        elif 'code' in payload and 'data' in payload:
+            self.on_realtime_update(payload['code'], payload['data'], payload.get('today_bar'))
 
     def push_stock_info(self,stock_code, row):
         """
@@ -6254,6 +6384,53 @@ class MainWindow(QMainWindow, WindowMixin):
         elif idx > x_range[1] - margin:
             vb.setXRange(idx + margin - (x_range[1] - x_range[0]), idx + margin, padding=0)
 
+    def _refresh_stock_signal_cache(self, code):
+        """[PERF/NEW] 预过滤并缓存当前股票的历史信号点 (SignalPoint 列表)"""
+        from signal_types import SignalPoint, SignalType, SignalSource
+        
+        if not hasattr(self, '_hist_df_cache') or self._hist_df_cache.empty:
+            self._current_stock_signals = []
+            return
+
+        # 锁定当前过滤代码
+        self._last_signals_stock_code = code
+
+        # 1. 过滤当前代码
+        stock_signals_df = self._hist_df_cache[self._hist_df_cache['code'] == str(code)]
+        if stock_signals_df.empty:
+            self._current_stock_signals = []
+            return
+
+        # 2. 构建日期映射 (用于获取 bar_index)
+        dates = self.day_df.index
+        # 优化：使用类属性缓存好的 date_map，如果没有则动态创建
+        date_map = getattr(self, '_cached_date_map', {})
+        if not date_map or len(date_map) != len(dates):
+            date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
+            self._cached_date_map = date_map
+        
+        new_signals = []
+        for row in stock_signals_df.itertuples(index=False):
+            sig_date = str(row.date).split()[0]
+            if sig_date in date_map:
+                idx = date_map[sig_date]
+                y_p = row.price if pd.notnull(row.price) else self.day_df.iloc[idx]['close']
+                action = str(row.action)
+                
+                is_buy = 'Buy' in action or '买' in action or 'ADD' in action
+                stype = SignalType.BUY if is_buy else SignalType.SELL
+                if "VETO" in action: stype = SignalType.VETO
+                source = SignalSource.SHADOW_ENGINE if "SHADOW" in action else SignalSource.STRATEGY_ENGINE
+
+                new_signals.append(SignalPoint(
+                    code=code, timestamp=sig_date, bar_index=idx, price=y_p,
+                    signal_type=stype, source=source, reason=str(row.reason),
+                    debug_info=getattr(row, 'indicators', {})
+                ))
+        
+        self._current_stock_signals = new_signals
+        # logger.debug(f"[PERF] Refreshed signal cache for {code}: {len(new_signals)} points")
+
     def _on_initial_loaded(self, code, day_df, tick_df):
         # ⚡ 立即更新标题,清除 "Loading..." 状态
         if day_df is not None and not day_df.empty:
@@ -6286,8 +6463,10 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⭐ 记录当前加载成功的股票代码
         self.current_day_df_code = code
+        # 🚀 [PERF] 加载完数据后同步更新信号缓存
+        self._refresh_stock_signal_cache(code)
+        
         # 1. 優先獲取可用於渲染的實時/模擬數據 (The "Ghost Bar" Source)
-
         effective_tick_df = None
         if tick_df is not None and not tick_df.empty:
             effective_tick_df = tick_df
@@ -6319,45 +6498,6 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
             with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=600):
                 self.render_charts(code, self.day_df, None)
-
-        '''
-        # ⭐ 核心修复：既然 DataLoaderThread 已经带回了最新的 tick_df，直接利用它来生成首个幽灵 K 线
-        # 这样无论是否在交易时间，只要打开图表，就能看到最新的今天行情。
-        # [FIX] 只要开启了实时模式 OR 开启了策略模拟，都应该尝试使用 tick_df 进行详细渲染
-        if (self.realtime or self.show_strategy_simulation) and tick_df is not None and not tick_df.empty:
-            logger.debug(f"[InitialLoad] Using fresh tick_df from DataLoader for {code}, triggering update...")
-            today_bar = tick_to_daily_bar(tick_df)
-            # 立即触发同步 (不使用 QTimer 以防闪烁)
-            self.on_realtime_update(code, tick_df, today_bar)
-            # [FIX] on_realtime_update 已经调用了 render_charts，无需重复渲染
-        elif self.realtime:
-            # 如果 realtime 开启但 DataLoader 没拿到 tick_df，再尝试从缓存补全
-            cached = self._tick_cache.get(code)
-            if cached:
-                logger.info(f"[InitialLoad] Using cached realtime data for {code}...")
-                self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
-                # [FIX] on_realtime_update 已经调用了 render_charts，无需重复渲染
-            else:
-                # realtime 开启但没有任何实时数据，兜底渲染
-                self._capture_view_state()
-                with timed_ctx("render_charts", warn_ms=100):
-                    self.render_charts(code, self.day_df, None)
-        else:
-            # [FIX] realtime 关闭时，如果开启了策略模拟且有数据，尝试展示
-            if self.show_strategy_simulation and tick_df is not None and not tick_df.empty:
-                logger.debug(f"[InitialLoad] Realtime disabled but strategy simulation on. Rendering with tick_df for {code}")
-                self._capture_view_state()
-                with timed_ctx("render_charts", warn_ms=100):
-                    self.render_charts(code, self.day_df, tick_df)
-            else:
-                # [FIX] realtime 关闭时，直接渲染历史数据（不使用缓存）
-                logger.debug(f"[InitialLoad] Realtime disabled, rendering historical data only for {code}")
-                self._capture_view_state()
-                with timed_ctx("render_charts", warn_ms=100):
-                    self.render_charts(code, self.day_df, None)
-        '''
-        # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
-        # self._reset_kline_view(self.day_df)
 
     def _need_ghost_bar(self,day_df):
 
@@ -6764,7 +6904,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._apply_pg_theme_to_plot(self.kline_plot)
         self._apply_pg_theme_to_plot(self.tick_plot)
         if hasattr(self, 'volume_plot'):
-            self._apply_pg_theme_to_plot(self.volume_plot)
+             self._apply_pg_theme_to_plot(self.volume_plot)
 
         # 4. 刷新渲染
         if self.current_code:
@@ -8386,11 +8526,15 @@ class MainWindow(QMainWindow, WindowMixin):
             # 防止复位时引起的死循环重绘
             if not getattr(self, '_is_resetting_charts', False):
                 is_from_button = isinstance(df, bool)
-                if is_from_button or force:
+                # ⭐ [PERF/POLICY] 只有当真的是来自重置按钮 (Manual click) 时才执行破坏性清理
+                # 联动或切股触发的自动复位 (force=True but not from button) 仅清理视角
+                should_do_destructive_clear = is_from_button
+                
+                if should_do_destructive_clear:
                     # [MANUAL VIEW LOCK CLEAR] Clear the lock when a forced reset occurs.
                     self._manual_view_lock = False
                     # [FIX] 点击 reset 按键或要求 force 复位时，清理 K 线图基础数据解决图像重影问题
-                    logger.debug("Manual reset triggered, clearing charts to fix ghosting...")
+                    logger.debug("Manual destructive reset triggered (Button Click), clearing all items...")
                     self._is_resetting_charts = True
                     try:
                         # [FIX] 摒弃 .clear()，改用靶向移除。防止销毁依赖初始化的 tick_pct_axis 轴对象和网格
@@ -8401,10 +8545,12 @@ class MainWindow(QMainWindow, WindowMixin):
                                         plot.removeItem(item)
                                     except Exception: pass
                                     
-                        keep_kline = [getattr(self, a) for a in ['vline', 'hline', 'crosshair_label'] if hasattr(self, a)]
+                        keep_kline = [getattr(self, a) for a in ['vline', 'hline', 'crosshair_label', 'linkage_v_line', 'linkage_label'] if hasattr(self, a)]
                         keep_tick = [getattr(self, a) for a in ['tick_vline', 'tick_hline', 'tick_crosshair_label', 'tick_axis', 'tick_pct_axis'] if hasattr(self, a)]
                         
                         clean_plot(self.kline_plot, keep_kline)
+                        self.signal_overlay.clear(target='kline') # 同步清理信号
+                        
                         clean_plot(self.tick_plot, keep_tick)
                         if hasattr(self, 'volume_plot'):
                             keep_vol = [getattr(self, 'vol_date_axis')] if hasattr(self, 'vol_date_axis') else []
@@ -8417,6 +8563,7 @@ class MainWindow(QMainWindow, WindowMixin):
                                     'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ppre_avg_line', 'ghost_candle',
                                     'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_items_pool',
                                     'hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p', 'anno_arrow_p', 'anno_label_p']
+                        # 🚀 [NOTE] 'linkage_v_line' 和 'linkage_label' 不在 clear_attrs 中，且在 keep_kline 中已受保护
                         for attr in clear_attrs:
                             if hasattr(self, attr):
                                 delattr(self, attr)
@@ -8666,6 +8813,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.on_resample_changed(target_resample)
 
         if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
+            # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号，直接手动触发一次重绘以更新标记
+            if hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code:
+                logger.info(f"[IPC] Same stock linkage detected for {code}, triggering immediate redraw.")
+                self.render_charts(code, self.day_df, None, force=True)
             return
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
@@ -9449,10 +9600,21 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"[_check_market_gaps] Error: {e}")
 
-    def render_charts(self, code, day_df, tick_df):
+    def render_charts(self, code, day_df, tick_df, force=False):
         """
-        [极限性能版] 渲染完整图表 (带有信号缓存与对象复用)
+        [极限性能版] 渲染完整图表 (带有 150ms 频率节流与对象复用)
         """
+        # 🛡️ [PERF/Throttle] 渲染频率限制：150ms 内不重复渲染相同代码 (排除强制重绘的情况)
+        now = time.time()
+        last_t = getattr(self, '_last_render_time', 0)
+        
+        # [FIX] 如果是切换股票，应该允许立即渲染，所以检查 code
+        if not force and (now - last_t < 0.150) and getattr(self, '_last_rendered_code', None) == code:
+             return
+             
+        # 状态记录 (放到这里，确保后续 setXRange 等触发的二次渲染能被隔离)
+        self._last_render_time = now
+        self._last_rendered_code = code
         # ⚡ [PERF] 缓存容量管理：防止长时间运行内存泄露
         if len(self._sbc_cache) > 100:
             self._sbc_cache.clear()
@@ -9515,7 +9677,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 保证后续绘图逻辑（均线、九转等）能完整跑完流程，且此时坐标系已由 _reset_kline_view 设置就位
                     self._is_painting = True # 标记防止重置函数内再次触发递归
                     try:
-                        self._reset_kline_view(df=day_df, force=True)
+                        # 🚀 [PERF] 此处不再强制 destructive reset，仅对齐视口
+                        self._reset_kline_view(df=day_df, force=False)
                     finally:
                         self._is_painting = False
                     # 👈 注意：此处不再 return，流程继续走完
@@ -9556,7 +9719,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 保持自适应开启
                 vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
                 vb.setAutoVisible(y=True)
-            import time
             # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
             # [UPGRADE] 智能判定：仅当用户处于“观测最新行情”状态时，且不在切股冷却期，才在价格出圈时自动纠偏
             current_time = time.time()
@@ -9999,6 +10161,9 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'chan_zs_pool'):
                 for item in self.chan_zs_pool: item.hide()
 
+        # --- 🚀 [IPC/CLEAN] 联动标记现在集成到信号系统中，不再手动绘制 Line/Label ---
+        pass
+
 
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
@@ -10087,50 +10252,87 @@ class MainWindow(QMainWindow, WindowMixin):
                     kline_signals.extend(sim_signals)
                     self._strategy_cache[code] = (strat_key, sim_signals)
 
-        # 2. 实盘日志历史信号 (CSV) - 引入缓存优化
-        import time
-        now_ts = time.time()
-        # 每 30 秒重新加载一次历史信号 CSV
-        if now_ts - getattr(self, '_hist_df_last_load', 0) > 30:
+        # 2. 实盘日志历史信号 (CSV) - 使用预过滤缓存优化性能
+        if now - getattr(self, '_hist_df_last_load', 0) > 30:
             with timed_ctx("get_signal_history_df", warn_ms=200):
                 self._hist_df_cache = self.logger.get_signal_history_df()
                 if not self._hist_df_cache.empty:
                     self._hist_df_cache['code'] = self._hist_df_cache['code'].astype(str)
-                self._hist_df_last_load = now_ts
+                self._hist_df_last_load = now
+                self._refresh_stock_signal_cache(code) # 全量更新后同步刷新当股缓存
         
-        hist_df = self._hist_df_cache
-        if not hist_df.empty:
-            stock_signals = hist_df[hist_df['code'] == str(code)]
+        # 如果缓存过期（切股后未刷新），在此兜底刷新一次
+        if self._last_signals_stock_code != code:
+            self._refresh_stock_signal_cache(code)
             
-            # 性能优化：缓存 date_map
-            cache_dates_key = (code, len(dates), dates[-1] if len(dates)>0 else "")
-            if getattr(self, "_last_dates_cache_key", None) != cache_dates_key:
-                self._cached_date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
-                self._last_dates_cache_key = cache_dates_key
-            
-            date_map = self._cached_date_map
-            
-            # 使用 itertuples 替代 iterrows，速度提升约 10 倍
-            for row in stock_signals.itertuples(index=False):
-                # row 属性对应 DataFrame 列名，如果没有列名则按位置
-                # 假设列顺序已知或通过 getattr 安全获取
-                sig_date = str(row.date).split()[0]
-                if sig_date in date_map:
-                    idx = date_map[sig_date]
-                    y_p = row.price if pd.notnull(row.price) else day_df.iloc[idx]['close']
-                    action = str(row.action)
-                    reason = str(row.reason)
-                    
-                    is_buy = 'Buy' in action or '买' in action or 'ADD' in action
-                    stype = SignalType.BUY if is_buy else SignalType.SELL
-                    if "VETO" in action: stype = SignalType.VETO
-                    source = SignalSource.SHADOW_ENGINE if "SHADOW" in action else SignalSource.STRATEGY_ENGINE
+        kline_signals.extend(self._current_stock_signals)
 
-                    kline_signals.append(SignalPoint(
-                        code=code, timestamp=sig_date, bar_index=idx, price=y_p,
-                        signal_type=stype, source=source, reason=reason,
-                        debug_info=getattr(row, 'indicators', {})
-                    ))
+        # ----------------- 🚀 [IPC/FIXED] 恢复联动信息富文本看板展示 -----------------
+        has_valid_linkage = hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code
+        
+        if not has_valid_linkage:
+            if hasattr(self, 'linkage_v_line'): self.linkage_v_line.hide()
+            if hasattr(self, 'linkage_label'): self.linkage_label.hide()
+        else:
+            try:
+                target_ts = self.active_time_linkage.get('timestamp')
+                # 0. 格式标准化
+                if target_ts and len(str(target_ts)) == 8 and str(target_ts).isdigit():
+                    t_str = str(target_ts)
+                    target_ts = f"{t_str[:4]}-{t_str[4:6]}-{t_str[6:]}"
+                
+                # 1. 寻找 X 轴坐标 (利用已缓存的 date_map)
+                found_idx = -1
+                target_str_date = str(target_ts)[:10]
+                date_map = getattr(self, '_cached_date_map', {})
+                if target_str_date in date_map:
+                    found_idx = date_map[target_str_date]
+
+                if found_idx != -1:
+                    # 🚀 [NEW] 视角自动对齐
+                    if self.active_time_linkage.get('auto_scroll'):
+                        self.kline_plot.setXRange(max(0, found_idx - 120), min(len(day_df)-1, found_idx + 30))
+                        self.active_time_linkage['auto_scroll'] = False
+                        logger.debug(f"[IPC] View scrolled to linkage: {target_ts}")
+
+                    # 2. 绘制黄色分段竖线 (不再一线贯穿)
+                    if not hasattr(self, 'linkage_v_line'):
+                        self.linkage_v_line = pg.PlotCurveItem(pen=pg.mkPen('#FFFF00', width=3, style=Qt.PenStyle.DashLine))
+                        self.kline_plot.addItem(self.linkage_v_line)
+                    
+                    row = day_df.iloc[found_idx]
+                    y_min = row['low'] * 0.9
+                    y_max = row['high'] * 1.1
+                    self.linkage_v_line.setData(x=[found_idx, found_idx], y=[y_min, y_max])
+                    self.linkage_v_line.show()
+                    self.linkage_v_line.setZValue(150)
+
+                    # 3. 绘制高位信息看板
+                    if not hasattr(self, 'linkage_label'):
+                        self.linkage_label = pg.TextItem(anchor=(0.5, 1), fill=(0, 0, 0, 180)) # 背景遮罩
+                        self.kline_plot.addItem(self.linkage_label)
+                    
+                    # 基准价与涨跌幅
+                    base_p = self.active_time_linkage.get('price') or row['close']
+                    curr_p = day_df.iloc[-1]['close']
+                    pct = (curr_p / base_p - 1) * 100
+                    label = self.active_time_linkage.get('label', '联动')
+                    
+                    full_text = f"<span style='color:#FFFF00; font-weight:bold; font-size:11pt;'>[{label}]</span><br/>" \
+                                f"<span style='color:#BBBBBB;'>基准价: {base_p:.2f}</span><br/>" \
+                                f"<span style='color:{'#FF4444' if pct>=0 else '#44FF44'}; font-size:12pt; font-weight:bold;'>距今涨跌: {pct:+.2f}%</span>"
+                    
+                    self.linkage_label.setHtml(full_text)
+                    # 🚀 [FIX] 放置在更高位置，不挡 K 线
+                    y_pos = row['high'] * 1.15
+                    self.linkage_label.setPos(found_idx, y_pos)
+                    self.linkage_label.setZValue(151)
+                    self.linkage_label.show()
+                else:
+                    if hasattr(self, 'linkage_v_line'): self.linkage_v_line.hide()
+                    if hasattr(self, 'linkage_label'): self.linkage_label.hide()
+            except Exception as e:
+                logger.debug(f"[IPC] Linkage rendering error: {e}")
 
         # 3. 实时影子信号 (K线占位图标)
         # [FIX] 无论什么条件，必须有实时数据才能激活实时模式，否则无法获取最新价格导致 Crash
@@ -10261,7 +10463,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     y_v = high_p * 1.015
             y_visuals.append(y_v)
 
-        self.signal_overlay.update_signals(kline_signals, target='kline', y_visuals=y_visuals)
+        # 🚀 [REFINED] 最终更新信号覆盖层，仅在匹配 linkage_date 时显示 D+N 标签，防止视线干扰
+        link_date = self.active_time_linkage.get('timestamp') if hasattr(self, 'active_time_linkage') else None
+        self.signal_overlay.update_signals(kline_signals, target='kline', y_visuals=y_visuals, day_df=day_df, linkage_date=link_date)
 
         # -------------------------
         # 移除此处的 sensing_bar 设置，改到 intraday 内容设置之后
@@ -12575,9 +12779,50 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.hotlist_panel.show()
 
     def _on_hotlist_stock_selected(self, code: str, name: str):
-        """热点列表单击: 切换到该股票"""
-        if code and code != self.current_code:
-            self.load_stock_by_code(code, name)
+        """[UPGRADE] 热点列表联动: 切换股票并解析历史时间锚点"""
+        if not code: return
+        
+        actual_code = code
+        signal_date = None
+        signal_price = 0.0
+        label = "联动"
+        
+        # 1. 解析复合指令 code|realtime=false|signal_type=follow|signal_date=...|signal_price=...
+        if "|" in code:
+            parts = code.split("|")
+            actual_code = parts[0]
+            for p in parts[1:]:
+                if p.startswith("signal_date="):
+                    signal_date = p.split("=")[1]
+                elif p.startswith("signal_type="):
+                    st = p.split("=")[1]
+                    # 文字精简：跟单, 观察, 热点
+                    label = {"hotlist": "热点", "follow": "🎯 跟单", "watchlist": "📊 观察"}.get(st, "联动")
+                elif p.startswith("signal_price="):
+                    try: signal_price = float(p.split("=")[1])
+                    except: pass
+
+        # 🚀 [FIX] 必须包含 code 键且确保 timestamp 命名一致，否则 update_rendering 会判定联动无效
+        if signal_date:
+            self.active_time_linkage = {
+                'code': actual_code,
+                'timestamp': signal_date,
+                'label': label,
+                'price': signal_price if signal_price > 0 else None,
+                'auto_scroll': True
+            }
+            logger.info(f"[Linkage] High-precision linkage activated: {actual_code} @ {signal_date} (Type: {label}, Price: {signal_price})")
+        else:
+            # 清理旧联动（除非是显式的跨窗口联动，这里由于是 Hotlist 点击，我们希望清理上一次的状态）
+            if hasattr(self, 'active_time_linkage'):
+                self.active_time_linkage = {}
+
+        # 3. 执行加载或刷新
+        if actual_code != self.current_code:
+            self.load_stock_by_code(actual_code, name)
+        else:
+            # 代码相同，仅刷新渲染层以更新标尺位置
+            self._refresh_kline_view()
     
     def _on_hotlist_voice_alert(self, code: str, msg: str):
         """热点面板语音通知 - 同时更新信号日志面板"""

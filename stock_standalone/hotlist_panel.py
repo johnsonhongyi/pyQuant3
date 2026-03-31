@@ -1189,8 +1189,14 @@ class HotlistPanel(QWidget, WindowMixin):
                     # [DEBUNCE] 增加去重逻辑
                     if self._last_selected_codes["watchlist"] != code:
                         self._last_selected_codes["watchlist"] = code
+                        # 获取发现价格
+                        price = 0.0
+                        if (it := self.watchlist_table.item(row, 5)): # 发现价列
+                            try: price = float(it.text())
+                            except: pass
+                        
                         # 发送附带发现日期的信号
-                        sig_str = f"{code}|realtime=false|signal_type=watchlist"
+                        sig_str = f"{code}|realtime=false|signal_type=watchlist|signal_price={price}"
                         if discover_date:
                             sig_str += f"|signal_date={discover_date}"
                         self.stock_selected.emit(sig_str, name_item.text())
@@ -2091,8 +2097,14 @@ class HotlistPanel(QWidget, WindowMixin):
                                 signal_date = time_txt.split(' ')[0]
                     
                     if code:
+                        # 获取入场价
+                        entry_price = 0.0
+                        if (it := self.follow_table.item(row, 4)): # 入场价列
+                            try: entry_price = float(it.text())
+                            except: pass
+
                         # [FIX] Link with signal date for K-line marking, specify type to avoid mixing
-                        link_msg = f"{code}|realtime=false|signal_type=follow"
+                        link_msg = f"{code}|realtime=false|signal_type=follow|signal_price={entry_price}"
                         if signal_date:
                             link_msg += f"|signal_date={signal_date}"
                         
@@ -2355,8 +2367,11 @@ class HotlistPanel(QWidget, WindowMixin):
                 # [DEBUNCE] 增加去重逻辑，防止重复联动主窗口
                 if self._last_selected_codes["hotlist"] != item.code:
                     self._last_selected_codes["hotlist"] = item.code
-                    # [FIX] Hotlist link: No signal_date needed, specify type
-                    self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
+                    # [FIX] Hotlist link: No signal_date needed, specify type and add_price
+                    link_msg = f"{item.code}|realtime=false|signal_type=hotlist|signal_price={item.add_price}"
+                    if item.add_time and len(item.add_time) >= 10:
+                        link_msg += f"|signal_date={item.add_time[:10]}"
+                    self.stock_selected.emit(link_msg, item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
         """键盘导航联动（上下键切换时也触发股票选择）"""

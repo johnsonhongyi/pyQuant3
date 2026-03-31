@@ -2678,21 +2678,31 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         try:
             # 🚀 [NEW] 核心修复：判断可视化窗口是否已打开，避免点击冷启动导致的 GIL 锁
-            # 注意：qt_process 存量检测可以在当前线程执行
             is_viz_open = False
             if hasattr(host, 'qt_process') and host.qt_process and host.qt_process.is_alive():
                 is_viz_open = True
 
+            is_history = getattr(self, '_is_history_mode', False)
+            history_date = getattr(self, '_history_date', "")
+
             def _do_linkage_in_main_thread():
-                # 1. 尝试联动主界面的 scroll 信号 (兼容专用版)
-                if hasattr(host, 'scroll_to_code_signal'):
-                    host.scroll_to_code_signal.emit(code)
+                # 🚀 [FIXED] 统一联动逻辑：竞价面板核心在于时间对齐，因此无论是否历史模式都执行 link_to_visualizer
+                target_date = history_date
+                if not target_date:
+                    # 如果没有历史日期，补全为今日
+                    target_date = datetime.now().strftime('%Y-%m-%d')
                 
-                # 2. 尝试直接调用 tree_scroll_to_code (常见于 Tk/Qt 主界面)
-                if hasattr(host, 'tree_scroll_to_code'):
-                    # 关键修改：只有可视化已运行且正常时，才传递 vis=True
-                    # 避免在联动时动态启动新进程触发 GIL Crash
-                    host.tree_scroll_to_code(code, vis=is_viz_open)
+                # 1. 优先调用 link_to_visualizer (代码切换 + 时间标记)
+                if hasattr(host, 'link_to_visualizer'):
+                     host.link_to_visualizer(code, target_date)
+                     logger.info(f"[SectorPanel] Linked {code} at {target_date} (Unified Linkage Mode)")
+                
+                # 2. 只有在没有综合接口时，才回退到简单的代码切换信号
+                else:
+                    if hasattr(host, 'scroll_to_code_signal'):
+                        host.scroll_to_code_signal.emit(code)
+                    elif hasattr(host, 'tree_scroll_to_code'):
+                        host.tree_scroll_to_code(code, vis=is_viz_open)
         
                 # 3. 如果主界面有 sender 对象，通过它发送 (处理 TDX/THS 联动)
                 # 在主线程调用以保证安全提取 Tk 变量并防止剪贴板竞争

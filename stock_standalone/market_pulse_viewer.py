@@ -722,20 +722,25 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         if not vals: return
         
         code = vals[1] # Code index
-        # # 1. TDX Linkage (Clipboard)
-        # try:
-        #     import pyperclip
-        #     pyperclip.copy(code)
-        # except: pass
         
-        # 2. Push to Visualizer / Linkage via Monitor App
-        if self.monitor_app and hasattr(self.monitor_app, 'sender'):
-             # Construct minimal row data for push
-            # row_data = {'name': vals[2], 'high': 0, 'lastp1d': 0, 'percent': 0, 'close': vals[6], 'volume': 0}
-            # self.monitor_app.push_stock_info(code, row_data)
+        # 🚀 [NEW] 用户需求：战报窗口复盘模式下的时间联动
+        query_date = self.current_date
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # 1. 可视化器联动 (基础跳转与时间同步)
+        if self.monitor_app and getattr(self.monitor_app, "vis_var", None) and self.monitor_app.vis_var.get():
+            if hasattr(self.monitor_app, 'link_to_visualizer'):
+                 if query_date != today_str:
+                     # 历史复盘模式：通过 link_to_visualizer 同步日期
+                     self.monitor_app.link_to_visualizer(code, query_date)
+                     # self.logger.info(f"MarketPulse: Linked {code} at {query_date} (History Mode)")
+                 elif hasattr(self.monitor_app, 'open_visualizer'):
+                     # 今日实时模式：仅执行基础跳转
+                     self.monitor_app.open_visualizer(code)
+
+        # 2. TDX Linkage (通过主程序接口)
+        if self.monitor_app and hasattr(self.monitor_app, 'sender') and self.monitor_app.sender:
             self.monitor_app.sender.send(code)
-        if hasattr(self.monitor_app, 'open_visualizer') and self.monitor_app.vis_var.get():
-            self.monitor_app.open_visualizer(code)
         # # 3. Sync Main Window Search (Optional but helpful)
         # if self.monitor_app and hasattr(self.monitor_app, 'search_var1'):
         #     try:
