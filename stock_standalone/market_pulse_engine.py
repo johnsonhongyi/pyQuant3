@@ -372,3 +372,7 @@ class DailyPulseEngine:
 
     def update_notes(self, date_str, notes):
         return market_pulse_db.update_user_notes(date_str, notes)
+
+    def get_available_dates(self):
+        """Retrieve all dates with available reports."""
+        return market_pulse_db.get_all_recorded_dates()
