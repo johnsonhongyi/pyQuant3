@@ -609,6 +609,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             self._use_feature_marking = False
         
+        # 🚀 [IPC OPTIMIZATION] 统一 IPC 发送队列，防止高频点击产生大量僵尸线程
+        import queue as q_lib
+        if not hasattr(self, '_ipc_task_queue'):
+            self._ipc_task_queue = q_lib.Queue(maxsize=100)
+            self._ipc_worker_stop = threading.Event()
+            self._ipc_worker_thread = threading.Thread(target=self._ipc_worker_loop, daemon=True, name="MonitorTK_IPC_Worker")
+            self._ipc_worker_thread.start()
+
         #总览概念分析前5板块
         self.concept_top5 = None
         #初始化延迟运行live_strategy
@@ -617,6 +625,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.handbook = StockHandbook()
         # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
         self.live_strategy = None
+        
         self._schedule_after(3000, self._init_live_strategy)
         
         # [NEW] For Market Temperature Sync
@@ -737,6 +746,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
 
+    def _ipc_worker_loop(self):
+        """[OPTIMIZATION] 唯一背景线程处理发往 Visualizer 的指令，解耦 UI 且防止线程溢出"""
+        logger.info("🚀 MonitorTK IPC Background Worker started.")
+        while not self._ipc_worker_stop.is_set():
+            try:
+                # 阻塞获取任务
+                cmd_tuple = self._ipc_task_queue.get(timeout=1.0)
+                if not cmd_tuple:
+                    self._ipc_task_queue.task_done()
+                    continue
+                
+                # 真正的发送操作 (IO 密集型，可能阻塞)
+                try:
+                    # 检查存活性
+                    if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
+                        if hasattr(self, 'viz_conn') and self.viz_conn is not None:
+                            self.viz_conn[0].send(cmd_tuple)
+                except Exception as e:
+                    logger.debug(f"IPC Send (BG Worker) failed: {e}")
+                
+                self._ipc_task_queue.task_done()
+            except Empty:
+                continue
+            except Exception as e:
+                logger.error(f"IPC Worker Error: {e}")
+                time.sleep(1)
+
+    def _async_viz_send(self, cmd, payload):
+        """发送指令到可视化器 (入队不阻塞)"""
+        try:
+            self._ipc_task_queue.put((cmd, payload), block=False)
+        except Full:
+            # 如果队列满了，通常意味着可视化器端彻底卡死，清空旧任务优先响应新任务
+            try:
+                while not self._ipc_task_queue.empty(): self._ipc_task_queue.get_nowait()
+                self._ipc_task_queue.put((cmd, payload), block=False)
+            except: pass
+
+
     def open_market_pulse(self):
         """Open the Daily Market Pulse Dashboard."""
         if not self._pulse_viewer_class:
@@ -818,6 +866,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"Aggregated task [{key}] error: {e}")
         
+        _aggregator_wrapper.key = f"agg:[{key}]"
         if hasattr(self, 'tk_dispatch_queue'):
             # 控制队列深度：如果主线程跟不上，且队列过长，则启动丢弃策略
             if self.tk_dispatch_queue.qsize() > 100:
@@ -829,133 +878,138 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._schedule_after(0, _aggregator_wrapper)
 
     def _process_dispatch_queue(self):
-        """[STABILITY] 主循环：定期清空任务队列并驱动 PyQt 事件循环，包含执行明细审计"""
-        # 🛡️ 极端退出守卫：防止 GIL 释放后的非法 re-entry
-        if getattr(self, '_is_closing', False) or (getattr(self, '_app_exiting', None) and self._app_exiting.is_set()):
+        """[STABLE v5] 单心跳 + 时间预算 + 心跳检测 + 防重复调度"""
+
+        if getattr(self, '_is_closing', False) or (
+            getattr(self, '_app_exiting', None) and self._app_exiting.is_set()
+        ):
             return
 
-        # ✅ [FIX] 标记为运行中，防止冗余 Watchdog 任务重叠执行
-        self._dispatch_running = True
-            
         import functools
         from collections import Counter
         from queue import Empty
-        
+        import time
+
+        self._dispatch_running = True
+
         now = time.perf_counter()
-        next_delay = 100
-        processed_count = 0 
         start_t = now
-        
-        # ⭐ 用于记录本轮执行的任务分布
+        processed_count = 0
+        next_delay = 50   # 默认节奏（比你之前更稳）
+
         task_stats = Counter()
         max_single_task = {"name": "None", "dur": 0}
 
-        # ✅ [FIX] 每轮硬上限：防止主线程被单次 dispatch 独占
-        MAX_TASKS_PER_CYCLE = 5
-        # ✅ [FIX] 软时间预算：20ms
-        TIME_BUDGET_S = 0.020
+        # ✅ 更大预算，提高 UI 吞吐量
+        MAX_TASKS_PER_CYCLE = 15
+        TIME_BUDGET_S = 0.018   # 18ms (给主线程更多连续运行时间)
 
         try:
-            # 1. 限时处理 Tk 任务（双重截止：时间 + 任务数）
-            # ✅ [FIX] 放弃 empty() 检查，改用 try...get_nowait() 异常驱动
             while processed_count < MAX_TASKS_PER_CYCLE:
 
-                # [FIX v1] 前置时间检查
-                time_used = time.perf_counter() - start_t
-                if time_used > TIME_BUDGET_S:
-                    next_delay = 20
+                # ⛔ 预算检查：留出极小空隙给 OS 其他事件
+                if (time.perf_counter() - start_t) > TIME_BUDGET_S:
+                    next_delay = 10
                     break
 
                 try:
                     task = self.tk_dispatch_queue.get_nowait()
-                    if callable(task):
-                        # --- 提取任务名称 ---
-                        t_func = task.func if isinstance(task, functools.partial) else task
-                        t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(task)))
-                        t_name = t_name.split(' at ')[0].replace('<locals>.', '')
-                        short_name = t_name.split('.')[-1]
-
-                        task_start = time.perf_counter()
-                        
-                        # 执行任务
-                        task()
-                        
-                        task_dur = (time.perf_counter() - task_start) * 1000
-                        
-                        # ⭐ 记录统计数据
-                        processed_count += 1
-                        task_stats[short_name] += 1
-                        if task_dur > max_single_task["dur"]:
-                            max_single_task = {"name": t_name, "dur": task_dur}
-
-                        # 单个任务重度阻塞报警
-                        if task_dur > 200:
-                             logger.warning(f"🚨 抓到耗时任务! [{t_name}] 耗时 {task_dur:.2f}ms")
-
-                        # ✅ [FIX v2 - 核心] 后置耗时检查 ——
-                        # 如果单任务本身就很慢，立即结束本轮循环，归还控制权
-                        time_after_task = time.perf_counter() - start_t
-                        if time_after_task > TIME_BUDGET_S:
-                            remaining = self.tk_dispatch_queue.qsize()
-                            if remaining > 20:
-                                logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {remaining} 项待续")
-                            next_delay = 20
-                            break
-                                
                 except Empty:
-                    next_delay = 200
+                    # 队列空：如果没有活跃任务，延长检查间隔以节省省电
+                    next_delay = 150 if processed_count == 0 else 50
                     break
-                except Exception as e:
-                    # 🛡️ 定位具体是哪个任务报错，不中断循环
-                    task_label = getattr(task, '__qualname__', str(task)[:80]) if 'task' in dir() else 'unknown'
-                    logger.error(f"[_process_dispatch_queue] Task执行异常 [{task_label}]: {e}\n{traceback.format_exc()}")
-                except BaseException as e:
-                    logger.critical(f"[_process_dispatch_queue] BaseException in task: {type(e).__name__}: {e}")
-                    raise
+                
+                if not callable(task):
+                    continue
 
-            # 积压提示
-            remaining_after = self.tk_dispatch_queue.qsize()
-            if remaining_after > 20 and processed_count > 0:
-                logger.warning(f"⚠️ 队列积压分片：本轮处理 {processed_count} 项，剩余 {remaining_after} 项待续")
+                # 执行任务
+                try:
+                    task_start = time.perf_counter()
+                    task()
+                    task_dur = (time.perf_counter() - task_start) * 1000
+                    processed_count += 1
+
+                    # 1. 优先获取名称路径 (能探测 lambda 的外层定义位置)
+                    t_name = getattr(task, 'key', None)
+                    if not t_name:
+                        t_func = task.func if hasattr(task, 'func') else task
+                        # 这里使用 __qualname__ 能获取到 _outer_func.<locals>.<inner_func> 这种路径
+                        t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(t_func)))
+                    
+                    if not isinstance(t_name, str): 
+                        t_name = str(t_name)
+                    
+                    # 2. 强力清洗：全局剔除冗余类名和闭包标记
+                    t_name = t_name.replace("StockMonitorApp.", "").replace(".<locals>", "")
+                    
+                    if " at 0x" in t_name:
+                        t_name = t_name.split(" at 0x")[0]
+                    if t_name.startswith("<bound method "):
+                        t_name = t_name.replace("<bound method ", "").split(" of ")[0]
+                    
+                    # 限制长度
+                    t_name = t_name[:60]
+                    
+                    # 持久化统计 (跨多次 dispatch 累加)
+                    if not hasattr(self, '_cycle_audit'):
+                        self._cycle_audit = {'times': {}, 'counts': {}, 'start': time.time()}
+                    self._cycle_audit['times'][t_name] = self._cycle_audit['times'].get(t_name, 0) + task_dur
+                    self._cycle_audit['counts'][t_name] = self._cycle_audit['counts'].get(t_name, 0) + 1
+                    
+                    # 统计更新
+                    task_stats[t_name] += 1
+                    if task_dur > max_single_task['dur']:
+                        max_single_task.update({"name": t_name, "dur": task_dur})
+
+                    # 统计慢任务
+                    if task_dur > 2000:
+                        logger.warning(f"🚨 慢任务: {t_name} {task_dur:.1f}ms")
+
+                    # 🚀 [YIELD] 每 5 个任务主动呼吸一次，保持窗口可拖动
+                    if processed_count % 5 == 0:
+                        self.update_idletasks()
+                except Exception as e:
+                    logger.error(f"Dispatch Error: {e}")
+
+            # 积压监控
+            remaining = self.tk_dispatch_queue.qsize()
+            if remaining > 300:
+                logger.warning(f"⚠️ 队列积压: {remaining}")
 
         except Exception as e:
-            logger.error(f"Dispatch Queue Critical Error: {e}")
+            logger.error(f"Dispatch error: {e}")
 
         finally:
             total_time = (time.perf_counter() - start_t) * 1000
-            
-            # ✅ [FIX] 任务执行完毕，释放运行状态位
+
             self._dispatch_running = False
+            self._last_task_finish_time = time.time()
+
+            # --- [高级功能] 周期性能审计排行 (已改为手动触发，见 show_ui_performance_audit) ---
             
-            if processed_count > 0 and (total_time > 50 or processed_count > 20):
+            # 保留原有的单波次严重阻塞报警
+            if processed_count > 0 and total_time > 2000:
+                logger.warning(f"🕒 Batch Delay: {total_time:.1f}ms | {processed_count} tasks | max: {max_single_task['name']}")
+
+            # =========================
+            # ✅ 新版本（稳定）
+            # =========================
+
+            def _run():
                 try:
-                    stats_detail = ", ".join([f"{name}({count})" for name, count in task_stats.items()])
-                    max_task_name = max_single_task.get('name', 'Unknown')
-                    max_task_dur = max_single_task.get('dur', 0)
-                    
-                    logger.info(
-                        f"⏱️ 调度审计: 耗时 {total_time:.1f}ms | 处理 {processed_count} 项 | "
-                        f"最重: [{max_task_name}]({max_task_dur:.1f}ms) | 分布: [{stats_detail}]"
-                    )
-                except Exception: pass
-
-            # 3. 智能调度：根据负载动态调整下次执行时间
-            is_closing = getattr(self, '_is_closing', False) or \
-                         (getattr(self, '_app_exiting', None) and self._app_exiting.is_set())
-
-            if not is_closing:
-                safe_delay = next_delay
-                if total_time > 100:
-                    safe_delay = max(safe_delay, 50) 
-                elif processed_count > 15:
-                    safe_delay = max(safe_delay, 50)
-
-                # ✅ [FIX v3 - 灵魂修复] 必须绕过 _schedule_after 调度，改用 self.after
-                # 防止由于 _schedule_after 的 debounce 机制导致调度中断
-                try:
-                    self.after(safe_delay, self._process_dispatch_queue)
+                    self._dispatch_scheduled = False   # ✅ 先释放
+                    self._process_dispatch_queue()
                 except Exception as e:
-                    logger.error(f"Heartbeat schedule failed: {e}")
+                    logger.error(f"dispatch run error: {e}")
+
+            # 只防止“短时间重复调度”
+            if not getattr(self, "_dispatch_scheduled", False):
+                self._dispatch_scheduled = True
+                try:
+                    self.after(next_delay, _run)
+                except Exception as e:
+                    logger.error(f"schedule fail: {e}")
+                    self._dispatch_scheduled = False   # ✅ 失败必须释放
 
 
     def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
@@ -1028,12 +1082,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 如果主循环来不及消费导致积压超过 2000 项，仅允许关键任务进入。
             try:
                 q_size = self.tk_dispatch_queue.qsize()
-                if q_size > 2000:
+                if q_size > 300:
                     # 获取识别指纹
                     task_fingerprint = str(key if key is not None else func).lower()
                     
                     # 核心业务名单（select, click, signal, order 等关键链路禁止丢弃）
-                    is_critical = any(k in task_fingerprint for k in ("select", "click", "signal", "order", "init", "close"))
+                    is_critical = any(k in task_fingerprint for k in ("select", "click", "signal", "order", "close"))
                     
                     if not is_critical:
                         if time.time() - getattr(self, '_last_drop_log', 0) > 5:
@@ -1044,12 +1098,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 🚑 [FIX] 协作式限流 Watchdog：
             # 只有在主脉搏【静止】且超过限流步长（50ms）时，才由 Worker 尝试拉起。
+            # -------------------------
+            # Watchdog（基于心跳，不是 running 状态）
+            # -------------------------
             now_t = time.time()
-            if not getattr(self, "_dispatch_running", False) and (now_t - getattr(self, "_last_dispatch_kick", 0) > 0.05):
-                self._last_dispatch_kick = now_t
-                if hasattr(self, "after"):
+            last = getattr(self, "_last_task_finish_time", 0)
+
+            # 超过 0.5s 没有执行任何任务 → 可能卡死
+            if now_t - last > 0.5:
+                if now_t - getattr(self, "_last_dispatch_kick", 0) > 1.0:
+                    self._last_dispatch_kick = now_t
                     try:
                         self.after(100, self._process_dispatch_queue)
+                        logger.warning("🧯 Watchdog恢复调度")
                     except Exception:
                         pass
 
@@ -1083,6 +1144,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 🛡️ [BUG FIX] 直接用模块级 logger，不依赖 self.logger
                     logger.error(f"❌ [_schedule_after_v4] Async Task Error [{task_key}]: {e}\n{traceback.format_exc()}")
 
+            safe_call.key = task_key
             self.tk_dispatch_queue.put(safe_call)
             return "redirected"
 
@@ -3025,14 +3087,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 🔄 优化：处理队列中的所有数据包，不跳过中间增量（解决“缺斤短两”数据不全问题）
                 # 我们逐个分发包到后台 worker 进行策略计算，但只在最后一轮同步 UI
+                # 🔄 优化：只取最新的数据包，清空积压以防止主线程被 unpickle 堆叠占满
                 all_packets = []
+                latest_p = None
                 while not self.queue.empty():
                     try:
-                        p = self.queue.get_nowait()
-                        if p is not None:
-                            all_packets.append(p)
+                        latest_p = self.queue.get_nowait()
                     except Empty:
                         break
+                
+                if latest_p:
+                    all_packets = [latest_p]
+                    proc_count = 1
                 
                 if all_packets:
                     proc_count = len(all_packets)
@@ -3114,7 +3180,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # ⭐ [FIX] 恢复并净化 Code 列
             def _sanitize_codes(d):
                 if d is None: return None
-                d = d.copy() # 避免在 Worker 线程修改主线程共享引用导致碰撞
+                d = d.copy() # [CORE] 避免修改主线程或原数据引用的副本
+                
+                # [FIX-AMBIGUITY] 极其重要：如果索引本身的名字就叫 'code'，
+                # 需将其设为 None，否则后续插入 'code' 列会导致 sort_values 报二义性错误
+                if d.index.name == 'code':
+                    d.index.name = None
+
                 if 'code' not in d.columns:
                     d['code'] = d.index.astype(str)
                 if d['code'].dtype == 'object':
@@ -3180,13 +3252,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # --- 🛠️ [UI] 排序与附加属性 ---
             if df is not None and not df.empty:
-                if getattr(self, 'sortby_col', None) is not None:
-                    if self.sortby_col == 'code':
-                        self.sortby_col = 'name'
-                    df = df.sort_values(
-                        by=self.sortby_col,
-                        ascending=getattr(self, 'sortby_col_ascend', False)
-                    )
+                sort_target = getattr(self, 'sortby_col', None)
+                if sort_target is not None:
+                    # [STABILITY] 如果目标列缺失（常见于启动初期或动态变更列），尝试降级或跳过，避免 KeyError 报错
+                    if sort_target not in df.columns:
+                        sort_target = 'name' if 'name' in df.columns else None
+                    
+                    if sort_target:
+                        df = df.sort_values(
+                            by=sort_target,
+                            ascending=getattr(self, 'sortby_col_ascend', False)
+                        )
 
                 cur_res = self.global_values.getkey("resample") or 'd'
                 if 'resample' not in df.columns:
@@ -3737,8 +3813,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 2. 发送扫描指令
         # open_visualizer 会初始化 viz_command_queue
         if hasattr(self, 'viz_conn') and self.viz_conn:
-             self.viz_conn[0].send(('CMD_SCAN_CONSOLIDATION', {}))
-             logger.info("Sent CMD_SCAN_CONSOLIDATION to Visualizer")
+             # [FIX] 🐞 异步发送指令，防止 UI 在 Pipe 缓冲区满时卡死
+             threading.Thread(target=lambda: self.viz_conn[0].send(('CMD_SCAN_CONSOLIDATION', {})), daemon=True).start()
+             logger.info("Async sent CMD_SCAN_CONSOLIDATION to Visualizer")
              if hasattr(self, 'status_var'):
                 self.status_var.set("已发送策略扫描指令...")
              
@@ -3894,16 +3971,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 ---
                 if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
                     try:
-                        if self.viz_conn is not None:
-                            if is_linkage:
-                                # 🚀 [SIMPLIFIED] 只传递代码和日期
-                                payload = {'code': code, 'resample': resample, 'timestamp': timestamp}
-                                self.viz_conn[0].send(('TIME_LINK', payload))
-                                logger.debug(f"[IPC] Sent TIME_LINK for {code} at {timestamp}")
-                            else:
-                                self.viz_conn[0].send(('SWITCH_CODE', {'code': code, 'resample': resample}))
-                                logger.debug(f"Queue: Sent SWITCH_CODE {code}")
-                            sent = True
+                        if is_linkage:
+                            # 🚀 [OPTIMIZED] 使用单例后台 worker 发送
+                            payload = {'code': code, 'resample': resample, 'timestamp': timestamp}
+                            self._async_viz_send('TIME_LINK', payload)
+                            logger.debug(f"[IPC] Queue TIME_LINK for {code}")
+                        else:
+                            self._async_viz_send('SWITCH_CODE', {'code': code, 'resample': resample})
+                            logger.debug(f"[IPC] Queue SWITCH_CODE {code}")
+                        sent = True
+                    except Exception as e:
+                        logger.error(f"Async send queue failed: {e}")
                     except Exception as e:
                         logger.error(f"Queue send failed: {e}")
 
@@ -4021,11 +4099,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             sent = False  # ⭐ 本轮是否成功发送
             try:
                 now = time.time()
+                
+                # 动态调整发送频率：数据量越大，发送越稀疏，防止 GIL 挤占
+                if not hasattr(self, 'df_all'): 
+                    time.sleep(2)
+                    continue
+                
+                n_rows = len(self.df_all) if hasattr(self, 'df_all') else 0
+                dynamic_interval = min_interval
+                if n_rows > 3000: dynamic_interval = 2.5
+                if n_rows > 5000: dynamic_interval = 5.0
+                
                 # ⭐ 限流 + 抖动
-                if now - last_send_time < min_interval:
-                    time.sleep(min_interval - (now - last_send_time) + random.uniform(0, max_jitter))
+                if now - last_send_time < dynamic_interval:
+                    time.sleep(1.0) # 小碎步休眠防止 CPU 100%
+                    continue
+                
                 last_send_time = time.time()
 
+                # ⚡ [CORE] 线程安全地获取行情快照
+                # 使用哈希检测跳过无变化的昂贵计算（及 IPC 发送）
+                with getattr(self, '_df_lock', threading.Lock()):
+                    df_ui = self.df_all.copy()
+                
+                # [OPTIMIZE] 快速哈希校验：如果核心价格列完全没动，没必要比较/同步
+                n_rows_now = len(df_ui)
+                df_hash = hash(n_rows_now)
+                if not df_ui.empty:
+                    p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in df_ui.columns), None)
+                    if p_col:
+                        # 采样计算哈希 (头中尾)
+                        sample_idx = [0, n_rows_now // 2, n_rows_now - 1] if n_rows_now > 2 else list(range(n_rows_now))
+                        df_hash = hash(tuple(df_ui[p_col].iloc[sample_idx].values)) ^ hash(n_rows_now)
+                
                 # ⚡ [FIX] 处理来自 Pipe 的强制全量同步请求（线程安全方式）
                 if getattr(self, '_force_full_sync_pending', False):
                     logger.info("[send_df] Executing pending FULL SYNC request")
@@ -4033,11 +4139,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         del self.df_ui_prev
                     self.sync_version = 0
                     self._force_full_sync_pending = False
-
-                # ⚡ [CORE] 线程安全地获取行情快照
-                # 必须带锁复制，否则 pandas 在多线程环境下（尤其是 rename/fillna 等操作时）会导致 GIL 崩溃
-                with getattr(self, '_df_lock', threading.Lock()):
-                     df_ui = self.df_all.copy()
+                    
+                self._last_send_df_hash = df_hash
                 # --- 计算增量 ---
                 if hasattr(self, 'df_ui_prev'):
                     # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
@@ -4172,7 +4275,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vis_enabled = getattr(self, '_vis_enabled_cache', True)
             if sent and not prev and vis_enabled:
                 logger.info("[send_df] first successful send")
-
+            
+            # send_diff_df_status = hasattr(self, '_last_send_df_hash') and self._last_send_df_hash == df_hash and not getattr(self, '_force_full_sync_pending', False):
+            # # 数据指纹一致，且无强制请求，跳过本轮昂贵的比较和发送
+            # # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
+            # # logger.info(f"[send_df] Data fingerprint unchanged. Skip sync. getattr(self, '_force_full_sync_pending', False): {getattr(self, '_force_full_sync_pending', False)}")
             # ======================================================
             # ⭐ 7️⃣ 调度逻辑
             # ======================================================
@@ -6399,14 +6506,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info("RealtimeDataService injected into StockLiveStrategy.")
             
             # 注册报警回调
-            # self.live_strategy.set_alert_callback(self.on_voice_alert)
-            self.live_strategy.set_alert_callback(self._safe_on_voice_alert)
+            self.live_strategy.alert_callback = self._safe_on_voice_alert
             # 注册语音开始播放的回调，用于同步闪烁
             if hasattr(self.live_strategy, '_voice'):
                 self.live_strategy._voice.on_speak_start = self.on_voice_speak_start
                 self.live_strategy._voice.on_speak_end = self.on_voice_speak_end
             
-            logger.info("✅ 实时监控策略模块已启动")
+            # 🚀 [NEW] 注册策略完成回调，实现“数据更新后回调”需求
+            if hasattr(self.live_strategy, 'strategy_callback'):
+                self.live_strategy.strategy_callback = lambda df: self._schedule_after(0, self.refresh_tree, df)
+            
+            logger.info("✅ 实时监控策略模块已启动 (已挂载实时刷新回调)")
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
 
@@ -9629,11 +9739,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"❌ 切换特征颜色失败: {e}")
 
     def refresh_tree(self, df=None, force=False):
-        """刷新 TreeView，保证列和数据严格对齐。"""
+        """刷新 TreeView，保证列和数据严格对齐。 (高性能版：强制节流)"""
         start_time = time.time()
+
+        # ⚡ [OPTIMIZATION] 针对大列表 (5000+行) 强制节流，防止主线程被刷新操作占满导致卡死
+        if not hasattr(self, '_last_tree_refresh_time'):
+            self._last_tree_refresh_time = 0
+            
+        n_rows_current = len(df) if df is not None else (len(self.current_df) if hasattr(self, 'current_df') else 0)
+        
+        # 若非强制模式，大数据量下限制刷新频率 (3000行以上每3s刷新，5000行以上每8s刷新)
+        throttle_interval = 2.0  # 默认 2s
+        if n_rows_current > 5000:
+            throttle_interval = 8.0
+        elif n_rows_current > 2000:
+            throttle_interval = 4.0
+            
+        if not force and (start_time - self._last_tree_refresh_time < throttle_interval):
+            return
+            
+        self._last_tree_refresh_time = start_time
         
         if df is None:
-            df = self.current_df.copy()
+            df = self.current_df.copy() if hasattr(self, 'current_df') else None
 
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
@@ -9912,7 +10040,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
 
-        self.refresh_tree(df_sorted)
+        self.refresh_tree(df_sorted, force=True)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
         self.tree.yview_moveto(0)
 
@@ -13052,7 +13180,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.select_code = None
         self.sortby_col = None
         self.sortby_col_ascend = None
-        self.refresh_tree(self.df_all)
+        self.refresh_tree(self.df_all, force=True)
         resample = self.resample_combo.get()
         # self.status_var.set(f"搜索框 {which} 已清空")
         # self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
@@ -13447,6 +13575,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         analysis_win.bind("<Escape>", lambda e: on_analysis_close())
         refresh_analysis()
 
+    def show_ui_performance_audit(self, reset=True):
+        """展示 UI 线程性能审计排行 (由监控窗口手动触发)"""
+        try:
+            if not hasattr(self, '_cycle_audit') or not self._cycle_audit['times']:
+                logger.info("ℹ️ 尚无活跃的 UI 性能统计数据。")
+                return
+            
+            now_t = time.time()
+            elapsed = now_t - self._cycle_audit['start']
+            
+            # 对耗时进行排行 (手动查看时展示前 10 名)
+            top_tasks = sorted(self._cycle_audit['times'].items(), key=lambda x: x[1], reverse=True)[:10]
+            if not top_tasks:
+                logger.info(f"ℹ️ 过去 {elapsed:.1f}s 内无 UI 任务记录。")
+                return
+
+            lines = [f"📊 [UI 线程画像回顾] 统计周期: {elapsed:.1f}s (Top 10)"]
+            for name, dur in top_tasks:
+                count = self._cycle_audit['counts'].get(name, 1)
+                avg = dur / count
+                lines.append(f"  - {name:<40} : {dur:>7.1f}ms / {count:>4d}次 (均值 {avg:>5.1f}ms)")
+            
+            logger.warning("\n".join(lines))
+            
+            if reset:
+                # 重置计数器，开始新一轮画像
+                self._cycle_audit = {'times': {}, 'counts': {}, 'start': now_t}
+                logger.info("✅ 性能统计数据已重置。")
+        except Exception as e:
+            logger.error(f"❌ 性能审计展示失败: {e}")
+
     def open_realtime_monitor(self):
         """打开实时数据服务监控窗口 (支持窗口复用)"""
         if hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win and self._realtime_monitor_win.winfo_exists():
@@ -13532,6 +13691,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             auto_chk = tk.Checkbutton(perf_frame, text=f"Auto Guard(Clip at {self.realtime_service.mem_threshold_mb}MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
             auto_chk.pack(side="left", padx=5)
+
+            # --- [NEW] UI 性能审计按钮 ---
+            audit_btn = tk.Button(perf_frame, text="🔍 UI Audit", command=lambda: self.show_ui_performance_audit(reset=True), 
+                                 font=("Microsoft YaHei", 9, "bold"), fg="#d35400", bg="#fdf2e9")
+            audit_btn.pack(side="left", padx=10)
 
             # Simple text area for status and logs
             text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
@@ -13800,7 +13964,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 #停止刷新
                 self.stop_refresh()
                 self.df_all = df
-                self.refresh_tree(df)
+                self.refresh_tree(df, force=True)
                 idx =file_path.find('monitor')
                 status_txt = file_path[idx:]
                 # logger.info(f'status_txt:{status_txt}')
