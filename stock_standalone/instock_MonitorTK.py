@@ -1590,90 +1590,105 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._schedule_after(60*1000, self.schedule_15_30_job)
 
-    # worker
     def run_15_30_task(self):
+        """盘后自动任务：包含离线行情存档与所有子面板的持久化"""
         if getattr(self, "_task_running", False):
             return
 
-        # ✅ 每日自动保存 SectorBiddingPanel 历史数据
-        # [REFINED] 如果面板不存在，先初始化（确保在主线程执行）以加载最新信号，然后强行保存快照
-        if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
-            try:
-                import queue
-                wait_q = queue.Queue()
+        # ✅ 每日自动保存 SectorBiddingPanel 历史数据 (高精度密度版)
+        # 1. 预先准备数据快照 (提升作用域，确保全局可用)
+        try:
+            import queue
+            wait_q = queue.Queue()
+            df_feed = None
+            
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                df_feed = self.df_all.copy()
+                if 'code' not in df_feed.columns and df_feed.index.name == 'code':
+                    df_feed = df_feed.reset_index()
+            
+            if df_feed is None:
+                logger.warning("🕒 [15:30 Task] df_all empty at 15:30, aborting save.")
+            else:
                 def _init_panel_task():
+                    """在 UI 线程仅执行轻量化实例化与异步喂数"""
                     try:
                         from sector_bidding_panel import SectorBiddingPanel
                         if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
                             self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                            logger.info("📡 [15:30 Task] Auto-initialized SectorBiddingPanel on Main thread.")
-                            
-                            # ⭐ 立即喂入当日最终行情数据，确保 detector 有数可存
-                            if hasattr(self, 'df_all') and not self.df_all.empty:
-                                logger.info(f"📊 [15:30 Task] Feeding EOD data: {len(self.df_all)} stocks. Cols: {list(self.df_all.columns[:10])}...")
-                                # 为保万一，在主线程喂数前做一次列映射兼容
-                                df_feed = self.df_all.copy()
-                                if 'code' not in df_feed.columns and df_feed.index.name == 'code':
-                                    df_feed = df_feed.reset_index()
-                                
-                                self.sector_bidding_panel.on_realtime_data_arrived(df_feed, force_update=True)
-                                logger.info("📊 [15:30 Task] Fed data to SectorBiddingPanel successfully.")
-                            else:
-                                logger.warning("⚠️ [15:30 Task] df_all still empty, Panel will be blank!")
+                            logger.info("📡 [15:30 Task] Standard SectorBiddingPanel instance created on UI thread.")
+                        
+                        # ⭐ 异步喂数：任务进入面板自带的 _worker 线程并行处理，绝不阻塞 UI
+                        self.sector_bidding_panel.on_realtime_data_arrived(df_feed, force_update=False)
                     except Exception as ex:
-                        logger.error(f"Inner init error: {ex}")
+                        logger.error(f"Panel dispatch-init error: {ex}")
                     finally:
                         wait_q.put(True)
 
                 if hasattr(self, "tk_dispatch_queue"):
-                    # [NEW] 启动面板前，先确保 df_all 已经拉到数据 (重启时的冷启动保护)
-                    retry_cnt = 0
-                    while (not hasattr(self, 'df_all') or self.df_all.empty) and retry_cnt < 10:
-                        logger.info(f"⏳ [15:30 Task] Waiting for df_all data (retry {retry_cnt})...")
-                        time.sleep(1)
-                        retry_cnt += 1
-
                     self.tk_dispatch_queue.put(_init_panel_task)
                     try:
-                        wait_q.get(timeout=10)
+                        # a. 等待 UI 实例化任务本身下发完成
+                        wait_q.get(timeout=10) 
+                        
+                        # b. ⭐ [SYNC-DENSITY-CHECK] 核心策略：直到全量指标提取完成且队列清空
+                        detector = getattr(self.sector_bidding_panel, 'detector', None)
+                        worker_obj = getattr(self.sector_bidding_panel, '_worker', None)
+                        if detector and worker_obj:
+                            logger.info("📊 [15:30 Task] Monitoring indicator density (waiting for scores)...")
+                            sync_start = time.time()
+                            target_count = len(df_feed)
+                            
+                            # 持续检测计算深度：只要得分池还没填满（<90%）或者队列还有数，就继续等
+                            # 即使是新面板启动，也会因为这个循环而等待 K 线抓取和评分计算完成
+                            while (time.time() - sync_start < 60.0):
+                                q_count = worker_obj.df_queue.qsize() if hasattr(worker_obj.df_queue, 'qsize') else 0
+                                score_count = len(detector._tick_series)
+                                
+                                # 成功判定：计算队列为空且已抓取超过 90% 的股票指标
+                                if q_count == 0 and score_count >= (target_count * 0.9):
+                                    break
+                                time.sleep(1.5)
+                            
+                            # 额外缓冲 3s，确保分值聚合到板块
+                            time.sleep(3.0)
+                            logger.info(f"⏳ [15:30 Task] EOD calculation sync complete. scores:{len(detector._tick_series)} in {time.time()-sync_start:.1f}s.")
+                        else:
+                            time.sleep(5.0) 
                     except queue.Empty:
-                        logger.warning("🕒 [15:30 Task] SectorBiddingPanel init timeout")
+                        logger.warning("🕒 [15:30 Task] SectorBiddingPanel dispatch timeout")
                 else:
-                    # Fallback if queue not ready
                     from sector_bidding_panel import SectorBiddingPanel
                     self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
 
-            except Exception as e:
-                logger.error(f"Failed to auto-init SectorBiddingPanel in task: {e}")
+                # --- 此时得分已由工作线程处理完毕，执行高采样率存档 ---
+                if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
+                    try:
+                        if cct.get_trade_date_status():
+                            detector = getattr(self.sector_bidding_panel, 'detector', None)
+                            if detector:
+                                # 同步极速聚合板块分
+                                detector.update_scores()
+                                detector.save_persistent_data(force=True)
+                                logger.info("✅ [15:30 Task] SectorBiddingPanel 归档圆满完成 (数据已熟透)。")
+                    except Exception as e:
+                        logger.error(f"❌ [15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
 
-        if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
-            try:
-                # 🛡️ [FIX] 增加交易日判定，防止非交易日强制保存导致数据被空 session 覆盖
-                if cct.get_trade_date_status():
-                    if hasattr(self.sector_bidding_panel, 'detector'):
-                        # 💡 使用 force=True 确保在收盘后也能保存
-                        self.sector_bidding_panel.detector.save_persistent_data(force=True)
-                        logger.info("✅ [15:30 Task] SectorBiddingPanel 每日历史数据自动保存完成 (TradeDay=True)")
-                else:
-                    logger.info("ℹ️ [15:30 Task] Skip SectorBiddingPanel save: Not a trade date.")
-            except Exception as e:
-                logger.error(f"❌ [15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
+        except Exception as global_e:
+            logger.error(f"❌ [15:30 Task] Global Exception in run_15_30_task: {global_e}")
 
+        # --- 其他模块自动保存：LiveStrategy ---
         if hasattr(self, "live_strategy"):
             try:
-                # 提取窗口名称用于保存位置
-                # unique_code 格式为 "concept_name_code" 或 "concept_name"
                 now_time = cct.get_now_time_int()
-                if now_time > 1500:
+                if now_time >= 1500:
                     self.live_strategy._save_monitors()
-                    logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
-                else:
-                    logger.info(f"[on_close] now:{now_time} 未到收盘时间 未进行_save_monitors SAVE")
-
+                    logger.info(f"✅ [15:30 Task] LiveStrategy monitors saved OK at {now_time}")
             except Exception as e:
-                logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
+                logger.warning(f"❌ [15:30 Task] LiveStrategy saving failed: {e}")
 
         today = cct.get_today('')
+        global write_all_day_date
         if write_all_day_date == today:
             logger.info(f'Write_market_all_day_mp 已经完成')
             return
@@ -1686,6 +1701,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 CFG = cct.GlobalConfig(conf_ini)
                 # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
                 CFG.set_and_save("general", "write_all_day_date", today)
+                write_all_day_date = today
             else:
                 logger.info(f"today: {today} is trade_date :{cct.get_trade_date_status()} not to Write_market_all_day_mp")
 
