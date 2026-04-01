@@ -22,24 +22,30 @@ from tk_gui_modules.window_mixin import WindowMixin
 from signal_bus import get_signal_bus, SignalBus, BusEvent
 from JohnsonUtil import commonTips as cct
 
-class VolumeDetailsDialog(QDialog):
+class VolumeDetailsDialog(QDialog, WindowMixin):
     """持久化的放量详情弹窗"""
     code_clicked = pyqtSignal(str, str) # 信号联动 (代码, 名称)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🔥 今日异动放量个股 (Top 30)")
-        self.resize(450, 600)
         self.setMinimumWidth(380)
         self._is_updating = False # 更新标志
         
-        # 窗口内置布局
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        # 加载窗口位置与大小
+        self.load_window_position_qt(self, "volume_details_dialog", default_width=450, default_height=600)
         
-        # 头部说明
-        header = QLabel("点击代码可联动查看分时图 (双击行亦可)")
-        header.setStyleSheet("color: #888; font-size: 11px;")
+        # [NEW] 设置窗口标志：置顶及工具窗口样式 (工具窗口在 Windows 下有更窄的标题栏)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        
+        # 窗口内置布局 (超窄边框配置)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        
+        # 头部说明 (精简版)
+        header = QLabel("🔥 异动放量 | 双击行联动")
+        header.setStyleSheet("color: #ffa500; font-size: 12px; padding-left: 5px; font-weight: bold;")
         layout.addWidget(header)
         
         # 表格展示
@@ -49,39 +55,37 @@ class VolumeDetailsDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(True) # ✅ 启用排序
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setDefaultSectionSize(26) # 行高微调 (适应 13px 文字)
+        self.table.setSortingEnabled(True)
+        
+        h_header = self.table.horizontalHeader()
+        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        h_header.setFixedHeight(28) # 表头高度微调
+        
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: #1a1a1a;
-                color: #ddd;
-                gridline-color: #333;
+                background-color: #0d121f;
+                color: #ffffff;
+                gridline-color: #2a2d42;
                 border: none;
             }
             QHeaderView::section {
-                background-color: #252525;
-                color: #aaa;
+                background-color: #1a1c2c;
+                color: #888;
                 padding: 4px;
-                border: 0.5px solid #333;
+                border: 0.5px solid #2a2d42;
+                font-weight: bold;
             }
             QTableWidget::item:selected {
-                background-color: #333;
+                background-color: #2a2d42;
+                color: #00ff88;
             }
         """)
         
         self.table.itemClicked.connect(self._on_item_clicked)
         self.table.itemDoubleClicked.connect(self._on_item_clicked)
-        self.table.itemSelectionChanged.connect(self._on_selection_changed) # ✅ 支持键盘上下键联动
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self.table)
-        
-        # 底部关闭按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        close_btn = QPushButton("关闭")
-        close_btn.setFixedWidth(80)
-        close_btn.clicked.connect(self.hide) # 点击关闭只是隐藏
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
         
     def _on_item_clicked(self, item):
         if item:
@@ -147,6 +151,16 @@ class VolumeDetailsDialog(QDialog):
             
         self.table.setSortingEnabled(True) # 恢复自适应排序
         self._is_updating = False
+
+    def closeEvent(self, event):
+        """关闭事件时保存位置"""
+        self.save_window_position_qt_visual(self, "volume_details_dialog")
+        event.accept()
+
+    def hideEvent(self, event):
+        """隐藏事件时保存位置 (用于该 Dialog 频繁 hide/show 的场景)"""
+        self.save_window_position_qt_visual(self, "volume_details_dialog")
+        super().hideEvent(event)
 
 logger = logging.getLogger(__name__)
 
