@@ -2925,14 +2925,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.stock_table.setColumnCount(len(self.headers))
 
-        # 使用映射显示中文表头
         display_headers = [self.column_map.get(h, h) for h in self.headers]
         self.stock_table.setHorizontalHeaderLabels(display_headers)
         self.stock_table.setSortingEnabled(True)
         headers = self.stock_table.horizontalHeader()
-        headers.setStretchLastSection(True)
         # 设置表格列自适应
-        # ⭐ [BUGFIX REVERTED] 恢复自动宽度，以保证默认显示不空旷
+        # [RESTORE] 恢复内容自适应模式，并在数据填充后通过 _limit_table_column_widths 统一调优
         for col in range(len(self.headers)):
             headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         
@@ -7497,17 +7495,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.viewport().setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
             
-            # ⭐ [BUGFIX] 限制过宽列，防止挤压 K 线图
-            if not df.empty:
+            # ⭐ [BUGFIX] 强制触发列宽重算并限制过宽列，实现“启动即紧凑”
+            if update_type == "FULL" and not df.empty:
                 try:
-                    # 确保 i 有效，防止 headers 长度与表格列数不匹配
-                    header_count = len(self.headers)
-                    table_col_count = self.stock_table.columnCount()
-                    for i in range(min(header_count, table_col_count)):
-                        h = self.headers[i]
-                        if h in ('last_reason', 'shadow_info'):
-                            if self.stock_table.columnWidth(i) > 200:
-                                self.stock_table.setColumnWidth(i, 200)
+                    self.stock_table.resizeColumnsToContents()
+                    self._limit_table_column_widths()
                 except Exception:
                     pass
 
@@ -7534,10 +7526,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
+        headers = self.stock_table.horizontalHeader()
         try:
             for i, h in enumerate(self.headers):
-                if h in ('last_reason', 'shadow_info'):
+                h_low = h.lower()
+                # 1. 尝试使用 get_compact_width 获取紧凑预设
+                cw = get_compact_width(h_low)
+                if h_low == 'name': 
+                    cw = 75 # 名称列特殊兜底
+                
+                # 2. 如果当前列宽超过预设或特定大文本列超过上限
+                if cw and self.stock_table.columnWidth(i) > cw:
+                    headers.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+                    self.stock_table.setColumnWidth(i, cw)
+                elif h_low in ('last_reason', 'shadow_info'):
+                    # 大文本列限制在 200
                     if self.stock_table.columnWidth(i) > 200:
+                        headers.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
                         self.stock_table.setColumnWidth(i, 200)
         except Exception:
             pass
@@ -9216,25 +9221,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     elif hasattr(self, 'chan_bi_curve'):
                         self.chan_bi_curve.hide()
 
-                    # 2.1 渲染线段 (Xianduan)
-                    xd_idxs = results.get('xdIdxs', [])
-                    if xd_idxs and hasattr(self, 'chan_xd_curve'):
-                        xd_x, xd_y = [], []
-                        xd_type = results.get('xdType', 0) # 1: 向上段, -1: 向下段
-                        curr_xd_type = -xd_type if xd_type != 0 else -1
-                        
-                        for idx in xd_idxs:
-                            dt = chanK.index[idx]
-                            if dt in date_to_x:
-                                xd_x.append(date_to_x[dt])
-                                val = chanK['high'].iloc[idx] if curr_xd_type == 1 else chanK['low'].iloc[idx]
-                                xd_y.append(val)
-                                curr_xd_type = -curr_xd_type
-                                
-                        self.chan_xd_curve.setData(x=xd_x, y=xd_y)
-                        self.chan_xd_curve.setPen(xd_pen)
-                        self.chan_xd_curve.show()
-                    elif hasattr(self, 'chan_xd_curve'):
+                    # 2.1 渲染线段 (Xianduan) [DISABLED: 效果不好，按用户需求取消显示]
+                    if hasattr(self, 'chan_xd_curve'):
                         self.chan_xd_curve.hide()
                         
                     # 3. 渲染中枢 (Zhongshu) - 复用对象池
@@ -10184,25 +10172,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 elif hasattr(self, 'chan_bi_curve'):
                     self.chan_bi_curve.hide()
 
-                # 2.1 渲染线段 (Xianduan)
-                xd_idxs = results.get('xdIdxs', [])
-                if xd_idxs and hasattr(self, 'chan_xd_curve'):
-                    xd_x, xd_y = [], []
-                    xd_type = results.get('xdType', 0) # 1: 向上段, -1: 向下段
-                    curr_xd_type = -xd_type if xd_type != 0 else -1
-                    
-                    for idx in xd_idxs:
-                        dt = chanK.index[idx]
-                        if dt in date_to_x:
-                            xd_x.append(date_to_x[dt])
-                            val = chanK['high'].iloc[idx] if curr_xd_type == 1 else chanK['low'].iloc[idx]
-                            xd_y.append(val)
-                            curr_xd_type = -curr_xd_type
-                            
-                    self.chan_xd_curve.setData(x=xd_x, y=xd_y)
-                    self.chan_xd_curve.setPen(xd_pen)
-                    self.chan_xd_curve.show()
-                elif hasattr(self, 'chan_xd_curve'):
+                # 2.1 渲染线段 (Xianduan) [DISABLED: 效果不好，按用户需求取消显示]
+                if hasattr(self, 'chan_xd_curve'):
                     self.chan_xd_curve.hide()
                     
                 # 3. 渲染中枢 (Zhongshu) - 复用对象池

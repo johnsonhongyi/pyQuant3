@@ -60,6 +60,11 @@ realdatadf = pd.DataFrame()  # 存储股票异动数据的DataFrame
 last_updated_time = None # 记录上次更新时间
 realdatadf_lock = threading.Lock() # 为 loaddf 创建一个全局锁
 update_interval_minutes = 10
+
+# --- [NEW] IPC 可视化联动全局状态 (VISUALIZER) ---
+_vis_last_link_key = None
+vis_var = None # 将在 __main__ 中初始化为 BooleanVar
+
 start_init = 0
 scheduled_task = None
 viewdf = pd.DataFrame()
@@ -89,13 +94,19 @@ codelist = []
 ths_code=[]
 send_stock_code = None
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
-
 # 保存每个 stock_code/item_id 的刷新状态
 refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
 # 控制更新节流
 UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
 last_update_time = 0
 message_cache = []  # 缓存队列
+# -------------------------
+# IPC 可视化联动全局变量
+# -------------------------
+_vis_last_linkage_data = None
+_vis_select_code = None
+_vis_debounce_sec = 0.5
+qt_process = None
 
 import argparse
 import logging
@@ -1346,18 +1357,99 @@ def generate_stock_code(stock_code):
         
         return f"4{stock_code}"
 
-def send_to_tdx(stock_code):
+
+# =============================================================================
+# ⭐ [NEW] 联动可视化 IPC 功能 (PyQt6 Visualizer Interaction)
+# =============================================================================
+
+def open_visualizer(code, timestamp=None):
+    """
+    联动可视化核心接口：
+    1. 内部处理防抖与去重逻辑
+    2. 异步通过 Thread 调用 Socket IPC
+    3. 如果 Visualizer 进程未启动，则自动拉起
+    """
+    global _vis_select_code, _vis_last_linkage_data
+    
+    if not code:
+        return
+
+    # 1️⃣ 联动数据逻辑处理 (去重/防抖)
+    is_linkage = timestamp is not None
+    
+    if is_linkage:
+        link_key = (str(code), str(timestamp))
+        if _vis_last_linkage_data == link_key:
+            return
+        _vis_last_linkage_data = link_key
+    else:
+        if _vis_select_code == code:
+            return
+        _vis_select_code = code
+            
+    # 2️⃣ 异步调用执行 (避免阻塞主 UI 线程)
+    threading.Thread(target=_do_open_visualizer_thread, args=(code, timestamp), daemon=True).start()
+
+def _do_open_visualizer_thread(code, timestamp):
+    """
+    后台线程执行 IPC 发送逻辑
+    """
+    global qt_process
+    try:
+        import socket
+        ipc_host, ipc_port = '127.0.0.1', 26668
+        # 默认 resample 级别，可从全局配置获取，暂设为 '1min'
+        resample = "d" 
+        is_linkage = timestamp is not None
+        
+        sent = False
+        
+        # --- 🚀 [IPC UPGRADE] 尝试 Socket 通道推送 ---
+        try:
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.settimeout(0.3)  # 进一步缩短超时
+            client_socket.connect((ipc_host, ipc_port))
+            
+            if is_linkage:
+                # 适配联动协议：TIME_LINK|代码|时间点|参数
+                ipc_msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
+                logger.debug(f"[IPC/Socket] Sent TIME_LINK for {code} at {timestamp}")
+            else:
+                # 适配基础切换协议：CODE|代码|参数
+                ipc_msg = f"CODE|{code}|resample={resample}"
+                logger.debug(f"[IPC/Socket] Sent CODE switch for {code}")
+            
+            client_socket.send(ipc_msg.encode('utf-8'))
+            client_socket.close()
+            sent = True
+        except:
+            pass
+
+                
+    except Exception as e:
+        logger.error(f"Visualizer IPC processing error: {e}")
+
+
+def link_to_visualizer(code, timestamp):
+    """
+    对外暴露的联动接口，支持快速调用
+    """
+    open_visualizer(code, timestamp)
+
+def send_to_tdx(stock_code,timestamp=None):
     """发送股票代码到通达信"""
     global send_stock_code
     if send_stock_code and send_stock_code == stock_code:
         return
     else:
         send_stock_code = stock_code
-        
+
     tdx_state = tdx_var.get()
     ths_state = ths_var.get()
     dfcf_state = dfcf_var.get()
-    if not tdx_state and not ths_state and not dfcf_state:
+    vis_state = vis_var.get()
+
+    if not tdx_state and not ths_state and not dfcf_state and not vis_state:
         root.title(f"股票异动数据监控")
     else:
 
@@ -1377,8 +1469,10 @@ def send_to_tdx(stock_code):
 
         # 在新线程中执行发送操作，避免UI卡顿
         threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
-
-
+        if vis_state:
+            # ⭐ [NEW] 触发可视化 IPC 联动
+            open_visualizer(stock_code,timestamp)
+            
 def broadcast_stock_code(stock_code,message_type='stock'):
     if isinstance(stock_code, dict):
         stock_code = stock_code['content']
@@ -2294,6 +2388,8 @@ def update_linkage_status():
     tdx_state = tdx_var.get()
     ths_state = ths_var.get()
     dfcf_state = dfcf_var.get()
+    vis_state = vis_var.get()
+
     if not tdx_state:
         global tdx_window_handle
         tdx_window_handle = 0
@@ -2304,9 +2400,48 @@ def update_linkage_status():
     if not dfcf_state:
         global dfcf_process_hwnd
         dfcf_process_hwnd = 0
+    
+    # 持久化联动状态
+    save_linkage_config()
+    
     if uniq_var.get() or not uniq_var.get():
         show_tasks()
-    logger.info(f"TDX: {tdx_var.get()}, THS: {ths_var.get()}, DC: {dfcf_var.get()}, Uniq: {uniq_var.get()},Sub: {sub_var.get()} ,Win, {win_var.get()}")
+    logger.info(f"TDX: {tdx_state}, THS: {ths_state}, VIS: {vis_state}, DC: {dfcf_state}, Uniq: {uniq_var.get()}, Sub: {sub_var.get()}, Win: {win_var.get()}")
+
+def save_linkage_config():
+    """保存联动开关状态到本地 JSON"""
+    try:
+        config_path = os.path.join(BASE_DIR, "linkage_config.json")
+        config = {
+            "tdx": tdx_var.get(),
+            "ths": ths_var.get(),
+            "dfcf": dfcf_var.get(),
+            "vis": vis_var.get(),
+            "uniq": uniq_var.get(),
+            "sub": sub_var.get(),
+            "win": win_var.get()
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        logger.error(f"Failed to save linkage config: {e}")
+
+def load_linkage_config():
+    """从本地 JSON 加载联动开关状态"""
+    try:
+        config_path = os.path.join(BASE_DIR, "linkage_config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                tdx_var.set(config.get("tdx", True))
+                ths_var.set(config.get("ths", True))
+                dfcf_var.set(config.get("dfcf", False))
+                vis_var.set(config.get("vis", False))
+                uniq_var.set(config.get("uniq", False))
+                sub_var.set(config.get("sub", False))
+                win_var.set(config.get("win", False))
+    except Exception as e:
+        logger.error(f"Failed to load linkage config: {e}")
 
 def daily_task():
     """
@@ -4202,9 +4337,13 @@ def open_archive_view_window(filename):
         stock_info = tree_widget.item(selected_item, 'values')
         if not stock_info:
             return
-
+        _updated_time = stock_info[-1][:10]
+        if len(_updated_time) == 10:
+            timestamp = _updated_time
+        else:
+            timestamp = None
         stock_code = str(stock_info[0]).zfill(6)
-        send_to_tdx(stock_code)
+        send_to_tdx(stock_code,timestamp)
 
         logger.info(f"选中股票代码: {stock_code}")
         time.sleep(0.1)
@@ -4219,9 +4358,13 @@ def open_archive_view_window(filename):
         vals = tree_widget.item(row_id, "values")
         if not vals:
             return
-
+        _updated_time = vals[-1][:10]
+        if len(_updated_time) == 10:
+            timestamp = _updated_time
+        else:
+            timestamp = None
         code = str(vals[0]).zfill(6)
-        send_to_tdx(code)
+        send_to_tdx(code,timestamp)
 
     # 绑定事件
     # tree.bind("<Button-3>", show_menu)             # 右键菜单
@@ -4379,59 +4522,6 @@ def save_monitor_list():
 
     archive_monitor_list()
 
-
-# def load_monitor_list():
-#     """
-#     从文件加载监控股票列表（自动升级旧结构）。
-#     确保返回值总是 List[List]，且每条记录至少包含8个字段（含 create_time）。
-#     """
-#     if not os.path.exists(MONITOR_LIST_FILE):
-#         return []
-
-#     # 读取原始文件
-#     try:
-#         with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
-#             loaded_raw = json.load(f)
-#     except (json.JSONDecodeError, TypeError, OSError) as e:
-#         logger.info(f"⚠️ 读取监控列表失败: {e}")
-#         return []
-
-#     if not isinstance(loaded_raw, list):
-#         logger.info("⚠️ 文件内容不是列表，已忽略。")
-#         return []
-
-#     upgraded = []
-#     changed = False
-#     now_str = datetime.now().strftime("%Y-%m-%d %H")
-
-#     for idx, item in enumerate(loaded_raw):
-#         # 只接受 list/tuple
-#         if not isinstance(item, (list, tuple)):
-#             logger.info(f"⚠️ 跳过无效记录 index={idx}: {item!r}")
-#             continue
-
-#         row = list(item)
-
-#         # 若缺失 create_time，则补充
-#         if len(row) < 8:
-#             row.append(now_str)
-#             changed = True
-#             logger.info(f"升级监控记录: code={row[0] if row else 'UNKNOWN'} -> 添加 create_time={now_str}")
-
-#         upgraded.append(row)
-
-#     # ✅ 如果有变更，写回文件
-#     if changed:
-#         try:
-#             with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
-#                 json.dump(upgraded, f, ensure_ascii=False, indent=2)
-#             logger.info(f"已自动升级并回写文件: {MONITOR_LIST_FILE}")
-#         except OSError as e:
-#             logger.info(f"⚠️ 写入文件失败: {e}")
-
-#     # ✅ 如果没有任何升级发生，就返回规范化后的 loaded_raw
-#     # （保证外部调用返回的是 list[list]）
-#     return upgraded if changed else [list(item) for item in loaded_raw if isinstance(item, (list, tuple))]
 
 def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
     """
@@ -4605,120 +4695,6 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
 
     return temp_df
 
-# def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
-#     global realdatadf, loaded_df, last_updated_time, date_write_is_processed
-
-#     now_int = get_now_time_int()
-
-#     # ---------- 第一阶段：交易前、初始化时，必须强制获取 ----------
-#     if not get_work_time():  # 非交易时间
-#         return get_stock_changes(selected_type=selected_type, stock_code=stock_code)
-
-#     # ---------- 第二阶段：交易进行中 ----------
-#     # loaded_df 未初始化 → 必须强制获取
-#     if loaded_df is None:
-#         return get_stock_changes(selected_type=selected_type, stock_code=stock_code)
-
-#     # ---------- 第三阶段：普通更新逻辑 ----------
-#     if stock_code:
-#         stock_code = stock_code.zfill(6)
-
-#     return get_stock_changes(selected_type=selected_type, stock_code=stock_code)
-
-
-# def _get_tdx_data_df(stock_code=None):
-#     global sina_data_last_updated_time,sina_data_df
-#     global pytables_status,today_tdx_df
-#     basedir = "G:" + os.sep
-#     ptype='low'
-#     resample='d'
-#     dl = 70
-#     filter='y'
-#     fname = os.path.join(basedir, "tdx_last_df.h5")             # 原始 HDF5
-#     table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
-#     # table = "all"
-#     current_time = datetime.now()
-#     # tdx_df = None
-#     if pytables_status and today_tdx_df.isEmpty() :
-#         today_tdx_df = read_hdf_table(fname,table)
-#         sina_data_df = sina_data_df + today_tdx_df.loc('high4')
-#     return today_tdx_df
-# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
-
-
-# def _get_win32_exe_path():
-#     """
-#     使用 Win32 API 获取当前进程的主模块路径。
-#     这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
-#     """
-#     # 假设是 32767 字符的路径长度是足够的
-#     MAX_PATH_LENGTH = 32767 
-#     buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
-    
-#     # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
-#     # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
-#     ctypes.windll.kernel32.GetModuleFileNameW(
-#         None, buffer, MAX_PATH_LENGTH
-#     )
-#     return os.path.dirname(os.path.abspath(buffer.value))
-
-
-# def get_base_path(log=logger):
-#     """
-#     获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
-#     使用 Win32 API 优先获取真实的 EXE 目录。
-#     """
-    
-#     # 检查是否为 Python 解释器运行
-#     is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
-    
-#     # 1. 普通 Python 脚本模式
-#     if is_interpreter and not getattr(sys, "frozen", False):
-#         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
-#         try:
-#             # 此时 __file__ 是可靠的
-#             path = os.path.dirname(os.path.abspath(__file__))
-#             log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
-#             return path
-#         except NameError:
-#              pass # 忽略交互模式
-    
-#     # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
-#     # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
-#     if sys.platform.startswith('win'):
-#         try:
-#             # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
-#             real_path = _get_win32_exe_path()
-            
-#             # 核心：确保我们返回的是 EXE 的真实目录
-#             if real_path != os.path.dirname(os.path.abspath(sys.executable)):
-#                  # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
-#                  # 或者程序被从其他地方调用，我们信任 Win32 API。
-#                  log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
-#                  return real_path
-            
-#             # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
-#             if not is_interpreter:
-#                  log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
-#                  return real_path
-
-#         except Exception:
-#             pass 
-
-#     # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
-#     if getattr(sys, "frozen", False) or not is_interpreter:
-#         path = os.path.dirname(os.path.abspath(sys.executable))
-#         log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
-#         return path
-
-#     # 4. 极端脚本回退
-#     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
-#     return os.path.dirname(os.path.abspath(sys.argv[0]))
-
-
-# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
-#print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
-#print(f'get_base_path() : {get_base_path()}')
 
 def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None,log=logger):
     """
@@ -5027,23 +5003,6 @@ def _get_sina_data_realtime(stock_code=None):
 
     return df
 
-# def _get_stock_changes(selected_type=None, stock_code=None):
-#     """获取股票异动数据"""
-#     global realdatadf,loaded_df
-#     global last_updated_time
-#     current_time = datetime.now()
-
-#     if loaded_df is None:
-#         temp_df = get_stock_changes_time(selected_type=selected_type)
-#     else:
-#         temp_df = loaded_df.copy()
-
-#     temp_df = filter_stocks(temp_df,selected_type)
-    
-#     if stock_code:
-#         stock_code = stock_code.zfill(6)
-#         temp_df = temp_df[temp_df['代码'].astype(str).str.zfill(6) == str(stock_code)]
-#     return temp_df
  
 def _get_stock_changes(selected_type=None, stock_code=None):
     """获取股票异动数据（带安全检查）"""
@@ -5130,32 +5089,6 @@ def refresh_stock_data(window_info, tree, item_id,debug=False):
             result_queue.put(("error", e, tree, window_info, item_id))
     threading.Thread(target=task, daemon=True).start()
 
-# def handle_error(payload, tree, window_info, item_id):
-#     """处理后台线程或消息队列中的错误"""
-#     import traceback
-#     logger.info(f"⚠️ 异步任务出错:{payload}")
-#     traceback.print_exc()
-
-# def handle_error(payload, tree, window_info, item_id):
-#     """处理后台线程或消息队列中的错误"""
-
-#     logger.info(f"⚠️ 异步任务出错: {payload}")
-
-#     # ---- 1) payload 是真正的异常 ----
-#     if isinstance(payload, BaseException):
-#         logger.error("异常类型: %s", type(payload).__name__)
-#         traceback.print_exception(type(payload), payload, payload.__traceback__)
-#         return
-
-#     # ---- 2) payload 不是异常，打印详细结构 ----
-#     logger.error("⚠️ payload 不是异常对象，类型: %s", type(payload))
-#     logger.error("⚠️ payload 内容: %r", payload)
-
-#     # ---- 3) 如果是 dict，检查是否有 'error' 等字段 ----
-#     if isinstance(payload, dict):
-#         for key in ("error", "exception", "msg", "message"):
-#             if key in payload:
-#                 logger.error("⚠️ payload 内含错误信息字段 %s: %r", key, payload[key])
 
 def handle_error(payload, tree, window_info, item_id):
     """处理后台线程或消息队列中的错误（更强壮版本）"""
@@ -5729,7 +5662,7 @@ def on_monitor_double_click(event, stock_code,manual=False):
 
 
 
-def update_code_entry(stock_code):
+def update_code_entry(stock_code,timestamp=None):
     """更新主窗口的 Entry"""
     global code_entry
     logger.info(f'update_code_entry:{stock_code}')
@@ -5739,7 +5672,7 @@ def update_code_entry(stock_code):
     if stock_code:
         stock_code = stock_code.zfill(6)
         selected_item = tree.selection()
-        send_to_tdx(stock_code)
+        send_to_tdx(stock_code,timestamp)
     # safe_set_stock_code(code_entry, stock_code)
     # code_entry.delete(0, tk.END)
     # code_entry.insert(0, stock_code)
@@ -6910,13 +6843,14 @@ def create_monitor_window(stock_info):
         command=lambda code=stock_code: refresh_manual(code)
     )
     btn_refresh.pack(side=tk.LEFT, padx=10)
-
+    date_str = c_time[:10]
     # === 注册事件 ===
     place_new_window(monitor_win, stock_code)
     refresh_stock_data(window_info, monitor_tree, item_id)
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
     monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
-    monitor_tree.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+    # monitor_tree.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+    monitor_tree.bind("<Button-1>", lambda event: update_code_entry(stock_code, date_str))
     monitor_tree.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event, stock_code))
     monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
 
@@ -7860,7 +7794,8 @@ def open_rules_overview(parent_win=None):
             stock_info = tree.item(selected_item, 'values')
             stock_code = stock_info[0]
             stock_code = stock_code.zfill(6)
-            send_to_tdx(stock_code)
+            _updated_time = stock_info[-1]
+            send_to_tdx(stock_code,_updated_time)
 
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
@@ -7882,7 +7817,8 @@ def open_rules_overview(parent_win=None):
         code = vals[0]
         name = vals[1]
         # logger.info(f'on_single_click sel : {row_id} vals : {vals}')
-        send_to_tdx(code)
+        _updated_time = vals[-1]
+        send_to_tdx(code,_updated_time)
         # code_entry.delete(0, tk.END)
         # code_entry.insert(0, code)
 
@@ -8065,16 +8001,21 @@ def open_alert_center():
         logger.info("Timer reset due to user action")
 
     def on_tree_select(event):
-        """处理表格行选择事件"""
+        """处理报警中心表格行选择事件"""
         tree = event.widget
-        # logger.info(f"事件来源: {tree}")
         selected_item = tree.selection()
-        # logger.info(f'selected_item : {selected_item}')
         if selected_item:
             stock_info = tree.item(selected_item, 'values')
+            timestamp = stock_info[0]  #提取时间戳
             stock_code = stock_info[1]
             stock_code = stock_code.zfill(6)
-            send_to_tdx(stock_code)
+            # 🚀 [IPC UPGRADE] 联动转发时带上时间信息
+            _updated_time = stock_info[-1][:10]
+            if len(_updated_time) == 10:
+                timestamp = _updated_time
+            else:
+                timestamp = None
+            send_to_tdx(stock_code,timestamp)
 
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
@@ -8091,10 +8032,16 @@ def open_alert_center():
         if not row_id:
             return
         vals = alert_tree.item(row_id, "values")
+        timestamp = vals[0]
         code = vals[1]
         name = vals[2]
         # logger.info(f'on_single_click sel : {row_id} vals : {vals}')
-        send_to_tdx(code)
+        _updated_time = stock_info[-1][:10]
+        if len(_updated_time) == 10:
+            timestamp = _updated_time
+        else:
+            timestamp = None
+        send_to_tdx(code, timestamp)
         # code_entry.delete(0, tk.END)
         # code_entry.insert(0, code)
         safe_set_stock_code(code_entry, code)
@@ -9943,17 +9890,24 @@ if __name__ == "__main__":
     frame_right.pack(side=tk.RIGHT, padx=2, pady=2)
 
     # Variables
+    global tdx_var, ths_var, dfcf_var, uniq_var, sub_var, win_var
     tdx_var = tk.BooleanVar(value=True)
     ths_var = tk.BooleanVar(value=True)
-    dfcf_var = tk.BooleanVar(value=False)
+    vis_var = tk.BooleanVar(value=False)
     uniq_var = tk.BooleanVar(value=False)
+    dfcf_var = tk.BooleanVar(value=False)
     sub_var = tk.BooleanVar(value=False)
     win_var = tk.BooleanVar(value=False)
+    
+    # 尝试并恢复持久化状态
+    load_linkage_config()
+
     checkbuttons_info = [
         ("TDX", tdx_var),
         ("THS", ths_var),
-        ("DC", dfcf_var),
+        ("VIS", vis_var),
         ("Uniq", uniq_var),
+        ("DC", dfcf_var),
         ("Sub", sub_var),
         ("Win", win_var)
     ]
@@ -10127,7 +10081,16 @@ if __name__ == "__main__":
     tree_frame.grid_columnconfigure(0, weight=1)
 
     # 绑定选择事件
-    tree.bind("<<TreeviewSelect>>", on_tree_select)
+    def on_main_tree_select(event):
+        selected = tree.selection()
+        if selected:
+            vals = tree.item(selected[0], "values")
+            timestamp = vals[0]
+            code = vals[1]
+            # 🚀 [IPC UPGRADE] 监控主表联动
+            send_to_tdx(code, timestamp)
+    
+    tree.bind("<<TreeviewSelect>>", on_main_tree_select)
 
 
 

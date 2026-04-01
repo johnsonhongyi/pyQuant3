@@ -36,6 +36,7 @@ import win32con
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 from tkinter import filedialog,Menu,simpledialog
+from concurrent.futures import ThreadPoolExecutor
 # import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
 try:
     from PyQt6 import QtWidgets, QtCore, QtGui
@@ -371,7 +372,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # ⭐ 启动计时
         self._init_start_time = time.time()
-        
+        self.executor = ThreadPoolExecutor(max_workers=4)
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
         try:
@@ -3158,10 +3159,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     latest_pkg = all_packets[-1]
                     self._is_processing_tree_data = True
                     
-                    if not hasattr(self, 'executor'):
-                        from concurrent.futures import ThreadPoolExecutor
-                        # ⭐ 保持 max_workers=1 确保任务按序执行，但通过跳帧减少排队总数
-                        self.executor = ThreadPoolExecutor(max_workers=1)
+                    # if not hasattr(self, 'executor'):
+                    #     from concurrent.futures import ThreadPoolExecutor
+                    #     # ⭐ 保持 max_workers=1 确保任务按序执行，但通过跳帧减少排队总数
+                    #     self.executor = ThreadPoolExecutor(max_workers=1)
                     
                     # 提交最新的包，执行全量同步
                     self.executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query)
@@ -4049,6 +4050,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 已打开，直接通过 IPC 发送联动指令
             self.open_visualizer(code, timestamp=timestamp)
 
+    def start_qt_async(self, code, resample):
+        if getattr(self, "_qt_starting", False):
+            return
+
+        self._qt_starting = True
+
+        def task():
+            try:
+                time.sleep(0.2)  # 仍然保留轻微延迟
+                self._start_visualizer_process(code, resample)
+            finally:
+                self._qt_starting = False
+
+        self.executor.submit(task)
 
     def _start_visualizer_process(self, code, resample=None):
         """独立方法：在子线程中安全启动 Qt 可视化进程"""
@@ -4077,7 +4092,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info(f"Launched QT GUI process via Pipe for {initial_payload}")
             
             # 给 Qt 初始化时间
-            time.sleep(1)
+            # time.sleep(1)
             
             if hasattr(self, '_df_first_send_done'):
                 self._df_first_send_done = False
