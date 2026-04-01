@@ -5875,7 +5875,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 res = last_switch_payload.get('resample', 'd')
                 if code:
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        logger.info(f"[IPC] Consolidated SWITCH_CODE for {code}")
+                        logger.debug(f"[IPC] Consolidated SWITCH_CODE for {code}")
                         self.load_stock_by_code(code, resample=res)
 
             # 🚀 [NEW] 同时轮询内部语音反馈队列，实现自发联动标记

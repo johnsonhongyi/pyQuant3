@@ -5503,7 +5503,79 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 messagebox.showwarning("警告", "交易引擎未启动")
                 return
             
+            row = self.df_all.loc[code]
+            # 构建行情数据字典
+            row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+            
+            # 构建快照数据（使用 df_all 中的正确字段名）
+            # lastp1d = 昨日收盘价, lastv1d/2d/3d = 昨日/前日/大前日成交量
+            # lasth1d/lastl1d = 昨日最高/最低价, per1d = 昨日涨幅
+            snapshot = {
+                'last_close': row_dict.get('lastp1d', row_dict.get('settle', 0)),
+                'percent': row_dict.get('per1d', row_dict.get('percent', 0)),
+                'nclose': row_dict.get('nclose', 0),    # 今日均价
+                'lowvol': row_dict.get('lowvol', 0),    # 最近最低价的地量
+                'llowvol': row_dict.get('llowvol', 0),  # 三十日内的地量
+                'ma20d': row_dict.get('ma20d', 0),      # 二十日线
+                'ma5d': row_dict.get('ma5d', 0),        # 五日线
+                'hmax': row_dict.get('hmax', 0),        # 30日最高价
+                'hmax60': row_dict.get('hmax60', 0),    # 60日最高价
+                'low60': row_dict.get('low60', 0),      # 60日最低价
+                'low10': row_dict.get('low10', 0),      # 10日最低价
+                'high4': row_dict.get('high4', 0),      # 4日最高
+                'max5': row_dict.get('max5', 0),        # 5日最高
+                'lower': row_dict.get('lower', 0),      # 布林下轨
+                'upper1': row_dict.get('upper1', 0),
+                'upper2': row_dict.get('upper2', 0),
+                'upper3': row_dict.get('upper3', 0),
+                'upper4': row_dict.get('upper4', 0),
+                'upper5': row_dict.get('upper5', 0),
+                'lastl1d': row_dict.get('lastl1d', 0),
+                'lastl2d': row_dict.get('lastl2d', 0),
+                'lastl3d': row_dict.get('lastl3d', 0),
+                'lastl4d': row_dict.get('lastl4d', 0),
+                'lastl5d': row_dict.get('lastl5d', 0),
+                'lasth1d': row_dict.get('lasth1d', 0),
+                'lasth2d': row_dict.get('lasth2d', 0),
+                'lasth3d': row_dict.get('lasth3d', 0),
+                'lasth4d': row_dict.get('lasth4d', 0),
+                'lasth5d': row_dict.get('lasth5d', 0),
+                'lastp1d': row_dict.get('lastp1d', 0),
+                'lastp2d': row_dict.get('lastp2d', 0),
+                'lastp3d': row_dict.get('lastp3d', 0),
+                'lastp4d': row_dict.get('lastp4d', 0),
+                'lastp5d': row_dict.get('lastp5d', 0),
+                'lasto1d': row_dict.get('lasto1d', 0),
+                'lasto2d': row_dict.get('lasto2d', 0),
+                'lasto3d': row_dict.get('lasto3d', 0),
+                'lasto4d': row_dict.get('lasto4d', 0),
+                'lasto5d': row_dict.get('lasto5d', 0),
+                'highest_since_buy': row_dict.get('high', 0),
+                'cost_price': row_dict.get('lastp3d', 0),  # 默认三天前收盘价为成本
+                'hvolume': row.get('hv', 0),
+                'lvolume': row.get('lv', 0),
+            }
             # 💥 [NEW] 构建增强理由 (包含 TD/Top 信息)
+            day_df = pd.DataFrame()
+            
+            if hasattr(self, 'live_strategy') and self.live_strategy:
+                # 1. 获取日线缓存
+                cache_key = f"{code}_d"
+                day_df = self.live_strategy.daily_history_cache.get(cache_key, pd.DataFrame())
+                if day_df.empty:
+                    day_df = self.live_strategy.daily_history_cache.get(code, pd.DataFrame())
+                
+                # 2. 获取当前仓位状态
+                monitors = self.live_strategy.get_monitors()
+                actual_key = code
+                if code not in monitors:
+                    for k in monitors.keys():
+                        if k.startswith(code):
+                            actual_key = k
+                            break
+                if actual_key in monitors:
+                    current_phase_obj = monitors[actual_key].get('trade_phase', "IDLE")
+                    
             enriched_reason = result.get('reason', '')
             if not day_df.empty:
                 from daily_top_detector import detect_top_signals
