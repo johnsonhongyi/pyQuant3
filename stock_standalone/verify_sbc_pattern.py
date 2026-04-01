@@ -229,9 +229,12 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             # 多日模式：日期变换时显示日期前缀
             last_date = None
             for t in ts_objs:
-                if t.date() != last_date:
+                if pd.isna(t):
+                    continue  # 跳过 NaT
+                cur_date = t.date()
+                if cur_date != last_date:
                     time_labels.append(t.strftime("%d %H:%M"))
-                    last_date = t.date()
+                    last_date = cur_date
                 else:
                     time_labels.append(t.strftime("%H:%M"))
         else:

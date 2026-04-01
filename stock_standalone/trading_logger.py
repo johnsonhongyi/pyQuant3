@@ -315,6 +315,28 @@ class TradingLogger:
             logger.error(f"Error getting selections: {e}")
             return pd.DataFrame() if pd else []
 
+    def log_signal_batch(self, records: list[tuple]) -> None:
+        """批量记录每日决策信号 (高性能事务)"""
+        if not records: return
+        try:
+            # 使用 executemany 进行批量写入
+            self.db_manager.executemany("""
+                INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators, resample)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, records)
+        except Exception as e:
+            logger.error(f"Error logging signal batch: {e}")
+
+    def log_status_batch(self, records: list[tuple]) -> None:
+        """批量记录状态变更 (用于 PhaseEngine 持久化)"""
+        if not records: return
+        try:
+            self.db_manager.executemany("""
+                UPDATE voice_alerts SET tags = ? WHERE code = ? AND resample = ?
+            """, records)
+        except Exception as e:
+            logger.error(f"Error logging status batch: {e}")
+
     def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None, resample: str = 'd') -> None:
         """
         记录每日决策信号

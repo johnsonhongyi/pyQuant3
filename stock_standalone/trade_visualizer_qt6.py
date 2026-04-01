@@ -809,37 +809,7 @@ class SignalOverlay:
                 txt.setPos(x_pos, y_pos)
                 self.text_items[target].append(txt)
 
-            # [REFINED] 距今相关信息显示 (仅在 K 线图且明确联动匹配该信号点时展示)
-            if target == 'kline' and day_df is not None and not day_df.empty:
-                try:
-                    total_len = len(day_df)
-                    days_ago = total_len - 1 - int(x_pos)
-                    # 🚀 [REFINED] 极致精简：只有当信号日期与“联动目标日期”匹配时，由于联动板需要 D+N 参考，才显示标签
-                    # 这样可以解决图中 D+ 漫天飞的问题，只显示您关注的那一个点的相对时间
-                    is_match_link = False
-                    if linkage_date:
-                        t_str = str(sig.timestamp).split(' ')[0]
-                        l_str = str(linkage_date).split(' ')[0]
-                        if t_str == l_str:
-                            is_match_link = True
-                    
-                    if days_ago >= 0 and is_match_link:
-                        ago_lbl = self._get_text_item(target)
-                        # 文字精简：D+N 或 Today
-                        text = f"D+{int(days_ago)}" if days_ago > 0 else "Today"
-                        # 颜色：采用中性灰
-                        color = "#AAAAAA"
-                        
-                        # 放置在图标下方 (买入类/关注类) 或上方 (卖出类)
-                        is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.FOLLOW, SignalType.WATCH)
-                        anchor = (0.5, -1.2) if is_buy else (0.5, 2.2)
-                        
-                        ago_lbl.setHtml(f'<div style="font-size: 8pt; color: {color};">{text}</div>')
-                        ago_lbl.setAnchor(anchor)
-                        ago_lbl.setPos(x_pos, y_pos)
-                        self.text_items[target].append(ago_lbl)
-                except Exception:
-                    pass
+            # [IPC/REFINED] 距今相关信息 D+N 已集成到联动看板，此处不再绘制以免干扰视线
 
         # 最后统一更新 scatter
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, pen=pens, data=data)
@@ -1001,7 +971,7 @@ Resample_LABELS_Days = {'d':duration_date_day,'2d':duration_date_2d,'3d':duratio
                       'w':duration_date_week,'m':duration_date_month}
 
 class DataLoaderThread(QThread):
-    data_loaded: pyqtSignal = pyqtSignal(object, object, object) # code, day_df, tick_df
+    data_loaded: pyqtSignal = pyqtSignal(object, object, object, object) # code, day_df, tick_df, signal_history_df
     code: str
     resample: str
     mutex_lock: QMutex
@@ -1025,13 +995,14 @@ class DataLoaderThread(QThread):
     MAX_CACHE_MEMORY = 5 * 1024 * 1024       # 5MB 限制
     MAX_TICK_CACHE_MEMORY = 5 * 1024 * 1024  # 5MB 限制
 
-    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True, sina=None) -> None:
+    def __init__(self, code: str, mutex_lock: QMutex, resample: str = 'd', fastohlc: bool = True, sina=None, parent_win=None) -> None:
         super().__init__()
         self.code = code
         self.resample = resample
         self.mutex_lock = mutex_lock # 存储锁对象
         self.fastohlc = fastohlc
         self.sina = sina # [NEW] Use shared Sina instance
+        self.parent_win = parent_win # [NEW] Store parent window for logger access
         self._search_code = None
         self._resample = None
         self._is_interrupted = False  # [NEW] 中断标志位
@@ -1194,10 +1165,18 @@ class DataLoaderThread(QThread):
             if day_df.empty and tick_df.empty:
                 logger.error(f"Failed to load any data for {self.code} after retries")
 
+            # 3. Fetch Signal History (Historical Trades)
+            signal_history_df = pd.DataFrame()
+            try:
+                # 即使 day_df/tick_df 成功，信号历史也应顺带加载，防止 UI 线程读取 CSV 导致闪烁
+                if hasattr(self, 'parent_win') and self.parent_win:
+                    signal_history_df = self.parent_win.logger.get_signal_history_df()
+            except: pass
+
             self._search_code = self.code
             self._resample = self.resample
             with timed_ctx("emit", warn_ms=1800):
-                self.data_loaded.emit(self.code, day_df, tick_df)
+                self.data_loaded.emit(self.code, day_df, tick_df, signal_history_df)
 
         except Exception:
             logger.exception(f"DataLoaderThread Critical Error for {self.code}")
@@ -5832,26 +5811,50 @@ class MainWindow(QMainWindow, WindowMixin):
         last_switch_payload = None
         last_link_payload = None
 
+        # ⭐ [ANTIGRAVITY FIX] 防止指令风暴导致 UI 挂起：单次轮询最多处理 N 条指令，确保 UI 线程呼吸
+        max_commands_per_poll = 15
+        commands_count = 0
+        
         try:
-            while self.command_conn.poll():
+            while commands_count < max_commands_per_poll and self.command_conn.poll():
+                commands_count += 1
+                commands_count += 1
                 cmd_data = self.command_conn.recv()
                 if not cmd_data: break
                 
                 cmd_type, payload = cmd_data
-                # logger.debug(f"[Visualizer] Polled command: {cmd_type}")
                 
                 if cmd_type == 'SWITCH_CODE':
                     last_switch_payload = payload
-                    last_link_payload = None # 切换优先级高于或覆盖联动
+                    last_link_payload = None 
                 elif cmd_type == 'TIME_LINK':
                     last_link_payload = payload
-                    # last_switch_payload = None # 联动通常携带切换意图
                 elif cmd_type == 'UPDATE_DF_DATA':
-                    # 数据更新具有增量性，仍然即时处理以保证数据一致性
-                    self._handle_update_df_data(payload)
+                    # 🚀 [OPTIMIZATION] 数据同步仅存入内存，不准在循环内触发耗时的 TableUpdate!
+                    p_type = payload.get('type')
+                    if p_type == 'UPDATE_DF_ALL':
+                        self.df_all = payload.get('data')
+                        self.df_cache = self.df_all
+                        self._pending_table_refresh = True
+                    elif p_type == 'UPDATE_DF_DIFF':
+                        self.apply_df_diff(payload.get('data'), skip_table_request=True)
+                        self._pending_table_refresh = True
+                    elif 'code' in payload and 'data' in payload:
+                        # 分时数据：可以保留即时更新，因为通常只涉及一个个股
+                        self._handle_update_df_data(payload)
                 elif cmd_type == 'CMD_SCAN_CONSOLIDATION':
                     if hasattr(self, 'on_scan_triggered'):
                         self.on_scan_triggered()
+
+            # --- 统一执行本轮最后的有效切换意图 ---
+            if last_link_payload:
+                # ... 省略细节，下方的 load_stock 会处理
+                pass 
+            
+            # 🚀 [Batch UI Update] 处理完所有指令后，统一触发一次表格刷新
+            if getattr(self, '_pending_table_refresh', False):
+                self.request_table_update()
+                self._pending_table_refresh = False
 
             # --- 统一执行本轮最后的有效切换意图 ---
             if last_link_payload:
@@ -5913,7 +5916,12 @@ class MainWindow(QMainWindow, WindowMixin):
         elif p_type == 'UPDATE_DF_DIFF':
             self.apply_df_diff(payload.get('data'))
         elif 'code' in payload and 'data' in payload:
-            self.on_realtime_update(payload['code'], payload['data'], payload.get('today_bar'))
+            tick_df = payload['data']
+            today_bar = payload.get('today_bar')
+            # 🛡️ [FIX] 补全实时 K 线逻辑：如果 payload 未预先计算 today_bar (如来自 MonitorTK 的直连负载)，则自动尝试补全
+            if today_bar is None and tick_df is not None and not tick_df.empty:
+                today_bar = tick_to_daily_bar(tick_df)
+            self.on_realtime_update(payload['code'], tick_df, today_bar)
 
     def push_stock_info(self,stock_code, row):
         """
@@ -6431,8 +6439,37 @@ class MainWindow(QMainWindow, WindowMixin):
         self._current_stock_signals = new_signals
         # logger.debug(f"[PERF] Refreshed signal cache for {code}: {len(new_signals)} points")
 
-    def _on_initial_loaded(self, code, day_df, tick_df):
-        # ⚡ 立即更新标题,清除 "Loading..." 状态
+    def _on_initial_loaded(self, code, day_df, tick_df, signal_history_df=None):
+        # ⭐ [ATOMIC RENDER] 锁定 UI 更新，合而为一，防止碎片化闪烁
+        was_enabled = self.updatesEnabled()
+        if was_enabled: self.setUpdatesEnabled(False)
+        try:
+            self._on_initial_loaded_logic(code, day_df, tick_df, signal_history_df)
+        finally:
+            if was_enabled:
+                self.setUpdatesEnabled(True)
+                self.update() # 强制最后合成为完整一帧渲染
+
+    def _on_initial_loaded_logic(self, code, day_df, tick_df, signal_history_df=None):
+        # 0. ⚡ 立即同步数据到全局变量 (核心坐标系)，必须在 signal 缓存刷新之前
+        if day_df is not None and not day_df.empty:
+            # ⚡ 过滤掉今天的数据 (盘中)，只保留过去的日 K (配合实时 Ghost Bar)
+            today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
+            is_intraday = self.realtime and cct.get_work_time_duration()
+            if is_intraday or self._debug_realtime:
+                day_df = day_df[day_df.index < today_str]
+
+            self.day_df = day_df.copy()
+            self.day_df.index = pd.to_datetime(self.day_df.index).strftime('%Y-%m-%d')
+            self.current_day_df_code = code
+
+        # ⚡ 立即同步信号历史缓存，防止后续逻辑中重复加载 CSV
+        if signal_history_df is not None and not signal_history_df.empty:
+            self._hist_df_cache = signal_history_df
+            self._hist_df_last_load = time.time()
+            if code is not None: self._refresh_stock_signal_cache(code)
+        
+        # ⚡ 更新标题,清除 "Loading..." 状态
         if day_df is not None and not day_df.empty:
             self._update_plot_title(code, day_df, tick_df)
 
@@ -6450,22 +6487,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
             return
 
-        # ⚡ 过滤掉今天的数据，只保留过去的日 K
-        today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
-        is_intraday = self.realtime and cct.get_work_time_duration()
-
-        if is_intraday or self._debug_realtime:
-            day_df = day_df[day_df.index < today_str]
-
-        self.day_df = day_df.copy()
-        datetime_index = pd.to_datetime(self.day_df.index)
-        self.day_df.index = datetime_index.strftime('%Y-%m-%d')
-        
-        # ⭐ 记录当前加载成功的股票代码
-        self.current_day_df_code = code
-        # 🚀 [PERF] 加载完数据后同步更新信号缓存
-        self._refresh_stock_signal_cache(code)
-        
         # 1. 優先獲取可用於渲染的實時/模擬數據 (The "Ghost Bar" Source)
         effective_tick_df = None
         if tick_df is not None and not tick_df.empty:
@@ -6483,16 +6504,21 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(
                 f"[InitialLoad] Detailed rendering for {code} (Realtime:{self.realtime}, Sim:{self.show_strategy_simulation})"
             )
+            # 1. 生成今日实时 Bar
             today_bar = tick_to_daily_bar(effective_tick_df)
 
-            # 注意：這裡直接調用渲染，確保模擬數據被帶入
-            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=600):
-                # 重點：即便 realtime 為 False，只要 show_strategy_simulation 為 True，也要帶入 tick_df
-                self.render_charts(code, self.day_df, effective_tick_df)
+            # 2. 🚀 [FIX] 彻底解决日线补不全：在初次渲染前，先行同步数据到 day_df
+            # 我們這裡只進行數據合併，不准重複渲染
+            self.on_realtime_update(code, effective_tick_df, today_bar, skip_render=True)
 
-            # 如果 realtime 真的有開，才去啟動定時刷新或同步狀態
-            if self.realtime:
-                self.on_realtime_update(code, effective_tick_df, today_bar)
+            # 3. 执行唯一的一次重量级渲染，并带入 force=True 确保首屏出图
+            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=800):
+                self.render_charts(code, self.day_df, effective_tick_df, force=True)
+            
+            # 更新最后一次渲染时间戳，防止触发瞬间的第二次渲染（如果 poll 队列此时正好有该股更新）
+            self._last_kline_render_time[code] = time.time()
+
+
         else:
             # 3. 兜底：純歷史數據渲染
             logger.debug(f"[InitialLoad] historical rendering only for {code}")
@@ -6542,7 +6568,7 @@ class MainWindow(QMainWindow, WindowMixin):
         return need_ghost_bar 
 
 
-    def on_realtime_update(self, code, tick_df, today_bar):
+    def on_realtime_update(self, code, tick_df, today_bar, skip_render=False):
         """实时更新（极限优化 + day_df 安全合并）"""
         import time
 
@@ -6553,13 +6579,23 @@ class MainWindow(QMainWindow, WindowMixin):
         }
 
         if today_bar is None or today_bar.empty:
-            return
+            if tick_df is not None and not tick_df.empty:
+                # 🛡️ [KISS/SAFETY] 尝试在这里也进行兜底补全，防止由其他路径进入时缺失 bar
+                today_bar = tick_to_daily_bar(tick_df)
+                # 更新已记录的二级快取以便后续复用
+                if code in self._tick_cache:
+                    self._tick_cache[code]['today_bar'] = today_bar
+            else:
+                return
 
         # --- 股票匹配检查 ---
         if code != self.current_day_df_code:
             return
         if not self._debug_realtime and (not self.realtime or code != self.current_code):
             return
+        
+        if skip_render:
+             return
 
         # --- 索引统一 ---
         today_idx = pd.to_datetime(today_bar.index[0]).strftime('%Y-%m-%d')
@@ -6978,7 +7014,9 @@ class MainWindow(QMainWindow, WindowMixin):
         menubar.addAction(self.log_toggle_action)
 
         # --- [NEW] 指数快捷按钮 (使用标准 Action 以确保在菜单栏顶层可见) ---
-        index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","588930":"科创ETF"}
+        # index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","588930":"科创ETF"}
+        index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","999688":"科创50"}
+
         for code, name in index_map.items():
             act = QAction(name, self)
             act.setToolTip(f"一键直达 {name} ({code})")
@@ -7482,12 +7520,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.info(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s")
 
             # ⚡ 全量更新完成后，如果有激活的板块可见性过滤，重新应用 setRowHidden
+            # 🚀 [OPTIMIZATION] 避免无意义的 setRowHidden 调用，只有在状态真正改变时才调用 Qt 操作
             active_codes = getattr(self, '_cat_filter_visible_codes', None)
-            if active_codes and hasattr(self, '_table_item_map') and self._table_item_map:
+            if active_codes is not None and hasattr(self, '_table_item_map'):
                 self.stock_table.setUpdatesEnabled(False)
+                # 获取当前所有行的隐藏状态，避免重复操作触发布局引擎
                 for code, row_idx in self._table_item_map.items():
-                    self.stock_table.setRowHidden(row_idx, code not in active_codes)
+                    should_hide = code not in active_codes
+                    if self.stock_table.isRowHidden(row_idx) != should_hide:
+                        self.stock_table.setRowHidden(row_idx, should_hide)
                 self.stock_table.setUpdatesEnabled(True)
+
 
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
@@ -8463,12 +8506,23 @@ class MainWindow(QMainWindow, WindowMixin):
         import time
         now = time.time()
         
+        # ⚡ [OPTIMIZATION] 针对 5000+ 行的大数据列表，强行拉长刷新间隔
+        actual_interval = self._table_update_interval
+        n_rows = len(self.df_all) if self.df_all is not None else 0
+        if n_rows > 3000:
+            # 极大数据量下，刷新频率降低到 10s 一次，优先保证 K 线渲染和 UI 响应
+            actual_interval = max(actual_interval, 10.0) 
+        elif n_rows > 1000:
+            actual_interval = max(actual_interval, 3.0)
+            
         # 立即更新或延迟
-        if now - self._last_table_update_time > (self._table_update_interval * 2):
+        if now - self._last_table_update_time > (actual_interval * 1.5):
             self._flush_table_updates()
         elif not self._table_refresh_timer.isActive():
-            delay = max(50, int((self._table_update_interval - (now - self._last_table_update_time)) * 1000))
+            delay = max(50, int((actual_interval - (now - self._last_table_update_time)) * 1000))
             self._table_refresh_timer.start(delay)
+
+
 
         # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
         sizes = self.main_splitter.sizes()
@@ -8915,7 +8969,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.hdf5_mutex,
                 resample=self.resample,
                 fastohlc=fastohlc_val,
-                sina=self.sina # Pass shared instance
+                sina=self.sina, # Pass shared instance
+                parent_win=self
             )
         with timed_ctx(f"data_loaded {code}", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)
@@ -9601,6 +9656,24 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"[_check_market_gaps] Error: {e}")
 
     def render_charts(self, code, day_df, tick_df, force=False):
+        # 🚀 [ATOMIC] 开启原子渲染模式，防止 K线 -> 分信号 -> 标记 的多阶段闪烁
+        self.setUpdatesEnabled(False)
+        try:
+            self._render_charts_impl(code, day_df, tick_df, force)
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _render_charts_impl(self, code, day_df, tick_df, force=False):
+        # 🚀 [ATOMIC RENDER] 锁定 UI 更新，确保 K线->均线->信号 一体化计算与呈现
+        was_enabled = self.updatesEnabled()
+        if was_enabled: self.setUpdatesEnabled(False)
+        try:
+            self._render_charts_logic(code, day_df, tick_df, force)
+        finally:
+            if was_enabled:
+                self.setUpdatesEnabled(True)
+
+    def _render_charts_logic(self, code, day_df, tick_df, force=False):
         """
         [极限性能版] 渲染完整图表 (带有 150ms 频率节流与对象复用)
         """
@@ -10252,16 +10325,12 @@ class MainWindow(QMainWindow, WindowMixin):
                     kline_signals.extend(sim_signals)
                     self._strategy_cache[code] = (strat_key, sim_signals)
 
-        # 2. 实盘日志历史信号 (CSV) - 使用预过滤缓存优化性能
-        if now - getattr(self, '_hist_df_last_load', 0) > 30:
-            with timed_ctx("get_signal_history_df", warn_ms=200):
-                self._hist_df_cache = self.logger.get_signal_history_df()
-                if not self._hist_df_cache.empty:
-                    self._hist_df_cache['code'] = self._hist_df_cache['code'].astype(str)
-                self._hist_df_last_load = now
-                self._refresh_stock_signal_cache(code) # 全量更新后同步刷新当股缓存
+        # 2. 实盘日志历史信号 (CSV)
+        # ⭐ [OPTIMIZATION] 信号历史由 DataLoaderThread 统一加载交付，不再在此处同步读取文件
+        # if now - getattr(self, '_hist_df_last_load', 0) > 30:
+        #     self._hist_df_cache = self.logger.get_signal_history_df()
         
-        # 如果缓存过期（切股后未刷新），在此兜底刷新一次
+        # 兜底刷新当股信号缓存
         if self._last_signals_stock_code != code:
             self._refresh_stock_signal_cache(code)
             
@@ -10312,13 +10381,16 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.linkage_label = pg.TextItem(anchor=(0.5, 1), fill=(0, 0, 0, 180)) # 背景遮罩
                         self.kline_plot.addItem(self.linkage_label)
                     
-                    # 基准价与涨跌幅
+                    # 基准价与涨跌幅 (由 D+N 相对时间增强)
+                    total_len = len(day_df)
+                    days_ago = total_len - 1 - found_idx
+                    d_plus_n = f"D+{int(days_ago)}" if days_ago > 0 else "Today"
                     base_p = self.active_time_linkage.get('price') or row['close']
                     curr_p = day_df.iloc[-1]['close']
                     pct = (curr_p / base_p - 1) * 100
                     label = self.active_time_linkage.get('label', '联动')
                     
-                    full_text = f"<span style='color:#FFFF00; font-weight:bold; font-size:11pt;'>[{label}]</span><br/>" \
+                    full_text = f"<span style='color:#FFFF00; font-weight:bold; font-size:11pt;'>[{label} : {d_plus_n}]</span><br/>" \
                                 f"<span style='color:#BBBBBB;'>基准价: {base_p:.2f}</span><br/>" \
                                 f"<span style='color:{'#FF4444' if pct>=0 else '#44FF44'}; font-size:12pt; font-weight:bold;'>距今涨跌: {pct:+.2f}%</span>"
                     
@@ -12822,7 +12894,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(actual_code, name)
         else:
             # 代码相同，仅刷新渲染层以更新标尺位置
-            self._refresh_kline_view()
+            self.render_charts(actual_code, self.day_df, getattr(self, 'tick_df', None), force=True)
     
     def _on_hotlist_voice_alert(self, code: str, msg: str):
         """热点面板语音通知 - 同时更新信号日志面板"""

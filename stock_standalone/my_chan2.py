@@ -4,10 +4,10 @@ import numpy as np
 import datetime
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.log
-import numba as nb
+# import numba as nb
 import time
 
-@nb.jit(nopython=True)
+# @nb.jit(nopython=True)
 def fast_chan_inclusion(high, low, vol, amount):
     """
     Numba accelerated Chan inclusion processing
@@ -83,7 +83,7 @@ def parse2ChanK(k_data, k_values=None, chan_kdf=True):
     }, index=k_data.index[s_idx])
     return chanK
 
-@nb.njit
+# @nb.njit
 def fast_identify_fractograms(high, low, close):
     """
     Numba accelerated fractogram identification
@@ -119,7 +119,7 @@ def parse2ChanFen(chanK, recursion=False):
     )
     return list(f_types), list(f_idx)
 
-@nb.njit
+# @nb.njit
 def fast_identify_strokes(f_types, f_indices, high, low, least_khl_num):
     """
     Numba accelerated stroke identification
@@ -257,7 +257,7 @@ def parse2Xianduan(biIdx, chanK, least_windows=3):
     
     return xdIdx, final_xdType, xfenTypes
 
-@nb.njit
+# @nb.njit
 def fast_identify_central_areas(bi_idx, high, low):
     """
     Numba accelerated central area identification
