@@ -878,6 +878,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             self._schedule_after(0, _aggregator_wrapper)
 
+    def _safe_schedule_dispatch(self, delay=50):
+        if getattr(self, "_dispatch_scheduled", False):
+            return
+
+        self._dispatch_scheduled = True
+
+        def _run():
+            try:
+                self._process_dispatch_queue()
+            except Exception as e:
+                logger.error(f"dispatch run error: {e}")
+            finally:
+                self._dispatch_scheduled = False   # ✅ 放这里（关键）
+
+        try:
+            self.after(delay, _run)
+        except Exception as e:
+            logger.error(f"schedule fail: {e}")
+            self._dispatch_scheduled = False
+
     def _process_dispatch_queue(self):
         """[STABLE v5] 单心跳 + 时间预算 + 心跳检测 + 防重复调度"""
 
@@ -992,10 +1012,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if processed_count > 0 and total_time > 2000:
                 logger.warning(f"🕒 Batch Delay: {total_time:.1f}ms | {processed_count} tasks | max: {max_single_task['name']}")
 
+
             # =========================
             # ✅ 新版本（稳定）
             # =========================
-
             def _run():
                 try:
                     self._dispatch_scheduled = False   # ✅ 先释放
@@ -1106,11 +1126,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             last = getattr(self, "_last_task_finish_time", 0)
 
             # 超过 0.5s 没有执行任何任务 → 可能卡死
-            if now_t - last > 0.5:
+            # if now_t - last > 5:
+            #     if now_t - getattr(self, "_last_dispatch_kick", 0) > 1.0:
+            #         self._last_dispatch_kick = now_t
+            #         try:
+            #             self.after(100, self._process_dispatch_queue)
+            #             logger.warning("🧯 Watchdog恢复调度")
+            #         except Exception:
+            #             pass
+            if now_t - last > 5:
                 if now_t - getattr(self, "_last_dispatch_kick", 0) > 1.0:
                     self._last_dispatch_kick = now_t
                     try:
-                        self.after(100, self._process_dispatch_queue)
+                        self._safe_schedule_dispatch(100)
                         logger.warning("🧯 Watchdog恢复调度")
                     except Exception:
                         pass
