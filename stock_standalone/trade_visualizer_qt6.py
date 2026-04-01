@@ -10329,11 +10329,18 @@ class MainWindow(QMainWindow, WindowMixin):
                     found_idx = date_map[target_str_date]
 
                 if found_idx != -1:
-                    # 🚀 [NEW] 视角自动对齐
+                    # 🚀 [IPC/FIXED] 视角动态对齐：右侧紧贴最新行情，确保联动点可见且不出现大片空白
                     if self.active_time_linkage.get('auto_scroll'):
-                        self.kline_plot.setXRange(max(0, found_idx - 120), min(len(day_df)-1, found_idx + 30))
+                        last_idx = len(day_df) - 1
+                        # 1. 视口右边界：数据末尾再多给 8 根 K 线的空隙，确保“右侧永远在画面内”
+                        x_max = last_idx + 2
+                        # 2. 视口左边界：确保联动点可见 (左侧预留 30 根)，且至少显示 150 根以维持常规缩放
+                        x_min = min(found_idx - 30, x_max - 150)
+                        
+                        self.kline_plot.setXRange(max(0, x_min), x_max)
                         self.active_time_linkage['auto_scroll'] = False
-                        logger.debug(f"[IPC] View scrolled to linkage: {target_ts}")
+                        logger.debug(f"[IPC] View scrolled: last_idx={last_idx}, found_idx={found_idx}")
+                        
 
                     # 2. 绘制黄色分段竖线 (不再一线贯穿)
                     if not hasattr(self, 'linkage_v_line'):
