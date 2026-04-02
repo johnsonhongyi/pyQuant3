@@ -2489,7 +2489,76 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug(f"[init_global_concept_data] 新增 prev_data: {concepts[0]}")
 
 
+    def get_global_concepts_ranking(self, top_n=10, reverse=True):
+        """
+        [NEW] 全市场概念热度/跌幅排序，不锚定具体个股。
+        相比 get_following_concepts_by_correlation，它更适合做“大盘总览”。
+        """
+        if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+            return []
+            
+        df_all = self.df_all
+        
+        # 1. 提取涨幅序列
+        if 'percent' in df_all.columns and 'per1d' in df_all.columns:
+            percent_series = np.where((df_all['percent'] == 0) | df_all['percent'].isna(), df_all['per1d'], df_all['percent'])
+            percent_series = pd.Series(percent_series, index=df_all.index)
+        else:
+            percent_series = df_all.get('percent', df_all.get('per1d', pd.Series(0, index=df_all.index)))
+
+        # 2. 准备基础数据
+        required_cols = ['category', 'ma5d', 'ma20d', 'ma60d', 'close']
+        available_cols = [c for c in required_cols if c in df_all.columns]
+        df_tmp = df_all[available_cols].copy()
+        df_tmp['percent'] = percent_series
+        
+        # 3. 展开概念
+        df_tmp['category'] = df_tmp['category'].fillna('').astype(str)
+        df_exploded = df_tmp.assign(category=df_tmp['category'].str.split(';')).explode('category')
+        df_exploded['category'] = df_exploded['category'].str.strip()
+        
+        # 过滤无效
+        df_exploded = df_exploded[~df_exploded['category'].isin(['', '0', 'nan', 'None'])]
+        
+        # 预计算趋势
+        if 'ma5d' in df_exploded.columns and 'ma60d' in df_exploded.columns:
+            df_exploded['is_bullish'] = (df_exploded['ma5d'] > df_exploded['ma20d']) & \
+                                        (df_exploded['ma20d'] > df_exploded['ma60d']) & \
+                                        (df_exploded['close'] > df_exploded['ma60d'])
+        else:
+            df_exploded['is_bullish'] = False
+            
+        # 4. 分组聚合统计
+        g = df_exploded.groupby('category')
+        # 统计核心指标：均值、总数、趋势占比
+        agg_df = g.agg(
+            avg_percent=('percent', 'mean'),
+            count=('percent', 'size'),
+            bullish_ratio=('is_bullish', 'mean')
+        )
+        
+        # 过滤杂音（成员小于 3 的板块通常没代表性）
+        agg_df = agg_df[agg_df['count'] >= 3]
+        
+        # 5. 计算综合得分 (针对总览模式优化的公式)
+        # Score = avg_percent * (1 + bullish_ratio)
+        # 这样既考虑了当日爆发力，也考虑了板块结构性。
+        agg_df['score'] = agg_df['avg_percent'] * (1.0 + agg_df['bullish_ratio'])
+        
+        # 6. 排序并取 TopN
+        # reverse=True: 领涨优先; reverse=False: 领跌优先
+        agg_df = agg_df.sort_values('score', ascending=not reverse)
+        top_df = agg_df.head(top_n)
+        
+        results = []
+        for name, row in top_df.iterrows():
+            # 兼容 get_following_concepts_by_correlation 的返回格式
+            results.append((name, round(row['score'], 2), round(row['avg_percent'], 2), 1.0, round(row['bullish_ratio'], 2)))
+            
+        return results
+
     def get_following_concepts_by_correlation(self, code, top_n=10, reverse=True):
+
         def compute_follow_ratio(percents, stock_percent):
             """
             percents: 概念内所有股票涨幅列表
@@ -12076,6 +12145,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def_reverse = getattr(self, "_pg_default_sort_reverse", True)
         
         if code is None or code == "总览":
+            # get_global_concepts_ranking
             tcode, _ = self.get_stock_code_none(reverse=def_reverse)
             top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n, reverse=def_reverse)
             code = "总览"

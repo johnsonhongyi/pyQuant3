@@ -2684,16 +2684,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
             is_history = getattr(self, '_is_history_mode', False)
             history_date = getattr(self, '_history_date', "")
-
+            
             def _do_linkage_in_main_thread():
                 # 🚀 [FIXED] 统一联动逻辑：竞价面板核心在于时间对齐，因此无论是否历史模式都执行 link_to_visualizer
                 target_date = history_date
-                if not target_date:
-                    # 如果没有历史日期，补全为今日
-                    target_date = datetime.now().strftime('%Y-%m-%d')
-                
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if not target_date or history_date == today_str:
+                    if hasattr(host, 'open_visualizer'):
+                        host.open_visualizer(code)
                 # 1. 优先调用 link_to_visualizer (代码切换 + 时间标记)
-                if hasattr(host, 'link_to_visualizer'):
+                elif hasattr(host, 'link_to_visualizer'):
                      host.link_to_visualizer(code, target_date)
                      logger.info(f"[SectorPanel] Linked {code} at {target_date} (Unified Linkage Mode)")
                 
