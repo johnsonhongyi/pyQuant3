@@ -18,6 +18,7 @@ from functools import partial
 import signal
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 import pyqtgraph as pg # ⚡ 已移至局部作用域 (修复：由于类定义需要，恢复至全局但保持 lazy)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -2463,6 +2464,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self._voice_paused = False # [NEW] 独立的语音暂停标志
         self.verbose_log_enabled = False # [NEW] 控制台详细日志开关
         self.sina = sina_data.Sina() # [NEW] Centralized Sina instance for the main process
+        
+        # 🚀 [NEW] Centralized Thread Pool for Visualizer background tasks
+        self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+        logger.info(f"[Visualizer] Shared ThreadPoolExecutor initialized with {cct.livestrategy_max_workers} workers.")
         
         # [FIX] 内部实时进程专用的停止标志，避免污染全局 stop_flag
         self.rt_worker_stop_flag = mp.Value('b', True)

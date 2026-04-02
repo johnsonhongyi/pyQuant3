@@ -59,9 +59,15 @@ class StrategyController:
     
     def _register_builtin_strategies(self) -> None:
         """注册内置策略"""
+        # 🚀 [NEW] 获取共享线程池，用于全场扫描等耗时后台任务
+        executor = getattr(self.master, "executor", None)
+        if executor:
+            logger.info(f"[StrategyController] Found master executor. Passing to builtin strategies.")
+
         # 注册强势整理策略
         try:
-            sc_strat = StrongConsolidationStrategy()
+            # ⭐ [OPTIMIZATION] 注入共享线程池
+            sc_strat = StrongConsolidationStrategy(executor=executor)
             self.registry.register(sc_strat)
             # 根据初始配置启用/禁用
             if sc_strat.name in self._enabled_strategies:
@@ -73,7 +79,8 @@ class StrategyController:
             
         # 注册突发启动策略
         try:
-            sl_strat = SuddenLaunchStrategy()
+            # ⭐ [OPTIMIZATION] 注入共享线程池
+            sl_strat = SuddenLaunchStrategy(executor=executor)
             self.registry.register(sl_strat)
             if sl_strat.name in self._enabled_strategies:
                 self.registry.enable(sl_strat.name)

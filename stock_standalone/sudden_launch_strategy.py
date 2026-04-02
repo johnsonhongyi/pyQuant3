@@ -20,8 +20,9 @@ class SuddenLaunchStrategy(IStrategy):
     2. 形态: 一阳穿多线 (MA5/10/60) + 直达布林上轨 + 量能放大
     """
     
-    def __init__(self, config: Optional[StrategyConfig] = None):
+    def __init__(self, config: Optional[StrategyConfig] = None, executor: Optional[Any] = None):
         super().__init__(config)
+        self.executor = executor
         if not self._config.description:
             self._config.description = "捕捉一阳穿多线、直达Upper的突发启动形态"
             
