@@ -101,41 +101,77 @@ class DailyPulseEngine:
         }
 
     def _get_index_status(self):
-        """Fetch major indices status (SH, SZ, CYB)."""
+        """Fetch major indices status with robust mapping (SH=999999, KCB=999688)."""
+        idx_codes = ["000001", "399001", "399006", "000688"]
+        nm_map = {
+            "000001": "上证", "999999": "上证", 
+            "399001": "深证", "300001": "深证",
+            "399006": "创业", 
+            "000688": "科创", "999688": "科创", "000312": "科创", "999312": "科创"
+        }
+        indices = []
+        
         try:
-            sina = Sina()
-            # sh000001 (SSE), sz399001 (SZSE), sz399006 (ChiNext), sh000688 (KCB50)
-            index_codes = ['sh000001', 'sz399001', 'sz399006', 'sh000688']
-            nm_map = {
-                'sh000001': '上证指数', '999999': '上证指数',
-                'sz399001': '深证成指', 'sz399006': '创业板指',
-                'sh000688': '科创50', '999312': '科创50'
-            }
-            # Sina class handles mapping internally if structured correctly
-            # But let's use the explicit method to be safe
-            df = sina.get_stock_code_data(index_codes, index=True)
-            
-            indices = []
-            if df is not None and not df.empty:
-                for code in index_codes:
-                    if code in df.index:
-                        row = df.loc[code]
-                        name = row.get('name', code)
-                        price = row.get('now', 0)
-                        prev_close = row.get('llastp', 0)
-                        pct = 0.0
-                        if prev_close > 0:
-                            pct = (price - prev_close) / prev_close * 100
-                        indices.append({
-                            'code': code,
-                            'name': name,
-                            'price': price,
-                            'percent': round(pct, 2)
-                        })
-            return indices
+            # Synchronize with MonitorTK's successful implementation
+            from JSONData import sina_data
+            sina = sina_data.Sina()
+            # [KEY CHANGE] Use get_stock_list_data which performs internal mapping
+            idf = sina.get_stock_list_data(idx_codes, index=True)
+            if idf is not None and not idf.empty:
+                for c, r in idf.iterrows():
+                    code_str = str(c)
+                    price = r.get('now', 0)
+                    prev_close = r.get('llastp', 0)
+                    pct = 0.0
+                    if prev_close > 0:
+                        pct = (price - prev_close) / prev_close * 100
+                    
+                    indices.append({
+                        'code': code_str,
+                        'name': nm_map.get(code_str, getattr(r, 'name', code_str)),
+                        'price': price,
+                        'percent': round(pct, 2)
+                    })
+                self.logger.info(f"Sina indices (mapped) fetched: {[i['name'] for i in indices]}")
         except Exception as e:
-            self.logger.error(f"Failed to get index status: {e}")
-            return []
+            self.logger.error(f"Sina index fetch failed: {e}")
+
+        # 2. Fallback to Selector's df_all_realtime if indices list is incomplete
+        if len(indices) < len(idx_codes) and self.selector:
+            try:
+                df_all = self.selector.df_all_realtime
+                if df_all is not None and not df_all.empty:
+                    for raw_code in idx_codes:
+                        # Skip if already found in Sina
+                        name_to_find = nm_map.get(raw_code, raw_code)
+                        if any(idx['name'] == name_to_find for idx in indices): continue
+                        
+                        # Multi-mapping search (999999/999688 are standard in df_all)
+                        alt_list = [raw_code]
+                        if raw_code == "000001": alt_list.extend(["999999", "sh000001"])
+                        elif raw_code == "399001": alt_list.extend(["300001", "sz399001"])
+                        elif raw_code == "000688": alt_list.extend(["999688", "sh000688", "000312"])
+                        
+                        found_row = None
+                        for c in alt_list:
+                            if c in df_all.index:
+                                found_row = df_all.loc[c]
+                                break
+                        
+                        if found_row is not None:
+                            price = found_row.get('trade', found_row.get('price', 0))
+                            pct = found_row.get('percent', 0.0)
+                            indices.append({
+                                'code': raw_code,
+                                'name': name_to_find,
+                                'price': price,
+                                'percent': round(pct, 2)
+                            })
+                self.logger.info(f"Fallback indices populated. Total: {len(indices)}")
+            except Exception as e:
+                self.logger.error(f"Fallback index fetch failed: {e}")
+                
+        return indices
 
     def generate_daily_report(self, monitored_stocks, force_date=None):
         """
@@ -145,6 +181,14 @@ class DailyPulseEngine:
         """
         today = force_date or datetime.now().strftime("%Y-%m-%d")
         
+        # [NEW] 强制刷新 Selector 缓存数据，防止“一天没动过”
+        if self.selector:
+            try:
+                if hasattr(self.selector, 'df_all_realtime'):
+                    # 确保获取的是最新的实时行情
+                    self.selector.get_candidates_df() 
+            except: pass
+
         # 1. Get Hot Sectors
         hot_sectors = []
         if self.selector:
@@ -306,18 +350,10 @@ class DailyPulseEngine:
         sector_heat = sum([s[1] for s in hot_sectors[:5]]) / 5 if hot_sectors else 0
         
         # Base from stock sentiment (max weight reduction to avoid inflation)
-        temperature, summary = self.calculate_professional_temperature(ready_pct, sector_heat, breadth, indices)
+        temperature, _ = self.calculate_professional_temperature(ready_pct, sector_heat, breadth, indices)
+        summary = self.get_summary_text_by_temp(temperature)
         
-        if temperature > 80:
-            summary = "市场情绪火热，赚钱效应极佳，主线力量强劲。"
-        elif temperature > 60:
-            summary = "市场温和向好，局部机会活跃，适合积极博弈。"
-        elif temperature > 40:
-            summary = "市场震荡分化，赚钱效应一般，控制仓位防守。"
-        elif temperature > 20:
-            summary = "市场持续低迷，空头占据核心，保持谨慎避险。"
-        else:
-            summary = "市场冰冷到极点，风险溢出显著，建议空仓观望。"
+        summary_data = {}
             
         summary_data = {
             'temperature': round(temperature, 1),
@@ -335,8 +371,22 @@ class DailyPulseEngine:
 
 
     @staticmethod
+    def get_summary_text_by_temp(temperature):
+        """Map temperature value to professional human-readable summary."""
+        if temperature > 80:
+            return "市场情绪火热，赚钱效应极佳，主线力量强劲。"
+        elif temperature > 60:
+            return "市场温和向好，局部机会活跃，适合积极博弈。"
+        elif temperature > 40:
+            return "市场震荡分化，赚钱效应一般，控制仓位防守。"
+        elif temperature > 20:
+            return "市场持续低迷，空头占据核心，保持谨慎避险。"
+        else:
+            return "市场冰冷到极点，风险溢出显著，建议空仓观望。"
+
+    @staticmethod
     def calculate_professional_temperature(ready_pct, sector_heat, breadth, indices):
-        """Standalone reusable temperature calculation."""
+        """Standalone reusable temperature calculation (Logic Only)."""
         import numpy as np
         # 3.1 Index Impact (Average of major indices)
         avg_index_pct = np.mean([idx['percent'] for idx in indices]) if indices else 0.0
@@ -346,25 +396,25 @@ class DailyPulseEngine:
         
         # PROFESSIONAL FORMULA:
         # Base: (High Score Pct * 0.4) + (Sector Heat * 3) + 35
-        # Adjustment: Index_Pct * 12 + (Up_Ratio - 0.5) * 60
+        # Adjustment: Index_Pct * 10 + (Up_Ratio - 0.5) * 85
         base_temp = (ready_pct * 0.4) + (sector_heat * 3) + 35
-        correction = (avg_index_pct * 12) + (up_ratio - 0.5) * 60
+        correction = (avg_index_pct * 10) + (up_ratio - 0.5) * 85
         
         temperature = min(100, max(0, base_temp + correction))
         
-        summary = ""
+        # Simple status for internal mapping
         if temperature > 80:
-            summary = "市场火热"
+            status = "市场火热"
         elif temperature > 60:
-            summary = "市场活跃"
+            status = "市场活跃"
         elif temperature > 40:
-            summary = "市场平淡"
+            status = "市场平淡"
         elif temperature > 20:
-            summary = "市场低迷"
+            status = "市场低迷"
         else:
-            summary = "市场冰点"
+            status = "市场冰点"
             
-        return float(temperature), summary
+        return float(temperature), status
 
     def get_history(self, date_str):
         """Retrieve historical report."""
