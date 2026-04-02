@@ -372,7 +372,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # ⭐ 启动计时
         self._init_start_time = time.time()
-        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
         try:
@@ -1707,7 +1707,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"❌ [15:30 Task] Global Exception in run_15_30_task: {global_e}")
 
         # --- 其他模块自动保存：LiveStrategy ---
-        if hasattr(self, "live_strategy"):
+        if hasattr(self, "live_strategy") and self.live_strategy is not None:
             try:
                 now_time = cct.get_now_time_int()
                 if now_time >= 1500:
@@ -14423,6 +14423,14 @@ def parse_args():
         default=None,  # 完全不使用该参数时为 None
         help="清理数据库中非交易时段的信号记录。默认清理 signal_strategy.db。使用 'all' 清理所有数据库。用法: -cleanup-signals [signal_strategy.db|trading_signals.db|all]"
     )
+    
+    # 数据库重复记录清理 (一股一仓排重)
+    parser.add_argument(
+        "-dedup",
+        "--dedup",
+        action="store_true",
+        help="清理 follow_queue 数据库中的冗余重复活跃记录 (执行一次性排重)"
+    )
 
 
     args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
@@ -14637,6 +14645,26 @@ if __name__ == "__main__":
         print(f"✅ [清理完成] 共删除 {total_deleted} 条非交易时段记录")
         print(f"{'='*60}")
         sys.exit(0)
+        
+    # ✅ 命令行触发数据库去重清理 (一股一仓排重)
+    if getattr(args, 'dedup', False):
+        from trading_hub import get_trading_hub
+        print("\n正在启动数据库排重清理 (Deduplication Cleanup)...")
+        hub = get_trading_hub()
+        res = hub.cleanup_duplicates()
+        if res['found_dupes'] > 0:
+            print(f"✅ 处理完成: 发现 {res['found_dupes']} 只重复代码，清理了 {res['cancelled_count']} 条冗余记录。")
+        else:
+            print("✅ 检查完成: 数据库中不存在活跃的重复记录。")
+        sys.exit(0)
+
+    # 🚀 [AUTO] 启动时自动执行轻量级排重 (确保系统健壮性)
+    try:
+        from trading_hub import get_trading_hub
+        hub = get_trading_hub()
+        hub.cleanup_duplicates()
+    except Exception as e:
+        logger.error(f"Auto deduplication failed on startup: {e}")
 
     
     # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)

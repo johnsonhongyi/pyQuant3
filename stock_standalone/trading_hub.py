@@ -458,6 +458,65 @@ class TradingHub:
         except Exception as e:
             logger.error(f"[TradingHub] Update follow status error: {e}")
             return False
+
+    def cleanup_duplicates(self) -> dict[str, int]:
+        """
+        [DE-DUP] 全局排重清理 (一股一仓原则)
+        对处于活性状态的冗余记录进行强制清理，仅保留 ID 最大的一条。
+        
+        Returns:
+            {'found_dupes': count, 'cancelled_count': count}
+        """
+        results = {'found_dupes': 0, 'cancelled_count': 0}
+        try:
+            mgr = SQLiteConnectionManager.get_instance(self.signal_db)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            
+            # 找到所有重复的活性代码
+            c.execute("""
+                SELECT code, COUNT(*) 
+                FROM follow_queue 
+                WHERE status NOT IN ('EXITED', 'CANCELLED') 
+                GROUP BY code 
+                HAVING COUNT(*) > 1
+            """)
+            dupes = c.fetchall()
+            results['found_dupes'] = len(dupes)
+            
+            if not dupes:
+                return results
+                
+            total_cancelled = 0
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            for code, count in dupes:
+                # 找到该代码最新的有效 ID
+                c.execute("""
+                    SELECT MAX(id) FROM follow_queue 
+                    WHERE code = ? AND status NOT IN ('EXITED', 'CANCELLED')
+                """, (code,))
+                max_id = c.fetchone()[0]
+                
+                # 将其余记录设为 CANCELLED
+                c.execute("""
+                    UPDATE follow_queue 
+                    SET status = 'CANCELLED', updated_at = ?, 
+                        notes = COALESCE(notes, '') || ' | System Dedup Cleanup'
+                    WHERE code = ? AND id != ? AND status NOT IN ('EXITED', 'CANCELLED')
+                """, (now, code, max_id))
+                total_cancelled += c.rowcount
+            
+            conn.commit()
+            results['cancelled_count'] = total_cancelled
+            
+            if total_cancelled > 0:
+                logger.info(f"[TradingHub] De-dup Cleanup: Handled {len(dupes)} stocks, cancelled {total_cancelled} records.")
+                
+            return results
+        except Exception as e:
+            logger.error(f"[TradingHub] Cleanup duplicates error: {e}")
+            return results
     
     def get_follow_queue_df(self) -> pd.DataFrame:
         """获取待跟单队列(DataFrame格式) - 去重版本

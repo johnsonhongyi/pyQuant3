@@ -11,13 +11,14 @@ import json
 import datetime
 import multiprocessing as mp
 import pandas as pd
+import numpy as np
+from collections import deque
 import re
 import socket
 import queue
 from queue import Queue, Empty, Full
 from typing import Any, Optional, Callable, Dict, List, Union
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -428,6 +429,12 @@ class StockLiveStrategy:
 
         self.config_file = "voice_alert_config.json"
         
+        # 🚀 [NEW] K线抓取配置与状态 (Stable v2)
+        self.max_fetch_kline = cct.live_MAX_FETCH     #30  每轮最大抓取数量
+        self._kline_rr_pool: List[str] = []
+        self._kline_rr_cursor = 0
+        
+        
         # --- [NEW] 黑名单管理 (Blacklist Management) ---
         self._blacklist_data = {} # {code: {name, date, reason, hit_count}}
         # Note: 此时 trading_logger 可能还没初始化，会在后续加载
@@ -474,8 +481,16 @@ class StockLiveStrategy:
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
         
-        # 告警任务和后台扫描需要足够的并发工人，避免因 sleep/IO 阻塞导致任务积压
-        self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+        # 🛡️ [OPTIMIZATION] 统一使用主 Master 的线程池 (由用户明确要求，防止资源失控)
+        if hasattr(self.master, 'executor') and self.master.executor:
+            self.executor = self.master.executor
+            self._using_shared_executor = True
+            logger.info("✅ StockLiveStrategy: 已连接主 Master 共享线程池")
+        else:
+            self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+            self._using_shared_executor = False
+            logger.debug(f"ℹ️ StockLiveStrategy: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
+            
         self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
         
         # 初始化记录器 (必须在 _load_monitors 之前)
@@ -569,13 +584,16 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.error(f"Error shutting down VoiceAnnouncer: {e}")
                 
-        # 2. 停止线程池 (不再接收新任务，不等待)
-        if hasattr(self, "executor") and self.executor:
+        # 2. 停止线程池 (只有在非共享模式下才执行 shutdown，防止误关全局池)
+        if hasattr(self, "executor") and self.executor and not getattr(self, "_using_shared_executor", False):
             try:
                 self.executor.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
+                logger.info("StockLiveStrategy: Private executor shutdown.")
+            except (TypeError, Exception):
                 # Python 3.8 不支持 cancel_futures
-                self.executor.shutdown(wait=False)
+                try:
+                    self.executor.shutdown(wait=False)
+                except: pass
 
         # 3. ⭐ [NEW] 停止 IPC 发送线程
         try:
@@ -2306,12 +2324,62 @@ class StockLiveStrategy:
                     if hasattr(self.realtime_service, 'get_batch_minute_klines'):
                         all_klines = self.realtime_service.get_batch_minute_klines(valid_keys, n=30)
                     else:
-                        # 如果没有批量接口，则在此处并发收集
-                        from concurrent.futures import ThreadPoolExecutor
-                        def _fetch_k(c): return c, self.realtime_service.get_minute_klines(c, n=30)
-                        with ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers) as executor:
-                            results = executor.map(_fetch_k, valid_keys)
-                            all_klines = dict(results)
+                        # 🔄 [STRICT RR] 严格轮训调度 (Stable v2.1)：彻底消除漂移，确保 100% 公平全覆盖
+                        
+                        # -----------------------------
+                        # 1️⃣ 初始化/同步轮换池
+                        # -----------------------------
+                        current_set = set(valid_keys)
+                        # 仅在监控列表结构发生变化时重置池与游标
+                        if set(self._kline_rr_pool) != current_set:
+                            self._kline_rr_pool = list(valid_keys)
+                            self._kline_rr_cursor = 0
+                            logger.info(f"🔄 [RR Reset] pool rebuilt, size={len(self._kline_rr_pool)}")
+                            
+                        pool = self._kline_rr_pool
+                        pool_size = len(pool)
+                        
+                        if pool_size > 0:
+                            # -----------------------------
+                            # 2️⃣ 严格轮询切片（跨轮次平滑衔接）
+                            # -----------------------------
+                            start = self._kline_rr_cursor
+                            end = start + self.max_fetch_kline
+                            
+                            if end <= pool_size:
+                                fetch_list = pool[start:end]
+                            else:
+                                # 跨轮衔接：取末尾剩余 + 下轮开头补足
+                                fetch_list = pool[start:] + pool[:(end - pool_size)]
+                                
+                            # 更新游标位置（防御式取模，防止 pool_size 为 0 时崩溃）
+                            self._kline_rr_cursor = end % max(pool_size, 1)
+                            logger.info(f"🔄 [RR Fetch] Round-robin start={start} size={len(fetch_list)} next_cursor={self._kline_rr_cursor}")
+                        else:
+                            fetch_list = []
+
+                        if fetch_list:
+                            # -----------------------------
+                            # 3️⃣ 并发抓取执行 (使用常驻 pool)
+                            # -----------------------------
+                            future_to_code = {
+                                self.executor.submit(self.realtime_service.get_minute_klines, c, 30): c 
+                                for c in fetch_list
+                            }
+                            
+                            try:
+                                # 1.2s 全局硬超时保护，这是唯一的超时控制点
+                                for future in as_completed(future_to_code, timeout=1.2):
+                                    try:
+                                        code = future_to_code[future]
+                                        # 🚀 [CLEAN] 移除冗余的 result(timeout=0.5)，避免双重超时导致的逻辑冲突
+                                        k_data = future.result() 
+                                        if k_data is not None:
+                                            all_klines[code] = k_data
+                                    except Exception as fe:
+                                        logger.debug(f"Async kline data error for {code}: {fe}")
+                            except Exception as te:
+                                logger.debug(f"RR batch kline fetch timeout: {te}")
                 except Exception as e:
                     logger.debug(f"Batch fetch realtime data failed: {e}")
 

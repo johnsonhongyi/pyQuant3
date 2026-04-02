@@ -20,8 +20,9 @@ class StrongConsolidationStrategy(IStrategy):
     3. 检查最近2日是否呈现攻击形态 (每日新高, 量能配合)
     """
     
-    def __init__(self, config: Optional[StrategyConfig] = None):
+    def __init__(self, config: Optional[StrategyConfig] = None, executor: Optional[Any] = None):
         super().__init__(config)
+        self.executor = executor # 🚀 [NEW] 持有外部注入的线程池
         if not self._config.description:
             self._config.description = "捕捉强势整理后再次突破的个股 (如301348模式)"
         
@@ -143,9 +144,18 @@ class StrongConsolidationStrategy(IStrategy):
 
         logger.info(f"🚀 Starting Strong Consolidation scan for {len(codes)} stocks (resample={resample}, parallel={parallel})...")
 
-        if parallel and len(codes) > 50:
+        if parallel and len(codes) > 10:
+            # 🚀 [OPTIMIZATION] 优先使用注入的全局线程池
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+            
+            # 如果没有注入 executor，则使用本地池 (降级)
+            if self.executor is None:
+                logger.warning(f"[StrongConsolidation] No shared executor found. Falling back to local pool.")
+                local_pool = ThreadPoolExecutor(max_workers=int(os.cpu_count()/2) or 4)
+            else:
+                local_pool = self.executor
+
+            try:
                 # 预切片
                 def _get_sub_df(c):
                     if isinstance(df_all.index, pd.MultiIndex):
@@ -159,7 +169,7 @@ class StrongConsolidationStrategy(IStrategy):
                         else:
                             return df_all[df_all.index == c]
 
-                futures = {executor.submit(self._detect_pattern, str(c), _get_sub_df(c)): c for c in codes}
+                futures = {local_pool.submit(self._detect_pattern, str(c), _get_sub_df(c)): c for c in codes}
                 for future in as_completed(futures):
                     code = futures[future]
                     try:
@@ -177,6 +187,10 @@ class StrongConsolidationStrategy(IStrategy):
                             })
                     except Exception as e:
                         logger.error(f"Scan failed for {code}: {e}")
+            finally:
+                # 🛑 只有本地创建的池子才需要关闭，共享池禁止关闭
+                if self.executor is None and 'local_pool' in locals():
+                    local_pool.shutdown(wait=False)
         else:
             for code in codes:
                 try:
