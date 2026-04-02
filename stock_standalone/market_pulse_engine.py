@@ -353,8 +353,6 @@ class DailyPulseEngine:
         temperature, _ = self.calculate_professional_temperature(ready_pct, sector_heat, breadth, indices)
         summary = self.get_summary_text_by_temp(temperature)
         
-        summary_data = {}
-            
         summary_data = {
             'temperature': round(temperature, 1),
             'summary': summary,

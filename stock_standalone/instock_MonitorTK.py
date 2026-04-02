@@ -885,12 +885,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._dispatch_scheduled = True
 
         def _run():
+            if getattr(self, "_dispatch_running", False):
+                self._dispatch_scheduled = False   # ✅ 防止卡死
+                return
+
+            self._dispatch_running = True
+
             try:
                 self._process_dispatch_queue()
             except Exception as e:
                 logger.error(f"dispatch run error: {e}")
             finally:
-                self._dispatch_scheduled = False   # ✅ 放这里（关键）
+                self._dispatch_running = False
+                self._dispatch_scheduled = False   # ✅ 必须释放（核心）
 
         try:
             self.after(delay, _run)
@@ -900,16 +907,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _process_dispatch_queue(self):
         """[STABLE v5] 单心跳 + 时间预算 + 心跳检测 + 防重复调度"""
+        import functools
+        from collections import Counter
+        from queue import Empty
+        import time
 
         if getattr(self, '_is_closing', False) or (
             getattr(self, '_app_exiting', None) and self._app_exiting.is_set()
         ):
             return
-
-        import functools
-        from collections import Counter
-        from queue import Empty
-        import time
+        if getattr(self, "_dispatch_running", False):
+            return   # ❗ 防止重入
 
         self._dispatch_running = True
 
@@ -1017,8 +1025,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # ✅ 新版本（稳定）
             # =========================
             def _run():
+                self._dispatch_scheduled = False   # 只负责释放调度标记
                 try:
-                    self._dispatch_scheduled = False   # ✅ 先释放
                     self._process_dispatch_queue()
                 except Exception as e:
                     logger.error(f"dispatch run error: {e}")
@@ -1134,14 +1142,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #             logger.warning("🧯 Watchdog恢复调度")
             #         except Exception:
             #             pass
-            if now_t - last > 2:
+            if now_t - last > 5:
                 if now_t - getattr(self, "_last_dispatch_kick", 0) > 1.0:
                     self._last_dispatch_kick = now_t
-                    try:
-                        self._safe_schedule_dispatch(100)
-                        logger.warning("🧯 Watchdog恢复调度")
-                    except Exception:
-                        pass
+                    logger.warning("🧯 Watchdog恢复调度观察")
+                    self._last_task_finish_time = time.time()
+                    # try:
+                    #     self._safe_schedule_dispatch(100)
+                    #     logger.warning("🧯 Watchdog恢复调度")
+                    # except Exception:
+                    #     pass
 
             if debounce:
                 now = time.time()
@@ -4369,7 +4379,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 2️⃣ socket 单独计时
                         with timed_ctx("viz_IPC_send", warn_ms=300):
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                s.settimeout(1.0)
+                                s.settimeout(0.6)
                                 s.connect((ipc_host, ipc_port))
                                 s.sendall(b"DATA" + header + payload)
 
@@ -6692,6 +6702,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
+        if getattr(self, "live_strategy", None) is not None:
+            logger.warning("⚠️ live_strategy already initialized, skip")
+            return
         try:
             # 注意：realtime_service 可能还在异步加载中，传入当前值（可能为 None）
             # 稍后在 _on_realtime_service_ready 中会注入
