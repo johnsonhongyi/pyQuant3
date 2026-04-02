@@ -2309,7 +2309,7 @@ class StockLiveStrategy:
                         # 如果没有批量接口，则在此处并发收集
                         from concurrent.futures import ThreadPoolExecutor
                         def _fetch_k(c): return c, self.realtime_service.get_minute_klines(c, n=30)
-                        with ThreadPoolExecutor(max_workers=10) as executor:
+                        with ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers) as executor:
                             results = executor.map(_fetch_k, valid_keys)
                             all_klines = dict(results)
                 except Exception as e:
@@ -3121,7 +3121,7 @@ class StockLiveStrategy:
             # 手刻统计：循环总体耗时
             cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
             if cost_loop_ms > 500: # 允许合理范围，避免在 150ms 波动时报警
-                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms:.2f} ms for {len(valid_keys)} stocks")
+                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks")
 
         except Exception as e:
             logger.error(f"Strategy Check Error: {e}")

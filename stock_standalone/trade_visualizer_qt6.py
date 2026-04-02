@@ -1032,7 +1032,7 @@ class DataLoaderThread(QThread):
 
             # 1. Fetch Daily Data (Historical) with Session Awareness
             cache_key = (self.code, self.resample, self.fastohlc)
-            # day_ttl = 3600 # 交易时间 10 分钟 TTL，非交易时间永久有效
+            # day_ttl = 10 # 交易时间 10 分钟 TTL，非交易时间永久有效
             
             with DataLoaderThread._cache_lock:
                 if cache_key in DataLoaderThread._df_cache:
@@ -1049,8 +1049,8 @@ class DataLoaderThread(QThread):
                     current_date = datetime.now().date()
                     if cache_date == current_date:
                         # if not is_work_time or (time.time() - ts < day_ttl):
-                            day_df = cached_df
-                            logger.debug(f"[DataLoaderThread] Day Cache Hit: {self.code} (Work:{is_work_time})")
+                        day_df = cached_df
+                        logger.debug(f"[DataLoaderThread] Day Cache Hit: {self.code} (Work:{is_work_time})")
             
             if day_df.empty:
                 for attempt in range(3):
@@ -2515,6 +2515,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_td_sequential = True  # 神奇九转默认开启
         self.tk_linkage_auto_display = True # [NEW] 联动自动显示开关 (用户需求：停止接收tk的联动不自动显示的功能)
         self.realtime = True  # 默认开启
+        self.render_mode_atomic = True # [NEW] 渲染模式：True 为标准原子模式（等数据），False 为极速性能模式 (GhostBar)
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
         self.garbage_threads = []         # ⭐ 线程回收站：防止 QThread 被提前 GC 导致崩溃 (1.6)
@@ -4252,6 +4253,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.linkage_action.triggered.connect(self.on_toggle_linkage)
         self.toolbar.addAction(self.linkage_action)
 
+        # # [NEW] 渲染模式切换
+        # self.toolbar.addSeparator()
+        # self.render_mode_cb = QCheckBox("标准")
+        # self.render_mode_cb.setToolTip("Checked: Standard Mode (Wait for data, No Flicker)\nUnchecked: Performance Mode (GhostBar, Fast but Flicker)")
+        # self.render_mode_cb.setChecked(self.render_mode_atomic)
+        # self.render_mode_cb.stateChanged.connect(self._on_render_mode_changed)
+        # self.toolbar.addWidget(self.render_mode_cb)
+
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
         self.toolbar.setStyleSheet("""
@@ -4279,6 +4288,10 @@ class MainWindow(QMainWindow, WindowMixin):
     #         logger.info(f"Test signal sent: {code} - {pattern}")
     #     else:
     #         QMessageBox.warning(self, "错误", "信号面板未初始化")
+    
+    # def _on_render_mode_changed(self, state):
+    #     self.render_mode_atomic = (state == Qt.CheckState.Checked.value)
+    #     logger.info(f"Render mode changed to: {'Standard' if self.render_mode_atomic else 'Performance'}")
 
     def on_toggle_simulation(self, checked):
         self.show_strategy_simulation = checked
@@ -4465,12 +4478,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 active_threads.append(self._sbc_req_thread)
 
         if active_threads:
-            QMessageBox.information(self, "请稍候", f"后台正在对 {target_code} 进行验证，请等待完成后再试。")
+            toast_message(self, f"后台正在对 {target_code} 进行验证，请等待完成后再试。")
             return
 
         target_code = code or self.current_code
         if not target_code:
-            QMessageBox.warning(self, "未选中个股", "请先在主图或列表中选中/加载一只个股再执行测试。")
+            toast_message(self, "请先在主图或列表中选中/加载一只个股再执行测试。")
             return
             
         from PyQt6.QtGui import QGuiApplication
@@ -5549,10 +5562,14 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if cached and (now - cached['ts']) < limit:
             logger.debug(f"[RT] Cache HIT for {code} (age: {now - cached['ts']:.1f}s)")
-            # [FIX] 不再立即触发 GUI 更新，等待 DataLoader 完成后统一渲染
-            # 这样可以确保只渲染一次，使用完整的新周期数据
-            # self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
             
+            # ⭐ [NEW] 如果已经有 tick 但没有 bar，先生成并补齐，为 DataLoader 后续原子渲染做准备
+            if cached.get('tick_df') is not None and cached.get('today_bar') is None:
+                today_bar = tick_to_daily_bar(cached['tick_df'])
+                cached['today_bar'] = today_bar
+                self._tick_cache[code] = cached
+                logger.debug(f"[RT] Pre-calculated today_bar for {code} from cache.")
+
             # 虽然有缓存，但如果常驻进程没跑，还是得启动它以便后续更新
             if self.realtime_process and self.realtime_process.is_alive():
                  # 发送到任务队列，让进程在后台慢慢更新
@@ -5845,9 +5862,6 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.on_scan_triggered()
 
             # --- 统一执行本轮最后的有效切换意图 ---
-            if last_link_payload:
-                # ... 省略细节，下方的 load_stock 会处理
-                pass 
             
             # 🚀 [Batch UI Update] 处理完所有指令后，统一触发一次表格刷新
             if getattr(self, '_pending_table_refresh', False):
@@ -5914,49 +5928,24 @@ class MainWindow(QMainWindow, WindowMixin):
         elif p_type == 'UPDATE_DF_DIFF':
             self.apply_df_diff(payload.get('data'))
         elif 'code' in payload and 'data' in payload:
-            tick_df = payload['data']
-            today_bar = payload.get('today_bar')
-            # 🛡️ [FIX] 补全实时 K 线逻辑：如果 payload 未预先计算 today_bar (如来自 MonitorTK 的直连负载)，则自动尝试补全
+            tick_df, today_bar = payload['data'], payload.get('today_bar')
             if today_bar is None and tick_df is not None and not tick_df.empty:
                 today_bar = tick_to_daily_bar(tick_df)
             self.on_realtime_update(payload['code'], tick_df, today_bar)
 
-    def push_stock_info(self,stock_code, row):
-        """
-        从 self.df_all 的一行数据提取 stock_info 并推送
-        """
+    def push_stock_info(self, stock_code, row):
+        """推送个股信息到 IPC 管道"""
         try:
             stock_info = {
-                "code": str(stock_code),
-                "name": str(row["name"]),
-                "high": str(row["high"]),
-                "lastp1d": str(row["lastp1d"]),
+                "code": str(stock_code), "name": str(row["name"]),
+                "high": str(row["high"]), "lastp1d": str(row["lastp1d"]),
                 "percent": float(row.get("percent", 0)),
-                "price": float(row.get("close", 0)),
-                "volume": int(row.get("volume", 0))
+                "price": float(row.get("close", 0)), "volume": int(row.get("volume", 0))
             }
-            # code, _ , percent,price, vol
-            # 转为 JSON 字符串
-            payload = json.dumps(stock_info, ensure_ascii=False)
-
-            # ---- 根据传输方式选择 ----
-            # 如果用 WM_COPYDATA，需要 encode 成 bytes 再传
-            # if hasattr(self, "send_wm_copydata"):
-            #     self.send_wm_copydata(payload.encode("utf-8"))
-
-            # 如果用 Pipe / Queue，可以直接传 str
-            # elif hasattr(self, "pipe"):
-            #     self.pipe.send(payload)
-
-
-            # 推送给异动联动（用管道/消息）
-            send_code_via_pipe(payload, logger=logger)   # 假设你用 multiprocessing.Pipe
-            # 或者 self.queue.put(stock_info)  # 如果是队列
-            # 或者 send_code_to_other_window(stock_info) # 如果是 WM_COPYDATA
-            logger.info(f"推送: {stock_info}")
+            send_code_via_pipe(json.dumps(stock_info, ensure_ascii=False), logger=logger)
             return True
         except Exception as e:
-            logger.error(f"推送 stock_info 出错: {e} {row}")
+            logger.error(f"推送 stock_info 出错: {e}")
             return False
 
 
@@ -6449,79 +6438,76 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.update() # 强制最后合成为完整一帧渲染
 
     def _on_initial_loaded_logic(self, code, day_df, tick_df, signal_history_df=None):
-        # 0. ⚡ 立即同步数据到全局变量 (核心坐标系)，必须在 signal 缓存刷新之前
+        # 0. ⚡ 数据合法性检查
+        if code != self.current_code:
+            logger.debug(f"[Rapid Browse] Discarding outdated result for {code}")
+            return
+
+        # 1. ⚡ 信号/基准数据初始化 (必须先构建一个干净的 local_day_df)
+        local_day_df = pd.DataFrame()
         if day_df is not None and not day_df.empty:
-            # ⚡ 过滤掉今天的数据 (盘中)，只保留过去的日 K (配合实时 Ghost Bar)
+            local_day_df = day_df.copy()
+            local_day_df.index = pd.to_datetime(local_day_df.index).strftime('%Y-%m-%d')
+            # 统一列名: volume -> vol
+            if 'volume' in local_day_df.columns and 'vol' not in local_day_df.columns:
+                local_day_df['vol'] = local_day_df['volume']
+
+            # 盘中剥离今日（如有），由后续实时 Tick 重新构建，确保极值精度
             today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
             is_intraday = self.realtime and cct.get_work_time_duration()
             if is_intraday or self._debug_realtime:
-                day_df = day_df[day_df.index < today_str]
+                local_day_df = local_day_df[local_day_df.index < today_str]
 
-            self.day_df = day_df.copy()
-            self.day_df.index = pd.to_datetime(self.day_df.index).strftime('%Y-%m-%d')
-            self.current_day_df_code = code
-
-        # ⚡ 立即同步信号历史缓存，防止后续逻辑中重复加载 CSV
+        # 2. ⚡ 信号缓存刷新 (依赖 local_day_df 的索引)
         if signal_history_df is not None and not signal_history_df.empty:
             self._hist_df_cache = signal_history_df
             self._hist_df_last_load = time.time()
-            if code is not None: self._refresh_stock_signal_cache(code)
-        
-        # ⚡ 更新标题,清除 "Loading..." 状态
-        if day_df is not None and not day_df.empty:
-            self._update_plot_title(code, day_df, tick_df)
 
-        # 检查是否是当前请求的代码
-        if code != self.current_code:
-            logger.debug(f"[Rapid Browse] Discarding outdated result for {code}, current is {self.current_code}")
-            return
-
-        # [FIX] 如果加载失败(empty)且我们已经有该股的数据，则不要覆盖(防止图表消失)
-        if (day_df is None or day_df.empty) and not self.day_df.empty and self.current_day_df_code == code:
-            logger.warning(f"[InitialLoad] RECEIVED EMPTY DATA for {code}, but keeping existing data to prevent clearing.")
-            # 尝试使用缓存补全实时
-            cached = self._tick_cache.get(code)
-            if cached:
-                self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
-            return
-
-        # 1. 優先獲取可用於渲染的實時/模擬數據 (The "Ghost Bar" Source)
+        # 3. ⚡ 实时数据捕获 (Ghost Bar Source)
         effective_tick_df = None
         if tick_df is not None and not tick_df.empty:
             effective_tick_df = tick_df
         elif self._tick_cache.get(code):
-            # 即使 DataLoader 沒傳，如果快取有，也應該拿出來用
-            effective_tick_df = self._tick_cache.get(code).get("tick_df")
+            effective_tick_df = self._tick_cache[code].get("tick_df")
+        
+        # [Standard Mode] 原子增强：最后同步补抓一次
+        if self.render_mode_atomic and is_intraday and (effective_tick_df is None or effective_tick_df.empty):
+             logger.info(f"[InitialLoad] Sync Fetch for {code} in Standard Mode")
+             effective_tick_df = self.sina.get_real_time_tick(code, enrich_data=True)
 
-        # 2. 決定是否執行詳細渲染 (包含幽靈 K 線)
-        should_render_detailed = (
-            self.realtime or self.show_strategy_simulation
-        ) and effective_tick_df is not None
-
-        if should_render_detailed:
-            logger.debug(
-                f"[InitialLoad] Detailed rendering for {code} (Realtime:{self.realtime}, Sim:{self.show_strategy_simulation})"
-            )
-            # 1. 生成今日实时 Bar
+        # 4. ⚡ 数据整合 (原子合成)
+        if effective_tick_df is not None and not effective_tick_df.empty:
             today_bar = tick_to_daily_bar(effective_tick_df)
+            if not today_bar.empty:
+                # 统一今日 Bar 指标与日期
+                today_idx = pd.to_datetime(today_bar.index[0]).strftime('%Y-%m-%d')
+                today_bar['vol'] = today_bar['volume'] if 'volume' in today_bar.columns else 0
+                
+                # 合并逻辑：即使没有历史数据，也至少要显示今日这一根 K
+                if local_day_df.empty:
+                    local_day_df = today_bar.copy()
+                    local_day_df.index = [today_idx]
+                else:
+                    today_bar_aligned = today_bar.reindex(columns=local_day_df.columns, fill_value=0)
+                    local_day_df.loc[today_idx] = today_bar_aligned.iloc[0]
 
-            # 2. 🚀 [FIX] 彻底解决日线补不全：在初次渲染前，先行同步数据到 day_df
-            # 我們這裡只進行數據合併，不准重複渲染
-            self.on_realtime_update(code, effective_tick_df, today_bar, skip_render=True)
+        # 5. ⚡ 统一状态赋值并执行唯一渲染
+        if not local_day_df.empty:
+            self.day_df = local_day_df 
+            self.current_day_df_code = code
+            
+            # 刷新信号坐标系
+            self._refresh_stock_signal_cache(code)
+            # 更新标题
+            self._update_plot_title(code, self.day_df, effective_tick_df)
 
-            # 3. 执行唯一的一次重量级渲染，并带入 force=True 确保首屏出图
-            with timed_ctx(f"render_charts_detailed:{code}", warn_ms=800):
+            # --- 最终原子渲染 ---
+            with timed_ctx(f"AtomicRender:{code}", warn_ms=800):
                 self.render_charts(code, self.day_df, effective_tick_df, force=True)
             
-            # 更新最后一次渲染时间戳，防止触发瞬间的第二次渲染（如果 poll 队列此时正好有该股更新）
             self._last_kline_render_time[code] = time.time()
-
-
         else:
-            # 3. 兜底：純歷史數據渲染
-            logger.debug(f"[InitialLoad] historical rendering only for {code}")
-            with timed_ctx(f"rrender_charts_detailed_historical:{code}", warn_ms=600):
-                self.render_charts(code, self.day_df, None)
+            logger.warning(f"[InitialLoad] No displayable data for {code}")
 
     def _need_ghost_bar(self,day_df):
 
@@ -6567,82 +6553,77 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def on_realtime_update(self, code, tick_df, today_bar, skip_render=False):
-        """实时更新（极限优化 + day_df 安全合并）"""
-        import time
+        """实时更新（高水位保护合并策略）"""
+        import time 
+        now_ts = time.time()
+        
+        # 0. ⚡ 缓存新鲜度校验
+        cached = self._tick_cache.get(code)
+        if cached and cached.get('ts', 0) > now_ts + 0.1: # 异常未来包或略旧于当前的直接略过
+             # 如果已经有更新的缓存，则不再接受 Pipe 中延迟的旧包
+             if tick_df is not None and len(tick_df) < len(cached.get('tick_df', [])):
+                 return
 
         self._tick_cache[code] = {
-            'tick_df': tick_df,
-            'today_bar': today_bar,
-            'ts': time.time()
+            'tick_df': tick_df, 'today_bar': today_bar, 'ts': now_ts
         }
 
         if today_bar is None or today_bar.empty:
             if tick_df is not None and not tick_df.empty:
-                # 🛡️ [KISS/SAFETY] 尝试在这里也进行兜底补全，防止由其他路径进入时缺失 bar
                 today_bar = tick_to_daily_bar(tick_df)
-                # 更新已记录的二级快取以便后续复用
-                if code in self._tick_cache:
-                    self._tick_cache[code]['today_bar'] = today_bar
-            else:
-                return
+                self._tick_cache[code]['today_bar'] = today_bar
+            else: return
 
-        # --- 股票匹配检查 ---
-        if code != self.current_day_df_code:
-            return
-        if not self._debug_realtime and (not self.realtime or code != self.current_code):
-            return
-        
-        if skip_render:
-             return
+        # 1. ⚡ 状态匹配校验
+        if code != self.current_day_df_code: return
+        if not self._debug_realtime and (not self.realtime or code != self.current_code): return
+        if skip_render: return
 
-        # --- 索引统一 ---
+        # 2. ⚡ 索引与列名对齐
         today_idx = pd.to_datetime(today_bar.index[0]).strftime('%Y-%m-%d')
         today_bar.index = [today_idx]
+        today_bar['vol'] = today_bar['volume'] if 'volume' in today_bar.columns else 0
 
         # 数值列精度
         for col in ['open', 'high', 'low', 'close']:
             if col in today_bar.columns:
-                today_bar[col] = today_bar[col].round(2)
+                today_bar[col] = pd.to_numeric(today_bar[col], errors='coerce').round(2)
 
-        today_bar['vol'] = today_bar['volume'] if 'volume' in today_bar.columns else 0
-
-        # --- 补全实时指标 ---
+        # 3. ⚡ 补全实时指标
         if not self.df_all.empty:
-            stock_row = None
-            if code in self.df_all.index:
-                stock_row = self.df_all.loc[code]
-            elif 'code' in self.df_all.columns:
-                filtered = self.df_all[self.df_all['code'] == code]
-                if not filtered.empty:
-                    stock_row = filtered.iloc[0]
-
+            stock_row = self.df_all.loc[code] if code in self.df_all.index else None
             if stock_row is not None:
                 for col in ['ma5d','ma10d','ma20d','ma60d','Rank','win','slope','macddif','macddea','macd']:
-                    if col in self.df_all.columns and col not in today_bar.columns:
+                    if col in stock_row.index and col not in today_bar.columns:
                         today_bar[col] = stock_row[col]
 
-        # --- 合并到 day_df ---
+        # 4. ⚡ “高水位”合并机制 (High-water mark merger)
         if today_idx in self.day_df.index:
-            # 安全列对齐更新
-            for col in self.day_df.columns:
-                if col in today_bar.columns:
-                    if col == 'open':
-                        # open 已有有效值时不覆盖
-                        if pd.notna(self.day_df.at[today_idx, col]) and self.day_df.at[today_idx, col] > 0:
-                            continue
-                    self.day_df.at[today_idx, col] = today_bar.at[today_idx, col]
+            new_row = today_bar.iloc[0]
+            # --- 极值保护核心逻辑 ---
+            # High 采用最大值，Low 采用最小值，Close 采用最新值，防止数据包延迟导致 K 线“缩水”
+            if pd.notna(new_row.get('high')):
+                self.day_df.at[today_idx, 'high'] = max(self.day_df.at[today_idx, 'high'], new_row['high'])
+            if pd.notna(new_row.get('low')):
+                self.day_df.at[today_idx, 'low'] = min(self.day_df.at[today_idx, 'low'], new_row['low']) if self.day_df.at[today_idx, 'low'] > 0 else new_row['low']
+            
+            # Open 只在原先为空时更新
+            if pd.isna(self.day_df.at[today_idx, 'open']) or self.day_df.at[today_idx, 'open'] <= 0:
+                self.day_df.at[today_idx, 'open'] = new_row.get('open', 0)
+                
+            # Close 和 Volume 始终相信最新包
+            self.day_df.at[today_idx, 'close'] = new_row.get('close', self.day_df.at[today_idx, 'close'])
+            self.day_df.at[today_idx, 'vol'] = max(self.day_df.at[today_idx, 'vol'], new_row.get('vol', 0))
         else:
-            # 新增一行，列顺序和类型对齐
+            # 索引对齐追加
             today_bar_aligned = today_bar.reindex(columns=self.day_df.columns, fill_value=0)
             self.day_df.loc[today_idx] = today_bar_aligned.iloc[0]
 
-        # --- 渲染图表（节流） ---
+        # 5. ⚡ 节流渲染
         now = time.time()
-        last_render = self._last_kline_render_time.get(code, 0)
-        if now - last_render >= self._render_throttle_interval:
-            with timed_ctx("render_charts_realtime", warn_ms=200):
-                self.render_charts(code, self.day_df, tick_df)
-                self._last_kline_render_time[code] = time.time()
+        if now - self._last_kline_render_time.get(code, 0) >= self._render_throttle_interval:
+            self.render_charts(code, self.day_df, tick_df)
+            self._last_kline_render_time[code] = now
 
     def on_realtime_update_slow(self, code, tick_df, today_bar):
         """处理实时分时与幽灵 K 线更新"""
@@ -8874,8 +8855,8 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
             # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号，直接手动触发一次重绘以更新标记
             if hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code:
-                logger.info(f"[IPC] Same stock linkage detected for {code}, triggering immediate redraw.")
-                self.render_charts(code, self.day_df, None, force=True)
+                logger.info(f"[IPC] Same stock linkage detected for {code}, triggering immediate return.")
+                # self.render_charts(code, self.day_df, None, force=True)
             return
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
@@ -9644,12 +9625,14 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"[_check_market_gaps] Error: {e}")
 
     def render_charts(self, code, day_df, tick_df, force=False):
-        # 🚀 [ATOMIC] 开启原子渲染模式，防止 K线 -> 分信号 -> 标记 的多阶段闪烁
-        self.setUpdatesEnabled(False)
+        # 🚀 [ATOMIC] 开启原子渲染模式，采用嵌套感应锁定
+        was_enabled = self.updatesEnabled()
+        if was_enabled: self.setUpdatesEnabled(False)
         try:
             self._render_charts_impl(code, day_df, tick_df, force)
         finally:
-            self.setUpdatesEnabled(True)
+            if was_enabled:
+                self.setUpdatesEnabled(True)
 
     def _render_charts_impl(self, code, day_df, tick_df, force=False):
         # 🚀 [ATOMIC RENDER] 锁定 UI 更新，确保 K线->均线->信号 一体化计算与呈现
@@ -10008,13 +9991,24 @@ class MainWindow(QMainWindow, WindowMixin):
                 main_buy = df_custom['main_buy'].values
                 main_sell = df_custom['main_sell'].values
                 
+                # 获取价格数据用于判定阴阳线
+                open_vals = day_df['open'].values
+                close_vals = day_df['close'].values
+
                 for i in range(len(df_custom)):
+                    # 判定是否为下跌 K 线（阴线）
+                    is_falling = close_vals[i] < open_vals[i]
+
                     if main_buy[i]:
                         custom_colors.append('#00FFFF') # Yellow-Cyan (主力买入)
                     elif main_sell[i]:
                         custom_colors.append('#FF00FF') # Magenta (主力卖出)
                     elif is_red[i]:
-                        custom_colors.append('#FF0000') # Red (红色持股)
+                        # ⚡ [FIX] 下跌 K 线（大阴线/杀跌）禁止显示红色，避免误导
+                        if is_falling:
+                            custom_colors.append(None) # 还原为默认阴线颜色（绿色/紫色主卖）
+                        else:
+                            custom_colors.append('#FF0000') # Red (红色持股)
                     elif is_cyan[i]:
                         custom_colors.append('#C0C0C0') # Silver (青色观望/灰色)
                     else:
