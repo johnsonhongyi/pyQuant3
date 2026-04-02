@@ -372,7 +372,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # ⭐ 启动计时
         self._init_start_time = time.time()
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=2)
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
         try:
@@ -922,8 +922,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         max_single_task = {"name": "None", "dur": 0}
 
         # ✅ 更大预算，提高 UI 吞吐量
-        MAX_TASKS_PER_CYCLE = 15
-        TIME_BUDGET_S = 0.018   # 18ms (给主线程更多连续运行时间)
+        MAX_TASKS_PER_CYCLE = 5
+        TIME_BUDGET_S = 0.005    # 18ms (给主线程更多连续运行时间)
 
         try:
             while processed_count < MAX_TASKS_PER_CYCLE:
@@ -1072,7 +1072,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if hasattr(self, "after"):
                 try:
-                    self.after(10, self._process_dispatch_queue)
+                    self.after(1, self._process_dispatch_queue)
                 except:
                     pass
 
@@ -1134,7 +1134,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #             logger.warning("🧯 Watchdog恢复调度")
             #         except Exception:
             #             pass
-            if now_t - last > 5:
+            if now_t - last > 2:
                 if now_t - getattr(self, "_last_dispatch_kick", 0) > 1.0:
                     self._last_dispatch_kick = now_t
                     try:
@@ -4179,7 +4179,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⚡ [CORE] 线程安全地获取行情快照
                 # 使用哈希检测跳过无变化的昂贵计算（及 IPC 发送）
                 with getattr(self, '_df_lock', threading.Lock()):
-                    df_ui = self.df_all.copy()
+                    df_ui = self.df_all
                 
                 # [OPTIMIZE] 快速哈希校验：如果核心价格列完全没动，没必要比较/同步
                 n_rows_now = len(df_ui)

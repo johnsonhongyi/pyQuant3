@@ -259,25 +259,22 @@ class TradingHub:
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # [FIX] Truncate time to minute or check existence to prevent second-level duplicates
-            # Policy: One signal per code per day? Or per minute?
-            # Let's align with unique constraint: We should reuse the same row for the same day unless it's a diff signal.
-            # But the UNIQUE index is (code, detected_date). If detected_date has seconds, it's useless for dedup.
-            
-            # Use Day string for dedup check
-            day_str = datetime.now().strftime("%Y-%m-%d")
-            
-            # Check if exists for today
-            c.execute("SELECT id FROM follow_queue WHERE code=? AND detected_date LIKE ?", (signal.code, f"{day_str}%"))
+            # [FIX] 跨天查重：寻找所有非终止状态的记录 (一股一仓原则)
+            # 解决问题：之前仅通过 detected_date LIKE ? 查重，导致跨天重复插入
+            c.execute("""
+                SELECT id FROM follow_queue 
+                WHERE code=? AND status NOT IN ('EXITED', 'CANCELLED')
+                ORDER BY updated_at DESC LIMIT 1
+            """, (signal.code,))
             row = c.fetchone()
             
             if row:
-                # Update existing
+                # 更新现有记录，保持 ID 不变以维护生命周期连续性
                 c.execute("""
                     UPDATE follow_queue 
-                    SET signal_type=?, detected_price=?, status=?, updated_at=?, notes=?
+                    SET signal_type=?, detected_price=?, updated_at=?, notes=notes || ?
                     WHERE id=?
-                """, (signal.signal_type, signal.detected_price, signal.status, now, signal.notes, row[0]))
+                """, (signal.signal_type, signal.detected_price, now, f" | 重复扫入:{now}", row[0]))
             else:
                 # Insert new
                 c.execute("""
@@ -335,14 +332,30 @@ class TradingHub:
         ]
         query_cols = ", ".join(fields)
         
+        # [OPTIMIZE] 增加分组与排序，确保一个股票只处理一条最相关的活性记录，从源头解决“卡死”问题
         if status:
             if isinstance(status, (list, tuple)):
                 placeholders = ", ".join(["?"] * len(status))
-                c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status IN ({placeholders}) ORDER BY priority DESC, detected_date", tuple(status))
+                c.execute(f"""
+                    SELECT {query_cols} FROM follow_queue 
+                    WHERE status IN ({placeholders}) 
+                    GROUP BY code
+                    ORDER BY priority DESC, updated_at DESC
+                """, tuple(status))
             else:
-                c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status = ? ORDER BY priority DESC, detected_date", (status,))
+                c.execute(f"""
+                    SELECT {query_cols} FROM follow_queue 
+                    WHERE status = ? 
+                    GROUP BY code
+                    ORDER BY priority DESC, updated_at DESC
+                """, (status,))
         else:
-            c.execute(f"SELECT {query_cols} FROM follow_queue WHERE status != 'EXITED' AND status != 'CANCELLED' ORDER BY priority DESC, detected_date")
+            c.execute(f"""
+                SELECT {query_cols} FROM follow_queue 
+                WHERE status NOT IN ('EXITED', 'CANCELLED') 
+                GROUP BY code
+                ORDER BY priority DESC, updated_at DESC
+            """)
         
         rows = c.fetchall()
         
@@ -435,8 +448,8 @@ class TradingHub:
                 # Nothing to update
                 return True
             
-            # 执行更新
-            sql = f"UPDATE follow_queue SET {', '.join(update_fields)} WHERE code = ?"
+            # 执行更新 - [FIX] 严格限制仅更新非终止状态的记录，防止误触历史数据
+            sql = f"UPDATE follow_queue SET {', '.join(update_fields)} WHERE code = ? AND status NOT IN ('EXITED', 'CANCELLED')"
             update_values.append(code)
             c.execute(sql, tuple(update_values))
             
@@ -1439,11 +1452,12 @@ class TradingHub:
             c = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # 获取持仓中的跟单 (ENTERED 状态)
+            # 获取持仓中的跟单 (ENTERED 状态) - [SAFETY] 增加 GROUP BY 确保每股唯一
             c.execute("""
-                SELECT id, code, name, detected_price, entry_price, notes
+                SELECT MAX(id), code, name, detected_price, entry_price, notes
                 FROM follow_queue
                 WHERE status = 'ENTERED'
+                GROUP BY code
             """)
             holdings = c.fetchall()
 

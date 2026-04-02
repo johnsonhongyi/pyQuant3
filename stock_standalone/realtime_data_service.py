@@ -598,7 +598,7 @@ class MinuteKlineCache:
                      (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) != 925
                  )]
                  klines = self._shared_cache[code]
-                 logger.info(f"🧹 [{code}] Bidding sentiment bars (Pre-9:30) pruned at {hhmm} to avoid MA interference.")
+                 # logger.debug(f"🧹 [{code}] Bidding sentiment bars (Pre-9:30) pruned at {hhmm} to avoid MA interference.")
                  self._is_dirty = True
 
         # 1. 初始插入 or 跨天插入
