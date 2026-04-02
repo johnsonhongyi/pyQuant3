@@ -3932,6 +3932,13 @@ class MainWindow(QMainWindow, WindowMixin):
                          if p.startswith("resample="):
                              res = p.split("=")[1]
                      
+                     # ⭐ [DEBOUNCE] IPC 级别去重：相同代码 + 相同时间戳 + 已在显示中 = 忽略
+                     last_link = getattr(self, '_last_ipc_link_id', None)
+                     curr_link = f"{link_code}_{timestamp}"
+                     if last_link == curr_link and self.current_code == link_code:
+                         # logger.debug(f"[IPC] Linkage {curr_link} already processed, skipping.")
+                         return
+                     
                      # ⚡ [DEBOUNCE] 映射到统一的联动处理逻辑 (将 Socket 指令放入防抖队列)
                      self.active_time_linkage = {
                          'code': link_code,
@@ -3940,6 +3947,7 @@ class MainWindow(QMainWindow, WindowMixin):
                          'price': None,
                          'auto_scroll': True
                      }
+                     self._last_ipc_link_id = curr_link
                      logger.info(f"[IPC/Socket] Buffered TIME_LINK for {link_code} at {timestamp}")
                      
                      if getattr(self, 'tk_linkage_auto_display', True):
@@ -8858,10 +8866,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.on_resample_changed(target_resample)
 
         if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
-            # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号，直接手动触发一次重绘以更新标记
+            # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号，检查时间戳是否变化以决定是否重新标记渲染
             if hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code:
-                logger.info(f"[IPC] Same stock linkage detected for {code}, triggering immediate return.")
-                # self.render_charts(code, self.day_df, None, force=True)
+                current_ts = self.active_time_linkage.get('timestamp')
+                last_processed_ts = getattr(self, '_last_ipc_linkage_ts', None)
+                
+                if current_ts != last_processed_ts:
+                    logger.info(f"[IPC] New linkage timestamp ({current_ts}) for {code}, triggering redraw.")
+                    self.render_charts(code, self.day_df, None, force=True)
+                    self._last_ipc_linkage_ts = current_ts
+                else:
+                    logger.debug(f"[IPC] Duplicate linkage ({current_ts}) for {code}, skipping redraw.")
             return
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
