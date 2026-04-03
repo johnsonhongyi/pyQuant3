@@ -318,42 +318,43 @@ class TradingLogger:
     def log_signal_batch(self, records: list[dict]) -> None:
         """批量记录每日决策信号 (高性能事务)"""
         if not records: return
-        # prepared = []
-        # date_str = datetime.now().strftime('%Y-%m-%d')
-        # for r in records:
-        #     try:
-        #         # 合并 decision debug 和 row_data 到 indicators (同 log_signal 逻辑)
-        #         decision = r.get('decision', {})
-        #         indicators = decision.get('debug', {}).copy()
-        #         row_data = r.get('row_data')
-        #         if row_data:
-        #             for k, v in row_data.items():
-        #                 if k not in indicators: indicators[k] = v
+        prepared = []
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        for r in records:
+            try:
+                # 合并 decision debug 和 row_data 到 indicators (同 log_signal 逻辑)
+                decision = r.get('decision', {})
+                indicators = decision.get('debug', {}).copy()
+                row_data = r.get('row_data')
+                if row_data:
+                    for k, v in row_data.items():
+                        if k not in indicators: indicators[k] = v
                 
-        #         indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
+                indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
                 
-        #         prepared.append((
-        #             date_str,
-        #             r['code'],
-        #             r['name'],
-        #             r['price'],
-        #             decision.get('action'),
-        #             decision.get('position'),
-        #             decision.get('reason'),
-        #             indicators_json,
-        #             r.get('resample', 'd')
-        #         ))
-        #     except Exception as e:
-        #         logger.error(f"Error preparing signal record for {r.get('code')}: {e}")
+                prepared.append((
+                    date_str,
+                    r['code'],
+                    r['name'],
+                    r['price'],
+                    decision.get('action'),
+                    decision.get('position'),
+                    decision.get('reason'),
+                    indicators_json,
+                    r.get('resample', 'd')
+                ))
+            except Exception as e:
+                logger.error(f"Error preparing signal record for {r.get('code')}: {e}")
 
-        # if not prepared: return
+        if not prepared: return
         try:
             # 使用 executemany 进行批量写入 (基于 ? 占位符的元组列表)
             self.db_manager.executemany("""
                 INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators, resample)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-            # """, prepared)
+            """, prepared)
+            # """, records)
+
         except Exception as e:
             logger.error(f"Error logging signal batch: {e}")
 

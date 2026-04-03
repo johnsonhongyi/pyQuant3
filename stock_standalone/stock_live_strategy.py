@@ -2360,232 +2360,180 @@ class StockLiveStrategy:
     # =========================
     # ✅ 主函数（最终稳定版）
     # =========================
-    def _check_strategies(self, df, resample='d'):
-        if getattr(self, "_is_checking", False):
-            return
-
-        self._is_checking = True
+    def _check_strategies(self, df: pd.DataFrame, resample: str = 'd') -> None:
+        """
+        [CORE] 核心多线程策略扫描引擎 (并行化重构 v2.3)
+        """
+        # 🛡️ 状态位已在 process_data 锁内提前设置，此处无需再次检查
+        start_loop_timer = time.perf_counter()
         try:
-            import time
-            now = time.time()
-            start_loop_timer = time.perf_counter()
-            
-            if self.trading_logger is None:
-                return
-
-            # =========================
-            # 1️⃣ 快照
-            # =========================
+            # 1. 环境准备与归一化快照
+            now, now_ts_str = time.time(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with self._lock:
                 monitored_snapshot = dict(self._monitored_stocks)
-
-            valid_keys = [
-                k for k, v in monitored_snapshot.items()
-                if v.get('resample', 'd') == resample
-            ]
-
-            if not valid_keys:
-                return
-
-            # =========================
-            # 2️⃣ RR调度
-            # =========================
-            fetch_list = self._rr_dispatch(valid_keys, resample)
-
-            if not fetch_list:
-                return
-
-            # =========================
-            # 3️⃣ 批量上下文（核心）
-            # =========================
-            ctx = self._prepare_batch_context(df, fetch_list, resample)
-
-            # =========================
-            # 4️⃣ 并发执行（强制消费异常）
-            # =========================
-            self._execute_parallel(fetch_list, monitored_snapshot, ctx, resample)
-            cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
-            if cost_loop_ms > 50:
-                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks (submitted={submitted_count})")
+            valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
+            
+            logger.info(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Valid={len(valid_keys)} DF={len(df)}")
+            
+            # 2. RR 轮换分发逻辑 (Full-Dimensional Static Memory Fix)
+            if not hasattr(StockLiveStrategy, "_kline_rr_cursors_static"):
+                StockLiveStrategy._kline_rr_cursors_static = {} # {resample: cursor}
+            if not hasattr(StockLiveStrategy, "_kline_rr_pools_static"):
+                StockLiveStrategy._kline_rr_pools_static = {}   # {resample: list}
+            
+            # 获取当前周期的独立池子与游标
+            res_pool = StockLiveStrategy._kline_rr_pools_static.get(resample, [])
+            res_cursor = StockLiveStrategy._kline_rr_cursors_static.get(resample, 0)
+            
+            # 池子同步判定 (按周期独立)
+            if len(res_pool) != len(valid_keys):
+                res_pool = list(valid_keys)
+                StockLiveStrategy._kline_rr_pools_static[resample] = res_pool
+                res_cursor %= max(len(res_pool), 1) # 对齐尺寸
+                logger.info(f"🔄 [RR Sync] resample={resample}, pool size={len(res_pool)}, cursor={res_cursor}")
+            
+            pool, pool_size = res_pool, len(res_pool)
+            if pool_size > 0:
+                start = res_cursor
+                max_fetch = getattr(self, 'max_fetch_kline', 30)
+                end = start + max_fetch
+                fetch_list = (pool[start:end] if end <= pool_size else pool[start:] + pool[:(end - pool_size)])
                 
-        except Exception as e:
-            logger.error(f"Strategy Check Error: {e}", exc_info=True)
+                # 存回当前周期的独立游标
+                StockLiveStrategy._kline_rr_cursors_static[resample] = end % pool_size
+                logger.info(f"🔍 [RR_STATUS] PoolSize({resample})={pool_size} Cursor={start} FetchCount={len(fetch_list)}")
+            else:
+                fetch_list = []
 
-        finally:
-            self._is_checking = False
-
-            if getattr(self, "_needs_monitor_save", False):
-                self._save_monitors()
-                self._needs_monitor_save = False
-
-            import gc
-            if not hasattr(self, '_round'):
-                self._round = 0
-            self._round += 1
-
-            gc.collect(2 if self._round % 50 == 0 else 0)
-
-
-    # =========================
-    # ✅ RR调度
-    # =========================
-    def _rr_dispatch(self, valid_keys, resample):
-
-        if not hasattr(self, "_rr_cursor"):
-            self._rr_cursor = {}
-
-        if not hasattr(self, "_rr_pool"):
-            self._rr_pool = {}
-
-        pool = self._rr_pool.get(resample, [])
-        cursor = self._rr_cursor.get(resample, 0)
-
-        if len(pool) != len(valid_keys):
-            pool = list(valid_keys)
-            self._rr_pool[resample] = pool
-            cursor = 0
-
-        size = len(pool)
-        if size == 0:
-            return []
-
-        batch = getattr(self, "max_fetch_batch", 30)
-
-        start = cursor
-        end = start + batch
-
-        fetch = (
-            pool[start:end] if end <= size
-            else pool[start:] + pool[:end - size]
-        )
-
-        self._rr_cursor[resample] = end % size
-
-        return fetch
-
-
-    # =========================
-    # ✅ 批量上下文
-    # =========================
-    def _prepare_batch_context(self, df, fetch_list, resample):
-
-        import time
-
-        codes = list(set(k.split('_')[0] for k in fetch_list))
-
-        # DataFrame
-        df_sub = df[df.index.isin(codes)]
-        if not df_sub.index.is_unique:
-            df_sub = df_sub[~df_sub.index.duplicated(keep='last')]
-        rows = df_sub.to_dict('index')
-
-        # 连亏
-        try:
-            loss_map = self.trading_logger.get_batch_consecutive_losses(
-                codes, resample=resample
-            )
-        except Exception:
-            loss_map = {}
-
-        # 持仓
-        try:
-            trades = self.trading_logger.get_trades()
-        except Exception:
-            trades = []
-
-        open_trades = {
-            (t['code'], t.get('resample', 'd')): t
-            for t in trades if t.get('status') == 'OPEN'
-        }
-
-        # 情绪
-        emotion_map = {}
-        if self.realtime_service:
-            try:
-                emotion_map = self.realtime_service.get_emotion_scores(codes)
-            except Exception:
-                emotion_map = {}
-
-        return {
-            "rows": rows,
-            "loss_map": loss_map,
-            "emotion": emotion_map,
-            "open_trades": open_trades,
-            "now": time.time()
-        }
-
-
-    # =========================
-    # ✅ 并发执行
-    # =========================
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _execute_parallel(self, fetch_list, monitored_snapshot, ctx, resample):
-
-        max_workers = min(8, len(fetch_list)) if fetch_list else 1
-        all_emotion_scores = {}
-        if self.realtime_service:
-            try:
-                all_emotion_scores = self.realtime_service.get_emotion_scores(fetch_list)
-            except Exception as e:
-                logger.debug(f"Batch fetch emotion scores failed: {e}")
-        # 1. 批量连续亏损次数预取 (解决 loop_feedback_db_losses 5s 瓶颈)
-
-        all_loss_streaks = {}
-        try:
-            all_loss_streaks = self.trading_logger.get_batch_consecutive_losses(codes_to_fetch, resample=resample)
-        except Exception as e:
-            logger.debug(f"Batch fetch loss streaks failed: {e}")
-        
-        # # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
-        # trades_info = self.trading_logger.get_trades()
-        # open_trades = {(t['code'], t.get('resample', 'd')): t for t in trades_info if t['status'] == 'OPEN'}
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-
-            for key in fetch_list:
-                futures.append(
-                    executor.submit(
-                        self._process_single_stock,
-                        key,
-                        monitored_snapshot,
-                        ctx,
-                        resample,
-                        all_emotion_scores,
-                        all_loss_streaks
-                    )
-                )
-
-            for f in futures:
+            # 3. 批量环境数据抓取 (全量预取以消除 Worker 阻塞)
+            all_emotion_scores, all_klines, all_loss_streaks, open_trades = {}, {}, {}, {}
+            if fetch_list:
                 try:
-                    f.result()
-                except Exception as e:
-                    logger.error(f"Worker error: {e}", exc_info=True)
+                    # 更新日线历史全量缓存 (供形态探测器使用)
+                    if hasattr(self, '_update_daily_history_cache'):
+                        for key in fetch_list:
+                            code_idx = key.split('_')[0]
+                            self._update_daily_history_cache(code_idx, resample)
+                    
+                    # 🚀 [PERF] 同步 55188 全量数据: 移出循环，每批次仅执行一次
+                    all_55188 = {}
+                    if self.realtime_service:
+                        try:
+                            ext_status = self.realtime_service.get_55188_data() # 获取全量字典
+                            if isinstance(ext_status, dict):
+                                df_ext = ext_status.get('df')
+                                if df_ext is not None and not df_ext.empty:
+                                    all_55188 = df_ext.to_dict(orient='index')
+                        except Exception: pass
+
+                    if self.realtime_service:
+                        all_emotion_scores = self.realtime_service.get_emotion_scores(fetch_list)
+                        if hasattr(self.realtime_service, 'get_batch_minute_klines'):
+                            all_klines = self.realtime_service.get_batch_minute_klines(fetch_list, n=30)
+                            
+                    db_codes = [str(k.split('_')[0]) for k in fetch_list]
+                    all_loss_streaks = self.trading_logger.get_batch_consecutive_losses(db_codes, resample=resample)
+                    hub = get_trading_hub()
+                    trades_info = hub.get_open_trades(resample=resample)
+                    open_trades = {(str(t['code']), t.get('resample', 'd')): t for t in trades_info}
+                except Exception as e_prep:
+                    logger.debug(f"📊 [PREP_ERROR] Data sync partially failed: {e_prep}")
+
+            # 4. 并发任务分发
+            signal_batch, status_batch, alert_items = [], [], []
+            import concurrent.futures
+            futures, submitted_count = {}, 0
+            for key in fetch_list:
+                try:
+                    code_idx = key.split('_')[0]
+                    if code_idx in df.index:
+                        futures[self.executor.submit(
+                            self._detect_signals_single_stock, 
+                            key, df.loc[code_idx].to_dict(), monitored_snapshot[key],
+                            all_emotion_scores, all_klines, all_loss_streaks, 
+                            open_trades, all_55188, resample, now, now_ts_str
+                        )] = key
+                        submitted_count += 1
+                except Exception as e_dispatch:
+                    logger.debug(f"Task submission error for {key}: {e_dispatch}")
+            
+            logger.info(f"🚀 [DISPATCH] Submitted {submitted_count} / Goal {len(fetch_list)}")
+
+            # 5. 结果收集与同步 (并发结果落地)
+            if futures:
+                try:
+                    # [OPTIMIZATION] 增加超时阈值 (10s -> 25s) 并补充详细状态探针
+                    for future in concurrent.futures.as_completed(futures, timeout=25):
+                        try:
+                            res = future.result()
+                            if not res: continue
+                            key, code = res['key'], res['code']
+                            with self._lock:
+                                if key in self._monitored_stocks:
+                                     self._monitored_stocks[key]['snapshot'].update(res['snapshot_updates'])
+                                     if 'last_alert' in res:
+                                         self._monitored_stocks[key]['last_alert'] = res['last_alert']
+                            
+                            # 🚀 [NEW] 同步关键状态回主 DataFrame (供 UI/Monitor 显示)
+                            if 'df_updates' in res['snapshot_updates']:
+                                try:
+                                    for col, val in res['snapshot_updates']['df_updates'].items():
+                                        df.at[code, col] = val
+                                except Exception: pass
+
+                            if res.get('signal_item'): signal_batch.append(res['signal_item'])
+                            if res.get('status_item'): status_batch.append(res['status_item'])
+                            if res.get('alert_payload'): alert_items.append(res)
+                        except Exception as e_future:
+                            logger.debug(f"Worker task error: {e_future}")
+                except concurrent.futures.TimeoutError:
+                    # 🔍 [DIAGNOSTIC] 超时深度诊断：统计未完成任务，精确定位卡死源
+                    unfinished_keys = [futures[f] for f in futures if not f.done()]
+                    logger.error(f"❌ [ENGINE_TIMEOUT] _check_strategies TIMEOUT: {len(unfinished_keys)} (of {len(futures)}) futures unfinished. Suspects: {unfinished_keys[:10]}...")
+                    # 尝试非阻塞取消 (对执行中任务无效，但可清理队列)
+                    for f in futures: 
+                        if not f.done(): f.cancel()
+                except Exception as e_inner:
+                    logger.error(f"❌ [ENGINE_INNER] Collection error: {e_inner}")
+
+            # 6. 原子写入与同步报警 (性能指标结算)
+            cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
+            if cost_loop_ms > 1000:
+                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks (submitted={submitted_count})")
+
+            if signal_batch: self.trading_logger.log_signal_batch(signal_batch)
+            if status_batch: self.trading_logger.log_status_batch(status_batch)
+            for item in alert_items:
+                p = item['alert_payload']
+                msg_txt = "\n".join([m[1] if isinstance(m, tuple) else str(m) for m in item['messages']])
+                self._trigger_alert(p['code'], p['name'], msg_txt, action=p['action'], price=p['price'], resample=resample, score=p['score'])
+
+        except Exception as e:
+            logger.error(f"❌ [ENGINE_CRITICAL] _check_strategies failed: {e}")
+            import traceback; logger.error(traceback.format_exc())
+            print(f"CRITICAL ENGINE ERROR: {e}")
+        finally:
+            with self._lock:
+                if resample in self._is_checking_resamples:
+                    self._is_checking_resamples.remove(resample)
+
+
+
+
 
 
     # =========================
     # 🚨 单股处理（核心）
     # =========================
-    def _process_single_stock(self, key, monitored_snapshot, ctx, resample,all_emotion_scores,all_loss_streaks):
-
-        data = monitored_snapshot.get(key)
-        if not data:
-            return
+    def _detect_signals_single_stock(self, key, row, data, all_emotion_scores, all_klines, all_loss_streaks, open_trades, all_55188, resample, now, now_ts_str):
 
         code = data.get('code', key.split('_')[0])
-
-        row = ctx["rows"].get(code)
-        if row is None and str(code).isdigit():
-            row = ctx["rows"].get(int(code))
-
         if row is None:
-            return
+            return None
 
 
         # ---------- 历史 snapshot 与 持仓同步 ----------
         snap = data.get('snapshot', {})
-        now = ctx["now"]
 
         
 
@@ -2598,8 +2546,8 @@ class StockLiveStrategy:
         # =========================
         # ✅ 批量注入（必须）
         # =========================
-        snap['loss_streak'] = ctx["loss_map"].get(code, 0)
-        snap['rt_emotion'] = ctx["emotion"].get(code, 50)
+        snap['loss_streak'] = all_loss_streaks.get(code, 0)
+        snap['rt_emotion'] = all_emotion_scores.get(code, 50)
     
         # ---------- 安全获取行情数据 ----------
         try:
@@ -2615,8 +2563,8 @@ class StockLiveStrategy:
             return
         
         trade_key = (code, resample)
-        if trade_key in ctx["open_trades"]:
-            trade = ctx["open_trades"][trade_key]
+        if trade_key in open_trades:
+            trade = open_trades[trade_key]
             snap['cost_price'] = trade.get('buy_price', 0)
             snap['buy_date'] = trade.get('buy_date', '')
             snap['buy_reason'] = trade.get('buy_reason', '')
@@ -2648,7 +2596,7 @@ class StockLiveStrategy:
                     logger.debug(f"⚡ {code} 触发 V 型反转信号")
                     
                 # 3. 注入 55188 外部数据 (人气、主力、题材)
-                ext_55188 = self.realtime_service.get_55188_data(code)
+                ext_55188 = all_55188.get(code)
                 if ext_55188:
                     snap['hot_rank'] = ext_55188.get('hot_rank', 999)
                     snap['zhuli_rank'] = ext_55188.get('zhuli_rank', 999)
@@ -2805,6 +2753,9 @@ class StockLiveStrategy:
         if highest_today > 0:
             snap['pullback_depth'] = (highest_today - current_price) / highest_today
 
+        # --- 🛸 批量注入全量 K 线数据 (分钟级别) ---
+        snap['klines'] = all_klines.get(key, [])
+
         last_close = snap.get('last_close', 0)
         last_percent = snap.get('percent', None)
 
@@ -2837,7 +2788,7 @@ class StockLiveStrategy:
                 data['below_nclose_start'] = 0
                 data['below_nclose_count'] = 0
             if data['below_nclose_count'] >= 3:
-                messages.append(("RISK", f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price})"))
+                messages.append(("RISK", f"卖出 价格连续低于今日均价 {current_nclose} ({current_price})"))
 
         # ---------- 昨日收盘风控 ----------
         if not is_t1_restricted and last_close > 0:
@@ -2851,7 +2802,7 @@ class StockLiveStrategy:
                 data['below_last_close_start'] = 0
                 data['below_last_close_count'] = 0
             if data['below_last_close_count'] >= 2:
-                messages.append(("RISK", f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price})"))
+                messages.append(("RISK", f"减仓 价格连续低于昨日收盘 {last_close} ({current_price})"))
 
         # ---------- 上下文趋势分析 (Context Analysis) ----------
         open_p = float(row.get('open', 0.0))
@@ -2903,7 +2854,7 @@ class StockLiveStrategy:
                 elif rtype == 'change_up':
                     action_str = "涨幅达到"
                 
-                msg = f"{trend_prefix}{data['name']} {action_str} {current_price} 涨幅 {current_change}% 量能 {volume_change} 换手 {ratio_change}{trend_suffix}"
+                msg = f"{trend_prefix}{action_str} {current_price} 涨幅 {current_change}% 量能 {volume_change} 换手 {ratio_change}{trend_suffix}"
                 messages.append(("RULE", msg))
 
         # ---------- [NEW] 起跳新星探测逻辑 (win_upper 0 -> 1) ----------
@@ -2953,7 +2904,7 @@ class StockLiveStrategy:
                     reason_star = "高开高走" if is_high_open_walk else "起跳最低点"
                     if curr_win_u1 == 1: reason_star = "首日" + reason_star
                     
-                    msg_star = f"🌟 [起跳新星]: {data['name']} {reason_star}站稳压力位! 量能 {curr_vol_ratio:.1f} 基因 {gem_score:.1f}"
+                    msg_star = f"🌟 [起跳新星]: {reason_star}站稳压力位! 量能 {curr_vol_ratio:.1f} 基因 {gem_score:.1f}"
                     messages.append(("PATTERN", msg_star))
                     snap['star_triggered_date'] = today_str # 锁定记录，防轰炸
                     # ⭐ [FIX] 将频繁触发的日志降级为 DEBUG
@@ -3093,8 +3044,8 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.error(f"Phase engine error {code}: {e}")
         
-        if decision['action'] != "HOLD":
-            messages.append(("RULE", f"决策引擎建议 {decision['action']}: {decision['reason']}"))
+        # if decision['action'] != "HOLD":
+        #    messages.append(("RULE", f"决策引擎建议 {decision['action']}: {decision['reason']}"))
             
         # --- ⭐ 影子策略并行运行 (Dual Strategy Optimization) ---
         shadow_decision = self.shadow_engine.evaluate(row, snap)
@@ -3213,8 +3164,8 @@ class StockLiveStrategy:
         snap['midline_rising'] = current_mid > snap.get('yesterday_midline', 0) > snap.get('day_before_midline', -1) if snap.get('yesterday_midline', 0) > 0 else False
         snap['midline_falling'] = current_mid < snap.get('yesterday_midline', 9999) < snap.get('day_before_midline', 9999) if snap.get('yesterday_midline', 0) > 0 else False
 
-        # --- 3.6 记录信号日志 ---
-        self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
+        # --- 3.6 记录信号日志 (已通过 signal_batch 统一回写，此处仅保留逻辑意向) ---
+        # self.trading_logger.log_signal(code, data.get('name', ''), current_price, decision, row_data=row_data)
 
         # --- ⭐ 将决策与监理感知回写至 snap (供 UI 同步使用) ---
         action = decision.get('action', 'HOLD')
@@ -3245,27 +3196,26 @@ class StockLiveStrategy:
         else:
             snap['shadow_info'] = ""
 
-        # --- [新增] 将 SNAP 中的关键策略状态同步回 DataFrame ---
-        # 这是因为 Monitor 和 Visualizer 通常从 self.df_all (即这里的 df) 读取数据
-        try:
-            df.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.0)
-            df.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
-            df.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
-            df.at[code, 'last_action'] = snap.get('last_action', '')
-            df.at[code, 'last_reason'] = snap.get('last_reason', '')
-            df.at[code, 'shadow_info'] = snap.get('shadow_info', '')
-            df.at[code, 'last_signal'] = snap.get('last_signal', 'HOLD')
-            df.at[code, 'last_signal_date'] = snap.get('last_signal_date', '')
-            df.at[code, 'structure_base_score'] = snap.get('structure_base_score', 50.0)
-        except Exception as e:
-            pass
+        # --- [新增] 将 SNAP 中的关键策略状态同步 (由主线程统一处理或已包含在 snapshot_updates 中) ---
+        # 注意: 此处 row 是 dict 拷贝，无法直接回写 df
+        snap['df_updates'] = {
+            'market_win_rate': snap.get('market_win_rate', 0.0),
+            'loss_streak': snap.get('loss_streak', 0),
+            'vwap_bias': snap.get('vwap_bias', 0.0),
+            'last_action': snap.get('last_action', ''),
+            'last_reason': snap.get('last_reason', ''),
+            'shadow_info': snap.get('shadow_info', ''),
+            'last_signal': snap.get('last_signal', 'HOLD'),
+            'last_signal_date': snap.get('last_signal_date', ''),
+            'structure_base_score': snap.get('structure_base_score', 50.0)
+        }
 
         if decision["action"] not in ("持仓", "观望"):
             pos_val = decision.get("position", 0)
             # 防止 NaN 转换为整数失败
             if pd.isna(pos_val):
                 pos_val = 0
-            messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
+            messages.append(("POSITION", f'{decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
 
         # 💥 [NEW] 提取指标并增强报警消息
         td_setup = decision["debug"].get("td_setup", 0)
@@ -3281,10 +3231,27 @@ class StockLiveStrategy:
             # 防止 NaN 转换失败
             if pd.isna(ratio):
                 ratio = 0
-            messages.append(("POSITION", f'[Risk] {data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
+            messages.append(("POSITION", f'[Risk] {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
+
+        # 构造结果返回给主引擎
+        res = {
+            'key': key,
+            'code': code,
+            'snapshot_updates': snap,
+            'alert_payload': None,
+            'messages': [],
+            'last_alert': data.get('last_alert', 0),
+            'signal_item': None,
+            'status_item': None
+        }
 
         if messages:
             priority_order = ["RISK","RULE","POSITION","PATTERN"]
+            # 🚀 [NEW] 按优先级级别排序 (RISK 优先于 RULE 优先于 POSITION 优先于 PATTERN)
+            try:
+                messages.sort(key=lambda x: priority_order.index(x[0]) if x[0] in priority_order else 99)
+            except Exception: pass
+
             unique_msgs = []
             seen = set()
             for mtype,msg in messages:
@@ -3295,31 +3262,29 @@ class StockLiveStrategy:
                     seen.add(msg)
                     unique_msgs.append(msg)
             t1_prefix = "[T+1限制] " if is_t1_restricted else ""
-            combined_msgs = t1_prefix + "\n".join(unique_msgs)
-            log_msg = combined_msgs.replace("\n"," | ")
-            if isinstance(action,pd.Series):
-                action = action.iloc[0] if not action.empty else "HOLD"
-            self._trigger_alert(
-                code,
-                data['name'],
-                combined_msgs,
-                action=str(action),
-                price=current_price,
-                resample=resample,
-                score=snap.get('score', snap.get('max_score_today', 0.0)),
-                grade=snap.get('grade', '')
-            )
-            # logger.info(f'{decision["action"]}')
-            if decision["action"]  in ("VETO", "买入",'卖出'):
-                # ⭐ [FIX] 移除或完全屏蔽此处的控制台输出，统一走 logging 管理
-                # 如果需要查看，请在 logging 配置中开启 DEBUG
-                pass
-            data['last_alert'] = now
-            # ⭐ [FIX] 不在单股循环内保存文件，改为设置标记
-            self._needs_monitor_save = True
-            data['below_nclose_count'] = 0
-            data['below_nclose_start'] = 0
-            data['below_last_close_count'] = 0
+            res['messages'] = [(None, t1_prefix + m) for m in unique_msgs] # 包裹成元组兼容引擎 join
+
+            res['alert_payload'] = {
+                'code': code,
+                'name': data.get('name', ''),
+                'action': str(action),
+                'price': current_price,
+                'score': snap.get('score', snap.get('max_score_today', 0.0))
+            }
+            res['last_alert'] = now
+            
+            # 设置 signal_item 用于批量存储
+            res['signal_item'] = {
+                'code': code,
+                'name': data.get('name', ''),
+                'price': current_price,
+                'decision': decision,
+                'row_data': row_data,
+                'resample': resample
+            }
+
+        return res
+
 
         # if not messages:
         #     logger.debug(f"{code} data: {messages}")
