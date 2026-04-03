@@ -244,6 +244,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     """
     code_clicked = pyqtSignal(str, str)
     sig_bus_event = pyqtSignal(object)
+    sig_heartbeat = pyqtSignal(object) # [NEW] 专门用于心跳与统计更新的信号
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -279,6 +280,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._setup_bus_connection()
         # ⭐ [FIX] 显式指定 QueuedConnection，确保跨线程信号在 GUI 线程处理
         self.sig_bus_event.connect(self._safe_process_event, Qt.ConnectionType.QueuedConnection)
+        self.sig_heartbeat.connect(self._safe_process_heartbeat, Qt.ConnectionType.QueuedConnection)
         
         self._stats_timer = QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats_display)
@@ -552,9 +554,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._refresh_all_tables()
 
     def _on_heartbeat_received(self, event: BusEvent):
-        QTimer.singleShot(0, lambda: self._update_last_sync_time())
+        """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
+        self.sig_heartbeat.emit(event)
+
+    def _safe_process_heartbeat(self, event: BusEvent):
+        """[GUI THREAD] 处理心跳和市场统计"""
+        self._update_last_sync_time()
         if event.source == "market_stats" and isinstance(event.payload, dict):
-            QTimer.singleShot(0, lambda: self.update_market_stats(event.payload))
+            self.update_market_stats(event.payload)
 
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')} (实时)")

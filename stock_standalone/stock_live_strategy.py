@@ -483,6 +483,7 @@ class StockLiveStrategy:
         self._last_rank_scan_date: str = ""
         self._pending_hist_fetches: set = set() # [NEW] Track async history fetches
         self._df_lock: Optional[threading.Lock] = None # 🛡️ [NEW] From master app
+        self._lock = threading.Lock() # 🛡️ [NEW] 内部列表锁，保护 _monitored_stocks 和属性竞态
 
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
@@ -496,8 +497,9 @@ class StockLiveStrategy:
             self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
             self._using_shared_executor = False
             logger.debug(f"ℹ️ StockLiveStrategy: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
-            
-        self._is_checking = False  # [NEW] 运行状态锁，防止并发重入引发积压
+        
+        self._is_checking_resamples: set[str] = set() # [NEW] 并行运行状态锁，按 resample 隔离防止并发冲突
+        self._last_process_time = 0.0 # 🛡️ Ensure init 
         
         # 初始化记录器 (必须在 _load_monitors 之前)
         # [OPTIMIZE] Delay TradingLogger and TradingHub init to background to avoid startup hang
@@ -707,7 +709,8 @@ class StockLiveStrategy:
             hub = get_trading_hub()
             logger.info("✅ TradingHub initialized in background.")
             
-            self._monitored_stocks = {}
+            with self._lock:
+                self._monitored_stocks = {}
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     raw_data = json.load(f)
@@ -849,9 +852,10 @@ class StockLiveStrategy:
                                 to_remove.append(key)
                     
                     if to_remove:
-                        for k in to_remove:
-                            if k in self._monitored_stocks:
-                                del self._monitored_stocks[k]
+                        with self._lock:
+                            for k in to_remove:
+                                if k in self._monitored_stocks:
+                                    del self._monitored_stocks[k]
                         logger.info(f"🧹 自动清理: 已移出 {len(to_remove)} 只已平仓的持仓股监控")
                         self._save_monitors()
 
@@ -931,43 +935,44 @@ class StockLiveStrategy:
                 return f"筛选器未返回逻辑日期 {logical_date} 的任何标的"
             
 
-            added_count = 0
-            existing_codes = set(self._monitored_stocks.keys())
-            
-            for _, row in df_candidates.iterrows():
-                code = row['code']
-                name = row.get('name', '')
-                if code not in existing_codes:
-                    self._monitored_stocks[code] = {
-                        "name": name,
-                        "rules": [],
-                        "last_alert": 0,
-                        "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "tags": f"auto_{logical_date}",
-                        "create_price": float(row.get('price', 0.0)),
-                        "snapshot": {
-                            "trade": float(row.get('price', 0.0)),
-                            "percent": float(row.get('percent', 0.0)),
-                            "ratio": float(row.get('ratio', 0.0)),
-                            "amount_desc": row.get('amount', 0),
-                            "status": str(row.get('status', '')),
-                            "score": float(row.get('score', 0.0)),
-                            "grade": str(row.get('grade', '')),  # [NEW] 存入等级
-                            "reason": str(row.get('reason', ''))
+            with self._lock:
+                added_count = 0
+                existing_codes = set(self._monitored_stocks.keys())
+                
+                for _, row in df_candidates.iterrows():
+                    code = row['code']
+                    name = row.get('name', '')
+                    if code not in existing_codes:
+                        self._monitored_stocks[code] = {
+                            "name": name,
+                            "rules": [],
+                            "last_alert": 0,
+                            "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "tags": f"auto_{logical_date}",
+                            "create_price": float(row.get('price', 0.0)),
+                            "snapshot": {
+                                "trade": float(row.get('price', 0.0)),
+                                "percent": float(row.get('percent', 0.0)),
+                                "ratio": float(row.get('ratio', 0.0)),
+                                "amount_desc": row.get('amount', 0),
+                                "status": str(row.get('status', '')),
+                                "score": float(row.get('score', 0.0)),
+                                "grade": str(row.get('grade', '')),  # [NEW] 存入等级
+                                "reason": str(row.get('reason', ''))
+                            }
                         }
-                    }
-                    added_count += 1
-                else:
-                    # 如果已存在，更新其 snapshot
-                    snap = self._monitored_stocks[code]['snapshot']
-                    snap.update({
-                        "status": str(row.get('status', snap.get('status', ''))),
-                        "score": float(row.get('score', snap.get('score', 0.0))),
-                        "grade": str(row.get('grade', snap.get('grade', ''))), # [NEW] 更新等级
-                        "reason": str(row.get('reason', snap.get('reason', '')))
-                    })
-            
-            self._last_import_logical_date = logical_date
+                        added_count += 1
+                    else:
+                        # 如果已存在，更新其 snapshot
+                        snap = self._monitored_stocks[code].setdefault('snapshot', {})
+                        snap.update({
+                            "status": str(row.get('status', snap.get('status', ''))),
+                            "score": float(row.get('score', snap.get('score', 0.0))),
+                            "grade": str(row.get('grade', snap.get('grade', ''))), # [NEW] 更新等级
+                            "reason": str(row.get('reason', snap.get('reason', '')))
+                        })
+                
+                self._last_import_logical_date = logical_date
             
             if added_count > 0:
                 self._save_monitors()
@@ -1081,65 +1086,66 @@ class StockLiveStrategy:
         # 使用纯 code 作为 key（不再使用复合 key）
         key = code
 
-        if key not in self._monitored_stocks:
-            self._monitored_stocks[key] = {
-                'code': code, # 保存原始代码以供查询
-                'name': name,
-                'rules': [],
-                'last_alert': 0,
-                'resample': resample,
-                'created_time': datetime.datetime.now().strftime("%Y-%m-%d %H"),
-                'added_date': datetime.datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
-                'create_price': create_price,
-                'tags': tags or ""
-            }
-        
-        stock = self._monitored_stocks[key]
-        # 如果提供了 tags 且不为空，则更新（覆盖旧的或空的）
-        if tags:
-            stock['tags'] = tags
-        
-        # 记录触发加入的规则类型
-        stock['rule_type_tag'] = rule_type
-        
-        # 确保 created_time 和 added_date 存在 (对于旧数据)
-        # import removed
-        if 'created_time' not in stock:
-            stock['created_time'] = datetime.datetime.now().strftime("%Y-%m-%d %H")
-        if 'added_date' not in stock:
-            stock['added_date'] = datetime.datetime.now().strftime('%Y-%m-%d')
-
-        # 确保派生字段存在
-        stock.setdefault('rule_keys', set())
-
-        # ✅ 查找是否已存在同 type 规则
-        for r in stock['rules']:
-            if r['type'] == rule_type:
-                old_value = r['value']
-                r['value'] = value
-
-                # 更新 rule_keys
-                old_key = self._rule_key(rule_type, old_value)
-                new_key = self._rule_key(rule_type, value)
-                stock['rule_keys'].discard(old_key)
-                stock['rule_keys'].add(new_key)
-
-                self._save_monitors()
-                logger.info(
-                    f"Monitor updated: {name}({code}) {rule_type} {old_value} → {value}"
-                )
-                return "updated"
-
-        # ✅ 不存在才新增
-        rule_key = self._rule_key(rule_type, value)
-
-        stock['rules'].append({
-            'type': rule_type,
-            'value': value
-        })
-        stock['rule_keys'].add(rule_key)
-
-        self._save_monitors()
+        with self._lock:
+            if key not in self._monitored_stocks:
+                self._monitored_stocks[key] = {
+                    'code': code, # 保存原始代码以供查询
+                    'name': name,
+                    'rules': [],
+                    'last_alert': 0,
+                    'resample': resample,
+                    'created_time': datetime.datetime.now().strftime("%Y-%m-%d %H"),
+                    'added_date': datetime.datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
+                    'create_price': create_price,
+                    'tags': tags or ""
+                }
+            
+            stock = self._monitored_stocks[key]
+            # 如果提供了 tags 且不为空，则更新（覆盖旧的或空的）
+            if tags:
+                stock['tags'] = tags
+            
+            # 记录触发加入的规则类型
+            stock['rule_type_tag'] = rule_type
+            
+            # 确保 created_time 和 added_date 存在 (对于旧数据)
+            # import removed
+            if 'created_time' not in stock:
+                stock['created_time'] = datetime.datetime.now().strftime("%Y-%m-%d %H")
+            if 'added_date' not in stock:
+                stock['added_date'] = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+            # 确保派生字段存在
+            stock.setdefault('rule_keys', set())
+    
+            # ✅ 查找是否已存在同 type 规则
+            for r in stock['rules']:
+                if r['type'] == rule_type:
+                    old_value = r['value']
+                    r['value'] = value
+    
+                    # 更新 rule_keys
+                    old_key = self._rule_key(rule_type, old_value)
+                    new_key = self._rule_key(rule_type, value)
+                    stock['rule_keys'].discard(old_key)
+                    stock['rule_keys'].add(new_key)
+    
+                    self._save_monitors()
+                    logger.info(
+                        f"Monitor updated: {name}({code}) {rule_type} {old_value} → {value}"
+                    )
+                    return "updated"
+    
+            # ✅ 不存在才新增
+            rule_key = self._rule_key(rule_type, value)
+    
+            stock['rules'].append({
+                'type': rule_type,
+                'value': value
+            })
+            stock['rule_keys'].add(rule_key)
+    
+            self._save_monitors()
         
         # 记录到历史以便前端查询
         # import removed
@@ -1167,7 +1173,11 @@ class StockLiveStrategy:
             
         # ----------------- Throttling -----------------
         now = time.time()
-        if now - getattr(self, '_last_process_time', 0.0) < 2.0:
+        # 🛡️ 快速检查锁状态 (按周期隔离保护)，防止并发重入
+        if resample in self._is_checking_resamples:
+            return
+            
+        if now - getattr(self, '_last_process_time', 0.0) < 1.0: # 稍微提高频率到 1s
             return
         self._last_process_time = now
 
@@ -1226,10 +1236,19 @@ class StockLiveStrategy:
         # 2. 规则引擎监控 (Existing rules)
         # self._check_risk_control(df_internal)
         
-        # --- ⭐ [关键] 异步触发策略判定 (增加防重入保护) ---
-        if not self._is_checking:
+        # --- ⭐ [关键] 异步触发策略判定 (增加原子锁保护，支持多周期并行) ---
+        can_submit = False
+        with self._lock:
+            if resample not in self._is_checking_resamples:
+                # 🛡️ 按 resample 颗粒度加锁，允许 日/周/月 线同时并行扫描
+                self._is_checking_resamples.add(resample)
+                can_submit = True
+                
+        if can_submit:
              # [OPTIMIZE] 核心性能优化：仅过滤受监控股票的子集进行策略检查
-             target_codes = list(self._monitored_stocks.keys())
+             with self._lock:
+                 target_codes = list(self._monitored_stocks.keys())
+                 
              if target_codes:
                  # 🛡️ [FIX] 无论原始行情索引如何，强制归一化索引类型为 str 以对齐监控逻辑
                  df_tmp = df_internal.copy()
@@ -1238,12 +1257,19 @@ class StockLiveStrategy:
                  df_target = df_tmp.loc[matched_idx]
                  
                  # 🔍 [DIAGNOSTIC] 检查交叉点
-                 logger.info(f"🔍 [INTERSECT] Target={len(target_codes)} Matched={len(matched_idx)} SampleMatched={list(matched_idx[:3])}")
+                 # logger.info(f"🔍 [INTERSECT] Target={len(target_codes)} Matched={len(matched_idx)}")
                  
                  if not df_target.empty:
+                    # 🚀 [PERF] 已在锁外，提交到线程池分发执行
                     self.executor.submit(self._check_strategies, df_target, resample=resample)
+                 else:
+                    with self._lock: 
+                        if resample in self._is_checking_resamples:
+                            self._is_checking_resamples.remove(resample) 
              else:
-                 logger.info("🔍 [INTERSECT] Monitors is EMPTY. Nothing to scan.")
+                 with self._lock:
+                     if resample in self._is_checking_resamples:
+                         self._is_checking_resamples.remove(resample)
 
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
@@ -1281,7 +1307,8 @@ class StockLiveStrategy:
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
         # 🛡️ [OPTIMIZE] 批量收集更新，最小化锁持有时间，防止 UI 线程在 acquire 时卡住
         updates_data = []
-        monitored_list = list(self._monitored_stocks.items())
+        with self._lock:
+            monitored_list = list(self._monitored_stocks.items())
         
         # 1. 锁外收集数据
         for key, stock in monitored_list:
@@ -2230,8 +2257,8 @@ class StockLiveStrategy:
                 ]
             }
             
-            key = f"{code}_{resample}" if resample != 'd' else code
-            self._monitored_stocks[key] = monitor_data
+            with self._lock:
+                self._monitored_stocks[key] = monitor_data
             self._save_monitors()
             
             # 4. 移除待跟单队列缓存
@@ -2334,14 +2361,13 @@ class StockLiveStrategy:
         """
         [CORE] 核心多线程策略扫描引擎 (并行化重构 v2.3)
         """
-        if self._is_checking:
-            return
-        self._is_checking = True
+        # 🛡️ 状态位已在 process_data 锁内提前设置，此处无需再次检查
         start_loop_timer = time.perf_counter()
         try:
             # 1. 环境准备与归一化快照
             now, now_ts_str = time.time(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            monitored_snapshot = dict(self._monitored_stocks)
+            with self._lock:
+                monitored_snapshot = dict(self._monitored_stocks)
             valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
             
             logger.info(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Valid={len(valid_keys)} DF={len(df)}")
@@ -2432,25 +2458,37 @@ class StockLiveStrategy:
 
             # 5. 结果收集与同步 (并发结果落地)
             if futures:
-                for future in concurrent.futures.as_completed(futures, timeout=5.0):
-                    try:
-                        res = future.result()
-                        if not res: continue
-                        key, code = res['key'], res['code']
-                        if key in self._monitored_stocks:
-                             self._monitored_stocks[key]['snapshot'].update(res['snapshot_updates'])
-                             if 'last_alert' in res:
-                                 self._monitored_stocks[key]['last_alert'] = res['last_alert']
-                        if res.get('signal_item'): signal_batch.append(res['signal_item'])
-                        if res.get('status_item'): status_batch.append(res['status_item'])
-                        if res.get('alert_payload'): alert_items.append(res)
-                    except Exception as e_future:
-                        logger.debug(f"Worker task error: {e_future}")
+                try:
+                    # [OPTIMIZATION] 增加超时阈值 (10s -> 25s) 并补充详细状态探针
+                    for future in concurrent.futures.as_completed(futures, timeout=10):
+                        try:
+                            res = future.result()
+                            if not res: continue
+                            key, code = res['key'], res['code']
+                            with self._lock:
+                                if key in self._monitored_stocks:
+                                     self._monitored_stocks[key]['snapshot'].update(res['snapshot_updates'])
+                                     if 'last_alert' in res:
+                                         self._monitored_stocks[key]['last_alert'] = res['last_alert']
+                            if res.get('signal_item'): signal_batch.append(res['signal_item'])
+                            if res.get('status_item'): status_batch.append(res['status_item'])
+                            if res.get('alert_payload'): alert_items.append(res)
+                        except Exception as e_future:
+                            logger.debug(f"Worker task error: {e_future}")
+                except concurrent.futures.TimeoutError:
+                    # 🔍 [DIAGNOSTIC] 超时深度诊断：统计未完成任务，精确定位卡死源
+                    unfinished_keys = [futures[f] for f in futures if not f.done()]
+                    logger.error(f"❌ [ENGINE_TIMEOUT] _check_strategies TIMEOUT: {len(unfinished_keys)} (of {len(futures)}) futures unfinished. Suspects: {unfinished_keys[:10]}...")
+                    # 尝试非阻塞取消 (对执行中任务无效，但可清理队列)
+                    for f in futures: 
+                        if not f.done(): f.cancel()
+                except Exception as e_inner:
+                    logger.error(f"❌ [ENGINE_INNER] Collection error: {e_inner}")
 
             # 6. 原子写入与同步报警 (性能指标结算)
             cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
-            if cost_loop_ms > 500:
-                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks")
+            if cost_loop_ms > 1000:
+                logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks (submitted={submitted_count})")
 
             if signal_batch: self.trading_logger.log_signal_batch(signal_batch)
             if status_batch: self.trading_logger.log_status_batch(status_batch)
@@ -2464,7 +2502,9 @@ class StockLiveStrategy:
             import traceback; logger.error(traceback.format_exc())
             print(f"CRITICAL ENGINE ERROR: {e}")
         finally:
-            self._is_checking = False
+            with self._lock:
+                if resample in self._is_checking_resamples:
+                    self._is_checking_resamples.remove(resample)
 
     def _detect_signals_single_stock(self, key: str, row: dict, data: dict, 
                                      all_emotion_scores: dict, all_klines: dict, 
@@ -2801,7 +2841,9 @@ class StockLiveStrategy:
             stock_resample = self._monitored_stocks[key].get('resample', 'd')
             
             # 1. 从内存移除
-            del self._monitored_stocks[key]
+            with self._lock:
+                if key in self._monitored_stocks:
+                    del self._monitored_stocks[key]
             logger.info(f"Removed monitor {key} from memory")
             
             # 2. 从数据库物理删除
@@ -3061,10 +3103,17 @@ class StockLiveStrategy:
 
             
             # === [P7] 仓位状态机联动 ===
-            if self.phase_engine and hasattr(self, 'df') and self.df is not None:
+            if self.phase_engine:
                 try:
-                    # 获取行情快照
-                    row = self.df.loc[event.code] if event.code in self.df.index else pd.Series()
+                    # 🛡️ 此时仍在子线程，安全起见从 master 的锁保护下访问 df
+                    # 或从 local 缓存抓取
+                    row = pd.Series()
+                    if hasattr(self, 'df') and self.df is not None:
+                         # 🛡️ 尝试获取主数据引用
+                         target_df = self.df
+                         if event.code in target_df.index:
+                             row = target_df.loc[event.code]
+                    
                     if not row.empty:
                         # 触发状态机评估
                         new_phase = self.phase_engine.evaluate_phase(event.code, row, {"pattern": event.pattern})
@@ -3794,47 +3843,48 @@ class StockLiveStrategy:
                 name = row['name']
                 current_price = float(row.get('price', 0))
                 
-            if code in self._monitored_stocks:
-                stock_data = self._monitored_stocks[code]
-                # [Fix]: 如果已有条目，必须更新标签以确认为今日热点，防止"跟丢"
-                was_updated = False
-                if stock_data.get('create_price', 0) <= 0:
-                    stock_data['create_price'] = current_price
-                    was_updated = True
-                
-                # 更新标签为最新热点标签 (除非是手动股，不覆盖手动标)
-                # 这样依然保留原来的 rules，但刷新了身份
-                current_tag = str(stock_data.get('tags', ''))
-                if 'manual' not in current_tag and tag not in current_tag:
-                     stock_data['tags'] = tag  # 更新为最新的 auto_hotspot_loop
-                     was_updated = True
-                
-                # 更新 snapshot 中的 reason (最新的热点理由)
-                if 'snapshot' in stock_data:
+            with self._lock:
+                if code in self._monitored_stocks:
+                    stock_data = self._monitored_stocks[code]
+                    # [Fix]: 如果已有条目，必须更新标签以确认为今日热点，防止"跟丢"
+                    was_updated = False
+                    if stock_data.get('create_price', 0) <= 0:
+                        stock_data['create_price'] = current_price
+                        was_updated = True
+                    
+                    # 更新标签为最新热点标签 (除非是手动股，不覆盖手动标)
+                    # 这样依然保留原来的 rules，但刷新了身份
+                    current_tag = str(stock_data.get('tags', ''))
+                    if 'manual' not in current_tag and tag not in current_tag:
+                         stock_data['tags'] = tag  # 更新为最新的 auto_hotspot_loop
+                         was_updated = True
+                    
+                    # 更新 snapshot 中的 reason (最新的热点理由)
+                    if 'snapshot' not in stock_data: stock_data['snapshot'] = {}
                     stock_data['snapshot']['reason'] = row.get('reason', '')
                     stock_data['snapshot']['score'] = row.get('score', 0)
-                     
-                if was_updated:
-                    repaired_names.append(name)
+                         
+                    if was_updated:
+                        repaired_names.append(name)
+                    else:
+                        skipped_names.append(name)
                 else:
-                    skipped_names.append(name)
-            else:
-                added_names.append(name)
-                self._monitored_stocks[code] = {
-                    "name": name,
-                    "rules": [{'type': 'price_up', 'value': current_price}], 
-                    "last_alert": 0,
-                    "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "create_price": current_price,
-                    "tags": tag,
-                    "grade": row.get('grade', ''),
-                    "snapshot": {
-                        "score": row.get('score', 0),
-                        "reason": row.get('reason', ''),
-                        "category": row.get('category', ''),
-                        "tqi": row.get('tqi_score', 0)
+                    added_names.append(name)
+                    self._monitored_stocks[code] = {
+                        "name": name,
+                        "rules": [{'type': 'price_up', 'value': current_price}], 
+                        "last_alert": 0,
+                        "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "create_price": current_price,
+                        "tags": tag,
+                        "grade": row.get('grade', ''),
+                        "snapshot": {
+                            "score": row.get('score', 0),
+                            "reason": row.get('reason', ''),
+                            "category": row.get('category', ''),
+                            "tqi": row.get('tqi_score', 0)
+                        }
                     }
-                }
                 
                 # 同步到数据库
                 if hasattr(self, 'trading_logger'):
