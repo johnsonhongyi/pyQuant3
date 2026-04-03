@@ -1191,7 +1191,8 @@ class IntradayEmotionTracker:
         """
         批量更新情绪分（稳定化版本）
         df: 包含 'percent', 'amount', 'volume' 等列
-        """
+        """
+        self.breakdown_details = []
         try:
             if df.empty: return
             
@@ -1563,7 +1564,11 @@ class IntradayEmotionTracker:
                                              if code_str not in self._signal_start_price:
                                                  self._signal_start_price[code_str] = price
                                          else:
-                                             logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
+                                             # 构造统一长度/格式的信息条目
+                                             # 使用 :<8 (左对齐占8位) 来保证代码和名称对齐
+                                             info_entry = f"{code_str:<7} {name_display:<8} | 破位点: {avg_p:.2f}"
+                                             self.breakdown_details.append(info_entry)
+                                             # logger.warning(f"⚠️ [SBC-Breakdown] {code_str}{name_display} 结构性破位: {r_time_str} 跌破关键位置或均线 ({avg_p:.2f})")
                                          
                                          try:
                                              from signal_bus import SignalBus
@@ -1632,7 +1637,15 @@ class IntradayEmotionTracker:
             self.history.append((now, self.scores.copy()))
             if len(self.history) > 60:
                 self.history.popleft()
-
+            if self.breakdown_details:
+                count = len(self.breakdown_details)
+                # 如果破位股太多（比如超过5个），只打印前几个并显示总数，防止刷屏
+                if count > 5:
+                    summary = "\n".join(self.breakdown_details[:5]) # 取前5个
+                    logger.warning(f"⚠️ [SBC-Breakdown] 集中破位(共{count}只):\n{summary}\n...等其它{count-5}只")
+                else:
+                    summary = "\n".join(self.breakdown_details)
+                    logger.warning(f"⚠️ [SBC-Breakdown] 发现破位:\n{summary}")
         except Exception as e:
             import traceback
             traceback.print_exc()

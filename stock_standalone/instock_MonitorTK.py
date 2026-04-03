@@ -371,9 +371,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # Ensure DataHub is ready before any data processing starts
         # self.data_hub = DataHubService.get_instance()
         
-        # ⭐ 启动计时
+        # ⭐ 启动计时 (优化: 提升主线程池并发底线，防止递归任务死锁)
         self._init_start_time = time.time()
+        # 🛡️ [FIX] 增加并发底线锁定保护: 如果配置过低(如4)，在多级别/多 resample 扫描下极易死锁
+        # safe_workers = max(16, cct.livestrategy_max_workers)
         self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+        logger.info(f"✅ Master ThreadPoolExecutor started with  workers (Config: {cct.livestrategy_max_workers})")
+        
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
         try:
@@ -721,6 +725,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-b>", lambda event: self.close_all_alerts())
         self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
         self.bind("<Alt-k>", lambda event: self.open_market_pulse())
+        self.bind("<Alt-l>", lambda event: self.open_live_signal_viewer())
+        self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
         self._schedule_after(3000, self._check_dpi_change)
@@ -1329,13 +1335,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         注册热键，通过 WM_HOTKEY 消息传递，永远不会被 Windows 自动卸载。
         支持重复调用（先清理旧热键线程再重新注册）。
         
+        快捷键如果已经被占用, 就自动退回到程序的快捷键, 不用全局模式。
+        
         Args:
             show_toast: 是否在注册完成后显示提示信息（手动重新初始化时为 True）
         """
         # 先关闭旧的热键线程（支持重复调用）
         self._shutdown_global_hotkeys()
 
-        # 热键 ID -> 回调映射
+        # 热键 ID -> 回调映射 (统一回调入口)
         hotkey_callbacks = {
             0: lambda: self._schedule_after(0, self.close_all_alerts),
             1: lambda: self._schedule_after(0, self.open_voice_monitor_manager),
@@ -1353,26 +1361,50 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             """独立守护线程：注册热键 + 消息循环"""
             user32 = ctypes.windll.user32
             WM_HOTKEY = 0x0312
-            WM_QUIT = 0x0012
             
-            # 保存线程 ID，用于外部发送 WM_QUIT
+            # 保存线程 ID，用于外部发送 WM_QUIT (0x0012)
             self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
             
             registered_ids = []
+            failed_offsets = []
             
-            # 注册所有热键
+            # 1. 尝试注册所有全局热键
             for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
                 hk_id = self._HOTKEY_ID_BASE + offset
+                # 尝试注册为全局热键
                 if user32.RegisterHotKey(None, hk_id, mod, vk):
                     registered_ids.append(hk_id)
-                    logger.debug(f"[Hotkey] 已注册: {desc} (id={hk_id})")
+                    logger.info(f"✅ [Hotkey] 全局热键已激活: {desc} (id={hk_id})")
                 else:
                     err = ctypes.get_last_error()
-                    logger.warning(f"[Hotkey] 注册 {desc} 失败 (error={err})，可能已被其他程序占用")
+                    logger.warning(f"⚠️ [Hotkey] 全局注册 {desc} 失败 (error={err})，将被程序本地快捷键接管")
+                    failed_offsets.append(offset)
             
-            logger.info(f"✅ [Hotkey] 全局快捷键已注册 ({len(registered_ids)}/{len(self._HOTKEY_MAP)})")
+            # 2. 对于注册失败的热键，由主线程进行本地绑定退回 (或确保本地绑定生效)
+            if failed_offsets:
+                def _bind_local_fallbacks():
+                    for off in failed_offsets:
+                        _, _, desc = self._HOTKEY_MAP[off]
+                        cb = hotkey_callbacks.get(off)
+                        if not cb: continue
+                        
+                        # 转换 description (如 "Alt+B") 到 Tkinter binding string (如 "<Alt-b>")
+                        tk_key = f"<{desc.replace('+', '-').lower()}>"
+                        try:
+                            # 注意：如果已经在 __init__ 中静态绑定过，这里会覆盖或共存
+                            # 但作为“退回”策略，此处进行显式兜底
+                            self.bind_all(tk_key, lambda e, func=cb: func())
+                            logger.info(f"🔁 [Hotkey] 退回到本地快捷键: {tk_key}")
+                        except Exception as e:
+                            logger.error(f"❌ [Hotkey] 本地绑定 {tk_key} 失败: {e}")
+                
+                # 跨线程调度到主线程执行 Tk 绑定
+                self.tk_dispatch_queue.put(_bind_local_fallbacks)
+
+            if registered_ids:
+                logger.info(f"⚡ [Hotkey] 成功注册 {len(registered_ids)} 个系统级全局快捷键")
             
-            # 消息循环
+            # 3. 消息循环 (只监听 WM_HOTKEY 和 WM_QUIT)
             msg = ctypes.wintypes.MSG()
             while not self._hotkey_stop_event.is_set():
                 # GetMessage 会阻塞直到有消息，收到 WM_QUIT 返回 0
@@ -1386,14 +1418,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     callback = hotkey_callbacks.get(offset)
                     if callback:
                         try:
-                            callback()
+                            # 所有的回调都必须回到主线程执行 UI 操作
+                            callback() 
                         except Exception as e:
-                            logger.error(f"[Hotkey] 回调执行失败 (id={offset}): {e}")
+                            logger.error(f"[Hotkey] 全局热键回调失败 (id={offset}): {e}")
+                
+                # 给 Windows 消息循环换气的短暂让步 (可选)
+                # user32.TranslateMessage(ctypes.byref(msg))
+                # user32.DispatchMessageW(ctypes.byref(msg))
             
-            # 清理：注销所有热键
+            # 4. 清理：注销所有热键
             for hk_id in registered_ids:
                 user32.UnregisterHotKey(None, hk_id)
-            logger.info("[Hotkey] 全局快捷键已全部注销")
+            logger.info("[Hotkey] 全局快捷键线程已安全关闭，所有热键已释放")
         
         # 启动守护线程
         self._hotkey_thread = threading.Thread(
@@ -1403,9 +1440,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
         self._hotkey_thread.start()
 
-        hotkey_list = "Alt+B/E/S/K/L/H"
         if show_toast:
-            self.status_var.set(f"✅ 全局快捷键已重新初始化: {hotkey_list}")
+            hotkey_list = "/".join([v[2] for v in self._HOTKEY_MAP.values()])
+            self.status_var.set(f"✅ 快捷键已重置: {hotkey_list}")
+
 
     def _shutdown_global_hotkeys(self):
         """安全关闭热键线程，注销所有已注册的全局快捷键"""
@@ -2926,7 +2964,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -2965,8 +3003,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_market_pulse()
             elif action == "实盘数据":
                 self.persistent_df_all_to_h5()
-            # elif action == "重置快捷键":
-            #     self.setup_global_hotkey(show_toast=True)
+            elif action == "重置快捷键":
+                self.setup_global_hotkey(show_toast=True)
 
 
         def on_select(event=None):
@@ -4081,6 +4119,131 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         self.open_visualizer(stock_code)
 
     def open_visualizer(self, code, timestamp=None):
+
+        # =========================
+        # 0. 基础过滤（UI线程安全）
+        # =========================
+        if not code and self._last_resample != self.global_values.getkey("resample"):
+            return
+
+        now = time.time()
+        is_linkage = timestamp is not None
+
+        # =========================
+        # 1. 联动去重（严格）
+        # =========================
+        if is_linkage:
+            link_key = (str(code), str(timestamp))
+            if getattr(self, '_last_linkage_data', None) == link_key:
+                return
+            self._last_linkage_data = link_key
+
+        # =========================
+        # 2. 普通选择去重
+        # =========================
+        if not is_linkage:
+            if self.vis_select_code == code:
+                return
+            self.vis_select_code = code
+
+            if (self._last_visualizer_code == code and
+                (now - self._last_visualizer_time) < self._visualizer_debounce_sec):
+                return
+
+            self._last_visualizer_code = code
+            self._last_visualizer_time = now
+
+        # =========================
+        # 3. UI安全读取（只在主线程执行）
+        # =========================
+        try:
+            resample_now = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
+        except Exception:
+            resample_now = 'd'
+
+        self._df_sync_running = True
+
+        # =========================
+        # 4. worker（纯 IO / IPC，无 UI）
+        # =========================
+        def _worker(code, timestamp, resample):
+
+            def try_queue_send():
+                try:
+                    if hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive():
+
+                        payload = {
+                            'code': code,
+                            'resample': resample,
+                            'timestamp': timestamp
+                        }
+
+                        if is_linkage:
+                            self._async_viz_send('TIME_LINK', payload)
+                        else:
+                            self._async_viz_send('SWITCH_CODE', payload)
+
+                        return True
+                except Exception as e:
+                    logger.error(f"[IPC][QUEUE] failed: {e}")
+                return False
+
+            def try_socket_send():
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.3)
+                        s.connect(('127.0.0.1', 26668))
+
+                        if is_linkage:
+                            msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
+                        else:
+                            msg = f"CODE|{code}|resample={resample}"
+
+                        s.send(msg.encode("utf-8"))
+                        return True
+
+                except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                    logger.debug(f"[IPC][SOCKET] failed: {e}")
+                except Exception as e:
+                    logger.error(f"[IPC][SOCKET] unexpected: {e}")
+
+                return False
+
+            try:
+                if try_queue_send():
+                    return
+
+                if try_socket_send():
+                    return
+
+                # =========================
+                # 5. 最后兜底：启动进程
+                # =========================
+                if not hasattr(self, 'qt_process') or not self.qt_process or not self.qt_process.is_alive():
+                    self._start_visualizer_process(code, resample)
+
+            except Exception as e:
+                logger.error(f"[WORKER] open_visualizer fatal error: {e}")
+
+        # =========================
+        # 6. 启动线程（只做调度）
+        # =========================
+        threading.Thread(
+            target=_worker,
+            args=(code, timestamp, resample_now),
+            daemon=True
+        ).start()
+
+        # =========================
+        # 7. UI提示（主线程安全）
+        # =========================
+        try:
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.config(text=f"🚀 可视化指令已发出: {code}")
+        except Exception:
+            pass
+            
+    def open_visualizer_bug(self, code, timestamp=None):
         
         if not code and self._last_resample != self.global_values.getkey("resample"):
             return
