@@ -1207,7 +1207,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [NEW] Search Bar
         bar_lay_1.addWidget(QLabel("🔍搜索:"))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("例如: MA60反转 涨幅>3")
+        self.search_input.setPlaceholderText("例如:涨幅>3")
         self.search_input.setFixedWidth(180)
         self.search_input.returnPressed.connect(self._on_search_triggered)
         bar_lay_1.addWidget(self.search_input)

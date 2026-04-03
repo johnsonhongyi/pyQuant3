@@ -3400,6 +3400,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 每一帧包都参与策略计算，确保“不缺斤短两”，包含语音报警触发
                         self.live_strategy.process_data(full_df, concept_top5=getattr(self, 'concept_top5', None), resample=cur_res)
                     except Exception as strategy_err:
+                        import traceback
+                        traceback.print_exc()
                         logger.error(f"Global Strategy processing failed: {strategy_err}")
 
             # --- 🛠️ [SYNC] 同步 UI 视图子集 ---
@@ -3436,7 +3438,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df._consolidate_inplace()
                     if full_df is not None: full_df._consolidate_inplace()
                 except Exception:
-                    pass
+                    import traceback
+                    traceback.print_exc()
 
                 cur_res = self.global_values.getkey("resample") or 'd'
                 # --- 🛠️ [UI SYNC] 同步到主界面控制逻辑 ---
@@ -3458,6 +3461,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._is_processing_tree_data = False
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
             self._is_processing_tree_data = False
 
@@ -13548,7 +13553,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if onclick:
                     df_code = self.df_all.loc[self.df_all.index == code]
                     results = check_code(self.df_all,code,self.search_var1.get())
-                    logger.info(f'check_code: {results}')
+                    # logger.info(f'check_code: {results}')
                     self.tree_scroll_to_code(code)
                     if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
                         self.kline_monitor.tree_scroll_to_code_kline(code)
