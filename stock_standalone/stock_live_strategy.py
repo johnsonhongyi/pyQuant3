@@ -2409,11 +2409,11 @@ class StockLiveStrategy:
             all_emotion_scores, all_klines, all_loss_streaks, open_trades = {}, {}, {}, {}
             if fetch_list:
                 try:
-                    # 更新日线历史全量缓存 (供形态探测器使用)
-                    if hasattr(self, '_update_daily_history_cache'):
-                        for key in fetch_list:
-                            code_idx = key.split('_')[0]
-                            self._update_daily_history_cache(code_idx, resample)
+                    # 🚀 [OPTIMIZATION] 移除串行更新历史缓存，将其移至 Worker 并行执行
+                    # if hasattr(self, '_update_daily_history_cache'):
+                    #    for key in fetch_list:
+                    #        code_idx = key.split('_')[0]
+                    #        self._update_daily_history_cache(code_idx, resample)
                     
                     # 🚀 [PERF] 同步 55188 全量数据: 移出循环，每批次仅执行一次
                     all_55188 = {}
@@ -2484,6 +2484,13 @@ class StockLiveStrategy:
                             if res.get('signal_item'): signal_batch.append(res['signal_item'])
                             if res.get('status_item'): status_batch.append(res['status_item'])
                             if res.get('alert_payload'): alert_items.append(res)
+                            
+                            # 🚀 [NEW] 处理 DB 异步同步 (主线程非阻塞执行)
+                            if res.get('db_sync_note'):
+                                try:
+                                    hub_sync = get_trading_hub()
+                                    hub_sync.update_follow_status(res['code'], notes=res['db_sync_note'])
+                                except: pass
                         except Exception as e_future:
                             logger.debug(f"Worker task error: {e_future}")
                 except concurrent.futures.TimeoutError:
@@ -2503,10 +2510,10 @@ class StockLiveStrategy:
 
             if signal_batch: self.trading_logger.log_signal_batch(signal_batch)
             if status_batch: self.trading_logger.log_status_batch(status_batch)
-            for item in alert_items:
-                p = item['alert_payload']
-                msg_txt = "\n".join([m[1] if isinstance(m, tuple) else str(m) for m in item['messages']])
-                self._trigger_alert(p['code'], p['name'], msg_txt, action=p['action'], price=p['price'], resample=resample, score=p['score'])
+            # for item in alert_items:
+            #     p = item['alert_payload']
+            #     msg_txt = "\n".join([m[1] if isinstance(m, tuple) else str(m) for m in item['messages']])
+            #     self._trigger_alert(p['code'], p['name'], msg_txt, action=p['action'], price=p['price'], resample=resample, score=p['score'])
 
         except Exception as e:
             logger.error(f"❌ [ENGINE_CRITICAL] _check_strategies failed: {e}")
@@ -2534,6 +2541,19 @@ class StockLiveStrategy:
 
         # ---------- 历史 snapshot 与 持仓同步 ----------
         snap = data.get('snapshot', {})
+
+        # [FIX] 提前初始化 res 字典，防止状态机逻辑 (Phase Engine) 提前引用报错 (res referenced before assignment)
+        res = {
+            'key': key,
+            'code': code,
+            'snapshot_updates': snap,
+            'alert_payload': None,
+            'messages': [],
+            'last_alert': data.get('last_alert', 0),
+            'signal_item': None,
+            'status_item': None,
+            'db_sync_note': None  # 🚀 预留数据库同步备注
+        }
 
         
 
@@ -2916,15 +2936,19 @@ class StockLiveStrategy:
         # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
         if self.realtime_service:
             try:
-                # --- 3.1 读取实时情绪 ---
-                rt_emotion = self.realtime_service.get_emotion_score(code)
+                # --- 3.1 读取实时情绪 (来自批量脉冲缓存) ---
+                rt_emotion = all_emotion_scores.get(code, 0)
                 snap['rt_emotion'] = snap.get('rt_emotion', 0) + rt_emotion
             except Exception as e:
                 logger.debug(f"rt_emotion fetch error: {e}")
 
             try:
-                # --- 3.2 V-Shape K线形态 ---
-                klines = self.realtime_service.get_minute_klines(code, n=30)
+                # 🚀 [PARALLEL] 在 Worker 内并行更新历史 K 线缓存 (不再串行排队)
+                if hasattr(self, '_update_daily_history_cache'):
+                    self._update_daily_history_cache(code_idx, resample)
+
+                # --- 3.2 V-Shape K线形态 (来自批量脉冲缓存) ---
+                klines = all_klines.get(code, [])
                 if len(klines) >= 15:
                     lows = [k['low'] for k in klines]
                     closes = [k['close'] for k in klines]
@@ -3005,21 +3029,10 @@ class StockLiveStrategy:
                     # Log change
                     messages.append(("RULE", f"状态变更: {curr_phase.value}->{new_phase.value} {phase_reason}"))
                     
-                    # [Visualization] Persist Phase to DB (via Notes) for HotlistPanel
-                    # ⭐ [High Performance] 异步写入 DB，避免阻塞 321 股大循环 (解决 200ms 抖动)
-                    try:
-                        import threading
-                        def _async_db_sync(c, n):
-                            try:
-                                h = get_trading_hub()
-                                h.update_follow_status(c, notes=n)
-                            except: pass
-                        
-                        t = threading.Thread(target=_async_db_sync, args=(code, new_note), daemon=True)
-                        t.start()
-                        snap['phase_synced_ts'] = time.time()
-                    except Exception as db_e:
-                        logger.debug(f"Failed to start async phase sync: {db_e}")
+                    # ⭐ [High Performance] 移除 Worker 内子线程，通过 res 返回同步指令
+                    new_note = f"[{new_phase.value}] 状态变更"
+                    res['db_sync_note'] = new_note
+                    snap['phase_synced_ts'] = now
                     
                     # 如果是 EXIT，强制叠加卖出信号
                     if new_phase == TradePhase.EXIT:
@@ -3042,7 +3055,7 @@ class StockLiveStrategy:
                 snap['phase_target_pos'] = target_pos_ratio
 
             except Exception as e:
-                logger.error(f"Phase engine error {code}: {e}")
+                logger.exception(f"Phase engine error {code}: {e}")
         
         # if decision['action'] != "HOLD":
         #    messages.append(("RULE", f"决策引擎建议 {decision['action']}: {decision['reason']}"))
@@ -3233,17 +3246,7 @@ class StockLiveStrategy:
                 ratio = 0
             messages.append(("POSITION", f'[Risk] {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
-        # 构造结果返回给主引擎
-        res = {
-            'key': key,
-            'code': code,
-            'snapshot_updates': snap,
-            'alert_payload': None,
-            'messages': [],
-            'last_alert': data.get('last_alert', 0),
-            'signal_item': None,
-            'status_item': None
-        }
+        
 
         if messages:
             priority_order = ["RISK","RULE","POSITION","PATTERN"]
@@ -3262,18 +3265,27 @@ class StockLiveStrategy:
                     seen.add(msg)
                     unique_msgs.append(msg)
             t1_prefix = "[T+1限制] " if is_t1_restricted else ""
-            res['messages'] = [(None, t1_prefix + m) for m in unique_msgs] # 包裹成元组兼容引擎 join
-
-            res['alert_payload'] = {
-                'code': code,
-                'name': data.get('name', ''),
-                'action': str(action),
-                'price': current_price,
-                'score': snap.get('score', snap.get('max_score_today', 0.0))
-            }
-            res['last_alert'] = now
             
-            # 设置 signal_item 用于批量存储
+            # 🚀 [NEW] 报警单独分发：确保每个信号在 UI 侧有独立的染色 sig_type
+            # 此处直接循环触发，不再聚合为 combined_msgs 以修复颜色显示问题
+            if isinstance(action,pd.Series):
+                action = action.iloc[0] if not action.empty else "HOLD"
+            
+            for mtype, msg in messages:
+                # 再次快速去重判定 (unique_msgs 已处理内容，此处直接过滤重复内容)
+                if str(msg) in unique_msgs:
+                    self._trigger_alert(
+                        code,
+                        data.get('name', ''),
+                        f"{t1_prefix}{msg}",
+                        action=str(action),
+                        price=current_price,
+                        resample=resample,
+                        score=snap.get('score', snap.get('max_score_today', 0.0)),
+                        grade=snap.get('grade', '')
+                    )
+            
+            # 设置 signal_item 用于主引擎批量存储
             res['signal_item'] = {
                 'code': code,
                 'name': data.get('name', ''),
@@ -3282,7 +3294,25 @@ class StockLiveStrategy:
                 'row_data': row_data,
                 'resample': resample
             }
+            # logger.info(f'{decision["action"]}')
+            if decision["action"]  in ("VETO", "买入",'卖出'):
+                # ⭐ [FIX] 移除或完全屏蔽此处的控制台输出，统一走 logging 管理
+                # 如果需要查看，请在 logging 配置中开启 DEBUG
+                pass
+            data['last_alert'] = now
+            # ⭐ [FIX] 不在单股循环内保存文件，改为设置标记
+            self._needs_monitor_save = True
+            data['below_nclose_count'] = 0
+            data['below_nclose_start'] = 0
+            data['below_last_close_count'] = 0
 
+             # [Optimization] 完善结果返回给主引擎
+            res.update({
+                'snapshot_updates': snap,
+                'last_alert': data.get('last_alert', 0),
+                'db_sync_note': res.get('db_sync_note') # 保持状态机可能已注入的 note
+            })
+            
         return res
 
 
