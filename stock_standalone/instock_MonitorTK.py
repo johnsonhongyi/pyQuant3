@@ -114,7 +114,7 @@ from db_utils import *
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
-# import keyboard  # pip install keyboard  # ⚡ 已替换为 Win32 RegisterHotKey API
+import keyboard  # ✅ 当前使用 keyboard 库实现全局热键 (Win32 API 作为备份)
 # import trade_visualizer_qt6 as qtviz  # ⚡ 移至局部作用域
 from sys_utils import assert_main_thread
 import struct, pickle
@@ -1005,7 +1005,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if processed_count % 5 == 0:
                         self.update_idletasks()
                 except Exception as e:
-                    logger.error(f"Dispatch Error: {e}")
+                    logger.exception(f"Dispatch Error: {e}")
 
             # 积压监控
             remaining = self.tk_dispatch_queue.qsize()
@@ -1325,6 +1325,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         3: (win32con.MOD_ALT, 0x4B, "Alt+K"),  # K - 每日复盘
         4: (win32con.MOD_ALT, 0x4C, "Alt+L"),  # Q - 实时信号仪表盘
         5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H - 切换Hotlist
+        6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
     }
 
     def setup_global_hotkey(self, show_toast=False):
@@ -1351,6 +1352,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             3: lambda: self._schedule_after(0, self.open_market_pulse),
             4: lambda: self._schedule_after(0, self.open_live_signal_viewer),
             5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
+            6: lambda: self._schedule_after(0, self._run_live_strategy_process),
         }
 
         # 线程退出事件
@@ -1358,29 +1360,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._hotkey_thread_id = None  # 存储线程 ID，用于发送退出消息
 
         def _hotkey_thread_func():
-            """独立守护线程：注册热键 + 消息循环"""
-            user32 = ctypes.windll.user32
-            WM_HOTKEY = 0x0312
+            """独立守护线程：使用 keyboard 库注册全局热键 (Win32 API 留作备份)"""
+            logger.info("⚡ [Hotkey] 正在使用 keyboard 库模式激活系统全局快捷键...")
             
-            # 保存线程 ID，用于外部发送 WM_QUIT (0x0012)
+            # 保存线程 ID (虽然 keyboard 模式可能不需要，但为了兼容 _shutdown_global_hotkeys 的逻辑依然保留)
             self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
             
-            registered_ids = []
             failed_offsets = []
             
-            # 1. 尝试注册所有全局热键
-            for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
-                hk_id = self._HOTKEY_ID_BASE + offset
-                # 尝试注册为全局热键
-                if user32.RegisterHotKey(None, hk_id, mod, vk):
-                    registered_ids.append(hk_id)
-                    logger.info(f"✅ [Hotkey] 全局热键已激活: {desc} (id={hk_id})")
-                else:
-                    err = ctypes.get_last_error()
-                    logger.warning(f"⚠️ [Hotkey] 全局注册 {desc} 失败 (error={err})，将被程序本地快捷键接管")
+            # 1. 使用 keyboard.add_hotkey 尝试注册所有全局热键
+            for offset, (_, _, desc) in self._HOTKEY_MAP.items():
+                cb = hotkey_callbacks.get(offset)
+                if not cb: continue
+                
+                try:
+                    # 注册全局热键，suppress=False 保证按键不被独占拦截
+                    keyboard.add_hotkey(desc, cb)
+                    logger.info(f"✅ [Hotkey] 全局热键激活 (keyboard): {desc}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [Hotkey] keyboard 绑定 {desc} 失败 (error={e})，将由程序本地快捷键接管")
                     failed_offsets.append(offset)
             
-            # 2. 对于注册失败的热键，由主线程进行本地绑定退回 (或确保本地绑定生效)
+            # 2. 对于注册失败的热键，由主线程进行本地绑定退回
             if failed_offsets:
                 def _bind_local_fallbacks():
                     for off in failed_offsets:
@@ -1388,49 +1389,54 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         cb = hotkey_callbacks.get(off)
                         if not cb: continue
                         
-                        # 转换 description (如 "Alt+B") 到 Tkinter binding string (如 "<Alt-b>")
                         tk_key = f"<{desc.replace('+', '-').lower()}>"
                         try:
-                            # 注意：如果已经在 __init__ 中静态绑定过，这里会覆盖或共存
-                            # 但作为“退回”策略，此处进行显式兜底
                             self.bind_all(tk_key, lambda e, func=cb: func())
                             logger.info(f"🔁 [Hotkey] 退回到本地快捷键: {tk_key}")
                         except Exception as e:
                             logger.error(f"❌ [Hotkey] 本地绑定 {tk_key} 失败: {e}")
                 
-                # 跨线程调度到主线程执行 Tk 绑定
                 self.tk_dispatch_queue.put(_bind_local_fallbacks)
 
-            if registered_ids:
-                logger.info(f"⚡ [Hotkey] 成功注册 {len(registered_ids)} 个系统级全局快捷键")
+            # 3. 阻塞等待直到停止事件被设置
+            # 使用 wait 替代消息循环，更轻量
+            self._hotkey_stop_event.wait()
             
-            # 3. 消息循环 (只监听 WM_HOTKEY 和 WM_QUIT)
+            # 4. 清理：注销所有 keyboard 钩子
+            try:
+                keyboard.unhook_all()
+                logger.info("[Hotkey] 全局热键线程已关闭，keyboard 钩子已释放")
+            except:
+                pass
+
+        # === [备份备用] 下方为原 Win32 RegisterHotKey 原生实现，如 keyboard 模式不稳可切换回来 ===
+        def _hotkey_thread_func_WIN32_BACKUP():
+            user32 = ctypes.windll.user32
+            WM_HOTKEY = 0x0312
+            self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+            registered_ids = []
+            failed_offsets = []
+            for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
+                hk_id = self._HOTKEY_ID_BASE + offset
+                if user32.RegisterHotKey(None, hk_id, mod, vk):
+                    registered_ids.append(hk_id)
+                    logger.info(f"✅ [Hotkey] Win32端热键已激活: {desc}")
+                else:
+                    failed_offsets.append(offset)
+            
+            # 消息循环...
             msg = ctypes.wintypes.MSG()
             while not self._hotkey_stop_event.is_set():
-                # GetMessage 会阻塞直到有消息，收到 WM_QUIT 返回 0
                 ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-                if ret <= 0:  # WM_QUIT 或错误
-                    break
-                
+                if ret <= 0: break
                 if msg.message == WM_HOTKEY:
                     hk_id = msg.wParam
-                    offset = hk_id - self._HOTKEY_ID_BASE
-                    callback = hotkey_callbacks.get(offset)
-                    if callback:
-                        try:
-                            # 所有的回调都必须回到主线程执行 UI 操作
-                            callback() 
-                        except Exception as e:
-                            logger.error(f"[Hotkey] 全局热键回调失败 (id={offset}): {e}")
-                
-                # 给 Windows 消息循环换气的短暂让步 (可选)
-                # user32.TranslateMessage(ctypes.byref(msg))
-                # user32.DispatchMessageW(ctypes.byref(msg))
+                    callback = hotkey_callbacks.get(hk_id - self._HOTKEY_ID_BASE)
+                    if callback: callback()
             
-            # 4. 清理：注销所有热键
             for hk_id in registered_ids:
                 user32.UnregisterHotKey(None, hk_id)
-            logger.info("[Hotkey] 全局快捷键线程已安全关闭，所有热键已释放")
+        # =========================================================================
         
         # 启动守护线程
         self._hotkey_thread = threading.Thread(
@@ -2957,6 +2963,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_combo2.bind("<<ComboboxSelected>>", on_combo2_selected)
 
         tk.Button(bottom_search_frame, text="搜索", command=lambda: self.apply_search()).pack(side="left", padx=3)
+        
+        # 🧪 [NEW] 手动触发扫描：每点击一次扫描一批 (由策略引擎内部 RR 游标控制)
+        def manual_scan():
+            self._run_live_strategy_process()
+            toast_message(self, "🚀 手动信号扫描已触发 (按批次轮转)")
+            
+        tk.Button(bottom_search_frame, text="信号扫描", command=manual_scan, bg="#e3f2fd", cursor="hand2").pack(side="left", padx=3)
+
         tk.Button(bottom_search_frame, text="清空", command=lambda: self.clean_search(1)).pack(side="left", padx=2)
         tk.Button(bottom_search_frame, text="删除", command=lambda: self.delete_search_history(1)).pack(side="left", padx=2)
         tk.Button(bottom_search_frame, text="管理", command=lambda: self.open_column_manager()).pack(side="left", padx=2)
@@ -3048,6 +3062,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.setup_global_hotkey()
         self._schedule_after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
         self.open_column_manager_init()
+
+    def _run_live_strategy_process(self, full_df=None):
+        """
+        [Helper] 集中封装实盘策略分发逻辑 (信号触发 & 语音报警)
+        :param full_df: 输入行情 Dataframe，若为 None 则尝试使用缓存的 self.df_all
+        """
+        # 1. 数据就绪检查
+        if full_df is None:
+            full_df = getattr(self, 'df_all', None)
+        
+        if full_df is None or full_df.empty:
+            logger.debug("Strategy process skipped: full_df is empty or None")
+            return
+            
+        # 2. 策略引擎检查
+        strategy_engine = getattr(self, 'live_strategy', None)
+        if strategy_engine is None:
+            logger.debug("Strategy process skipped: live_strategy is None")
+            return
+
+        # 3. 执行策略扫描
+        try:
+            # 兼容：从全局配置读取当前周期
+            cur_res = self.global_values.getkey("resample") or 'd'
+            
+            # --- 🚀 [STRATEGY CORE] ---
+            # 直接调用策略引擎，它内部包含多线程异步扫描及 UI 信号回调
+            strategy_engine.process_data(
+                full_df, 
+                concept_top5=getattr(self, 'concept_top5', None), 
+                resample=cur_res
+            )
+            # --------------------------
+            
+        except Exception as strategy_err:
+            logger.exception(f"Global Strategy processing failed: {strategy_err}")
+
 
     def replace_st_key_sort_col(self, old_col, new_col):
         """替换显示列并刷新表格"""
@@ -3392,7 +3443,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.error(f"Full-snapshot detect_signals failed: {e}")
 
-            # --- 🛠️ [STRATEGY] 全球/全量策略分发 (必须在 UI 过滤之前，确保即使主表为空也要报警) ---
+            # --- 🛠️ [STRATEGY] 全球/全量策略分发 ---
             if full_df is not None and not full_df.empty:
                 if getattr(self, 'live_strategy', None) is not None:
                     try:
@@ -3403,7 +3454,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         import traceback
                         traceback.print_exc()
                         logger.error(f"Global Strategy processing failed: {strategy_err}")
-
+            # self._run_live_strategy_process(full_df)
             # --- 🛠️ [SYNC] 同步 UI 视图子集 ---
             # 使主 Treeview 渲染的数据 (df) 与全量行情在逻辑列上保持一致
             if full_df is not None and df is not None and not df.empty:
@@ -3461,9 +3512,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._is_processing_tree_data = False
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            logger.error(f"Error in _process_tree_data_async: {e}", exc_info=True)
+            logger.exception(f"Error in _process_tree_data_async: {e}", exc_info=True)
             self._is_processing_tree_data = False
 
     def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d'):

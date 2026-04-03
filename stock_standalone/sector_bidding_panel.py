@@ -2060,7 +2060,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_search_triggered(self):
         query = self.search_input.text().strip()
         if not query:
-            query = self.search_input.placeholderText().replace("例如: ", "").strip()
+            query = self.search_input.placeholderText().replace("例如:", "").strip()
             self.search_input.setText(query)
         self._active_search_query = query
         self.manual_refresh()
