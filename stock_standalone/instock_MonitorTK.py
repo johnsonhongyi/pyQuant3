@@ -99,7 +99,8 @@ import stock_indicator_help
 
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
-
+import faulthandler
+faulthandler.enable()
 # Integrated Query Engine
 try:
     from query_engine_util import query_engine
@@ -4043,17 +4044,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error saving UI states: {e}")
 
 
-    def _on_clipboard_code_visualizer(self, stock_code):
+    # def _on_clipboard_code_visualizer(self, stock_code):
         
-        self._schedule_after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
+    #     self._schedule_after(0, lambda: self._handle_clipboard_code_visualizer(stock_code))
+    def _on_clipboard_code_visualizer(self, stock_code):
+        try:
+            if stock_code == getattr(self, "_last_clip_code", None):
+                return
+            self._last_clip_code = stock_code
 
+            if self.tk_dispatch_queue.qsize() > 200:
+                return
+
+            self.tk_dispatch_queue.put(
+                lambda c=stock_code: self._handle_clipboard_code_visualizer(c)
+            )
+
+        except Exception as e:
+            logger.error(f"enqueue clipboard task error: {e}")
 
     def _handle_clipboard_code_visualizer(self, stock_code):
 
+        if not hasattr(self, 'vis_var'):
+            return
+
         self.select_code = stock_code
 
-        if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+        if self.vis_var.get() and stock_code:
             self.open_visualizer(stock_code)
+
+    # def _handle_clipboard_code_visualizer(self, stock_code):
+
+    #     self.select_code = stock_code
+
+    #     if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+    #         self.open_visualizer(stock_code)
 
     def open_visualizer(self, code, timestamp=None):
         
@@ -4258,7 +4283,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⚡ [CORE] 线程安全地获取行情快照
                 # 使用哈希检测跳过无变化的昂贵计算（及 IPC 发送）
                 with getattr(self, '_df_lock', threading.Lock()):
-                    df_ui = self.df_all
+                    df_ui = self.df_all.copy()
                 
                 # [OPTIMIZE] 快速哈希校验：如果核心价格列完全没动，没必要比较/同步
                 n_rows_now = len(df_ui)
