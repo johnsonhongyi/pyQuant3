@@ -4665,7 +4665,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 2️⃣ socket 单独计时
                         with timed_ctx("viz_IPC_send", warn_ms=300):
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                s.settimeout(0.6)
+                                s.settimeout(0.5)
                                 s.connect((ipc_host, ipc_port))
                                 s.sendall(b"DATA" + header + payload)
 
