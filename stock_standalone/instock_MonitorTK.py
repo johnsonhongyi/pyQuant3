@@ -961,23 +961,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 执行任务
                 try:
-                    task_start = time.perf_counter()
-                    task()
-                    task_dur = (time.perf_counter() - task_start) * 1000
-                    processed_count += 1
-
-                    # 1. 优先获取名称路径 (能探测 lambda 的外层定义位置)
+                    # 1. 获取任务描述名称 (用于性能监控追踪)
                     t_name = getattr(task, 'key', None)
                     if not t_name:
                         t_func = task.func if hasattr(task, 'func') else task
-                        # 这里使用 __qualname__ 能获取到 _outer_func.<locals>.<inner_func> 这种路径
                         t_name = getattr(t_func, '__qualname__', getattr(t_func, '__name__', str(t_func)))
                     
-                    if not isinstance(t_name, str): 
-                        t_name = str(t_name)
-                    
-                    # 2. 强力清洗：全局剔除冗余类名和闭包标记
+                    if not isinstance(t_name, str): t_name = str(t_name)
+                    # 强力清洗：全局剔除冗余类名和闭包标记
                     t_name = t_name.replace("StockMonitorApp.", "").replace(".<locals>", "")
+
+                    task_start = time.perf_counter()
+                    task()
+                    task_dur = (time.perf_counter() - task_start) * 1000
+                    
+                    # ⭐ [PERFORMANCE] 监测主线程耗时任务
+                    if task_dur > 100:
+                        logger.warning(f"⚠️ [UI_BLOCK] Task '{t_name}' took {task_dur:.2f}ms (Budget={TIME_BUDGET_S*1000}ms)")
+                    
+                    processed_count += 1
                     
                     if " at 0x" in t_name:
                         t_name = t_name.split(" at 0x")[0]
@@ -4176,7 +4178,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         self.open_visualizer(stock_code)
 
     def open_visualizer(self, code, timestamp=None):
-
+        logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
         # =========================
         # 0. 基础过滤（UI线程安全）
         # =========================
@@ -4434,6 +4436,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _start_visualizer_process(self, code, resample=None):
         """独立方法：在子线程中安全启动 Qt 可视化进程"""
+        start_t = time.time()
         try:
             if resample is None:
                 resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
@@ -4449,26 +4452,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # 启动进程：传入 code|resample, stop_flag, log_level, debug, conn
             initial_payload = f"{code}|resample={resample}"
+            
+            import_start = time.time()
             import trade_visualizer_qt6 as qtviz
+            logger.debug(f"[Visualizer] Import trade_visualizer_qt6 cost {(time.time() - import_start)*1000:.1f}ms")
+
+            launch_start = time.time()
             self.qt_process = mp.Process(
                 target=qtviz.main, 
                 args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_conn[1]), 
                 daemon=False
             )
             self.qt_process.start()
-            logger.info(f"Launched QT GUI process via Pipe for {initial_payload}")
-            
-            # 给 Qt 初始化时间
-            # time.sleep(1)
+            logger.info(f"[Visualizer] Launched QT process cost {(time.time() - launch_start)*1000:.1f}ms for {initial_payload}")
             
             if hasattr(self, '_df_first_send_done'):
                 self._df_first_send_done = False
                 
             # 启动/确认同步线程
+            thread_start = time.time()
             if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
                 self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
                 self._df_sync_thread.start()
+                logger.debug(f"[Visualizer] df_sync_thread start cost {(time.time() - thread_start)*1000:.1f}ms")
+            
             self._viz_ready = True
+            logger.debug(f"✅ [Visualizer] Full startup sequence finished in {(time.time() - start_t)*1000:.1f}ms")
 
         except Exception as e:
             logger.error(f"Failed to start Qt visualizer: {e}")
@@ -4580,10 +4589,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
                 if hasattr(self, 'df_ui_prev') and not self._cold_start:
                     try:
-                        # 仅在已有缓存且不是冷启动时才 compare
-                        df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                        with timed_ctx("viz_df_compare", warn_ms=1000):
+                            # 仅在已有缓存且不是冷启动时才 compare
+                            df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            
                         if df_diff.empty:
-                            logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                            # logger.debug("[send_df] df_diff empty, skip sending this cycle")
                             msg_type = 'DF_DIFF_EMPTY'
                             sent = True
                         else:
@@ -4650,10 +4661,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ======================================================
                 # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
                 # ======================================================
-                # [FIX] 避免在后台线程直接调用 self.vis_var.get()，改为读取 master 的可见性状态 (非 UI 调用) 或变量快照
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 
-                if not sent and vis_enabled:
+                # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
+                now_ipc = time.time()
+                ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
+                
+                if not sent and vis_enabled and now_ipc > ipc_cooldown:
                     try:
                         # 1️⃣ pickle 单独计时
                         with timed_ctx("viz_IPC_pickle", warn_ms=300):
@@ -4663,25 +4677,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         header = struct.pack("!I", len(payload))
 
                         # 2️⃣ socket 单独计时
-                        with timed_ctx("viz_IPC_send", warn_ms=300):
+                        with timed_ctx("viz_IPC_send", warn_ms=400):
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                s.settimeout(0.5)
+                                s.settimeout(0.4) # 缩短超时到 400ms
                                 s.connect((ipc_host, ipc_port))
                                 s.sendall(b"DATA" + header + payload)
 
                         logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
                         sent = True
+                        self._viz_ipc_fail_count = 0 # 成功清零
                         
                         # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
                         if self.qt_process is not None and self.qt_process.is_alive():
                             logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
 
-                    except Exception as e:
-                        # 只有当真正失败时才 Warning，避免没有 Visualizer 时的噪音
-                        # logger.warning(f"[IPC] send failed: {e}")
+                    except (socket.timeout, ConnectionError, OSError) as e:
+                        # 只有当真正失败时才记录
+                        fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
+                        self._viz_ipc_fail_count = fail_count
+                        
+                        # 如果连续失败 3 次，开启 10-60 秒的冷却 (非工作时间更久)
+                        if fail_count >= 3:
+                            cooldown_dur = 60 if not cct.get_work_time() else 10
+                            self._viz_ipc_cooldown_until = now_ipc + cooldown_dur
+                            logger.info(f"⚠️ [IPC] Failed {fail_count} times, enter {cooldown_dur}s cooldown. (Error: {e})")
+                        
                         self._viz_ready = False
                         if not vis_enabled:
-                            # self._df_first_send_done = True
                             sent = True
 
             except Exception:
