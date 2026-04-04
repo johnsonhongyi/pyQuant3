@@ -118,6 +118,8 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         # Data
         self.current_date = datetime.now().strftime("%Y-%m-%d")
         self.report_data = None
+        self._refresh_count = 0
+        self._fit_job = None
         
         # Styles
         self._init_styles()
@@ -186,38 +188,9 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self.paned = tk.PanedWindow(self, orient="vertical", sashrelief="raised", sashwidth=4)
         self.paned.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # # --- Top Pane: Market Context & Summary ---
-        # top_frame = tk.LabelFrame(self.paned, text="市场温度与复盘总结 (Market Context)", padx=5, pady=5)
-        # self.paned.add(top_frame, height=250)
-        
-        # # Left: Thermometer & Sectors
-        # ctx_left = tk.Frame(top_frame)
-        # ctx_left.pack(side="left", fill="y", padx=5)
-        
-        # tk.Label(ctx_left, text="市场温度:", font=("Microsoft YaHei", 12)).pack(anchor="w")
-        # self.lbl_temp = tk.Label(ctx_left, text="0°C", font=("Arial", 24, "bold"), fg="gray")
-        # self.lbl_temp.pack(anchor="w", pady=5)
-        
-        # tk.Label(ctx_left, text="核心风口:", font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(10,0))
-        # self.txt_sectors = tk.Text(ctx_left, width=30, height=50, font=("Microsoft YaHei", 9), bg="#f9f9f9")
-        # self.txt_sectors.pack(fill="both", expand=True)
-
-        # # Right: Strategy Summary & Notes
-        # ctx_right = tk.Frame(top_frame)
-        # ctx_right.pack(side="left", fill="both", expand=True, padx=5)
-        
-        # tk.Label(ctx_right, text="策略分析 & 交易笔记 (User Notes):", font=("Microsoft YaHei", 10)).pack(anchor="w")
-        # self.txt_summary = scrolledtext.ScrolledText(ctx_right, height=8, font=("Microsoft YaHei", 10))
-        # self.txt_summary.pack(fill="both", expand=True)
-        
-        # # Save Notes Button
-        # btn_save_note = tk.Button(ctx_right, text="💾 保存笔记", command=self.save_notes)
-        # btn_save_note.pack(anchor="e", pady=2)
-
         # --- Top Pane: Market Context & Summary ---
         top_frame = tk.LabelFrame(self.paned, text="市场温度与复盘总结 (Market Context)", padx=5, pady=5)
         self.paned.add(top_frame, height=350)
-        # self.paned.add(top_frame)
 
         # ===== 左侧：核心风口（窄 + 可滚动）=====
         ctx_left = tk.Frame(top_frame)
@@ -359,6 +332,9 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         # Bindings
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.on_right_click)
+        self.tree.tag_configure('hot', background='#ffe6e6') # Light red
+        self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
+
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Up>", self.on_key_nav)
         self.tree.bind("<Down>", self.on_key_nav)
@@ -502,18 +478,38 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
 
 
     def _auto_fit_columns(self):
-        """根据内容自动调整列宽"""
+        """
+        根据内容自动调整列宽 (Debounce 模式)
+        避免在连续刷新时频繁触发高成本的测量逻辑
+        """
+        if self._fit_job:
+            self.after_cancel(self._fit_job)
+        self._fit_job = self.after(1000, self._do_auto_fit)
+
+    def _do_auto_fit(self):
+        self._fit_job = None
+        # 采样深度从 15 恢复到 25，因为执行频率已经由于 debounce 大幅降低
+        sample_depth = 25
+        
         f = tkfont.Font(font='Arial 9') 
         cols = self.tree["columns"]
+        all_items = self.tree.get_children()
+        sample_items = all_items[:sample_depth]
+        
+        # 缓存测量结果避免重复计算相同字符串
+        measure_cache = {}
+        def get_width(text):
+            if text not in measure_cache:
+                measure_cache[text] = f.measure(text)
+            return measure_cache[text]
+
         for col in cols:
             header_text = self.tree.heading(col)["text"]
-            max_w = f.measure(header_text) + 20
+            max_w = get_width(header_text) + 20
             
-            all_items = self.tree.get_children()
-            sample_items = all_items[:50] # 采样前50行
             for item in sample_items:
                 cell_val = str(self.tree.set(item, col))
-                max_w = max(max_w, f.measure(cell_val) + 20)
+                max_w = max(max_w, get_width(cell_val) + 20)
             
             # 限制合理范围
             if col in ["action_plan", "reason", "auto_reason"]:
@@ -549,24 +545,27 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
             flat = breadth.get('flat', 0)
             total = breadth.get('total', 1)
             
-            # Draw Bar
-            self.breadth_canvas.delete("all")
-            w = 200
-            up_w = (up / total) * w
-            flat_w = (flat / total) * w
-            # Red for Up, Green for Down in A-share context
-            self.breadth_canvas.create_rectangle(0, 0, up_w, 20, fill="#f2dede", outline="") # Tinted Red
-            self.breadth_canvas.create_rectangle(up_w, 0, up_w + flat_w, 20, fill="#eeeeee", outline="") # Gray
-            self.breadth_canvas.create_rectangle(up_w + flat_w, 0, w, 20, fill="#dff0d8", outline="") # Tinted Green
-            
-            # Foreground stronger bars
-            self.breadth_canvas.create_rectangle(0, 6, min(up_w, 2), 12, fill="#d9534f", outline="")
-            self.breadth_canvas.create_rectangle(w - min((w-(up_w+flat_w)), 2), 6, w, 12, fill="#5cb85c", outline="")
+            breadth_key = f"{up}_{down}_{flat}_{total}"
+            if not hasattr(self, '_last_breadth') or self._last_breadth != breadth_key:
+                self._last_breadth = breadth_key
+                # Draw Bar
+                self.breadth_canvas.delete("all")
+                w = 200
+                up_w = (up / total) * w
+                flat_w = (flat / total) * w
+                # Red for Up, Green for Down in A-share context
+                self.breadth_canvas.create_rectangle(0, 0, up_w, 20, fill="#f2dede", outline="") # Tinted Red
+                self.breadth_canvas.create_rectangle(up_w, 0, up_w + flat_w, 20, fill="#eeeeee", outline="") # Gray
+                self.breadth_canvas.create_rectangle(up_w + flat_w, 0, w, 20, fill="#dff0d8", outline="") # Tinted Green
+                
+                # Foreground stronger bars
+                self.breadth_canvas.create_rectangle(0, 6, min(up_w, 2), 12, fill="#d9534f", outline="")
+                self.breadth_canvas.create_rectangle(w - min((w-(up_w+flat_w)), 2), 6, w, 12, fill="#5cb85c", outline="")
 
-            self.lbl_breadth_stats.config(
-                text=f"↑ {up}  |  ↓ {down}  ({flat})", 
-                fg="#d9534f" if up > down else "#5cb85c"
-            )
+                self.lbl_breadth_stats.config(
+                    text=f"↑ {up}  |  ↓ {down}  ({flat})", 
+                    fg="#d9534f" if up > down else "#5cb85c"
+                )
 
         # Update Indices Performance
         indices = summary.get('indices', [])
@@ -593,26 +592,34 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         # Hot Sectors
         hot_list = summary.get('hot_sectors', [])
-        self.txt_sectors.delete("1.0", tk.END)
-        for s in hot_list[:12]:
-             # s is [name, pct]
-             name = s[0]
-             pct = s[1]
-             # Insert name with link tag
-             start_idx = self.txt_sectors.index(tk.INSERT)
-             self.txt_sectors.insert(tk.END, f"{name}", "link")
-             self.txt_sectors.insert(tk.END, f" : {pct}%\n")
+        if not hasattr(self, '_last_hot_sectors') or self._last_hot_sectors != hot_list:
+            self.txt_sectors.delete("1.0", tk.END)
+            for s in hot_list[:12]:
+                 name = s[0]
+                 pct = s[1]
+                 self.txt_sectors.insert(tk.END, f"{name}", "link")
+                 self.txt_sectors.insert(tk.END, f" : {pct}%\n")
+            self._last_hot_sectors = hot_list
         
         # User Notes / Summary
-        self.txt_summary.delete("1.0", tk.END)
         note = summary.get('user_notes', '') or summary.get('summary_text', '')
-        self.txt_summary.insert(tk.END, note)
+        if not hasattr(self, '_last_note') or self._last_note != note:
+            self.txt_summary.delete("1.0", tk.END)
+            self.txt_summary.insert(tk.END, note)
+            self._last_note = note
         
-        # 2. Update Tree
-        self.tree.delete(*self.tree.get_children())
+        # 2. Update Tree (Diff Update)
+        self._refresh_count += 1
+        existing_items = self.tree.get_children()
+        num_existing = len(existing_items)
+        
+        # Performance trick: hide columns during redraw
+        orig_cols = self.tree["columns"]
+        self.tree.configure(displaycolumns=(), takefocus=0)
         
         # Sort by Score desc
         stocks.sort(key=lambda x: x.get('score', 0), reverse=True)
+        stocks = stocks[:100] # 限制行数提升性能
         
         total_score = 0
         count = len(stocks)
@@ -656,15 +663,33 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
             )
             # Tag logic
             tag = 'hot' if score > 90 else 'warm' if score > 80 else 'cold'
-            self.tree.insert("", "end", values=values, tags=(tag,))
+            
+            if idx < num_existing:
+                item_id = existing_items[idx]
+                # [Industrial Practice] Dirty Flag Check - Compare all values to avoid expensive Treeview updates
+                try:
+                    current_vals = self.tree.item(item_id, "values")
+                    current_tags = self.tree.item(item_id, "tags")
+                    # Compare string versions of values as item() returns strings
+                    if tuple(map(str, values)) != current_vals or (tag,) != tuple(current_tags):
+                        self.tree.item(item_id, values=values, tags=(tag,))
+                except:
+                    # Fallback in case item management is in inconsistent state during rapid interactions
+                    self.tree.item(item_id, values=values, tags=(tag,))
+            else:
+                self.tree.insert("", "end", values=values, tags=(tag,))
+                
+        # Remove trailing stale items
+        if count < num_existing:
+            self.tree.delete(*existing_items[count:])
+            
+        # Restore columns and focus
+        self.tree.configure(displaycolumns=orig_cols, takefocus=1)
             
         # Update Stats Bar
         avg_score = total_score / count if count > 0 else 0
         self.lbl_stats.config(text=f"Total: {count}  |  Avg Score: {avg_score:.1f}")
 
-        self.tree.tag_configure('hot', background='#ffe6e6') # Light red
-        self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
-        
         # [NEW] 数据填充后自动调整列宽
         self.after(100, self._auto_fit_columns)
 
@@ -691,7 +716,6 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
                     self.monitor_app.show_concept_top10_window_simple(sector_name, focus_force=False)
             else:
                 self.logger.warning("monitor_app or show_concept_top10_window_simple not available")
-        self.tree.tag_configure('warm', background='#fff9e6') # Light yellow
 
     def save_notes(self):
         """Save text area content to DB."""

@@ -3,11 +3,11 @@
 股票特征标记模块
 提供行颜色高亮、图标标记等功能
 """
-
 # import logging
 # logger = logging.getLogger(__name__)
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger()
+import pandas as pd
 
 
 class StockFeatureMarker:
@@ -201,6 +201,55 @@ class StockFeatureMarker:
                 icons.insert(0, self.ICONS['bullish_trend'])
             
         return ''.join(icons)
+    
+    def process_dataframe(self, df: pd.DataFrame) -> dict:
+        """
+        批量处理DataFrame，返回 {code: (tags, icon)} 映射
+        
+        Args:
+            df: 包含技术指标的DataFrame
+            
+        Returns:
+            dict: {code: (tags, icon)}
+        """
+        results = {}
+        if df.empty:
+            return results
+            
+        # 确保 code 列存在
+        if 'code' not in df.columns:
+            # 尝试从 index 获取
+            df = df.copy()
+            df['code'] = df.index
+            
+        # 预取所有可能需要的列，如果缺失则填充默认值，避免循环中频繁判断
+        cols_needed = [
+            'percent', 'volume', 'price', 'trade', 'high4', 'max5', 'max10', 
+            'hmax', 'hmax60', 'low4', 'low10', 'low60', 'lmin', 'min5', 
+            'cmean', 'hv', 'lv', 'llowvol', 'lastdu4', 'category',
+            'ma5d', 'ma20d', 'ma60d'
+        ]
+        
+        df_proc = df.copy()
+        for col in cols_needed:
+            if col not in df_proc.columns:
+                # 特殊映射: price 可能叫 trade
+                if col == 'price' and 'trade' in df_proc.columns:
+                    df_proc['price'] = df_proc['trade']
+                else:
+                    df_proc[col] = 0 if col != 'category' else ''
+        
+        # 转换为字典列表处理更高效
+        items = df_proc.to_dict('records')
+        for item in items:
+            code = str(item.get('code', ''))
+            if not code: continue
+            
+            tags = self.get_tags_for_row(item) if self.enable_colors else []
+            icon = self.get_icon_for_row(item)
+            results[code] = (tags, icon)
+            
+        return results
     
     def apply_marks(self, item_id: str, row_data: dict, add_icon: bool = False):
         """
