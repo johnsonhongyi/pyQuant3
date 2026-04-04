@@ -108,7 +108,7 @@ class SignalBus:
                 self._subscribers[event_type] = []
             if handler not in self._subscribers[event_type]:
                 self._subscribers[event_type].append(handler)
-                logger.info(f"SignalBus: {getattr(handler, '__name__', str(handler))} subscribed to {event_type}. Total subscribers: {len(self._subscribers[event_type])}")
+                logger.debug(f"SignalBus: {getattr(handler, '__name__', str(handler))} subscribed to {event_type}. Total subscribers: {len(self._subscribers[event_type])}")
     
     def unsubscribe(self, event_type: str, handler: Callable) -> bool:
         """取消订阅"""
@@ -116,7 +116,7 @@ class SignalBus:
             if event_type in self._subscribers:
                 try:
                     self._subscribers[event_type].remove(handler)
-                    logger.info(f"SignalBus: {getattr(handler, '__name__', str(handler))} unsubscribed from {event_type}")
+                    logger.debug(f"SignalBus: {getattr(handler, '__name__', str(handler))} unsubscribed from {event_type}")
                     return True
                 except ValueError:
                     pass

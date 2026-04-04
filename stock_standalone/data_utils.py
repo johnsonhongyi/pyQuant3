@@ -2762,7 +2762,7 @@ def fetch_and_process(
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
           
-            logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
+            logger.debug(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
 

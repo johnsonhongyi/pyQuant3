@@ -1379,7 +1379,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     # 注册全局热键，suppress=False 保证按键不被独占拦截
                     keyboard.add_hotkey(desc, cb)
-                    logger.info(f"✅ [Hotkey] 全局热键激活 (keyboard): {desc}")
+                    logger.debug(f"✅ [Hotkey] 全局热键激活 (keyboard): {desc}")
                 except Exception as e:
                     logger.warning(f"⚠️ [Hotkey] keyboard 绑定 {desc} 失败 (error={e})，将由程序本地快捷键接管")
                     failed_offsets.append(offset)
@@ -1554,7 +1554,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             break
 
                         msg = data.decode("utf-8", errors="ignore")
-                        logger.info(f"[Pipe] recv: {msg}")
+                        logger.debug(f"[Pipe] recv: {msg}")
 
                         try:
                             obj = json.loads(msg)
@@ -1569,7 +1569,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self._df_first_send_done = False
 
                         elif obj and obj.get("cmd") == "VIZ_EXIT":
-                            logger.info('[Pipe] Visualizer exited. Cleaning up qt_process state.')
+                            logger.debug('[Pipe] Visualizer exited. Cleaning up qt_process state.')
                             self.qt_process = None
                             self.viz_command_queue = None
                             self._viz_ready = False

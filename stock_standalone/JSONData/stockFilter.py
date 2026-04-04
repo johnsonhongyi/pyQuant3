@@ -363,7 +363,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         if market_key is not None and market_value is not None:
             if market_key == '3' and market_value not in ['1']:
                 market_value= int(float(market_value))
-                log.info("stf market_key:%s" % (market_key))
+                log.debug("stf market_key:%s" % (market_key))
                 idx_k= cct.get_col_in_columns(df, 'perc%sd', market_value)
                 if market_va_filter is not None:
                     df= df[(df[("perc%sd" % (idx_k))] >= int(market_va_filter)) ]
