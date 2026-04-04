@@ -152,6 +152,18 @@ def send_signal_to_visualizer_ipc(data: dict):
     """ Standardized signals for IPC and SignalBus """
     global _ipc_sender_thread
 
+    # ⭐ [THROTTLE] 内部节流：防止同一秒内对同一只股票发送过多重复的 IPC 信号 (震荡导致)
+    now = time.time()
+    code = data.get('code')
+    if code:
+        if not hasattr(send_signal_to_visualizer_ipc, '_last_t'):
+            send_signal_to_visualizer_ipc._last_t = {}
+        
+        last_t_map = send_signal_to_visualizer_ipc._last_t
+        if now - last_t_map.get(code, 0) < 0.5: # 0.5秒冷却
+            return
+        last_t_map[code] = now
+
     try:
         # 1. Start IPC sender thread if not already running
         if _ipc_sender_thread is None or not _ipc_sender_thread.is_alive():
@@ -160,8 +172,8 @@ def send_signal_to_visualizer_ipc(data: dict):
 
         # 2. ---------- SignalBus (Main process only) ----------
         sig_type = data.get('pattern', 'ALERT')
-
         try:
+            from signal_bus import SignalBus, StandardSignal, publish_standard_signal
             std_sig = StandardSignal(
                 code=data.get('code', ''),
                 name=data.get('name', ''),
@@ -180,13 +192,10 @@ def send_signal_to_visualizer_ipc(data: dict):
             logger.debug(f"SignalBus publish failed: {e}")
 
         # 3. ---------- IPC (Queue it for Async worker) ----------
-        try:
+        if ipc_queue:
             ipc_queue.put(data, block=False) # Non-blocking put
-        except Full:
-            # If queue is somehow full, drop the least important (oldest) signal? 
-            # Or just wait a tiny bit? For now, we drop to ensure strategy doesn't lag.
-            logger.warning("IPC Queue full! Dropping signal to prevent lag.")
-            
+    except queue.Full:
+        pass
     except Exception as e:
         logger.debug(f"send_signal_to_visualizer_ipc error: {e}")
         
@@ -873,6 +882,7 @@ class StockLiveStrategy:
                 stock.setdefault('last_alert', 0)
                 stock.setdefault('resample', 'd')
                 stock.setdefault('create_price', 0.0)
+                stock.setdefault('snapshot', {}) # 🛡️ [FIX] 确保存在 snapshot 字典，防止 KeyError
                 if 'code' not in stock:
                     stock['code'] = key.split('_')[0]
 
@@ -1255,22 +1265,9 @@ class StockLiveStrategy:
                  target_codes = list(self._monitored_stocks.keys())
                  
              if target_codes:
-                 # 🛡️ [FIX] 无论原始行情索引如何，强制归一化索引类型为 str 以对齐监控逻辑
-                 df_tmp = df_internal.copy()
-                 df_tmp.index = df_tmp.index.astype(str)
-                 matched_idx = df_tmp.index.intersection(target_codes)
-                 df_target = df_tmp.loc[matched_idx]
-                 
-                 # 🔍 [DIAGNOSTIC] 检查交叉点
-                 # logger.info(f"🔍 [INTERSECT] Target={len(target_codes)} Matched={len(matched_idx)}")
-                 
-                 if not df_target.empty:
-                    # 🚀 [PERF] 已在锁外，提交到线程池分发执行
-                    self.executor.submit(self._check_strategies, df_target, resample=resample)
-                 else:
-                    with self._lock: 
-                        if resample in self._is_checking_resamples:
-                            self._is_checking_resamples.remove(resample) 
+                 # 🛡️ [PERF OPTIMIZE] 延迟到 _check_strategies 内部进行 index 转换和 intersection
+                 # 这里只提交任务，最大限度减少主线程/刷新线程的停顿
+                 self.executor.submit(self._check_strategies, df_internal, target_codes, resample=resample)
              else:
                  with self._lock:
                      if resample in self._is_checking_resamples:
@@ -1349,7 +1346,6 @@ class StockLiveStrategy:
 
         # [REMOVED] DataHubService publish logic
         pass
-
 
     def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any], resample: str = 'd'):
         """
@@ -2365,20 +2361,35 @@ class StockLiveStrategy:
     # =========================
     # ✅ 主函数（最终稳定版）
     # =========================
-    def _check_strategies(self, df: pd.DataFrame, resample: str = 'd') -> None:
+    def _check_strategies(self, df_all_data: pd.DataFrame, target_codes: list, resample: str = 'd') -> None:
         """
         [CORE] 核心多线程策略扫描引擎 (并行化重构 v2.3)
         """
         # 🛡️ 状态位已在 process_data 锁内提前设置，此处无需再次检查
-        start_loop_timer = time.perf_counter()
         try:
+            # --- 🛡️ [HEAVY PREP MOVED HERE] ---
+            # 在子线程内进行耗时的索引转换和过滤，释放调用者/UI 线程
+            if df_all_data.index.dtype != object:
+                # 只在必要时 copy 和转换
+                df_all_data = df_all_data.copy()
+                df_all_data.index = df_all_data.index.astype(str)
+            
+            # 使用传入的监控代码进行交集过滤
+            matched_idx = df_all_data.index.intersection(target_codes)
+            df = df_all_data.loc[matched_idx]
+            
+            if df.empty:
+                logger.debug(f"[_check_strategies] resample={resample} No matched codes found in current DF.")
+                return
+
+            start_loop_timer = time.perf_counter()
             # 1. 环境准备与归一化快照
             now, now_ts_str = time.time(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with self._lock:
                 monitored_snapshot = dict(self._monitored_stocks)
             valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
             
-            logger.info(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Valid={len(valid_keys)} DF={len(df)}")
+            logger.info(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Matched={len(df)} Resample={resample}")
             
             # 2. RR 轮换分发逻辑 (Full-Dimensional Static Memory Fix)
             if not hasattr(StockLiveStrategy, "_kline_rr_cursors_static"):
@@ -2467,46 +2478,54 @@ class StockLiveStrategy:
             # 5. 结果收集与同步 (并发结果落地)
             if futures:
                 try:
-                    # [OPTIMIZATION] 增加超时阈值 (10s -> 25s) 并补充详细状态探针
+                    import concurrent.futures
                     for future in concurrent.futures.as_completed(futures, timeout=25):
                         try:
                             res = future.result()
                             if not res: continue
                             key, code = res['key'], res['code']
+                            
+                            # 更新内存快照
                             with self._lock:
                                 if key in self._monitored_stocks:
-                                     self._monitored_stocks[key]['snapshot'].update(res['snapshot_updates'])
+                                     # 🛡️ [FIX] 安全更新 snapshot，确保 key['snapshot'] 存在
+                                     target_stock = self._monitored_stocks[key]
+                                     if 'snapshot' not in target_stock:
+                                         target_stock['snapshot'] = {}
+                                     
+                                     if res.get('snapshot_updates'):
+                                         target_stock['snapshot'].update(res['snapshot_updates'])
+                                     
                                      if 'last_alert' in res:
-                                         self._monitored_stocks[key]['last_alert'] = res['last_alert']
+                                         target_stock['last_alert'] = res['last_alert']
                             
-                            # 🚀 [NEW] 同步关键状态回主 DataFrame (供 UI/Monitor 显示)
-                            if 'df_updates' in res['snapshot_updates']:
+                            # 🚀 [NEW] 集中的结果归集与状态更新 (同步 UI 视图子集)
+                            if res.get('df_updates'):
                                 try:
-                                    for col, val in res['snapshot_updates']['df_updates'].items():
+                                    for col, val in res['df_updates'].items():
                                         df.at[code, col] = val
                                 except Exception: pass
 
                             if res.get('signal_item'): signal_batch.append(res['signal_item'])
                             if res.get('status_item'): status_batch.append(res['status_item'])
-                            if res.get('alert_payload'): alert_items.append(res)
                             
                             # 🚀 [NEW] 处理 DB 异步同步 (主线程非阻塞执行)
                             if res.get('db_sync_note'):
-                                try:
-                                    hub_sync = get_trading_hub()
-                                    hub_sync.update_follow_status(res['code'], notes=res['db_sync_note'])
-                                except: pass
-                        except Exception as e_future:
-                            logger.debug(f"Worker task error: {e_future}")
+                                 try:
+                                     hub_sync = get_trading_hub()
+                                     hub_sync.update_follow_status(res['code'], notes=res['db_sync_note'])
+                                 except: pass
+
+                        except Exception as e_res:
+                            logger.error(f"Future result processing failed: {e_res}")
+
                 except concurrent.futures.TimeoutError:
-                    # 🔍 [DIAGNOSTIC] 超时深度诊断：统计未完成任务，精确定位卡死源
                     unfinished_keys = [futures[f] for f in futures if not f.done()]
                     logger.error(f"❌ [ENGINE_TIMEOUT] _check_strategies TIMEOUT: {len(unfinished_keys)} (of {len(futures)}) futures unfinished. Suspects: {unfinished_keys[:10]}...")
-                    # 尝试非阻塞取消 (对执行中任务无效，但可清理队列)
                     for f in futures: 
                         if not f.done(): f.cancel()
-                except Exception as e_inner:
-                    logger.error(f"❌ [ENGINE_INNER] Collection error: {e_inner}")
+                except Exception as e_outer:
+                    logger.error(f"❌ [ENGINE_COLLECT] Collection loop error: {e_outer}")
 
             # 6. 原子写入与同步报警 (性能指标结算)
             cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
@@ -2515,16 +2534,11 @@ class StockLiveStrategy:
 
             if signal_batch: self.trading_logger.log_signal_batch(signal_batch)
             if status_batch: self.trading_logger.log_status_batch(status_batch)
-            # for item in alert_items:
-            #     p = item['alert_payload']
-            #     msg_txt = "\n".join([m[1] if isinstance(m, tuple) else str(m) for m in item['messages']])
-            #     self._trigger_alert(p['code'], p['name'], msg_txt, action=p['action'], price=p['price'], resample=resample, score=p['score'])
 
         except Exception as e:
-            logger.error(f"❌ [ENGINE_CRITICAL] _check_strategies failed: {e}")
-            import traceback; logger.error(traceback.format_exc())
-            print(f"CRITICAL ENGINE ERROR: {e}")
+            logger.error(f"🚨 [ENGINE_CRITICAL] _check_strategies failed: {e}")
         finally:
+            # 🛡️ 最终任务结束，释放并行状态位
             with self._lock:
                 if resample in self._is_checking_resamples:
                     self._is_checking_resamples.remove(resample)
@@ -2537,15 +2551,13 @@ class StockLiveStrategy:
                         exc_items = list(self._data_exceptions.items())
                         count = len(exc_items)
                         if count > 5:
-                            # 提取前5个异常示例
                             summary = "\n".join([f"• {code}: {reason}" for code, reason in exc_items[:5]])
                             logger.warning(f"⚠️ [Data-Exception] 集中数据异常(共{count}只):\n{summary}\n...等其它{count-5}只数据缺失")
                         else:
                             summary = "\n".join([f"• {code}: {reason}" for code, reason in exc_items])
                             logger.warning(f"⚠️ [Data-Exception] 发现数据异常:\n{summary}")
-                        
-                        self._data_exceptions.clear() # 处理后清空
-                self._data_check_rounds = 0 # 重置计数器
+                        self._data_exceptions.clear()
+                self._data_check_rounds = 0
 
 
 
@@ -2656,6 +2668,10 @@ class StockLiveStrategy:
                     snap['theme_logic'] = ext_55188.get('theme_logic', "")
                     snap['sector_score'] = ext_55188.get('sector_score', 0.0)
                 else:
+                    # --- [NEW] 数据异常检测: 外部实时数据缺失 ---
+                    with self._data_exception_lock:
+                        existing = self._data_exceptions.get(code, "")
+                        self._data_exceptions[code] = f"{existing}, 55188缺失" if existing else "55188缺失"
                     snap['hot_rank'] = 999
                     snap['zhuli_rank'] = 999
                     snap['net_ratio_ext'] = 0
@@ -2683,6 +2699,13 @@ class StockLiveStrategy:
             try:
                 self._update_daily_history_cache(code,resample) # 尝试刷新全量缓存
                 prev_rows = self.daily_history_cache.get(f'{code}_{resample}')
+                
+                # --- [NEW] 数据异常检测: 历史K线缓存缺失 ---
+                if prev_rows is None or prev_rows.empty:
+                    with self._data_exception_lock:
+                        existing = self._data_exceptions.get(code, "")
+                        self._data_exceptions[code] = f"{existing}, 历史缓存缺失" if existing else "历史缓存缺失"
+                
                 snap['day_df'] = prev_rows # [NEW] 供决策引擎进行顶部检测
                 det_events = self.daily_pattern_detector.update(
                     code=code,
@@ -2717,7 +2740,13 @@ class StockLiveStrategy:
         stock_sector = snap.get('theme_name', '')
         if not stock_sector and 'category' in row:
                 cats = str(row['category']).split(';')
-                if cats: stock_sector = cats[0]
+                if cats: 
+                    stock_sector = cats[0]
+                else:
+                    # --- [NEW] 数据异常检测: 板块识别失败 ---
+                    with self._data_exception_lock:
+                        existing = self._data_exceptions.get(code, "")
+                        self._data_exceptions[code] = f"{existing}, 板块数据缺失" if existing else "板块数据缺失"
 
         for p_sector, p_code, p_drop in pullback_alerts:
             # check if self is leader
@@ -2735,6 +2764,10 @@ class StockLiveStrategy:
             if last_h > 0 and last_l > 0:
                 snap['yesterday_midline'] = (last_h + last_l) / 2
             else:
+                # --- [NEW] 数据异常检测: 历史高低价缺失 ---
+                with self._data_exception_lock:
+                    existing = self._data_exceptions.get(code, "")
+                    self._data_exceptions[code] = f"{existing}, 昨高低缺失" if existing else "昨高低缺失"
                 snap['yesterday_midline'] = float(row.get('last_close', 0)) # fallback
 
             # 前中轴
@@ -2743,7 +2776,11 @@ class StockLiveStrategy:
             if last2_h > 0 and last2_l > 0:
                 snap['day_before_midline'] = (last2_h + last2_l) / 2
             else:
-                    snap['day_before_midline'] = snap['yesterday_midline'] # fallback
+                # --- [NEW] 数据异常检测: 前日高低价缺失 ---
+                with self._data_exception_lock:
+                    existing = self._data_exceptions.get(code, "")
+                    self._data_exceptions[code] = f"{existing}, 前高低缺失" if existing else "前高低缺失"
+                snap['day_before_midline'] = snap['yesterday_midline'] # fallback
 
             # 今日实施中轴 (动态)
             if current_high > 0:
@@ -3039,6 +3076,14 @@ class StockLiveStrategy:
         
         # ---------- 决策引擎 ----------
         # ---------- 决策引擎 ----------
+        # --- [NEW] 数据异常检测: 决策输入合法性 ---
+        required_cols = ['trade', 'percent', 'volume']
+        missing_decision_data = [col for col in required_cols if pd.isna(row.get(col)) or row.get(col) == 0]
+        if missing_decision_data:
+            with self._data_exception_lock:
+                existing = self._data_exceptions.get(code, "")
+                self._data_exceptions[code] = f"{existing}, 决策数据缺失({','.join(missing_decision_data)})" if existing else f"决策数据缺失({','.join(missing_decision_data)})"
+
         decision = self.decision_engine.evaluate(row, snap)
 
         # --- [NEW] P0.6 仓位状态机逻辑 ---

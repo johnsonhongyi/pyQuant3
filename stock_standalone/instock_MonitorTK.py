@@ -3082,22 +3082,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug("Strategy process skipped: live_strategy is None")
             return
 
-        # 3. 执行策略扫描
+        # 3. [ASYNC UPGRADE] 将耗时的策略处理异步化，避免阻塞 UI 线程 (尤其是 manual_scan)
         try:
             # 兼容：从全局配置读取当前周期
             cur_res = self.global_values.getkey("resample") or 'd'
-            
-            # --- 🚀 [STRATEGY CORE] ---
-            # 直接调用策略引擎，它内部包含多线程异步扫描及 UI 信号回调
-            strategy_engine.process_data(
-                full_df, 
-                concept_top5=getattr(self, 'concept_top5', None), 
-                resample=cur_res
-            )
-            # --------------------------
+            cur_concept = getattr(self, 'concept_top5', None)
+
+            # 🛠️ [SNAPSHOT] 对数据进行快照化，防止子线程处理时主线程正在修改引发 RuntimeError: dict changed size during iteration
+            # 或者是 Pandas 的 SettingWithCopyWarning
+            df_snapshot = full_df.copy()
+
+            if hasattr(self, 'executor') and self.executor:
+                # 投递到线程池，立即返回，释放 UI 指令
+                self.executor.submit(
+                    strategy_engine.process_data, 
+                    df_snapshot, 
+                    concept_top5=cur_concept, 
+                    resample=cur_res
+                )
+            else:
+                # 兜底方案 (不推荐)
+                strategy_engine.process_data(df_snapshot, concept_top5=cur_concept, resample=cur_res)
             
         except Exception as strategy_err:
-            logger.exception(f"Global Strategy processing failed: {strategy_err}")
+            logger.exception(f"Async Strategy submission failed: {strategy_err}")
 
 
     def replace_st_key_sort_col(self, old_col, new_col):
@@ -3445,15 +3453,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # --- 🛠️ [STRATEGY] 全球/全量策略分发 ---
             if full_df is not None and not full_df.empty:
-                if getattr(self, 'live_strategy', None) is not None:
-                    try:
-                        cur_res = self.global_values.getkey("resample") or 'd'
-                        # 每一帧包都参与策略计算，确保“不缺斤短两”，包含语音报警触发
-                        self.live_strategy.process_data(full_df, concept_top5=getattr(self, 'concept_top5', None), resample=cur_res)
-                    except Exception as strategy_err:
-                        import traceback
-                        traceback.print_exc()
-                        logger.error(f"Global Strategy processing failed: {strategy_err}")
+                # [ASYNC UPGRADE] 使用封装好的异步分发接口，避免主循环卡顿
+                self._run_live_strategy_process(full_df)
             # self._run_live_strategy_process(full_df)
             # --- 🛠️ [SYNC] 同步 UI 视图子集 ---
             # 使主 Treeview 渲染的数据 (df) 与全量行情在逻辑列上保持一致
@@ -4391,6 +4392,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not code or not timestamp:
             return
         
+        # ⭐ [THROTTLE] 联动限流：避免 1s 内对同一只股票重复发送联动 (由于 T80 及策略震荡可能触发多次)
+        now = time.time()
+        throttle_key = f"link_{code}"
+        if hasattr(self, '_viz_link_throttle'):
+            last_t = self._viz_link_throttle.get(throttle_key, 0)
+            if now - last_t < 1.0: # 1秒冷却
+                return
+        else:
+            self._viz_link_throttle = {}
+        
+        self._viz_link_throttle[throttle_key] = now
+
         # 如果可视化尚未打开，则尝试开启
         if not (hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()):
             if hasattr(self, 'vis_var') and self.vis_var.get():
@@ -4412,7 +4425,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             finally:
                 self._qt_starting = False
 
-        self.executor.submit(task)
+        if hasattr(self, 'executor') and self.executor:
+            self.executor.submit(task)
+        else:
+            t = threading.Thread(target=task, daemon=True)
+            t.start()
 
     def _start_visualizer_process(self, code, resample=None):
         """独立方法：在子线程中安全启动 Qt 可视化进程"""
@@ -8058,18 +8075,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # self.code_to_alert_win[code] = win # 已移至上方
             self._schedule_after(10, self._update_voice_active_codes)
             
-            # 数据获取
-            category_content = "暂无详细信息"
-            # 🛡️ [FIX] 线程安全地获取数据
-            # with self._df_lock:
-            #     if code in self.df_all.index:
-            #         category_content = self.df_all.loc[code].get('category', '')
-
-            with self._df_lock:
-                if code in self.df_all.index:
-                    category_content = self.df_all.at[code, 'category']
-                else:
-                    category_content = ''
+            # 🚦 [REMOVE SYNC LOCK] 不再在主线程同步拿锁获取 category，统一交由异步 fetch 处理
+            category_content = "获取中..."
+            # 开启异步获取，秒出窗口
+            self._async_update_alert_details(code, win)
             
             # 自动关闭逻辑判断 (是否有语音)
             has_voice = False
