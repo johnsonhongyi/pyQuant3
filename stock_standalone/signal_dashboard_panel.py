@@ -489,7 +489,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table = self._create_signal_table()
             self.tables[tab_name] = table
             self.tabs.addTab(table, tab_name)
-        self.tabs.currentChanged.connect(lambda: self._on_search_text_changed(self.search_input.text()))
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
         
         # --- 底部状态栏布局优化 ---
@@ -533,7 +533,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
+        
+        # [MOD] 设置默认按时间(第0列)倒序排列
         table.setSortingEnabled(True)
+        table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+        
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -639,7 +643,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 批量插入
         self._is_updating_ui = True
         try:
-            for event in events_to_process: # 按到达顺序插入到第0行，最终批次中最新的在最前
+            # [MOD] 对待插入的信号按时间戳从旧到新排序，这样依次 insertRow(0) 后最新的就会在最前面
+            events_to_process.sort(key=lambda x: x.timestamp)
+            for event in events_to_process:
                 self._append_to_tables(event)
         finally:
             self._is_updating_ui = False
@@ -649,14 +655,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             state = scroll_states.get(name)
             if not state: continue
             
-            # 如果之前不在顶部，向下偏移新插入的行数以保持视图静止
-            if not state['at_top']:
+            # [MOD] 逻辑：
+            # 1. 如果用户之前就在顶部(at_top=True)，则继续保持在顶部(0位置)，此时能看到最新冒出来的信号
+            # 2. 如果用户之前正在往下翻看旧数据(at_top=False)，则向下偏移新插入的行数，以保持视窗内原来的内容不动
+            if state['at_top']:
+                table.verticalScrollBar().setValue(0)
+            else:
                 new_val = state['value'] + len(events_to_process)
                 table.verticalScrollBar().setValue(new_val)
-            
-            # 恢复选择 (如有必要，这里简单回放，也可增加偏移量逻辑)
-            # for (top, bottom) in state['selected']:
-            #     table.setRangeSelected(QTableWidgetSelectionRange(top + len(events_to_process), ..., ...), True)
 
     def _process_event(self, event: BusEvent, update_ui=True):
         payload = event.payload
@@ -783,6 +789,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if it: it.setForeground(color)
             self._flash_row(table, 0)
             if table.rowCount() > 500: table.removeRow(table.rowCount() - 1)
+            
+            # [NEW] 如果当前是按时间列排序，显式调用一次让它生效
+            if was_sorting and table.horizontalHeader().sortIndicatorSection() == 0:
+                table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                
         finally: table.setSortingEnabled(was_sorting)
 
     def _flash_row(self, table, row):
@@ -1097,6 +1108,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         for row in range(table.rowCount()):
             match = any(search_text in str(table.item(row, i).text()).lower() for i in [0, 2, 3, 4, 5] if table.item(row, i))
             table.setRowHidden(row, not match)
+        
+        # [NEW] 手动搜索过滤后，自动滚动到顶部显示最新信号
+        table.verticalScrollBar().setValue(0)
+
+    def _on_tab_changed(self, index):
+        """[MANUAL] 手动切换 Tab 时，应用搜索并回到顶部"""
+        self._apply_filter() # 先根据搜索框内容过滤
+        table = self.tabs.widget(index)
+        if isinstance(table, QTableWidget):
+            table.verticalScrollBar().setValue(0) # 回到顶部
 
     def _on_search_context_menu(self, pos):
         QTimer.singleShot(30, lambda: self.search_input.setText(QApplication.clipboard().text().strip()))

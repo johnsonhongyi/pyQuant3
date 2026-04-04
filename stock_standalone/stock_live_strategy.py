@@ -577,6 +577,11 @@ class StockLiveStrategy:
         self.batch_start_time: float = 0.0
         self.batch_last_check: float = 0.0
 
+        # --- [NEW] 数据异常监测计数器与容器 (10轮一报) ---
+        self._data_exceptions: dict[str, str] = {} # {code: reason}
+        self._data_exception_lock = threading.Lock()
+        self._data_check_rounds: int = 0
+
     def stop(self):
         """停止策略引擎并关闭后台线程"""
         if self._is_stopping:
@@ -2523,6 +2528,24 @@ class StockLiveStrategy:
             with self._lock:
                 if resample in self._is_checking_resamples:
                     self._is_checking_resamples.remove(resample)
+            
+            # --- [NEW] 10轮一报汇总逻辑 (Performance Optimized) ---
+            self._data_check_rounds += 1
+            if self._data_check_rounds >= 10:
+                with self._data_exception_lock:
+                    if self._data_exceptions:
+                        exc_items = list(self._data_exceptions.items())
+                        count = len(exc_items)
+                        if count > 5:
+                            # 提取前5个异常示例
+                            summary = "\n".join([f"• {code}: {reason}" for code, reason in exc_items[:5]])
+                            logger.warning(f"⚠️ [Data-Exception] 集中数据异常(共{count}只):\n{summary}\n...等其它{count-5}只数据缺失")
+                        else:
+                            summary = "\n".join([f"• {code}: {reason}" for code, reason in exc_items])
+                            logger.warning(f"⚠️ [Data-Exception] 发现数据异常:\n{summary}")
+                        
+                        self._data_exceptions.clear() # 处理后清空
+                self._data_check_rounds = 0 # 重置计数器
 
 
 
@@ -2578,8 +2601,14 @@ class StockLiveStrategy:
             if volume_change > 1000: volume_change = 1.0 # 防御处理
             ratio_change = float(row.get('ratio', 0.0))
             current_high = float(row.get('high', 0.0))
+            
+            # --- [NEW] 数据异常检测: 行情无效 ---
+            if current_price == 0 or current_nclose == 0:
+                with self._data_exception_lock:
+                    self._data_exceptions[code] = "行情无效(Price=0)"
         except (ValueError, TypeError) as e:
-            logger.warning(f"{code} 行情数据异常: {e}")
+            with self._data_exception_lock:
+                self._data_exceptions[code] = f"行情异常({str(e)})"
             return
         
         trade_key = (code, resample)
@@ -2949,6 +2978,12 @@ class StockLiveStrategy:
 
                 # --- 3.2 V-Shape K线形态 (来自批量脉冲缓存) ---
                 klines = all_klines.get(code, [])
+                
+                # --- [NEW] 数据异常检测: K线缺失 ---
+                if not klines:
+                    with self._data_exception_lock:
+                        existing = self._data_exceptions.get(code, "")
+                        self._data_exceptions[code] = f"{existing}, K线缺失" if existing else "K线缺失"
                 if len(klines) >= 15:
                     lows = [k['low'] for k in klines]
                     closes = [k['close'] for k in klines]
@@ -3010,6 +3045,12 @@ class StockLiveStrategy:
         if self.phase_engine:
             try:
                 # 1. 获取当前状态 (从 snap 恢复)
+                # --- [NEW] 数据异常检测: 状态机数据真实性 ---
+                if 'trade_phase' not in snap:
+                    with self._data_exception_lock:
+                        existing = self._data_exceptions.get(code, "")
+                        self._data_exceptions[code] = f"{existing}, 状态机缺失" if existing else "状态机缺失"
+                
                 curr_phase_str = snap.get('trade_phase', 'IDLE')
                 try:
                     curr_phase = TradePhase(curr_phase_str)
