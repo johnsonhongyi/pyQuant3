@@ -3068,7 +3068,7 @@ class StockLiveStrategy:
             try:
                 # 🚀 [PARALLEL] 在 Worker 内并行更新历史 K 线缓存 (不再串行排队)
                 if hasattr(self, '_update_daily_history_cache'):
-                    self._update_daily_history_cache(code_idx, resample)
+                    self._update_daily_history_cache(code, resample)
 
                 # --- 3.2 V-Shape K线形态 (来自批量脉冲缓存) ---
                 klines = all_klines.get(code, [])
