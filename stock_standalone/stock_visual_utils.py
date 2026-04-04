@@ -23,6 +23,139 @@ except ImportError:
     class SignalPoint:
         pass
 
+import socket
+import struct
+import pickle
+import threading
+import logging
+import collections
+import time
+
+logger = logging.getLogger(__name__)
+
+class IPCSocketClient:
+    """
+    [Industrial Standard] 持久化非阻塞 IPC 客户端。
+    采用“单写线程 + 循环缓冲区 + 自动重连”模型，确保调用方永不阻塞。
+    """
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            with cls._lock:
+                if not cls._instance:
+                    cls._instance = super(IPCSocketClient, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, host='127.0.0.1', port=26668):
+        if hasattr(self, '_initialized'): return
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.lock = threading.Lock()
+        
+        # 核心队列：使用 deque(maxlen) 实现“丢弃旧消息”策略
+        self.queue = collections.deque(maxlen=200)
+        self.stop_event = threading.Event()
+        self.worker_thread = None
+        
+        self._initialized = True
+
+    def _start_worker_if_needed(self):
+        """确保后台写线程正在运行"""
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            with self.lock:
+                if self.worker_thread is None or not self.worker_thread.is_alive():
+                    self.stop_event.clear()
+                    self.worker_thread = threading.Thread(
+                        target=self._sender_loop, 
+                        name="IPCSocketSender",
+                        daemon=True
+                    )
+                    self.worker_thread.start()
+                    logger.info("[IPC Client] Sender thread started.")
+
+    def enqueue_command(self, cmd: str):
+        """非阻塞入队指令 (O(1) 立即返回)"""
+        self._start_worker_if_needed()
+        self.queue.append(('CMD', cmd))
+
+    def enqueue_data(self, msg_type: str, data_obj: any):
+        """非阻塞入队数据 (O(1) 立即返回)"""
+        self._start_worker_if_needed()
+        self.queue.append(('DATA', msg_type, data_obj))
+
+    def _connect(self):
+        """内部重连逻辑"""
+        if self.sock:
+            return True
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.settimeout(2.0)
+            self.sock.connect((self.host, self.port))
+            # self.sock.setblocking(False) # 也可以考虑使用非阻塞模式 send
+            return True
+        except Exception:
+            self.sock = None
+            return False
+
+    def _sender_loop(self):
+        """后台单写线程循环"""
+        while not self.stop_event.is_set():
+            if not self.queue:
+                time.sleep(0.02) # 无任务时降低 CPU
+                continue
+            
+            # 1. 尝试连接可视化器
+            if not self._connect():
+                time.sleep(1.0) # 连接失败时等待重试，不空转
+                continue
+
+            # 2. 取出一个任务 (LATEST FIRST 策略可通过 deque.pop() 实现，这里用 popleft 顺序执行)
+            # 如果队列积压太严重，也可以在这里执行合并/去重逻辑
+            try:
+                task = self.queue.popleft()
+            except IndexError:
+                continue
+
+            # 3. 执行发送
+            try:
+                if task[0] == 'CMD':
+                    cmd_str = task[1]
+                    if not cmd_str.startswith(("CODE|", "TIME|", "SIGN|")):
+                        cmd_str = f"CODE|{cmd_str}"
+                    # 🚀 [FIX] 强制追加换行符，解决 TCP 粘包导致的 JSON 解析 Extra data 错误
+                    full_cmd = f"{cmd_str}\n"
+                    self.sock.sendall(full_cmd.encode('utf-8'))
+                
+                elif task[0] == 'DATA':
+                    msg_type, data_obj = task[1], task[2]
+                    payload = pickle.dumps((msg_type, data_obj))
+                    header = b"DATA" + struct.pack("!I", len(payload))
+                    self.sock.sendall(header + payload)
+                
+            except (socket.error, ConnectionError) as e:
+                logger.debug(f"[IPC Client] Send failed, reconnecting next loop: {e}")
+                if self.sock:
+                    try: self.sock.close()
+                    except: pass
+                    self.sock = None
+                # 发送失败的任务重新放回队列头部（可选，如果数据过期可以不接回）
+                # self.queue.appendleft(task) 
+
+    def close(self):
+        """关闭客户端"""
+        self.stop_event.set()
+        with self.lock:
+            if self.sock:
+                try: self.sock.close()
+                except: pass
+                self.sock = None
+
+# 全局单例
+ipc_client = IPCSocketClient()
+
 class TimeAxisItem(pg.AxisItem):
     """Custom axis to display time strings for indexed data."""
     def __init__(self, time_map, *args, **kwargs):
