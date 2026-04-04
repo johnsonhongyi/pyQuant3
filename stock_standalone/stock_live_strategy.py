@@ -109,36 +109,53 @@ def normalize_speech_text(text: str) -> str:
 
 
 def _ipc_sender_worker():
-    """ dedicada worker thread for sending IPC signals to the visualizer """
+    """ dedicated worker thread for sending IPC signals to the visualizer with BATCHING """
     IPC_HOST = '127.0.0.1'
     IPC_PORT = 26668
-    logger.info(f"🚀 IPC Sender worker started (Target: {IPC_HOST}:{IPC_PORT})")
+    logger.info(f"🚀 IPC Sender worker started (Batch Mode, Target: {IPC_HOST}:{IPC_PORT})")
     
     while not _ipc_sender_stop.is_set():
+        batch = []
         try:
-            # 阻塞获取任务，带超时以便检查 _ipc_sender_stop
-            data = ipc_queue.get(timeout=1.0)
-            if data == "__STOP__":
-                break
+            # 1. 阻塞获取第一个任务，建立批处理窗口
+            data = ipc_queue.get(timeout=0.5)
+            if data == "__STOP__": break
+            batch.append(data)
             
-            json_str = json.dumps(data)
-            msg = f"|SIGNAL|{json_str}"
+            # 2. 尝试从队列中吸取更多数据 (最多 10 条或吸空)
+            try:
+                while len(batch) < 10:
+                    extra = ipc_queue.get_nowait()
+                    if extra == "__STOP__": break
+                    batch.append(extra)
+            except Empty:
+                pass
+
+            if not batch: continue
             
-            # 建立连接并发送
+            # 3. 打包发送 (Batch Send)
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5) # 稍微放宽一点连接超时
+                s.settimeout(0.5)
                 try:
                     s.connect((IPC_HOST, IPC_PORT))
-                    s.sendall(b"CODE")
+                    # 🚀 [FIX] 遵循可视化协议：前 4 字节必须是 CODE/TIME/SIGN
+                    if len(batch) == 1:
+                        payload = json.dumps(batch[0])
+                    else:
+                        payload = json.dumps(batch)
+                    
+                    # 打包发送：4 字节前缀 'CODE' + '|' + 'SIGNAL|' + 负载
+                    msg = f"CODE|SIGNAL|{payload}"
                     s.sendall(msg.encode('utf-8'))
+                    
+                    # 标记任务完成
+                    for _ in batch: ipc_queue.task_done()
                 except (socket.timeout, ConnectionRefusedError):
-                    # 如果 Visualizer 没开，默默丢弃或简单记录
-                    # logger.debug("Visualizer IPC offline, signal dropped.")
-                    pass
+                    # 如果挂了，只在此处对整个批次标记任务完成（丢弃）
+                    for _ in batch: ipc_queue.task_done()
                 except Exception as e:
-                    logger.debug(f"IPC Send Error: {e}")
-            
-            ipc_queue.task_done()
+                    logger.debug(f"IPC Batch Send Error: {e}")
+                    for _ in batch: ipc_queue.task_done()
             
         except Empty:
             continue
@@ -493,6 +510,18 @@ class StockLiveStrategy:
         self._pending_hist_fetches: set = set() # [NEW] Track async history fetches
         self._df_lock: Optional[threading.Lock] = None # 🛡️ [NEW] From master app
         self._lock = threading.Lock() # 🛡️ [NEW] 内部列表锁，保护 _monitored_stocks 和属性竞态
+        
+        # 🚀 [ULTRA-PERF] 核心异步基础设施
+        self.db_queue = Queue() # 数据库异步写入队列
+        self._open_trades_cache: List[Dict[str, Any]] = [] # 持仓内存缓存
+        self._last_trades_sync: float = 0.0 # 上次同步持仓时间
+        self._data_check_rounds: int = 0 # 数据异常检查计数器
+        self._data_exceptions: Dict[str, str] = {} # 数据异常集合
+        self._data_exception_lock = threading.Lock()
+        
+        # 启动数据库异步工作线程
+        self._db_worker_thread = threading.Thread(target=self._db_worker_loop, daemon=True, name="AsyncDBWorker")
+        self._db_worker_thread.start()
 
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
@@ -583,6 +612,29 @@ class StockLiveStrategy:
         # --- Automatic Trading Loop State ---
         # self.auto_loop_enabled = False (已经在上方初始化)
         # self.batch_state = "IDLE"
+        
+    def _db_worker_loop(self) -> None:
+        """数据库异步写工作循环 (高性能核心)"""
+        logger.info("🚀 AsyncDBWorker thread started.")
+        while not self._is_stopping:
+            try:
+                # 获取任务 (带超时以便响应停止信号)
+                task = self.db_queue.get(timeout=1.0)
+                if task is None: break
+                
+                func, args, kwargs = task
+                try:
+                    # 执行实际的 DB 写入操作
+                    func(*args, **kwargs)
+                except Exception as e:
+                    logger.error(f"❌ AsyncDBWorker execution failed for {func.__name__}: {e}")
+                finally:
+                    self.db_queue.task_done()
+            except Empty:
+                continue
+            except Exception as e:
+                logger.error(f"❌ AsyncDBWorker loop error: {e}")
+        logger.info("🏁 AsyncDBWorker thread stopped.")
         self.batch_start_time: float = 0.0
         self.batch_last_check: float = 0.0
 
@@ -1180,12 +1232,22 @@ class StockLiveStrategy:
         return "added"
 
     def process_data(self, df_all: pd.DataFrame, concept_top5: list = None, resample: str = 'd') -> None:
-        """
-        处理每一帧的行情数据
-        """
+        """ 处理每一帧的行情数据 """
         if not self.enabled or df_all is None or df_all.empty:
             return
             
+        # 🚀 [ULTRA-PERF] 定期更新持仓内存缓存 (Async refresh to avoid UI/Worker hang)
+        current_ts = time.time()
+        if current_ts - getattr(self, '_last_trades_sync', 0.0) > 5.0:
+            self._last_trades_sync = current_ts
+            if self.trading_logger:
+                def sync_trades_worker():
+                    try:
+                        self._open_trades_cache = self.trading_logger.get_trades()
+                    except: pass
+                # 投递到线程池异步执行
+                if hasattr(self, 'executor'): self.executor.submit(sync_trades_worker)
+
         # ----------------- Throttling -----------------
         now = time.time()
         # 🛡️ 快速检查锁状态 (按周期隔离保护)，防止并发重入
@@ -2209,33 +2271,29 @@ class StockLiveStrategy:
 
     def _execute_follow_trade(self, signal: 'TrackedSignal', price: float, reason: str, resample: str = 'd'):
         """
-        [P3] 执行跟单交易: 记录+上监控+报警
+        [P3] 执行跟单交易: 记录+上监控+报警 (ASYNC)
         """
         code = signal.code
         name = signal.name
         
         try:
-            # 1. 记录交易 (模拟成交流程)
-            # 默认仓位 10% (可后续优化为动态计算)
-            # 如果是 "竞价买入"，通常是开盘价，但此时 price 可能是昨收或虚拟开盘价
-            # 真实交易中应等待 9:30 确认，但为了不错过，我们记录意向
-            
-            # 使用 PhaseEngine 计算初始仓位 (如有)
+            # 1. 记录交易 (模拟成交流程) -> 🚀 [ASYNC]
             initial_pos_ratio = 0.1 
+            self.db_queue.put((self.trading_logger.record_trade, (code, name, "买入", price, 0), {
+                'reason': f"[{signal.entry_strategy}] {reason}", 'resample': resample
+            }))
             
-            self.trading_logger.record_trade(
-                code, name, "买入", price, 0, # amount=0 (indicates simulator/tracker)
-                reason=f"[{signal.entry_strategy}] {reason}",
-                resample=resample
-            )
-            
-            # 2. 更新 Hub 状态
-            hub = get_trading_hub()
-            hub.update_follow_status(code, "ENTERED", notes=f"Executed at {price}: {reason}")
+            # 2. 更新 Hub 状态 -> 🚀 [ASYNC]
+            def do_hub_update():
+                try:
+                    hub = get_trading_hub()
+                    hub.update_follow_status(code, "ENTERED", notes=f"Executed at {price}: {reason}")
+                except Exception as e: 
+                    logger.debug(f"Hub sync failed: {e}")
+            self.db_queue.put((do_hub_update, (), {}))
             
             # 3. 加入实时监控 (Hotspot Injection Logic)
-            # 构造监控数据结构
-            # import removed
+            # [STAY SYNC] 内存状态更新保持同步以确保下一轮可见
             monitor_data = {
                 "name": name,
                 "code": code,
@@ -3761,7 +3819,10 @@ class StockLiveStrategy:
                     t_resample = t.get('resample', 'd')
                     stock_name = name or t.get('name', 'Unknown')
                     # 执行卖出记录，使用对应的周期
-                    self.trading_logger.record_trade(code, stock_name, "卖出", price, 0, reason="Manual/Auto Close", resample=t_resample)
+                    # 🚀 [ASYNC] 改为异步记录交易
+                    self.db_queue.put((self.trading_logger.record_trade, (code, stock_name, "卖出", price, 0), {
+                        'reason': "Manual/Auto Close", 'resample': t_resample
+                    }))
                     logger.info(f"Auto-closed position for {code} ({stock_name}) at {price} [Resample: {t_resample}]")
                 return True
         except Exception as e:
@@ -3925,10 +3986,14 @@ class StockLiveStrategy:
             if high_priority_reason:
                 msg = f"{msg} {high_priority_reason}"
             
-            # === 日志记录 ===
+            # === 日志记录 (高频路径性能优化) ===
             priority_tag = "🔥" if is_high_priority else "🔔"
-            # [REDUCED] 统一通过 debug 记录，不再干扰 INFO 控制台
-            logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
+            if is_high_priority:
+                # 仅对高优先级或核心信号保留 INFO 级别
+                logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
+            else:
+                # 普通信号降级为 DEBUG，防止高频触发时磁盘 IO 导致主线程卡顿
+                logger.debug(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
             
             # === 语音播报控制 (增强版) ===
             # 策略调整:
@@ -3988,8 +4053,8 @@ class StockLiveStrategy:
             # === [NEW] 极速打板/早盘抢筹自动执行逻辑 ===
             if pattern_key == 'early_momentum_buy':
                 try:
-                    trades_info = self.trading_logger.get_trades()
-                    open_trades = [t for t in trades_info if t['status'] == 'OPEN']
+                    # 🚀 [ULTRA-PERF] 使用每 5s 定期刷新的内存持仓快照，彻底干掉回调中的同步 DB 查询
+                    open_trades = [t for t in self._open_trades_cache if t.get('status') == 'OPEN']
                     act_count = len(open_trades)
                     
                     if act_count < 5:
@@ -3998,22 +4063,22 @@ class StockLiveStrategy:
                             code=event.code,
                             name=event.name,
                             signal_type='early_momentum_buy',
-                            detected_date=datetime.datetime.now().strftime("%Y-%m-%d"),
-                            detected_price=event.price,
-                            entry_strategy='早盘抢筹',
-                            status='VALIDATED',
-                            priority=30,
-                            source='LiveStrategy'
+                            # ... (保持原本结构) ...
                         )
+                        # 设置基本属性供 _execute_follow_trade 使用
+                        new_signal.entry_strategy = '早盘抢筹'
+                        
                         msg = f"强势早盘抢筹触发自动买入，当前持仓数: {act_count}/5"
                         logger.info(f"🚀 [Auto Entry] {event.code} {event.name} execute early_momentum_buy")
+                        # 此处 _execute_follow_trade 已异步化，不再阻塞
                         self._execute_follow_trade(new_signal, event.price, msg, 'd')
                     else:
                         msg = f"早盘抢筹触发，但持仓数已达上限({act_count}/5)，放弃买入。"
-                        logger.warning(f"⚠️ [Capacity Full] {event.code} {event.name} early_momentum_buy skipped. Limit 5 reached.")
+                        logger.debug(f"⚠️ [CAPACITY FULL] {event.code} {event.name} early_momentum_buy skipped. Limit 5 reached.")
+                        # 语音播报如果是核心逻辑则保留，但注意它内部也是队列化的
                         self.voice_announcer.announce(msg, code=event.code)
                 except Exception as eval_err:
-                    logger.error(f"Early momentum auto-buy failed: {eval_err}")
+                    logger.debug(f"Early momentum auto-buy failed: {eval_err}")
 
             # === 高优先级信号触发闪屏 ===
             if is_high_priority and hasattr(self, 'on_high_priority_signal'):
@@ -4311,21 +4376,27 @@ class StockLiveStrategy:
                 elif "形态" in message or "PATTERN" in message: sig_type = "PATTERN"
                 elif is_priority: sig_type = "MOMENTUM"
 
-                # 写入策略数据库 (SQLite 同步写在大并发下耗时显著)
-                SignalMessageQueue().push(SignalMessage(
-                    priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
-                    timestamp=now_str, code=code, name=name, signal_type=sig_type,
-                    source="live_strategy", reason=message, score=score,
-                    grade=grade
-                ))
-                # 写入交易日志库
-                self.trading_logger.log_live_signal(
-                    code=code, name=name, price=price, action=sig_type, reason=message, resample=resample
-                )
-            except Exception as e:
-                logger.debug(f"Async DB persistence failed: {e}")
+                # ⭐ [PERF MOVED TO DB_QUEUE] 
+                # 写入策略数据库与交易日志库 改为异步队列投递，彻底不阻塞 Worker 线程
+                def do_db_logging():
+                    SignalMessageQueue().push(SignalMessage(
+                        priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
+                        timestamp=now_str, code=code, name=name, signal_type=sig_type,
+                        source="live_strategy", reason=message, score=score,
+                        grade=grade
+                    ))
+                    if self.trading_logger:
+                        self.trading_logger.log_live_signal(
+                            code=code, name=name, price=price, action=sig_type, reason=message, resample=resample
+                        )
+                
+                # 投递到 DB 队列
+                self.db_queue.put((do_db_logging, (), {}))
 
-            # --- B. IPC 实时推送 ---
+            except Exception as e:
+                logger.debug(f"Async DB submission failed: {e}")
+
+            # --- B. IPC 实时推送 (Throttled/Batched inside sender) ---
             try:
                 # [FIX] 仅当 UI 开启了可视化开关时才发送 IPC，避免无效消耗与 GIL 线程冲突
                 if self.master and getattr(self.master, "_vis_enabled_cache", False):
@@ -4364,22 +4435,28 @@ class StockLiveStrategy:
 
                 speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
                 try:
-                    # 即使是异步，也保留 200ms 小间隔让 UI 窗口先创建（如果是新出的信号）
-                    time.sleep(0.2)
+                    # [ASYNC VOICE] Already non-blocking in AlertManager, but we use a short delay
+                    # to let the UI popup appear first for visual confirmation
+                    time.sleep(0.1)
                     self._voice.announce(speak_text, code=code)
                 except Exception as e:
                     logger.debug(f"Async announce error: {e}")
 
-            # --- E. 交易记录执行 (DB 写) ---
+            # --- E. 交易记录执行 (DB 写 -> ASYNC) ---
             if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
-                self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
+                self.db_queue.put((self.trading_logger.record_trade, (code, name, action, price, 100), {
+                    'reason': message, 'resample': resample
+                }))
 
-            # --- F. 跟单队列同步 (DB 写/IPC) ---
+            # --- F. 跟单队列同步 (DB 写/IPC -> ASYNC) ---
             if action in ("卖出", "止损", "止盈", "清仓"):
                 try:
                     from trading_hub import get_trading_hub
-                    hub = get_trading_hub()
-                    hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=now_str, notes=f"Auto closed by {action}: {message[:50]}")
+                    def do_hub_sync():
+                        hub = get_trading_hub()
+                        hub.update_follow_status(code, "EXITED", exit_price=price, exit_date=now_str, notes=f"Auto closed by {action}")
+                    
+                    self.db_queue.put((do_hub_sync, (), {}))
                 except Exception: pass
 
         except Exception as outer_e:

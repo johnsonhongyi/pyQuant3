@@ -453,6 +453,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.viz_conn = None  # ⭐ [FIX] 使用 Pipe 代替 Queue，避免 GIL 崩溃
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
+        self._viz_ready = False
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
@@ -4276,7 +4277,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # =========================
                 if not hasattr(self, 'qt_process') or not self.qt_process or not self.qt_process.is_alive():
                     self._start_visualizer_process(code, resample)
-
             except Exception as e:
                 logger.error(f"[WORKER] open_visualizer fatal error: {e}")
 
@@ -4467,6 +4467,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
                 self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
                 self._df_sync_thread.start()
+            self._viz_ready = True
 
         except Exception as e:
             logger.error(f"Failed to start Qt visualizer: {e}")
@@ -4480,7 +4481,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         max_jitter = 0.2    # 随机抖动
         logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
         count = 0
+        self._cold_start = True # ⭐ [NEW] 冷启动标志
+        
         while self._df_sync_running:
+            # 🚀 [FIX 1] 前置可视化过滤：没开可视化且没同步请求，直接长休眠
+            # vis_enabled = getattr(self, '_vis_enabled_cache', True)
+            # if not vis_enabled and not getattr(self, '_force_full_sync_pending', False):
+            #     for _ in range(10):  # 10 * 0.2 = 2秒
+            #         if getattr(self, '_vis_enabled_cache', True):
+            #             break
+            #         time.sleep(0.2)
+            #     else:
+            #         continue
+            vis_enabled = getattr(self, '_vis_enabled_cache', True)
+            viz_ready   = getattr(self, '_viz_ready', False)
+            proc_alive  = hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()
+            # ⭐ 只有状态发生变化才更新
+            if not proc_alive and getattr(self, '_viz_ready', False):
+                logger.warning("[VIZ] process died → set _viz_ready=False")
+                self._viz_ready = False
+            if (
+                (not vis_enabled or not proc_alive or not viz_ready)
+                and not getattr(self, '_force_full_sync_pending', False)
+            ):
+                # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
+                for _ in range(10):  # 最多等2秒
+                    if getattr(self, '_vis_enabled_cache', False) and getattr(self, '_viz_ready', False):
+                        break
+                    time.sleep(0.2)
+                else:
+                    continue
+
             # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
             if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
                and not getattr(self, '_force_full_sync_pending', False):
@@ -4515,11 +4546,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 last_send_time = time.time()
 
                 # ⚡ [CORE] 线程安全地获取行情快照
-                # 使用哈希检测跳过无变化的昂贵计算（及 IPC 发送）
                 with getattr(self, '_df_lock', threading.Lock()):
                     df_ui = self.df_all.copy()
                 
-                # [OPTIMIZE] 快速哈希校验：如果核心价格列完全没动，没必要比较/同步
+                # [OPTIMIZE] 快速哈希校验
                 n_rows_now = len(df_ui)
                 df_hash = hash(n_rows_now)
                 if not df_ui.empty:
@@ -4529,53 +4559,47 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         sample_idx = [0, n_rows_now // 2, n_rows_now - 1] if n_rows_now > 2 else list(range(n_rows_now))
                         df_hash = hash(tuple(df_ui[p_col].iloc[sample_idx].values)) ^ hash(n_rows_now)
                 
-                # ⚡ [FIX] 处理来自 Pipe 的强制全量同步请求（线程安全方式）
+                # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
+                if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not getattr(self, '_force_full_sync_pending', False):
+                    # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
+                    continue
+
+                # ⚡ [FIX] 处理强制全量同步请求
                 if getattr(self, '_force_full_sync_pending', False):
                     logger.info("[send_df] Executing pending FULL SYNC request")
                     if hasattr(self, 'df_ui_prev'):
                         del self.df_ui_prev
                     self.sync_version = 0
                     self._force_full_sync_pending = False
+                    self._cold_start = True # 标记为全量重发
                     
                 self._last_send_df_hash = df_hash
-                # --- 计算增量 ---
-                if hasattr(self, 'df_ui_prev'):
-                    # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
-                    # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+
+                # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
+                if hasattr(self, 'df_ui_prev') and not self._cold_start:
                     try:
+                        # 仅在已有缓存且不是冷启动时才 compare
                         df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
-                        # 如果没有变化行，就跳过本轮
                         if df_diff.empty:
                             logger.debug("[send_df] df_diff empty, skip sending this cycle")
                             sent = True
                         else:
                             msg_type = 'UPDATE_DF_DIFF'
                             payload_to_send = df_diff
-                            # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
-                            mem = 0 # df_diff.memory_usage(deep=True).sum()
+                            mem = 0 
 
                     except ValueError as e:
-                        # debug 输出索引和列的不一致
-                        prev_cols = set(self.df_ui_prev.columns) if hasattr(self, 'df_ui_prev') else set()
-                        curr_cols = set(df_ui.columns)
-                        prev_idx = set(self.df_ui_prev.index) if hasattr(self, 'df_ui_prev') else set()
-                        curr_idx = set(df_ui.index)
-
-                        logger.debug(f"[send_df] compare() ValueError: {e}")
-                        logger.debug(f"[send_df] columns prev={list(prev_cols)[:5]}, curr={list(curr_cols)[:5]}")
-                        logger.debug(f"[send_df] index prev={list(prev_idx)[:5]}, curr={list(curr_idx)[:5]}")
-
-                        # 为了不中断，可以直接把全量当作 diff
+                        logger.debug(f"[send_df] compare() ValueError: {e}, fallback to UPDATE_DF_ALL")
                         payload_to_send = df_ui
-                        # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
-                        mem = 0 # df_ui.memory_usage(deep=True).sum()
+                        mem = 0 
                         msg_type = 'UPDATE_DF_ALL'
-
                 else:
+                    # 冷启动或无缓存时，直接全量
                     payload_to_send = df_ui
-                    # --- 3️⃣ 内存日志 --- (⚡ 移除耗时的 deep=True)
-                    mem = 0 # df_ui.memory_usage(deep=True).sum()
+                    mem = 0 
                     msg_type = 'UPDATE_DF_ALL'
+                    self._cold_start = False # 重置冷启动标志
+
 
                 # 更新缓存
                 self.df_ui_prev = df_ui.copy()
@@ -4613,6 +4637,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except (EOFError, BrokenPipeError, ConnectionResetError):
                          logger.warning("[Pipe] connection lost, fallback to Socket")
                          self.viz_conn = None
+                         self._viz_ready = False
                     except Exception as e:
                          logger.error(f"[Pipe] send failed: {e}")
 
@@ -4626,7 +4651,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # [FIX] 避免在后台线程直接调用 self.vis_var.get()，改为读取 master 的可见性状态 (非 UI 调用) 或变量快照
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 
-                if not sent:
+                if not sent and vis_enabled:
                     try:
                         # 1️⃣ pickle 单独计时
                         with timed_ctx("viz_IPC_pickle", warn_ms=300):
@@ -4652,7 +4677,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         # 只有当真正失败时才 Warning，避免没有 Visualizer 时的噪音
                         # logger.warning(f"[IPC] send failed: {e}")
-                        pass
+                        self._viz_ready = False
                         if not vis_enabled:
                             # self._df_first_send_done = True
                             sent = True
@@ -13746,7 +13771,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 已经创建过，直接显示
                 self.kline_monitor.deiconify()
                 self.kline_monitor.lift()
-                self.kline_monitor.focus_force()
+                # self.kline_monitor.focus_force()
+                self._schedule_after(500, self.kline_monitor.focus_force)
         logger.info("启动K线监控OK...")
         # 在这里可以启动你的实时监控逻辑，例如:
         # 1. 调用获取数据的线程
