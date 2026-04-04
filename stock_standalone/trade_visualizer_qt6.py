@@ -5821,6 +5821,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⚡ [OPTIMIZATION] 记录变更代码，交给节流器异步刷新
             changed_codes = set(df_diff.index.tolist())
             self.update_df_all(self.df_all, changed_codes=changed_codes)
+
+            # ⚡ [NEW] 推送数据给 Hotlist 后台线程 (Worker)
+            if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                self.hotlist_panel.push_market_data(self.df_all)
         except Exception as e:
             logger.error(f"[apply_df_diff] Error: {e}")
 
@@ -8289,8 +8293,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.df_cache = df  # 直接引用，不复制
                 self.df_all = df
                 logger.debug(f"[_process_df_all_update] df_all updated, rows={len(self.df_all)}")
-                # [REMOVED] DataHubService publish logic
-                pass
+                
+                # ⚡ [NEW] 推送数据给 Hotlist 后台线程 (Worker)
+                if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                    self.hotlist_panel.push_market_data(self.df_all)
             elif df is not None:
                 self.df_cache = pd.DataFrame()
                 self.df_all = self.df_cache

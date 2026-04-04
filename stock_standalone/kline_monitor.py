@@ -411,7 +411,7 @@ class KLineMonitor(tk.Toplevel):
 
                 if not self._ui_update_pending:
                     self._ui_update_pending = True
-                    self.after(0, self._safe_apply_filters)
+                    self.after(200, self._safe_apply_filters)
 
         except Exception as e:
             logger.error(f"[Monitor] 初次更新错误: {e}")
@@ -459,7 +459,7 @@ class KLineMonitor(tk.Toplevel):
                         if not self.winfo_exists():
                             break
                         self._ui_update_pending = True
-                        self.after(0, self._safe_apply_filters)
+                        self.after(100, self._safe_apply_filters)
                     except (tk.TclError, RuntimeError, AttributeError):
                         break
 

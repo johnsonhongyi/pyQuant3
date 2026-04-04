@@ -10,6 +10,8 @@ import sys
 import sqlite3
 import time
 import re
+import queue
+from queue import Empty
 from datetime import datetime
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -134,44 +136,174 @@ class HotlistWorker(QThread):
     data_ready = pyqtSignal(object, str)
     # [NEW] 信号：(watchlist_df, error_msg)
     watchlist_ready = pyqtSignal(object, str)
+    # [NEW] 信号：(code, name, pattern, msg, is_high_priority)
+    signal_detected = pyqtSignal(str, str, str, str, bool)
     
     def __init__(self, interval: float = 2.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.interval = interval
         self._running = True
+        self.market_data_queue = queue.Queue(maxsize=5) # [NEW] 市场数据推送队列
+        self._pattern_detector = None
+        self._last_data_sigs: dict[str, tuple[float, float, float]] = {}
+        self._last_check_fingerprint = ""
+        self._signal_counts: dict[tuple[str, str], int] = {} # 内存缓存计数
+        self._watched_codes: set[str] = set() # [NEW] 外部同步的热点代码池
     
     def run(self):
         if get_trading_hub is None:
             return
         
+        # 1. 启动时加载历史信号计数 (避开 UI 线程)
+        self._load_signal_counts()
+
+        # 2. 初始检测器
+        if has_detector_imported and self._pattern_detector is None:
+             self._pattern_detector = IntradayPatternDetector(
+                cooldown=120,
+                publish_to_bus=False 
+            )
+             self._pattern_detector.on_pattern = self._on_signal_detected_worker
+
+        last_pull_time = 0
+        
         while self._running:
             try:
-                # 1. 拉取数据
-                hub = get_trading_hub()
-                df_follow = hub.get_follow_queue_df()
-                
-                df_watchlist = pd.DataFrame()
-                if hasattr(hub, 'get_watchlist_df'):
-                    df_watchlist = hub.get_watchlist_df()
-                
-                # [NEW] 在后台线程中补全板块信息, 避免 UI 卡死
-                if not df_watchlist.empty:
-                    self._augment_watchlist_sectors(df_watchlist)
+                # --- A. 处理市场数据推送 (高频/实时) ---
+                try:
+                    # 尝试从队列获取数据，最多等待 0.1s
+                    df_market = self.market_data_queue.get(timeout=0.1)
+                    if df_market is not None and not df_market.empty:
+                        self._process_patterns_async(df_market)
+                except Empty:
+                    pass
 
-                # 2. 发送数据 (不要在线程里操作 UI)
-                self.data_ready.emit(df_follow, "")
-                if not df_watchlist.empty:
-                    self.watchlist_ready.emit(df_watchlist, "")
+                # --- B. 定期拉取关注列表/观察池 (低频/2s) ---
+                now = time.time()
+                if now - last_pull_time >= self.interval:
+                    hub = get_trading_hub()
+                    df_follow = hub.get_follow_queue_df()
+                    
+                    df_watchlist = pd.DataFrame()
+                    if hasattr(hub, 'get_watchlist_df'):
+                        df_watchlist = hub.get_watchlist_df()
+                    
+                    if not df_watchlist.empty:
+                        self._augment_watchlist_sectors(df_watchlist)
+
+                    self.data_ready.emit(df_follow, "")
+                    if not df_watchlist.empty:
+                        self.watchlist_ready.emit(df_watchlist, "")
+                    
+                    last_pull_time = now
                 
             except Exception as e:
-                logger.error(f"HotlistWorker error: {e}")
-                self.data_ready.emit(None, str(e))
-                self.watchlist_ready.emit(None, str(e))
+                logger.error(f"HotlistWorker loop error: {e}")
+                time.sleep(1) # 发生错误稍微休息
                 
             # 简单的休眠
             for _ in range(int(self.interval * 10)):
                 if not self._running: break
                 time.sleep(0.1)
+
+    def set_watched_codes(self, codes: list[str]):
+        """[Worker] 更新关注的代码列表 (热点股)"""
+        self._watched_codes = set(codes)
+
+    def _load_signal_counts(self):
+        """[Worker] 从数据库加载今日信号计数"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            c.execute("SELECT code, pattern, count FROM signal_counts WHERE date = ?", (today,))
+            rows = c.fetchall()
+            c.close()
+            for code, pattern, count in rows:
+                self._signal_counts[(code, pattern)] = count
+        except: pass
+
+    def _save_signal_count(self, code: str, pattern: str, count: int):
+        """[Worker] 保存单个信号计数到数据库 (后台 IO)"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            c.execute("""
+                INSERT OR REPLACE INTO signal_counts (code, pattern, date, count, last_trigger)
+                VALUES (?, ?, ?, ?, ?)
+            """, (code, pattern, today, count, now))
+            conn.commit()
+            c.close()
+        except Exception as e:
+            logger.error(f"Worker save signal error: {e}")
+
+    def _on_signal_detected_worker(self, event: 'PatternEvent'):
+        """[Worker] 形态检测回调"""
+        try:
+            if not event or not event.code or event.price <= 0: return
+            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
+            time_str = datetime.now().strftime('%H:%M:%S')
+            
+            signal_key = (event.code, event.pattern)
+            count = self._signal_counts.get(signal_key, 0) + 1
+            self._signal_counts[signal_key] = count
+            
+            # 后台写库
+            self._save_signal_count(event.code, event.pattern, count)
+            
+            msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f} (第{count}次)"
+            is_high_priority = event.pattern in ['bull_trap_exit', 'momentum_failure', 'top_signal', 'high_drop']
+            
+            # 发射信号给 UI 线程
+            self.signal_detected.emit(event.code, event.name, event.pattern, msg, is_high_priority)
+            logger.warning(f"🔥 [Worker] 热点信号: {msg}")
+        except Exception as e:
+            logger.error(f"Worker signal callback error: {e}")
+
+    def _process_patterns_async(self, df: pd.DataFrame):
+        """[Worker] 异步执行形态扫描"""
+        if not has_detector_imported or self._pattern_detector is None: return
+        
+        # 1. 简单指纹校验，防止重复计算
+        try:
+            current_fp = f"{len(df)}_{int(df['close'].iloc[-1]*100 if not df.empty else 0)}"
+            if self._last_check_fingerprint == current_fp: return
+            self._last_check_fingerprint = current_fp
+        except: pass
+
+        # 2. 遍历热点股 (Worker 内部状态?) 
+        # 注意：Worker 并不直接持有 self.items，需要通过消息传递或由 UI 线程提供
+        # 暂时只针对全量 df 处理，或者在推送时自带感兴趣的代码列表
+        
+        # 获取当前的热点代码 (由 Panel 定期同步给 Worker 或由 Panel 在 push 时指定)
+        # 简化版：Worker 只处理传入 df 中感兴趣的代码
+        for code in df.index:
+            if code not in self._watched_codes: continue
+            try:
+                row = df.loc[code]
+                price = float(row.get('price', row.get('close', 0)))
+                volume = float(row.get('volume', 0))
+                amount = float(row.get('amount', 0))
+                prev_close = float(row.get('lastp1d', 0))
+                
+                if price <= 0 or prev_close <= 0: continue
+                
+                current_sig = (price, volume, amount)
+                if self._last_data_sigs.get(code) == current_sig: continue
+                self._last_data_sigs[code] = current_sig
+
+                self._pattern_detector.update(
+                    code=str(code),
+                    name=str(row.get('name', code)),
+                    tick_df=None,
+                    day_row=row,
+                    prev_close=prev_close
+                )
+            except: pass
 
     def _augment_watchlist_sectors(self, df):
         """后台纯内存补全板块信息, 不持久化写数据库 (最高效安全)"""
@@ -296,15 +428,20 @@ class HotlistPanel(QWidget, WindowMixin):
             "follow": "",
             "watchlist": ""
         }
-        self._pattern_detector = None
         # [NEW] 热门板块缓存
         self._recent_hot_concepts_cache: set[str] = set()
         self._last_hot_concepts_sync = 0.0
+        
+        # [NEW] UI 刷新脏位标记与限流缓存
+        self._pending_table_refresh_follow = False
+        self._pending_table_refresh_watchlist = False
+        self._pending_pnl_refresh = False
         
         # [MODIFIED] 移除 QTimer，改用 Worker
         self.data_worker = HotlistWorker(interval=1.0, parent=self)
         self.data_worker.data_ready.connect(self._on_worker_data)
         self.data_worker.watchlist_ready.connect(self._on_watchlist_data)
+        self.data_worker.signal_detected.connect(self._on_worker_signal_detected)
         
         # UI 属性定义 (用于类型提示)
         self.table: QTableWidget = None # type: ignore
@@ -689,10 +826,10 @@ class HotlistPanel(QWidget, WindowMixin):
         self.data_worker.data_ready.connect(self._on_worker_data)
         self.data_worker.watchlist_ready.connect(self._on_watchlist_data)
         
-        # 定时刷新 PnL (仅 UI 更新,数据由 worker 提供)
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self._refresh_pnl)
-        self.refresh_timer.start(2000)
+        # [NEW] 核心 UI 限流刷新定时器 (每 500ms 刷新一次可视化，防止风暴)
+        self.refresh_ui_timer = QTimer(self)
+        self.refresh_ui_timer.timeout.connect(self._perform_ui_refresh)
+        self.refresh_ui_timer.start(500)
 
         layout.addLayout(status_bar)
         
@@ -700,6 +837,45 @@ class HotlistPanel(QWidget, WindowMixin):
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._sync_voice_ui)
         self._sync_timer.start(1000)
+
+    def push_market_data(self, df: pd.DataFrame):
+        """[Public API] 接收主窗口推送的 df_all，并喂给后台 Worker"""
+        if hasattr(self, 'data_worker') and self.data_worker:
+            try:
+                # 仅入队，不阻塞 UI 线程
+                # 如果队列满了，覆盖旧的 (非阻塞)
+                if self.data_worker.market_data_queue.full():
+                    try: self.data_worker.market_data_queue.get_nowait()
+                    except: pass
+                self.data_worker.market_data_queue.put_nowait(df)
+            except: pass
+
+    def _on_worker_signal_detected(self, code, name, pattern, msg, is_high_priority):
+        """处理后台 Worker 传回的形态信号"""
+        # 1. 发射日志信号 (带给 LogPanel)
+        self.signal_log.emit(code, name, pattern, msg, is_high_priority)
+        
+        # 2. 语音播报由主窗口联动处理，或在此处触发额外逻辑
+        # logger.debug(f"[UI] Signal received: {msg}")
+
+    def _perform_ui_refresh(self):
+        """[Limited Frequency] 统一执行 UI 刷新任务，消除重绘负载"""
+        if self._pending_pnl_refresh:
+            self._refresh_pnl_ui_only()
+            self._pending_pnl_refresh = False
+            
+        if self._pending_table_refresh_follow:
+            if self.tabs.currentIndex() == 1:
+                self._update_follow_queue()
+            self._pending_table_refresh_follow = False
+
+        if self._pending_table_refresh_watchlist:
+            if self.tabs.currentIndex() == 2:
+                self._update_watchlist_queue()
+            self._pending_table_refresh_watchlist = False
+            
+        # 总是更新状态栏
+        self._update_status_bar()
 
     def _sync_voice_ui(self):
         """主动从主窗口同步语音状态"""
@@ -1002,42 +1178,18 @@ class HotlistPanel(QWidget, WindowMixin):
         return item
 
     def _on_watchlist_data(self, df_watchlist: Optional[pd.DataFrame], error_msg: str):
-        """Watchlist 数据回调"""
-        if error_msg or df_watchlist is None or df_watchlist.empty:
-            if df_watchlist is not None and df_watchlist.empty:
-                if hasattr(self, 'watchlist_table'): self.watchlist_table.setRowCount(0)
+        """[Worker Callback] 观察池数据到达 (主线程)"""
+        if error_msg:
             return
 
-        # [NEW] 强势股跟随过滤：仅保留前 30 个，按趋势分和连强分排序
-        sort_cols = []
-        if 'trend_score' in df_watchlist.columns: sort_cols.append('trend_score')
-        if 'consecutive_strong' in df_watchlist.columns: sort_cols.append('consecutive_strong')
-        
-        if sort_cols:
-            df_watchlist = df_watchlist.sort_values(by=sort_cols, ascending=False).head(100)
-        else:
-            df_watchlist = df_watchlist.head(100)
-        
-        # [OPTIMIZE] 数据指纹检查,避免频繁全量刷新
-        codes = sorted(df_watchlist['code'].astype(str).tolist())
-        statuses = df_watchlist['validation_status'].tolist() if 'validation_status' in df_watchlist.columns else []
-        new_fingerprint = f"{len(codes)}:{','.join(codes[:5])}:{','.join(map(str, statuses[:5]))}"
-        
-        old_fingerprint = getattr(self, '_last_watchlist_fingerprint', '')
-        needs_full_rebuild = (new_fingerprint != old_fingerprint)
-        
+        if df_watchlist is None or df_watchlist.empty:
+            return
+
+        # 1. 缓存数据 (Worker 已通过 _augment_watchlist_sectors 完成增强)
         self._last_df_watchlist = df_watchlist
-        self._last_watchlist_fingerprint = new_fingerprint
         
-        # [OPTIMIZE] Only update UI if Watchlist tab is visible
-        if hasattr(self, 'tabs') and self.tabs.currentIndex() == 2:
-            if needs_full_rebuild:
-                # 数据结构变化,全量重绘
-                self._update_watchlist_queue(df_watchlist)
-            else:
-                # 仅数据值变化,轻量级更新
-                self._update_watchlist_prices_only()
-        self._update_status_bar()
+        # 2. 设置脏标记，由 refresh_ui_timer 消费
+        self._pending_table_refresh_watchlist = True
 
     def _update_watchlist_queue(self, df=None):
         """刷新观察池可视化 (智能增量渲染)"""
@@ -1441,6 +1593,19 @@ class HotlistPanel(QWidget, WindowMixin):
             # Fallback
             QTableWidget.wheelEvent(table, event)
     
+    def _on_worker_data(self, df_follow: Optional[pd.DataFrame], error_msg: str):
+        """Worker 数据回调 (主线程执行)"""
+        if error_msg:
+            return
+            
+        if df_follow is not None:
+             self.follow_count = len(df_follow)
+             self._last_df_follow = df_follow
+             
+             # 设置脏标记，由 refresh_ui_timer 消费
+             self._pending_table_refresh_follow = True
+             self._pending_pnl_refresh = True
+
     def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察"):
         """
         添加股票到热点列表
@@ -1548,44 +1713,6 @@ class HotlistPanel(QWidget, WindowMixin):
                     self._update_watchlist_queue(df)
             
             # [OPTIMIZE] 仅当数据源可用时才执行同步刷新，且增加冷却控制
-            self._refresh_pnl_ui_only()
-
-    def _on_worker_data(self, df_follow: Optional[pd.DataFrame], error_msg: str):
-        """Worker 数据回调 (主线程执行)"""
-        if error_msg:
-            return
-            
-        if df_follow is not None:
-            # [OPTIMIZE] 差分更新检查
-            try:
-                # 使用 updated_at 的最大值作为指纹 (假设最新的一条变了，数据就变了)
-                # 或者如果有行数变化
-                current_fingerprint = ""
-                if not df_follow.empty:
-                    max_time = df_follow['updated_at'].max() if 'updated_at' in df_follow.columns else ""
-                    current_fingerprint = f"{len(df_follow)}_{max_time}"
-                
-                # 如果指纹一致，跳过重绘
-                if hasattr(self, '_last_follow_fingerprint') and self._last_follow_fingerprint == current_fingerprint:
-                    pass
-                else:
-                    self.follow_count = len(df_follow) # [NEW] Update count
-                    self._last_df_follow = df_follow # [NEW] Cache
-                    
-                    # [OPTIMIZE] Only update UI if Follow tab is visible
-                    if hasattr(self, 'tabs') and self.tabs.currentIndex() == 1:
-                        with timed_ctx("tabs_update_follow_status", warn_ms=100):
-                            self._update_follow_queue(df_follow)
-                        
-                    self._last_follow_fingerprint = current_fingerprint
-                    self._update_status_bar() # [NEW] Refresh UI
-            except Exception:
-                # 出错降级：总是更新
-                with timed_ctx("Exception_update_follow_status", warn_ms=100):
-                    self._update_follow_queue(df_follow)
-
-            # 刷新 PnL (仅当 Tab 1 可见时？或者总是？)
-            # 用户抱怨日志太多，先静默调用
             self._refresh_pnl_ui_only()
 
     def _refresh_pnl(self):
@@ -2308,22 +2435,6 @@ class HotlistPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.debug(f"Load signal counts error: {e}")
     
-    def _save_signal_count(self, code: str, pattern: str, count: int):
-        """保存单个信号计数到数据库（按天）"""
-        try:
-            today = datetime.now().strftime('%Y-%m-%d')
-            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
-            conn = mgr.get_connection()
-            c = conn.cursor()
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            c.execute("""
-                INSERT OR REPLACE INTO signal_counts (code, pattern, date, count, last_trigger)
-                VALUES (?, ?, ?, ?, ?)
-            """, (code, pattern, today, count, now))
-            conn.commit()
-            c.close()
-        except Exception as e:
-            logger.error(f"Save signal count error: {e}")
     
     def _get_item_from_row(self, row: int) -> Optional[HotlistItem]:
         """
@@ -2517,141 +2628,9 @@ class HotlistPanel(QWidget, WindowMixin):
                 break
         self._refresh_table()
     
-    def _notify_voice(self, code: str, msg: str):
-        """发送语音通知信号"""
-        # 检查语音暂停状态
-        if self._voice_paused:
-            return
-        if self.voice_enabled:
-            self.voice_alert.emit(code, msg)
-            logger.debug(f"Voice alert: {code} - {msg}")
-    
     def contains(self, code: str) -> bool:
         """检查是否已包含该股票"""
         return any(item.code == code for item in self.items)
-
-    # ================== 形态检测 ==================
-    def check_patterns(self, df: pd.DataFrame) -> None:
-        """
-        检测热点股票的形态信号
-        
-        Args:
-            df: 包含实时数据的 DataFrame (df_all)
-        """
-        if not has_detector_imported:
-            logger.warning("⚠️ Pattern Detector not available (Import failed)")
-            return
-        
-        if df is None or df.empty:
-            return
-            
-        # [MODIFIED] 每日重置信号计数（按天统计）
-        current_date = datetime.now().date()
-        if current_date != self._last_reset_date:
-            self._signal_counts.clear()
-            self._last_reset_date = current_date
-            logger.info(f"📅 新的一天：已重置今日信号计数 ({current_date})")
-        
-        # ⭐ 使用及健壮的数据指纹 (Length + SumClose + SumVol)
-        try:
-            c_sum = int(df['close'].sum() * 100)
-            v_sum = int(df['volume'].sum())
-            current_fp = f"{len(df)}_{c_sum}_{v_sum}"
-        except Exception as e:
-            current_fp = f"{len(df)}_{hash(str(df.index.tolist()[:5]))}"
-            
-        # 如果数据未变化，跳过检测
-        if hasattr(self, '_last_check_fingerprint') and self._last_check_fingerprint == current_fp:
-            return
-        self._last_check_fingerprint = current_fp
-        
-        # ⭐ 新的一轮检测开始：重置本轮说话标记
-        self._batch_spoken_flag = False
-        
-        # 懒加载检测器
-        if self._pattern_detector is None:
-            self._pattern_detector = IntradayPatternDetector(
-                cooldown=120,           # 2分钟冷却
-                publish_to_bus=False    # 不发布到全局总线，局部处理
-            )
-            self._pattern_detector.on_pattern = self._on_signal_detected
-            logger.info("🔥 HotlistPanel PatternDetector initialized")
-            
-        # logger.info(f"🔍 Scan Started: {len(self.items)} items, FP={current_fp}")
-        
-        # 遍历热点股票
-        for item in self.items:
-            if item.code not in df.index:
-                continue
-            try:
-                row = df.loc[item.code]
-                
-                # 1. 基础数据校验 (Data Validation)
-                price = float(row.get('price', row.get('close', 0)))
-                volume = float(row.get('volume', 0))
-                amount = float(row.get('amount', 0))
-                prev_close = float(row.get('lastp1d', 0))
-                
-                # 剔除无效数据流
-                if price <= 0 or prev_close <= 0 or volume < 0:
-                    continue
-                
-                # 2. 数据更新检测 (Skip redundant data)
-                # 只有当 价、量、额 至少有一个发生变化时，才认为数据流有更新
-                current_sig = (price, volume, amount)
-                if self._last_data_sigs.get(item.code) == current_sig:
-                    continue
-                
-                # 更新指纹
-                self._last_data_sigs[item.code] = current_sig
-                
-                # 3. 执行形态扫描
-                self._pattern_detector.update(
-                    code=item.code,
-                    name=item.name,
-                    tick_df=None,
-                    day_row=row,
-                    prev_close=prev_close
-                )
-            except Exception as e:
-                # logger.debug(f"Pattern check error for {item.code}: {e}")
-                pass
-
-    def _on_signal_detected(self, event: 'PatternEvent') -> None:
-        """形态检测回调"""
-        try:
-            # 数据完整性二次校验
-            if not event or not event.code or event.price <= 0:
-                return
-                
-            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
-            time_str = datetime.now().strftime('%H:%M:%S')
-            
-            # ⭐ 信号计数统计（累积）
-            signal_key = (event.code, event.pattern)
-            count = self._signal_counts.get(signal_key, 0) + 1
-            self._signal_counts[signal_key] = count
-            
-            # [NEW] 持久化到数据库
-            self._save_signal_count(event.code, event.pattern, count)
-            
-            msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f} (第{count}次)"
-            
-            # 发射信号日志 (仅在数据有效且由于 update 触发后产生)
-            try:
-                # 根据信号类型判断优先级 (风险信号为高优先级)
-                is_high_priority = event.pattern in ['bull_trap_exit', 'momentum_failure', 'top_signal', 'high_drop']
-                self.signal_log.emit(event.code, event.name, event.pattern, msg, is_high_priority)
-            except Exception as e_emit:
-                logger.error(f"❌ Signal emit failed: {e_emit}")
-            
-            # ⚡ [REFINED] 统一信号流向：不再此处直接调用 _notify_voice。
-            # 信号通过 signal_log.emit 推送到 MainWindow 后，由“所见即所播”机制统一处理播报。
-            logger.warning(f"🔥 热点信号: {msg}")
-        except Exception as e:
-            logger.error(f"Signal callback error: {e}")
-
-    # ================== 拖动支持 ==================
     def mousePressEvent(self, event):
         """记录拖动起始位置"""
         if event.button() == Qt.MouseButton.LeftButton:
