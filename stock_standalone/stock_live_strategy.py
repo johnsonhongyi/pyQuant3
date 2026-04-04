@@ -47,6 +47,12 @@ _ipc_sender_thread: Optional[threading.Thread] = None
 _ipc_sender_stop = threading.Event()
 
 try:
+    from stock_visual_utils import ipc_client
+except ImportError:
+    ipc_client = None
+    logger.warning("stock_visual_utils/ipc_client not found.")
+
+try:
     from stock_selector import StockSelector
 except ImportError:
     StockSelector = None
@@ -133,29 +139,22 @@ def _ipc_sender_worker():
 
             if not batch: continue
             
-            # 3. 打包发送 (Batch Send)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                try:
-                    s.connect((IPC_HOST, IPC_PORT))
-                    # 🚀 [FIX] 遵循可视化协议：前 4 字节必须是 CODE/TIME/SIGN
-                    if len(batch) == 1:
-                        payload = json.dumps(batch[0])
-                    else:
-                        payload = json.dumps(batch)
-                    
-                    # 打包发送：4 字节前缀 'CODE' + '|' + 'SIGNAL|' + 负载
-                    msg = f"CODE|SIGNAL|{payload}"
-                    s.sendall(msg.encode('utf-8'))
-                    
-                    # 标记任务完成
-                    for _ in batch: ipc_queue.task_done()
-                except (socket.timeout, ConnectionRefusedError):
-                    # 如果挂了，只在此处对整个批次标记任务完成（丢弃）
-                    for _ in batch: ipc_queue.task_done()
-                except Exception as e:
-                    logger.debug(f"IPC Batch Send Error: {e}")
-                    for _ in batch: ipc_queue.task_done()
+            # 3. 使用持久化客户端发送 (Send via Persistent Client)
+            if ipc_client:
+                # 🚀 [FIX] 遵循可视化协议：前 4 字节必须是 CODE/TIME/SIGN
+                if len(batch) == 1:
+                    payload = json.dumps(batch[0])
+                else:
+                    payload = json.dumps(batch)
+                
+                # 指令：4 字节前缀 'CODE' + '|' + 'SIGNAL|' + 负载
+                msg = f"CODE|SIGNAL|{payload}"
+                ipc_client.enqueue_command(msg)
+                
+                # 标记任务完成 (入队即视为分发完成，后台线程负责可靠传输)
+                for _ in batch: ipc_queue.task_done()
+            else:
+                for _ in batch: ipc_queue.task_done()
             
         except Empty:
             continue

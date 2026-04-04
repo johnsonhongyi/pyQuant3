@@ -753,31 +753,26 @@ class SignalOverlay:
                 fy = float(y_pos)
                 if math.isnan(fx) or math.isnan(fy):
                     continue
-                # 后续使用转换后的数值
                 x_pos, y_pos = fx, fy
             except (TypeError, ValueError):
                 continue
 
-            # [UPGRADE] Special handling for Emoji Markers (like '🎯', '🔥', '🚀', '⚠️')
-            # Natively pyqtgraph ScatterPlotItem does not support these unicode symbols as shapes.
+            # [UPGRADE] Special handling for Emoji Markers
             is_emoji = isinstance(sig.symbol, str) and len(sig.symbol) == 1 and ord(sig.symbol) > 127
-            if is_emoji or sig.symbol == '🎯':
-                # Draw Emoji as TextItem (centered on point)
-                marker = self._get_text_item(target)
-                # Use HTML to control size/color explicitly if needed, but simple unicode works too.
-                # Center anchor (0.5, 0.5) puts the center of text at (x,y)
+            if is_emoji:
+                marker = pg.TextItem()
                 marker.setHtml(f'<div style="font-size: {sig.size}pt; color: #FFD700; font-weight: bold;">{sig.symbol}</div>')
                 marker.setAnchor((0.5, 0.5))
                 marker.setPos(x_pos, y_pos)
                 self.text_items[target].append(marker)
+                plot.addItem(marker)
                 
-                # Add invisible hit target for interaction
                 xs.append(x_pos)
                 ys.append(y_pos)
-                brushes.append(pg.mkBrush((0,0,0,0))) # Transparent
+                brushes.append(pg.mkBrush((0,0,0,0)))
                 symbols.append('o') 
-                sizes.append(sig.size) # Hit area size
-                pens.append(pg.mkPen((0,0,0,0))) # Transparent border
+                sizes.append(sig.size)
+                pens.append(pg.mkPen((0,0,0,0)))
                 data.append(sig.to_visual_hit()['meta'])
             else:
                 xs.append(x_pos)
@@ -785,24 +780,22 @@ class SignalOverlay:
                 brushes.append(pg.mkBrush(sig.color))
                 symbols.append(sig.symbol)
                 sizes.append(sig.size)
-                pens.append(pg.mkPen(None)) # No outline for standard shapes
+                pens.append(pg.mkPen(None))
                 data.append(sig.to_visual_hit()['meta'])
 
-            # 添加价格文字标签 (K线图上通常隐藏具体价格数字以保持整洁，主要通过分时图查看详情)
             if target != 'kline':
                 is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
                 
-                # [UPGRADE] Support specific Text Colors for FOLLOW/EXIT
                 if sig.signal_type == SignalType.FOLLOW:
-                    text_color = (255, 215, 0) # Gold
-                    anchor = (0.5, -0.8) # Below (leave space for large marker)
+                    text_color = (255, 215, 0)
+                    anchor = (0.5, -0.8)
                 elif sig.signal_type == SignalType.EXIT_FOLLOW:
-                    text_color = (255, 69, 0) # OrangeRed
-                    anchor = (0.5, 1.5) # Above (Exit)
+                    text_color = (255, 69, 0)
+                    anchor = (0.5, 1.5)
                 else:
                     anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
                     text_color = (255, 120, 120) if is_buy else (120, 255, 120)
-
+                
                 txt = self._get_text_item(target)
                 txt.setText(f"{sig.price:.2f}")
                 txt.setAnchor(anchor)
@@ -810,11 +803,7 @@ class SignalOverlay:
                 txt.setPos(x_pos, y_pos)
                 self.text_items[target].append(txt)
 
-            # [IPC/REFINED] 距今相关信息 D+N 已集成到联动看板，此处不再绘制以免干扰视线
-
-        # 最后统一更新 scatter
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, pen=pens, data=data)
-
 
     def set_on_click_handler(self, handler):
         """设置信号点击回调"""
@@ -844,10 +833,8 @@ class CommandListenerThread(QThread):
         self.running = True
 
     def stop(self):
-        """退出监听线程"""
         self.running = False
         try:
-            # ⭐ 关键：强制关闭连接以解除 accept() 阻塞
             if self.server_socket:
                 try:
                     self.server_socket.shutdown(socket.SHUT_RDWR)
@@ -856,106 +843,90 @@ class CommandListenerThread(QThread):
                 self.server_socket.close()
         except Exception as e:
             logger.debug(f"[IPC] Error closing server socket: {e}")
-        
         self.quit()
-        # 等待线程自然退出
         if not self.wait(1000):
             self.terminate()
 
     def run(self):
-        # ⭐ 关键：避免 accept 无限阻塞
         self.server_socket.settimeout(1.0)
+        if not hasattr(self, 'executor') or not self.executor:
+            self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+            logger.debug(f"ℹ️ Viz: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
         while self.running:
             try:
-                # accept 阻塞，直到有客户端连接
-                client_socket: socket.socket
-                client_socket, _ = self.server_socket.accept()
-                try:
-                    client_socket.settimeout(10.0)
-                    # 尝试增加接收缓冲区
-                    try:
-                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) # 2MB
-                    except Exception:
-                        pass
-
-                    # 1. 精确读取 4 字节协议头
-                    prefix = recv_exact(client_socket, 4, lambda: self.running)
-                    if not prefix:
-                        client_socket.close()
-                        continue
-
-                    if prefix == b"DATA":
-                        # --- DATA 模式：二进制大数据包 ---
-                        try:
-                            # 2. 读取长度头 (4 字节)
-                            header = recv_exact(client_socket, 4, lambda: self.running)
-                            size = struct.unpack("!I", header)[0]
-                            
-                            # 限制异常大小，防止内存攻击（200MB 限制）
-                            if size > 200 * 1024 * 1024:
-                                logger.error(f"[IPC] Packet too large ({size} bytes). Discarding.")
-                                client_socket.close()
-                                continue
-
-                            logger.debug(f"[IPC] Start receiving payload: {size/(1024*1024):.2f} MB")
-                            
-                            # 3. 读取完整负载
-                            payload = recv_exact(client_socket, size, lambda: self.running)
-                            if payload:
-                                raw_data = pickle.loads(payload)
-                                if isinstance(raw_data, tuple) and len(raw_data) == 2:
-                                    msg_type, df_obj = raw_data
-                                    self.dataframe_received.emit(df_obj, msg_type)
-                                    logger.info(f"[IPC] Dataframe processed: {msg_type}")
-                        except Exception as e:
-                            logger.error(f"[IPC] DATA Packet process error: {e}")
-
-                    elif prefix in (b"CODE", b"TIME", b"SIGN"):
-                        # --- CODE 模式：短文本指令 (CODE|...) ---
-                        try:
-                            # 尝试非阻塞读取剩余内容 (加大缓冲区防止JSON截断)
-                            client_socket.settimeout(1.0) # 防止这里死锁
-                            remaining = client_socket.recv(16384) # 1KB -> 16KB
-                            full_cmd_bytes = prefix + remaining
-                            cmd = full_cmd_bytes.decode("utf-8", errors='ignore')
-                            
-                            # logger.info(f"[IPC DEBUG] Prefix=CODE, len={len(remaining)}, cmd[:50]={cmd[:50]}")
-
-                            if "|" in cmd:
-                                # logger.info(f"[IPC] Command received: {cmd}")
-                                self.command_received.emit(cmd)
-                            else:
-                                logger.warning(f"[IPC] Invalid command (no pipe): {cmd}")
-                        except Exception as e:
-                            logger.error(f"[IPC] Command process error: {e}")
-                    
-                    else:
-                        # 未知协议头，可能是脏数据，直接丢弃
-                        logger.warning(f"[IPC] Unknown protocol prefix: {prefix}. Discarding connection.")
-                        client_socket.close()
-                finally:
-                    try:
-                        client_socket.close()
-                    except Exception:
-                        pass
+                client_socket, addr = self.server_socket.accept()
+                self.executor.submit(self._handle_client, client_socket, addr)
             except socket.timeout:
                 continue
-            except OSError as e:
-                # server_socket 被关闭时，这是“正常退出路径”
-                if not self.running:
-                    break
-                logger.warning(f"[IPC] accept OSError: {e}")
-
             except Exception as e:
-                logger.exception("[IPC] Unexpected listener error")
+                if self.running:
+                    logger.error(f"[IPC] Accept error: {e}")
+                break
+        self.executor.shutdown(wait=False)
 
-        print("[IPC] CommandListenerThread exited cleanly")
+    def _handle_client(self, client_socket: socket.socket, addr):
+        """处理单个客户端的长连接或短连接 (工业级 Server 端模式)"""
+        try:
+            client_socket.settimeout(30.0) # 长连接默认超时
+            while self.running:
+                # 1. 精确读取 4 字节协议头
+                try:
+                    prefix = recv_exact(client_socket, 4, lambda: self.running)
+                except (ConnectionError, RuntimeError, socket.timeout):
+                    break # 退出循环，关闭此连接
+                
+                if not prefix:
+                    break
 
-            # except Exception as e:
-            #     if self.running:
-            #         print(f"[IPC] Listener Loop Error: {e}")
-            #     else:
-            #         break
+                if prefix == b"DATA":
+                    # --- DATA 模式：二进制大数据包 ---
+                    try:
+                        header = recv_exact(client_socket, 4, lambda: self.running)
+                        if not header: break
+                        size = struct.unpack("!I", header)[0]
+                        if size > 200 * 1024 * 1024:
+                            logger.error(f"[IPC] Packet too large ({size} bytes).")
+                            break
+                        payload = recv_exact(client_socket, size, lambda: self.running)
+                        if not payload: break
+                        raw_data = pickle.loads(payload)
+                        if isinstance(raw_data, tuple) and len(raw_data) == 2:
+                            msg_type, df_obj = raw_data
+                            self.dataframe_received.emit(df_obj, msg_type)
+                    except Exception as e:
+                        logger.error(f"[IPC] DATA Packet process error: {e}")
+                        break
+
+                elif prefix in (b"CODE", b"TIME", b"SIGN"):
+                    # --- CODE 模式：文本指令流 ---
+                    try:
+                        # 🚀 [FIX] 使用定界符模式读取。直到读取到 \n，解决粘包解析失败。
+                        line_bytes = [prefix]
+                        while self.running:
+                            char = client_socket.recv(1)
+                            if not char or char == b"\n":
+                                break
+                            line_bytes.append(char)
+                        
+                        cmd = b"".join(line_bytes).decode("utf-8", errors='ignore').strip()
+                        if "|" in cmd:
+                            self.command_received.emit(cmd)
+                        
+                        client_socket.settimeout(30.0) # 重新进入长连接等待
+                    except Exception as e:
+                        logger.error(f"[IPC] Command process error: {e}")
+                        break
+                else:
+                    logger.warning(f"[IPC] Unknown protocol prefix: {prefix}. Discarding connection.")
+                    break
+        except Exception as e:
+            if self.running:
+                logger.debug(f"[IPC] Client handler error: {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
 
 
 duration_date_day = 120
@@ -3895,13 +3866,22 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             if not cmd_str: return
             
-            # 移除协议前缀 "CODE|" 如果存在
-            if cmd_str.startswith("CODE|"):
-                content = cmd_str[5:]
-            else:
-                content = cmd_str
+            # 🚀 [UPGRADE] 鲁棒的前缀处理
+            # 兼容多种格式: "CODE|SIGNAL|...", "SIGNAL|...", "CODESIGNAL|..."
+            content = cmd_str
+            for prefix in ["CODE|", "SIGN|", "TIME|"]:
+                if content.startswith(prefix):
+                    content = content[len(prefix):]
+                    break
+            
+            # 特殊处理：如果由于协议粘连导致出现 "CODESIGNAL|" 或 "SIGNSIGNAL|"
+            if content.startswith("CODESIGNAL|"):
+                content = content[4:]
+            elif content.startswith("SIGNSIGNAL|"):
+                content = content[4:]
                 
             # 1. 信号推送命令: SIGNAL|{json_str}
+            content = content.strip()
             logger.debug(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
             if content.startswith("SIGNAL|"):
                 try:

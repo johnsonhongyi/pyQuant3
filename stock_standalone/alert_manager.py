@@ -249,6 +249,12 @@ class AlertManager:
         self.stop_event: threading.Event = threading.Event()
         self.interrupt_event: threading.Event = threading.Event()
         
+        # [NEW] 聚合报警缓冲区 (Industrial Standard Consolidation)
+        self._batch_lock = threading.Lock()
+        self._batch_data = {} # {key: [(priority, message, time)]}
+        self._batch_timer = None
+        self._batch_interval = 0.2 # 200ms 窗口，足够捕获同一扫描周期的所有引擎信号
+        
         # Callbacks
         self.on_speak_start = None
         self.on_speak_end = None
@@ -262,7 +268,7 @@ class AlertManager:
         
         self.start()
         self._start_feedback_listener()
-        
+
     def start(self):
         """启动或重启语音线程 (Resolved mp.Queue GIL Crash)"""
         if self.process is None or not self.process.is_alive():
@@ -289,7 +295,6 @@ class AlertManager:
         while True:
             try:
                 msg = self.feedback_queue.get(timeout=1.0)
-                # logger.info(f"Feedback Received: {msg}") # Debug
                 etype, key = msg
                 if etype == 'START':
                     if self.on_speak_start:
@@ -309,165 +314,155 @@ class AlertManager:
         if not hasattr(self, 'current_state'): return
         try:
             if not codes_list:
-                # 如果列表为空，则标记为 NONE，表示明确的“无窗状态”
                 codes_str = "NONE"
             else:
                 codes_str = ",".join(map(str, codes_list))
-            
-            # 直接写入共享字典
             self.current_state['active_codes'] = codes_str
             self.current_state['last_sync_time'] = time.time()
         except:
             pass
 
     def stop_current_speech(self, key=None):
-        """
-        非破坏式中断（修复卡顿版）
-        - 不 terminate 进程
-        - 立即跳过当前 & 队列中的目标
-        """
+        """非破坏式中断"""
         if not self.process or not self.process.is_alive():
             return
-
-        # 1️⃣ 放入取消队列（队列中的 & 即将到来的都会被跳过）
         if key:
             self.cancel_queue.put(str(key))
         else:
-            # None 表示全局中断：特殊标记
             self.cancel_queue.put("__ALL__")
 
-        # 2️⃣ 标记中断意图（给 worker 读取）
-        try:
-            current = self.current_key.value.decode('utf-8').strip()
-        except:
-            current = ""
-
-        # 3️⃣ 如果正在播报，快速触发“软中断”
-        # 关键点：不杀进程，让 worker 自然走到 runAndWait() 结束
-        if key is None or current == str(key):
-            logger.debug(f"Soft-interrupt speech (key={key}, current={current})")
-
-            # 利用 cancel 机制 + 清空 current_key
-            try:
-                self.current_key.value = b""
-            except:
-                pass
-
     def resume_voice(self):
-        """
-        恢复语音播报并清除取消标记
-        [FIX] 清空积压的旧消息，防止恢复时突然播放大量过时报警 (幽灵语音)
-        """
+        """恢复语音播报"""
         self.voice_enabled = True
         try:
-            # 1. 清空积压队列
             while not self.voice_queue.empty():
                 try: self.voice_queue.get_nowait()
                 except: break
-            
-            # 2. 清除 global stop 标记
             self.cancel_queue.put("__CLEAR__")
             logger.info("AlertManager: Voice resumed and queue flushed.")
         except:
             pass
 
-
-    # def stop_current_speech(self, key=None):
-    #     """
-    #     硬中断逻辑
-    #     :param key: 目标品种代码。如果提供，则仅当当前正在播报该品种时才中断。
-    #                 如果不提供，则中断当前所有播报。
-    #     """
-    #     if not self.process or not self.process.is_alive():
-    #         return
-
-    #     # 1. 无论如何，加入取消列表（确保还在排队的稍后被跳过）
-    #     if key:
-    #         self.cancel_queue.put(str(key))
-
-    #     # 2. 判断是否需要物理中断当前进程
-    #     should_terminate = False
-    #     if key is None:
-    #         should_terminate = True
-    #         logger.info("Interrupting current speech (Global)")
-    #     else:
-    #         try:
-    #             current = self.current_key.value.decode('utf-8').strip()
-    #             if current == str(key):
-    #                 should_terminate = True
-    #                 logger.info(f"Interrupting current speech for code: {key}")
-    #             else:
-    #                 logger.debug(f"Code {key} is not currently speaking (Current: {current}), skip terminate.")
-    #         except:
-    #             should_terminate = True # 降级为全部中断
-
-    #     if should_terminate:
-    #         worker_pid = self.process.pid
-    #         try:
-    #             self.process.terminate()
-    #             self.process.join(timeout=0.1)
-    #             if self.process.is_alive():
-    #                 os.kill(worker_pid, 9)
-    #         except: pass
-            
-    #         self.process = None 
-    #         self.current_key.value = b"" # 重置状态
-    #         self.start() # 重启
-            
     def stop(self):
         """系统完全退出"""
         self.stop_event.set()
         if self.process and self.process.is_alive():
-            self.stop_event.set() # 信号线程退出
             self.process.join(timeout=0.5)
-            if self.process and self.process.is_alive():
-                logger.debug("Alert worker thread still alive, will be collected by daemon")
         logger.info("Alert system stopped.")
 
-    def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
-        """发送报警"""
-        if not self.enabled: return
+    def _flush_batch_alerts(self):
+        """[CORE] 聚合报警刷新逻辑：将同一周期的多条报警合并为一条"""
+        with self._batch_lock:
+            data_to_flush = self._batch_data
+            self._batch_data = {}
+            self._batch_timer = None
             
-        now = time.time()
+        if not data_to_flush: return
+
+        for key, alerts in data_to_flush.items():
+            try:
+                # 1. 确定最高优先级
+                min_priority = min(a[0] for a in alerts)
+                
+                # 2. 消息去重并智能合并
+                unique_messages = []
+                seen_snippets = set()
+                
+                # 寻找共通前缀 (通常到股票名称和代码为止)
+                # 📢 [Alert] 注意卖出，北京科锐 002350 ，...
+                header = ""
+                for p, m, t in alerts:
+                    parts = str(m).split("，")
+                    if len(parts) >= 2 and not header:
+                        # 尝试提取 "注意XX，名称 代码" 作为 Header
+                        header = "，".join(parts[:2])
+                
+                body_parts = []
+                for p, m, t in alerts:
+                    m_str = str(m)
+                    # 移除已有的 header 部分，提取差异化理由
+                    if header and m_str.startswith(header):
+                        diff = m_str[len(header):].lstrip("，").strip()
+                    else:
+                        diff = m_str
+                    
+                    if diff and diff not in seen_snippets:
+                        body_parts.append(diff)
+                        seen_snippets.add(diff)
+                
+                # 3. 组装最终消息
+                if header:
+                    merged_msg = f"{header}：{' | '.join(body_parts)}"
+                else:
+                    merged_msg = " | ".join(body_parts)
+                
+                # 4. 执行发送
+                self._do_send_alert(merged_msg, min_priority, key, cooldown=0) # 已在入队前检查过 key cooldown
+            except Exception as e:
+                logger.error(f"Flush Alert Error for {key}: {e}")
+
+    def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
+        """发送报警 (支持合并)"""
+        if not self.enabled: return
+        
         # 1. 冷却检查
+        now = time.time()
         if key and cooldown > 0:
             if now - self.cooldowns.get(key, 0) < cooldown:
                 return
+            # 注意：此处不立即更新 cooldown，因为消息还在 batch 缓冲区
+            # 如果 flush 成功，由 _do_send_alert 决定是否再检查
+        
+        # 2. 如果提供了 Key (股票代码)，进入聚合缓冲
+        if key and len(str(key)) == 6:
+            with self._batch_lock:
+                if key not in self._batch_data:
+                    self._batch_data[key] = []
+                self._batch_data[key].append((priority, message, now))
+                
+                if self._batch_timer is None:
+                    self._batch_timer = threading.Timer(self._batch_interval, self._flush_batch_alerts)
+                    self._batch_timer.daemon = True
+                    self._batch_timer.start()
+            return
+        
+        # 3. 全局/无 Key 消息：直接即时发送
+        self._do_send_alert(message, priority, key, cooldown)
+
+    def _do_send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
+        """实际的消息分发与记录逻辑"""
+        now = time.time()
+        
+        # 1. 最终冷却确认 (针对即时或 Batch 后的消息更新时间戳)
+        if key and cooldown > 0:
+            # 此处再次检查是确保在 Batch 期间产生的重复在发送时也能被拦截
+            if now - self.cooldowns.get(key, 0) < cooldown: return
             self.cooldowns[key] = now
             
-        # 2. 日志 (Throttled)
+        # 2. 日志记录
         is_high = (priority <= 1)
-        
-        # [OPTIMIZATION] 全局报警日志流控
-        # 如果短时间内大量报警，仅记录高优先级，或每隔一定时间记录一次
         log_allowed = True
         if not is_high:
-            if now - self.global_last_alert < 0.1: # 100ms 内的连续低优先级报警不打印日志，防止 IO 阻塞
+            if now - self.global_last_alert < 0.1:
                 log_allowed = False
         
         if log_allowed or is_high:
             self.global_last_alert = now
             prefix = "🔴" if priority == 0 else "📢" if priority == 1 else "ℹ️"
             logger.warning(f"{prefix} [Alert] {message}")
-        
-        # 3. 语音 & BEEP (已禁用滴滴声)
-        
-        # [OPTIMIZATION] 队列深度保护
-        # [FIX] 放宽限制：从20提升到50,避免过早丢弃语音
-        # 如果队列堆积超过 50 条，且当前不是高优先级，则丢弃，防止语音进程处理不过来导致系统卡顿
+            
+        # 3. 语音队列分放
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
                 q_size = self.voice_queue.qsize()
                 if q_size > 50 and not is_high:
-                    logger.debug(f"AlertManager: Queue full ({q_size}), dropped low priority alert: {key}")
                     return
 
-                # [Fix] 使用字典包装，包含时间戳以支持竞态检查
                 item = {
                     'priority': priority,
                     'message': message,
                     'key': key,
-                    'timestamp': time.time()
+                    'timestamp': now
                 }
                 self.voice_queue.put(item, block=False)
             except:

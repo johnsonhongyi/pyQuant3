@@ -1570,6 +1570,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.info('[Pipe] Visualizer exited. Cleaning up qt_process state.')
                             self.qt_process = None
                             self.viz_command_queue = None
+                            self._viz_ready = False
                             if hasattr(self, 'viz_stop_flag'):
                                 self.viz_stop_flag.value = True  # Reset for next launch
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
