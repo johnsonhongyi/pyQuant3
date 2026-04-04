@@ -754,7 +754,21 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         item = self.table.item(current.row(), 0)
         if item:
             code = re.sub(r'[^\d]', '', item.text())
-            QTimer.singleShot(50, lambda: self.parent()._link_code(code, focus_widget=self.table))
+            # [SAFE] Use a timer that is property managed
+            if not hasattr(self, '_link_timer'):
+                self._link_timer = QTimer(self)
+                self._link_timer.setSingleShot(True)
+                self._link_timer.timeout.connect(self._exec_delayed_link)
+            
+            self._pending_link_code = code
+            self._link_timer.start(50)
+
+    def _exec_delayed_link(self):
+        """执行延迟代码联动"""
+        try:
+            if hasattr(self, '_pending_link_code') and self.parent():
+                self.parent()._link_code(self._pending_link_code, focus_widget=self.table)
+        except RuntimeError: pass
 
     def _on_row_clicked(self, row, col):
         if col > 1: return
@@ -967,6 +981,23 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._allow_real_close = allow_real_close  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
         self._last_rendered_data_version = -1
         self._last_rendered_stock_cache = {} # sector -> version
+
+        # 🚀 [Performance] Pre-cached UI Resources
+        self._color_red = QColor("#FF4444")
+        self._color_green = QColor("#44CC44")
+        self._color_orange = QColor("#FF9900")
+        self._color_yellow = QColor("#FFCC00")
+        self._color_blue = QColor("#409cff")
+        self._color_gray = QColor("#888888")
+        self._color_light_blue = QColor("#aad4ff")
+        
+        self._bold_font = QFont("Microsoft YaHei", 9)
+        self._bold_font.setBold(True)
+        self._small_font = QFont("Microsoft YaHei", 8)
+        
+        # 🔒 [Thread Safety]
+        import threading
+        self._update_lock = threading.Lock()
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
@@ -1374,9 +1405,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.sector_table.setFont(QFont("Microsoft YaHei", 9))
         self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.sector_table.setSortingEnabled(True)
+        self.sector_table.setSortingEnabled(False) # [PURE PYTHON SORT]
         self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
+        
+        self.sector_table.horizontalHeader().sectionClicked.connect(self._on_sector_header_clicked)
         
         self.sector_table.itemSelectionChanged.connect(self._on_sector_table_selection_changed)
         self.sector_table.cellDoubleClicked.connect(self._on_sector_table_dblclick)
@@ -1399,6 +1432,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             "background:#0d1b2a;color:#00ff88;padding:3px 6px;border-radius:3px;"
         )
         rlay.addWidget(self.kline_lbl)
+
+        # 🚀 [NEW] Sorting State Initialization
+        self._sector_sort_col = 1 # Default: Score
+        self._sector_sort_asc = False 
+        self._watchlist_sort_col = 4 # Default: Time
+        self._watchlist_sort_asc = False
 
         self.leader_lbl = QLabel("")
         self.leader_lbl.setStyleSheet("color:#FF6666;font-weight:bold;font-size:12px;")
@@ -1465,11 +1504,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
-        self.watchlist_table.setSortingEnabled(True) # [ADD] Enable table clicking/sorting
-        self.watchlist_table.horizontalHeader().setSortIndicator(4, Qt.SortOrder.DescendingOrder)
-        self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
-        self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
-        self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
+        self.watchlist_table.setSortingEnabled(False) # [PURE PYTHON SORT]
+        self.watchlist_table.horizontalHeader().sectionClicked.connect(self._on_watchlist_header_clicked)
         # [NEW] 排序后自动滚动到顶部
         self.watchlist_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.watchlist_table.scrollToTop())
         
@@ -1528,7 +1564,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # [FIX] 利用现有的 QThread (_worker) 安全执行
             if hasattr(self, '_worker'):
                 self.detector.reset_observation_anchors()
-                self._force_update_requested = True
+                with self._update_lock:
+                    self._force_update_requested = True
                 
                 if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
                     # 如果有实盘数据，推入队列，触发计算
@@ -1537,14 +1574,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     # 否则触发全量异步 sweep
                     self._worker.trigger_recalc()
             
-            # 使用 QTimer 设置按钮防抖恢复
-            QTimer.singleShot(2500, lambda: self.btn_refresh.setEnabled(True))
-            QTimer.singleShot(2500, lambda: self.btn_refresh.setText("刷新 🔄"))
+            # 使用更安全的定时恢复 (避免已销毁组件的 lambda crash)
+            QTimer.singleShot(2500, self._restore_refresh_button_state)
             
         except Exception as e:
             logger.error(f"Manual refresh failed: {e}")
-            self.btn_refresh.setEnabled(True)
-            self.btn_refresh.setText("刷新 🔄")
+            self._restore_refresh_button_state()
+
+    def _restore_refresh_button_state(self):
+        """安全恢复刷新按钮状态"""
+        try:
+            if hasattr(self, 'btn_refresh'):
+                self.btn_refresh.setEnabled(True)
+                self.btn_refresh.setText("刷新 🔄")
+        except RuntimeError: pass # Handle C++ object deleted
 
     def _run_sbc_test(self, use_live: bool, code: str = None, extra_lines: dict = None):
         """调用 SBC 信号验证逻辑"""
@@ -1595,7 +1638,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 管理窗口引用，防止被回收
             if not hasattr(self, '_sbc_test_windows'):
                 self._sbc_test_windows = []
-            self._sbc_test_windows = [w for w in self._sbc_test_windows if w.isVisible()]
+            
+            # [CLEANUP] Remove destroyed windows
+            self._sbc_test_windows = [w for w in self._sbc_test_windows if w and not w.isHidden()]
             
             is_multi = getattr(self, '_sbc_test_is_multi', False)
             existing_win = self._sbc_test_windows[-1] if self._sbc_test_windows and not is_multi else None
@@ -1650,26 +1695,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         return None
 
-    # def on_realtime_data_arrived(self, df_all, force_update=False):
-    #     """主线程调用，将数据推入后台线程列队避免卡顿 UI"""
-    #     if self._is_history_mode:
-    #         return # [NEW] 历史模式下拦截实时数据
-    #     try:
-    #         # Drop obsolete frames if we are piling up
-    #         if len(self._worker.df_queue) > 1:
-    #              self._worker.df_queue.clear()
-                 
-    #         # [OPTIMIZE] 移除冗余 copy()，调用方 (MonitorTK) 已通过 copy() 机制隔离数据，此处直接透传
-    #         self._worker.add_data(df_all)
-            
-    #         # Record force_update request state
-    #         self._force_update_requested = force_update
-            
-    #     except Exception as e:
-    #         import traceback
-    #         traceback.print_exc()
-    #         logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
-
     def on_realtime_data_arrived(self, df_all, force_update=False):
         """主线程调用，将数据推入后台线程避免卡顿 UI"""
         
@@ -1687,7 +1712,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 推入最新数据
             self._worker.add_data(df_all)
 
-            self._force_update_requested = force_update
+            with self._update_lock:
+                self._force_update_requested = force_update
 
         except Exception as e:
             import traceback
@@ -1709,148 +1735,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 允许竞价期间更快速刷新 (最低 1s)
             limit = max(1.0, limit)
             
-            if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
+            with self._update_lock:
+                should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= 0.2) # Throttled to 5 FPS
+            
+            if should_refresh:
                 # [HEARTBEAT] 前台刷新心跳
                 if self.detector.enable_log:
                     logger.info(f"💓 [Board Panel] Refreshing heartbeat: Total sectors={len(self.detector.active_sectors)}")
                     
                 self._refresh_sector_list()
                 self._last_refresh_ts = now
-                self._force_update_requested = False
+                with self._update_lock:
+                    self._force_update_requested = False
                 
         except Exception as e:
             logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
-
-    # ------------------------------------------------------------------ UI refresh
-    # def _refresh_sector_list(self):
-    #     # 1. 安全检查，防止初始化过程中的过早调用
-    #     if not hasattr(self, '_worker') or self._worker is None:
-    #         return
-            
-    #     # 2. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
-    #     sectors = self.detector.get_active_sectors()
-        
-    #     # 1. 如果还在排队（尤其是第一次注册大量个股），在 UI 提示
-    #     if self._worker.df_queue:
-    #         if hasattr(self, 'status_lbl'):
-    #             self.status_lbl.setText(f"📡 正在拉取个股分时 (队列: {len(self._worker.df_queue)})...")
-    #             self.status_lbl.setStyleSheet("color: #FFD700; font-weight: bold;")
-
-    #     if not sectors:
-    #         # 如果目前没有活跃板块，在状态栏提示
-    #         if hasattr(self, 'status_lbl') and not self._worker.df_queue:
-    #             self.status_lbl.setText("📝 目前无满足门槛的活跃板块 (或正在计算中)")
-    #             self.status_lbl.setStyleSheet("color: #AAAAAA;")
-            
-    #         # [STABILITY] 数据为空时也要清理旧表
-    #         self.sector_table.setRowCount(0)
-    #         return
-        
-    #     now_str = datetime.now().strftime("%H:%M:%S")
-    #     if hasattr(self, 'status_lbl'):
-    #         self.status_lbl.setText(f"✅ 刷新完成 ({now_str}) | 活跃板块: {len(sectors)}")
-    #         self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
-        
-    #     # 1. 记录当前选中的板块名，以便在刷新后恢复
-    #     selected_sector = ""
-    #     items = self.sector_table.selectedItems()
-    #     if items:
-    #         selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-            
-    #     self.sector_table.setUpdatesEnabled(False)
-    #     self.sector_table.blockSignals(True)
-    #     self.sector_table.setSortingEnabled(False) # 填充时静默
-    #     self.sector_table.setRowCount(0)
-        
-    #     # 2. 填充表格
-    #     for i, sdata in enumerate(sectors):
-    #         sn = sdata['sector']
-    #         sc = sdata['score']
-    #         tags = sdata.get('tags', '')
-    #         lp = sdata.get('leader_pct', 0)
-    #         ln = sdata.get('leader_name', '未知')
-            
-    #         # 选择颜色和图标
-    #         if sc >= 15: # 归一化后的新门槛
-    #             color = "#FF3333" # 强攻红
-    #             icon_char = "🔥"
-    #         elif sc >= 8:
-    #             color = "#FF9900" # 蓄势橙
-    #             icon_char = "⚡"
-    #         else:
-    #             color = "#AAAAAA" # 观测灰
-    #             icon_char = "📊"
-
-    #         self.sector_table.insertRow(i)
-            
-    #         # 第一列：板块名 (带图标)
-    #         item_name = QTableWidgetItem(f"{icon_char} {sn}")
-    #         item_name.setData(Qt.ItemDataRole.UserRole, sn)
-    #         item_name.setForeground(QColor(color))
-    #         self.sector_table.setItem(i, 0, item_name)
-            
-    #         diff = sdata.get('score_diff', 0.0)
-            
-    #         item_score = NumericTableWidgetItem(f"{sc:.1f}")
-    #         item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-    #         item_score.setForeground(QColor(color))
-    #         self.sector_table.setItem(i, 1, item_score)
-            
-    #         # 第三列：涨跌 (独立列，显示增量并支持排序)
-    #         diff_text = f"{diff:+.1f}" if diff != 0 else "0.0"
-    #         item_diff = NumericTableWidgetItem(diff_text)
-    #         item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-    #         # 颜色逻辑：如果有显著增长变红，显著下跌变绿
-    #         if diff > 0.1:
-    #             item_diff.setForeground(QColor("#FF4444"))
-    #         elif diff < -0.1:
-    #             item_diff.setForeground(QColor("#44CC44"))
-    #         else:
-    #             item_diff.setForeground(QColor(color))
-                
-    #         self.sector_table.setItem(i, 2, item_diff)
-            
-    #         # 第四列：龙头股 (名+幅)
-    #         item_leader = QTableWidgetItem(f"{ln} ({lp:+.1f}%)")
-    #         item_leader.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    #         self.sector_table.setItem(i, 3, item_leader)
-            
-    #         # 第五列：状态标签
-    #         item_tag = QTableWidgetItem(tags)
-    #         item_tag.setFont(QFont("Microsoft YaHei", 8))
-    #         self.sector_table.setItem(i, 4, item_tag)
-
-    #         # 恢复之前的选择
-    #         if sn == selected_sector:
-    #             self.sector_table.selectRow(i)
-        
-    #     self.sector_table.setSortingEnabled(True)
-    #     self.sector_table.setUpdatesEnabled(True)
-    #     self.sector_table.blockSignals(False)
-        
-    #     # 3. 自动选中第一个
-    #     if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
-    #         self.sector_table.selectRow(0)
-        
-    #     # 🚦 [FIX] 强制触发：无论是否 auto_select，只要有选中项，都重刷一次右侧个股表
-    #     # 否则如果板块选择没变，右侧数据（现价/涨幅）就不会随刷新周期更新
-    #     if self.sector_table.selectedItems():
-    #         self._on_sector_table_selection_changed()
-        
-    #     # 4. 更新状态栏
-    #     sub_cnt = len(self.detector._subscribed)
-    #     sess = self._session_str()
-        
-    #     # [NEW] Render total hits if search is active
-    #     if hasattr(self, '_active_search_query') and self._active_search_query:
-    #         self.status_lbl.setText(f"[{sess}] 过滤模式 | 关键字: {self._active_search_query}")
-    #     else:
-    #         if hasattr(self, 'status_lbl'):
-    #             self.status_lbl.setText(f"[{sess}] 订阅:{sub_cnt}  活跃板块:{len(sectors)}")
-
-    #     # 5. [NEW] 更新底部重点表
-    #     self._populate_watchlist()
 
     def _refresh_sector_list(self):
         # 1. 安全检查
@@ -1887,21 +1786,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             )
             self.status_lbl.setStyleSheet("color: #aad4ff; font-weight: bold;")
 
-        # 4. 记住选中项
+        # 4. 记住选中项 (为复用做准备)
         selected_sector = ""
         items = self.sector_table.selectedItems()
         if items:
-            selected_sector = self.sector_table.item(
-                items[0].row(), 0
-            ).data(Qt.ItemDataRole.UserRole)
+            selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
 
-        # 5. 表格刷新（冻结 UI）
+        # [NEW] 5. Python Level Sorting
+        col, asc = self._sector_sort_col, self._sector_sort_asc
+        if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
+        elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: x.get('score_diff', 0), reverse=not asc)
+        elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
+
+        # 6. 表格渲染 (Dirty Check Update)
         self.sector_table.setUpdatesEnabled(False)
         self.sector_table.blockSignals(True)
-        self.sector_table.setSortingEnabled(False)
-        self.sector_table.setRowCount(0)
+        
+        current_rows = self.sector_table.rowCount()
+        new_count = len(sectors)
+        if current_rows != new_count:
+            self.sector_table.setRowCount(new_count)
 
-        # 6. 填充数据
+        # 6. 填充数据 (Reuse & Diff Update)
         for i, sdata in enumerate(sectors):
             sn = sdata['sector']
             sc = sdata['score']
@@ -1909,58 +1816,48 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             lp = sdata.get('leader_pct', 0)
             ln = sdata.get('leader_name', '未知')
 
+            # Pre-compute search blob (avoid concat in eval)
+            sdata['_search_blob'] = f"{sn} {tags} {ln}".lower()
+
             if sc >= 15:
-                color = "#FF3333"
+                color = self._color_red
                 icon_char = "🔥"
             elif sc >= 8:
-                color = "#FF9900"
+                color = self._color_orange
                 icon_char = "⚡"
             else:
-                color = "#AAAAAA"
+                color = self._color_gray
                 icon_char = "📊"
 
-            self.sector_table.insertRow(i)
-
-            item_name = QTableWidgetItem(f"{icon_char} {sn}")
-            item_name.setData(Qt.ItemDataRole.UserRole, sn)
-            item_name.setForeground(QColor(color))
-            self.sector_table.setItem(i, 0, item_name)
+            # Col 0: Name
+            self._update_cell(self.sector_table, i, 0, f"{icon_char} {sn}", 
+                            color=color, user_role=sn)
 
             diff = sdata.get('score_diff', 0.0)
 
-            item_score = NumericTableWidgetItem(f"{sc:.1f}")
-            item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_score.setForeground(QColor(color))
-            self.sector_table.setItem(i, 1, item_score)
+            # Col 1: Score
+            self._update_cell(self.sector_table, i, 1, f"{sc:.1f}", 
+                            color=color, alignment=Qt.AlignmentFlag.AlignCenter, 
+                            is_numeric=True)
 
+            # Col 2: Diff
             diff_text = f"{diff:+.1f}" if diff != 0 else "0.0"
-            item_diff = NumericTableWidgetItem(diff_text)
-            item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            diff_color = self._color_red if diff > 0.1 else (self._color_green if diff < -0.1 else color)
+            self._update_cell(self.sector_table, i, 2, diff_text, 
+                            color=diff_color, alignment=Qt.AlignmentFlag.AlignCenter, 
+                            is_numeric=True)
 
-            if diff > 0.1:
-                item_diff.setForeground(QColor("#FF4444"))
-            elif diff < -0.1:
-                item_diff.setForeground(QColor("#44CC44"))
-            else:
-                item_diff.setForeground(QColor(color))
+            # Col 3: Leader
+            self._update_cell(self.sector_table, i, 3, f"{ln} ({lp:+.1f}%)", 
+                            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            self.sector_table.setItem(i, 2, item_diff)
-
-            item_leader = QTableWidgetItem(f"{ln} ({lp:+.1f}%)")
-            item_leader.setTextAlignment(
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            )
-            self.sector_table.setItem(i, 3, item_leader)
-
-            item_tag = QTableWidgetItem(tags)
-            item_tag.setFont(QFont("Microsoft YaHei", 8))
-            self.sector_table.setItem(i, 4, item_tag)
+            # Col 4: Tags
+            self._update_cell(self.sector_table, i, 4, tags, font=self._small_font)
 
             if sn == selected_sector:
                 self.sector_table.selectRow(i)
 
         # 7. 恢复 UI
-        self.sector_table.setSortingEnabled(True)
         self.sector_table.setUpdatesEnabled(True)
         self.sector_table.blockSignals(False)
 
@@ -2008,11 +1905,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 遍历探测器中的活跃板块，找到匹配的数据
         for d in self.detector.get_active_sectors():
             if d['sector'] == sn:
-                # 如果这个板块的数据版本已经渲染过，且不是强制刷新，则跳过
-                if not getattr(self, '_force_update_requested', False):
-                    # 也可以根据 d.get('ts') 来更精细判断，目前先用全局版本简单过滤
-                    pass
-                
+                # [OPTIMIZE] 检查是否需要更新
+                with self._update_lock:
+                    force = self._force_update_requested
+                    
                 self._populate_table(d)
                 
                 # [NEW] 联动逻辑：如果是用户光标切换（且不是正在刷新的静默状态），自动联动龙头
@@ -2098,33 +1994,48 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         if 'leader_price' in row_data:
                              actual_val = row_data.get('leader_price', 0.0)
                     elif field == '量比':
-                        pass # Requires extracting vol ratio from df_all if needed. Skip for now or default true.
+                        # [FIX] 从元数据或当前行情中尝试提取量比，如果没有则默认为 0
+                        actual_val = row_data.get('vol_ratio', row_data.get('meta', {}).get('vol_ratio', 0.0))
                     
-                    if op == '>':
+                    # [FIX] 运算符归一化映射
+                    op_map = {
+                        '>=': '>=', '=>': '>=',
+                        '<=': '<=', '=<': '<=',
+                        '>': '>', '<': '<',
+                        '=': '==', '==': '=='
+                    }
+                    real_op = op_map.get(op, '==')
+                    
+                    if real_op == '>':
                         if not actual_val > target_val: return False
-                    elif op == '<':
+                    elif real_op == '<':
                         if not actual_val < target_val: return False
-                    elif op in ('>=', '=>'):
+                    elif real_op == '>=':
                         if not actual_val >= target_val: return False
-                    elif op in ('<=', '=<'):
+                    elif real_op == '<=':
                         if not actual_val <= target_val: return False
-                    elif op in ('=', '=='):
+                    elif real_op == '==':
                         if not abs(actual_val - target_val) < 0.01: return False
                         
                 except ValueError:
                     continue # Ignore invalid floats
             else:
-                # Fallback to general text inclusion search (Code, Name, Hint, Role)
-                text_to_search = (
-                    str(row_data.get('code', '')) + 
-                    str(row_data.get('name', '')) + 
-                    str(row_data.get('hint', '')) + 
-                    str(row_data.get('pattern_hint', '')) + 
-                    str(row_data.get('leader_name', '')) +
-                    str(row_data.get('role', '')) +
-                    str(row_data.get('tags', ''))
-                )
-                if cond.lower() not in text_to_search.lower():
+                # [OPTIMIZE] Use pre-computed search blob
+                search_blob = row_data.get('_search_blob')
+                if not search_blob:
+                    # Fallback compute once if missing
+                    search_blob = (
+                        str(row_data.get('code', '')) + 
+                        str(row_data.get('name', '')) + 
+                        str(row_data.get('hint', '')) + 
+                        str(row_data.get('pattern_hint', '')) + 
+                        str(row_data.get('leader_name', '')) +
+                        str(row_data.get('role', '')) +
+                        str(row_data.get('tags', ''))
+                    ).lower()
+                    row_data['_search_blob'] = search_blob
+                
+                if cond.lower() not in search_blob:
                     return False
                     
         return True
@@ -2166,6 +2077,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             'is_counter': data.get('is_counter_trend', False)
         }]
         for f in data.get('followers', []):
+            f_klines = f.get('klines', [])
             rows.append({
                 'code': f['code'], 'name': f['name'],
                 'role': '📌跟随',
@@ -2173,14 +2085,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'pct_diff': f.get('pct_diff', 0.0),
                 'price_diff': f.get('price_diff', 0.0),
                 'dff': f.get('dff', 0.0),
-                'klines': f.get('klines', []),
+                'klines': f_klines,
+                # [OPTIMIZE] Pre-calculate values for TrendDelegate to avoid O(K) loop in UI
+                'k_cache': {
+                    'prices': [float(k.get('close', 0)) for k in f_klines],
+                    'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
+                },
                 'last_close': f.get('last_close', 0),
                 'high_day': f.get('high_day', 0),
                 'low_day': f.get('low_day', 0),
                 'last_high': f.get('last_high', 0),
                 'last_low': f.get('last_low', 0),
                 'hint': f.get('pattern_hint', '板块联动'),
-                'untradable': f.get('untradable', False), # Follower untradability not fully tracked yet but added for safety
+                'untradable': f.get('untradable', False),
                 'is_counter': False
             })
 
@@ -2213,6 +2130,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif col == 6:  # dff (切片力度)
             rows.sort(key=lambda r: r.get('dff', 0.0), reverse=rev)
         
+        # [NEW] Pre-compute search blobs for all rows (bulk move to worker context eventually)
+        for r in rows:
+            if '_search_blob' not in r:
+                r['_search_blob'] = (f"{r['code']} {r['name']} {r['hint']} {r['role']}").lower()
+
         # 💡 [ENHANCEMENT] 如果用户没有主动点击排序，默认将龙头置顶
         # (这仅在上述 col 匹配不到或强制恢复时生效)
         # if col == -1: ...
@@ -2228,123 +2150,160 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 item = self.stock_table.item(curr_row, 0)
                 if item: self._last_selected_code = item.text()
 
-        self.stock_table.setRowCount(len(rows))
+        cur_rows = self.stock_table.rowCount()
+        if cur_rows != len(rows):
+            self.stock_table.setRowCount(len(rows))
+
         target_row = -1
         for i, r in enumerate(rows):
-            it0 = self._set_item(i, 0, r['code'])
-            if it0:
-                # 存储该个股所属的板块名称，用于右键“定位板块”
-                it0.setData(Qt.ItemDataRole.UserRole + 1, data.get('sector', '未知'))
-                
-            self._set_item(i, 1, r['name'])
-
-            role_item = QTableWidgetItem(r['role'])
-            if '龙头' in r['role']:
-                role_item.setForeground(QColor("#FF3344"))
-                f2 = role_item.font(); f2.setBold(True); role_item.setFont(f2)
-            self.stock_table.setItem(i, 2, role_item)
-
-            self._set_item(i, 3, f"{r['price']:.2f}")
-
-            # 恢复丢失的涨幅列 (Column 4)
-            pct_item = QTableWidgetItem(f"{r['pct']:+.2f}%")
-            pct_item.setForeground(QColor("#FF4444") if r['pct'] > 0
-                                   else QColor("#44CC44"))
-            self.stock_table.setItem(i, 4, pct_item)
+            # 1. 代码
+            self._update_cell(self.stock_table, i, 0, r['code'], 
+                            user_role_v1=data.get('sector', '未知'))
             
-            # [NEW] 涨跌列 (Column 5) - 显示 [绝对额 (切片增量%)]
+            # 2. 名称
+            self._update_cell(self.stock_table, i, 1, r['name'])
+
+            # 3. 角色
+            role_c = self._color_red if '龙头' in r['role'] else None
+            role_f = self._bold_font if '龙头' in r['role'] else None
+            self._update_cell(self.stock_table, i, 2, r['role'], color=role_c, font=role_f)
+
+            # 4. 现价
+            self._update_cell(self.stock_table, i, 3, f"{r['price']:.2f}")
+
+            # 5. 涨幅
+            pct_c = self._color_red if r['pct'] > 0 else self._color_green
+            self._update_cell(self.stock_table, i, 4, f"{r['pct']:+.2f}%", color=pct_c)
+            
+            # 6. 涨跌 [绝对额]
             p_diff = r.get('price_diff', 0.0)
             pct_slc = r.get('pct_diff', 0.0)
-            
-            # 格式：+0.15 (+0.5%)
-            diff_text = f"{p_diff:+.2f}"
-            
-            diff_item = NumericTableWidgetItem(diff_text)
-            if p_diff > 0.001 or pct_slc > 0.01:
-                diff_item.setForeground(QColor("#FF4444"))
-            elif p_diff < -0.001 or pct_slc < -0.01:
-                diff_item.setForeground(QColor("#44CC44"))
-            else:
-                diff_item.setForeground(QColor("#888888"))
-            diff_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.stock_table.setItem(i, 5, diff_item)
+            diff_c = self._color_red if (p_diff > 0.001 or pct_slc > 0.01) else (self._color_green if (p_diff < -0.001 or pct_slc < -0.01) else self._color_gray)
+            self._update_cell(self.stock_table, i, 5, f"{p_diff:+.2f}", 
+                            color=diff_c, alignment=Qt.AlignmentFlag.AlignCenter, is_numeric=True)
 
-            # [NEW] dff 列 (Column 6)
+            # 7. dff
             dff_val = r.get('dff', 0.0)
-            dff_item = NumericTableWidgetItem(f"{dff_val:+.2f}")
-            if dff_val > 0: dff_item.setForeground(QColor("#FFCC00")) # 金色显示活跃度
-            elif dff_val < 0: dff_item.setForeground(QColor("#00FFFF"))
-            self.stock_table.setItem(i, 6, dff_item)
+            dff_c = self._color_yellow if dff_val > 0 else (QColor("#00FFFF") if dff_val < 0 else None)
+            self._update_cell(self.stock_table, i, 6, f"{dff_val:+.2f}", 
+                            color=dff_c, is_numeric=True)
 
-            # 更新分时走势列 (Column 7)，传递原始价格列表供 Delegate 绘制
-            k_prices = []
-            for k in r['klines']:
-                try:
-                    if isinstance(k, dict):
-                        k_prices.append(float(k.get('close', 0)))
-                    else:
-                        k_prices.append(float(getattr(k, 'close', 0)))
-                except (ValueError, TypeError, AttributeError):
-                    k_prices.append(0.0)
-            
-            # 更新分时走势列 (Column 7) - 存储全量 klines 用于详情窗绘制
-            k_item = QTableWidgetItem("")
-            k_item.setData(Qt.ItemDataRole.UserRole, {
+            # 8. 分时走势 (绘图列)
+            # [OPTIMIZE] Use pre-calculated cache from Step 1
+            k_cache = r.get('k_cache', {})
+            k_data = {
                 'klines': r.get('klines', []),      
-                'prices': k_prices,
-                'volumes': [float(k.get('volume', k.get('vol', 0))) for k in r.get('klines', [])],
+                'prices': k_cache.get('prices', []),
+                'volumes': k_cache.get('volumes', []),
                 'last_close': r.get('last_close', 0),
                 'now_price': r.get('price', 0)
-            })
-            k_item.setFlags(k_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.stock_table.setItem(i, 7, k_item)
+            }
+            # Note: _update_cell handles diff check for data objects
+            self._update_cell(self.stock_table, i, 7, "", user_role=k_data)
 
+            # 9. 形态暗示
             hint_str = r['hint']
-            if r['untradable']:
-                hint_str = "🚫一字板 " + hint_str
-            if r['is_counter']:
-                hint_str = "🔥逆势 " + hint_str
-                
-            hint_item = QTableWidgetItem(hint_str)
+            if r['untradable']: hint_str = "🚫一字板 " + hint_str
+            if r['is_counter']: hint_str = "🔥逆势 " + hint_str
             
-            # [Added] 增强颜色提示
-            if "今日主杀" in hint_str or "破均价线" in hint_str:
-                hint_item.setForeground(QColor("#FF1111")) # 亮红提示风险
-            elif "新高" in hint_str or "突破" in hint_str or "放量" in hint_str:
-                hint_item.setForeground(QColor("#FFCC00")) # 金黄色提示异动/突破
-            elif "支撑" in hint_str or "多头" in hint_str:
-                hint_item.setForeground(QColor("#FF99CC")) # 粉紫色提示持仓优势
-            elif r['untradable']:
-                hint_item.setForeground(QColor("#888888")) # 灰色显示不可交易
-            elif r['is_counter']:
-                hint_item.setForeground(QColor("#FFCC00"))
+            hint_c = None
+            if "今日主杀" in hint_str or "破均价线" in hint_str: hint_c = QColor("#FF1111")
+            elif "新高" in hint_str or "突破" in hint_str or "放量" in hint_str: hint_c = self._color_yellow
+            elif "支撑" in hint_str or "多头" in hint_str: hint_c = QColor("#FF99CC")
+            elif r['untradable']: hint_c = self._color_gray
+            elif r['is_counter']: hint_c = self._color_yellow
                 
-            self.stock_table.setItem(i, 8, hint_item)
+            self._update_cell(self.stock_table, i, 8, hint_str, color=hint_c)
 
-            # 匹配之前选中的行
             if r['code'] == self._last_selected_code:
                 target_row = i
 
         self.stock_table._last_populated_sector = data.get('sector')
 
-        # 统一设置所有项为不可编辑 (除特定交互外)
-        for r_idx in range(self.stock_table.rowCount()):
-            for c_idx in range(self.stock_table.columnCount()):
-                it = self.stock_table.item(r_idx, c_idx)
-                if it:
-                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-
         # 恢复选中状态
         if target_row >= 0:
-            self.stock_table.setCurrentCell(target_row, 0)
+            # [OPTIMIZE] Only set if focus or manually requested to avoid jumpy UI
+            if self.stock_table.currentRow() != target_row:
+                self.stock_table.setCurrentCell(target_row, 0)
         
         self._is_populating = False
         self.stock_table.setUpdatesEnabled(True)
+        
+    def _on_header_clicked(self, col):
+        """Python-level sort for stock table"""
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = False # Default descending for scores/pct
+            
+        # Update header icons or sort indicators manually if needed
+        self.stock_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder)
+        
+        # Trigger re-populate
+        current_sector = getattr(self.stock_table, '_last_populated_sector', None)
+        if current_sector:
+            for d in self.detector.get_active_sectors():
+                if d['sector'] == current_sector:
+                    self._populate_table(d)
+                    break
+
+    def _on_sector_header_clicked(self, col):
+        """Python-level sort for sector table"""
+        if self._sector_sort_col == col:
+            self._sector_sort_asc = not self._sector_sort_asc
+        else:
+            self._sector_sort_col = col
+            self._sector_sort_asc = False
+            
+        self.sector_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sector_sort_asc else Qt.SortOrder.DescendingOrder)
+        self._refresh_sector_list()
+        
+    def _on_watchlist_header_clicked(self, col):
+        """Python-level sort for watchlist table"""
+        if self._watchlist_sort_col == col:
+            self._watchlist_sort_asc = not self._watchlist_sort_asc
+        else:
+            self._watchlist_sort_col = col
+            self._watchlist_sort_asc = False
+            
+        self.watchlist_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._watchlist_sort_asc else Qt.SortOrder.DescendingOrder)
+        self._populate_watchlist()
+
+    def _update_cell(self, table, row, col, text, color=None, font=None, alignment=None, 
+                     user_role=None, user_role_v1=None, is_numeric=False):
+        """[INDUSTRIAL] Reuses table items and only updates if changed to minimize UI jitter."""
+        item = table.item(row, col)
+        if not item:
+            if is_numeric:
+                item = NumericTableWidgetItem(str(text))
+            else:
+                item = QTableWidgetItem(str(text))
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, col, item)
+        
+        # 1. Text Update (Dirty Check)
+        if item.text() != str(text):
+            item.setText(str(text))
+            
+        # 2. Visual Style (Cached check would be faster but Qt QColor/QFont internal check is decent)
+        if color: item.setForeground(color)
+        if font: item.setFont(font)
+        if alignment: item.setTextAlignment(alignment)
+        
+        # 3. Metadata
+        if user_role is not None:
+            # For dict/objects, simple equality check might be slow but it's better than full rebuild
+            if item.data(Qt.ItemDataRole.UserRole) != user_role:
+                item.setData(Qt.ItemDataRole.UserRole, user_role)
+        if user_role_v1 is not None:
+             if item.data(Qt.ItemDataRole.UserRole + 1) != user_role_v1:
+                item.setData(Qt.ItemDataRole.UserRole + 1, user_role_v1)
+        return item
 
     def _set_item(self, row, col, text):
-        it = QTableWidgetItem(str(text))
-        self.stock_table.setItem(row, col, it)
-        return it
+        """[DEPRECATED] Use _update_cell instead."""
+        return self._update_cell(self.stock_table, row, col, text)
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self):
@@ -2375,22 +2334,41 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             item = self.watchlist_table.item(curr_row, 0)
             if item: selected_code = item.text()
 
-        self.watchlist_table.setRowCount(len(watchlist))
+        cur_w_rows = self.watchlist_table.rowCount()
+        new_count = len(watchlist)
         
-        # [NEW] Disable sorting while populating to prevent sort crashes
-        self.watchlist_table.setSortingEnabled(False)
+        # [NEW] Pre-compute search blobs for watchlist (O(1) logic)
+        for w in watchlist:
+            if '_search_blob' not in w:
+                w['_search_blob'] = (f"{w['code']} {w['name']} {w.get('sector', '')} {w.get('reason', '')}").lower()
+        
+        # [NEW] Python Level Sorting for Watchlist
+        w_col, w_asc = self._watchlist_sort_col, self._watchlist_sort_asc
+        if w_col == 0: watchlist.sort(key=lambda x: x.get('code', ''), reverse=not w_asc)
+        elif w_col == 1: watchlist.sort(key=lambda x: x.get('name', ''), reverse=not w_asc)
+        elif w_col == 2: watchlist.sort(key=lambda x: x.get('pct', 0), reverse=not w_asc)
+        elif w_col == 3: watchlist.sort(key=lambda x: x.get('sector', ''), reverse=not w_asc)
+        elif w_col == 4: watchlist.sort(key=lambda x: x.get('time_str', x.get('time', '')), reverse=not w_asc)
+        
+        # [OPTIMIZE] Only toggle layout changes if row count changed
+        row_count_changed = (cur_w_rows != new_count)
+        if row_count_changed:
+            self.watchlist_table.setRowCount(new_count)
+        
         target_row = -1
         
         for i, w in enumerate(watchlist):
             # 1. 代码
-            self.watchlist_table.setItem(i, 0, QTableWidgetItem(w['code']))
+            self._update_cell(self.watchlist_table, i, 0, w['code'])
+            
             # 2. 名称
-            self.watchlist_table.setItem(i, 1, QTableWidgetItem(w['name']))
+            self._update_cell(self.watchlist_table, i, 1, w['name'])
+            
             # 3. 涨幅
             p_val = w.get('pct', 0)
-            p_item = NumericTableWidgetItem(f"{p_val:+.2f}%")
-            p_item.setForeground(QColor("#FF4444") if p_val > 0 else QColor("#44CC44"))
-            self.watchlist_table.setItem(i, 2, p_item)
+            p_c = self._color_red if p_val > 0 else self._color_green
+            self._update_cell(self.watchlist_table, i, 2, f"{p_val:+.2f}%", color=p_c, is_numeric=True)
+            
             # 4. 核心板块
             s_val = w.get('sector', '')
             # 过滤掉市场标签
@@ -2398,35 +2376,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             all_cats = s_val.split(';')
             cats = [c for c in all_cats if c not in market_tags]
             sector_short = cats[0] if cats else (all_cats[0] if all_cats else 'N/A')
-            self.watchlist_table.setItem(i, 3, QTableWidgetItem(sector_short))
+            self._update_cell(self.watchlist_table, i, 3, sector_short)
+            
             # 5. 触发时间
-            self.watchlist_table.setItem(i, 4, QTableWidgetItem(w.get('time_str', '--:--:--')))
+            self._update_cell(self.watchlist_table, i, 4, str(w.get('time_str', w.get('time', '--:--:--'))))
+            
             # 6. 状态/原因
             reason = w.get('reason', '')
-            r_item = QTableWidgetItem(reason)
-            if '涨停' in reason:
-                r_item.setForeground(QColor("#FF1493"))
-            self.watchlist_table.setItem(i, 5, r_item)
+            r_c = QColor("#FF1493") if '涨停' in reason else None
+            self._update_cell(self.watchlist_table, i, 5, reason, color=r_c)
 
             if w['code'] == selected_code:
                 target_row = i
 
-        # 设置不可编辑
-        for r_idx in range(self.watchlist_table.rowCount()):
-            for c_idx in range(self.watchlist_table.columnCount()):
-                it = self.watchlist_table.item(r_idx, c_idx)
-                if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-
         if target_row >= 0:
-            # 仅当当前没有选中行，或者选中行变动时，才恢复选中
-            # 避免实时刷新时反复 setCurrentCell 导致滚动跳动
-            if self.watchlist_table.currentRow() != target_row:
+            # [OPTIMIZE] Selection Debouncing: Only set if the jump is significant or no current selection
+            curr_w_row = self.watchlist_table.currentRow()
+            if curr_w_row < 0 or abs(curr_w_row - target_row) > 0:
                 self.watchlist_table.blockSignals(True)
                 self.watchlist_table.setCurrentCell(target_row, 0)
                 self.watchlist_table.blockSignals(False)
                 
-        # [NEW] Re-enable sorting
-        self.watchlist_table.setSortingEnabled(True)
+        # 移除 setSortingEnabled 开关，永久保持 False
         # [NEW] Update Watchlist title stats
         # [NEW] Update Watchlist title stats (History indicator integrated)
         hist_suffix = ""

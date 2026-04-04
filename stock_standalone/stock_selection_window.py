@@ -69,6 +69,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         self.current_date = datetime.now().strftime("%Y-%m-%d")
         
+        # ✅ 性能优化标记
+        self._column_widths_cached = False
+        self._rendering_active = False # 防止并发渲染
+        self._render_token = 0         # 标识当前渲染批次
+        
         self._init_ui()
         
         # ✅ 初始化股票特征标记器
@@ -378,6 +383,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                         self.df_full_candidates['user_status'] = "待定"
                     if 'user_reason' not in self.df_full_candidates.columns:
                         self.df_full_candidates['user_reason'] = ""
+                
+                # ✅ [OPTIMIZE] 重置列宽重测标记，确保新数据能重新计算宽度
+                self._column_widths_cached = False
 
             # --- Filter & Display Phase ---
             if self.df_full_candidates.empty:
@@ -385,20 +393,30 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self._update_title_stats()
                 return
 
-            # if self.live_strategy is not None and hasattr(self.live_strategy, 'df') and 'sum_perc' in self.live_strategy.df.columns:
-            if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and 'sum_perc' in self.selector.df_all_realtime.columns:
-                # 按索引对齐取值
-                # 使用 selector 缓存的实时数据进行映射，避免 live_strategy 为 None 时报错
-                self.df_full_candidates['昨日涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['per1d']).fillna(0)
-                self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['sum_perc']).fillna(0)
-                self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['win']).fillna(0)
-                self.df_full_candidates['Rank'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['Rank']).fillna(0)
+            if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and not self.selector.df_all_realtime.empty:
+                # ✅ [FIX] 避免列重复导致的 overlap 错误
+                # 如果 df_full_candidates 已存在这些列（可能来自缓存或重复调用），需先剔除
+                overlap_cols = [c for c in ['昨日涨幅', '连阳涨幅', 'win', 'Rank'] if c in self.df_full_candidates.columns]
+                if overlap_cols:
+                    self.df_full_candidates.drop(columns=overlap_cols, inplace=True)
+                
+                # ✅ [OPTIMIZE] 使用 join 替代 merge，尤其是在已有索引时更轻量
+                rt = self.selector.df_all_realtime[['per1d', 'sum_perc', 'win', 'Rank']].rename(columns={
+                    'per1d': '昨日涨幅',
+                    'sum_perc': '连阳涨幅',
+                    'win': 'win',
+                    'Rank': 'Rank'
+                })
+                # [PERF] join 比 merge (hash join) 更快，前提是右表已 set_index
+                self.df_full_candidates = self.df_full_candidates.join(rt, on='code', how='left')
+                # 填充 NaN 避免解析错误
+                for col in ['昨日涨幅', '连阳涨幅', 'win', 'Rank']:
+                    self.df_full_candidates[col] = self.df_full_candidates[col].fillna(0)
             else:
-                # live_strategy 不存在或列缺失，全部填 0
-                self.df_full_candidates['昨日涨幅'] = 0
-                self.df_full_candidates['连阳涨幅'] = 0
-                self.df_full_candidates['win'] = 0
-                self.df_full_candidates['Rank'] = 0
+                # 兜底：如果实时行情还未就绪，补齐结构以防渲染报错
+                for col in ['昨日涨幅', '连阳涨幅', 'win', 'Rank']:
+                    if col not in self.df_full_candidates.columns:
+                        self.df_full_candidates[col] = 0
             # 从全量缓存中复制，用于当前视窗的筛选/显示
             self.df_candidates = self.df_full_candidates.copy()
 
@@ -431,124 +449,139 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # self.df_candidates['user_status'] = "待定"
             # self.df_candidates['user_reason'] = ""
             
-            for index, row in self.df_candidates.iterrows():
-                # 获取已有的用户标注（如果存在）
-                user_status = row.get('user_status', "待定")
-                user_reason = row.get('user_reason', "")
-                
-                # 设置对应的标签记录颜色
-                tag = "pending"
-                if user_status == "选中": tag = "selected"
-                elif user_status == "丢弃": tag = "ignored"
-
-                amount_raw = float(row.get('amount', 0))
-                amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
-
-                # ✅ 整合 StockFeatureMarker 颜色标记与图标
-                all_tags = [tag]
-                display_name = row['name']
-                if self.feature_marker:
-                    code = row['code']
-                    # 🚀 关键：优先从 selector.df_all_realtime 中获取最新且完整的技术指标
-                    # df_candidates 可能只包含基础字段，而 df_all_realtime 包含 high4, max5 等全量计算结果
-                    if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and code in self.selector.df_all_realtime.index:
-                        s_data = self.selector.df_all_realtime.loc[code]
-                    else:
-                        s_data = row
-                        
-                    row_dict = {
-                        'percent': s_data.get('percent', 0),
-                        'volume': s_data.get('volume', 0),
-                        'category': s_data.get('category', ''),
-                        # 详细指标支持（从实时全量库中提取）
-                        'price': s_data.get('price', s_data.get('trade', 0)),
-                        'high4': s_data.get('high4', 0),
-                        'max5': s_data.get('max5', 0),
-                        'max10': s_data.get('max10', 0),
-                        'hmax': s_data.get('hmax', 0),
-                        'hmax60': s_data.get('hmax60', 0),
-                        'low4': s_data.get('low4', 0),
-                        'low10': s_data.get('low10', 0),
-                        'low60': s_data.get('low60', 0),
-                        'lmin': s_data.get('lmin', 0),
-                        'min5': s_data.get('min5', 0),
-                        'cmean': s_data.get('cmean', 0),
-                        'hv': s_data.get('hv', 0),
-                        'lv': s_data.get('lv', 0),
-                        'llowvol': s_data.get('llowvol', 0),
-                        'lastdu4': s_data.get('lastdu4', 0)
-                    }
+            # --- Rendering Phase ---
+            # ✅ [OPTIMIZE] 批量处理特征标记
+            self._row_features = {}
+            if self.feature_marker and not self.df_candidates.empty:
+                try:
+                    # 🚀 [PERF] 极致优化：如果 df_all_realtime 包含 code 索引，直接 loc 提取，避免 merge 消耗
+                    # 同时只提取当前显示的候选股子集
+                    rt_all = self.selector.df_all_realtime
+                    cand_codes = self.df_candidates['code'].tolist()
+                    # 仅选择存在的索引，避免 reindex 报错
+                    valid_codes = [c for c in cand_codes if c in rt_all.index]
+                    df_for_features = rt_all.loc[valid_codes]
                     
-                    # 应用颜色标签
-                    if self.feature_marker.enable_colors:
-                        extra_tags = self.feature_marker.get_tags_for_row(row_dict)
-                        if extra_tags:
-                            all_tags.extend(extra_tags)
-                    
-                    # 应用图标
-                    icon = self.feature_marker.get_icon_for_row(row_dict)
-                    if icon:
-                        display_name = f"{icon} {display_name}"
+                    self._row_features = self.feature_marker.process_dataframe(df_for_features)
+                except Exception as e:
+                    logger.warning(f"Feature processing failed: {e}")
 
-                # 格式化各个字段，增强对 None/NaN 的健壮性
-                score_val = row.get('score', 0)
-                score_str = str(int(score_val)) if pd.notna(score_val) else "0"
-
-                win_val = row.get('win', 0)
-                win_str = str(int(win_val)) if pd.notna(win_val) else "0"
-                
-                rank_val = row.get('Rank', 0)
-                rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
-
-                grade = row.get('grade', 'C')
-                if grade == "S": all_tags.append("grade_S")
-                elif grade == "A": all_tags.append("grade_A")
-
-                tqi_val = row.get('tqi', 0)
-                tqi_str = f"{tqi_val:.0f}" if pd.notna(tqi_val) else "0"
-                
-                pct_val = row.get('percent', 0)
-                pct_str = f"{pct_val:.2f}" if pd.notna(pct_val) else "0.00"
-                
-                yest_pct_val = row.get('昨日涨幅', 0)
-                yest_pct_str = f"{yest_pct_val:.2f}" if pd.notna(yest_pct_val) else "0.00"
-                
-                ratio_val = row.get('ratio', 0)
-                ratio_str = f"{ratio_val:.2f}" if pd.notna(ratio_val) else "0.00"
-
-                self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], display_name, grade, tqi_str, row.get('status', ''), score_str, rank_str, row['price'], 
-                    pct_str, yest_pct_str, ratio_str, amount_str,
-                    row.get('连阳涨幅', 0), win_str, row['volume'], row.get('category', ''), row['reason'], 
-                    user_status, user_reason
-                ), tags=tuple(all_tags))
+            # ✅ [OPTIMIZE] 采用“批量冻结 UI”渲染模式
+            self._render_token += 1
+            self._do_bulk_render(self._render_token)
             
-            # 渲染完成后自动调整列宽
-            self.after(100, self._auto_fit_columns)
-                
         except Exception as e:
             logger.error(f"错误 加载数据失败: {e}")
             import traceback
             traceback.print_exc()
             messagebox.showerror("错误", f"加载数据失败: {e}")
 
-    def _auto_fit_columns(self):
-        """根据内容自动调整列宽"""
+    def _do_bulk_render(self, token: int):
+        """
+        🚀 [ULTIMATE PERF] 批量插入 + UI 渲染冻结
+        bypass Tcl 层每行重绘产生的 O(n²) 级卡顿
+        """
+        if token != self._render_token:
+            return
+            
+        if self.df_candidates.empty:
+            return
+
+        # 1. 冻结渲染 (通过隐藏所有列实现)
+        all_cols = list(self.tree["columns"])
+        self.tree.configure(displaycolumns=())
+        
+        try:
+            # 2. 预准备所有数据行 (Python 快速构建，避免在 insert 循环内做 format/logic)
+            # 使用 itertuples 遍历
+            insert_batch = []
+            for row in self.df_candidates.itertuples(index=False):
+                code = str(row.code)
+                user_status = getattr(row, 'user_status', "待定")
+                user_reason = getattr(row, 'user_reason', "")
+                
+                tag = "pending"
+                if user_status == "选中": tag = "selected"
+                elif user_status == "丢弃": tag = "ignored"
+
+                amount_raw = float(getattr(row, 'amount', 0))
+                amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
+
+                display_name = row.name
+                all_tags = [tag]
+                if code in self._row_features:
+                    f_tags, icon = self._row_features[code]
+                    if f_tags: all_tags.extend(f_tags)
+                    if icon: display_name = f"{icon} {display_name}"
+
+                grade = getattr(row, 'grade', 'C')
+                if grade == "S": all_tags.append("grade_S")
+                elif grade == "A": all_tags.append("grade_A")
+
+                # 批量插元组
+                insert_batch.append((
+                    code, display_name, grade,
+                    f"{getattr(row, 'tqi', 0):.0f}",
+                    getattr(row, 'status', ''),
+                    str(int(getattr(row, 'score', 0))),
+                    str(int(getattr(row, 'Rank', 0))),
+                    getattr(row, 'price', 0),
+                    f"{getattr(row, 'percent', 0):.2f}",
+                    f"{getattr(row, '昨日涨幅', 0):.2f}",
+                    f"{getattr(row, 'ratio', 0):.2f}",
+                    amount_str,
+                    getattr(row, '连阳涨幅', 0),
+                    str(int(getattr(row, 'win', 0))),
+                    getattr(row, 'volume', 0),
+                    getattr(row, 'category', ''),
+                    getattr(row, 'reason', ''),
+                    user_status,
+                    user_reason,
+                    tuple(all_tags) # 最后一项辅助存 tags
+                ))
+
+            # 3. 阻塞式快速插入 (因为关闭了显示，此时耗时极短)
+            for item in insert_batch:
+                self.tree.insert("", "end", iid=item[0], values=item[:-1], tags=item[-1])
+
+        finally:
+            # 4. 恢复渲染并强制刷新
+            self.tree.configure(displaycolumns=all_cols)
+            self.tree.update_idletasks()
+
+        # 5. 列宽自适应
+        if not self._column_widths_cached:
+            self.after(50, lambda: self._auto_fit_columns(force=False))
+
+    def _auto_fit_columns(self, force: bool = False):
+        """
+        根据内容自动调整列宽
+        :param force: 是否强制重新测量（默认缓存后不重测）
+        """
+        if not force and self._column_widths_cached:
+            return
+
         import tkinter.font as tkfont
         f: tkfont.Font = tkfont.Font(font='Arial 9') # 与 treeview 字体保持一致
         
         cols: Any = self.tree["columns"]
+
+        # 🚀 [PERF] 极致优化：将 get_children 提到循环外，采样结果也复用，避免每一列都重复构造 list
+        all_items = self.tree.get_children()
+        sample_items = all_items[:50] if len(all_items) > 50 else all_items
+        
         # 为每列计算最大宽度
         for col in cols:
             # 获取表头文字宽度 (加一点 padding)
             header_text: str = self.tree.heading(col)["text"]
             max_w: int = f.measure(header_text) + 20
             
-            # 获取采样行该列的内容 (限制数量以提升性能)
-            all_items = self.tree.get_children()
-            sample_items = all_items[:200] if len(all_items) > 200 else all_items
             for item in sample_items:
                 cell_val: str = str(self.tree.set(item, col))
+                # [PERF] 剔除超长文本测量，直接封顶
+                if len(cell_val) > 100:
+                    max_w = max(max_w, 400)
+                    continue
                 max_w = max(max_w, f.measure(cell_val) + 20)
             
             # 限制合理范围并应用
@@ -558,6 +591,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 max_w = min(max_w, 200)
             
             _ = self.tree.column(col, width=max_w)
+        
+        self._column_widths_cached = True
 
     def _on_toolbar_double_click(self, event: Any):
         """双击顶部工具栏调整窗口宽度"""
@@ -587,20 +622,25 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.title(f"{base_title} (结果: 0)")
             return
             
-        all_tags = []
-        # 'reason' 列存储了机选理由，可能由 '|' 分隔
-        for r in self.df_candidates['reason'].dropna():
-            tags = [t.strip() for t in str(r).split('|') if t.strip()]
-            all_tags.extend(tags)
+        # 🚀 [PERF] 优化大盘理由扫描：利用 str.get_dummies 或 Series.str.cat 快速统计，
+        # 避免在 UI 主循环中进行全量 list 扁平化。如果数据量巨大，这里会有毫秒级的卡顿。
+        try:
+            # 获取 reason 列并切分标签
+            reasons = self.df_candidates['reason'].dropna().astype(str)
+            if not reasons.empty:
+                all_tags = []
+                for r in reasons:
+                    # 传统的 str.split 方案在大数据下优于复杂的正则
+                    all_tags.extend([t.strip() for t in r.split('|') if t.strip()])
+                counter = Counter(all_tags)
+                top3 = counter.most_common(3)
+                stats_str = " | ".join([f"{tag}({count})" for tag, count in top3])
+            else:
+                stats_str = ""
+        except Exception:
+            stats_str = "Error"
             
-        counter = Counter(all_tags)
-        # 获取 Top 3 理由
-        top3 = counter.most_common(3)
-        stats_str = ""
-        if top3:
-            stats_str = " | ".join([f"{tag}({count})" for tag, count in top3])
-            
-        # 获取等级分布
+        # 获取等级分布 (value_counts 已经很高效了)
         if 'grade' in self.df_candidates.columns:
             grades = self.df_candidates['grade'].value_counts()
             grade_str = " | ".join([f"{g}:{grades.get(g, 0)}" for g in ["S", "A", "B"] if g in grades])
@@ -739,6 +779,12 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             dates = self.selector.get_selection_dates()
             if not dates:
                 return
+            
+            # ✅ [OPTIMIZE] 防抖：如果日期集合没变，跳过刷新
+            dates_sig = hash(tuple(sorted(dates)))
+            if getattr(self, '_last_calendar_sig', None) == dates_sig:
+                return
+            self._last_calendar_sig = dates_sig
             
             # 获取 DateEntry 内部的 Calendar 实例
             cal = self.date_entry._calendar
