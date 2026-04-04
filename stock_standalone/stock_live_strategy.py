@@ -118,7 +118,7 @@ def _ipc_sender_worker():
     """ dedicated worker thread for sending IPC signals to the visualizer with BATCHING """
     IPC_HOST = '127.0.0.1'
     IPC_PORT = 26668
-    logger.info(f"🚀 IPC Sender worker started (Batch Mode, Target: {IPC_HOST}:{IPC_PORT})")
+    logger.debug(f"🚀 IPC Sender worker started (Batch Mode, Target: {IPC_HOST}:{IPC_PORT})")
     
     while not _ipc_sender_stop.is_set():
         batch = []
@@ -2494,7 +2494,7 @@ class StockLiveStrategy:
                 monitored_snapshot = dict(self._monitored_stocks)
             valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
             
-            logger.info(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Matched={len(df)} Resample={resample}")
+            logger.debug(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Matched={len(df)} Resample={resample}")
             
             # 2. RR 轮换分发逻辑 (Full-Dimensional Static Memory Fix)
             if not hasattr(StockLiveStrategy, "_kline_rr_cursors_static"):
@@ -2511,7 +2511,7 @@ class StockLiveStrategy:
                 res_pool = list(valid_keys)
                 StockLiveStrategy._kline_rr_pools_static[resample] = res_pool
                 res_cursor %= max(len(res_pool), 1) # 对齐尺寸
-                logger.info(f"🔄 [RR Sync] resample={resample}, pool size={len(res_pool)}, cursor={res_cursor}")
+                logger.debug(f"🔄 [RR Sync] resample={resample}, pool size={len(res_pool)}, cursor={res_cursor}")
             
             pool, pool_size = res_pool, len(res_pool)
             if pool_size > 0:

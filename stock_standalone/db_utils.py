@@ -47,7 +47,7 @@ class SQLiteConnectionManager:
             # [NEW] 100页缓冲即刻将 wal 挂载回主库，让外部实时访问无锁
             conn.execute("PRAGMA wal_autocheckpoint=100;")
             conn.close()
-            logger.info(f"DB WAL mode enabled for {self.db_path}")
+            logger.debug(f"DB WAL mode enabled for {self.db_path}")
         except Exception as e:
             logger.error(f"Failed to enable WAL mode for {self.db_path}: {e}")
 

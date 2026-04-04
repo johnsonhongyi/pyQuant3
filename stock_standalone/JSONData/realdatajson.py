@@ -944,7 +944,7 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
         log.info("Market_realTime:%s"%len(dp))
         dp=dp.fillna(0)
         dp=dp.dropna()
-        log.info("DP:%s" % dp[:1].open)
+        log.debug("DP:%s" % dp[:1].open)
         dp['dff']=0
         df=get_sina_all_json_dd(vol,type)
 

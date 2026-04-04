@@ -344,24 +344,24 @@ class VoiceProcess:
         # 3. 如果处于暂停，强制恢复以便处理中止
         self.pause_event.set()
         
-        logger.info("🛑 Voice broadcast aborted and queue cleared")
+        logger.debug("🛑 Voice broadcast aborted and queue cleared")
 
     def pause(self):
         """暂停播报"""
         self.pause_event.clear()
         # 同时触发 abort_event 中止当前正在说的
         self.abort_event.set()
-        logger.info("⏸ Voice broadcast paused")
+        logger.debug("⏸ Voice broadcast paused")
 
     def resume(self):
         """恢复播报"""
         self.abort_event.clear()
         self.pause_event.set()
-        logger.info("▶ Voice broadcast resumed")
+        logger.debug("▶ Voice broadcast resumed")
 
     def stop(self):
         """停止语音播报进程 (强化退出版)"""
-        logger.info("Stopping voice worker process...")
+        logger.debug("Stopping voice worker process...")
         self.stop_flag.value = False
         self.abort_event.set() # 立即中止当前播报
         
@@ -2595,12 +2595,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # self.backtest_timer.start(60000) # 每分钟检查一次
         # self._last_backtest_date = None
 
-        logger.info(f"[Visualizer] Realtime UI poll timer started at 1000ms")
-        logger.info(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
+        logger.debug(f"[Visualizer] Realtime UI poll timer started at 1000ms")
+        logger.debug(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
 
         # ⭐ 新增：指令 Pipe 轮询 (处理来自 MonitorTK 的直连指令)
         if hasattr(self, 'command_conn') and self.command_conn:
-            logger.info(f"[Visualizer] Command Pipe connection detected.")
+            logger.debug(f"[Visualizer] Command Pipe connection detected.")
             self.command_timer = QTimer()
             self.command_timer.timeout.connect(self._poll_command_queue)
             self.command_timer.start(200)  # 200ms 轮询一次，保证响应速度
@@ -3934,7 +3934,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     self._ipc_signal_timer.start(self._ipc_signal_debounce_ms)
                     
                     total_dur = (time.perf_counter() - start_t) * 1000 if 'start_t' in locals() else 0
-                    logger.info(f"📩 [IPC_RECV] Received signal for {code} - JSON:{json_dur:.1f} ms, WaitDebounce: {self._ipc_signal_debounce_ms}ms")
+                    logger.debug(f"📩 [IPC_RECV] Received signal for {code} - JSON:{json_dur:.1f} ms, WaitDebounce: {self._ipc_signal_debounce_ms}ms")
                     
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")
@@ -5638,7 +5638,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def _stop_realtime_process(self, timeout=2.0):
         """[STABILITY] 安全停止实时数据线程，确保 Join 成功，防止退出时 Access Violation"""
         if self.realtime_process and self.realtime_process.is_alive():
-            logger.info("Stopping [RealtimeUpdateWorkerThread]...")
+            logger.debug("Stopping [RealtimeUpdateWorkerThread]...")
             self.rt_worker_stop_flag.value = False
             # 增加等待时间到 2s 以上，因为 worker 内部有 sleep(1) 或类似逻辑
             self.realtime_process.join(timeout=timeout)
@@ -12369,7 +12369,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # [NEW] 📜 详细日志开关保存
             window_config['verbose_log_enabled'] = getattr(self, 'verbose_log_enabled', False)
-            logger.info(f"[SaveConfig] Voice Paused: {is_p}")
+            logger.debug(f"[SaveConfig] Voice Paused: {is_p}")
             
             # 3.10 联动自动显示状态
             if hasattr(self, 'tk_linkage_auto_display'):
@@ -12679,7 +12679,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 0.️4 立即停止语音进程 (防止退出过程中继续播报噪音)
 
         if hasattr(self, 'voice_thread') and self.voice_thread:
-            logger.info("Closing Voice Broadcast system...")
+            logger.debug("Closing Voice Broadcast system...")
             try:
                 self.voice_thread.stop()
             except Exception as e:
@@ -12706,7 +12706,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1️⃣ 停止实时数据进程
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
-        logger.info(f'stop_flag.value: {self.stop_flag.value}')
+        logger.debug(f'stop_flag.value: {self.stop_flag.value}')
 
         # 2️⃣ 停止并关闭独立面板 (关键：防止 QThread Destroyed)
         if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
@@ -12745,7 +12745,7 @@ class MainWindow(QMainWindow, WindowMixin):
             from data_utils import send_code_via_pipe, PIPE_NAME_TK
             # 使用 send_code_via_pipe 发送字典指令
             send_code_via_pipe({"cmd": "VIZ_EXIT"}, logger=logger, pipe_name=PIPE_NAME_TK)
-            logger.info("Sent VIZ_EXIT to Monitor.")
+            logger.debug("Sent VIZ_EXIT to Monitor.")
         except Exception as e:
             logger.warning(f"Failed to send VIZ_EXIT to Monitor: {e}")
         # 1.1️⃣ 停止实时数据处理线程 (集中管理)
@@ -12756,7 +12756,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
-        logger.info(f'[FinalClean] exit status stop_flag: {self.stop_flag.value}')
+        logger.debug(f'[FinalClean] exit status stop_flag: {self.stop_flag.value}')
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
         # 先清理垃圾回收站中的线程
