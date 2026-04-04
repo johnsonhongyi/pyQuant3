@@ -546,7 +546,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
             # 获取采样行该列的内容 (限制数量以提升性能)
             all_items = self.tree.get_children()
-            sample_items = all_items[:100] if len(all_items) > 100 else all_items
+            sample_items = all_items[:200] if len(all_items) > 200 else all_items
             for item in sample_items:
                 cell_val: str = str(self.tree.set(item, col))
                 max_w = max(max_w, f.measure(cell_val) + 20)

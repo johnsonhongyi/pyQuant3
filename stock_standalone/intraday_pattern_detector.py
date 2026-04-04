@@ -167,9 +167,9 @@ class IntradayPatternDetector:
         # 可配置的检测开关
         self.enabled_patterns = set(self.PATTERNS)
         
-        # 信号计数跟踪 (key: "code_pattern" -> count for today)
         self._signal_counts: Dict[str, int] = {}
         self.stock_grades: Dict[str, str] = {}      # [NEW] 评级缓存
+        self.stock_scores: Dict[str, float] = {}    # [NEW] 分数(质量分)缓存
 
     def _load_config(self) -> Dict[str, Any]:
         """从 JSON 文件加载策略阈值配置"""
@@ -238,9 +238,11 @@ class IntradayPatternDetector:
         """禁用特定形态检测"""
         self.enabled_patterns.discard(pattern)
     
-    def set_stock_grades(self, grades: Dict[str, str]):
-        """设置股票评级映射表"""
+    def set_stock_grades(self, grades: Dict[str, str], scores: Dict[str, float] = None):
+        """设置股票评级和分值映射表"""
         self.stock_grades = grades
+        if scores is not None:
+            self.stock_scores = scores
 
     def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame] = None, 
                day_row: pd.Series = None, prev_close: float = 0,
@@ -350,8 +352,11 @@ class IntradayPatternDetector:
             if count > 1:
                 ev.detail = f"{ev.detail} (第{count}次)"
             
-            # [NEW] 补全评级字段
+            # [NEW] 补全评级字段和基本质量分
             ev.grade = self.stock_grades.get(code, "")
+            base_score = self.stock_scores.get(code, 0.0)
+            if ev.score == 0.0 and base_score > 0.0:
+                ev.score = base_score
             
             if should_notify:
                 notified_events.append(ev)

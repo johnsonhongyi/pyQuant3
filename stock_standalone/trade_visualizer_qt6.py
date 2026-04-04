@@ -3618,6 +3618,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'strong_auction_open'
             ]
             if not (pattern in valid_patterns or is_high_priority):
+                logger.debug(f"ℹ️ [SIGNAL SKIP] {code} {pattern} - Not in valid_patterns")
                 return
 
             # ⚡ [NEW] 细化过滤：低开走高模型 仅捕捉 开盘即最低 且 涨幅 > 3% 的个股 (强势意图)
@@ -3889,6 +3890,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def process_ipc_command(self, cmd_str: str):
         """处理 IPC 命令分发"""
+        start_t = time.perf_counter()
         try:
             if not cmd_str: return
             
@@ -3910,20 +3912,30 @@ class MainWindow(QMainWindow, WindowMixin):
             content = content.strip()
             logger.debug(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
             if content.startswith("SIGNAL|"):
+                json_start = time.perf_counter()
                 try:
                     json_str = content[7:]
                     data = json.loads(json_str)
                     
+                    # 🚀 [PERF] 统计 JSON 解析耗时
+                    json_dur = (time.perf_counter() - json_start) * 1000
+                    if json_dur > 20: 
+                         logger.warning(f"⚠️ [PERF] Signal JSON parsing too slow: {json_dur:.1f}ms")
+                    
                     # ⚡ [DEBOUNCE] 加入缓冲区并启动定时器
                     if isinstance(data, dict):
                         self._ipc_signal_buffer.append(data)
+                        code = data.get('code', 'N/A')
                     elif isinstance(data, list):
                         self._ipc_signal_buffer.extend(data)
+                        code = "BATCH"
                     
                     # 200ms 防抖，批量处理密集信号
                     self._ipc_signal_timer.start(self._ipc_signal_debounce_ms)
                     
-                    # logger.debug(f"IPC SIGNAL buffered: {len(data) if isinstance(data, list) else 1} items")
+                    total_dur = (time.perf_counter() - start_t) * 1000 if 'start_t' in locals() else 0
+                    logger.info(f"📩 [IPC_RECV] Received signal for {code} - JSON:{json_dur:.1f} ms, WaitDebounce: {self._ipc_signal_debounce_ms}ms")
+                    
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")
             

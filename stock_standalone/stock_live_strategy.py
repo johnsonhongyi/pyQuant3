@@ -167,7 +167,8 @@ def _ipc_sender_worker():
 def send_signal_to_visualizer_ipc(data: dict):
     """ Standardized signals for IPC and SignalBus """
     global _ipc_sender_thread
-
+    start_t = time.perf_counter()
+    
     # ⭐ [THROTTLE] 内部节流：防止同一秒内对同一只股票发送过多重复的 IPC 信号 (震荡导致)
     now = time.time()
     code = data.get('code')
@@ -188,6 +189,7 @@ def send_signal_to_visualizer_ipc(data: dict):
 
         # 2. ---------- SignalBus (Main process only) ----------
         sig_type = data.get('pattern', 'ALERT')
+        bus_start = time.perf_counter()
         try:
             from signal_bus import SignalBus, StandardSignal, publish_standard_signal
             std_sig = StandardSignal(
@@ -203,17 +205,35 @@ def send_signal_to_visualizer_ipc(data: dict):
                 score=float(data.get('score', 0.0)),
                 grade=data.get('grade', '')
             )
+            # 🚀 [PERF] 统计发布到本地总线的耗时
             publish_standard_signal(std_sig)
+            bus_dur = (time.perf_counter() - bus_start) * 1000
+            if bus_dur > 50:
+                logger.warning(f"⚠️ [PERF] SignalBus publish {code} too slow: {bus_dur:.1f}ms")
+            
         except Exception as e:
             logger.debug(f"SignalBus publish failed: {e}")
 
         # 3. ---------- IPC (Queue it for Async worker) ----------
+        queue_start = time.perf_counter()
         if ipc_queue:
+            # ⭐ [DEBUG] 监测队列是否发生挤压
+            q_size = ipc_queue.qsize()
+            if q_size > 50:
+                logger.warning(f"🚨 [IPC_QUEUE] Congestion detected! Current queue size: {q_size}")
+            
             ipc_queue.put(data, block=False) # Non-blocking put
+            
+            queue_dur = (time.perf_counter() - queue_start) * 1000
+            total_dur = (time.perf_counter() - start_t) * 1000
+            logger.debug(f"✨ [IPC_SEND] {code}({sig_type}) - Bus:{bus_dur:.1f}ms, Queue:{queue_dur:.1f}ms, Total:{total_dur:.1f}ms (Q={q_size})")
+        else:
+             logger.warning(f"[IPC_SEND] ipc_queue is None, signal {code} skipped.")
+             
     except queue.Full:
-        pass
+        logger.error(f"🚨 [IPC_QUEUE] FULL! Dropping signal for {code}")
     except Exception as e:
-        logger.debug(f"send_signal_to_visualizer_ipc error: {e}")
+        logger.error(f"send_signal_to_visualizer_ipc error for {code}: {e}")
         
 
 # _voice_process_target removed (moved to alert_manager.py)
@@ -1022,8 +1042,8 @@ class StockLiveStrategy:
                                 "ratio": float(row.get('ratio', 0.0)),
                                 "amount_desc": row.get('amount', 0),
                                 "status": str(row.get('status', '')),
-                                "score": float(row.get('score', 0.0)),
-                                "grade": str(row.get('grade', '')),  # [NEW] 存入等级
+                                "score": float(row.get('tqi', row.get('质量分', row.get('score', 0.0)))),
+                                "grade": str(row.get('等级', row.get('grade', ''))),  # [NEW] 存入等级
                                 "reason": str(row.get('reason', ''))
                             }
                         }
@@ -1033,8 +1053,8 @@ class StockLiveStrategy:
                         snap = self._monitored_stocks[code].setdefault('snapshot', {})
                         snap.update({
                             "status": str(row.get('status', snap.get('status', ''))),
-                            "score": float(row.get('score', snap.get('score', 0.0))),
-                            "grade": str(row.get('grade', snap.get('grade', ''))), # [NEW] 更新等级
+                            "score": float(row.get('tqi', row.get('质量分', row.get('score', snap.get('score', 0.0))))),
+                            "grade": str(row.get('等级', row.get('grade', snap.get('grade', '')))), # [NEW] 更新等级
                             "reason": str(row.get('reason', snap.get('reason', '')))
                         })
                 
@@ -1062,17 +1082,25 @@ class StockLiveStrategy:
             return
             
         grades = {}
+        scores = {}
         for key, stock in self._monitored_stocks.items():
             code = stock.get('code', key.split('_')[0])
             grade = stock.get('grade') or stock.get('snapshot', {}).get('grade', '')
+            score = stock.get('score') or stock.get('snapshot', {}).get('score', 0.0)
             if grade:
                 grades[code] = grade
+            if score:
+                scores[code] = float(score)
         
         if getattr(self, 'pattern_detector', None):
-            self.pattern_detector.set_stock_grades(grades)
+            self.pattern_detector.set_stock_grades(grades, scores)
             
         if getattr(self, 'daily_pattern_detector', None):
-            self.daily_pattern_detector.set_stock_grades(grades)
+            # daily_pattern_detector maybe still uses `set_stock_grades(grades)` without score, but we should safely call it if it's there
+            try:
+                self.daily_pattern_detector.set_stock_grades(grades, scores)
+            except TypeError:
+                self.daily_pattern_detector.set_stock_grades(grades)
             
         logger.debug(f"Synced {len(grades)} stock grades to detectors.")
 
@@ -1094,7 +1122,8 @@ class StockLiveStrategy:
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
                     'rule_type_tag': stock.get('rule_type_tag', ""),
-                    'grade': stock.get('grade', stock.get('snapshot', {}).get('grade', "")) # [NEW] 持久化等级
+                    'grade': stock.get('grade', stock.get('snapshot', {}).get('grade', "")), # [NEW] 持久化等级
+                    'score': stock.get('score', stock.get('snapshot', {}).get('score', 0.0)) # [NEW] 持久化分值
                 }
 
                 # --- 可选：添加行情快照 ---
@@ -2442,6 +2471,25 @@ class StockLiveStrategy:
             start_loop_timer = time.perf_counter()
             # 1. 环境准备与归一化快照
             now, now_ts_str = time.time(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # --- [NEW] 提前提取当天全局选股和指标数据 ---
+            # 直接使用 StockSelector 极其高效的类级缓存，自动根据开盘状态推算 logical_date
+            global_cand_df = pd.DataFrame()
+            if StockSelector:
+                try:
+                    # 传入实时最新的 df_all_data 初始化，不仅补齐指标，还能供其他组件利用已实例化的最新数据集
+                    selector = StockSelector(df=df_all_data)
+                    cand_df = selector.get_candidates_df(force=False)
+                    if not cand_df.empty:
+                         if 'code' in cand_df.columns and cand_df.index.name != 'code':
+                             # 使用 copy 避免 SettingWithCopyWarning, 因为缓存的 df 是独立对象，但保守复制一次也可以，或者直接利用它
+                             global_cand_df = cand_df.copy()
+                             global_cand_df.set_index('code', drop=False, inplace=True)
+                         else:
+                             global_cand_df = cand_df
+                except Exception as e:
+                    logger.error(f"提取全局缓存选股数据失败: {e}")
+
             with self._lock:
                 monitored_snapshot = dict(self._monitored_stocks)
             valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
@@ -2520,9 +2568,18 @@ class StockLiveStrategy:
                 try:
                     code_idx = key.split('_')[0]
                     if code_idx in df.index:
+                        row_dict = df.loc[code_idx].to_dict()
+                        
+                        # --- [NEW] 从全局候选数据补充缺失指标 ---
+                        if not global_cand_df.empty and code_idx in global_cand_df.index:
+                            cand_row = global_cand_df.loc[code_idx].to_dict()
+                            for c_key in ['grade', 'tqi', 'score', 'category', 'ma5', 'ma10', 'ma60d', 'volume']:
+                                if c_key in cand_row and pd.notna(cand_row[c_key]):
+                                    row_dict[c_key] = cand_row[c_key]
+                                    
                         futures[self.executor.submit(
                             self._detect_signals_single_stock, 
-                            key, df.loc[code_idx].to_dict(), monitored_snapshot[key],
+                            key, row_dict, monitored_snapshot[key],
                             all_emotion_scores, all_klines, all_loss_streaks, 
                             open_trades, all_55188, resample, now, now_ts_str
                         )] = key

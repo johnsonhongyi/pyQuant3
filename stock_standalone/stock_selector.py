@@ -7,6 +7,7 @@ import datetime
 import logging
 import sqlite3
 import re
+import threading
 from typing import List, Dict, Any, Optional
 
 # 添加项目根目录到路径
@@ -31,6 +32,20 @@ class StockSelector:
     2. 基于技术指标筛选强势股 (趋势、量能、结构)
     3. 生成筛选日志，用于后续分析优化
     """
+    
+    # --- 全局多线程安全缓区 ---
+    _global_candidates_cache: Dict[str, pd.DataFrame] = {}
+    _cache_lock = threading.Lock()
+
+    @classmethod
+    def get_candidates_cache(cls, key: str) -> Optional[pd.DataFrame]:
+        with cls._cache_lock:
+            return cls._global_candidates_cache.get(key)
+
+    @classmethod
+    def set_candidates_cache(cls, key: str, value: pd.DataFrame):
+        with cls._cache_lock:
+            cls._global_candidates_cache[key] = value
 
     # def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
     def __init__(self, df: Optional[pd.DataFrame] = None, resample: str = 'd'):
@@ -287,7 +302,7 @@ class StockSelector:
         
         return df
 
-    def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None) -> pd.DataFrame:
+    def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None,top10 = 10) -> pd.DataFrame:
         """执行优化后的筛选逻辑"""
         resample = self.resample # 使用当前实例的周期标识
         if df.empty:
@@ -336,8 +351,8 @@ class StockSelector:
                 concept_scores.append((c, avg))
         
         concept_scores.sort(key=lambda x: x[1], reverse=True)
-        top_hot_names = [x[0] for x in concept_scores[:5]]
-        self.logger.info(f"Top 5 Concepts: {top_hot_names}")
+        top_hot_names = [x[0] for x in concept_scores[:top10]]
+        self.logger.info(f"Top {top10} Concepts: {top_hot_names}")
         self._last_hotspots = concept_scores # 缓存供外部查询
         
         # --- [NEW] Identify Sector Leaders (Top 5 per Hot Theme) ---
@@ -357,10 +372,10 @@ class StockSelector:
                     })
             # 按涨幅和成交额排序，取前 5 名
             sector_stocks.sort(key=lambda x: (x['percent'], x['amount']), reverse=True)
-            for s in sector_stocks[:5]:
+            for s in sector_stocks[:top10]:
                 protected_leaders.add(s['code'])
         
-        self.logger.info(f"Protected Sector Leaders: {len(protected_leaders)} stocks from Top 5 Themes")
+        self.logger.info(f"Protected Sector Leaders: {len(protected_leaders)} stocks from Top {top10} Themes")
 
         selected_records = []
 
@@ -910,9 +925,38 @@ class StockSelector:
         if resample:
             self.resample = resample
         
-        target_date = logical_date if logical_date else datetime.datetime.now().strftime("%Y-%m-%d")
+        # if not logical_date:
+        #     is_trading = cct.get_work_time_duration()
+        #     # 不开市是最近的交易日, 开市交易期用的是上一个交易日
+        #     logical_date = cct.get_last_trade_date() if is_trading else cct.get_today()
+            
+        # target_date = logical_date
+
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        is_today = (target_date == today_str)
+
+        if not logical_date:
+            # 判断今天是否交易日（而不是是否在交易时间段）
+            is_trade_day = cct.get_trade_date_status()  # ✅ 用这个
+
+            if is_trade_day:
+                logical_date = today_str
+            else:
+                logical_date = cct.get_last_trade_date()
+
+        target_date = logical_date
+
+        # # ✅ 简化 today 判断（避免重复调用）
+        is_today = (target_date == logical_date)
+        
+        # # 放宽 '今日' 的判定，只要是要找当天/最近交易日皆视为 today
+        # is_today = (target_date == today_str or target_date == cct.get_last_trade_date())
+        
+        # [NEW] 采用多线程安全的类级全局缓存封装访问
+        cache_key = f"{target_date}_{self.resample}"
+        if not force:
+            cached_df = self.get_candidates_cache(cache_key)
+            if cached_df is not None:
+                return cached_df
 
         # 1. 尝试从数据库加载 (SQLite)
         if not force and self.db_logger:
@@ -938,6 +982,7 @@ class StockSelector:
                         
                         df_history = pd.merge(df_history, rt_cats, left_on='code', right_index=True, how='left')
                     
+                    self.set_candidates_cache(cache_key, df_history.copy())
                     return df_history
             except Exception as e:
                 self.logger.error(f"读取历史数据失败: {e}")
@@ -948,10 +993,12 @@ class StockSelector:
             return pd.DataFrame()
 
         # 3. 运行今日实时策略逻辑
-        self.logger.info(f"正在运行实时选股策略 (日期: {today_str}, 周期: {self.resample})")
+        self.logger.info(f"正在运行实时选股策略 (日期: {today_str} 模拟is_today {is_today}, 周期: {self.resample})")
         df = self.load_data()
         df = self.calculate_indicators(df)
         df_res = self.filter_strong_stocks(df, today=today_str)
+        
+        self.set_candidates_cache(cache_key, df_res.copy() if not df_res.empty else df_res)
         return df_res
 
 if __name__ == '__main__':
