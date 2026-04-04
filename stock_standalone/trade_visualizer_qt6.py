@@ -813,13 +813,31 @@ class SignalOverlay:
 
 def recv_exact(sock: socket.socket, size: int, running_cb: Optional[Callable[[], bool]] = None) -> bytes:
     buf = b""
-    while len(buf) < size:
-        if running_cb and not running_cb():
-            raise RuntimeError("Listener stopped")
-        chunk = sock.recv(size - len(buf))
-        if not chunk:
-            raise ConnectionError("Socket closed")
-        buf += chunk
+    # ⚡ [FIX] 获取原始超时，并使用短超时循环以支持 running_cb 检查
+    original_timeout = sock.gettimeout()
+    start_time = time.time()
+    effective_timeout = original_timeout if original_timeout is not None else 30.0
+    
+    try:
+        sock.settimeout(1.0) # ⚡ [PERF] 进入循环前只设置一次短超时，避免在循环内频繁调用
+        while len(buf) < size:
+            if running_cb and not running_cb():
+                raise RuntimeError("Listener stopped")
+            
+            # 检查总超时，防止死循环
+            if time.time() - start_time > effective_timeout:
+                raise socket.timeout("recv_exact timeout")
+
+            try:
+                chunk = sock.recv(size - len(buf))
+                if not chunk:
+                    raise ConnectionError("Socket closed")
+                buf += chunk
+            except socket.timeout:
+                continue
+    finally:
+        # 恢复原始超时设置
+        sock.settimeout(original_timeout)
     return buf
 
 
@@ -902,11 +920,19 @@ class CommandListenerThread(QThread):
                     try:
                         # 🚀 [FIX] 使用定界符模式读取。直到读取到 \n，解决粘包解析失败。
                         line_bytes = [prefix]
+                        # ⚡ [REFINED] 为指令流读取增加超时控制和退出检查，防止关闭窗口时阻塞
+                        read_start = time.time()
+                        client_socket.settimeout(1.0) # ⚡ [PERF] 循环外设置一次即可
                         while self.running:
-                            char = client_socket.recv(1)
-                            if not char or char == b"\n":
+                            if time.time() - read_start > 30.0: # 指令流最大等待 30s
                                 break
-                            line_bytes.append(char)
+                            try:
+                                char = client_socket.recv(1)
+                                if not char or char == b"\n":
+                                    break
+                                line_bytes.append(char)
+                            except socket.timeout:
+                                continue
                         
                         cmd = b"".join(line_bytes).decode("utf-8", errors='ignore').strip()
                         if "|" in cmd:
@@ -3210,7 +3236,7 @@ class MainWindow(QMainWindow, WindowMixin):
             ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
             ("Alt+H", "显示/隐藏热点自选面板 (Global)", self._toggle_hotlist_panel),
             ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
-            ("Alt+V", "开启/关闭热点语音播报 (Voice)", self._toggle_hotlist_voice),
+            ("Alt+O", "开启/关闭热点语音播报 (Voice)", self._toggle_hotlist_voice),
             ("Alt+W", "紧凑自适应列宽 (当前焦点表格)", self._on_shortcut_autofit),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
@@ -3226,7 +3252,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if handler and key_seq != "Space": # Space in keyPressEvent
                 # ⭐ [FIX] 如果该按键已经作为 Menu Action (Alt+H/L/V) 注册过，则跳过 QShortcut
                 # 防止在 ApplicationShortcut 上下文中触发两次导致逻辑失效
-                if key_seq in ["Alt+H", "Alt+L", "Alt+V"]:
+                if key_seq in ["Alt+H", "Alt+L", "Alt+O"]:
                     logger.debug(f"[Shortcut] Skip redundant QShortcut for {key_seq}, handled by QAction")
                     continue
                     
@@ -6973,9 +6999,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.voice_thread.pause()
             logger.info("StartUp: Voice system initialized to PAUSED state.")
              
-        text = "🔇 热点播报: 关(Alt+V)" if is_paused else "🔊 热点播报: 开(Alt+V)"
+        text = "🔇 热点播报: 关(Alt+O)" if is_paused else "🔊 热点播报: 开(Alt+O)"
         self.voice_action = QAction(text, self)
-        self.voice_action.setShortcut(QKeySequence("Alt+V"))
+        self.voice_action.setShortcut(QKeySequence("Alt+O"))
         self.voice_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
         self.voice_action.triggered.connect(self._toggle_hotlist_voice)
@@ -7120,11 +7146,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if new_is_paused:
             # 🔇 关闭：暂停播报并立即中止当前
             self.voice_thread.pause()
-            text = "🔇 热点播报: 关(Alt+V)"
+            text = "🔇 热点播报: 关(Alt+O)"
             logger.info("🔇 语音播报已关闭")
         else:
             # 🔊 开启
-            text = "🔊 热点播报: 开(Alt+V)"
+            text = "🔊 热点播报: 开(Alt+O)"
             # 确保不处于暂停状态
             self.voice_thread.resume()
             logger.info("🔊 语音播报已开启")
@@ -12142,7 +12168,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if hasattr(self, 'voice_action'):
                  is_p = getattr(self, '_pending_hotlist_voice_paused', False)
-                 text = "🔇 热点播报: 关(Alt+V)" if is_p else "🔊 热点播报: 开(Alt+V)"
+                 text = "🔇 热点播报: 关(Alt+O)" if is_p else "🔊 热点播报: 开(Alt+O)"
                  self.voice_action.setText(text)
             
             # --- 4. 列宽配置 ---

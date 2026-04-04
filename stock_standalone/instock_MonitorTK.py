@@ -4498,20 +4498,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             viz_ready   = getattr(self, '_viz_ready', False)
             proc_alive  = hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()
             # ⭐ 只有状态发生变化才更新
-            if not proc_alive and getattr(self, '_viz_ready', False):
-                logger.warning("[VIZ] process died → set _viz_ready=False")
-                self._viz_ready = False
-            if (
-                (not vis_enabled or not proc_alive or not viz_ready)
-                and not getattr(self, '_force_full_sync_pending', False)
-            ):
-                # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
-                for _ in range(10):  # 最多等2秒
-                    if getattr(self, '_vis_enabled_cache', False) and getattr(self, '_viz_ready', False):
-                        break
-                    time.sleep(0.2)
-                else:
-                    continue
+            if getattr(self, "_df_first_send_done", False) and not getattr(self, '_force_full_sync_pending', False):
+                if not proc_alive and getattr(self, '_viz_ready', False):
+                    logger.warning("[VIZ] process died → set _viz_ready=False")
+                    self._viz_ready = False
+                if (
+                    (not vis_enabled or not proc_alive or not viz_ready)
+                    and not getattr(self, '_force_full_sync_pending', False)
+                ):
+                    # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
+                    for _ in range(10):  # 最多等2秒
+                        if getattr(self, '_vis_enabled_cache', False) and getattr(self, '_viz_ready', False):
+                            break
+                        time.sleep(0.2)
+                    else:
+                        continue
 
             # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
             if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
@@ -4583,6 +4584,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
                         if df_diff.empty:
                             logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                            msg_type = 'DF_DIFF_EMPTY'
                             sent = True
                         else:
                             msg_type = 'UPDATE_DF_DIFF'
@@ -4638,7 +4640,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except (EOFError, BrokenPipeError, ConnectionResetError):
                          logger.warning("[Pipe] connection lost, fallback to Socket")
                          self.viz_conn = None
-                         self._viz_ready = False
                     except Exception as e:
                          logger.error(f"[Pipe] send failed: {e}")
 
@@ -4715,7 +4716,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def on_voice_toggle(self):
         val = self.voice_var.get()
-        self.live_strategy.set_voice_enabled(val)
+        if getattr(self, 'live_strategy', None) is not None:
+            self.live_strategy.set_voice_enabled(val)
+        else:
+            logger.warning(f'live_strategy is None, cannot set voice enabled')
         if not val:
             # 如果关闭语音，立即停止当前播放
             try:
