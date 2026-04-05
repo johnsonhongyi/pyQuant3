@@ -3077,13 +3077,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             full_df = getattr(self, 'df_all', None)
         
         if full_df is None or full_df.empty:
-            logger.debug("Strategy process skipped: full_df is empty or None")
+            logger.warning("Strategy process skipped: df_all is empty or None")
             return
             
         # 2. 策略引擎检查
         strategy_engine = getattr(self, 'live_strategy', None)
         if strategy_engine is None:
-            logger.debug("Strategy process skipped: live_strategy is None")
+            logger.warning("Strategy process skipped: live_strategy is None")
             return
 
         # 3. [ASYNC UPGRADE] 将耗时的策略处理异步化，避免阻塞 UI 线程 (尤其是 manual_scan)
@@ -3199,8 +3199,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if diff:
                 logger.info(f'diff : {diff}')
                 self.replace_column(*diff,apply_search=False)
-
     def refresh_data(self):
+
         """
         手动刷新：更新 resample 全局配置，触发后台进程下一轮 fetch_and_process
         """

@@ -169,7 +169,7 @@ logger = logging.getLogger(__name__)
 CATEGORY_MAP = {
     "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
-    "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告"],
+    "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
     "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"]
 }
@@ -527,11 +527,30 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 提取分类名称 (不含括号)
         current_cat = current_text.split(' (')[0] if ' (' in current_text else current_text
         
+        # [FIX] 下拉框中的数量统计，必须扫描实际可视表以保证所点即所得 (消除因多重覆写去重引发的 Phantom空项)
+        table = getattr(self, "tables", {}).get("全部信号")
+        counts = {k: 0 for k in SIGNAL_TYPE_MAP.keys()}
+        if table is not None:
+            counts["ALL"] = table.rowCount()
+            for r in range(table.rowCount()):
+                pattern_item = table.item(r, 4)
+                if pattern_item:
+                    raw_pattern = str(pattern_item.data(Qt.ItemDataRole.UserRole) or pattern_item.text())
+                    matched_type = "ALERT"
+                    for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+                        if any(kw.lower() in raw_pattern.lower() for kw in keywords):
+                            matched_type = eng_key
+                            break
+                    if matched_type in counts:
+                        counts[matched_type] += 1
+                    else:
+                        counts[matched_type] = 1
+
         self.type_filter.blockSignals(True)
         self.type_filter.clear()
         for eng_key, ch_name in SIGNAL_TYPE_MAP.items():
-            count = self._signal_type_counts.get(eng_key, 0)
-            item_text = f"{ch_name} ({count})" if eng_key != "ALL" else f"{ch_name} ({self._signal_type_counts['ALL']})"
+            count = counts.get(eng_key, 0)
+            item_text = f"{ch_name} ({count})" if eng_key != "ALL" else f"{ch_name} ({counts['ALL']})"
             self.type_filter.addItem(item_text, eng_key)
             if ch_name == current_cat:
                 self.type_filter.setCurrentText(item_text)
@@ -592,6 +611,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         d = str(payload.get('detail', payload.get('message', ''))).lower()
         if not hasattr(event, '_cached_cats'):
             cats = set()
+            # [REVERTED] 恢复重叠多重标签: 一个复杂事件极可能是买点也符合破位结构，应被多重抓取展示
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["突破加速"]): cats.add("breakout")
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["卖点预警"]): cats.add("risk")
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["结构破位"]): cats.add("breakdown")
@@ -645,12 +665,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         if not events_raw: return
 
-        # ⚡ [PERF] 批次内去重：仅保留每个股票最新的信号，极大减少重复 UI 操作
-        dedup_map = {}
-        for ev in events_raw:
-            code = ev.payload.get('code')
-            if code: dedup_map[code] = ev
-        events_to_process = sorted(dedup_map.values(), key=lambda x: x.timestamp)
+        # ⚡ [FIX] 移除此处的批次内按股票代码去重！
+        # 如果同一个股票在3秒内同时触发"跟单"与"破位"，较早的跨分类信号若被去重丢弃，会导致某分类卡片统计增加了但表格中永远不出现该行的严重Bug。
+        # 去重下放至 _insert_row 内部，针对每个子分类表格进行精准的独立覆盖更新。
+        events_to_process = events_raw
 
         # 记录当前各表格的滚动状态
         scroll_states = {}
@@ -749,7 +767,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 1. 全部信号
         self._insert_row(self.tables["全部信号"], time_str, code, name, pattern, detail, count, score, grade, payload)
         
-        # 2. 分类信号
+        # 2. 分类信号 
         matched_cats = 0
         for cat, patterns in CATEGORY_MAP.items():
             if any(p.lower() in pattern.lower() or p.lower() in detail.lower() for p in patterns):
@@ -820,8 +838,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             table.insertRow(0)
             
-            # 🛡️ [CAPPING] 限制表格总长度，防止 insertRow(0) 导致的 O(N) 性能指数下降
-            max_rows = 500 if table == self.tables.get("全部信号") else 200
+            # 🛡️ [CAPPING] 限制表格总长度，放宽至1000，与历史总事件数匹配，防止过早丢弃导致上下数据不一
+            max_rows = 1000
             if table.rowCount() > max_rows:
                 # 清除将被移除行在缓存中的索引 (最后一行)
                 rem_row = table.rowCount() - 1
@@ -873,11 +891,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if it: it.setForeground(color)
             self._flash_row(table, 0)
             
-            # 🛡️ [CAPPING] 限制表格总长度，防止 insertRow(0) 导致的 O(N) 性能指数下降
-            # 全部信号表保留 500 条，分类表保留 200 条
-            max_rows = 500 if table == self.tables.get("全部信号") else 200
-            if table.rowCount() > max_rows:
-                table.removeRow(table.rowCount() - 1)
+            self._flash_row(table, 0)
             
             # [FIX] 不要在这里执行 sortByColumn，这会导致每一行插入都重排一次
             # 如果是批量插入，排序会在 _process_batch_signals 恢复时进行一次全局排序
@@ -940,6 +954,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
         if total > 0:
             with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
+                # [REVERTED] 顶部卡片展示底层总触发的累计次数 (包含同一只股票的历史重复触发)，不改变既有去重策略
                 self.cards["follow"].setText(str(self._stats_counters["follow"]))
                 self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
                 self.cards["risk"].setText(str(self._stats_counters["risk"]))
@@ -1032,13 +1047,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.hot_sectors_label.setText(" | ".join(top_3) if top_3 else "暂无数据")
         self.hot_sectors_label.setTextFormat(Qt.TextFormat.RichText)
         
-        # 更新底部统计信息
-        follow = self._stats_counters.get("follow", 0)
-        breakout = self._stats_counters.get("breakout", 0)
-        risk = self._stats_counters.get("risk", 0)
-        breakdown = self._stats_counters.get("breakdown", 0)
-        total = self._signal_type_counts.get("ALL", 0)
-        self.stats_info_label.setText(f"跟单: {follow} | 突破: {breakout} | 风险: {risk} | 破位: {breakdown} | 全部: {total}")
+        # 更新底部统计信息 - 用于对比校验真实显示的表格行数结构
+        follow_cnt = self.tables["跟单信号"].rowCount() if "跟单信号" in self.tables else 0
+        breakout_cnt = self.tables["突破加速"].rowCount() if "突破加速" in self.tables else 0
+        risk_cnt = self.tables["卖点预警"].rowCount() if "卖点预警" in self.tables else 0
+        breakdown_cnt = self.tables["结构破位"].rowCount() if "结构破位" in self.tables else 0
+        other_cnt = self.tables["其它信号"].rowCount() if "其它信号" in self.tables else 0
+        total_cnt = self.tables["全部信号"].rowCount() if "全部信号" in self.tables else 0
+        
+        # [FIX] 使用清晰文案说明卡片展示的是历史信号流总数，而底部展示的是去重排版后的界面数据，消除数据理解误区。
+        self.stats_info_label.setText(f"(可视表行数) -> 跟单:{follow_cnt} 突破:{breakout_cnt} 风险:{risk_cnt} 破位:{breakdown_cnt} | 总表可视数: {total_cnt}")
 
     def update_market_stats(self, stats: dict):
         try:
@@ -1061,6 +1079,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         mapping = {"follow": "跟单信号", "breakout": "突破加速", "risk": "卖点预警", "breakdown": "结构破位", "other": "其它信号"}
         tab_name = mapping.get(key)
         if tab_name:
+            # [FIX] 点击顶部卡片时，重置下拉列表以防过滤掉卡片内信号
+            if hasattr(self, 'type_filter') and self.type_filter.currentData() != "ALL":
+                idx = self.type_filter.findData("ALL")
+                if idx >= 0:
+                    self.type_filter.setCurrentIndex(idx)
+                    
             for i in range(self.tabs.count()):
                 if self.tabs.tabText(i) == tab_name:
                     self.tabs.setCurrentIndex(i)
@@ -1227,6 +1251,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         search_text = self.search_input.text().strip().lower()
         target_type_key = self.type_filter.currentData() or "ALL"
         
+        # [FIX] 如果使用了下拉过滤且当前不在"全部信号"标签，则自动切到"全部信号"以防止交叉过滤导致全空
+        if target_type_key != "ALL" and self.tabs.tabText(self.tabs.currentIndex()) != "全部信号":
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == "全部信号":
+                    self.tabs.blockSignals(True)
+                    self.tabs.setCurrentIndex(i)
+                    self.tabs.blockSignals(False)
+                    break
+                    
         table = self.tabs.currentWidget()
         if not isinstance(table, QTableWidget): return
         for row in range(table.rowCount()):
