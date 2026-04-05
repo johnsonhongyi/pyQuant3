@@ -93,6 +93,14 @@ class SectorHeat:
     updated_at: datetime       = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
+        # [MOD] 跟风明细格式化为易读的字符串，缩减 UI 展示压力
+        details = []
+        for f in self.follower_detail:
+            name = f.get('name', '未知')
+            pct  = f.get('pct', 0.0)
+            details.append(f"{name}({pct:+.1f}%)")
+        detail_str = " ".join(details) if details else "无"
+
         return {
             'name': self.name,
             'heat_score': round(self.heat_score, 1),
@@ -108,10 +116,10 @@ class SectorHeat:
             'leader_vwap': round(self.leader_vwap, 3),
             'score_diff': round(self.score_diff, 2),
             'follow_ratio': round(self.follow_ratio, 2),
-            'sector_type': self.sector_type,
+            'sector_type': self.sector_type or "📈 跟随", # [MOD] 提供默认类型
             'tags': self.tags,
             'follower_codes': self.follower_codes,
-            'follower_detail': self.follower_detail,
+            'follower_detail': detail_str, # [MOD] 使用格式化后的字符串
             'updated_at': self.updated_at.strftime('%H:%M:%S'),
         }
 
@@ -143,7 +151,7 @@ class DecisionSignal:
             'code': self.code,
             'name': self.name,
             'sector': self.sector,
-            'signal_type': self.signal_type.name,
+            'signal_type': self.signal_type.name if hasattr(self.signal_type, 'name') else str(self.signal_type),
             'priority': self.priority,
             'suggest_price': round(self.suggest_price, 3),
             'current_price': round(self.current_price, 3),
@@ -155,7 +163,7 @@ class DecisionSignal:
             'reason': self.reason,
             'leader_code': self.leader_code,
             'is_leader': self.is_leader,
-            'created_at': self.created_at.strftime('%H:%M:%S'),
+            'created_at': self.created_at.strftime('%H:%M:%S') if self.created_at else "",
             'status': self.status,
         }
 
@@ -192,6 +200,8 @@ class SectorFocusMap:
         self._bidding_scores: Dict[str, float] = {}
         # 55188 ext_data DataFrame
         self._ext_df: Optional[pd.DataFrame] = None
+        self._zhuli_rank_map: Dict[str, int] = {}
+        self._hot_rank_map: Dict[str, int] = {}
         self._last_update: Optional[datetime] = None
         # v2: 来自 detector 的完整个股快照 {code: snap_dict}
         self._detector_stock_snap: Dict[str, dict] = {}
@@ -203,12 +213,46 @@ class SectorFocusMap:
         with self._lock:
             self._bidding_scores.update(scores)
 
+    def load_55188_cache(self):
+        """[NEW] 从 scraper_55188 自动加载人气与主力排名缓存"""
+        try:
+            from scraper_55188 import load_cache
+            df = load_cache()
+            if df is not None and not df.empty:
+                self.inject_ext_data(df)
+                logger.debug(f"[SectorFocusMap] 55188 cache loaded: {len(df)} rows")
+        except Exception as e:
+            logger.debug(f"load_55188_cache failed: {e}")
+
     def inject_ext_data(self, df: pd.DataFrame):
-        """注入 55188 综合数据"""
+        """注入 55188 综合数据 (主力排名/人气排名)"""
         with self._lock:
             self._ext_df = df
+            # 预处理排名映射提升查询效率
+            if not df.empty and 'code' in df.columns:
+                self._zhuli_rank_map = df.set_index('code')['zhuli_rank'].to_dict() if 'zhuli_rank' in df.columns else {}
+                self._hot_rank_map = df.set_index('code')['hot_rank'].to_dict() if 'hot_rank' in df.columns else {}
+            else:
+                self._zhuli_rank_map = {}
+                self._hot_rank_map = {}
 
     # ── v2 核心注入：直接从 detector 灌入板块图 ──────────────────────────────
+
+    def _clean_sector_name(self, name: str) -> str:
+        """[FIX] 清洗板块名称：去除尾部分号与特殊垃圾字符"""
+        if not name: return ""
+        if pd.isna(name): return ""
+        name = str(name).strip('; ').strip()
+        # 黑名单过滤（乱码或占位符）
+        if name in ('0', ';', '--', '-', '.', 'nan', 'None', ''):
+            return ""
+        # 长度保护（过长的可能是爬虫解析失败的堆叠字符串）
+        # [MOD] 放宽到 50，防止复合概念被误杀
+        if len(name) > 50:
+            return ""
+        return name
+
+
 
     def inject_detector_sectors(
         self,
@@ -230,7 +274,8 @@ class SectorFocusMap:
             new_code_sector: Dict[str, str] = {}
 
             for sec in active_sectors:
-                sname = sec.get('sector', '')
+                # [FIX] 对板块名称进行清洗和过滤
+                sname = self._clean_sector_name(sec.get('sector', ''))
                 if not sname:
                     continue
 
@@ -420,11 +465,40 @@ class SectorFocusMap:
 
         result: List[SectorHeat] = []
         for _, row in sectors_raw.sort_values('heat_score', ascending=False).head(20).iterrows():
-            sname = row['name']
-            sec_df = df[df['category'] == sname].copy()
+            # [FIX] 对降级路径的板块名称进行清洗
+            sname = self._clean_sector_name(row['name'])
+            if not sname:
+                continue
+            
+            sec_df = df[df['category'] == row['name']].copy() # 注意聚合还是用原始 key
             if sec_df.empty:
                 continue
             leader_code, leader_name, leader_pct, followers = self._identify_leader(sec_df, bidding, det_snap)
+            
+            # [FIX] 在 fallback 降级聚合路径中同步补充 follower_detail 逻辑，防丢失明细
+            follower_detail = []
+            for f_code in followers[:MAX_FOLLOWERS_PER_SECTOR]:
+                if not f_code: continue
+                # 提取基本信息
+                f_pct = 0.0
+                if f_code in det_snap:
+                    f_pct = float(det_snap[f_code].get('pct', 0.0))
+                else:
+                    try:
+                        f_pct = float(sec_df.loc[sec_df['code'] == f_code, 'percent'].iloc[0])
+                    except: pass
+                
+                f_name = f_code
+                try:
+                    f_name = str(sec_df.loc[sec_df['code'] == f_code, 'name'].iloc[0])
+                except: pass
+                
+                follower_detail.append({
+                    'code': str(f_code),
+                    'name': str(f_name),
+                    'pct': float(f_pct)
+                })
+
             heat = SectorHeat(
                 name=sname,
                 heat_score=float(row['heat_score']),
@@ -436,14 +510,15 @@ class SectorFocusMap:
                 leader_name=leader_name,
                 leader_change_pct=leader_pct,
                 follower_codes=followers,
+                follower_detail=follower_detail,
                 updated_at=datetime.now(),
             )
             result.append(heat)
 
         with self._lock:
+            # [FIX] 允许覆盖更新：确保手动执行时，计算出的新热度、新龙头能实时刷新到 map 中
             for h in result:
-                if h.name not in self._sector_map:
-                    self._sector_map[h.name] = h
+                self._sector_map[h.name] = h
             for h in result:
                 self._code_sector[h.leader_code] = h.name
                 for fc in h.follower_codes:
@@ -503,6 +578,11 @@ class SectorFocusMap:
         """获取 detector 快照中的个股数据（含 klines/pct_diff/dff）"""
         with self._lock:
             return self._detector_stock_snap.get(code)
+
+    def get_stock_ranks(self, code: str) -> Tuple[int, int]:
+        """获取 55188 排名 (主力排名, 人气排名)"""
+        with self._lock:
+            return self._zhuli_rank_map.get(code, 9999), self._hot_rank_map.get(code, 9999)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,12 +692,15 @@ class IntradayPullbackDetector:
         sector_name: str,
         pct_diff: float = 0.0,
         dff: float = 0.0,
+        index_pct: float = 0.0,  # [NEW] 指数涨跌幅
+        ranks: Tuple[int, int] = (9999, 9999), # [NEW] (主力排名, 人气排名)
+        ignore_cooldown: bool = False, # [NEW] 手动触发时绕过冷却时间
     ) -> Optional[DecisionSignal]:
         try:
             return self._check(
                 code, name, current_price, day_high, vwap,
                 vol_ratio, prev_close, last_5min_prices, sector_name,
-                pct_diff, dff,
+                pct_diff, dff, index_pct, ranks, ignore_cooldown
             )
         except Exception as e:
             logger.debug(f"[Pullback] scan error {code}: {e}")
@@ -636,10 +719,15 @@ class IntradayPullbackDetector:
         sector: str,
         pct_diff: float,
         dff: float,
+        index_pct: float = 0.0,
+        ranks: Tuple[int, int] = (9999, 9999),
+        ignore_cooldown: bool = False,
     ) -> Optional[DecisionSignal]:
         with self._lock:
             last = self._triggered.get(code)
-        if last and (datetime.now() - last).seconds < self._cooldown_sec:
+        
+        # [MOD] 手动强制执行模式忽略冷却时间
+        if not ignore_cooldown and last and (datetime.now() - last).seconds < self._cooldown_sec:
             return None
 
         if price <= 0 or day_high <= 0:
@@ -710,6 +798,45 @@ class IntradayPullbackDetector:
 
         with self._lock:
             self._triggered[code] = datetime.now()
+
+        # ─────────────────────────────────────────────────────────
+        # §D  [NEW] 外部提权与大盘逆势策略逻辑
+        # ─────────────────────────────────────────────────────────
+        zhuli_rank, hot_rank = ranks
+        priority_bonus = 0
+        extra_reason = []
+
+        # 1. 55188 人气/主力提权
+        if zhuli_rank <= 100:
+            priority_bonus += 15
+            extra_reason.append(f"[主力榜{zhuli_rank}]")
+        elif zhuli_rank <= 300:
+            priority_bonus += 5
+            
+        if hot_rank <= 50:
+            priority_bonus += 12
+            extra_reason.append(f"[人气榜{hot_rank}]")
+        elif hot_rank <= 150:
+            priority_bonus += 5
+
+        # 2. 大盘逆势差异性策略 (Divergence / Relative Strength)
+        # 策略定义：大盘不给力时个股显露真金 (Alpha 挖掘)
+        if index_pct < -0.3 and pct_diff > 0.5:
+            # 大盘跌，个股逆势涨超过0.5% (强力逆势)
+            priority_bonus += 15
+            extra_reason.append("📈 逆势领涨")
+        elif index_pct < 0.2 and pct_diff > 2.0:
+            # 大盘平或微涨，个股暴力拉升 (独立强攻)
+            priority_bonus += 10
+            extra_reason.append("🛡️ 独立强攻")
+        elif index_pct > 0.8 and pct_diff < 0.2:
+            # 大盘大涨，个股滞涨 (弱于大盘，减分)
+            priority_bonus -= 10
+        
+        # 应用提权
+        priority = min(100, int(priority + priority_bonus))
+        if extra_reason:
+            reason = " ".join(extra_reason) + " " + reason
 
         return DecisionSignal(
             code=code,
@@ -880,6 +1007,8 @@ class SectorFocusController:
         self._bidding_scores: Dict[str, float] = {}
         self._hot_rank_map: Dict[str, int] = {}
         self._df_realtime: Optional[pd.DataFrame] = None
+        self._index_pct_diff: float = 0.0          # [NEW] 指数基准涨幅
+        self._last_55188_sync: float = 0.0        # [NEW] 55188 同步节拍
 
         self._last_full_update: float = 0.0
         self._full_update_interval = 30.0   # 全量计算30秒一次
@@ -959,30 +1088,53 @@ class SectorFocusController:
             logger.warning(f"[SectorFocusController] inject_from_detector failed: {e}")
             return False
 
+    def inject_market_indices(self, indices: Dict[str, Any]):
+        """注入大盘指数数据，用于计算逆势差异性 [NEW]"""
+        try:
+            # 优先采用 创业板(深) 或 上证 作为基准
+            sh_pct = float(indices.get('sh000001', 0.0) or 0.0)
+            cyb_pct = float(indices.get('sz399006', 0.0) or 0.0)
+            
+            with self._lock:
+                # 选取波幅较大的指数作为日内基准
+                self._index_pct_diff = cyb_pct if abs(cyb_pct) > abs(sh_pct) else sh_pct
+        except Exception:
+            pass
+
     # ── 主循环 Tick（在后台线程中周期性调用）────────────────────────────────
 
-    def tick(self):
+    def tick(self, force: bool = False):
         """
         单次行情 Tick 处理
+        - 周期性同步 55188 缓存
         - 节流30秒做全量板块热力计算（降级通道）
         - 实时扫描回踩买点并推入决策队列
         """
         now = time.time()
+        # [MOD] 手动或周期同步 55188 缓存数据
+        if force or (now - self._last_55188_sync > 300):
+            self.sector_map.load_55188_cache()
+            with self._lock:
+                self._last_55188_sync = now
+        
+        # ... (数据准备)
         df = None
         with self._lock:
             df = self._df_realtime
             bidding = dict(self._bidding_scores)
             hot_rank = dict(self._hot_rank_map)
 
-        # 全量板块热力（30秒节流，仅在 sector_map 中没有 detector 数据时启用降级通道）
-        if now - self._last_full_update >= self._full_update_interval:
+        # [MOD] 强制模式下直接进入板块热力计算，不查 30s 节流；且在 force=True 时必然执行降级聚合计算以确保 UI 响应
+        if force or (now - self._last_full_update >= self._full_update_interval):
             try:
                 if df is not None and not df.empty:
                     with self.sector_map._lock:
                         has_detector_data = bool(self.sector_map._sector_map)
-                    if not has_detector_data:
-                        # 降级：从 df_realtime 聚合
+                    
+                    # [FIX] 如果是手动强制运行 (force=True)，则必须重新聚合计算一遍本地数据，否则 UI 点击 [引擎执行] 没反应
+                    if force or not has_detector_data:
                         self.sector_map.update(df)
+                    
                     self.star_engine.confirm_leaders(df, bidding, hot_rank)
                 self._last_full_update = now
             except Exception as e:
@@ -990,11 +1142,12 @@ class SectorFocusController:
 
         # 实时扫描回踩买点
         if df is not None and not df.empty:
-            self._scan_pullbacks(df)
+            self._scan_pullbacks(df, force=force)
 
-    def _scan_pullbacks(self, df: pd.DataFrame):
+    def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
-        hot_sectors = self.sector_map.get_hot_sectors(top_n=8)
+        # [MOD] 扩大扫描范围：从 8 扩大到 15，防止排名靠后的优质板块丢股
+        hot_sectors = self.sector_map.get_hot_sectors(top_n=15)
 
         for sh in hot_sectors:
             # 龙头自身 + 跟进股
@@ -1004,11 +1157,21 @@ class SectorFocusController:
                 if not code:
                     continue
                 try:
-                    self._scan_one_v2(code, sh)
+                    # 传入当前指数状态与 55188 排名数据
+                    idx_pct = getattr(self, '_index_pct_diff', 0.0)
+                    ranks = self.sector_map.get_stock_ranks(code)
+                    self._scan_one_v2(code, sh, index_pct=idx_pct, ranks=ranks, force=force)
                 except Exception as e:
                     logger.debug(f"[scan_pullbacks] {code}: {e}")
 
-    def _scan_one_v2(self, code: str, sh: SectorHeat):
+    def manual_run(self):
+        """[NEW] 手动强制执行引擎全链路逻辑（用于 UI 触发/调试测试）"""
+        logger.info("⚡ [SectorFocusController] 手动强制触发全链路重算...")
+        # 强制下发 force=True 以绕过内部所有节流
+        self.tick(force=True)
+        logger.info("✅ [SectorFocusController] 手动全链路刷新完成")
+
+    def _scan_one_v2(self, code: str, sh: SectorHeat, index_pct: float = 0.0, ranks: Tuple[int, int] = (9999, 9999), force: bool = False):
         """
         [v2] 对单只股扫描买点，优先使用 detector 快照数据（含真实 klines）
         """
@@ -1077,6 +1240,9 @@ class SectorFocusController:
             sector_name=sh.name,
             pct_diff=pct_diff,
             dff=dff,
+            index_pct=index_pct,
+            ranks=ranks,
+            ignore_cooldown=force, # [MOD] 透传强制扫描标志，忽略冷却周期
         )
 
         if signal:

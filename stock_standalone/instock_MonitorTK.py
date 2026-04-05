@@ -3820,6 +3820,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.tk_dispatch_queue.put(lambda s=final_stats: self._signal_dashboard_win.update_market_stats(s))
                         
                         try:
+                            # [NEW] 将指数数据注入交易决策引擎，支持逆势策略计算
+                            from sector_focus_engine import get_focus_controller
+                            ctrl = get_focus_controller()
+                            if ctrl:
+                                ctrl.inject_market_indices(indices_data)
+                                
                             from signal_bus import get_signal_bus, SignalBus
                             get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", final_stats)
                         except: pass
@@ -4540,6 +4546,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #         time.sleep(0.2)
             #     else:
             #         continue
+            
             vis_enabled = getattr(self, '_vis_enabled_cache', True)
             viz_ready   = getattr(self, '_viz_ready', False)
             proc_alive  = hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()
