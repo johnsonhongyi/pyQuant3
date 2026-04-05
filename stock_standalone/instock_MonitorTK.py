@@ -3600,10 +3600,47 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 panel.on_realtime_data_arrived(full_df)
                             except Exception as e:
                                 logger.error(f"Panel sync failed: {e}")
-                        
+
+                        # ✅ [盘中交易引擎 v2] 直接从 BiddingMomentumDetector 完整注入
+                        try:
+                            _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
+                            if lt_now - _fc_last >= 30.0 and full_df is not None and not full_df.empty:
+                                from sector_focus_engine import get_focus_controller
+                                fc = get_focus_controller()
+
+                                # ① 实时行情（降级通道备用）
+                                fc.inject_realtime(full_df)
+
+                                # ② 核心：直接从已运算完毕的 BiddingMomentumDetector 注入
+                                #    一次调用完成：板块图+个股快照+竞价分+comparison_interval=60m
+                                _sbp = getattr(self, 'sector_bidding_panel', None)
+                                _detector = getattr(_sbp, 'detector', None) if _sbp else None
+                                if _detector is not None:
+                                    fc.inject_from_detector(_detector)
+                                else:
+                                    # 降级：无 panel，仅用 df_all 聚合
+                                    logger.debug("[SectorFocusEngine] no detector, using df fallback")
+
+                                # ③ 55188 外部数据（主力/题材/人气）
+                                try:
+                                    from scraper_55188 import get_cache_df as _55188_cache
+                                    _ext_df = _55188_cache()
+                                    if _ext_df is not None and not _ext_df.empty:
+                                        fc.inject_ext_data(_ext_df)
+                                except Exception:
+                                    pass
+
+                                # ④ 后台 Tick（板块热力确认+买点扫描+决策队列更新）
+                                self.executor.submit(fc.tick)
+                                self._focus_ctrl_last_inject = lt_now
+                        except Exception as _fe:
+                            logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
+
+
                         self._last_low_freq_ts = lt_now
 
                 self._put_deduped_task("low_freq_ui_sync", _low_freq_sync_tasks)
+
 
                 # ⭐ 交易 GUI 同步 (轻量级)
                 if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:

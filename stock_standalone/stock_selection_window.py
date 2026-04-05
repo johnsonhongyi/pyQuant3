@@ -14,6 +14,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ✅ 盘中交易引擎（懒加载，避免启动依赖）
+try:
+    from sector_focus_engine import get_focus_controller, SectorFocusController
+    from trade_gateway import get_trade_gateway, MockTradeGateway
+    TRADING_ENGINE_AVAILABLE = True
+except ImportError:
+    TRADING_ENGINE_AVAILABLE = False
+    logger.warning("⚠️ 盘中交易引擎未加载（sector_focus_engine / trade_gateway 缺失）")
+
 # ✅ 股票特征标记模块导入
 try:
     from stock_feature_marker import StockFeatureMarker
@@ -73,6 +82,16 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self._column_widths_cached = False
         self._rendering_active = False # 防止并发渲染
         self._render_token = 0         # 标识当前渲染批次
+
+        # ✅ 盘中交易引擎引用
+        self._focus_ctrl: Optional['SectorFocusController'] = None
+        self._trade_gw: Optional['MockTradeGateway'] = None
+        if TRADING_ENGINE_AVAILABLE:
+            try:
+                self._focus_ctrl = get_focus_controller()
+                self._trade_gw   = get_trade_gateway()
+            except Exception as _e:
+                logger.warning(f"⚠️ 引擎初始化失败: {_e}")
         
         self._init_ui()
         
@@ -240,12 +259,18 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # 绑定双击顶部工具栏自动调整窗口大小
         _ = toolbar.bind("<Double-1>", self._on_toolbar_double_click)
 
-        # --- Main List ---
-        # Columns
+        # --- Main Notebook（选股表 + 板块聚焦 + 决策队列）---
+        self._notebook = ttk.Notebook(self)
+        self._notebook.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # ── Tab 1: 策略选股表（原有，保持不变）──────────────────────────────────
+        tab_select = tk.Frame(self._notebook)
+        self._notebook.add(tab_select, text="📋 策略选股")
+
         columns = ("code", "name", "grade", "tqi", "status", "score", "rank", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
-        tree_frame = tk.Frame(self)
-        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        tree_frame = tk.Frame(tab_select)
+        tree_frame.pack(fill="both", expand=True)
         
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
@@ -307,6 +332,20 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click) # 🚀 [NEW] 双击联动标记
         self.tree.bind("<Button-3>", self.show_context_menu)
+
+        # ── Tab 2: 板块聚焦（盘中热力）────────────────────────────────────────
+        tab_sector = tk.Frame(self._notebook)
+        self._notebook.add(tab_sector, text="🔥 板块聚焦")
+        self._init_sector_tab(tab_sector)
+
+        # ── Tab 3: 实时决策队列 ───────────────────────────────────────────────
+        tab_decision = tk.Frame(self._notebook)
+        self._notebook.add(tab_decision, text="🎯 实时决策")
+        self._init_decision_tab(tab_decision)
+
+        # 定时刷新（切换到交易相关Tab时才真正更新）
+        self._focus_refresh_id: Optional[str] = None
+        self._schedule_focus_refresh()
 
     def _update_hotspots(self):
         """更新今日热点按钮"""
@@ -1395,4 +1434,654 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
         self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# StockSelectionWindow — 盘中交易新能力（板块聚焦 Tab + 实时决策 Tab）
+# 以 monkey-patch 形式追加到类，保持文件结构不变
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _init_sector_tab(self, parent: tk.Frame):
+    """
+    板块聚焦 Tab 初始化
+    ─────────────────────
+    上方：板块热力排行榜（实时更新）
+    下方：选中板块的成员股详情 + 龙头标识
+    """
+    # ── 顶部信息行 ───────────────────────────────────────────────────────────
+    info_bar = tk.Frame(parent, bg="#1a2332")
+    info_bar.pack(fill="x", pady=2)
+
+    self._sector_status_lbl = tk.Label(
+        info_bar, text="⏸ 等待数据...",
+        bg="#1a2332", fg="#aaaaaa", font=("Arial", 9)
+    )
+    self._sector_status_lbl.pack(side="left", padx=8)
+
+    tk.Button(
+        info_bar, text="⟳ 立即刷新",
+        bg="#2c3e50", fg="#00cc88", font=("Arial", 9),
+        relief="flat", pady=1,
+        command=self._force_refresh_sector,
+    ).pack(side="right", padx=8)
+
+    # ── 板块热力排行（上半区）────────────────────────────────────────────────
+    paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
+    paned.pack(fill="both", expand=True)
+
+    top_frame = tk.Frame(paned, bg="#0e1621")
+    paned.add(top_frame, height=220)
+
+    sector_cols = ("rank", "name", "heat", "bid_score", "zt_count", "leader_code", "leader_name", "leader_pct", "followers")
+    self._sector_tree = ttk.Treeview(top_frame, columns=sector_cols, show="headings", height=8)
+
+    sec_headers = {
+        "rank": "排名", "name": "板块名称", "heat": "热力分",
+        "bid_score": "竞价均分", "zt_count": "涨停数",
+        "leader_code": "龙头代码", "leader_name": "龙头名",
+        "leader_pct": "龙头涨幅%", "followers": "跟进股",
+    }
+    for col, text in sec_headers.items():
+        self._sector_tree.heading(col, text=text, command=lambda c=col: self._sort_sector_tree(c))
+        self._sector_tree.column(col, anchor="center", width=80)
+
+    self._sector_tree.column("name", width=120, stretch=False)
+    self._sector_tree.column("followers", width=200, stretch=True)
+    self._sector_tree.column("heat", width=65, stretch=False)
+
+    self._sector_tree.tag_configure("hot1", background="#3a1a1a", foreground="#ff4444")  # 第1名
+    self._sector_tree.tag_configure("hot2", background="#2a1f0a", foreground="#ff9900")  # 第2名
+    self._sector_tree.tag_configure("hot3", background="#1a2a1a", foreground="#44cc44")  # 第3名
+    self._sector_tree.tag_configure("normal", background="#0e1621", foreground="#cccccc")
+
+    sec_vsb = ttk.Scrollbar(top_frame, orient="vertical", command=self._sector_tree.yview)
+    self._sector_tree.configure(yscroll=sec_vsb.set)
+    self._sector_tree.grid(row=0, column=0, sticky="nsew")
+    sec_vsb.grid(row=0, column=1, sticky="ns")
+    top_frame.grid_rowconfigure(0, weight=1)
+    top_frame.grid_columnconfigure(0, weight=1)
+
+    self._sector_tree.bind("<<TreeviewSelect>>", self._on_sector_selected)
+
+    # ── 成员股详情（下半区）──────────────────────────────────────────────────
+    bottom_frame = tk.Frame(paned, bg="#0e1621")
+    paned.add(bottom_frame, height=160)
+
+    self._sector_detail_lbl = tk.Label(
+        bottom_frame, text="← 点击板块查看成员股",
+        bg="#0e1621", fg="#666666", font=("Arial", 9, "italic"),
+        anchor="w",
+    )
+    self._sector_detail_lbl.pack(fill="x", padx=5, pady=2)
+
+    member_cols = ("code", "name", "role", "percent", "bid_score", "vol_ratio", "pullback_signal")
+    self._member_tree = ttk.Treeview(bottom_frame, columns=member_cols, show="headings", height=5)
+
+    mem_headers = {
+        "code": "代码", "name": "名称", "role": "角色",
+        "percent": "涨幅%", "bid_score": "竞价分",
+        "vol_ratio": "量比", "pullback_signal": "买点信号",
+    }
+    for col, text in mem_headers.items():
+        self._member_tree.heading(col, text=text)
+        self._member_tree.column(col, anchor="center", width=90)
+    self._member_tree.column("name", width=80, stretch=False)
+    self._member_tree.column("pullback_signal", width=200, stretch=True)
+
+    self._member_tree.tag_configure("leader", background="#3a1a00", foreground="#ff8844")
+    self._member_tree.tag_configure("follower", background="#001a2a", foreground="#44aaff")
+    self._member_tree.tag_configure("signal", background="#001a10", foreground="#44ff88")
+
+    mem_vsb = ttk.Scrollbar(bottom_frame, orient="vertical", command=self._member_tree.yview)
+    self._member_tree.configure(yscroll=mem_vsb.set)
+    self._member_tree.pack(side="left", fill="both", expand=True)
+    mem_vsb.pack(side="right", fill="y")
+
+    self._member_tree.bind("<Double-1>", self._on_member_double_click)
+
+
+def _init_decision_tab(self, parent: tk.Frame):
+    """
+    实时决策队列 Tab 初始化
+    ────────────────────────
+    上方：持仓汇总条（资金风控状态）
+    中部：待操作信号列表（优先级排序）
+    下方：今日持仓 + 交易流水分栏
+    """
+    # ── 风控状态条 ───────────────────────────────────────────────────────────
+    risk_bar = tk.Frame(parent, bg="#1a0010", pady=3)
+    risk_bar.pack(fill="x")
+
+    self._risk_status_lbl = tk.Label(
+        risk_bar, text="🛡 风控: 正常 | 持仓: 0/10 | 今日盈亏: --",
+        bg="#1a0010", fg="#aaaaaa", font=("Arial", 9, "bold")
+    )
+    self._risk_status_lbl.pack(side="left", padx=8)
+
+    btn_frame = tk.Frame(risk_bar, bg="#1a0010")
+    btn_frame.pack(side="right", padx=5)
+    tk.Button(btn_frame, text="🗑 清除已完结", bg="#2c1a00", fg="#cc8800",
+              font=("Arial", 8), relief="flat", pady=1,
+              command=self._clear_done_signals).pack(side="left", padx=2)
+    tk.Button(btn_frame, text="📤 一键卖出全部", bg="#3a0000", fg="#ff4444",
+              font=("Arial", 8), relief="flat", pady=1,
+              command=self._sell_all_positions).pack(side="left", padx=2)
+
+    # ── 主体分栏 ─────────────────────────────────────────────────────────────
+    paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
+    paned.pack(fill="both", expand=True)
+
+    # 上半：决策信号队列
+    signal_frame = tk.LabelFrame(paned, text="  🎯 实时买点决策队列（按优先级排序）  ",
+                                  bg="#0a0f1a", fg="#00cc88", font=("Arial", 9, "bold"))
+    paned.add(signal_frame, height=200)
+
+    sig_cols = ("priority", "code", "name", "sector", "signal_type", "suggest_price",
+                "current_price", "change_pct", "sector_heat", "reason", "status")
+    self._signal_tree = ttk.Treeview(signal_frame, columns=sig_cols, show="headings", height=7)
+
+    sig_headers = {
+        "priority": "优先级", "code": "代码", "name": "名称",
+        "sector": "板块", "signal_type": "信号类型",
+        "suggest_price": "建议价", "current_price": "现价",
+        "change_pct": "涨幅%", "sector_heat": "板块热度",
+        "reason": "触发原因", "status": "状态",
+    }
+    for col, text in sig_headers.items():
+        self._signal_tree.heading(col, text=text)
+        self._signal_tree.column(col, anchor="center", width=70)
+    self._signal_tree.column("reason", width=250, stretch=True)
+    self._signal_tree.column("sector", width=100, stretch=False)
+    self._signal_tree.column("name", width=75, stretch=False)
+
+    self._signal_tree.tag_configure("high", background="#1a2a00", foreground="#88ff44")   # 高优先级
+    self._signal_tree.tag_configure("medium", background="#001a2a", foreground="#44aaff") # 中
+    self._signal_tree.tag_configure("done", background="#1a1a1a", foreground="#555555")   # 已完结
+
+    sig_vsb = ttk.Scrollbar(signal_frame, orient="vertical", command=self._signal_tree.yview)
+    self._signal_tree.configure(yscroll=sig_vsb.set)
+    self._signal_tree.grid(row=0, column=0, sticky="nsew")
+    sig_vsb.grid(row=0, column=1, sticky="ns")
+    signal_frame.grid_rowconfigure(0, weight=1)
+    signal_frame.grid_columnconfigure(0, weight=1)
+
+    # 按钮行
+    btn_row = tk.Frame(signal_frame, bg="#0a0f1a")
+    btn_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=2)
+    tk.Button(btn_row, text="📈 模拟买入（选中）", bg="#003a00", fg="#44ff88",
+              font=("Arial", 9, "bold"), relief="flat", pady=2,
+              command=self._mock_buy_selected).pack(side="left", padx=5)
+    tk.Button(btn_row, text="🚫 忽略（选中）", bg="#2a2a2a", fg="#888888",
+              font=("Arial", 9), relief="flat", pady=2,
+              command=self._ignore_selected_signal).pack(side="left", padx=3)
+
+    self._signal_tree.bind("<Double-1>", lambda e: self._mock_buy_selected())
+
+    # 下半：持仓 + 流水分栏
+    bottom_nb = ttk.Notebook(paned)
+    paned.add(bottom_nb, height=180)
+
+    # 持仓 Tab
+    pos_frame = tk.Frame(bottom_nb, bg="#0a0f1a")
+    bottom_nb.add(pos_frame, text="📊 当前持仓")
+
+    pos_cols = ("code", "name", "sector", "entry_price", "current_price",
+                "pnl_pct", "pnl_value", "shares", "stop_loss", "entry_time")
+    self._pos_tree = ttk.Treeview(pos_frame, columns=pos_cols, show="headings", height=5)
+    pos_headers = {
+        "code":"代码","name":"名称","sector":"板块",
+        "entry_price":"入场价","current_price":"现价",
+        "pnl_pct":"盈亏%","pnl_value":"盈亏额",
+        "shares":"股数","stop_loss":"止损价","entry_time":"入场时间",
+    }
+    for col, text in pos_headers.items():
+        self._pos_tree.heading(col, text=text)
+        self._pos_tree.column(col, anchor="center", width=80)
+    self._pos_tree.column("name", width=75, stretch=False)
+    self._pos_tree.column("sector", width=100, stretch=False)
+
+    self._pos_tree.tag_configure("profit", foreground="#44ff88")
+    self._pos_tree.tag_configure("loss",   foreground="#ff4444")
+    self._pos_tree.tag_configure("flat",   foreground="#cccccc")
+
+    pos_vsb = ttk.Scrollbar(pos_frame, orient="vertical", command=self._pos_tree.yview)
+    self._pos_tree.configure(yscroll=pos_vsb.set)
+    self._pos_tree.pack(side="left", fill="both", expand=True)
+    pos_vsb.pack(side="right", fill="y")
+
+    tk.Button(pos_frame, text="📉 卖出选中", bg="#3a0000", fg="#ff6666",
+              font=("Arial", 9), relief="flat",
+              command=self._mock_sell_selected).pack(side="bottom", pady=3)
+
+    # 流水 Tab
+    log_frame = tk.Frame(bottom_nb, bg="#0a0f1a")
+    bottom_nb.add(log_frame, text="📜 今日流水")
+
+    log_cols = ("time", "action", "code", "name", "price", "shares", "amount", "pnl_pct", "reason")
+    self._log_tree = ttk.Treeview(log_frame, columns=log_cols, show="headings", height=5)
+    log_headers = {
+        "time":"时间","action":"操作","code":"代码","name":"名称",
+        "price":"价格","shares":"股数","amount":"金额",
+        "pnl_pct":"盈亏%","reason":"原因",
+    }
+    for col, text in log_headers.items():
+        self._log_tree.heading(col, text=text)
+        self._log_tree.column(col, anchor="center", width=80)
+    self._log_tree.column("reason", width=200, stretch=True)
+    self._log_tree.tag_configure("buy",  foreground="#44aaff")
+    self._log_tree.tag_configure("sell_profit", foreground="#44ff88")
+    self._log_tree.tag_configure("sell_loss",   foreground="#ff4444")
+
+    log_vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self._log_tree.yview)
+    self._log_tree.configure(yscroll=log_vsb.set)
+    self._log_tree.pack(side="left", fill="both", expand=True)
+    log_vsb.pack(side="right", fill="y")
+
+
+def _schedule_focus_refresh(self):
+    """每15秒刷新一次两个盘中Tab（仅当窗口存在时）"""
+    try:
+        self._refresh_focus_tabs()
+        self._focus_refresh_id = self.after(15000, self._schedule_focus_refresh)
+    except tk.TclError:
+        pass  # 窗口已销毁
+
+
+def _refresh_focus_tabs(self):
+    """刷新板块聚焦 + 实时决策 Tab 的数据"""
+    self._refresh_sector_tab()
+    self._refresh_decision_tab()
+
+
+def _refresh_sector_tab(self):
+    """更新板块热力排行表"""
+    if not hasattr(self, '_sector_tree'):
+        return
+    if not self._focus_ctrl:
+        self._sector_status_lbl.config(text="⏸ 交易引擎未初始化", fg="#666666")
+        return
+
+    try:
+        hot_sectors = self._focus_ctrl.get_hot_sectors(top_n=20)
+        if not hot_sectors:
+            self._sector_status_lbl.config(
+                text="⏸ 暂无板块数据（等待竞价开始或行情推送）", fg="#888888"
+            )
+            return
+
+        # 清空并重填（板块数量少，不需要Diff模型）
+        self._sector_tree.delete(*self._sector_tree.get_children())
+
+        for i, s in enumerate(hot_sectors, 1):
+            tag = "hot1" if i == 1 else ("hot2" if i == 2 else ("hot3" if i == 3 else "normal"))
+            followers_str = " / ".join(s.get('follower_codes', []))
+            self._sector_tree.insert("", "end", iid=str(i), values=(
+                f"#{i}",
+                s.get('name', ''),
+                f"{s.get('heat_score', 0):.1f}",
+                f"{s.get('bidding_score', 0):.2f}",
+                s.get('zt_count', 0),
+                s.get('leader_code', ''),
+                s.get('leader_name', ''),
+                f"{s.get('leader_change_pct', 0):+.2f}%",
+                followers_str,
+            ), tags=(tag,))
+
+        now_str = datetime.now().strftime('%H:%M:%S')
+        self._sector_status_lbl.config(
+            text=f"✅ 已更新 {now_str} | 监控板块: {len(hot_sectors)} 个",
+            fg="#00cc88"
+        )
+    except Exception as e:
+        logger.debug(f"[sector_tab] refresh error: {e}")
+
+
+def _on_sector_selected(self, event=None):
+    """点击板块行，展示该板块成员股详情"""
+    if not hasattr(self, '_member_tree') or not self._focus_ctrl:
+        return
+    sel = self._sector_tree.selection()
+    if not sel:
+        return
+
+    try:
+        row_idx = int(sel[0]) - 1
+        hot_sectors = self._focus_ctrl.get_hot_sectors(top_n=20)
+        if row_idx < 0 or row_idx >= len(hot_sectors):
+            return
+
+        sh = hot_sectors[row_idx]
+        sector_name = sh.get('name', '')
+        self._sector_detail_lbl.config(
+            text=f"🔥 {sector_name}  |  龙头: {sh.get('leader_name','')}({sh.get('leader_code','')})"
+        )
+
+        # 从实时行情中取该板块成员
+        self._member_tree.delete(*self._member_tree.get_children())
+
+        df_rt = None
+        if self.selector and hasattr(self.selector, 'df_all_realtime'):
+            df_rt = self.selector.df_all_realtime
+
+        if df_rt is None or df_rt.empty:
+            return
+
+        # 筛选该板块
+        col = 'category'
+        if col not in df_rt.columns:
+            return
+
+        members = df_rt[df_rt[col] == sector_name].copy()
+        if members.empty:
+            return
+
+        members['_pct'] = pd.to_numeric(members.get('percent', 0), errors='coerce').fillna(0)
+        members = members.sort_values('_pct', ascending=False)
+
+        leader_code = sh.get('leader_code', '')
+        followers = sh.get('follower_codes', [])
+        decision_codes = {s['code'] for s in self._focus_ctrl.get_decision_queue()}
+
+        for _, row in members.iterrows():
+            code = str(row.get('code', ''))
+            name = str(row.get('name', ''))
+            pct = float(row.get('percent', row.get('_pct', 0)))
+
+            if code == leader_code:
+                role = "🌟龙头"
+                tag = "leader"
+            elif code in followers:
+                role = "⭐跟进"
+                tag = "follower"
+            else:
+                role = "观察"
+                tag = "normal"
+
+            signal_str = "⚡ 买点!" if code in decision_codes else ""
+            if code in decision_codes:
+                tag = "signal"
+
+            self._member_tree.insert("", "end", iid=code, values=(
+                code, name, role,
+                f"{pct:+.2f}%",
+                f"{row.get('_bid_score', 0):.1f}",
+                f"{row.get('ratio', 1.0):.2f}",
+                signal_str,
+            ), tags=(tag,))
+    except Exception as e:
+        logger.debug(f"[on_sector_selected] error: {e}")
+
+
+def _on_member_double_click(self, event=None):
+    """双击成员股联动主界面 K 线图"""
+    sel = self._member_tree.selection()
+    if not sel:
+        return
+    code = sel[0]
+    if self.sender:
+        try:
+            self.sender.set_stock(code)
+        except Exception:
+            pass
+
+
+def _force_refresh_sector(self):
+    """手动触发板块数据强制更新"""
+    if not self._focus_ctrl:
+        return
+    # 注入当前实时行情并立即刷新
+    if self.selector and hasattr(self.selector, 'df_all_realtime'):
+        df = self.selector.df_all_realtime
+        if not df.empty:
+            self._focus_ctrl.inject_realtime(df)
+    self._refresh_sector_tab()
+
+
+def _sort_sector_tree(self, col: str):
+    """板块列表点击表头排序"""
+    try:
+        items = [(self._sector_tree.set(k, col), k) for k in self._sector_tree.get_children('')]
+        try:
+            items.sort(key=lambda x: float(x[0].replace('%', '').replace('#', '').replace('▲', '').replace('▼', '') or 0), reverse=True)
+        except Exception:
+            items.sort()
+        for idx, (_, k) in enumerate(items):
+            self._sector_tree.move(k, '', idx)
+    except Exception as e:
+        logger.debug(f"_sort_sector_tree: {e}")
+
+
+def _refresh_decision_tab(self):
+    """更新实时决策队列 + 持仓 + 流水"""
+    if not hasattr(self, '_signal_tree'):
+        return
+
+    # ── 决策信号队列 ──────────────────────────────────────────────────────────
+    if self._focus_ctrl:
+        try:
+            signals = self._focus_ctrl.get_decision_queue()
+            existing = {self._signal_tree.set(k, 'code'): k for k in self._signal_tree.get_children()}
+
+            for s in signals:
+                code = s['code']
+                priority = s['priority']
+                tag = "high" if priority >= 70 else ("medium" if priority >= 50 else "normal")
+                if s['status'] in ('已忽略', '已成交'):
+                    tag = "done"
+
+                values = (
+                    priority,
+                    code, s['name'], s['sector'],
+                    s['signal_type'],
+                    s.get('suggest_price', 0),
+                    s.get('current_price', 0),
+                    f"{s.get('change_pct', 0):+.2f}%",
+                    f"{s.get('sector_heat', 0):.1f}",
+                    s.get('reason', ''),
+                    s.get('status', ''),
+                )
+                if code in existing:
+                    self._signal_tree.item(existing[code], values=values, tags=(tag,))
+                else:
+                    self._signal_tree.insert("", "end", iid=code, values=values, tags=(tag,))
+        except Exception as e:
+            logger.debug(f"[decision_tab] signal refresh: {e}")
+
+    # ── 持仓 ──────────────────────────────────────────────────────────────────
+    if self._trade_gw:
+        try:
+            positions = self._trade_gw.get_positions()
+            existing_pos = set(self._pos_tree.get_children())
+            current_codes = set()
+
+            for p in positions:
+                code = p['code']
+                current_codes.add(code)
+                pnl_pct = p['pnl_pct']
+                tag = "profit" if pnl_pct > 0 else ("loss" if pnl_pct < 0 else "flat")
+                values = (
+                    code, p['name'], p['sector'],
+                    p['entry_price'], p['current_price'],
+                    f"{pnl_pct:+.2f}%", f"{p['pnl_value']:+.2f}",
+                    p['shares'], p['stop_loss'], p['entry_time'],
+                )
+                if code in existing_pos:
+                    self._pos_tree.item(code, values=values, tags=(tag,))
+                else:
+                    self._pos_tree.insert("", "end", iid=code, values=values, tags=(tag,))
+
+            for code in (existing_pos - current_codes):
+                self._pos_tree.delete(code)
+
+            # 风控状态条更新
+            summary = self._trade_gw.get_summary()
+            lock_str = "🔴 已锁仓！" if summary['is_locked'] else "🟢 正常"
+            self._risk_status_lbl.config(
+                text=(
+                    f"🛡 风控: {lock_str} | "
+                    f"持仓: {summary['position_count']}/10 | "
+                    f"浮动盈亏: {summary['total_unrealized_pnl']:+.2f} | "
+                    f"日亏损: {summary['daily_loss_pct']:.2f}%"
+                ),
+                fg="#ff4444" if summary['is_locked'] else "#aaaaaa"
+            )
+
+        except Exception as e:
+            logger.debug(f"[decision_tab] position refresh: {e}")
+
+        # ── 今日流水 ──────────────────────────────────────────────────────────
+        try:
+            logs = self._trade_gw.get_today_log()
+            self._log_tree.delete(*self._log_tree.get_children())
+            for i, r in enumerate(reversed(logs)):  # 最新在顶
+                tag = "buy" if r['action'] == "BUY" else (
+                    "sell_profit" if r.get('pnl_pct', 0) >= 0 else "sell_loss"
+                )
+                self._log_tree.insert("", "end", iid=str(i), values=(
+                    r['time'], r['action'], r['code'], r['name'],
+                    r['price'], r['shares'], r['amount'],
+                    f"{r.get('pnl_pct', 0):+.2f}%" if r['action'] == "SELL" else "--",
+                    r.get('reason', ''),
+                ), tags=(tag,))
+        except Exception as e:
+            logger.debug(f"[decision_tab] log refresh: {e}")
+
+
+def _mock_buy_selected(self):
+    """模拟买入：对决策队列中选中的信号执行买入"""
+    if not self._trade_gw:
+        return
+    sel = self._signal_tree.selection()
+    if not sel:
+        return
+    code = sel[0]
+
+    try:
+        signals = self._focus_ctrl.get_decision_queue() if self._focus_ctrl else []
+        sig = next((s for s in signals if s['code'] == code), None)
+        if not sig:
+            return
+
+        price = sig.get('suggest_price') or sig.get('current_price', 0)
+        if price <= 0:
+            messagebox.showwarning("提示", f"{code} 价格异常，无法买入")
+            return
+
+        ok, msg = self._trade_gw.submit_buy(
+            code=code, name=sig['name'],
+            sector=sig.get('sector', ''),
+            price=price,
+            strategy_tag=sig.get('signal_type', ''),
+            reason=sig.get('reason', ''),
+        )
+
+        if ok:
+            # 更新信号状态
+            if self._focus_ctrl:
+                self._focus_ctrl.decision_queue.update_status(code, "已提交")
+            self._refresh_decision_tab()
+            messagebox.showinfo("模拟买入", msg)
+        else:
+            messagebox.showwarning("买入拒绝", msg)
+    except Exception as e:
+        messagebox.showerror("错误", str(e))
+
+
+def _mock_sell_selected(self):
+    """模拟卖出：对持仓中选中的股票执行卖出"""
+    if not self._trade_gw:
+        return
+    sel = self._pos_tree.selection()
+    if not sel:
+        return
+    code = sel[0]
+
+    # 获取当前价（从实时行情）
+    price = 0.0
+    if self.selector and hasattr(self.selector, 'df_all_realtime'):
+        df = self.selector.df_all_realtime
+        if code in df.index:
+            price = float(df.loc[code].get('trade', df.loc[code].get('price', 0)) or 0)
+
+    if price <= 0:
+        ans = messagebox.askstring("手动输入价格", f"无法获取 {code} 实时价，请手动输入卖出价格：")
+        try:
+            price = float(ans or 0)
+        except Exception:
+            price = 0
+
+    if price <= 0:
+        messagebox.showwarning("提示", "价格无效，取消卖出")
+        return
+
+    ok, msg = self._trade_gw.submit_sell(code, price, reason="手动卖出")
+    if ok:
+        self._refresh_decision_tab()
+        messagebox.showinfo("模拟卖出", msg)
+    else:
+        messagebox.showwarning("卖出失败", msg)
+
+
+def _ignore_selected_signal(self):
+    """忽略选中的决策信号"""
+    sel = self._signal_tree.selection()
+    if not sel or not self._focus_ctrl:
+        return
+    code = sel[0]
+    self._focus_ctrl.decision_queue.update_status(code, "已忽略")
+    self._refresh_decision_tab()
+
+
+def _clear_done_signals(self):
+    """清除已完结的信号"""
+    if self._focus_ctrl:
+        self._focus_ctrl.decision_queue.clear_non_pending()
+    self._refresh_decision_tab()
+
+
+def _sell_all_positions(self):
+    """一键卖出全部持仓"""
+    if not self._trade_gw:
+        return
+    positions = self._trade_gw.get_positions()
+    if not positions:
+        messagebox.showinfo("提示", "当前无持仓")
+        return
+
+    if not messagebox.askyesno("确认", f"确认模拟卖出全部 {len(positions)} 只持仓？"):
+        return
+
+    df_rt = None
+    if self.selector and hasattr(self.selector, 'df_all_realtime'):
+        df_rt = self.selector.df_all_realtime
+
+    for p in positions:
+        code = p['code']
+        price = p['current_price']
+        if df_rt is not None and code in df_rt.index:
+            rt_price = float(df_rt.loc[code].get('trade', 0) or 0)
+            if rt_price > 0:
+                price = rt_price
+        self._trade_gw.submit_sell(code, price, reason="一键清仓")
+
+    self._refresh_decision_tab()
+    messagebox.showinfo("完成", "已执行模拟卖出全部持仓")
+
+
+# 将新方法 monkey-patch 绑定到 StockSelectionWindow 类
+StockSelectionWindow._init_sector_tab       = _init_sector_tab
+StockSelectionWindow._init_decision_tab     = _init_decision_tab
+StockSelectionWindow._schedule_focus_refresh = _schedule_focus_refresh
+StockSelectionWindow._refresh_focus_tabs    = _refresh_focus_tabs
+StockSelectionWindow._refresh_sector_tab    = _refresh_sector_tab
+StockSelectionWindow._on_sector_selected    = _on_sector_selected
+StockSelectionWindow._on_member_double_click = _on_member_double_click
+StockSelectionWindow._force_refresh_sector  = _force_refresh_sector
+StockSelectionWindow._sort_sector_tree      = _sort_sector_tree
+StockSelectionWindow._refresh_decision_tab  = _refresh_decision_tab
+StockSelectionWindow._mock_buy_selected     = _mock_buy_selected
+StockSelectionWindow._mock_sell_selected    = _mock_sell_selected
+StockSelectionWindow._ignore_selected_signal = _ignore_selected_signal
+StockSelectionWindow._clear_done_signals    = _clear_done_signals
+StockSelectionWindow._sell_all_positions    = _sell_all_positions
 
