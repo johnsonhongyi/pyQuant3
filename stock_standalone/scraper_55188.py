@@ -1047,6 +1047,20 @@ class Scraper55188:
     #     logger.info(f"Updated fetching snapshot size: {len(result)}")
     #     return result
 
+
+def get_cache_df() -> 'pd.DataFrame':
+    """
+    获取内存中最新的55188缓存数据（不触发网络请求）
+    供 SectorFocusEngine 直接调用。
+    Returns: DataFrame 或空 DataFrame（如无缓存）
+    """
+    global _MEM_CACHE_DF
+    if _MEM_CACHE_DF is not None and not _MEM_CACHE_DF.empty:
+        return _MEM_CACHE_DF
+    # 尝试从磁盘加载一次
+    return load_cache()
+
+
 if __name__ == "__main__":
     scraper = Scraper55188()
     logger.setLevel(LoggerFactory.DEBUG)
@@ -1059,3 +1073,4 @@ if __name__ == "__main__":
             print(df[df['code'] == '688548'].iloc[0])
     else:
         print("Empty.")
+

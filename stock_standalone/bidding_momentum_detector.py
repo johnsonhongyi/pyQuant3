@@ -281,7 +281,7 @@ class BiddingMomentumDetector:
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
         
         # ---- [NEW] 强度历史对比与变动追踪 ----
-        self.comparison_interval: float = 30 * 60 # 默认 30 分钟对比窗口 (秒)
+        self.comparison_interval: float = 60 * 60 # 默认 60 分钟对比窗口 (秒)
         self.baseline_time: float = time.time()  # 阈值的初始基准时间
         # sector -> anchor_score
         self.sector_anchors: Dict[str, float] = {}

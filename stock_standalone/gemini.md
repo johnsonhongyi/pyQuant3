@@ -1,9 +1,19 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-03-13 15:40  
+> 最后更新：2026-04-06 01:34  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
+---
+
+## 📚 设计文档导航（优先阅读）
+
+| 文档 | 说明 | 状态 |
+|------|------|------|
+| [SYSTEM_ARCHITECTURE.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/SYSTEM_ARCHITECTURE.md) | **全系统架构设计**：五层架构、数据流、字段说明、关键文件索引 | ✅ 最新 |
+| [TRADING_ENGINE_DESIGN.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/TRADING_ENGINE_DESIGN.md) | **盘中交易决策引擎设计**：引擎五层架构、接口说明、交易规则、待实施计划 | ✅ 最新 |
+| [QUICKSTART.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/QUICKSTART.md) | 快速启动指南 | 参考 |
+| [PACKAGES_GUIDE.txt](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/PACKAGES_GUIDE.txt) | 依赖包说明 | 参考 |
 
 ---
 
@@ -18,18 +28,73 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
-## ✅ 最近完成任务: 信号看板增强与系统退出逻辑修复 (03-13 15:34)
+---
 
-**状态**: ✅ 已完成
-**目标**: 提升信号看板分类准确性、优化交互体验，并彻底解决后台进程退出残留问题。
+## ✅ 最新完成任务：盘中实时交易决策引擎 v2 完整打通 (04-06 01:34)
+
+**状态**: ✅ 已完成  
+**目标**: 将竞价面板（BiddingMomentumDetector）的完整数据流（score/pct_diff/dff/klines/板块图）直接打通到 SectorFocusController 决策引擎，实现"数据一次计算，全链路复用"。
 
 ### 核心变更
-- **看板分类与单元格联动**: 将 `BREAKOUT_STAR` 与 `ma60反转启动` 归入买入机会类。实现双击单元格复制股票代码，并修复了 `_vol_dialog` 初始化 Bug。
-- **全域右键粘贴**: 信号看板及主程序搜索框全面支持右键粘贴识别并立即触发搜索。
-- **退出逻辑重构**: 修复 `data_utils.py` 循环逻辑，确保子进程在收到退出信号后立即终止，解决关机/退出时的卡顿与残留 DB 写入。
+
+| 文件 | 变更内容 |
+|------|----------|
+| `sector_focus_engine.py` | **完整重写 v2**：新增 `inject_from_detector()` / `inject_detector_sectors()` / `_scan_one_v2()` / 形态4强势跟进 |
+| `bidding_momentum_detector.py` | `comparison_interval` 默认值 30m → **60m** |
+| `instock_MonitorTK.py` | 注入代码升级：`inject_bidding` → `inject_from_detector(detector)` |
+| `SYSTEM_ARCHITECTURE.md` | **新建**：全系统架构交接文档 |
+| `TRADING_ENGINE_DESIGN.md` | **新建**：决策引擎完整设计文档 |
+
+### 数据链（完整版）
+```
+BiddingMomentumDetector（竞价面板后台）
+  ├─ ts.score / pct_diff / dff / klines  ← 个股完整快照
+  └─ active_sectors（board_score/score_diff/follow_ratio/leader/followers）
+        ↓ 每30秒 inject_from_detector()
+SectorFocusController（决策引擎）
+  ├─ SectorHeat（含真实klines/pct_diff/dff）
+  ├─ StarFollowEngine（board_score三重确认龙头）
+  └─ IntradayPullbackDetector（用真实kline计算VWAP+prices5+vol_ratio）
+        └─ 4种形态 → DecisionQueue → MockTradeGateway
+```
+
+### 下一步计划（详见 TRADING_ENGINE_DESIGN.md §八）
+- **P1**：盘中观察信号生成频率，微调回踩灵敏度参数
+- **P2**：UI 显示60m窗口倒计时
+- **P3**：升级全自动执行（人机协同确认模式）
+
+---
+
+## ✅ 历史完成任务: 优化 IPC 延迟与 UI 卡顿诊断 (04-04 19:30)
+
+**状态**: ✅ 已完成
+**目标**: 解决报警推送后 UI 挂起 10-20 秒的问题，并优化可视化未开启时的无效 IPC 消耗。
+
+### 核心变更
+- **UI 任务监测**: 引入 `[UI_BLOCK]` 监测机制，自动记录任何超过 100ms 的主线程 lambda/函数任务，用于精确定位阻塞源。
+- **IPC 失败冷却**: 针对 Socket IPC 增加了失败计数与冷却机制（3次失败后冷却 10-60s），避免在未开启可视化时后台线程频繁触发 400ms 的超时等待，降低 CPU/GIL 指数级压力。
+- **启动流追踪**: 在 `_start_visualizer_process` 中增加了全路径耗时统计（Import、Launch、Thread Start），用于量化 20s 的启动间隔。
 
 ### 历史记录 (Brain Artifacts)
-- 验收报告: [20260313_1534_walkthrough.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260313_1534_walkthrough.md)
+- 任务清单: [20260404_1930_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260404_1930_task.md)
+
+---
+
+## ✅ 历史完成任务: 修复 stock_live_strategy 中的 NameError (04-04 19:10)
+
+**状态**: ✅ 已完成
+**目标**: 解决 `_detect_signals_single_stock` 函数中 `code_idx` 未定义导致 V-Shape 检测失败的问题。
+
+### 核心变更
+- **变量修复**: 将 `_update_daily_history_cache` 调用中的 `code_idx` 改为正确的作用域变量 `code`。
+- **稳定性增强**: 修复了并行缓存更新时由于变量引用错误导致的静默失败。
+
+### 历史记录 (Brain Artifacts)
+- 任务清单: [20260404_1910_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260404_1910_task.md)
+
+---
+
+## ✅ 历史完成任务: 信号看板增强与系统退出逻辑修复 (03-13 15:34)
 
 ---
 
@@ -327,6 +392,18 @@ if hasattr(self, 'pattern_detector'):
 - [x] `stock_live_strategy.py` - 集成形态检测 ✅ 01-21
 - [x] `trade_visualizer_qt6.py` - 全局热键 + 信号日志集 ✅ 01-21
 
+## 2026-04-02 10:30
+- [x] 成功重构 `StockLiveStrategy` 判定引擎：
+    - 实现核心逻辑抽离与子线程 Worker 化，支持 30 路并行扫描。
+    - 部署 **Stable v2.1 严格轮询调度器 (RR)**，锁定检测范围至 30 只/轮，实现全市场标的首尾公平覆盖。
+    - 结合 **Batch DB Commit** 机制，将循环延迟从 **15.56s 优化至 1.4s** 左右，彻底解决 DataLoop 阻塞。
+
+## 2026-04-02 23:05
+- [x] 重载 `StockLiveStrategy` 并行化引擎 v2.2：
+    - 实现 `process_data` 索引强制归一化 (`astype(str)`)，彻底解决 `int/str` 混合索引导致的“静默扫描” Bug。
+    - 物理复刻 `f4759f24dd` 基准版本的触发鲁棒性，确保初始化时立即触发首轮报警。
+    - 联调 30 路多线程 Worker，确保单次扫描耗时保持在 1s 左右，极大提升盘中捕捉信号的实时性。
+
 ### P0.5: 统一数据中心 + 板块联动跟单 (2026-01-23)
 
 **目标**: 数据说话、盈利说话，聚焦板块联动强势突破
@@ -504,6 +581,13 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期时间 | 变更描述 | 涉及文件 |
 | :--- | :--- | :--- |
+| 04-06 01:34 | **决策引擎v2完整打通**: inject_from_detector/inject_detector_sectors/_scan_one_v2/形态4/comparison_interval默认60m | `sector_focus_engine.py`, `bidding_momentum_detector.py`, `instock_MonitorTK.py` |
+| 04-06 01:34 | **新建架构文档**: SYSTEM_ARCHITECTURE.md（全系统架构）+ TRADING_ENGINE_DESIGN.md（交易引擎设计） | `SYSTEM_ARCHITECTURE.md`, `TRADING_ENGINE_DESIGN.md` |
+| 04-05 23:55 | **深度修复 signal_dashboard_panel.py**：统计数量对齐、过滤冲突、下拉精确度、防空优化 | `signal_dashboard_panel.py` |
+| 04-04 23:10 | **深度优化 SectorBiddingPanel**：资源预加载、批量渲染Diff、纯Python排序、分时图预计算、全量索引化搜索、渲染节流 | `sector_bidding_panel.py` |
+| 04-04 22:58 | **深度优化 MarketPulseViewer**：最大行数限制、Dirty Flag、列宽防抖、状态缓存 | `market_pulse_viewer.py` |
+| 04-04 19:10 | **代码修复**: 修复 `stock_live_strategy.py` 中 `code_idx` 未定义错误 | `stock_live_strategy.py` |
+
 | 03-13 15:34 | **信号看板增强与退出修复**: 信号分类、双击复制、右键粘贴、退出死循环修复 | `signal_dashboard_panel.py`, `instock_MonitorTK.py`, `data_utils.py` |
 | 03-10 22:40 | **强势启动与绩效评分**: 集成 `hmax60`/`hmax`/`max5`/`high4` 突破识别，新增信号后动态绩效加分逻辑 | `realtime_data_service.py`, `test_bidding_replay.py` |
 | 03-04 23:55 | **UI 双增强**: 修复标题 hitTest 走漏换行符，新增板块过滤框支持右键粘贴过滤、清空 | `trade_visualizer_qt6.py` |
