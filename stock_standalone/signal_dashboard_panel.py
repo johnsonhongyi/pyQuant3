@@ -23,6 +23,14 @@ from tk_gui_modules.window_mixin import WindowMixin
 from signal_bus import get_signal_bus, SignalBus, BusEvent
 from JohnsonUtil import commonTips as cct
 
+# ✅ 盘中交易引擎（局部导入防止循环依赖）
+def get_engine_controller():
+    try:
+        from sector_focus_engine import get_focus_controller
+        return get_focus_controller()
+    except Exception:
+        return None
+
 class VolumeDetailsDialog(QDialog, WindowMixin):
     """持久化的放量详情弹窗"""
     code_clicked = pyqtSignal(str, str) # 信号联动 (代码, 名称)
@@ -257,16 +265,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._all_events: List[BusEvent] = []
         self._stock_stats: Dict[str, Dict] = {} 
         self._sector_heat: Dict[str, int] = {}  
-        self._stats_counters = {
-            "follow": 0, "breakout": 0, "risk": 0, "breakdown": 0, "bull": 0, "bear": 0, "other": 0
-        }
+        self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._signal_type_counts = {k: 0 for k in SIGNAL_TYPE_MAP.keys()}
         self._signal_type_counts["ALL"] = 0
+        self._stats_counters = {"follow": 0, "breakout": 0, "risk": 0, "breakdown": 0, "bull": 0, "bear": 0, "other": 0}
         self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
         self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
         self._row_cache = {} # {table_obj: {code: table_item_at_col2}} 用于 O(1) 查找现有行
+        
+        # [NEW] 决策引擎相关
+        self._decision_queue_data: List[dict] = []
+        self._sector_focus_data: List[dict] = []
+        self._engine_ctrl = None
         
         # --- 2. 组件与窗口初始化 ---
         self._vol_dialog = VolumeDetailsDialog(self)
@@ -292,6 +304,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._batch_timer.timeout.connect(self._process_batch_signals)
         self._batch_timer.start(3000)
 
+        # [NEW] 决策引擎同步定时器 (遵循系统 cct.duration_sleep_time)
+        self._engine_sync_timer = QTimer(self)
+        self._engine_sync_timer.timeout.connect(self._update_engine_views)
+        # 获取系统配置的更新节奏，赋予默认 5s 兜底
+        try:
+            # 优先从 cct.CFG 获取，否则尝试从 cct 直接获取（取决于 JohnsonUtil 加载方式）
+            interval_s = float(getattr(cct.CFG, 'duration_sleep_time', 5)) if hasattr(cct, 'CFG') else float(getattr(cct, 'duration_sleep_time', 5))
+            interval_ms = max(2000, int(interval_s * 1000)) # 强制不低于 2s 以保证 UI 流畅
+        except Exception:
+            interval_ms = 5000
+        self._engine_sync_timer.start(interval_ms)
+        logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，节拍: {interval_ms}ms")
+
     def stop(self):
         """停止所有计时器和订阅，释放资源"""
         try:
@@ -302,6 +327,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             if hasattr(self, '_batch_timer') and self._batch_timer: 
                 self._batch_timer.stop()
+        except Exception: pass
+
+        try:
+            if hasattr(self, '_engine_sync_timer') and self._engine_sync_timer: 
+                self._engine_sync_timer.stop()
         except Exception: pass
         
         try:
@@ -471,11 +501,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         search_lay.addWidget(self.type_filter)
         search_lay.addWidget(self.search_input)
         
-        # 过滤清空按钮
-        self.clear_search_btn = QPushButton("清空")
-        self.clear_search_btn.setFixedWidth(50)
-        self.clear_search_btn.setStyleSheet("QPushButton { background: transparent; color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 3px; font-size: 8pt; } QPushButton:hover { color: #fff; background: #c9302c; border-color: #ac2925; }")
-        self.clear_search_btn.clicked.connect(self._clear_filters)
+        # [MOD] 原清空按钮重构为：[🛠️ 引擎执行] (全链路逻辑触发)
+        self.manual_run_btn = QPushButton("🛠️ 引擎执行")
+        self.manual_run_btn.setFixedWidth(80)
+        self.manual_run_btn.setStyleSheet("""
+            QPushButton { 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ff8c00, stop:1 #ff4500); 
+                color: #fff; 
+                border: 1px solid #ff4500; 
+                border-radius: 4px; 
+                padding: 3px; 
+                font-size: 8.5pt; 
+                font-weight: bold; 
+            } 
+            QPushButton:hover { background: #ff4500; border-color: #ff0000; }
+            QPushButton:pressed { background: #cc3700; }
+        """)
+        self.manual_run_btn.clicked.connect(self._on_engine_manual_run)
 
         # [NEW] 重置按钮
         self.reset_btn = QPushButton("♻️ 重置")
@@ -491,14 +533,24 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         corner_lay.setSpacing(5)
         corner_lay.addWidget(self.type_filter)
         corner_lay.addWidget(self.search_input)
-        corner_lay.addWidget(self.clear_search_btn)
+        corner_lay.addWidget(self.manual_run_btn)
         corner_lay.addWidget(self.reset_btn)
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
         self.tables: Dict[str, QTableWidget] = {}
-        for tab_name in ["全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会", "其它信号"]:
-            table = self._create_signal_table()
+
+        # [MOD] 新增页签：决策队列与板块热力
+        all_tabs = ["🌟 决策队列", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会", "其它信号"]
+        for tab_name in all_tabs:
+            if tab_name == "🌟 决策队列":
+                table = self._create_decision_table()
+            elif tab_name == "🔥 板块热力":
+                table = self._create_sector_table()
+            else:
+                table = self._create_signal_table()
+            
             self.tables[tab_name] = table
             self.tabs.addTab(table, tab_name)
+        
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
         
@@ -577,6 +629,87 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.itemSelectionChanged.connect(self._on_selection_changed)
         return table
 
+    def _create_decision_table(self) -> QTableWidget:
+        """创建决策队列表"""
+        columns = ["时间", "优先级", "状态", "代码", "名称", "形态类别", "所属板块", "现价", "建议价", "周期涨变", "DFF动量", "捕捉理由"]
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(True)
+        table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder) # 默认按时间倒序
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        
+        # [MOD] 统一单击与双击联动处理器
+        table.cellClicked.connect(self._on_cell_clicked)
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.itemSelectionChanged.connect(self._on_selection_changed)
+        return table
+
+    def _create_sector_table(self) -> QTableWidget:
+        """创建板块热力表"""
+        columns = ["板块名称", "热度", "竞分", "类型", "龙头", "龙头名称", "龙头涨幅", "跟涨%", "跟风明细", "更新时间"]
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(True)
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 跟风明细拉伸
+        
+        # [MOD] 统一单击与双击联动处理器
+        table.cellClicked.connect(self._on_sector_table_clicked)
+        table.cellDoubleClicked.connect(self._on_sector_table_double_clicked)
+        table.itemSelectionChanged.connect(self._on_selection_changed)
+        return table
+
+    def _on_sector_table_clicked(self, row, col):
+        """板块表单击联动：同步龙头 K 线"""
+        table = self.sender()
+        if not isinstance(table, QTableWidget): return
+        
+        code_col, name_col = -1, -1
+        for i in range(table.columnCount()):
+            header = table.horizontalHeaderItem(i)
+            if header:
+                t = header.text()
+                if t == "龙头": code_col = i
+                elif t == "龙头名称": name_col = i
+        
+        if code_col >= 0:
+            c_it = table.item(row, code_col)
+            n_it = table.item(row, name_col) if name_col >= 0 else None
+            if c_it and c_it.text():
+                self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
+
+    def _on_sector_table_double_clicked(self, row, col):
+        """板块表双击：寻找该行龙头并复制到剪贴板，随后发送联动"""
+        table = self.tables.get("🔥 板块热力")
+        if not table: return
+        item = table.item(row, 4)
+        name_item = table.item(row, 5)
+        if item and item.text():
+            code = item.text()
+            name = name_item.text() if name_item else ""
+            
+            # [NEW] 双击复制功能
+            header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
+            if header in ["龙头", "龙头名称"]:
+                clipboard = QApplication.clipboard()
+                clipboard.setText(code)
+                self.status_label.setText(f"📋 龙头代码 {code} ({name}) 已复制")
+                
+            self.code_clicked.emit(code, name)
+
     def _setup_bus_connection(self):
         bus = get_signal_bus()
         bus.subscribe(SignalBus.EVENT_PATTERN, self._on_signal_received)
@@ -599,6 +732,122 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')} (实时)")
+
+    # --- [NEW] 决策引擎同步渲染逻辑 ---
+    def _update_engine_views(self):
+        """从 SectorFocusController 同步最新的决策与板块热力"""
+        if self._engine_ctrl is None:
+            self._engine_ctrl = get_engine_controller()
+        
+        if self._engine_ctrl is None:
+            return
+
+        # 1. 更新决策队列表
+        try:
+            decisions = self._engine_ctrl.get_decision_queue()
+            self._refresh_decision_table(decisions)
+        except Exception as e:
+            logger.debug(f"Refresh decision table failed: {e}")
+
+        # 2. 更新板块热力表
+        try:
+            sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
+            self._refresh_sector_table(sectors)
+        except Exception as e:
+            logger.debug(f"Refresh sector table failed: {e}")
+
+    def _refresh_decision_table(self, decisions: List[dict]):
+        table = self.tables.get("🌟 决策队列")
+        if not table: return
+        
+        table.setSortingEnabled(False)
+        # 获取当前选中的代码，用于恢复 (代码列移到了 index 3)
+        current_selection = None
+        sel_items = table.selectedItems()
+        if sel_items: current_selection = table.item(sel_items[0].row(), 3).text()
+
+        table.setRowCount(len(decisions))
+        for i, d in enumerate(decisions):
+            # ["时间", "优先级", "状态", "代码", "名称", "形态类别", "所属板块", "现价", "建议价", "周期涨变", "DFF动量", "捕捉理由"]
+            table.setItem(i, 0, QTableWidgetItem(d.get('created_at', '')))
+            
+            prio = d.get('priority', 0)
+            p_item = NumericTableWidgetItem(prio)
+            if prio >= 75: p_item.setForeground(QBrush(QColor("#ff0000"))) # 极高优
+            elif prio >= 60: p_item.setForeground(QBrush(QColor("#ffaa00"))) # 高优
+            table.setItem(i, 1, p_item)
+
+            st_item = QTableWidgetItem(d.get('status', '待处理'))
+            if '成交' in st_item.text(): st_item.setForeground(QBrush(QColor("#00ff88")))
+            table.setItem(i, 2, st_item)
+
+            code = d.get('code', '')
+            c_item = QTableWidgetItem(code)
+            c_item.setForeground(QBrush(QColor("#ffff00" if code.startswith('30') else "#00ffff")))
+            table.setItem(i, 3, c_item)
+
+            table.setItem(i, 4, QTableWidgetItem(d.get('name', '')))
+            table.setItem(i, 5, QTableWidgetItem(d.get('signal_type', '')))
+            table.setItem(i, 6, QTableWidgetItem(d.get('sector', '')))
+            
+            table.setItem(i, 7, NumericTableWidgetItem(d.get('current_price', 0.0)))
+            table.setItem(i, 8, NumericTableWidgetItem(d.get('suggest_price', 0.0)))
+            
+            pd_val = d.get('pct_diff', 0.0)
+            pd_item = NumericTableWidgetItem(pd_val)
+            pd_item.setText(f"{pd_val:+.2f}%")
+            if pd_val > 0: pd_item.setForeground(QBrush(QColor("#ff4444")))
+            elif pd_val < 0: pd_item.setForeground(QBrush(QColor("#44ff44")))
+            table.setItem(i, 9, pd_item)
+
+            table.setItem(i, 10, NumericTableWidgetItem(d.get('dff', 0.0)))
+            table.setItem(i, 11, QTableWidgetItem(d.get('reason', '')))
+
+        table.setSortingEnabled(True)
+        # 恢复选中
+        if current_selection:
+            for r in range(table.rowCount()):
+                if table.item(r, 3).text() == current_selection:
+                    table.selectRow(r)
+                    break
+
+    def _refresh_sector_table(self, sectors: List[dict]):
+        table = self.tables.get("🔥 板块热力")
+        if not table: return
+        
+        table.setSortingEnabled(False)
+        table.setRowCount(len(sectors))
+        for i, s in enumerate(sectors):
+            # ["板块名称", "热度", "竞分", "类型", "龙头", "龙头名称", "龙头涨幅", "跟涨%", "跟风明细"]
+            table.setItem(i, 0, QTableWidgetItem(s.get('name', '')))
+            
+            heat = s.get('heat_score', 0.0)
+            h_item = NumericTableWidgetItem(heat)
+            if heat >= 40: h_item.setForeground(QBrush(QColor("#ff0000")))
+            table.setItem(i, 1, h_item)
+
+            table.setItem(i, 2, NumericTableWidgetItem(s.get('bidding_score', 0.0)))
+            
+            type_str = s.get('sector_type', '跟随')
+            type_item = QTableWidgetItem(type_str)
+            if '强攻' in type_str: type_item.setForeground(QBrush(QColor("#ff4444")))
+            elif '蓄势' in type_str: type_item.setForeground(QBrush(QColor("#ffaa00")))
+            table.setItem(i, 3, type_item)
+
+            table.setItem(i, 4, QTableWidgetItem(s.get('leader_code', '')))
+            table.setItem(i, 5, QTableWidgetItem(s.get('leader_name', '')))
+            
+            l_pct = s.get('leader_change_pct', 0.0)
+            lp_item = NumericTableWidgetItem(l_pct)
+            lp_item.setText(f"{l_pct:+.2f}%")
+            if l_pct > 0: lp_item.setForeground(QBrush(QColor("#ff4444")))
+            table.setItem(i, 6, lp_item)
+
+            table.setItem(i, 7, NumericTableWidgetItem(s.get('follow_ratio', 0.0)))
+            table.setItem(i, 8, QTableWidgetItem(s.get('follower_detail', '')))
+            table.setItem(i, 9, QTableWidgetItem(s.get('updated_at', '')))
+
+        table.setSortingEnabled(True)
 
     def _on_signal_received(self, event: BusEvent):
         self.sig_bus_event.emit(event)
@@ -1179,8 +1428,44 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_cell_clicked(self, row, col):
         table = self.sender()
-        code_item, name_item = table.item(row, 2), table.item(row, 3)
-        if code_item and name_item: self.code_clicked.emit(code_item.text(), name_item.text())
+        # 动态获取列
+        code_col, name_col = -1, -1
+        for i in range(table.columnCount()):
+            header = table.horizontalHeaderItem(i)
+            if header:
+                t = header.text()
+                if t in ["代码", "龙头"]: code_col = i
+                elif t in ["名称", "龙头名称"]: name_col = i
+        
+        if code_col >= 0:
+            c_it = table.item(row, code_col)
+            n_it = table.item(row, name_col) if name_col >= 0 else None
+            if c_it:
+                self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
+
+    def _on_selection_changed(self):
+        """处理键盘上下键切换时的联动"""
+        table = self.sender()
+        if not isinstance(table, QTableWidget): return
+        # 获取当前选中的行（取第一个）
+        items = table.selectedItems()
+        if not items: return
+        row = items[0].row()
+        
+        # 动态获取列
+        code_col, name_col = -1, -1
+        for i in range(table.columnCount()):
+            header = table.horizontalHeaderItem(i)
+            if header:
+                t = header.text()
+                if t in ["代码", "龙头"]: code_col = i
+                elif t in ["名称", "龙头名称"]: name_col = i
+        
+        if code_col >= 0:
+            c_it = table.item(row, code_col)
+            n_it = table.item(row, name_col) if name_col >= 0 else None
+            if c_it and c_it.text():
+                self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
 
     # def _on_cell_double_clicked(self, row, col):
     #     table = self.sender()
@@ -1203,8 +1488,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_cell_double_clicked(self, row, col):
         table = self.sender()
-        it_code = table.item(row, 2)
-        it_name = table.item(row, 3)
+        
+        # 动态获取列
+        code_col, name_col = 2, 3
+        for i in range(table.columnCount()):
+            header = table.horizontalHeaderItem(i)
+            if header:
+                text = header.text()
+                if text in ["代码", "龙头"]: code_col = i
+                elif text in ["名称", "龙头名称", "板块名称"]: name_col = i
+
+        it_code = table.item(row, code_col)
+        it_name = table.item(row, name_col)
         it_current = table.item(row, col)
         
         if not it_code or not it_name or not it_current: 
@@ -1262,23 +1557,37 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     
         table = self.tabs.currentWidget()
         if not isinstance(table, QTableWidget): return
+        
+        # 动态查找当前表格关键属性所在列
+        code_col, name_col, pattern_col, sector_col = -1, -1, -1, -1
+        for i in range(table.columnCount()):
+            header = table.horizontalHeaderItem(i)
+            if header:
+                text = header.text()
+                if text in ["代码", "龙头"]: code_col = i
+                elif text in ["名称", "龙头名称", "板块名称"]: name_col = i
+                elif text in ["形态类别", "形态/信号"]: pattern_col = i
+                elif text in ["所属板块"]: sector_col = i
+
         for row in range(table.rowCount()):
             row_visible = True
             
             # 1. 文本搜索 (代码/名称/板块)
             if search_text:
-                code_item = table.item(row, 2)
-                name_item = table.item(row, 3)
-                if code_item and name_item:
-                    sector_data = name_item.data(Qt.ItemDataRole.UserRole)
-                    sector_str = str(sector_data).lower() if sector_data else ""
-                    row_visible = (search_text in code_item.text().lower() or 
-                                  search_text in name_item.text().lower() or
-                                  search_text == sector_str)
+                c_text = table.item(row, code_col).text().lower() if code_col >= 0 and table.item(row, code_col) else ""
+                n_text = table.item(row, name_col).text().lower() if name_col >= 0 and table.item(row, name_col) else ""
+                s_text = table.item(row, sector_col).text().lower() if sector_col >= 0 and table.item(row, sector_col) else ""
+                
+                # 特殊：提取 Name 单元格中存为 UserRole 的板块信息
+                if name_col >= 0 and table.item(row, name_col):
+                    sector_data = table.item(row, name_col).data(Qt.ItemDataRole.UserRole)
+                    if sector_data: s_text += str(sector_data).lower()
+
+                row_visible = (search_text in c_text or search_text in n_text or search_text in s_text)
                                   
             # 2. 类型下拉过滤 (保证逻辑与下拉框计数完全一致)
-            if row_visible and target_type_key != "ALL":
-                pattern_item = table.item(row, 4)
+            if row_visible and target_type_key != "ALL" and pattern_col >= 0:
+                pattern_item = table.item(row, pattern_col)
                 if pattern_item:
                     raw_pattern = str(pattern_item.data(Qt.ItemDataRole.UserRole) or pattern_item.text())
                     matched_type = "ALERT"
@@ -1307,7 +1616,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if getattr(self, '_is_updating_ui', False): return
         table = self.sender()
         items = table.selectedItems()
-        if items: self.code_clicked.emit(table.item(items[0].row(), 2).text(), table.item(items[0].row(), 3).text())
+        if items:
+            row = items[0].row()
+            code_col = 2
+            name_col = 3
+            
+            # 动态查找当前表格的【代码】和【名称】所在列索引
+            for i in range(table.columnCount()):
+                header = table.horizontalHeaderItem(i)
+                if header:
+                    text = header.text()
+                    if text in ["代码", "龙头"]: code_col = i
+                    elif text in ["名称", "龙头名称"]: name_col = i
+                    
+            code_item = table.item(row, code_col)
+            name_item = table.item(row, name_col)
+            if code_item and name_item:
+                self.code_clicked.emit(code_item.text(), name_item.text())
 
     def _save_ui_state(self):
         try:
@@ -1365,6 +1690,29 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._refresh_type_filter_items()
         self.status_label.setText("📊 信号面板已重置，等待新行情数据流入...")
         logger.info("SignalDashboard: User manual reset triggered.")
+
+    def _on_engine_manual_run(self):
+        """手动触发引擎全链路逻辑验证"""
+        try:
+            self.status_label.setText("⚡ 正在执行引擎全链路重算...")
+            self.manual_run_btn.setEnabled(False)
+            
+            # 1. 触发引擎层强制重算
+            from sector_focus_engine import get_focus_controller
+            ctrl = get_focus_controller()
+            if ctrl:
+                ctrl.manual_run()
+            
+            # 2. 立即更新 UI 视图
+            self._update_engine_views()
+            
+            self.status_label.setText("✅ 引擎重算刷新完成")
+            logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新")
+        except Exception as e:
+            self.status_label.setText(f"❌ 重算失败: {e}")
+        finally:
+            # 冷却 1.5s 后恢复可点击状态，防止疯狂连点
+            QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
 
 if __name__ == "__main__":
     import sys

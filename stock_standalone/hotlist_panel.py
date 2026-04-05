@@ -1159,10 +1159,15 @@ class HotlistPanel(QWidget, WindowMixin):
             table.setItem(row, col, item)
         else:
             # 复用并更新
-            if item.text() != display_text:
-                item.setText(display_text)
+            # [FIX] 无论是否显式传递 sort_value，只要 value 是数值，就必须同步更新 item.sort_value
+            # 这是修复“序号无法恢复排序”的关键：防止复用的 Item 带着旧行的排序权重
             if sort_value is not None:
                 item.sort_value = sort_value # type: ignore
+            elif isinstance(value, (int, float)):
+                item.sort_value = value # type: ignore
+            
+            if item.text() != display_text:
+                item.setText(display_text)
         
         # 统一设置对齐和颜色
         if isinstance(value, (int, float)):
@@ -1865,6 +1870,7 @@ class HotlistPanel(QWidget, WindowMixin):
                         price_txt = f"{curr_price:.2f}"
                         if it.text() != price_txt:
                             it.setText(price_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = curr_price # [FIX] 同步排序权重
                 
                 # 更新盈亏% (Col 5)
                 # [FIX] Better fallback for entry_price
@@ -1878,6 +1884,7 @@ class HotlistPanel(QWidget, WindowMixin):
                         pnl_txt = f"{pnl_pct:+.2f}%"
                         if it.text() != pnl_txt:
                             it.setText(pnl_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = pnl_pct # [FIX] 同步排序权重
                             # 批量设置颜色
                             if pnl_pct > 0: 
                                 it.setForeground(QColor(220, 80, 80))
@@ -1930,6 +1937,7 @@ class HotlistPanel(QWidget, WindowMixin):
                         price_txt = f"{curr_price:.2f}"
                         if it.text() != price_txt:
                             it.setText(price_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = curr_price # [FIX] 同步排序权重
                 
                 # 更新盈亏% (Col 7)
                 discover_price = float(row.discover_price or 0.0)
@@ -1939,6 +1947,7 @@ class HotlistPanel(QWidget, WindowMixin):
                         pnl_txt = f"{pnl_pct:+.2f}%"
                         if it.text() != pnl_txt:
                             it.setText(pnl_txt)
+                            if hasattr(it, 'sort_value'): it.sort_value = pnl_pct # [FIX] 同步排序权重
                             # 批量设置颜色
                             if pnl_pct > 0: 
                                 it.setForeground(QColor(220, 80, 80))

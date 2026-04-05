@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-04-06 01:34  
+> 最后更新：2026-04-06 02:16  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -30,40 +30,50 @@
 
 ---
 
-## ✅ 最新完成任务：盘中实时交易决策引擎 v2 完整打通 (04-06 01:34)
+## ✅ 最新完成任务：信号面板“手动执行”功能打通 (04-06 02:16)
 
 **状态**: ✅ 已完成  
-**目标**: 将竞价面板（BiddingMomentumDetector）的完整数据流（score/pct_diff/dff/klines/板块图）直接打通到 SectorFocusController 决策引擎，实现"数据一次计算，全链路复用"。
+**目标**: 将信号面板右上角的“清空”按钮替换为对新设计系统的“全链路手动触发”功能，支持用户实时验证逻辑特征、测试信号并强制刷新决策视图。
 
 ### 核心变更
 
 | 文件 | 变更内容 |
 |------|----------|
-| `sector_focus_engine.py` | **完整重写 v2**：新增 `inject_from_detector()` / `inject_detector_sectors()` / `_scan_one_v2()` / 形态4强势跟进 |
-| `bidding_momentum_detector.py` | `comparison_interval` 默认值 30m → **60m** |
-| `instock_MonitorTK.py` | 注入代码升级：`inject_bidding` → `inject_from_detector(detector)` |
-| `SYSTEM_ARCHITECTURE.md` | **新建**：全系统架构交接文档 |
-| `TRADING_ENGINE_DESIGN.md` | **新建**：决策引擎完整设计文档 |
-
-### 数据链（完整版）
-```
-BiddingMomentumDetector（竞价面板后台）
-  ├─ ts.score / pct_diff / dff / klines  ← 个股完整快照
-  └─ active_sectors（board_score/score_diff/follow_ratio/leader/followers）
-        ↓ 每30秒 inject_from_detector()
-SectorFocusController（决策引擎）
-  ├─ SectorHeat（含真实klines/pct_diff/dff）
-  ├─ StarFollowEngine（board_score三重确认龙头）
-  └─ IntradayPullbackDetector（用真实kline计算VWAP+prices5+vol_ratio）
-        └─ 4种形态 → DecisionQueue → MockTradeGateway
-```
-
-### 下一步计划（详见 TRADING_ENGINE_DESIGN.md §八）
-- **P1**：盘中观察信号生成频率，微调回踩灵敏度参数
-- **P2**：UI 显示60m窗口倒计时
-- **P3**：升级全自动执行（人机协同确认模式）
+| `sector_focus_engine.py` | **接口扩展**：新增 `manual_run()` 方法，强制重置节流节拍并触发全量 Tick 计算 |
+| `signal_dashboard_panel.py` | **UI 重构**：将 `clear_search_btn` 替换为 `manual_run_btn` ("🛠️ 引擎执行")，并实现防连点保护逻辑 |
+| `task.md` | **同步归档**：建立手动触发验证专项任务清单 |
+| `walkthrough.md` | **同步成果**：更新引擎手动执行逻辑与交互说明文档 |
 
 ---
+
+## ✅ 历史完成任务：55188 整合与大盘逆势策略深度打通 (04-06 02:05)
+
+### 核心变更
+
+| 文件 | 变更内容 |
+|------|----------|
+| `sector_focus_engine.py` | **核心策略升级**：实现 55188 缓存自动加载、指数对比逻辑、优先级提权算式 (Relative Strength) |
+| `instock_MonitorTK.py` | **数据链路桥接**：在市场统计循环中实时将指数涨跌幅注入 `SectorFocusController` |
+| `task.md` | **同步归档**：建立 55188 整合专项任务清单 |
+| `walkthrough.md` | **同步成果**：更新决策引擎“智能化”提权工作报告 |
+
+### 提权模型 (Alpha Boost)
+```
+Decision Signal Priority = Base + Bonus
+  ├─ 55188 主力榜前100: +15
+  ├─ 55188 人气榜前50: +12
+  └─ 大盘逆势提权 (Divergence):
+        ├─ 📈 逆势领涨 (大盘跌/个股涨): +15
+        └─ 🛡️ 独立强攻 (大盘平/个股爆发): +10
+```
+
+### 下一步计划
+- **P1**：观察实盘中“逆势领涨”标签的准确率，优化指数基准切换逻辑。
+- **P2**：整合 55188 题材挖掘中的“题材日期”，过滤已过期的炒作题材。
+
+---
+
+## ✅ 历史完成任务：盘中实时交易决策引擎 v2 完整打通 (04-06 01:34)
 
 ## ✅ 历史完成任务: 优化 IPC 延迟与 UI 卡顿诊断 (04-04 19:30)
 
@@ -581,6 +591,8 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期时间 | 变更描述 | 涉及文件 |
 | :--- | :--- | :--- |
+| 04-06 02:16 | **手动引擎执行**: 替换清空按钮为[🛠️ 引擎执行]，实现全链路逻辑手动触发与实时刷新 | `sector_focus_engine.py`, `signal_dashboard_panel.py` |
+| 04-06 02:05 | **55188整合与逆势策略**: 实现人气/主力自动提权加分，增加[逆势领涨]检测及指数数据注入链路 | `sector_focus_engine.py`, `instock_MonitorTK.py` |
 | 04-06 01:34 | **决策引擎v2完整打通**: inject_from_detector/inject_detector_sectors/_scan_one_v2/形态4/comparison_interval默认60m | `sector_focus_engine.py`, `bidding_momentum_detector.py`, `instock_MonitorTK.py` |
 | 04-06 01:34 | **新建架构文档**: SYSTEM_ARCHITECTURE.md（全系统架构）+ TRADING_ENGINE_DESIGN.md（交易引擎设计） | `SYSTEM_ARCHITECTURE.md`, `TRADING_ENGINE_DESIGN.md` |
 | 04-05 23:55 | **深度修复 signal_dashboard_panel.py**：统计数量对齐、过滤冲突、下拉精确度、防空优化 | `signal_dashboard_panel.py` |
