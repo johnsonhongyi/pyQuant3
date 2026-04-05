@@ -817,7 +817,7 @@ class HotlistPanel(QWidget, WindowMixin):
         self.pause_voice_btn = QPushButton("🔊")
         self.pause_voice_btn.setFixedSize(32, 22)
         self.pause_voice_btn.setCheckable(True)
-        self.pause_voice_btn.setToolTip("开启/关闭热点信号语音播报(Alt+V)")
+        self.pause_voice_btn.setToolTip("开启/关闭热点信号语音播报(Alt+O)")
         self.pause_voice_btn.clicked.connect(self.toggle_voice)
         self._update_voice_button_style() # Use existing update logic
         
@@ -919,7 +919,7 @@ class HotlistPanel(QWidget, WindowMixin):
             
         # ⭐ [NEW] 同步更新主窗口菜单文本与 Action 状态
         if hasattr(main_window, 'voice_action'):
-            text = "🔇 热点播报: 关(Alt+V)" if self._voice_paused else "🔊 热点播报: 开(Alt+V)"
+            text = "🔇 热点播报: 关(Alt+O)" if self._voice_paused else "🔊 热点播报: 开(Alt+O)"
             main_window.voice_action.setText(text)
              
         # ⭐ [NEW] 立即触发主窗口配置保存
