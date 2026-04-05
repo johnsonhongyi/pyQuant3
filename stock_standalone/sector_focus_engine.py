@@ -239,17 +239,22 @@ class SectorFocusMap:
     # ── v2 核心注入：直接从 detector 灌入板块图 ──────────────────────────────
 
     def _clean_sector_name(self, name: str) -> str:
-        """[FIX] 清洗板块名称：去除尾部分号与特殊垃圾字符"""
-        if not name: return ""
-        if pd.isna(name): return ""
+        """[FIX] 精准清洗：特赦 '0' (新股)，清扫其他垃圾符号"""
+        if name is None: return ""
         name = str(name).strip('; ').strip()
-        # 黑名单过滤（乱码或占位符）
-        if name in ('0', ';', '--', '-', '.', 'nan', 'None', ''):
+        
+        # 1. 特赦：'0' 代表新股或无板块个股，属于重要信号，必须保留
+        if name == '0':
+            return '0'
+            
+        # 2. 拦截：纯占位符或无效垃圾数据
+        if name in (';', '--', '-', '.', 'nan', 'None', ''):
             return ""
-        # 长度保护（过长的可能是爬虫解析失败的堆叠字符串）
-        # [MOD] 放宽到 50，防止复合概念被误杀
-        if len(name) > 50:
+            
+        # 3. 长度保护：过长的垃圾堆叠字符（通常为解析错误）
+        if len(name) > 100: # 放宽到100，确保复合板块不被截断
             return ""
+            
         return name
 
 
@@ -464,6 +469,7 @@ class SectorFocusMap:
         ) * 100
 
         result: List[SectorHeat] = []
+        # [ROLLBACK] 恢复最初的执行广度：恢复到 head(20)
         for _, row in sectors_raw.sort_values('heat_score', ascending=False).head(20).iterrows():
             # [FIX] 对降级路径的板块名称进行清洗
             sname = self._clean_sector_name(row['name'])
@@ -551,8 +557,9 @@ class SectorFocusMap:
         leader_code = str(leader.get('code', ''))
         leader_name = str(leader.get('name', ''))
         leader_pct  = float(leader.get('percent', 0.0))
+        # [FIX] 撤销 bid 限制，找回丢失的跟风股（解决跟风明细无信息的问题）
         followers_df = sorted_df.iloc[1:MAX_FOLLOWERS_PER_SECTOR + 1]
-        follower_codes = [str(r['code']) for _, r in followers_df.iterrows() if r['_bid'] > 0]
+        follower_codes = [str(r['code']) for _, r in followers_df.iterrows()]
         return leader_code, leader_name, leader_pct, follower_codes
 
     # ── 查询接口 ──────────────────────────────────────────────────────────────
@@ -1146,8 +1153,8 @@ class SectorFocusController:
 
     def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
-        # [MOD] 扩大扫描范围：从 8 扩大到 15，防止排名靠后的优质板块丢股
-        hot_sectors = self.sector_map.get_hot_sectors(top_n=15)
+        # [ROLLBACK] 恢复最初探测范围：由 15/30 缩回 8
+        hot_sectors = self.sector_map.get_hot_sectors(top_n=8)
 
         for sh in hot_sectors:
             # 龙头自身 + 跟进股
