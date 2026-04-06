@@ -1333,18 +1333,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def setup_global_hotkey(self, show_toast=False):
         """
-        使用 Win32 RegisterHotKey API 注册系统全局快捷键。
-        
-        与 keyboard 库的 WH_KEYBOARD_LL 钩子不同，RegisterHotKey 在系统级
-        注册热键，通过 WM_HOTKEY 消息传递，永远不会被 Windows 自动卸载。
-        支持重复调用（先清理旧热键线程再重新注册）。
-        
-        快捷键如果已经被占用, 就自动退回到程序的快捷键, 不用全局模式。
-        
+        使用 keyboard 库注册系统全局快捷键。
+
+        修复重置失效的根因：
+        旧线程 cleanup 与新线程 startup 都调用 keyboard.unhook_all()，
+        两个线程并发执行导致竞态，新线程的 add_hotkey 在混乱状态中静默失败。
+
+        修复策略：
+        - keyboard.unhook_all() 统一由 _shutdown_global_hotkeys() 在 join
+          完成后在调用方（主线程）执行，保证 unhook → add_hotkey 严格串行。
+        - 线程内部只负责 add_hotkey + wait，不再碰 unhook_all。
+
         Args:
             show_toast: 是否在注册完成后显示提示信息（手动重新初始化时为 True）
         """
-        # 先关闭旧的热键线程（支持重复调用）
+        # _shutdown_global_hotkeys 内部会 join 旧线程并 unhook_all，保证干净状态
         self._shutdown_global_hotkeys()
 
         # 热键 ID -> 回调映射 (统一回调入口)
@@ -1360,88 +1363,49 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 线程退出事件
         self._hotkey_stop_event = threading.Event()
-        self._hotkey_thread_id = None  # 存储线程 ID，用于发送退出消息
 
         def _hotkey_thread_func():
-            """独立守护线程：使用 keyboard 库注册全局热键 (Win32 API 留作备份)"""
-            logger.info("⚡ [Hotkey] 正在使用 keyboard 库模式激活系统全局快捷键...")
-            
-            # 保存线程 ID (虽然 keyboard 模式可能不需要，但为了兼容 _shutdown_global_hotkeys 的逻辑依然保留)
-            self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-            
+            """
+            keyboard 库热键线程。
+            此时 _shutdown_global_hotkeys 已保证 unhook_all 完成，
+            本线程直接 add_hotkey，不再调用 unhook_all（避免竞态）。
+            """
+            logger.info("⚡ [Hotkey] keyboard 库模式启动，注册全局快捷键...")
             failed_offsets = []
-            
-            # 1. 使用 keyboard.add_hotkey 尝试注册所有全局热键
+
             for offset, (_, _, desc) in self._HOTKEY_MAP.items():
                 cb = hotkey_callbacks.get(offset)
-                if not cb: continue
-                
+                if not cb:
+                    continue
                 try:
-                    # 注册全局热键，suppress=False 保证按键不被独占拦截
-                    keyboard.add_hotkey(desc, cb)
-                    logger.debug(f"✅ [Hotkey] 全局热键激活 (keyboard): {desc}")
+                    keyboard.add_hotkey(desc, cb, suppress=False)
+                    logger.debug("✅ [Hotkey] 全局热键已注册: %s", desc)
                 except Exception as e:
-                    logger.warning(f"⚠️ [Hotkey] keyboard 绑定 {desc} 失败 (error={e})，将由程序本地快捷键接管")
+                    logger.warning("⚠️ [Hotkey] keyboard 绑定 %s 失败 (%s)，退回本地快捷键", desc, e)
                     failed_offsets.append(offset)
-            
-            # 2. 对于注册失败的热键，由主线程进行本地绑定退回
+
+            # 注册失败的热键退回 Tk 本地绑定
             if failed_offsets:
                 def _bind_local_fallbacks():
                     for off in failed_offsets:
                         _, _, desc = self._HOTKEY_MAP[off]
                         cb = hotkey_callbacks.get(off)
-                        if not cb: continue
-                        
+                        if not cb:
+                            continue
                         tk_key = f"<{desc.replace('+', '-').lower()}>"
                         try:
                             self.bind_all(tk_key, lambda e, func=cb: func())
-                            logger.info(f"🔁 [Hotkey] 退回到本地快捷键: {tk_key}")
-                        except Exception as e:
-                            logger.error(f"❌ [Hotkey] 本地绑定 {tk_key} 失败: {e}")
-                
+                            logger.info("🔁 [Hotkey] 退回本地快捷键: %s", tk_key)
+                        except Exception as ex:
+                            logger.error("❌ [Hotkey] 本地绑定 %s 失败: %s", tk_key, ex)
                 self.tk_dispatch_queue.put(_bind_local_fallbacks)
 
-            # 3. 阻塞等待直到停止事件被设置
-            # 使用 wait 替代消息循环，更轻量
+            # 阻塞等待，直到 _shutdown_global_hotkeys 触发退出
             self._hotkey_stop_event.wait()
-            
-            # 4. 清理：注销所有 keyboard 钩子
-            try:
-                keyboard.unhook_all()
-                logger.info("[Hotkey] 全局热键线程已关闭，keyboard 钩子已释放")
-            except:
-                pass
+            # ⚠️ 线程退出时不调用 keyboard.unhook_all()，
+            # 由 _shutdown_global_hotkeys join 后统一执行，避免竞态
+            logger.info("[Hotkey] keyboard 热键线程已退出")
 
-        # === [备份备用] 下方为原 Win32 RegisterHotKey 原生实现，如 keyboard 模式不稳可切换回来 ===
-        def _hotkey_thread_func_WIN32_BACKUP():
-            user32 = ctypes.windll.user32
-            WM_HOTKEY = 0x0312
-            self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-            registered_ids = []
-            failed_offsets = []
-            for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
-                hk_id = self._HOTKEY_ID_BASE + offset
-                if user32.RegisterHotKey(None, hk_id, mod, vk):
-                    registered_ids.append(hk_id)
-                    logger.info(f"✅ [Hotkey] Win32端热键已激活: {desc}")
-                else:
-                    failed_offsets.append(offset)
-            
-            # 消息循环...
-            msg = ctypes.wintypes.MSG()
-            while not self._hotkey_stop_event.is_set():
-                ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-                if ret <= 0: break
-                if msg.message == WM_HOTKEY:
-                    hk_id = msg.wParam
-                    callback = hotkey_callbacks.get(hk_id - self._HOTKEY_ID_BASE)
-                    if callback: callback()
-            
-            for hk_id in registered_ids:
-                user32.UnregisterHotKey(None, hk_id)
-        # =========================================================================
-        
-        # 启动守护线程
         self._hotkey_thread = threading.Thread(
             target=_hotkey_thread_func,
             name="GlobalHotkeyThread",
@@ -1455,25 +1419,59 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _shutdown_global_hotkeys(self):
-        """安全关闭热键线程，注销所有已注册的全局快捷键"""
+        """
+        安全关闭热键线程，并在 join 后统一执行 keyboard.unhook_all()。
+
+        关键时序（保证无竞态）：
+        1. set stop_event → 旧线程从 wait() 中返回并退出（不调用 unhook）
+        2. join 等旧线程彻底死亡
+        3. 在本线程（调用方）执行 keyboard.unhook_all()，状态确定干净
+        4. 调用方随后可安全启动新线程并 add_hotkey
+        """
         if hasattr(self, '_hotkey_stop_event') and self._hotkey_stop_event:
             self._hotkey_stop_event.set()
-        
-        # 向热键线程发送 WM_QUIT 消息，使 GetMessage 返回 0
-        if hasattr(self, '_hotkey_thread_id') and self._hotkey_thread_id:
-            try:
-                ctypes.windll.user32.PostThreadMessageW(
-                    self._hotkey_thread_id, 0x0012, 0, 0  # WM_QUIT
-                )
-            except Exception as e:
-                logger.debug(f"[Hotkey] PostThreadMessage 失败 (可忽略): {e}")
-        
-        # 等待线程退出
+
+        # 等待旧线程彻底退出（旧线程不调用 unhook，join 后状态确定）
         if hasattr(self, '_hotkey_thread') and self._hotkey_thread and self._hotkey_thread.is_alive():
-            self._hotkey_thread.join(timeout=2.0)
-        
+            self._hotkey_thread.join(timeout=3.0)
+
+        # join 完成后，在调用方统一清理 keyboard 钩子（串行，无竞态）
+        try:
+            keyboard.unhook_all()
+            logger.debug("[Hotkey] keyboard.unhook_all() 完成（调用方线程）")
+        except Exception as e:
+            logger.debug("[Hotkey] keyboard.unhook_all 失败 (可忽略): %s", e)
+
         self._hotkey_thread_id = None
         self._hotkey_stop_event = None
+    # === [备份备用] 下方为原 Win32 RegisterHotKey 原生实现，如 keyboard 模式不稳可切换回来 ===
+    def _hotkey_thread_func_WIN32_BACKUP():
+        user32 = ctypes.windll.user32
+        WM_HOTKEY = 0x0312
+        self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        registered_ids = []
+        failed_offsets = []
+        for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
+            hk_id = self._HOTKEY_ID_BASE + offset
+            if user32.RegisterHotKey(None, hk_id, mod, vk):
+                registered_ids.append(hk_id)
+                logger.info(f"✅ [Hotkey] Win32端热键已激活: {desc}")
+            else:
+                failed_offsets.append(offset)
+        
+        # 消息循环...
+        msg = ctypes.wintypes.MSG()
+        while not self._hotkey_stop_event.is_set():
+            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret <= 0: break
+            if msg.message == WM_HOTKEY:
+                hk_id = msg.wParam
+                callback = hotkey_callbacks.get(hk_id - self._HOTKEY_ID_BASE)
+                if callback: callback()
+        
+        for hk_id in registered_ids:
+            user32.UnregisterHotKey(None, hk_id)
+    # =========================================================================
 
     def on_resize(self, event):
         if event.widget != self:
