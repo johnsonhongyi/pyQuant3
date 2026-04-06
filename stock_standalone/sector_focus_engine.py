@@ -35,7 +35,15 @@ from datetime import datetime
 from enum import IntEnum
 from typing import Dict, List, Optional, Tuple, Any
 
+import json
+import os
+
 import pandas as pd
+
+try:
+    from JSONData import tdx_data_Day as tdd
+except ImportError:
+    tdd = None
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +69,14 @@ class SignalType(IntEnum):
     VWAP_SUPPORT       = 2   # 均价线支撑
     SECTOR_BREAKOUT    = 3   # 板块共振突破
     HOT_FOLLOW         = 4   # 龙头确认后跟进
+
+
+# 龙头状态机（四级）
+class DragonStatus(IntEnum):
+    CANDIDATE  = 0   # StarFollow 刚确认，候选观察中
+    DRAGON     = 1   # 连续多日新高，真龙头
+    WARNING    = 2   # 出现预警信号（创新低/失去地位）
+    ELIMINATED = 3   # 已淘汰，从跟踪名单清除
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,6 +182,101 @@ class DecisionSignal:
             'created_at': self.created_at.strftime('%H:%M:%S') if self.created_at else "",
             'status': self.status,
         }
+
+
+@dataclass
+class DragonRecord:
+    """单只龙头的跨日追踪记录（可持久化）"""
+    # ── 跨日持久化字段（无默认值）
+    code: str
+    name: str
+    sector: str
+    status: DragonStatus
+    confirmed_date: str        # 首次确认日期 YYYYMMDD
+    tracked_days: int          # 已跟踪交易日数
+    consecutive_new_highs: int # 连续创新高天数
+    prev_day_high: float       # 昨日日内最高
+    prev_day_low: float        # 昨日日内最低
+    prev_day_close: float      # 昨日收盘
+    today_high: float          # 今日已知最高
+    today_low: float           # 今日已知最低
+    cum_pct_from_entry: float = 0.0  # 从首次确认累计涨幅%
+    entry_price: float = 0.0         # 首次确认入场参考价
+    warning_days: int = 0          # 连续预警天数
+    last_update: str = ""           # datetime isoformat
+    tags: List[str] = field(default_factory=list)            # 状态标签
+    # ── 盘中瞬态字段（有默认值，不持久化）
+    current_price: float = 0.0
+    current_pct: float   = 0.0
+    vwap: float          = 0.0
+    dff: float           = 0.0
+    below_vwap_count: int = field(default=0, repr=False)
+
+    def to_dict(self) -> dict:
+        return {
+            'code': self.code,
+            'name': self.name,
+            'sector': self.sector,
+            'status': self.status.name,
+            'status_label': ['候选🌱', '真龙🐉', '预警⚠️', '淘汰❌'][int(self.status)],
+            'confirmed_date': self.confirmed_date,
+            'tracked_days': self.tracked_days,
+            'consecutive_new_highs': self.consecutive_new_highs,
+            'prev_day_high': round(self.prev_day_high, 3),
+            'prev_day_low': round(self.prev_day_low, 3),
+            'today_high': round(self.today_high, 3),
+            'today_low': round(self.today_low, 3),
+            'cum_pct': round(self.cum_pct_from_entry, 2),
+            'entry_price': round(self.entry_price, 3),
+            'warning_days': self.warning_days,
+            'tags': ' '.join(self.tags[-4:]),
+            'current_price': round(self.current_price, 3),
+            'current_pct': round(self.current_pct, 2),
+            'vwap': round(self.vwap, 3),
+            'dff': round(self.dff, 2),
+            'last_update': self.last_update,
+        }
+
+    def to_persist_dict(self) -> dict:
+        """仅保留跨日必要字段"""
+        return {
+            'code': self.code, 'name': self.name, 'sector': self.sector,
+            'status': int(self.status),
+            'confirmed_date': self.confirmed_date,
+            'tracked_days': self.tracked_days,
+            'consecutive_new_highs': self.consecutive_new_highs,
+            'prev_day_high': self.prev_day_high,
+            'prev_day_low': self.prev_day_low,
+            'prev_day_close': self.prev_day_close,
+            'today_high': self.today_high,
+            'today_low': self.today_low,
+            'cum_pct_from_entry': self.cum_pct_from_entry,
+            'entry_price': self.entry_price,
+            'warning_days': self.warning_days,
+            'last_update': self.last_update,
+            'tags': self.tags,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'DragonRecord':
+        return cls(
+            code=d['code'], name=d.get('name', d['code']),
+            sector=d.get('sector', ''),
+            status=DragonStatus(int(d.get('status', 0))),
+            confirmed_date=d.get('confirmed_date', ''),
+            tracked_days=int(d.get('tracked_days', 1)),
+            consecutive_new_highs=int(d.get('consecutive_new_highs', 0)),
+            prev_day_high=float(d.get('prev_day_high', 0.0)),
+            prev_day_low=float(d.get('prev_day_low', 0.0)),
+            prev_day_close=float(d.get('prev_day_close', 0.0)),
+            today_high=float(d.get('today_high', 0.0)),
+            today_low=float(d.get('today_low', 0.0)),
+            cum_pct_from_entry=float(d.get('cum_pct_from_entry', 0.0)),
+            entry_price=float(d.get('entry_price', 0.0)),
+            warning_days=int(d.get('warning_days', 0)),
+            last_update=d.get('last_update', datetime.now().isoformat()),
+            tags=list(d.get('tags', [])),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,9 +425,14 @@ class SectorFocusMap:
                     if vol_sum > 0:
                         leader_vwap = amt_sum / vol_sum
 
-                # heat_score：直接用 board_score 归一化到 0~100
-                # 后续可与其他板块相对标准化；现在先直接 *10（board_score 通常 5~30）
-                heat_score = min(100.0, board_score * 3.5)
+                # [A] heat_score = board_score 基础分 + 趋势动量加成
+                # score_diff>0: 60m内强度上升；follow_ratio>0.5: 多数个股跟涨；leader_pct_diff>0: 龙头处于上升通道
+                momentum_bonus = (
+                    min(score_diff * 3.0, 15.0) +          # 强度上升趋势，最多+15
+                    (follow_ratio - 0.5) * 20.0 +           # 跟涨扩散度，±10
+                    min(leader_pct_diff * 2.0, 10.0)        # 龙头60m内涨幅，最多+10
+                )
+                heat_score = min(100.0, board_score * 3.0 + max(0.0, momentum_bonus))
 
                 # 跟随股代码列表
                 followers = sec.get('followers', [])
@@ -579,7 +695,12 @@ class SectorFocusMap:
             {c: s.get('score', 0.0) for c, s in det_snap.items()}
         ).fillna(sec_df['code'].map(bidding).fillna(0.0))
         sec_df['_zt'] = sec_df['percent'] >= 9.5
-        
+
+        # [D] dff 主力资金流向（正值=主力净流入，优先识别悄悄建仓的潜力股）
+        sec_df['_dff'] = sec_df['code'].map(
+            {c: float(s.get('dff', 0.0)) for c, s in det_snap.items()}
+        ).fillna(0.0)
+
         # [NEW] 在龙头识别中深度集成 55188 人气排名
         hot_map = self._hot_rank_map
         sec_df['_hot_rank'] = sec_df['code'].map(hot_map).fillna(9999)
@@ -595,7 +716,8 @@ class SectorFocusMap:
             sec_df['_zt'].astype(float) * 40 +
             sec_df['_bid'] * 4 +
             sec_df['percent'].clip(0, 10) * 1 +
-            sec_df['_rank_points'] * 1 # 3% 涨幅 + Top 100 人气即可挑战龙头
+            sec_df['_rank_points'] * 1 +           # 人气排名加分
+            sec_df['_dff'].clip(0, 20) * 2         # [D] dff 主力资金加权（最多+40分）
         )
         sorted_df = sec_df.sort_values('_leader_score', ascending=False).reset_index(drop=True)
         if sorted_df.empty:
@@ -657,6 +779,8 @@ class StarFollowEngine:
     def __init__(self, sector_map: SectorFocusMap):
         self._sector_map = sector_map
         self._confirmed_leaders: Dict[str, datetime] = {}
+        self._leader_baselines: Dict[str, float] = {}   # [B] 确认时涨幅基准
+        self._leader_weakened: set = set()               # [B] 已弱化龙头集合（从确认点回落>2.5%）
         self._lock = threading.Lock()
 
     def confirm_leaders(
@@ -685,12 +809,15 @@ class StarFollowEngine:
                 with self._lock:
                     if code not in self._confirmed_leaders:
                         self._confirmed_leaders[code] = datetime.now()
+                        self._leader_baselines[code] = pct   # [B] 记录确认时涨幅基准
                         new_leaders.append(code)
                         logger.info(
                             f"[StarFollow] 龙头确认: {code}({sh.leader_name}) "
                             f"板块={sh.name} 涨幅={pct:.1f}% 板块强度={bid:.1f} "
                             f"人气={h_rank} 类型={sh.sector_type}"
                         )
+            # [B] 每次 confirm_leaders 调用都同步衰减状态（不限于新确认的龙头）
+            self._update_weakened_state(code, pct)
         return new_leaders
 
     def get_follow_candidates(self, sector_name: str) -> List[str]:
@@ -707,9 +834,491 @@ class StarFollowEngine:
         with self._lock:
             return dict(self._confirmed_leaders)
 
+    def _update_weakened_state(self, code: str, current_pct: float):
+        """[B] 实时同步龙头强弱状态（每次 confirm_leaders 调用时自动触发）"""
+        with self._lock:
+            if code not in self._confirmed_leaders:
+                return
+            baseline = self._leader_baselines.get(code, current_pct)
+            if current_pct < baseline - 2.5:     # 从确认点回落超2.5%，标记弱化
+                if code not in self._leader_weakened:
+                    self._leader_weakened.add(code)
+                    logger.info(f"[StarFollow] 龙头弱化: {code} 当前={current_pct:.1f}% 基准={baseline:.1f}%")
+            elif current_pct >= baseline - 1.0:  # 反弹修复，取消弱化
+                self._leader_weakened.discard(code)
+
+    def is_leader_strong(self, code: str) -> bool:
+        """[B] 强势确认：已确认 且 未弱化（双重条件，减少弱势龙头产生的跟随信号）"""
+        with self._lock:
+            return code in self._confirmed_leaders and code not in self._leader_weakened
+
     def reset_day(self):
         with self._lock:
             self._confirmed_leaders.clear()
+            self._leader_baselines.clear()   # [B]
+            self._leader_weakened.clear()    # [B]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §3.5  龙头持续追踪器（DragonLeaderTracker）— 跨日资金轮转核心
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DRAGON_PERSIST_PATH = "snapshots/dragon_tracker.json"
+
+
+class DragonLeaderTracker:
+    """
+    龙头持续追踪器 — 周而复始自动挖掘 + 自动清理
+    ─────────────────────────────────────────────
+    工作链路：
+      1. add_candidate()              — StarFollow 确认后入库候选
+      2. intraday_update()            — 每 tick：盘中新高不新低 ➜ 初级认可
+      3. daily_close_snapshot()       — 收盘固化日高低，自动升降级/淘汰垃圾
+      4. auto_next_day_validate_all() — 次日开盘批量初始化新一日基准
+      5. get_dragon_signal()          — 为真龙/盘中新高候选生成高优先级信号
+      6. JSON 持久化                  — 程序重启不丢跨日跟踪状态
+
+    升级：CANDIDATE ➜ DRAGON
+      - 连续 DRAGON_UPGRADE_DAYS(=2) 个交易日创新高，且未创新低
+    淘汰：WARNING ➜ ELIMINATED（自动从名单清除）
+      - 盘中跌破昨日最低价
+      - 连续 WARNING_ELIM_DAYS(=2) 日预警未修复
+    """
+
+    DRAGON_UPGRADE_DAYS  = 2    # 连续N日新高升级为真龙头
+    WARNING_ELIM_DAYS    = 2    # 连续N日预警则淘汰
+    INTRADAY_VWAP_LIMIT  = 3    # 盘中连续N次跌穿VWAP触发预警
+    MIN_SECTOR_HEAT      = 20.0 # 候选入库最低板块热度
+
+    def __init__(self, persist_path: Optional[str] = None):
+        self._records: Dict[str, DragonRecord] = {}
+        self._lock = threading.Lock()
+        self._persist_path = persist_path or _DRAGON_PERSIST_PATH
+        self._today_str: str = datetime.now().strftime('%Y%m%d')
+        self._next_day_done: bool = False
+        self._load_persist()
+
+    # ── 持久化 ────────────────────────────────────────────────────────────────
+
+    def _load_persist(self):
+        """启动时加载跨日龙头数据（跳过 ELIMINATED）"""
+        try:
+            if not os.path.exists(self._persist_path):
+                return
+            with open(self._persist_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            n = 0
+            for item in data.get('records', []):
+                try:
+                    rec = DragonRecord.from_dict(item)
+                    if rec.status != DragonStatus.ELIMINATED:
+                        self._records[rec.code] = rec
+                        n += 1
+                except Exception as e:
+                    logger.debug(f"[DragonTracker] load record err: {e}")
+            logger.info(f"[DragonTracker] 加载持久化龙头: {n} 只 (日期={data.get('date','')})")
+        except Exception as e:
+            logger.warning(f"[DragonTracker] 加载持久化失败: {e}")
+
+    def _save_persist(self):
+        """原子写入持久化 JSON"""
+        try:
+            d = os.path.dirname(self._persist_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with self._lock:
+                items = [r.to_persist_dict() for r in self._records.values()
+                         if r.status != DragonStatus.ELIMINATED]
+            tmp = self._persist_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'saved_at': datetime.now().isoformat(),
+                           'date': self._today_str,
+                           'records': items}, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._persist_path)
+            logger.debug(f"[DragonTracker] 持久化保存: {len(items)} 条")
+        except Exception as e:
+            logger.warning(f"[DragonTracker] 持久化保存失败: {e}")
+
+    # ── 候选加入 ──────────────────────────────────────────────────────────────
+
+    def add_candidate(self, code: str, name: str, sector: str,
+                      current_price: float, sector_heat: float = 0.0):
+        """StarFollowEngine 确认后调用，将个股加入候选名单（已存在则跳过）"""
+        if sector_heat < self.MIN_SECTOR_HEAT:
+            return
+        with self._lock:
+            if code in self._records:
+                return
+            rec = DragonRecord(
+                code=code, name=name, sector=sector,
+                status=DragonStatus.CANDIDATE,
+                confirmed_date=self._today_str,
+                tracked_days=1, consecutive_new_highs=0,
+                prev_day_high=0.0, prev_day_low=0.0, prev_day_close=0.0,
+                today_high=current_price, today_low=current_price,
+                cum_pct_from_entry=0.0, entry_price=current_price,
+                warning_days=0, last_update=datetime.now().isoformat(),
+                tags=['新候选'],
+            )
+            self._records[code] = rec
+        logger.info(f"[DragonTracker] 🌱 候选入库: {code}({name}) 板块={sector} 入场价={current_price:.3f}")
+
+    # ── 盘中实时更新 ──────────────────────────────────────────────────────────
+
+    def intraday_update(self, code: str, current_price: float,
+                        day_high: float, day_low: float,
+                        vwap: float, dff: float, current_pct: float,
+                        sector_heat: float = 0.0):
+        """每 tick 调用：新高不新低 ➜ 初级认可；跌破昨低 ➜ 立即 WARNING"""
+        with self._lock:
+            rec = self._records.get(code)
+            if rec is None or rec.status == DragonStatus.ELIMINATED:
+                return
+
+            # 更新今日高低
+            if day_high > rec.today_high:
+                rec.today_high = day_high
+            if day_low > 0 and (rec.today_low <= 0 or day_low < rec.today_low):
+                rec.today_low = day_low
+
+            # 实时字段
+            rec.current_price = current_price
+            rec.current_pct   = current_pct
+            rec.vwap          = vwap
+            rec.dff           = dff
+            rec.last_update   = datetime.now().isoformat()
+            if rec.entry_price > 0:
+                rec.cum_pct_from_entry = (current_price / rec.entry_price - 1) * 100
+
+            # ① 盘中跌破昨日最低 ➜ 立即 WARNING
+            if rec.prev_day_low > 0 and current_price < rec.prev_day_low * 0.999:
+                if rec.status != DragonStatus.WARNING:
+                    rec.status = DragonStatus.WARNING
+                    rec.warning_days = max(rec.warning_days, 1)
+                if '盘中破昨低' not in rec.tags:
+                    rec.tags.append('盘中破昨低')
+                logger.info(f"[DragonTracker] ⚠️ 盘中破昨低: {code} 当前={current_price:.3f} 昨低={rec.prev_day_low:.3f}")
+                return
+
+            # ② 盘中新高不新低 ➜ 去掉破位标记，WARNING 给一次修复机会
+            if rec.prev_day_high > 0:
+                is_new_hi = rec.today_high > rec.prev_day_high
+                is_ok_low = rec.today_low  >= rec.prev_day_low * 0.998
+                if is_new_hi and is_ok_low:
+                    if '盘中新高' not in rec.tags:
+                        rec.tags.append('盘中新高')
+                    rec.tags = [t for t in rec.tags if t != '盘中破昨低']
+                    if rec.status == DragonStatus.WARNING and rec.today_high > rec.prev_day_high * 1.002:
+                        rec.warning_days = max(0, rec.warning_days - 1)
+                        if rec.warning_days == 0:
+                            rec.status = DragonStatus.CANDIDATE
+                            logger.info(f"[DragonTracker] ↑ 盘中修复: {code}")
+
+            # ③ 连续跌穿 VWAP 次数统计
+            if vwap > 0 and current_price < vwap * 0.998:
+                rec.below_vwap_count += 1
+                if rec.below_vwap_count >= self.INTRADAY_VWAP_LIMIT:
+                    if '跌破均线' not in rec.tags:
+                        rec.tags.append('跌破均线')
+            else:
+                rec.below_vwap_count = 0
+                rec.tags = [t for t in rec.tags if t != '跌破均线']
+
+    # ── 收盘快照（每日 ~15:00 调用）────────────────────────────────────────────
+
+    def daily_close_snapshot(self) -> dict:
+        """
+        收盘后调用：
+        - 固化今日高低 ➜ prev_day；清零今日字段
+        - 连续N日新高 ➜ 升级 DRAGON
+        - 创新低 / 连续N日 WARNING ➜ ELIMINATED 淘汰
+        - 保存 JSON
+        """
+        self._today_str = datetime.now().strftime('%Y%m%d')
+        upgraded, eliminated = [], []
+
+        with self._lock:
+            for code, rec in list(self._records.items()):
+                # 当日高低对比昨日
+                if rec.prev_day_high > 0:
+                    made_new_high = rec.today_high > rec.prev_day_high
+                    made_new_low  = rec.today_low  < rec.prev_day_low * 0.998 if rec.prev_day_low > 0 else False
+
+                    if made_new_high and not made_new_low:
+                        rec.consecutive_new_highs += 1
+                        if '连续新高' not in rec.tags:
+                            rec.tags.append('连续新高')
+                    else:
+                        rec.consecutive_new_highs = 0
+                        rec.tags = [t for t in rec.tags if t != '连续新高']
+
+                    if made_new_low:
+                        if rec.status != DragonStatus.WARNING:
+                            rec.status = DragonStatus.WARNING
+                        rec.warning_days += 1
+                        if '创新低' not in rec.tags:
+                            rec.tags.append('创新低')
+                    else:
+                        rec.tags = [t for t in rec.tags if t != '创新低']
+                        if rec.status == DragonStatus.WARNING:
+                            rec.warning_days = max(0, rec.warning_days - 1)
+                            if rec.warning_days == 0:
+                                rec.status = DragonStatus.CANDIDATE
+
+                # 淘汰：连续预警超阈值
+                if rec.warning_days >= self.WARNING_ELIM_DAYS:
+                    rec.status = DragonStatus.ELIMINATED
+                    eliminated.append(code)
+                    logger.info(f"[DragonTracker] ❌ 淘汰: {code}({rec.name}) 连续{rec.warning_days}日预警")
+                    continue
+
+                # 升级：连续新高达标
+                if (rec.status == DragonStatus.CANDIDATE
+                        and rec.consecutive_new_highs >= self.DRAGON_UPGRADE_DAYS):
+                    rec.status = DragonStatus.DRAGON
+                    upgraded.append(code)
+                    logger.info(f"[DragonTracker] 🐉 升级真龙头: {code}({rec.name}) 连续{rec.consecutive_new_highs}日新高")
+
+                # 固化：今日 ➜ 昨日
+                rec.prev_day_high  = rec.today_high  if rec.today_high  > 0 else rec.prev_day_high
+                rec.prev_day_low   = rec.today_low   if rec.today_low   > 0 else rec.prev_day_low
+                rec.prev_day_close = rec.current_price if rec.current_price > 0 else rec.prev_day_close
+                # 清零今日盘中字段
+                rec.today_high = 0.0
+                rec.today_low  = 0.0
+                rec.below_vwap_count = 0
+                rec.tags = [t for t in rec.tags if t not in ('盘中新高', '盘中破昨低', '新候选')]
+                rec.tracked_days += 1
+                rec.last_update = datetime.now().isoformat()
+
+            # 删除已淘汰
+            for code in eliminated:
+                self._records.pop(code, None)
+
+        self._next_day_done = False
+        self._save_persist()
+        logger.info(f"[DragonTracker] 收盘快照完成: 升级={upgraded} 淘汰={eliminated} 存活={len(self._records)}")
+        return {'upgraded': upgraded, 'eliminated': eliminated}
+
+    # ── 次日批量初始化 ────────────────────────────────────────────────────────
+
+    def auto_next_day_validate_all(self, stock_snaps: Dict[str, dict]):
+        """次日开盘后检测到日期变更时调用一次，用开盘价初始化今日高低"""
+        if self._next_day_done:
+            return
+        with self._lock:
+            codes = list(self._records.keys())
+        for code in codes:
+            snap = stock_snaps.get(code, {})
+            price = float(snap.get('price', 0.0))
+            if price <= 0:
+                continue
+            prev_close = float(snap.get('last_close', 0.0))
+            with self._lock:
+                rec = self._records.get(code)
+                if rec and rec.today_high <= 0:
+                    rec.today_high = price
+                    rec.today_low  = price
+                    if prev_close > 0 and rec.prev_day_close <= 0:
+                        rec.prev_day_close = prev_close
+        self._next_day_done = True
+        logger.info(f"[DragonTracker] 次日批量初始化: {len(codes)} 只")
+
+    def get_dragon_records(self, min_status=DragonStatus.CANDIDATE) -> List[dict]:
+        """[NEW] 公开接口：获取当前符合条件的龙头个股数据列表"""
+        with self._lock:
+            # ⭐ 核心修复：在 Record 对象层面进行 Enum 比较，防止 dict 转换后的类型冲突
+            recs = [r.to_dict() for r in self._records.values() 
+                    if r.status != DragonStatus.ELIMINATED and (min_status is None or r.status >= min_status)]
+            # 按连续新高排序 (降序)
+            recs.sort(key=lambda x: (int(x['status']), x['consecutive_new_highs'], x['cum_pct_from_entry']), reverse=True)
+            return recs
+
+    def get_dragons(self, min_status=DragonStatus.CANDIDATE) -> List[DragonRecord]:
+        """内部/外部：直接返回 Record 对象列表"""
+        with self._lock:
+            res = [r for r in self._records.values() if r.status != DragonStatus.ELIMINATED]
+            if min_status is not None:
+                res = [r for r in res if r.status >= min_status]
+            return res
+
+    # ── 生成龙头专属决策信号 ──────────────────────────────────────────────────
+
+    def get_dragon_signal(self, code: str, sector_heat: float = 50.0) -> Optional[DecisionSignal]:
+        """为 DRAGON / 盘中新高候选 生成高优先级决策信号"""
+        with self._lock:
+            rec = self._records.get(code)
+        if rec is None or rec.status in (DragonStatus.ELIMINATED, DragonStatus.WARNING):
+            return None
+        # 必须确认盘中新高
+        if rec.prev_day_high > 0 and rec.today_high <= rec.prev_day_high:
+            return None
+        if rec.current_price <= 0:
+            return None
+
+        base = 85 if rec.status == DragonStatus.DRAGON else 75
+        priority = int(
+            base
+            + min(rec.consecutive_new_highs, 3) * 3   # 最多 +9
+            + min(max(rec.cum_pct_from_entry, 0), 20) / 2  # 最多 +10
+            + sector_heat * 0.10
+            + max(0, rec.dff) * 1.5
+        )
+        priority = min(100, priority)
+
+        tag = "🐉 真龙头" if rec.status == DragonStatus.DRAGON else "🌱 候选龙"
+        reason = (
+            f"{tag} 连续{rec.consecutive_new_highs}日新高 "
+            f"累计{rec.cum_pct_from_entry:+.1f}% "
+            f"跟踪{rec.tracked_days}日 dff={rec.dff:+.2f} "
+            f"[{' '.join(rec.tags[-3:])}]"
+        )
+        suggest = round(rec.vwap * 1.001, 3) if rec.vwap > 0 else rec.current_price
+        return DecisionSignal(
+            code=code, name=rec.name, sector=rec.sector,
+            signal_type=SignalType.HOT_FOLLOW,
+            priority=priority,
+            suggest_price=suggest,
+            current_price=rec.current_price,
+            change_pct=rec.current_pct,
+            sector_heat=sector_heat,
+            reason=reason,
+            leader_code=code,
+            is_leader=True,
+            pct_diff=rec.cum_pct_from_entry,
+            dff=rec.dff,
+            sector_type="🐉 龙头持续",
+        )
+
+    # ── 查询接口 ──────────────────────────────────────────────────────────────
+
+    def get_dragons(self, min_status: DragonStatus = DragonStatus.CANDIDATE) -> List[DragonRecord]:
+        """获取当前龙头列表，按状态+连续新高天数排序"""
+        with self._lock:
+            recs = [r for r in self._records.values()
+                    if r.status != DragonStatus.ELIMINATED and r.status >= min_status]
+        return sorted(recs,
+                      key=lambda r: (int(r.status), r.consecutive_new_highs, r.cum_pct_from_entry),
+                      reverse=True)
+
+    def get_count(self) -> dict:
+        with self._lock:
+            c = {'candidate': 0, 'dragon': 0, 'warning': 0}
+            for r in self._records.values():
+                if r.status == DragonStatus.CANDIDATE:   c['candidate'] += 1
+                elif r.status == DragonStatus.DRAGON:    c['dragon']    += 1
+                elif r.status == DragonStatus.WARNING:   c['warning']   += 1
+        c['total'] = sum(c.values())
+        return c
+
+    def reset_day(self):
+        """每日开盘前：清除已淘汰记录，为新交易日做准备（不清除跨日状态）"""
+        with self._lock:
+            elim = [c for c, r in self._records.items() if r.status == DragonStatus.ELIMINATED]
+            for c in elim:
+                del self._records[c]
+        logger.info(f"[DragonTracker] 日重置: 移除淘汰={len(elim)} 存活={len(self._records)}")
+
+    # ── 历史深度挖掘 ──────────────────────────────────────────────────────────
+
+    def mine_history_dragons(self, codes: List[str], days: int = 7):
+        """
+        [NEW] 核心逻辑：自动通过历史 K 线回溯挖掘龙头
+        用于：手动执行引擎时的“自动补位”或“初始化回溯”
+        """
+        if tdd is None or not codes:
+            return
+        
+        logger.info(f"🔍 [DragonTracker] 开始 7 日深度挖掘扫描 (池大小={len(codes)})...")
+        found_new = 0
+        
+        for code in codes:
+            # 1. 过滤已存在的活跃记录
+            with self._lock:
+                if code in self._records and self._records[code].status != DragonStatus.ELIMINATED:
+                    continue
+            
+            try:
+                # 2. 获取历史日线 (TDX)
+                df = tdd.get_tdx_Exp_day_to_df(code, dl=days + 1, resample='d', fastohlc=True)
+                if df is None or len(df) < 2:
+                    continue
+                
+                # 3. 状态回溯重构 (State Reconstruction)
+                consecutive_highs = 0
+                cum_pct = 0.0
+                first_low = -1.0
+                has_fatal_break = False
+                
+                # 倒数第2根开始是昨日，最后1根是今日（或最近一交易日）
+                # 我们按顺序模拟过去 3-5 天的表现
+                for i in range(1, len(df)):
+                    prev = df.iloc[i-1]
+                    curr = df.iloc[i]
+                    
+                    c_high, c_low, c_close = float(curr['high']), float(curr['low']), float(curr['close'])
+                    p_high, p_low, p_close = float(prev['high']), float(prev['low']), float(prev['close'])
+                    
+                    # 核心判定逻辑：显著尝试突破或维持高位
+                    if c_high >= p_high: 
+                        consecutive_highs += 1
+                        if consecutive_highs == 1:
+                            entry_p = p_close
+                        # 累计涨幅基于入场点
+                        cum_pct = (c_close / entry_p - 1) * 100 if entry_p > 0 else 0.0
+                        entry_p = min(entry_p, p_close) if entry_p > 0 else entry_p
+                    elif c_low < p_low * 0.985: # 容忍度放宽到 1.5%，防止由于正常波动中断计数
+                        consecutive_highs = 0 
+                        if c_low < p_low * 0.970: # 严重破位 (3%)
+                            has_fatal_break = True
+                
+                # 4. 判定入库条件
+                # 显著降低冷启动门槛：只要有过 1 次新高，且没有发生恶性破位，就作为候选
+                if consecutive_highs >= 1 and not has_fatal_break:
+                    status = DragonStatus.DRAGON if consecutive_highs >= self.DRAGON_UPGRADE_DAYS else DragonStatus.CANDIDATE
+                    
+                    last_row = df.iloc[-1]
+                    prev_row = df.iloc[-2] if len(df) > 1 else last_row
+                    
+                    with self._lock:
+                        # 计算入场价 (首个新高日的前一日收盘)
+                        e_idx = max(0, len(df)-1-consecutive_highs)
+                        entry_price = float(df.iloc[e_idx]['close'])
+                        current_price = float(last_row['close'])
+                        cum_pct = (current_price / entry_price - 1) * 100 if entry_price > 0 else 0.0
+                        
+                        rec = DragonRecord(
+                            code=code,
+                            name=str(last_row.get('name', code)),
+                            sector="", 
+                            status=status,
+                            confirmed_date=datetime.now().strftime('%Y%m%d'),
+                            tracked_days=consecutive_highs + 1,
+                            consecutive_new_highs=consecutive_highs,
+                            prev_day_high=float(prev_row['high']),
+                            prev_day_low=float(prev_row['low']),
+                            prev_day_close=float(prev_row['close']),
+                            today_high=float(last_row['high']),
+                            today_low=float(last_row['low']),
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            cum_pct_from_entry=cum_pct, # ⭐ 补全必填参数
+                            warning_days=0,            # ⭐ 补全必填参数
+                            last_update=datetime.now().isoformat(),
+                            tags=['历史回溯', f'{consecutive_highs}日新高'],
+                        )
+                        self._records[code] = rec
+                        found_new += 1
+            except Exception as e:
+                logger.error(f"❌ [DragonMine] {code} error: {e}", exc_info=True)
+
+        if found_new > 0:
+            logger.info(f"✅ [DragonTracker] 历史挖掘完成: 发现 {found_new} 只存量龙头/候选")
+            self._save_persist()
+
+    def force_save(self):
+        """外部强制持久化（可在面板关闭时调用）"""
+        self._save_persist()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -802,6 +1411,12 @@ class IntradayPullbackDetector:
         drop_from_high = (price - day_high) / day_high if day_high > 0 else 0.0
         diff_from_vwap = (price - vwap) / vwap if vwap > 0 else 0.0
 
+        # ── [C] 强势前置条件：硬性剔除弱势股与结构破坏的个股 ──────────────────
+        if change_pct < 0.5:           # 当日涨幅 < 0.5%，弱势股，不值得追击
+            return None
+        if diff_from_vwap < -0.010:    # 跌破VWAP超1%，结构破坏，等待修复后再入场
+            return None
+
         signal_type = None
         reason = ""
         priority = 0
@@ -817,23 +1432,23 @@ class IntradayPullbackDetector:
             # dff 正值（主力流入）加分
             priority = int(60 + sector_heat * 0.3 + max(0, dff) * 2)
 
-        # 形态2：VWAP支撑 — 当前价在VWAP附近±0.3%，量放大，龙头已确认
+        # 形态2：VWAP支撑 — 当前价在VWAP附近±0.3%，量放大，龙头强势确认（未弱化）
         elif (abs(diff_from_vwap) <= 0.003 and
               vol_ratio >= 1.0 and
-              self._star_engine.is_leader_confirmed(leader_code)):
+              self._star_engine.is_leader_strong(leader_code)):  # [C] 用 is_leader_strong 替代 is_leader_confirmed
             signal_type = SignalType.VWAP_SUPPORT
             reason = (f"均线支撑: 均价差{diff_from_vwap*100:.2f}% "
-                      f"龙头{leader_code}已确认 dff={dff:+.2f}")
+                      f"龙头{leader_code}强势确认 dff={dff:+.2f}")
             priority = int(55 + sector_heat * 0.25 + max(0, dff) * 1.5)
 
-        # 形态3：板块共振点 — 龙头确认，附近上翘，且周期内有涨幅
-        elif (self._star_engine.is_leader_confirmed(leader_code) and
+        # 形态3：板块共振点 — 龙头强势确认，附近上翘，且周期内有明显涨幅
+        elif (self._star_engine.is_leader_strong(leader_code) and  # [C] 用 is_leader_strong
               len(prices5) >= 3 and
               prices5[-1] > prices5[-3] and
               diff_from_vwap >= -0.008 and
-              pct_diff >= 0.1):   # v2: 要求周期内有正向变动
+              pct_diff >= 0.3):   # [C] 从 0.1% 提升到 0.3%，过滤微弱震荡
             signal_type = SignalType.SECTOR_BREAKOUT
-            reason = (f"板块共振: 龙头{leader_code}已确认 "
+            reason = (f"板块共振: 龙头{leader_code}强势确认 "
                       f"跟进股上翘 均价差{diff_from_vwap*100:.2f}% "
                       f"周期涨幅{pct_diff:+.2f}%")
             priority = int(70 + sector_heat * 0.3 + pct_diff * 2)
@@ -1066,6 +1681,7 @@ class SectorFocusController:
         self.pullback_detector = IntradayPullbackDetector(self.sector_map, self.star_engine)
         self.decision_queue    = DecisionQueue()
         self.exit_monitor      = ExitMonitor(self.sector_map)
+        self.dragon_tracker    = DragonLeaderTracker()  # [Dragon] 龙头跨日持续跟踪器
 
         self._lock = threading.Lock()
         self._bidding_scores: Dict[str, float] = {}
@@ -1076,6 +1692,8 @@ class SectorFocusController:
 
         self._last_full_update: float = 0.0
         self._full_update_interval = 30.0   # 全量计算30秒一次
+        self._last_snapshot_date = ""      # [Dragon] 记录今日是否执行过收盘快照
+        self._last_30m_slot = -1           # [Dragon] 记录上一个 30 分钟同步槽位 (9:30 offset=0)
 
     # ── 数据注入（可从多个线程调用）────────────────────────────────────────
 
@@ -1189,20 +1807,68 @@ class SectorFocusController:
             hot_rank = dict(self._hot_rank_map)
 
         # [MOD] 强制模式下直接进入板块热力计算，不查 30s 节流；且在 force=True 时必然执行降级聚合计算以确保 UI 响应
+        today_date = datetime.now().strftime('%Y%m%d')
+        
+        # [Dragon] 自动收盘快照检测 (每天 15:00 - 15:10 之间触发一次)
+        now_dt = datetime.now()
+        if now_dt.hour == 15 and 0 <= now_dt.minute <= 10:
+            if self._last_snapshot_date != today_date:
+                logger.info(f"🕒 [Controller] 检测到收盘时间，自动触发龙头归档快照: {today_date}")
+                self.run_daily_close_snapshot()
+                self._last_snapshot_date = today_date
+
+        # [Dragon] 30 分钟整点强制扫描检测 (9:30, 10:00, 10:30, 11:00, 13:30, 14:00, 14:30)
+        # 计算 09:30 开始的分钟偏移量
+        m_offset = (now_dt.hour * 60 + now_dt.minute) - 570  # 9:30 = 570min
+        if 0 <= m_offset <= 330: # 交易时间内 (9:30 - 15:00)
+            slot = m_offset // 30
+            if slot != self._last_30m_slot:
+                logger.info(f"⏰ [Controller] 到达 30 分钟同步节点 (Offset={m_offset}m, Slot={slot}), 触发全量引擎对齐")
+                force = True # 强制执行下方全量计算逻辑
+                self._last_30m_slot = slot
+                # 执行一次龙头状态固化，确保持久化最新
+                self.dragon_tracker._save_persist()
+
         if force or (now - self._last_full_update >= self._full_update_interval):
             try:
                 if df is not None and not df.empty:
                     with self.sector_map._lock:
                         has_detector_data = bool(self.sector_map._sector_map)
-                    
+
                     # [FIX] 如果是手动强制运行 (force=True)，则必须重新聚合计算一遍本地数据，否则 UI 点击 [引擎执行] 没反应
                     if force or not has_detector_data:
                         self.sector_map.update(df)
-                    
-                    self.star_engine.confirm_leaders(df, bidding, hot_rank)
+
+                    new_leaders = self.star_engine.confirm_leaders(df, bidding, hot_rank)
+
+                    # [Dragon] 将新确认的龙头导入候选名单
+                    for ldr_code in new_leaders:
+                        try:
+                            sec_name = self.sector_map.get_sector_of_code(ldr_code) or ''
+                            ldr_sh   = self.sector_map.get_sector_heat(sec_name)
+                            ldr_snap = self.sector_map.get_stock_snap(ldr_code)
+                            if ldr_snap:
+                                self.dragon_tracker.add_candidate(
+                                    code=ldr_code,
+                                    name=str(ldr_snap.get('name', ldr_code)),
+                                    sector=sec_name,
+                                    current_price=float(ldr_snap.get('price', 0.0)),
+                                    sector_heat=ldr_sh.heat_score if ldr_sh else 0.0,
+                                )
+                        except Exception:
+                            pass
+
+                    # [Dragon] 自动检测日期变更，触发次日批量初始化
+                    today_str = datetime.now().strftime('%Y%m%d')
+                    if today_str != self.dragon_tracker._today_str:
+                        with self.sector_map._lock:
+                            all_snaps = dict(self.sector_map._detector_stock_snap)
+                        self.dragon_tracker.auto_next_day_validate_all(all_snaps)
+
                 self._last_full_update = now
             except Exception as e:
                 logger.warning(f"[Controller] full update failed: {e}")
+
 
         # 实时扫描回踩买点
         if df is not None and not df.empty:
@@ -1210,7 +1876,6 @@ class SectorFocusController:
 
     def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
-        # [ROLLBACK] 恢复最初探测范围：由 15/30 缩回 8
         hot_sectors = self.sector_map.get_hot_sectors(top_n=8)
 
         for sh in hot_sectors:
@@ -1221,16 +1886,72 @@ class SectorFocusController:
                 if not code:
                     continue
                 try:
-                    # 传入当前指数状态与 55188 排名数据
                     idx_pct = getattr(self, '_index_pct_diff', 0.0)
                     ranks = self.sector_map.get_stock_ranks(code)
                     self._scan_one_v2(code, sh, index_pct=idx_pct, ranks=ranks, force=force)
                 except Exception as e:
                     logger.debug(f"[scan_pullbacks] {code}: {e}")
 
+        # [Dragon] 龙头持续跟踪信号扫描（priority 75+，重点标记）
+        try:
+            dragons = self.dragon_tracker.get_dragons(min_status=DragonStatus.CANDIDATE)
+            for rec in dragons:
+                snap = self.sector_map.get_stock_snap(rec.code)
+                if not snap:
+                    continue
+                try:
+                    sec_name = rec.sector or self.sector_map.get_sector_of_code(rec.code) or ''
+                    ldr_sh   = self.sector_map.get_sector_heat(sec_name)
+                    s_heat   = ldr_sh.heat_score if ldr_sh else 50.0
+                    # 更新盘中实时状态
+                    self.dragon_tracker.intraday_update(
+                        code=rec.code,
+                        current_price=float(snap.get('price', 0.0)),
+                        day_high=float(snap.get('high_day', 0.0)),
+                        day_low=float(snap.get('low_day', snap.get('price', 0.0))),
+                        vwap=float(snap.get('vwap', 0.0)),
+                        dff=float(snap.get('dff', 0.0)),
+                        current_pct=float(snap.get('pct', 0.0)),
+                        sector_heat=s_heat,
+                    )
+                    # 生成龙头专属决策信号
+                    dragon_sig = self.dragon_tracker.get_dragon_signal(rec.code, s_heat)
+                    if dragon_sig:
+                        self.decision_queue.push(dragon_sig)
+                        logger.info(
+                            f"[Dragon] 🐉 {rec.code}({rec.name}) "
+                            f"priority={dragon_sig.priority} {dragon_sig.reason}"
+                        )
+                except Exception as e:
+                    logger.debug(f"[Dragon] scan {rec.code}: {e}")
+        except Exception as e:
+            logger.debug(f"[Dragon] dragon scan failed: {e}")
+
     def manual_run(self):
         """[NEW] 手动强制执行引擎全链路逻辑（用于 UI 触发/调试测试）"""
         logger.info("⚡ [SectorFocusController] 手动强制触发全链路重算...")
+        
+        # 1. 深度回溯扫描：尝试从现有的板块龙头中挖掘历史存量
+        try:
+            potential_codes = []
+            hot_sectors = self.sector_map.get_hot_sectors(top_n=20)
+            for sh in hot_sectors:
+                if sh.leader_code: potential_codes.append(sh.leader_code)
+                potential_codes.extend(sh.follower_codes[:2])
+            
+            if potential_codes:
+                # 自动挖掘过去 7 天
+                self.dragon_tracker.mine_history_dragons(list(set(potential_codes)), days=7)
+                
+                # 补全板块名称 (刚才挖掘时没带板块)
+                with self.dragon_tracker._lock:
+                    for code, r in self.dragon_tracker._records.items():
+                        if not r.sector:
+                            r.sector = self.sector_map.get_sector_of_code(code) or ''
+        except Exception as e:
+            logger.warning(f"[ManualRun] History mining failed: {e}")
+
+        # 2. 正常全链路刷新
         # 强制下发 force=True 以绕过内部所有节流
         self.tick(force=True)
         logger.info("✅ [SectorFocusController] 手动全链路刷新完成")
@@ -1366,7 +2087,30 @@ class SectorFocusController:
         self.pullback_detector.reset_day()
         self.decision_queue.reset_day()
         self.exit_monitor.reset_day()
+        self.dragon_tracker.reset_day()  # [Dragon] 清理已淘汰，保留跨日状态
         logger.info("[Controller] 每日重置完成")
+
+    # [Dragon] 龙头追踪对外接口 ─────────────────────────────────────────────
+
+    def get_dragon_leaders(
+        self, min_status: DragonStatus = DragonStatus.CANDIDATE
+    ) -> List[dict]:
+        """获取龙头追踪列表（UI 消费接口）"""
+        return [r.to_dict() for r in self.dragon_tracker.get_dragons(min_status)]
+
+    def get_dragon_count(self) -> dict:
+        """获取龙头数量统计 {'candidate': N, 'dragon': N, 'warning': N, 'total': N}"""
+        return self.dragon_tracker.get_count()
+
+    def run_daily_close_snapshot(self) -> dict:
+        """
+        收盘后（~15:00）手动调用：
+        固化日高低，自动升级/淘汰，保存 JSON。
+        返回 {'upgraded': [...], 'eliminated': [...]}
+        """
+        result = self.dragon_tracker.daily_close_snapshot()
+        logger.info(f"[Controller] 龙头日收盘快照: {result}")
+        return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -6507,8 +6507,10 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"[Rapid Browse] Discarding outdated result for {code}")
             return
 
-        # 1. ⚡ 信号/基准数据初始化 (必须先构建一个干净的 local_day_df)
+        # 1. ⚡ 信号/基准数据初始化 (必须先构建一个干净特 local_day_df)
         local_day_df = pd.DataFrame()
+        is_intraday = self.realtime and cct.get_work_time_duration()
+
         if day_df is not None and not day_df.empty:
             local_day_df = day_df.copy()
             local_day_df.index = pd.to_datetime(local_day_df.index).strftime('%Y-%m-%d')
@@ -6518,7 +6520,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 盘中剥离今日（如有），由后续实时 Tick 重新构建，确保极值精度
             today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
-            is_intraday = self.realtime and cct.get_work_time_duration()
             if is_intraday or self._debug_realtime:
                 local_day_df = local_day_df[local_day_df.index < today_str]
 

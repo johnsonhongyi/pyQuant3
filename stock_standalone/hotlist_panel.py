@@ -2636,7 +2636,15 @@ class HotlistPanel(QWidget, WindowMixin):
                     self._notify_voice(code, f"{item.name} 状态变更为 {group}")
                 break
         self._refresh_table()
-    
+    def _notify_voice(self, code: str, msg: str):
+        """发送语音通知信号"""
+        # 检查语音暂停状态
+        if self._voice_paused:
+            return
+        if self.voice_enabled:
+            self.voice_alert.emit(code, msg)
+            logger.debug(f"Voice alert: {code} - {msg}")
+            
     def contains(self, code: str) -> bool:
         """检查是否已包含该股票"""
         return any(item.code == code for item in self.items)

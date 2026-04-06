@@ -316,6 +316,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             interval_ms = 5000
         self._engine_sync_timer.start(interval_ms)
         logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，节拍: {interval_ms}ms")
+        
+        # [MOD] 状态栏轮播定时器与消息池
+        self._carousel_idx = 0
+        self._carousel_messages = []
+        self._carousel_timer = QTimer(self)
+        self._carousel_timer.timeout.connect(self._update_status_carousel)
+        self._carousel_timer.start(5000) # 5秒切换一次消息
 
     def stop(self):
         """停止所有计时器和订阅，释放资源"""
@@ -337,6 +344,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             if hasattr(self, '_search_timer') and self._search_timer: 
                 self._search_timer.stop()
+        except Exception: pass
+
+        try:
+            if hasattr(self, '_carousel_timer') and self._carousel_timer: 
+                self._carousel_timer.stop()
         except Exception: pass
         
         try:
@@ -440,7 +452,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         header_layout.addSpacing(30)
         self.cards = {}
-        for key, name, color in [("follow", "跟单信号", "#FFD700"), ("breakout", "突破加速", "#FF4500"), ("risk", "风险卖出", "#00FA9A"), ("breakdown", "结构破位", "#87CEFA"), ("other", "其它信号", "#A9A9A9")]:
+        # [MOD] 增加 "dragon" 龙头池卡片，放在第一位
+        card_configs = [
+            ("dragon", "🐉 龙头池", "#FFD700"),
+            ("follow", "跟单信号", "#FFD700"), 
+            ("breakout", "突破加速", "#FF4500"), 
+            ("risk", "风险卖出", "#00FA9A"), 
+            ("breakdown", "结构破位", "#87CEFA"), 
+            ("other", "其它信号", "#A9A9A9")
+        ]
+        for key, name, color in card_configs:
             card = QFrame()
             card.setMinimumWidth(60)
             card.setMaximumWidth(200)
@@ -538,11 +559,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
         self.tables: Dict[str, QTableWidget] = {}
 
-        # [MOD] 新增页签：决策队列与板块热力
-        all_tabs = ["🌟 决策队列", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会", "其它信号"]
+        # [MOD] 新增页签：决策队列与板块热力、龙头追踪
+        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会", "其它信号"]
         for tab_name in all_tabs:
             if tab_name == "🌟 决策队列":
                 table = self._create_decision_table()
+            elif tab_name == "🐉 龙头追踪":
+                table = self._create_dragon_table()
             elif tab_name == "🔥 板块热力":
                 table = self._create_sector_table()
             else:
@@ -672,6 +695,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.itemSelectionChanged.connect(self._on_selection_changed)
         return table
 
+    def _create_dragon_table(self) -> QTableWidget:
+        """创建龙头追踪列表"""
+        columns = ["状态", "代码", "名称", "所属板块", "现点%", "累计涨%", "追踪天", "新高天", "DFF动量", "VWAP", "更新时间", "标签"]
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(True)
+        table.horizontalHeader().setSortIndicator(5, Qt.SortOrder.DescendingOrder) # 默认按累跌倒序
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 标签拉伸
+        
+        table.cellClicked.connect(self._on_cell_clicked)
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.itemSelectionChanged.connect(self._on_selection_changed)
+        return table
+
     def _on_sector_table_clicked(self, row, col):
         """板块表单击联动：同步龙头 K 线"""
         table = self.sender()
@@ -749,7 +793,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.debug(f"Refresh decision table failed: {e}")
 
-        # 2. 更新板块热力表
+        # 2. 更新龙头追踪表 [NEW]
+        try:
+            dragons = self._engine_ctrl.get_dragon_leaders()
+            self._refresh_dragon_table(dragons)
+        except Exception as e:
+            logger.debug(f"Refresh dragon table failed: {e}")
+
+        # 3. 更新板块热力表
         try:
             sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
             self._refresh_sector_table(sectors)
@@ -801,7 +852,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(i, 9, pd_item)
 
             table.setItem(i, 10, NumericTableWidgetItem(d.get('dff', 0.0)))
-            table.setItem(i, 11, QTableWidgetItem(d.get('reason', '')))
+            
+            reason = d.get('reason', '')
+            r_item = QTableWidgetItem(reason)
+            table.setItem(i, 11, r_item)
+
+            # [Dragon] 龙头重点标记逻辑
+            if '🐉' in reason:
+                # 1. 突出颜色：深金黄色背景 (暗金)
+                dragon_bg = QColor(100, 80, 0, 100) 
+                for col in range(table.columnCount()):
+                    it = table.item(i, col)
+                    if it:
+                        it.setBackground(QBrush(dragon_bg))
+                        # 2. 核心信息加粗
+                        if col in [3, 4]: # 代码与名称
+                            f = it.font()
+                            f.setBold(True)
+                            it.setFont(f)
+                            it.setForeground(QBrush(QColor("#FFD700"))) # 亮金色文字
 
         table.setSortingEnabled(True)
         # 恢复选中
@@ -809,6 +878,99 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             for r in range(table.rowCount()):
                 if table.item(r, 3).text() == current_selection:
                     table.selectRow(r)
+
+    def _refresh_dragon_table(self, dragons: List[dict]):
+        """刷新龙头追踪表 [NEW]"""
+        table = self.tables.get("🐉 龙头追踪")
+        if not table: return
+        
+        table.setSortingEnabled(False)
+        # 记录选中项代码 (代码在 index 1)
+        current_selection = None
+        sel_items = table.selectedItems()
+        if sel_items: current_selection = table.item(sel_items[0].row(), 1).text()
+
+        # 复用行逻辑
+        if table.rowCount() != len(dragons):
+            table.setRowCount(len(dragons))
+            
+        for i, d in enumerate(dragons):
+            # ["状态", "代码", "名称", "所属板块", "现点%", "累计涨%", "追踪天", "新高天", "DFF动量", "VWAP", "更新时间", "标签"]
+            
+            # 0. 状态
+            st_lbl = d.get('status_label', '')
+            st_item = QTableWidgetItem(st_lbl)
+            if '龙' in st_lbl: st_item.setForeground(QBrush(QColor("#FFD700"))) # 亮金
+            elif '候' in st_lbl: st_item.setForeground(QBrush(QColor("#00FF00"))) # 嫩绿
+            table.setItem(i, 0, st_item)
+
+            # 1. 代码
+            code = d.get('code', '')
+            c_item = QTableWidgetItem(code)
+            c_item.setForeground(QBrush(QColor("#ffff00" if code.startswith('30') else "#00ffff")))
+            table.setItem(i, 1, c_item)
+
+            # 2. 名称
+            n_item = QTableWidgetItem(d.get('name', ''))
+            if '龙' in st_lbl: 
+                f = n_item.font()
+                f.setBold(True)
+                n_item.setFont(f)
+            table.setItem(i, 2, n_item)
+
+            # 3. 板块
+            table.setItem(i, 3, QTableWidgetItem(d.get('sector', '')))
+
+            # 4. 现点% (日内涨幅)
+            c_pct = d.get('current_pct', 0.0)
+            cp_item = NumericTableWidgetItem(c_pct)
+            cp_item.setText(f"{c_pct:+.2f}%")
+            if c_pct > 0: cp_item.setForeground(QBrush(QColor("#ff4444")))
+            elif c_pct < 0: cp_item.setForeground(QBrush(QColor("#44ff44")))
+            table.setItem(i, 4, cp_item)
+
+            # 5. 累计涨% (从确认点至今)
+            cum_pct = d.get('cum_pct', 0.0)
+            cum_item = NumericTableWidgetItem(cum_pct)
+            cum_item.setText(f"{cum_pct:+.2f}%")
+            if cum_pct > 5: cum_item.setForeground(QBrush(QColor("#FFD700"))) # 大肉标金
+            elif cum_pct > 0: cum_item.setForeground(QBrush(QColor("#ff4444")))
+            table.setItem(i, 5, cum_item)
+
+            # 6. 追踪天
+            table.setItem(i, 6, NumericTableWidgetItem(d.get('tracked_days', 0)))
+
+            # 7. 新高天
+            nh_days = d.get('consecutive_new_highs', 0)
+            nh_item = NumericTableWidgetItem(nh_days)
+            if nh_days >= 3: nh_item.setForeground(QBrush(QColor("#ff4500"))) # 连续3日新高变橙红
+            table.setItem(i, 7, nh_item)
+
+            # 8. DFF动量
+            dff = d.get('dff', 0.0)
+            dff_item = NumericTableWidgetItem(dff)
+            if dff > 0: dff_item.setForeground(QBrush(QColor("#00ff88")))
+            table.setItem(i, 8, dff_item)
+
+            # 9. VWAP
+            table.setItem(i, 9, NumericTableWidgetItem(d.get('vwap', 0.0)))
+
+            # 10. 更新时间
+            up_time = d.get('last_update', '')
+            if len(up_time) > 19: # ISO 格式处理
+                up_time = up_time[11:19]
+            table.setItem(i, 10, QTableWidgetItem(up_time))
+
+            # 11. 标签
+            table.setItem(i, 11, QTableWidgetItem(d.get('tags', '')))
+
+        table.setSortingEnabled(True)
+        # 恢复选中
+        if current_selection:
+            for r in range(table.rowCount()):
+                if table.item(r, 1).text() == current_selection:
+                    table.selectRow(r)
+                    break
                     break
 
     def _refresh_sector_table(self, sectors: List[dict]):
@@ -1200,6 +1362,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _update_stats_display(self):
         total = len(self._all_events)
+        
+        # [FIX] 提前获取市场统计，确保无论是否有信号，后续逻辑都能安全访问
+        market_up = self._market_stats.get('up', 0)
+        market_down = self._market_stats.get('down', 0)
+        prof_temp = self._market_stats.get('temperature')
+
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
         if total > 0:
             with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
@@ -1209,13 +1377,30 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.cards["risk"].setText(str(self._stats_counters["risk"]))
                 self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
                 self.cards["other"].setText(str(self._stats_counters.get("other", 0)))
+                
+                # [Dragon] 更新龙头统计
+                if self._engine_ctrl:
+                    d_counts = self._engine_ctrl.get_dragon_count()
+                    d_total = d_counts.get('dragon', 0)
+                    c_total = d_counts.get('candidate', 0)
+                    self.cards["dragon"].setText(str(d_total + c_total))
+                    
+                    # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
+                    self._carousel_messages = [
+                        f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()}",
+                        f"🐉 龙头关注: 真龙 {d_total} | 候选 {c_total}",
+                        f"🔥 市场信号: F:{self._stats_counters['follow']} | B:{self._stats_counters['breakout']} | R:{self._stats_counters['risk']} | S:{self._stats_counters['breakdown']}",
+                        f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
+                    ]
+                    
+                    # 简化顶部文字 (原 stats_info_label)
+                    compact_text = f"F:{self._stats_counters['follow']} B:{self._stats_counters['breakout']} R:{self._stats_counters['risk']} Σ:{total}"
+                    self.stats_info_label.setText(compact_text)
         
         
         # 1. 通用计算多空比
         total_bull = self._stats_counters.get("bull", 0)
         total_bear = self._stats_counters.get("bear", 0)
-        market_up = self._market_stats.get('up', 0)
-        market_down = self._market_stats.get('down', 0)
         
         # 优先使用全市场涨跌比，因为它更稳定且反映大盘真实深度
         if market_up + market_down > 100:
@@ -1226,7 +1411,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             ratio = 0.0 # 默认修正为0更符合逻辑
             
         # 2. 优先使用从 monitor 传来的专业市场温度评分
-        prof_temp = self._market_stats.get('temperature')
         if prof_temp is not None:
             temp_val = float(prof_temp)
             status = "冷清"
@@ -1325,14 +1509,24 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.debug(f"Update market stats failed: {e}")
 
     def _on_card_clicked(self, key):
-        mapping = {"follow": "跟单信号", "breakout": "突破加速", "risk": "卖点预警", "breakdown": "结构破位", "other": "其它信号"}
+        mapping = {
+            "dragon": "🐉 龙头追踪",
+            "follow": "跟单信号", 
+            "breakout": "突破加速", 
+            "risk": "卖点预警", 
+            "breakdown": "结构破位", 
+            "other": "其它信号"
+        }
         tab_name = mapping.get(key)
         if tab_name:
-            # [FIX] 点击顶部卡片时，重置下拉列表以防过滤掉卡片内信号
+            # [FIX] 点击顶部卡片时，不仅重置下拉列表，还要清空搜索框，彻底消除交叉过滤限制
             if hasattr(self, 'type_filter') and self.type_filter.currentData() != "ALL":
                 idx = self.type_filter.findData("ALL")
                 if idx >= 0:
                     self.type_filter.setCurrentIndex(idx)
+                    
+            if hasattr(self, 'search_input') and self.search_input.text():
+                    self.search_input.clear()
                     
             for i in range(self.tabs.count()):
                 if self.tabs.tabText(i) == tab_name:
@@ -1713,6 +1907,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         finally:
             # 冷却 1.5s 后恢复可点击状态，防止疯狂连点
             QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
+
+    def _get_next_scan_time(self):
+        """[Dragon] 计算下一个 30 分钟扫描节点"""
+        now = datetime.now()
+        cur_min_total = now.hour * 60 + now.minute
+        # 交易节拍节点 (相对于 9:30 的偏移量)
+        slots = [0, 30, 60, 90, 120, 240, 270, 300, 330] # 9:30, 10:00, 10:30...
+        for s in slots:
+            target_min = 570 + s
+            if target_min > cur_min_total:
+                h, m = target_min // 60, target_min % 60
+                return f"{h:02d}:{m:02d}"
+        return "15:00"
+
+    def _update_status_carousel(self):
+        """[MOD] 底部状态栏轮播逻辑"""
+        if not self._carousel_messages:
+            self.status_label.setText("⌛ 系统初始化中...")
+            return
+        self._carousel_idx = (self._carousel_idx + 1) % len(self._carousel_messages)
+        self.status_label.setText(self._carousel_messages[self._carousel_idx])
 
 if __name__ == "__main__":
     import sys
