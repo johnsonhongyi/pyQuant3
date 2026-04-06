@@ -83,9 +83,16 @@ except ImportError:
 # System-wide hotkey support
 # [REMOVED] lib keyboard dependency to avoid sleep/wake conflict and resource waste.
 # Using QShortcut locally and Pipe for cross-process communication instead.
-KEYBOARD_AVAILABLE = False
-keyboard = None
-
+# KEYBOARD_AVAILABLE = False
+# keyboard = None
+# System-wide hotkey support
+try:
+    import keyboard
+    KEYBOARD_AVAILABLE = True
+except ImportError:
+    keyboard = None  # type: ignore
+    KEYBOARD_AVAILABLE = False
+    
 # Configuration
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
@@ -4269,7 +4276,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # [REMOVED] GlobalKeys toggle since keyboard lib is removed for stability.
         # Shortcuts are now local (QShortcut) and focused on reliability.
-        self.toolbar.addSeparator()
+        
+        # 系统级全局快捷键开关 (初始化状态)
+        self.global_shortcuts_enabled = False  # 默认关闭（仅 App-wide）
+        self.system_hotkeys_registered = False
+
+        if KEYBOARD_AVAILABLE:
+            self.gs_action = QAction("GlobalKeys", self)
+            self.gs_action.setCheckable(True)
+            self.gs_action.setToolTip("开启后快捷键为系统级（即使应用失去焦点也有效）")
+            self.gs_action.setChecked(self.global_shortcuts_enabled)
+            self.gs_action.triggered.connect(self.on_toggle_global_keys)
+            self.toolbar.addAction(self.gs_action)
+        else:
+            # keyboard 库不可用，添加提示
+            label = QLabel(" [系统快捷键不可用] ")
+            label.setStyleSheet("color: gray; font-size: 10px;")
+            self.toolbar.addWidget(label)
 
         self.toolbar.addSeparator()
 
@@ -4641,7 +4664,67 @@ class MainWindow(QMainWindow, WindowMixin):
 
     # [REMOVED] system hotkey registration methods to ensure KISS and avoid conflicts.
     # Logic moved to local QShortcuts with pipe-command-forwarding in _init_global_shortcuts.
+    def on_toggle_global_keys(self, checked):
+        """切换系统级全局快捷键"""
+        self.global_shortcuts_enabled = checked
+        
+        # 1. 注销/注册系统热键 (keyboard)
+        if checked:
+            self._register_system_hotkeys()
+        else:
+            self._unregister_system_hotkeys()
+            
+        # 2. 动态启用/禁用冲突的 App-wide 快捷键 (防止双重触发)
+        # 包含所有的核心全局热键，确保系统模式开启时，App 内部的 Shortcut 被屏蔽
+        # conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/", "Alt+H", "Alt+L"]
+        conflict_keys = ["Alt+T", "Alt+F",  "Alt+H", "Alt+L"]
+        # conflict_keys = ["Alt+T", "Alt+F",  "Alt+H"]
+        if hasattr(self, 'shortcuts'):
+            for key in conflict_keys:
+                if key in self.shortcuts:
+                    self.shortcuts[key].setEnabled(not checked)
+        
+        state = "全局模式 (System Wide)" if checked else "窗口模式 (App Wide)"
+        logger.info(f"Shortcut mode changed to: {state}")
 
+    def _register_system_hotkeys(self):
+        """注册系统级全局快捷键"""
+        if not KEYBOARD_AVAILABLE or not keyboard or self.system_hotkeys_registered:
+            return
+            
+        try:
+            # 注册系统全局快捷键 (使用 QTimer 确保主线程执行)
+            keyboard.add_hotkey('alt+t', lambda: QTimer.singleShot(0, self._show_signal_box))
+            keyboard.add_hotkey('alt+f', lambda: QTimer.singleShot(0, self._show_filter_panel))
+            # keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
+            keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
+            keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            
+            # 兼容性补充 (Ctrl+Alt+H 等)
+            # keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
+            # keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            
+            self.system_hotkeys_registered = True
+            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H)")
+        except Exception as e:
+            logger.error(f"❌ 系统快捷键注册失败: {e}")
+            self.global_shortcuts_enabled = False
+    
+    def _unregister_system_hotkeys(self):
+        """注销系统级全局快捷键"""
+        if not KEYBOARD_AVAILABLE or not keyboard or not self.system_hotkeys_registered:
+            return
+        
+        try:
+            keyboard.remove_hotkey('alt+t')
+            keyboard.remove_hotkey('alt+f')
+            # keyboard.remove_hotkey('ctrl+/')
+            keyboard.remove_hotkey('alt+h')
+            keyboard.remove_hotkey('alt+l')
+            self.system_hotkeys_registered = False
+            logger.info("✅ 系统级全局快捷键已注销")
+        except Exception as e:
+            logger.warning(f"⚠️ 系统快捷键注销失败: {e}")
 
     def _safe_len(self, df, fallback=150):
         """
