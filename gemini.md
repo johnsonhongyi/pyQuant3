@@ -47,3 +47,11 @@
   - [x] **实现快照存量可视化 (Existing Data Highlighting)**：自动扫描 `snapshots/` 目录，将已有快照数据的日期在日历中以 **红色、加粗、下划线** 样式高亮显示，并提供实时的文件存在性校验及状态反馈。
   - [x] **修复周末高亮冲突**：显式重置周六、周日的默认文本格式，彻底消除 QCalendarWidget 自带的周末红字对快照标记的干扰。
   - [x] **UI 持久化与逻辑集成**：确保复盘模式下不仅能加载历史数据，且界面状态（按钮颜色、状态栏提示、重点表标题等）能正确反映复盘日期，同步更新联动逻辑支持 `YYYYMMDD` 对齐。
+
+## 2026-04-06 21:45
+- [x] 深度优化竞价面板表格排序交互：
+  - [x] **统一排序回顶逻辑**：为 `stock_table` (个股) 补齐了 `sortIndicatorChanged` 信号联动，确保与 `sector_table` (板块) 及 `watchlist_table` (重点) 行为一致，点击表头排序后自动滚动至顶部。
+  - [x] **清理冗余代码**：删除了 `SectorBiddingPanel` 中重复定义的 `_on_header_clicked` 虚假成员函数，合并逻辑并增强了当前板块缓存 (last_populated_sector) 的鲁棒性，消除了排序逻辑冲突。
+
+## 2026-04-06 21:48
+- [x] 修复当日重点表 (Watchlist) 联动失效：在 `_init_ui` 中补齐了缺失的 `cellClicked`、`cellDoubleClicked` 及 `currentCellChanged` 信号连接，恢复了点击/双击联动以及键盘上下键切换时的实时联动功能。

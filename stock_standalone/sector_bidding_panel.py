@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
     QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate
+from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat
 import pyqtgraph as pg
 import numpy as np
@@ -1622,6 +1622,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
         self.stock_table.setItemDelegateForColumn(7, TrendDelegate(self)) # [FIX] 对准分时走势列
+        self.stock_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.stock_table.scrollToTop())
         vh = self.stock_table.verticalHeader()
         if vh: vh.setDefaultSectionSize(32) # 紧凑行高
         rlay.addWidget(self.stock_table)
@@ -1661,13 +1662,34 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.watchlist_table.customContextMenuRequested.connect(self._on_watchlist_context_menu)
         
+        # [FIX] 补齐联动信号
+        self.watchlist_table.cellClicked.connect(self._on_watchlist_clicked)
+        self.watchlist_table.cellDoubleClicked.connect(self._on_watchlist_dblclick)
+        self.watchlist_table.currentCellChanged.connect(self._on_watchlist_cell_changed)
+        
         w_lay.addWidget(self.watchlist_table)
         self.v_splitter.addWidget(self.watchlist_group)
         self.v_splitter.setSizes([500, 180]) # 默认分配比例
         
         root.addWidget(self.v_splitter, 1)   # stretch=1 撑满剩余高度
 
+        # [NEW] 焦点监控：用于处理排序回顶与选中项跟踪的动态切换
+        self._last_focused_widget = None
+        for table in [self.sector_table, self.stock_table, self.watchlist_table]:
+            table.installEventFilter(self)
+            table._reset_on_next_sort = False
+
     # ------------------------------------------------------------------ helpers
+    def eventFilter(self, obj, event):
+        """[UX] 监控焦点切换，自动处理排序重置逻辑"""
+        if event.type() == QEvent.Type.FocusIn:
+            if obj in [self.sector_table, self.stock_table, self.watchlist_table]:
+                if self._last_focused_widget != obj:
+                    obj._reset_on_next_sort = True
+                    self._last_focused_widget = obj
+                    # logger.debug(f"[Focus] Reset sort top for {obj.objectName()}")
+        return super().eventFilter(obj, event)
+
     def _make_cb(self, text: str, key: str, layout: QHBoxLayout) -> QCheckBox:
         cb = QCheckBox(text)
         cb.setChecked(self.detector.strategies[key]['enabled'])
@@ -1899,7 +1921,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
 
-    def _refresh_sector_list(self):
+    def _refresh_sector_list(self, reset_to_top: bool = False):
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
             return
@@ -2012,6 +2034,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 8. 默认选中
         if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
+            
+        if reset_to_top and self.sector_table.rowCount() > 0:
+            self.sector_table.selectRow(0)
+            self.sector_table.scrollToTop()
 
         # 9. 联动刷新
         if self.sector_table.selectedItems():
@@ -2056,8 +2082,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # [OPTIMIZE] 检查是否需要更新
                 with self._update_lock:
                     force = self._force_update_requested
+                
+                # [UX] 响应个股标题点击传导的重置信号
+                reset_to_top = getattr(self.stock_table, '_temp_reset_to_top', False)
+                self.stock_table._temp_reset_to_top = False # 消费掉
                     
-                self._populate_table(d)
+                self._populate_table(d, reset_to_top=reset_to_top)
                 
                 # [NEW] 联动逻辑：如果是用户光标切换（且不是正在刷新的静默状态），自动联动龙头
                 if self.sector_table.hasFocus():
@@ -2189,7 +2219,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return True
 
     # ------------------------------------------------------------------ table fill
-    def _populate_table(self, data: dict):
+    def _populate_table(self, data: dict, reset_to_top: bool = False):
         leader_code   = data.get('leader', '')
         leader_name   = data.get('leader_name', leader_code)
         leader_pct    = data.get('leader_pct', 0.0)
@@ -2292,11 +2322,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._is_populating = True
         
         # 记录当前选中的代码，以便恢复
-        if not self._last_selected_code:
+        if not self._last_selected_code and not reset_to_top:
             curr_row = self.stock_table.currentRow()
             if curr_row >= 0:
                 item = self.stock_table.item(curr_row, 0)
                 if item: self._last_selected_code = item.text()
+        
+        if reset_to_top:
+            self._last_selected_code = None # 强制清除记忆以防干扰
 
         cur_rows = self.stock_table.rowCount()
         if cur_rows != len(rows):
@@ -2369,32 +2402,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table._last_populated_sector = data.get('sector')
 
         # 恢复选中状态
-        if target_row >= 0:
+        if reset_to_top and self.stock_table.rowCount() > 0:
+            self.stock_table.setCurrentCell(0, 0)
+            self.stock_table.scrollToTop()
+        elif target_row >= 0:
             # [OPTIMIZE] Only set if focus or manually requested to avoid jumpy UI
             if self.stock_table.currentRow() != target_row:
                 self.stock_table.setCurrentCell(target_row, 0)
+        elif self.stock_table.rowCount() > 0 and not self.stock_table.selectedItems():
+            # 没有任何选中的时候默认选第1个
+            self.stock_table.setCurrentCell(0, 0)
         
         self._is_populating = False
         self.stock_table.setUpdatesEnabled(True)
         
-    def _on_header_clicked(self, col):
-        """Python-level sort for stock table"""
-        if self._sort_col == col:
-            self._sort_asc = not self._sort_asc
-        else:
-            self._sort_col = col
-            self._sort_asc = False # Default descending for scores/pct
-            
-        # Update header icons or sort indicators manually if needed
-        self.stock_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder)
-        
-        # Trigger re-populate
-        current_sector = getattr(self.stock_table, '_last_populated_sector', None)
-        if current_sector:
-            for d in self.detector.get_active_sectors():
-                if d['sector'] == current_sector:
-                    self._populate_table(d)
-                    break
 
     def _on_sector_header_clicked(self, col):
         """Python-level sort for sector table"""
@@ -2405,7 +2426,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._sector_sort_asc = False
             
         self.sector_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sector_sort_asc else Qt.SortOrder.DescendingOrder)
-        self._refresh_sector_list()
+        
+        # [UX] 如果刚从其他表切换焦点回来，自动回顶并取消跟踪
+        reset_top = getattr(self.sector_table, '_reset_on_next_sort', False)
+        if reset_top:
+            self.sector_table._reset_on_next_sort = False
+            
+        self._refresh_sector_list(reset_to_top=reset_top)
         
     def _on_watchlist_header_clicked(self, col):
         """Python-level sort for watchlist table"""
@@ -2416,7 +2443,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._watchlist_sort_asc = False
             
         self.watchlist_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._watchlist_sort_asc else Qt.SortOrder.DescendingOrder)
-        self._populate_watchlist()
+        
+        # [UX] 如果刚从其他表切换焦点回来，自动回顶并取消跟踪
+        reset_top = getattr(self.watchlist_table, '_reset_on_next_sort', False)
+        if reset_top:
+             self.watchlist_table._reset_on_next_sort = False
+             
+        self._populate_watchlist(reset_to_top=reset_top)
 
     def _update_cell(self, table, row, col, text, color=None, font=None, alignment=None, 
                      user_role=None, user_role_v1=None, is_numeric=False):
@@ -2454,7 +2487,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return self._update_cell(self.stock_table, row, col, text)
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
-    def _populate_watchlist(self):
+    def _populate_watchlist(self, reset_to_top: bool = False):
         """填充底部当日重点表"""
         watchlist = self.detector.get_daily_watchlist()
         
@@ -2477,10 +2510,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # 记录当前选中代码以便恢复
         selected_code = ""
-        curr_row = self.watchlist_table.currentRow()
-        if curr_row >= 0:
-            item = self.watchlist_table.item(curr_row, 0)
-            if item: selected_code = item.text()
+        if not reset_to_top:
+            curr_row = self.watchlist_table.currentRow()
+            if curr_row >= 0:
+                item = self.watchlist_table.item(curr_row, 0)
+                if item: selected_code = item.text()
 
         cur_w_rows = self.watchlist_table.rowCount()
         new_count = len(watchlist)
@@ -2537,13 +2571,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if w['code'] == selected_code:
                 target_row = i
 
-        if target_row >= 0:
+        if reset_to_top and self.watchlist_table.rowCount() > 0:
+            self.watchlist_table.setCurrentCell(0, 0)
+            self.watchlist_table.scrollToTop()
+        elif target_row >= 0:
             # [OPTIMIZE] Selection Debouncing: Only set if the jump is significant or no current selection
             curr_w_row = self.watchlist_table.currentRow()
             if curr_w_row < 0 or abs(curr_w_row - target_row) > 0:
                 self.watchlist_table.blockSignals(True)
                 self.watchlist_table.setCurrentCell(target_row, 0)
                 self.watchlist_table.blockSignals(False)
+        elif self.watchlist_table.rowCount() > 0 and not self.watchlist_table.selectedItems():
+            self.watchlist_table.setCurrentCell(0, 0)
                 
         # 移除 setSortingEnabled 开关，永久保持 False
         # [NEW] Update Watchlist title stats
@@ -2704,13 +2743,30 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._sort_asc = not self._sort_asc
         else:
             self._sort_col = col
-            self._sort_asc = False
+            self._sort_asc = False # Default descending for scores/pct
+            
+        # Update header icons or sort indicators manually
+        self.stock_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder)
+            
         # 刷新当前板块
+        reset_top = getattr(self.stock_table, '_reset_on_next_sort', False)
+        if reset_top:
+            self.stock_table._reset_on_next_sort = False
+            
         curr_row = self.sector_table.currentRow()
         if curr_row >= 0:
+            # 内部调用 _populate_table 时，如果我们需要 reset，可以通过某种方式告知
+            # 这里简单起见，我们直接设置属性让后续刷新感知
+            self.stock_table._temp_reset_to_top = reset_top
             self._on_sector_table_selection_changed()
-        # [NEW] 排序后自动滚动到顶部
-        self.stock_table.scrollToTop()
+        else:
+            # 兜底：如果左侧没选，尝试用缓存的板块刷新
+            current_sector = getattr(self.stock_table, '_last_populated_sector', None)
+            if current_sector:
+                for d in self.detector.get_active_sectors():
+                    if d['sector'] == current_sector:
+                        self._populate_table(d, reset_to_top=reset_top)
+                        break
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
         code_item = self.stock_table.item(row, 0)

@@ -591,6 +591,7 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期时间 | 变更描述 | 涉及文件 |
 | :--- | :--- | :--- |
+| 04-06 21:09 | **决策引擎信号质量深度改进 v3**: A)热力评分引入 score_diff/follow_ratio/leader_pct_diff 动量加权；B)龙头新增实时弱化追踪 is_leader_strong()；C)形态前置强势过滤（涨幅≥0.5%+站稳VWAP）；D)跟随股排名加入主力dff权重 | `sector_focus_engine.py` |
 | 04-06 02:16 | **手动引擎执行**: 替换清空按钮为[🛠️ 引擎执行]，实现全链路逻辑手动触发与实时刷新 | `sector_focus_engine.py`, `signal_dashboard_panel.py` |
 | 04-06 02:05 | **55188整合与逆势策略**: 实现人气/主力自动提权加分，增加[逆势领涨]检测及指数数据注入链路 | `sector_focus_engine.py`, `instock_MonitorTK.py` |
 | 04-06 01:34 | **决策引擎v2完整打通**: inject_from_detector/inject_detector_sectors/_scan_one_v2/形态4/comparison_interval默认60m | `sector_focus_engine.py`, `bidding_momentum_detector.py`, `instock_MonitorTK.py` |
