@@ -434,20 +434,54 @@ class SectorFocusMap:
             zhuli_map = {}
         df['_zhuli'] = df['code'].map(zhuli_map).fillna(0.0)
 
+        # [FIX] 预处理板块名：过滤首尾空格及特殊分号，确保聚合不重叠
+        df['category'] = df['category'].astype(str).str.strip('; ').str.strip()
+
         # 按板块聚合
+        # [NEW] 集成 55188 排名数据：计算人气密度
+        hot_map   = self._hot_rank_map
+        zhuli_map_rank = self._zhuli_rank_map
+        
+        # 将排名映射回主表
+        df['_hot_rank']   = df['code'].map(hot_map).fillna(9999)
+        df['_zhuli_rank'] = df['code'].map(zhuli_map_rank).fillna(9999)
+        
+        # 计算进入 Top 300 的密度 (用于板块热度提权)
+        df['_is_popular'] = df['_hot_rank'] <= 300
+        
         g = df.groupby('category', sort=False)
         sectors_raw = g.agg(
             _bid_mean=('_bid_score', 'mean'),
             _zt_sum=('_is_zt', 'sum'),
             _vol_mean=('_vol_ratio', 'mean'),
             _zhuli_mean=('_zhuli', 'mean'),
+            _avg_pct=('percent', 'mean'),
+            _pop_count=('_is_popular', 'sum'), # [NEW] 人气股数量
             _count=('code', 'count'),
         ).reset_index()
+
+        # [NEW] 计算红盘占比 & 均线之上占比 (结构健康度)
+        df['_is_above_vwap'] = df['percent'] > 0 # 简单模拟
+        pos_df = df[df['percent'] > 0].groupby('category', sort=False).size().reset_index(name='_pos_count')
+        sectors_raw = pd.merge(sectors_raw, pos_df, on='category', how='left').fillna(0)
+        sectors_raw['_pos_ratio'] = sectors_raw['_pos_count'] / sectors_raw['_count']
+        sectors_raw['_pop_density'] = sectors_raw['_pop_count'] / sectors_raw['_count']
+
         sectors_raw.rename(columns={'category': 'name'}, inplace=True)
 
         sectors_raw = sectors_raw[sectors_raw['_count'] >= 3]
         if sectors_raw.empty:
             return []
+
+        # [NEW] 结构性提权与降速：全面考虑人气与结构
+        sectors_raw['_struct_bonus'] = 1.0
+        # 阴跌降权：平均跌幅>0.5% 且红盘占比<40% 或 人气全无
+        dead_mask = (sectors_raw['_avg_pct'] < -0.5) & (sectors_raw['_pos_ratio'] < 0.4)
+        sectors_raw.loc[dead_mask, '_struct_bonus'] = 0.05 
+        
+        # 起步/强攻提权：平均涨幅为正且红盘占比>60% 且有人气股扎堆
+        start_mask = (sectors_raw['_avg_pct'] > 0.0) & (sectors_raw['_pos_ratio'] > 0.6) & (sectors_raw['_pop_count'] >= 1)
+        sectors_raw.loc[start_mask, '_struct_bonus'] = 1.8 # 提高提权系数
 
         # 3. 标准化各分量 → 0~1
         def _norm(s: pd.Series) -> pd.Series:
@@ -462,11 +496,11 @@ class SectorFocusMap:
         sectors_raw['_n_zhl'] = _norm(sectors_raw['_zhuli_mean'])
 
         sectors_raw['heat_score'] = (
-            sectors_raw['_n_bid'] * self.W_BIDDING +
-            sectors_raw['_n_zt']  * self.W_ZT +
-            sectors_raw['_n_zhl'] * self.W_ZHULI +
-            sectors_raw['_n_vol'] * self.W_VOL
-        ) * 100
+            (sectors_raw['_n_bid'] * self.W_BIDDING +
+             sectors_raw['_n_zt']  * self.W_ZT +
+             sectors_raw['_n_zhl'] * self.W_ZHULI +
+             sectors_raw['_n_vol'] * self.W_VOL) * 100
+        ) * sectors_raw['_struct_bonus'] # [CORE] 结构性修正
 
         result: List[SectorHeat] = []
         # [ROLLBACK] 恢复最初的执行广度：恢复到 head(20)
@@ -545,10 +579,23 @@ class SectorFocusMap:
             {c: s.get('score', 0.0) for c, s in det_snap.items()}
         ).fillna(sec_df['code'].map(bidding).fillna(0.0))
         sec_df['_zt'] = sec_df['percent'] >= 9.5
+        
+        # [NEW] 在龙头识别中深度集成 55188 人气排名
+        hot_map = self._hot_rank_map
+        sec_df['_hot_rank'] = sec_df['code'].map(hot_map).fillna(9999)
+        # 人气越高分数越多，Top 10: 25分, Top 100: 15分, Top 300: 10分
+        def _rank_score(r):
+            if r <= 10: return 25.0
+            if r <= 100: return 15.0
+            if r <= 300: return 10.0
+            return 0.0
+        sec_df['_rank_points'] = sec_df['_hot_rank'].apply(_rank_score)
+
         sec_df['_leader_score'] = (
-            sec_df['_zt'].astype(float) * 50 +
-            sec_df['_bid'] * 5 +
-            sec_df['percent'].clip(0, 10) * 1
+            sec_df['_zt'].astype(float) * 40 +
+            sec_df['_bid'] * 4 +
+            sec_df['percent'].clip(0, 10) * 1 +
+            sec_df['_rank_points'] * 1 # 3% 涨幅 + Top 100 人气即可挑战龙头
         )
         sorted_df = sec_df.sort_values('_leader_score', ascending=False).reset_index(drop=True)
         if sorted_df.empty:
@@ -557,7 +604,7 @@ class SectorFocusMap:
         leader_code = str(leader.get('code', ''))
         leader_name = str(leader.get('name', ''))
         leader_pct  = float(leader.get('percent', 0.0))
-        # [FIX] 撤销 bid 限制，找回丢失的跟风股（解决跟风明细无信息的问题）
+        # [FIX] 撤销 bid 限制
         followers_df = sorted_df.iloc[1:MAX_FOLLOWERS_PER_SECTOR + 1]
         follower_codes = [str(r['code']) for _, r in followers_df.iterrows()]
         return leader_code, leader_name, leader_pct, follower_codes
@@ -603,9 +650,9 @@ class StarFollowEngine:
     v2：确认条件增加对 detector board_score 的直接引用
     """
 
-    LEADER_MIN_ZT_OR_PCT  = 5.0    # 龙头涨幅≥5%（降低门槛捕捉更多机会）
+    LEADER_MIN_ZT_OR_PCT  = 3.0    # [MOD] 龙头调低门槛至3%（紧跟启动大阳）
     LEADER_MIN_BID_SCORE  = 3.0    # 竞价/detector score≥3.0
-    LEADER_HOT_RANK_MAX   = 200    # 55188 人气排名≤200
+    LEADER_HOT_RANK_MAX   = 300    # [MOD] 适当放宽人气要求
 
     def __init__(self, sector_map: SectorFocusMap):
         self._sector_map = sector_map
@@ -793,12 +840,22 @@ class IntradayPullbackDetector:
 
         # 形态4：强势蓄势突破 — 板块类型为蓄势/强攻，且 dff 为正
         elif ('蓄势' in sector_type or '强攻' in sector_type):
-            if pct_diff >= 0.3 and dff > 0 and diff_from_vwap >= -0.01:
+            if pct_diff >= 0.5 and dff > 0 and diff_from_vwap >= -0.005:
                 signal_type = SignalType.HOT_FOLLOW
-                reason = (f"强势跟进({sector_type}): "
-                          f"周期涨幅{pct_diff:+.2f}% dff={dff:+.2f} "
-                          f"均价差{diff_from_vwap*100:.2f}%")
-                priority = int(65 + sector_heat * 0.25 + pct_diff * 3 + dff)
+                reason = (f"强势蓄势: 周期涨幅{pct_diff:+.2f}% dff={dff:+.2f} 站稳均线")
+                priority = int(65 + sector_heat * 0.25 + pct_diff * 4 + dff)
+
+        # 形态5：[NEW] 中阳起步确认 — 擒贼擒王，紧跟启动
+        # 判断标准：周期内涨幅 > 3% (或降级模式下当日涨幅 > 4.5%)，主力流入，且处于均线上方
+        if signal_type is None:
+            trigger_pct = 3.0
+            # 如果是降级模式且 pct_diff 被赋值为当日涨幅，门槛适当调高
+            if pct_diff >= trigger_pct and dff > 0 and diff_from_vwap >= 0:
+                signal_type = SignalType.STARTUP_RISE if 'STARTUP_RISE' in SignalType.__members__ else SignalType.HOT_FOLLOW
+                is_king = (code == leader_code)
+                tag = "👑 龙头起步" if is_king else "👥 跟随共振"
+                reason = (f"{tag}: 启动幅度{pct_diff:+.1f}% 资金dff={dff:+.2f} 均线上企稳")
+                priority = int(75 + sector_heat * 0.3 + pct_diff * 5)
 
         if signal_type is None:
             return None
@@ -1228,7 +1285,8 @@ class SectorFocusController:
             vol_ratio  = float(row.get('ratio', 1.0) or 1.0)
             prev_close = float(row.get('lastp1d', row.get('prev_close', 0)) or 0)
             name       = str(row.get('name', code))
-            pct_diff   = 0.0
+            # [FIX] 关键修复：从实时表取当前涨幅作为对比基准，不再由于硬编码为 0 导致过滤失效
+            pct_diff   = float(row.get('percent', 0.0)) 
             dff        = float(row.get('dff', 0.0) or 0.0)
             prices5    = [price]
 

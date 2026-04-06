@@ -3457,31 +3457,24 @@ class MainWindow(QMainWindow, WindowMixin):
     
     
     def _toggle_signal_log(self):
-        """切换信号日志面板显示"""
-        if not hasattr(self, 'signal_log_panel'):
+        """切换信号日志面板显示 (Toggle)"""
+        if not hasattr(self, "signal_log_panel"):
             return
-        
-        # [MODIFIED] Check if visible, if so, bring to front instead of hiding
-        # User Feedback: "clicked again, the panel should be brought to the foreground"
+
         if self.signal_log_panel.isVisible():
-            self.signal_log_panel.show()
-            self.signal_log_panel.raise_()
-            self.signal_log_panel.activateWindow()
+            self.signal_log_panel.hide()
         else:
             self.signal_log_panel.show()
             self.signal_log_panel.raise_()
             self.signal_log_panel.activateWindow()
 
     def _toggle_hotlist_panel(self):
-        """显示/隐藏热点自选面板 (Global)"""
-        if not hasattr(self, 'hotlist_panel'):
+        """显示/隐藏热点自选面板 (Toggle)"""
+        if not hasattr(self, "hotlist_panel"):
             return
-            
-        # [MODIFIED] Check if visible, if so, bring to front instead of hiding
+
         if self.hotlist_panel.isVisible():
-            self.hotlist_panel.show()
-            self.hotlist_panel.raise_()
-            self.hotlist_panel.activateWindow()
+            self.hotlist_panel.hide()
         else:
             self.hotlist_panel.show()
             self.hotlist_panel.raise_()
@@ -4002,6 +3995,17 @@ class MainWindow(QMainWindow, WindowMixin):
                     else:
                         logger.debug(f"[IPC] Linkage auto-display disabled, skipped: {parts[0]}")
             
+            # 4. 特殊功能开关
+            elif content == "TOGGLE_HOTLIST":
+                logger.info("[IPC] Command TOGGLE_HOTLIST received")
+                if hasattr(self, "_toggle_hotlist_panel"):
+                    QtCore.QTimer.singleShot(0, self._toggle_hotlist_panel)
+
+            elif content == "TOGGLE_LOG":
+                logger.info("[IPC] Command TOGGLE_LOG received")
+                if hasattr(self, "_toggle_signal_log"):
+                    QtCore.QTimer.singleShot(0, self._toggle_signal_log)
+
             else:
                 logger.warning(f"Unknown IPC command content: {content}")
                 
@@ -4649,7 +4653,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 2. 动态启用/禁用冲突的 App-wide 快捷键 (防止双重触发)
         # 包含所有的核心全局热键，确保系统模式开启时，App 内部的 Shortcut 被屏蔽
         # conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/", "Alt+H", "Alt+L"]
-        conflict_keys = ["Alt+T", "Alt+F",  "Alt+H", "Alt+L"]
+        # conflict_keys = ["Alt+T", "Alt+F",  "Alt+H", "Alt+L"]
+        conflict_keys = ["Alt+T", "Alt+F",  "Alt+H"]
         if hasattr(self, 'shortcuts'):
             for key in conflict_keys:
                 if key in self.shortcuts:
@@ -4669,14 +4674,14 @@ class MainWindow(QMainWindow, WindowMixin):
             keyboard.add_hotkey('alt+f', lambda: QTimer.singleShot(0, self._show_filter_panel))
             # keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
             keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
-            keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            # keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             # 兼容性补充 (Ctrl+Alt+H 等)
             # keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
             # keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             self.system_hotkeys_registered = True
-            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H, Alt+L)")
+            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H)")
         except Exception as e:
             logger.error(f"❌ 系统快捷键注册失败: {e}")
             self.global_shortcuts_enabled = False
@@ -4691,7 +4696,7 @@ class MainWindow(QMainWindow, WindowMixin):
             keyboard.remove_hotkey('alt+f')
             # keyboard.remove_hotkey('ctrl+/')
             keyboard.remove_hotkey('alt+h')
-            keyboard.remove_hotkey('alt+l')
+            # keyboard.remove_hotkey('alt+l')
             self.system_hotkeys_registered = False
             logger.info("✅ 系统级全局快捷键已注销")
         except Exception as e:
