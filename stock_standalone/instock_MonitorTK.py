@@ -1331,26 +1331,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
     }
 
-    def setup_global_hotkey(self, show_toast=False):
+
+    def setup_global_hotkey(self, show_toast=False, mode="GLOBAL"):
         """
-        使用 keyboard 库注册系统全局快捷键。
-
-        修复重置失效的根因：
-        旧线程 cleanup 与新线程 startup 都调用 keyboard.unhook_all()，
-        两个线程并发执行导致竞态，新线程的 add_hotkey 在混乱状态中静默失败。
-
-        修复策略：
-        - keyboard.unhook_all() 统一由 _shutdown_global_hotkeys() 在 join
-          完成后在调用方（主线程）执行，保证 unhook → add_hotkey 严格串行。
-        - 线程内部只负责 add_hotkey + wait，不再碰 unhook_all。
-
-        Args:
-            show_toast: 是否在注册完成后显示提示信息（手动重新初始化时为 True）
+        注册快捷键。
+        mode: "GLOBAL" (Win32 系统级) 或 "LOCAL" (仅本窗口有效)
         """
-        # _shutdown_global_hotkeys 内部会 join 旧线程并 unhook_all，保证干净状态
+        self._hotkey_stop_event = threading.Event()
+
+        # 1. 彻底清理旧钩子/线程
         self._shutdown_global_hotkeys()
-
-        # 热键 ID -> 回调映射 (统一回调入口)
+        
+        # 2. 准备回调逻辑
         hotkey_callbacks = {
             0: lambda: self._schedule_after(0, self.close_all_alerts),
             1: lambda: self._schedule_after(0, self.open_voice_monitor_manager),
@@ -1360,58 +1352,76 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
             6: lambda: self._schedule_after(0, self._run_live_strategy_process),
         }
+        self._hotkey_callbacks = hotkey_callbacks
 
-        # 线程退出事件
-        self._hotkey_stop_event = threading.Event()
+        if mode == "GLOBAL":
+            # --- Win32 系统级全局热键模式 ---
+            self._hotkey_stop_event = threading.Event()
 
-        def _hotkey_thread_func():
-            """
-            keyboard 库热键线程。
-            此时 _shutdown_global_hotkeys 已保证 unhook_all 完成，
-            本线程直接 add_hotkey，不再调用 unhook_all（避免竞态）。
-            """
-            logger.info("⚡ [Hotkey] keyboard 库模式启动，注册全局快捷键...")
-            failed_offsets = []
+            def _hotkey_thread_func():
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.windll.user32
+                
+                registered_ids = []
+                for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
+                    hk_id = self._HOTKEY_ID_BASE + offset
+                    if user32.RegisterHotKey(None, hk_id, mod, vk):
+                        registered_ids.append(hk_id)
+                        logger.info(f"✅ [Hotkey] Win32 全局热键已激活: {desc}")
+                    else:
+                        logger.warning(f"⚠️ [Hotkey] Win32 注册 {desc} 失败，可能已被占用")
 
+                try:
+                    msg = wintypes.MSG()
+                    while not self._hotkey_stop_event.is_set():
+                        if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                            if msg.message == 0x0312:  # WM_HOTKEY
+                                hk_id = msg.wParam
+                                offset = hk_id - self._HOTKEY_ID_BASE
+                                cb = self._hotkey_callbacks.get(offset)
+                                if cb:
+                                    logger.debug(f"🔥 [Hotkey] Win32 Hotkey Triggered: ID={hk_id}")
+                                    cb()
+                            user32.TranslateMessage(ctypes.byref(msg))
+                            user32.DispatchMessageW(ctypes.byref(msg))
+                        else:
+                            time.sleep(0.05)
+                except Exception as e:
+                    logger.error(f"❌ [Hotkey] Win32 线程异常: {e}")
+                finally:
+                    for hk_id in registered_ids:
+                        user32.UnregisterHotKey(None, hk_id)
+                    logger.info("[Hotkey] Win32 热键已注销，线程退出")
+
+            self._hotkey_thread = threading.Thread(
+                target=_hotkey_thread_func,
+                name="GlobalHotkeyThreadWin32",
+                daemon=True
+            )
+            self._hotkey_thread.start()
+            if show_toast:
+                toast_message(self, "✅ 全局快捷键已重置为系统级 (System-wide)")
+        
+        else:
+            # --- Tkinter 本地窗口快捷键模式 (降级模式) ---
+            logger.info("⚡ [Hotkey] 切换到本地窗口快捷键模式...")
             for offset, (_, _, desc) in self._HOTKEY_MAP.items():
                 cb = hotkey_callbacks.get(offset)
-                if not cb:
-                    continue
+                if not cb: continue
+                
+                # 将 Alt+X 转换为 Tk 合法格式 (注意：Alt 首字母必须大写，且字母推荐小写)
+                # 例如: "Alt+V" -> "<Alt-v>"
+                key_part = desc.split('+')[-1].lower()
+                tk_key = f"<Alt-{key_part}>"
                 try:
-                    keyboard.add_hotkey(desc, cb, suppress=False)
-                    logger.debug("✅ [Hotkey] 全局热键已注册: %s", desc)
-                except Exception as e:
-                    logger.warning("⚠️ [Hotkey] keyboard 绑定 %s 失败 (%s)，退回本地快捷键", desc, e)
-                    failed_offsets.append(offset)
-
-            # 注册失败的热键退回 Tk 本地绑定
-            if failed_offsets:
-                def _bind_local_fallbacks():
-                    for off in failed_offsets:
-                        _, _, desc = self._HOTKEY_MAP[off]
-                        cb = hotkey_callbacks.get(off)
-                        if not cb:
-                            continue
-                        tk_key = f"<{desc.replace('+', '-').lower()}>"
-                        try:
-                            self.bind_all(tk_key, lambda e, func=cb: func())
-                            logger.info("🔁 [Hotkey] 退回本地快捷键: %s", tk_key)
-                        except Exception as ex:
-                            logger.error("❌ [Hotkey] 本地绑定 %s 失败: %s", tk_key, ex)
-                self.tk_dispatch_queue.put(_bind_local_fallbacks)
-
-            # 阻塞等待，直到 _shutdown_global_hotkeys 触发退出
-            self._hotkey_stop_event.wait()
-            # ⚠️ 线程退出时不调用 keyboard.unhook_all()，
-            # 由 _shutdown_global_hotkeys join 后统一执行，避免竞态
-            logger.info("[Hotkey] keyboard 热键线程已退出")
-
-        self._hotkey_thread = threading.Thread(
-            target=_hotkey_thread_func,
-            name="GlobalHotkeyThread",
-            daemon=True
-        )
-        self._hotkey_thread.start()
+                    self.bind_all(tk_key, lambda e, func=cb: func())
+                    logger.debug(f"✅ [Hotkey] 本地快捷键已绑定: {tk_key}")
+                except Exception as ex:
+                    logger.error(f"❌ [Hotkey] 本地绑定 {tk_key} 失败: {ex}")
+            
+            if show_toast:
+                toast_message(self, "📴 全局快捷键已失效，仅在窗口内生效 (App-wide)")
 
         if show_toast:
             hotkey_list = "/".join([v[2] for v in self._HOTKEY_MAP.values()])
@@ -1444,34 +1454,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._hotkey_thread_id = None
         self._hotkey_stop_event = None
-    # === [备份备用] 下方为原 Win32 RegisterHotKey 原生实现，如 keyboard 模式不稳可切换回来 ===
-    def _hotkey_thread_func_WIN32_BACKUP():
-        user32 = ctypes.windll.user32
-        WM_HOTKEY = 0x0312
-        self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        registered_ids = []
-        failed_offsets = []
-        for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
-            hk_id = self._HOTKEY_ID_BASE + offset
-            if user32.RegisterHotKey(None, hk_id, mod, vk):
-                registered_ids.append(hk_id)
-                logger.info(f"✅ [Hotkey] Win32端热键已激活: {desc}")
-            else:
-                failed_offsets.append(offset)
-        
-        # 消息循环...
-        msg = ctypes.wintypes.MSG()
-        while not self._hotkey_stop_event.is_set():
-            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0: break
-            if msg.message == WM_HOTKEY:
-                hk_id = msg.wParam
-                callback = hotkey_callbacks.get(hk_id - self._HOTKEY_ID_BASE)
-                if callback: callback()
-        
-        for hk_id in registered_ids:
-            user32.UnregisterHotKey(None, hk_id)
+    # === [REMOVED] 已切换至原生 RegisterHotKey 模式，不再需要单独的备用实现 ===
     # =========================================================================
+
 
     def on_resize(self, event):
         if event.widget != self:
@@ -1601,6 +1586,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.info(f"✅ Main App voice state synced to: {enabled}")
                             
                             self.tk_dispatch_queue.put(sync_voice_ui)
+
+                        elif obj and obj.get("cmd") == "EXEC_MACRO":
+                            macro = obj.get("macro")
+                            logger.info(f"[Pipe] Recv EXEC_MACRO: {macro}")
+                            if macro == "RUN_STRATEGY":
+                                self.tk_dispatch_queue.put(self._run_live_strategy_process)
+                            elif macro == "SHOW_MARKET_PULSE":
+                                self.tk_dispatch_queue.put(self.open_market_pulse)
+                            elif macro == "CLOSE_ALERTS":
+                                self.tk_dispatch_queue.put(self.close_all_alerts)
+                            elif macro == "SHOW_SIGNAL_VIEWER":
+                                self.tk_dispatch_queue.put(self.open_live_signal_viewer)
+                            elif macro == "SHOW_STRATEGY_MANAGER":
+                                self.tk_dispatch_queue.put(self.open_strategy_manager)
+                            elif macro == "SHOW_VOICE_MANAGER":
+                                self.tk_dispatch_queue.put(self.open_voice_monitor_manager)
 
                 except pywintypes.error as e:
                     # 正常退出错误码 → 静默退出
@@ -2980,7 +2981,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -3020,7 +3021,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             elif action == "实盘数据":
                 self.persistent_df_all_to_h5()
             elif action == "重置快捷键":
-                self.setup_global_hotkey(show_toast=True)
+                self.setup_global_hotkey(show_toast=True, mode="GLOBAL")
+            elif action == "关闭全局快捷键":
+                self.setup_global_hotkey(show_toast=True, mode="LOCAL")
 
 
         def on_select(event=None):
