@@ -13,10 +13,10 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
-    QMessageBox, QFileDialog, QAbstractItemView
+    QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray
-from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter
+from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate
+from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat
 import pyqtgraph as pg
 import numpy as np
 
@@ -827,6 +827,153 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         super().closeEvent(event)
 
 
+class SnapshotCalendarDialog(QDialog):
+    """日历模式快照选择器 - 增强体验，红色显示有数据的日期"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📅 历史复盘日期选择")
+        self.resize(380, 480)
+        
+        self.selected_file = None
+        # 统一路径获取方式
+        self.snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
+        
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(10)
+        
+        tip_lbl = QLabel("💡 红色字体日期代表已有快照文件")
+        tip_lbl.setStyleSheet("color: #aad4ff; font-weight: bold; background: #2a3a4a; padding: 5px; border-radius: 4px;")
+        lay.addWidget(tip_lbl)
+        
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(False)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+
+        # 【最终强效修复：覆盖所有星期表头格式】
+        # 这种方式优先级最高，能绕过任何系统的 QSS 限制
+        header_fmt = QTextCharFormat()
+        header_fmt.setForeground(QColor("#90caf9")) #⭐ 淡天蓝色，高亮且护眼
+        header_fmt.setBackground(QColor("#2b2b2b"))
+        f = header_fmt.font()
+        f.setBold(True)
+        header_fmt.setFont(f)
+
+        for day in [
+            Qt.DayOfWeek.Monday, Qt.DayOfWeek.Tuesday, Qt.DayOfWeek.Wednesday,
+            Qt.DayOfWeek.Thursday, Qt.DayOfWeek.Friday, Qt.DayOfWeek.Saturday,
+            Qt.DayOfWeek.Sunday
+        ]:
+            self.calendar.setWeekdayTextFormat(day, header_fmt)
+
+        # 调色板兜底：强制背景为深色
+        pal = self.calendar.palette()
+        dark_color = QColor("#2b2b2b")
+        pal.setColor(pal.ColorRole.Window, dark_color)
+        pal.setColor(pal.ColorRole.Base, dark_color)
+        pal.setColor(pal.ColorRole.Button, dark_color)
+        pal.setColor(pal.ColorRole.ButtonText, QColor("#90caf9"))
+        self.calendar.setPalette(pal)
+
+        # 样式表全局覆盖
+        self.calendar.setStyleSheet("""
+            QCalendarWidget { background: #2b2b2b; color: #dddddd; }
+            QCalendarWidget QWidget#qt_calendar_navigationbar { background: #333333; }
+            QCalendarWidget QToolButton { color: #00ff88; font-weight: bold; background: transparent; padding: 5px; }
+            /* 针对表格格子的核心样式 */
+            QCalendarWidget QAbstractItemView {
+                background: #2b2b2b;
+                color: #dddddd;
+                selection-background-color: #409cff;
+                selection-color: white;
+            }
+        """)
+        
+        # 初始标记
+        self._highlight_snapshot_dates()
+        
+        # 当月份或日期改变时刷新标记或状态
+        self.calendar.currentPageChanged.connect(self._highlight_snapshot_dates)
+        self.calendar.selectionChanged.connect(self._on_selection_changed)
+        # 【新增：双击日期或回车支持快速加载】
+        self.calendar.activated.connect(self._on_calendar_activated)
+        
+        lay.addWidget(self.calendar)
+        
+        self.info_lbl = QLabel("请从日历中选择日期...")
+        self.info_lbl.setStyleSheet("color: #888; font-style: italic; padding: 5px;")
+        self.info_lbl.setWordWrap(True)
+        lay.addWidget(self.info_lbl)
+        
+        btn_lay = QHBoxLayout()
+        self.btn_ok = QPushButton("🚀 确认加载")
+        self.btn_ok.setEnabled(False)
+        self.btn_ok.setFixedHeight(35)
+        self.btn_ok.setStyleSheet("background-color: #2a3a4a; color: #00ff88; font-weight: bold;")
+        self.btn_ok.clicked.connect(self.accept)
+        
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setFixedHeight(35)
+        btn_cancel.clicked.connect(self.reject)
+        
+        btn_lay.addWidget(btn_cancel)
+        btn_lay.addWidget(self.btn_ok)
+        lay.addLayout(btn_lay)
+        
+        # 如果当前已经选了日期，触发一下检查
+        self._on_selection_changed()
+        
+    def _highlight_snapshot_dates(self):
+        """遍历快照目录，并在日历上标红有快照的日期"""
+        if not os.path.exists(self.snapshots_dir):
+            return
+            
+        fmt = QTextCharFormat()
+        # 现实红色 (Display Red)
+        fmt.setForeground(QColor("#FF4444")) 
+        f = fmt.font()
+        f.setBold(True)
+        f.setUnderline(True)
+        fmt.setFont(f)
+        
+        # 获取所有快照文件名并提取日期
+        try:
+            files = os.listdir(self.snapshots_dir)
+            for f_name in files:
+                if f_name.startswith("bidding_") and f_name.endswith(".json.gz"):
+                    match = re.search(r'bidding_(\d{8})', f_name)
+                    if match:
+                        date_str = match.group(1) 
+                        qdate = QDate.fromString(date_str, "yyyyMMdd")
+                        if qdate.isValid():
+                            self.calendar.setDateTextFormat(qdate, fmt)
+        except Exception as e:
+            logger.debug(f"[Calendar] Highlight error: {e}")
+
+    def _on_selection_changed(self):
+        qdate = self.calendar.selectedDate()
+        date_str = qdate.toString("yyyyMMdd")
+        fname = f"bidding_{date_str}.json.gz"
+        fpath = os.path.join(self.snapshots_dir, fname)
+        
+        if os.path.exists(fpath):
+            self.selected_file = fpath
+            self.info_lbl.setText(f"✅ 已选中: {fname}\n可以加载该日期的历史快照。")
+            self.info_lbl.setStyleSheet("color: #00ff88; font-weight: bold; background: #1a2a1a; border-radius: 3px;")
+            self.btn_ok.setEnabled(True)
+            self.btn_ok.setStyleSheet("background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88;")
+        else:
+            self.selected_file = None
+            self.info_lbl.setText(f"❌ 日期 {date_str} 暂无快照文件。\n请选择标记为红色的日期。")
+            self.info_lbl.setStyleSheet("color: #FF4444; background: #2a1a1a; border-radius: 3px;")
+            self.btn_ok.setEnabled(False)
+            self.btn_ok.setStyleSheet("background-color: #222; color: #555;")
+
+    def _on_calendar_activated(self, qdate):
+        """处理双击或回车：如果有数据则直接加载"""
+        self._on_selection_changed()
+        if self.btn_ok.isEnabled() and self.selected_file:
+            self.accept()
 
 
 from queue import Queue, Empty
@@ -940,6 +1087,7 @@ class DataProcessWorker(QObject):
 
         logger.info("🏁 [Worker] Loop exited safely.")
         self.stopped.emit()
+
 
 class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
@@ -2974,17 +3122,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.error(f"❌ [UI] 保存布局失败: {e}")
 
     def _on_history_load_clicked(self):
-        """弹出文件选择框加载历史快照"""
-        snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
-        if not os.path.exists(snapshots_dir):
-            os.makedirs(snapshots_dir, exist_ok=True)
-            
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择历史竞价快照", snapshots_dir, "Snapshot Files (*.json.gz)"
-        )
-        
-        if file_path:
-            if self.detector.load_from_snapshot(file_path):
+        """弹出【增强型日历】选择框加载历史快照"""
+        dialog = SnapshotCalendarDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            file_path = dialog.selected_file
+            if file_path and self.detector.load_from_snapshot(file_path):
                 self._is_history_mode = True
                 self.detector.in_history_mode = True
                 # 从文件名尝试提取日期 bidding_20260312.json.gz
@@ -2993,7 +3135,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 
                 # 更新 UI 状态
                 self.btn_live.setVisible(True)
-                self.btn_history.setStyleSheet("background-color: #4a3a2a; color: #ff9900;")
+                self.btn_history.setStyleSheet("background-color: #4a3a2a; color: #ff9900; border: 1px solid #ff9900;")
                 self.btn_refresh.setEnabled(False) # 历史模式下不能“刷新”实时数据
                 
                 # 触发一次 UI 刷新
@@ -3001,13 +3143,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._populate_watchlist()
                 
                 if hasattr(self, 'status_lbl'):
-                    self.status_lbl.setText(f"🎬 [历史复盘] 📅 {self._history_date} | 数据已加载")
+                    self.status_lbl.setText(f"🎬 [历史复盘] 📅 {self._history_date} | 快照已就绪")
                     self.status_lbl.setStyleSheet("color: #ff9900; font-weight: bold;")
                     
                 # 触发重点表标题刷新
                 self._populate_watchlist()
             else:
-                QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏或格式不正确。")
+                if dialog.selected_file:
+                    QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏或格式不正确。")
 
     def _on_history_track_clicked(self):
         """[NEW] 自动选择最近几日的快照进行强势股追踪分析"""
