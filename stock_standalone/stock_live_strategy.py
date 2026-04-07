@@ -3827,17 +3827,31 @@ class StockLiveStrategy:
                     open_trades = [t for t in trades if t['code'] == pure_code and t['status'] == 'OPEN']
                     if open_trades:
                         for trade in open_trades:
+                            # 提取最新价，如果有缓存的话
+                            current_price = 0.0
+                            if hasattr(self, 'df') and self.df is not None and pure_code in self.df.index:
+                                try:
+                                    row = self.df.loc[pure_code]
+                                    if type(row) == pd.DataFrame:
+                                        row = row.iloc[0]
+                                    current_price = float(row.get('trade', 0) or row.get('close', 0))
+                                except Exception:
+                                    pass
+                            
+                            if current_price <= 0 and 'create_price' in self._monitored_stocks[key]:
+                                current_price = self._monitored_stocks[key]['create_price']
+                            
                             # 这里我们不真正卖出，而是标记为 CLOSED (或者引入新的状态 MANUAL_REMOVED)
                             # 为了打断循环，我们调用 update_trade_status (需要 logger 支持，或者直接 close)
                             # 既然是移除监控，意味着不再关注，视为结束跟踪
                             self.trading_logger.close_trade(
                                 code=pure_code, 
-                                sell_price=0, 
+                                sell_price=current_price, 
                                 sell_reason="手动移除监控(不再跟踪)",
-                                sell_amount=0, # 0 表示仅修改状态
+                                sell_amount=0, # 0 表示全部平仓
                                 resample=trade.get('resample', 'd') # 👈 注入正确的周期，确保数据库更新生效
                             )
-                        logger.info(f"Closed {len(open_trades)} trade records for {pure_code} to prevent auto-recovery")
+                        logger.info(f"Closed {len(open_trades)} trade records for {pure_code} at price {current_price} to prevent auto-recovery")
                 except Exception as e:
                     logger.error(f"Failed to close trade for {pure_code}: {e}")
             

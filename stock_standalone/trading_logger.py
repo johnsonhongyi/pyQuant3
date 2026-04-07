@@ -632,6 +632,13 @@ class TradingLogger:
             gross_profit = (sell_price - b_price) * sell_amount
             net_profit = gross_profit - total_fee
             pnl_pct = net_profit / (b_price * b_amount) if (b_price > 0 and b_amount > 0) else 0.0
+            
+            # 防御性逻辑：如果是为了标记系统状态导致传了非法的0价格，清空假亏损
+            if sell_price <= 0:
+                net_profit = 0.0
+                pnl_pct = 0.0
+                total_fee = old_fee
+                
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             cur.execute("""
