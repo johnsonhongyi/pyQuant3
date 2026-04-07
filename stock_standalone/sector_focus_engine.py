@@ -106,6 +106,7 @@ class SectorHeat:
     sector_type: str           = ""   # 🔥强攻/♨️蓄势/🔄反转/📈跟随
     tags: str                  = ""   # 标签串
     follower_detail: List[dict] = field(default_factory=list)  # 跟进股明细
+    race_candidates: List[dict] = field(default_factory=list)  # [NEW] 龙头竞赛选手列表
     updated_at: datetime       = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
@@ -136,6 +137,7 @@ class SectorHeat:
             'tags': self.tags,
             'follower_codes': self.follower_codes,
             'follower_detail': detail_str, # [MOD] 使用格式化后的字符串
+            'race_candidates': self.race_candidates, # [NEW] 竞赛明细
             'updated_at': self.updated_at.strftime('%H:%M:%S'),
         }
 
@@ -491,6 +493,7 @@ class SectorFocusMap:
                     sector_type=sector_type,
                     tags=tags,
                     follower_detail=follower_detail,
+                    race_candidates=sec.get('race_candidates', []), # 从 detector 获取竞赛选手
                     updated_at=datetime.now(),
                 )
                 new_map[sname] = sh
@@ -630,7 +633,7 @@ class SectorFocusMap:
             sec_df = df[df['category'] == row['name']].copy() # 注意聚合还是用原始 key
             if sec_df.empty:
                 continue
-            leader_code, leader_name, leader_pct, followers = self._identify_leader(sec_df, bidding, det_snap)
+            leader_code, leader_name, leader_pct, followers, race_candidates = self._identify_leader(sec_df, bidding, det_snap)
             
             # [FIX] 在 fallback 降级聚合路径中同步补充 follower_detail 逻辑，防丢失明细
             follower_detail = []
@@ -666,8 +669,16 @@ class SectorFocusMap:
                 leader_code=leader_code,
                 leader_name=leader_name,
                 leader_change_pct=leader_pct,
+                leader_pct_diff=0.0,
+                leader_dff=0.0,
+                leader_vwap=0.0,
+                score_diff=0.0,
+                follow_ratio=0.0,
+                sector_type="",
+                tags="",
                 follower_codes=followers,
                 follower_detail=follower_detail,
+                race_candidates=race_candidates, # [NEW] 注入竞赛选手
                 updated_at=datetime.now(),
             )
             result.append(heat)
@@ -689,7 +700,7 @@ class SectorFocusMap:
         sec_df: pd.DataFrame,
         bidding: Dict[str, float],
         det_snap: Dict[str, dict],
-    ) -> Tuple[str, str, float, List[str]]:
+    ) -> Tuple[str, str, float, List[str], List[dict]]:
         sec_df = sec_df.copy()
         # 优先用 detector score，否则用 bidding_scores
         sec_df['_bid'] = sec_df['code'].map(
@@ -730,7 +741,41 @@ class SectorFocusMap:
         # [FIX] 撤销 bid 限制
         followers_df = sorted_df.iloc[1:MAX_FOLLOWERS_PER_SECTOR + 1]
         follower_codes = [str(r['code']) for _, r in followers_df.iterrows()]
-        return leader_code, leader_name, leader_pct, follower_codes
+        
+        # [NEW] 龙头竞赛选手识别：涨幅 > 基准 且 人力 > 0
+        temp = self.get_market_temperature()
+        entry_pct = 3.0
+        if temp >= 70: entry_pct = 3.5
+        elif temp < 35: entry_pct = 2.5
+        
+        candidates_df = sorted_df[sorted_df['percent'] >= entry_pct].head(5)
+        race_candidates = []
+        for _, r in candidates_df.iterrows():
+            pct = float(r.get('percent', 0.0))
+            status = "参赛🌱"
+            if pct >= 9.0: status = "确核🐲"
+            elif pct >= 6.0: status = "晋级🌟"
+            
+            race_candidates.append({
+                'code': str(r.get('code', '')),
+                'name': str(r.get('name', '')),
+                'pct': round(pct, 2),
+                'status': status,
+                'score': round(float(r.get('_leader_score', 0.0)), 1)
+            })
+
+        return leader_code, leader_name, leader_pct, follower_codes, race_candidates
+
+    def get_market_temperature(self) -> float:
+        """[NEW] 计算当前市场整体温度：基于热点板块的平均 heat_score"""
+        with self._lock:
+            if not self._sector_map:
+                return 50.0
+            top_sectors = sorted(self._sector_map.values(), key=lambda s: s.heat_score, reverse=True)[:5]
+            if not top_sectors:
+                return 50.0
+            avg_heat = sum(s.heat_score for s in top_sectors) / len(top_sectors)
+            return avg_heat
 
     # ── 查询接口 ──────────────────────────────────────────────────────────────
 
@@ -773,15 +818,16 @@ class StarFollowEngine:
     v2：确认条件增加对 detector board_score 的直接引用
     """
 
-    LEADER_MIN_ZT_OR_PCT  = 3.0    # [MOD] 龙头调低门槛至3%（紧跟启动大阳）
-    LEADER_MIN_BID_SCORE  = 3.0    # 竞价/detector score≥3.0
-    LEADER_HOT_RANK_MAX   = 300    # [MOD] 适当放宽人气要求
+    LEADER_MIN_ZT_OR_PCT  = 9.0    # [MOD] 龙头门槛巨幅提升：必须触碰或封死涨停(≥9%)，或具备极强爆发力
+    LEADER_MIN_BID_SCORE  = 5.0    # 竞价/detector score 相应提高
+    LEADER_HOT_RANK_MAX   = 100    # [MOD] 收缩人气要求，必须是全市场前 100 名的焦点
 
     def __init__(self, sector_map: SectorFocusMap):
         self._sector_map = sector_map
         self._confirmed_leaders: Dict[str, datetime] = {}
         self._leader_baselines: Dict[str, float] = {}   # [B] 确认时涨幅基准
-        self._leader_weakened: set = set()               # [B] 已弱化龙头集合（从确认点回落>2.5%）
+        self._leader_weakened: set = set()               # [B] 已弱化龙头集合
+        self._race_peaks: Dict[str, float] = {}          # [NEW] 记录竞赛选手的盘中最高涨幅
         self._lock = threading.Lock()
 
     def confirm_leaders(
@@ -794,12 +840,12 @@ class StarFollowEngine:
         new_leaders = []
 
         for sh in hot_sectors:
+            # 1. 处理确核逻辑 (Winner)
             code = sh.leader_code
             if not code:
                 continue
             pct    = sh.leader_change_pct
-            # v2: 优先用 heat_score 来判断板块强度（已含 board_score）
-            bid    = sh.bidding_score  # 直接用板块 board_score
+            bid    = sh.bidding_score
             h_rank = (hot_rank_map or {}).get(code, 9999)
 
             ok_pct = pct >= self.LEADER_MIN_ZT_OR_PCT
@@ -810,16 +856,47 @@ class StarFollowEngine:
                 with self._lock:
                     if code not in self._confirmed_leaders:
                         self._confirmed_leaders[code] = datetime.now()
-                        self._leader_baselines[code] = pct   # [B] 记录确认时涨幅基准
+                        self._leader_baselines[code] = pct
                         new_leaders.append(code)
-                        logger.info(
-                            f"[StarFollow] 龙头确认: {code}({sh.leader_name}) "
-                            f"板块={sh.name} 涨幅={pct:.1f}% 板块强度={bid:.1f} "
-                            f"人气={h_rank} 类型={sh.sector_type}"
-                        )
-            # [B] 每次 confirm_leaders 调用都同步衰减状态（不限于新确认的龙头）
+                        logger.info(f"[Competition] 🏆 胜出确核: {code}({sh.leader_name}) 板块={sh.name}")
+
+            # 2. [NEW] 竞赛选手状态维护与淘汰 (Competition & Pruning)
+            self._prune_candidates(sh)
+            
+            # 3. 同步衰减状态
             self._update_weakened_state(code, pct)
         return new_leaders
+
+    def _prune_candidates(self, sh: SectorHeat):
+        """[NEW] 去弱留强逻辑：实时剔除掉队选手"""
+        if not sh.race_candidates:
+            return
+            
+        with self._lock:
+            # 更新峰值并标记淘汰
+            survivors = []
+            leader_pct = sh.leader_change_pct
+            
+            for c in sh.race_candidates:
+                code = c['code']
+                pct = c['pct']
+                peak = max(self._race_peaks.get(code, 0.0), pct)
+                self._race_peaks[code] = peak
+                
+                # 淘汰条件1：从高位回落超过 2.5% (洗盘太狠或抛压大)
+                is_fallback = (pct < peak - 2.5)
+                # 淘汰条件2：落后领头羊超过 5.0% (被甩开一个身位)
+                is_lagging  = (pct < leader_pct - 5.0) and (pct < 6.0) # 6%以上属于晋级区，容忍度略高
+                
+                if is_fallback or is_lagging:
+                    reason = "回落" if is_fallback else "掉队"
+                    # logger.debug(f"[Competition] 淘汰选手: {code} 原因={reason} 当前={pct}% 最高={peak}%")
+                    continue # 不加入幸存者名单
+                
+                survivors.append(c)
+            
+            # 更新 SectorHeat 对象
+            sh.race_candidates = survivors[:5] # 严格限制 3-5 个名额
 
     def get_follow_candidates(self, sector_name: str) -> List[str]:
         sh = self._sector_map.get_sector_heat(sector_name)
@@ -841,11 +918,12 @@ class StarFollowEngine:
             if code not in self._confirmed_leaders:
                 return
             baseline = self._leader_baselines.get(code, current_pct)
-            if current_pct < baseline - 2.5:     # 从确认点回落超2.5%，标记弱化
+            # 真正的龙头极少大幅回落，如果从确认的高点（如涨停）回落超过 3.5%，视为爆量烂板或被洗弱
+            if current_pct < baseline - 3.5:     
                 if code not in self._leader_weakened:
                     self._leader_weakened.add(code)
-                    logger.info(f"[StarFollow] 龙头弱化: {code} 当前={current_pct:.1f}% 基准={baseline:.1f}%")
-            elif current_pct >= baseline - 1.0:  # 反弹修复，取消弱化
+                    logger.info(f"[StarFollow] 龙头弱化(破位洗盘): {code} 当前={current_pct:.1f}% 基准={baseline:.1f}%")
+            elif current_pct >= baseline - 1.5:  # 反弹修复，取消弱化
                 self._leader_weakened.discard(code)
 
     def is_leader_strong(self, code: str) -> bool:
@@ -858,6 +936,7 @@ class StarFollowEngine:
             self._confirmed_leaders.clear()
             self._leader_baselines.clear()   # [B]
             self._leader_weakened.clear()    # [B]
+            self._race_peaks.clear()         # [NEW] 清除盘中竞赛峰值数据
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -991,13 +1070,17 @@ class DragonLeaderTracker:
             if rec.entry_price > 0:
                 rec.cum_pct_from_entry = (current_price / rec.entry_price - 1) * 100
 
-            # ① 盘中跌破昨日最低 ➜ 立即 WARNING
-            if rec.prev_day_low > 0 and current_price < rec.prev_day_low * 0.999:
+            # ① 启动价保护原则：盘中只要跌破“启动阳线收盘价”(prev_day_close) ➜ 立即判定失败
+            if rec.prev_day_close > 0 and current_price < rec.prev_day_close * 0.998:
                 if rec.status != DragonStatus.WARNING:
                     rec.status = DragonStatus.WARNING
                     rec.warning_days = max(rec.warning_days, 1)
-                if '盘中破昨低' not in rec.tags:
-                    rec.tags.append('盘中破昨低')
+                if '破启动收盘价' not in rec.tags:
+                    rec.tags.append('破启动收盘价')
+                logger.info(f"[DragonTracker] 核心预警: {code} 跌破启动收盘位 {rec.prev_day_close:.2f}")
+
+            # ② 盘中跌破昨日最低 ➜ 加重预警
+            if rec.prev_day_low > 0 and current_price < rec.prev_day_low * 0.995:
                 logger.info(f"[DragonTracker] ⚠️ 盘中破昨低: {code} 当前={current_price:.3f} 昨低={rec.prev_day_low:.3f}")
                 return
 
@@ -1352,10 +1435,10 @@ class IntradayPullbackDetector:
     四种回踩买点形态检测（v2 使用真实 kline 序列）
     """
 
-    MIN_DROP_FROM_HIGH   = -0.015
-    MAX_DROP_FROM_VWAP   = -0.005
-    MAX_VOL_RATIO_DURING = 0.85
-    MIN_SECTOR_HEAT      = 25.0    # 从 40 降到 25，更早捕捉
+    MIN_DROP_FROM_HIGH   = -0.012    # [MOD] 回落容忍度收窄，强者恒强不深调
+    MAX_DROP_FROM_VWAP   = -0.003    # [MOD] 必须贴身均线
+    MAX_VOL_RATIO_DURING = 0.8       # [MOD] 缩量要求更严格
+    MIN_SECTOR_HEAT      = 35.0      # [MOD] 门槛从 25 提至 35，非超级热点不发信号
 
     def __init__(self, sector_map: SectorFocusMap, star_engine: StarFollowEngine):
         self._sector_map = sector_map
@@ -1434,10 +1517,23 @@ class IntradayPullbackDetector:
         diff_from_vwap = (price - vwap) / vwap if vwap > 0 else 0.0
 
         # ── [C] 强势前置条件：硬性剔除弱势股与结构破坏的个股 ──────────────────
-        if change_pct < 0.5:           # 当日涨幅 < 0.5%，弱势股，不值得追击
+        # ── [C] 强势前置条件：必须是启动中的“蛟龙” ──────────────────
+        # 1. 启动阳线收盘价不破原则：如果跌破昨日收盘（启动点），直接宣告死亡
+        if price < prev_close:
             return None
-        if diff_from_vwap < -0.010:    # 跌破VWAP超1%，结构破坏，等待修复后再入场
+        
+        # 2. 涨幅门槛：非极端强势不入场 (启动点通常在 3%~5% 以上)
+        if change_pct < 2.5:           
             return None
+        
+        # 3. 分时结构：必须在均价线之上运行 (VWAP 是多空生死线)
+        if diff_from_vwap < -0.005:    
+            return None
+        
+        # [NEW] 开盘 10 分钟加权：09:30-09:40 是黄金狙击时段
+        now_time = datetime.now()
+        is_morning_rush = (now_time.hour == 9 and 30 <= now_time.minute <= 40)
+        morning_bonus = 20 if is_morning_rush else 0
 
         signal_type = None
         reason = ""
@@ -1483,16 +1579,16 @@ class IntradayPullbackDetector:
                 priority = int(65 + sector_heat * 0.25 + pct_diff * 4 + dff)
 
         # 形态5：[NEW] 中阳起步确认 — 擒贼擒王，紧跟启动
-        # 判断标准：周期内涨幅 > 3% (或降级模式下当日涨幅 > 4.5%)，主力流入，且处于均线上方
+        # 判断标准：周期内涨幅 > 5% (必须是大阳穿透)，主力流入，且处于均线上方
         if signal_type is None:
-            trigger_pct = 3.0
-            # 如果是降级模式且 pct_diff 被赋值为当日涨幅，门槛适当调高
+            trigger_pct = 5.0
             if pct_diff >= trigger_pct and dff > 0 and diff_from_vwap >= 0:
-                signal_type = SignalType.STARTUP_RISE if 'STARTUP_RISE' in SignalType.__members__ else SignalType.HOT_FOLLOW
+                signal_type = SignalType.HOT_FOLLOW
                 is_king = (code == leader_code)
-                tag = "👑 龙头起步" if is_king else "👥 跟随共振"
-                reason = (f"{tag}: 启动幅度{pct_diff:+.1f}% 资金dff={dff:+.2f} 均线上企稳")
-                priority = int(75 + sector_heat * 0.3 + pct_diff * 5)
+                is_breakout = pct_diff >= 7.0 # [NEW] 7% 以上视为穿透上轨的大阳
+                tag = "🚀 龙头突破" if (is_king and is_breakout) else ("👑 龙头起步" if is_king else "👥 跟随共振")
+                reason = (f"{tag}: 启动幅度{pct_diff:+.1f}% 资金dff={dff:+.2f} 站稳启动均线上方")
+                priority = int(80 + sector_heat * 0.2 + pct_diff * 4 + morning_bonus)
 
         if signal_type is None:
             return None
