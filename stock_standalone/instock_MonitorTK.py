@@ -1706,7 +1706,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.info("📡 [15:30 Task] Standard SectorBiddingPanel instance created on UI thread.")
                         
                         # ⭐ 异步喂数：任务进入面板自带的 _worker 线程并行处理，绝不阻塞 UI
-                        self.sector_bidding_panel.on_realtime_data_arrived(df_feed, force_update=False)
+                        self.sector_bidding_panel.on_realtime_data_arrived(df_feed.copy(), force_update=False)  # [THREAD-SAFETY] copy() 防止子线程悬空指针
                     except Exception as ex:
                         logger.error(f"Panel dispatch-init error: {ex}")
                     finally:
@@ -3598,7 +3598,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         panel = getattr(self, "sector_bidding_panel", None)
                         if panel and panel.isVisible():
                             try:
-                                panel.on_realtime_data_arrived(full_df)
+                                panel.on_realtime_data_arrived(full_df.copy())  # [THREAD-SAFETY] copy() 防止子线程悬空指针
                             except Exception as e:
                                 logger.error(f"Panel sync failed: {e}")
 
@@ -3610,7 +3610,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 fc = get_focus_controller()
 
                                 # ① 实时行情（降级通道备用）
-                                fc.inject_realtime(full_df)
+                                fc.inject_realtime(full_df.copy())  # [THREAD-SAFETY] copy()
 
                                 # ② 核心：直接从已运算完毕的 BiddingMomentumDetector 注入
                                 #    一次调用完成：板块图+个股快照+竞价分+comparison_interval=60m
@@ -4063,7 +4063,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.sector_bidding_panel.show()
             # 立即推一次数据以初始化订阅
             if hasattr(self, 'df_all') and not self.df_all.empty:
-                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
+                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)  # [THREAD-SAFETY] copy() 防止子线程悬空指针
         except Exception as e:
             logger.error(f"打开竞价监控面板失败: {e}")
             import traceback
@@ -4602,7 +4602,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 last_send_time = time.time()
 
                 # ⚡ [CORE] 线程安全地获取行情快照
-                with getattr(self, '_df_lock', threading.Lock()):
+                with self._df_lock:  # [FIX] 硬编码锁引用，避免 getattr 每次创建新 Lock
                     df_ui = self.df_all.copy()
                 
                 # [OPTIMIZE] 快速哈希校验
