@@ -365,6 +365,9 @@ class BiddingMomentumDetector:
         if df_all is None or df_all.empty:
             return
 
+        # [THREAD-SAFETY] 防御性 copy：防止调用方在其他线程中修改或释放底层 C 数组
+        df_all = df_all.copy()
+
         # 确保 code 列存在
         if 'code' in df_all.columns:
             df = df_all.set_index('code', drop=False)

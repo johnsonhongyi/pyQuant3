@@ -1219,9 +1219,27 @@ class DragonLeaderTracker:
                 del self._records[c]
         logger.info(f"[DragonTracker] 日重置: 移除淘汰={len(elim)} 存活={len(self._records)}")
 
+    def sync_names(self, mapping: Dict[str, str]):
+        """
+        [NEW] 名称同步：修复内存中名称等于代码的记录
+        由 Controller 定期或在数据注入时调用。
+        """
+        if not mapping:
+            return
+        with self._lock:
+            updated = 0
+            for code, rec in self._records.items():
+                if rec.name == code or not rec.name:
+                    new_name = mapping.get(code)
+                    if new_name and new_name != code:
+                        rec.name = new_name
+                        updated += 1
+            if updated > 0:
+                logger.info(f"[DragonTracker] 成功修合同步 {updated} 只龙头的名称")
+
     # ── 历史深度挖掘 ──────────────────────────────────────────────────────────
 
-    def mine_history_dragons(self, codes: List[str], days: int = 7):
+    def mine_history_dragons(self, codes: List[str], days: int = 7, name_mapping: Optional[Dict[str, str]] = None):
         """
         [NEW] 核心逻辑：自动通过历史 K 线回溯挖掘龙头
         用于：手动执行引擎时的“自动补位”或“初始化回溯”
@@ -1229,6 +1247,7 @@ class DragonLeaderTracker:
         if tdd is None or not codes:
             return
         
+        name_mapping = name_mapping or {}
         logger.info(f"🔍 [DragonTracker] 开始 7 日深度挖掘扫描 (池大小={len(codes)})...")
         found_new = 0
         
@@ -1287,9 +1306,11 @@ class DragonLeaderTracker:
                         current_price = float(last_row['close'])
                         cum_pct = (current_price / entry_price - 1) * 100 if entry_price > 0 else 0.0
                         
+                        name = name_mapping.get(code) or str(last_row.get('name', code))
+                        
                         rec = DragonRecord(
                             code=code,
-                            name=str(last_row.get('name', code)),
+                            name=name,
                             sector="", 
                             status=status,
                             confirmed_date=datetime.now().strftime('%Y%m%d'),
@@ -1694,6 +1715,29 @@ class SectorFocusController:
         self._full_update_interval = 30.0   # 全量计算30秒一次
         self._last_snapshot_date = ""      # [Dragon] 记录今日是否执行过收盘快照
         self._last_30m_slot = -1           # [Dragon] 记录上一个 30 分钟同步槽位 (9:30 offset=0)
+        self._name_cache: Dict[str, str] = {}  # [NEW] 代码 -> 名称映射缓存
+
+    def _get_stock_name(self, code: str, default: Optional[str] = None) -> str:
+        """获取股票名称，优先从缓存获取，或从实时数据动态补全"""
+        name = self._name_cache.get(code)
+        if name and name != code:
+            return name
+        
+        # 尝试通过实时数据补全
+        with self._lock:
+            if self._df_realtime is not None and code in self._df_realtime.index:
+                name = str(self._df_realtime.loc[code, 'name'])
+                if name and name != code:
+                    self._name_cache[code] = name
+                    return name
+        
+        return default if default else code
+
+    def update_name_cache(self, mapping: Dict[str, str]):
+        """外部注入名称映射"""
+        with self._lock:
+            self._name_cache.update(mapping)
+
 
     # ── 数据注入（可从多个线程调用）────────────────────────────────────────
 
@@ -1701,6 +1745,13 @@ class SectorFocusController:
         """注入实时行情 DataFrame"""
         with self._lock:
             self._df_realtime = df
+            if df is not None and not df.empty and 'name' in df.columns:
+                # 增量更新名称缓存
+                names = df['name'].dropna().to_dict()
+                self._name_cache.update(names)
+                # 同步修复已经追踪的龙头名称
+                self.dragon_tracker.sync_names(names)
+
 
     def inject_bidding(self, scores: Dict[str, float]):
         """注入竞价评分 {code: score}（旧接口兼容保留）"""
@@ -1745,8 +1796,17 @@ class SectorFocusController:
             # 3. 获取个股快照（_global_snap_cache 内含完整 pct_diff/dff/klines）
             with detector._lock:
                 stock_snap = dict(detector._global_snap_cache)
+            
+            # [NEW] 补全名称缓存
+            if stock_snap:
+                names = {c: str(s.get('name', c)) for c, s in stock_snap.items() if s.get('name')}
+                if names:
+                    with self._lock:
+                        self._name_cache.update(names)
+                    self.dragon_tracker.sync_names(names)
 
             # 4. 注入板块图（优先通道）
+
             self.sector_map.inject_detector_sectors(active_sectors, stock_snap)
 
             # 5. 同步竞价评分 {code: score}（兼容旧通道）
@@ -1848,9 +1908,10 @@ class SectorFocusController:
                             ldr_sh   = self.sector_map.get_sector_heat(sec_name)
                             ldr_snap = self.sector_map.get_stock_snap(ldr_code)
                             if ldr_snap:
+                                name = self._get_stock_name(ldr_code, str(ldr_snap.get('name', ldr_code)))
                                 self.dragon_tracker.add_candidate(
                                     code=ldr_code,
-                                    name=str(ldr_snap.get('name', ldr_code)),
+                                    name=name,
                                     sector=sec_name,
                                     current_price=float(ldr_snap.get('price', 0.0)),
                                     sector_heat=ldr_sh.heat_score if ldr_sh else 0.0,
@@ -1940,8 +2001,12 @@ class SectorFocusController:
                 potential_codes.extend(sh.follower_codes[:2])
             
             if potential_codes:
-                # 自动挖掘过去 7 天
-                self.dragon_tracker.mine_history_dragons(list(set(potential_codes)), days=7)
+                # 自动挖掘过去 7 天，传入当前已有的名称映射
+                self.dragon_tracker.mine_history_dragons(
+                    list(set(potential_codes)), 
+                    days=7, 
+                    name_mapping=self._name_cache
+                )
                 
                 # 补全板块名称 (刚才挖掘时没带板块)
                 with self.dragon_tracker._lock:
@@ -1968,7 +2033,8 @@ class SectorFocusController:
             price      = float(snap.get('price', 0.0))
             day_high   = float(snap.get('high_day', price))
             prev_close = float(snap.get('last_close', 0.0))
-            name       = str(snap.get('name', code))
+            name       = self._get_stock_name(code, str(snap.get('name', code)))
+
             pct_diff   = float(snap.get('pct_diff', 0.0))
             dff        = float(snap.get('dff', 0.0))
             klines     = snap.get('klines', [])
@@ -2005,7 +2071,7 @@ class SectorFocusController:
             vwap       = float(row.get('vwap', row.get('average', price)) or price)
             vol_ratio  = float(row.get('ratio', 1.0) or 1.0)
             prev_close = float(row.get('lastp1d', row.get('prev_close', 0)) or 0)
-            name       = str(row.get('name', code))
+            name       = self._get_stock_name(code, str(row.get('name', code)))
             # [FIX] 关键修复：从实时表取当前涨幅作为对比基准，不再由于硬编码为 0 导致过滤失效
             pct_diff   = float(row.get('percent', 0.0)) 
             dff        = float(row.get('dff', 0.0) or 0.0)
@@ -2096,6 +2162,9 @@ class SectorFocusController:
         self, min_status: DragonStatus = DragonStatus.CANDIDATE
     ) -> List[dict]:
         """获取龙头追踪列表（UI 消费接口）"""
+        # [NEW] 在返回前最后一次同步修复名称，防止冷启动或快照导致的代码显示
+        if self._name_cache:
+            self.dragon_tracker.sync_names(self._name_cache)
         return [r.to_dict() for r in self.dragon_tracker.get_dragons(min_status)]
 
     def get_dragon_count(self) -> dict:

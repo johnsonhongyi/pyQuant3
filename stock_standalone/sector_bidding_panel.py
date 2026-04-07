@@ -1879,8 +1879,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 except Empty:
                     break
 
-            # 推入最新数据
-            self._worker.add_data(df_all)
+            # 推入最新数据（纵深防御：即使调用者忘记 copy，此处兜底）
+            self._worker.add_data(df_all.copy())  # [THREAD-SAFETY] 防御性 copy
 
             with self._update_lock:
                 self._force_update_requested = force_update
