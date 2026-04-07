@@ -29,6 +29,7 @@ class T1StrategyEngine:
         # 缓存每个股票的预设目标价和ATR，避免频繁计算
         # {code: {'buy_target': float, 'sell_target': float, 'atr': float, 'trend': TrendState, 'last_update': 'YYYY-MM-DD'}}
         self.target_cache: dict[str, dict[str, Any]] = {}
+        self.add_count_cache: dict[str, dict[str, Any]] = {} # 每日加仓次数限制 {code: {'date': 'YYYY-MM-DD', 'count': 0}}
 
     def _calculate_atr(self, code: str, period: int = 5,resample: str = 'd') -> float:
         """从 tdd 获取历史K线计算 ATR"""
@@ -192,6 +193,12 @@ class T1StrategyEngine:
             # 有利润垫的情况下，触发跟踪止盈
             return 'REDUCE', f"ATR跟踪止盈 (回落突破 {atr_multiplier}ATR)", current_price
 
+        # 获取今日的加仓记录
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        add_record = self.add_count_cache.get(code, {'date': today_str, 'count': 0})
+        if add_record['date'] != today_str:
+            add_record = {'date': today_str, 'count': 0}
+
         # --- 2. 震荡市高抛低吸 (T+0预埋卖卖点) ---
         if trend == TrendState.OSCILLATING:
             # 高抛
@@ -201,24 +208,26 @@ class T1StrategyEngine:
                     return 'REDUCE', f"触碰阻力预卖位 ({sell_target:.2f}) T+0高抛", current_price
             
             # 低吸 (前提是不能跌破防守线，这里可以结合 VWAP 确认企稳)
-            nclose = float(row.get('nclose', 0)) # VWAP
-            if current_price <= buy_target and current_price > nclose:
-                return 'ADD', f"触碰支撑预买位 ({buy_target:.2f}) T+0吸纳", current_price
+            # [2026-04] 震荡市左侧低吸容易被埋，过滤掉该场景，仅允许回落到极端地位或热点主升浪做T
+            pass
 
-        # --- 3. 主升浪顺势加仓 ---
+        # --- 3. 主升浪顺势加仓 (最核心的交易区间) ---
         if trend == TrendState.MAIN_WAVE:
             # 缩量回踩 MA5 买入
             if current_price <= buy_target and current_price >= buy_target * 0.98:
-                # 需结合分时图，如果在此停留企稳可加仓 (简单逻辑：当前不大幅跌破均价)
+                # 需结合分时图，不破前日均线并在VWAP企稳
                 nclose = float(row.get('nclose', 0))
-                if current_price >= nclose * 0.995: 
-                    return 'ADD', f"主升浪回踩企稳 ({buy_target:.2f}) 顺势加仓", current_price
+                # 均线支撑之上必须站稳 VWAP
+                if current_price >= nclose * 1.002 and add_record['count'] < 1: 
+                    self.add_count_cache[code] = {'date': today_str, 'count': add_record['count'] + 1}
+                    return 'ADD', f"主升浪回踩企稳 ({buy_target:.2f}) 顺势加仓 (当日第1次)", current_price
 
         # --- 4. [NEW] 诱空反转确认加仓 (Shakeout Reversal) ---
-        if snap.get('bear_trap_reversal', False):
-            now_time = dt.datetime.now().time()
-            if now_time >= dt.time(14, 0): # 14:00 后确认
-                if current_price > nclose:
+        if snap.get('bear_trap_reversal', False) and add_record['count'] < 1:
+            now_time = datetime.now().time()
+            if now_time >= datetime.strptime("14:00", "%H:%M").time(): # 14:00 后确认
+                if current_price > float(row.get('nclose', 0)):
+                    self.add_count_cache[code] = {'date': today_str, 'count': add_record['count'] + 1}
                     return 'ADD', "🔥诱空反转尾盘确认, 此时加仓安全系数高", current_price
 
         return 'HOLD', "", 0.0
