@@ -776,6 +776,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # ✅ [USER-REQ] 切换日期时自动清空板块/关键字筛选，以显示该日全量数据
         if hasattr(self, 'concept_filter_var'):
             self.concept_filter_var.set("")
+            
+        if hasattr(self, '_notebook') and self._notebook.index("current") != 0:
+            self._notebook.select(0)
 
         # 切换日期时，自动加载该日期的历史记录 (非强制运行策略)
         self.load_data(force=False, target_date=self.current_date)
@@ -797,6 +800,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # ✅ [USER-REQ] 切换日期时自动清空板块筛选
             if hasattr(self, 'concept_filter_var'):
                 self.concept_filter_var.set("")
+                
+            if hasattr(self, '_notebook') and self._notebook.index("current") != 0:
+                self._notebook.select(0)
 
             self.current_date = target_str
             self.load_data(force=False, target_date=self.current_date)
@@ -854,6 +860,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         query = self.concept_filter_var.get().strip()
         if query:
             self.update_history(query)
+            
+        if hasattr(self, '_notebook') and self._notebook.index("current") != 0:
+            self._notebook.select(0)
+            
         self.load_data()
 
     def on_select(self, event):
@@ -1470,7 +1480,7 @@ def _init_sector_tab(self, parent: tk.Frame):
     paned.pack(fill="both", expand=True)
 
     top_frame = tk.Frame(paned, bg="#0e1621")
-    paned.add(top_frame, height=220)
+    paned.add(top_frame, height=300)
 
     sector_cols = ("rank", "name", "heat", "bid_score", "zt_count", "leader_code", "leader_name", "leader_pct", "followers")
     self._sector_tree = ttk.Treeview(top_frame, columns=sector_cols, show="headings", height=8)
@@ -1505,7 +1515,7 @@ def _init_sector_tab(self, parent: tk.Frame):
 
     # ── 成员股详情（下半区）──────────────────────────────────────────────────
     bottom_frame = tk.Frame(paned, bg="#0e1621")
-    paned.add(bottom_frame, height=160)
+    paned.add(bottom_frame, height=200)
 
     self._sector_detail_lbl = tk.Label(
         bottom_frame, text="← 点击板块查看成员股",
@@ -1537,7 +1547,8 @@ def _init_sector_tab(self, parent: tk.Frame):
     self._member_tree.pack(side="left", fill="both", expand=True)
     mem_vsb.pack(side="right", fill="y")
 
-    self._member_tree.bind("<Double-1>", self._on_member_double_click)
+    self._member_tree.bind("<<TreeviewSelect>>", self._on_member_selected)
+    self._member_tree.bind("<Double-1>", self._on_member_selected)
 
 
 def _init_decision_tab(self, parent: tk.Frame):
@@ -1574,25 +1585,28 @@ def _init_decision_tab(self, parent: tk.Frame):
     # 上半：决策信号队列
     signal_frame = tk.LabelFrame(paned, text="  🎯 实时买点决策队列（按优先级排序）  ",
                                   bg="#0a0f1a", fg="#00cc88", font=("Arial", 9, "bold"))
-    paned.add(signal_frame, height=200)
+    paned.add(signal_frame, height=300)
 
-    sig_cols = ("priority", "code", "name", "sector", "signal_type", "suggest_price",
-                "current_price", "change_pct", "sector_heat", "reason", "status")
+    sig_cols = ("time", "priority", "code", "name", "sector", "signal_type", "suggest_price",
+                "current_price", "change_pct", "sector_heat", "hits", "reason", "status")
     self._signal_tree = ttk.Treeview(signal_frame, columns=sig_cols, show="headings", height=7)
 
     sig_headers = {
-        "priority": "优先级", "code": "代码", "name": "名称",
+        "time": "时间", "priority": "优先级", "code": "代码", "name": "名称",
         "sector": "板块", "signal_type": "信号类型",
         "suggest_price": "建议价", "current_price": "现价",
-        "change_pct": "涨幅%", "sector_heat": "板块热度",
-        "reason": "触发原因", "status": "状态",
+        "change_pct": "涨幅%", "sector_heat": "热度",
+        "hits": "次数", "reason": "触发原因", "status": "状态",
     }
     for col, text in sig_headers.items():
-        self._signal_tree.heading(col, text=text)
-        self._signal_tree.column(col, anchor="center", width=70)
+        self._signal_tree.heading(col, text=text, command=lambda c=col: self._sort_signal_tree(c))
+        self._signal_tree.column(col, anchor="center", width=60)
     self._signal_tree.column("reason", width=250, stretch=True)
-    self._signal_tree.column("sector", width=100, stretch=False)
-    self._signal_tree.column("name", width=75, stretch=False)
+    self._signal_tree.column("sector", width=80, stretch=False)
+    self._signal_tree.column("name", width=70, stretch=False)
+    self._signal_tree.column("time", width=70, stretch=False)
+    self._signal_tree.column("hits", width=40, stretch=False)
+    self._signal_tree.column("priority", width=50, stretch=False)
 
     self._signal_tree.tag_configure("high", background="#1a2a00", foreground="#88ff44")   # 高优先级
     self._signal_tree.tag_configure("medium", background="#001a2a", foreground="#44aaff") # 中
@@ -1615,11 +1629,64 @@ def _init_decision_tab(self, parent: tk.Frame):
               font=("Arial", 9), relief="flat", pady=2,
               command=self._ignore_selected_signal).pack(side="left", padx=3)
 
-    self._signal_tree.bind("<Double-1>", lambda e: self._mock_buy_selected())
+    self._signal_tree.bind("<Double-1>", self._on_signal_double_click)
+    self._signal_tree.bind("<<TreeviewSelect>>", self._on_signal_selected)
+
+    self._sig_tooltip_win = None
+    self._sig_last_hover_id = None
+    
+    def on_sig_motion(event):
+        item = self._signal_tree.identify_row(event.y)
+        col = self._signal_tree.identify_column(event.x)
+        if item and col:
+            col_name = self._signal_tree.column(col, 'id')
+            if col_name == 'reason':
+                if self._sig_last_hover_id == item:
+                    return
+                self._sig_last_hover_id = item
+                hide_sig_tooltip()
+                try:
+                    vals = self._signal_tree.item(item, 'values')
+                    txt = vals[11] if len(vals) > 11 else ""
+                    if txt:
+                        # 文字多行显示
+                        txt = str(txt).replace('|', '\n').replace('；', '\n').replace(';', '\n')
+                        
+                        self._sig_tooltip_win = tk.Toplevel(self._signal_tree)
+                        self._sig_tooltip_win.wm_overrideredirect(True)
+                        self._sig_tooltip_win.attributes("-topmost", True)
+                        
+                        # 计算位置，避免屏幕右侧遮挡
+                        screen_w = self._signal_tree.winfo_screenwidth()
+                        est_w = 380 # 预估悬浮窗最大宽度
+                        x_pos = event.x_root + 15
+                        if x_pos + est_w > screen_w:
+                            x_pos = event.x_root - est_w - 10
+                        y_pos = event.y_root + 15
+                        
+                        self._sig_tooltip_win.geometry(f"+{x_pos}+{y_pos}")
+                        
+                        # 红色文字
+                        tk.Label(self._sig_tooltip_win, text=txt, bg="#1a0000", fg="#ff3333", 
+                                 font=("Arial", 10, "bold"), justify="left", wraplength=350,
+                                 relief="solid", bd=1, padx=6, pady=4).pack()
+                except Exception:
+                    pass
+                return
+        hide_sig_tooltip()
+        self._sig_last_hover_id = None
+
+    def hide_sig_tooltip(event=None):
+        if getattr(self, '_sig_tooltip_win', None):
+            self._sig_tooltip_win.destroy()
+            self._sig_tooltip_win = None
+
+    self._signal_tree.bind("<Motion>", on_sig_motion)
+    self._signal_tree.bind("<Leave>", hide_sig_tooltip)
 
     # 下半：持仓 + 流水分栏
     bottom_nb = ttk.Notebook(paned)
-    paned.add(bottom_nb, height=180)
+    paned.add(bottom_nb, height=200)
 
     # 持仓 Tab
     pos_frame = tk.Frame(bottom_nb, bg="#0a0f1a")
@@ -1640,9 +1707,9 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._pos_tree.column("name", width=75, stretch=False)
     self._pos_tree.column("sector", width=100, stretch=False)
 
-    self._pos_tree.tag_configure("profit", foreground="#44ff88")
-    self._pos_tree.tag_configure("loss",   foreground="#ff4444")
-    self._pos_tree.tag_configure("flat",   foreground="#cccccc")
+    self._pos_tree.tag_configure("profit", background="#0e1621", foreground="#44ff88")
+    self._pos_tree.tag_configure("loss",   background="#0e1621", foreground="#ff4444")
+    self._pos_tree.tag_configure("flat",   background="#0e1621", foreground="#cccccc")
 
     pos_vsb = ttk.Scrollbar(pos_frame, orient="vertical", command=self._pos_tree.yview)
     self._pos_tree.configure(yscroll=pos_vsb.set)
@@ -1668,9 +1735,9 @@ def _init_decision_tab(self, parent: tk.Frame):
         self._log_tree.heading(col, text=text)
         self._log_tree.column(col, anchor="center", width=80)
     self._log_tree.column("reason", width=200, stretch=True)
-    self._log_tree.tag_configure("buy",  foreground="#44aaff")
-    self._log_tree.tag_configure("sell_profit", foreground="#44ff88")
-    self._log_tree.tag_configure("sell_loss",   foreground="#ff4444")
+    self._log_tree.tag_configure("buy",         background="#0e1621", foreground="#44aaff")
+    self._log_tree.tag_configure("sell_profit", background="#0e1621", foreground="#44ff88")
+    self._log_tree.tag_configure("sell_loss",   background="#0e1621", foreground="#ff4444")
 
     log_vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self._log_tree.yview)
     self._log_tree.configure(yscroll=log_vsb.set)
@@ -1771,7 +1838,14 @@ def _on_sector_selected(self, event=None):
         if col not in df_rt.columns:
             return
 
-        members = df_rt[df_rt[col] == sector_name].copy()
+        leader_code = str(sh.get('leader_code', ''))
+        followers = [str(c) for c in sh.get('follower_codes', [])]
+        target_codes = set(followers)
+        if leader_code:
+            target_codes.add(leader_code)
+
+        members = df_rt[df_rt.index.isin(target_codes)].copy()
+
         if members.empty:
             return
 
@@ -1783,8 +1857,8 @@ def _on_sector_selected(self, event=None):
         decision_codes = {s['code'] for s in self._focus_ctrl.get_decision_queue()}
 
         for _, row in members.iterrows():
-            code = str(row.get('code', ''))
-            name = str(row.get('name', ''))
+            code = str(row.get('code', row.name))
+            name = str(row.get('name', code))
             pct = float(row.get('percent', row.get('_pct', 0)))
 
             if code == leader_code:
@@ -1808,21 +1882,34 @@ def _on_sector_selected(self, event=None):
                 f"{row.get('ratio', 1.0):.2f}",
                 signal_str,
             ), tags=(tag,))
+        
+        # 自动联动到龙头股
+        if leader_code and hasattr(self, 'sender') and self.sender:
+            try:
+                self.sender.send(leader_code)
+            except Exception:
+                pass
+            if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+                if hasattr(self.master, 'open_visualizer'):
+                    self.master.open_visualizer(leader_code)
     except Exception as e:
         logger.debug(f"[on_sector_selected] error: {e}")
 
 
-def _on_member_double_click(self, event=None):
-    """双击成员股联动主界面 K 线图"""
+def _on_member_selected(self, event=None):
+    """单击或双击成员股联动主界面 K 线图"""
     sel = self._member_tree.selection()
     if not sel:
         return
     code = sel[0]
-    if self.sender:
+    if hasattr(self, 'sender') and self.sender:
         try:
-            self.sender.set_stock(code)
+            self.sender.send(code)
         except Exception:
             pass
+    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+        if hasattr(self.master, 'open_visualizer'):
+            self.master.open_visualizer(code)
 
 
 def _force_refresh_sector(self):
@@ -1870,6 +1957,7 @@ def _refresh_decision_tab(self):
                     tag = "done"
 
                 values = (
+                    s.get('created_at', ''),
                     priority,
                     code, s['name'], s['sector'],
                     s['signal_type'],
@@ -1877,6 +1965,7 @@ def _refresh_decision_tab(self):
                     s.get('current_price', 0),
                     f"{s.get('change_pct', 0):+.2f}%",
                     f"{s.get('sector_heat', 0):.1f}",
+                    s.get('hits', 1),
                     s.get('reason', ''),
                     s.get('status', ''),
                 )
@@ -2067,6 +2156,56 @@ def _sell_all_positions(self):
     self._refresh_decision_tab()
     messagebox.showinfo("完成", "已执行模拟卖出全部持仓")
 
+def _on_signal_double_click(self, event):
+    """双击决策信号联动或显示原因详情"""
+    sel = self._signal_tree.selection()
+    if not sel:
+        return
+    code = sel[0]
+    
+    # 检查是否双击了触发原因列
+    col_id = self._signal_tree.identify_column(event.x)
+    col_name = self._signal_tree.column(col_id, 'id')
+    if col_name == 'reason':
+        try:
+            values = self._signal_tree.item(code, 'values')
+            reason_text = values[11]
+            messagebox.showinfo("触发原因详情", reason_text, parent=self)
+        except Exception:
+            pass
+        return
+        
+    # 其他列双击执行模拟买入
+    self._mock_buy_selected()
+
+def _on_signal_selected(self, event=None):
+    """单击信号队列联动主界面 K 线图"""
+    sel = self._signal_tree.selection()
+    if not sel:
+        return
+    code = sel[0]
+    if hasattr(self, 'sender') and self.sender:
+        try:
+            self.sender.send(code)
+        except Exception:
+            pass
+    if self.master and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+        if hasattr(self.master, 'open_visualizer'):
+            self.master.open_visualizer(code)
+
+def _sort_signal_tree(self, col: str):
+    """决策信号列表点击表头排序"""
+    try:
+        items = [(self._signal_tree.set(k, col), k) for k in self._signal_tree.get_children('')]
+        try:
+            items.sort(key=lambda x: float(x[0].replace('%', '').replace('#', '').replace('+', '').replace('-', '') or 0), reverse=True)
+        except Exception:
+            items.sort(reverse=True)
+        for idx, (_, k) in enumerate(items):
+            self._signal_tree.move(k, '', idx)
+    except Exception as e:
+        logger.debug(f"_sort_signal_tree: {e}")
+
 
 # 将新方法 monkey-patch 绑定到 StockSelectionWindow 类
 StockSelectionWindow._init_sector_tab       = _init_sector_tab
@@ -2075,7 +2214,7 @@ StockSelectionWindow._schedule_focus_refresh = _schedule_focus_refresh
 StockSelectionWindow._refresh_focus_tabs    = _refresh_focus_tabs
 StockSelectionWindow._refresh_sector_tab    = _refresh_sector_tab
 StockSelectionWindow._on_sector_selected    = _on_sector_selected
-StockSelectionWindow._on_member_double_click = _on_member_double_click
+StockSelectionWindow._on_member_selected    = _on_member_selected
 StockSelectionWindow._force_refresh_sector  = _force_refresh_sector
 StockSelectionWindow._sort_sector_tree      = _sort_sector_tree
 StockSelectionWindow._refresh_decision_tab  = _refresh_decision_tab
@@ -2084,4 +2223,7 @@ StockSelectionWindow._mock_sell_selected    = _mock_sell_selected
 StockSelectionWindow._ignore_selected_signal = _ignore_selected_signal
 StockSelectionWindow._clear_done_signals    = _clear_done_signals
 StockSelectionWindow._sell_all_positions    = _sell_all_positions
+StockSelectionWindow._on_signal_double_click = _on_signal_double_click
+StockSelectionWindow._on_signal_selected     = _on_signal_selected
+StockSelectionWindow._sort_signal_tree       = _sort_signal_tree
 
