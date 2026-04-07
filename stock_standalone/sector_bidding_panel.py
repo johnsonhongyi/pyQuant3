@@ -2226,6 +2226,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         leader_price  = data.get('leader_price', 0.0)
         leader_klines = data.get('leader_klines', [])
         followers     = data.get('followers', [])
+        race_candidates = data.get('race_candidates', [])
+        
+        # [NEW] 建立竞赛状态映射表
+        race_map = {rc['code']: rc['status'] for rc in race_candidates}
 
         mini = _ascii_kline(leader_klines, width=44, last_close=data.get('leader_last_close', 0))
         self.kline_lbl.setText(f"龙头分时: {mini}")
@@ -2256,7 +2260,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         }]
         for f in data.get('followers', []):
             f_klines = f.get('klines', [])
-            rows.append({
+            row_item = {
                 'code': f['code'], 'name': f['name'],
                 'role': '📌跟随',
                 'pct': f['pct'], 'price': f['price'],
@@ -2264,7 +2268,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'price_diff': f.get('price_diff', 0.0),
                 'dff': f.get('dff', 0.0),
                 'klines': f_klines,
-                # [OPTIMIZE] Pre-calculate values for TrendDelegate to avoid O(K) loop in UI
                 'k_cache': {
                     'prices': [float(k.get('close', 0)) for k in f_klines],
                     'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
@@ -2277,7 +2280,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'hint': f.get('pattern_hint', '板块联动'),
                 'untradable': f.get('untradable', False),
                 'is_counter': False
-            })
+            }
+            # [NEW] 动态赋予竞赛角色标签
+            if f['code'] in race_map:
+                row_item['role'] = race_map[f['code']]
+            rows.append(row_item)
 
         # Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
@@ -2345,8 +2352,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.stock_table, i, 1, r['name'])
 
             # 3. 角色
-            role_c = self._color_red if '龙头' in r['role'] else None
-            role_f = self._bold_font if '龙头' in r['role'] else None
+            is_leader = '龙头' in r['role'] or '确核🐲' in r['role']
+            role_c = self._color_red if is_leader else (self._color_orange if '🌟' in r['role'] else (self._color_light_blue if '🌱' in r['role'] else None))
+            role_f = self._bold_font if is_leader else None
             self._update_cell(self.stock_table, i, 2, r['role'], color=role_c, font=role_f)
 
             # 4. 现价

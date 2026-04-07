@@ -303,6 +303,9 @@ class BiddingMomentumDetector:
         # [NEW] 模式保护
         self.in_history_mode = False
 
+        # [NEW] 竞赛模式状态跟踪
+        self._race_peaks: Dict[str, float] = {} # code -> intraday_peak_pct
+
         # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
 
@@ -1047,7 +1050,7 @@ class BiddingMomentumDetector:
         ral_val = getattr(ts_obj, 'ral', 0)
         
         # 蓄势评分加成
-        if 0 < (cur_close - ma20) / ma20 < 0.015 and last_du4 < 2.5:
+        if ma20 > 0 and 0 < (cur_close - ma20) / ma20 < 0.015 and last_du4 < 2.5:
             is_accumulating = True
             bonus = 5.0
             if ral_val > 15: bonus += 3.0 # 长期守住 MA20 的强势蓄势
@@ -1289,6 +1292,9 @@ class BiddingMomentumDetector:
                 self.last_data_ts = data_ts
             elif data_ts == 0:
                 self.last_data_ts = time.time()
+            
+            if self.enable_log and final_score > 0:
+                logger.debug(f"🎯 [Score] {code}: {final_score:.2f} (Cycle:{cycle_score:.1f} Bid:{bidding_score:.1f} Inst:{score:.1f} Mom:{ts_obj.momentum_score:.1f})")
 
     # =========================================================
     # 内部：板块聚合
@@ -1383,6 +1389,7 @@ class BiddingMomentumDetector:
                         ts.momentum_score = 0.0
                         ts.first_breakout_ts = 0.0
                         ts.pattern_hint = ""
+                    self._race_peaks.clear() # [NEW] 清除竞赛高点
                     self.reset_observation_anchors()
 
         # --- 更新全量 Watchlist (仅针对有变动的个股) ---
@@ -1400,6 +1407,12 @@ class BiddingMomentumDetector:
                         'time_str': datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M'),
                         'reason': '涨停', 'pattern_hint': d['pattern_hint']
                     }
+
+        # [NEW] 5. 市场温度与准入门槛自适应
+        temp = self.get_market_temperature()
+        entry_pct = 3.0
+        if temp >= 70: entry_pct = 3.5
+        elif temp < 35: entry_pct = 2.5
 
         new_active = {} if target_sectors is None else self.active_sectors.copy()
         
@@ -1435,6 +1448,10 @@ class BiddingMomentumDetector:
                 continue
             
             for s in stocks:
+                sid = s['code']
+                ts_obj = self._tick_series.get(sid)
+                if not ts_obj: continue
+
                 base_score = s['score']
                 drawdown_pct = max(0, (s['high_day'] - s['price']) / s['last_close'] * 100) if s['last_close'] > 0 else 0
                 penalty = drawdown_pct * 4.0 
@@ -1444,12 +1461,39 @@ class BiddingMomentumDetector:
                     time_diff_min = (market_open_dt.timestamp() - s['first_breakout_ts']) / 60.0
                     time_bonus = 10.0 + time_diff_min * (0.1 if time_diff_min >= 0 else 0.5)
                 
-                s['leader_score'] = base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus
+                # [NEW] 结构性加分 (Structure Bonus: Rising along VWAP)
+                # 过滤单纯的脉冲异动，奖励那些贴着均价线稳健爬升的“真异动”
+                struct_bonus = 0.0
+                if getattr(ts_obj, 'is_upper_band', False): struct_bonus += 20.0
+                if getattr(ts_obj, 'is_accumulating', False): struct_bonus += 10.0
+                if getattr(ts_obj, 'is_new_high', False): struct_bonus += 15.0
+
+                # [NEW] 确核/竞赛等级加权 (Dual-Track Priority)
+                # 只有真实封板或大幅拉升的真龙，才能获得绝对权重，防止诱多杂毛抢占龙头。
+                conviction_priority = 0.0
+                limit_thr = get_limit_up_threshold(sid)
+                if s['pct'] >= limit_thr:
+                    conviction_priority = 1000.0 # 确核真龙
+                elif s['pct'] >= 6.0:
+                    conviction_priority = 500.0  # 核心晋级
+                elif s['pct'] >= entry_pct:
+                    conviction_priority = 100.0  # 活跃参赛
+                
+                # 最终推选分 = 基础分(score+pct) + 顺位加权 + 结构加权
+                s['leader_score'] = (base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus) + conviction_priority + struct_bonus
+                
                 if market_avg_pct < -0.5 and s['pct'] > 1.0: s['leader_score'] += 10.0 
                 if s['is_untradable']: s['leader_score'] -= 50.0 
 
+            # 按顺位加权排序，确保确核股必登顶
             stocks.sort(key=lambda x: x['leader_score'], reverse=True)
             candidate_leader = stocks[0]
+            
+            # [FIX] 严格保护：如果排在第一位的个股涨幅不到 3.0% 且板块内有高于 3.0% 的个股，强制重排
+            if candidate_leader['pct'] < 3.0:
+                better_pct_stocks = [s for s in stocks if s['pct'] >= 3.0]
+                if better_pct_stocks:
+                    candidate_leader = better_pct_stocks[0]
             leader_code = candidate_leader['code']
             leader_pct = candidate_leader['pct']
 
@@ -1558,6 +1602,40 @@ class BiddingMomentumDetector:
             anchor = self.sector_anchors[sector]
             staged_diff = board_score - anchor
 
+            # [NEW] 竞赛选手识别与剪枝 (Race Candidates Logic)
+            # 1. 过滤符合条件的个股
+            race_list = []
+            for s in stocks:
+                pct = s['pct']
+                if pct < entry_pct: continue
+                
+                # 2. 剪枝逻辑 (Pruning)
+                sid = s['code']
+                peak = max(pct, self._race_peaks.get(sid, 0.0))
+                self._race_peaks[sid] = peak
+                
+                # A: 回撤剪枝 - 如果从今日最高点回落超过 2.5%，淘汰
+                if (peak - pct) > 2.5: continue
+                # B: 掉队剪枝 - 如果落后于板块龙头超过 5.0%，且低于 6.0% (给予高位股更多观察空间)，淘汰
+                if (leader_pct - pct) > 5.0 and pct < 6.0: continue
+                
+                status = "参赛🌱"
+                # 确核逻辑：必须摸到涨停边缘 (主板9.5, 创20)
+                limit_thr = get_limit_up_threshold(sid)
+                if pct >= limit_thr: status = "确核🐲"
+                elif pct >= 6.0: status = "晋级🌟"
+                
+                race_list.append({
+                    'code': sid,
+                    'name': s['name'],
+                    'pct': round(pct, 2),
+                    'status': status,
+                    'score': round(s.get('leader_score', 0.0), 1)
+                })
+            
+            # 仅取 Top 5 竞争者
+            race_candidates = sorted(race_list, key=lambda x: x['score'], reverse=True)[:5]
+
             new_active[sector] = {
                 'sector': sector, 'score': round(board_score, 2), 'tags': " ".join(tags),
                 'ts': time.time(), # [FIX] 添加时间戳，用于 GC
@@ -1603,12 +1681,25 @@ class BiddingMomentumDetector:
                         'last_low': s.get('last_low', 0.0)
                     } for s in stocks[1:15]
                 ],
+                'race_candidates': race_candidates, # [NEW] 注入竞赛选手状态
                 'linked_concepts': linked_concepts[:3]
             }
 
         with self._lock:
             self.active_sectors = new_active
             self.data_version += 1
+
+    def get_market_temperature(self) -> float:
+        """[NEW] 计算当前市场整体温度：基于热点板块的平均 score"""
+        with self._lock:
+            if not self.active_sectors:
+                return 50.0
+            top_sectors = sorted(self.active_sectors.values(), key=lambda s: s.get('score', 0), reverse=True)[:5]
+            if not top_sectors:
+                return 50.0
+            avg_score = sum(s.get('score', 0) for s in top_sectors) / len(top_sectors)
+            # 将 0-15 分映射到 0-100 温度 (设 15 分为沸腾点)
+            return min(100.0, avg_score * 6.6)
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
