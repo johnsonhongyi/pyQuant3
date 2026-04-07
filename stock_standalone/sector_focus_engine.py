@@ -161,6 +161,7 @@ class DecisionSignal:
     sector_type: str           = ""    # 板块类型
     created_at: datetime       = field(default_factory=datetime.now)
     status: str                = "待处理"   # 待处理/已忽略/已提交/已成交
+    hits: int                  = 1         # 触发次数
 
     def to_dict(self) -> dict:
         return {
@@ -179,10 +180,10 @@ class DecisionSignal:
             'reason': self.reason,
             'leader_code': self.leader_code,
             'is_leader': self.is_leader,
-            'created_at': self.created_at.strftime('%H:%M:%S') if self.created_at else "",
+            'created_at': self.created_at.strftime('%H:%M:%S') if getattr(self, 'created_at', None) else "",
             'status': self.status,
+            'hits': getattr(self, 'hits', 1)
         }
-
 
 @dataclass
 class DragonRecord:
@@ -1577,8 +1578,12 @@ class DecisionQueue:
     def push(self, signal: DecisionSignal):
         with self._lock:
             existing = self._signals.get(signal.code)
-            if existing is None or signal.priority >= existing.priority:
-                self._signals[signal.code] = signal
+            if existing:
+                signal.hits = getattr(existing, 'hits', 1) + 1
+                if signal.priority < existing.priority:
+                    signal.priority = existing.priority  # 保留高优先级
+            self._signals[signal.code] = signal
+            
             if len(self._signals) > self.MAX_QUEUE_SIZE:
                 self._evict_lowest()
 
