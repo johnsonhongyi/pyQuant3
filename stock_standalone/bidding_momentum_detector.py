@@ -23,6 +23,112 @@ import gzip
 import numpy as np
 from JohnsonUtil import commonTips as cct
 
+def compress_klines(klines):
+    """
+    [精简结构] 将 K 线 deque/list 压缩为【列式存储】格式 (Columnar Encoding):
+    { 'b': base_ts, 'o': [offsets], 'c': [closes], 'v': [volumes] }
+    优势: 提升压缩率 15-30%，且便于后续二进制扩展。
+    """
+    if not klines:
+        return {}
+    
+    # 提取最近 30 根
+    k_list = list(klines)[-30:]
+    base_ts = 0
+    offsets, closes, volumes = [], [], []
+    
+    from datetime import datetime
+    
+    for k in k_list:
+        d = k.as_dict() if hasattr(k, 'as_dict') else k
+        if not d: continue
+        
+        # 优化 1: 避免 pandas，利用 fromisoformat (Python 3.7+)
+        dt = d.get('datetime', d.get('time'))
+        if not dt: continue
+        
+        try:
+            if isinstance(dt, str):
+                # 兼容 "YYYY-MM-DD HH:MM:SS" 或 ISO 格式
+                if len(dt) > 10 and dt[10] == ' ': 
+                    ts = int(datetime.strptime(dt, '%Y-%m-%d %H:%M:%S').timestamp())
+                else:
+                    ts = int(datetime.fromisoformat(dt).timestamp())
+            elif hasattr(dt, 'timestamp'):
+                ts = int(dt.timestamp())
+            else:
+                ts = int(dt)
+            
+            if base_ts == 0:
+                base_ts = ts
+            
+            # 优化 2: 减少冗余的 round/float cast
+            c = d.get('close')
+            v = d.get('volume')
+            
+            offsets.append((ts - base_ts) // 60)
+            closes.append(round(float(c), 2) if c is not None else 0.0)
+            volumes.append(int(float(v)) if v is not None else 0)
+        except:
+            continue
+
+    if not offsets:
+        return {}
+
+    return {
+        'b': base_ts,
+        'o': offsets,
+        'c': closes,
+        'v': volumes
+    }
+
+def decompress_klines(compressed):
+    """
+    解压紧凑格式 K 线数据回 dict 列表，兼容 [list-of-dict], [list-of-list] 及新的 [columnar] 格式。
+    """
+    if not compressed:
+        return []
+    
+    # 1. 兼容最原始格式 (list of dicts)
+    if isinstance(compressed, list):
+        if not compressed: return []
+        if isinstance(compressed[0], dict):
+            return compressed
+        return []
+
+    if not isinstance(compressed, dict) or 'b' not in compressed:
+        return []
+        
+    base_ts = compressed['b']
+    from datetime import datetime
+    out = []
+
+    # 2. 兼容 0408_v1 结构 {b, d:[[..]]}
+    if 'd' in compressed:
+        compact_data = compressed['d']
+        for item in compact_data:
+            if not isinstance(item, (list, tuple)) or len(item) < 3: continue
+            ts = base_ts + item[0] * 60
+            dt_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            out.append({'datetime': dt_str, 'time': ts, 'close': item[1], 'volume': item[2]})
+        return out
+
+    # 3. 新的 Columnar 格式 {b, o:[], c:[], v:[]}
+    offsets = compressed.get('o', [])
+    closes = compressed.get('c', [])
+    volumes = compressed.get('v', [])
+    
+    for i in range(len(offsets)):
+        ts = base_ts + offsets[i] * 60
+        dt_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+        out.append({
+            'datetime': dt_str,
+            'time': ts,
+            'close': closes[i] if i < len(closes) else 0.0,
+            'volume': volumes[i] if i < len(volumes) else 0
+        })
+    return out
+
 if TYPE_CHECKING:
     from realtime_data_service import DataPublisher
 
@@ -56,6 +162,7 @@ class TickSeries:
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
                  'is_upper_band', 'is_new_high', 'momentum_score',
                  '_splitted_cats', '_total_vol', '_total_amt',
+                 'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage')
 
     def __init__(self, code: str, max_len: int = 30):
@@ -89,8 +196,13 @@ class TickSeries:
         self.is_new_high: bool = False   # [NEW] 创历史/波段新高
         self.momentum_score: float = 0.0 # [NEW] 持续动量累计分
         self._splitted_cats: Optional[List[str]] = None
-        self._total_vol: float = 0.0
-        self._total_amt: float = 0.0
+        self._total_vol: float = 0.0 # 内部循环计数
+        self._total_amt: float = 0.0 # 内部循环计数
+        self.total_vol: float = 0.0 # 当日成交量
+        self.vol_ratio: float = 0.0 # 量比
+        self.lvol: float = 0.0      # 地量参考
+        self.last6vol: float = 0.0  # 6日均量
+        self.market_role: str = "跟随" # [NEW] 角色标签: 排头兵/主帅/跟随
         self.score_anchor: float = 0.0
         self.score_diff: float = 0.0
         self.price_anchor: float = 0.0
@@ -147,6 +259,12 @@ class TickSeries:
         
         v_dff = _val('dff', 0.0)
         self.dff = float(v_dff) if v_dff else 0.0
+        
+        # [NEW] 捕获实盘量能核心指标
+        self.vol_ratio = float(_val('volume', _val('vol_ratio', 0.0)))
+        self.total_vol = float(_val('vol', _val('volume_total', 0.0)))
+        self.lvol = float(_val('lvol', 0.0))
+        self.last6vol = float(_val('last6vol', 0.0))
         
         v_top0 = _val('top0', 0)
         self.top0 = int(v_top0) if v_top0 else 0
@@ -299,9 +417,13 @@ class BiddingMomentumDetector:
         # [Tier 2] 增量缓存
         self._global_snap_cache: Dict[str, Dict[str, Any]] = {}
         self._sector_active_stocks_persistent: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        
+        # [NEW] 市场整体数据缓存
+        self.last_market_avg = 0.0
 
-        # [NEW] 模式保护
+        # [NEW] 模式保护与参数
         self.in_history_mode = False
+        self.use_dragon_race = False  # 龙头竞赛模式（停用后回归 0407 挖掘模式）
 
         # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
@@ -438,12 +560,11 @@ class BiddingMomentumDetector:
         with self._lock:
             return list(self.daily_watchlist.values())
 
-    def update_scores(self, active_codes=None):
+    def update_scores(self, active_codes=None, force: bool = False):
         """
-        定时调用（如 UI 刷新计时器），对所有已注册 code 重新评分，
-        并聚合为板块结果。适用于没有订阅推送（非交易时段调试）。
-        
-        active_codes: List[str], 如果提供，则仅对这些代码进行评分（提升回放效率）
+        主入口：计算每只个股分值并聚合板块。
+        active_codes: 如果提供，则仅对这些代码进行评分。
+        force: 是否强制全量刷新。
         """
         if active_codes is not None:
             codes = active_codes
@@ -454,8 +575,29 @@ class BiddingMomentumDetector:
         for code in codes:
             self._evaluate_code(code)
         
-        # 优化：仅聚合受影响的板块
         self._aggregate_sectors(active_codes=active_codes)
+
+    def reconstruct_all_from_cache(self):
+        """[NEW] 为历史模式提供的全量算法重映射，用于在模式切换时立即同步 UI"""
+        if not getattr(self, 'in_history_mode', False): return
+        
+        logger.info("🔄 [Detector] 正在为全部板块重新映射算法逻辑...")
+        from collections import defaultdict
+        code_sector_map = defaultdict(list)
+        for code, snap in self._global_snap_cache.items():
+            cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(snap.get('category', ''))) if c.strip()]
+            for cat in cats:
+                code_sector_map[cat].append(snap)
+        
+        market_avg = getattr(self, 'last_market_avg', 0.0)
+        # 直接在现有板块映射上执行原地覆盖
+        for s_name, info in list(self.active_sectors.items()):
+            candidates = code_sector_map.get(s_name, [])
+            if candidates:
+                self._reconstruct_sector_from_candidates(s_name, info, candidates, market_avg)
+        
+        # 版本递增触发 UI 刷新
+        self.data_version = getattr(self, 'data_version', 0) + 1
 
     # ------------------------------------------------------------------ 持久化
     def _get_persistence_path(self, snapshot_date: str = None) -> str:
@@ -523,64 +665,78 @@ class BiddingMomentumDetector:
 
         try:
             # [Data Preparation ...]
-            # [OPTIMIZED] 深度清理数据，不保存分时 K 线，减小磁盘占用和提升保存速度
+            # [OPTIMIZED] 深度清理数据，严禁重叠存储 K 线
             def _clean_data(obj):
                 if isinstance(obj, dict):
-                    # 关键：剔除 K 线数据，它们在启动时或显示时可以动态拉取
-                    return {k: _clean_data(v) for k, v in obj.items() if k != 'klines'}
+                    # 彻底剔除所有形式的 K 线数据，仅在 meta_data 中保留一份
+                    return {k: _clean_data(v) for k, v in obj.items() if not k.endswith('klines')}
                 elif isinstance(obj, list):
                     return [_clean_data(item) for item in obj]
                 return obj
 
-            data = {
-                'timestamp': round(time.time(), 2),
-                'stock_scores': {code: round(ts.score, 2) for code, ts in self._tick_series.items() if (ts.score > 0 or ts.momentum_score > 0)},
-                'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in self._tick_series.items() if ts.momentum_score > 0},
-                'sector_data': {name: _clean_data(info) for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
-                'stock_score_anchors': {code: round(ts.score_anchor, 2) 
-                                        for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
-                'baseline_time': round(self.baseline_time, 2),
-                'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
-                'stock_price_anchors': {code: round(ts.price_anchor, 4) 
-                                        for code, ts in self._tick_series.items() if ts.price_anchor > 0},
-                'watchlist': _clean_data(self.daily_watchlist)
-            }
-            
-            sd_count = len(data.get('sector_data', {}))
-            wl_count = len(data.get('watchlist', {}))
-            significant_stocks = {code: s for code, s in data.get('stock_scores', {}).items() if s >= 0.1}
-            ss_count = len(significant_stocks)
-            
-            if sd_count == 0 and wl_count == 0 and ss_count == 0:
-                logger.debug("ℹ️ [Detector] No active signals to save.")
-                return
-
-            relevant_codes = set(significant_stocks.keys()) | set(data.get('watchlist', {}).keys()) | set(self.stock_selector_seeds.keys())
+            # [COLUMNAR-METADATA] 使用列式存储减少 Key 重复开销
+            significant_stocks = {code: s for code, s in self._tick_series.items() if (s.score >= 0.1 or s.momentum_score > 0)}
+            relevant_codes = set(significant_stocks.keys()) | set(self.daily_watchlist.keys()) | set(self.stock_selector_seeds.keys())
             for sinfo in self.active_sectors.values():
                 relevant_codes.add(sinfo.get('leader'))
                 for f in sinfo.get('followers', []):
                     relevant_codes.add(f.get('code'))
             
-            meta_data = {}
-            for code in relevant_codes:
-                if not code: continue
+            codes_list = [c for c in relevant_codes if c]
+            meta_cols = {
+                'code': codes_list,
+                'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
+                'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 'k': []
+            }
+            for code in codes_list:
                 ts = self._tick_series.get(code)
                 if ts:
-                    meta_data[code] = {
-                        'name': ts.name,
-                        'reason': getattr(ts, 'pattern_hint', ''),
-                        'category': ts.category,
-                        'last_close': ts.last_close,
-                        'open_price': ts.open_price,
-                        'high_day': ts.high_day,
-                        'low_day': ts.low_day,
-                        'now_price': ts.current_price, # 这里的 current_price 会取最新的
-                        # [OPTIMIZED] 分时数据不保存，节省关闭时的 IO 耗时，冷启动通过实时拉取恢复
-                    }
-            data['meta_data'] = meta_data
+                    meta_cols['n'].append(ts.name)
+                    meta_cols['ph'].append(getattr(ts, 'pattern_hint', ''))
+                    meta_cols['c'].append(ts.category)
+                    meta_cols['lc'].append(round(ts.last_close, 3))
+                    meta_cols['op'].append(round(ts.open_price, 3))
+                    meta_cols['hd'].append(round(ts.high_day, 3))
+                    meta_cols['ld'].append(round(ts.low_day, 3))
+                    meta_cols['lh'].append(round(ts.last_high, 3))
+                    meta_cols['ll'].append(round(ts.last_low, 3))
+                    meta_cols['np'].append(round(ts.current_price, 3))
+                    meta_cols['fb'].append(round(ts.first_breakout_ts, 1))
+                    meta_cols['rl'].append(ts.ral)
+                    meta_cols['iu'].append(1 if ts.is_untradable else 0)
+                    meta_cols['ic'].append(1 if ts.is_counter_trend else 0)
+                    meta_cols['k'].append(compress_klines(ts.klines))
+                else:
+                    for k in meta_cols: 
+                        if k != 'code': meta_cols[k].append(None)
+
+            data = {
+                'timestamp': round(time.time(), 2),
+                'stock_scores': {code: round(ts.score, 2) for code, ts in significant_stocks.items()},
+                'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in significant_stocks.items() if ts.momentum_score > 0},
+                'sector_data': {name: _clean_data(info) for name, info in self.active_sectors.items() if info.get('score', 0) > 0},
+                'stock_score_anchors': {code: round(ts.score_anchor, 2) for code, ts in self._tick_series.items() if ts.score_anchor != 0.0},
+                'baseline_time': round(self.baseline_time, 2),
+                'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
+                'stock_price_anchors': {code: round(ts.price_anchor, 4) for code, ts in self._tick_series.items() if ts.price_anchor > 0},
+                'watchlist': _clean_data(self.daily_watchlist),
+                'stock_selector_seeds': self.stock_selector_seeds,
+                'meta_cols': meta_cols 
+            }
+            
+            sd_count = len(data.get('sector_data', {}))
+            ss_count = len(significant_stocks)
+            wl_count = len(data.get('watchlist', {}))
+            
+            # [FIX] 如果是强制保存 (force) 则跳过内容检查；否则至少需要板块或重点股数据才存盘
+            if not force:
+                if sd_count == 0 and ss_count == 0 and wl_count == 0:
+                    # logger.debug("ℹ️ [Detector] No active signals to save (skipped).")
+                    return
 
             # ⭐ [C-Reinforcement] 原子化写入：先写临时文件，然后 os.replace
-            def atomic_gz_save(target_path, data_dict):
+            import zlib
+            def atomic_save(target_path, data_dict):
                 def np_handler(obj):
                     if isinstance(obj, (np.integer, np.int32, np.int64)):
                         return int(obj)
@@ -592,16 +748,16 @@ class BiddingMomentumDetector:
 
                 temp_path = target_path + f".{os.getpid()}.tmp"
                 try:
-                    with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
-                        json.dump(data_dict, f, ensure_ascii=False, default=np_handler)
+                    # 性能与体积平衡：使用 separators 消除空格，并用 zlib 6级 压缩
+                    json_str = json.dumps(data_dict, ensure_ascii=False, default=np_handler, separators=(',', ':'))
+                    compressed = zlib.compress(json_str.encode('utf-8'), level=6)
                     
-                    # [STABILITY] Windows file replacement
+                    with open(temp_path, 'wb') as f:
+                        f.write(compressed)
+                    
                     if os.path.exists(target_path):
-                        try:
-                            # 尝试删除旧文件，防止 replace 时权限冲突
-                            os.remove(target_path)
-                        except Exception as e:
-                            logger.error(f"[atomic_gz_save] remove error: {e}")
+                        try: os.remove(target_path)
+                        except: pass
                     
                     os.replace(temp_path, target_path)
                     return True
@@ -612,22 +768,18 @@ class BiddingMomentumDetector:
                     raise e
 
             main_path = self._get_persistence_path()
-            if atomic_gz_save(main_path, data):
+            if atomic_save(main_path, data):
                 today_str = datetime.datetime.now().strftime('%Y%m%d')
                 snapshot_path = self._get_persistence_path(snapshot_date=today_str)
-                # [OPTIMIZED] 如果主路径与快照路径不同，直接复制已压好的文件，避免重复耗时的 JSON+GZIP
                 if os.path.normpath(main_path) != os.path.normpath(snapshot_path):
                     import shutil
                     try:
-                        # 确保快照所在的目录存在
                         os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
                         shutil.copy2(main_path, snapshot_path)
                         logger.info(f"📸 [Detector] Snapshot copied to {snapshot_path}")
                     except Exception as e:
-                        logger.warning(f"Failed to copy snapshot from {main_path} to {snapshot_path}: {e}")
-                        atomic_gz_save(snapshot_path, data)
-                else:
-                    logger.debug(f"[Detector] Snapshot path identical to main path: {main_path}")
+                        logger.warning(f"Failed to copy snapshot: {e}")
+                        atomic_save(snapshot_path, data)
 
             logger.info(f"💾 [Detector] Session data saved to {main_path} ({ss_count} stocks, {sd_count} sectors)")
             if snapshot_path != main_path:
@@ -678,9 +830,24 @@ class BiddingMomentumDetector:
                 logger.info(f"📅 [Detector] 持久化数据已过期 ({file_date_str} -> {today_str})，跳过加载。")
                 return
 
-            # 使用 gzip 解压读取
-            with gzip.open(path, 'rt', encoding='utf-8') as f:
-                data = json.load(f)
+            # [COMPRESSION-ADAPTIVE] 支持 zlib 或 gzip
+            import zlib
+            with open(path, 'rb') as f:
+                raw_data = f.read()
+            
+            try:
+                # 优先尝试 zlib 解压
+                decompressed = zlib.decompress(raw_data).decode('utf-8')
+                data = json.loads(decompressed)
+            except Exception:
+                # 兼容旧版本 gzip 格式
+                try:
+                    import gzip
+                    decompressed = gzip.decompress(raw_data).decode('utf-8')
+                    data = json.loads(decompressed)
+                except Exception as e:
+                    logger.error(f"[Detector] Decompression failed: {e}")
+                    return
 
             # 恢复个股分
             stock_scores = data.get('stock_scores', {})
@@ -717,22 +884,67 @@ class BiddingMomentumDetector:
             # 恢复重点表
             self.daily_watchlist = data.get('watchlist', {})
 
-            meta_data = data.get('meta_data', {})
-            for code, m in meta_data.items():
-                if code not in self._tick_series:
-                    self._tick_series[code] = TickSeries(code)
-                ts = self._tick_series[code]
-                ts.last_close = m.get('last_close', ts.last_close)
-                ts.open_price = m.get('open_price', ts.open_price)
-                ts.high_day = m.get('high_day', ts.high_day)
-                ts.low_day = m.get('low_day', ts.low_day)
-                ts.now_price = m.get('now_price', ts.now_price)
-                ts.name = m.get('name', ts.name)
-                ts.category = m.get('category', ts.category)
-                ts.score = m.get('score', ts.score)
-                ts.first_breakout_ts = m.get('first_breakout_ts', ts.first_breakout_ts)
-                ts.pattern_hint = m.get('pattern_hint', ts.pattern_hint)
-                ts.momentum_score = m.get('momentum_score', ts.momentum_score)
+            # [NEW] 恢复种子股状态，确保实盘重启后种子奖分 (+15) 生效
+            self.stock_selector_seeds = data.get('stock_selector_seeds', {})
+
+            # [RECONSTRUCT-METADATA] 处理新的列式存储格式
+            meta_cols = data.get('meta_cols', {})
+            if meta_cols and 'code' in meta_cols:
+                codes = meta_cols['code']
+                for i, code in enumerate(codes):
+                    if not code: continue
+                    if code not in self._tick_series:
+                        self._tick_series[code] = TickSeries(code)
+                    ts = self._tick_series[code]
+                    
+                    # 映射函数简化代码
+                    def _get(key, default):
+                        val = meta_cols.get(key, [])
+                        return val[i] if i < len(val) and val[i] is not None else default
+
+                    ts.name = _get('n', ts.name)
+                    ts.pattern_hint = _get('ph', ts.pattern_hint)
+                    ts.category = _get('c', ts.category)
+                    ts.last_close = _get('lc', ts.last_close)
+                    ts.open_price = _get('op', ts.open_price)
+                    ts.high_day = _get('hd', ts.high_day)
+                    ts.low_day = _get('ld', ts.low_day)
+                    ts.last_high = _get('lh', ts.last_high)
+                    ts.last_low = _get('ll', ts.last_low)
+                    ts.now_price = _get('np', ts.now_price)
+                    ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
+                    ts.ral = _get('rl', ts.ral)
+                    ts.is_untradable = bool(_get('iu', ts.is_untradable))
+                    ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                    
+                    # 恢复 K 线
+                    klines_data = _get('k', None)
+                    if klines_data:
+                        ts.klines.clear()
+                        for k in decompress_klines(klines_data):
+                            ts.push_kline(k)
+            else:
+                # 兼容旧的 meta_data (dict 格式)
+                meta_data = data.get('meta_data', {})
+                for code, m in meta_data.items():
+                    if code not in self._tick_series:
+                        self._tick_series[code] = TickSeries(code)
+                    ts = self._tick_series[code]
+                    ts.last_close = m.get('last_close', ts.last_close)
+                    ts.open_price = m.get('open_price', ts.open_price)
+                    ts.high_day = m.get('high_day', ts.high_day)
+                    ts.low_day = m.get('low_day', ts.low_day)
+                    ts.now_price = m.get('now_price', ts.now_price)
+                    ts.name = m.get('name', ts.name)
+                    ts.category = m.get('category', ts.category)
+                    ts.score = m.get('score', ts.score)
+                    ts.first_breakout_ts = m.get('first_breakout_ts', ts.first_breakout_ts)
+                    ts.pattern_hint = m.get('pattern_hint', ts.pattern_hint)
+                    ts.momentum_score = m.get('momentum_score', ts.momentum_score)
+                    
+                    ts.klines.clear()
+                    for k in decompress_klines(m.get('klines', [])): # [OPTIMIZED] 解压加载
+                        ts.push_kline(k)
             
             logger.info(f"♻️ [Detector] 会话数据已恢复: {len(stock_scores)} 只个股, {len(self.active_sectors)} 个板块")
         except Exception as e:
@@ -746,8 +958,22 @@ class BiddingMomentumDetector:
                 logger.error(f"Snapshot file not found: {filepath}")
                 return False
 
-            with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-                data = json.load(f)
+            # [COMPRESSION-ADAPTIVE] 支持 zlib 或 gzip
+            import zlib
+            with open(filepath, 'rb') as f:
+                raw_data = f.read()
+            
+            try:
+                decompressed = zlib.decompress(raw_data).decode('utf-8')
+                data = json.loads(decompressed)
+            except Exception:
+                try:
+                    import gzip
+                    decompressed = gzip.decompress(raw_data).decode('utf-8')
+                    data = json.loads(decompressed)
+                except Exception as e:
+                    logger.error(f"[Detector] Snapshot decompression failed: {e}")
+                    return False
 
             with self._lock:
                 # 1. 重置当前状态
@@ -761,6 +987,9 @@ class BiddingMomentumDetector:
                 momentum_scores = data.get('momentum_scores', {})
                 meta_data = data.get('meta_data', {})
                 
+                # [NEW] 恢复种子股状态，确保复盘时种子奖分 (+15) 生效
+                self.stock_selector_seeds = data.get('stock_selector_seeds', {})
+                
                 self._global_snap_cache.clear()
                 
                 for code, score in stock_scores.items():
@@ -768,32 +997,50 @@ class BiddingMomentumDetector:
                     ts.score = score
                     ts.momentum_score = momentum_scores.get(code, 0.0)
                     
-                    # 恢复元数据
-                    if code in meta_data:
-                        m = meta_data[code]
-                        ts.name = m.get('name', code)
-                        ts.pattern_hint = m.get('reason', '')
-                        ts.category = m.get('category', '')
-                        ts.last_close = m.get('last_close', 0.0)
-                        ts.high_day = m.get('high_day', 0.0)
-                        ts.low_day = m.get('low_day', 0.0)
-                        ts.last_high = m.get('last_high', 0.0)
-                        ts.last_low = m.get('last_low', 0.0)
-                        for k in m.get('klines', []):
-                            ts.push_kline(k)
+                    # [RECONSTRUCT-METADATA] 处理新的列式存储格式
+                    meta_cols = data.get('meta_cols', {})
+                    if meta_cols and 'code' in meta_cols:
+                        # 建立临时索引 map 避免 O(N^2)
+                        codes_list = meta_cols['code']
+                        if not hasattr(self, '_meta_idx_map') or getattr(self, '_meta_idx_date', 0) != data.get('timestamp'):
+                            self._meta_idx_map = {c: idx for idx, c in enumerate(codes_list)}
+                            self._meta_idx_date = data.get('timestamp')
+                        
+                        i = self._meta_idx_map.get(code)
+                        if i is not None:
+                            def _get_val(key, default):
+                                v_list = meta_cols.get(key, [])
+                                return v_list[i] if i < len(v_list) and v_list[i] is not None else default
+                            
+                            ts.name = _get_val('n', code)
+                            ts.category = _get_val('c', '')
+                            ts.last_close = _get_val('lc', 0.0)
+                            ts.high_day = _get_val('hd', 0.0)
+                            ts.low_day = _get_val('ld', 0.0)
+                            ts.last_high = _get_val('lh', 0.0)
+                            ts.last_low = _get_val('ll', 0.0)
+                            ts.now_price = _get_val('np', 0.0)
+                            ts.first_breakout_ts = _get_val('fb', 0.0)
+                            ts.ral = _get_val('rl', 0)
+                            ts.is_untradable = bool(_get_val('iu', False))
+                            ts.is_counter_trend = bool(_get_val('ic', False))
+                            ts.pattern_hint = _get_val('ph', '')
+                            
+                            ts.klines.clear()
+                            k_data = _get_val('k', [])
+                            for k in decompress_klines(k_data):
+                                ts.push_kline(k)
                     
-                    self._tick_series[code] = ts
-                    
-                    # 同时重建 _global_snap_cache 以便 UI 渲染个股详情
+                    # 同时重建 _global_snap_cache 以便 UI 渲染
                     self._global_snap_cache[code] = {
-                        'score': score, 'pct': ts.current_pct, 'price': ts.current_price,
+                        'code': code, 'score': score, 
+                        'pct': ts.current_pct, 'price': ts.current_price,
                         'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
-                        'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
-                        'last_low': ts.last_low, 'pattern_hint': ts.pattern_hint,
-                        'klines': list(ts.klines),
-                        'is_untradable': ts.is_untradable,
-                        'is_counter_trend': ts.is_counter_trend,
-                        'ral': ts.ral
+                        'high_day': ts.high_day, 'low_day': ts.low_day,
+                        'last_high': ts.last_high, 'last_low': ts.last_low,
+                        'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
+                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                        'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts
                     }
 
                 # 恢复价格锚点与分值锚点
@@ -839,50 +1086,151 @@ class BiddingMomentumDetector:
                 
                 # 成功加载后进入历史模式
                 self.in_history_mode = True
+                
+            # [CRITICAL] 为历史快照全量重建跟随股与角色态势
+            # 性能优化：先建立个股 -> 板块的反向索引，避免 O(S*N) 的嵌套循环导致 UI 卡死
+            logger.info(f"🔄 [Detector] 为 {len(self.active_sectors)} 个板块并行重建深度数据态势...")
+            
+            from collections import defaultdict
+            code_sector_map = defaultdict(list)
+            for code, snap in self._global_snap_cache.items():
+                cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(snap.get('category', ''))) if c.strip()]
+                for cat in cats:
+                    code_sector_map[cat].append(snap)
+            
+            market_avg = getattr(self, 'last_market_avg', 0.0)
+            for s_name, info in self.active_sectors.items():
+                candidates = code_sector_map.get(s_name, [])
+                if candidates:
+                    self._reconstruct_sector_from_candidates(s_name, info, candidates, market_avg)
 
-            logger.info(f"🎬 [Detector] 历史快照已加载: {filepath} ({len(self.active_sectors)} 板块)")
+            logger.info(f"🎬 [Detector] 历史快照已加载并重建完成: {filepath}")
             return True
         except Exception as e:
             logger.error(f"Failed to load snapshot: {e}")
             return False
 
-    def reconstruct_followers(self, sector_name: str):
-        """
-        [NEW] 手工从元数据缓存中重建指定板块的跟随股 (针对旧快照)
-        扫描 _global_snap_cache 中所有属于该板块的个股。
-        """
-        with self._lock:
-            if sector_name not in self.active_sectors:
-                logger.warning(f"⚠️ [Detector] Sector {sector_name} not found in active_sectors")
-                return
+    def _determine_role(self, s: dict, leader_code: str, leader_score: float) -> str:
+        """统一逻辑确定个股在板块中的角色标签"""
+        pct = s.get('pct', 0.0)
+        if s['code'] == leader_code:
+            return "🏆 龙头"
+        elif pct >= 9.5:
+            return "核心🐲" 
+        elif pct >= 7.0 or leader_score > 35:
+            return "确核🐲" 
+        elif pct >= 4.0 or leader_score > 20:
+            return "晋级🌟"
+        elif pct >= 1.5 or leader_score > 10:
+            return "参赛🌱"
+        else:
+            return "跟随📌"
 
-            info = self.active_sectors[sector_name]
-            leader_code = info.get('leader', '')
+    def _calculate_leader_score(self, s: dict, sector: str, market_avg_pct: float) -> float:
+        """内部评估一个个股作为龙头的综合得分"""
+        base_score = s.get('score', 0.0)
+        time_bonus = 0.0
+        
+        # 异动时间溢价 (0407 核心：越早越好)
+        if s.get('first_breakout_ts', 0) > 0:
+            elapsed = time.time() - s['first_breakout_ts']
+            if elapsed < 3600: # 1小时内异动有额外权重
+                time_bonus = 5.0 * (1.0 - elapsed / 3600.0)
+
+        if not getattr(self, 'use_dragon_race', False):
+            # 💡 [0407 挖掘模式] 强调异动时间与先发优势 (让蓝色光标更具特异性)
+            # 权重：基础分(1.0) + 涨幅(0.4) + 时间溢价 + 种子潜力(+15.0)
+            l_score = base_score * 1.0 + s['pct'] * 0.4 + time_bonus
             
-            # 搜集候选人
+            # [SEED BONUS] 选股器种子显著加分 (0407 核心挖掘力)
+            if s['code'] in self.stock_selector_seeds:
+                l_score += 15.0
+            
+            # [LIQUIDITY BONUS] 大盘成交金额加成 (蓝色光标这类大成交额龙头的优势)
+            # 大金额成交代表机构介入深，具备更强的领涨代表性
+            klines = s.get('klines', [])
+            total_amount = 0.0
+            if klines:
+                for k in klines:
+                    # 兼容不同数据源的成交额字段 (amount/turnover)
+                    amt = float(k.get('amount', k.get('turnover', 0.0)))
+                    if amt == 0: # 兜底：计算估算成交额
+                        amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
+                    total_amount += amt
+            
+            if total_amount > 1e8: # 1亿以上开始加分 (针对分时段累计)
+                l_score += min(5.0, total_amount / 2e8) # 每2亿加1分，封顶5分
+            
+            # [STABILITY] 取消高回撤罚分，允许低位震荡蓄势
+            return l_score
+        else:
+            # [竞赛/追涨模式] 强调当日爆发力
+            drawdown_pct = max(0, (s.get('high_day', 0.0) - s.get('price', 0.0)) / s.get('last_close', 1.0) * 100) if s.get('last_close', 0) > 0 else 0
+            penalty = drawdown_pct * 4.0 
+            
+            l_score = base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus
+            if s.get('is_untradable'): l_score -= 50.0 
+            return l_score
+
+    def reconstruct_followers(self, sector_name: str):
+        """[NEW] 手工从元数据缓存中重建指定板块的跟随股 (针对单个板块刷新)"""
+        with self._lock:
+            if sector_name not in self.active_sectors: return
+            info = self.active_sectors[sector_name]
+            
             candidates = []
+            market_avg = self.last_market_avg
             for code, snap in self._global_snap_cache.items():
-                if code == leader_code: continue
-                
-                # 匹配板块
                 cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(snap.get('category', ''))) if c.strip()]
                 if sector_name in cats:
-                    candidates.append({
-                        'code': code,
-                        'name': snap.get('name', code),
-                        'pct': snap.get('pct', 0.0),
-                        'score': snap.get('score', 0.0),
-                        'score_diff': snap.get('score_diff', 0.0),
-                        'pct_diff': snap.get('pct_diff', 0.0),
-                        'price': snap.get('price', 0.0),
-                        'first_ts': snap.get('first_breakout_ts', 0.0)
-                    })
+                    snap['leader_score'] = self._calculate_leader_score(snap, sector_name, market_avg)
+                    candidates.append(snap)
             
-            # 按评分排序取前 15 名
-            candidates.sort(key=lambda x: x['score'], reverse=True)
-            info['followers'] = candidates[:15]
-            
-            logger.info(f"✅ [Detector] Sector {sector_name} reconstructed: {len(info['followers'])} followers found.")
+            if not candidates: return
+            self._reconstruct_sector_from_candidates(sector_name, info, candidates, market_avg)
+
+    def _reconstruct_sector_from_candidates(self, sector_name: str, info: dict, candidates: list, market_avg: float):
+        """内部核心逻辑：根据候选人名单填充板块详情、角色和跟随股"""
+        # 1. 计算龙分并排序 (强制重算以响应算法切换)
+        for snap in candidates:
+            snap['leader_score'] = self._calculate_leader_score(snap, sector_name, market_avg)
+        
+        candidates.sort(key=lambda x: x.get('leader_score', 0), reverse=True)
+        
+        # 2. 确定龙头
+        current_leader = candidates[0]['code']
+        info['leader'] = current_leader
+        info['leader_name'] = candidates[0]['name']
+        info['leader_pct'] = candidates[0].get('pct', 0.0)
+        info['leader_price'] = candidates[0].get('price', 0.0)
+        info['leader_klines'] = candidates[0].get('klines', [])
+        
+        # 3. 重建角色名单 (仅在模式开启时执行)
+        race_candidates = []
+        if getattr(self, 'use_dragon_race', False):
+            for s in candidates[:15]:
+                role = self._determine_role(s, current_leader, s['leader_score'])
+                race_candidates.append({
+                    'code': s['code'], 'name': s['name'], 'role': role,
+                    'pct': round(s.get('pct', 0.0), 2), 'score': round(s.get('score', 0.0), 1),
+                    'l_score': round(s['leader_score'], 1)
+                })
+        info['race_candidates'] = race_candidates
+        
+        # 4. 填充跟随股列表 (Top 15)
+        info['followers'] = [
+            {
+                'code': s['code'], 
+                'name': s.get('name', s['code']), 
+                'pct': s.get('pct', 0.0), 
+                'score': s.get('score', 0.0), 
+                'price': s.get('price', 0.0), 
+                'dff': s.get('dff', 0.0),
+                'klines': s.get('klines', []),
+                'last_close': s.get('last_close', 0.0),
+                'first_ts': s.get('first_breakout_ts', 0.0)
+            } for s in candidates[1:16]
+        ]
 
     # =========================================================
     # 内部：订阅回调
@@ -949,6 +1297,25 @@ class BiddingMomentumDetector:
             cycle_score += 1.0  # 基础牛熊分
             if ma60 > 0 and cur_close > ma60:
                 cycle_score += 1.0
+        
+        # [NEW] 资金规模与角色判定 (Using user-provided real-time fields)
+        amount_bonus = 0.0  # [FIX] 显式初始化奖分变量
+        total_amount = ts_obj.total_vol * cur_close
+        if total_amount > 2e8: # 权重规模
+            amount_bonus += 2.0
+            ts_obj.market_role = "主帅"
+        elif ts_obj.vol_ratio > 3.0 and total_amount < 5e7:
+            amount_bonus += 1.0
+            ts_obj.market_role = "排头兵"
+        else:
+            ts_obj.market_role = "跟随"
+            
+        # [NEW] 地量回升奖励 (LVOL Reversal)
+        if ts_obj.lvol > 0 and ts_obj.total_vol > ts_obj.lvol * 1.5:
+            amount_bonus += 2.0 # 地量见底后放量
+            ts_obj.pattern_hint += "[地量启动]"
+            
+        score += amount_bonus
         
         # [Moved Up] 状态标志初始化
         is_counter = False
@@ -1047,7 +1414,8 @@ class BiddingMomentumDetector:
         ral_val = getattr(ts_obj, 'ral', 0)
         
         # 蓄势评分加成
-        if 0 < (cur_close - ma20) / ma20 < 0.015 and last_du4 < 2.5:
+        # if 0 < (cur_close - ma20) / ma20 < 0.015 and last_du4 < 2.5:
+        if ma20 > 0 and (cur_close - ma20) / ma20 > 0.02:
             is_accumulating = True
             bonus = 5.0
             if ral_val > 15: bonus += 3.0 # 长期守住 MA20 的强势蓄势
@@ -1294,6 +1662,7 @@ class BiddingMomentumDetector:
     # 内部：板块聚合
     # =========================================================
 
+
     def _aggregate_sectors(self, active_codes=None):
         """
         将高分个股聚合到板块，找龙头和跟随股。
@@ -1435,23 +1804,23 @@ class BiddingMomentumDetector:
                 continue
             
             for s in stocks:
-                base_score = s['score']
-                drawdown_pct = max(0, (s['high_day'] - s['price']) / s['last_close'] * 100) if s['last_close'] > 0 else 0
-                penalty = drawdown_pct * 4.0 
-                time_bonus = 0.0
-                if s['first_breakout_ts'] > 0:
-                    market_open_dt = pd.Timestamp.fromtimestamp(s['first_breakout_ts']).replace(hour=9, minute=30, second=0)
-                    time_diff_min = (market_open_dt.timestamp() - s['first_breakout_ts']) / 60.0
-                    time_bonus = 10.0 + time_diff_min * (0.1 if time_diff_min >= 0 else 0.5)
-                
-                s['leader_score'] = base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus
-                if market_avg_pct < -0.5 and s['pct'] > 1.0: s['leader_score'] += 10.0 
-                if s['is_untradable']: s['leader_score'] -= 50.0 
+                s['leader_score'] = self._calculate_leader_score(s, sector, market_avg_pct)
 
             stocks.sort(key=lambda x: x['leader_score'], reverse=True)
             candidate_leader = stocks[0]
             leader_code = candidate_leader['code']
             leader_pct = candidate_leader['pct']
+
+            # [NEW] 龙头竞赛选手识别 (Race Candidates) - 对应 UI 中的“角色”精细化展示
+            # 将板块内除了绝对龙头之外的强势股打上状态标签
+            race_candidates = []
+            for s in stocks:
+                role = self._determine_role(s, leader_code, s['leader_score'])
+                race_candidates.append({
+                    'code': s['code'], 'name': s['name'], 'role': role,
+                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
+                    'l_score': round(s['leader_score'], 1)
+                })
 
             all_member_codes = self.sector_map.get(sector, set())
             active_member_count = 0
@@ -1573,13 +1942,7 @@ class BiddingMomentumDetector:
                 'leader_last_high': l_data.get('last_high', 0),
                 'leader_last_low': l_data.get('last_low', 0),
                 'leader_first_ts': l_data['first_breakout_ts'],
-                'leader_score_val': l_data.get('score', 0.0),
-                'leader_score_diff': l_data.get('score_diff', 0.0),
-                'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
-                'leader_price_diff': round(l_data.get('price_diff', 0.0), 2),
-                'leader_dff': round(l_data.get('dff', 0.0), 2),
-                'pattern_hint': l_data['pattern_hint'],
-                'is_untradable': l_data['is_untradable'],
+                'race_candidates': race_candidates,
                 'followers': [
                     {
                         'code': s['code'], 
