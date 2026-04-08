@@ -3425,6 +3425,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             full_df = _sanitize_codes(full_df)
             
+            # --- 🚀 [OPTIMIZE] 源头脏检查 (Source Dirty Check) ---
+            # 如果全量数据指纹（规模+价格特征）未变且无实时搜索请求，跳过后续昂贵的信号检测与同步序列
+            df_source_hash = 0
+            if full_df is not None and not full_df.empty:
+                p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
+                if p_col:
+                    n = len(full_df)
+                    sample_idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
+                    p_val = full_df[p_col].iloc[sample_idx].sum()
+                    df_source_hash = hash(n) ^ hash(p_val)
+                
+                if not query and getattr(self, '_last_processed_df_hash', -1) == df_source_hash:
+                    self._is_processing_tree_data = False
+                    return
+                self._last_processed_df_hash = df_source_hash
+
             # --- 🛠️ [FILTER] 实时同步搜索过滤逻辑 (解决“搜索失效”关键) ---
             if query and full_df is not None:
                 from query_engine_util import query_engine
@@ -3490,15 +3506,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
 
-                # [FIX-GIL] 提前主动整合 DataFrame 内存布局 (提升跨进程引用效率)
-                try:
-                    df._consolidate_inplace()
-                    if full_df is not None: full_df._consolidate_inplace()
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-
-                cur_res = self.global_values.getkey("resample") or 'd'
                 # --- 🛠️ [UI SYNC] 同步到主界面控制逻辑 ---
                 # ⭐ [MAJOR FIX] 使用聚合器提交任务，消灭 UI 线程积压带来的 3s 延迟
                 # 无论后台计算多快，UI 始终只执行“最新的”一组数据更新任务
@@ -3547,6 +3554,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_hash = hash(full_df.index.size)
                 
                 last_hash = getattr(self, '_last_apply_df_hash', -1)
+                
+                if df_hash != last_hash:
+                    has_update = True
+                    # [OPTIMIZE] 仅在数据真实变动时，执行一次全量内存整合，提升后续索引速度
+                    try:
+                        full_df._consolidate_inplace()
+                    except Exception: pass
                 
                 with self._df_lock:
                     self.df_all = full_df
@@ -3605,38 +3619,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # ✅ [盘中交易引擎 v2] 直接从 BiddingMomentumDetector 完整注入
                         try:
                             _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
-                            if lt_now - _fc_last >= 30.0 and full_df is not None and not full_df.empty:
+                            # [THROTTLE] 交易引擎注入间隔限制在 30s，且仅在快照更新时执行
+                            if has_update and (lt_now - _fc_last >= 30.0):
                                 from sector_focus_engine import get_focus_controller
                                 fc = get_focus_controller()
 
-                                # ① 实时行情（降级通道备用）
-                                fc.inject_realtime(full_df.copy())  # [THREAD-SAFETY] copy()
-
-                                # ② 核心：直接从已运算完毕的 BiddingMomentumDetector 注入
-                                #    一次调用完成：板块图+个股快照+竞价分+comparison_interval=60m
+                                # ① 核心：直接从已运算完毕的 BiddingMomentumDetector 注入 (零拷贝逻辑)
                                 _sbp = getattr(self, 'sector_bidding_panel', None)
                                 _detector = getattr(_sbp, 'detector', None) if _sbp else None
                                 if _detector is not None:
                                     fc.inject_from_detector(_detector)
                                 else:
-                                    # 降级：无 panel，仅用 df_all 聚合
-                                    logger.debug("[SectorFocusEngine] no detector, using df fallback")
+                                    # 降级：无 detector，仅用 df_all 聚合 (使用 readonly 视图减少 CPU)
+                                    fc.inject_realtime(full_df) 
 
-                                # ③ 55188 外部数据（主力/题材/人气）
+                                # ② 55188 外部数据（主力/题材/人气）
                                 try:
                                     from scraper_55188 import get_cache_df as _55188_cache
                                     _ext_df = _55188_cache()
                                     if _ext_df is not None and not _ext_df.empty:
                                         fc.inject_ext_data(_ext_df)
-                                except Exception:
-                                    pass
+                                except Exception: pass
 
-                                # ④ 后台 Tick（板块热力确认+买点扫描+决策队列更新）
+                                # ③ 后台 Tick（板块热力确认+买点扫描+决策队列更新）
                                 self.executor.submit(fc.tick)
                                 self._focus_ctrl_last_inject = lt_now
                         except Exception as _fe:
                             logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
-
 
                         self._last_low_freq_ts = lt_now
 
@@ -3646,14 +3655,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⭐ 交易 GUI 同步 (轻量级)
                 if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:
                     self._trading_gui_qt6.df_all = self.df_all
-                # 4. [HOUSEKEEPING] 窗口恢复与后台任务初始化
+                # 4. [HOUSEKEEPING] 窗口恢复与后台任务集中初始化
                 if not hasattr(self, "_restore_done"):
                     self._restore_done = True
-                    self._schedule_after(2000, self.restore_all_monitor_windows)
-                    self._schedule_after(10000, self._check_ext_data_update)
-                    self._schedule_after(30000, self.KLineMonitor_init)
-                    self._schedule_after(60000, self.schedule_15_30_job)
-                    self._schedule_after(5000, self._start_feedback_listener)
+                    self._schedule_after(2000, self._batch_init_housekeeping)
 
                 # 🧹 周期性手动 GC (根据反馈：按 50 次更新触发一次，降低卡顿)
                 if not hasattr(self, '_update_count'): self._update_count = 0
@@ -3706,6 +3711,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f'queue update: {self.format_next_time()}')
                     # 打印性能统计摘要
                     # cct.print_timing_summary()
+
+    def _batch_init_housekeeping(self):
+        """[OPTIMIZE] 集中处理后台常驻任务的初始化，减少主线程计时器碎片"""
+        self.restore_all_monitor_windows()
+        self._schedule_after(3000, self._start_feedback_listener)
+        self._schedule_after(8000, self._check_ext_data_update)
+        self._schedule_after(28000, self.KLineMonitor_init)
+        self._schedule_after(58000, self.schedule_15_30_job)
 
     def _aggregate_market_dashboard_stats(self, has_update: bool):
         """[EXTRA] 计算全盘统计概览 (上涨/下跌/指数/温度)，通过主线程分步执行或线程池"""

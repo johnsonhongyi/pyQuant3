@@ -3978,7 +3978,7 @@ class MainWindow(QMainWindow, WindowMixin):
                          'auto_scroll': True
                      }
                      self._last_ipc_link_id = curr_link
-                     logger.info(f"[IPC/Socket] Buffered TIME_LINK for {link_code} at {timestamp}")
+                     logger.debug(f"[IPC/Socket] Buffered TIME_LINK for {link_code} at {timestamp}")
                      
                      if getattr(self, 'tk_linkage_auto_display', True):
                          # ⭐ 使用统一的防抖计时器，避免 Socket 洪水导致卡顿
@@ -4016,12 +4016,12 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 4. 特殊功能开关
             elif content == "TOGGLE_HOTLIST":
-                logger.info("[IPC] Command TOGGLE_HOTLIST received")
+                logger.debug("[IPC] Command TOGGLE_HOTLIST received")
                 if hasattr(self, "_toggle_hotlist_panel"):
                     QtCore.QTimer.singleShot(0, self._toggle_hotlist_panel)
 
             elif content == "TOGGLE_LOG":
-                logger.info("[IPC] Command TOGGLE_LOG received")
+                logger.debug("[IPC] Command TOGGLE_LOG received")
                 if hasattr(self, "_toggle_signal_log"):
                     QtCore.QTimer.singleShot(0, self._toggle_signal_log)
 

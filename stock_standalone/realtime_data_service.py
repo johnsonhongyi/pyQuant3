@@ -1191,7 +1191,8 @@ class IntradayEmotionTracker:
         """
         批量更新情绪分（稳定化版本）
         df: 包含 'percent', 'amount', 'volume' 等列
-        """
+        """
+
         self.breakdown_details = []
         try:
             if df.empty: return
@@ -1363,7 +1364,7 @@ class IntradayEmotionTracker:
                         r_day_num = int((r_ts + 28800) // 86400)
                         if r_day_num > self._last_date.get(code_str, 0):
                             if code_str in self._last_date: # 不是第一次见，是真的变天了
-                                logger.info(f"🔄 [{code_str}] Resetting intraday trackers for new day {r_day_num}")
+                                logger.debug(f"🔄 [{code_str}] Resetting intraday trackers for new day {r_day_num}")
                             self._last_vol[code_str] = 0.0
                             self._cumulative_amt[code_str] = 0.0
                             self._intraday_high[code_str] = 0.0
