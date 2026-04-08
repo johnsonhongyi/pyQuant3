@@ -3620,7 +3620,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
                             # [THROTTLE] 交易引擎注入间隔限制在 30s，且仅在快照更新时执行
-                            if has_update and (lt_now - _fc_last >= 30.0):
+                            if has_update and (lt_now - _fc_last >= duration_sleep_time):
                                 from sector_focus_engine import get_focus_controller
                                 fc = get_focus_controller()
 

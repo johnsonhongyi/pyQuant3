@@ -259,61 +259,6 @@ class MinuteKlineCache:
             import traceback
             logger.debug(traceback.format_exc())
 
-    def from_dataframe_slow(self, df: Optional[pd.DataFrame]):
-        """
-        从 DataFrame 恢复缓存数据
-        """
-        if df is None or df.empty:
-            return
-            
-        try:
-            # 确保 code 是标准化字符串格式
-            df_raw = df.copy()
-            df = df.copy()
-            if 'code' in df.columns:
-                df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
-            
-            # 确保时间有序并清理可能的重复数据
-            if 'time' in df.columns:
-                df['time'] = df['time'].astype(int) 
-                df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
-                df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
-            
-            # 清空当前
-            self.clear()
-            
-            # 按 code 分组重建
-            for code, group in df.groupby('code'):
-                code_str = str(code)
-                new_list: list[KLineItem] = []
-                # itertuples 性能较好
-                for row in group.itertuples(index=False):
-                    try:
-                        # 确保所有数值都是标准类型
-                        item = KLineItem(
-                            time=int(getattr(row, 'time', 0)),
-                            open=float(getattr(row, 'open', 0.0)),
-                            high=float(getattr(row, 'high', 0.0)),
-                            low=float(getattr(row, 'low', 0.0)),
-                            close=float(getattr(row, 'close', 0.0)),
-                            volume=float(getattr(row, 'volume', 0.0)),
-                            cum_vol_start=float(getattr(row, 'cum_vol_start', 0.0))
-                        )
-                        new_list.append(item)
-                    except (AttributeError, ValueError, TypeError):
-                        continue
-                if len(new_list) > self._max_len:
-                    new_list = new_list[-self._max_len:]
-                self._shared_cache[code_str] = new_list
-            
-            self._is_dirty = True 
-            self._is_restored = True
-            logger.info(f"♻️ MinuteKlineCache restored: {len(self._shared_cache)} stocks. [Rows: {len(df_raw)} -> Cleaned: {len(df)}]")
-        except Exception as e:
-            logger.error(f"MinuteKlineCache restore error: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-
     @property
     def max_len(self) -> int:
         return self._max_len
@@ -703,45 +648,6 @@ class MinuteKlineCache:
         else:
             # 忽略过时数据
             pass
-
-    # def fast_fill_from_tick(self, tick_df: pd.DataFrame,use_tick_vol = False) -> pd.DataFrame:
-    #     """
-    #     将 tick 数据补充进 stock_df，并过滤无效 tick
-    #     """
-
-    #     tick = tick_df.reset_index()
-
-    #     # 时间转换
-    #     tick['ticktime'] = pd.to_datetime(tick['ticktime']).dt.tz_localize('Asia/Shanghai')
-    #     tick['time'] = tick['ticktime'].astype('int64') // 10**9
-
-    #     # 成交量列
-    #     if use_tick_vol:
-    #         vol_col = 'tick_vol' if 'tick_vol' in tick.columns else 'volume'
-    #     else:
-    #         vol_col = 'volume'
-    #     # ---- 过滤无效 tick ----
-    #     tick = tick[
-    #         (tick[vol_col] > 0) &
-    #         (tick['close'] > 0)
-    #     ]
-
-    #     # 统一字段
-    #     tick_part = tick[['code','time','open','high','low','close']].copy()
-    #     tick_part['volume'] = tick[vol_col]
-
-    #     # cols = ['code','time','open','high','low','close','volume']
-    #     # stock_part = stock_df[cols]
-
-    #     # # 合并
-    #     # df = pd.concat([stock_part, tick_part], ignore_index=True)
-
-    #     # 排序
-    #     # df = df.sort_values(['code','time'])
-
-    #     # 去重（tick优先）
-    #     # df = df.drop_duplicates(['code','time'], keep='last')
-    #     return tick_part
 
     def _supplemental_fetch(self, code: str):
         """
@@ -1706,6 +1612,44 @@ except ImportError:
 from scraper_55188 import Scraper55188
 from JohnsonUtil import commonTips as cct
 
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+
+def klines_to_df(klines: list) -> pd.DataFrame:
+    """
+    klines: List[dict]，必须包含 time (unix timestamp)
+    """
+
+    if not klines:
+        return pd.DataFrame()
+
+    # UTC+8 时区
+    tz_8 = timezone(timedelta(hours=8))
+
+    rows = []
+    for k in klines:
+        ts = k.get("time")
+
+        # 转换时间
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz_8)
+
+        rows.append({
+            "datetime": dt,
+            "date": dt.date(),
+            "time": dt.strftime("%H:%M:%S"),
+            "open": k.get("open"),
+            "high": k.get("high"),
+            "low": k.get("low"),
+            "close": k.get("close"),
+            "volume": k.get("volume"),
+            "cum_vol": k.get("cum_vol_start")  # 如果存在
+        })
+
+    # 保持 list 原始顺序（不排序）
+    df = pd.DataFrame(rows)
+
+    return df
+
 class DataPublisher:
     """
     数据分发器 (核心入口)
@@ -1839,7 +1783,6 @@ class DataPublisher:
             if not self.simulation_mode:
                 cached_df = self.cache_slot.load_df()
                 total_stocks = len(cached_df['code'].unique()) if not cached_df.empty else 0
-                
                 if total_stocks < 2000:
                     logger.info(f"📡 Snapshot deficient (Stocks: {total_stocks}), attempting recovery from HDF5...")
                     h5_df = self.recover_from_hdf5()
@@ -1851,10 +1794,11 @@ class DataPublisher:
                             cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
                         new_total = len(cached_df['code'].unique())
                         logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
-
                 if not cached_df.empty:
                     with timed_ctx("from_dataframe_timed", warn_ms=5000):
                         self.kline_cache.from_dataframe(cached_df)
+                    # import ipdb;ipdb.set_trace()
+                    # df = klines_to_df(self.kline_cache.get_klines('300058',n=280))
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False
                 else:

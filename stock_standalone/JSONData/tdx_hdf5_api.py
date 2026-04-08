@@ -1710,14 +1710,31 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     if dratio < ct.dratio_limit:
                         comm_code = list(set(df_multi_code) & set(multi_code))
                         # print df_multi_code,multi_code,comm_code,len(comm_code)
-                        inx_key=comm_code[random.randint(0, len(comm_code)-1)]
-                        if  inx_key in df.index.get_level_values('code'):
-                            now_time=df.loc[inx_key].index[-1]
-                            tmp_time=tmpdf.loc[inx_key].index[-1]
-                            if now_time == tmp_time:
-                                log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" % (fname, table,inx_key
-                                    , now_time))
-                                return False
+                        # ⚡ [FIX] 采样多只股票进行防重判断，防止单一冷门股由于未成交而导致全盘更新失效
+                        sample_count = min(5, len(comm_code))
+                        sample_codes = random.sample(comm_code, sample_count)
+                        all_unchanged = True
+                        
+                        for inx_key in sample_codes:
+                            if inx_key in df.index.get_level_values('code'):
+                                try:
+                                    # 兼容 Series 和 DataFrame (针对单次或多次采样)
+                                    row_df = df.loc[inx_key]
+                                    now_time = row_df.index[-1] if hasattr(row_df.index, '__len__') else row_df.name
+                                    
+                                    tmp_row = tmpdf.loc[inx_key]
+                                    tmp_time = tmp_row.index[-1] if hasattr(tmp_row.index, '__len__') else tmp_row.name
+                                    
+                                    if now_time != tmp_time:
+                                        all_unchanged = False
+                                        break
+                                except Exception:
+                                    all_unchanged = False # 出现解析异常时，为了安全，强制执行写入
+                                    break
+                        
+                        if all_unchanged:
+                            log.debug("%s %s Multi batch stagnant (sampled %d codes), Skipping Write." % (fname, table, sample_count))
+                            return False
                     elif dratio == 1:
                         print(("newData ratio:%s all:%s"%(dratio,len(df))))
                     else:

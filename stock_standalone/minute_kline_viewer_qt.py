@@ -103,7 +103,7 @@ class DataFrameModel(QAbstractTableModel):
                 
                 if role == _DisplayRole or role == Qt.ItemDataRole.EditRole:
                     # Time Formatting for display only
-                    if role == _DisplayRole and col_name.lower() in ('time', 'timestamp', 'ticktime'):
+                    if role == _DisplayRole and col_name.lower() in ('time', 'timestamp', 'ticktime', 'datetime', 'date', '时间'):
                         try:
                             ts = float(val)
                             if ts > 1000000000:
@@ -655,11 +655,11 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             
             # 硬编码针对性微调
             if col_lower == 'code':
-                target_w = max(target_w, 70)
-            elif col_lower in ('time', 'ticktime', 'datetime', 'timestamp'):
-                target_w = max(target_w, 125)
+                target_w = max(target_w, 75)
+            elif col_lower in ('time', 'ticktime', 'datetime', 'timestamp', 'date', '时间'):
+                target_w = max(target_w, 160)
             elif col_lower == 'name':
-                target_w = max(target_w, 85)
+                target_w = max(target_w, 110)
             elif col_lower == 'count':
                 target_w = max(target_w, 55)
             
@@ -1351,12 +1351,20 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
     def on_clear_query(self):
         """清空查询"""
         self.query_input.setPlainText("")
+        # 🛡️ 增加：一并清空个股搜索框，确保“显示全部”
+        if hasattr(self, 'search_input'):
+            self.search_input.clear()
+            
         self.on_apply_query()
         self.statusBar().showMessage("Query cleared. Showing full summary counts.", 3000)
 
     def on_filter(self, df_input=None):
         """处理搜索框输入，实时过滤股票摘要"""
         try:
+            # 🛡️ 信号兼容性处理：如果从 search_input.textChanged 触发，df_input 会是 str，需忽略之
+            if not isinstance(df_input, pd.DataFrame):
+                df_input = None
+
             search_text = self.search_input.text().strip().upper()
             df = df_input if df_input is not None else self.get_queried_df()
             
