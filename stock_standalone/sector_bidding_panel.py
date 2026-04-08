@@ -106,7 +106,7 @@ class SearchHistoryDelegate(QStyledItemDelegate):
         r = option.rect
         btn_w = 28
         return QRect(r.right() - btn_w, r.top(), btn_w, r.height())
-    
+
     # [REMOVED] editorEvent 交互逻辑移至 Panel 的 eventFilter 中处理以提高稳定性
 
 
@@ -692,6 +692,7 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         super().__init__(parent)
         self.all_snap_paths = all_snap_paths
         self.realtime_service = realtime_service
+        self.detector = getattr(parent, 'detector', None)
         self.code_target = "multi_day_track"
         self._all_results = []
         self._is_populating = False
@@ -740,6 +741,13 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         tip = QLabel("💡 提示：🏆龙头 📌跟随。支持键盘 ↑ ↓ 联动主面板。")
         tip.setStyleSheet("color: #888; font-style: italic;")
         btm_lay.addWidget(tip)
+        # [NEW] 龙头竞赛开关
+        self.cb_dragon_race = QCheckBox("龙头竞赛")
+        self.cb_dragon_race.setChecked(getattr(self.detector, 'use_dragon_race', False))
+        self.cb_dragon_race.toggled.connect(self._on_dragon_race_toggled)
+        self.cb_dragon_race.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        btm_lay.addWidget(self.cb_dragon_race)
+
         btm_lay.addStretch()
         
         self.btn_rearrange = QPushButton("🔳 铺满窗口")
@@ -876,6 +884,24 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         self._save_geometry()
         super().closeEvent(event)
 
+    def _on_dragon_race_toggled(self, checked):
+        """同步龙头竞赛设置到主面板与检测器"""
+        parent = self.parent()
+        if parent and hasattr(parent, 'cb_dragon_race'):
+            # blockSignals 禁止递归刷新
+            parent.cb_dragon_race.blockSignals(True)
+            parent.cb_dragon_race.setChecked(checked)
+            parent.cb_dragon_race.blockSignals(False)
+            
+            # 手动调用父类的逻辑 slot 以执行实际的 detector 切换和刷新
+            if hasattr(parent, '_on_dragon_race_toggled'):
+                parent._on_dragon_race_toggled(checked)
+        elif self.detector:
+            self.detector.use_dragon_race = checked
+            if hasattr(self.detector, 'reconstruct_all_from_cache'):
+                self.detector.reconstruct_all_from_cache()
+
+
 
 class SnapshotCalendarDialog(QDialog):
     """日历模式快照选择器 - 增强体验，红色显示有数据的日期"""
@@ -956,6 +982,16 @@ class SnapshotCalendarDialog(QDialog):
         lay.addWidget(self.info_lbl)
         
         btn_lay = QHBoxLayout()
+        
+        # [NEW] 手动选择文件按钮
+        self.btn_browse = QPushButton("📁 浏览文件...")
+        self.btn_browse.setFixedHeight(35)
+        self.btn_browse.setToolTip("手动选择特定的 .json.gz 快照文件")
+        self.btn_browse.clicked.connect(self._on_browse_clicked)
+        btn_lay.addWidget(self.btn_browse)
+        
+        btn_lay.addStretch()
+        
         self.btn_ok = QPushButton("🚀 确认加载")
         self.btn_ok.setEnabled(False)
         self.btn_ok.setFixedHeight(35)
@@ -1023,6 +1059,23 @@ class SnapshotCalendarDialog(QDialog):
         """处理双击或回车：如果有数据则直接加载"""
         self._on_selection_changed()
         if self.btn_ok.isEnabled() and self.selected_file:
+            self.accept()
+
+    def _on_browse_clicked(self):
+        """手动浏览文件系统选择快照"""
+        # 统一路径获取方式
+        start_dir = self.snapshots_dir
+        if not os.path.exists(start_dir):
+            try:
+                os.makedirs(start_dir, exist_ok=True)
+            except:
+                start_dir = os.getcwd()
+            
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择历史快照文件", start_dir, "快照文件 (*.json.gz);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.selected_file = file_path
             self.accept()
 
 
@@ -1272,6 +1325,38 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._allow_real_close = True
         self.close()
 
+    def _on_dragon_race_toggled(self, checked):
+        """切换龙头竞赛模式"""
+        self.detector.use_dragon_race = checked
+        logger.info(f"🔄 [SectorPanel] Dragon Race Mode: {'ENABLED (追涨模式)' if checked else 'DISABLED (挖掘模式)'}")
+        
+        # [NEW] 同步到追踪 Dialog 的状态 (双向同步)
+        if hasattr(self, '_hist_tracker_dialog'):
+            try:
+                if self._hist_tracker_dialog.isVisible():
+                    self._hist_tracker_dialog.cb_dragon_race.blockSignals(True)
+                    self._hist_tracker_dialog.cb_dragon_race.setChecked(checked)
+                    self._hist_tracker_dialog.cb_dragon_race.blockSignals(False)
+            except (RuntimeError, AttributeError): pass # 即使窗口已销毁也不触发报错
+
+        if self._is_history_mode:
+            # [FIX] 历史模式下，直接触发全量缓存重映射，无需重选文件
+            self.detector.reconstruct_all_from_cache()
+            self._refresh_sector_list()
+            # [NEW] 强制刷新当前选中的板块右侧表格，确保龙头角色和位次立即更新
+            self._on_sector_table_selection_changed()
+        else:
+            # 实时模式处理
+            self.detector._last_gc_ts = 0 
+            self.manual_refresh()
+        
+        if hasattr(self, 'status_lbl'):
+            mode_str = "竞赛模式 (追涨)" if checked else "挖掘模式 (先锋)"
+            self.status_lbl.setText(f"⚙️ 模式切换: {mode_str}")
+            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            # 3秒后还原
+            QTimer.singleShot(3000, lambda: self.status_lbl.setText("准备就绪"))
+
     def closeEvent(self, event):
         """处理窗口关闭事件，执行资源回收"""
         if not self._allow_real_close:
@@ -1381,15 +1466,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # [NEW] 恢复搜索历史
             if 'search_history' in ui_state:
                 self._search_history = ui_state['search_history']
-                if self._search_history:
-                    self.search_input.blockSignals(True)
-                    self.search_input.clear()
-                    self.search_input.addItems(self._search_history)
-                    # 确保“龙头”始终在选项中 (如果不在历史中则添加)
-                    if "龙头" not in self._search_history:
-                        self.search_input.addItem("龙头")
-                    self.search_input.setCurrentText("")
-                    self.search_input.blockSignals(False)
+                self._update_search_combo_list()
             
             logger.debug("📊 [SectorPanel] UI state restored")
         except Exception as e:
@@ -1421,6 +1498,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.cb_ma_rebound = self._make_cb("MA回踩高开", 'ma_rebound',   bar_lay_1)
         self.cb_surge_vol  = self._make_cb("放量",     'surge_vol',       bar_lay_1)
         self.cb_consec     = self._make_cb("连续拉升", 'consecutive_up',  bar_lay_1)
+        
+        # [NEW] 龙头竞赛开关
+        self.cb_dragon_race = QCheckBox("竞赛模式")
+        self.cb_dragon_race.setToolTip("开启后切换到‘追涨模式’，更强调涨幅和防回撤；关闭则回到‘挖掘模式’，更侧重早盘异动先锋。")
+        self.cb_dragon_race.setChecked(getattr(self.detector, 'use_dragon_race', False))
+        self.cb_dragon_race.toggled.connect(self._on_dragon_race_toggled)
+        self.cb_dragon_race.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        bar_lay_1.addWidget(self.cb_dragon_race)
 
         bar_lay_1.addStretch()
         # 🚀 [NEW] Rearrange Button
@@ -1806,18 +1891,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """手动触发评分计算和 UI 刷新 (增加防抖和状态反馈)"""
         if not hasattr(self, 'btn_refresh'): return
         
+        # [NEW] 历史模式专门路径
+        if self._is_history_mode:
+            self._refresh_sector_list()
+            self._populate_watchlist()
+            # [FIX] 搜索时右侧表无法及时更新：强制同步当前板块详情
+            if self.sector_table.currentRow() >= 0:
+                self._on_sector_table_selection_changed()
+            return
+
         try:
             # 1. 按钮防抖与反馈
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("扫描中...")
             if hasattr(self, 'status_lbl'):
-                lbl_text = "⏳ [实时模式] 正在异步计算评分映射..." if not self._is_history_mode else f"📁 [历史模式: {self._history_date}] 刷新..."
-                self.status_lbl.setText(lbl_text)
+                self.status_lbl.setText("⏳ [实时模式] 正在异步计算评分映射...")
                 self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
-            
-            # [FIX] 移除主线程耗时计算，统一交给后台线程处理
-            # if hasattr(self, 'detector'):
-            #     self.detector.update_scores() # 这会触发 detector 内的 check_time 逻辑
             
             # [FIX] 利用现有的 QThread (_worker) 安全执行
             if hasattr(self, '_worker'):
@@ -2273,11 +2362,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # 保持 ComboBox 列表同步 (仅保留最近 20 条)
         self._search_history = self._search_history[:20]
-        self.search_input.blockSignals(True)
-        self.search_input.clear()
-        self.search_input.addItems(self._search_history)
-        self.search_input.setCurrentText(query)
-        self.search_input.blockSignals(False)
+        self._update_search_combo_list(current_text=query)
         
         self.manual_refresh()
         
@@ -2303,10 +2388,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._delete_history_item_by_row(index.row())
         elif action == clear_action:
             self._search_history = []
-            self.search_input.blockSignals(True)
-            self.search_input.clear()
-            self.search_input.addItem("龙头")
-            self.search_input.blockSignals(False)
+            self._update_search_combo_list()
             self._save_ui_state()
 
     def _delete_history_item_by_row(self, row: int):
@@ -2318,12 +2400,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if item_text in self._search_history:
             self._search_history.remove(item_text)
         
-        self.search_input.blockSignals(True)
-        self.search_input.removeItem(row)
-        # 刷新 ComboBox 下拉列表以应用变更
-        self.search_input.blockSignals(False)
+        self._update_search_combo_list()
         self._save_ui_state()
         # logger.debug(f"🗑️ [SectorPanel] Deleted history: {item_text}")
+
+    def _update_search_combo_list(self, current_text: str = None):
+        """统一管理搜索下拉框列表，确保'龙头'始终在首位"""
+        self.search_input.blockSignals(True)
+        self.search_input.clear()
+        # 1. 强制添加龙头
+        self.search_input.addItem("龙头")
+        # 2. 添加其余历史记录 (排除龙头)
+        other_history = [it for it in self._search_history if it != "龙头"]
+        self.search_input.addItems(other_history)
+        
+        if current_text is not None:
+            self.search_input.setCurrentText(current_text)
+        else:
+            # [FIX] 不再默认选中“龙头”，保持输入框空白或显示 Placeholder
+            self.search_input.setCurrentIndex(-1)
+            self.search_input.lineEdit().clear()
+            
+        self.search_input.blockSignals(False)
             
     def _on_search_cleared(self):
         self.search_input.setCurrentText("")
@@ -2331,6 +2429,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._is_leader_search_mode = False
         # 恢复标题
         self.watchlist_group.setTitle("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
+        # [FIX] 无论什么模式，清空搜索后都强制全局重刷一次 UI
         self.manual_refresh()
         
     def _evaluate_search_condition(self, query_str: str, row_data: dict) -> bool:
@@ -2424,49 +2523,106 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             f"K线:{len(leader_klines)}棒"
         )
 
-        rows = [{
-            'code': leader_code, 
-            'name': leader_name,
-            'role': '🏆龙头',
-            'pct': leader_pct, 
-            'price': leader_price,
-            'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
-            'price_diff': data.get('leader_price_diff', 0.0),
-            'dff': data.get('leader_dff', 0.0),
-            'klines': leader_klines,
-            'last_close': data.get('leader_last_close', 0),
-            'high_day': data.get('leader_high_day', 0),
-            'low_day': data.get('leader_low_day', 0),
-            'last_high': data.get('leader_last_high', 0),
-            'last_low': data.get('leader_last_low', 0),
-            'hint': data.get('pattern_hint', '主力拉升'),
-            'untradable': data.get('is_untradable', False),
-            'is_counter': data.get('is_counter_trend', False)
-        }]
-        for f in data.get('followers', []):
-            f_klines = f.get('klines', [])
-            rows.append({
-                'code': f['code'], 'name': f['name'],
-                'role': '📌跟随',
-                'pct': f['pct'], 'price': f['price'],
-                'pct_diff': f.get('pct_diff', 0.0),
-                'price_diff': f.get('price_diff', 0.0),
-                'dff': f.get('dff', 0.0),
-                'klines': f_klines,
-                # [OPTIMIZE] Pre-calculate values for TrendDelegate to avoid O(K) loop in UI
-                'k_cache': {
-                    'prices': [float(k.get('close', 0)) for k in f_klines],
-                    'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
-                },
-                'last_close': f.get('last_close', 0),
-                'high_day': f.get('high_day', 0),
-                'low_day': f.get('low_day', 0),
-                'last_high': f.get('last_high', 0),
-                'last_low': f.get('last_low', 0),
-                'hint': f.get('pattern_hint', '板块联动'),
-                'untradable': f.get('untradable', False),
-                'is_counter': False
-            })
+        # [NEW] 支撑精细化角色显示 (龙头竞赛逻辑)
+        race_candidates = data.get('race_candidates', [])
+        rows = []
+        
+        if race_candidates:
+            # 优先采用 detector 算好的竞赛明细
+            for rc in race_candidates:
+                code = rc['code']
+                # 尝试补充详情 (从 followers 或 global_snap_cache)
+                r_data = None
+                # 先找 leader
+                if code == leader_code:
+                    r_data = {
+                        'pct_diff': data.get('leader_pct_diff', 0.0),
+                        'price_diff': data.get('leader_price_diff', 0.0),
+                        'dff': data.get('leader_dff', 0.0),
+                        'klines': leader_klines,
+                        'last_close': data.get('leader_last_close', 0),
+                        'high_day': data.get('leader_high_day', 0),
+                        'low_day': data.get('leader_low_day', 0),
+                        'last_high': data.get('leader_last_high', 0),
+                        'last_low': data.get('leader_last_low', 0),
+                        'hint': data.get('pattern_hint', '主力拉升'),
+                        'untradable': data.get('is_untradable', False),
+                        'is_counter': data.get('is_counter_trend', False)
+                    }
+                else:
+                    # 再从 followers 中找
+                    for f in data.get('followers', []):
+                        if f['code'] == code:
+                            r_data = f
+                            break
+                
+                if r_data:
+                    f_klines = r_data.get('klines', [])
+                    rows.append({
+                        'code': code, 'name': rc.get('name', '未知'),
+                        'role': rc.get('role', '跟随📌'),
+                        'pct': rc.get('pct', 0.0), 'price': r_data.get('price', 0.0),
+                        'pct_diff': r_data.get('pct_diff', 0.0),
+                        'price_diff': r_data.get('price_diff', 0.0),
+                        'dff': r_data.get('dff', 0.0),
+                        'klines': f_klines,
+                        'k_cache': {
+                            'prices': [float(k.get('close', 0)) for k in f_klines],
+                            'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
+                        },
+                        'last_close': r_data.get('last_close', 0),
+                        'high_day': r_data.get('high_day', 0),
+                        'low_day': r_data.get('low_day', 0),
+                        'last_high': r_data.get('last_high', 0),
+                        'last_low': r_data.get('last_low', 0),
+                        'hint': r_data.get('hint', r_data.get('pattern_hint', '板块联动')),
+                        'untradable': r_data.get('untradable', r_data.get('is_untradable', False)),
+                        'is_counter': r_data.get('is_counter', False)
+                    })
+        else:
+            # Fallback: 使用传统的 Leader + Followers 结构
+            rows = [{
+                'code': leader_code, 
+                'name': leader_name,
+                'role': '🏆龙头',
+                'pct': leader_pct, 
+                'price': leader_price,
+                'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
+                'price_diff': data.get('leader_price_diff', 0.0),
+                'dff': data.get('leader_dff', 0.0),
+                'klines': leader_klines,
+                'last_close': data.get('leader_last_close', 0),
+                'high_day': data.get('leader_high_day', 0),
+                'low_day': data.get('leader_low_day', 0),
+                'last_high': data.get('leader_last_high', 0),
+                'last_low': data.get('leader_last_low', 0),
+                'hint': data.get('pattern_hint', '主力拉升'),
+                'untradable': data.get('is_untradable', False),
+                'is_counter': data.get('is_counter_trend', False)
+            }]
+            for f in data.get('followers', []):
+                f_klines = f.get('klines', [])
+                rows.append({
+                    'code': f['code'], 'name': f['name'],
+                    'role': '📌跟随',
+                    'pct': f['pct'], 'price': f['price'],
+                    'pct_diff': f.get('pct_diff', 0.0),
+                    'price_diff': f.get('price_diff', 0.0),
+                    'dff': f.get('dff', 0.0),
+                    'klines': f_klines,
+                    'k_cache': {
+                        'prices': [float(k.get('close', 0)) for k in f_klines],
+                        'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
+                    },
+                    'last_close': f.get('last_close', 0),
+                    'high_day': f.get('high_day', 0),
+                    'low_day': f.get('low_day', 0),
+                    'last_high': f.get('last_high', 0),
+                    'last_low': f.get('last_low', 0),
+                    'hint': f.get('pattern_hint', '板块联动'),
+                    'untradable': f.get('untradable', False),
+                    'is_counter': False
+                })
 
         # Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
@@ -3424,6 +3580,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 if hasattr(self, 'status_lbl'):
                     self.status_lbl.setText(f"🎬 [历史复盘] 📅 {self._history_date} | 快照已就绪")
                     self.status_lbl.setStyleSheet("color: #ff9900; font-weight: bold;")
+                
+                # [NEW] 同步更新窗口标题，防止被搜索信息覆盖
+                self.setWindowTitle(f"🎞️ [历史复盘] {self._history_date} | 竞价及联动监控")
                     
                 # 触发重点表标题刷新
                 self._populate_watchlist()
@@ -3450,8 +3609,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         rs = getattr(self.main_window, 'realtime_service', None)
         # 传入所有快照，供 Dialog 自由选择
-        dialog = HistoricalTrackerDialog(valid_snaps, rs, self)
-        dialog.show()
+        # [FIX] 存储引用并同步状态
+        self._hist_tracker_dialog = HistoricalTrackerDialog(valid_snaps, rs, self)
+        self._hist_tracker_dialog.show()
 
 
     def _on_back_to_live_clicked(self):
@@ -3469,6 +3629,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self, 'status_lbl'):
             self.status_lbl.setText("📡 已切回实时监控模式")
             self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+        
+        # [NEW] 恢复默认窗口标题
+        self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
             
         # 触发重点表标题刷新
         self._populate_watchlist()

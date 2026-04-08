@@ -30,7 +30,30 @@
 
 ---
 
-## ✅ 最新完成任务：信号面板“手动执行”功能打通 (04-06 02:16)
+## ✅ 最近完成任务：深度修复 TickSeries 崩溃异常与逻辑错误 (04-08 22:05)
+- [x] **补全 TickSeries 内存模型**：在 `__slots__` 中补齐了缺失的 `total_vol`, `vol_ratio`, `lvol`, `last6vol`, `market_role` 字段，彻底解决了历史快照加载及实盘运行中因属性非法导致的 `AttributeError`。
+- [x] **修正算法逻辑指向**：修复了 `_evaluate_code` 中 3 处由于 `self` 指向错误导致的属性访问故障，确保量能评分、角色判定及地量启动逻辑正确作用于个股实例而非检测器引擎。
+- [x] **健壮性加固**：在 `TickSeries.__init__` 中显式初始化内部计数器 `_total_vol` 与 `_total_amt`，并清理了 `update_meta` 中的冗余赋值代码，提升了数据管道的吞吐效率。
+
+## ✅ 最近完成任务: 深度修复 bidding_momentum_detector.py 持久化与复盘逻辑 (04-08 21:15)
+- [x] **修复实盘重启种子丢失**：在 `load_persistent_data` 中补齐了 `stock_selector_seeds` 的恢复逻辑，确保重启后“延续”龙头的 +15 分奖分及形态描述正确加载。
+- [x] **优化分时数据一致性**：在实盘重启任务中增加了 `klines` 的恢复，确保领袖评分（Leader Score）计算所需的成交量能数据在重启后依然精准。
+- [x] **性能与鲁棒性优化**：彻底合并了 `load_from_snapshot` 中的冗余 K 线循环，并修复了此前因代码块替换导致的 Python 循环结构破坏风险。
+
+## ✅ 历史完成任务：优化 minute_kline_viewer_qt 表格显示 (04-08 18:35)
+- [x] **增强时间列宽适配**：将 `time`、`ticktime`、`时间` 等时间列的最小宽度从 125 提升至 160，确保 `YYYY-MM-DD HH:MM:SS` 完整显示。
+- [x] **优化名称与代码列宽**：将 `name` 列最小宽度提升至 110，`code` 列提升至 75，提升个股识别度。
+- [x] **扩展时间字段识别**：在 `DataFrameModel` 中新增对 `datetime`、`date`、`时间` 字段的识别与自动格式化映射，提升跨数据源（CSV/HDF5）的显示兼容性。
+
+## ✅ 历史完成任务: 修复 minute_kline_viewer_qt 搜索过滤报错 (04-08 16:38)
+- [x] **解决信号参数冲突**：针对 `search_input.textChanged` 信号会自动传递新字符串参数的特性，在 `on_filter` 内部增加了类型检查。
+- [x] **消除属性缺失异常**：彻底解决了由于字符串误作 DataFrame 处理导致的 `'str' object has no attribute 'empty'` 崩溃异常。
+
+## ✅ 历史完成任务: 深度优化表格排序与滚动回顶交互 (04-08 11:50)
+- [x] **强制手动排序回顶**：修改了板块表、个股表、重点表的表头点击回调，点击表头排序后自动滚动至顶部。
+- [x] **新增板块切换自动回顶**：在板块变更时自动滚动至顶部，解决跨板块浏览时的滚动位置残留问题。
+
+## ✅ 历史完成任务：信号面板“手动执行”功能打通 (04-06 02:16)
 
 **状态**: ✅ 已完成  
 **目标**: 将信号面板右上角的“清空”按钮替换为对新设计系统的“全链路手动触发”功能，支持用户实时验证逻辑特征、测试信号并强制刷新决策视图。
@@ -591,6 +614,9 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期时间 | 变更描述 | 涉及文件 |
 | :--- | :--- | :--- |
+| 04-08 18:35 | **minute_kline_viewer_qt 宽度优化**: 增加时间(160)、名称(110)、代码(75)最小列宽，并扩展 time 字段格式化兼容性 | `minute_kline_viewer_qt.py` |
+| 04-08 16:38 | **minute_kline_viewer_qt 搜索过滤修复**: 解决 textChanged 信号参数导致的 DataFrame 属性缺失报错 | `minute_kline_viewer_qt.py` |
+| 04-08 11:50 | **表格排序回顶优化**: 实现板块、个股、重点表排序及板块切换自动回顶 | `sector_bidding_panel.py` |
 | 04-06 21:09 | **决策引擎信号质量深度改进 v3**: A)热力评分引入 score_diff/follow_ratio/leader_pct_diff 动量加权；B)龙头新增实时弱化追踪 is_leader_strong()；C)形态前置强势过滤（涨幅≥0.5%+站稳VWAP）；D)跟随股排名加入主力dff权重 | `sector_focus_engine.py` |
 | 04-06 02:16 | **手动引擎执行**: 替换清空按钮为[🛠️ 引擎执行]，实现全链路逻辑手动触发与实时刷新 | `sector_focus_engine.py`, `signal_dashboard_panel.py` |
 | 04-06 02:05 | **55188整合与逆势策略**: 实现人气/主力自动提权加分，增加[逆势领涨]检测及指数数据注入链路 | `sector_focus_engine.py`, `instock_MonitorTK.py` |
