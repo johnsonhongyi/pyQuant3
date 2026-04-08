@@ -707,16 +707,25 @@ class Sina:
         # endtime = '10:00:00'
         endtime = '10:30:00'
 
-        run_col = ['close']
+        run_col = ['close', 'low', 'high']
         df_latest = self.get_col_agg_df(h5_hist, df_latest, run_col, all_func, startime, endtime)
-        log.info(f'update_agg_cache df_latest get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
+        
+        # ⚡ [CRITICAL FIX] 同步计算结果回缓存
+        # 确保已存在的 common_codes 也能更新到从轨迹中算出的早盘指标
+        for col in ['nlow', 'nhigh', 'nclose']:
+            if col in df_latest.columns:
+                agg_metrics.loc[common_codes, col] = df_latest.loc[common_codes, col].fillna(agg_metrics.loc[common_codes, col])
+
+        log.info(f'update_agg_cache df_latest sync done, duration:{time.time()-time_h5_hist:.1f}')
 
         new_codes = stats.index.difference(agg_metrics.index)
         if len(new_codes) > 0:
-            new_df = stats.loc[new_codes].rename(columns={'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'})
-            # 补齐：防止新 code 出现 0.0
-            new_df.loc[new_df['nlow'] <= 0, 'nlow'] = stats.loc[new_codes, 'close']
-            new_df.loc[new_df['nhigh'] <= 0, 'nhigh'] = stats.loc[new_codes, 'close']
+            new_df = df_latest.loc[new_codes, [c for c in ['nlow', 'nhigh', 'nclose'] if c in df_latest.columns]]
+            # 补齐：如果轨迹中也没有，用 stats 兜底
+            for col in ['nlow', 'nhigh', 'nclose']:
+                source = col[1:] if col.startswith('n') else col
+                new_df[col] = new_df[col].fillna(stats.loc[new_codes, source])
+            
             agg_metrics = pd.concat([agg_metrics, new_df])
             
         self.agg_cache.setkey('agg_metrics', agg_metrics)
@@ -762,7 +771,7 @@ class Sina:
             # with timed_ctx("_calc_intraday_vwapNhigh", warn_ms=80):
             agg_df = self.get_col_agg_df(h5_hist, df_current, run_col, all_func, startime, endtime)
 
-            endtime = '15:00:00'
+            endtime = '10:30:00'
             run_col = ['close']
 
             # agg_df = self.get_col_agg_df(h5_hist, agg_df, run_col, all_func, startime, endtime)
@@ -845,13 +854,24 @@ class Sina:
         # rebuild_df.loc[rebuild_df['nclose'] <= 0, 'nclose'] = curr_stats['close'].reindex(rebuild_df.index)
 
 
-        # nclose：优先使用历史聚合值，仅在缺失 / 非法时才用当前 close 兜底
+        # nclose：优先使用历史聚合值，仅在缺失 / 非法时才用 Web 回补或当前 close 兜底
         rebuild_df['nclose'] = agg_df['nclose'].reindex(rebuild_df.index)
 
         mask_nclose_fix = rebuild_df['nclose'].fillna(0) <= 0
         if mask_nclose_fix.any():
-            rebuild_df.loc[mask_nclose_fix, 'nclose'] = \
-                curr_stats['close'].reindex(rebuild_df.index)[mask_nclose_fix]
+            fix_codes = rebuild_df.index[mask_nclose_fix].tolist()
+            log.info(f"Targeting {len(fix_codes)} codes for nclose web-backfill...")
+            for i, code in enumerate(fix_codes):
+                if i > 50: break # 防止重启延迟过高
+                web_vwap = self._fetch_sina_intraday_kline(code)
+                if web_vwap is not None:
+                    rebuild_df.loc[code, 'nclose'] = web_vwap
+            
+            # 最后的彻底兜底
+            mask_final = rebuild_df['nclose'].fillna(0) <= 0
+            if mask_final.any():
+                rebuild_df.loc[mask_final, 'nclose'] = \
+                    curr_stats['close'].reindex(rebuild_df.index)[mask_final]
 
 
         if 'nstd' in agg_df.columns:
@@ -862,6 +882,36 @@ class Sina:
         self.agg_cache.setkey('agg_metrics', rebuild_df)
         log.info("Rebuild agg cache. size:%s time:%.2f" % (len(rebuild_df), time.time() - time_s))
         return cct.combine_dataFrame(df_current, rebuild_df)
+
+    def _fetch_sina_intraday_kline(self, code: str, target_time: str = '10:30:00') -> Optional[float]:
+        """从新浪 API 获取当日 5 分钟 K 线并计算截止到 target_time 的 VWAP。"""
+        try:
+            symbol = ('sh%s' % code) if code.startswith(('60', '688', '11')) else ('sz%s' % code)
+            if code.startswith(('43', '83', '87', '92')): symbol = 'bj%s' % code
+            
+            url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=5&ma=no&datalen=100"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code != 200: return None
+            data = response.json()
+            if not data or not isinstance(data, list): return None
+            
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+            total_amount = 0.0
+            total_volume = 0.0
+            for bar in data:
+                dt_str = bar.get('day', '')
+                if not dt_str.startswith(today_str): continue
+                if dt_str.split(' ')[-1] > target_time: continue
+                c = float(bar.get('close', 0))
+                v = float(bar.get('volume', 0))
+                total_amount += c * v
+                total_volume += v
+                
+            return total_amount / total_volume if total_volume > 0 else None
+        except Exception as e:
+            log.warning(f"Failed to fetch intraday kline for {code}: {e}")
+            return None
 
 
     def get_cname_code(self, cname: str) -> Union[str, int]:
@@ -1228,9 +1278,18 @@ class Sina:
         list_s = []
         # 1. 解析个股 (旧逻辑)
         for stock_match_object in result:
-            # 兼容旧逻辑且防止误匹配指数行 (如 sh000001 的数字部分)
+            # ⚡ [FIX] 针对 300058 等创业板股票的精准抢救
+            # 原逻辑 isalpha() 会把 sz300058 也跳过，因为 sz 是字母，导致其只能去 index 循环碰运气
+            # 改进：仅当 prefix 为 'sh' 且 code 为 '000xxx' (指数段) 时才跳过，普通的 sz/sh 6xxx 应该进 Stock 循环
             start_pos = stock_match_object.start()
-            if start_pos >= 2 and stocks_detail[start_pos-2:start_pos].isalpha():
+            code_matched = stock_match_object.group(1)
+            prefix = stocks_detail[max(0, start_pos-2):start_pos].lower()
+            
+            # 如果是 sh 且 code 以 000 开头，大概率是指数（如 sh000001），跳过进入 index 循环
+            if prefix == 'sh' and code_matched.startswith('000'):
+                continue
+            # 这里的 alpha 检查还是保留一层兜底但要排除 sz/sh 正常前缀
+            if start_pos >= 2 and prefix.isalpha() and prefix not in ['sz', 'sh', 'bj']:
                 continue
             stock = stock_match_object.groups()
             list_s.append(
@@ -1353,7 +1412,8 @@ class Sina:
              
         dt_v = df.dt.value_counts().index[0]
         # 宽容过滤：主日期外，额外保留映射后的指数代码段
-        index_codes = ['999999', '399001', '399006', '399678', '399005', '999688']
+        # 保护指数和核心基准不被日期过滤掉 (Sina 有时指数日期更新滞后)
+        index_codes = ['999999', '399001', '399006', '399678', '399005', '999688', '000300', '000905', '000852', '899050']
         df = df[(df.dt >= dt_v) | (df['code'].isin(index_codes))]
 
         df.rename(columns={'close': 'llastp'}, inplace=True)
@@ -1407,7 +1467,7 @@ class Sina:
         otime =  cct.get_config_value_ramfile('sina_logtime',int_time=True)
 
         
-        if now_time_int > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
+        if now_time_int > 925 and (not index and ( cct.get_work_time(otime) or cct.get_work_time())):
             time_s = time.time()
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
@@ -1904,55 +1964,43 @@ class Sina:
 
     def get_col_agg_df(self, h5: pd.DataFrame, dd: pd.DataFrame, run_col: Union[List[str], Dict[str, str]], all_func: Dict[str, str], startime: Optional[str], endtime: Optional[str], freq: Optional[str] = '5T') -> pd.DataFrame:
         """
-        聚合 MultiIndex DataFrame，按 code 聚合 ticktime。
-        h5: 原始 tick 数据
-        dd: 已存在的汇总数据
-        run_col: 需要聚合的列列表或字典
-        all_func: 所有列的聚合映射
-        startime, endtime: 切片时间
-        freq: 可选，按频率取最后一条
+        聚合 MultiIndex DataFrame，按 code 聚合指标。
         """
-
-        if isinstance(run_col, list):
-            now_col = [all_func[co] for co in run_col if co in all_func]
-        else:
-            now_col = [all_func[co] for co in run_col.keys() if co in all_func]
+        if h5 is None or len(h5) == 0:
+            return dd
+            
+        time_n = time.time()
+        if isinstance(run_col, str):
+            run_col = [run_col]
 
         # 构建列-聚合函数映射
         func_map = cct.from_list_to_dict(run_col, all_func)
-        if h5 is not None and len(h5) > len(dd):
-            time_n = time.time()
-            # ===== 修复 nclose 为 VWAP =====
-            if isinstance(run_col, list) and 'close' in run_col:
+        
+        try:
+            # 1. 计算 VWAP (nclose)
+            if 'close' in run_col:
                 vwap_df = self._calc_intraday_vwap_fast(h5, startime, endtime)
-                if vwap_df is not None and len(vwap_df) > 0:
-                    dd = cct.combine_dataFrame(dd, vwap_df,
-                                               col=None,
-                                               compare=None,
-                                               append=False,
-                                               clean=True)
-            else:
-                # 先切片时间
-                if freq is None:
-                    #没有freq切片返回是multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'last', 'open': 'first'}
-                    h5_slice = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
-                else:
-                    # 如果按 freq，只取每组最后一条（更高效方式）
-                    h5_slice = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
-                    if h5_slice is not None:
-                        h5_slice = h5_slice.groupby(level=0).last()
-
-                if h5_slice is not None and len(h5_slice) > 0:
-                    # 重置 index 到 code
-                    h5_proc = h5_slice.reset_index().set_index('code')
-                    h5_proc.rename(columns=func_map, inplace=True)
-                    h5_res = h5_proc.loc[:, now_col]
-
-                    # 使用 combine_dataFrame 合并
-                    dd = cct.combine_dataFrame(dd, h5_res, col=None, compare=None, append=False, clean=True)
-
-                log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5_slice) if h5_slice is not None else 0, endtime))
-
+                if vwap_df is not None and not vwap_df.empty:
+                    dd = cct.combine_dataFrame(dd, vwap_df, col=None, compare=None, append=False, clean=True)
+            
+            # 2. 聚合极值 (nlow, nhigh)
+            agg_cols = [c for c in run_col if c in ['low', 'high']]
+            if agg_cols:
+                h5_slice = cct.get_limit_multiIndex_Row(h5, col=agg_cols, start=startime, end=endtime)
+                if h5_slice is not None and not h5_slice.empty:
+                    agg_dict = {}
+                    if 'low' in agg_cols: agg_dict['low'] = 'min'
+                    if 'high' in agg_cols: agg_dict['high'] = 'max'
+                    
+                    agg_res = h5_slice.groupby(level=0).agg(agg_dict)
+                    agg_res.rename(columns=func_map, inplace=True)
+                    dd = cct.combine_dataFrame(dd, agg_res, col=None, compare=None, append=False, clean=True)
+            
+            log.debug('get_col_agg_df cost:%.2fs' % (time.time() - time_n))
+            
+        except Exception as e:
+            log.error(f"get_col_agg_df Error: {e}")
+            
         return dd
         
     def _load_hdf_hist_unified(

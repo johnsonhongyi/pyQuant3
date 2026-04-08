@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
-    QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget
+    QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget, QStyle
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat
@@ -58,6 +58,56 @@ def _ascii_kline(klines: List[dict], width: int = 24, last_close: float = 0) -> 
         return "─" * len(closes)
     bars = '▁▂▃▅▇'
     return ''.join(bars[min(4, int((c - mn) / (mx - mn) * 4.99))] for c in closes)
+
+
+class SearchHistoryDelegate(QStyledItemDelegate):
+    """自定义委托：为 QComboBox 下拉项添加右侧删除按钮"""
+    delete_clicked = pyqtSignal(int)
+    
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        # 1. 绘制标准背景与文字
+        super().paint(painter, option, index)
+        
+        # 保护常驻项
+        if index.data() == "龙头":
+            return
+            
+        # 2. 绘制右侧 'x' 按钮
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 计算按钮区域 (右侧 28 像素宽)
+        btn_rect = self.get_btn_rect(option)
+        
+        # 判定状态
+        is_hovered = option.state & QStyle.StateFlag.State_Selected
+        
+        # [NEW] 绘制微透明圆形衬底，增加点击反馈感
+        if is_hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 68, 68, 45)) # 淡淡的珊瑚红背景
+            # 按钮中心绘制圆形
+            circle_r = 10
+            painter.drawEllipse(btn_rect.center(), circle_r, circle_r)
+        
+        # [NEW] 精致化 'x' 图标
+        painter.setPen(QPen(QColor("#FF4444" if is_hovered else "#929292"), 1.8))
+        
+        icon_margin = 9
+        painter.drawLine(btn_rect.left() + icon_margin, btn_rect.top() + icon_margin,
+                         btn_rect.right() - icon_margin, btn_rect.bottom() - icon_margin)
+        painter.drawLine(btn_rect.right() - icon_margin, btn_rect.top() + icon_margin,
+                         btn_rect.left() + icon_margin, btn_rect.bottom() - icon_margin)
+        
+        painter.restore()
+
+    @staticmethod
+    def get_btn_rect(option: QStyleOptionViewItem) -> QRect:
+        r = option.rect
+        btn_w = 28
+        return QRect(r.right() - btn_w, r.top(), btn_w, r.height())
+    
+    # [REMOVED] editorEvent 交互逻辑移至 Panel 的 eventFilter 中处理以提高稳定性
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -1129,6 +1179,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._allow_real_close = allow_real_close  # [NEW] 区分隐藏还是彻底关闭 (X按钮隐藏，工具栏按钮关闭)
         self._last_rendered_data_version = -1
         self._last_rendered_stock_cache = {} # sector -> version
+        self._search_history = []           # [NEW] 搜索历史记录
+        self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
+        self._active_search_query = ""
 
         # 🚀 [Performance] Pre-cached UI Resources
         self._color_red = QColor("#FF4444")
@@ -1274,6 +1327,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 保存 Splitter 状态
             data_to_save['splitter_h_state'] = self.splitter.saveState().toHex().data().decode()
             data_to_save['v_splitter_state'] = self.v_splitter.saveState().toHex().data().decode()
+            
+            # [NEW] 保存搜索历史
+            data_to_save['search_history'] = self._search_history
 
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
@@ -1321,6 +1377,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.splitter.restoreState(QByteArray.fromHex(ui_state['splitter_h_state'].encode()))
             if 'v_splitter_state' in ui_state:
                 self.v_splitter.restoreState(QByteArray.fromHex(ui_state['v_splitter_state'].encode()))
+            
+            # [NEW] 恢复搜索历史
+            if 'search_history' in ui_state:
+                self._search_history = ui_state['search_history']
+                if self._search_history:
+                    self.search_input.blockSignals(True)
+                    self.search_input.clear()
+                    self.search_input.addItems(self._search_history)
+                    # 确保“龙头”始终在选项中 (如果不在历史中则添加)
+                    if "龙头" not in self._search_history:
+                        self.search_input.addItem("龙头")
+                    self.search_input.setCurrentText("")
+                    self.search_input.blockSignals(False)
             
             logger.debug("📊 [SectorPanel] UI state restored")
         except Exception as e:
@@ -1383,12 +1452,30 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_1.addSpacing(4)
         bar_lay_1.addWidget(self._sep())
         
-        # [NEW] Search Bar
+        # [NEW] Search Bar (Upgraded to QComboBox for history)
+        from PyQt6.QtWidgets import QComboBox
         bar_lay_1.addWidget(QLabel("🔍搜索:"))
-        self.search_input = QLineEdit()
+        self.search_input = QComboBox()
+        self.search_input.setEditable(True)
+        self.search_input.setDuplicatesEnabled(False)
+        self.search_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         self.search_input.setPlaceholderText("例如:涨幅>3")
         self.search_input.setFixedWidth(180)
-        self.search_input.returnPressed.connect(self._on_search_triggered)
+        self.search_input.lineEdit().returnPressed.connect(self._on_search_triggered)
+        # [NEW] 实现选择历史项后自动触发搜索
+        self.search_input.activated.connect(self._on_search_triggered)
+        # 添加默认常驻选项
+        self.search_input.addItem("龙头")
+        # [NEW] 为历史列表视图配置右键菜单，实现删除功能
+        self.search_input.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.search_input.view().customContextMenuRequested.connect(self._on_search_history_context_menu)
+        # [NEW] 应用可视化删除委托
+        self.history_delegate = SearchHistoryDelegate(self.search_input)
+        # 信号连接保留作为备用逻辑
+        self.history_delegate.delete_clicked.connect(self._delete_history_item_by_row)
+        self.search_input.view().setItemDelegate(self.history_delegate)
+        # [NEW] 核心补强：在视口层安装过滤器，抢在 QComboBox 之前拦截点击
+        self.search_input.view().viewport().installEventFilter(self)
         bar_lay_1.addWidget(self.search_input)
         
         self.btn_search = QPushButton("查询")
@@ -1410,6 +1497,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         self.btn_refresh = QPushButton("刷新 🔄")
         self.btn_refresh.setFixedWidth(65)
+        self.btn_refresh.setToolTip("刷新评分并更新表格内容\n快捷键: F5 或双击空白处")
         self.btn_refresh.clicked.connect(self.manual_refresh)
         bar_lay_2.addWidget(self.btn_refresh)
 
@@ -2135,18 +2223,114 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_sector_dblclick(self, item):
         pass
 
+    # ------------------------------------------------------------------ Event Handling
+    def eventFilter(self, source, event):
+        """拦截并处理特定组件的底层事件"""
+        # 1. 拦截搜索历史下拉列表的点击，防止误触发选择
+        if hasattr(self, 'search_input') and source == self.search_input.view().viewport():
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                pos = event.pos()
+                view = self.search_input.view()
+                index = view.indexAt(pos)
+                if index.isValid():
+                    # 获取该项的物理矩形
+                    visual_rect = view.visualRect(index)
+                    # 模拟 option 以复用 Delegate 的位置算法
+                    option = QStyleOptionViewItem()
+                    option.rect = visual_rect
+                    
+                    btn_rect = SearchHistoryDelegate.get_btn_rect(option)
+                    if btn_rect.contains(pos):
+                        # 确认为删除按钮点击
+                        if index.data() != "龙头":
+                            self._delete_history_item_by_row(index.row())
+                        # 🛡️ 核心：返回 True 彻底截断该按下事件，让 ComboBox 无法触发 activated 信号
+                        return True
+        
+        return super().eventFilter(source, event)
+
     # ------------------------------------------------------------------ search functionality
     def _on_search_triggered(self):
-        query = self.search_input.text().strip()
+        query = self.search_input.currentText().strip()
         if not query:
             query = self.search_input.placeholderText().replace("例如:", "").strip()
-            self.search_input.setText(query)
-        self._active_search_query = query
+            self.search_input.setCurrentText(query)
+        
+        # [NEW] 龙头特殊逻辑
+        if query == "龙头":
+            self._is_leader_search_mode = True
+            self._active_search_query = ""
+        else:
+            self._is_leader_search_mode = False
+            self._active_search_query = query
+        
+        # [NEW] 维护历史记录 (置顶并去重)
+        if query not in self._search_history:
+            self._search_history.insert(0, query)
+        else:
+            self._search_history.remove(query)
+            self._search_history.insert(0, query)
+        
+        # 保持 ComboBox 列表同步 (仅保留最近 20 条)
+        self._search_history = self._search_history[:20]
+        self.search_input.blockSignals(True)
+        self.search_input.clear()
+        self.search_input.addItems(self._search_history)
+        self.search_input.setCurrentText(query)
+        self.search_input.blockSignals(False)
+        
         self.manual_refresh()
         
+    def _on_search_history_context_menu(self, pos):
+        """处理搜索历史下拉项的右键删除逻辑"""
+        index = self.search_input.view().indexAt(pos)
+        if not index.isValid():
+            return
+        
+        item_text = self.search_input.itemText(index.row())
+        if item_text == "龙头": # 保留默认核心项
+            return
+            
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2c3e50; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #34495e; }")
+        
+        del_action = menu.addAction("❌ 删除此条记录")
+        menu.addSeparator()
+        clear_action = menu.addAction("🗑️ 清空所有历史")
+        
+        action = menu.exec(self.search_input.view().mapToGlobal(pos))
+        if action == del_action:
+            self._delete_history_item_by_row(index.row())
+        elif action == clear_action:
+            self._search_history = []
+            self.search_input.blockSignals(True)
+            self.search_input.clear()
+            self.search_input.addItem("龙头")
+            self.search_input.blockSignals(False)
+            self._save_ui_state()
+
+    def _delete_history_item_by_row(self, row: int):
+        """按行号删除搜索历史"""
+        item_text = self.search_input.itemText(row)
+        if not item_text or item_text == "龙头":
+            return
+            
+        if item_text in self._search_history:
+            self._search_history.remove(item_text)
+        
+        self.search_input.blockSignals(True)
+        self.search_input.removeItem(row)
+        # 刷新 ComboBox 下拉列表以应用变更
+        self.search_input.blockSignals(False)
+        self._save_ui_state()
+        # logger.debug(f"🗑️ [SectorPanel] Deleted history: {item_text}")
+            
     def _on_search_cleared(self):
-        self.search_input.clear()
+        self.search_input.setCurrentText("")
         self._active_search_query = ""
+        self._is_leader_search_mode = False
+        # 恢复标题
+        self.watchlist_group.setTitle("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
         self.manual_refresh()
         
     def _evaluate_search_condition(self, query_str: str, row_data: dict) -> bool:
@@ -2492,7 +2676,40 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
         """填充底部当日重点表"""
-        watchlist = self.detector.get_daily_watchlist()
+        # [NEW] 龙头搜索模式逻辑
+        if getattr(self, '_is_leader_search_mode', False):
+            watchlist = []
+            seen_codes = set()
+            sectors = self.detector.get_active_sectors()
+            for d in sectors:
+                code = d.get('leader', '')
+                if not code or code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                
+                # [NEW] 获取精准挖掘时间 (first_breakout_ts)
+                trigger_ts = 0
+                # 尝试从探测器内部状态直接获取该个股的历史触发时间
+                ts_obj = self.detector._tick_series.get(code)
+                if ts_obj:
+                    trigger_ts = ts_obj.first_breakout_ts
+                
+                # 如果尚未记录挖掘时间（可能属于刚领涨但未达爆发分值的萌芽股），使用数据流最后更新时间
+                if trigger_ts <= 0:
+                    trigger_ts = self.detector.last_data_ts if self.detector.last_data_ts > 0 else time.time()
+                
+                time_str = datetime.fromtimestamp(trigger_ts).strftime('%H:%M:%S')
+                
+                watchlist.append({
+                    'code': code,
+                    'name': d.get('leader_name', ''),
+                    'pct': d.get('leader_pct', 0.0),
+                    'sector': d.get('sector', ''),
+                    'reason': '核心龙头',
+                    'time_str': time_str
+                })
+        else:
+            watchlist = self.detector.get_daily_watchlist()
         
         # [NEW] Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
@@ -2587,9 +2804,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif self.watchlist_table.rowCount() > 0 and not self.watchlist_table.selectedItems():
             self.watchlist_table.setCurrentCell(0, 0)
                 
-        # 移除 setSortingEnabled 开关，永久保持 False
-        # [NEW] Update Watchlist title stats
-        # [NEW] Update Watchlist title stats (History indicator integrated)
+        # [NEW] Update Watchlist title stats (History/Search indicator integrated)
+        search_suffix = ""
+        if getattr(self, '_is_leader_search_mode', False):
+            search_suffix = " | 🔍 搜索结果: 各板块龙头"
+        elif getattr(self, '_active_search_query', ''):
+            search_suffix = f" | 🔍 筛选: {self._active_search_query}"
+
         hist_suffix = ""
         if self._is_history_mode:
             try:
@@ -2599,7 +2820,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             except:
                 hist_suffix = " | 🎬 [历史复盘]"
                 
-        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只, 涨停/溢出个股){hist_suffix}")
+        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
 
     def _on_watchlist_clicked(self, row, col):
         """重点表联动"""

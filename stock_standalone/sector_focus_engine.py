@@ -39,7 +39,7 @@ import json
 import os
 
 import pandas as pd
-
+from JohnsonUtil import commonTips as cct
 try:
     from JSONData import tdx_data_Day as tdd
 except ImportError:
@@ -1813,7 +1813,7 @@ class SectorFocusController:
         self._last_55188_sync: float = 0.0        # [NEW] 55188 同步节拍
 
         self._last_full_update: float = 0.0
-        self._full_update_interval = 30.0   # 全量计算30秒一次
+        self._full_update_interval = float(getattr(cct.CFG, 'duration_sleep_time', 60.0)) #30.0   # 全量计算30秒一次
         self._last_snapshot_date = ""      # [Dragon] 记录今日是否执行过收盘快照
         self._last_30m_slot = -1           # [Dragon] 记录上一个 30 分钟同步槽位 (9:30 offset=0)
         self._name_cache: Dict[str, str] = {}  # [NEW] 代码 -> 名称映射缓存
