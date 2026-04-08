@@ -2083,8 +2083,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 with self._update_lock:
                     force = self._force_update_requested
                 
-                # [UX] 响应个股标题点击传导的重置信号
+                # [UX] 响应个股标题点击传导的重置信号，或者检测到板块切换时也自动回顶
                 reset_to_top = getattr(self.stock_table, '_temp_reset_to_top', False)
+                if not reset_to_top:
+                    last_sect = getattr(self.stock_table, '_last_populated_sector', None)
+                    if last_sect != sn:
+                        reset_to_top = True
+
                 self.stock_table._temp_reset_to_top = False # 消费掉
                     
                 self._populate_table(d, reset_to_top=reset_to_top)
@@ -2226,10 +2231,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         leader_price  = data.get('leader_price', 0.0)
         leader_klines = data.get('leader_klines', [])
         followers     = data.get('followers', [])
-        race_candidates = data.get('race_candidates', [])
-        
-        # [NEW] 建立竞赛状态映射表
-        race_map = {rc['code']: rc['status'] for rc in race_candidates}
 
         mini = _ascii_kline(leader_klines, width=44, last_close=data.get('leader_last_close', 0))
         self.kline_lbl.setText(f"龙头分时: {mini}")
@@ -2260,7 +2261,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         }]
         for f in data.get('followers', []):
             f_klines = f.get('klines', [])
-            row_item = {
+            rows.append({
                 'code': f['code'], 'name': f['name'],
                 'role': '📌跟随',
                 'pct': f['pct'], 'price': f['price'],
@@ -2268,6 +2269,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'price_diff': f.get('price_diff', 0.0),
                 'dff': f.get('dff', 0.0),
                 'klines': f_klines,
+                # [OPTIMIZE] Pre-calculate values for TrendDelegate to avoid O(K) loop in UI
                 'k_cache': {
                     'prices': [float(k.get('close', 0)) for k in f_klines],
                     'volumes': [float(k.get('volume', k.get('vol', 0))) for k in f_klines]
@@ -2280,11 +2282,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'hint': f.get('pattern_hint', '板块联动'),
                 'untradable': f.get('untradable', False),
                 'is_counter': False
-            }
-            # [NEW] 动态赋予竞赛角色标签
-            if f['code'] in race_map:
-                row_item['role'] = race_map[f['code']]
-            rows.append(row_item)
+            })
 
         # Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
@@ -2352,9 +2350,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.stock_table, i, 1, r['name'])
 
             # 3. 角色
-            is_leader = '龙头' in r['role'] or '确核🐲' in r['role']
-            role_c = self._color_red if is_leader else (self._color_orange if '🌟' in r['role'] else (self._color_light_blue if '🌱' in r['role'] else None))
-            role_f = self._bold_font if is_leader else None
+            role_c = self._color_red if '龙头' in r['role'] else None
+            role_f = self._bold_font if '龙头' in r['role'] else None
             self._update_cell(self.stock_table, i, 2, r['role'], color=role_c, font=role_f)
 
             # 4. 现价
@@ -2435,10 +2432,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         self.sector_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sector_sort_asc else Qt.SortOrder.DescendingOrder)
         
-        # [UX] 如果刚从其他表切换焦点回来，自动回顶并取消跟踪
-        reset_top = getattr(self.sector_table, '_reset_on_next_sort', False)
-        if reset_top:
-            self.sector_table._reset_on_next_sort = False
+        # [UX] 手动点击排序项始终回顶，并清理焦点重置标记
+        reset_top = True
+        self.sector_table._reset_on_next_sort = False
             
         self._refresh_sector_list(reset_to_top=reset_top)
         
@@ -2452,10 +2448,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         self.watchlist_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._watchlist_sort_asc else Qt.SortOrder.DescendingOrder)
         
-        # [UX] 如果刚从其他表切换焦点回来，自动回顶并取消跟踪
-        reset_top = getattr(self.watchlist_table, '_reset_on_next_sort', False)
-        if reset_top:
-             self.watchlist_table._reset_on_next_sort = False
+        # [UX] 手动点击排序项始终回顶，并清理焦点重置标记
+        reset_top = True
+        self.watchlist_table._reset_on_next_sort = False
              
         self._populate_watchlist(reset_to_top=reset_top)
 
@@ -2756,10 +2751,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # Update header icons or sort indicators manually
         self.stock_table.horizontalHeader().setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder)
             
-        # 刷新当前板块
-        reset_top = getattr(self.stock_table, '_reset_on_next_sort', False)
-        if reset_top:
-            self.stock_table._reset_on_next_sort = False
+        # [UX] 手动点击排序项始终回顶，并清理焦点重置标记
+        reset_top = True
+        self.stock_table._reset_on_next_sort = False
             
         curr_row = self.sector_table.currentRow()
         if curr_row >= 0:
