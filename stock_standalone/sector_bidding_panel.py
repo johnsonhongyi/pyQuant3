@@ -2353,6 +2353,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._is_leader_search_mode = False
             self._active_search_query = query
         
+        self._force_show_all_in_stock_table = False # 重置特殊显示状态
+        
         # [NEW] 维护历史记录 (置顶并去重)
         if query not in self._search_history:
             self._search_history.insert(0, query)
@@ -2427,6 +2429,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.search_input.setCurrentText("")
         self._active_search_query = ""
         self._is_leader_search_mode = False
+        self._force_show_all_in_stock_table = False # 重置特殊显示状态
         # 恢复标题
         self.watchlist_group.setTitle("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
         # [FIX] 无论什么模式，清空搜索后都强制全局重刷一次 UI
@@ -2527,7 +2530,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         race_candidates = data.get('race_candidates', [])
         rows = []
         
-        if race_candidates:
+        # [UX] 如果处于搜索穿透模式，则忽略竞赛截断逻辑，显示全量个股
+        is_penetrating = getattr(self, '_force_show_all_in_stock_table', False)
+        if race_candidates and not is_penetrating:
             # 优先采用 detector 算好的竞赛明细
             for rc in race_candidates:
                 code = rc['code']
@@ -2623,15 +2628,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'untradable': f.get('untradable', False),
                     'is_counter': False
                 })
-
         # Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
-        if active_query:
+        force_show_all = getattr(self, '_force_show_all_in_stock_table', False)
+        if active_query and not force_show_all:
             filtered_rows = []
             for r in rows:
                 if self._evaluate_search_condition(active_query, r):
                     filtered_rows.append(r)
             rows = filtered_rows
+        
+        # [NEW] 更新搜索状态提示 (集成到 leader 标签)
+        if active_query:
+            status = f" [搜索穿透]" if force_show_all else f" [过滤🔍:{active_query}]"
+            curr_text = self.leader_lbl.text()
+            if status not in curr_text:
+                self.leader_lbl.setText(curr_text + status)
 
         # 应用排序 (Manual Sort)
         col = self._sort_col
@@ -2829,6 +2841,72 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """[DEPRECATED] Use _update_cell instead."""
         return self._update_cell(self.stock_table, row, col, text)
 
+    def _search_sectors_by_stock(self, query: str) -> List[dict]:
+        """[NEW] 在当前所有活跃板块中，搜索包含 query(代码或名称) 的板块并返回板块条目"""
+        results = []
+        detector = self.detector
+        q_lower = query.lower()
+        
+        with detector._lock:
+            # 遍历所有活跃板块 (detector.active_sectors 是一个 dict {sector_name: info})
+            for s_name, info in detector.active_sectors.items():
+                leader_code = info.get('leader', '')
+                leader_name = info.get('leader_name', leader_code)
+                followers = info.get('followers', [])
+                count = len(followers) + 1 # 加上龙头
+                
+                # A. 检查龙头
+                match_stock = ""
+                if q_lower in leader_code or q_lower in leader_name.lower():
+                    match_stock = leader_name
+                
+                # B. 检查跟随股
+                if not match_stock:
+                    for f in followers:
+                        if q_lower in f['code'] or q_lower in f['name'].lower():
+                            match_stock = f['name']
+                            break
+                
+                if match_stock:
+                    # 获取该板块匹配到的具体个股代码 (如果有)
+                    m_code = ""
+                    if q_lower in leader_code or q_lower in leader_name.lower():
+                        m_code = leader_code
+                    else:
+                        for f in followers:
+                            if q_lower in f['code'] or q_lower in f['name'].lower():
+                                m_code = f['code']
+                                break
+
+                    # 找到了包含该股的活跃板块
+                    results.append({
+                        'code': leader_code,        # 以板块龙头代码作为标识
+                        'name': f"{s_name} ({count}只)",  # 名称处显示板块名+数量
+                        'pct': info.get('leader_pct', 0.0), # 使用龙头涨幅代表板块
+                        'sector': s_name,           # 板块列显示板块名
+                        'reason': f"🔍 包含个股: {match_stock}",
+                        'time_str': '--:--:--',
+                        '_is_sector_entry': True,   # 标记为板块追溯项
+                        '_match_code': m_code       # 记录命中的代码用于后续精准选中
+                    })
+        
+        # [FALLBACK] 如果没在活跃板块中，则回退到基础个股搜索展示所属板块信息
+        if not results:
+            with detector._lock:
+                for code, ts in detector._tick_series.items():
+                    if code == '000000': continue
+                    if q_lower in code or q_lower in ts.name.lower():
+                        results.append({
+                            'code': code,
+                            'name': ts.name,
+                            'pct': ts.current_pct,
+                            'sector': ts.category,
+                            'reason': '搜索定位 (暂无活跃)',
+                            'time_str': '--:--:--'
+                        })
+        
+        return results
+
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
         """填充底部当日重点表"""
@@ -2870,9 +2948,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [NEW] Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
         if active_query:
+            # Check if we should supplement results for direct code/name search
+            # (Matches 6-digit code or Chinese name, and query is not a condition like ">")
+            is_direct_stock_search = len(active_query) >= 2 and not any(op in active_query for op in ['>', '<', '='])
+            
             filtered_wl = []
+            seen_codes_in_wl = set()
+            
+            # Step 1: Filter existing watchlist items
             for w in watchlist:
-                # Map watchlist fields to expect format for _evaluate_search_condition
                 row_mock = {
                     'code': w['code'],
                     'name': w['name'],
@@ -2882,6 +2966,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 }
                 if self._evaluate_search_condition(active_query, row_mock):
                     filtered_wl.append(w)
+                    seen_codes_in_wl.add(w['code'])
+            
+            # Step 2: If it's a direct stock search, prioritize finding sectors containing this stock
+            if is_direct_stock_search:
+                sector_results = self._search_sectors_by_stock(active_query)
+                for sr in sector_results:
+                    # 避免重复 (如果已经是 watchlist 个股则跳过)
+                    if sr['code'] not in seen_codes_in_wl or sr.get('_is_sector_entry'):
+                        filtered_wl.append(sr)
+                        seen_codes_in_wl.add(sr['code'])
+            
             watchlist = filtered_wl
         
         # 记录当前选中代码以便恢复
@@ -2944,6 +3039,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             r_c = QColor("#FF1493") if '涨停' in reason else None
             self._update_cell(self.watchlist_table, i, 5, reason, color=r_c)
 
+            # [NEW] 存入核心元数据：板块追溯标记及匹配代码
+            c_item = self.watchlist_table.item(i, 0)
+            if c_item:
+                if w.get('_is_sector_entry'):
+                    c_item.setData(Qt.ItemDataRole.UserRole + 2, True)
+                    c_item.setData(Qt.ItemDataRole.UserRole + 10, w.get('_match_code', ''))
+                else:
+                    c_item.setData(Qt.ItemDataRole.UserRole + 2, False)
+                    c_item.setData(Qt.ItemDataRole.UserRole + 10, "")
+
+            # [NEW] 存入核心元数据：板块追溯标记及匹配代码
+            c_item = self.watchlist_table.item(i, 0)
+            if c_item:
+                if w.get('_is_sector_entry'):
+                    c_item.setData(Qt.ItemDataRole.UserRole + 2, True)
+                    c_item.setData(Qt.ItemDataRole.UserRole + 10, w.get('_match_code', ''))
+                else:
+                    c_item.setData(Qt.ItemDataRole.UserRole + 2, False)
+                    c_item.setData(Qt.ItemDataRole.UserRole + 10, "")
+
             if w['code'] == selected_code:
                 target_row = i
 
@@ -2977,13 +3092,75 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 hist_suffix = " | 🎬 [历史复盘]"
                 
         self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
+        # [UX] 状态列自适应
+        self.watchlist_table.resizeColumnToContents(5)
 
-    def _on_watchlist_clicked(self, row, col):
-        """重点表联动"""
-        item = self.watchlist_table.item(row, 0)
-        if item:
-            code = item.text()
+    def _on_watchlist_clicked(self, row, col, link_software=True):
+        """重点表点击联动：1. 代码外部联动(可选) 2. 自动定位板块 3. 在个股表中选中"""
+        if row < 0: return
+        item_code = self.watchlist_table.item(row, 0)
+        item_sect = self.watchlist_table.item(row, 3) 
+        if not item_code: return
+        
+        code = item_code.text()
+        sector_name = item_sect.text().strip() if item_sect else ""
+        
+        # 1. 执行外部代码联动 (TDX/可视化器) - 仅在点击时，键盘上下键不触发
+        if link_software:
             self._link_code(code, focus_widget=self.watchlist_table)
+        
+        # 2. 个股/板块定位：如果板块名存在，尝试联动左侧板块表并切换右侧个股视图
+        if sector_name:
+            # [UX] 检查是否是板块溯源条目
+            is_sector_entry = item_code.data(Qt.ItemDataRole.UserRole + 2) == True
+            match_code = item_code.data(Qt.ItemDataRole.UserRole + 10) # 溯源时匹配到的个股
+            
+            if is_sector_entry:
+                # 这种情况下，强制顶层表格显示该板块所有股票，不被搜索词过滤
+                self._force_show_all_in_stock_table = True
+            
+            # 找到板块并选中
+            target_sector = None
+            parts = [p.strip() for p in sector_name.split(';') if p.strip()]
+            
+            # [UX] 如果点击的是板块溯源记录 (名称列就是板块名)，优先按名称定位
+            item_name = self.watchlist_table.item(row, 1)
+            name_text = item_name.text() if item_name else ""
+            if '(' in name_text: name_text = name_text.split('(')[0].strip() # 剔除数量
+            
+            for i in range(self.sector_table.rowCount()):
+                sn = self.sector_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
+                if sn == name_text or sn == sector_name or sn in parts or any(p in sn for p in parts):
+                    # 如果当前已经选中了这一行，则 setCurrentCell 可能不会触发 refresh
+                    # 我们手动触发以确保 _force_show_all 被应用
+                    if self.sector_table.currentRow() == i:
+                        self._on_sector_table_selection_changed()
+                    else:
+                        self.sector_table.setCurrentCell(i, 0)
+                    target_sector = sn
+                    break
+            
+            # 3. 深度联动：如果已经成功切换到板块，尝试在右侧 stock_table 中直接选中该个股
+            if target_sector:
+                # 给 populate_table 一点渲染完成的时间
+                def _select_in_stock_table():
+                    # 如果点击的是板块溯源记录，则优先精准定位到 match_code
+                    search_id = match_code if (is_sector_entry and match_code) else code
+                    found = False
+                    for r in range(self.stock_table.rowCount()):
+                        c_item = self.stock_table.item(r, 0)
+                        if c_item and c_item.text() == search_id:
+                            self.stock_table.setCurrentCell(r, 0)
+                            found = True
+                            break
+                    
+                    if not found and self.stock_table.rowCount() > 0:
+                        self.stock_table.setCurrentCell(0, 0)
+                    
+                    # 保持焦点以便键盘操作
+                    self.watchlist_table.setFocus()
+                    
+                QTimer.singleShot(100, _select_in_stock_table)
 
     def _on_watchlist_dblclick(self, row, col):
         """重点表双击：对应列执行不同动作"""
@@ -3063,9 +3240,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         item = self.watchlist_table.item(row, 0)
         if item:
             code = item.text()
-            # 键盘切换时延迟触发联动，防止快速连续按键卡顿
+            # 键盘切换时延迟触发联动，仅更新内部视图，不触发外部软件
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self._link_code(code, focus_widget=self.watchlist_table))
+            QTimer.singleShot(50, lambda: self._on_watchlist_clicked(row, 0, link_software=False))
 
     def _follower_klines(self, code: str) -> List[dict]:
         with self.detector._lock:
