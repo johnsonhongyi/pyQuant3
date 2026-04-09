@@ -327,7 +327,7 @@ class IntradayDecisionEngine:
             if is_t1_restricted:
                 debug["sell_skip"] = "T+1限制，跳过卖出信号检测"
             else:
-                sell_action, sell_pos, sell_reason = self._sell_decision(price, ma5, ma10, snapshot, structure, debug)
+                sell_action, sell_pos, sell_reason = self._sell_decision(row, price, ma5, ma10, snapshot, structure, debug)
                 if sell_action == "卖出":
                     debug["sell_reason"] = sell_reason
                     return {
@@ -655,7 +655,7 @@ class IntradayDecisionEngine:
 
     # ==================== 卖出信号 ====================
     
-    def _sell_decision(self, price: float, ma5: float, ma10: float, 
+    def _sell_decision(self, row: dict[str, Any], price: float, ma5: float, ma10: float, 
                        snapshot: dict[str, Any], structure: str, debug: dict[str, Any]) -> tuple[str, float, str]:
         """
         卖出信号判定 (精准版)
@@ -695,6 +695,17 @@ class IntradayDecisionEngine:
         else:
             distance_from_high = 0
         
+        # ================================================================
+        # ⭐ [NEW] P0: 开盘极速离场判定 (9:30 - 9:50)
+        # 针对 T+1 且弱势开盘的个股，强制离场，防止被动持仓
+        # ================================================================
+        is_opening_failure, opening_msg = self._opening_sell_check(row, snapshot, debug)
+        if is_opening_failure:
+            sell_score += 0.85
+            pillar_hits.append("价格行为")
+            reasons.append(opening_msg)
+            debug["sell_score_source"] = "OPENING_FAILURE"
+
         # ================================================================
         # 支柱 1 (P1): 趋势压力
         # - 严重乖离 (远高于均线，获利了结时机)
@@ -815,10 +826,29 @@ class IntradayDecisionEngine:
             # ⭐ [NEW] 边界防御：早盘杀跌保护 (Shakeout Guard)
             # 用户逻辑：早盘是低价连续结构，打的是 T+1 无法交易规则。所以除非极度破位，否则在 10:30 前不全仓杀跌。
             now_time = dt.datetime.now().time()
-            if now_time < dt.datetime.strptime("10:30", "%H:%M").time():
+            is_opening_fail = debug.get("sell_score_source") == "OPENING_FAILURE"
+            
+            # 如果不是明确的开盘失败判定，实施洗盘保护
+            if now_time < dt.datetime.strptime("10:30", "%H:%M").time() and not is_opening_fail:
                 if "日内破位主杀" not in reasons and sell_score < 0.85:
                     sell_score *= 0.7
                     reasons.append("🛡️ 早盘洗盘保护 (Shakeout Guard)")
+            
+            # ⭐ [NEW] 盘中防洗盘保护 (Breakdown Protection 针对 10:00 - 14:30)
+            # 逻辑：如果没有跌破日内低点，且量能萎缩，则拒绝“着急清仓”
+            is_midday = dt.datetime.strptime("10:00", "%H:%M").time() <= now_time <= dt.datetime.strptime("14:30", "%H:%M").time()
+            if is_midday and not is_opening_fail:
+                lowest_today = float(snapshot.get("lowest_today", low))
+                # 记录最新的最低触发点
+                if low < lowest_today:
+                    snapshot["lowest_today"] = low
+                    lowest_today = low
+                
+                # 如果当前价格未创日内新低（允许 0.3% 容忍），且量能不强，视为缩量震荡
+                if price > lowest_today * 1.003 and volume < 1.2 and "日内破位主杀" not in reasons:
+                    if sell_score < 0.85: # 极强卖点除外
+                        sell_score *= 0.8
+                        reasons.append("🛡️ 缩量震荡不破位保护")
             
             if sell_score >= threshold:
                 return ("卖出", -max(sell_score, 0.5), " | ".join(p for p in reasons if "⚠️" not in p))
@@ -853,6 +883,14 @@ class IntradayDecisionEngine:
         if pnl_pct < -self.stop_loss_pct:
             # 达到硬止损线，全清
             return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
+        
+        # ⭐ [NEW] 开盘 15 分钟高敏感止损 (针对 T+1)
+        now_time = dt.datetime.now().time()
+        is_t1 = snapshot.get("buy_date", "") != dt.datetime.now().strftime("%Y-%m-%d")
+        if is_t1 and now_time <= dt.datetime.strptime("09:45", "%H:%M").time():
+            # 早盘如果亏损超过 2.5% 且反弹无力（在均线下方）
+            if pnl_pct < -0.025 and price < nclose:
+                return {"triggered": True, "action": "开盘止损", "position": 0.0, "reason": f"早盘弱势且亏损达{abs(pnl_pct):.1%}"}
         
         # --- [New] 🚨 提前预警与主动防守 (Early Detection Sell Logic) 🚨 ---
         # 目标：在达到 2.5% 的硬性预警前，通过结构、均线、流动性特征提前识别风险。
@@ -1097,7 +1135,7 @@ class IntradayDecisionEngine:
         # 10:00-11:00 (600-660)
         if 600 <= curr_min <= 660:
             return -0.15, "早盘高位风险区(慎追)"
-        
+
         # 14:50-15:00 (890-900) -> 尾盘禁买一刀切
         if 890 <= curr_min <= 900:
             return -1.0, "尾盘禁买(14:50后)"
@@ -1106,7 +1144,55 @@ class IntradayDecisionEngine:
         if 870 <= curr_min < 890:
             return -0.20, "尾盘风险区(慎开)"
             
-        return 0, ""
+        return 0.0, ""
+        
+    def _opening_sell_check(self, row: dict, snapshot: dict, debug: dict) -> tuple[bool, str]:
+        """
+        [P0] 专门检测 9:30 - 9:50 期间的开盘弱势。
+        旨在解决“尾盘买入次日被套”无法及时离场的问题。
+        """
+        now_time = dt.datetime.now().time()
+        if now_time > dt.datetime.strptime("09:50", "%H:%M").time():
+            return False, ""
+            
+        is_t1 = snapshot.get("buy_date", "") != dt.datetime.now().strftime("%Y-%m-%d")
+        if not is_t1:
+            return False, ""
+            
+        price = float(row.get("trade", 0))
+        last_close = float(row.get("lastp1d", row.get("last_close", 0)))
+        open_p = float(row.get("open", 0))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
+        cost_price = float(snapshot.get("cost_price", 0))
+        
+        if price <= 0 or last_close <= 0 or cost_price <= 0:
+            return False, ""
+            
+        pnl_pct = (price - cost_price) / cost_price
+        
+        # 判定标准：
+        # 1. 处于亏损状态
+        if pnl_pct >= 0:
+            return False, ""
+            
+        # 2. 弱势表现（满足以下 2 项以上）
+        weak_hits = 0
+        reasons = []
+        
+        if price < last_close * 0.99:
+            weak_hits += 1
+            reasons.append("跳空低开")
+        if open_p > 0 and price < open_p * 0.99:
+            weak_hits += 1
+            reasons.append("开盘即跌")
+        if nclose > 0 and price < nclose:
+            weak_hits += 1
+            reasons.append("均线压制")
+            
+        if weak_hits >= 2:
+            return True, f"🚨 T+1 开盘失败结构: {','.join(reasons)}"
+            
+        return False, ""
 
     def _limit_price_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, str]:
         """

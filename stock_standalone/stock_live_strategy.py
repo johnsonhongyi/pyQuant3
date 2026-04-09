@@ -2944,6 +2944,12 @@ class StockLiveStrategy:
         # 追踪日内最高价
         if current_high > snap.get('highest_today', 0):
             snap['highest_today'] = current_high
+            
+        # 追踪日内最低价 (用于盘中破位判定)
+        current_low = float(row.get('low', current_price))
+        if 'lowest_today' not in snap or current_low < snap['lowest_today']:
+            snap['lowest_today'] = current_low
+            
         # 追踪日内最大泵高幅度 (相对于开盘价)
         if open_price > 0:
             pump_height = (snap.get('highest_today', current_high) - open_price) / open_price

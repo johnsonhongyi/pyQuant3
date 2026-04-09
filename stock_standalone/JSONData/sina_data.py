@@ -1053,6 +1053,7 @@ class Sina:
                         now_dt = pd.Timestamp.now()
                         today_str = now_dt.strftime('%Y-%m-%d')
                         is_trade_day = cct.get_trade_date_status()
+                        work_time_now = cct.get_work_time()
                         valid_date = True
                         if is_trade_day and work_time_now:
                             if 'dt' in h5.columns:
