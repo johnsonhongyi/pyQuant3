@@ -2578,6 +2578,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self._ipc_code_debounce_timer = QTimer(self)
         self._ipc_code_debounce_timer.setSingleShot(True)
         self._ipc_code_debounce_timer.timeout.connect(self._flush_ipc_code_load)
+        
+        # ⚡ [NEW] Resample切换防抖 (防止快速点击 Resample 按钮导致渲染队列堆积)
+        self._resample_debounce_timer = QTimer(self)
+        self._resample_debounce_timer.setSingleShot(True)
+        self._resample_debounce_timer.timeout.connect(self._on_resample_debounce_timeout)
+        self._pending_resample_key = None
 
         # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
         self.loader: Optional[DataLoaderThread] = None
@@ -2621,7 +2627,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lifecycle_timer.timeout.connect(self._check_lifecycle)
         self.lifecycle_timer.start(2000) # 每 2s 检查一次生命周期标志
         self.day_df = pd.DataFrame()
+        self.daily_df_raw = pd.DataFrame() # [NEW] 专门存储原始日线(Daily)数据供 SBC 核心分析使用，不受 Resample 影响
         self.df_all = pd.DataFrame()
+        self._render_seq = 0 # [NEW] 渲染任务序列号，用于在耗时阶段检测并中断过时的渲染任务
 
         # ---- resample state ----
         self.resample_keys = ['d','2d', '3d', 'w', 'm']
@@ -4857,18 +4865,24 @@ class MainWindow(QMainWindow, WindowMixin):
         if key == self.resample:
             return
 
-        # ① 更新内部状态
+        # ① 更新内部状态并同步同步 UI（立即执行以保证交互即时性）
         self.resample = key
         self.current_resample_idx = self.resample_keys.index(key)
 
-        # ② 同步 toolbar UI（关键）
         act = self.resample_actions.get(key)
         if act is not None and not act.isChecked():
             act.setChecked(True)
 
-        # ③ 执行真实业务逻辑
-        if self.current_code:
+        # ② 启动延迟加载（防抖核心）
+        self._pending_resample_key = key
+        self._resample_debounce_timer.start(50) # 50ms 防抖
+
+    def _on_resample_debounce_timeout(self):
+        """防抖超时后触发真实加载"""
+        if self.current_code and self._pending_resample_key:
+            logger.info(f"[Resample] Debounced load triggered: {self.current_code} -> {self._pending_resample_key}")
             self.load_stock_by_code(self.current_code)
+            self._pending_resample_key = None
 
     def _init_tdx(self):
         """Initialize TDX / THS independent link toggles"""
@@ -6560,6 +6574,10 @@ class MainWindow(QMainWindow, WindowMixin):
         if not local_day_df.empty:
             self.day_df = local_day_df 
             self.current_day_df_code = code
+
+            # [NEW] 专门备份原始日线数据供 SBC/策略分析使用（仅在 resample='d' 时更新）
+            if self.resample == 'd':
+                self.daily_df_raw = self.day_df.copy()
             
             # 刷新信号坐标系
             self._refresh_stock_signal_cache(code)
@@ -8935,6 +8953,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
         self.current_code = code
+        self._render_seq += 1 # [NEW] 递增渲染序列号，用于使旧的异步渲染任务失效
         self._last_stock_switch_time = time.time()  # 记录切股时间
         self.select_resample = self.resample
         self.tick_prices = np.array([])
@@ -8995,9 +9014,12 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.setCurrentCell(row, 0)
             self.stock_table.scrollToItem(code_item, QAbstractItemView.ScrollHint.EnsureVisible)
         
-        # [FIX] 设置 Loading 状态同时清理标题缓存, 确保数据加载完成后能强制刷新标题
-        # (否则切换周期时因 code 没变, _update_plot_title 会误判为标题无需更新)
-        self.kline_plot.setTitle(f"Loading {code}...")
+        # [FIX] 性能优化：只有在代码真正改变时才显示 Loading，防止切换周期时的标题闪烁
+        # 同时配合 _update_plot_title 内部的缓存机制，如果标题内容没变，则不刷新 UI 节省性能
+        if getattr(self, "_last_rendered_code", None) != code:
+            self.kline_plot.setTitle(f"Loading {code}...")
+            self._last_title_cache_key = None # 强制失效缓存，确保加载完能刷回正式标题
+            self._last_full_title = None      # 强制失效全标题缓存
         # ⭐ [NEW] 加载守卫 (Loading Guard)
         # 如果当前 loader 已经在加载这一只股票且周期相同，则无需重复开启新线程
         if hasattr(self, 'loader') and self.loader is not None and self.loader.isRunning():
@@ -9722,6 +9744,9 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         [极限性能版] 渲染完整图表 (带有 150ms 频率节流与对象复用)
         """
+        # ⚡ [NEW] 渲染任务保护序列号 (Sequence Protection)
+        current_seq = self._render_seq
+
         # 🛡️ [PERF/Throttle] 渲染频率限制：150ms 内不重复渲染相同代码 (排除强制重绘的情况)
         now = time.time()
         last_t = getattr(self, '_last_render_time', 0)
@@ -10344,25 +10369,55 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
         if self.show_strategy_simulation:
-            # ⚡ [OPTIMIZATION] Strategy Cache Check (Enhanced with Date & Precision)
-            today_str = datetime.now().strftime('%Y%m%d')
-            df_all_p = 0
-            if not self.df_all.empty and code in self.df_all.index:
-                # 价格精度对齐 (2位即可)，防止浮点数误差
-                df_all_p = round(float(self.df_all.loc[code, 'close']), 2) if 'close' in self.df_all.columns else 0
+            # ⚡ [PROTECTION] 中断判定
+            if self._render_seq != current_seq: return
+
+            # ⚡ [LIMIT PERF v4] 双轨策略模拟逻辑
+            # 将信号分为“历史沉淀(Archived)”和“当日动态(Live)”
             
-            last_day_p = round(float(day_df.iloc[-1]['close']), 2)
-            strat_key = (code, len(day_df), day_df.index[-1], last_day_p, df_all_p, today_str)
-            cached_strat = self._strategy_cache.get(code)
+            # A. 处理历史信号 (除今日外)
+            # hist_key 这里排除正在变动的最后一根 Bar
+            hist_key = (code, self.resample, len(day_df) - 1, day_df.index[-2] if len(day_df) > 1 else None)
             
-            if cached_strat and cached_strat[0] == strat_key:
-                kline_signals.extend(cached_strat[1])
-                # logger.debug(f"[PERF] Strategy Cache HIT for {code}")
+            if not hasattr(self, '_archived_strat_cache'):
+                self._archived_strat_cache = {}
+            
+            cached_hist_signals = self._archived_strat_cache.get(hist_key)
+            if cached_hist_signals is not None:
+                kline_signals = list(cached_hist_signals)
             else:
-                with timed_ctx("_run_strategy_simulation_signal", warn_ms=200):
-                    sim_signals = self._run_strategy_simulation_new50(code, day_df, n_rows=0) # ⚡ [FIX] 由 50 改为 0，防止早盘信号消失
-                    kline_signals.extend(sim_signals)
-                    self._strategy_cache[code] = (strat_key, sim_signals)
+                with timed_ctx("_run_strategy_simulation_signal_hist", warn_ms=100):
+                    # 仅回测到昨日收盘
+                    hist_signals = self.strategy_controller.evaluate_historical_signals(code, day_df.iloc[:-1])
+                    self._archived_strat_cache[hist_key] = hist_signals
+                    kline_signals = list(hist_signals)
+            
+            # B. 处理当日实时决策 (Live Signal)
+            if not day_df.empty and tick_df is not None:
+                try:
+                    # 获取当日行情快照并单点评估 (O(1))
+                    row_today = day_df.iloc[-1].to_dict()
+                    row_today['trade'] = float(tick_df['close'].iloc[-1]) if not tick_df.empty else row_today['close']
+                    
+                    snapshot = {
+                         'code': code,
+                         'nclose': row_today.get('avg_price', row_today.get('close')),
+                         'last_close': day_df['close'].iloc[-2] if len(day_df) > 1 else row_today['close'],
+                         'score': getattr(self, 'current_selection_score', 0)
+                    }
+                    
+                    # 仅针对最后一点进行决策 (极速路径)
+                    decision = self.strategy_controller.get_realtime_decision(code, row_today, snapshot)
+                    if decision and decision.get('action') in ("买入", "卖出", "止损", "止盈", "加仓", "减仓"):
+                         live_sig = self.strategy_controller._create_signal_point(
+                             code=code, timestamp=day_df.index[-1], idx=len(day_df)-1,
+                             price=row_today['trade'],
+                             stype=self.strategy_controller._map_action_to_signal_type(decision['action']),
+                             source=SignalSource.STRATEGY_ENGINE, reason=decision.get('reason', '')
+                         )
+                         kline_signals.append(live_sig)
+                except Exception:
+                    pass
 
         # 2. 实盘日志历史信号 (CSV)
         # ⭐ [OPTIMIZATION] 信号历史由 DataLoaderThread 统一加载交付，不再在此处同步读取文件
@@ -10484,54 +10539,59 @@ class MainWindow(QMainWindow, WindowMixin):
             kline_signals.extend(watch_signals)
 
         # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
-        # TODO: 以后将 sbc_tracker/baseline_loader 等都收纳到 sbc_core 内部
         self.all_today_sbc_signals = []
         if tick_df is not None and not tick_df.empty and self.show_strategy_simulation:
-            # ⚡ [OPTIMIZATION] SBC Cache Check (Enhanced with Date & Precision)
+            # ⚡ [PROTECTION] 中断判定
+            if self._render_seq != current_seq: return
+
+            # ⚡ [OPTIMIZATION] SBC Cache Check (Static History Basis)
             today_str = datetime.now().strftime('%Y%m%d')
-            last_tick_p = round(float(tick_df['close'].iloc[-1]), 2) if 'close' in tick_df.columns else 0
-            sbc_key = (code, len(day_df), len(tick_df), last_tick_p, today_str)
+            
+            # 使用原始日线作为 SBC 基准
+            day_df_for_sbc = self.daily_df_raw if not self.daily_df_raw.empty else day_df
+            
+            # 💥 [CRITICAL FIX] 移除 last_tick_p 和 tick_df 长度
+            # SBC 缓存只应基于“已经定型的日线数据”
+            sbc_key = (code, len(day_df_for_sbc), today_str)
             
             cached_sbc = self._sbc_cache.get(code)
             if cached_sbc and cached_sbc[0] == sbc_key:
                 self.all_today_sbc_signals = cached_sbc[1]
-                # logger.debug(f"[PERF] SBC Cache HIT for {code}")
+                # logger.debug(f"[PERF] SBC Static Cache HIT for {code}")
             else:
                 with timed_ctx("sbc_core_analysis", warn_ms=200):
                     try:
-                        # 委托 sbc_core 进行高性能批量分析 (日期感知流)
+                        # run_sbc_analysis_core 内部会自动处理 tick_df 叠加
                         sbc_results = sbc_core.run_sbc_analysis_core(
-                            code, day_df, tick_df, verbose=self.verbose_log_enabled,
+                            code, day_df_for_sbc, tick_df, verbose=self.verbose_log_enabled,
                             engine=self.decision_engine, 
                             baseline_loader=self.sbc_baseline_loader
                         )
                         self.all_today_sbc_signals = sbc_results.get("signals", [])
-                        
-                        # [SYNC] 将分时买点信号同步映射到 K 线层，实现跨维显示
-                        for s in self.all_today_sbc_signals:
-                            s_ts = s.timestamp
-                            s_date = s_ts[:10] if isinstance(s_ts, str) else datetime.fromtimestamp(s_ts).strftime('%Y-%m-%d')
-                            k_idx = self._find_date_index(day_df, s_date)
-                            if k_idx != -1 and s.signal_type in (SignalType.BUY, SignalType.FOLLOW):
-                                ks = SignalPoint(
-                                    code=s.code, timestamp=s.timestamp, 
-                                    bar_index=k_idx, price=day_df['close'].iloc[k_idx],
-                                    signal_type=s.signal_type, reason=s.reason,
-                                    source=s.source, debug_info=s.debug_info
-                                )
-                                kline_signals.append(ks)
                         self._sbc_cache[code] = (sbc_key, self.all_today_sbc_signals)
                     except Exception as e:
-                        import traceback
-                        logger.debug(f"SBC integration error: {e}\n{traceback.format_exc()}")
+                        logger.debug(f"SBC integration error: {e}")
+
+            # [SYNC] 将分点转换为当前视图的 K 线坐标
+            for s in self.all_today_sbc_signals:
+                s_date = s.timestamp[:10] if isinstance(s.timestamp, str) else datetime.fromtimestamp(s.timestamp).strftime('%Y-%m-%d')
+                k_idx = self._find_date_index(day_df, s_date)
+                if k_idx != -1 and s.signal_type in (SignalType.BUY, SignalType.FOLLOW):
+                    kline_signals.append(SignalPoint(
+                        code=s.code, timestamp=s.timestamp, 
+                        bar_index=k_idx, price=day_df['close'].iloc[k_idx],
+                        signal_type=s.signal_type, reason=s.reason,
+                        source=s.source, debug_info=s.debug_info
+                    ))
             
-            # ⭐ [FIX] 立即刷新视觉层数据
             self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
         else:
-            # 性能优化：如果不显示或没数据，确保旧信号被清理
             self.signal_overlay.update_signals([], target='tick')
 
-        # 执行 K 线绘图 (计算视觉偏移)
+        # ⚡ [PROTECTION] 最终渲染前再次检查中断
+        if self._render_seq != current_seq: return
+        
+        # 7. 执行 K 线标注 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
         
         y_visuals = []
@@ -10982,7 +11042,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 2. 构建主标题 (只有在 info/code 改变或强制更新时才重新构建)
         # 使用 tuple 作为缓存键提高效率
-        cache_key = (code, info.get('name'), info.get('Rank'), info.get('percent'))
+        cache_key = (code, info.get('name'), info.get('Rank'), info.get('percent'), self.resample)
         main_title = getattr(self, "_cached_main_title_str", "")
         
         if getattr(self, "_last_title_cache_key", None) != cache_key:

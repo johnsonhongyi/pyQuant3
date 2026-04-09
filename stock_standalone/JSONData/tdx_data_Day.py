@@ -5163,61 +5163,64 @@ def compute_condition_up(df):
     # hop_record_down=[]
     #向上跳空,看是否有回落(之后的最低价有没有低于缺口前价格)
     #向下跳空,看是否有回升(之后的最高价有没有高于缺口前价格)
+    # 🚀 [LIMIT PERF v3] 向量化改写核心逻辑，移除 O(N^2) 循环与高频 Log
     for i in condition_up.index:
-        #如果向上跳空
-
-        hop_date = i #跳空时间 
-        # lastday = cct.day_last_days(i,-1)
-        lastday = df.index[df.index < i][-1]
-
-        ex_hop_price = df['high'].at[lastday]  #前一根K线最高价   
-        post_hop_price = df['low'].at[i]  #跳空后的价格
-
-        fill_data = ''          #回补时间
-        fill_day = np.nan           #回补天数
-        #看滞后有没有回补向上的跳空
-        duration = df.index[df.index > i] #跳空后的数据日
-
-        for j in duration:
-            log.debug(f"j:{j}: low :{df['low'].at[j]}")
-            if df['low'].at[j] <= ex_hop_price:
-                fill_data = j
-                fill_day = len(df.index[(df.index > i) & (df.index <= j)])
-                break
-        hop_record.append({'hop':'up',
-                            'jop_date':hop_date,
-                            'ex_hop_price':ex_hop_price,
-                            'post_hop_price':post_hop_price,
-                            'fill_data':fill_data,
-                            'fill_day':fill_day })
-
-        #如果有向下跳空
-    for i in condition_down.index:
-        #如果向下跳空
-
-        hop_date = i #跳空时间 
-        # lastday = cct.day_last_days(i,-1)
-        lastday = df.index[df.index < i][-1]
-        ex_hop_price = df['low'].at[lastday]  #前一根K线最低价   
-        post_hop_price = df['high'].at[i]  #跳空后的价格
-
-        fill_data = ''          #回补时间
-        fill_day = np.nan           #回补天数
-        #看滞后有没有回补向上的跳空
-        duration = df.index[df.index > i] #跳空后的数据日
+        hop_date = i
+        # 寻找前一交易日最高价
+        prev_indices = df.index[df.index < i]
+        if prev_indices.empty: continue
+        lastday = prev_indices[-1]
+        ex_hop_price = df['high'].at[lastday]
+        post_hop_price = df['low'].at[i]
         
-        for j in duration:
-            if df['low'].at[j] >= ex_hop_price:
-                fill_data = j
-                fill_day = len(df.index[(df.index > i) & (df.index <= j)])
-                break
-        hop_record.append({'hop':'down',
-                            'jop_date':hop_date,
-                            'ex_hop_price':ex_hop_price,
-                            'post_hop_price':post_hop_price,
-                            'fill_data':fill_data,
-                            'fill_day':fill_day })
+        # 向量化寻找回补点：一次性找到所有满足条件的后续日期
+        duration_df = df[df.index > i]
+        if not duration_df.empty:
+            fill_mask = duration_df['low'] <= ex_hop_price
+            fill_indices = duration_df.index[fill_mask]
+            
+            if not fill_indices.empty:
+                fill_data = fill_indices[0]
+                # 这里使用 index.get_loc 的差值计算天数，比重新构造 DataFrame 快得多
+                fill_day = df.index.get_loc(fill_data) - df.index.get_loc(i)
+                hop_record.append({
+                    'hop':'up', 'jop_date':hop_date, 'ex_hop_price':ex_hop_price,
+                    'post_hop_price':post_hop_price, 'fill_data':fill_data, 'fill_day':fill_day 
+                })
+            else:
+                hop_record.append({
+                    'hop':'up', 'jop_date':hop_date, 'ex_hop_price':ex_hop_price,
+                    'post_hop_price':post_hop_price, 'fill_data': '', 'fill_day': np.nan 
+                })
+
+    for i in condition_down.index:
+        hop_date = i
+        prev_indices = df.index[df.index < i]
+        if prev_indices.empty: continue
+        lastday = prev_indices[-1]
+        ex_hop_price = df['low'].at[lastday]
+        post_hop_price = df['high'].at[i]
+        
+        duration_df = df[df.index > i]
+        if not duration_df.empty:
+            fill_mask = duration_df['high'] >= ex_hop_price
+            fill_indices = duration_df.index[fill_mask]
+            
+            if not fill_indices.empty:
+                fill_data = fill_indices[0]
+                fill_day = df.index.get_loc(fill_data) - df.index.get_loc(i)
+                hop_record.append({
+                    'hop':'down', 'jop_date':hop_date, 'ex_hop_price':ex_hop_price,
+                    'post_hop_price':post_hop_price, 'fill_data':fill_data, 'fill_day':fill_day 
+                })
+            else:
+                hop_record.append({
+                    'hop':'down', 'jop_date':hop_date, 'ex_hop_price':ex_hop_price,
+                    'post_hop_price':post_hop_price, 'fill_data': '', 'fill_day': np.nan 
+                })
+    
     hop_df = pd.DataFrame(hop_record)
+    return hop_df
     # hop_df[hop_df.fill_day <> '']         #已经回补
     # hop_df.fill_day.isnull()  #没有回补
     return hop_df

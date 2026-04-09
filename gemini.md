@@ -126,3 +126,16 @@
     - [x] **修复序列化异常 (Fix TypeError)**：针对 `GlobalValues` 可能处于 `multiprocessing.Manager` 模式的情况，将不可序列化的 `threading.Lock` 和 `_HDF_LOADING` (包含 Event) 迁移至 `builtins` 全局空间。这解决了 `cannot pickle '_thread.lock' object` 的致命崩溃，同时保证了单进程多模块环境下的资源唯一性。
     - [x] **迁移 L1 内存缓存**：将 `_SINA_HDF5_MEM_CACHE` 挂载至 `GlobalValues()`，并添加 `try-except` 降级逻辑。确保在分布式或多进程环境下，DataFrame 等可序列化数据尽可能通过 Manager 共享，不可行时自动回退到 `builtins` 模式。
     - [x] **共享加载原子锁**：通过 `builtins` 锁实现全进程范围内的 SingleFlight 加载保护，彻底杜绝了多模块冷启动时的 IO 惊群效应。
+
+## 2026-04-09 16:35
+- [x] 修复 `trade_visualizer_qt6.py` 切换可视化周期（Resample）后标题无法更新（停留在 Loading...）的问题。
+
+## 2026-04-09 16:45
+- [x] 深度优化 `trade_visualizer_qt6.py` 渲染性能与 UI 响应速度：
+    - [x] **实现周期切换防抖 (Resample Debouncing)**：引入 50ms 的 `QTimer` 延迟触发机制，合并高频点击请求，避免渲染队列积压。
+    - [x] **SBC 分析与周期解耦 (Period-Agnostic SBC Cache)**：建立 `daily_df_raw` 基准日线存储。SBC 缓存键不再依赖当前视图的 resample 长度，实现切换周期时的 100% 缓存命中，消除重算耗时（~70ms）。
+    - [x] **引入渲染任务中止保护 (Render Sequence Protection)**：通过 `_render_seq` 序列号机制，在耗时分析分支（SBC/策略回测/散点标注）前后实时检测更新请求。若请求已过期则立即中断并释放主线程，彻底解决连续操作时的 UI 粘滞感。
+    - [x] **策略仿真强缓存 (Enhanced Strategy Cache)**：优化了历史信号仿真缓存键，针对周期切换进行了针对性加速。
+    - [x] **代码健壮性加固**：清理了渲染逻辑中的冗余 print 和旧的缓存判定路径，增强了多负载下的稳定性。
+
+
