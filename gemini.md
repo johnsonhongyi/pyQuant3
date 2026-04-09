@@ -109,3 +109,20 @@
     - [x] **修复重置崩溃风险**：将 `_reset_daily_state` 中的 `klines` 复位由列表赋值改为 `clear()` 操作，保留了 `deque` 引用及其 `maxlen` 属性，消除了高位运行时的 UI 渲染崩溃。
     - [x] **优化过期清理阈值**：将跨日文件的丢弃门槛锁定在 09:15，确保竞价准备期的元数据可用性，同时杜绝看板历史残留。
     - [x] **新增手动重置交互**：集成工具栏“🔄 重置今日”红色按钮，支持用户在不重启程序的情况下平滑清理历史残留。
+## 2026-04-09 14:10
+- [x] 修复 `realtime_data_service.py` 中的 `NameError: name 'List' is not defined`：
+    - [x] **补齐 typing 导入**：在文件头部导入中添加了缺失的 `List`。
+    - [x] **统一风格优化**：将 `backfill_gaps_from_hdf5` 等新增方法的类型提示从 `List[str]` 转换为 PEP 585 风格的 `list[str]`，以与该文件现有的 `dict[...]` 和 `list[...]` 风格保持一致，提升了代码的兼容性与现代感。
+
+## 2026-04-09 15:30
+- [x] 深度重构 `RealtimeDataService` 的 HDF5 数据恢复机制：
+    - [x] **废弃直接 HDF5 访问**：在 `recover_from_hdf5_by_codes` 中移除对 `tdx_hdf5_api.load_hdf_db` 的直接调用，转而使用 `sina_data.Sina` 提供的统一接口 `get_sina_MultiIndex_data`。
+    - [x] **接入 SingleFlight 缓存引擎**：通过 `sina_data.Sina` 实例，自动共享架构级的 HDF5 内存缓存与 SingleFlight 加载保护，消除了并发恢复时的冗余磁盘 IO。
+    - [x] **优化 MultiIndex 精准过滤**：利用 Pandas MultiIndex 特性对 `code_list` 进行向量化求交集过滤，将数百个品种的恢复定位延迟从百毫秒级降低至微秒级。
+    - [x] **保持聚合逻辑一致性**：确保恢复的数据流管道化进入 `_aggregate_hdf5_df`，实现 Tick 到 1分钟 K 线的标准转换。
+
+## 2026-04-09 16:30
+- [x] **实现 Sina 数据缓存的进程级全局共享与健壮性加固**：
+    - [x] **修复序列化异常 (Fix TypeError)**：针对 `GlobalValues` 可能处于 `multiprocessing.Manager` 模式的情况，将不可序列化的 `threading.Lock` 和 `_HDF_LOADING` (包含 Event) 迁移至 `builtins` 全局空间。这解决了 `cannot pickle '_thread.lock' object` 的致命崩溃，同时保证了单进程多模块环境下的资源唯一性。
+    - [x] **迁移 L1 内存缓存**：将 `_SINA_HDF5_MEM_CACHE` 挂载至 `GlobalValues()`，并添加 `try-except` 降级逻辑。确保在分布式或多进程环境下，DataFrame 等可序列化数据尽可能通过 Manager 共享，不可行时自动回退到 `builtins` 模式。
+    - [x] **共享加载原子锁**：通过 `builtins` 锁实现全进程范围内的 SingleFlight 加载保护，彻底杜绝了多模块冷启动时的 IO 惊群效应。

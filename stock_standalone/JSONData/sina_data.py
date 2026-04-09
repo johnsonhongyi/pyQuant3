@@ -243,14 +243,20 @@ class StockCode:
 
 # -*- encoding: utf-8 -*-
 all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
-
-# ⚡ [GLOBAL CACHE] 本进程全局缓存，加速 Sina 跨实例访问 (1.2)
-_SINA_HDF5_MEM_CACHE: Dict[str, Dict[str, Any]] = {}
-_HDF_LOAD_LOCK = threading.Lock()  # ⚡ [NEW] 全局加载锁，防止并发重写 (1.3)
-_HDF_LOADING = {}  # ⚡ [NEW] 记录正在加载的任务，避免惊群效应 (1.3)
+# ⚡ [INTERNAL-GLOBAL] 进程级共享资源助手 (用于跨模块加载同步)
+import builtins
+def _get_shared_res(name, default_factory):
+    if not hasattr(builtins, name):
+        setattr(builtins, name, default_factory())
+    return getattr(builtins, name)
 
 class Sina:
     """新浪免费行情获取"""
+    # ⚡ [CORE-CACHE] 进程内跨模块路径唯一的共享资源，严格封装于 Sina 内部
+    _MEM_CACHE = _get_shared_res('_HG_SINA_HDF5_MEM_CACHE', dict)
+    _LOAD_LOCK = _get_shared_res('_HG_SINA_HDF5_LOAD_LOCK', threading.Lock)
+    _LOADING_ST = _get_shared_res('_HG_SINA_HDF5_LOADING', dict)
+
     grep_stock_detail: re.Pattern
     sina_stock_api: str
     stock_data: List[str]
@@ -408,11 +414,28 @@ class Sina:
         all_codes = self.stockcode.get_stock_codes()
         self.load_stock_codes(all_codes)
         time_s = time.time()
-        # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
-        # h5 = self._load_hdf_hist_unified(debug=False)
-        # h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
-        # 确保 sina_limit_time 是 int
+        
+        # 0. [INTERNAL CACHE CHECK] - 优先检查 Sina 类属性共享缓存
+        cache_key = f"Sina_all_snapshot_{self.hdf_name}_{self.table}"
         sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+        
+        cached_item = self._MEM_CACHE.get(cache_key)
+        if cached_item:
+            c_df = cached_item.get('df')
+            c_time = cached_item.get('time', 0)
+            if c_df is not None and not c_df.empty:
+                # 检查日期与时间鲜度
+                now_dt = pd.Timestamp.now()
+                # 简单粗暴检查：如果是非交易时段，或者交易时段内未过期，则返回
+                if not cct.get_work_time() or (time.time() - c_time < sina_limit_time_int):
+                    log.info(f"Sina.all: Returning class-level shared cache (Age: {time.time()-c_time:.1f}s)")
+                    return c_df
+
+        # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
+        # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
+        sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+        # [FIX] 严重性能问题：Sina.all 是抓取快照的，绝对不能使用 _load_hdf_hist_unified 去载入 172MB 的 MultiIndex 轨迹！
+        # 否则会导致 DataPublisher 每次都收到几百万行去遍历，瞬间撑爆内存。
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=None, limit_time=sina_limit_time_int)
         
         # 核心修正：如果请求包含关键指数（999999），但载入的缓存中缺失该代码，则强制执行实时抓取以同步 HDF5
@@ -644,6 +667,9 @@ class Sina:
                     self.agg_cache.setkey('last_mi_save_time', now_time)
                     log.info("Saved MultiIndex history (sync) to %s (len: %d)" % (h5_mi_fname, len(mi_df)))
 
+        # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存，加速进程内跨实例并发访问
+        cache_key = f"Sina_all_snapshot_{self.hdf_name}_{self.table}"
+        self._MEM_CACHE[cache_key] = {'df': df_final.copy(), 'time': time.time()}
         return df_final
 
     def _update_agg_cache(self, df_latest: pd.DataFrame,h5_hist: pd.DataFrame) -> None:
@@ -987,6 +1013,18 @@ class Sina:
             
             # 确保 sina_limit_time 是 int
             sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+            
+            # 0. [INTERNAL CACHE CHECK] - 优先检查 Sina 类属性共享缓存
+            cache_key = f"Sina_market_snapshot_{market}_{self.hdf_name}_{self.table}"
+            cached_item = self._MEM_CACHE.get(cache_key)
+            if cached_item:
+                c_df = cached_item.get('df')
+                c_time = cached_item.get('time', 0)
+                if c_df is not None and not c_df.empty:
+                    if not cct.get_work_time() or (time.time() - c_time < sina_limit_time_int):
+                        log.info(f"Sina.market({market}): Returning class-level shared cache (Age: {time.time()-c_time:.1f}s)")
+                        return c_df
+
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=sina_limit_time_int)
             log.info("h5a market: %s stocksTime:%0.2f" % (market, time.time() - time_s))
 
@@ -1046,7 +1084,10 @@ class Sina:
                 self.stock_list.append(request_list_final)
                 self.request_num = 1
             
-            return self._filter_suspended(self.get_stock_data())
+            df_res = self._filter_suspended(self.get_stock_data())
+            # [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存
+            self._MEM_CACHE[cache_key] = {'df': df_res.copy(), 'time': time.time()}
+            return df_res
 
 
     # https://github.com/jinrongxiaoe/easyquotation
@@ -2060,7 +2101,7 @@ class Sina:
         now_time = time.time()
 
         # 1. [Memory Cache Check] - 无锁快查
-        item = _SINA_HDF5_MEM_CACHE.get(table)
+        item = self._MEM_CACHE.get(table)
         if item and item.get('ready'):
             last_t = float(item.get('last_time', 0))
             if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
@@ -2069,21 +2110,21 @@ class Sina:
         # 2. [Concurrency Control] - 角色分配 (Loader vs Waiter)
         is_loader = False
         event = None
-        with _HDF_LOAD_LOCK:
+        with self._LOAD_LOCK:
             # 2.1 双检锁 (Double-check inside lock)
-            item = _SINA_HDF5_MEM_CACHE.get(table)
+            item = self._MEM_CACHE.get(table)
             if item and item.get('ready'):
                 last_t = float(item.get('last_time', 0))
                 if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
                     return item['df']
 
             # 2.2 确定角色
-            if table in _HDF_LOADING:
-                event = _HDF_LOADING[table]
+            if table in self._LOADING_ST:
+                event = self._LOADING_ST[table]
                 is_loader = False
             else:
                 event = threading.Event()
-                _HDF_LOADING[table] = event
+                self._LOADING_ST[table] = event
                 is_loader = True
 
         if not is_loader:
@@ -2094,7 +2135,7 @@ class Sina:
             event.wait(timeout=60)
             
             # 再次查内存，验证 Ready 标志
-            item = _SINA_HDF5_MEM_CACHE.get(table)
+            item = self._MEM_CACHE.get(table)
             if item and item.get('ready'):
                 return item['df']
             else:
@@ -2120,12 +2161,14 @@ class Sina:
                     h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
                 
                 if h5_hist is not None and not h5_hist.empty:
-                    self.agg_cache.setkey(cache_key_df, h5_hist)
+                    # [OPTIMIZE] 不再使用 agg_cache (GlobalValues) 持久化 172MB 的巨型数据，
+                    # 避免在 builtins 中产生双重引用导致无法 GC 内存暴涨。
+                    # 统一交由 _MEM_CACHE 和 limit_time 处理 L1 软缓存
                     self.agg_cache.setkey(cache_key_time, time.time())
             
             # ⚡ [1. CACHE WRITE] 先写缓存和 Ready 标志 (确保数据可见性)
             if h5_hist is not None and not h5_hist.empty:
-                _SINA_HDF5_MEM_CACHE[table] = {
+                self._MEM_CACHE[table] = {
                     'df': h5_hist, 
                     'last_time': time.time(),
                     'ready': True 
@@ -2136,14 +2179,33 @@ class Sina:
         finally:
             # ⚡ [2. STATE CLEANUP] 先清理加载状态，[3. SIGNAL] 最后唤醒 Waiters
             # 必须在 finally 中单次唤醒，确保 Waiters 醒来时 Loading 状态已同步清理
-            with _HDF_LOAD_LOCK:
-                if _HDF_LOADING.get(table) == event:
-                    del _HDF_LOADING[table]
+            with self._LOAD_LOCK:
+                if self._LOADING_ST.get(table) == event:
+                    del self._LOADING_ST[table]
             event.set() 
 
     def get_sina_MultiIndex_data(self):
         """兼容性包装：使用统一缓存获取 MultiIndex 数据"""
         return self._load_hdf_hist_unified()
+
+    def clear_unified_cache(self, table: str = None):
+        """
+        [OPTIMIZATION] 主动清理千万级行的 MultiIndex HDF5 内存缓存。
+        专为长时间运行的长驻 UI 进程设计，在回补历史数据完毕后应强制调用此方法释放 500MB+ 的 DataFrame，
+        以避免 Python 进程常驻内存偏高。
+        """
+        table_keys = [table] if table else list(self._MEM_CACHE.keys())
+        cleared_any = False
+        with self._LOAD_LOCK:
+            for k in table_keys:
+                if k in self._MEM_CACHE:
+                    del self._MEM_CACHE[k]
+                    cleared_any = True
+        
+        if cleared_any:
+            log.info(f"🧹 Sina._MEM_CACHE cleared for {table_keys}. Forcing GC...")
+            import gc
+            gc.collect()
 
     # def get_code_df_fast(h5_hist: pd.DataFrame, code: str, debug=False) -> pd.DataFrame:
     #     """
