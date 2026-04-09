@@ -436,22 +436,32 @@ class Sina:
                         # 🔥 取最大值（最新tick）
                         ticktime_val = valid_ticktimes.max()
 
+                        # -------- 情况0：已经是 Timestamp (Pandas 自动转换) --------
+                        if isinstance(ticktime_val, pd.Timestamp):
+                            last_dt = ticktime_val
+
                         # -------- 情况1：Unix时间戳 --------
-                        if isinstance(ticktime_val, (int, float)) and ticktime_val > 1e9:
+                        elif isinstance(ticktime_val, (int, float)) and ticktime_val > 1e9:
                             last_dt = pd.to_datetime(ticktime_val, unit='s')
 
-                        # -------- 情况2：完整日期字符串 --------
-                        elif isinstance(ticktime_val, str) and '-' in ticktime_val:
+                        # -------- 情况2：完整日期字符串 (包含日期的字符串) --------
+                        elif isinstance(ticktime_val, str) and ('-' in ticktime_val or '/' in ticktime_val):
                             last_dt = pd.to_datetime(ticktime_val)
 
                         # -------- 情况3：HH:MM:SS --------
                         else:
+                            # ⚡ [STALENESS-PROTECT] 此时极度危险，若丢掉日期，今天 11:40 运行，昨天 11:30 的数据会被误判为 10 分钟前
+                            # 方案：如果有 dt 列，先尝试结合 dt 列恢复完整日期
+                            dt_val = h5.loc[valid_ticktimes.idxmax(), 'dt'] if 'dt' in h5.columns else None
+                            
                             t = pd.to_datetime(str(ticktime_val)).time()
-                            last_dt = now_dt.replace(hour=t.hour, minute=t.minute, second=t.second)
-
-                            # 如果算出来在未来，说明是昨天的收盘tick
-                            if last_dt > now_dt:
-                                last_dt -= pd.Timedelta(days=1)
+                            if dt_val and isinstance(dt_val, str) and '-' in dt_val:
+                                last_dt = pd.to_datetime(f"{dt_val} {t}")
+                            else:
+                                # 彻底兜底：保留原逻辑但加强警惕
+                                last_dt = now_dt.replace(hour=t.hour, minute=t.minute, second=t.second)
+                                if last_dt > now_dt:
+                                    last_dt -= pd.Timedelta(days=1)
 
                         l_time = (now_dt - last_dt).total_seconds()
 
@@ -486,7 +496,19 @@ class Sina:
                     # 09:25–09:30 临近开盘 —— 再次锁回 HDF，避免无效抖动
                     pre_open_lock = 925 <= now_int < 930
                     # ===== 2️⃣ 常规 HDF 条件 =====
-                    normal_return_hdf = (not work_time_now) or (is_trade_day and l_time < sina_limit_time_int)
+                    # 🚀 [STALENESS-DOUBLE-CHECK] 即使 l_time 合格，也要深度交叉校验 data_date 覆盖度
+                    # 在交易时段内，如果缓存数据是昨天的，或者只有部分是今天的（比如之前只更新过子市场），也要强制更新
+                    # ⚡ [NEW] 不只看最高时间戳，还要看整体数据日期是否大多属于今日（95% 以上覆盖率）
+                    is_today_data = (last_dt.date() == now_dt.date())
+                    if is_today_data and work_time_now and 'dt' in h5.columns:
+                        today_str = now_dt.strftime('%Y-%m-%d')
+                        today_ratio = (h5['dt'] == today_str).mean()
+                        if today_ratio < 0.96:
+                             log.info(f"Sina.all: Cache freshness uneven (Today ratio: {today_ratio:.2%}), forcing full refresh.")
+                             is_today_data = False
+
+                    normal_return_hdf = (not work_time_now) or (is_trade_day and l_time < sina_limit_time_int and is_today_data)
+                    
                     # ===== 3️⃣ 最终是否直接返回 HDF =====
                     return_hdf_status = pre_open_force_hdf or pre_open_lock or normal_return_hdf
                     # ===== 4️⃣ 是否触发“早返回”逻辑 =====
@@ -548,8 +570,8 @@ class Sina:
                 df_final = self._rebuild_agg_cache(h5_hist, df)
             else:
                 self._update_agg_cache(df, h5_hist)
-                agg_data = self.agg_cache.getkey('agg_metrics')
-                df_final = cct.combine_dataFrame(df, agg_data)
+                # ⚡ [CORE-FIX] 交换参数顺序：让新数据 df 覆盖旧缓存 agg_data
+                df_final = cct.combine_dataFrame(agg_data, df)
 
             # 4. 补充列并持久化 snapshot (sina_data/all)
             df_final = self.combine_lastbuy(df_final)
@@ -983,12 +1005,26 @@ class Sina:
                     
                     ticktime = int(ts_str)
                     
-                    # o_time 校验
+                    # o_time 校验 (增强版：同时校验日期是否匹配今日)
                     o_time_df = h5[h5.timel != 0].timel
                     if not o_time_df.empty:
                         o_time_val = o_time_df.iloc[0]
                         o_time_int = self.get_int_time(o_time_val)
-                        if ((o_time_int >= 1500 and ticktime >= 1500) or (o_time_int < 1500 and ticktime < 1500)):
+                        
+                        # 🚦 增加日期一致性判定：如果是交易日且是早盘，缓存日期不对则绝对不返回
+                        now_dt = pd.Timestamp.now()
+                        today_str = now_dt.strftime('%Y-%m-%d')
+                        is_trade_day = cct.get_trade_date_status()
+                        valid_date = True
+                        if is_trade_day and work_time_now:
+                            if 'dt' in h5.columns:
+                                # 对于单一市场，可以要求更高的今日占比 (99%+)
+                                today_ratio = (h5['dt'] == today_str).mean()
+                                if today_ratio < 0.99:
+                                    valid_date = False
+                                    log.info(f"Sina.market({market}): Stale date detected in cache (Ratio: {today_ratio:.2%}), ignoring HDF.")
+                        
+                        if valid_date and ((o_time_int >= 1500 and ticktime >= 1500) or (o_time_int < 1500 and ticktime < 1500)):
                             h5 = self.combine_lastbuy(h5)
                             return self._filter_suspended(h5)
 
@@ -1062,8 +1098,8 @@ class Sina:
             # 此时内存缓存已由 _rebuild_agg_cache 设置好
         else:
             if self.market_type != 'all':
-                # ⚡ [PERF_PATH] 子市场请求极速路径：直接复用共享内存，严禁扫盘 HDF5
-                df_final = cct.combine_dataFrame(df, agg_data)
+                # ⚡ [CORE-FIX] 交换参数顺序：让新数据 df 覆盖旧缓存 agg_data
+                df_final = cct.combine_dataFrame(agg_data, df)
                 if 'nhigh' not in df_final.columns:
                     df_final['nhigh'] = df_final['close']
                 if 'nclose' not in df_final.columns:
@@ -1075,9 +1111,10 @@ class Sina:
                 h5_mi_table = 'all_' + str(l_limit_time)
                 # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
                 h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
-                self._update_agg_cache(df,h5_hist)
+                self._update_agg_cache(df, h5_hist)
                 agg_data = self.agg_cache.getkey('agg_metrics')
-                df_final = cct.combine_dataFrame(df, agg_data)
+                # ⚡ [CORE-FIX] 交换参数顺序：让新数据 df 覆盖旧缓存 agg_data
+                df_final = cct.combine_dataFrame(agg_data, df)
                 if 'nhigh' not in df_final.columns:
                     df_final['nhigh'] = df_final['close']
                 if 'nclose' not in df_final.columns:
@@ -2505,7 +2542,7 @@ if __name__ == "__main__":
     # df = sina.get_stock_code_data('999999',index=True)
     print(f'index: {df}')
     code='603056'
-    code='920082'
+    code='300058'
     # dd = sina.get_real_time_tick('300376')
     dd = sina.get_real_time_tick(code)
     dde = sina.get_real_time_tick(code, enrich_data=True)

@@ -1636,6 +1636,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_sbc_replay.clicked.connect(lambda: self._run_sbc_test(False))
         bar_lay_2.addWidget(self.btn_sbc_replay)
 
+        # [REPOSITIONED] 重置今日按钮移动至此处，减少误触风险
+        self.btn_reset_today = QPushButton("🔄 重置今日")
+        self.btn_reset_today.setFixedWidth(85)
+        self.btn_reset_today.setStyleSheet("background-color: #3d0000; color: #ff6060; font-weight: bold; border: 1.5px solid #ff4444; border-radius: 4px;")
+        self.btn_reset_today.setToolTip("⚠️ 清除全部历史缓存(重点表/评分/锚点)，强制从零开始采集（不可撤销）")
+        self.btn_reset_today.clicked.connect(self._on_reset_today_clicked)
+        bar_lay_2.addWidget(self.btn_reset_today)
+
         bar_lay_2.addWidget(self._sep())
 
         self.status_lbl = QLabel("等待数据...")
@@ -3049,16 +3057,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     c_item.setData(Qt.ItemDataRole.UserRole + 2, False)
                     c_item.setData(Qt.ItemDataRole.UserRole + 10, "")
 
-            # [NEW] 存入核心元数据：板块追溯标记及匹配代码
-            c_item = self.watchlist_table.item(i, 0)
-            if c_item:
-                if w.get('_is_sector_entry'):
-                    c_item.setData(Qt.ItemDataRole.UserRole + 2, True)
-                    c_item.setData(Qt.ItemDataRole.UserRole + 10, w.get('_match_code', ''))
-                else:
-                    c_item.setData(Qt.ItemDataRole.UserRole + 2, False)
-                    c_item.setData(Qt.ItemDataRole.UserRole + 10, "")
-
             if w['code'] == selected_code:
                 target_row = i
 
@@ -3812,6 +3810,52 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         # 触发重点表标题刷新
         self._populate_watchlist()
+
+    def _on_reset_today_clicked(self):
+        """
+        [NEW] 手动重置今日数据：清除所有历史缓存/看板，强制从零开始采集。
+        用于解决重启后昨日数据污染问题，无需重启程序。
+        """
+        import datetime as _dt
+        reply = QMessageBox.warning(
+            self,
+            "⚠️ 确认重置",
+            "此操作将清除当前所有监控数据（重点表、板块评分、个股评分），\n"
+            "让今日监控从零开始重新采集。\n\n"
+            "❗ 操作不可撤销，确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            now_dt = _dt.datetime.now()
+            # 1. 调用 detector 的统一重置方法
+            self.detector._reset_daily_state(now_dt)
+            # 2. 同步更新 _last_data_date 为今日，防止 _check_day_switch 再触发
+            self.detector._last_data_date = now_dt.strftime('%Y-%m-%d')
+            # 3. 确保退出历史模式
+            if self._is_history_mode:
+                self._is_history_mode = False
+                self.detector.in_history_mode = False
+                self.btn_live.setVisible(False)
+                self.btn_history.setStyleSheet("")
+            # 4. 重置搜索状态
+            self._active_search_query = ""
+            self._is_leader_search_mode = False
+            # 5. 全量刷新 UI
+            self.manual_refresh()
+            self._populate_watchlist(reset_to_top=True)
+            # 6. 更新状态栏
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🔄 已重置！正在重新采集今日数据...")
+                self.status_lbl.setStyleSheet("color: #ff9900; font-weight: bold;")
+            logger.info("[Panel] 用户手动触发今日数据重置，所有历史缓存已清除。")
+        except Exception as e:
+            logger.error(f"[Panel] 重置今日数据失败: {e}")
+            QMessageBox.critical(self, "重置失败", f"操作出错：{e}")
+
 
     def _locate_sector(self, sector_name: str):
         """在左侧板块表中找到并滚动到指定的板块"""
