@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 from collections import deque, defaultdict
-from typing import Any, Optional, cast
+from typing import Any, Optional, cast, List
 from collections.abc import Callable
 import psutil
 import os
@@ -69,9 +69,9 @@ class MinuteKlineCache:
     _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
     simulation_mode: bool
 
-    def __init__(self, max_len: int = 240, simulation_mode: bool = False, verbose: bool = False):
+    def __init__(self, max_len: int = 200, simulation_mode: bool = False, verbose: bool = False):
         self._max_len = max_len
-        self._slack = 20  # [NEW] 裁切缓冲区，避免频繁触发切片操作
+        self._slack = 61  # [OPTIMIZED] 满 261 裁切到 200，减少频繁 del 操作带来的性能波动
         self.simulation_mode = simulation_mode
         self.verbose = verbose
         self._shared_cache: dict[str, list[KLineItem]] = {} # code -> list[KLineItem]
@@ -79,72 +79,94 @@ class MinuteKlineCache:
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
         self._supplemented_codes = set()
+        self._bidding_pruned_today = {} # {code: date_str} 记录今日已清理竞价数据的日期
         # [NEW] 限频日志计数器
         self._day_log_cycle_count = 0  # 今日已打印异常的周期数
         self._last_log_date = ""        # 上次打印日志的日期
+        self._lock = threading.Lock() # 真正的锁
         
     def __len__(self) -> int:
         return len(self._shared_cache)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
-        转换为 DataFrame (用于外部分析或持久化)
-        增加了最终去重检查以确保数据完整性
+        [OPTIMIZED] 极限性能版：直接从内存对象提取 NumPy 数组，避免 dict 中转和百万次 Python 循环。
         """
-        data: list[dict[str, Any]] = []
-        for code, dq in self._shared_cache.items():
-            # 强制标准化 code
-            code_clean = str(code).strip().zfill(6)
-            for item in dq:
-                # 显式构造字典以提升在数百万行数据时的速度
-                data.append({
-                    'time': item.time,
-                    'open': item.open,
-                    'high': item.high,
-                    'low': item.low,
-                    'close': item.close,
-                    'volume': item.volume,
-                    'cum_vol_start': item.cum_vol_start,
-                    'code': code_clean
-                })
+        import numpy as np
         
-        if not data:
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(data)
-        if df.empty:
-            return df
+        with self._lock:
+            # 1. 快速统计总量
+            total_nodes = sum(len(dq) for dq in self._shared_cache.values())
+            if total_nodes == 0:
+                return pd.DataFrame()
+                
+            # 2. 预分配 NumPy 数组
+            codes = np.empty(total_nodes, dtype='U10')
+            times = np.empty(total_nodes, dtype='int64')
+            opens = np.empty(total_nodes, dtype='float32')
+            highs = np.empty(total_nodes, dtype='float32')
+            lows = np.empty(total_nodes, dtype='float32')
+            closes = np.empty(total_nodes, dtype='float32')
+            vols = np.empty(total_nodes, dtype='float32')
+            cums = np.empty(total_nodes, dtype='float32')
             
-        # 强制转换类型并补齐 6 位代码
-        df['time'] = df['time'].astype(int)
-        df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
+            # 3. 核心循环：批量填充
+            curr_idx = 0
+            for code, dq in self._shared_cache.items():
+                n = len(dq)
+                if n == 0: continue
+                
+                end_idx = curr_idx + n
+                codes[curr_idx:end_idx] = code
+                
+                # [PERF] list comprehension 在 deque 上速度尚可
+                times[curr_idx:end_idx] = [k.time for k in dq]
+                opens[curr_idx:end_idx] = [k.open for k in dq]
+                highs[curr_idx:end_idx] = [k.high for k in dq]
+                lows[curr_idx:end_idx] = [k.low for k in dq]
+                closes[curr_idx:end_idx] = [k.close for k in dq]
+                vols[curr_idx:end_idx] = [k.volume for k in dq]
+                cums[curr_idx:end_idx] = [k.cum_vol_start for k in dq]
+                
+                curr_idx = end_idx
+            
+        return pd.DataFrame({
+            'code': codes, 'time': times, 'open': opens, 'high': highs,
+            'low': lows, 'close': closes, 'volume': vols, 'cum_vol_start': cums
+        })
         
-        # 仅保留排序和去重防线：确保返回的 DF 绝对没有重复的 (code, time)
-        df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
-        return df
-
-    def count_gaps(self, threshold: int = 200) -> dict[str, int]:
+    def count_gaps(self, threshold: int = 200, active_codes: Optional[set[str]] = None) -> dict[str, int]:
         """
         统计数据完整性：返回低于 threshold 个 tick 的 ticker 数量及详情
+        active_codes: 当前活跃的代码集合 (如来自最新行情快照)，若传入则包含 cache 中完全缺失的代码
         """
         low_tick_codes = {}
-        for code, dq in self._shared_cache.items():
-            count = len(dq)
-            if 0 < count < threshold:
-                low_tick_codes[code] = count
+        with self._lock:
+            # 1. 遍历已有缓存
+            for code, dq in self._shared_cache.items():
+                count = len(dq)
+                if count < threshold:
+                    low_tick_codes[code] = count
+            
+            # 2. 检查活跃但完全缺失的代码
+            if active_codes:
+                for code in active_codes:
+                    if code not in self._shared_cache or not self._shared_cache[code]:
+                        low_tick_codes[code] = 0
         
-        if low_tick_codes:
-            logger.info(f"📊 [DataHub] Found {len(low_tick_codes)} stocks with insufficient history (< {threshold} ticks).")
         return low_tick_codes
 
     def prune_stale_stocks(self, max_idle_days: int = 3):
         """
         [NEW] 24/7 内存管理：清理超过 N 天未更新的陈旧个股，防止内存字典无限膨胀
         """
+        if self.simulation_mode:
+            return
+
         now_ts = time.time()
         max_idle_seconds = max_idle_days * 86400
         
-        with threading.Lock(): # 简单粗暴的锁保护
+        with self._lock:  # [FIX] 使用正确的类成员锁
             stale_codes = [
                 code for code, last_ts in self._last_update_ts.items() 
                 if now_ts - last_ts > max_idle_seconds
@@ -183,18 +205,33 @@ class MinuteKlineCache:
 
             # time 规范化
             if 'time' in cols:
-                # [SAFETY] 确保 time 是 float/int 类型的时间戳
+                # [SAFETY] 确保 time 是 float/int 类型的时间戳 (修正混合类型下的解析偏差)
                 if not pd.api.types.is_numeric_dtype(df['time']):
                     try:
-                        # 尝试将 datetime 转换为 Unix 时间戳
-                        dt_temp = pd.to_datetime(df['time'])
-                        if dt_temp.dt.tz is None:
-                            df['time'] = dt_temp.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
-                        else:
-                            df['time'] = dt_temp.dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
-                    except:
-                        pass
+                        # 核心修复：针对混合类型 (int/float 和 datetime)，分别处理
+                        # 避免 pd.to_datetime 将 Unix 秒级时间戳误认为 nanoseconds (导致日期变成 1970年)
+                        
+                        # 1. 尝试识别已经是数字的部分
+                        df['time_numeric'] = pd.to_numeric(df['time'], errors='coerce')
+                        mask_is_num = df['time_numeric'].notna()
+                        
+                        # 2. 识别需要转换的部分 (如 datetime 对象或字符串)
+                        if (~mask_is_num).any():
+                            target_rows = df[~mask_is_num]
+                            dt_temp = pd.to_datetime(target_rows['time'], errors='coerce')
+                            # 转换为 Unix 秒
+                            if dt_temp.dt.tz is None:
+                                ts_series = dt_temp.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                            else:
+                                ts_series = dt_temp.dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
+                            df.loc[~mask_is_num, 'time_numeric'] = ts_series
+                        
+                        df['time'] = df['time_numeric']
+                        # 下面两行由于是 copy 操作后的子集 df，无需 drop 以提升性能，后续只取 avail_cols
+                    except Exception as e:
+                        logger.warning(f"⚠️ MinuteKlineCache time conversion error: {e}")
                 
+                # 重新转换为 int64 排列
                 times_arr = df['time'].values.astype('int64') # 升级为 int64 防止溢出
                 
                 # --- [FIX] 全向量化时间准入判定 ---
@@ -260,7 +297,6 @@ class MinuteKlineCache:
                 s_idx, e_idx = boundaries[i], boundaries[i+1]
                 code = str(codes[s_idx])
                 
-                # Slicing creates lightweight views in NumPy
                 kl_list = [
                     KLineItem(t, o, h, l, cl, v, cv)
                     for t, o, h, l, cl, v, cv in zip(
@@ -274,9 +310,29 @@ class MinuteKlineCache:
                     )
                 ]
                 
-                if len(kl_list) > max_len:
-                    kl_list = kl_list[-max_len:]
-                shared_cache[code] = kl_list
+                with self._lock: # 使用成员锁保护合并过程
+                    if merge and code in shared_cache:
+                        existing = shared_cache[code]
+                        if existing:
+                            # [REFINED] 深度补齐逻辑：全量时间轴合并
+                            exist_times = {k.time for k in existing}
+                            new_items = [k for k in kl_list if k.time not in exist_times]
+                            
+                            if new_items:
+                                # 3. 合并并重排序 (保持 KLineItem 对象引用)
+                                combined = sorted(new_items + existing, key=lambda x: x.time)
+                                # 4. 严格裁切至 max_len
+                                if len(combined) > max_len:
+                                    combined = combined[-max_len:]
+                                shared_cache[code] = combined
+                        else:
+                            # 缓存为空但 code 已在 dict 中 (很少见)，直接赋值
+                            shared_cache[code] = kl_list[-max_len:] if len(kl_list) > max_len else kl_list
+                    else:
+                        # 全量覆盖或新个股
+                        if len(kl_list) > max_len:
+                            kl_list = kl_list[-max_len:]
+                        shared_cache[code] = kl_list
 
             self._is_dirty = True
             self._is_restored = True
@@ -305,27 +361,31 @@ class MinuteKlineCache:
 
     def set_mode(self, max_len: int):
         """动态切换回溯时长：不清除数据，仅裁剪旧节点以回收内存"""
-        if self._max_len != max_len:
-            logger.info(f"✂️ MinuteKlineCache Trimming: {self._max_len} -> {max_len} nodes")
-            self._max_len = max_len
-            # 对所有现有数据进行批量裁切
-            for code in self._shared_cache:
-                klines = self._shared_cache[code]
-                if len(klines) > max_len:
-                    self._shared_cache[code] = klines[-max_len:]
+        with self._lock:
+            if self._max_len != max_len:
+                logger.info(f"✂️ MinuteKlineCache Trimming: {self._max_len} -> {max_len} nodes")
+                self._max_len = max_len
+                # 对所有现有数据进行批量裁切
+                for code in self._shared_cache.keys():
+                    klines = self._shared_cache[code]
+                    if len(klines) > max_len:
+                        self._shared_cache[code] = klines[-max_len:]
 
     def clear(self):
         """完全清空缓存"""
-        self._shared_cache.clear()
-        self._last_update_ts.clear()
-        self._is_dirty = False
+        with self._lock:
+            self._shared_cache.clear()
+            self._last_update_ts.clear()
+            self._is_dirty = False
+            self._bidding_pruned_today.clear()
 
     def get_klines(self, code: str, n: int = 60) -> list[dict[str, Any]]:
-        if code not in self._shared_cache:
-            return []
-        nodes = self._shared_cache[code][-n:]
-        # Support dict-based access for existing strategy code
-        return [node.as_dict() for node in nodes]
+        with self._lock:
+            if code not in self._shared_cache:
+                return []
+            nodes = self._shared_cache[code][-n:]
+            # Support dict-based access for existing strategy code
+            return [node.as_dict() for node in nodes]
 
     def update_batch(self, df: Optional[pd.DataFrame], subscribers: dict[str, list[Callable[..., Any]]]):
         """
@@ -550,136 +610,139 @@ class MinuteKlineCache:
         原子化更新 K 线 (纯净增量逻辑)
         hhmm: 当前时段，用于支持竞价时段 (9:30以前) 的成交量回退容错
         """
-        if code not in self._shared_cache:
-            self._shared_cache[code] = []
-        klines = self._shared_cache[code]
-        
-        # [NEW] 情绪数据清理 (9:30 自动剔除模拟竞价数据)
-        # 用户反馈：9:30 以后 9:15-9:24 就只是情绪数据，会干扰均线判断逻辑，应予以清理。
-        if hhmm is not None and hhmm >= 930 and klines:
-             has_bidding = False
-             curr_dt = datetime.fromtimestamp(minute_ts)
-             for k in klines:
-                 k_dt = datetime.fromtimestamp(k.time)
-                 if k_dt.date() == curr_dt.date():
-                     k_hhmm = k_dt.hour * 100 + k_dt.minute
-                     # 9:25 是真实的集合竞价，保留；清理 9:15-9:24 及可能的 9:26-9:29 模拟数据
-                     if 915 <= k_hhmm < 930 and k_hhmm != 925:
-                         has_bidding = True
-                         break
-             
-             if has_bidding:
-                 self._shared_cache[code] = [k for k in klines if not (
-                     datetime.fromtimestamp(k.time).date() == curr_dt.date() and 
-                     915 <= (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) < 930 and
-                     (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) != 925
-                 )]
-                 klines = self._shared_cache[code]
-                 # logger.debug(f"🧹 [{code}] Bidding sentiment bars (Pre-9:30) pruned at {hhmm} to avoid MA interference.")
-                 self._is_dirty = True
+        with self._lock:  # [LOCK UP] 锁覆盖范围扩展至全函数，确保 list 操作绝对安全
+            if code not in self._shared_cache:
+                self._shared_cache[code] = []
+            klines = self._shared_cache[code]
+            
+            # 1. 情绪数据清理 (9:30 自动剔除模拟竞价数据)
+            if hhmm is not None and hhmm >= 930 and klines:
+                 curr_dt = datetime.fromtimestamp(minute_ts)
+                 today_str = curr_dt.strftime('%Y%m%d')
+                 
+                 # 性能优化：只有在今日尚未清理过时才进行扫描
+                 if self._bidding_pruned_today.get(code) != today_str:
+                      has_bidding = False
+                      for k in klines:
+                          k_dt = datetime.fromtimestamp(k.time)
+                          if k_dt.date() == curr_dt.date():
+                              k_hhmm = k_dt.hour * 100 + k_dt.minute
+                              # 9:25 是真实的集合竞价，保留；清理 9:15-9:24 模拟数据
+                              if 915 <= k_hhmm < 930 and k_hhmm != 925:
+                                  has_bidding = True
+                                  break
+                      
+                      if has_bidding:
+                           # 执行清理
+                           self._shared_cache[code] = [k for k in klines if not (
+                               datetime.fromtimestamp(k.time).date() == curr_dt.date() and 
+                               915 <= (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) < 930 and
+                               (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) != 925
+                           )]
+                           klines = self._shared_cache[code]
+                           self._is_dirty = True
+                      
+                      # 标记今日已处理
+                      self._bidding_pruned_today[code] = today_str
 
-        # 1. 初始插入 or 跨天插入
-        is_new_day = False
-        if klines:
-            last_dt = datetime.fromtimestamp(klines[-1].time)
-            curr_dt = datetime.fromtimestamp(minute_ts)
-            if last_dt.date() != curr_dt.date():
-                is_new_day = True
+            # 2. 初始插入 or 跨天插入
+            is_new_day = False
+            if klines:
+                last_dt = datetime.fromtimestamp(klines[-1].time)
+                curr_dt = datetime.fromtimestamp(minute_ts)
+                if last_dt.date() != curr_dt.date():
+                    is_new_day = True
 
-        if not klines or is_new_day:
-            # [REFINED] 强化集合竞价成交量捕捉 (9:25 是第一根时，将全量成交记入 volume)
-            vol_for_first = current_cum_vol if (925 <= hhmm <= 931) else 0.0
-            klines.append(KLineItem(
-                time=minute_ts, open=price, high=price, low=price, close=price,
-                volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
-            ))
-            self._is_dirty = True
-            return
-
-        # 重要：清理后重新获取 last_k 引用，确保后续更新针对的是清理后的 K 线链条
-        last_k = klines[-1]
-
-        # [Daily Reset] 用户要求支持多日，不在此处重置
-
-        # 获取 hhmm (如果未传入) 作为容错
-        if hhmm is None:
-            seconds_from_midnight = (minute_ts + 28800) % 86400
-            mins_from_midnight = int(seconds_from_midnight // 60)
-            hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
-        
-        # [SELF-HEALING] 处理潜在的未来时间 Bar 污染
-        if last_k.time > time.time() + 300 and minute_ts < last_k.time:
-            logger.warning(f"🚨 [{code}] Future bar detected, pruning to recover.")
-            klines.pop()
-            if not klines:
+            if not klines or is_new_day:
+                # 强化集合竞价成交量捕捉
+                vol_for_first = current_cum_vol if (925 <= hhmm <= 931) else 0.0
                 klines.append(KLineItem(
                     time=minute_ts, open=price, high=price, low=price, close=price,
-                    volume=0.0, cum_vol_start=current_cum_vol
+                    volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
                 ))
                 self._is_dirty = True
                 return
+
+            # 获取 last_k 引用 (安全获取)
             last_k = klines[-1]
-        
-        # 2. 同一分钟更新
-        if last_k.time == minute_ts:
-            last_k.high = max(last_k.high, price)
-            last_k.low = min(last_k.low, price)
-            last_k.close = price
+
+            # 容错获取 hhmm
+            if hhmm is None:
+                seconds_from_midnight = (minute_ts + 28800) % 86400
+                mins_from_midnight = int(seconds_from_midnight // 60)
+                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
             
-            if current_cum_vol < last_k.cum_vol_start:
-                is_bidding = (hhmm < 930)
-                rollback_amount = last_k.cum_vol_start - current_cum_vol
-                limit_amt = last_k.cum_vol_start * 0.1 if is_bidding else 1000
+            # [SELF-HEALING] 处理潜在的未来时间 Bar 污染
+            if last_k.time > time.time() + 300 and minute_ts < last_k.time:
+                logger.warning(f"🚨 [{code}] Future bar detected, pruning to recover.")
+                klines.pop()
+                if not klines:
+                    klines.append(KLineItem(
+                        time=minute_ts, open=price, high=price, low=price, close=price,
+                        volume=0.0, cum_vol_start=current_cum_vol
+                    ))
+                    self._is_dirty = True
+                    return
+                last_k = klines[-1]
+            
+            # 3. 同一分钟更新
+            if last_k.time == minute_ts:
+                last_k.high = max(last_k.high, price)
+                last_k.low = min(last_k.low, price)
+                last_k.close = price
                 
-                if rollback_amount > limit_amt and rollback_amount > 1000:
-                    last_k.cum_vol_start = current_cum_vol
-                    last_k.volume = 0.0
-            else:
-                last_k.volume = current_cum_vol - last_k.cum_vol_start
-            self._is_dirty = True
-            
-        # 3. 开启新分钟
-        elif minute_ts > last_k.time:
-            last_hhmm = datetime.fromtimestamp(last_k.time).hour * 100 + datetime.fromtimestamp(last_k.time).minute
-            
-            # 补齐上一个 Bar 的最终成交量
-            if current_cum_vol >= last_k.cum_vol_start:
-                # [FIX] 9:25 -> 9:30 跨越特殊处理
-                # 9:25 的 Volume 在集合竞价结束时已固定。后续 9:30 的 Tick 不应再推高 9:25 的成交量。
-                if last_hhmm == 925 and hhmm >= 930:
-                    pass 
+                if current_cum_vol < last_k.cum_vol_start:
+                    is_bidding = (hhmm < 930)
+                    rollback_amount = last_k.cum_vol_start - current_cum_vol
+                    limit_amt = last_k.cum_vol_start * 0.1 if is_bidding else 1000
+                    
+                    if rollback_amount > limit_amt and rollback_amount > 1000:
+                        last_k.cum_vol_start = current_cum_vol
+                        last_k.volume = 0.0
                 else:
                     last_k.volume = current_cum_vol - last_k.cum_vol_start
-            
-            # [FIX] 确定新分钟的起始累积成交量
-            # 正常情况下是当前 Tick 的累积量，但跨越 gap 时应以上一个 Bar 的终点为起点
-            new_cum_vol_start = current_cum_vol
-            if last_hhmm == 925 and hhmm >= 930:
-                new_cum_vol_start = last_k.cum_vol_start + last_k.volume
-            
-            # 插入新分钟起始数据
-            # 如果当前 Tick 已有超出 new_cum_vol_start 的增量，直接计入 volume
-            new_vol = 0.0
-            if current_cum_vol > new_cum_vol_start:
-                new_vol = current_cum_vol - new_cum_vol_start
-
-            klines.append(KLineItem(
-                time=minute_ts, open=price, high=price, low=price, close=price,
-                volume=new_vol,
-                cum_vol_start=new_cum_vol_start
-            ))
-            
-            # [REFINED] 平滑裁切逻辑：超过 max_len + slack 时一次性批量删除
-            # 避免 list 被频繁执行 O(N) 的 pop(0)
-            if len(klines) > self._max_len + self._slack:
-                # 裁切掉最早的 _slack 根 K 线
-                # 例如 max_len=240, slack=20, 长度到 261 时，裁切掉前 20 根变成 241 根
-                klines[:self._slack] = []
+                self._is_dirty = True
                 
-            self._is_dirty = True
-        else:
-            # 忽略过时数据
-            pass
+            # 4. 开启新分钟
+            elif minute_ts > last_k.time:
+                last_hhmm = datetime.fromtimestamp(last_k.time).hour * 100 + datetime.fromtimestamp(last_k.time).minute
+                
+                # 补齐上一个 Bar 的最终成交量
+                if current_cum_vol >= last_k.cum_vol_start:
+                    if not (last_hhmm == 925 and hhmm >= 930):
+                        last_k.volume = current_cum_vol - last_k.cum_vol_start
+                
+                # 确定新分钟的起始累积成交量
+                new_cum_vol_start = current_cum_vol
+                if last_hhmm == 925 and hhmm >= 930:
+                    new_cum_vol_start = last_k.cum_vol_start + last_k.volume
+                
+                # 插入新分钟起始数据
+                new_vol = 0.0
+                if current_cum_vol > new_cum_vol_start:
+                    new_vol = current_cum_vol - new_cum_vol_start
+
+                klines.append(KLineItem(
+                    time=minute_ts, open=price, high=price, low=price, close=price,
+                    volume=new_vol,
+                    cum_vol_start=new_cum_vol_start
+                ))
+                
+                # [FIXED & SAFETY] 裁切逻辑纠偏：
+                # 显式 del 头部数据，绝对保护尾部最新数据。同时增加 len 校验防止误删。
+                curr_len = len(klines)
+                if curr_len > self._max_len + self._slack:
+                    num_to_trim = curr_len - self._max_len
+                    if num_to_trim > 0:
+                        # 确保不由于负索引导致逻辑错误，del klines[:n] 移除最旧的 n 个
+                        del klines[:num_to_trim]
+                    
+                self._is_dirty = True
+            else:
+                # 忽略过时数据，且进行最后一次确认防止由于时钟回拨误判
+                if last_k.time - minute_ts > 86400: # 跨天级别脏数据
+                    logger.debug(f"Ignore stale data for {code}: tick_t={minute_ts}, last_t={last_k.time}")
+                pass
 
     def _supplemental_fetch(self, code: str):
         """
@@ -1716,19 +1779,19 @@ class DataPublisher:
                  enable_backup: bool = False, validation_mode: bool = False,
                  simulation_mode: bool = False, verbose: bool = False):
         self.paused = False
-        self.high_performance = high_performance
+        self.high_performance = True  # 强制高性能
         self.simulation_mode = simulation_mode
         self.verbose = verbose
         self._save_lock = threading.Lock()
         # 核心缓存组件 (传递 verbose)
         self.kline_cache = MinuteKlineCache(
-            max_len=240 if high_performance else 1440,
+            max_len=200, # 极限性能模式：满 261 裁切至 200，减少 CPU 抖动
             simulation_mode=simulation_mode,
             verbose=verbose
         )
-        self.auto_switch_enabled = True
-        self.mem_threshold_mb = cct.threshold_mb # 阈值调低初始值至 1200MB
-        self.node_threshold = 1000000 # 默认 100万个节点触发降级
+        self.auto_switch_enabled = True # 开启自动降级/清理
+        self.mem_threshold_mb = 1600  # 1.6GB 阈值
+        self.node_threshold = 1000000 # 100万节点阈值
         # =========================
         # Persistent Cache Settings
         # =========================
@@ -1743,6 +1806,11 @@ class DataPublisher:
                 logger=logger,
             )
         self._last_save_fp = "" # 上次保存数据的指纹
+        
+        # Sector Persistence Settings
+        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concept_pg_data.db")
+        self.sector_cache = {} # {name: score}
+        self.last_db_check = 0.0
         self._last_batch_fp = "" # 上次批次数据的指纹
         self._last_save_status = "N/A" # 上次保存状态
         self._last_update_date: Optional[str] = None # 最近处理的数据日期 (YYYY-MM-DD)
@@ -1763,9 +1831,9 @@ class DataPublisher:
         self.last_db_check = 0.0
 
         # Time-based goals (Hours)
-        # [MODIFIED] Increased from 4.0 to 20.0 to support 5 days of multi-day analysis
-        self.TARGET_HOURS_HP = 20.0
-        self.TARGET_HOURS_LEGACY = 4.0
+        # 恢复旧的性能模式：满 261 裁切到 200 (约 3.3 小时)
+        self.TARGET_HOURS_HP = 3.5
+        self.TARGET_HOURS_LEGACY = 3.3
 
         # Mode-based settings: Calculate max_len based on default 60s first
         default_interval = 60
@@ -1786,6 +1854,7 @@ class DataPublisher:
         self.last_batch_time = 0
         self.max_batch_time = 0.0
         self.batch_rates_dq = deque(maxlen=10) # Last 10 batch rates (rows/sec)
+        self.data_version = 0
         
         self._last_save_ts = self.start_time  # [FIX] Prevent immediate save on startup
 
@@ -1814,25 +1883,55 @@ class DataPublisher:
             # 则尝试从 sina_MultiIndex_data.h5 增量恢复。
             if not self.simulation_mode:
                 cached_df = self.cache_slot.load_df()
-                total_stocks = len(cached_df['code'].unique()) if not cached_df.empty else 0
-                if total_stocks < 2000:
-                    logger.info(f"📡 Snapshot deficient (Stocks: {total_stocks}), attempting recovery from HDF5...")
+                
+                # [REFINED] 强化缺失检查：不仅看股票总数，还需盘查今日活跃数据覆盖量
+                # 如果 PKL 中的分钟 K 线基本都是历史数据（今日节点太少），则强制从 HDF5 增量补回。
+                total_stocks = 0
+                today_nodes_count = 0
+                if not cached_df.empty:
+                    # 快速获取股票总数
+                    if 'code' in cached_df.columns:
+                        total_stocks = len(cached_df['code'].unique())
+                    
+                    # 采样检测今日数据密度 (使用 NumPy 向量化，不解析对象)
+                    if 'time' in cached_df.columns:
+                        try:
+                            ts_arr = pd.to_numeric(cached_df['time'], errors='coerce').values
+                            # UTC+8 0点日期值
+                            today_val = int((time.time() + 28800) // 86400)
+                            # 计算所有节点的日期并对比
+                            today_nodes_count = np.sum(((ts_arr + 28800) // 86400) == today_val)
+                        except:
+                            today_nodes_count = 0
+                
+                # 判定补回准则：
+                # 1. 股票总数不足 2000 (系统性缺失)
+                # 2. 或是处于盘中活跃期 (09:25后)，但今日数据节点不足 5000 (严重覆盖不足)
+                hhmm_now = int(datetime.now().strftime('%H%M'))
+                need_h5_recovery = (total_stocks < 2000)
+                if not need_h5_recovery and (920 <= hhmm_now <= 1515):
+                    if today_nodes_count < 5000:
+                        logger.info(f"📡 Snapshot lacks today's data ({today_nodes_count} nodes), triggering HDF5 backfill...")
+                        need_h5_recovery = True
+                
+                if need_h5_recovery:
+                    logger.info(f"📡 Attempting recovery from HDF5 (Total Stocks: {total_stocks}, Today Nodes: {today_nodes_count})...")
                     h5_df = self.recover_from_hdf5()
                     if not h5_df.empty:
                         if cached_df.empty:
                             cached_df = h5_df
                         else:
-                            # 合并：以 H5 为准，补全缺失股票
+                            # 合并：以 H5 为准，补全最新行情。注意：concat 必须保持 time 顺序，后续 from_dataframe 会重排
                             cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
                         new_total = len(cached_df['code'].unique())
-                        logger.info(f"✅ Recovery success. Total stocks now: {new_total}")
+                        logger.info(f"✅ Recovery success. Total stocks: {new_total}")
+
                 if not cached_df.empty:
                     with timed_ctx("from_dataframe_timed", warn_ms=5000):
                         self.kline_cache.from_dataframe(cached_df)
-                    # import ipdb;ipdb.set_trace()
-                    # df = klines_to_df(self.kline_cache.get_klines('300058',n=280))
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False
+                    self.data_version += 1
                 else:
                     logger.warning("ℹ️ No MinuteKlineCache found on disk or empty. Protection ACTIVE.")
                     self._is_recovered_empty = True
@@ -1904,24 +2003,19 @@ class DataPublisher:
             self.set_high_performance(self.high_performance)
 
     def set_high_performance(self, enabled: bool):
-        """动态切换回溯时长：基于目标小时数和抓取频率平衡内存"""
+        """动态切换回溯时长：基于目标小时数平衡内存"""
         self.high_performance = enabled
         target_h = self.TARGET_HOURS_HP if enabled else self.TARGET_HOURS_LEGACY
         
-        # 优先级：外部设定的频率 > 观测到的频率 > 60s
-        interval = self.expected_interval
-        if interval <= 0:
-            status = self.get_status()
-            interval = status.get('avg_interval_sec', 60)
-        
-        if interval <= 0: interval = 60
-        
-        # 4h @ 60s = 240, 4h @ 120s = 120
-        cache_len = int((target_h * 3600) / interval)
-        cache_len = max(60, cache_len) # 兜底最小 60
+        # [CRITICAL FIX] 缓存长度必须基于 1-minute 基准频率计算，而非当前的抓取频率。
+        # 即使采集间隔是 120s 或 300s，我们存储的依然是分时 Bar 序列，
+        # 如果基于 observed interval 下掉 max_len，会导致已有的高频历史数据被强行裁切。
+        base_interval = 60 
+        cache_len = int((target_h * 3600) / base_interval)
+        cache_len = max(240, cache_len) # 强制最小 4 小时 (240 根)
         
         self.kline_cache.set_mode(max_len=cache_len)
-        logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Interval: {interval}s | Limit: {cache_len}K")
+        logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Limit: {cache_len}K (Fixed Base 60s)")
 
     def set_auto_switch(self, enabled: bool, threshold_mb: float = 1600, node_limit: int = 1000000):
         """设置自动切换规则"""
@@ -1943,8 +2037,8 @@ class DataPublisher:
         self._last_batch_fp = ""
         self._time_source_logged = False
         
-        # 2. 清理陈旧 K 线缓存
-        self.kline_cache.prune_stale_stocks(max_idle_days=3)
+        # 2. 清理陈旧 K 线缓存 (恢复旧逻辑：1天未更新即视为陈旧)
+        self.kline_cache.prune_stale_stocks(max_idle_days=1)
         
         # 3. 重置情绪基准
         self.emotion_baseline = DailyEmotionBaseline(verbose=self.verbose)
@@ -2105,7 +2199,7 @@ class DataPublisher:
         
     def recover_from_hdf5(self) -> pd.DataFrame:
         """
-        从 sina_MultiIndex_data.h5 恢复当日 Tick 轨迹并转化为 K 线格式
+        从 sina_MultiIndex_data.h5 恢复当日 Tick 轨迹并转化为 K 线格式 (聚合版)
         """
         try:
             h5_fname = 'sina_MultiIndex_data'
@@ -2115,58 +2209,204 @@ class DataPublisher:
             
             logger.info(f"🔍 Reading HDF5: {h5_fname} table: {h5_table}")
             # 使用 tdx_hdf5_api 的统一接口读取
-            df_mi = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False,MultiIndex=True)
+            df_mi = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False, MultiIndex=True)
             if df_mi is None or df_mi.empty:
                 logger.warning("⚠️ HDF5 recovery source is empty.")
                 return pd.DataFrame()
             
-            # --- 结构转换：MultiIndex -> Flat DataFrame ---
-            # H5 结构通常是: Index=['code', 'ticktime'], Columns=['close', 'high', 'low', 'volume', ...]
+            # 1. 结构转换：MultiIndex -> Flat DataFrame
             df = df_mi.reset_index()
             
-            # 特殊处理：将 'ticktime' 字段转为 Unix 整数时间戳 'time'
+            # 2. 核心时间逻辑修复：解析 ticktime
             if 'ticktime' in df.columns:
-                # 兼容性处理：显式指定 Asia/Shanghai 时区，防止 pd.to_datetime 默认按 UTC 产生 8小时偏差
                 try:
                     if pd.api.types.is_datetime64_any_dtype(df['ticktime']):
                         # 如果是 datetime64，确保本地化到上海 (CST)
                         if df['ticktime'].dt.tz is None:
-                            df['time'] = df['ticktime'].dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                            df['dt_sh'] = df['ticktime'].dt.tz_localize('Asia/Shanghai', ambiguous='infer')
                         else:
-                            df['time'] = df['ticktime'].dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
+                            df['dt_sh'] = df['ticktime'].dt.tz_convert('Asia/Shanghai')
                     else:
-                        # 如果是 HH:MM:SS 字符串，拼接今日日期并强制本地化
-                        now_str = datetime.now().strftime('%Y-%m-%d')
-                        dt_series = pd.to_datetime(now_str + " " + df['ticktime'].astype(str))
-                        # 核心修复点：使用 tz_localize('Asia/Shanghai') 告知 pandas 这是北京时间
-                        # .view('int64') 会基于 1970-01-01 00:00:00 UTC 计算纳秒数，产生正确的 Unix Timestamp
-                        df['time'] = dt_series.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                        # 兼容处理：检查是否包含日期
+                        tick_str_sample = str(df['ticktime'].iloc[0])
+                        if len(tick_str_sample) < 10: # HH:MM:SS
+                            today_str = datetime.now().strftime('%Y-%m-%d')
+                            df['ticktime_full'] = today_str + " " + df['ticktime'].astype(str)
+                        else:
+                            df['ticktime_full'] = df['ticktime'].astype(str)
+                        
+                        df['dt_sh'] = pd.to_datetime(df['ticktime_full']).dt.tz_localize('Asia/Shanghai', ambiguous='infer')
+                    
+                    # 统一为 Unix Timestamp (秒)
+                    df['time_raw'] = df['dt_sh'].view('int64') // 10**9
                 except Exception as e:
                     logger.warning(f"⚠️ recover_from_hdf5 time conversion failed: {e}")
-                    if 'time' not in df.columns:
-                        df['time'] = time.time()
+                    if 'time_raw' not in df.columns:
+                        df['time_raw'] = time.time()
+                        df['dt_sh'] = pd.to_datetime(df['time_raw'], unit='s', utc=True).dt.tz_convert('Asia/Shanghai')
+            else:
+                if 'time_raw' not in df.columns: 
+                    df['time_raw'] = time.time()
+                df['dt_sh'] = pd.to_datetime(df['time_raw'], unit='s', utc=True).dt.tz_convert('Asia/Shanghai')
+
+            # 3. [CRITICAL] 聚合为 1 分钟 OHLCV K 线
+            # 理由：MinuteKlineCache 必须以分钟对齐，直接存原始 Tick (秒级) 会导致队列长度迅速耗尽
+            # 且会干扰 _update_internal 的分钟插入逻辑（秒级时间戳会阻碍分钟对齐的 update）
             
-            # 补齐 MinuteKlineCache 需要的字段
+            # 准备聚合列
             if 'close' in df.columns:
-                if 'open' not in df.columns: df['open'] = df['close']
-                if 'high' not in df.columns: df['high'] = df['close']
-                if 'low' not in df.columns: df['low'] = df['close']
+                for col in ['open', 'high', 'low']:
+                    if col not in df.columns: df[col] = df['close']
             
-            # 累计成交量处理 (H5 如果存的是分笔，这里需要聚合)
-            # 但实际上 sina_MultiIndex 存的是快照轨迹，可以直接使用
-            if 'volume' not in df.columns: df['volume'] = 0
-            df['cum_vol_start'] = 0 # 恢复时通常设为0，由后续 update 修正
+            # 设置分钟粒度锚点 (Floor to Minute)
+            df['minute'] = df['dt_sh'].dt.floor('min')
             
-            # 规范化列名
-            needed = ['code', 'time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start']
-            df = df[[c for c in needed if c in df.columns]]
+            # 执行聚合：注意 Sina HDF5 中的 volume 通常是当日累积成交量
+            # 使用 groupby().agg 提升大批量数据的处理速度
+            agg_groups = df.groupby(['code', 'minute'])
+            df_k = agg_groups.agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'max',   # 这里先取本分钟最大累积量
+            }).reset_index()
             
-            return df
+            # 4. 计算分钟增量成交量
+            df_k = df_k.sort_values(['code', 'minute'])
+            # cum_vol_prev 为本代码本分钟之前的最大累积量
+            df_k['cum_vol_prev'] = df_k.groupby('code')['volume'].shift(1).fillna(0)
+            # 分钟内的成交量 = 本分钟末累积量 - 上分钟末累积量
+            df_k['real_volume'] = (df_k['volume'] - df_k['cum_vol_prev']).clip(lower=0)
+            
+            # 5. 格式封装：映射回 MinuteKlineCache 约定的列名
+            df_res = pd.DataFrame()
+            df_res['code'] = df_k['code']
+            df_res['time'] = df_k['minute'].view('int64') // 10**9
+            df_res['open'] = df_k['open']
+            df_res['high'] = df_k['high']
+            df_res['low'] = df_k['low']
+            df_res['close'] = df_k['close']
+            df_res['volume'] = df_k['real_volume']   # 变成增量成交量
+            df_res['cum_vol_start'] = df_k['cum_vol_prev'] # 累积量起点
+            
+            logger.info(f"✅ HDF5 aggregated: {len(df_res)} minute-bars recovered from H5.")
+            return df_res
             
         except Exception as e:
             logger.error(f"❌ recover_from_hdf5 failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            return pd.DataFrame()
+
+    def backfill_gaps_from_hdf5(self, code_list: list[str]):
+        """
+        针对特定缺口个股执行精准补全 (离线 HDF5 路径)
+        """
+        if not code_list: return
+        
+        try:
+            # 1. 从 HDF5 抓取这些代码的历史全量
+            h5_df = self.recover_from_hdf5_by_codes(code_list)
+            if h5_df is not None and not h5_df.empty:
+                logger.debug(f"📡 Backfilling gaps for {len(code_list)} codes from HDF5...")
+                self.kline_cache.from_dataframe(h5_df, merge=True)
+                self.data_version += 1
+                
+            # [MEMORY OPTIMIZE] 强制清理刚刚被拉入内存的 1GB HDF5 轨迹，避免 TK UI 程序常驻内存暴涨
+            from JSONData import sina_data
+            sina_data.Sina().clear_unified_cache()
+            
+        except Exception as e:
+            logger.error(f"backfill_gaps error: {e}")
+
+    def recover_from_hdf5_by_codes(self, code_list: list[str]) -> pd.DataFrame:
+        """从 HDF5 精准恢复指定代码的数据"""
+        from JSONData import sina_data
+        sina = sina_data.Sina()
+        # 获取全量 MultiIndex 缓存数据 (已内部管理 SingleFlight 与 L6 缓存)
+        h5_mi = sina.get_sina_MultiIndex_data()
+        
+        if h5_mi is None or h5_mi.empty:
+            return pd.DataFrame()
+            
+        # 针对 code_list 执行高性能过滤
+        try:
+            if isinstance(h5_mi.index, pd.MultiIndex):
+                # 如果是 MultiIndex，针对 level 0 (code) 执行过滤
+                level0_codes = h5_mi.index.levels[0]
+                valid_codes = list(level0_codes.intersection(set(code_list)))
+                if valid_codes:
+                    df = h5_mi.loc[valid_codes]
+                else:
+                    return pd.DataFrame()
+            else:
+                # 兼容单索引
+                valid_codes = h5_mi.index.intersection(set(code_list))
+                if not valid_codes.empty:
+                    df = h5_mi.loc[valid_codes]
+                else:
+                    return pd.DataFrame()
+        except Exception as e:
+            # Fallback for safety
+            logger.warning(f"recover_from_hdf5_by_codes loc failed: {e}")
+            df = h5_mi[h5_mi.index.get_level_values(0).isin(code_list)]
+
+        if df.empty: return pd.DataFrame()
+        
+        # 复用聚合逻辑 (注意：agg 内部会处理 reset_index 后的 ticktime 列)
+        return self._aggregate_hdf5_df(df.reset_index())
+
+    def _aggregate_hdf5_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """内部工具：将 Tick 级 DataFrame 聚合为 K 线级"""
+        try:
+            if 'ticktime' not in df.columns: return pd.DataFrame()
+            
+            # 强化时间解析：处理混合格式
+            if not pd.api.types.is_datetime64_any_dtype(df['ticktime']):
+                sample = str(df['ticktime'].iloc[0])
+                if len(sample) < 10: # 只有 HH:MM:SS，说明缺失日期标签
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    df['ticktime'] = today_str + " " + df['ticktime'].astype(str)
+                # 如果长度 >= 10 (如 YYYY-MM-DD)，则保留原始信息交由 pd.to_datetime 处理
+            
+            df['dt_sh'] = pd.to_datetime(df['ticktime'], errors='coerce')
+            df = df.dropna(subset=['dt_sh'])
+            if df['dt_sh'].dt.tz is None:
+                df['dt_sh'] = df['dt_sh'].dt.tz_localize('Asia/Shanghai', ambiguous='infer')
+            else:
+                df['dt_sh'] = df['dt_sh'].dt.tz_convert('Asia/Shanghai')
+            
+            if 'close' in df.columns:
+                for col in ['open', 'high', 'low']:
+                    if col not in df.columns: df[col] = df['close']
+            
+            df['minute'] = df['dt_sh'].dt.floor('min')
+            agg_groups = df.groupby(['code', 'minute'])
+            df_k = agg_groups.agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'max',
+            }).reset_index()
+            
+            df_k['date'] = df_k['minute'].dt.date
+            df_k = df_k.sort_values(['code', 'minute'])
+            df_k['cum_vol_prev'] = df_k.groupby(['code', 'date'])['volume'].shift(1).fillna(0)
+            df_k['real_volume'] = (df_k['volume'] - df_k['cum_vol_prev']).clip(lower=0)
+            
+            df_res = pd.DataFrame()
+            df_res['code'] = df_k['code']
+            df_res['time'] = df_k['minute'].astype('int64') // 10**9
+            df_res['open'] = df_k['open']
+            df_res['high'] = df_k['high']
+            df_res['low'] = df_k['low']
+            df_res['close'] = df_k['close']
+            df_res['volume'] = df_k['real_volume']
+            df_res['cum_vol_start'] = df_k['cum_vol_prev']
+            return df_res
+        except:
             return pd.DataFrame()
 
     def register_names(self, df_or_dict: Any):
@@ -2346,15 +2586,34 @@ class DataPublisher:
                 # except Exception as dh_err:
                 #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
 
-                # [OPTIMIZED] Periodically log gap statistics - throttle to avoid log flood
+                # [REFINED] 强化间隙检测：包含 cache 中完全缺失但在当前 snapshot 活跃的代码
                 now_t = time.time()
                 if not hasattr(self, '_last_gap_log_t'): self._last_gap_log_t = 0
-                if now_t - self._last_gap_log_t > 300: # Every 5 minutes
-                    self.kline_cache.count_gaps(threshold=200)
+                
+                # [Optimization] 启动初期加速体检 (前10次批次每60秒一次，之后15分钟一次)
+                gap_interval = 60 if self.update_count < 10 else 900
+                if now_t - self._last_gap_log_t > gap_interval:
+                    # 获取当前 snapshot 中的所有代码，用于发现完全缺失的个股
+                    active_codes = set(df['code'].astype(str).str.strip().str.zfill(6).tolist()) if not df.empty else None
+                    
+                    # [REFINED] 间隙检测阈值动态适配：要求达到当前上限的 80%
+                    limit_len = self.kline_cache._max_len
+                    target_threshold = int(limit_len * 0.8)
+                    low_tick_codes = self.kline_cache.count_gaps(threshold=target_threshold, active_codes=active_codes)
                     self._last_gap_log_t = now_t
+                    
+                    if low_tick_codes:
+                        # 启动异步补全，防止阻塞主心跳
+                        codes_to_fix = list(low_tick_codes.keys())
+                        threading.Thread(
+                            target=self.backfill_gaps_from_hdf5,
+                            args=(codes_to_fix,),
+                            daemon=True
+                        ).start()
 
                 # Continue with existing pipeline...
                 self.update_count += 1
+                self.data_version += 1
                 
                 # 情绪与 KLine 更新
                 # [OPTIMIZED] Skip calculate_baseline if already done for TODAY
@@ -2369,7 +2628,6 @@ class DataPublisher:
                     self.kline_cache.update_batch(df, self.subscribers)
                 
                 # 3. 性能统计
-                self.update_count += 1
                 self.total_rows_processed += len(df)
                 t1 = time.time()
                 duration = t1 - t0
