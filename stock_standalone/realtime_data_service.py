@@ -137,6 +137,26 @@ class MinuteKlineCache:
             logger.info(f"📊 [DataHub] Found {len(low_tick_codes)} stocks with insufficient history (< {threshold} ticks).")
         return low_tick_codes
 
+    def prune_stale_stocks(self, max_idle_days: int = 3):
+        """
+        [NEW] 24/7 内存管理：清理超过 N 天未更新的陈旧个股，防止内存字典无限膨胀
+        """
+        now_ts = time.time()
+        max_idle_seconds = max_idle_days * 86400
+        
+        with threading.Lock(): # 简单粗暴的锁保护
+            stale_codes = [
+                code for code, last_ts in self._last_update_ts.items() 
+                if now_ts - last_ts > max_idle_seconds
+            ]
+            
+            if stale_codes:
+                logger.info(f"🧹 [MinuteKlineCache] Pruning {len(stale_codes)} stale stocks (idle > {max_idle_days} days)...")
+                for code in stale_codes:
+                    self._shared_cache.pop(code, None)
+                    self._last_update_ts.pop(code, None)
+                self._is_dirty = True
+
     def from_dataframe(self, df: Optional[pd.DataFrame], merge: bool = False):
         """
         从 DataFrame 恢复缓存数据（极限性能优化版：NumPy 边界探测 + zip 批量实例化）
@@ -163,7 +183,19 @@ class MinuteKlineCache:
 
             # time 规范化
             if 'time' in cols:
-                times_arr = df['time'].values.astype('int32')
+                # [SAFETY] 确保 time 是 float/int 类型的时间戳
+                if not pd.api.types.is_numeric_dtype(df['time']):
+                    try:
+                        # 尝试将 datetime 转换为 Unix 时间戳
+                        dt_temp = pd.to_datetime(df['time'])
+                        if dt_temp.dt.tz is None:
+                            df['time'] = dt_temp.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                        else:
+                            df['time'] = dt_temp.dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
+                    except:
+                        pass
+                
+                times_arr = df['time'].values.astype('int64') # 升级为 int64 防止溢出
                 
                 # --- [FIX] 全向量化时间准入判定 ---
                 # UTC+8 转换 (28800s)
@@ -1846,6 +1878,11 @@ class DataPublisher:
             return
             
         logger.info("🛑 DataPublisher stopping background tasks...")
+        # [NEW] 退出前强制保存快照，防止盘后最后一段数据丢失
+        try:
+            self.save_cache(force=True)
+        except:
+            pass
         self._stop_event.set()
         # 由于是 daemon 线程，此处无需 join 阻塞，让逻辑感知 event 后自然终结即可
 
@@ -1893,26 +1930,57 @@ class DataPublisher:
         self.node_threshold = node_limit
         logger.info(f"⚙️ Auto-Switch: enabled={enabled}, mem={threshold_mb}MB, nodes={node_limit}")
 
+    # ------------------------------------------------------------------ 维护与管理
+    def daily_reset(self):
+        """
+        [NEW] 每日重置：用于 24/7 连续运行时的状态初始化
+        """
+        logger.info("📅 [DataPublisher] Performing daily reset (24/7 Maintenance)...")
+        # 1. 重置统计指标
+        self.update_count = 0
+        self.total_rows_processed = 0
+        self.batch_rates_dq.clear()
+        self._last_batch_fp = ""
+        self._time_source_logged = False
+        
+        # 2. 清理陈旧 K 线缓存
+        self.kline_cache.prune_stale_stocks(max_idle_days=3)
+        
+        # 3. 重置情绪基准
+        self.emotion_baseline = DailyEmotionBaseline(verbose=self.verbose)
+        
+        # 4. 强制执行一次 GC
+        gc.collect()
+
     def _maintenance_task(self):
         """
-        后台维护任务：每 5 分钟检查一次内存和数据量
+        后台维护任务：支持 24/7 运行
+        交易时段：每 5 分钟检查一次
+        非交易时段：每 30 分钟检查一次
         """
+        last_reset_date = datetime.now().strftime("%Y-%m-%d")
+        
         while not self._stop_event.is_set():
-            # 使用 wait(timeout) 替代 time.sleep，可立即响应停止信号
-            if self._stop_event.wait(300):
-                break
-            
-            # [Added] 交易日 & 15:30 前限制 (遵循用户特定时段维护量产效率)
-            if not cct.get_trade_date_status():
-                continue
-            
+            # 通过 wait(timeout) 实现响应式休眠
             hhmm = int(datetime.now().strftime("%H%M"))
-            # 不执行策略的时间段：早于 9:45，午休，15:30 之后
-            if hhmm < 945 or (1130 <= hhmm < 1300) or hhmm >= 1600:
-                continue
+            is_active_period = (900 <= hhmm <= 1600)
+            
+            wait_time = 300 if is_active_period else 1800
+            if self._stop_event.wait(wait_time):
+                break
+                
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # --- 1. 跨日重置检查 ---
+            if today_str != last_reset_date:
+                # 在凌晨 00:00 - 08:30 之间执行一次重置
+                if 0 <= hhmm <= 850:
+                    self.daily_reset()
+                    last_reset_date = today_str
 
+            # --- 2. 周期性保存 ---
             try:
-                # 无论是否有新数据，都在维护线程检查并执行周期性保存
+                # [OPT] 在收盘后或非交易日，如果脏了就存一次，没脏不强制存
                 self.save_cache(force=False)
                 
                 status = self.get_status()
@@ -1922,6 +1990,7 @@ class DataPublisher:
                 # 自动降级逻辑 (内存超限 或 节点数超限)
                 reason = ""
                 if self.auto_switch_enabled and self.high_performance:
+                    # 仅在活跃时段才可能触发大规模增长，非活跃时段主要维持现状
                     if mem_mb > self.mem_threshold_mb:
                         reason = f"Memory High ({mem_mb:.1f}MB)"
                     elif total_nodes > self.node_threshold:
@@ -1931,12 +2000,11 @@ class DataPublisher:
                         logger.warning(f"⚠️ {reason}. Triggering Auto-Downgrade to Legacy Mode...")
                         self.set_high_performance(False)
                 
-                # Perf Mode info for logging
-                is_hp = status.get('high_performance_mode', True)
-                # 每小时更新一次板块持续性缓存
-                if time.time() - self.last_db_check > 3600:
-                    self._update_sector_cache()
-                    self.last_db_check = time.time()
+                # 每小时更新一次板块持续性缓存 (仅限交易日)
+                if cct.get_trade_date_status():
+                    if time.time() - self.last_db_check > 3600:
+                        self._update_sector_cache()
+                        self.last_db_check = time.time()
                 
             except Exception as e:
                 logger.error(f"Maintenance task error: {e}")
@@ -2058,13 +2126,25 @@ class DataPublisher:
             
             # 特殊处理：将 'ticktime' 字段转为 Unix 整数时间戳 'time'
             if 'ticktime' in df.columns:
-                # 兼容性处理：如果包含日期，转为 Unix
-                if pd.api.types.is_datetime64_any_dtype(df['ticktime']):
-                    df['time'] = df['ticktime'].view('int64') // 10**9
-                else:
-                    # 如果是 HH:MM:SS，则拼接今日日期
-                    now_str = datetime.now().strftime('%Y-%m-%d')
-                    df['time'] = pd.to_datetime(now_str + " " + df['ticktime'].astype(str)).view('int64') // 10**9
+                # 兼容性处理：显式指定 Asia/Shanghai 时区，防止 pd.to_datetime 默认按 UTC 产生 8小时偏差
+                try:
+                    if pd.api.types.is_datetime64_any_dtype(df['ticktime']):
+                        # 如果是 datetime64，确保本地化到上海 (CST)
+                        if df['ticktime'].dt.tz is None:
+                            df['time'] = df['ticktime'].dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                        else:
+                            df['time'] = df['ticktime'].dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
+                    else:
+                        # 如果是 HH:MM:SS 字符串，拼接今日日期并强制本地化
+                        now_str = datetime.now().strftime('%Y-%m-%d')
+                        dt_series = pd.to_datetime(now_str + " " + df['ticktime'].astype(str))
+                        # 核心修复点：使用 tz_localize('Asia/Shanghai') 告知 pandas 这是北京时间
+                        # .view('int64') 会基于 1970-01-01 00:00:00 UTC 计算纳秒数，产生正确的 Unix Timestamp
+                        df['time'] = dt_series.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
+                except Exception as e:
+                    logger.warning(f"⚠️ recover_from_hdf5 time conversion failed: {e}")
+                    if 'time' not in df.columns:
+                        df['time'] = time.time()
             
             # 补齐 MinuteKlineCache 需要的字段
             if 'close' in df.columns:
@@ -2225,7 +2305,8 @@ class DataPublisher:
             # 仅对采样行进行指纹计算，确保覆盖全场
             check_sample = df.iloc[list(set(indices))]
             
-            # [REFINED] 将分钟级时间加入指纹，确保每分钟至少触发一次全流程 (Heartbeat)
+            # [REFINED] 将分钟级时间加入指纹，并增加首尾及中间全场采样
+            # 确保即使前 50 只个股不跳动，整批次数据更新也能正常驱动
             batch_fp = f"{hhmm}_" + df_fingerprint(check_sample, cols=fp_cols)
             is_new_batch = (batch_fp != self._last_batch_fp)
 
@@ -2326,8 +2407,16 @@ class DataPublisher:
                 
                 now = time.time()
                 # 只有在强制模式，或者时间间隔已到时才检查脏标记
-                if not force and ((now - self._last_save_ts < self._save_interval) or not cct.get_work_time()):
-                    return
+                # [OPT] 如果不处于交易时间且不脏，则直接退出；但如果是 dirty，即使不在交易时间也允许保存一次
+                if not force:
+                    if (now - self._last_save_ts < self._save_interval):
+                        return
+                    # 盘后补充保存逻辑：如果 dirty 且距离上次保存超过 5分钟，且处于收盘后的“宽限期” (15:00-16:00)，允许存一次
+                    if not cct.get_work_time():
+                        hhmm = int(datetime.now().strftime("%H%M"))
+                        if not (1500 <= hhmm <= 1600) and self._last_save_ts > 0:
+                            if not self.kline_cache._is_dirty:
+                                return
                 
                 # 如果不脏，则只更新时间戳
                 if not self.kline_cache._is_dirty and self._last_save_ts > 0:

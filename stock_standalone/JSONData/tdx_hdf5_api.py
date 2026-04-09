@@ -2122,7 +2122,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             o_time.sort()  # 原代码使用 sorted(..., reverse=False)
 
                     if len(dd) > 0:
-                        l_time = np.mean(o_time) if len(o_time) > 0 else 0.0
+                        # 🚀 [STALENESS-PROTECT] 使用 max 而非 mean，确保只要有一批数据过期，整表就触发刷新
+                        l_time = np.max(o_time) if len(o_time) > 0 else 0.0
                         # dd = normalize_ticktime(dd)
                         # log.info(f'dd normalize_ticktime:{dd.ticktime[0]}')
                         # 原先在极高命中率时用 ticktime 重新计算 dratio
@@ -2239,7 +2240,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             o_time = [now_t - float(t) for t in unique_timel]
                             o_time.sort()
                     if len(o_time) > 0:
-                        l_time = np.mean(o_time)
+                        # 🚀 [STALENESS-PROTECT] 使用 max 而非 mean
+                        l_time = np.max(o_time)
                     else:
                         l_time = 0.0
 

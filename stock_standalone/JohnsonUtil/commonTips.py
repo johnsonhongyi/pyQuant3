@@ -846,7 +846,7 @@ class GlobalConfig:
         self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=200, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
-        self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=3600, value_type="int")
+        self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=1800, value_type="int")
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.vis_column_map = self.get_with_writeback(
             "general",

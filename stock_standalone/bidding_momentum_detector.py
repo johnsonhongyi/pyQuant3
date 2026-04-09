@@ -424,6 +424,7 @@ class BiddingMomentumDetector:
         # [NEW] 模式保护与参数
         self.in_history_mode = False
         self.use_dragon_race = False  # 龙头竞赛模式（停用后回归 0407 挖掘模式）
+        self._last_data_date: str = "" # [NEW] 记录上次处理数据的日期 (YYYY-MM-DD)
 
         # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
@@ -575,7 +576,97 @@ class BiddingMomentumDetector:
         for code in codes:
             self._evaluate_code(code)
         
+        # [NEW] 每次全量刷新前，检查是否需要执行跨日重置 (防止开盘加载了昨日陈旧数据)
+        self._check_day_switch(datetime.datetime.now())
+        
         self._aggregate_sectors(active_codes=active_codes)
+
+    def _check_day_switch(self, current_dt: datetime.datetime):
+        """[NEW] 核心逻辑：检测交易日切换，执行内容与日期双重维度的重置清理，防止昨日残留影响今日看板"""
+        if self.in_history_mode: return # 复盘模式由 load_from_snapshot 统一重置
+        
+        today_str = current_dt.strftime('%Y-%m-%d')
+        is_fresh_start = (not self._last_data_date)
+        
+        # [HEALING] 保险措施：即便日期标记可能由于文件 mtime 被带偏，只要到了交易准备段且表里有昨日残留，就强制清理
+        # 这里的 hour >= 9 指的是 09:00 之后开始执行主动侦测
+        if current_dt.hour >= 9:
+            # 抽样/触发式清理：如果表中存在日期早于今日的信号，强制执行重置
+            if self._prune_expired_signals(current_dt):
+                self._last_data_date = today_str # 强制更新日期标记
+                return
+
+        if is_fresh_start:
+            self._last_data_date = today_str
+            return
+            
+        if self._last_data_date != today_str:
+            # ⭐ [C-Reinforcement] 只有在开盘交易准备段 (09:00+) 才自动触发清理
+            # 防止在凌晨重启程序时意外清空了正在分析的昨日数据
+            if current_dt.hour < 9:
+                return
+
+            logger.info(f"📅 [Detector] 检测到交易日切换 ({self._last_data_date} -> {today_str})，正在重置内存状态...")
+            self._reset_daily_state(current_dt)
+            self._last_data_date = today_str
+            return
+
+    def _prune_expired_signals(self, current_dt: datetime.datetime) -> bool:
+        """
+        [FIXED] 自愈清理：根据重点表 (watchlist) 和活跃板块 (active_sectors) 中的 触发时间 判定是否过期。
+        返回 True 表示执行了重置/清理。
+        """
+        today = current_dt.date()
+        stale_found = False
+        
+        # 1. 检查重点监控表
+        if self.daily_watchlist:
+            for code, info in self.daily_watchlist.items():
+                ts = info.get('trigger_ts', 0)
+                if ts > 0:
+                    item_date = datetime.datetime.fromtimestamp(ts).date()
+                    if item_date < today:
+                        stale_found = True
+                        break
+        
+        # 2. 如果重点表没发现，检查活跃板块表 (可能昨天没有涨停但有很多异动板块)
+        if not stale_found and self.active_sectors:
+            for name, info in self.active_sectors.items():
+                ts = info.get('ts', 0) # 这里的 ts 是最后更新时间
+                if ts > 0:
+                    item_date = datetime.datetime.fromtimestamp(ts).date()
+                    if item_date < today:
+                        stale_found = True
+                        break
+        
+        if stale_found:
+            logger.warning(f"🧹 [Detector] 自愈清理：检测到昨日残留数据 (触发时期早于 {today})，正在强制肃清。")
+            self._reset_daily_state(current_dt)
+            return True
+        return False
+
+    def _reset_daily_state(self, current_dt: datetime.datetime):
+        """[DRY] 统一执行全量每日状态重置，确保今日看板从零开始"""
+        with self._lock:
+            # 1. 清空看板级汇总表
+            self.daily_watchlist.clear()
+            self.active_sectors.clear()
+            self.sector_anchors.clear()
+            self._sector_active_stocks_persistent.clear()
+            
+            # 2. 状态重置：清空内存中所有个股的情绪评分锚点与异动标签
+            for ts in self._tick_series.values():
+                ts.score = 0.0
+                ts.momentum_score = 0.0
+                ts.score_anchor = 0.0
+                ts.price_anchor = ts.current_price if hasattr(ts, 'current_price') else 0.0
+                ts.first_breakout_ts = 0.0      # 彻底重置异动计时器
+                ts.pattern_hint = ""           # 清空形态描述
+                ts.klines.clear()              # 清空分时数据（保留 deque 结构，避免破坏 maxlen）
+                
+        # 3. 时间锚点重置，作为后续计算“异动了多久”的基准
+        self.baseline_time = current_dt.timestamp()
+        self.data_version += 1 # 联动 UI 全量重传
 
     def reconstruct_all_from_cache(self):
         """[NEW] 为历史模式提供的全量算法重映射，用于在模式切换时立即同步 UI"""
@@ -711,6 +802,7 @@ class BiddingMomentumDetector:
                         if k != 'code': meta_cols[k].append(None)
 
             data = {
+                'data_date': self._last_data_date or datetime.datetime.now().strftime('%Y-%m-%d'),
                 'timestamp': round(time.time(), 2),
                 'stock_scores': {code: round(ts.score, 2) for code, ts in significant_stocks.items()},
                 'momentum_scores': {code: round(ts.momentum_score, 2) for code, ts in significant_stocks.items() if ts.momentum_score > 0},
@@ -802,29 +894,32 @@ class BiddingMomentumDetector:
             today_str = now_dt.strftime('%Y-%m-%d')
 
             is_expired = False
-            # [NEW] 虽然未过期，但我们仍需记录文件的日期，以便之后进行 9:15 的跨日重置判断
+            is_cross_day = False  # [NEW] 是否为跨日数据（昨日文件 → 今日启动）
+            # [NEW] 虽然未过期，但我们仍需记录文件的日期，以便之后进行跨日重置判断
             self._concept_data_date = file_dt.date()
             
             try:
                 # 获取从文件日期到今天的交易日列表 (使用 cct 中已初始化的 lazy-loaded 实例)
                 trade_days = cct.a_trade_calendar.get_trade_days_interval(file_date_str, today_str)
                 
-                # 1. 如果中间隔了至少一个完整的交易日，肯定过期
+                # 1. 如果中间隔了至少一个完整的交易日，彻底过期
                 if len(trade_days) > 2:
                     is_expired = True
                 # 2. 如果是相邻交易日（如周五到周一，或昨日到今日）
                 elif len(trade_days) == 2:
-                    # 如果今日是交易日，且已经接近/进入开盘时段 (9:15)，则视为过期
                     if cct.get_day_istrade_date(today_str):
-                        if now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 15):
+                        # [FIXED] 标记为跨日但不立即丢弃，后续仅清空看板数据，保留元数据
+                        is_cross_day = True
+                        # 09:15 后（竞价已结束）且还在早盘，或者其他交易时段启动，认为过期数据需彻底隔离
+                        if now_dt.hour >= 10 or (now_dt.hour == 9 and now_dt.minute >= 15):
                             is_expired = True
-                    # 如果今日不是交易日，或者还没到 9:15，我们保留上一交易日的数据
-                # 3. 如果 len(trade_days) == 1，说明在同一个交易日内或都是非交易日，不过期
+                    # 如果今日不是交易日，保留上一交易日数据继续分析
+                # 3. 如果 len(trade_days) == 1，同一个交易日内，正常加载
             except Exception as e:
                 # 兜底逻辑：如果交易日历获取失败，回退到 15.5 小时硬性判断
                 if time.time() - mtime > 15.5 * 3600:
                     is_expired = True
-                logger.debug(f"[Detector] 交易日历判断异常，使用保底时长判断: {e}")
+                logger.debug(f"[Detector] 交易日历判断异常，回退判断: {e}")
 
             if is_expired:
                 logger.info(f"📅 [Detector] 持久化数据已过期 ({file_date_str} -> {today_str})，跳过加载。")
@@ -881,8 +976,51 @@ class BiddingMomentumDetector:
                 if code in self._tick_series:
                     self._tick_series[code].price_anchor = p_anchor
                 
-            # 恢复重点表
-            self.daily_watchlist = data.get('watchlist', {})
+            # [FIXED v2] 最终防层：逐条验证 watchlist 每个条目的 trigger_ts
+            # 无论 is_cross_day / mtime / 交易日历是否准确，只要触发时间早于今日零点，一律丢弃。
+            # 这可以防止启动后文件日期被“污染”为今日但内容仍是昨日的情况。
+            if is_cross_day:
+                logger.info(f"📅 [Detector] 跨日加载：清空昨日重点表与板块评分，仅保留元数据。")
+                self.daily_watchlist = {}          # 重点表清空
+                self.active_sectors = {}           # 板块汇总清空
+                self.sector_anchors = {}           # 板块锚点清空
+                # 个股状态全量复位
+                for ts in self._tick_series.values():
+                    ts.score = 0.0
+                    ts.momentum_score = 0.0
+                    ts.score_anchor = 0.0
+                    ts.first_breakout_ts = 0.0
+                    ts.klines.clear()
+            else:
+                # 同日重启：仍需防范性验证 trigger_ts
+                raw_watchlist = data.get('watchlist', {})
+                # 今日零点时间戳
+                today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
+                valid_watchlist = {}
+                stale_count = 0
+                for code, entry in raw_watchlist.items():
+                    ts_entry = entry.get('trigger_ts', 0)
+                    # 尝试从 time 字符串读取备份（兼容性处理）
+                    if ts_entry <= 0 and 'time' in entry:
+                        try:
+                            # 期望格式 HH:MM:SS，如果包含日期则优先
+                            t_str = entry['time']
+                            if '-' in t_str: 
+                                # 包含日期如 0408-15:00，这必然是昨日
+                                ts_entry = 0 
+                            else:
+                                # 仅时间，默认为今日（保守处理）
+                                ts_entry = today_midnight_ts + 1
+                        except: pass
+                    
+                    if ts_entry >= today_midnight_ts:
+                        valid_watchlist[code] = entry
+                    else:
+                        stale_count += 1
+                
+                if stale_count > 0:
+                    logger.warning(f"🧹 [Detector] 从当日文件中剔除 {stale_count} 条昨日残留记录。")
+                self.daily_watchlist = valid_watchlist
 
             # [NEW] 恢复种子股状态，确保实盘重启后种子奖分 (+15) 生效
             self.stock_selector_seeds = data.get('stock_selector_seeds', {})
@@ -947,6 +1085,14 @@ class BiddingMomentumDetector:
                         ts.push_kline(k)
             
             logger.info(f"♻️ [Detector] 会话数据已恢复: {len(stock_scores)} 只个股, {len(self.active_sectors)} 个板块")
+            # [FIX] 跨日时将日期标记设为今日，防止 _check_day_switch 再次触发重置
+            # 同日重启时，优先使用 JSON 内嵌的 data_date，避免 os mtime 被带偏
+            if is_cross_day:
+                self._last_data_date = today_str
+                logger.info(f"📅 [Detector] 跨日加载完成，日期标记已更新为今日 ({today_str})")
+            else:
+                self._last_data_date = data.get('data_date', file_date_str)
+            self._concept_data_date = file_dt.date()
         except Exception as e:
             logger.error(f"❌ [Detector] 加载会话数据失败: {e}")
         self._gc_old_sectors()
@@ -1086,6 +1232,11 @@ class BiddingMomentumDetector:
                 
                 # 成功加载后进入历史模式
                 self.in_history_mode = True
+                
+                # [NEW] 记录快照日期，防止复盘过程中误触发重置
+                snap_ts = data.get('timestamp', 0)
+                if snap_ts > 0:
+                    self._last_data_date = datetime.datetime.fromtimestamp(snap_ts).strftime('%Y-%m-%d')
                 
             # [CRITICAL] 为历史快照全量重建跟随股与角色态势
             # 性能优化：先建立个股 -> 板块的反向索引，避免 O(S*N) 的嵌套循环导致 UI 卡死
@@ -1738,21 +1889,24 @@ class BiddingMomentumDetector:
 
         # [RE-ENABLED] 自动清理跨日数据，确保早盘竞价开始时看板是干净的
         if self._concept_data_date != today:
-            # 如果是交易日，且已经过了 9:15，我们强制清理一次上一交易日的残余数据
+            # 如果是交易日，且已经过了 09:00，我们强制清理一次上一交易日的残余数据
             if cct.get_day_istrade_date(str(today)):
-                if now_t >= 915:
+                if now_t >= 900:
                     logger.info(f"📅 [Detector] {today} Day Transition Detected (Bidding started) - Cleaning stale session data")
                     self._concept_data_date = today
                     self.daily_watchlist.clear()
                     self._sector_active_stocks_persistent.clear()
                     self.active_sectors.clear()
+                    self.sector_anchors.clear()
                     # 同时也彻底清理个股评分，防止早期无 K 线导致评分不刷新的问题
                     for ts in self._tick_series.values():
                         ts.score = 0.0
                         ts.momentum_score = 0.0
+                        ts.score_anchor = 0.0
                         ts.first_breakout_ts = 0.0
                         ts.pattern_hint = ""
                     self.reset_observation_anchors()
+                    self.data_version += 1
 
         # --- 更新全量 Watchlist (仅针对有变动的个股) ---
         codes_for_watchlist = active_codes if active_codes is not None else snap.keys()
@@ -1767,6 +1921,7 @@ class BiddingMomentumDetector:
                     self.daily_watchlist[code] = {
                         'code': code, 'name': d['name'], 'sector': d['category'], 'pct': round(d['pct'], 2),
                         'time_str': datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M'),
+                        'trigger_ts': trigger_ts, # [FIXED] 保存原始时间戳，用于跨日逻辑判定
                         'reason': '涨停', 'pattern_hint': d['pattern_hint']
                     }
 
