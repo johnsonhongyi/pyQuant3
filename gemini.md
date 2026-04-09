@@ -138,4 +138,15 @@
     - [x] **策略仿真强缓存 (Enhanced Strategy Cache)**：优化了历史信号仿真缓存键，针对周期切换进行了针对性加速。
     - [x] **代码健壮性加固**：清理了渲染逻辑中的冗余 print 和旧的缓存判定路径，增强了多负载下的稳定性。
 
+## 2026-04-09 17:45
+- [x] 修复 `intraday_decision_engine.py` 中的 `TypeError: cannot unpack non-iterable NoneType object`：
+    - [x] **补齐函数返回值**：修复了 `_time_structure_filter` 在非预设时间段内缺失默认 `return` 的问题，确保其始终返回 `tuple[float, str]`。
+    - [x] **清理错位逻辑代码**：将意外飘移到 `_opening_sell_check` 下方的尾盘风险过滤逻辑重新归位至 `_time_structure_filter` 内部，并移除了不可达的冗余代码块，增强了决策引擎的运行稳定性。
 
+## 2026-04-09 17:55
+- [x] 修复 `sina_data.py` 中的 `NameError: name 'work_time_now' is not defined`：
+    - [x] **补齐变量定义**：在 `market` 函数内部补齐了缺失的 `work_time_now = cct.get_work_time()` 定义，解决了在执行收盘后任务（`run_15_30_task`）时由于缓存校验逻辑引发的程序崩溃。
+## 2026-04-09 18:05
+- [x] 修复 `intraday_decision_engine.py` 中的 `NameError: name 'row' is not defined`：
+    - [x] **修正函数签名**：将缺失的 `row` 参数补全至 `_sell_decision` 方法中。
+    - [x] **同步更新调用链**：在 `evaluate` 方法中调用 `_sell_decision` 时正确传递当前行情 `row` 字典，确保 9:30-9:50 期间的开盘弱势检测逻辑能够正常执行。
