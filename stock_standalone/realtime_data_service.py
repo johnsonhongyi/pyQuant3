@@ -1790,8 +1790,8 @@ class DataPublisher:
             verbose=verbose
         )
         self.auto_switch_enabled = True # 开启自动降级/清理
-        self.mem_threshold_mb = 1600  # 1.6GB 阈值
-        self.node_threshold = 1000000 # 100万节点阈值
+        self.mem_threshold_mb = int(getattr(cct.CFG, 'mem_threshold_mb', 1800))  # 1.6GB 阈值
+        self.node_threshold = 2000000 # 200万节点阈值
         # =========================
         # Persistent Cache Settings
         # =========================
