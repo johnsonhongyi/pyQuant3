@@ -2497,6 +2497,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             query = self.query_input.currentText().strip()
         else:
             query = query.strip()
+            
+        # [NEW] 拆分 "备注 (逻辑)" 格式 (来自 UI 组合框显示)，优先提取核心逻辑以防 NameError
+        if '(' in query and query.endswith(')'):
+            m = re.match(r'^(.*?)\s*\((.*)\)$', query)
+            if m:
+                p1, p2 = m.groups()
+                # 判定为 UI 标签格式：左侧含中文/破折号，右侧含逻辑符且较长
+                if re.search(r'[\u4e00-\u9fa5\-]', p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
+                    logger.debug(f"🔍 [SectorPanel] Detached UI label '{p1}' from query.")
+                    query = p2.strip()
         
         # [MOD] 宏搜索按反馈采用“只读模式”，不再自动写盘同步（仅由用户通过其他方式或不作持久化）
 
