@@ -2881,6 +2881,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 禁止编辑：防止误触发覆盖 Code/Name 等关键信息，只允许选择和复制
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stock_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
         # # 列名中英文映射
@@ -3116,6 +3117,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree = QTreeWidget()
         self.filter_tree.setHeaderLabels(["Filtered Results"])
         self.filter_tree.setColumnCount(1)
+        self.filter_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.filter_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
         self.filter_tree.itemDoubleClicked.connect(self._on_filter_tree_item_double_clicked)
 
@@ -7374,219 +7377,51 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         start_time = time.time()
 
-        
         if df is None or df.empty:
             self.stock_table.setRowCount(0)
             self._table_item_map = {}  # 重置映射
             return
         
-
-        # ⚡ 性能优化: 预先关闭信号和排序
-        self.stock_table.blockSignals(True)
-        self.stock_table.setUpdatesEnabled(False) 
-        self.stock_table.setSortingEnabled(False) # 关键性能点
-        
         n_rows = len(df)
         
-        # ⚡ [CRITICAL] 大数据量（>500行）使用异步分块更新，避免UI卡死
-        # [FINAL DECISION] 异步分块已被证实为卡死元凶，永久禁用，使用稳健的同步更新
-        if n_rows > 999999: 
-            logger.info(f"[TableUpdate] Large dataset ({n_rows} rows), using async chunked update")
-            self._update_table_in_chunks_full_async(df, chunk_size=100, force_full=force_full)
+        # 🚀 [CRITICAL] 凡是大规模更新，强制进入 V4 异步渲染引擎，消灭主线程阻塞感
+        if n_rows > 300 or force_full or not getattr(self, '_table_item_map', {}):
+            self._update_table_in_chunks_v4(df, force_full=force_full)
             return
-        
-        # ⚡ 初始化映射表（首次或重置后）
-        if not hasattr(self, '_table_item_map'):
-            self._table_item_map = {}  # code -> row_idx 映射
-        if not hasattr(self, '_table_update_count'):
-            self._table_update_count = 0
-            
-        self._table_update_count += 1
-        
-        # ⚡ 每50次增量更新后强制全量刷新，防止累积误差
-        # 或者外部明确要求强制全量
-        if force_full or self._table_update_count >= 50 or not self._table_item_map:
-            force_full = True
-            self._table_update_count = 0
-            self._table_item_map = {}
-        
-        # ⚡ 性能优化: 禁用信号和排序
-        self.stock_table.blockSignals(True)
-        # 保存状态：排序、选择、滚动位置
-        saved_v_scroll = self.stock_table.verticalScrollBar().value()
-        saved_h_scroll = self.stock_table.horizontalScrollBar().value()
-        header = self.stock_table.horizontalHeader()
-        saved_sort_col = header.sortIndicatorSection()
-        saved_sort_order = header.sortIndicatorOrder()
 
+        # --- 300行以下小量更新：同步路径 ---
+        self.stock_table.blockSignals(True)
+        self.stock_table.setUpdatesEnabled(False) 
         self.stock_table.setSortingEnabled(False)
-        self.stock_table.setUpdatesEnabled(False)
-        self.stock_table.viewport().setUpdatesEnabled(False) # 额外锁定视口
-        
-        update_type = "FULL" if (force_full or not self._table_item_map) else "INCR"
         
         try:
-            n_rows = len(df)
-            
-            # ⚡ 预处理列名映射（一次性）
             cols_in_df = {c.lower(): c for c in df.columns}
             optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
             optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
+            codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
+            names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
             
-            # ⚡ 批量获取数据为 numpy 数组
-            has_code_col = 'code' in cols_in_df
-            has_name_col = 'name' in cols_in_df
-            
-            codes = df[cols_in_df['code']].values if has_code_col else df.index.values
-            names = df[cols_in_df['name']].values if has_name_col else [''] * n_rows
-            
-            # ⚡ 预获取可选列数据
             optional_data = {}
             for col_name, real_col in optional_cols_real:
-                if real_col:
-                    optional_data[col_name] = df[real_col].values
-                else:
-                    optional_data[col_name] = [0] * n_rows
-            
-            # ⚡ 计算新旧代码差异
-            new_codes = set(str(c) for c in codes)
-            old_codes = set(self._table_item_map.keys())
-            
-            codes_to_delete = old_codes - new_codes
-            codes_to_add = new_codes - old_codes
-            codes_to_update = old_codes & new_codes
-            
-            # ⚡ 如果有大量行需要删除/添加，使用全量刷新
-            if len(codes_to_delete) > 100 or len(codes_to_add) > 100:
-                force_full = True
-                self._table_item_map = {}
-            
-            no_edit_flag = Qt.ItemFlag.ItemIsEditable
-            
-            if force_full or not self._table_item_map:
-                # === 全量刷新 ===
-                # ⚡ [UI FIX] 保存当前选中/关注的股票
-                target_code = getattr(self, 'current_code', None)
-                target_row_idx = -1
+                optional_data[col_name] = df[real_col].values if real_col else [0] * n_rows
 
-                logger.debug("[TableUpdate] Clearing table...")
-                self.stock_table.setRowCount(0) # 显式清空
+            self._ensure_table_item_pool(n_rows)
+            
+            for i in range(n_rows):
+                s_code = str(codes[i])
+                s_name = str(names[i]) if pd.notnull(names[i]) else ''
+                # 即使同步路径也强制使用脏检测 Setter (Fast-Path)
+                self._set_table_row_fast(i, s_code, s_name, optional_cols_real, optional_data)
+                self._table_item_map[s_code] = i
                 
-                self.stock_table.setRowCount(n_rows)
-                self._table_item_map = {}
-                
-                for row_idx in range(n_rows):
-                    # if row_idx % 1000 == 0:
-                    #     logger.debug(f"[TableUpdate] Filling row {row_idx}...")
-                    try:
-                        stock_code = str(codes[row_idx])
-                        if stock_code == target_code:
-                            target_row_idx = row_idx
-                        stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                        
-                        self._set_table_row(row_idx, stock_code, stock_name, 
-                                           optional_cols_real, optional_data, no_edit_flag)
-                        self._table_item_map[stock_code] = row_idx
-                    except Exception as e:
-                        logger.warning(f"[TableUpdate] Row error at {row_idx}: {e}")
-                        continue
-            else:
-                # === 增量更新 ===
-                # 1. 删除不存在的行 (从后往前删除避免索引错乱)
-                if codes_to_delete:
-                    rows_to_delete = sorted([self._table_item_map[c] for c in codes_to_delete], reverse=True)
-                    for row_idx in rows_to_delete:
-                        self.stock_table.removeRow(row_idx)
-                    # 更新映射
-                    for code in codes_to_delete:
-                        if code in self._table_item_map:
-                            del self._table_item_map[code]
-                    # 重新计算剩余行的索引
-                    self._rebuild_item_map_from_table()
-                
-                # 2. 更新或新增行
-                for row_idx in range(n_rows):
-                    try:
-                        stock_code = str(codes[row_idx])
-                        
-                        # ⭐ [OPTIMIZATION] 如果提供了变更列表，且该代码未变，则跳过 UI 更新
-                        if changed_codes is not None and stock_code not in changed_codes:
-                            continue
-
-                        if stock_code in self._table_item_map:
-                            # 更新现有行
-                            old_row_idx = self._table_item_map[stock_code]
-                            stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                            self._update_table_row(old_row_idx, stock_code, stock_name,
-                                                  optional_cols_real, optional_data, row_idx)
-                        else:
-                            # 新增行
-                            new_row_idx = self.stock_table.rowCount()
-                            self.stock_table.insertRow(new_row_idx)
-                            stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                            self._set_table_row(new_row_idx, stock_code, stock_name,
-                                               optional_cols_real, optional_data, no_edit_flag, row_idx)
-                            self._table_item_map[stock_code] = new_row_idx
-                    except Exception as e:
-                        logger.warning(f"[TableUpdate] Incr row error at {row_idx}: {e}")
-                        continue
-        
-        finally:
-            # ⚡ 恢复排序状态
-            self.stock_table.setSortingEnabled(True)
-            self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
-            
-            # ⚡ [OPTIMIZATION] 仅在全量刷新或行数变化时重建索引
-            if update_type == "FULL" or len(codes_to_delete) > 0 or len(codes_to_add) > 0:
-                self._rebuild_item_map_from_table()
-            
-            # ⚡ 恢复选中项 (在排序和映射重建之后)
-            if self.current_code:
-                self.stock_table.blockSignals(True)
-                code_str = str(self.current_code)
-                if code_str in self._table_item_map:
-                    row = self._table_item_map[code_str]
-                    # logger.debug(f"[TableUpdate] Restoring selection to row {row} for {code_str}")
-                    self.stock_table.setCurrentCell(row, 0)
-                self.stock_table.blockSignals(False)
-
-            # ⚡ 恢复滚动位置
-            self.stock_table.verticalScrollBar().setValue(saved_v_scroll)
-            self.stock_table.horizontalScrollBar().setValue(saved_h_scroll)
-            
-            # ⚡ 恢复信号和更新
-            self.stock_table.setUpdatesEnabled(True)
-            self.stock_table.viewport().setUpdatesEnabled(True)
-            self.stock_table.blockSignals(False)
-            
-            # ⭐ [BUGFIX] 强制触发列宽重算并限制过宽列，实现“启动即紧凑”
-            if update_type == "FULL" and not df.empty:
-                try:
-                    self.stock_table.resizeColumnsToContents()
-                    self._limit_table_column_widths()
-                except Exception:
-                    pass
-
-            # ⚡ 性能日志
             duration = time.time() - start_time
-            n_rows = len(df) if not df.empty else 0
-            if duration > 0.5:
-                logger.warning(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s ⚠️")
-            else:
-                logger.info(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s")
-
-            # ⚡ 全量更新完成后，如果有激活的板块可见性过滤，重新应用 setRowHidden
-            # 🚀 [OPTIMIZATION] 避免无意义的 setRowHidden 调用，只有在状态真正改变时才调用 Qt 操作
-            active_codes = getattr(self, '_cat_filter_visible_codes', None)
-            if active_codes is not None and hasattr(self, '_table_item_map'):
-                self.stock_table.setUpdatesEnabled(False)
-                # 获取当前所有行的隐藏状态，避免重复操作触发布局引擎
-                for code, row_idx in self._table_item_map.items():
-                    should_hide = code not in active_codes
-                    if self.stock_table.isRowHidden(row_idx) != should_hide:
-                        self.stock_table.setRowHidden(row_idx, should_hide)
-                self.stock_table.setUpdatesEnabled(True)
-
+            logger.info(f"[TableUpdate] Synchronous Fast update: {n_rows} rows in {duration:.3f}s")
+            
+        finally:
+            self.stock_table.setSortingEnabled(True)
+            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.blockSignals(False)
+            self._apply_cat_filter_logic()
 
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
@@ -7610,6 +7445,73 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.stock_table.setColumnWidth(i, 200)
         except Exception:
             pass
+
+    def _ensure_table_item_pool(self, n_rows):
+        """[PERF] 极致优化：预填充 Item 池，消灭运行时对象创建开销"""
+        table = self.stock_table
+        n_cols = table.columnCount()
+        no_edit_flag = Qt.ItemFlag.ItemIsEditable
+        
+        # 只要有一行没填满，就全量检测填充一次（通常仅在容量扩张时发生）
+        # 这种 O(N) 的探测只在 FULL UPDATE 初始执行一次
+        for r in range(n_rows):
+            for c in range(n_cols):
+                if table.item(r, c) is None:
+                    item = QTableWidgetItem()
+                    item.setFlags(item.flags() & ~no_edit_flag)
+                    table.setItem(r, c, item)
+
+    def _set_table_row_fast(self, row_idx, stock_code, stock_name, 
+                           optional_cols_real, optional_data, data_idx=None,
+                           color_cache=None):
+        """[PERF] 极致脏检测 Setter。核心优化：复用外部传入的 color_cache"""
+        if data_idx is None: data_idx = row_idx
+        table = self.stock_table
+        
+        # 使用传入的缓存，规避 5万+ 次循环内部创建 QColor 的严重开销
+        RED, GREEN, BLACK = color_cache if color_cache else (QColor('red'), QColor('green'), QColor('black'))
+
+        # 1. Code 列 (Column 0)
+        item = table.item(row_idx, 0)
+        if item.text() != stock_code: 
+            item.setText(stock_code)
+            item.setData(Qt.ItemDataRole.UserRole, stock_code)
+
+        # 2. Name 列 (Column 1)
+        item = table.item(row_idx, 1)
+        if item.text() != stock_name:
+            item.setText(stock_name)
+
+        # 3. 可选列 (Column 2+)
+        for col_idx, (col_name, _) in enumerate(optional_cols_real, start=2):
+            val = optional_data[col_name][data_idx]
+            item = table.item(row_idx, col_idx)
+            
+            # 🚀 数值与字符串脏检测
+            # 优先使用 DisplayRole 原始值比对，避免频繁转 string
+            new_val = float(val) if pd.notnull(val) and isinstance(val, (int, float, np.integer, np.floating)) else str(val) if pd.notnull(val) else 0.0
+            if item.data(Qt.ItemDataRole.DisplayRole) != new_val:
+                item.setData(Qt.ItemDataRole.DisplayRole, new_val)
+            
+            # 🚀 颜色脏检测
+            target_color = BLACK
+            if pd.notnull(val) and (
+                col_name in ('percent', 'dff') 
+                or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
+            ):
+                val_float = float(val)
+                if val_float > 0: target_color = RED
+                elif val_float < 0: target_color = GREEN
+            
+            # 只有当颜色真正需要改变时才触发表格重绘信号
+            if item.foreground().color() != target_color:
+                item.setForeground(target_color)
+
+        # 4. 映射更新 (内存操作)
+        self.code_name_map[stock_code] = stock_name
+        self.code_info_map[stock_code] = {"name": stock_name}
+        for col_name, _ in optional_cols_real:
+            self.code_info_map[stock_code][col_name] = optional_data[col_name][data_idx]
 
     def _do_sync_update_logic(self, df, n_rows, codes, names, optional_cols_real, optional_data, no_edit_flag):
         """同步更新的核心逻辑块 (用于小数据量或全量刷新)"""
@@ -7641,254 +7543,182 @@ class MainWindow(QMainWindow, WindowMixin):
                                    optional_cols_real, optional_data, no_edit_flag, row_idx)
                 self._table_item_map[stock_code] = new_idx
 
-    def _update_table_in_chunks_full_async(self, df, chunk_size, force_full):
-        """完全异步地更新表格：数据准备 + 分块渲染均在计时器中分步触发
-        
-        [OPTIMIZATION] 修复全量数据卡死问题：
-        - 将数据准备阶段也异步化，在 QTimer 中分步执行
-        - 避免大数据量时阻塞主线程
+    def _update_table_in_chunks_v4(self, df, force_full=True):
+        """分块异步更新表格 V4 — 工业级极限优化版
+
+        1. [结构复用] 废弃 setRowCount(0)，只在长度变化时进行物理扩容（性能分水岭）。
+        2. [Item池化] 启动时一次性填满 QTableWidgetItem，后续只改 Text/Data。
+        3. [快门刷新] 开启 UpdatesEnabled(True) -> update() -> False 循环。
+        4. [脏检测] 仅在数据真实变化时触发 UI 设置（setData）。
         """
         import time
         n_rows = len(df)
         
-        # ⚡ [CRITICAL FIX] 立即返回控制权给主线程，
-        # 将所有重活（包括数据准备）都推入 QTimer 链
-        logger.info(f"[TableUpdate] Scheduling async update for {n_rows} rows...")
+        if not hasattr(self, '_chunk_seq'): self._chunk_seq = 0
+        self._chunk_seq += 1
+        current_seq = self._chunk_seq
         
-        def _do_async_update():
-            """真正的异步更新逻辑，在下一个事件循环中执行"""
-            prep_start = time.time()
+        # 0. 预存 UI 状态
+        saved_v_scroll = self.stock_table.verticalScrollBar().value()
+        saved_h_scroll = self.stock_table.horizontalScrollBar().value()
+        header = self.stock_table.horizontalHeader()
+        saved_sort_col = header.sortIndicatorSection()
+        saved_sort_order = header.sortIndicatorOrder()
+        target_code = getattr(self, 'current_code', None)
+
+        # 1. 内存数据准备 (规避主线程 CPU Spike)
+        cols_in_df = {c.lower(): c for c in df.columns}
+        optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
+        optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
+        codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
+        names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
+        optional_data = {}
+        for col_name, real_col in optional_cols_real:
+            optional_data[col_name] = df[real_col].values if real_col else [0] * n_rows
+        
+        # 0. 预存渲染资源与计时器
+        color_cache = (QColor('red'), QColor('green'), QColor('black'))
+        net_render_time = 0.0
+        start_time_all = time.time()
+
+        def _deferred_setup():
+            nonlocal net_render_time
+            setup_start = time.time()
+            if self._chunk_seq != current_seq: return
+            try: _ = self.stock_table.rowCount()
+            except RuntimeError: return
+
+            self.stock_table.blockSignals(True)
+            self.stock_table.setUpdatesEnabled(False)
+            self.stock_table.setSortingEnabled(False)
             
-            try:
-                # 1. 数据准备 (现在在异步上下文中执行)
-                cols_in_df = {c.lower(): c for c in df.columns}
-                optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
-                optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
-                codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
-                names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
-                optional_data = {}
-                for col_name, real_col in optional_cols_real:
-                    optional_data[col_name] = df[real_col].values if real_col else [0] * n_rows
+            _h = self.stock_table.horizontalHeader()
+            for i in range(self.stock_table.columnCount()):
+                _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
                 
-                no_edit_flag = Qt.ItemFlag.ItemIsEditable
-                nonlocal force_full
-                
-                # 2. 结构调整 (全量包直接 setRowCount，杜绝 removeRow 死循环)
-                self.stock_table.blockSignals(True)
-                self.stock_table.setSortingEnabled(False)
-                
-                if force_full or not self._table_item_map:
-                    self.stock_table.setRowCount(n_rows)
-                    self._table_item_map = {}
-                    force_full = True
-                else:
-                    # 增量包下的删除检测
-                    new_codes = set(str(c) for c in codes)
-                    old_codes = set(self._table_item_map.keys())
-                    codes_to_delete = old_codes - new_codes
-                    if len(codes_to_delete) > 100:
-                        self.stock_table.setRowCount(n_rows)
-                        self._table_item_map = {}
-                        force_full = True # 降级为全量，更快
-                    elif codes_to_delete:
-                        rows_to_delete = sorted([self._table_item_map[c] for c in codes_to_delete if c in self._table_item_map], reverse=True)
-                        for ridx in rows_to_delete: self.stock_table.removeRow(ridx)
-                        for c in codes_to_delete: self._table_item_map.pop(c, None)
-                        self._rebuild_item_map_from_table()
+            if self.stock_table.rowCount() != n_rows:
+                self.stock_table.setRowCount(n_rows)
+            
+            self._ensure_table_item_pool(n_rows)
+            self._table_item_map = {}
+            
+            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.blockSignals(False)
+            
+            net_render_time += (time.time() - setup_start)
+            QtCore.QTimer.singleShot(0, lambda: _process_chunk(0, is_first=True))
 
-                prep_duration = time.time() - prep_start
-                logger.info(f"[TableUpdate] Prep done (is_full={force_full}) in {prep_duration:.3f}s, starting async chunking...")
+        def _process_chunk(start_idx, is_first=False):
+            """分块渲染核心 logic (快门模式)"""
+            nonlocal net_render_time
+            chunk_start = time.time()
+            if self._chunk_seq != current_seq: return
+            try: _ = self.stock_table.rowCount()
+            except RuntimeError: return
 
-                # 3. 分块渲染器
-                # ⚡ [OPTIMIZATION] 全程禁用 UI 更新，最后统一恢复，避免中间重绘卡死
-                self.stock_table.setUpdatesEnabled(False)
-                self.stock_table.setSortingEnabled(False)
-                
-                def process_next_chunk(start_idx):
-                    # 辅助：恢复语音
-                    def _ensure_voice_resumed(tag):
-                        if hasattr(self, 'voice_thread') and self.voice_thread:
-                            if self.voice_thread.pause_for_sync:
-                                self.voice_thread.pause_for_sync = False
-                                logger.debug(f"[TableUpdate] Voice thread resumed ({tag})")
-                    
-                    try:
-                        logger.debug(f"[TableUpdate] Chunk START: idx={start_idx}/{n_rows}")
-                        
-                        if not self.isVisible(): 
-                            # 窗口不可见时，恢复表格状态并退出
-                            logger.debug("[TableUpdate] Window not visible, aborting chunk update")
-                            self.stock_table.setUpdatesEnabled(True)
-                            self.stock_table.setSortingEnabled(True)
-                            if block_signals_state is False: # 只有之前没阻塞才恢复
-                                self.stock_table.blockSignals(False)
-                            _ensure_voice_resumed("WindowHidden")
-                            return
-
-                        if start_idx >= n_rows:
-                            # 最终收尾
-                            self.stock_table.setUpdatesEnabled(True) # ⚡ [CRITICAL] 恢复 UI 更新
-                            self.stock_table.setSortingEnabled(True)
-                            if block_signals_state is False:
-                                self.stock_table.blockSignals(False)
-                                
-                            self._limit_table_column_widths()
-                            logger.info(f"[TableUpdate] DEFERRED update finished: {n_rows} rows")
-                            _ensure_voice_resumed("Finished")
-                            return
-
-                        end_idx = min(start_idx + chunk_size, n_rows)
-                        logger.debug(f"[TableUpdate] Processing rows {start_idx}-{end_idx}")
-                        
-                        # 批量写入，不再中间开关 updatesEnabled
-                        for i in range(start_idx, end_idx):
-                            try:
-                                s_code = str(codes[i])
-                                s_name = str(names[i]) if pd.notnull(names[i]) else ''
-                                
-                                if force_full or s_code not in self._table_item_map:
-                                    if force_full:
-                                        self._set_table_row(i, s_code, s_name, optional_cols_real, optional_data, no_edit_flag)
-                                        self._table_item_map[s_code] = i
-                                    else:
-                                        new_r = self.stock_table.rowCount()
-                                        self.stock_table.insertRow(new_r)
-                                        self._set_table_row(new_r, s_code, s_name, optional_cols_real, optional_data, no_edit_flag, i)
-                                        self._table_item_map[s_code] = new_r
-                                else:
-                                    r_idx = self._table_item_map[s_code]
-                                    self._update_table_row(r_idx, s_code, s_name, optional_cols_real, optional_data, i)
-
-                            except Exception as row_e:
-                                logger.warning(f"[TableUpdate] Row error at {i} ({s_code}): {row_e}")
-                                continue
-
-                        logger.debug(f"[TableUpdate] Chunk DONE: idx={start_idx}-{end_idx}, scheduling next...")
-                        
-                        # ⚡ 核心呼吸：保持较大的时间片，与 UI 循环交互
-                        QtCore.QTimer.singleShot(10, lambda: process_next_chunk(end_idx))
-                        
-                    except Exception as e:
-                        import traceback
-                        logger.error(f"[TableUpdate] Chunk processing error at row {start_idx}: {e}")
-                        logger.error(f"[TableUpdate] Traceback: {traceback.format_exc()}")
-                        # 恢复表格状态
-                        try:
-                            self.stock_table.setUpdatesEnabled(True)
-                            self.stock_table.setSortingEnabled(True)
-                            self.stock_table.blockSignals(False)
-                        except:
-                            pass
-                        _ensure_voice_resumed("Error")
-
-                # 启动第一块处理
-                block_signals_state = self.stock_table.signalsBlocked() # 记录原始状态
-                if not block_signals_state:
-                    self.stock_table.blockSignals(True)
-                    
-                logger.debug("[TableUpdate] Starting first chunk...")
-                process_next_chunk(0)
-                
-            except Exception as e:
-                logger.error(f"[TableUpdate] Async update error: {e}")
-                # 确保恢复表格状态
+            # [PERF] 提升块大小至 500，减少 Timer 切换损耗
+            chunk_size = 50 if is_first else 500 
+            end_idx = min(start_idx + chunk_size, n_rows)
+            
+            self.stock_table.blockSignals(True)
+            self.stock_table.setUpdatesEnabled(False)
+            
+            for i in range(start_idx, end_idx):
                 try:
-                    self.stock_table.setSortingEnabled(True)
-                    self.stock_table.blockSignals(False)
-                except:
-                    pass
-        
-        # ⚡ [KEY] 使用 singleShot(0) 将整个数据准备推入下一个事件循环
-        # 10ms 延迟给 UI 一个喘息机会
-        QtCore.QTimer.singleShot(10, _do_async_update)
-    
-    def _set_table_row(self, row_idx, stock_code, stock_name, optional_cols_real, 
-                       optional_data, no_edit_flag, data_idx=None):
-        """设置表格行数据（用于新增和全量刷新）"""
-        if data_idx is None:
-            data_idx = row_idx
-            
-        # Code 列
-        code_item = QTableWidgetItem(stock_code)
-        code_item.setData(Qt.ItemDataRole.UserRole, stock_code)
-        code_item.setFlags(code_item.flags() & ~no_edit_flag)
-        self.stock_table.setItem(row_idx, 0, code_item)
-        
-        # Name 列
-        name_item = QTableWidgetItem(stock_name)
-        name_item.setFlags(name_item.flags() & ~no_edit_flag)
-        self.stock_table.setItem(row_idx, 1, name_item)
-        
-        # 更新映射
-        self.code_name_map[stock_code] = stock_name
-        code_info = {"name": stock_name}
-        
-        # 可选列
-        for col_idx, (col_name, _) in enumerate(optional_cols_real, start=2):
-            val = optional_data[col_name][data_idx]
-            code_info[col_name] = val
-            
-            item = QTableWidgetItem()
-            if pd.notnull(val):
-                if isinstance(val, (int, float, np.integer, np.floating)):
-                    item.setData(Qt.ItemDataRole.DisplayRole, float(val))
-                else:
-                    item.setData(Qt.ItemDataRole.DisplayRole, str(val))
-            else:
-                item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
-            
-            # 颜色渲染
-            # if col_name in ('percent', 'dff','per1d') and pd.notnull(val):
-            if pd.notnull(val) and (
-                col_name in ('percent', 'dff') 
-                or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
-            ):
-                val_float = float(val)
-                if val_float > 0:
-                    item.setForeground(QColor('red'))
-                elif val_float < 0:
-                    item.setForeground(QColor('green'))
-            
-            item.setFlags(item.flags() & ~no_edit_flag)
-            self.stock_table.setItem(row_idx, col_idx, item)
-        
-        self.code_info_map[stock_code] = code_info
-    
-    def _update_table_row(self, row_idx, stock_code, stock_name, optional_cols_real, 
-                          optional_data, data_idx):
-        """更新表格行数据（用于增量更新，只更新变化的值）"""
-        # 检查并更新可选列
-        for col_idx, (col_name, _) in enumerate(optional_cols_real, start=2):
-            val = optional_data[col_name][data_idx]
-            
-            item = self.stock_table.item(row_idx, col_idx)
-            if item:
-                old_val = item.data(Qt.ItemDataRole.DisplayRole)
-                new_val = float(val) if pd.notnull(val) and isinstance(val, (int, float, np.integer, np.floating)) else str(val) if pd.notnull(val) else 0.0
+                    s_code = str(codes[i])
+                    s_name = str(names[i]) if pd.notnull(names[i]) else ''
+                    self._set_table_row_fast(i, s_code, s_name, optional_cols_real, optional_data, color_cache=color_cache)
+                    self._table_item_map[s_code] = i
+                except Exception: continue
                 
-                # 只有值变化时才更新
-                if old_val != new_val:
-                    item.setData(Qt.ItemDataRole.DisplayRole, new_val)
-                    
-                    # 更新颜色
-                    # if col_name in ('percent', 'dff','per1d') and pd.notnull(val):
-                    if pd.notnull(val) and (
-                        col_name in ('percent', 'dff') 
-                        or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
-                    ):
-                        val_float = float(val)
-                        if val_float > 0:
-                            item.setForeground(QColor('red'))
-                        elif val_float < 0:
-                            item.setForeground(QColor('green'))
-                        else:
-                            item.setForeground(QColor('black'))
-        
-        # 更新映射
-        if stock_code in self.code_info_map:
-            for col_name, _ in optional_cols_real:
-                self.code_info_map[stock_code][col_name] = optional_data[col_name][data_idx]
-    
+            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.viewport().update()
+            self.stock_table.blockSignals(False)
+            
+            if is_first:
+                QtWidgets.QApplication.processEvents()
+
+            net_render_time += (time.time() - chunk_start)
+                
+            # [Shutter Control] 开启快门 -> 发起 update -> 立即关闭
+            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.viewport().update()
+            self.stock_table.blockSignals(False)
+            
+            if is_first:
+                QtWidgets.QApplication.processEvents()
+
+            if end_idx < n_rows:
+                QtCore.QTimer.singleShot(1, lambda: _process_chunk(end_idx, is_first=False))
+            else:
+                _finalize()
+
+        def _finalize():
+            """所有分块完成后一次性收尾"""
+            try:
+                self.stock_table.blockSignals(True)
+                _h = self.stock_table.horizontalHeader()
+                for i in range(self.stock_table.columnCount()):
+                    _h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+                _h.setStretchLastSection(True)
+                
+                self._rebuild_item_map_from_table()
+                self.stock_table.setSortingEnabled(True)
+                self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
+                
+                if target_code:
+                    c_str = str(target_code)
+                    if c_str in self._table_item_map:
+                        self.stock_table.setCurrentCell(self._table_item_map[c_str], 0)
+                
+                self.stock_table.verticalScrollBar().setValue(saved_v_scroll)
+                self.stock_table.horizontalScrollBar().setValue(saved_h_scroll)
+                
+                # self.stock_table.resizeColumnsToContents()  # [PERF] 移除全量测量耗时
+                self._limit_table_column_widths()
+                self.stock_table.blockSignals(False)
+                
+                # 最后一次性精准应用板块过滤
+                self._apply_cat_filter_logic()
+                
+                # [CRITICAL] 整个流程唯一的一次重绘：开启 updates 并强制触发一次 repaint
+                self.stock_table.setUpdatesEnabled(True)
+                self.stock_table.viewport().update()
+                self.stock_table.blockSignals(False)
+                
+                wall_time = time.time() - start_time_all
+                # 对齐用户之前的感官：这里 Net 代表 CPU 纯渲染耗时，Wall 代表包含异步间隔的总耗时
+                logger.warning(f"[TableUpdate] V4 Extreme finished: {n_rows} rows. [Net: {net_render_time:.3f}s, Wall: {wall_time:.3f}s]")
+            except Exception as e:
+                logger.error(f"[TableUpdate] V4 Finalize Error: {e}")
+                self.stock_table.setUpdatesEnabled(True)
+                self.stock_table.blockSignals(False)
+
+        QtCore.QTimer.singleShot(0, _deferred_setup)
+
+    def _apply_cat_filter_logic(self):
+        """[PERF] 板块可见性过滤脏检测版"""
+        active_codes = getattr(self, '_cat_filter_visible_codes', None)
+        if active_codes is not None and hasattr(self, '_table_item_map'):
+            self.stock_table.setUpdatesEnabled(False)
+            for code, row_idx in self._table_item_map.items():
+                should_hide = code not in active_codes
+                if self.stock_table.isRowHidden(row_idx) != should_hide:
+                    self.stock_table.setRowHidden(row_idx, should_hide)
+            self.stock_table.setUpdatesEnabled(True)
+
+    def _update_table_in_chunks_v3(self, df, force_full=True):
+        """[重定向] 使用工业级极限优化 V4 版"""
+        self._update_table_in_chunks_v4(df, force_full=force_full)
+
+    def _update_table_in_chunks_v2(self, df, chunk_size=500, force_full=True):
+        """[重定向] 使用 V4 版"""
+        self._update_table_in_chunks_v4(df, force_full=force_full)
+
+    def _update_table_in_chunks_full_async(self, df, chunk_size=100, force_full=True):
+        """[重定向] 使用 V4 版"""
+        self._update_table_in_chunks_v4(df, force_full=force_full)
+
     def _rebuild_item_map_from_table(self):
         """从表格重建 item_map（优化版：直读模型数据）"""
         self._table_item_map = {}
