@@ -3238,9 +3238,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         item = self.watchlist_table.item(row, 0)
         if item:
             code = item.text()
-            # 键盘切换时延迟触发联动，仅更新内部视图，不触发外部软件
+            # 键盘切换时延迟触发联动，支持外部软件联动 (TDX 等)
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self._on_watchlist_clicked(row, 0, link_software=False))
+            QTimer.singleShot(50, lambda: self._on_watchlist_clicked(row, 0, link_software=True))
 
     def _follower_klines(self, code: str) -> List[dict]:
         with self.detector._lock:

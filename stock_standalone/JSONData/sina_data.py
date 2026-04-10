@@ -685,9 +685,9 @@ class Sina:
         # 1. 提取当前批次的统计值
         stats: pd.DataFrame
         if 'code' in df_latest.columns:
-            stats = df_latest.groupby('code').agg({'low': 'min', 'high': 'max', 'close': 'last'})
+            stats = df_latest.groupby('code').agg({'open': 'first', 'low': 'min', 'high': 'max', 'close': 'last'})
         else:
-            stats = df_latest.groupby(level=0).agg({'low': 'min', 'high': 'max', 'close': 'last'})
+            stats = df_latest.groupby(level=0).agg({'open': 'first', 'low': 'min', 'high': 'max', 'close': 'last'})
             
         # 强制索引为字符串
         stats.index = stats.index.astype(str)
@@ -700,8 +700,11 @@ class Sina:
             new_agg = stats.rename(columns={'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'})
             new_agg.index = new_agg.index.astype(str)
             new_agg['nstd'] = np.nan
+            # 初次创建时强制包含 open 守卫
+            new_agg['nlow'] = new_agg[['nlow', 'open']].min(axis=1)
+            new_agg['nhigh'] = new_agg[['nhigh', 'open']].max(axis=1)
             self.agg_cache.setkey('agg_metrics', new_agg)
-            log.info("Initialized AggregatorCache with %d codes" % len(new_agg))
+            log.info("Initialized AggregatorCache with %d codes (OpenGuard included)" % len(new_agg))
             return
             
         if not agg_metrics.index.dtype == object:
@@ -711,22 +714,28 @@ class Sina:
         
         common_codes = agg_metrics.index.intersection(stats.index)
         if len(common_codes) > 0:
-            # nlow: 强制修正 0.0 或 NaN
+            # nlow: 强制修正 0.0 或 NaN，并开启 Open 守卫
             agg_metrics.loc[common_codes, 'nlow'] = agg_metrics.loc[common_codes, 'nlow'].fillna(0)
             idx_low_fix = (agg_metrics.loc[common_codes, 'nlow'] <= 0)
             if idx_low_fix.any():
                 fix_codes = common_codes[idx_low_fix]
                 agg_metrics.loc[fix_codes, 'nlow'] = stats.loc[fix_codes, 'low']
+            
+            # [OPEN-GUARD] 无论何时，最低价必须包含开盘价
+            agg_metrics.loc[common_codes, 'nlow'] = agg_metrics.loc[common_codes, 'nlow'].combine(stats.loc[common_codes, 'open'], min)
                 
             if now_int <= 945:
                  agg_metrics.loc[common_codes, 'nlow'] = agg_metrics.loc[common_codes, 'nlow'].combine(stats.loc[common_codes, 'low'], min)
 
-            # nhigh: 强制修正 0.0 或 NaN
+            # nhigh: 强制修正 0.0 或 NaN，并开启 Open 守卫
             agg_metrics.loc[common_codes, 'nhigh'] = agg_metrics.loc[common_codes, 'nhigh'].fillna(0)
             idx_high_fix = (agg_metrics.loc[common_codes, 'nhigh'] <= 0)
             if idx_high_fix.any():
                 fix_codes_h = common_codes[idx_high_fix]
                 agg_metrics.loc[fix_codes_h, 'nhigh'] = stats.loc[fix_codes_h, 'high']
+
+            # [OPEN-GUARD] 无论何时，最高价必须包含开盘价
+            agg_metrics.loc[common_codes, 'nhigh'] = agg_metrics.loc[common_codes, 'nhigh'].combine(stats.loc[common_codes, 'open'], max)
 
             if now_int <= 1030:
                  agg_metrics.loc[common_codes, 'nhigh'] = agg_metrics.loc[common_codes, 'nhigh'].combine(stats.loc[common_codes, 'high'], max)
@@ -838,9 +847,9 @@ class Sina:
 
         curr_stats: pd.DataFrame
         if 'code' in df_current.columns:
-            curr_stats = df_current.groupby('code').agg({'low': 'min', 'high': 'max', 'close': 'last'})
+            curr_stats = df_current.groupby('code').agg({'open': 'first', 'low': 'min', 'high': 'max', 'close': 'last'})
         else:
-            curr_stats = df_current.groupby(level=0).agg({'low': 'min', 'high': 'max', 'close': 'last'})
+            curr_stats = df_current.groupby(level=0).agg({'open': 'first', 'low': 'min', 'high': 'max', 'close': 'last'})
             
         # 统一索引类型为字符串
         agg_df.index = agg_df.index.astype(str)
@@ -879,6 +888,9 @@ class Sina:
                  codes_still = codes_fix[idx_still_zero]
                  rebuild_df.loc[codes_still, 'nlow'] = curr_stats['close'].reindex(codes_still)
         
+        # [OPEN-GUARD] 无论何时，最低价必须考虑到开盘价
+        rebuild_df['nlow'] = rebuild_df['nlow'].combine(curr_stats['open'].reindex(rebuild_df.index), min)
+
         if now_int <= 945:
             rebuild_df['nlow'] = rebuild_df['nlow'].combine(curr_stats['low'].reindex(rebuild_df.index), min)
         if 'nhigh' not in agg_df.columns:
@@ -897,8 +909,17 @@ class Sina:
                  codes_still_h = codes_fix_h[idx_still_zero_h]
                  rebuild_df.loc[codes_still_h, 'nhigh'] = curr_stats['close'].reindex(codes_still_h)
         
+        # [OPEN-GUARD] 无论何时，最高价必须考虑到开盘价
+        rebuild_df['nhigh'] = rebuild_df['nhigh'].combine(curr_stats['open'].reindex(rebuild_df.index), max)
+
         if now_int <= 1030:
             rebuild_df['nhigh'] = rebuild_df['nhigh'].combine(curr_stats['high'].reindex(rebuild_df.index), max)
+        else:
+            # [LOGIC-FIX] 即使过了 10:30，如果发现轨迹计算出的 nhigh 异常偏低（甚至低于开盘价），
+            # 也应根据实时 API 抓到的 high 字段进行一次合理性对齐（前提是轨迹极度残缺）
+            mask_bad_high = (rebuild_df['nhigh'] < rebuild_df['nlow']) | (rebuild_df['nhigh'] == 0)
+            if mask_bad_high.any():
+                rebuild_df.loc[mask_bad_high, 'nhigh'] = curr_stats['high'].reindex(rebuild_df.index)[mask_bad_high]
             
         # # nclose: 直接用当前价更新
         # rebuild_df['nclose'] = curr_stats['close'].reindex(rebuild_df.index).fillna(agg_df['nclose'].reindex(rebuild_df.index))
