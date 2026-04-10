@@ -13,12 +13,13 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QGroupBox, QToolBar, QSizePolicy, QPushButton, QFrame,
     QStyledItemDelegate, QStyleOptionViewItem, QDialog, QLineEdit,
-    QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget, QStyle
+    QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget, QStyle, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat
 import pyqtgraph as pg
 import numpy as np
+import pandas as pd
 
 from tk_gui_modules.window_mixin import WindowMixin
 try:
@@ -34,7 +35,14 @@ import os
 import json
 import traceback
 
-from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE, SEARCH_HISTORY_FILE
+try:
+    from history_manager import quick_save_specific_history
+    from query_engine_util import query_engine
+except ImportError:
+    from stock_standalone.history_manager import quick_save_specific_history
+    from stock_standalone.query_engine_util import query_engine
+
 
 logger = logging.getLogger(__name__)
 
@@ -411,10 +419,10 @@ class DetailedChartDialog(QDialog, WindowMixin):
         
         # 使用配置中的刷新间隔 (s -> ms)
         try:
-            interval = float(getattr(cct.CFG, 'duration_sleep_time', 5.0))
-            if interval < 1.0: interval = 1.0
+            interval = float(getattr(cct.CFG, 'duration_sleep_time', 30.0))
+            if interval < 30.0: interval = 30.0
         except:
-            interval = 5.0
+            interval = 30.0
         self._refresh_timer.start(int(interval * 1000)) 
 
     def _render_chart(self, klines):
@@ -1233,6 +1241,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_rendered_data_version = -1
         self._last_rendered_stock_cache = {} # sector -> version
         self._search_history = []           # [NEW] 搜索历史记录
+        self._last_source_df = None         # [NEW] 缓存最新的全量行情 DataFrame (用于宏观查询)
         self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
         self._active_search_query = ""
 
@@ -1252,6 +1261,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 🔒 [Thread Safety]
         import threading
         self._update_lock = threading.Lock()
+        
+        # [NEW] Macro Query State
+        self._macro_query_str = ""
+        self._macro_filtered_codes = [] # List of codes that pass Stage 1
+        self._is_macro_active = False
 
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
@@ -1413,8 +1427,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             data_to_save['splitter_h_state'] = self.splitter.saveState().toHex().data().decode()
             data_to_save['v_splitter_state'] = self.v_splitter.saveState().toHex().data().decode()
             
-            # [NEW] 保存搜索历史
+            # [NEW] 保存搜索历史与宏观查询状态
             data_to_save['search_history'] = self._search_history
+            data_to_save['history_group_index'] = self.history_selector.currentIndex() if hasattr(self, 'history_selector') else 4
+            data_to_save['macro_query'] = self.query_input.currentText() if hasattr(self, 'query_input') else ""
+            data_to_save['use_dragon_race'] = self.cb_dragon_race.isChecked() if hasattr(self, 'cb_dragon_race') else False
 
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
@@ -1468,7 +1485,37 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._search_history = ui_state['search_history']
                 self._update_search_combo_list()
             
-            logger.debug("📊 [SectorPanel] UI state restored")
+            # [NEW] 恢复历史分组与宏观过滤状态
+            if 'history_group_index' in ui_state and hasattr(self, 'history_selector'):
+                idx = ui_state['history_group_index']
+                # 阻塞信号防止在恢复期间触发多次无意义更新
+                self.history_selector.blockSignals(True)
+                self.history_selector.setCurrentIndex(idx)
+                self.history_selector.blockSignals(False)
+                # 手动触发一次加载逻辑以填充 ComboBox
+                self._load_current_history_to_combo()
+                
+            if 'macro_query' in ui_state and hasattr(self, 'query_input'):
+                q_str = ui_state['macro_query']
+                self.query_input.setCurrentText(q_str)
+                # [ADJUST] 启动时根据查询框是否有内容决定是否自动执行，保持状态一致
+                if q_str.strip():
+                    QTimer.singleShot(1500, self._on_query_triggered)
+            
+            # [NEW] 局部搜索同步启动：如果上次有搜索词，也建议同步触发一次
+            if hasattr(self, 'search_input') and self.search_input.currentText().strip():
+                # 无需 timer，populate 过程会自动读取 _active_search_query
+                self._on_search_triggered()
+            
+            # [NEW] 恢复竞赛模式状态
+            if 'use_dragon_race' in ui_state and hasattr(self, 'cb_dragon_race'):
+                checked = ui_state['use_dragon_race']
+                self.detector.use_dragon_race = checked
+                self.cb_dragon_race.blockSignals(True)
+                self.cb_dragon_race.setChecked(checked)
+                self.cb_dragon_race.blockSignals(False)
+            
+            logger.debug("📊 [SectorPanel] UI state restored (including History Group & Macro Query)")
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
 
@@ -1537,29 +1584,34 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_1.addSpacing(4)
         bar_lay_1.addWidget(self._sep())
         
-        # [NEW] Search Bar (Upgraded to QComboBox for history)
-        from PyQt6.QtWidgets import QComboBox
-        bar_lay_1.addWidget(QLabel("🔍搜索:"))
+        # [NEW] History Group Selector (Integrates with history_manager.py)
+        bar_lay_1.addWidget(QLabel("📂历史:"))
+        self.history_selector = QComboBox()
+        self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
+        # [NEW] 按反馈：宏观搜索默认使用 history5
+        self.history_selector.setCurrentIndex(4)  
+        self.history_selector.setFixedWidth(80)
+        self.history_selector.currentIndexChanged.connect(self._on_history_group_changed)
+        bar_lay_1.addWidget(self.history_selector)
+
+        # [NEW] Local Search Bar (Original functionality: Name/Code/Leader) - 局部搜索 (回归原位)
+        bar_lay_1.addWidget(QLabel(" 🧐搜索:"))
         self.search_input = QComboBox()
         self.search_input.setEditable(True)
         self.search_input.setDuplicatesEnabled(False)
         self.search_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
-        self.search_input.setPlaceholderText("例如:涨幅>3")
-        self.search_input.setFixedWidth(180)
+        self.search_input.setPlaceholderText("龙头")
+        self.search_input.setFixedWidth(150)
         self.search_input.lineEdit().returnPressed.connect(self._on_search_triggered)
-        # [NEW] 实现选择历史项后自动触发搜索
         self.search_input.activated.connect(self._on_search_triggered)
         # 添加默认常驻选项
         self.search_input.addItem("龙头")
-        # [NEW] 为历史列表视图配置右键菜单，实现删除功能
+        # 为历史列表项应用委托与右键菜单
         self.search_input.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.search_input.view().customContextMenuRequested.connect(self._on_search_history_context_menu)
-        # [NEW] 应用可视化删除委托
         self.history_delegate = SearchHistoryDelegate(self.search_input)
-        # 信号连接保留作为备用逻辑
         self.history_delegate.delete_clicked.connect(self._delete_history_item_by_row)
         self.search_input.view().setItemDelegate(self.history_delegate)
-        # [NEW] 核心补强：在视口层安装过滤器，抢在 QComboBox 之前拦截点击
         self.search_input.view().viewport().installEventFilter(self)
         bar_lay_1.addWidget(self.search_input)
         
@@ -1648,8 +1700,31 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.status_lbl = QLabel("等待数据...")
         self.status_lbl.setStyleSheet("color:#FFA500;font-weight:bold;")
+        self.status_lbl.setWordWrap(True) # [FIX] 防止长报错或查询字符串撑开窗口
         bar_lay_2.addWidget(self.status_lbl)
+
+        # [NEW] 使用 Stretch 将后续查询组件推向右侧，并添加分隔符
         bar_lay_2.addStretch()
+        bar_lay_2.addWidget(self._sep())
+
+        # [NEW] Macro Query Bar Moved Here (Next to Replay Info)
+        bar_lay_2.addWidget(QLabel(" 🔍查询:"))
+        self.query_input = QComboBox()
+        self.query_input.setEditable(True)
+        self.query_input.setDuplicatesEnabled(False)
+        self.query_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
+        self.query_input.setPlaceholderText("宏观过滤: 涨幅>3 and score>10")
+        self.query_input.setFixedWidth(210)
+        self.query_input.lineEdit().returnPressed.connect(self._on_query_triggered)
+        self.query_input.activated.connect(self._on_query_triggered)
+
+        # 为查询框应用可视化删除委托
+        self.query_history_delegate = SearchHistoryDelegate(self.query_input)
+        self.query_input.view().setItemDelegate(self.query_history_delegate)
+        self.query_input.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.query_input.view().customContextMenuRequested.connect(self._on_query_history_context_menu)
+        self.query_input.view().viewport().installEventFilter(self)
+        bar_lay_2.addWidget(self.query_input)
         
         bar_lay_main.addLayout(bar_lay_2)
 
@@ -1770,6 +1845,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.leader_lbl = QLabel("")
         self.leader_lbl.setStyleSheet("color:#FF6666;font-weight:bold;font-size:12px;")
+        self.leader_lbl.setWordWrap(True) # [FIX] 防止长过滤条件撑开窗口宽度
         rlay.addWidget(self.leader_lbl)
 
         # 个股表（带排序）
@@ -1823,6 +1899,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
         w_lay = QVBoxLayout(self.watchlist_group)
         w_lay.setContentsMargins(2, 6, 2, 2)
+        
+        # [NEW] 宏观过滤状态显示 (位于当日重点表顶部右侧)
+        h_header_lay = QHBoxLayout()
+        h_header_lay.setContentsMargins(0, 0, 10, 0)
+        h_header_lay.addStretch()
+        self.macro_info_lbl = QLabel("")
+        self.macro_info_lbl.setStyleSheet("color: #00ff88; font-weight: bold; font-family: Microsoft YaHei;")
+        h_header_lay.addWidget(self.macro_info_lbl)
+        w_lay.addLayout(h_header_lay)
         
         W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因']
         self.watchlist_table = QTableWidget(0, len(W_COLS))
@@ -2075,8 +2160,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             traceback.print_exc()
             logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
 
-    def _on_worker_finished(self):
+    def _on_worker_finished(self, df: pd.DataFrame = None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+        # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
+        if df is not None:
+            self._last_source_df = df
+            
+            # [NEW] 实现实盘实时过滤：如果宏观查询激活，在每次数据更新后自动重算匹配池
+            if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
+                self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
+            
         try:
             now = time.time()
             
@@ -2149,6 +2242,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # [NEW] 5. Python Level Sorting
         col, asc = self._sector_sort_col, self._sector_sort_asc
+        
+        # [NEW] 应用宏观查询过滤到板块列表
+        if self._is_macro_active and self._macro_filtered_codes:
+            filtered_sectors = []
+            for s in sectors:
+                # 判准逻辑：如果板块龙头或跟随者中有任何一个满足宏观查询，则显示该板块
+                all_involved = [s.get('leader')] + [f.get('code') for f in s.get('followers', [])]
+                if any(c in self._macro_filtered_codes for c in all_involved if c):
+                    filtered_sectors.append(s)
+            sectors = filtered_sectors
+
         if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
         elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
         elif col == 2: sectors.sort(key=lambda x: x.get('score_diff', 0), reverse=not asc)
@@ -2353,7 +2457,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             query = self.search_input.placeholderText().replace("例如:", "").strip()
             self.search_input.setCurrentText(query)
         
-        # [NEW] 龙头特殊逻辑
+        # [UX] 龙头特殊逻辑
         if query == "龙头":
             self._is_leader_search_mode = True
             self._active_search_query = ""
@@ -2376,6 +2480,91 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         self.manual_refresh()
         
+    def _on_query_triggered(self):
+        """执行宏观查询 (Stage 1 Filtering)"""
+        query = self.query_input.currentText().strip()
+        
+        # [MOD] 宏搜索按反馈采用“只读模式”，不再自动写盘同步（仅由用户通过其他方式或不作持久化）
+
+        # 2. 执行查询引擎逻辑
+        if not query:
+            self._is_macro_active = False
+            self._macro_query_str = ""
+            self._macro_filtered_codes = []
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🔍 宏过滤已解除 (显示全量)")
+                self.status_lbl.setStyleSheet("color: #888888;")
+        else:
+            self._run_macro_query_internal(query)
+
+        # 触发全局刷新
+        self.manual_refresh()
+
+    def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
+        """核心查询逻辑提取：根据 query 计算匹配个股代码池，支持手动触发与背景数据自动同步"""
+        self._is_macro_active = True
+        self._macro_query_str = query
+        try:
+            df = getattr(self, '_last_source_df', None)
+            if df is None or df.empty:
+                self._macro_filtered_codes = []
+                if not is_auto_refresh and hasattr(self, 'status_lbl'):
+                    self.status_lbl.setText("🔭 等待首轮完整行情到达后即可查询...")
+                    self.status_lbl.setStyleSheet("color: #FFA500;")
+                return
+
+            # 使用 query_engine 执行，支持自然语言解析
+            if query_engine:
+                res = query_engine.execute(df, query)
+            else:
+                res = df.query(query)
+            
+            if isinstance(res, pd.DataFrame):
+                # 兼容不同结构的 code 提取
+                if 'code' in res.columns:
+                    self._macro_filtered_codes = res['code'].tolist()
+                else:
+                    self._macro_filtered_codes = res.index.tolist()
+            else:
+                self._macro_filtered_codes = []
+            
+            # 更新 UI 反馈 (手动触发或匹配数量变化时显示)
+            count = len(self._macro_filtered_codes)
+            if not is_auto_refresh and hasattr(self, 'status_lbl'):
+                msg = f"✅ 过滤完成: {count} 只个股 (Source: {len(df)})"
+                self.status_lbl.setText(msg)
+                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            # 同时同步到重点表顶部的标签
+            if hasattr(self, 'macro_info_lbl'):
+                self.macro_info_lbl.setText(f"🔍 宏过滤: {count} 只命中")
+                self.macro_info_lbl.setStyleSheet("color: #00ff88; font-weight: bold;" if count > 0 else "color: #888888;")
+                
+            # logger.debug(f"[MacroQuery] {query} -> {count} results (auto={is_auto_refresh})")
+        except Exception as e:
+            if not is_auto_refresh:
+                logger.error(f"[MacroQuery] Filter execution failed: {e}")
+                if hasattr(self, 'status_lbl'):
+                    self.status_lbl.setText(f"❌ 查询语法错误: {e}")
+                    self.status_lbl.setStyleSheet("color: #ff6666;")
+                if hasattr(self, 'macro_info_lbl'):
+                    self.macro_info_lbl.setText("❌ 语法错误")
+                    self.macro_info_lbl.setStyleSheet("color: #ff6666;")
+            self._macro_filtered_codes = []
+
+    def _on_query_history_context_menu(self, pos):
+        """处理查询历史下拉项的右键删除逻辑"""
+        index = self.query_input.view().indexAt(pos)
+        if not index.isValid(): return
+        item_text = self.query_input.itemText(index.row())
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2c3e50; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #34495e; }")
+        del_action = menu.addAction("❌ 删除此条查询")
+        if menu.exec(self.query_input.view().viewport().mapToGlobal(pos)) == del_action:
+            self.query_input.removeItem(index.row())
+            self._save_persistence()
+
     def _on_search_history_context_menu(self, pos):
         """处理搜索历史下拉项的右键删除逻辑"""
         index = self.search_input.view().indexAt(pos)
@@ -2414,6 +2603,58 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._save_ui_state()
         # logger.debug(f"🗑️ [SectorPanel] Deleted history: {item_text}")
 
+    # ── [NEW] History Manager Integration Methods ────────────────────
+    def _on_history_group_changed(self):
+        """当历史分组切换时，加载新的查询列表（不自动触发刷新，由用户手动点击选择）"""
+        self._load_current_history_to_combo()
+        
+        # 切换后自动保存设置
+        self._save_geometry()
+
+    def _load_current_history_to_combo(self):
+        """[REFINED] 统一加载所有搜索框的历史记录：宏观查询跟随下拉，局部搜索固定分组"""
+        if not hasattr(self, 'history_selector'): return
+        
+        history_key = self.history_selector.currentText()
+        
+        # 1. 刷新【宏观查询】框 (跟随 history_selector 选择的分组)
+        if hasattr(self, 'query_input'):
+            self._set_combo_history(self.query_input, history_key)
+            
+        # 2. 刷新【局部搜索】框已由 _load_persistence 和 _update_search_combo_list 独立管理
+        # 不再强制关联 history1，避免污染宏观查询的分组数据
+
+    def _set_combo_history(self, combo: QComboBox, history_key: str, add_leader=False):
+        """原子化填充 ComboBox 历史，并保留当前输入内容"""
+        history_items = []
+        if os.path.exists(SEARCH_HISTORY_FILE):
+            try:
+                with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    raw_items = data.get(history_key, [])
+                    for item in raw_items:
+                        q = item.get("query", "") if isinstance(item, dict) else str(item)
+                        if q and q not in history_items:
+                            history_items.append(q)
+            except Exception: pass
+        
+        cur_text = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        if add_leader: combo.addItem("龙头")
+        for h in history_items[:30]: 
+            combo.addItem(h)
+        
+        # [REVERT] 恢复之前的逻辑：在切换分组时不再强制同步为最新的历史记录，而是保留当前文本
+        # 以防止自动刷新导致用户当前正在分析的操作被覆盖
+        if cur_text:
+            combo.setCurrentText(cur_text)
+        else:
+            combo.setCurrentIndex(-1)
+            combo.lineEdit().clear()
+        combo.blockSignals(False)
+
+
     def _update_search_combo_list(self, current_text: str = None):
         """统一管理搜索下拉框列表，确保'龙头'始终在首位"""
         self.search_input.blockSignals(True)
@@ -2434,14 +2675,34 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.search_input.blockSignals(False)
             
     def _on_search_cleared(self):
+        """[ENHANCED] 清除全部搜索与过滤状态，并重置 UI 为全量显示"""
+        # 1. 重置局部搜索 (Name/Code/Leader)
         self.search_input.setCurrentText("")
+        self.search_input.lineEdit().clear()
         self._active_search_query = ""
         self._is_leader_search_mode = False
-        self._force_show_all_in_stock_table = False # 重置特殊显示状态
-        # 恢复标题
-        self.watchlist_group.setTitle("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
-        # [FIX] 无论什么模式，清空搜索后都强制全局重刷一次 UI
+        self._force_show_all_in_stock_table = False 
+        
+        # 2. 重置宏观查询 (Macro Query)
+        if hasattr(self, 'query_input'):
+            self.query_input.setCurrentText("")
+            self.query_input.lineEdit().clear()
+        self._is_macro_active = False
+        self._macro_query_str = ""
+        self._macro_filtered_codes = []
+            
+        # 3. 更新 UI 反馈
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText("🧹 已清空全部搜索与过滤条件 (显示全量)")
+            self.status_lbl.setStyleSheet("color: #888888;")
+            
+        if hasattr(self, 'macro_info_lbl'):
+            self.macro_info_lbl.setText("🔍 宏过滤: 已解除")
+            self.macro_info_lbl.setStyleSheet("color: #888888;")
+
+        # 4. 执行全量表格刷新
         self.manual_refresh()
+        self._save_ui_state()
         
     def _evaluate_search_condition(self, query_str: str, row_data: dict) -> bool:
         """
@@ -2569,6 +2830,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             r_data = f
                             break
                 
+                # [NEW] 增加对宏观查询条件过滤的支持 (Stage 1 Filtering)
+                if self._is_macro_active and self._macro_filtered_codes:
+                    if code not in self._macro_filtered_codes:
+                        continue
+
                 if r_data:
                     f_klines = r_data.get('klines', [])
                     rows.append({
@@ -2594,26 +2860,34 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     })
         else:
             # Fallback: 使用传统的 Leader + Followers 结构
-            rows = [{
-                'code': leader_code, 
-                'name': leader_name,
-                'role': '🏆龙头',
-                'pct': leader_pct, 
-                'price': leader_price,
-                'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
-                'price_diff': data.get('leader_price_diff', 0.0),
-                'dff': data.get('leader_dff', 0.0),
-                'klines': leader_klines,
-                'last_close': data.get('leader_last_close', 0),
-                'high_day': data.get('leader_high_day', 0),
-                'low_day': data.get('leader_low_day', 0),
-                'last_high': data.get('leader_last_high', 0),
-                'last_low': data.get('leader_last_low', 0),
-                'hint': data.get('pattern_hint', '主力拉升'),
-                'untradable': data.get('is_untradable', False),
-                'is_counter': data.get('is_counter_trend', False)
-            }]
+            rows = []
+            # 龙头过滤
+            if not self._is_macro_active or (leader_code in self._macro_filtered_codes):
+                rows.append({
+                    'code': leader_code, 
+                    'name': leader_name,
+                    'role': '🏆龙头',
+                    'pct': leader_pct, 
+                    'price': leader_price,
+                    'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
+                    'price_diff': data.get('leader_price_diff', 0.0),
+                    'dff': data.get('leader_dff', 0.0),
+                    'klines': leader_klines,
+                    'last_close': data.get('leader_last_close', 0),
+                    'high_day': data.get('leader_high_day', 0),
+                    'low_day': data.get('leader_low_day', 0),
+                    'last_high': data.get('leader_last_high', 0),
+                    'last_low': data.get('leader_last_low', 0),
+                    'hint': data.get('pattern_hint', '主力拉升'),
+                    'untradable': data.get('is_untradable', False),
+                    'is_counter': data.get('is_counter_trend', False)
+                })
+            
+            # 跟随股过滤
             for f in data.get('followers', []):
+                if self._is_macro_active and self._macro_filtered_codes:
+                    if f['code'] not in self._macro_filtered_codes:
+                        continue
                 f_klines = f.get('klines', [])
                 rows.append({
                     'code': f['code'], 'name': f['name'],
@@ -2965,6 +3239,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # Step 1: Filter existing watchlist items
             for w in watchlist:
+                # [NEW] 同时满足宏观查询 (如果激活)
+                if self._is_macro_active and self._macro_filtered_codes:
+                    if w['code'] not in self._macro_filtered_codes:
+                        continue
+
                 row_mock = {
                     'code': w['code'],
                     'name': w['name'],
@@ -3392,12 +3671,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         dlg.exec()
 
     def on_stock_clicked(self, row, col, force_link=False):
-        # 仅当点击 code(0) 或 name(1) 列时才联动，除非是 force_link (如键盘触发)
-        if not force_link and col > 1: return
-
+        """点击个股行时触发联动 (TDX/可视化器)"""
+        if row < 0: return
+        
+        # [REFINED-FIX] 核心修复：彻底废弃 col > 1 的限制逻辑。
+        # 原因是 _populate_table 会默认选中 Row 0，导致点击首行时 currentCellChanged 信号失效。
+        # 此时只能依靠 cellClicked 触发联动。若还限制列索引，会导致点中“现价/涨幅”等列时由于 return 逻辑而无反应。
+        # 现在改为全行点击均联动，且强制获取焦点以增强稳定性。
         code_item = self.stock_table.item(row, 0)
         if code_item:
             code = code_item.text()
+            if not self.stock_table.hasFocus():
+                self.stock_table.setFocus()
             self._link_code(code, focus_widget=self.stock_table)
 
     def _link_code(self, code: str, focus_widget=None):
@@ -3668,6 +3953,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
                 # 同步到 detector
                 self._on_strategy_changed()
+
+                # [NEW] 恢复历史分组选择
+                history_idx = p_data.get("history_selector_index", 4)
+                if hasattr(self, 'history_selector'):
+                    self.history_selector.blockSignals(True)
+                    self.history_selector.setCurrentIndex(history_idx)
+                    self.history_selector.blockSignals(False)
+                
+                # 恢复完成后加载一次数据
+                self._load_current_history_to_combo()
             except Exception as e:
                 logger.warning(f"Error restoring business settings: {e}")
                 
@@ -3720,6 +4015,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             }
             p_data["cb_log"] = self.cb_log.isChecked()
             
+            if hasattr(self, 'history_selector'):
+                p_data["history_selector_index"] = self.history_selector.currentIndex()
+            
+            # [NEW] 保存宏观查询内容
+            if hasattr(self, 'query_input'):
+                p_data["macro_query"] = self.query_input.currentText()
+                
             p_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             config[SETTINGS_SECTION] = p_data
