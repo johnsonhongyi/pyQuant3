@@ -362,11 +362,12 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     crashTen_all_st = 0
     ffall['zlr'] = 0
     ffall['zzb'] = 0
-
+    sina = sina_data.Sina(readonly=True)
+    sina.all
     for market in indexKeys:
         # market = ct.SINA_Market_KEY()
         #        df = rd.get_sina_Market_json(market, False)
-        df = sina_data.Sina().market(market)
+        df = sina.market(market)
         # count=len(df.index)
         # log.info("market:%s" % df[:1])
         df = df.dropna(how='all')

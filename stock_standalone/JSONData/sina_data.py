@@ -277,7 +277,8 @@ class Sina:
     stock_list: List[str]
     request_num: int
 
-    def __init__(self) -> None:
+    def __init__(self, readonly: bool = False) -> None:
+        self.readonly = readonly
         import pandas as pd
         import numpy as np
         # self.grep_stock_detail = re.compile(r'(\d+)=([^\S][^,]+?)%s' %
@@ -603,7 +604,8 @@ class Sina:
                     source_col = c[1:] if c.startswith('n') else 'close'
                     df_final[c] = df_final[source_col] if source_col in df_final.columns else df_final.get('close', 0)
             
-            h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
+            if not self.readonly:
+                h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
             
             # 格式化
             for c in ['nclose', 'nstd']:
@@ -637,8 +639,8 @@ class Sina:
             h5_mi_fname = 'sina_MultiIndex_data'
             limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
             h5_mi_table = 'all_' + str(limit_time_int)
-            # 仅在交易时间内记录
-            if cct.get_work_time():
+            # 仅在交易时间内记录, 且非只读模式才写盘
+            if cct.get_work_time() and not self.readonly:
                 # 构造 MultiIndex 精简格式轨迹
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
                 
@@ -667,9 +669,10 @@ class Sina:
                     self.agg_cache.setkey('last_mi_save_time', now_time)
                     log.info("Saved MultiIndex history (sync) to %s (len: %d)" % (h5_mi_fname, len(mi_df)))
 
-        # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存，加速进程内跨实例并发访问
-        cache_key = f"Sina_all_snapshot_{self.hdf_name}_{self.table}"
-        self._MEM_CACHE[cache_key] = {'df': df_final.copy(), 'time': time.time()}
+        # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存，加速进程内跨实例并发访问 (只读模式不更新全局缓存)
+        if not self.readonly:
+            cache_key = f"Sina_all_snapshot_{self.hdf_name}_{self.table}"
+            self._MEM_CACHE[cache_key] = {'df': df_final.copy(), 'time': time.time()}
         return df_final
 
     def _update_agg_cache(self, df_latest: pd.DataFrame,h5_hist: pd.DataFrame) -> None:
@@ -776,7 +779,8 @@ class Sina:
             
             agg_metrics = pd.concat([agg_metrics, new_df])
             
-        self.agg_cache.setkey('agg_metrics', agg_metrics)
+        if not self.readonly:
+            self.agg_cache.setkey('agg_metrics', agg_metrics)
 
     def _rebuild_agg_cache(self, h5_hist: Optional[pd.DataFrame], df_current: pd.DataFrame) -> pd.DataFrame:
         """从历史 MultiIndex 数据中重建聚合缓存 (优化兼容日期前缀)"""
@@ -988,6 +992,7 @@ class Sina:
         else:
 
             self.market_type = market
+            self.table = 'all' # ⚡ [FIX] 统一从 all 表读取，减小 IO 复杂度，避免子市场表缺失导致误报日志
             self.stockcode = StockCode()
             self.stock_code_path = self.stockcode.stock_code_path
             all_codes = self.stockcode.get_stock_codes()
@@ -1086,8 +1091,9 @@ class Sina:
                 self.request_num = 1
             
             df_res = self._filter_suspended(self.get_stock_data())
-            # [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存
-            self._MEM_CACHE[cache_key] = {'df': df_res.copy(), 'time': time.time()}
+            # [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存 (只读模式不更新全局缓存)
+            if not self.readonly:
+                self._MEM_CACHE[cache_key] = {'df': df_res.copy(), 'time': time.time()}
             return df_res
 
 
@@ -1163,8 +1169,14 @@ class Sina:
                     df_final['nclose'] = df_final['close']
         # 5. 合并 lastbuy 并持久化
         df_final = self.combine_lastbuy(df_final)
+        
+        # ⚡ [FIX] 彻底解决内存缓存泄露问题：如果不是 'all' 模式，强行过滤掉不属于当前市场的代码
+        # 防止由于 agg_metrics cache (GlobalValues) 共享导致的 SH 代码出现在 SZ 结果中
+        if self.market_type is not None and self.market_type != 'all' and self.stock_codes:
+            df_final = df_final[df_final.index.isin(self.stock_codes)]
+            
         # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
-        if self.market_type is not None and self.market_type == 'all':
+        if self.market_type is not None and self.market_type == 'all' and not self.readonly:
             h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
 
         if df_final is not None and len(df_final) > 0:
@@ -1225,10 +1237,10 @@ class Sina:
                         mi_df = mi_df.set_index(['code', 'ticktime'])
 
                     # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
-                    if self.market_type is not None and self.market_type == 'all':
+                    if self.market_type is not None and self.market_type == 'all' and not self.readonly:
                         h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
-                    self.agg_cache.setkey('last_mi_save_time', now_time)
-                    log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
+                        self.agg_cache.setkey('last_mi_save_time', now_time)
+                        log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
 
         return df_final
 
@@ -1641,8 +1653,9 @@ class Sina:
             h5_mi_table = 'all_' + str(limit_time_int)
             
             try:
-                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True, sizelimit=cct.sina_MultiIndex_limit)
-                log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
+                if not self.readonly:
+                    h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True, sizelimit=cct.sina_MultiIndex_limit)
+                    log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
             except Exception as e:
                 log.error(f"HDF5 Write Error for {h5_mi_table}: {e}")
                 try:
@@ -2553,8 +2566,22 @@ if __name__ == "__main__":
     # log.setLevel(LoggerFactory.DEBUG)
 
     # log.setLevel(LoggerFactory.DEBUG)
-    sina = Sina()
+    # sina = Sina()
+    sina = Sina(readonly=True)
     dm = sina.all
+
+
+    for ma in ['bj','sh', 'sz', 'cyb', 'kcb']:
+        # for ma in ['sh']:
+        # df = Sina().market(ma)
+        df = sina.market(ma)
+        # print df.loc['600581']
+        # print len(sina.all)
+        print(("market:%s" % (ma)))
+        print(f'count:{len(df)}')
+    import ipdb;ipdb.set_trace()
+
+
     idx_codes = ["000001", "399001", "399006", "000688"]
     # dff = sina.get_stock_list_data(idx_codes, index=True)
     indices_data=[]
@@ -2852,7 +2879,11 @@ if __name__ == "__main__":
         # print df.shape
         # log.error("code :%s is None"%(code))
         time_s = time.time()
-        h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
+        # readonly 检查
+        if hasattr(self, 'readonly') and self.readonly:
+            print("Readonly mode: skip write_hdf_db")
+        else:
+            h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
         print(("hdf5 main all :%s  time:%0.2f" % (len(df), time.time() - time_s)))
 
         # print df[df.code == '600581']
