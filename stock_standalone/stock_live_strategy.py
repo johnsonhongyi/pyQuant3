@@ -3486,19 +3486,28 @@ class StockLiveStrategy:
             if isinstance(action,pd.Series):
                 action = action.iloc[0] if not action.empty else "HOLD"
             
+            is_primary_alert = True
             for mtype, msg in messages:
+                msg_str = str(msg)
                 # 再次快速去重判定 (unique_msgs 已处理内容，此处直接过滤重复内容)
-                if str(msg) in unique_msgs:
+                if msg_str in unique_msgs:
+                    unique_msgs.remove(msg_str)  # 消费掉，确保绝对不重复
+                    
+                    # 🚀 [PERF FIX] 仅首条消息携带真实的交易动作 (买卖)，后续消息降级为"关联"
+                    # 彻底解决单次循环内多条消息导致 _async_alert_worker 轰炸 record_trade 的并发 Bug
+                    current_action = str(action) if is_primary_alert else "关联"
+                    
                     self._trigger_alert(
                         code,
                         data.get('name', ''),
-                        f"{t1_prefix}{msg}",
-                        action=str(action),
+                        f"{t1_prefix}{msg_str}",
+                        action=current_action,
                         price=current_price,
                         resample=resample,
                         score=snap.get('score', snap.get('max_score_today', 0.0)),
                         grade=snap.get('grade', '')
                     )
+                    is_primary_alert = False
             
             # 设置 signal_item 用于主引擎批量存储
             res['signal_item'] = {
