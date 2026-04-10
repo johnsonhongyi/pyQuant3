@@ -1709,6 +1709,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # [NEW] Macro Query Bar Moved Here (Next to Replay Info)
         bar_lay_2.addWidget(QLabel(" 🔍查询:"))
+        
+        # [NEW] 历史刷新按钮
+        self.btn_reload_query = QPushButton("🔄")
+        self.btn_reload_query.setFixedWidth(28)
+        self.btn_reload_query.setToolTip("重新加载历史查询记录库 (无需切换分组)")
+        self.btn_reload_query.setStyleSheet("QPushButton { color: #aad4ff; background: #2a3a4a; border: 1px solid #444; border-radius: 3px; } QPushButton:hover { background: #34495e; }")
+        self.btn_reload_query.clicked.connect(self._load_current_history_to_combo_with_tip)
+        bar_lay_2.addWidget(self.btn_reload_query)
+
         self.query_input = QComboBox()
         self.query_input.setEditable(True)
         self.query_input.setDuplicatesEnabled(False)
@@ -2610,6 +2619,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # 切换后自动保存设置
         self._save_geometry()
+
+    def _load_current_history_to_combo_with_tip(self):
+        """刷新历史并给出 UI 提示"""
+        self._load_current_history_to_combo()
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText("✅ 历史列表已重新加载")
+            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            QTimer.singleShot(2000, lambda: self.status_lbl.setText("准备就绪"))
 
     def _load_current_history_to_combo(self):
         """[REFINED] 统一加载所有搜索框的历史记录：宏观查询跟随下拉，局部搜索固定分组"""
