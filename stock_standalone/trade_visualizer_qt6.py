@@ -7438,6 +7438,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 if cw and self.stock_table.columnWidth(i) > cw:
                     headers.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
                     self.stock_table.setColumnWidth(i, cw)
+                # elif h_low in ('code', 'name'):
+                #     headers.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
                 elif h_low in ('last_reason', 'shadow_info'):
                     # 大文本列限制在 200
                     if self.stock_table.columnWidth(i) > 200:
@@ -7686,7 +7688,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 for i in range(self.stock_table.columnCount()):
                     # [PERF] 极致优化：不要启动 ResizeToContents，这会引发 Qt 全量布局计算。
                     # 保持 Interactive，让 _limit_table_column_widths 处理即可。
-                    _h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+                    if i in [0,1]:
+                        _h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+                    else: 
+                        _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
                 _h.setStretchLastSection(True)
                 
                 self._rebuild_item_map_from_table()

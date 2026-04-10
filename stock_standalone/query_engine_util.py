@@ -164,6 +164,14 @@ class PandasQueryEngine:
             process_content = triple_match.group(1)
         elif assign_match and assign_match.group(1).lower() not in ('result', 'signal', 'import', 'from'):
             process_content = assign_match.group(2)
+        elif '(' in raw_input and raw_input.endswith(')'):
+            # 处理 "备注 (逻辑)" 格式 (来自 UI 组合框显示)
+            label_match = re.search(r'^(.*?)\s*\((.*)\)$', raw_input, re.DOTALL)
+            if label_match:
+                note_part, inner_logic = label_match.groups()
+                # 判定规则：note 包含中文或破折号，且 inner 包含逻辑操作符
+                if re.search(r'[\u4e00-\u9fa5\-]', note_part) and any(op in inner_logic.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
+                    process_content = inner_logic
 
         # 2. 清洗注释与换行
         lines = []
