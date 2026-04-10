@@ -1643,7 +1643,7 @@ def put_table_safe(h5, table, df, *,
             h5.put(
                 key, df,
                 format='table',
-                index=False,  # ⚡ 禁用实时索引维护以保稳定
+                index=True,  # 保留 MultiIndex
                 append=True,
                 complib=complib,
                 complevel=complevel,
@@ -1654,7 +1654,7 @@ def put_table_safe(h5, table, df, *,
         h5.put(
             key, df,
             format='table',
-            index=False,  # ⚡ 初始创建也不建索引，保持轻量
+            index=(not MultiIndex),  # 单索引时保留默认整数索引
             append=MultiIndex,
             complib=complib,
             complevel=complevel,
@@ -1801,7 +1801,12 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             # 仅针对 MultiIndex 的追加模式进行采样对比
                             if MultiIndex and not rewrite:
                                 try:
-                                    tmpdf = store.select(table, start=-500)
+                                    # [FIX] ⚡ 恢复历史 ticktime 去重防护：
+                                    # start=-500 只覆盖最后~2个品种，导致 dratio 极高从而绕过重复检测。
+                                    # 改为动态读取 n_unique*2 行，确保每个品种都有最新记录可供比对。
+                                    n_unique = len(df.index.get_level_values('code').unique())
+                                    tail_rows = max(500, n_unique * 2)
+                                    tmpdf = store.select(table, start=-tail_rows)
                                 except Exception:
                                     tmpdf = pd.DataFrame()
                             else:
@@ -1893,8 +1898,12 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
     time_t=time.time()
     if df is not None and not df.empty and table is not None:
-        # 类型规范化：HDF5 写入时 object 类型可能导致性能下降
+        # 类型规范化：HDF5 写入时 object 类型可能导致 schema 不匹配
+        # [FIX] ⚡ 恢复历史正确逻辑：object → str 转换仅在非 MultiIndex 表执行
+        # MultiIndex 表（如 sina_MultiIndex_data.h5）中 close/high 等列本质为 float，
+        # 若也做 astype(str) 会破坏 schema，导致追加时 cannot match existing table structure
         dd = df.dtypes.to_frame()
+        # if 'object' in dd.values and not MultiIndex:
         if 'object' in dd.values:
             col_obj = dd[dd[0] == 'object'].index.tolist()
             log.debug(f"Converting object columns to str: {col_obj}")
@@ -1979,9 +1988,36 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     if os.path.exists(fname_path):
                         shutil.copy2(fname_path, temp_fname)
                     
-                    with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
-                        put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
-            
+                    try:
+                        with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
+                            put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
+                    except ValueError as ve:
+                        if "cannot match existing table structure" in str(ve):
+                            # [AUTO-FIX] ⚡ schema 不匹配自愈：
+                            # 1. 读取原文件全量历史数据
+                            # 2. 与新数据 concat + 去重
+                            # 3. 以 mode='w' 统一 schema 全量写入，保留所有历史
+                            log.warning(f"⚠️ [SCHEMA-MISMATCH] {fname}[{table}] schema mismatch, rebuilding with full history: {ve}")
+                            if os.path.exists(temp_fname):
+                                try: os.remove(temp_fname)
+                                except: pass
+                            try:
+                                hist_df = pd.read_hdf(fname_path, key=table) if os.path.exists(fname_path) else pd.DataFrame()
+                            except Exception as re:
+                                log.error(f"[SCHEMA-FIX] Failed to read history, writing new data only: {re}")
+                                hist_df = pd.DataFrame()
+                            if not hist_df.empty:
+                                merged_df = pd.concat([hist_df, df])
+                                merged_df = merged_df[~merged_df.index.duplicated(keep='last')]
+                            else:
+                                merged_df = df
+                            with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_h5:
+                                put_table_safe(tmp_h5, table, merged_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
+                            log.warning(f"✅ [SCHEMA-FIX] {fname}[{table}] rebuilt with {len(merged_df)} rows (hist={len(hist_df)}, new={len(df)}), schema restored.")
+                            del hist_df, merged_df
+                        else:
+                            raise
+
             # --- 阶段 2: 安全替换原文件 ---
             if os.path.exists(temp_fname) and os.path.getsize(temp_fname) > 1024:
                 success = False

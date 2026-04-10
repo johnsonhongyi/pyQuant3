@@ -739,27 +739,6 @@ class Sina:
 
             if now_int <= 1030:
                  agg_metrics.loc[common_codes, 'nhigh'] = agg_metrics.loc[common_codes, 'nhigh'].combine(stats.loc[common_codes, 'high'], max)
-
-            #无条件覆盖nclose
-            # agg_metrics.loc[common_codes, 'nclose'] = stats.loc[common_codes, 'close']
-
-            # # nclose：仅在缺失或非法时才用 close 兜底
-            # mask_nclose = agg_metrics.loc[common_codes, 'nclose'].fillna(0) <= 0
-            # # if mask_nclose.any():
-            # #     fix_codes = common_codes[mask_nclose]
-            # #     agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
-
-            # if mask_nclose.any():
-            #     time_h5_hist = time.time()
-            #     all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
-            #     startime = None
-            #     endtime = '15:00:00'
-            #     run_col = ['close']
-            #     fix_codes = common_codes[mask_nclose]
-            #     # agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
-            #     agg_df = self.get_col_agg_df(h5_hist, df_latest, run_col, all_func, startime, endtime)
-            #     agg_metrics.loc[fix_codes, 'nclose'] = agg_df.loc[fix_codes, 'nclose']
-            #     log.info(f'update_agg_cache get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
         
         time_h5_hist = time.time()
         all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}

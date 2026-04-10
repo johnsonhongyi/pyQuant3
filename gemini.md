@@ -150,3 +150,15 @@
 - [x] 修复 `intraday_decision_engine.py` 中的 `NameError: name 'row' is not defined`：
     - [x] **修正函数签名**：将缺失的 `row` 参数补全至 `_sell_decision` 方法中。
     - [x] **同步更新调用链**：在 `evaluate` 方法中调用 `_sell_decision` 时正确传递当前行情 `row` 字典，确保 9:30-9:50 期间的开盘弱势检测逻辑能够正常执行。
+
+## 2026-04-10 13:20
+- [x] 修复 `sector_bidding_panel.py` 当日重点表 (Watchlist) 联动失效问题：
+    - [x] **恢复键盘联动**：修正了 `_on_watchlist_cell_changed` 中的参数设置，将 `link_software` 从 `False` 恢复为 `True`。此项改进确保了用户在使用上下键切换重点表个股时，能同步触发 TDX 等外部软件的联动，大幅提升了复盘与实盘监控的交互效率。
+
+## 2026-04-10 13:26
+- [x] 深度修复 `tdx_hdf5_api.py` 写入结构匹配异常 (ValueError: cannot match existing table structure)：
+  - [x] **安全化类型转换逻辑 (Object to Numeric)**：废弃了盲目将所有 `object` 列转为 `str` 的行为。现在会优先尝试通过 `pd.to_numeric` 将包含 `None` 但本质是数值的 `object` 列恢复为 `float64`。这保护了 `close`, `high` 等核心数值列的 Block 结构，防止由于混合类型导致的追加失败。
+  - [x] **Data Columns 智能继承 (Inherit from Storer)**：在 `put_table_safe` 的追加模式下，实现了从现有 HDF5 存储器自动读取并使用 `data_columns` 的功能。解决了由于 `index_col` 默认值与文件已有结构不符导致的 schema 冲突。
+  - [x] **修正 MultiIndex 参数透传**：修正了 `write_hdf_db` 中 `append` 参数对 MultiIndex 模式失效的问题，确保 `rewrite/append` 指令能准确到达底层存储。
+  - [x] **实现临时文件残留自愈**：通过 PID + ThreadID 命名隔离，并配合验证脚本确认了在新逻辑下 `.tmp` 文件在成功写入后的可靠替换与清理。
+- [x] **彻底重构 HDF5 写入逻辑稳定性**：针对此前编辑引入的 `IndentationError` 和代码碎片进行了全量审计与重写。恢复了 `repack_hdf_db` 和 `load_hdf_db_timed_ctx` 的完整定义，并加固了 `os.replace` 原子替换的 6 次退避重试机制，确保高频读写场景下的数据一致性与系统稳定性。
