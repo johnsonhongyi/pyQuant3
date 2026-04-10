@@ -7432,7 +7432,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 1. 尝试使用 get_compact_width 获取紧凑预设
                 cw = get_compact_width(h_low)
                 if h_low == 'name': 
-                    cw = 75 # 名称列特殊兜底
+                    cw = 65 # 名称列特殊兜底
                 
                 # 2. 如果当前列宽超过预设或特定大文本列超过上限
                 if cw and self.stock_table.columnWidth(i) > cw:
@@ -7446,72 +7446,85 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception:
             pass
 
+    def _get_or_create_item(self, r, c):
+        """[STABILITY] 获取或原子创建 Item，防止 NoneType 崩溃"""
+        table = self.stock_table
+        item = table.item(r, c)
+        if item is None:
+            item = QTableWidgetItem()
+            # 默认禁止编辑（与主风格对齐）
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(r, c, item)
+        return item
+
     def _ensure_table_item_pool(self, n_rows):
         """[PERF] 极致优化：预填充 Item 池，消灭运行时对象创建开销"""
-        table = self.stock_table
-        n_cols = table.columnCount()
-        no_edit_flag = Qt.ItemFlag.ItemIsEditable
+        n_cols = self.stock_table.columnCount()
         
         # 只要有一行没填满，就全量检测填充一次（通常仅在容量扩张时发生）
         # 这种 O(N) 的探测只在 FULL UPDATE 初始执行一次
         for r in range(n_rows):
             for c in range(n_cols):
-                if table.item(r, c) is None:
-                    item = QTableWidgetItem()
-                    item.setFlags(item.flags() & ~no_edit_flag)
-                    table.setItem(r, c, item)
+                self._get_or_create_item(r, c)
 
     def _set_table_row_fast(self, row_idx, stock_code, stock_name, 
-                           optional_cols_real, optional_data, data_idx=None,
+                           optional_cols_real, optional_data_arrays, data_idx=None,
                            color_cache=None):
-        """[PERF] 极致脏检测 Setter。核心优化：复用外部传入的 color_cache"""
+        """[PERF] 极致脏检测 Setter。核心优化：使用预处理过的 Typed Arrays"""
         if data_idx is None: data_idx = row_idx
         table = self.stock_table
         
-        # 使用传入的缓存，规避 5万+ 次循环内部创建 QColor 的严重开销
+        # 使用传入的缓存，规避对象创建开销
         RED, GREEN, BLACK = color_cache if color_cache else (QColor('red'), QColor('green'), QColor('black'))
 
-        # 1. Code 列 (Column 0)
-        item = table.item(row_idx, 0)
-        if item.text() != stock_code: 
-            item.setText(stock_code)
-            item.setData(Qt.ItemDataRole.UserRole, stock_code)
+        # 1. Code & Name 列 (脏检测，使用安全获取助手)
+        item0 = self._get_or_create_item(row_idx, 0)
+        if item0.text() != stock_code: 
+            item0.setText(stock_code)
+            item0.setData(Qt.ItemDataRole.UserRole, stock_code)
 
-        # 2. Name 列 (Column 1)
-        item = table.item(row_idx, 1)
-        if item.text() != stock_name:
-            item.setText(stock_name)
+        item1 = self._get_or_create_item(row_idx, 1)
+        if item1.text() != stock_name:
+            item1.setText(stock_name)
 
         # 3. 可选列 (Column 2+)
+        # 🚀 [OPTIMIZATION] 预取 columns 数组提高局部性
+        DisplayRole = Qt.ItemDataRole.DisplayRole
         for col_idx, (col_name, _) in enumerate(optional_cols_real, start=2):
-            val = optional_data[col_name][data_idx]
-            item = table.item(row_idx, col_idx)
+            raw_val = optional_data_arrays[col_name][data_idx]
             
-            # 🚀 数值与字符串脏检测
-            # 优先使用 DisplayRole 原始值比对，避免频繁转 string
-            new_val = float(val) if pd.notnull(val) and isinstance(val, (int, float, np.integer, np.floating)) else str(val) if pd.notnull(val) else 0.0
-            if item.data(Qt.ItemDataRole.DisplayRole) != new_val:
-                item.setData(Qt.ItemDataRole.DisplayRole, new_val)
+            # 兼容 PyQt6：确保 numpy 类型被转换为 Python 原生类型
+            if pd.notnull(raw_val):
+                if isinstance(raw_val, (int, float, np.integer, np.floating)):
+                    new_val = float(raw_val)
+                else:
+                    new_val = str(raw_val)
+            else:
+                new_val = 0.0
+                
+            item = self._get_or_create_item(row_idx, col_idx)
             
-            # 🚀 颜色脏检测
-            target_color = BLACK
-            if pd.notnull(val) and (
-                col_name in ('percent', 'dff') 
-                or (col_name.startswith('per') and col_name.endswith('d') and col_name[3:-1].isdigit())
-            ):
-                val_float = float(val)
-                if val_float > 0: target_color = RED
-                elif val_float < 0: target_color = GREEN
-            
-            # 只有当颜色真正需要改变时才触发表格重绘信号
-            if item.foreground().color() != target_color:
-                item.setForeground(target_color)
+            # 🚀 脏检测：值未变则跳过所有逻辑（含颜色）
+            if item.data(DisplayRole) != new_val:
+                item.setData(DisplayRole, new_val)
+                
+                # 只有产生异动（红绿）时，才强制设置颜色，其余时间使用主题默认色
+                target_color = None
+                if col_name in ('percent', 'dff') or (col_name.startswith('per') and 'd' in col_name):
+                    try:
+                        v_float = float(new_val)
+                        if v_float > 0: target_color = RED
+                        elif v_float < 0: target_color = GREEN
+                    except: pass
+                
+                if target_color:
+                    item.setForeground(target_color)
+                else:
+                    item.setData(Qt.ItemDataRole.ForegroundRole, None)
 
-        # 4. 映射更新 (内存操作)
+        # 4. 内存映射同步 (主线程操作)
         self.code_name_map[stock_code] = stock_name
         self.code_info_map[stock_code] = {"name": stock_name}
-        for col_name, _ in optional_cols_real:
-            self.code_info_map[stock_code][col_name] = optional_data[col_name][data_idx]
 
     def _do_sync_update_logic(self, df, n_rows, codes, names, optional_cols_real, optional_data, no_edit_flag):
         """同步更新的核心逻辑块 (用于小数据量或全量刷新)"""
@@ -7572,9 +7585,21 @@ class MainWindow(QMainWindow, WindowMixin):
         optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
         codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
         names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
-        optional_data = {}
+        # 1. 内存数据向量化准备 (在主线程外预处理类型，消灭循环内 if/else)
+        codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
+        names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
+        
+        optional_data_arrays = {}
         for col_name, real_col in optional_cols_real:
-            optional_data[col_name] = df[real_col].values if real_col else [0] * n_rows
+            if real_col:
+                col_vals = df[real_col]
+                # 🚀 向量化推断类型：如果是数值且包含 None，提前处理为 float64
+                if pd.api.types.is_numeric_dtype(col_vals):
+                    optional_data_arrays[col_name] = col_vals.fillna(0.0).values
+                else:
+                    optional_data_arrays[col_name] = col_vals.astype(str).values
+            else:
+                optional_data_arrays[col_name] = [0.0] * n_rows
         
         # 0. 预存渲染资源与计时器
         color_cache = (QColor('red'), QColor('green'), QColor('black'))
@@ -7627,7 +7652,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 try:
                     s_code = str(codes[i])
                     s_name = str(names[i]) if pd.notnull(names[i]) else ''
-                    self._set_table_row_fast(i, s_code, s_name, optional_cols_real, optional_data, color_cache=color_cache)
+                    self._set_table_row_fast(i, s_code, s_name, optional_cols_real, optional_data_arrays, color_cache=color_cache)
                     self._table_item_map[s_code] = i
                 except Exception: continue
                 
@@ -7659,6 +7684,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.stock_table.blockSignals(True)
                 _h = self.stock_table.horizontalHeader()
                 for i in range(self.stock_table.columnCount()):
+                    # [PERF] 极致优化：不要启动 ResizeToContents，这会引发 Qt 全量布局计算。
+                    # 保持 Interactive，让 _limit_table_column_widths 处理即可。
                     _h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
                 _h.setStretchLastSection(True)
                 
