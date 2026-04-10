@@ -12989,7 +12989,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'price': signal_price if signal_price > 0 else None,
                 'auto_scroll': True
             }
-            logger.info(f"[Linkage] High-precision linkage activated: {actual_code} @ {signal_date} (Type: {label}, Price: {signal_price})")
+            logger.debug(f"[Linkage] High-precision linkage activated: {actual_code} @ {signal_date} (Type: {label}, Price: {signal_price})")
         else:
             # 清理旧联动（除非是显式的跨窗口联动，这里由于是 Hotlist 点击，我们希望清理上一次的状态）
             if hasattr(self, 'active_time_linkage'):
