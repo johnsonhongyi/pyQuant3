@@ -3089,8 +3089,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 3. [ASYNC UPGRADE] 将耗时的策略处理异步化，避免阻塞 UI 线程 (尤其是 manual_scan)
         try:
-            # 兼容：从全局配置读取当前周期
-            cur_res = self.global_values.getkey("resample") or 'd'
+            # 兼容：从全局配置读取当前周期 (归一化处理，防止 'd' vs 'D')
+            cur_res = str(self.global_values.getkey("resample") or 'd').lower().strip()
             cur_concept = getattr(self, 'concept_top5', None)
 
             # 🛠️ [SNAPSHOT] 对数据进行快照化，防止子线程处理时主线程正在修改引发 RuntimeError: dict changed size during iteration
@@ -3098,13 +3098,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df_snapshot = full_df.copy()
 
             if hasattr(self, 'executor') and self.executor:
+                # [THROTTLE] 增加分发节流保护，防止前一个分析任务由于卡顿未返回时持续堆积
+                if getattr(self, '_is_strategy_running', False):
+                    return
+                self._is_strategy_running = True
+                
+                def _wrap_process():
+                    try:
+                        strategy_engine.process_data(df_snapshot, concept_top5=cur_concept, resample=cur_res)
+                    finally:
+                        self._is_strategy_running = False
+
                 # 投递到线程池，立即返回，释放 UI 指令
-                self.executor.submit(
-                    strategy_engine.process_data, 
-                    df_snapshot, 
-                    concept_top5=cur_concept, 
-                    resample=cur_res
-                )
+                self.executor.submit(_wrap_process)
             else:
                 # 兜底方案 (不推荐)
                 strategy_engine.process_data(df_snapshot, concept_top5=cur_concept, resample=cur_res)

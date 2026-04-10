@@ -639,6 +639,7 @@ class IntradayDecisionEngine:
 
             # ---------- 常规卖出判断 ----------
             sell_action, sell_pos, sell_reason = self._sell_decision(
+                row,
                 price,
                 snapshot.get('ma5d', 0),
                 snapshot.get('ma10d', 0),
@@ -677,6 +678,7 @@ class IntradayDecisionEngine:
         last_close = float(snapshot.get("last_close", 0))
         nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
         high = float(debug.get("high_val", 0))
+        low = float(row.get("low", price)) # ⚡ [FIX] 补全缺失的 low 定义
         if high <= 0:
             high = price
         highest_today = float(snapshot.get('highest_today', high))
@@ -786,6 +788,14 @@ class IntradayDecisionEngine:
         
         # 持有高点下移（买入后每次反弹都更低）
         if highest_since_buy > 0 and high < highest_since_buy * 0.98 and nclose > 0 and price < nclose:
+            # 1. 均价线下方的震荡回落
+            if nclose > 0 and price < nclose:
+                # 如果当前价格已经跌破了今日高低点中轴，且均价线在上方压制
+                high_val = float(row.get('high', 0))
+                low_val = float(row.get('low', price)) # ⚡ [FIX] 补全缺失的 low 定义
+                pullback_low = (high_val - low_val) * 0.5 + low_val
+                if price < pullback_low:
+                    pass
             p3_score += 0.30
             reasons.append(f"反弹高点持续下移")
 
