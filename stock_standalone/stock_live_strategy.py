@@ -1261,6 +1261,9 @@ class StockLiveStrategy:
 
     def process_data(self, df_all: pd.DataFrame, concept_top5: list = None, resample: str = 'd') -> None:
         """ 处理每一帧的行情数据 """
+        # [NEW] 周期归一化，防止 'd' vs 'D' 导致匹配失败
+        resample = str(resample).lower().strip()
+        
         if not self.enabled or df_all is None or df_all.empty:
             return
             
@@ -2492,7 +2495,9 @@ class StockLiveStrategy:
 
             with self._lock:
                 monitored_snapshot = dict(self._monitored_stocks)
-            valid_keys = [k for k in monitored_snapshot.keys() if monitored_snapshot[k].get('resample', 'd') == resample]
+            # [FIX] 归一化匹配，确保周期不敏感匹配
+            valid_keys = [k for k in monitored_snapshot.keys() 
+                         if str(monitored_snapshot[k].get('resample', 'd')).lower().strip() == resample]
             
             logger.debug(f"🎯 [ENGINE] _check_strategies started. Monitors={len(monitored_snapshot)} Matched={len(df)} Resample={resample}")
             
@@ -2507,9 +2512,13 @@ class StockLiveStrategy:
             res_cursor = StockLiveStrategy._kline_rr_cursors_static.get(resample, 0)
             
             # 池子同步判定 (按周期独立)
-            if len(res_pool) != len(valid_keys):
+            # [FIX] 升级同步逻辑：不仅检查长度，还检查成员集合是否一致 (处理替换场景)
+            if set(res_pool) != set(valid_keys):
                 res_pool = list(valid_keys)
                 StockLiveStrategy._kline_rr_pools_static[resample] = res_pool
+                # 成员变化时重置游标从头开始，确保新成员能第一时间被扫描
+                StockLiveStrategy._kline_rr_cursors_static[resample] = 0
+                logger.info(f"🔄 [RR_SYNC] Pool updated for {resample}. Count: {len(res_pool)}")
                 res_cursor %= max(len(res_pool), 1) # 对齐尺寸
                 logger.debug(f"🔄 [RR Sync] resample={resample}, pool size={len(res_pool)}, cursor={res_cursor}")
             
@@ -2631,7 +2640,7 @@ class StockLiveStrategy:
                                  except: pass
 
                         except Exception as e_res:
-                            logger.error(f"Future result processing failed: {e_res}")
+                            logger.exception(f"Future result processing failed: {e_res}")
 
                 except concurrent.futures.TimeoutError:
                     unfinished_keys = [futures[f] for f in futures if not f.done()]

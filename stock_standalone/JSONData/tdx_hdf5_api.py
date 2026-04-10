@@ -69,6 +69,107 @@ def _on_rm_error(func, path, exc_info):
     log.warning(f"[TempCleanup] skip: {path}, reason: {err}")
 
 
+def _recover_orphaned_h5(fname_path: str) -> bool:
+    """
+    [Disaster Recovery] ⚡ 智能容灾自愈：
+    如果原 .h5 文件丢失，尝试从剩余的 .tmp.* 临时快照中寻找最新的（或已裁切好的）有效镜像并将其“转正”。
+    """
+    try:
+        # 如果主文件存在且足够大，无需恢复
+        if os.path.exists(fname_path) and os.path.getsize(fname_path) > 1024 * 10:
+            return False 
+
+        base_dir = os.path.dirname(fname_path)
+        base_name = os.path.basename(fname_path)
+        if base_name.endswith('.h5'):
+            base_name = base_name[:-3]
+        
+        candidates = []
+        if os.path.exists(base_dir):
+            for name in os.listdir(base_dir):
+                # 兼容 .tmp.PID.TID 和 .tmp.PID 两种模式
+                if name.startswith(base_name + ".tmp."):
+                    path = os.path.join(base_dir, name)
+                    if os.path.isfile(path):
+                        size = os.path.getsize(path)
+                        if size > 1024 * 10: # 必须大于 10KB
+                            candidates.append({
+                                'path': path, 
+                                'mtime': os.path.getmtime(path), 
+                                'size': size
+                            })
+        
+        if not candidates:
+            return False
+            
+        # 排序权重算法：
+        # 1. 最近 5 分钟内修改的优先
+        # 2. 如果多个修改时间相近，优先选择体积较小但合理的（通常是成功裁切过的镜像）
+        candidates.sort(key=lambda x: (x['mtime'], -x['size']), reverse=True)
+        
+        # 探测有效性
+        for cand in candidates:
+            best_tmp = cand['path']
+            try:
+                # 尝试用 HDFStore 只读打开探测是否有可用 Key
+                with pd.HDFStore(best_tmp, mode='r') as store:
+                    if len(store.keys()) > 0:
+                        log.warning(f"⚠️ [HDF-RECOVER] Target missing: {fname_path}. "
+                                    f"Promoting valid orphan: {os.path.basename(best_tmp)} "
+                                    f"(Size: {cand['size']/1024/1024:.1f}MB, Time: {time.ctime(cand['mtime'])})")
+                        os.replace(best_tmp, fname_path)
+                        return True
+            except Exception:
+                log.debug(f"[HDF-RECOVER] Candidate {best_tmp} is invalid/incomplete, skipping.")
+                continue
+
+        return False
+
+    except Exception as e:
+        log.error(f"❌ [HDF-RECOVER] Recovery failed for {fname_path}: {e}")
+        return False
+
+def _clean_orphaned_temp_files(fname_path: str):
+    """
+    [Space Optimization] ⚡ 写前清理：
+    清理 base_dir 下所有属于当前基础名的、且对应 PID 已消失的孤儿临时文件。
+    """
+    try:
+        base_dir = os.path.dirname(fname_path)
+        base_name = os.path.basename(fname_path)
+        if base_name.endswith('.h5'):
+            base_name = base_name[:-3]
+        
+        if not os.path.exists(base_dir):
+            return
+
+        for name in os.listdir(base_dir):
+            # 识别 .tmp.PID... 命名的文件
+            if name.startswith(base_name + ".tmp."):
+                path = os.path.join(base_dir, name)
+                try:
+                    parts = name.split(".")
+                    # 查找文件名中的 PID (通常是 .tmp. 后的第一段)
+                    pid_found = False
+                    for p in parts:
+                        if p.isdigit() and 10 < int(p) < 1000000: # 粗略判定是否为合法 PID
+                            pid = int(p)
+                            if not psutil.pid_exists(pid):
+                                os.remove(path)
+                                log.info(f"[HDF-CLEAN] Removed stale orphan from dead PID {pid}: {path}")
+                            pid_found = True
+                            break
+                    # 如果没找到数字（异常命名），为了安全暂时保留或者根据修改时间清理
+                    if not pid_found:
+                         if time.time() - os.path.getmtime(path) > 3600 * 24: # 超过24小时清理
+                             os.remove(path)
+                             log.info(f"[HDF-CLEAN] Removed very old unknown tmp file: {path}")
+                             
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"[HDF-CLEAN] Error cleaning orphaned files for {fname_path}: {e}")
+
 def cleanup_temp_dir(base_dir: str, temp_name: str = "Temp") -> None:
     """
     清理 base_dir 下的 Temp 目录内容（不确认、不抛异常、尽力而为）
@@ -107,6 +208,30 @@ def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
     """
     try:
         base_dir = os.path.abspath(base_dir)
+        # [FIX] ⚡ 安全加固：仅清理 base_dir 根目录下的孤儿锁文件 (.lock)
+        # 严禁在此处自动扫描并删除 '.tmp.' 文件，因为这会误删其他正在运行的线程生成的临时数据。
+        for name in os.listdir(base_dir):
+            if name.endswith('.lock'):
+                path = os.path.join(base_dir, name)
+                try:
+                    # 锁文件清理：检查 PID 是否存活
+                    try:
+                        with open(path, 'r') as f:
+                            content = f.read().strip()
+                            if content:
+                                pid_str = content.split('|')[0]
+                                if pid_str.isdigit() and psutil.pid_exists(int(pid_str)):
+                                    continue # 进程还在，不删
+                    except Exception:
+                        pass # 读取失败则尝试删除
+                    
+                    os.remove(path)
+                    log.info(f"[TempCleanup] removed orphaned lock file: {path}")
+                except Exception:
+                    pass
+
+        # 原有的子目录清理逻辑
+        temp_name = "temp"
         temp_dir = os.path.join(base_dir, temp_name)
 
         if not os.path.isdir(temp_dir):
@@ -131,7 +256,11 @@ def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
         log.error(f"[TempCleanup] fatal error on base_dir={base_dir}: {e}")
 
 
-# class SafeHDFStore_timed_ctx(pd.HDFStore):
+# 全局锁（进程内）
+_global_hdf_lock = threading.Lock()
+# [NEW] 专门保护 HDF5 文件写入过程的物理锁（防止同一进程内不同线程抢占 temp 文件）
+_hdf_write_lock = threading.Lock()
+
 class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
         @contextmanager
@@ -1497,13 +1626,24 @@ def put_table_safe(h5, table, df, *,
             )
         else:
             # MultiIndex 情况
-            if rewrite or len(h5[key]) < 1:
+            # [FIX] ⚡ 规避 0xc0000374 Heap Corruption：不要直接对大文件调用 len(h5[key])
+            # 因为这会加载整个表。改用 get_storer().nrows 只读元数据。
+            try:
+                storer = h5.get_storer(key)
+                existing_rows = storer.nrows if storer is not None else 0
+            except Exception:
+                existing_rows = 0
+                
+            if rewrite or existing_rows < 1:
                 h5.remove(key)
 
+            # [OPTIMIZE] ⚡ 规避 Access Violation：对 MultiIndex 禁用实时索引更新
+            # 在追加模式下，维护索引是极高的开销且容易在多线程下崩溃。
+            # 对于 170MB 级别的内存盘文件，全表扫描查询也非常快，无需实时维护索引。
             h5.put(
                 key, df,
                 format='table',
-                index=True,  # 保留 MultiIndex
+                index=False,  # ⚡ 禁用实时索引维护以保稳定
                 append=True,
                 complib=complib,
                 complevel=complevel,
@@ -1514,7 +1654,7 @@ def put_table_safe(h5, table, df, *,
         h5.put(
             key, df,
             format='table',
-            index=(not MultiIndex),  # 单索引时保留默认整数索引
+            index=False,  # ⚡ 初始创建也不建索引，保持轻量
             append=MultiIndex,
             complib=complib,
             complevel=complevel,
@@ -1657,10 +1797,18 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         if showtable:
                             print(f"fname: {(fname)} keys:{store.keys()}")
                         if '/' + table in list(store.keys()):
-                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib)
-                            if tmpdf.empty:
-                                log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
-                                # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+                            # [OPTIMIZE] ⚡ 规避 0xc0000374 Heap Corruption：不要为了检查状态而加载整表
+                            # 仅针对 MultiIndex 的追加模式进行采样对比
+                            if MultiIndex and not rewrite:
+                                try:
+                                    tmpdf = store.select(table, start=-500)
+                                except Exception:
+                                    tmpdf = pd.DataFrame()
+                            else:
+                                tmpdf = safe_load_table(store, table, chunk_size=5000, MultiIndex=MultiIndex, complib=complib)
+                                
+                            if tmpdf.empty and not MultiIndex: # 非 MultiIndex 表为空才报损坏
+                                log.info(f"{table} : table is corrupted or empty, will rebuild")
             except Exception as e:
                 log.error(f"Failed to open store {fname} for reading existing data: {e}. Skipping load.")
                 # 不再在此处暴力删除文件，由后续写入逻辑控制
@@ -1756,56 +1904,104 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             df = df.fillna(0)
 
         write_start_t = time.time()
-        temp_fname = fname + ".tmp." + str(os.getpid())
+        # [FIX] ⚡ 使用 PID + ThreadID 构造唯一的临时文件名，防止同一进程内不同线程冲突触发 Access Violation
+        temp_fname = fname + ".tmp." + str(os.getpid()) + "." + str(threading.get_ident())
         temp_fname = cct.get_ramdisk_path(temp_fname)
         fname_path = cct.get_ramdisk_path(fname)
 
         truncated_triggered = False
+        
+        # 1. 容灾自愈与强力清场
+        with _hdf_write_lock:
+            # 如果主文件不存在，尝试从临时镜像中恢复
+            if not os.path.exists(fname_path):
+                _recover_orphaned_h5(fname_path)
+            
+            # [FIX] ⚡ 为了节省 RAMDISK 空间，在开始新的写入前，清理掉所有已挂掉进程留下的冗余 tmp
+            _clean_orphaned_temp_files(fname_path)
+
         try:
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
 
-
-            if os.path.exists(fname_path):
-                shutil.copy2(fname_path, temp_fname)
-
-            with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
-                put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
-
-                # 裁切逻辑 (逻辑同前，仅在非工作时间或严重超限时触发)
-                if sizelimit is not None and MultiIndex and '/' + table in tmp_h5.keys():
-                    fsize_mb = os.path.getsize(temp_fname) / (1024 * 1024)
+            with _hdf_write_lock:
+                # 2. [OPTIMIZE] 内存侧预裁切逻辑：判断是否需要进行体积管理
+                needs_prune = False
+                if sizelimit is not None and MultiIndex and os.path.exists(fname_path):
+                    fsize_mb = os.path.getsize(fname_path) / (1024 * 1024)
                     if fsize_mb > sizelimit * 1.1:
-                        trunc_t = time.time()
-                        full_df = tmp_h5.get(table)
-                        if not full_df.empty:
-                            truncated_df = full_df.groupby(level='code', group_keys=False).tail(500) if fsize_mb > 500 else \
-                                            full_df.groupby(level='code', group_keys=False).apply(lambda x: x.tail(max(10, int(len(x) * 0.8))))
-                            tmp_h5.remove(table)
-                            put_table_safe(tmp_h5, table, truncated_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
-                            truncated_triggered = True
-                            log.warning(f"[HDF-TRUNCATE] Done in {time.time() - trunc_t:.1f}s. Rows: {len(full_df)} -> {len(truncated_df)}")
-                tmp_h5.flush()
-                tmp_h5.close()
-            # tmp_h5 句柄必须在此处关闭，否则 Windows 无法进行 replace
+                        needs_prune = True
+
+                # --- 模式 A: 智能重构 (内存合并 + 内存裁切 -> 一次写盘) ---
+                if needs_prune:
+                    log.warning(f"⚡ [HDF-TRUNCATE] Memory-side pruning triggered for {fname} (Size: {os.path.getsize(fname_path)/1024/1024:.1f}MB)")
+                    try:
+                        # [FIX] ⚡ 规避 0xc0000374 Heap Corruption：
+                        # 在读取超大 HDF5 前，清理所有残留句柄并执行垃圾回收
+                        try:
+                            tables.file._open_files.close_all()
+                        except Exception:
+                            pass
+                        
+                        gc.collect()
+
+                        # 使用 read_hdf 直接读取，减少句柄持有时间
+                        hist_df = pd.read_hdf(fname_path, key=table)
+                        
+                        # 合并新旧数据并去重裁切
+                        if hist_df is not None and not hist_df.empty:
+                            full_df = pd.concat([hist_df, df])
+                            full_df = full_df[~full_df.index.duplicated(keep='last')]
+                            
+                            safe_rows = 3000
+                            if len(full_df) > safe_rows * 2:
+                                truncated_df = full_df.groupby(level='code', group_keys=False).tail(safe_rows)
+                                # 直接一次性写入临时文件
+                                with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_h5:
+                                    put_table_safe(tmp_h5, table, truncated_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
+                                truncated_triggered = True
+                                log.warning(f"✅ [HDF-TRUNCATE] Memory-side prune complete. Rows: {len(hist_df)} -> {len(truncated_df)}")
+                                # 强制显式清理内存
+                                del hist_df, full_df, truncated_df
+                                gc.collect()
+                            else:
+                                needs_prune = False # 数据量不够裁切
+                        else:
+                            needs_prune = False
+                    except Exception as pe:
+                        log.error(f"❌ [HDF-TRUNCATE] Memory-side prune failed (0xc0000374 risk mitigated): {pe}. Falling back to normal append.")
+                        needs_prune = False
+                        if os.path.exists(temp_fname):
+                            try: os.remove(temp_fname)
+                            except: pass
+
+                # --- 模式 B: 常规快速追加 (Copy -> Append) ---
+                if not needs_prune:
+                    if os.path.exists(fname_path):
+                        shutil.copy2(fname_path, temp_fname)
+                    
+                    with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
+                        put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
+            
             # --- 阶段 2: 安全替换原文件 ---
+            if os.path.exists(temp_fname) and os.path.getsize(temp_fname) > 1024:
+                success = False
+                # 注意：SafeHDFStore 内部已经有关闭逻辑，但在 replace 前需确保所有 tmp_h5 句柄已销毁
                 success = False
                 with SafeHDFStore(fname, mode='a') as h5:
                     # SafeHDFStore 获取了进程锁，但它自己也打开了文件。
                     # 我们需要关闭它内部的句柄才能进行 os.replace/os.remove
                     h5.close() 
                     
-                    # 显式触发 GC 并关闭所有 PyTables 文件句柄，确保句柄释放 (Windows 强力模式)
-                    import gc
-                    import tables
-                    gc.collect()
-                    try:
-                        tables.file._open_files.close_all()
-                    except: pass
-
-                    
+                    # 🚀 安全替换原文件逻辑：不再调用全局 tables.file._open_files.close_all() 以免中断其他线程
                     max_retry = 6  # 增加重试次数，应对高频读写冲突
                     for r in range(max_retry):
                         try:
+                            # [FIX] ⚡ 核心保护：原子替换前必须预检源文件是否存在
+                            # 防止由于外部清理或文件系统异常导致 temp_fname 丢失，从而触发后续可能的级联错误
+                            if not os.path.exists(temp_fname):
+                                log.error(f"❌ [CRITICAL] Source temp file MISSING before replace: {temp_fname}. Replacement ABORTED to protect original file.")
+                                break
+
                             # 优先直接使用 os.replace (原子操作)
                             os.replace(temp_fname, fname_path)
                             success = True
@@ -1817,14 +2013,15 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             if r == max_retry - 1:
                                 log.error(f"Final replace attempt failed after {max_retry} retries: {re}")
                                 break
-                            log.warning(f"Replace retry {r+1}/{max_retry} failed ({re}), waiting {wait_time:.2f}s...")
+                            if isinstance(re, PermissionError):
+                                log.error(f"❌ [CRITICAL] File Locked: {fname} is being held by another process! "
+                                          f"Please check and KILL stale python processes (e.g. PID {os.getpid()} or others in screenshot). "
+                                          f"Check if you have multiple 'python.exe' instances running in Task Manager.")
+
+                            wait_time = 0.3 * (r + 1)
                             
-                            # 深度清理句柄
+                            # 深度清理句柄记录，不执行全局关闭
                             gc.collect()
-                            try:
-                                import tables
-                                tables.file._open_files.close_all()
-                            except: pass
                             
                             # 若前三次 replace 都失败，尝试强制删除原文件以打破死锁
                             if r >= 3:
@@ -1850,7 +2047,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     log.warning(f"⚡ [HDF-REPACK] Skipped during work time.")
                 
         except Exception as e:
-            log.error(f"❌ HDF Write failure: {e}")
+            log.exception(f"❌ HDF Write failure: {e}")
             # 只有在非替换阶段发生错误时，才尝试清理 temp_fname
             # 实际上在 replace 逻辑里我们已经有了 return False 保护
             return False
