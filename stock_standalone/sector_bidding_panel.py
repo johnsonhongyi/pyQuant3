@@ -1498,6 +1498,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if 'macro_query' in ui_state and hasattr(self, 'query_input'):
                 q_str = ui_state['macro_query']
                 self.query_input.setCurrentText(q_str)
+                if self.query_input.lineEdit():
+                    self.query_input.lineEdit().setCursorPosition(0)
                 # [ADJUST] 启动时根据查询框是否有内容决定是否自动执行，保持状态一致
                 if q_str.strip():
                     QTimer.singleShot(1500, self._on_query_triggered)
@@ -1700,12 +1702,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.status_lbl = QLabel("等待数据...")
         self.status_lbl.setStyleSheet("color:#FFA500;font-weight:bold;")
-        self.status_lbl.setWordWrap(True) # [FIX] 防止长报错或查询字符串撑开窗口
-        bar_lay_2.addWidget(self.status_lbl)
-
-        # [NEW] 使用 Stretch 将后续查询组件推向右侧，并添加分隔符
-        bar_lay_2.addStretch()
+        self.status_lbl.setWordWrap(False) # [CHANGE] 允许单行显示更长信息
+        bar_lay_2.addWidget(self.status_lbl, 1) # 给一个伸缩系数，占据中间空余空间
         bar_lay_2.addWidget(self._sep())
+
 
         # [NEW] Macro Query Bar Moved Here (Next to Replay Info)
         bar_lay_2.addWidget(QLabel(" 🔍查询:"))
@@ -2491,7 +2491,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
     def _on_query_triggered(self):
         """执行宏观查询 (Stage 1 Filtering)"""
-        query = self.query_input.currentText().strip()
+        # [MOD] 优先从 userData 获取原始查询语句，兼容 "备注 (查询)" 格式
+        query = self.query_input.currentData()
+        if query is None or not isinstance(query, str):
+            query = self.query_input.currentText().strip()
+        else:
+            query = query.strip()
         
         # [MOD] 宏搜索按反馈采用“只读模式”，不再自动写盘同步（仅由用户通过其他方式或不作持久化）
 
@@ -2508,6 +2513,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # 触发全局刷新
         self.manual_refresh()
+        
+        # [NEW] 强制将光标移至最前，确保长查询语句下备注(Note)可见
+        if self.query_input.lineEdit():
+            self.query_input.lineEdit().setCursorPosition(0)
 
     def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
         """核心查询逻辑提取：根据 query 计算匹配个股代码池，支持手动触发与背景数据自动同步"""
@@ -2643,24 +2652,44 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _set_combo_history(self, combo: QComboBox, history_key: str, add_leader=False):
         """原子化填充 ComboBox 历史，并保留当前输入内容"""
-        history_items = []
+        history_items = []  # 存储列表项: {"label": str, "query": str, "has_note": bool}
+        seen_queries = set()
+        
         if os.path.exists(SEARCH_HISTORY_FILE):
             try:
                 with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     raw_items = data.get(history_key, [])
                     for item in raw_items:
-                        q = item.get("query", "") if isinstance(item, dict) else str(item)
-                        if q and q not in history_items:
-                            history_items.append(q)
+                        if isinstance(item, dict):
+                            q = item.get("query", "")
+                            note = item.get("note", "")
+                        else:
+                            q = str(item)
+                            note = ""
+                            
+                        if q and q not in seen_queries:
+                            seen_queries.add(q)
+                            label = f"{note} ({q})" if note else q
+                            history_items.append({
+                                "label": label,
+                                "query": q,
+                                "has_note": bool(note)
+                            })
             except Exception: pass
+            
+        # ⭐ 排序：有备注的排在前面
+        history_items.sort(key=lambda x: 0 if x["has_note"] else 1)
         
         cur_text = combo.currentText()
         combo.blockSignals(True)
         combo.clear()
-        if add_leader: combo.addItem("龙头")
-        for h in history_items[:30]: 
-            combo.addItem(h)
+        
+        if add_leader: 
+            combo.addItem("龙头", userData="龙头")
+            
+        for item in history_items[:35]: 
+            combo.addItem(item["label"], userData=item["query"])
         
         # [REVERT] 恢复之前的逻辑：在切换分组时不再强制同步为最新的历史记录，而是保留当前文本
         # 以防止自动刷新导致用户当前正在分析的操作被覆盖
