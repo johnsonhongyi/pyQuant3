@@ -1770,6 +1770,36 @@ def repack_hdf_db(fname, complib='blosc'):
     finally:
         os.chdir(back_path)
 
+sina_MultiIndex_SCHEMA = {
+    'columns': ['open','high','low','close','volume','lastbuy','llastp'],
+    'dtypes': {
+        'open':'float64',
+        'high':'float64',
+        'low':'float64',
+        'close':'float64',
+        'volume':'float64',
+        'lastbuy':'float64',
+        'llastp':'float64'
+    }
+}
+
+def normalize_SCHEMA(df):
+    for c in sina_MultiIndex_SCHEMA['columns']:
+        if c not in df:
+            df[c] = np.nan
+
+    df = df[sina_MultiIndex_SCHEMA['columns']]
+
+    df = df.astype(sina_MultiIndex_SCHEMA['dtypes'], errors='ignore')
+
+    df = (
+        df.reset_index()
+        .drop_duplicates(['code','ticktime'], keep='last')
+        .set_index(['code','ticktime'])
+        .sort_index()
+    )
+
+    return df
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False, sizelimit=None):
 
@@ -1976,24 +2006,68 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         
                         # 合并新旧数据并去重裁切
                         if hist_df is not None and not hist_df.empty:
-                            full_df = pd.concat([hist_df, df])
-                            full_df = full_df[~full_df.index.duplicated(keep='last')]
-                            
+                            # --- 1. 合并 + 强制规范 ---
+                            full_df = (
+                                pd.concat([hist_df, df])
+                                .sort_index(level=['code', 'ticktime'])
+                                .reset_index()
+                                .drop_duplicates(subset=['code', 'ticktime'], keep='last')
+                                .set_index(['code', 'ticktime'])
+                                .sort_index()
+                            )
+
+                            # --- 2. 动态裁切参数 ---
                             safe_rows = 3000
-                            if len(full_df) > safe_rows * 2:
-                                truncated_df = full_df.groupby(level='code', group_keys=False).tail(safe_rows)
-                                # 直接一次性写入临时文件
+                            trigger_ratio = 1.2      # 超过120%才触发（防抖）
+                            shrink_ratio = 0.8       # 保留80%
+                            min_rows = 50            # 每个code最少保留
+
+                            # --- 3. 分组统计 ---
+                            group_sizes = full_df.groupby(level='code').size()
+
+                            # --- 4. 判断是否需要裁切（按code，而不是全局）---
+                            if (group_sizes > safe_rows * trigger_ratio).any():
+
+                                result = []
+
+                                for code, sub_df in full_df.groupby(level='code'):
+                                    n = len(sub_df)
+
+                                    if n > safe_rows * trigger_ratio:
+                                        # 👉 触发裁切：保留80%
+                                        keep_n = max(min_rows, int(n * shrink_ratio))
+                                        sub_df = sub_df.tail(keep_n)
+
+                                    # 未超限的不动
+                                    result.append(sub_df)
+
+                                truncated_df = (
+                                    pd.concat(result)
+                                    .sort_index(level=['code', 'ticktime'])
+                                )
+
+                                # --- 5. 写入 ---
                                 with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_h5:
-                                    put_table_safe(tmp_h5, table, truncated_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
+                                    put_table_safe(tmp_h5, table, truncated_df,
+                                                   MultiIndex=MultiIndex,
+                                                   rewrite=True,
+                                                   complib=complib)
+
                                 truncated_triggered = True
-                                log.warning(f"✅ [HDF-TRUNCATE] Memory-side prune complete. Rows: {len(hist_df)} -> {len(truncated_df)}")
-                                # 强制显式清理内存
+                                log.warning(
+                                    f"✅ [HDF-TRUNCATE] Dynamic prune complete. "
+                                    f"Rows: {len(hist_df)} -> {len(truncated_df)}"
+                                )
+
                                 del hist_df, full_df, truncated_df
                                 gc.collect()
+
                             else:
-                                needs_prune = False # 数据量不够裁切
+                                needs_prune = False
+
                         else:
                             needs_prune = False
+
                     except Exception as pe:
                         log.error(f"❌ [HDF-TRUNCATE] Memory-side prune failed (0xc0000374 risk mitigated): {pe}. Falling back to normal append.")
                         needs_prune = False
@@ -2007,6 +2081,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         shutil.copy2(fname_path, temp_fname)
                     
                     try:
+                        if MultiIndex:
+                            df = normalize_SCHEMA(df)
                         with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
                             put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
                     except ValueError as ve:
@@ -2047,7 +2123,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     h5.close() 
                     
                     # 🚀 安全替换原文件逻辑：不再调用全局 tables.file._open_files.close_all() 以免中断其他线程
-                    max_retry = 6  # 增加重试次数，应对高频读写冲突
+                    max_retry = 3  # 增加重试次数，应对高频读写冲突
                     for r in range(max_retry):
                         try:
                             # [FIX] ⚡ 核心保护：原子替换前必须预检源文件是否存在

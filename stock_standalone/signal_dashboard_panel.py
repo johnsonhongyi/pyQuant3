@@ -177,9 +177,11 @@ logger = logging.getLogger(__name__)
 CATEGORY_MAP = {
     "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
+    "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
     "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
-    "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"]
+    "尾盘诱多": ["tail_end_trap", "尾盘诱多", "陷阱"],
+    "其它信号": []
 }
 
 # 信号类型中文化与聚合映射
@@ -191,7 +193,8 @@ SIGNAL_TYPE_MAP = {
     "SBC-Breakdown": "结构破位",
     "BREAKOUT_STAR": "起跳新星",
     "PATTERN": "形态异动",
-    "ALERT": "预警信号"
+    "ALERT": "预警信号",
+    "tail_end_trap": "尾盘诱多"
 }
 
 SIGNAL_TYPE_KEYWORDS = {
@@ -201,6 +204,7 @@ SIGNAL_TYPE_KEYWORDS = {
     "SBC-Breakdown": ["SBC-Breakdown", "破位", "结构破位", "跌破", "风险", "破位"],
     "BREAKOUT_STAR": ["BREAKOUT_STAR", "起跳新星"],
     "PATTERN": ["PATTERN", "形态", "信号"],
+    "tail_end_trap": ["tail_end_trap", "尾盘诱多"],
 }
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -457,6 +461,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             ("dragon", "🐉 龙头池", "#FFD700"),
             ("follow", "跟单信号", "#FFD700"), 
             ("breakout", "突破加速", "#FF4500"), 
+            ("trap", "尾盘诱多", "#1E90FF"),
             ("risk", "风险卖出", "#00FA9A"), 
             ("breakdown", "结构破位", "#87CEFA"), 
             ("other", "其它信号", "#A9A9A9")
@@ -560,7 +565,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tables: Dict[str, QTableWidget] = {}
 
         # [MOD] 新增页签：决策队列与板块热力、龙头追踪
-        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "卖点预警", "结构破位", "买入机会", "其它信号"]
+        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"]
         for tab_name in all_tabs:
             if tab_name == "🌟 决策队列":
                 table = self._create_decision_table()
@@ -585,13 +590,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         status_layout.setSpacing(15)
 
         self.status_label = QLabel("就绪")
-        self.last_update_label = QLabel("--:--:--")
-        self.stats_info_label = QLabel("跟单: 0 | 突破: 0 | 风险: 0 | 破位: 0 | 全部: 0")
-        self.stats_info_label.setStyleSheet("color: #00ff88; font-family: 'Consolas';")
+        # [NEW] 实时更新时间标签，修复 AttributeError
+        self.last_update_label = QLabel("最后更新: --:--:--")
+        self.last_update_label.setStyleSheet("color: #666; font-family: 'Consolas';")
+        
+        self.stats_info_label = QLabel("跟单: 0 | 突破: 0 | 尾盘: 0 | 全部: 0")
+        self.stats_info_label.setStyleSheet("color: #00ff88; font-family: 'Microsoft YaHei'; font-weight: bold;")
 
         status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.last_update_label)
         status_layout.addStretch()
+        status_layout.addWidget(self.last_update_label) # 放置在中间或右侧
         status_layout.addWidget(self.stats_info_label)
 
         layout.addWidget(self.status_container)
@@ -1028,6 +1036,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["结构破位"]): cats.add("breakdown")
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["跟单信号"]): cats.add("follow")
             if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["买入机会"]): cats.add("bull")
+            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["尾盘诱多"]): cats.add("trap")
             if not cats: cats.add("other")
             event._cached_cats = cats
         for cat in event._cached_cats:
@@ -1376,6 +1385,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
                 self.cards["risk"].setText(str(self._stats_counters["risk"]))
                 self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
+                self.cards["trap"].setText(str(self._stats_counters.get("trap", 0)))
                 self.cards["other"].setText(str(self._stats_counters.get("other", 0)))
                 
                 # [Dragon] 更新龙头统计
@@ -1389,13 +1399,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     self._carousel_messages = [
                         f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()}",
                         f"🐉 龙头关注: 真龙 {d_total} | 候选 {c_total}",
-                        f"🔥 市场信号: F:{self._stats_counters['follow']} | B:{self._stats_counters['breakout']} | R:{self._stats_counters['risk']} | S:{self._stats_counters['breakdown']}",
+                        f"🔥 市场信号: F:{self._stats_counters['follow']} | B:{self._stats_counters['breakout']} | T:{self._stats_counters.get('trap', 0)} | R:{self._stats_counters['risk']} | S:{self._stats_counters['breakdown']}",
                         f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
                     ]
                     
-                    # 简化顶部文字 (原 stats_info_label)
-                    compact_text = f"F:{self._stats_counters['follow']} B:{self._stats_counters['breakout']} R:{self._stats_counters['risk']} Σ:{total}"
-                    self.stats_info_label.setText(compact_text)
+                    # [MOD] 动态获取各 Tab 行数用于状态栏展示
+                    counts_parts = []
+                    tab_to_count = ["🌟 决策队列", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "买入机会", "卖点预警", "结构破位"]
+                    for t_name in tab_to_count:
+                        tbl = self.tables.get(t_name)
+                        if tbl:
+                            # 简写映射
+                            short_name = t_name.replace("信号", "").replace("🌟 ", "").replace("🔥 ", "").replace("🐉 ", "")
+                            counts_parts.append(f"{short_name}: {tbl.rowCount()}")
+                    
+                    self.stats_info_label.setText(" | ".join(counts_parts))
         
         
         # 1. 通用计算多空比
@@ -1420,13 +1438,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             elif temp_val > 20: status = "低迷"
             else: status = "冰点"
             
-            self.temp_label.setText(f"市场温度: {status}")
-            self.ls_ratio_label.setText(f"多空比: {ratio:.2f} ({temp_val:.1f}°C)")
+            self.temp_label.setText(f"市场温度: {status} ({temp_val:.1f}°C)")
+            self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
             
             summary = self._market_stats.get('summary', '')
             if summary:
                 self.temp_label.setToolTip(summary)
-                self.status_label.setText(f"🌡️ {summary}") # 同时在底部状态栏提示
+                # [MOD] 状态栏左侧显示温度与更新时间
+                self.status_label.setText(f"🌡️ {status} ({temp_val:.1f}°C) | 🕒 同步: {datetime.now().strftime('%H:%M:%S')}")
             
             # 动态改色
             color = "#ddd"
@@ -1501,7 +1520,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if hasattr(self, '_vol_dialog') and self._vol_dialog.isVisible(): self._vol_dialog.update_data(stats.get("vol_details", []))
             self.market_breadth_label.setText(f"📊 上涨:{stats.get('up', 0)} 下跌:{stats.get('down', 0)}")
             self.vol_stat_label.setText(f"🚀 放量:{stats.get('vol_up', 0)}")
-            self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')}")
             
             # [FIX] 显式触发全局统计刷新，确保温度计和指数网格即时更新
             self._update_stats_display()
@@ -1513,6 +1531,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "dragon": "🐉 龙头追踪",
             "follow": "跟单信号", 
             "breakout": "突破加速", 
+            "trap": "尾盘诱多",
             "risk": "卖点预警", 
             "breakdown": "结构破位", 
             "other": "其它信号"
@@ -1877,8 +1896,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.vol_stat_label.setText("🚀 放量:--")
         self.ls_ratio_label.setText("多空比: --")
         self.hot_sectors_label.setText("等待数据...")
-        self.last_update_label.setText("最后更新: 等待同步...")
-        self.stats_info_label.setText("跟单: 0 | 突破: 0 | 风险: 0 | 破位: 0 | 全部: 0")
+        self.stats_info_label.setText("跟单: 0 | 突破: 0 | 尾盘: 0 | 风险: 0 | 破位: 0 | 全部: 0")
         
         # 5. 刷新下拉框计数
         self._refresh_type_filter_items()

@@ -1556,9 +1556,9 @@ class Sina:
         # 1. 轨迹历史数据 (仅精简 8 列) -> sina_MultiIndex_data.h5
         logtime = cct.get_config_value_ramfile('sina_logtime')
         otime =  cct.get_config_value_ramfile('sina_logtime',int_time=True)
-
+        is_workt_time = cct.get_work_time()
         
-        if now_time_int > 925 and (not index and ( cct.get_work_time(otime) or cct.get_work_time())):
+        if now_time_int > 925 and (not index and ( cct.get_work_time(otime) or is_workt_time )):
             time_s = time.time()
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
@@ -1653,7 +1653,7 @@ class Sina:
             h5_mi_table = 'all_' + str(limit_time_int)
             
             try:
-                if not self.readonly:
+                if is_workt_time and not self.readonly:
                     h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True, sizelimit=cct.sina_MultiIndex_limit)
                     log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
             except Exception as e:

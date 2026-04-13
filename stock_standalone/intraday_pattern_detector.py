@@ -310,7 +310,7 @@ class IntradayPatternDetector:
         
         # ⚡ [NEW] 尾盘诱多陷阱 (Tail-end Trap)
         if 'tail_end_trap' in self.enabled_patterns:
-            events.extend(self._check_tail_end_trap(code, name, day_row, prev_close, now_time))
+            events.extend(self._check_tail_end_trap(code, name, tick_df, day_row, prev_close, now_time))
         
         # 8. 缩量横盘 / 冲高回落 / 顶部信号
         if 'shrink_sideways' in self.enabled_patterns:
@@ -1102,42 +1102,84 @@ class IntradayPatternDetector:
         return events
 
     def _check_tail_end_trap(self, code: str, name: str, 
+                             tick_df: Optional[pd.DataFrame],
                              day_row: pd.Series, prev_close: float,
                              now_time: dt_time) -> List[PatternEvent]:
         """
         尾盘诱多陷阱检测 (Tail-end Pump Trap)
-        逻辑：14:00 后快速拉升但无量/破位均线/结构虚假
+        逻辑：修正为“突然拉升后大幅回落”或“早盘拉升后大幅回落”
+        注意：尾盘持续走高不算诱多
         """
         events = []
+        if tick_df is None or len(tick_df) < 20:
+            return events
+
         conf_t1 = self.config.get("t1_trap_defense", {})
         start_min = conf_t1.get("tail_end_start_time", 840) # 14:00
-        
         curr_min = now_time.hour * 60 + now_time.minute
-        if curr_min < start_min:
-            return events
-            
+        
         curr_p = float(day_row.get('close', day_row.get('trade', 0)))
         open_p = float(day_row.get('open', 0))
-        volume = float(day_row.get('volume', 0)) # 这里通常是量比或相对量
+        high_p = float(day_row.get('high', 0))
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+        vwap = amount / volume if volume > 0 else 0
         
-        # 计算今日涨幅
-        pump_gain = (curr_p - open_p) / open_p * 100 if open_p > 0 else 0
-        
-        # 判定门槛
-        pump_thresh = conf_t1.get("trap_pump_threshold", 1.5)
-        vol_limit = conf_t1.get("trap_vol_ratio_limit", 1.2)
-        
-        # 如果尾盘大幅拉升但量能不足
-        if pump_gain > pump_thresh and volume < vol_limit:
-            events.append(PatternEvent(
-                code=code, name=name, pattern='tail_end_trap',
-                timestamp=datetime.now().strftime('%H:%M:%S'),
-                price=curr_p,
-                detail=f"⚠️尾盘诱多: 14:00后拉升{pump_gain:.1f}%但量能不足({volume:.1f})",
-                score=40, # 低分代表风险或负面
-                is_high_priority=True
-            ))
+        if curr_p <= 0 or open_p <= 0 or vwap <= 0:
+            return events
+
+        # 模式一：下午突然拉升后大幅回落 (14:00 后)
+        if curr_min >= start_min:
+            # 找到 14:00 左右的价格作为基准
+            # tick_df 包含最近的分时数据
+            t_col = 'ticktime' if 'ticktime' in tick_df.columns else 'time'
+            p_col = 'price' if 'price' in tick_df.columns else 'close'
             
+            # 过滤 14:00 之后的数据进行分析
+            # 简单起见，对比当前价与最近 15-30 分钟的高点回落
+            # 如果曾经拉升过 > 1.5% 且现在回落了回落了涨幅的一半以上，或者破了 VWAP
+            
+            # 获取最近 30 个 tick (假设是 1 分钟线，约为 30 分钟)
+            recent_high = tick_df[p_col].tail(30).max()
+            recent_low_before_high = tick_df[p_col].tail(60).head(30).min() # 之前一段时间的低点
+            
+            if recent_high > 0 and recent_low_before_high > 0:
+                pump_pct = (recent_high - recent_low_before_high) / recent_low_before_high * 100
+                drop_from_high = (recent_high - curr_p) / recent_high * 100
+                
+                # 如果拉升超过 1.5% 且回落超过拉升幅度的一半
+                if pump_pct > 1.5 and drop_from_high > (pump_pct * 0.5):
+                     # 如果破了 VWAP，风险更大
+                     is_broken = curr_p < vwap * 0.998
+                     if is_broken or drop_from_high > 1.5:
+                        events.append(PatternEvent(
+                            code=code, name=name, pattern='tail_end_trap',
+                            timestamp=datetime.now().strftime('%H:%M:%S'),
+                            price=curr_p,
+                            detail=f"⚠️尾盘诱多: 突然拉升{pump_pct:.1f}%后大幅回落{drop_from_high:.1f}%",
+                            score=35,
+                            is_high_priority=True
+                        ))
+                        return events # 触发一种即可
+
+        # 模式二：早盘拉升后大幅回落 (全天视角)
+        # 如果早盘大涨 > 3%，下午跌破开盘价或破 VWAP 且偏离日高 > 4%
+        morning_high = float(day_row.get('high', 0))
+        morning_gain = (morning_high - prev_close) / prev_close * 100
+        current_gain = (curr_p - prev_close) / prev_close * 100
+        
+        if morning_gain > 3.0 and (morning_high - curr_p) / morning_high > 0.04:
+            # 如果当前价格已经弱于均线且在低位
+            if curr_p < vwap * 0.995 or curr_p < open_p * 1.005:
+                events.append(PatternEvent(
+                    code=code, name=name, pattern='tail_end_trap',
+                    timestamp=datetime.now().strftime('%H:%M:%S'),
+                    price=curr_p,
+                    detail=f"⚠️尾盘陷阱: 早盘拉升{morning_gain:.1f}%后大幅回撤, 当前仅余{current_gain:.1f}%",
+                    score=30,
+                    is_high_priority=True
+                ))
+        
         return events
 
     def _check_open_low_retest(self, code: str, name: str,
