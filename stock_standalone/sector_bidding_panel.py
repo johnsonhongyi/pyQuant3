@@ -1858,7 +1858,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         rlay.addWidget(self.leader_lbl)
 
         # 个股表（带排序）
-        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '涨跌', 'dff', '分时走势', '形态暗示(安)']
+        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '情绪', '涨跌', 'dff', '分时走势', '形态暗示(安)']
         self.stock_table = QTableWidget(0, len(COLS))
         self.stock_table.setHorizontalHeaderLabels(COLS)
         hdr = self.stock_table.horizontalHeader()
@@ -1870,9 +1870,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.stock_table.setColumnWidth(2, 60)  # 角色
             self.stock_table.setColumnWidth(3, 65)  # 现价
             self.stock_table.setColumnWidth(4, 75)  # 涨幅
-            self.stock_table.setColumnWidth(5, 120) # 涨跌 [p_diff (pct_slc)]
-            self.stock_table.setColumnWidth(6, 60)  # dff
-            self.stock_table.setColumnWidth(7, 95)  # 分时走势 (绘图列)
+            self.stock_table.setColumnWidth(5, 55)  # 情绪 (score)
+            self.stock_table.setColumnWidth(6, 120) # 涨跌 [p_diff (pct_slc)]
+            self.stock_table.setColumnWidth(7, 60)  # dff
+            self.stock_table.setColumnWidth(8, 95)  # 分时走势 (绘图列)
             
             # 最后一列“形态暗示”设置为自动拉伸，确前面的列位置固定
             hdr.setSectionResizeMode(len(COLS)-1, QHeaderView.ResizeMode.Stretch)
@@ -1887,7 +1888,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setAlternatingRowColors(True)
         self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
-        self.stock_table.setItemDelegateForColumn(7, TrendDelegate(self)) # [FIX] 对准分时走势列
+        self.stock_table.setItemDelegateForColumn(8, TrendDelegate(self)) # [FIX] 对准分时走势列
         self.stock_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.stock_table.scrollToTop())
         vh = self.stock_table.verticalHeader()
         if vh: vh.setDefaultSectionSize(32) # 紧凑行高
@@ -2869,6 +2870,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         'pct_diff': data.get('leader_pct_diff', 0.0),
                         'price_diff': data.get('leader_price_diff', 0.0),
                         'dff': data.get('leader_dff', 0.0),
+                        'score': data.get('leader_score', data.get('score', 0.0)),
+                        'momentum_score': data.get('leader_momentum_score', data.get('momentum_score', 0.0)),
                         'klines': leader_klines,
                         'last_close': data.get('leader_last_close', 0),
                         'high_day': data.get('leader_high_day', 0),
@@ -2900,6 +2903,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         'pct_diff': r_data.get('pct_diff', 0.0),
                         'price_diff': r_data.get('price_diff', 0.0),
                         'dff': r_data.get('dff', 0.0),
+                        'score': r_data.get('score', 0.0),
+                        'momentum_score': r_data.get('momentum_score', 0.0),
                         'klines': f_klines,
                         'k_cache': {
                             'prices': [float(k.get('close', 0)) for k in f_klines],
@@ -2928,6 +2933,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'pct_diff': data.get('leader_pct_diff', data.get('pct_diff', 0.0)),
                     'price_diff': data.get('leader_price_diff', 0.0),
                     'dff': data.get('leader_dff', 0.0),
+                    'score': data.get('leader_score', data.get('score', 0.0)),
+                    'momentum_score': data.get('leader_momentum_score', 0.0),
                     'klines': leader_klines,
                     'last_close': data.get('leader_last_close', 0),
                     'high_day': data.get('leader_high_day', 0),
@@ -2952,6 +2959,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'pct_diff': f.get('pct_diff', 0.0),
                     'price_diff': f.get('price_diff', 0.0),
                     'dff': f.get('dff', 0.0),
+                    'score': f.get('score', 0.0),
+                    'momentum_score': f.get('momentum_score', 0.0),
                     'klines': f_klines,
                     'k_cache': {
                         'prices': [float(k.get('close', 0)) for k in f_klines],
@@ -2997,10 +3006,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             rows.sort(key=lambda r: r.get('price', 0.0), reverse=rev)
         elif col == 4:  # 涨幅
             rows.sort(key=lambda r: r.get('pct', 0.0), reverse=rev)
-        elif col == 5:  # 涨跌 (切片涨跌/价格差值)
+        elif col == 5:  # 情绪 (score)
+            rows.sort(key=lambda r: r.get('score', 0.0), reverse=rev)
+        elif col == 6:  # 涨跌 (切片涨跌/价格差值)
             # 优先按价格差值排序，更直观
             rows.sort(key=lambda r: r.get('price_diff', 0.0), reverse=rev)
-        elif col == 6:  # dff (切片力度)
+        elif col == 7:  # dff (切片力度)
             rows.sort(key=lambda r: r.get('dff', 0.0), reverse=rev)
         
         # [NEW] Pre-compute search blobs for all rows (bulk move to worker context eventually)
@@ -3051,20 +3062,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             pct_c = self._color_red if r['pct'] > 0 else self._color_green
             self._update_cell(self.stock_table, i, 4, f"{r['pct']:+.2f}%", color=pct_c)
             
-            # 6. 涨跌 [绝对额]
+            # 6. 情绪 (score) [NEW]
+            s_val = r.get('score', 0.0)
+            s_c = self._color_yellow if s_val > 10 else (QColor("#FFA500") if s_val > 5 else None)
+            self._update_cell(self.stock_table, i, 5, f"{s_val:.1f}", color=s_c, is_numeric=True)
+
+            # 7. 涨跌 [绝对额]
             p_diff = r.get('price_diff', 0.0)
             pct_slc = r.get('pct_diff', 0.0)
             diff_c = self._color_red if (p_diff > 0.001 or pct_slc > 0.01) else (self._color_green if (p_diff < -0.001 or pct_slc < -0.01) else self._color_gray)
-            self._update_cell(self.stock_table, i, 5, f"{p_diff:+.2f}", 
+            self._update_cell(self.stock_table, i, 6, f"{p_diff:+.2f}", 
                             color=diff_c, alignment=Qt.AlignmentFlag.AlignCenter, is_numeric=True)
 
-            # 7. dff
+            # 8. dff
             dff_val = r.get('dff', 0.0)
             dff_c = self._color_yellow if dff_val > 0 else (QColor("#00FFFF") if dff_val < 0 else None)
-            self._update_cell(self.stock_table, i, 6, f"{dff_val:+.2f}", 
+            self._update_cell(self.stock_table, i, 7, f"{dff_val:+.2f}", 
                             color=dff_c, is_numeric=True)
 
-            # 8. 分时走势 (绘图列)
+            # 9. 分时走势 (绘图列)
             # [OPTIMIZE] Use pre-calculated cache from Step 1
             k_cache = r.get('k_cache', {})
             k_data = {
@@ -3075,9 +3091,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 'now_price': r.get('price', 0)
             }
             # Note: _update_cell handles diff check for data objects
-            self._update_cell(self.stock_table, i, 7, "", user_role=k_data)
+            self._update_cell(self.stock_table, i, 8, "", user_role=k_data)
 
-            # 9. 形态暗示
+            # 10. 形态暗示
             hint_str = r['hint']
             if r['untradable']: hint_str = "🚫一字板 " + hint_str
             if r['is_counter']: hint_str = "🔥逆势 " + hint_str
@@ -3089,7 +3105,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             elif r['untradable']: hint_c = self._color_gray
             elif r['is_counter']: hint_c = self._color_yellow
                 
-            self._update_cell(self.stock_table, i, 8, hint_str, color=hint_c)
+            self._update_cell(self.stock_table, i, 9, hint_str, color=hint_c)
 
             if r['code'] == self._last_selected_code:
                 target_row = i
@@ -3238,6 +3254,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             'code': code,
                             'name': ts.name,
                             'pct': ts.current_pct,
+                            'score': ts.score,
+                            'momentum_score': ts.momentum_score,
                             'sector': ts.category,
                             'reason': '搜索定位 (暂无活跃)',
                             'time_str': '--:--:--'
@@ -3672,8 +3690,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._copy_to_clipboard(name)
             return
 
-        # 双击功能只在分时走势 (Column 7) 上有效
-        if col != 7:
+        # 双击功能只在分时走势 (Column 8) 上有效
+        if col != 8:
             return
 
         # 💡 [ENHANCEMENT] 尝试从 realtime_service 获取全量 K 线 (n=240, 约一整天)
@@ -3696,8 +3714,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 meta['popularity'] = ext.get('rank', 'N/A')
                 meta['theme'] = ext.get('theme_name', ext.get('concept', 'N/A'))
 
-        # 获取该行对应的基础价格元数据 (对应 _populate_table 中的 k_item 所在列 7)
-        k_item = self.stock_table.item(row, 7)
+        # 获取该行对应的基础价格元数据 (对应 _populate_table 中的 k_item 所在列 8)
+        k_item = self.stock_table.item(row, 8)
         if k_item:
             pdata = k_item.data(Qt.ItemDataRole.UserRole)
             if isinstance(pdata, dict):
