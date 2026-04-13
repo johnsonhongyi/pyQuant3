@@ -371,12 +371,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # Ensure DataHub is ready before any data processing starts
         # self.data_hub = DataHubService.get_instance()
         
-        # ⭐ 启动计时 (优化: 提升主线程池并发底线，防止递归任务死锁)
+        # ⭐ 启动计时 (分层线程池架构 v2 - 工业级)
         self._init_start_time = time.time()
-        # 🛡️ [FIX] 增加并发底线锁定保护: 如果配置过低(如4)，在多级别/多 resample 扫描下极易死锁
-        # safe_workers = max(16, cct.livestrategy_max_workers)
-        self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
-        logger.info(f"✅ Master ThreadPoolExecutor started with  workers (Config: {cct.livestrategy_max_workers})")
+        # 🔷 [ARCH] 分层线程池设计:
+        #   pump_executor  (1线程) = 轻量编排: 解包/过滤/排序/调度 → Compute 返回后单点写 UI
+        #   compute_executor (N线程) = CPU重计算: 信号检测/策略/情绪评分
+        #   compute 线程永远不直接触碰 UI，结果必须回流 pump 后统一写入
+        _compute_workers = max(10, cct.livestrategy_max_workers)
+        self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
+        self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")
+        self.executor = self.compute_executor  # 🛡️ 向后兼容别名
+        logger.info(f"✅ Layered ThreadPool: pump=1 compute={_compute_workers} (Config: {cct.livestrategy_max_workers})")
+        # 🔷 [VERSION] 快照版本号 + inflight 计数器
+        self._snapshot_version     = 0
+        self._compute_inflight     = 0
+        self._compute_max_inflight = max(3, _compute_workers // 2)
         
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
@@ -837,42 +846,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._dashboard_first_sync_done = False # ⚡ 强制触发立即同步数据
             self._signal_dashboard_win.raise_()
             self._signal_dashboard_win.activateWindow()
-        # 🚀 性能常量配置 (优化: 针对 2026 高配环境提升吞吐量)
-        MAX_TASKS_PER_CYCLE = 20    # 🛡️ 增加并发任务数 (原 5)
-        TIME_BUDGET_S = 0.050       # 🛡️ 增加处理预算到 50ms (原 5ms/18ms)，保证连续响应
-        WARNING_THRESHOLD_MS = 500  # 🚨 降低慢任务警告门槛 (原 2000ms)
-        
-        if getattr(self, "_dispatch_running", False):
-            return   # ❗ 防止重入
 
-        self._dispatch_running = True
-        t_start = time.time()
-        tasks_done = 0
-        
-        try:
-            while not self.tk_dispatch_queue.empty():
-                if tasks_done >= MAX_TASKS_PER_CYCLE:
-                    break
-                if (time.time() - t_start) > TIME_BUDGET_S:
-                    break
-                    
-                try:
-                    t_name, task = self.tk_dispatch_queue.get_nowait()
-                    with self._pending_task_lock:
-                        self._pending_task_keys.discard(t_name)
-                    
-                    t_task_start = time.time()
-                    task()
-                    task_dur = (time.time() - t_task_start) * 1000
-                    
-                    # 统计慢任务
-                    if task_dur > WARNING_THRESHOLD_MS:
-                        logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} 耗时 {task_dur:.1f}ms (阈值 {WARNING_THRESHOLD_MS}ms)")
-                    
-                    tasks_done += 1
-                except Empty:
-                    break
-            
             toast_message(self, "实时信号仪表盘已启动")
         except Exception as e:
             logger.error(f"❌ 打开信号仪表盘失败: {e}\n{traceback.format_exc()}")
@@ -973,9 +947,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         task_stats = Counter()
         max_single_task = {"name": "None", "dur": 0}
 
-        # ✅ 更大预算，提高 UI 吞吐量
-        MAX_TASKS_PER_CYCLE = 5
-        TIME_BUDGET_S = 0.005    # 18ms (给主线程更多连续运行时间)
+        # UI dispatch 预算 (与 pump_lag 解耦 — 专注主线渲染)
+        MAX_TASKS_PER_CYCLE = 8
+        TIME_BUDGET_S = 0.020    # 20ms — 保持 UI 可拖动的黄金预算
+        SLOW_TASK_WARN_MS = 500  # 慢任务阈值降至 500ms
 
         try:
             while processed_count < MAX_TASKS_PER_CYCLE:
@@ -1037,8 +1012,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         max_single_task.update({"name": t_name, "dur": task_dur})
 
                     # 统计慢任务
-                    if task_dur > 2000:
-                        logger.warning(f"🚨 慢任务: {t_name} {task_dur:.1f}ms")
+                    if task_dur > SLOW_TASK_WARN_MS:
+                        logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} {task_dur:.1f}ms")
 
                     # 🚀 [YIELD] 每 5 个任务主动呼吸一次，保持窗口可拖动
                     if processed_count % 5 == 0:
@@ -3318,6 +3293,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             delay_sec = delay_ms / 1000
             target_time = datetime.now() + timedelta(seconds=delay_sec)
         return target_time.strftime("%H:%M")
+    
+    
     # ----------------- 数据刷新 ----------------- #
     def update_tree(self):
         assert_main_thread("update_tree")
@@ -3424,8 +3401,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     #     # ⭐ 保持 max_workers=1 确保任务按序执行，但通过跳帧减少排队总数
                     #     self.executor = ThreadPoolExecutor(max_workers=1)
                     
-                    # 提交最新的包，执行全量同步
-                    self.executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query)
+                    # 提交最新的包到 pump_executor (1线程串行，保证快照顺序一致性)
+                    self.pump_executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query)
                 else:
                     # Check if subprocess is still alive
                     if hasattr(self, 'proc') and self.proc is not None:
@@ -3442,145 +3419,221 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _process_tree_data_async(self, data_packet, sync_ui=True, query=""):
         """
-        [Worker Thread] 处理数据、计算信号逻辑，完成后同步到 UI
+        [Pump Thread - Lightweight Orchestrator]
+        严禁做任何 CPU 重计算。职责: 解包->净化->脏检查->过滤->排序->提交 compute。
+        compute 结果由 _on_compute_done->pump 回流->_handle_compute_result 单点写 UI。
         """
-
+        t_pump_start = time.time()
         try:
-            # 1. 解包与基础净化
+            # 1. 解包
             if isinstance(data_packet, dict):
-                full_df = data_packet.get('full_snapshot')
-                df_raw = data_packet.get('filtered_ui_data')
+                full_df   = data_packet.get('full_snapshot')
+                df_raw    = data_packet.get('filtered_ui_data')
+                snap_time = data_packet.get('timestamp', t_pump_start)
             else:
-                full_df = data_packet
-                df_raw = data_packet
+                full_df   = data_packet
+                df_raw    = data_packet
+                snap_time = t_pump_start
 
-            # ⭐ [FIX] 恢复并净化 Code 列
-            def _sanitize_codes(d):
+            # 2. 代码净化 (轻量)
+            def _sanitize(d):
                 if d is None: return None
-                d = d.copy() # [CORE] 避免修改主线程或原数据引用的副本
-                
-                # [FIX-AMBIGUITY] 极其重要：如果索引本身的名字就叫 'code'，
-                # 需将其设为 None，否则后续插入 'code' 列会导致 sort_values 报二义性错误
-                if d.index.name == 'code':
-                    d.index.name = None
-
+                d = d.copy()
+                if d.index.name == 'code': d.index.name = None
                 if 'code' not in d.columns:
                     d['code'] = d.index.astype(str)
                 if d['code'].dtype == 'object':
-                    extracted = d['code'].str.extract(r'(\d{6})')[0]
-                    if extracted.isna().any():
-                         extracted = extracted.fillna(d['code'].str.extract(r'(\d+)')[0])
-                    d['code'] = extracted.fillna(d['code'])
+                    ext = d['code'].str.extract(r'(\d{6})')[0]
+                    if ext.isna().any():
+                        ext = ext.fillna(d['code'].str.extract(r'(\d+)')[0])
+                    d['code'] = ext.fillna(d['code'])
                 return d
 
-            full_df = _sanitize_codes(full_df)
-            
-            # --- 🚀 [OPTIMIZE] 源头脏检查 (Source Dirty Check) ---
-            # 如果全量数据指纹（规模+价格特征）未变且无实时搜索请求，跳过后续昂贵的信号检测与同步序列
-            df_source_hash = 0
-            if full_df is not None and not full_df.empty:
-                p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
-                if p_col:
-                    n = len(full_df)
-                    sample_idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
-                    p_val = full_df[p_col].iloc[sample_idx].sum()
-                    df_source_hash = hash(n) ^ hash(p_val)
-                
-                if not query and getattr(self, '_last_processed_df_hash', -1) == df_source_hash:
-                    self._is_processing_tree_data = False
-                    return
-                self._last_processed_df_hash = df_source_hash
+            full_df = _sanitize(full_df)
+            if full_df is None or full_df.empty:
+                return
 
-            # --- 🛠️ [FILTER] 实时同步搜索过滤逻辑 (解决“搜索失效”关键) ---
-            if query and full_df is not None:
+            # 3. 源数据脏检查 (轻量)
+            p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
+            df_hash = 0
+            if p_col:
+                n = len(full_df)
+                idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
+                df_hash = hash(n) ^ hash(full_df[p_col].iloc[idx].sum())
+            if not query and getattr(self, '_last_processed_df_hash', -1) == df_hash:
+                return
+            self._last_processed_df_hash = df_hash
+
+            # 4. 过滤/查询 (轻量)
+            if query:
                 from query_engine_util import query_engine
                 try:
                     df = query_engine.execute(full_df, query)
                 except Exception:
-                    df = full_df # 如果过滤失败，回退到全量，但不报错
+                    df = full_df
             else:
-                df = _sanitize_codes(df_raw) if df_raw is not None else full_df
+                df = _sanitize(df_raw) if df_raw is not None else full_df.copy()
 
-            # --- 🛠️ [CORE] 统一全量行情增强逻辑 (信号+情绪) ---
-            if full_df is not None and not full_df.empty:
-                # 1. 情绪评分计算
-                if hasattr(self, 'realtime_service') and self.realtime_service:
-                    try:
-                        self.realtime_service.update_batch(full_df)
-                        # 为全量快照计算情绪状态，确保副窗口可见
-                        all_codes = full_df['code'].tolist()
-                        all_scores = self.realtime_service.get_emotion_scores(all_codes)
-                        full_df['emotion_status'] = full_df['code'].map(all_scores).fillna(50).astype(int)
-                    except Exception as e:
-                        logger.error(f"Full-snapshot realtime sync error: {e}")
-
-                # 2. 信号检测逻辑 (计算全量行情信号，包含九转、异动等核心数据)
-                try:
-                    t_start = time.time()
-                    full_df = detect_signals(full_df)
-                    # logger.debug(f'detect_signals(full_df) duration: {time.time()-t_start:.2f}s')
-                except Exception as e:
-                    logger.error(f"Full-snapshot detect_signals failed: {e}")
-
-            # --- 🛠️ [STRATEGY] 全球/全量策略分发 ---
-            if full_df is not None and not full_df.empty:
-                # [ASYNC UPGRADE] 使用封装好的异步分发接口，避免主循环卡顿
-                self._run_live_strategy_process(full_df)
-            # self._run_live_strategy_process(full_df)
-            # --- 🛠️ [SYNC] 同步 UI 视图子集 ---
-            # 使主 Treeview 渲染的数据 (df) 与全量行情在逻辑列上保持一致
-            if full_df is not None and df is not None and not df.empty:
-                try:
-                    # 使用 full_df 中计算好的增强列覆盖 df，并保持 df 原有的索引过滤结构
-                    df = full_df.loc[df.index.intersection(full_df.index)].copy()
-                except Exception:
-                    # 容错：如果 loc 失败，回退到原有 df 但仍尝试同步情绪（如果存在）
-                    if 'emotion_status' in full_df.columns:
-                         df['emotion_status'] = df['code'].map(full_df['emotion_status']).fillna(50)
-
-            # --- 🛠️ [UI] 排序与附加属性 ---
+            # 5. 排序 (轻量)
+            cur_res = self.global_values.getkey("resample") or 'd'
             if df is not None and not df.empty:
-                sort_target = getattr(self, 'sortby_col', None)
-                if sort_target is not None:
-                    # [STABILITY] 如果目标列缺失（常见于启动初期或动态变更列），尝试降级或跳过，避免 KeyError 报错
-                    if sort_target not in df.columns:
-                        sort_target = 'name' if 'name' in df.columns else None
-                    
-                    if sort_target:
-                        df = df.sort_values(
-                            by=sort_target,
-                            ascending=getattr(self, 'sortby_col_ascend', False)
-                        )
-
-                cur_res = self.global_values.getkey("resample") or 'd'
+                sort_col = getattr(self, 'sortby_col', None)
+                if sort_col and sort_col in df.columns:
+                    df = df.sort_values(by=sort_col, ascending=getattr(self, 'sortby_col_ascend', False))
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
 
-                # --- 🛠️ [UI SYNC] 同步到主界面控制逻辑 ---
-                # ⭐ [MAJOR FIX] 使用聚合器提交任务，消灭 UI 线程积压带来的 3s 延迟
-                if ui_df is not None and not ui_df.empty:
-                    # 无论后台计算多快，UI 始终只执行“最新的”一组数据更新任务
-                    def _do_sync():
-                        # 闭包捕获当前包
-                        self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
+            # 6. Pump 延迟诊断
+            pump_lag = time.time() - snap_time
+            logger.info(f"[PumpLag] {pump_lag:.3f}s")
+            if pump_lag > 1.0:
+                logger.warning(f"[PumpLag] Slow pump: {pump_lag:.3f}s")
 
-                    self._is_ui_sync_pending = True # 🛡️ 标记 UI 任务入队
-                    self._put_deduped_task("main_ui_sync", _do_sync)
-                else:
-                    # [EMPTY-UI] 如果 UI 过滤结果为空
-                    if full_df is not None and not full_df.empty:
-                        cur_res = self.global_values.getkey("resample") or 'd'
-                        def _do_mem_sync():
-                             self._apply_tree_data_sync(full_df, None, cur_res)
-                        self._is_ui_sync_pending = True
-                        self._put_deduped_task("main_ui_sync", _do_mem_sync)
+            # 7. Compute 风暴限流 (防止 compute_executor 队列爆炸)
+            max_fl = getattr(self, '_compute_max_inflight', 5)
+            if getattr(self, '_compute_inflight', 0) >= max_fl:
+                logger.warning(f"[ComputeStorm] Backlog {self._compute_inflight}>={max_fl}, dropping")
+                return
+
+            # 8. 分配版本号 (进入 compute 前绑定，确保过期判断准确)
+            self._snapshot_version = getattr(self, '_snapshot_version', 0) + 1
+            version = self._snapshot_version
+            self._compute_inflight = getattr(self, '_compute_inflight', 0) + 1
+
+            # 9. 提交 CPU 重计算到 compute_executor
+            fut = self.compute_executor.submit(
+                self._run_compute_async,
+                full_df.copy(),
+                df.copy() if df is not None and not df.empty else None,
+                sync_ui, cur_res, version
+            )
+            # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
+            fut.add_done_callback(lambda f, v=version: self._on_compute_done(f, v))
 
         except Exception as e:
-            logger.exception(f"Error in _process_tree_data_async: {e}", exc_info=True)
+            logger.exception(f"[Pump] Error in _process_tree_data_async: {e}")
         finally:
-            # 🛡️ [CORE] 无论成功失败，必须释放后台处理标志位，允许 update_tree 调度下一个包
+            # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
-            # 注意：_is_ui_sync_pending 依然为 True，直到 _apply_tree_data_sync 完成
+
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version):
+        """
+        [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
+        结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
+        """
+        try:
+            # 信号桥接 (跨进程事件转发到 SignalBus)
+            try:
+                from signal_bus import get_signal_bus
+                bus = get_signal_bus()
+                if hasattr(self, 'signal_bridge_queue'):
+                    cnt = 0
+                    while not self.signal_bridge_queue.empty():
+                        try:
+                            ev = self.signal_bridge_queue.get_nowait()
+                            if ev:
+                                bus.publish(
+                                    event_type=getattr(ev, 'event_type', None) or getattr(ev, 'type', 'unknown'),
+                                    source=f"{getattr(ev, 'source', 'unknown')} (bridged)",
+                                    payload=getattr(ev, 'payload', {}),
+                                    signal=getattr(ev, 'signal', None)
+                                )
+                                cnt += 1
+                            if cnt > 100: break
+                        except Exception: break
+            except Exception: pass
+
+            # 1. 情绪评分 (heavy)
+            if hasattr(self, 'realtime_service') and self.realtime_service:
+                try:
+                    self.realtime_service.update_batch(full_df)
+                    codes  = full_df['code'].tolist()
+                    scores = self.realtime_service.get_emotion_scores(codes)
+                    full_df['emotion_status'] = full_df['code'].map(scores).fillna(50).astype(int)
+                except Exception as e:
+                    logger.error(f"[Compute] Realtime sync error: {e}")
+
+            # 2. 信号检测 (最重的 CPU 操作)
+            try:
+                full_df = detect_signals(full_df)
+            except Exception as e:
+                logger.error(f"[Compute] detect_signals failed: {e}")
+
+            # 3. 将 full_df 增强列同步到 df 视图
+            if df is not None and not df.empty:
+                try:
+                    df = full_df.loc[df.index.intersection(full_df.index)].copy()
+                except Exception:
+                    if 'emotion_status' in full_df.columns:
+                        df['emotion_status'] = df['code'].map(
+                            full_df.set_index('code')['emotion_status']
+                        ).fillna(50)
+
+            # 4. 策略引擎 (fire-and-forget, 内置节流)
+            if not full_df.empty:
+                self._run_live_strategy_process(full_df)
+
+            return (full_df, df, sync_ui, cur_res)
+
+        except Exception as e:
+            logger.exception(f"[Compute] v{version} error: {e}")
+            return None
+
+    def _on_compute_done(self, fut, version):
+        """
+        [Compute Thread Callback] 严禁直接触 UI。
+        通过 pump_executor.submit 强制回流，确保 UI 写入永远只有 pump 一个入口。
+        """
+        try:
+            result = fut.result()
+        except Exception as e:
+            logger.error(f"[Compute] Future failed v{version}: {e}")
+            self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
+            return
+
+        if result is None:
+            self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
+            return
+
+        # 强制回流 pump — UI 单入口封口
+        self.pump_executor.submit(self._handle_compute_result, result, version)
+
+    def _handle_compute_result(self, result, version):
+        """
+        [Pump Thread] 版本检查 + 单点写 UI。
+        tk_dispatch_queue 的唯一合法写入点。
+        """
+        self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
+
+        # [VERSION] Pump 层: 丢弃过期结果 (第一层防护)
+        cur_ver = getattr(self, '_snapshot_version', 0)
+        if version < cur_ver:
+            logger.debug(f"[Version] Drop stale v{version} < v{cur_ver}")
+            return
+
+        try:
+            full_df, df, sync_ui, cur_res = result
+        except Exception as e:
+            logger.error(f"[Pump] Unpack result failed v{version}: {e}")
+            return
+
+        # 单点写 UI (通过 Latest-Wins 聚合器)
+        if df is not None and not df.empty:
+            def _do_sync():
+                # [VERSION] UI 层: 再次校验 (第二层防护)
+                if version < getattr(self, '_snapshot_version', 0):
+                    return
+                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
+            self._is_ui_sync_pending = True
+            self._put_deduped_task("main_ui_sync", _do_sync)
+        elif full_df is not None and not full_df.empty:
+            def _do_mem_sync():
+                if version < getattr(self, '_snapshot_version', 0):
+                    return
+                self._apply_tree_data_sync(full_df, None, cur_res)
+            self._is_ui_sync_pending = True
+            self._put_deduped_task("main_ui_sync", _do_mem_sync)
+
 
     def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d'):
         """

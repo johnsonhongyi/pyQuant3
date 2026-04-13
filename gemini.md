@@ -169,3 +169,12 @@
   - [x] **对齐 GlobalValues 缓存时效性**：在提取 `GlobalValues().getkey('is_trade_date')` 缓存前，增加对 `GlobalValues().getkey('trade_date') == date_str` 的强制校验。彻底解决因 `fetch_and_process` 无法识别新一天而未能自动进入早盘自动初始化的遗留顽疾。
   - [x] **修复由于参数预评估造成的高频网络风暴**：删除了 `get_trade_date_status` 传参给 `get_config_value_ramfile` 时的 `currvalue=get_day_istrade_date()`，此旧写法因 Python 参数的迫切求值（Eager Evaluation）导致即便缓存存在且生效，底层也必然发起一次无用的强制网络查询请求。现已改为按需短路。
   - [x] **补齐防空值 (Anti-None Poisoning) 写入机制**：对于底层 API 请求超时返回 `None` 时的结果进行显式屏蔽，在 `get_config_value_ramfile` 和 `get_trade_date_status` 内同时堵住了当结果无效时依然将其连同今天日期强制写入 RAM `h5config.txt` 以及内存 `GlobalValues()` 的致命漏洞。确保只有在 `trade_status is not None` 时才提交事务，保护当日元数据池不被污染。
+
+## 2026-04-13 15:45
+- [x] **深度稳定 Tkinter UI 响应：实施分层异步架构 (Pump + Compute Layer)**：
+  - [x] **分层线程池重构**：将原本臃肿的 executor 拆分为 `pump_executor` (单线程，负责顺序分发) 与 `compute_executor` (多线程，负责 CPU 密集型计算)，彻底解耦了实时行情泵送与策略/信号分析耗时任务。
+  - [x] **实现快照版本控制 (Snapshot Versioning)**：引入版本号对比机制，在 `_handle_compute_result` 中自动丢弃过期（Stale）的计算结果，消除了高位运行下 UI 数据的乱序与闪烁。
+  - [x] **建立 UI 队列硬通量保护 (Hard Backpressure)**：在 `tk_dispatch_queue` 中实现了 200/50 门槛保护。当队列堆积超过 200 个任务时强制丢弃旧任务并自动排空至 50，彻底防止了极端行情导致的 UI 假死与 Watchdog 重置。
+  - [x] **计算任务流限流与自愈 (Compute Throttling)**：通过 `_compute_inflight` 计数器动态限制并行计算深度（默认 5 帧），并配合高频 `PumpLag` 延迟诊断，实现了对高频数据风暴的平滑降级处理。
+  - [x] **单入口安全写入 (Single-entry Pipeline)**：通过 Future Callback 机制强制将所有 Compute 结果写回 Pump 线程进行版本过滤，确保 `tk_dispatch_queue` 只有单一合法的写入入口，大幅提升了并行环境下的状态一致性。
+  - [x] **深度恢复与修复**：成功挽救并修复了因编辑冲突引发的 `_run_live_strategy_process` 缺失、`IndentationError` 以及排序方法丢失等严重错误，恢复了系统的生产级可用性。
