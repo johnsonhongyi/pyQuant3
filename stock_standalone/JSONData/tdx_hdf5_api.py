@@ -1899,16 +1899,34 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     time_t=time.time()
     if df is not None and not df.empty and table is not None:
         # 类型规范化：HDF5 写入时 object 类型可能导致 schema 不匹配
-        # [FIX] ⚡ 恢复历史正确逻辑：object → str 转换仅在非 MultiIndex 表执行
-        # MultiIndex 表（如 sina_MultiIndex_data.h5）中 close/high 等列本质为 float，
-        # 若也做 astype(str) 会破坏 schema，导致追加时 cannot match existing table structure
+        # [FIX] ⚡ MultiIndex 表（如 sina_MultiIndex_data.h5）中 close/high 等列本质为 float，
+        # 直接 astype(str) 会破坏已有 schema 导致 cannot match existing table structure。
+        # 正确做法：MultiIndex 表优先 pd.to_numeric 恢复 float64，无法恢复才保留 object。
+        # 非 MultiIndex 表维持原有 astype(str) 行为（用于 code/name 等字符列）。
         dd = df.dtypes.to_frame()
-        # if 'object' in dd.values and not MultiIndex:
         if 'object' in dd.values:
             col_obj = dd[dd[0] == 'object'].index.tolist()
-            log.debug(f"Converting object columns to str: {col_obj}")
-            df[col_obj] = df[col_obj].astype(str)
-            if not MultiIndex:
+            if MultiIndex:
+                # MultiIndex 表：优先尝试将数值型 object 列恢复为 float64
+                str_cols = []
+                # 常见数值列白名单，即使全为空也必须是 float，防止 schema 损坏
+                numeric_whitelist = ['close', 'high', 'low', 'llastp', 'volume', 'lastbuy', 'change', 'amount', 'p_change']
+                for col in col_obj:
+                    converted = pd.to_numeric(df[col], errors='coerce')
+                    if converted.notna().any() or col.lower() in numeric_whitelist:
+                        # 包含有效数字，或者是已知的数值列，强制恢复为 float64
+                        df[col] = converted
+                        log.debug(f"[SCHEMA-GUARD] MultiIndex col '{col}': object → float64")
+                    else:
+                        # 确认为纯字符串列（如 name, time, ticktime）
+                        str_cols.append(col)
+                if str_cols:
+                    df[str_cols] = df[str_cols].astype(str)
+                    log.debug(f"[SCHEMA-GUARD] MultiIndex str cols kept as str: {str_cols}")
+            else:
+                # 非 MultiIndex 表：原有行为，全部转 str
+                log.debug(f"Converting object columns to str: {col_obj}")
+                df[col_obj] = df[col_obj].astype(str)
                 df.index = df.index.astype(str)
             df = df.fillna(0)
 
