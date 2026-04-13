@@ -723,11 +723,11 @@ class BiddingMomentumDetector:
             # logger.debug("[Detector] Skip save: Not a trade date.")
             return
 
-        # [NEW] [TIME-CHECK] 交易日 9:45 前不存盘，防止早上冷启动时覆盖昨日完美快照
+        # [NEW] [TIME-CHECK] 交易日 9:40 前不存盘，防止早上冷启动时覆盖昨日完美快照
         now = datetime.datetime.now()
         if not force and is_trade_day:
-            if now.hour < 9 or (now.hour == 9 and now.minute < 45):
-                # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:45).")
+            if now.hour < 9 or (now.hour == 9 and now.minute < 40):
+                # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:40).")
                 return
 
         # [NEW] [QUALITY-PROTECTION] 盘后或非交易日的数据质量比对保护
@@ -766,7 +766,9 @@ class BiddingMomentumDetector:
                 return obj
 
             # [COLUMNAR-METADATA] 使用列式存储减少 Key 重复开销
-            significant_stocks = {code: s for code, s in self._tick_series.items() if (s.score >= 0.1 or s.momentum_score > 0)}
+            significant_stocks = {code: s for code, s in self._tick_series.items() if (s.score >= 0.1)}
+            
+            # [ENHANCED-COVERAGE] 扩充采集范围，包含重点表和所有反馈列表中的个股，确保复盘不空白
             relevant_codes = set(significant_stocks.keys()) | set(self.daily_watchlist.keys()) | set(self.stock_selector_seeds.keys())
             for sinfo in self.active_sectors.values():
                 relevant_codes.add(sinfo.get('leader'))
@@ -777,7 +779,9 @@ class BiddingMomentumDetector:
             meta_cols = {
                 'code': codes_list,
                 'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
-                'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 'k': []
+                'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 
+                'p': [], 's': [], # [NEW] 仅保留涨幅、评分
+                'k': []
             }
             for code in codes_list:
                 ts = self._tick_series.get(code)
@@ -796,6 +800,8 @@ class BiddingMomentumDetector:
                     meta_cols['rl'].append(ts.ral)
                     meta_cols['iu'].append(1 if ts.is_untradable else 0)
                     meta_cols['ic'].append(1 if ts.is_counter_trend else 0)
+                    meta_cols['p'].append(round(ts.current_pct, 2))
+                    meta_cols['s'].append(round(ts.score, 1))
                     meta_cols['k'].append(compress_klines(ts.klines))
                 else:
                     for k in meta_cols: 
@@ -886,20 +892,21 @@ class BiddingMomentumDetector:
             if not os.path.exists(path):
                 return
 
-            # [REFINED] 跨日保护逻辑：考虑周末和非交易日
+            # [REFINED] 跨日保护逻辑：如果是今日启动且已经有内容，严禁触发 is_cross_day 清空
             mtime = os.path.getmtime(path)
             file_dt = datetime.datetime.fromtimestamp(mtime)
             file_date_str = file_dt.strftime('%Y-%m-%d')
             now_dt = datetime.datetime.now()
             today_str = now_dt.strftime('%Y-%m-%d')
+            
+            is_cross_day = (file_date_str != today_str)
 
             is_expired = False
-            is_cross_day = False  # [NEW] 是否为跨日数据（昨日文件 → 今日启动）
             # [NEW] 虽然未过期，但我们仍需记录文件的日期，以便之后进行跨日重置判断
             self._concept_data_date = file_dt.date()
             
             try:
-                # 获取从文件日期到今天的交易日列表 (使用 cct 中已初始化的 lazy-loaded 实例)
+                # 获取从文件日期到今天的交易日列表
                 trade_days = cct.a_trade_calendar.get_trade_days_interval(file_date_str, today_str)
                 
                 # 1. 如果中间隔了至少一个完整的交易日，彻底过期
@@ -908,18 +915,21 @@ class BiddingMomentumDetector:
                 # 2. 如果是相邻交易日（如周五到周一，或昨日到今日）
                 elif len(trade_days) == 2:
                     if cct.get_day_istrade_date(today_str):
-                        # [FIXED] 标记为跨日但不立即丢弃，后续仅清空看板数据，保留元数据
-                        is_cross_day = True
                         # 09:15 后（竞价已结束）且还在早盘，或者其他交易时段启动，认为过期数据需彻底隔离
-                        if now_dt.hour >= 10 or (now_dt.hour == 9 and now_dt.minute >= 15):
-                            is_expired = True
+                        # [FIX] 增加保护：如果在早盘启动，认为是跨日数据需清理；如果是收盘后启动（做复盘），保留
+                        if now_dt.hour < 15:
+                            if now_dt.hour >= 10 or (now_dt.hour == 9 and now_dt.minute >= 15):
+                                is_expired = True
                     # 如果今日不是交易日，保留上一交易日数据继续分析
-                # 3. 如果 len(trade_days) == 1，同一个交易日内，正常加载
+                # 3. 如果是同一个交易日重启 (len == 1)，绝不标记为跨日或过期
+                elif len(trade_days) == 1:
+                    is_cross_day = False
+                    is_expired = False
             except Exception as e:
-                # 兜底逻辑：如果交易日历获取失败，回退到 15.5 小时硬性判断
+                # 兜底逻辑
                 if time.time() - mtime > 15.5 * 3600:
                     is_expired = True
-                logger.debug(f"[Detector] 交易日历判断异常，回退判断: {e}")
+                logger.debug(f"[Detector] 交易日历判断异常: {e}")
 
             if is_expired:
                 logger.info(f"📅 [Detector] 持久化数据已过期 ({file_date_str} -> {today_str})，跳过加载。")
@@ -1051,9 +1061,24 @@ class BiddingMomentumDetector:
                     ts.last_low = _get('ll', ts.last_low)
                     ts.now_price = _get('np', ts.now_price)
                     ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
+                    ts.score = _get('s', ts.score) # [NEW] 情绪分恢复
                     ts.ral = _get('rl', ts.ral)
                     ts.is_untradable = bool(_get('iu', ts.is_untradable))
                     ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                    
+                    # [NEW] 同步更新全量缓存，确保 UI 在 Tick 到达前就能显示恢复出的分值与涨幅
+                    self._global_snap_cache[code] = {
+                        'code': code, 'name': ts.name, 'pct': _get('p', 0.0),
+                        'score': ts.score,
+                        'price': ts.now_price, 'last_close': ts.last_close,
+                        'category': ts.category, 'first_breakout_ts': ts.first_breakout_ts,
+                        'klines': decompress_klines(_get('k', [])),
+                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                        'pattern_hint': ts.pattern_hint
+                    }
+                    
+                    # 价格锚点与涨幅 (虽然 ts.current_pct 是属性，但 ts.now_price 恢复后会自愈，
+                    # 且 meta_cols 中有 'p' 列供 UI 层直接展示)
                     
                     # 恢复 K 线
                     klines_data = _get('k', None)
@@ -1084,7 +1109,7 @@ class BiddingMomentumDetector:
                     for k in decompress_klines(m.get('klines', [])): # [OPTIMIZED] 解压加载
                         ts.push_kline(k)
             
-            logger.info(f"♻️ [Detector] 会话数据已恢复: {len(stock_scores)} 只个股, {len(self.active_sectors)} 个板块")
+            logger.info(f"♻️ [Detector] 会话数据已恢复: {len(self._tick_series)} 只个股, {len(self.active_sectors)} 个板块")
             # [FIX] 跨日时将日期标记设为今日，防止 _check_day_switch 再次触发重置
             # 同日重启时，优先使用 JSON 内嵌的 data_date，避免 os mtime 被带偏
             if is_cross_day:
@@ -1889,10 +1914,10 @@ class BiddingMomentumDetector:
 
         # [RE-ENABLED] 自动清理跨日数据，确保早盘竞价开始时看板是干净的
         if self._concept_data_date != today:
-            # 如果是交易日，且已经过了 09:00，我们强制清理一次上一交易日的残余数据
+            # 如果是交易日，且处于早盘重置窗 (09:00 - 09:30)
             if cct.get_day_istrade_date(str(today)):
-                if now_t >= 900:
-                    logger.info(f"📅 [Detector] {today} Day Transition Detected (Bidding started) - Cleaning stale session data")
+                if 900 <= now_t <= 930:
+                    logger.info(f"📅 [Detector] {today} Morning Transition Detected (Bidding window) - Resetting session data")
                     self._concept_data_date = today
                     self.daily_watchlist.clear()
                     self._sector_active_stocks_persistent.clear()
@@ -1913,6 +1938,10 @@ class BiddingMomentumDetector:
         for code in codes_for_watchlist:
             d = snap.get(code)
             if d and d['pct'] >= get_limit_up_threshold(code) and not d['is_untradable']:
+                # [FIXED] 时间指纹过滤：09:20 之前的竞价涨停不计入重点表，防止虚假干扰
+                if now_t < 920 and not self.in_history_mode:
+                    continue
+                    
                 if code in self.daily_watchlist:
                     self.daily_watchlist[code]['pct'] = round(d['pct'], 2)
                     if d['pattern_hint']: self.daily_watchlist[code]['pattern_hint'] = d['pattern_hint']
