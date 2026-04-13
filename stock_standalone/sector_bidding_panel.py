@@ -1559,7 +1559,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_1.addStretch()
         # 🚀 [NEW] Rearrange Button
         self.btn_tile = QPushButton("窗口重排")
-        self.btn_tile.setFixedWidth(70)
+        self.btn_tile.setMinimumWidth(65)
         self.btn_tile.setStyleSheet("background-color: #444; color: #00ff88; border: 1px solid #00ff88;")
         self.btn_tile.clicked.connect(self._on_rearrange_clicked)
         bar_lay_1.addWidget(self.btn_tile)
@@ -1592,7 +1592,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
         # [NEW] 按反馈：宏观搜索默认使用 history5
         self.history_selector.setCurrentIndex(4)  
-        self.history_selector.setFixedWidth(80)
+        self.history_selector.setMinimumWidth(70)
         self.history_selector.currentIndexChanged.connect(self._on_history_group_changed)
         bar_lay_1.addWidget(self.history_selector)
 
@@ -1603,7 +1603,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.search_input.setDuplicatesEnabled(False)
         self.search_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         self.search_input.setPlaceholderText("龙头")
-        self.search_input.setFixedWidth(150)
+        self.search_input.setMinimumWidth(80)
         self.search_input.lineEdit().returnPressed.connect(self._on_search_triggered)
         self.search_input.activated.connect(self._on_search_triggered)
         # 添加默认常驻选项
@@ -1618,12 +1618,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_1.addWidget(self.search_input)
         
         self.btn_search = QPushButton("查询")
-        self.btn_search.setFixedWidth(55)
+        self.btn_search.setMinimumWidth(50)
         self.btn_search.clicked.connect(self._on_search_triggered)
         bar_lay_1.addWidget(self.btn_search)
         
         self.btn_clear_search = QPushButton("清除")
-        self.btn_clear_search.setFixedWidth(55)
+        self.btn_clear_search.setMinimumWidth(50)
         self.btn_clear_search.clicked.connect(self._on_search_cleared)
         bar_lay_1.addWidget(self.btn_clear_search)
         
@@ -1635,7 +1635,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_2.setSpacing(6)
         
         self.btn_refresh = QPushButton("刷新 🔄")
-        self.btn_refresh.setFixedWidth(65)
+        self.btn_refresh.setMinimumWidth(60)
         self.btn_refresh.setToolTip("刷新评分并更新表格内容\n快捷键: F5 或双击空白处")
         self.btn_refresh.clicked.connect(self.manual_refresh)
         bar_lay_2.addWidget(self.btn_refresh)
@@ -1647,26 +1647,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_2.addWidget(self.cb_log)
 
         self.btn_close = QPushButton("关闭 ✖")
-        self.btn_close.setFixedWidth(55)
+        self.btn_close.setMinimumWidth(50)
         self.btn_close.clicked.connect(self._on_btn_close_clicked)
         bar_lay_2.addWidget(self.btn_close)
 
         bar_lay_2.addWidget(self._sep())
 
         self.btn_history = QPushButton("历史复盘 📂")
-        self.btn_history.setFixedWidth(85)
+        self.btn_history.setMinimumWidth(80)
         self.btn_history.clicked.connect(self._on_history_load_clicked)
         bar_lay_2.addWidget(self.btn_history)
 
         self.btn_track = QPushButton("🔍 历史追踪")
-        self.btn_track.setFixedWidth(85)
+        self.btn_track.setMinimumWidth(80)
         self.btn_track.setStyleSheet("background-color: #2a3a4a; color: #ff9900;")
         self.btn_track.setToolTip("选择快照并对比当前走势，寻找 10 个潜力结构")
         self.btn_track.clicked.connect(self._on_history_track_clicked)
         bar_lay_2.addWidget(self.btn_track)
 
         self.btn_live = QPushButton("实时 📡")
-        self.btn_live.setFixedWidth(65)
+        self.btn_live.setMinimumWidth(60)
         self.btn_live.setStyleSheet("background-color: #2a3a4a; color: #00ff88; font-weight: bold;")
         self.btn_live.clicked.connect(self._on_back_to_live_clicked)
         self.btn_live.setVisible(False) # 初始隐藏
@@ -1677,14 +1677,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_2.addWidget(self._sep())
         
         self.btn_sbc_live = QPushButton("SBC实时⚡")
-        self.btn_sbc_live.setFixedWidth(85)
+        self.btn_sbc_live.setMinimumWidth(80)
         self.btn_sbc_live.setStyleSheet("background-color: #2a3a4a; color: #00ff88; font-weight: bold;")
         self.btn_sbc_live.setToolTip("使用Sina实时数据验证SBC信号 (需在个股表选中代码)")
         self.btn_sbc_live.clicked.connect(lambda: self._run_sbc_test(True))
         bar_lay_2.addWidget(self.btn_sbc_live)
 
         self.btn_sbc_replay = QPushButton("SBC回放")
-        self.btn_sbc_replay.setFixedWidth(75)
+        self.btn_sbc_replay.setMinimumWidth(70)
         self.btn_sbc_replay.setStyleSheet("background-color: #2a3a4a; color: #aad4ff;")
         self.btn_sbc_replay.setToolTip("使用本地缓存/日线数据执行SBC逻辑回放")
         self.btn_sbc_replay.clicked.connect(lambda: self._run_sbc_test(False))
@@ -1692,7 +1692,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # [REPOSITIONED] 重置今日按钮移动至此处，减少误触风险
         self.btn_reset_today = QPushButton("🔄 重置今日")
-        self.btn_reset_today.setFixedWidth(85)
+        self.btn_reset_today.setMinimumWidth(80)
         self.btn_reset_today.setStyleSheet("background-color: #3d0000; color: #ff6060; font-weight: bold; border: 1.5px solid #ff4444; border-radius: 4px;")
         self.btn_reset_today.setToolTip("⚠️ 清除全部历史缓存(重点表/评分/锚点)，强制从零开始采集（不可撤销）")
         self.btn_reset_today.clicked.connect(self._on_reset_today_clicked)
@@ -1702,7 +1702,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         self.status_lbl = QLabel("等待数据...")
         self.status_lbl.setStyleSheet("color:#FFA500;font-weight:bold;")
-        self.status_lbl.setWordWrap(False) # [CHANGE] 允许单行显示更长信息
+        self.status_lbl.setWordWrap(True) # [UPGRADE] 允许自适应换行 (2-3行)
+        self.status_lbl.setMinimumWidth(100)
         bar_lay_2.addWidget(self.status_lbl, 1) # 给一个伸缩系数，占据中间空余空间
         bar_lay_2.addWidget(self._sep())
 
@@ -1712,7 +1713,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # [NEW] 历史刷新按钮
         self.btn_reload_query = QPushButton("🔄")
-        self.btn_reload_query.setFixedWidth(28)
+        self.btn_reload_query.setMinimumWidth(28)
         self.btn_reload_query.setToolTip("重新加载历史查询记录库 (无需切换分组)")
         self.btn_reload_query.setStyleSheet("QPushButton { color: #aad4ff; background: #2a3a4a; border: 1px solid #444; border-radius: 3px; } QPushButton:hover { background: #34495e; }")
         self.btn_reload_query.clicked.connect(self._load_current_history_to_combo_with_tip)
@@ -1723,7 +1724,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.query_input.setDuplicatesEnabled(False)
         self.query_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         self.query_input.setPlaceholderText("宏观过滤: 涨幅>3 and score>10")
-        self.query_input.setFixedWidth(210)
+        self.query_input.setMinimumWidth(50) # [CHANGE] Allow shrinking
+        self.query_input.setMaximumWidth(200) # [CHANGE] Allow shrinking
         self.query_input.lineEdit().returnPressed.connect(self._on_query_triggered)
         self.query_input.activated.connect(self._on_query_triggered)
 
@@ -1750,7 +1752,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         bar_lay_3.addWidget(QLabel(" 观测时长:"))
         self.btn_sub_10 = QPushButton("-10m")
-        self.btn_sub_10.setFixedWidth(45)
+        self.btn_sub_10.setMinimumWidth(40)
         self.btn_sub_10.clicked.connect(lambda: self._adjust_interval(-10))
         bar_lay_3.addWidget(self.btn_sub_10)
         
@@ -1760,7 +1762,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_3.addWidget(self.lbl_interval)
         
         self.btn_add_10 = QPushButton("+10m")
-        self.btn_add_10.setFixedWidth(45)
+        self.btn_add_10.setMinimumWidth(40)
         self.btn_add_10.clicked.connect(lambda: self._adjust_interval(10))
         bar_lay_3.addWidget(self.btn_add_10)
 
@@ -1818,6 +1820,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.sector_table.setFont(QFont("Microsoft YaHei", 9))
         self.sector_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # self.sector_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.sector_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.sector_table.setSortingEnabled(False) # [PURE PYTHON SORT]
         self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
@@ -1885,6 +1888,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.cellClicked.connect(self.on_stock_clicked)  # 点击联动
         self.stock_table.cellDoubleClicked.connect(self._on_stock_double_clicked) # 双击放大
         self.stock_table.currentCellChanged.connect(self.on_stock_cell_changed) # 键盘光标联动
+        self.stock_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.stock_table.setAlternatingRowColors(True)
         self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
@@ -1927,6 +1931,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.watchlist_table.verticalHeader().setVisible(False)
         self.watchlist_table.verticalHeader().setDefaultSectionSize(25) # 紧凑行高
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.watchlist_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setFont(QFont("Microsoft YaHei", 9))
         self.watchlist_table.setSortingEnabled(False) # [PURE PYTHON SORT]
@@ -1979,7 +1984,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         sp.setRange(lo, hi)
         sp.setSingleStep(step)
         sp.setValue(val)
-        sp.setFixedWidth(58)
+        sp.setMinimumWidth(50)
         return sp
 
     @staticmethod
