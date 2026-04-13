@@ -394,6 +394,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._after_ids = []
         self._last_dispatch_kick = 0  
         self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
+        self._is_ui_sync_pending = False # 🛡️ [NEW] UI 同步任务待处理标志位
         
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
         self.main_window = self   
@@ -836,6 +837,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._dashboard_first_sync_done = False # ⚡ 强制触发立即同步数据
             self._signal_dashboard_win.raise_()
             self._signal_dashboard_win.activateWindow()
+        # 🚀 性能常量配置 (优化: 针对 2026 高配环境提升吞吐量)
+        MAX_TASKS_PER_CYCLE = 20    # 🛡️ 增加并发任务数 (原 5)
+        TIME_BUDGET_S = 0.050       # 🛡️ 增加处理预算到 50ms (原 5ms/18ms)，保证连续响应
+        WARNING_THRESHOLD_MS = 500  # 🚨 降低慢任务警告门槛 (原 2000ms)
+        
+        if getattr(self, "_dispatch_running", False):
+            return   # ❗ 防止重入
+
+        self._dispatch_running = True
+        t_start = time.time()
+        tasks_done = 0
+        
+        try:
+            while not self.tk_dispatch_queue.empty():
+                if tasks_done >= MAX_TASKS_PER_CYCLE:
+                    break
+                if (time.time() - t_start) > TIME_BUDGET_S:
+                    break
+                    
+                try:
+                    t_name, task = self.tk_dispatch_queue.get_nowait()
+                    with self._pending_task_lock:
+                        self._pending_task_keys.discard(t_name)
+                    
+                    t_task_start = time.time()
+                    task()
+                    task_dur = (time.time() - t_task_start) * 1000
+                    
+                    # 统计慢任务
+                    if task_dur > WARNING_THRESHOLD_MS:
+                        logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} 耗时 {task_dur:.1f}ms (阈值 {WARNING_THRESHOLD_MS}ms)")
+                    
+                    tasks_done += 1
+                except Empty:
+                    break
             
             toast_message(self, "实时信号仪表盘已启动")
         except Exception as e:
@@ -3296,17 +3332,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             if self.refresh_enabled:
                 
-                # [WATCHDOG] If we are stuck in processing for too long (>30s), force reset
-                is_stuck = getattr(self, '_is_processing_tree_data', False)
-                if is_stuck:
+                # [WATCHDOG] 增强版 Watchdog：区分后台计算与 UI 同步
+                is_bg_busy = getattr(self, '_is_processing_tree_data', False)
+                is_ui_pending = getattr(self, '_is_ui_sync_pending', False)
+                
+                if is_bg_busy or is_ui_pending:
                     now = time.time()
-                    last_processing_start = getattr(self, '_last_processing_start_time', 0)
-                    if last_processing_start > 0 and (now - last_processing_start) > 30:
-                        logger.warning(f"⚠️ [DataWatchdog] Detected stuck processing flag for {now - last_processing_start:.1f}s. Forcing reset.")
+                    last_start = getattr(self, '_last_processing_start_time', 0)
+                    elapsed = now - last_start
+                    
+                    if last_start > 0 and elapsed > 30:
+                        reason = "Algorithm/BG" if is_bg_busy else "UI/Dispatch"
+                        logger.warning(f"⚠️ [DataWatchdog] Detected STUCK ({reason}) for {elapsed:.1f}s. Forcing reset.")
                         self._is_processing_tree_data = False
+                        self._is_ui_sync_pending = False # 🛡️ 双重重置
                         self._last_processing_start_time = 0
                     else:
-                        # [FIX] 即使正在处理中且未超时，也要重新调度下一次检查，否则主循环会在此中断！
+                        # 正常排队中，5秒后再次检查
                         self._schedule_after(5000, self.update_tree)
                         return
                 
@@ -3516,25 +3558,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # --- 🛠️ [UI SYNC] 同步到主界面控制逻辑 ---
                 # ⭐ [MAJOR FIX] 使用聚合器提交任务，消灭 UI 线程积压带来的 3s 延迟
-                # 无论后台计算多快，UI 始终只执行“最新的”一组数据更新任务
-                def _do_sync():
-                    # 闭包捕获当前包
-                    self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
+                if ui_df is not None and not ui_df.empty:
+                    # 无论后台计算多快，UI 始终只执行“最新的”一组数据更新任务
+                    def _do_sync():
+                        # 闭包捕获当前包
+                        self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
 
-                self._put_deduped_task("main_ui_sync", _do_sync)
-            else:
-                # [EMPTY-UI] 如果 UI 过滤结果为空
-                if full_df is not None and not full_df.empty:
-                    cur_res = self.global_values.getkey("resample") or 'd'
-                    def _do_mem_sync():
-                         self._apply_tree_data_sync(full_df, None, cur_res)
-                    self._put_deduped_task("main_ui_sync", _do_mem_sync)
+                    self._is_ui_sync_pending = True # 🛡️ 标记 UI 任务入队
+                    self._put_deduped_task("main_ui_sync", _do_sync)
                 else:
-                    self._is_processing_tree_data = False
+                    # [EMPTY-UI] 如果 UI 过滤结果为空
+                    if full_df is not None and not full_df.empty:
+                        cur_res = self.global_values.getkey("resample") or 'd'
+                        def _do_mem_sync():
+                             self._apply_tree_data_sync(full_df, None, cur_res)
+                        self._is_ui_sync_pending = True
+                        self._put_deduped_task("main_ui_sync", _do_mem_sync)
 
         except Exception as e:
             logger.exception(f"Error in _process_tree_data_async: {e}", exc_info=True)
+        finally:
+            # 🛡️ [CORE] 无论成功失败，必须释放后台处理标志位，允许 update_tree 调度下一个包
             self._is_processing_tree_data = False
+            # 注意：_is_ui_sync_pending 依然为 True，直到 _apply_tree_data_sync 完成
 
     def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d'):
         """
@@ -3699,7 +3745,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"Error applying tree data: {e}", exc_info=True)
             finally:
-                self._is_processing_tree_data = False
+                # 🛡️ [CORE] UI 同步完成，彻底释放流水线信号，允许 update_tree 进入下一轮
+                self._is_ui_sync_pending = False
+                # self._is_processing_tree_data = False # 已在 _process_tree_data_async 的 finally 中处理
 
                 if has_update:
                     if getattr(self, '_last_resample', None) != self.global_values.getkey("resample"):
