@@ -689,3 +689,9 @@ if hasattr(self, 'pattern_detector'):
     - [x] **增强引擎预处理**：在 query_engine_util.py 中实现了对 备注 (逻辑) 格式的自动识别与剥离。
     - [x] **UI 触发层加固**：在 sector_bidding_panel.py 的 _on_query_triggered 中补齐了防御性拆分逻辑，确保启动恢复或手动输入时能自动提取核心逻辑。
     - [x] **原子化验证**：通过 scratch/verify_query_fix.py 验证了包含中文备注、破折号及复杂逻辑的多种组合查询均能正确解析并执行。
+
+## 2026-04-13 12:30
+- [x] 深度修复 commonTips.py 中 get_trade_date_status 频繁读写配置和死循环重试风暴导致 Tk 卡死的问题：
+  - [x] **增加线程锁防冲突 (_TRADE_STATUS_LOCK)**：防止 Tkinter UI 线程与多进程后台服务在同一瞬间涌入执行同步的 I/O。
+  - [x] **增加 _LAST_FAILED_TIME 防抖/熔断机制**：如果网络或初始化验证由于某种原因返回了 None/失败，提供一个 5 秒以上的冷却退避期，不要让 Tk 高频心跳不断去发起 ConfigObj IO 解析与强行远程查询。
+  - [x] **移除了无意义且致命的 update=True 死循环分支**：不再容忍当返回值等于 None 时原地强行带有 update=True 选项的第二遍暴击。

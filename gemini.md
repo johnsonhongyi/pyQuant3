@@ -162,3 +162,10 @@
   - [x] **修正 MultiIndex 参数透传**：修正了 `write_hdf_db` 中 `append` 参数对 MultiIndex 模式失效的问题，确保 `rewrite/append` 指令能准确到达底层存储。
   - [x] **实现临时文件残留自愈**：通过 PID + ThreadID 命名隔离，并配合验证脚本确认了在新逻辑下 `.tmp` 文件在成功写入后的可靠替换与清理。
 - [x] **彻底重构 HDF5 写入逻辑稳定性**：针对此前编辑引入的 `IndentationError` 和代码碎片进行了全量审计与重写。恢复了 `repack_hdf_db` 和 `load_hdf_db_timed_ctx` 的完整定义，并加固了 `os.replace` 原子替换的 6 次退避重试机制，确保高频读写场景下的数据一致性与系统稳定性。
+
+## 2026-04-13 08:45
+- [x] 深度修复 `commonTips.py` 中 `is_trade_date()` 跨周末后周一判定死锁 BUG：
+  - [x] **消除 Python 默认参数陷阱**：原函数使用 `date: ... = datetime.date.today()` 作为默认参数，导致在模块加载（如周五或周末）时日期被固化。周一无参调用时错误地向周五/周末请求判断，从而锁死缓存为 `False`。现已将默认值改为 `None`，在函数内部动态获取今天日期。
+  - [x] **对齐 GlobalValues 缓存时效性**：在提取 `GlobalValues().getkey('is_trade_date')` 缓存前，增加对 `GlobalValues().getkey('trade_date') == date_str` 的强制校验。彻底解决因 `fetch_and_process` 无法识别新一天而未能自动进入早盘自动初始化的遗留顽疾。
+  - [x] **修复由于参数预评估造成的高频网络风暴**：删除了 `get_trade_date_status` 传参给 `get_config_value_ramfile` 时的 `currvalue=get_day_istrade_date()`，此旧写法因 Python 参数的迫切求值（Eager Evaluation）导致即便缓存存在且生效，底层也必然发起一次无用的强制网络查询请求。现已改为按需短路。
+  - [x] **补齐防空值 (Anti-None Poisoning) 写入机制**：对于底层 API 请求超时返回 `None` 时的结果进行显式屏蔽，在 `get_config_value_ramfile` 和 `get_trade_date_status` 内同时堵住了当结果无效时依然将其连同今天日期强制写入 RAM `h5config.txt` 以及内存 `GlobalValues()` 的致命漏洞。确保只有在 `trade_status is not None` 时才提交事务，保护当日元数据池不被污染。
