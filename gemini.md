@@ -178,3 +178,13 @@
   - [x] **计算任务流限流与自愈 (Compute Throttling)**：通过 `_compute_inflight` 计数器动态限制并行计算深度（默认 5 帧），并配合高频 `PumpLag` 延迟诊断，实现了对高频数据风暴的平滑降级处理。
   - [x] **单入口安全写入 (Single-entry Pipeline)**：通过 Future Callback 机制强制将所有 Compute 结果写回 Pump 线程进行版本过滤，确保 `tk_dispatch_queue` 只有单一合法的写入入口，大幅提升了并行环境下的状态一致性。
   - [x] **深度恢复与修复**：成功挽救并修复了因编辑冲突引发的 `_run_live_strategy_process` 缺失、`IndentationError` 以及排序方法丢失等严重错误，恢复了系统的生产级可用性。
+## 2026-04-13 16:30
+- [x] **实现 `DataLoaderThread` 加载防抖 (Debounce for Data Loading)**：
+  - [x] 在 `MainWindow` 中引入 `_data_load_timer` (QTimer)，将加载操作延迟 50ms。
+  - [x] 重构 `load_stock_by_code` 为两阶段执行：UI 反馈立即生效，昂贵的数据加载任务延后。
+  - [x] 实现了 `_execute_delayed_load` 方法，遵循 "Last-One-Wins" 策略，快速连跳时仅加载最后一只股票，彻底消除了快速浏览时的 UI 线程粘滞感和 IO 惊群效应。
+## 2026-04-13 16:38
+- [x] **修复语音播报进程关闭时的 `access violation` 崩溃**：
+  - [x] 重构 `_voice_worker` 的 COM 初始化逻辑，将 `CoInitialize/CoUninitialize` 移出循环，改为线程级全局管理，大幅提升稳定性。
+  - [x] 优化 `VoiceProcess.stop` 顺序，增加到 3.0s 的 `join` 等待时间，并引入显式的 `abort()` 调用，确保语音引擎在主进程销毁前已完全停止。
+  - [x] 修复了因编辑冲突导致的 `normalize_speech_text` 代码损毁，恢复并稳固了语音播报系统的退出清理链路。

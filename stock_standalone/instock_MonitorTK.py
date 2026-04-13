@@ -3784,9 +3784,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ----------------- 竞价/尾盘异动自动弹窗 ----------------- #
                 if has_update:
                     now_hm = cct.get_now_time_int()
-                    is_bidding_or_late = (915 <= now_hm <= 945) or (1430 <= now_hm <= 1500)
-
-                    if is_bidding_or_late and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
+                    # 🚀 [MERGED] 整合并扩展自动开启逻辑
+                    # 1. 判定时间窗口：09:10 (竞价前夕) 到 15:05 (收盘整理期)
+                    # 2. 判定启动防抖：程序运行需超过 20 秒，避免启动初期瞬间弹出导致的卡顿
+                    is_auto_window = (915 <= now_hm <= 1505)
+                    is_ready_auto = (time.time() - self._init_start_time > 20)
+                    
+                    if is_auto_window and is_ready_auto and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
                         from sector_bidding_panel import SectorBiddingPanel
                         if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
                             self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
@@ -4169,8 +4173,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # Apply strict linkage immediately
         self._schedule_after(100, self.update_linkage_status)
-
-
 
     def open_sector_bidding_panel(self):
         """手动打开竞价/尾盘板块联动监控面板"""
