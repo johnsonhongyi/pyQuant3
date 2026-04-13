@@ -1960,16 +1960,35 @@ def read_ini(inifile: str = 'filter.ini', setrule: Optional[str] = None, categor
         rule = (f' category:{category} key:{read_config[category].keys()}\n{read_config[category][filterkey]}')
     return rule
 
-def is_trade_date(date: Union[datetime.date, str] = datetime.date.today()) -> Any:
-    trade_status: Any = None
+def is_trade_date(date: Union[datetime.date, str] = None) -> bool:
+    if date is None:
+        date = datetime.date.today()
+
     if isinstance(date, datetime.date):
-        date_str: str = date.strftime('%Y-%m-%d')
-        if date_str == get_today():
-            trade_status = GlobalValues().getkey('is_trade_date')
-        date = date_str
-    if trade_status is None:
-        trade_status = get_day_istrade_date(date)
-        GlobalValues().setkey('is_trade_date', trade_status)
+        date_str = date.strftime('%Y-%m-%d')
+    else:
+        date_str = parse_date_safe(date, to_str=True) or str(date)
+
+    today = get_today()
+
+    gv = GlobalValues()
+
+    # ✅ 只在“今天”才用缓存
+    if date_str == today:
+        cached_date = gv.getkey('trade_date')
+        cached_status = gv.getkey('is_trade_date')
+
+        if cached_date == today and cached_status is not None:
+            return cached_status
+
+    # ❗ 强制实时查询（避免污染）
+    trade_status = get_day_istrade_date(date_str)
+
+    # ✅ 只在“今天 + 结果可信”才缓存
+    if date_str == today and trade_status is not None:
+        gv.setkey('trade_date', today)
+        gv.setkey('is_trade_date', trade_status)
+
     return trade_status
 
 def get_trade_day_before(dl: int, endday=None) -> str:
@@ -5384,46 +5403,40 @@ def get_config_value_ramfile(fname: str, currvalue: Any = 0, xtype: str = 'time'
     classtype: str = fname
     conf_ini: str = get_ramdisk_dir() + os.path.sep + cfgfile
     if xtype == 'trade_date':
-        if os.path.exists(conf_ini):
-            config = ConfigObj(conf_ini, encoding='UTF8')
-
-            if classtype in list(config.keys()):
-                if xtype in list(config[classtype].keys()):
-                    save_date = config[classtype]['date']
+        try:
+            if os.path.exists(conf_ini):
+                config = ConfigObj(conf_ini, encoding='UTF8')
+                save_date = config.get(classtype, {}).get('date')
+                
+                if save_date == get_today() and not update:
+                    return config[classtype][xtype]
                 else:
-                    save_date = None
-            else:
-                save_date = None
-
-            if save_date is not None:
-                if save_date != get_today() or update:
                     trade_status = is_trade_date()
-                    if trade_status is not None or trade_status != 'None':
-                        if 'rewrite' in list(config[classtype].keys()):
-                            rewrite = int(config[classtype]['rewrite']) + 1
-                        else:
-                            rewrite = 1
-                        config[classtype] = {}
+                    if trade_status is not None and str(trade_status) != 'None':
+                        rewrite = int(config.get(classtype, {}).get('rewrite', 0)) + 1
+                        if classtype not in config:
+                            config[classtype] = {}
                         config[classtype][xtype] = trade_status
                         config[classtype]['date'] = get_today()
                         config[classtype]['rewrite'] = rewrite
                         config.write()
+                        return trade_status
+                    return None
             else:
-                config[classtype] = {}
-                config[classtype][xtype] = is_trade_date()
-                config[classtype]['date'] = get_today()
-                config[classtype]['rewrite'] = 1
-                config.write()
-        else:
-            config = ConfigObj(conf_ini, encoding='UTF8')
-            config[classtype] = {}
-            config[classtype][xtype] = is_trade_date()
-            config[classtype]['date'] = get_today()
-            config[classtype]['rewrite'] = 1
-                # time.strftime("%H:%M:%S",time.localtime(now))
-            config.write()
-
-        return config[classtype][xtype]    
+                config = ConfigObj(conf_ini, encoding='UTF8')
+                trade_status = is_trade_date()
+                if trade_status is not None and str(trade_status) != 'None':
+                    if classtype not in config:
+                        config[classtype] = {}
+                    config[classtype][xtype] = trade_status
+                    config[classtype]['date'] = get_today()
+                    config[classtype]['rewrite'] = 1
+                    config.write()
+                    return trade_status
+                return None
+        except Exception as e:
+            log.error(f"Error reading/writing {conf_ini}: {e}")
+            return None
 
     else:
 
@@ -5558,21 +5571,49 @@ def to_bool(value: Any) -> bool:
     return False
 
 
+import threading
+_TRADE_STATUS_LOCK = threading.Lock()
+_LAST_FAILED_TIME = 0.0
+
 def get_trade_date_status() -> bool:
-    trade_date: Optional[str] = GlobalValues().getkey('trade_date')
-    trade_status: Any = GlobalValues().getkey('is_trade_date')
-    if trade_status is None:
-        trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date')
-        if trade_status is None or trade_status == 'None':
-            trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date', update=True)
-        GlobalValues().setkey('is_trade_date', trade_status)
-        GlobalValues().setkey('trade_date', get_today())
-    if trade_date is not None:
-        if trade_date != get_today():
-            trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date')
-            GlobalValues().setkey('is_trade_date', trade_status)
-            GlobalValues().setkey('trade_date', get_today())
-    return to_bool(trade_status)
+    global _LAST_FAILED_TIME
+
+    today_str = get_today()
+    gv = GlobalValues()
+
+    # 1. 快路径
+    trade_date = gv.getkey('trade_date')
+    trade_status = gv.getkey('is_trade_date')
+    if trade_date == today_str and trade_status is not None:
+        return to_bool(trade_status)
+
+    import time
+    now = time.time()
+
+    # 2. 熔断
+    if now - _LAST_FAILED_TIME < 5.0:
+        return False
+
+    # 3. I/O（锁外）
+    trade_status = get_config_value_ramfile(
+        fname='is_trade_date', currvalue=None, xtype='trade_date'
+    )
+
+    # 4. 失败
+    if trade_status is None or str(trade_status) == 'None':
+        with _TRADE_STATUS_LOCK:
+            _LAST_FAILED_TIME = time.time()
+        return False
+
+    # 5. 类型修正
+    trade_status = to_bool(trade_status)
+
+    # 6. 写缓存
+    with _TRADE_STATUS_LOCK:
+        gv.setkey('is_trade_date', trade_status)
+        gv.setkey('trade_date', today_str)
+
+    return trade_status
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
 
 def get_realtime_status():

@@ -3304,6 +3304,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if last_processing_start > 0 and (now - last_processing_start) > 30:
                         logger.warning(f"⚠️ [DataWatchdog] Detected stuck processing flag for {now - last_processing_start:.1f}s. Forcing reset.")
                         self._is_processing_tree_data = False
+                        self._last_processing_start_time = 0
                     else:
                         # [FIX] 即使正在处理中且未超时，也要重新调度下一次检查，否则主循环会在此中断！
                         self._schedule_after(5000, self.update_tree)
@@ -3374,6 +3375,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     latest_pkg = all_packets[-1]
                     self._is_processing_tree_data = True
+                    self._last_processing_start_time = time.time()
                     
                     # if not hasattr(self, 'executor'):
                     #     from concurrent.futures import ThreadPoolExecutor
@@ -14412,7 +14414,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if remote_ts > self.last_ext_data_ts_local:
                         # local_time = datetime.datetime.fromtimestamp(int(ts))
                         # local_time = local_time.strftime("%Y-%m-%d %H:%M:%S")
-                        local_time = cct.get_unixtime_to_time(int(ts))
+                        local_time = cct.get_unixtime_to_time(int(remote_ts))
                         logger.info(f"🆕 Detected 55188 data update (ts={local_time}) use time: {remote_ts-time_start_55188:.2f}. Syncing UI...")
                         self.last_ext_data_ts_local = remote_ts
                         
