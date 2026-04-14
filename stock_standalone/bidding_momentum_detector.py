@@ -1083,7 +1083,7 @@ class BiddingMomentumDetector:
                         'category': ts.category, 'first_breakout_ts': ts.first_breakout_ts,
                         'klines': decompress_klines(_get('k', [])),
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                        'pattern_hint': ts.pattern_hint
+                        'pattern_hint': ts.pattern_hint, 'vol_ratio': getattr(ts, 'vol_ratio', 0.0)
                     }
                     
                     # 价格锚点与涨幅 (虽然 ts.current_pct 是属性，但 ts.now_price 恢复后会自愈，
@@ -1224,7 +1224,8 @@ class BiddingMomentumDetector:
                         'last_high': ts.last_high, 'last_low': ts.last_low,
                         'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                        'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts
+                        'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts,
+                        'vol_ratio': getattr(ts, 'vol_ratio', 0.0)
                     }
 
                 # 恢复价格锚点与分值锚点
@@ -1345,7 +1346,7 @@ class BiddingMomentumDetector:
             
             today_str = datetime.datetime.now().strftime('%Y%m%d')
             # 排除今日，寻找前两个交易日
-            past_dates = [d for d in dates if d < today_str][:2]
+            past_dates = [d for d in dates if d < today_str][:9]
             
             new_history = []
             for d_str in reversed(past_dates): # 从旧到新排列
@@ -1374,9 +1375,23 @@ class BiddingMomentumDetector:
             
             sector_data = data.get('sector_data', {})
             stock_scores = data.get('stock_scores', {})
-            res = []
             seen = set()
-            
+
+            # [NEW] 建立全量价格镜像，防止部分旧快照在 sector_data 中缺失价格字段
+            meta_prices = {}
+            meta_cols = data.get('meta_cols', {})
+            if meta_cols and 'code' in meta_cols:
+                codes_list = meta_cols['code']
+                np_list = meta_cols.get('np', [])
+                for i, c_code in enumerate(codes_list):
+                    if i < len(np_list) and np_list[i] is not None:
+                        meta_prices[c_code] = np_list[i]
+            else:
+                meta_data = data.get('meta_data', {})
+                for c_code, m in meta_data.items():
+                    p = m.get('now_price', m.get('price', 0))
+                    if p > 0: meta_prices[c_code] = p
+
             all_candidates = []
             for s_name, s_info in sector_data.items():
                 if s_info.get('score', 0) < 8.0: continue # 过滤弱势板块
@@ -1385,17 +1400,25 @@ class BiddingMomentumDetector:
                 candidates = s_info.get('followers', [])
                 l_code = s_info.get('leader')
                 if l_code and not any(f['code'] == l_code for f in candidates):
-                    candidates.append({'code': l_code, 'name': s_info.get('leader_name', l_code), 'score': stock_scores.get(l_code, 0)})
+                    candidates.append({
+                        'code': l_code, 
+                        'name': s_info.get('leader_name', l_code), 
+                        'score': stock_scores.get(l_code, 0),
+                        'price': s_info.get('leader_price', 0)
+                    })
                 
                 for c in candidates:
                     if c['code'] in seen: continue
+                    # [FIX] 优先取板块明细价格，若缺失则从全量 meta 镜像补齐
+                    b_p = float(c.get('price', meta_prices.get(c['code'], 0)))
+                    
                     all_candidates.append({
                         'date': date_str,
                         'code': c['code'],
                         'name': c.get('name', c['code']),
                         'sector': s_name,
                         'score': round(c.get('score', 0), 1),
-                        'base_price': c.get('price', 0),
+                        'base_price': b_p,
                         'base_vol_ratio': c.get('vol_ratio', 0)
                     })
                     seen.add(c['code'])
@@ -1414,6 +1437,9 @@ class BiddingMomentumDetector:
         # 剔除今日已有的项，准备重新抓取今日最新的 Top 2
         history_only = [d for d in self.dragon_3day_history if d['date'] != today_str]
         
+        # [FIX] 获取今日已有的基准记录，用于锁定最初发现时的基准价，避免实盘运行期间漂移
+        existing_today = {d['code']: d for d in self.dragon_3day_history if d['date'] == today_str}
+        
         # 提取今日潜在龙头
         potential_today = []
         seen = set()
@@ -1424,20 +1450,40 @@ class BiddingMomentumDetector:
             candidates = list(followers)
             l_code = s_info.get('leader')
             if l_code and not any(f['code'] == l_code for f in candidates):
-                candidates.append({'code': l_code, 'name': s_info['leader_name'], 'score': s_info.get('score', 0)})
+                # [FIX] 补全龙头价格等核心数据
+                candidates.append({
+                    'code': l_code, 
+                    'name': s_info.get('leader_name', ''), 
+                    'score': s_info.get('score', 0),
+                    'price': s_info.get('leader_price', 0)
+                })
             
             for c in candidates:
-                if c['code'] in seen: continue
+                code = c['code']
+                if code in seen: continue
+                
+                # [FIX] 健壮性补强：如果 candidates 中缺少核心字段，从全局 TickSeries 补齐
+                ts = self._tick_series.get(code)
+                c_name = c.get('name') or (ts.name if ts else code)
+                c_price = c.get('price') or (ts.now_price if ts else 0.0)
+                c_vr = c.get('vol_ratio') or (ts.vol_ratio if ts else 0.0)
+
+                # [FIX] 基准价锁定：如果今日已入库，则继承最初入库时的价格
+                if code in existing_today:
+                    base_price = existing_today[code].get('base_price', c_price)
+                else:
+                    base_price = c_price
+                    
                 potential_today.append({
                     'date': today_str,
-                    'code': c['code'],
-                    'name': c['name'],
+                    'code': code,
+                    'name': c_name,
                     'sector': s_name,
                     'score': round(c.get('score', 0), 1),
-                    'base_price': c.get('price', 0),
-                    'base_vol_ratio': c.get('vol_ratio', 0)
+                    'base_price': base_price,
+                    'base_vol_ratio': c_vr
                 })
-                seen.add(c['code'])
+                seen.add(code)
         
         # [UPGRADE] 今日全局势能排序 Top 30
         potential_today.sort(key=lambda x: x['score'], reverse=True)
@@ -1446,7 +1492,7 @@ class BiddingMomentumDetector:
         # [UPGRADE] 极致剪裁：合并历史与今日，确保每一天都只保留 Top 30，且仅保留最近 3 日
         combined = history_only + today_leaders
         all_dates = sorted(list({d['date'] for d in combined}), reverse=True)
-        valid_dates = all_dates[:3] # 仅保留最近 3 个交易日
+        valid_dates = all_dates[:10] # 仅保留最近 10 个交易日以支持 3D/5D 切换
         
         final_history = []
         for d_str in valid_dates:
@@ -2063,6 +2109,7 @@ class BiddingMomentumDetector:
                         'score_diff': getattr(ts, 'score_diff', 0.0),
                         'pct_diff': getattr(ts, 'pct_diff', 0.0),
                         'price_diff': getattr(ts, 'price_diff', 0.0),
+                        'vol_ratio': getattr(ts, 'vol_ratio', 0.0),
                         'dff': getattr(ts, 'dff', 0.0)
                     }
                     self._global_snap_cache[code] = data
