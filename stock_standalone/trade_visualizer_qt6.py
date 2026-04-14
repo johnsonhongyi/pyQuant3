@@ -173,7 +173,7 @@ def normalize_speech_text(text: str) -> str:
 
 
 def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause_event=None):
-    """语音播报工作者 (运行在独立线程)"""
+    """语音播报工作者 (运行在独立进程)"""
     import pyttsx3
     import time
     
@@ -185,102 +185,105 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
     
     logger.debug("[VoiceProcess] Worker started")
     
-    try:
-        # ⚡ [STABILITY] COM 线程初始化应在整个生命周期内只执行一次
-        if pythoncom:
+    last_speech_end_ts = 0.0 # [FIX] Timestamp filtering
+    
+    while stop_flag.value:
+        try:
+            # ⚡ [NEW] 检查暂停状态 (阻塞直到恢复)
+            if pause_event:
+                pause_event.wait()
+            
+            # 获取消息（阻塞等待 1s）
+            data = None
             try:
-                pythoncom.CoInitialize()
-            except Exception as e:
-                logger.error(f"[VoiceProcess] CoInitialize error: {e}")
-
-        last_speech_end_ts = 0.0 # [FIX] Timestamp filtering
-        
-        while stop_flag.value:
-            try:
-                # ⚡ [NEW] 检查暂停状态 (阻塞直到恢复)
-                if pause_event:
-                    if not pause_event.wait(timeout=1.0) and not stop_flag.value:
-                        continue # 被停止或超时
+                data = queue.get(timeout=1)
+            except:
+                continue
+            
+            if not data or not stop_flag.value:
+                continue
                 
-                # 获取消息（阻塞等待 1s）
-                data = None
+            # 兼容处理
+            msg_ts = 0.0
+            if isinstance(data, dict):
+                msg = data.get('text', '')
+                meta = data.get('meta', None)
+                msg_ts = data.get('timestamp', 0.0)
+            else:
+                msg = str(data)
+                meta = None
+                msg_ts = time.time()
+
+            # [FIX] 移除错误的时间戳过滤逻辑。
+            # 原逻辑：if msg_ts > 0 and msg_ts < last_speech_end_ts: continue
+            # 这会导致在播报第一条期间入队的所有信号都被视为“陈旧”而丢弃。
+            # 我们只需要确保不播报启动之前的极老信号即可（可选）。
+            if msg_ts > 0 and time.time() - msg_ts > 300: # 超过5分钟的才视为陈旧
+                continue
+
+
+            # 向主进程反馈：开始播报该条信号
+            if feedback_queue and meta:
                 try:
-                    data = queue.get(timeout=1)
+                    feedback_queue.put(meta)
                 except:
-                    continue
+                    pass
+
+            # 执行播报
+            speech_text = normalize_speech_text(msg)
+            logger.debug(f"[VoiceProcess] 🔊 播报: {speech_text}")
+            
+            # ⚡ [STABILITY] 在每一条播报前初始化，确保 Windows 引擎状态正确
+            engine = None
+            try:
+                if pythoncom:
+                    pythoncom.CoInitialize()
                 
-                if not data or not stop_flag.value:
-                    continue
+                engine = pyttsx3.init()
+                rate = engine.getProperty('rate')
+                logger.debug(f'rate:{rate}')
+                if isinstance(rate, (int, float)):
+                    # engine.setProperty('rate', rate + 40)
+                    engine.setProperty('rate', cct.voice_rate)
+                    engine.setProperty('volume', cct.voice_volume)
+
                     
-                # 兼容处理
-                msg_ts = 0.0
-                if isinstance(data, dict):
-                    msg = data.get('text', '')
-                    meta = data.get('meta', None)
-                    msg_ts = data.get('timestamp', 0.0)
-                else:
-                    msg = str(data)
-                    meta = None
-                    msg_ts = time.time()
-
-                if msg_ts > 0 and time.time() - msg_ts > 300: # 超过5分钟的才视为陈旧
-                    continue
-
-                # 向主进程反馈：开始播报该条信号
-                if feedback_queue and meta:
-                    try:
-                        feedback_queue.put(meta)
-                    except:
-                        pass
-
-                # 执行播报
-                speech_text = normalize_speech_text(msg)
-                logger.debug(f"[VoiceProcess] 🔊 播报: {speech_text}")
-                
-                engine = None
-                try:
-                    engine = pyttsx3.init()
-                    rate = engine.getProperty('rate')
-                    if isinstance(rate, (int, float)):
-                        engine.setProperty('rate', cct.voice_rate)
-                        engine.setProperty('volume', cct.voice_volume)
-
-                    def check_abort(name=None, location=None, length=None):
-                        if (abort_event and abort_event.is_set()) or not stop_flag.value:
-                            try:
-                                engine.stop()
-                            except:
-                                pass
-
-                    engine.connect('started-utterance', check_abort)
-                    engine.connect('started-word', check_abort)
-
-                    engine.say(speech_text)
-                    engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
-                    
-                    last_speech_end_ts = time.time()
-                    time.sleep(0.05)
-                except Exception as e:
-                    logger.error(f"[VoiceProcess] Engine error: {e}")
-                finally:
-                    if engine:
+                def check_abort(name=None, location=None, length=None):
+                    if (abort_event and abort_event.is_set()) or not stop_flag.value:
                         try:
                             engine.stop()
-                            del engine
                         except:
                             pass
-            except Exception as e:
-                logger.debug(f"[VoiceProcess] Loop error: {e}")
-                if not stop_flag.value: break
+
+                engine.connect('started-utterance', check_abort)
+                engine.connect('started-word', check_abort)
+
+                engine.say(speech_text)
+                engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
                 
-    finally:
-        # ⚡ [STABILITY] 彻底清理 COM 环境
-        if pythoncom:
-            try:
-                pythoncom.CoUninitialize()
-            except:
-                pass
-        logger.info("✅ Voice worker process exited cleanly")
+                # [FIX] Update completion timestamp
+                last_speech_end_ts = time.time()
+                
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"[VoiceProcess] Engine error: {e}")
+            finally:
+                if engine:
+                    try:
+                        engine.stop()
+                        del engine
+                    except:
+                        pass
+                if pythoncom:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+                    
+        except Exception as e:
+            logger.debug(f"[VoiceProcess] Loop error: {e}")
+            
+    logger.info("✅ Voice worker process exited cleanly")
     
     logger.debug("[VoiceProcess] Worker stopped")
 
@@ -383,7 +386,7 @@ class VoiceProcess:
                 
         if self.process and self.process.is_alive():
             # 给予更充分的等待时间，确保 COM 资源释放 (从 1.0 调至 3.0s)
-            self.process.join(timeout=3.0)
+            self.process.join(timeout=2.0)
             if self.process.is_alive():
                 logger.warning("⚠️ Voice worker thread still alive, will be collected by daemon")
         
@@ -3907,7 +3910,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         man_diff = _time.time() - getattr(self, '_last_ui_interaction_time', 0)
                         
                         # 联动 1: 日志面板自动定位与高亮 (仅在用户超过 5 秒未交互时自动滚动)
-                        self.signal_log_panel.highlight_row_by_content(code, snippet, force_scroll=(man_diff > 5.0))
+                        self.signal_log_panel.highlight_row_by_content(code, snippet, force_scroll=(man_diff > 3.0))
         except Exception as e:
             pass # 队列空或读取异常不影响主程
 

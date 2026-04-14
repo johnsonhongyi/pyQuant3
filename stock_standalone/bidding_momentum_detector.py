@@ -567,6 +567,10 @@ class BiddingMomentumDetector:
         active_codes: 如果提供，则仅对这些代码进行评分。
         force: 是否强制全量刷新。
         """
+        # [FIX] 跨日重置必须在所有评估逻辑之前执行
+        # 否则会先用昨日数据计算一轮，然后重置并显示空看板
+        self._check_day_switch(datetime.datetime.now())
+
         if active_codes is not None:
             codes = active_codes
         else:
@@ -575,9 +579,6 @@ class BiddingMomentumDetector:
                 
         for code in codes:
             self._evaluate_code(code)
-        
-        # [NEW] 每次全量刷新前，检查是否需要执行跨日重置 (防止开盘加载了昨日陈旧数据)
-        self._check_day_switch(datetime.datetime.now())
         
         self._aggregate_sectors(active_codes=active_codes)
 

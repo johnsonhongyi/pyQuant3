@@ -14712,11 +14712,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 continue  # 不处理当前活动窗口
 
             # 判断是否被遮挡
-            logger.info(f'win: {win} main_win: {main_win} type: {type(main_win)}')
+            logger.debug(f'win: {win} main_win: {main_win} type: {type(main_win)}')
 
             if is_window_covered_pg(win, main_win):
                 # 若被最小化，恢复
-                logger.info(f'v.get("code"): {v.get("code")}')
+                logger.debug(f'v.get("code"): {v.get("code")}')
                 if win.isMinimized():
                     win.showNormal()
 
