@@ -19,7 +19,7 @@ import numpy as np
 import subprocess
 log = LoggerFactory.log
 import gc
-global RAMDISK_KEY, INIT_LOG_Error,Debug_is_not_find
+global RAMDISK_KEY, INIT_LOG_Error, Debug_is_not_find
 RAMDISK_KEY = 0
 INIT_LOG_Error = 0
 Debug_is_not_find = 0
@@ -30,6 +30,43 @@ import psutil
 import shutil
 import errno
 import threading
+
+# # 从 global.ini 读取 MultiIndex 文件限额 (默认 150MB)
+# def _load_sina_multiindex_limit():
+#     try:
+#         # global.ini 位于 stock_standalone 根目录
+#         _config_path = os.path.join(cct.get_base_path(), 'global.ini')
+#         if os.path.exists(_config_path):
+#             from configobj import ConfigObj
+#             # 1. 尝试使用标准 ConfigObj 解析
+#             try:
+#                 _config = ConfigObj(_config_path, encoding='UTF8')
+#                 _gen_section = _config.get('general', {})
+#                 # 兼容大小写
+#                 _limit = _gen_section.get('sina_MultiIndex_limit') or _gen_section.get('sina_multiindex_limit')
+#                 if _limit is not None:
+#                     return int(_limit)
+#             except Exception:
+#                 pass
+
+#             # 2. 备选方案：如果 ConfigObj 解析异常，直接进行文本查找（鲁棒性最强）
+#             with open(_config_path, 'r', encoding='utf-8', errors='ignore') as f:
+#                 content = f.read()
+#                 # 使用正则匹配，不区分大小写
+#                 import re
+#                 match = re.search(r'sina_multiindex_limit\s*=\s*(\d+)', content, re.IGNORECASE)
+#                 if match:
+#                     return int(match.group(1))
+#     except Exception as e:
+#         log.error(f"Failed to load sina_multiindex_limit: {e}")
+#     return 150
+
+
+SINA_MULTIINDEX_LIMIT = cct.sina_MultiIndex_limit
+
+# 强制最低 10MB 防止除零或过小裁切
+if SINA_MULTIINDEX_LIMIT < 10:
+    SINA_MULTIINDEX_LIMIT = 150
 
 from contextlib import contextmanager
 
@@ -312,10 +349,11 @@ class SafeHDFStore(pd.HDFStore):
             self.log.info(f"ramdisk_hd5: {self.fname}")
 
         if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
-            self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
+            # 优先使用 global.ini 的配置 (默认 150MB)，不再硬编码为 300MB
+            self.big_H5_Size_limit = SINA_MULTIINDEX_LIMIT * 1.5
         else:
             self.big_H5_Size_limit = ct.big_H5_Size_limit
-        self.log.info(f'self.big_H5_Size_limit :{self.big_H5_Size_limit} self.multiIndexsize :{self.multiIndexsize}')
+        self.log.info(f'self.big_H5_Size_limit: {self.big_H5_Size_limit}MB (Default: 150MB) multiIndexsize: {self.multiIndexsize}')
 
         if not os.path.exists(self.basedir):
             if RAMDISK_KEY < 1:
@@ -1771,9 +1809,8 @@ def repack_hdf_db(fname, complib='blosc'):
         os.chdir(back_path)
 
 sina_MultiIndex_SCHEMA = {
-    'columns': ['open','high','low','close','volume','lastbuy','llastp'],
+    'columns': ['high','low','close','volume','lastbuy','llastp'],
     'dtypes': {
-        'open':'float64',
         'high':'float64',
         'low':'float64',
         'close':'float64',
@@ -1783,23 +1820,121 @@ sina_MultiIndex_SCHEMA = {
     }
 }
 
-def normalize_SCHEMA(df):
-    for c in sina_MultiIndex_SCHEMA['columns']:
-        if c not in df:
-            df[c] = np.nan
 
-    df = df[sina_MultiIndex_SCHEMA['columns']]
+def clean_nan_columns(df):
+    nan_cols = df.columns[df.isna().all()].tolist()
 
-    df = df.astype(sina_MultiIndex_SCHEMA['dtypes'], errors='ignore')
-
-    df = (
-        df.reset_index()
-        .drop_duplicates(['code','ticktime'], keep='last')
-        .set_index(['code','ticktime'])
-        .sort_index()
-    )
+    if nan_cols:
+        log.warning(f"[CLEAN] drop all-NaN columns: {nan_cols}")
+        df = df.drop(columns=nan_cols)
 
     return df
+
+def normalize_SCHEMA(df):
+
+    # =========================
+    # 0. 先清理脏列（🔥必须在最前）
+    # =========================
+    df = clean_nan_columns(df)
+
+    # =========================
+    # 1. 只保留已有列（不新增）
+    # =========================
+    existing_cols = [
+        c for c in sina_MultiIndex_SCHEMA['columns']
+        if c in df.columns
+    ]
+
+    if not existing_cols:
+        return df  # 没有任何匹配列，直接返回
+
+    df = df[existing_cols]
+
+    # =========================
+    # 2. 类型转换（只转存在的）
+    # =========================
+    dtype_map = {
+        k: v for k, v in sina_MultiIndex_SCHEMA['dtypes'].items()
+        if k in df.columns
+    }
+
+    if dtype_map:
+        df = df.astype(dtype_map, errors='ignore')
+
+    # =========================
+    # 3. 只处理严格 MultiIndex
+    # =========================
+    if isinstance(df.index, pd.MultiIndex):
+        idx_names = list(df.index.names)
+
+        if idx_names == ['code', 'ticktime']:
+            df = (
+                df.reset_index()
+                .drop_duplicates(['code', 'ticktime'], keep='last')
+                .set_index(['code', 'ticktime'])
+                .sort_index()
+            )
+
+    return df
+
+def repair_sina_multiindex_file(fname=None, table=None):
+    """
+    专门针对 sina_MultiIndex_data.h5 进行物理清理：
+    - 移除全 NaN 列（特别是错误的 open 列）
+    - 按照标准 SCHEMA 进行转换
+    - 移除重复项并按索引排序
+    """
+    if fname is None:
+        fname = 'sina_MultiIndex_data'
+    
+    # 获取真实路径
+    real_path = cct.get_ramdisk_path(fname)
+    if not os.path.exists(real_path):
+        log.warning(f"[REPAIR] File not found: {real_path}")
+        return
+
+    # 识别表格名 (默认为 all_30, all_60 等)
+    if table is None:
+        # 尝试通过 SafeHDFStore 获取所有以 all_ 开头的表格
+        try:
+            with SafeHDFStore(fname, mode='r') as store:
+                tables = [k.strip('/') for k in store.keys() if k.startswith('/all_')]
+        except Exception as e:
+            log.error(f"[REPAIR] Failed to inspect keys: {e}")
+            return
+    else:
+        tables = [table]
+
+    for t in tables:
+        log.info(f"🚀 [REPAIR] Starting cleanup for table: {t} in {fname}")
+        # 1. 加载数据
+        df = load_hdf_db(fname, table=t, MultiIndex=True)
+        if df is None or df.empty:
+            log.warning(f"[REPAIR] No data in {t}, skipping.")
+            continue
+
+        # 2. 调用标准规范化逻辑 (包含 clean_nan_columns)
+        orig_cols = df.columns.tolist()
+        df = normalize_SCHEMA(df)
+        new_cols = df.columns.tolist()
+
+        if len(orig_cols) != len(new_cols):
+             log.info(f"✨ [REPAIR] Dropped columns: {list(set(orig_cols) - set(new_cols))}")
+
+        # 3. 使用 rewrite=True 物理回写
+        write_hdf_db(fname, df, table=t, MultiIndex=True, rewrite=True)
+        log.info(f"✅ [REPAIR] Table {t} finalized. Rows: {len(df)}")
+
+    # 4. 物理裁切与压缩 (ptrepack)
+    fpath = cct.get_ramdisk_path(fname)
+    if os.path.exists(fpath):
+        fsize_mb = os.path.getsize(fpath) / 1e6
+        if fsize_mb > SINA_MULTIINDEX_LIMIT:
+            log.warning(f"🚀 [REPAIR] File size {fsize_mb:.1f}MB exceeds limit {SINA_MULTIINDEX_LIMIT}MB. Triggering ptrepack...")
+            with SafeHDFStore(fname) as store:
+                store.write_status = True  # 强制标记以触发 __exit__ 中的压缩
+    
+    log.info(f"✨ [REPAIR] Overall repair for {fname} complete.")
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False, sizelimit=None):
 
@@ -1810,9 +1945,15 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     # df=prepare_df_for_hdf5(df)
     df=df.fillna(0)
     code_subdf=df.index.tolist()
-    global RAMDISK_KEY
     if not RAMDISK_KEY < 1:
         return df
+
+    # # [OPTIMIZE] ⚡ 动态容量限额初始化
+    if sizelimit is None:
+        if 'sina_MultiIndex' in fname:
+            sizelimit = SINA_MULTIINDEX_LIMIT
+    #     else:
+    #         sizelimit = ct.big_H5_Size_limit
 
     if not MultiIndex:
         df['timel']=time.time()
@@ -2016,14 +2157,21 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 .sort_index()
                             )
 
-                            # --- 2. 动态裁切参数 ---
-                            safe_rows = 3000
+                            # --- 2. 分组统计与动态裁切参数 ---
+                            # [FIX] ⚡ 移动分组统计至参数计算前，避免 NameError
+                            group_sizes = full_df.groupby(level='code').size()
+                            num_codes = len(group_sizes)
+                            
                             trigger_ratio = 1.2      # 超过120%才触发（防抖）
                             shrink_ratio = 0.8       # 保留80%
                             min_rows = 50            # 每个code最少保留
 
-                            # --- 3. 分组统计 ---
-                            group_sizes = full_df.groupby(level='code').size()
+                            if num_codes > 1000:
+                                # 动态推算：总容量(bytes) / 平均单行大小(85 bytes) / 总股数
+                                calculated_safe = int(sizelimit * 1024 * 1024 / 85 / num_codes)
+                                safe_rows = max(min_rows, calculated_safe)
+                            else:
+                                safe_rows = 3000
 
                             # --- 4. 判断是否需要裁切（按code，而不是全局）---
                             if (group_sizes > safe_rows * trigger_ratio).any():
@@ -3027,6 +3175,7 @@ def check_tdx_all_df_read(fname='300'):
     except Exception as e:
         print("无法打开 HDF5:", e)
     return df
+
 if __name__ == "__main__":
 
     #    import tushare as ts
@@ -3044,8 +3193,8 @@ if __name__ == "__main__":
     # import os
     # fp=os.popen('ptrepack --chunkshape=auto --complevel=9 --complib=zlib   ../../tdx_all_df_300.h5_tmp  ../../tdx_all_df_300.h5')
     # print fp.read().decode('gbk')
-    
 
+    # repair_sina_multiindex_file()
 
     # p=subprocess.Popen('ptrepack --chunkshape=auto --complevel=9 --complib=zlib ../../tdx_all_df_300.h5_tmp ../../tdx_all_df_300.h5"', shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     # p.wait()
