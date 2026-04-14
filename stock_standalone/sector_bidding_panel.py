@@ -2018,7 +2018,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # [FIX] 利用现有的 QThread (_worker) 安全执行
             if hasattr(self, '_worker'):
-                self.detector.reset_observation_anchors()
+                # self.detector.reset_observation_anchors() # [REM] 手动刷新不再重置锚点，防止涨跌变动被清零
                 with self._update_lock:
                     self._force_update_requested = True
                 

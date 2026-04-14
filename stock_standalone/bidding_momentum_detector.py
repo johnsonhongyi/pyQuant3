@@ -1168,6 +1168,7 @@ class BiddingMomentumDetector:
                     ts = TickSeries(code)
                     ts.score = score
                     ts.momentum_score = momentum_scores.get(code, 0.0)
+                    self._tick_series[code] = ts # [FIX] 必须存入字典，否则无法进行后续计算逻辑
                     
                     # [RECONSTRUCT-METADATA] 处理新的列式存储格式
                     meta_cols = data.get('meta_cols', {})
@@ -1256,6 +1257,23 @@ class BiddingMomentumDetector:
                 self.sector_anchors = data.get('sector_anchors', {})
                 self.baseline_time = data.get('baseline_time', time.time())
                 
+                # [NEW] 核心修复：还原锚点后，立即根据当前价和锚点重建 diff 字段
+                for code, ts in self._tick_series.items():
+                    if ts.price_anchor > 0 and ts.now_price > 0:
+                        ts.price_diff = ts.now_price - ts.price_anchor
+                        if ts.price_anchor > 0:
+                            ts.pct_diff = (ts.price_diff / ts.price_anchor) * 100
+                    if ts.score_anchor > 0:
+                        ts.score_diff = ts.score - ts.score_anchor
+                    
+                    # 同步到 snap_cache 供 UI 渲染层读取
+                    if code in self._global_snap_cache:
+                        self._global_snap_cache[code].update({
+                            'pct_diff': round(ts.pct_diff, 2),
+                            'price_diff': round(ts.price_diff, 3),
+                            'score_diff': round(ts.score_diff, 2)
+                        })
+
                 # 成功加载后进入历史模式
                 self.in_history_mode = True
                 
@@ -1369,10 +1387,15 @@ class BiddingMomentumDetector:
     def _reconstruct_sector_from_candidates(self, sector_name: str, info: dict, candidates: list, market_avg: float):
         """内部核心逻辑：根据候选人名单填充板块详情、角色和跟随股"""
         # 1. 计算龙分并排序 (强制重算以响应算法切换)
+        board_score = info.get('score', 0.0)
         for snap in candidates:
             snap['leader_score'] = self._calculate_leader_score(snap, sector_name, market_avg)
         
         candidates.sort(key=lambda x: x.get('leader_score', 0), reverse=True)
+
+        # [NEW] 重新计算板块相对于锚点的变动
+        if sector_name in self.sector_anchors:
+            info['score_diff'] = round(board_score - self.sector_anchors[sector_name], 2)
         
         # 2. 确定龙头
         current_leader = candidates[0]['code']
@@ -1390,7 +1413,9 @@ class BiddingMomentumDetector:
                 race_candidates.append({
                     'code': s['code'], 'name': s['name'], 'role': role,
                     'pct': round(s.get('pct', 0.0), 2), 'score': round(s.get('score', 0.0), 1),
-                    'l_score': round(s['leader_score'], 1)
+                    'l_score': round(s['leader_score'], 1),
+                    'pct_diff': round(s.get('pct_diff', 0.0), 2),
+                    'score_diff': round(s.get('score_diff', 0.0), 2)
                 })
         info['race_candidates'] = race_candidates
         
@@ -1405,7 +1430,10 @@ class BiddingMomentumDetector:
                 'dff': s.get('dff', 0.0),
                 'klines': s.get('klines', []),
                 'last_close': s.get('last_close', 0.0),
-                'first_ts': s.get('first_breakout_ts', 0.0)
+                'first_ts': s.get('first_breakout_ts', 0.0),
+                'score_diff': round(s.get('score_diff', 0.0), 2),
+                'pct_diff': round(s.get('pct_diff', 0.0), 2),
+                'price_diff': round(s.get('price_diff', 0.0), 3)
             } for s in candidates[1:16]
         ]
 
@@ -1916,7 +1944,8 @@ class BiddingMomentumDetector:
         # [RE-ENABLED] 自动清理跨日数据，确保早盘竞价开始时看板是干净的
         if self._concept_data_date != today:
             # 如果是交易日，且处于早盘重置窗 (09:00 - 09:30)
-            if cct.get_day_istrade_date(str(today)):
+            is_trade_day = cct.get_day_istrade_date(str(today))
+            if is_trade_day:
                 if 900 <= now_t <= 930:
                     logger.info(f"📅 [Detector] {today} Morning Transition Detected (Bidding window) - Resetting session data")
                     self._concept_data_date = today
@@ -1933,6 +1962,14 @@ class BiddingMomentumDetector:
                         ts.pattern_hint = ""
                     self.reset_observation_anchors()
                     self.data_version += 1
+                elif now_t > 930:
+                    # [NEW] 如果启动时间已过早盘重置窗，直接对齐日期并重置锚点，开始今日计时
+                    logger.info(f"📅 [Detector] {today} Session Sync (Post-Bidding) - Aligning date and anchors")
+                    self._concept_data_date = today
+                    self.reset_observation_anchors()
+            else:
+                # 非交易日也更新日期，防止重复检查
+                self._concept_data_date = today
 
         # --- 更新全量 Watchlist (仅针对有变动的个股) ---
         codes_for_watchlist = active_codes if active_codes is not None else snap.keys()
@@ -1963,13 +2000,10 @@ class BiddingMomentumDetector:
         if self.is_active_session() and not self.in_history_mode:
             if now - self.baseline_time >= self.comparison_interval:
                 self.reset_observation_anchors()
-            
-            # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
 
-            
-            # [Added] 强制全量重刷板块，防止锚点丢失导致的数据显示异常
-            target_sectors = None
-            new_active = {}
+                # [Added] 仅在基准重置时，强制全量重刷板块，防止锚点丢失导致的数据显示异常
+                target_sectors = None
+                new_active = {}
         
         # 将 persistent dict 转换为 list 给计算逻辑使用
         sectors_to_update = target_sectors if target_sectors is not None else self._sector_active_stocks_persistent.keys()
