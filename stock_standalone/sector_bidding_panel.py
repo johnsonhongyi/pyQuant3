@@ -1432,6 +1432,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             data_to_save['history_group_index'] = self.history_selector.currentIndex() if hasattr(self, 'history_selector') else 4
             data_to_save['macro_query'] = self.query_input.currentText() if hasattr(self, 'query_input') else ""
             data_to_save['use_dragon_race'] = self.cb_dragon_race.isChecked() if hasattr(self, 'cb_dragon_race') else False
+            data_to_save['watchlist_mode'] = getattr(self, '_watchlist_mode', "NORMAL")
 
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
@@ -1516,6 +1517,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.cb_dragon_race.blockSignals(True)
                 self.cb_dragon_race.setChecked(checked)
                 self.cb_dragon_race.blockSignals(False)
+            
+            if 'watchlist_mode' in ui_state:
+                self._watchlist_mode = ui_state['watchlist_mode']
+                if self._watchlist_mode == "DRAGON_3D" and hasattr(self, 'btn_dragon_3d'):
+                    self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
             
             logger.debug("📊 [SectorPanel] UI state restored (including History Group & Macro Query)")
         except Exception as e:
@@ -1705,6 +1711,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.status_lbl.setWordWrap(True) # [UPGRADE] 允许自适应换行 (2-3行)
         self.status_lbl.setMinimumWidth(100)
         bar_lay_2.addWidget(self.status_lbl, 1) # 给一个伸缩系数，占据中间空余空间
+
+        # [SUPER] 龙头三日跟踪按钮
+        self.btn_dragon_3d = QPushButton("🐉 龙头三日")
+        self.btn_dragon_3d.setMinimumWidth(85)
+        self.btn_dragon_3d.setToolTip("切换到‘龙头三日跟踪’模型：展示最近三日挖掘到的潜力领袖及实时表现")
+        self.btn_dragon_3d.setStyleSheet("background-color: #1a2a3a; color: #ff9900; font-weight: bold; border-radius: 4px; border: 1px solid #ff9900;")
+        self.btn_dragon_3d.clicked.connect(self._on_dragon_3d_clicked)
+        self._watchlist_mode = "NORMAL"
+        bar_lay_2.addWidget(self.btn_dragon_3d)
+
         bar_lay_2.addWidget(self._sep())
 
 
@@ -2370,6 +2386,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 )
 
         # 11. 重点表刷新
+        self._populate_watchlist()
+
+    def _on_dragon_3d_clicked(self):
+        """切换龙头三日跟踪模式"""
+        if self._watchlist_mode == "NORMAL":
+            self._watchlist_mode = "DRAGON_3D"
+            self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("💡 已切换至 [龙头三日跟踪] 视角")
+        else:
+            self._watchlist_mode = "NORMAL"
+            self.btn_dragon_3d.setStyleSheet("background-color: #1a2a3a; color: #ff9900; font-weight: bold; border-radius: 4px; border: 1px solid #ff9900;")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("💡 已切换至 [当日重点] 视角")
+        
+        # 立即局部刷新重点表
         self._populate_watchlist()
         
     # ------------------------------------------------------------------ sector select
@@ -3278,9 +3310,51 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
-        """填充底部当日重点表"""
-        # [NEW] 龙头搜索模式逻辑
-        if getattr(self, '_is_leader_search_mode', False):
+        """填充底部当日重点表/龙头三日跟踪表"""
+        mode = getattr(self, '_watchlist_mode', "NORMAL")
+        
+        if mode == "DRAGON_3D":
+            # [SUPER] 龙头三日跟踪模式：先更新今日 Top 2，再加载历史数据并计算实时变动
+            self.detector._update_daily_dragon_top2()
+            watchlist = []
+            history_data = getattr(self.detector, 'dragon_3day_history', [])
+            snap = self.detector._global_snap_cache
+            
+            # [NEW] 增加代码去重，同一只个股在三日内多次异动时，仅展示最新的一条
+            seen_codes = set()
+            for d in reversed(history_data): # 从新到旧遍历以保留最新记录
+                code = d['code']
+                if code in seen_codes: continue
+                seen_codes.add(code)
+                
+                curr_price = 0.0
+                curr_vol_ratio = 0.0
+                
+                # 从实时缓存获取最新状态
+                if code in snap:
+                    curr_price = snap[code].get('price', 0.0)
+                    curr_vol_ratio = snap[code].get('vol_ratio', 0.0)
+                
+                # 计算累计涨跌 (相对发现日收盘价)
+                pct_3d = 0.0
+                base_p = d.get('base_price', 0.0)
+                if base_p > 0 and curr_price > 0:
+                    pct_3d = (curr_price - base_p) / base_p * 100
+                    
+                watchlist.append({
+                    'code': code,
+                    'name': d['name'],
+                    'pct': round(pct_3d, 2), # 存入累计涨幅
+                    'sector': d.get('sector', ''),
+                    'reason': f"初始分:{d.get('score', 0)}",
+                    'time_str': d.get('date', ''), 
+                    'vol_ratio': round(curr_vol_ratio, 2),
+                    '_is_3d_mode': True
+                })
+            
+            # 渲染前重新按日期降序排列
+            watchlist.sort(key=lambda x: x['time_str'], reverse=True)
+        elif getattr(self, '_is_leader_search_mode', False):
             watchlist = []
             seen_codes = set()
             sectors = self.detector.get_active_sectors()
@@ -3381,6 +3455,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         row_count_changed = (cur_w_rows != new_count)
         if row_count_changed:
             self.watchlist_table.setRowCount(new_count)
+
+        # [NEW] 动态调整表头，适应三日跟踪视角
+        if mode == "DRAGON_3D":
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '3D累计%', '板块', '日期', '现量比'])
+             self.watchlist_group.setTitle(f"🐉 龙头三日跟踪 (共 {new_count} 只, 跨日潜在领袖)")
+        else:
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因'])
+             self.watchlist_group.setTitle(f"📋 当日重点表 (共 {new_count} 只, 涨停/溢出个股)")
         
         target_row = -1
         
@@ -3405,13 +3487,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             sector_short = cats[0] if cats else (all_cats[0] if all_cats else 'N/A')
             self._update_cell(self.watchlist_table, i, 3, sector_short)
             
-            # 5. 触发时间
-            self._update_cell(self.watchlist_table, i, 4, str(w.get('time_str', w.get('time', '--:--:--'))))
+            # 5. 时间/日期
+            self._update_cell(self.watchlist_table, i, 4, str(w.get('time_str', '--:--:--')))
             
-            # 6. 状态/原因
-            reason = w.get('reason', '')
-            r_c = QColor("#FF1493") if '涨停' in reason else None
-            self._update_cell(self.watchlist_table, i, 5, reason, color=r_c)
+            # 6. 状态/量比
+            if mode == "DRAGON_3D":
+                vr = w.get('vol_ratio', 0.0)
+                vr_c = self._color_red if vr >= 2.0 else (self._color_green if vr < 0.8 else None)
+                self._update_cell(self.watchlist_table, i, 5, f"{vr:.2f}", color=vr_c, is_numeric=True)
+            else:
+                reason = w.get('reason', '')
+                r_c = QColor("#FF1493") if '涨停' in reason else None
+                self._update_cell(self.watchlist_table, i, 5, reason, color=r_c)
 
             # [NEW] 存入核心元数据：板块追溯标记及匹配代码
             c_item = self.watchlist_table.item(i, 0)
@@ -3455,7 +3542,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             except:
                 hist_suffix = " | 🎬 [历史复盘]"
                 
-        self.watchlist_group.setTitle(f"📋 当日重点表 (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
+        title_prefix = "🐉 龙头三日跟踪" if mode == "DRAGON_3D" else "📋 当日重点表"
+        self.watchlist_group.setTitle(f"{title_prefix} (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
         # [UX] 状态列自适应
         self.watchlist_table.resizeColumnToContents(5)
 
