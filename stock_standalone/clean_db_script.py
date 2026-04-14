@@ -27,6 +27,103 @@ DB_CONFIGS = {
     }
 }
 
+# def clean_non_trading_days_fast():
+#     print("Starting DB cleanup for non-trading days...")
+
+#     # ==============================
+#     # 1. 交易日缓存（只做一次）
+#     # ==============================
+#     trading_days = set(cct.get_all_trade_days())
+
+#     total_deleted = 0
+
+#     for db_name, tables in DB_CONFIGS.items():
+#         db_path = os.path.join(cct.get_base_path(), db_name)
+#         if not os.path.exists(db_path):
+#             continue
+
+#         print(f"\n[{db_name}]")
+#         conn = sqlite3.connect(db_path)
+#         c = conn.cursor()
+
+#         db_deleted = 0
+
+#         for table, date_col in tables.items():
+#             try:
+#                 # ==============================
+#                 # 2. 表存在性检查（轻量）
+#                 # ==============================
+#                 c.execute("""
+#                     SELECT 1 
+#                     FROM sqlite_master 
+#                     WHERE type='table' AND name=?
+#                 """, (table,))
+
+#                 if not c.fetchone():
+#                     continue
+
+#                 # ==============================
+#                 # 3. 记录删除前数量
+#                 # ==============================
+#                 c.execute(f"SELECT COUNT(*) FROM {table}")
+#                 before = c.fetchone()[0]
+
+#                 # ==============================
+#                 # 4. 单次 SQL 删除（核心优化）
+#                 # ==============================
+
+#                 # 交易日字符串（避免 IN 超长问题）
+#                 # 改为 NOT IN 小集合 + Python过滤逻辑
+
+#                 # ❗方案：直接删非交易日 + 非交易时间（一次完成）
+#                 c.execute(f"""
+#                     DELETE FROM {table}
+#                     WHERE
+#                         -- 非交易日
+#                         substr({date_col},1,10) NOT IN (
+#                             SELECT date(substr({date_col},1,10))
+#                         )
+#                         OR
+#                         -- 非交易时间
+#                         (
+#                             CAST(REPLACE(substr({date_col},12,5),':','') AS INTEGER) < 915
+#                             OR CAST(REPLACE(substr({date_col},12,5),':','') AS INTEGER) > 1500
+#                             OR (
+#                                 CAST(REPLACE(substr({date_col},12,5),':','') AS INTEGER) > 1130
+#                                 AND CAST(REPLACE(substr({date_col},12,5),':','') AS INTEGER) < 1300
+#                             )
+#                         )
+#                 """)
+
+#                 conn.commit()
+
+#                 # ==============================
+#                 # 5. 统计删除量（轻量）
+#                 # ==============================
+#                 c.execute(f"SELECT COUNT(*) FROM {table}")
+#                 after = c.fetchone()[0]
+
+#                 deleted = before - after
+#                 db_deleted += deleted
+
+#                 if deleted > 0:
+#                     print(f"  - {table}: {deleted}")
+
+#             except Exception as e:
+#                 print(f"  - Error {table}: {e}")
+
+#         # ==============================
+#         # 6. 每库只 VACUUM 一次
+#         # ==============================
+#         if db_deleted > 0:
+#             print("  - VACUUM...")
+#             c.execute("VACUUM")
+
+#         conn.close()
+#         total_deleted += db_deleted
+
+#     print(f"\nDone. Total deleted: {total_deleted}")
+    
 def clean_non_trading_days():
     print("Starting DB cleanup for non-trading days...")
     

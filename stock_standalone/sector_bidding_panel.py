@@ -2013,7 +2013,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("扫描中...")
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText("⏳ [实时模式] 正在异步计算评分映射...")
+                self.status_lbl.setText("⏳ [计算中] 正在扫描板块动量评分...")
                 self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
             
             # [FIX] 利用现有的 QThread (_worker) 安全执行
@@ -2199,20 +2199,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             limit = max(1.0, limit)
             
             with self._update_lock:
-                should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= 0.2) # Throttled to 5 FPS
+                # 即使没有强制请求，只要时间到了 (0.2s) 就尝试刷新 UI
+                should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= 0.2) 
             
             if should_refresh:
-                # [HEARTBEAT] 前台刷新心跳
-                if self.detector.enable_log:
-                    logger.info(f"💓 [Board Panel] Refreshing heartbeat: Total sectors={len(self.detector.active_sectors)}")
-                    
                 self._refresh_sector_list()
                 self._last_refresh_ts = now
                 with self._update_lock:
                     self._force_update_requested = False
-                
+            else:
+                # [NEW] 兜底：如果不需要全量刷新表格，但仍需给用户一个反馈，
+                # 尤其是在用户点击了刷新按钮后进入此回调的情况。
+                if getattr(self, '_force_update_requested', False) and hasattr(self, 'status_lbl'):
+                    if self.status_lbl.text().startswith("⏳"):
+                        now_str = datetime.now().strftime("%H:%M:%S")
+                        self.status_lbl.setText(f"✅ 计算已完成 ({now_str}) | 看板已对齐")
+                        self.status_lbl.setStyleSheet("color: #aad4ff;")
+            
         except Exception as e:
             logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"❌ 刷新出错: {e}")
+                self.status_lbl.setStyleSheet("color: #ff6666;")
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
         # 1. 安全检查

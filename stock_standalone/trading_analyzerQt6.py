@@ -25,6 +25,7 @@ from JohnsonUtil.stock_sender import StockSender
 from scraper_55188 import load_cache
 from stock_selector import StockSelector
 # [REMOVED] from stock_selection_window import StockSelectionWindow (Tkinter dependency causing instability in PyQt)
+import threading
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """自定义 TableWidgetItem，支持正确的数值排序"""
@@ -1770,8 +1771,28 @@ class TradingGUI(QWidget, WindowMixin):
         # [UNIFIED-LINKAGE] 联动后台发送
         self._execute_linkage(stock_code, source="double_click")
 
+    def _run_cleanup_async(self):
+        def worker():
+            try:
+                import clean_db_script
+                clean_db_script.clean_non_trading_days()
+
+                # ⚠️ 回到主线程更新UI
+                QTimer.singleShot(0, self._on_cleanup_done)
+
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_cleanup_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cleanup_done(self):
+        QMessageBox.information(self, "清理完成", "非交易日数据清理已完成！")
+        self.force_refresh_table()
+
+    def _on_cleanup_error(self, e):
+        QMessageBox.critical(self, "清理失败", f"清理过程中发生错误: {e}")
+        
     def trigger_db_cleanup(self):
-        """弹出确认选项，然后执行非交易日脏数据清理。"""
         reply = QMessageBox.question(
             self,
             "清理非交易日数据",
@@ -1779,15 +1800,28 @@ class TradingGUI(QWidget, WindowMixin):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
+
         if reply == QMessageBox.StandardButton.Yes:
-            try:
-                # Dynamically import so we dont have circular dependencies
-                import clean_db_script
-                clean_db_script.clean_non_trading_days()
-                QMessageBox.information(self, "清理完成", "非交易日数据清理已完成！您可以点击刷新查看最新数据。")
-                self.force_refresh_table()
-            except Exception as e:
-                QMessageBox.critical(self, "清理失败", f"清理过程中发生错误: {e}")
+            self._run_cleanup_async()
+
+    # def trigger_db_cleanup(self):
+    #     """弹出确认选项，然后执行非交易日脏数据清理。"""
+    #     reply = QMessageBox.question(
+    #         self,
+    #         "清理非交易日数据",
+    #         "是否确认清理数据库中所有源自非交易日（如周末测试）的脏数据记录？\n这可能需要一小段时间。",
+    #         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    #         QMessageBox.StandardButton.No
+    #     )
+    #     if reply == QMessageBox.StandardButton.Yes:
+    #         try:
+    #             # Dynamically import so we dont have circular dependencies
+    #             import clean_db_script
+    #             clean_db_script.clean_non_trading_days()
+    #             QMessageBox.information(self, "清理完成", "非交易日数据清理已完成！您可以点击刷新查看最新数据。")
+    #             self.force_refresh_table()
+    #         except Exception as e:
+    #             QMessageBox.critical(self, "清理失败", f"清理过程中发生错误: {e}")
 
     def _trigger_stock_linkage(self, row: int, column: int, force_send: bool = False):
         """
