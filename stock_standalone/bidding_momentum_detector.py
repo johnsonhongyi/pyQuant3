@@ -163,7 +163,8 @@ class TickSeries:
                  'is_upper_band', 'is_new_high', 'momentum_score',
                  '_splitted_cats', '_total_vol', '_total_amt',
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
-                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage')
+                 'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
+                 'racing_start_ts', 'last_stable_ts')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -210,6 +211,8 @@ class TickSeries:
         self.price_diff: float = 0.0
         self.dff: float = 0.0
         self.cycle_stage: int = 2
+        self.racing_start_ts: float = 0.0 # [NEW] 赛马开始时间戳
+        self.last_stable_ts: float = 0.0  # [NEW] 上次分时稳定(均价线上)时间
 
     def update_meta(self, row: Any):
         """
@@ -429,6 +432,11 @@ class BiddingMomentumDetector:
         # ---- [SUPER] 龙头三日跟踪与性能辅助 ----
         self.dragon_3day_history: List[Dict[str, Any]] = [] # [{date, code, name, sector, base_price, base_vol_l6, base_score}]
         self._dragon_init_done = False
+        self._last_dragon_update_v = -1  # [NEW] 记录上次执行龙三更新时的版本号
+        
+        # [NEW] 极限性能索引：支持 O(1) 的代码与名称检索
+        self._code_index: Dict[str, str] = {} # code -> name
+        self._name_index: Dict[str, str] = {} # name -> code
 
         # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
@@ -512,7 +520,13 @@ class BiddingMomentumDetector:
             if code == '000000' or not code: continue
             
             row_data = row._asdict()
+            name = str(row_data.get('name', code))
+
             with self._lock:
+                # 维护极限性能索引
+                self._code_index[code] = name
+                self._name_index[name] = code
+                
                 if code not in self._tick_series:
                     ts_obj = TickSeries(code)
                     ts_obj.update_meta(row_data)
@@ -584,7 +598,48 @@ class BiddingMomentumDetector:
         for code in codes:
             self._evaluate_code(code)
         
+        self.data_version += 1 # [NEW] 评分更新后递增版本号
         self._aggregate_sectors(active_codes=active_codes)
+
+    def search_by_index(self, query: str) -> List[dict]:
+        """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
+        q = query.strip().lower()
+        if not q: return []
+        
+        results = []
+        with self._lock:
+            # 1. 精准代码匹配 (6位)
+            if q in self._code_index:
+                code = q
+                ts = self._tick_series.get(code)
+                if ts: results.append(self._make_search_item(ts, "代码精准匹配"))
+            
+            # 2. 精准名称匹配
+            elif q in self._name_index:
+                code = self._name_index[q]
+                ts = self._tick_series.get(code)
+                if ts: results.append(self._make_search_item(ts, "名称精准匹配"))
+            
+            # 3. 模糊匹配 (代码前缀或名称包含)
+            else:
+                for code, name in self._code_index.items():
+                    if q in code or q in name.lower():
+                        ts = self._tick_series.get(code)
+                        if ts: results.append(self._make_search_item(ts, "模糊匹配"))
+                        if len(results) >= 50: break # 限制返回数量防止 UI 卡顿
+        return results
+
+    def _make_search_item(self, ts: TickSeries, reason: str) -> dict:
+        return {
+            'code': ts.code,
+            'name': ts.name,
+            'pct': ts.current_pct,
+            'score': ts.score,
+            'momentum_score': ts.momentum_score,
+            'sector': ts.category,
+            'reason': reason,
+            'time_str': '--:--:--'
+        }
 
     def _check_day_switch(self, current_dt: datetime.datetime):
         """[NEW] 核心逻辑：检测交易日切换，执行内容与日期双重维度的重置清理，防止昨日残留影响今日看板"""
@@ -785,7 +840,7 @@ class BiddingMomentumDetector:
                 'code': codes_list,
                 'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
                 'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 
-                'p': [], 's': [], # [NEW] 仅保留涨幅、评分
+                'p': [], 's': [], 'rs': [], # [NEW] 增加 rs 赛马时间
                 'k': []
             }
             for code in codes_list:
@@ -807,6 +862,7 @@ class BiddingMomentumDetector:
                     meta_cols['ic'].append(1 if ts.is_counter_trend else 0)
                     meta_cols['p'].append(round(ts.current_pct, 2))
                     meta_cols['s'].append(round(ts.score, 1))
+                    meta_cols['rs'].append(round(ts.racing_start_ts, 1)) # [NEW]
                     meta_cols['k'].append(compress_klines(ts.klines))
                 else:
                     for k in meta_cols: 
@@ -1074,6 +1130,8 @@ class BiddingMomentumDetector:
                     ts.ral = _get('rl', ts.ral)
                     ts.is_untradable = bool(_get('iu', ts.is_untradable))
                     ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                    ts.racing_start_ts = _get('rs', ts.racing_start_ts) # [NEW] 恢复赛马时间
+                    ts.last_stable_ts = ts.racing_start_ts if ts.racing_start_ts > 0 else 0.0
                     
                     # [NEW] 同步更新全量缓存，确保 UI 在 Tick 到达前就能显示恢复出的分值与涨幅
                     self._global_snap_cache[code] = {
@@ -1430,8 +1488,13 @@ class BiddingMomentumDetector:
             logger.error(f"Scavenge failed for {date_str}: {e}")
             return []
 
-    def _update_daily_dragon_top2(self):
+    def _update_daily_dragon_top2(self, force: bool = False):
         """[SUPER] 更新今日的板块 Top 2 到追踪库（每日累加）"""
+        # [NEW] 极限性能优化：如果数据版本未变化，且非强制刷新，则跳过重算
+        if not force and self.data_version == self._last_dragon_update_v:
+            return
+        self._last_dragon_update_v = self.data_version
+
         today_str = datetime.datetime.now().strftime('%Y%m%d')
         
         # 剔除今日已有的项，准备重新抓取今日最新的 Top 2

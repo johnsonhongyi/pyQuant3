@@ -2286,19 +2286,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         try:
             now = time.time()
             
-            # [REFINED] 动态获取 sleep 时间，直接从已经导入的 cct.CFG 获取
+            # [REFINED] 统一使用数据更新周期 (cct.duration_sleep_time) 控制 UI 渲染节奏
             try:
-                # cct (JohnsonUtil.commonTips) 已经在模块顶部导入
+                # [OPTIMIZE] 在交易活跃时稍微收紧节流 (最低 1s 渲染一次)，避免 UI 假死
                 limit = float(getattr(cct.CFG, 'duration_sleep_time', 5.0))
+                limit = max(1.0, limit)
             except:
                 limit = 5.0
                 
-            # 允许竞价期间更快速刷新 (最低 1s)
-            limit = max(1.0, limit)
-            
             with self._update_lock:
-                # 即使没有强制请求，只要时间到了 (0.2s) 就尝试刷新 UI
-                should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= 0.2) 
+                # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
+                should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
             
             if should_refresh:
                 self._refresh_sector_list()
@@ -3378,22 +3376,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         '_match_code': m_code       # 记录命中的代码用于后续精准选中
                     })
         
-        # [FALLBACK] 如果没在活跃板块中，则回退到基础个股搜索展示所属板块信息
+        # 2. [ULTRA-PERFORMANCE] 如果活跃板块未命中，利用数据层索引进行高速检索 (消除 O(N) 遍历)
         if not results:
-            with detector._lock:
-                for code, ts in detector._tick_series.items():
-                    if code == '000000': continue
-                    if q_lower in code or q_lower in ts.name.lower():
-                        results.append({
-                            'code': code,
-                            'name': ts.name,
-                            'pct': ts.current_pct,
-                            'score': ts.score,
-                            'momentum_score': ts.momentum_score,
-                            'sector': ts.category,
-                            'reason': '搜索定位 (暂无活跃)',
-                            'time_str': '--:--:--'
-                        })
+            results = detector.search_by_index(query)
         
         return results
 
@@ -3403,8 +3388,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         mode = getattr(self, '_watchlist_mode', "NORMAL")
         
         if mode in ["DRAGON_3D", "DRAGON_5D"]:
-            # [SUPER] 龙头多日跟踪模式：聚合 10 日内的种子，但根据模式切片分析窗口
-            self.detector._update_daily_dragon_top2()
+            # [OPTIMIZED] 龙头多日跟踪模式：引入数据层版本校验，避免重复执行聚合
+            dv = getattr(self.detector, 'data_version', 0)
+            if not getattr(self, '_dragon_cache_data', None) or getattr(self, '_dragon_cache_v', -1) != dv:
+                self.detector._update_daily_dragon_top2() # 内部已实现版本脏检查
+                self._dragon_cache_v = dv
+            
             all_history = getattr(self.detector, 'dragon_3day_history', []) # 实际已扩充至10日
             if not all_history:
                 self.watchlist_table.setRowCount(0)
