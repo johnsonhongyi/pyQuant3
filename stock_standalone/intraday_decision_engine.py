@@ -53,6 +53,7 @@ class IntradayDecisionEngine:
         self.trailing_stop_pct = trailing_stop_pct
         self.max_position = max_position
         self.cycle_stage = 2  # 默认周期阶段: 主升
+        self._racing_state: dict[str, dict[str, Any]] = {} # [NEW] 赛马状态持续追踪: {code: {start_ts, last_stable_ts, ...}}
         
         logger.info(f"IntradayDecisionEngine 初始化: stop_loss={stop_loss_pct:.1%}, " +
                    f"take_profit={take_profit_pct:.1%}, trailing={trailing_stop_pct:.1%}, " +
@@ -86,6 +87,7 @@ class IntradayDecisionEngine:
         ma10 = float(row.get("ma10d", 0))
         ma20 = float(row.get("ma20d", 0))
         ma60 = float(row.get("ma60d", 0))
+        ma602d = float(snapshot.get("ma602d", 0)) # 前天 MA60
         
         nclose = float(row.get("nclose", snapshot.get("nclose", price)))
         last_close = float(snapshot.get("last_close", snapshot.get("lastp1d", 0)))
@@ -339,7 +341,17 @@ class IntradayDecisionEngine:
 
         # ---------- 买入信号检测 ----------
         if mode in ("full", "buy_only"):
+            # 💥 [NEW] 赛马模式起爆集成 (Horse Racing Model Integration)
+            racing_result = self._check_horse_racing_breakout(row, snapshot, debug)
+            
             action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
+            
+            if racing_result["triggered"]:
+                action = "买入"
+                # 直接提升基础仓位，并确保包含 [重点] 标记
+                base_pos = max(base_pos, racing_result["bonus"])
+                ma_reason = racing_result["reason"]
+                debug["is_priority"] = True
             
             # 【新增】支撑位开仓检测 (Support Rebound)
             # 即使均线信号平平，如果跌到了强支撑位且企稳，也是高胜率开仓点
@@ -1168,12 +1180,12 @@ class IntradayDecisionEngine:
         is_t1 = snapshot.get("buy_date", "") != dt.datetime.now().strftime("%Y-%m-%d")
         if not is_t1:
             return False, ""
-            
+        
         price = float(row.get("trade", 0))
-        last_close = float(row.get("lastp1d", row.get("last_close", 0)))
-        open_p = float(row.get("open", 0))
-        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
+        last_close = float(snapshot.get("last_close", 0))
         cost_price = float(snapshot.get("cost_price", 0))
+        open_p = float(row.get("open", price))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
         
         if price <= 0 or last_close <= 0 or cost_price <= 0:
             return False, ""
@@ -1203,6 +1215,125 @@ class IntradayDecisionEngine:
             return True, f"🚨 T+1 开盘失败结构: {','.join(reasons)}"
             
         return False, ""
+
+    def _check_horse_racing_breakout(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+        """
+        [NEW] 赛马模式：捕捉开盘起爆且分时极其平稳、不回跌的强势股
+        逻辑演进：引入 5/10/30 分钟时序稳定性判定
+        """
+        code = str(row.get("code", snapshot.get("code", ""))).zfill(6)
+        result = {"triggered": False, "bonus": 0.0, "reason": "", "is_priority": False}
+        if not code or code == "000000": return result
+        
+        price = float(row.get("trade", 0))
+        open_p = float(row.get("open", price))
+        low = float(row.get("low", price))
+        nlow = float(row.get("nlow", snapshot.get("nlow", price)))
+        nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+        lastp1d = float(snapshot.get("last_close", snapshot.get("lastp1d", 0)))
+        
+        if price <= 0 or nclose <= 0 or lastp1d <= 0: return result
+        
+        # 1. 基础稳定性指标
+        is_above_vwap = price >= nclose * 0.998 # 略微放宽均线判定
+        is_above_open = price >= open_p * 0.998
+        
+        # 获取当前时间
+        now_dt = dt.datetime.now()
+        now_ts = now_dt.timestamp()
+        
+        # 2. 状态机逻辑
+        state = self._racing_state.get(code)
+        
+        # [NEW] 状态恢复逻辑：如果内存状态丢失但快照中已有赛马标记，尝试恢复
+        if not state and snapshot.get('pattern_hint') and '赛马' in str(snapshot['pattern_hint']):
+            fb_ts = float(snapshot.get('first_breakout_ts', 0))
+            if fb_ts > 0:
+                self._racing_state[code] = {
+                    "start_ts": fb_ts,
+                    "last_stable_ts": now_ts,
+                    "init_price": price,
+                    "max_price": price
+                }
+                state = self._racing_state[code]
+                logger.info(f"🔄 [Racing Engine] 已从快照恢复 {code} 的赛马追踪状态 (始于 {int((now_ts-fb_ts)/60)}m 前)")
+
+        # --- 初始准入形态判定 (初次起爆) ---
+        per1d = float(row.get("per1d", row.get("pct", 0)))
+        td_val = row.get("td_sell_setup", row.get("td_sell", snapshot.get("td_sell", 0)))
+        td_sell = int(td_val) if td_val and not pd.isna(td_val) else 0
+        
+        swl = float(row.get("SWL", snapshot.get("SWL", 0)))
+        sws = float(row.get("SWS", snapshot.get("SWS", 0)))
+        ma602d = float(snapshot.get("ma602d", 0))
+        lasth1d = float(row.get("lasth1d", 0))
+        lasth2d = float(row.get("lasth2d", 0))
+        lasth3d = float(row.get("lasth3d", 0))
+        lastl1d = float(row.get("lastl1d", 0))
+        
+        # 匹配用户反馈的形态逻辑 (lasth1d > lasth2d > lasth3d 等)
+        has_breakout_pattern = (
+            ((lasth1d > lasth2d > lasth3d) or 
+             ((lastl1d < ma602d and lasth1d > ma602d) and (per1d > 3 or td_sell > 0)))
+            and per1d > 0 and low >= lastl1d * 0.998 and swl > sws and price >= lastp1d
+        )
+        
+        if not state:
+            # 仅在早盘 (9:25-10:15) 允许开启新的赛马观察
+            is_morning_window = (9 < now_dt.hour < 10) or (now_dt.hour == 9 and now_dt.minute >= 25) or (now_dt.hour == 10 and now_dt.minute <= 15)
+            # 开盘极稳判定 (nlow 与 low 接近)
+            is_opening_stable = (nlow >= low * 0.998) and (open_p >= low * 0.998)
+            
+            if has_breakout_pattern and is_above_vwap and is_above_open and is_morning_window and is_opening_stable:
+                self._racing_state[code] = {
+                    "start_ts": now_ts,
+                    "last_stable_ts": now_ts,
+                    "init_price": price,
+                    "max_price": price
+                }
+                result.update({
+                    "triggered": True,
+                    "bonus": 0.45, # 初始起爆高奖分
+                    "reason": "[赛马起爆][重点] 早盘形态突破且开盘极其稳健",
+                    "is_priority": True
+                })
+            return result
+        
+        # --- 持续状态追踪 ---
+        duration_min = (now_ts - state["start_ts"]) / 60.0
+        
+        # 稳定性考核不通过则重置 (彻底跌破均线或大幅回撤)
+        if not is_above_vwap or price < open_p * 0.985:
+            if now_ts - state["last_stable_ts"] > 120: 
+                del self._racing_state[code]
+                return result
+        else:
+            state["last_stable_ts"] = now_ts
+            state["max_price"] = max(state.get("max_price", 0), price)
+        
+        # 根据持续时长给出理由与奖励分 (按用户要求的 5/15/30 节点)
+        tag = ""
+        bonus = 0.45
+        if duration_min >= 30:
+            tag = f"[赛马胜出: {int(duration_min)}m]"
+            bonus = 0.75 # 30分钟确认，极高优先级
+        elif duration_min >= 15:
+            tag = f"[赛马优胜候选者: {int(duration_min)}m]"
+            bonus = 0.6
+        elif duration_min >= 5:
+            tag = f"[赛马分化期: {int(duration_min)}m]"
+            bonus = 0.5
+            
+        if tag:
+            result.update({
+                "triggered": True,
+                "bonus": bonus,
+                "reason": f"{tag}[重点] 均价线上方持续走强",
+                "is_priority": True,
+                "racing_duration": duration_min # 供后续板块加分使用
+            })
+            
+        return result
 
     def _limit_price_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, str]:
         """
@@ -1400,6 +1531,77 @@ class IntradayDecisionEngine:
              result["bonus"] += 0.30
              result["reason"] += " | 站上Upper加速" if result["reason"] else "站上Upper加速"
         
+        return result
+
+    def _check_horse_racing_breakout(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+        """
+        检查“赛马模式”起爆信号 (Horse Racing Model)
+        核心逻辑：
+        1. 结构背景：处于二浪回调后的上涨阶段 (SWL > SWS)。
+        2. 筑底确认：td_sell > 1 (两日稳在MA5上) 或 出现“一阳串多线”异动。
+        3. 开盘即最低：open/nlow 极度接近 low，展现强势进攻意图。
+        """
+        price = float(row.get("trade", 0))
+        open_p = float(row.get("open", 0))
+        low = float(row.get("low", 0))
+        # 兼容 nlow 和 low
+        nlow = float(row.get("nlow", row.get("low", 0)))
+        
+        swl = float(row.get("SWL", snapshot.get("SWL", 0)))
+        sws = float(row.get("SWS", snapshot.get("SWS", 0)))
+        
+        # 兼容 td_sell_setup 和 td_sell
+        td_val = row.get("td_sell_setup", row.get("td_sell", snapshot.get("td_sell", 0)))
+        td_sell = int(td_val) if not pd.isna(td_val) else 0
+        
+        ma5 = float(row.get("ma5d", 0))
+        ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        
+        last_close = float(snapshot.get("last_close", 0))
+        
+        result = {"triggered": False, "bonus": 0.0, "reason": "", "is_priority": False}
+        
+        if price <= 0 or open_p <= 0 or low <= 0:
+            return result
+
+        # --- 1. 开盘即最低判定 (Stability Structure) ---
+        # 误差控制在 0.2% 以内
+        is_opening_low = (open_p <= low * 1.002) and (nlow <= low * 1.002)
+        
+        # --- 2. 筑底与强转强判定 ---
+        # td_sell > 1 代表至少两日站稳 MA5 且收盘 > 4日前收盘
+        is_bottom_reversal = (td_sell >= 2)
+        
+        # 一阳串多线 (Dragon Candle) - 当日开盘在均线簇下方或内部，现价横穿多条均线
+        is_dragon_candle = False
+        if ma5 > 0 and ma10 > 0 and ma20 > 0:
+            if price > max(ma5, ma10, ma20) and open_p < max(ma5, ma10, ma20) * 1.01:
+                # 均线纠缠度检查 (三线最大差距 < 3.5%)
+                ma_gap = (max(ma5, ma10, ma20) - min(ma5, ma10, ma20)) / min(ma5, ma10, ma20)
+                if ma_gap < 0.035:
+                    is_dragon_candle = True
+
+        # --- 3. 强势区间判定 (SWL/SWS Zone) ---
+        # 处于二浪启动区：SWL > SWS 且价格在压力线之上
+        is_strong_zone = (swl > sws) and (price > swl)
+
+        # --- 4. 综合判定触发 ---
+        # 核心触发：开盘即最低 + (筑底确认 或 一阳串多线) + 强势区间
+        if is_opening_low and (is_bottom_reversal or is_dragon_candle) and is_strong_zone:
+            result["triggered"] = True
+            result["is_priority"] = True
+            result["bonus"] = 0.45
+            
+            detail = "筑底翻转" if is_bottom_reversal else "一阳串多线"
+            result["reason"] = f"[赛马起爆][重点] {detail} + 开盘即最低"
+            
+            # 如果是早盘黄金时间窗口 (9:30 - 10:00)，额外增强信心
+            now_time = dt.datetime.now().time()
+            if now_time <= dt.datetime.strptime("10:00", "%H:%M").time():
+                result["bonus"] += 0.1
+                result["reason"] += " (早盘极速确认)"
+                
         return result
 
     def _vwap_trend_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:

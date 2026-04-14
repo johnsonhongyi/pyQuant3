@@ -175,7 +175,7 @@ logger = logging.getLogger(__name__)
 
 # 定义信号分类
 CATEGORY_MAP = {
-    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善"],
+    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马起爆", "重点"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
@@ -979,7 +979,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if table.item(r, 1).text() == current_selection:
                     table.selectRow(r)
                     break
-                    break
 
     def _refresh_sector_table(self, sectors: List[dict]):
         table = self.tables.get("🔥 板块热力")
@@ -999,9 +998,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(i, 2, NumericTableWidgetItem(s.get('bidding_score', 0.0)))
             
             type_str = s.get('sector_type', '跟随')
+            res_tag = s.get('resonance_tag', '')
+            if res_tag:
+                type_str = f"{type_str} | {res_tag}"
+            
             type_item = QTableWidgetItem(type_str)
-            if '强攻' in type_str: type_item.setForeground(QBrush(QColor("#ff4444")))
-            elif '蓄势' in type_str: type_item.setForeground(QBrush(QColor("#ffaa00")))
+            if res_tag:
+                type_item.setForeground(QBrush(QColor("#FF4500"))) # 橙红突出共振
+                type_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+                # 珊瑚红底色提示
+                type_item.setBackground(QBrush(QColor(255, 69, 0, 40)))
+            elif '强攻' in type_str:
+                type_item.setForeground(QBrush(QColor("#ff4444")))
+            elif '蓄势' in type_str:
+                type_item.setForeground(QBrush(QColor("#ffaa00")))
             table.setItem(i, 3, type_item)
 
             table.setItem(i, 4, QTableWidgetItem(s.get('leader_code', '')))
@@ -1233,6 +1243,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setRowHidden(r, not row_visible)
 
     def _get_item_color(self, pattern, detail):
+        if "[重点]" in detail or "[重点]" in pattern: return QColor("#FFD700") # 亮金色
         if "SELL" in pattern or "风险" in detail: return QColor("#00FF00")
         if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): return QColor("#FF4444")
         if "跟单" in detail: return QColor("#FFD700")
@@ -1309,6 +1320,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             for i in [0, 2, 3, 4, 5, 6, 7]:
                 it = table.item(0, i)
                 if it: it.setForeground(color)
+            
+            # [NEW] 重点信号行高亮 (赛马模式深度加成)
+            if "[重点]" in detail or "[重点]" in pattern:
+                # 使用深珊瑚红背景色突出重点，带透明度
+                highlight_bg = QColor(255, 127, 80, 50) 
+                for i in range(table.columnCount()):
+                    it = table.item(0, i)
+                    if it: 
+                        it.setBackground(QBrush(highlight_bg))
+                        # 名称和代码加粗显示
+                        if i in [2, 3]:
+                            f = it.font(); f.setBold(True); it.setFont(f)
+
             self._flash_row(table, 0)
             
             self._flash_row(table, 0)
