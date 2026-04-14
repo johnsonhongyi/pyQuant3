@@ -425,6 +425,10 @@ class BiddingMomentumDetector:
         self.in_history_mode = False
         self.use_dragon_race = False  # 龙头竞赛模式（停用后回归 0407 挖掘模式）
         self._last_data_date: str = "" # [NEW] 记录上次处理数据的日期 (YYYY-MM-DD)
+        
+        # ---- [SUPER] 龙头三日跟踪与性能辅助 ----
+        self.dragon_3day_history: List[Dict[str, Any]] = [] # [{date, code, name, sector, base_price, base_vol_l6, base_score}]
+        self._dragon_init_done = False
 
         # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
@@ -808,6 +812,9 @@ class BiddingMomentumDetector:
                     for k in meta_cols: 
                         if k != 'code': meta_cols[k].append(None)
 
+            # [NEW] 存盘前自动更新今日的 Top 2 到追踪历史库
+            self._update_daily_dragon_top2()
+
             data = {
                 'data_date': self._last_data_date or datetime.datetime.now().strftime('%Y-%m-%d'),
                 'timestamp': round(time.time(), 2),
@@ -820,7 +827,8 @@ class BiddingMomentumDetector:
                 'stock_price_anchors': {code: round(ts.price_anchor, 4) for code, ts in self._tick_series.items() if ts.price_anchor > 0},
                 'watchlist': _clean_data(self.daily_watchlist),
                 'stock_selector_seeds': self.stock_selector_seeds,
-                'meta_cols': meta_cols 
+                'meta_cols': meta_cols,
+                'dragon_3day_history': self.dragon_3day_history
             }
             
             sd_count = len(data.get('sector_data', {}))
@@ -1122,6 +1130,8 @@ class BiddingMomentumDetector:
         except Exception as e:
             logger.error(f"❌ [Detector] 加载会话数据失败: {e}")
         self._gc_old_sectors()
+        # [NEW] 启动或跨日载入后，初始化三日跟踪历史
+        self._init_dragon_3day_tracker()
 
     def load_from_snapshot(self, filepath: str) -> bool:
         """从指定的快照文件恢复数据，用于历史复盘"""
@@ -1153,6 +1163,7 @@ class BiddingMomentumDetector:
                 self.active_sectors.clear()
                 self.daily_watchlist.clear()
                 self.sector_anchors.clear()
+                self.dragon_3day_history = data.get('dragon_3day_history', [])
 
                 # 2. 恢复个股数据与 Snap 缓存
                 stock_scores = data.get('stock_scores', {})
@@ -1305,6 +1316,148 @@ class BiddingMomentumDetector:
             logger.error(f"Failed to load snapshot: {e}")
             return False
 
+    # ---- [SUPER] 龙头三日跟踪核心算法 ----
+
+    def _init_dragon_3day_tracker(self):
+        """[SUPER] 启动时初始化三日跟踪逻辑：补齐前两日快照。支持在已有今日数据的情况下回溯补全。"""
+        # [FIX] 如果已经完成初始化，或者历史记录中已经包含了 3 个不同日期的数据，跳过
+        existing_dates = {d['date'] for d in self.dragon_3day_history}
+        if self._dragon_init_done and len(existing_dates) >= 2:
+            return
+        
+        # 仅在非复盘模式且实盘下执行一至多次载入
+        if self.in_history_mode: return
+        
+        try:
+            # 1. 获取所有存量快照并按日期排序
+            snapshot_dir = os.path.join(os.getcwd(), 'snapshots')
+            if not os.path.exists(snapshot_dir): return
+            
+            files = [f for f in os.listdir(snapshot_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
+            if len(files) < 1: return
+            
+            # 提取日期并降序排列
+            dates = []
+            for f in files:
+                try: d_str = f.split('_')[1].split('.')[0]; dates.append(d_str)
+                except: continue
+            dates.sort(reverse=True)
+            
+            today_str = datetime.datetime.now().strftime('%Y%m%d')
+            # 排除今日，寻找前两个交易日
+            past_dates = [d for d in dates if d < today_str][:2]
+            
+            new_history = []
+            for d_str in reversed(past_dates): # 从旧到新排列
+                f_path = os.path.join(snapshot_dir, f"bidding_{d_str}.json.gz")
+                leaders = self._scavenge_top2_from_snapshot(f_path, d_str)
+                if leaders:
+                    new_history.extend(leaders)
+            
+            if new_history:
+                self.dragon_3day_history = new_history
+                logger.info(f"🐉 [DragonTracker] 成功从历史快照补齐 {len(new_history)} 只前传龙头个股")
+            
+            self._dragon_init_done = True
+        except Exception as e:
+            logger.error(f"❌ DragonTracker init failed: {e}")
+
+    def _scavenge_top2_from_snapshot(self, f_path: str, date_str: str) -> list:
+        """从指定快照中提取各板块的前 2 名强势股"""
+        try:
+            import zlib
+            with open(f_path, 'rb') as f: raw = f.read()
+            try: data = json.loads(zlib.decompress(raw).decode('utf-8'))
+            except: 
+                import gzip
+                data = json.loads(gzip.decompress(raw).decode('utf-8'))
+            
+            sector_data = data.get('sector_data', {})
+            stock_scores = data.get('stock_scores', {})
+            res = []
+            seen = set()
+            
+            all_candidates = []
+            for s_name, s_info in sector_data.items():
+                if s_info.get('score', 0) < 8.0: continue # 过滤弱势板块
+                
+                # 汇总所有潜力龙头
+                candidates = s_info.get('followers', [])
+                l_code = s_info.get('leader')
+                if l_code and not any(f['code'] == l_code for f in candidates):
+                    candidates.append({'code': l_code, 'name': s_info.get('leader_name', l_code), 'score': stock_scores.get(l_code, 0)})
+                
+                for c in candidates:
+                    if c['code'] in seen: continue
+                    all_candidates.append({
+                        'date': date_str,
+                        'code': c['code'],
+                        'name': c.get('name', c['code']),
+                        'sector': s_name,
+                        'score': round(c.get('score', 0), 1),
+                        'base_price': c.get('price', 0),
+                        'base_vol_ratio': c.get('vol_ratio', 0)
+                    })
+                    seen.add(c['code'])
+            
+            # [UPGRADE] 全局势能排序，仅保留前 30 名
+            all_candidates.sort(key=lambda x: x['score'], reverse=True)
+            return all_candidates[:30]
+        except Exception as e:
+            logger.error(f"Scavenge failed for {date_str}: {e}")
+            return []
+
+    def _update_daily_dragon_top2(self):
+        """[SUPER] 更新今日的板块 Top 2 到追踪库（每日累加）"""
+        today_str = datetime.datetime.now().strftime('%Y%m%d')
+        
+        # 剔除今日已有的项，准备重新抓取今日最新的 Top 2
+        history_only = [d for d in self.dragon_3day_history if d['date'] != today_str]
+        
+        # 提取今日潜在龙头
+        potential_today = []
+        seen = set()
+        for s_name, s_info in self.active_sectors.items():
+            if s_info.get('score', 0) < self.sector_score_threshold * 1.5: continue # 提高门槛
+            
+            followers = s_info.get('followers', [])
+            candidates = list(followers)
+            l_code = s_info.get('leader')
+            if l_code and not any(f['code'] == l_code for f in candidates):
+                candidates.append({'code': l_code, 'name': s_info['leader_name'], 'score': s_info.get('score', 0)})
+            
+            for c in candidates:
+                if c['code'] in seen: continue
+                potential_today.append({
+                    'date': today_str,
+                    'code': c['code'],
+                    'name': c['name'],
+                    'sector': s_name,
+                    'score': round(c.get('score', 0), 1),
+                    'base_price': c.get('price', 0),
+                    'base_vol_ratio': c.get('vol_ratio', 0)
+                })
+                seen.add(c['code'])
+        
+        # [UPGRADE] 今日全局势能排序 Top 30
+        potential_today.sort(key=lambda x: x['score'], reverse=True)
+        today_leaders = potential_today[:30]
+        
+        # [UPGRADE] 极致剪裁：合并历史与今日，确保每一天都只保留 Top 30，且仅保留最近 3 日
+        combined = history_only + today_leaders
+        all_dates = sorted(list({d['date'] for d in combined}), reverse=True)
+        valid_dates = all_dates[:3] # 仅保留最近 3 个交易日
+        
+        final_history = []
+        for d_str in valid_dates:
+            day_data = [d for d in combined if d['date'] == d_str]
+            # 再次按分数排序并取前 30，防止历史脏数据残留
+            day_data.sort(key=lambda x: x.get('score', 0), reverse=True)
+            final_history.extend(day_data[:30])
+            
+        self.dragon_3day_history = final_history
+        logger.info(f"🐉 [DragonTracker] 当前三日库已精简: {len(self.dragon_3day_history)} 只强势领袖 (日期分布: {valid_dates})")
+
     def _determine_role(self, s: dict, leader_code: str, leader_score: float) -> str:
         """统一逻辑确定个股在板块中的角色标签"""
         pct = s.get('pct', 0.0)
@@ -1324,46 +1477,53 @@ class BiddingMomentumDetector:
     def _calculate_leader_score(self, s: dict, sector: str, market_avg_pct: float) -> float:
         """内部评估一个个股作为龙头的综合得分"""
         base_score = s.get('score', 0.0)
-        time_bonus = 0.0
         
-        # 异动时间溢价 (0407 核心：越早越好)
-        if s.get('first_breakout_ts', 0) > 0:
-            elapsed = time.time() - s['first_breakout_ts']
-            if elapsed < 3600: # 1小时内异动有额外权重
-                time_bonus = 5.0 * (1.0 - elapsed / 3600.0)
-
+        # [SUPER 0414] 引入早盘时效溢价 (Opening Timeliness)
+        # 权重：竞价(9:15-9:30)与早盘抢筹(9:30-9:35) 是最核心的引领信号
+        opening_bonus = 0.0
+        fb_ts = s.get('first_breakout_ts', 0)
+        if fb_ts > 0:
+            dt = datetime.datetime.fromtimestamp(fb_ts)
+            # 构造今日 09:30 的锚点 (考虑到可能跨天加载，使用 fb_ts 当天的日期)
+            anchor_930 = dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+            
+            # 偏离值（秒）
+            offset = fb_ts - anchor_930
+            # 权重衰减逻辑：竞价期（offset<=0）最高分，开盘后 45 分钟内线性降至 0
+            if offset < 2700: 
+                if offset <= 0: # 竞价期 (9:15-9:30)
+                    opening_bonus = 12.0
+                else: # 开盘爆发期
+                    opening_bonus = 12.0 * (1.0 - offset / 2700.0)
+        
         if not getattr(self, 'use_dragon_race', False):
-            # 💡 [0407 挖掘模式] 强调异动时间与先发优势 (让蓝色光标更具特异性)
-            # 权重：基础分(1.0) + 涨幅(0.4) + 时间溢价 + 种子潜力(+15.0)
-            l_score = base_score * 1.0 + s['pct'] * 0.4 + time_bonus
+            # 💡 [0414 时效增强] 强调带头大哥的引领作用 (挖掘模式)
+            # 权重平衡：基础分(0.6) + 涨幅(0.8) + 早盘时效额外加成 + 种子加成
+            l_score = base_score * 0.6 + s['pct'] * 0.8 + opening_bonus
             
             # [SEED BONUS] 选股器种子显著加分 (0407 核心挖掘力)
             if s['code'] in self.stock_selector_seeds:
                 l_score += 15.0
             
-            # [LIQUIDITY BONUS] 大盘成交金额加成 (蓝色光标这类大成交额龙头的优势)
-            # 大金额成交代表机构介入深，具备更强的领涨代表性
+            # [LIQUIDITY BONUS] 大盘成交金额加成 (定海神针：金额越大越稳)
             klines = s.get('klines', [])
             total_amount = 0.0
             if klines:
                 for k in klines:
-                    # 兼容不同数据源的成交额字段 (amount/turnover)
                     amt = float(k.get('amount', k.get('turnover', 0.0)))
-                    if amt == 0: # 兜底：计算估算成交额
-                        amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
+                    if amt == 0: amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
                     total_amount += amt
             
-            if total_amount > 1e8: # 1亿以上开始加分 (针对分时段累计)
+            if total_amount > 1e8: 
                 l_score += min(5.0, total_amount / 2e8) # 每2亿加1分，封顶5分
             
-            # [STABILITY] 取消高回撤罚分，允许低位震荡蓄势
             return l_score
         else:
-            # [竞赛/追涨模式] 强调当日爆发力
+            # [竞赛/追涨模式] 强调当日爆发力 + 极度强调开盘时效
             drawdown_pct = max(0, (s.get('high_day', 0.0) - s.get('price', 0.0)) / s.get('last_close', 1.0) * 100) if s.get('last_close', 0) > 0 else 0
             penalty = drawdown_pct * 4.0 
             
-            l_score = base_score * 0.8 + s['pct'] * 1.2 - penalty + time_bonus
+            l_score = base_score * 0.6 + s['pct'] * 1.4 - penalty + opening_bonus
             if s.get('is_untradable'): l_score -= 50.0 
             return l_score
 
@@ -2005,9 +2165,19 @@ class BiddingMomentumDetector:
                 target_sectors = None
                 new_active = {}
         
-        # 将 persistent dict 转换为 list 给计算逻辑使用
-        sectors_to_update = target_sectors if target_sectors is not None else self._sector_active_stocks_persistent.keys()
+        # --- [PERF-OPTIMIZE] 极限性能优化：预初选活跃板块 ---
+        # 仅对有成员超过 score_threshold 的板块进行后续复杂的 board_score 计算
+        # 这一步能过滤掉 ~90% 的僵尸板块，极大降低 CPU 负载并解决 TK 卡顿
+        active_stocks_global = {code for code, ts in self._tick_series.items() if ts.score >= self.score_threshold}
         
+        sectors_to_update_raw = target_sectors if target_sectors is not None else self._sector_active_stocks_persistent.keys()
+        sectors_to_update = []
+        for s in sectors_to_update_raw:
+            # 快速检查该板块在持久化缓存中是否有任何一只是活跃的
+            stocks_raw = self._sector_active_stocks_persistent.get(s, {})
+            if any(c in active_stocks_global for c in stocks_raw):
+                sectors_to_update.append(s)
+
         for sector in sectors_to_update:
             stocks_dict = self._sector_active_stocks_persistent.get(sector, {})
             if not stocks_dict:
