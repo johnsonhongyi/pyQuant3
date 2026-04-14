@@ -25,9 +25,13 @@ from tk_gui_modules.window_mixin import WindowMixin
 try:
     from bidding_momentum_detector import BiddingMomentumDetector
     from JohnsonUtil import commonTips as cct
+    from JSONData import tdx_data_Day as tdd
+    from JSONData import stockFilter as stf
 except ImportError:
     from stock_standalone.bidding_momentum_detector import BiddingMomentumDetector
     from stock_standalone.JohnsonUtil import commonTips as cct
+    from stock_standalone.JSONData import tdx_data_Day as tdd
+    from stock_standalone.JSONData import stockFilter as stf
 # [REMOVED] DataHubService Imports
 import time
 import re
@@ -628,6 +632,10 @@ class HistoricalTrackerWorker(QThread):
                         else:
                             all_candidate_dict[code]['hist_hits'] += 1
                             all_candidate_dict[code]['hist_scores'][date_str] = snap.get('score', 0)
+                            # [FIX] 持续更新基准价。由于遍历顺序是从新到旧，最终会保留最早（最旧）一天的价格作为基准
+                            p = float(snap.get('price', 0.0))
+                            if p > 0:
+                                all_candidate_dict[code]['hist_price'] = p
 
             # STEP 2: 深度刷新实时行情并执行“重点”判定
             all_codes = list(all_candidate_dict.keys())
@@ -1925,18 +1933,40 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.v_splitter.setChildrenCollapsible(False)
         self.v_splitter.addWidget(self.splitter)
 
-        self.watchlist_group = QGroupBox("📋 当日重点表 (共 0 只, 涨停/溢出个股)")
-        self.watchlist_group.setStyleSheet("QGroupBox { font-weight:bold; color:#aad4ff; }")
+        self.watchlist_group = QGroupBox("") # [RECOVERY] 原生标题置空以腾出空间
+        self.watchlist_group.setStyleSheet("QGroupBox { border: 1px solid #333; margin-top: 0.5em; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         w_lay = QVBoxLayout(self.watchlist_group)
         w_lay.setContentsMargins(2, 6, 2, 2)
         
         # [NEW] 宏观过滤状态显示 (位于当日重点表顶部右侧)
+        # [RECOVERY] 整合标题与按钮至单行
         h_header_lay = QHBoxLayout()
-        h_header_lay.setContentsMargins(0, 0, 10, 0)
+        h_header_lay.setContentsMargins(5, 2, 5, 0)
+        h_header_lay.setSpacing(10)
+        
+        # 自定义标题 Label，模仿 QGroupBox 样式
+        self.watchlist_title_lbl = QLabel("📋 当日重点表")
+        self.watchlist_title_lbl.setStyleSheet("font-weight:bold; color:#aad4ff; font-family: Microsoft YaHei; font-size: 12px;")
+        h_header_lay.addWidget(self.watchlist_title_lbl)
+        
         h_header_lay.addStretch()
+        
         self.macro_info_lbl = QLabel("")
         self.macro_info_lbl.setStyleSheet("color: #00ff88; font-weight: bold; font-family: Microsoft YaHei;")
         h_header_lay.addWidget(self.macro_info_lbl)
+        
+        # [NEW] 写入板块功能按钮 - 移至右侧并缩小尺寸
+        self.btn_append_blk = QPushButton("➕ 追加板块")
+        self.btn_append_blk.setToolTip("将当前重点表数据‘追加’到 TDX 自定义板块")
+        self.btn_append_blk.setStyleSheet("QPushButton { background: #1a2a1a; color: #00ff88; font-size: 11px; padding: 1px 5px; border: 1px solid #00ff88; border-radius: 3px; } QPushButton:hover { background: #1b3d1b; }")
+        self.btn_append_blk.clicked.connect(lambda: self.write_to_blk(append=True))
+        h_header_lay.addWidget(self.btn_append_blk)
+
+        self.btn_rewrite_blk = QPushButton("📝 覆写板块")
+        self.btn_rewrite_blk.setToolTip("将当前重点表数据‘覆写’到 TDX 自定义板块")
+        self.btn_rewrite_blk.setStyleSheet("QPushButton { background: #2a1a1a; color: #ff6060; font-size: 11px; padding: 1px 5px; border: 1px solid #ff6060; border-radius: 3px; } QPushButton:hover { background: #3d1b1b; }")
+        self.btn_rewrite_blk.clicked.connect(lambda: self.write_to_blk(append=False))
+        h_header_lay.addWidget(self.btn_rewrite_blk)
         w_lay.addLayout(h_header_lay)
         
         W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因']
@@ -2149,6 +2179,58 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.status_lbl.setText("❌ SBC 错误")
             self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
         QMessageBox.critical(self, "SBC 测试错误", err_msg)
+
+    # ── [NEW] TDX Block Support ─────────────────────────────────────
+    def write_to_blk(self, append=True):
+        """将当前显示的重点表数据写入通达信板块"""
+        codes = []
+        for row in range(self.watchlist_table.rowCount()):
+            item = self.watchlist_table.item(row, 0)
+            if item:
+                # 去除图标等非数字字符
+                code = re.sub(r'[^\d]', '', item.text())
+                if code:
+                    codes.append(code)
+        
+        if not codes:
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("⚠️ 重点表无数据，取消写入")
+            return
+            
+        # 确定板块名称：优先从全局获取，否则使用默认值
+        blkname = getattr(cct.CFG, 'sector_write_blk',  "061.blk")
+
+        if hasattr(self.main_window, 'global_values'):
+            blkname = self.main_window.global_values.getkey("blkname") or "060.blk"
+        
+        try:
+            # 统一路径获取方式
+            if not hasattr(tdd, 'get_tdx_dir_blocknew'):
+                 # Fallback to cct or a standard path if tdd doesn't have it (though grep showed it's in cct)
+                 # Grep results showed: JohnsonUtil\commonTips.py:2989:def get_tdx_dir_blocknew():
+                 # And instock_MonitorTK.py:14575: block_path = tdd.get_tdx_dir_blocknew() + self.blkname
+                 # This means tdd (tdx_data_Day) likely has it.
+                 pass
+
+            block_path = tdd.get_tdx_dir_blocknew() + blkname
+            cct.write_to_blocknew(block_path, codes, append=append, doubleFile=False, keep_last=0, dfcf=False, reappend=True)
+            
+            # 反馈
+            msg = f"wri ok: {blkname} count: {len(codes)}"
+            logger.info(msg)
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"✅ {msg}")
+                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            # [USER REQUEST] 如果有 status_var2 (在 instock_MonitorTK 中有)，则尝试同步
+            if hasattr(self.main_window, 'status_var2'):
+                self.main_window.status_var2.set(f"wri ok: {blkname} count: {len(codes)}")
+                
+        except Exception as e:
+            err_msg = f"写入板块失败: {e}"
+            logger.error(err_msg)
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"❌ {err_msg}")
 
     def _get_selected_stock(self) -> Optional[str]:
         """提取当前选中的个股代码"""
@@ -2389,15 +2471,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._populate_watchlist()
 
     def _on_dragon_3d_clicked(self):
-        """切换龙头三日跟踪模式"""
+        """切换龙头追踪模式 (循环：普通 -> 三日 -> 五日)"""
         if self._watchlist_mode == "NORMAL":
             self._watchlist_mode = "DRAGON_3D"
             self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
             if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText("💡 已切换至 [龙头三日跟踪] 视角")
+                self.status_lbl.setText("💡 已切换至 [龙头三日跟踪] 视角 (基准: 3日内最早)")
+        elif self._watchlist_mode == "DRAGON_3D":
+            self._watchlist_mode = "DRAGON_5D"
+            self.btn_dragon_3d.setStyleSheet("background-color: #cc0000; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            self.btn_dragon_3d.setText("🐉 龙头五日")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🔥 已切换至 [龙头五日跟踪] 视角 (基准: 5日内最早)")
         else:
             self._watchlist_mode = "NORMAL"
             self.btn_dragon_3d.setStyleSheet("background-color: #1a2a3a; color: #ff9900; font-weight: bold; border-radius: 4px; border: 1px solid #ff9900;")
+            self.btn_dragon_3d.setText("🐉 龙头三日")
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("💡 已切换至 [当日重点] 视角")
         
@@ -3313,41 +3402,70 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """填充底部当日重点表/龙头三日跟踪表"""
         mode = getattr(self, '_watchlist_mode', "NORMAL")
         
-        if mode == "DRAGON_3D":
-            # [SUPER] 龙头三日跟踪模式：先更新今日 Top 2，再加载历史数据并计算实时变动
+        if mode in ["DRAGON_3D", "DRAGON_5D"]:
+            # [SUPER] 龙头多日跟踪模式：聚合 10 日内的种子，但根据模式切片分析窗口
             self.detector._update_daily_dragon_top2()
-            watchlist = []
-            history_data = getattr(self.detector, 'dragon_3day_history', [])
-            snap = self.detector._global_snap_cache
+            all_history = getattr(self.detector, 'dragon_3day_history', []) # 实际已扩充至10日
+            if not all_history:
+                self.watchlist_table.setRowCount(0)
+                return
+
+            # 1. 确定时间窗口
+            all_dates = sorted(list({d['date'] for d in all_history}), reverse=True)
+            window_days = 3 if mode == "DRAGON_3D" else 5
+            valid_dates = set(all_dates[:window_days])
             
-            # [NEW] 增加代码去重，同一只个股在三日内多次异动时，仅展示最新的一条
-            seen_codes = set()
-            for d in reversed(history_data): # 从新到旧遍历以保留最新记录
+            # 2. 精准去重聚合：最新的评分信息 + 最早的基准价
+            # history_data 是 Newest -> Oldest 排列的
+            history_data = [d for d in all_history if d['date'] in valid_dates]
+            
+            unique_leaders = {} # code -> merged_record
+            for d in history_data: # 按从新到旧遍历
                 code = d['code']
-                if code in seen_codes: continue
-                seen_codes.add(code)
-                
+                if code not in unique_leaders:
+                    # 首次遇到 (最新的)：保留状态、分值、原因
+                    record = d.copy()
+                    # [FIX] 兼容性处理：尝试获取多种可能的价格字段名
+                    record['_base_p_found'] = d.get('base_price') or d.get('price', 0.0)
+                    record['_base_date_found'] = d.get('date', '')
+                    unique_leaders[code] = record
+                else:
+                    # 再次遇到 (更旧的)：持续更新基准价，从而锁定在该窗口内最早的那次
+                    p_old = d.get('base_price') or d.get('price', 0.0)
+                    if p_old > 0:
+                        unique_leaders[code]['_base_p_found'] = p_old
+                        unique_leaders[code]['_base_date_found'] = d.get('date', '')
+
+            # 3. 计算实时涨幅与封装渲染对象
+            watchlist = []
+            snap = self.detector._global_snap_cache
+            for code, d in unique_leaders.items():
                 curr_price = 0.0
                 curr_vol_ratio = 0.0
-                
-                # 从实时缓存获取最新状态
                 if code in snap:
                     curr_price = snap[code].get('price', 0.0)
                     curr_vol_ratio = snap[code].get('vol_ratio', 0.0)
                 
-                # 计算累计涨跌 (相对发现日收盘价)
-                pct_3d = 0.0
-                base_p = d.get('base_price', 0.0)
+                # [FALLBACK] 如果不在今日活跃缓存，或量比缺失，从全量实时池 TickSeries 获取
+                if curr_price <= 0 or curr_vol_ratio <= 0:
+                    ts = self.detector._tick_series.get(code)
+                    if ts:
+                        if curr_price <= 0: curr_price = ts.now_price
+                        if curr_vol_ratio <= 0: curr_vol_ratio = ts.vol_ratio
+                
+                # 基准对比：使用在该窗口内找到的最早基准价
+                pct_long = 0.0
+                base_p = d['_base_p_found']
                 if base_p > 0 and curr_price > 0:
-                    pct_3d = (curr_price - base_p) / base_p * 100
-                    
+                    pct_long = (curr_price - base_p) / base_p * 100
+                
                 watchlist.append({
                     'code': code,
                     'name': d['name'],
-                    'pct': round(pct_3d, 2), # 存入累计涨幅
+                    'pct': round(pct_long, 2), # 存入在该周期内的累计涨幅
                     'sector': d.get('sector', ''),
                     'reason': f"初始分:{d.get('score', 0)}",
-                    'time_str': d.get('date', ''), 
+                    'time_str': d['_base_date_found'], # 显示最早发现日期 
                     'vol_ratio': round(curr_vol_ratio, 2),
                     '_is_3d_mode': True
                 })
@@ -3456,13 +3574,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if row_count_changed:
             self.watchlist_table.setRowCount(new_count)
 
-        # [NEW] 动态调整表头，适应三日跟踪视角
+        # [NEW] 动态调整表头，适应三日/五日跟踪视角
         if mode == "DRAGON_3D":
              self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '3D累计%', '板块', '日期', '现量比'])
-             self.watchlist_group.setTitle(f"🐉 龙头三日跟踪 (共 {new_count} 只, 跨日潜在领袖)")
+        elif mode == "DRAGON_5D":
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '5D累计%', '板块', '日期', '现量比'])
         else:
              self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因'])
-             self.watchlist_group.setTitle(f"📋 当日重点表 (共 {new_count} 只, 涨停/溢出个股)")
         
         target_row = -1
         
@@ -3526,10 +3644,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif self.watchlist_table.rowCount() > 0 and not self.watchlist_table.selectedItems():
             self.watchlist_table.setCurrentCell(0, 0)
                 
-        # [NEW] Update Watchlist title stats (History/Search indicator integrated)
+        # [NEW] Update Watchlist title stats (History/Search/Stats integrated into single-row Label)
         search_suffix = ""
         if getattr(self, '_is_leader_search_mode', False):
-            search_suffix = " | 🔍 搜索结果: 各板块龙头"
+            search_suffix = " | 🔍 龙头汇总"
         elif getattr(self, '_active_search_query', ''):
             search_suffix = f" | 🔍 筛选: {self._active_search_query}"
 
@@ -3538,12 +3656,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             try:
                 # 显示完整日期时间
                 f_dt = datetime.fromtimestamp(self.detector.baseline_time).strftime('%Y-%m-%d %H:%M:%S')
-                hist_suffix = f" | 🎬 [历史复盘: {f_dt}]"
+                hist_suffix = f" | 🎬 [复盘: {f_dt}]"
             except:
-                hist_suffix = " | 🎬 [历史复盘]"
+                hist_suffix = " | 🎬 [复盘]"
                 
-        title_prefix = "🐉 龙头三日跟踪" if mode == "DRAGON_3D" else "📋 当日重点表"
-        self.watchlist_group.setTitle(f"{title_prefix} (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
+        title_prefix = "📋 当日重点表"
+        if mode == "DRAGON_3D": title_prefix = "🐉 龙头三日跟踪"
+        elif mode == "DRAGON_5D": title_prefix = "🔥 龙头五日跟踪"
+        
+        self.watchlist_title_lbl.setText(f"{title_prefix} (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
+        
+        # [RECOVERY] 确保原生 QGroupBox 标题始终为空，防止样式冲突带来的双行显示
+        self.watchlist_group.setTitle("")
+        
         # [UX] 状态列自适应
         self.watchlist_table.resizeColumnToContents(5)
 
