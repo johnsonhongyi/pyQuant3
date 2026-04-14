@@ -5081,37 +5081,49 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if is_name_search:
             # --- 1. 名称搜索模式 ---
-            name_col = -1
-            if hasattr(self, 'headers'):
-                try:
-                    name_col = self.headers.index('name')
-                except ValueError:
-                    pass
+            # [OPTIMIZE] 采用字典反查
+            target_code = ""
+            if hasattr(self, 'code_name_map'):
+                # 建立反向映射 (缓存策略)
+                if not hasattr(self, '_name_to_code_map') or len(self._name_to_code_map) != len(self.code_name_map):
+                    self._name_to_code_map = {v: k for k, v in self.code_name_map.items()}
+                
+                target_code = self._name_to_code_map.get(raw_input, "")
             
-            if name_col >= 0:
-                for row in range(self.stock_table.rowCount()):
-                    name_item = self.stock_table.item(row, name_col)
-                    if name_item and name_item.text().strip() == raw_input:
-                        found_row = row
-                        break
+            # 尝试定位行
+            if target_code and hasattr(self, '_table_item_map'):
+                found_row = self._table_item_map.get(target_code, -1)
             
-            # 如果表格中没找到，尝试在全量映射中反查代码
-            if found_row == -1 and hasattr(self, 'code_name_map') and self.code_name_map:
-                for c, n in self.code_name_map.items():
-                    if n == raw_input:
-                        target_code = c
-                        break
+            # 如果字典没查到，降级到线性搜索 (通常为零)
+            if found_row == -1 and not target_code:
+                name_col = -1
+                if hasattr(self, 'headers'):
+                    try: name_col = self.headers.index('name')
+                    except ValueError: pass
+                
+                if name_col >= 0:
+                    for row in range(self.stock_table.rowCount()):
+                        name_item = self.stock_table.item(row, name_col)
+                        if name_item and name_item.text().strip() == raw_input:
+                            found_row = row
+                            break
         else:
-            # --- 2. 代码搜索模式 (原有逻辑) ---
+            # --- 2. 代码搜索模式 ---
             code = raw_input.zfill(6)
             target_code = code
-            for row in range(self.stock_table.rowCount()):
-                item = self.stock_table.item(row, 0)  # 第一列是 code
-                if item:
-                    item_code = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                    if str(item_code).zfill(6) == code:
-                        found_row = row
-                        break
+            # [OPTIMIZE] 直接使用 1.4 版本的 _table_item_map 索引
+            if hasattr(self, '_table_item_map'):
+                found_row = self._table_item_map.get(code, -1)
+            
+            # 兜底线性搜索
+            if found_row == -1:
+                for row in range(self.stock_table.rowCount()):
+                    item = self.stock_table.item(row, 0)
+                    if item:
+                        item_code = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                        if str(item_code).zfill(6) == code:
+                            found_row = row
+                            break
         
         # 执行跳转或直接加载
         if found_row >= 0:
@@ -6563,10 +6575,9 @@ class MainWindow(QMainWindow, WindowMixin):
         elif self._tick_cache.get(code):
             effective_tick_df = self._tick_cache[code].get("tick_df")
         
-        # [Standard Mode] 原子增强：最后同步补抓一次
-        if self.render_mode_atomic and is_intraday and (effective_tick_df is None or effective_tick_df.empty):
-             logger.info(f"[InitialLoad] Sync Fetch for {code} in Standard Mode")
-             effective_tick_df = self.sina.get_real_time_tick(code, enrich_data=True)
+        # [REMOVED] Sync Fetch for {code} in Standard Mode -> Moved to background thread
+        # The background DataLoaderThread already performs this fetch.
+        # Doing it here again synchronously blocks the UI thread for 1-3 seconds.
 
         # 4. ⚡ 数据整合 (原子合成)
         if effective_tick_df is not None and not effective_tick_df.empty:
