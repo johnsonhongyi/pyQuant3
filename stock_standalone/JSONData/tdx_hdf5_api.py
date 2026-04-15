@@ -1809,13 +1809,16 @@ def repack_hdf_db(fname, complib='blosc'):
         os.chdir(back_path)
 
 sina_MultiIndex_SCHEMA = {
-    'columns': ['high','low','close','volume','lastbuy','llastp'],
+    'columns': ['high','low','close','volume','lastbuy','llastp','open','vol','amount'],
     'dtypes': {
         'high':'float64',
         'low':'float64',
         'close':'float64',
         'volume':'float64',
         'lastbuy':'float64',
+        'open':'float64',
+        'vol':'float64',
+        'amount':'float64',
         'llastp':'float64'
     }
 }

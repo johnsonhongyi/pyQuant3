@@ -1218,8 +1218,8 @@ class IntradayDecisionEngine:
 
     def _check_horse_racing_breakout(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
         """
-        [NEW] 赛马模式：捕捉开盘起爆且分时极其平稳、不回跌的强势股
-        逻辑演进：引入 5/10/30 分钟时序稳定性判定
+        [NEW] 赛马模式：追踪开盘起爆且分时极其平稳、不回跌的强势股
+        逻辑演进：引入 5/10/30 分钟时序稳定性判定，支持“以点带面”联动
         """
         code = str(row.get("code", snapshot.get("code", ""))).zfill(6)
         result = {"triggered": False, "bonus": 0.0, "reason": "", "is_priority": False}
@@ -1234,8 +1234,8 @@ class IntradayDecisionEngine:
         
         if price <= 0 or nclose <= 0 or lastp1d <= 0: return result
         
-        # 1. 基础稳定性指标
-        is_above_vwap = price >= nclose * 0.998 # 略微放宽均线判定
+        # 1. 基础稳定性指标：站稳均价线与开盘价
+        is_above_vwap = price >= nclose * 0.998 # 允许万分之二的误差
         is_above_open = price >= open_p * 0.998
         
         # 获取当前时间
@@ -1245,7 +1245,7 @@ class IntradayDecisionEngine:
         # 2. 状态机逻辑
         state = self._racing_state.get(code)
         
-        # [NEW] 状态恢复逻辑：如果内存状态丢失但快照中已有赛马标记，尝试恢复
+        # [NEW] 状态恢复逻辑：如果内存状态丢失但快照中已有赛马标记，从 first_breakout_ts 恢复
         if not state and snapshot.get('pattern_hint') and '赛马' in str(snapshot['pattern_hint']):
             fb_ts = float(snapshot.get('first_breakout_ts', 0))
             if fb_ts > 0:
@@ -1253,12 +1253,13 @@ class IntradayDecisionEngine:
                     "start_ts": fb_ts,
                     "last_stable_ts": now_ts,
                     "init_price": price,
-                    "max_price": price
+                    "max_price": price,
+                    "last_alert_dur": int((now_ts - fb_ts)/60)
                 }
                 state = self._racing_state[code]
-                logger.info(f"🔄 [Racing Engine] 已从快照恢复 {code} 的赛马追踪状态 (始于 {int((now_ts-fb_ts)/60)}m 前)")
+                logger.info(f"🔄 [Racing Engine] 已从快照恢复 {code} 的赛马状态 (始于 {int((now_ts-fb_ts)/60)}m 前)")
 
-        # --- 初始准入形态判定 (初次起爆) ---
+        # --- 初始准入形态判定 (起爆瞬间) ---
         per1d = float(row.get("per1d", row.get("pct", 0)))
         td_val = row.get("td_sell_setup", row.get("td_sell", snapshot.get("td_sell", 0)))
         td_sell = int(td_val) if td_val and not pd.isna(td_val) else 0
@@ -1271,7 +1272,7 @@ class IntradayDecisionEngine:
         lasth3d = float(row.get("lasth3d", 0))
         lastl1d = float(row.get("lastl1d", 0))
         
-        # 匹配用户反馈的形态逻辑 (lasth1d > lasth2d > lasth3d 等)
+        # 形态逻辑：重心抬升或筑底穿线
         has_breakout_pattern = (
             ((lasth1d > lasth2d > lasth3d) or 
              ((lastl1d < ma602d and lasth1d > ma602d) and (per1d > 3 or td_sell > 0)))
@@ -1279,9 +1280,9 @@ class IntradayDecisionEngine:
         )
         
         if not state:
-            # 仅在早盘 (9:25-10:15) 允许开启新的赛马观察
-            is_morning_window = (9 < now_dt.hour < 10) or (now_dt.hour == 9 and now_dt.minute >= 25) or (now_dt.hour == 10 and now_dt.minute <= 15)
-            # 开盘极稳判定 (nlow 与 low 接近)
+            # 仅在早盘 (9:25-10:20) 允许开启新的赛马观察
+            is_morning_window = (9 < now_dt.hour < 10) or (now_dt.hour == 9 and now_dt.minute >= 25) or (now_dt.hour == 10 and now_dt.minute <= 20)
+            # 开盘极稳判定
             is_opening_stable = (nlow >= low * 0.998) and (open_p >= low * 0.998)
             
             if has_breakout_pattern and is_above_vwap and is_above_open and is_morning_window and is_opening_stable:
@@ -1289,48 +1290,57 @@ class IntradayDecisionEngine:
                     "start_ts": now_ts,
                     "last_stable_ts": now_ts,
                     "init_price": price,
-                    "max_price": price
+                    "max_price": price,
+                    "last_alert_dur": 0
                 }
                 result.update({
                     "triggered": True,
-                    "bonus": 0.45, # 初始起爆高奖分
+                    "bonus": 0.45, 
                     "reason": "[赛马起爆][重点] 早盘形态突破且开盘极其稳健",
                     "is_priority": True
                 })
             return result
         
-        # --- 持续状态追踪 ---
+        # --- 持续状态追踪 (Temporal Tracking) ---
         duration_min = (now_ts - state["start_ts"]) / 60.0
         
-        # 稳定性考核不通过则重置 (彻底跌破均线或大幅回撤)
-        if not is_above_vwap or price < open_p * 0.985:
-            if now_ts - state["last_stable_ts"] > 120: 
-                del self._racing_state[code]
-                return result
-        else:
-            state["last_stable_ts"] = now_ts
-            state["max_price"] = max(state.get("max_price", 0), price)
+        # 破位重置条件：大幅跌破均线 (1.5%) 或 跌破开盘价 (1%)
+        if price < nclose * 0.985 or price < open_p * 0.99:
+            # 如果曾经稳定超过 5 分钟，即便破位也保留记录但清空活跃追踪
+            del self._racing_state[code]
+            return result
         
-        # 根据持续时长给出理由与奖励分 (按用户要求的 5/15/30 节点)
+        # 正常更新状态
+        state["last_stable_ts"] = now_ts
+        state["max_price"] = max(state.get("max_price", 0), price)
+        
+        # 分波段考核 (5m/10m/15m/30m)
+        dur_int = int(duration_min)
         tag = ""
         bonus = 0.45
-        if duration_min >= 30:
-            tag = f"[赛马胜出: {int(duration_min)}m]"
-            bonus = 0.75 # 30分钟确认，极高优先级
-        elif duration_min >= 15:
-            tag = f"[赛马优胜候选者: {int(duration_min)}m]"
-            bonus = 0.6
-        elif duration_min >= 5:
-            tag = f"[赛马分化期: {int(duration_min)}m]"
+        
+        # 用户需求：5-10分化期，15分退潮对抗，30分强力异动
+        if dur_int >= 30:
+            tag = f"[赛马强力确认:{dur_int}m]"
+            bonus = 0.8
+        elif dur_int >= 15:
+            tag = f"[赛马退潮优胜:{dur_int}m]"
+            bonus = 0.65
+        elif dur_int >= 10:
+            tag = f"[赛马分化确认:{dur_int}m]"
+            bonus = 0.55
+        elif dur_int >= 5:
+            tag = f"[赛马观察期:{dur_int}m]"
             bonus = 0.5
             
-        if tag:
+        if tag and dur_int != state.get("last_alert_dur", -1):
+            state["last_alert_dur"] = dur_int
             result.update({
                 "triggered": True,
                 "bonus": bonus,
-                "reason": f"{tag}[重点] 均价线上方持续走强",
+                "reason": f"{tag}[重点] 均价线上方平稳运行",
                 "is_priority": True,
-                "racing_duration": duration_min # 供后续板块加分使用
+                "racing_duration": duration_min
             })
             
         return result

@@ -175,7 +175,7 @@ logger = logging.getLogger(__name__)
 
 # 定义信号分类
 CATEGORY_MAP = {
-    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马起爆", "重点"],
+    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马", "重点"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
@@ -198,7 +198,7 @@ SIGNAL_TYPE_MAP = {
 }
 
 SIGNAL_TYPE_KEYWORDS = {
-    "Fast-Track": ["Fast-Track", "跟单", "Pinbar", "结构改善", "起跳新星"],
+    "Fast-Track": ["Fast-Track", "跟单", "Pinbar", "结构改善", "起跳新星", "赛马"],
     "MOMENTUM": ["MOMENTUM", "超级动能", "动能", "加速"],
     "SBC-Breakout": ["SBC-Breakout", "突破", "强势结构", "趋势加速", "突破"],
     "SBC-Breakdown": ["SBC-Breakdown", "破位", "结构破位", "跌破", "风险", "破位"],
@@ -314,10 +314,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 获取系统配置的更新节奏，赋予默认 5s 兜底
         try:
             # 优先从 cct.CFG 获取，否则尝试从 cct 直接获取（取决于 JohnsonUtil 加载方式）
-            interval_s = float(getattr(cct.CFG, 'duration_sleep_time', 5)) if hasattr(cct, 'CFG') else float(getattr(cct, 'duration_sleep_time', 5))
-            interval_ms = max(2000, int(interval_s * 1000)) # 强制不低于 2s 以保证 UI 流畅
+            interval_s = float(getattr(cct.CFG, 'duration_sleep_time', 30)) if hasattr(cct, 'CFG') else float(getattr(cct, 'duration_sleep_time', 30))
+            interval_ms = max(10000, int(interval_s * 1000)) # 强制不低于 2s 以保证 UI 流畅
         except Exception:
-            interval_ms = 5000
+            interval_ms = 10000
         self._engine_sync_timer.start(interval_ms)
         logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，节拍: {interval_ms}ms")
         
@@ -326,7 +326,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._carousel_messages = []
         self._carousel_timer = QTimer(self)
         self._carousel_timer.timeout.connect(self._update_status_carousel)
-        self._carousel_timer.start(5000) # 5秒切换一次消息
+        self._carousel_timer.start(10000) # 5秒切换一次消息
 
     def stop(self):
         """停止所有计时器和订阅，释放资源"""
@@ -591,7 +591,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         self.status_label = QLabel("就绪")
         # [NEW] 实时更新时间标签，修复 AttributeError
-        self.last_update_label = QLabel("最后更新: --:--:--")
+        self.last_update_label = QLabel("--:--:--")
         self.last_update_label.setStyleSheet("color: #666; font-family: 'Consolas';")
         
         self.stats_info_label = QLabel("跟单: 0 | 突破: 0 | 尾盘: 0 | 全部: 0")
@@ -783,7 +783,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.update_market_stats(event.payload)
 
     def _update_last_sync_time(self):
-        self.last_update_label.setText(f"最后更新: {datetime.now().strftime('%H:%M:%S')} (实时)")
+        self.last_update_label.setText(f"{datetime.now().strftime('%H:%M:%S')} (实时)")
 
     # --- [NEW] 决策引擎同步渲染逻辑 ---
     def _update_engine_views(self):
@@ -1421,8 +1421,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     
                     # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
                     self._carousel_messages = [
-                        f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()}",
-                        f"🐉 龙头关注: 真龙 {d_total} | 候选 {c_total}",
+                        f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total}",
                         f"🔥 市场信号: F:{self._stats_counters['follow']} | B:{self._stats_counters['breakout']} | T:{self._stats_counters.get('trap', 0)} | R:{self._stats_counters['risk']} | S:{self._stats_counters['breakdown']}",
                         f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
                     ]
@@ -1532,7 +1531,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         total_cnt = self.tables["全部信号"].rowCount() if "全部信号" in self.tables else 0
         
         # [FIX] 使用清晰文案说明卡片展示的是历史信号流总数，而底部展示的是去重排版后的界面数据，消除数据理解误区。
-        self.stats_info_label.setText(f"(可视表行数) -> 跟单:{follow_cnt} 突破:{breakout_cnt} 风险:{risk_cnt} 破位:{breakdown_cnt} | 总表可视数: {total_cnt}")
+        self.stats_info_label.setText(f"跟单:{follow_cnt} 突破:{breakout_cnt} 风险:{risk_cnt} 破位:{breakdown_cnt} | 总表可视数: {total_cnt}")
 
     def update_market_stats(self, stats: dict):
         try:

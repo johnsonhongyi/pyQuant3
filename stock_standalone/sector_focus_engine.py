@@ -428,18 +428,44 @@ class SectorFocusMap:
                     if vol_sum > 0:
                         leader_vwap = amt_sum / vol_sum
 
+                # [NEW] 赛马模式：获得跟随股列表 (Move up to fix NameError)
+                followers = sec.get('followers', [])
+                follower_codes = [str(f.get('code', '')) for f in followers if f.get('code')][:MAX_FOLLOWERS_PER_SECTOR]
+
+                # [NEW] 赛马模式：板块共振加成 (Resonace Bonus)
+                # 如果板块内有股处于“赛马”状态，说明该板块具备时序稳定性，给予显著加分
+                resonance_bonus = 0.0
+                has_racing_winner = False
+                for f in followers:
+                    p_hint = str(f.get('pattern_hint', ''))
+                    # 使用灵活的子串匹配，支持 [赛马...], ★赛马... 等各种格式
+                    if '赛马' in p_hint:
+                        has_racing_winner = True
+                        if '强力确认' in p_hint or '30m' in p_hint:
+                            resonance_bonus = max(resonance_bonus, 20.0)
+                        elif '退潮优胜' in p_hint or '15m' in p_hint:
+                            resonance_bonus = max(resonance_bonus, 12.0)
+                        elif '分化确认' in p_hint or '10m' in p_hint:
+                            resonance_bonus = max(resonance_bonus, 5.0)
+                        else:
+                            resonance_bonus = max(resonance_bonus, 3.0) # 初始观察期
+
                 # [A] heat_score = board_score 基础分 + 趋势动量加成
+                
                 # score_diff>0: 60m内强度上升；follow_ratio>0.5: 多数个股跟涨；leader_pct_diff>0: 龙头处于上升通道
                 momentum_bonus = (
                     min(score_diff * 3.0, 15.0) +          # 强度上升趋势，最多+15
                     (follow_ratio - 0.5) * 20.0 +           # 跟涨扩散度，±10
-                    min(leader_pct_diff * 2.0, 10.0)        # 龙头60m内涨幅，最多+10
+                    min(leader_pct_diff * 2.0, 10.0) +      # 龙头60m内涨幅，最多+10
+                    resonance_bonus                        # [NEW] 赛马共振加成
                 )
                 heat_score = min(100.0, board_score * 3.0 + max(0.0, momentum_bonus))
+                
+                # 如果有赛马胜出，强制将板块类型标记为“🔥 强攻”
+                if has_racing_winner and '🔥 强攻' not in tags:
+                    tags = f"🔥 强攻 | {tags}" if tags else "🔥 强攻"
+                    sector_type = "🔥 强攻"
 
-                # 跟随股代码列表
-                followers = sec.get('followers', [])
-                follower_codes = [str(f.get('code', '')) for f in followers if f.get('code')][:MAX_FOLLOWERS_PER_SECTOR]
                 # 跟随股明细（含 pct_diff/dff）
                 follower_detail = []
                 for f in followers[:MAX_FOLLOWERS_PER_SECTOR]:
