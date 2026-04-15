@@ -1775,7 +1775,7 @@ class DataPublisher:
     max_batch_time: float
     _last_batch_fp: str
     _enable_backup: bool
-    def __init__(self, high_performance: bool = True, scraper_interval: int = 600, 
+    def __init__(self, high_performance: bool = True, scraper_interval: int = 3600, 
                  enable_backup: bool = False, validation_mode: bool = False,
                  simulation_mode: bool = False, verbose: bool = False):
         self.paused = False
@@ -1823,7 +1823,7 @@ class DataPublisher:
         # 55188 Scraper Settings
         self.scraper_interval = scraper_interval
         self.current_scraper_wait = scraper_interval
-        self.max_scraper_wait = 1800 # 最大 30 分钟
+        self.max_scraper_wait = 7200 # 最大 120 分钟
         
         # Sector Persistence Settings
         self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concept_pg_data.db")

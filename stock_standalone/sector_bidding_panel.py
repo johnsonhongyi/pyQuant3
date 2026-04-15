@@ -1167,9 +1167,10 @@ class DataProcessWorker(QObject):
                     if count > 0 and self.detector.enable_log:
                         logger.debug(f"⏩ [Worker] Skipped {count} stale data frames.")
 
-                    # 执行核心计算
-                    self.detector.register_codes(df)
-                    self.detector.update_scores()
+                    # 执行核心计算 (增量更新逻辑)
+                    active_codes = df.index.tolist() if hasattr(df, 'index') else None
+                    self.detector.register_codes(df) # [RESTORED] 必须注册新 code 才能计算评分
+                    self.detector.update_scores(active_codes=active_codes)
 
                     v = getattr(self.detector, "data_version", 0) + 1
                     setattr(self.detector, "data_version", v)
@@ -1188,7 +1189,7 @@ class DataProcessWorker(QObject):
                     if self.detector.enable_log:
                         logger.info("⚡ [Worker] Force recalculation")
 
-                    self.detector.update_scores()
+                    self.detector.update_scores(force=True)
 
                     v = getattr(self.detector, "data_version", 0) + 1
                     setattr(self.detector, "data_version", v)
@@ -1200,8 +1201,10 @@ class DataProcessWorker(QObject):
                 logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
 
             # 3. 最后的保险：防止在数据极高频时榨干 CPU
-            # 如果连续处理了任务，微小休眠 1ms 让系统调度一下
-            if has_done_work:
+            # 如果是交易时段，正常休眠；否则大幅减速以节省电力和计算资源
+            if not self.detector.is_active_session() and not has_done_work:
+                time.sleep(0.5) # 非活跃时段且空闲时，大幅降噪
+            elif has_done_work:
                 time.sleep(0.001) 
 
         logger.info("🏁 [Worker] Loop exited safely.")
@@ -1969,7 +1972,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         h_header_lay.addWidget(self.btn_rewrite_blk)
         w_lay.addLayout(h_header_lay)
         
-        W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因']
+        W_COLS = ['代码', '名称', '涨幅%', '核心板块', '触发时间', '分值', '状态/原因']
         self.watchlist_table = QTableWidget(0, len(W_COLS))
         self.watchlist_table.setHorizontalHeaderLabels(W_COLS)
         self.watchlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -3454,10 +3457,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'pct': round(pct_long, 2), # 存入在该周期内的累计涨幅
                     'sector': d.get('sector', ''),
                     'reason': f"初始分:{d.get('score', 0)}",
+                    'score': d.get('score', 0), 
                     'time_str': d['_base_date_found'], # 显示最早发现日期 
                     'vol_ratio': round(curr_vol_ratio, 2),
                     '_is_3d_mode': True
                 })
+                    # 'reason': float(d.get('score', 0)),
+                    # 'reason': f"初始分:{d.get('score', 0)}",
             
             # 渲染前重新按日期降序排列
             watchlist.sort(key=lambda x: x['time_str'], reverse=True)
@@ -3557,6 +3563,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif w_col == 2: watchlist.sort(key=lambda x: x.get('pct', 0), reverse=not w_asc)
         elif w_col == 3: watchlist.sort(key=lambda x: x.get('sector', ''), reverse=not w_asc)
         elif w_col == 4: watchlist.sort(key=lambda x: x.get('time_str', x.get('time', '')), reverse=not w_asc)
+        elif w_col == 5: watchlist.sort(key=lambda x: x.get('score', 0), reverse=not w_asc)
+        elif w_col == 6: watchlist.sort(key=lambda x: x.get('vol_ratio', x.get('reason', '')), reverse=not w_asc)
         
         # [OPTIMIZE] Only toggle layout changes if row count changed
         row_count_changed = (cur_w_rows != new_count)
@@ -3565,11 +3573,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # [NEW] 动态调整表头，适应三日/五日跟踪视角
         if mode == "DRAGON_3D":
-             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '3D累计%', '板块', '日期', '现量比'])
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '3D累计%', '板块', '日期', '初始分', '现量比'])
         elif mode == "DRAGON_5D":
-             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '5D累计%', '板块', '日期', '现量比'])
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '5D累计%', '板块', '日期', '初始分', '现量比'])
         else:
-             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '核心板块', '触发时间', '状态/原因'])
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '核心板块', '触发时间', '分值', '状态/原因'])
         
         target_row = -1
         
@@ -3597,15 +3605,23 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 5. 时间/日期
             self._update_cell(self.watchlist_table, i, 4, str(w.get('time_str', '--:--:--')))
             
-            # 6. 状态/量比
+            # 6. 分值
+            v_score = w.get('score', 0)
+            self._update_cell(self.watchlist_table, i, 5, f"{v_score:.1f}", is_numeric=True)
+
+            # 7. 状态/量比
             if mode == "DRAGON_3D":
                 vr = w.get('vol_ratio', 0.0)
                 vr_c = self._color_red if vr >= 2.0 else (self._color_green if vr < 0.8 else None)
-                self._update_cell(self.watchlist_table, i, 5, f"{vr:.2f}", color=vr_c, is_numeric=True)
+                self._update_cell(self.watchlist_table, i, 6, f"{vr:.2f}", color=vr_c, is_numeric=True)
+            elif mode == "DRAGON_5D":
+                vr = w.get('vol_ratio', 0.0)
+                vr_c = self._color_red if vr >= 2.0 else (self._color_green if vr < 0.8 else None)
+                self._update_cell(self.watchlist_table, i, 6, f"{vr:.2f}", color=vr_c, is_numeric=True)
             else:
                 reason = w.get('reason', '')
-                r_c = QColor("#FF1493") if '涨停' in reason else None
-                self._update_cell(self.watchlist_table, i, 5, reason, color=r_c)
+                r_c = QColor("#FF1493") if isinstance(reason, str) and '涨停' in reason else None
+                self._update_cell(self.watchlist_table, i, 6, reason, color=r_c)
 
             # [NEW] 存入核心元数据：板块追溯标记及匹配代码
             c_item = self.watchlist_table.item(i, 0)

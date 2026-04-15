@@ -164,7 +164,7 @@ class TickSeries:
                  '_splitted_cats', '_total_vol', '_total_amt',
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
-                 'racing_start_ts', 'last_stable_ts')
+                 'racing_start_ts', 'last_stable_ts', 'racing_duration')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -184,7 +184,13 @@ class TickSeries:
         self.first_breakout_ts: float = 0.0 # 记录当日首次异动的时间戳
         self.pattern_hint: str = "" # 记录形态特征词（如 V反、突破等）
         self.is_untradable: bool = False
-        self.is_counter_trend: bool = False
+        self.is_counter_trend: bool = False # 是否为逆势品种
+        
+        # [NEW] 赛马模式稳定性追踪
+        self.racing_start_ts: float = 0.0   # 赛马开始时间戳
+        self.last_stable_ts: float = 0.0    # 最近一次稳定在均线上的时间
+        self.racing_duration: float = 0.0   # 累计稳定时长(分)
+
         self.is_gap_leader: bool = False
         self.lastdu: float = 0.0 # [NEW] 价格波动幅度 (Range Volatility)
         self.lastdu4: float = 0.0 # [NEW] 短期(4日)价格波动幅度
@@ -211,8 +217,22 @@ class TickSeries:
         self.price_diff: float = 0.0
         self.dff: float = 0.0
         self.cycle_stage: int = 2
-        self.racing_start_ts: float = 0.0 # [NEW] 赛马开始时间戳
-        self.last_stable_ts: float = 0.0  # [NEW] 上次分时稳定(均价线上)时间
+
+    def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float):
+        """更新赛马模式稳定性状态"""
+        # 准入条件：收盘站在均价线与开盘价之上 (允许微小误差)
+        is_stable = (vwap > 0 and cur_close >= vwap * 0.998) and (open_p > 0 and cur_close >= open_p * 0.998)
+        
+        if is_stable:
+            if self.racing_start_ts <= 0:
+                self.racing_start_ts = now_ts
+            self.last_stable_ts = now_ts
+            self.racing_duration = (now_ts - self.racing_start_ts) / 60.0
+        else:
+            # 破位判定：如果彻底跌破 (回撤超过 1.5%)，重置赛马状态
+            if (vwap > 0 and cur_close < vwap * 0.985) or (open_p > 0 and cur_close < open_p * 0.985):
+                self.racing_start_ts = 0.0
+                self.racing_duration = 0.0
 
     def update_meta(self, row: Any):
         """
@@ -581,25 +601,29 @@ class BiddingMomentumDetector:
 
     def update_scores(self, active_codes=None, force: bool = False):
         """
-        主入口：计算每只个股分值并聚合板块。
-        active_codes: 如果提供，则仅对这些代码进行评分。
-        force: 是否强制全量刷新。
+        主入口：计算个股分值并聚合板块。
+        active_codes: 如果提供，则执行增量更新 (O(Delta) 复杂度)，极度节省性能。
+        force: 是否强制全量计算 (通常用于每 5 分钟的全局对齐)。
         """
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
-        # 否则会先用昨日数据计算一轮，然后重置并显示空看板
         self._check_day_switch(datetime.datetime.now())
 
-        if active_codes is not None:
-            codes = active_codes
-        else:
-            with self._lock:
+        with self._lock:
+            if active_codes is not None and not force:
+                # [INCREMENTAL] 增量模式：仅对当前变动的代码进行评估
+                codes = [c for c in active_codes if c in self._tick_series]
+            else:
+                # [FULL-SWEEP] 全量模式
                 codes = list(self._tick_series.keys())
                 
+        # [PERF] 针对 5000+ 品种，_evaluate_code 已优化为纯数值计算
         for code in codes:
             self._evaluate_code(code)
         
-        self.data_version += 1 # [NEW] 评分更新后递增版本号
-        self._aggregate_sectors(active_codes=active_codes)
+        self.data_version += 1 # 评分更新后递增版本号
+        
+        # 板块聚合逻辑
+        self._aggregate_sectors(active_codes=active_codes if not force else None)
 
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
@@ -783,12 +807,16 @@ class BiddingMomentumDetector:
             # logger.debug("[Detector] Skip save: Not a trade date.")
             return
 
-        # [NEW] [TIME-CHECK] 交易日 9:40 前不存盘，防止早上冷启动时覆盖昨日完美快照
+        # [NEW] [TIME-CHECK] 16:00 以后停止自动存盘，防止盘后无效 IO 或过时的全量序列化占用资源
+        # 此时数据已基本定型，无需每分钟保存一次
         now = datetime.datetime.now()
-        if not force and is_trade_day:
-            if now.hour < 9 or (now.hour == 9 and now.minute < 40):
-                # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:40).")
+        if not force:
+            if now.hour >= 16:
                 return
+            if is_trade_day:
+                if now.hour < 9 or (now.hour == 9 and now.minute < 40):
+                    # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:40).")
+                    return
 
         # [NEW] [QUALITY-PROTECTION] 盘后或非交易日的数据质量比对保护
         main_path = self._get_persistence_path()
@@ -2031,24 +2059,6 @@ class BiddingMomentumDetector:
         else:
             # 衰减逻辑：如果没有持续强势表现，动量分缓慢回落
             ts_obj.momentum_score = max(0.0, ts_obj.momentum_score - 0.1)
-
-        # --- 8. 最终评分与活性修正 ---
-        # 最终分 = 瞬时分(cycle+bidding+score) + 持续动量分
-        final_score = cycle_score + bidding_score + score + ts_obj.momentum_score
-        
-        # [NEW] 高开低走 (Gap Trap) 惩罚
-        # 如果高开超过 3.5% 但当前跌破均线且涨幅回撤超过高开幅度的一半
-        if open_gap_pct > 3.5 and cur_close < vwap and cur_pct < open_gap_pct * 0.6:
-            final_score *= 0.5 # 评分直接减半
-            ts_obj.momentum_score *= 0.5
-        
-        # [NEW] 活性修正：如果最近 3 分钟价格没有变动且未涨停，分数大幅衰减 (针对僵尸股)
-        if len(klines) >= 3:
-            last_3 = [k['close'] for k in list(klines)[-3:]]
-            if len(set(last_3)) == 1 and cur_pct < get_limit_up_threshold(code):
-                final_score *= 0.3
-                ts_obj.momentum_score *= 0.8 # 动量一同衰减
-
         # 尝试从数据中获取模拟时间
         data_ts = 0.0
         # 1. 优先从当前最新 row 提取时间
@@ -2070,6 +2080,38 @@ class BiddingMomentumDetector:
             data_ts = klines[-1].get('timestamp', self.last_data_ts if self.last_data_ts > 0 else time.time())
         else:
             data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            
+        # [NEW] 赛马模式：时序稳定性加分 (Opening Racing Model)
+        ts_obj.update_racing_status(cur_close, vwap, day_open, data_ts)
+        racing_bonus = 0.0
+        if ts_obj.racing_duration >= 30:
+            racing_bonus = 15.0 # 30分钟强力异动
+            if "★赛马30m" not in final_hint: final_hint = f"★赛马30m|{final_hint}"
+        elif ts_obj.racing_duration >= 15:
+            racing_bonus = 8.0  # 15分钟退潮优胜
+            if "赛马15m" not in final_hint: final_hint = f"赛马15m|{final_hint}"
+        elif ts_obj.racing_duration >= 5:
+            racing_bonus = 4.0  # 5分钟分化确认
+            if "赛马5m" not in final_hint: final_hint = f"赛马5m|{final_hint}"
+        
+        # 最终评分与活性修正
+        # 最终分 = 瞬时分(cycle+bidding+score) + 持续动量分 + 赛马稳定性加分
+        final_score = cycle_score + bidding_score + score + ts_obj.momentum_score + racing_bonus
+        
+        # [NEW] 高开低走 (Gap Trap) 惩罚
+        # 如果高开超过 3.5% 但当前跌破均线且涨幅回撤超过高开幅度的一半
+        if open_gap_pct > 3.5 and cur_close < vwap and cur_pct < open_gap_pct * 0.6:
+            final_score *= 0.5 # 评分直接减半
+            ts_obj.momentum_score *= 0.5
+        
+        # [NEW] 活性修正：如果最近 3 分钟价格没有变动且未涨停，分数大幅衰减 (针对僵尸股)
+        if len(klines) >= 3:
+            last_3 = [k['close'] for k in list(klines)[-3:]]
+            if len(set(last_3)) == 1 and cur_pct < get_limit_up_threshold(code):
+                final_score *= 0.3
+                ts_obj.momentum_score *= 0.8 # 动量一同衰减
+
+        
 
         # [NEW] 记录个股历史得分并计算增量涨跌
         now = time.time()
@@ -2252,11 +2294,13 @@ class BiddingMomentumDetector:
                     
                 if code in self.daily_watchlist:
                     self.daily_watchlist[code]['pct'] = round(d['pct'], 2)
+                    self.daily_watchlist[code]['score'] = round(d.get('score', 0), 1)
                     if d['pattern_hint']: self.daily_watchlist[code]['pattern_hint'] = d['pattern_hint']
                 else:
                     trigger_ts = d['first_breakout_ts'] if d['first_breakout_ts'] > 0 else now_ts
                     self.daily_watchlist[code] = {
                         'code': code, 'name': d['name'], 'sector': d['category'], 'pct': round(d['pct'], 2),
+                        'score': round(d.get('score', 0), 1),
                         'time_str': datetime.datetime.fromtimestamp(trigger_ts).strftime('%m%d-%H:%M'),
                         'trigger_ts': trigger_ts, # [FIXED] 保存原始时间戳，用于跨日逻辑判定
                         'reason': '涨停', 'pattern_hint': d['pattern_hint']
