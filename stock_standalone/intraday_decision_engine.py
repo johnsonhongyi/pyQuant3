@@ -1314,31 +1314,31 @@ class IntradayDecisionEngine:
         state["last_stable_ts"] = now_ts
         state["max_price"] = max(state.get("max_price", 0), price)
         
-        # 分波段考核 (5m/10m/15m/30m)
+        # 分步时序考核 (User Logic: 5-10m 分化确认, 15m 退潮对抗, 30m 终极确认)
         dur_int = int(duration_min)
         tag = ""
         bonus = 0.45
         
-        # 用户需求：5-10分化期，15分退潮对抗，30分强力异动
         if dur_int >= 30:
-            tag = f"[赛马强力确认:{dur_int}m]"
-            bonus = 0.8
+            tag = f"[赛马:强力终极确认 {dur_int}m]"
+            bonus = 0.85
+            result["is_winner"] = True # 特权标记，用于板块共振
         elif dur_int >= 15:
-            tag = f"[赛马退潮优胜:{dur_int}m]"
-            bonus = 0.65
+            tag = f"[赛马:退潮对抗优胜 {dur_int}m]"
+            bonus = 0.70
         elif dur_int >= 10:
-            tag = f"[赛马分化确认:{dur_int}m]"
-            bonus = 0.55
+            tag = f"[赛马:分化确认中 {dur_int}m]"
+            bonus = 0.60
         elif dur_int >= 5:
-            tag = f"[赛马观察期:{dur_int}m]"
-            bonus = 0.5
+            tag = f"[赛马:初步起步观察 {dur_int}m]"
+            bonus = 0.50
             
         if tag and dur_int != state.get("last_alert_dur", -1):
             state["last_alert_dur"] = dur_int
             result.update({
                 "triggered": True,
                 "bonus": bonus,
-                "reason": f"{tag}[重点] 均价线上方平稳运行",
+                "reason": f"{tag}[重点] 结构极稳且运行于 VWAP 上方",
                 "is_priority": True,
                 "racing_duration": duration_min
             })
@@ -1543,7 +1543,7 @@ class IntradayDecisionEngine:
         
         return result
 
-    def _check_horse_racing_breakout(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+    def _DEPRECATED_check_horse_racing_breakout_old(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
         """
         检查“赛马模式”起爆信号 (Horse Racing Model)
         核心逻辑：

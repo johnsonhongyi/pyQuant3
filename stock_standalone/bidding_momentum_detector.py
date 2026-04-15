@@ -218,19 +218,30 @@ class TickSeries:
         self.dff: float = 0.0
         self.cycle_stage: int = 2
 
-    def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float):
-        """更新赛马模式稳定性状态"""
-        # 准入条件：收盘站在均价线与开盘价之上 (允许微小误差)
-        is_stable = (vwap > 0 and cur_close >= vwap * 0.998) and (open_p > 0 and cur_close >= open_p * 0.998)
+    def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
+        """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
+        if cur_close <= 0 or vwap <= 0 or open_p <= 0: return
+
+        # 1. 结构准入：必须是开盘至今极其平稳，且当前站稳均价线与开盘价
+        # 允许万分之二的微小误差
+        is_above_support = (cur_close >= vwap * 0.998) and (cur_close >= open_p * 0.998)
         
-        if is_stable:
+        # [NEW] 开盘最低价结构校验 (User Requirement)
+        # 如果 low_p 显著低于 open_p 或 nlow，说明曾有深幅回撤，不符合赛马模式的“开盘即最低”特征
+        is_structural_stable = True
+        if low_p > 0:
+            # 允许 0.2% 的扰动
+            if open_p < low_p * 0.998 or nlow < low_p * 0.998:
+                is_structural_stable = False
+
+        if is_above_support and is_structural_stable:
             if self.racing_start_ts <= 0:
                 self.racing_start_ts = now_ts
             self.last_stable_ts = now_ts
             self.racing_duration = (now_ts - self.racing_start_ts) / 60.0
         else:
-            # 破位判定：如果彻底跌破 (回撤超过 1.5%)，重置赛马状态
-            if (vwap > 0 and cur_close < vwap * 0.985) or (open_p > 0 and cur_close < open_p * 0.985):
+            # 破位判定：如果彻底跌破 (回撤超过 1.5% 或 跌破开盘价 1%)，重置赛马状态
+            if cur_close < vwap * 0.985 or cur_close < open_p * 0.99 or not is_structural_stable:
                 self.racing_start_ts = 0.0
                 self.racing_duration = 0.0
 
@@ -2082,16 +2093,21 @@ class BiddingMomentumDetector:
             data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
             
         # [NEW] 赛马模式：时序稳定性加分 (Opening Racing Model)
-        ts_obj.update_racing_status(cur_close, vwap, day_open, data_ts)
+        # 传入 low 和 nlow 进行物理结构校验 (确保开盘即最低)
+        low_val = float(latest.get('low', cur_close))
+        nlow_val = float(latest.get('nlow', low_val))
+        ts_obj.update_racing_status(cur_close, vwap, day_open, data_ts, low_p=low_val, nlow=nlow_val)
+        
         racing_bonus = 0.0
-        if ts_obj.racing_duration >= 30:
-            racing_bonus = 15.0 # 30分钟强力异动
+        dur_raw = ts_obj.racing_duration
+        if dur_raw >= 30:
+            racing_bonus = 20.0 # [Dragon Class] 30分钟强力终极确认 (原15.0)
             if "★赛马30m" not in final_hint: final_hint = f"★赛马30m|{final_hint}"
-        elif ts_obj.racing_duration >= 15:
-            racing_bonus = 8.0  # 15分钟退潮优胜
+        elif dur_raw >= 15:
+            racing_bonus = 10.0 # [Leader Class] 15分钟退潮对抗 (原8.0)
             if "赛马15m" not in final_hint: final_hint = f"赛马15m|{final_hint}"
-        elif ts_obj.racing_duration >= 5:
-            racing_bonus = 4.0  # 5分钟分化确认
+        elif dur_raw >= 5:
+            racing_bonus = 5.0  # [Candidate Class] 5-10m 分化期 (原4.0)
             if "赛马5m" not in final_hint: final_hint = f"赛马5m|{final_hint}"
         
         # 最终评分与活性修正

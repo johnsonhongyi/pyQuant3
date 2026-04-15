@@ -90,7 +90,7 @@ def get_mock_cat(code):
         return f'{market};半导体;芯片'
     return market
 
-def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None):
+def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None):
     """
     基于 HDF5 本地 Tick 数据，按时间线回回放并推入 DataPublisher/BiddingMomentumDetector。
     
@@ -114,60 +114,68 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
         logger.error(f"Cannot find HDF5 file: {HDF5_FILE}")
         return
         
-    # 读取全天所有个股 tick 的快照 (仅作演示，实际可能非常耗内存，可用 chunk 或预选)
+    # 读取全天所有个股 tick 的快照
     # df 结构: MultiIndex(code, ticktime), columns=[price, volume, amount, type...]
     df = pd.read_hdf(HDF5_FILE, KEY)
     
-    logger.info(f"Loaded {len(df)} ticks. Restructuring data for playback...")
+    logger.info(f"Loaded {len(df)} total records from HDF5.")
 
-    # 展开索引，使其可以被时间排序
+    # 展开索引，统一处理逻辑
     df = df.reset_index()
     
-    # ticktime 可能只是 "09:25:03" 形式的文本
+    # ticktime 处理与转换
     if 'ticktime' not in df.columns:
         if 'time' in df.columns:
             df.rename(columns={'time': 'ticktime'}, inplace=True)
             
-    # [NEW] Filter by stock codes if specified
+    # 转换为 Datetime 并剔除无效时间戳 (NaT)
+    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+    prev_len = len(df)
+    df = df.dropna(subset=['ticktime'])
+    if len(df) < prev_len:
+        logger.warning(f"Dropped {prev_len - len(df)} records with invalid timestamps (NaT).")
+
+    # [NEW] 日期过滤检测
+    if replay_date:
+        # 如果传入的是 "2026-04-15" 字符串
+        target_date = pd.to_datetime(replay_date).date()
+        df = df[df['ticktime'].dt.date == target_date]
+        if df.empty:
+            logger.error(f"No data found for date: {replay_date}")
+            return
+        logger.info(f"Filtered for date: {replay_date}. Rows: {len(df)}")
+    else:
+        # 如果未指定日期，默认取记录中最新的日期
+        # [FIX] 使用 .max() 前确保数据已去重且无空值以防 TypeError
+        latest_date = df['ticktime'].dt.date.max()
+        df = df[df['ticktime'].dt.date == latest_date]
+        logger.info(f"Auto-selected latest recording date: {latest_date}. Rows: {len(df)}")
+
+    # [NEW] 过滤交易时间段 (09:25 - 15:00)
+    # 提取纯时间字符串 HH:MM:SS
+    df['_hms'] = df['ticktime'].dt.strftime('%H:%M:%S')
+    
+    # 优先使用 run_replay 传入的参数，如果没有传入则使用默认值
+    start_time_filter = start_time_str if start_time_str else "09:25:00"
+    end_time_filter = end_time_str if end_time_str else "15:00:00"
+    
+    df = df[(df['_hms'] >= start_time_filter) & (df['_hms'] <= end_time_filter)].copy()
+    
+    # 过滤指定的代码
     if codes:
         if isinstance(codes, str):
             codes = [c.strip() for c in codes.split(',')]
-        
-        # Robust check for 'code' in column or index
-        if 'code' in df.columns:
-            df = df[df['code'].astype(str).str.zfill(6).isin(codes)]
-        else:
-            df = df[df.index.get_level_values('code').astype(str).str.zfill(6).isin(codes)] if isinstance(df.index, pd.MultiIndex) else df[df.index.astype(str).str.zfill(6).isin(codes)]
+        df = df[df['code'].astype(str).str.zfill(6).isin(codes)]
         logger.info(f"Filtered playback data for {len(codes)} stocks: {codes}")
 
     # 按照实际 ticktime 进行排序
     df.sort_values(by='ticktime', inplace=True)
     
-    # 分析 ticktime 的实际格式，统一提取 HH:MM:SS 用于时间过滤
-    sample = df['ticktime'].iloc[0] if len(df) > 0 else None
-    logger.info(f"Sample ticktime type={type(sample)} value={sample!r}")
-    
-    # 将 ticktime 统一转换为纯时间字符串 "HH:MM:SS" 用于过滤
-    if sample is not None:
-        if isinstance(sample, (pd.Timestamp, np.datetime64)) or hasattr(sample, 'hour'):
-            # datetime64/Timestamp 类型：直接提取时间部分
-            df['_hms'] = pd.to_datetime(df['ticktime']).dt.strftime('%H:%M:%S')
-        elif isinstance(sample, str) and len(sample) > 8:
-            # 完整 datetime 字符串如 "2024-03-01 09:25:00"
-            df['_hms'] = df['ticktime'].str[-8:]  # 取最后8位
-        else:
-            # 已经是纯时间字符串
-            df['_hms'] = df['ticktime'].astype(str).str[:8]
-    else:
-        df['_hms'] = df['ticktime'].astype(str).str[:8]
-    
-    # 用提取的时间列进行过滤
-    df = df[(df['_hms'] >= start_time_str) & (df['_hms'] <= end_time_str)].copy()
-    # 用提取的纯时间列替换 ticktime，确保后续 t_str 比较一致
+    # 恢复老的 ticktime 格式 (HH:MM:SS 字符串) 兼容后续逻辑
     df['ticktime'] = df['_hms']
     df.drop(columns=['_hms'], inplace=True)
     
-    logger.info(f"Filtered to time range {start_time_str} - {end_time_str}. Total ticks: {len(df)}")
+    logger.info(f"Final slice range: {start_time_filter} - {end_time_filter}. Total ticks: {len(df)}")
     
     # --- [REAL DATA MODE] ---
     logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
@@ -428,12 +436,12 @@ def run_replay(start_time_str="13:11:00", end_time_str="15:00:00", playback_spee
                 tps = total_ticks_processed / max(0.001, real_elapsed)
                 speed_x = sim_elapsed / max(0.001, real_elapsed)
                 
-                # 速度评价
-                if speed_x > 50: speed_label = "🚀"
-                elif speed_x > 20: speed_label = "⚡"
-                elif speed_x > 5: speed_label = "🚅"
-                elif speed_x > 1: speed_label = "🚗"
-                else: speed_label = "🚶"
+                # 速度评价 (使用 ASCII 兼容 Windows GBK 终端)
+                if speed_x > 50: speed_label = ">>>>>"
+                elif speed_x > 20: speed_label = ">>>>"
+                elif speed_x > 5: speed_label = ">>>"
+                elif speed_x > 1: speed_label = ">>"
+                else: speed_label = ">"
                 
                 if concise:
                     sys.stdout.write(f"\r[Playback] {speed_label} {t_str} | {speed_x:.1f}x ({tps:.0f} tps) | Total: {len(publisher.kline_cache.cache)}      ")
@@ -574,11 +582,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sector Bidding Slice Backtest/Replay Tool")
     parser.add_argument("--speed", type=float, default=0.0, help="Playback speed multiplier (e.g. 1.0, 10.0). 0.0 means full speed.")
     parser.add_argument("--observation", type=str, action="append", help="Observation timestamps (HH:MM:SS) to pause and inspect. Can be specified multiple times.")
-    parser.add_argument("--start", type=str, default="09:30:00", help="Simulation start time (HH:MM:SS)")
+    parser.add_argument("--start", type=str, default="09:25:00", help="Simulation start time (HH:MM:SS)")
     parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
     parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', 'w', 'm'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
     parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
+    parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
+    parser.add_argument("--today", action="store_true", help="Automatically replay today's data")
     
     args = parser.parse_args()
     
@@ -591,6 +601,12 @@ if __name__ == "__main__":
     else:
         slice_stops = ["09:45:00", "10:00:00", "10:30:00", "11:00:00", "13:30:00", "14:00:00", "14:30:00", "14:45:00"]
     
+    # 日期逻辑处理
+    replay_date = args.date
+    if args.today:
+        replay_date = datetime.now().strftime('%Y-%m-%d')
+        logger.info(f"Today mode enabled. Targeting date: {replay_date}")
+
     run_replay(
         start_time_str=args.start, 
         end_time_str=args.end, 
@@ -598,5 +614,6 @@ if __name__ == "__main__":
         stops=slice_stops,
         concise=not args.verbose,
         resample=args.resample,
-        codes=args.codes
+        codes=args.codes,
+        replay_date=replay_date
     )
