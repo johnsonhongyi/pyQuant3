@@ -175,7 +175,7 @@ logger = logging.getLogger(__name__)
 
 # 定义信号分类
 CATEGORY_MAP = {
-    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马", "重点"],
+    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马", "重点", "终极确认", "优胜", "候选者"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
@@ -198,7 +198,7 @@ SIGNAL_TYPE_MAP = {
 }
 
 SIGNAL_TYPE_KEYWORDS = {
-    "Fast-Track": ["Fast-Track", "跟单", "Pinbar", "结构改善", "起跳新星", "赛马"],
+    "Fast-Track": ["Fast-Track", "跟单", "Pinbar", "结构改善", "起跳新星", "赛马", "终极确认", "优胜"],
     "MOMENTUM": ["MOMENTUM", "超级动能", "动能", "加速"],
     "SBC-Breakout": ["SBC-Breakout", "突破", "强势结构", "趋势加速", "突破"],
     "SBC-Breakdown": ["SBC-Breakdown", "破位", "结构破位", "跌破", "风险", "破位"],
