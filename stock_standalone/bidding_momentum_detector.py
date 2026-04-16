@@ -165,7 +165,7 @@ class TickSeries:
                  '_splitted_cats', '_total_vol', '_total_amt',
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
-                 'racing_start_ts', 'last_stable_ts', 'racing_duration')
+                 'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -218,6 +218,8 @@ class TickSeries:
         self.price_diff: float = 0.0
         self.dff: float = 0.0
         self.cycle_stage: int = 2
+        self.signal_count: int = 0
+        self._last_sig_min: int = 0
 
     def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
         """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
@@ -905,7 +907,7 @@ class BiddingMomentumDetector:
                 'code': codes_list,
                 'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
                 'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 
-                'p': [], 's': [], 'rs': [], # [NEW] 增加 rs 赛马时间
+                'p': [], 's': [], 'rs': [], 'sc': [], # [NEW] 增加 rs 赛马时间, sc 信号计数
                 'k': []
             }
             for code in codes_list:
@@ -928,6 +930,7 @@ class BiddingMomentumDetector:
                     meta_cols['p'].append(round(ts.current_pct, 2))
                     meta_cols['s'].append(round(ts.score, 1))
                     meta_cols['rs'].append(round(ts.racing_start_ts, 1)) # [NEW]
+                    meta_cols['sc'].append(ts.signal_count) # [NEW]
                     meta_cols['k'].append(compress_klines(ts.klines))
                 else:
                     for k in meta_cols: 
@@ -1196,6 +1199,9 @@ class BiddingMomentumDetector:
                     ts.is_untradable = bool(_get('iu', ts.is_untradable))
                     ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
                     ts.racing_start_ts = _get('rs', ts.racing_start_ts) # [NEW] 恢复赛马时间
+                    ts.signal_count = _get('sc', 0)
+                    if ts.signal_count > 0:
+                        ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
                     ts.last_stable_ts = ts.racing_start_ts if ts.racing_start_ts > 0 else 0.0
                     
                     # [NEW] 同步更新全量缓存，确保 UI 在 Tick 到达前就能显示恢复出的分值与涨幅
@@ -1206,7 +1212,8 @@ class BiddingMomentumDetector:
                         'category': ts.category, 'first_breakout_ts': ts.first_breakout_ts,
                         'klines': decompress_klines(_get('k', [])),
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                        'pattern_hint': ts.pattern_hint, 'vol_ratio': getattr(ts, 'vol_ratio', 0.0)
+                        'pattern_hint': ts.pattern_hint, 'vol_ratio': getattr(ts, 'vol_ratio', 0.0),
+                        'signal_count': ts.signal_count
                     }
                     
                     # 价格锚点与涨幅 (虽然 ts.current_pct 是属性，但 ts.now_price 恢复后会自愈，
@@ -1332,6 +1339,9 @@ class BiddingMomentumDetector:
                             ts.is_untradable = bool(_get_val('iu', False))
                             ts.is_counter_trend = bool(_get_val('ic', False))
                             ts.pattern_hint = _get_val('ph', '')
+                            ts.signal_count = _get_val('sc', 0)
+                            if ts.signal_count > 0:
+                                ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
                             
                             ts.klines.clear()
                             k_data = _get_val('k', [])
@@ -1348,7 +1358,7 @@ class BiddingMomentumDetector:
                         'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                         'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts,
-                        'vol_ratio': getattr(ts, 'vol_ratio', 0.0)
+                        'vol_ratio': getattr(ts, 'vol_ratio', 0.0), 'signal_count': ts.signal_count
                     }
 
                 # 恢复价格锚点与分值锚点
@@ -1416,6 +1426,9 @@ class BiddingMomentumDetector:
                 snap_ts = data.get('timestamp', 0)
                 if snap_ts > 0:
                     self._last_data_date = datetime.datetime.fromtimestamp(snap_ts).strftime('%Y-%m-%d')
+                    self.last_data_ts = snap_ts # [FIX] Sync timestamp for UI linkage
+                
+                self.data_version += 1 # [FIX] Notify UI of data change after snapshot load
                 
             # [CRITICAL] 为历史快照全量重建跟随股与角色态势
             # 性能优化：先建立个股 -> 板块的反向索引，避免 O(S*N) 的嵌套循环导致 UI 卡死
@@ -2196,6 +2209,13 @@ class BiddingMomentumDetector:
             
             if (final_score >= 5.0 or is_at_limit) and ts_obj.first_breakout_ts == 0:
                 ts_obj.first_breakout_ts = data_ts
+
+            if final_score >= 5.0:
+                # [NEW] 信号活跃度计数：每分钟异动分达标即计为一次活跃
+                current_min = int(data_ts // 60)
+                if ts_obj._last_sig_min != current_min:
+                    ts_obj.signal_count += 1
+                    ts_obj._last_sig_min = current_min
             
             # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0）且不处于涨停状态，重置异动时间
             if final_score < 2.0 and not is_at_limit:
@@ -2254,6 +2274,7 @@ class BiddingMomentumDetector:
                         'is_counter_trend': getattr(ts, 'is_counter_trend', False),
                         'is_accumulating': getattr(ts, 'is_accumulating', False),
                         'is_reversal': getattr(ts, 'is_reversal', False),
+                        'signal_count': ts.signal_count,
                         'ral': getattr(ts, 'ral', 0),
                         'top0': getattr(ts, 'top0', 0),
                         'top15': getattr(ts, 'top15', 0),
