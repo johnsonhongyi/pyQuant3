@@ -498,10 +498,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.stock_table.code_clicked.connect(self._on_stock_clicked)
         self.stock_table.code_double_clicked.connect(self._on_stock_double_clicked)
         
+        # [NEW] 右键菜单与快捷键支持
+        self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.stock_table.customContextMenuRequested.connect(self._on_stock_context_menu)
+        
         # [NEW] 支持键盘上下键切换个股联动
         self.stock_table.currentCellChanged.connect(self._on_stock_key_nav)
 
         self.sector_table.cellClicked.connect(self._on_sector_clicked)
+        self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
+
         # [NEW] 支持键盘上下键切换板块联动
         self.sector_table.currentCellChanged.connect(
             lambda r, c, pr, pc: self._on_sector_clicked(r, c)
@@ -586,6 +593,66 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         name_item = self.stock_table.item(row, 1)
         if code_item and name_item:
             self._on_stock_clicked(code_item.text(), name_item.text())
+
+    def _on_stock_context_menu(self, pos):
+        """个股表右键菜单"""
+        item = self.stock_table.itemAt(pos)
+        if not item: return
+        row = item.row()
+        code = self.stock_table.item(row, 0).text()
+        name = self.stock_table.item(row, 1).text()
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        act_viz = menu.addAction(f"📊 联动可视化 ({name})")
+        act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_context_viz"))
+        
+        menu.addSeparator()
+        act_copy = menu.addAction("📋 复制代码")
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
+        
+        menu.exec(self.stock_table.viewport().mapToGlobal(pos))
+
+    def _on_sector_context_menu(self, pos):
+        """板块表右键菜单"""
+        item = self.sector_table.itemAt(pos)
+        if not item: return
+        row = item.row()
+        leader_item = self.sector_table.item(row, 2)
+        if not leader_item: return
+        
+        import re
+        text = leader_item.text()
+        match = re.search(r'\((\d{6})\)', text)
+        if match:
+            code = match.group(1)
+            name = text.split("(")[0].strip()
+            
+            menu = QMenu(self)
+            menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+            
+            act_viz = menu.addAction(f"📊 联动可视化 (龙头: {name})")
+            act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_sector_context_viz"))
+            
+            menu.exec(self.sector_table.viewport().mapToGlobal(pos))
+
+    def keyPressEvent(self, event):
+        """支持 Enter 键快速触发联动"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.stock_table.hasFocus():
+                row = self.stock_table.currentRow()
+                if row >= 0:
+                    code = self.stock_table.item(row, 0).text()
+                    name = self.stock_table.item(row, 1).text()
+                    self._execute_linkage(code, name, source="racing_key_enter")
+                    return
+            elif self.sector_table.hasFocus():
+                row = self.sector_table.currentRow()
+                if row >= 0:
+                    self._on_sector_clicked(row, 0)
+                    return
+        super().keyPressEvent(event)
 
     def _on_sector_clicked(self, row, col):
         item = self.sector_table.item(row, 2)
