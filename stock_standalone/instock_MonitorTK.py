@@ -4024,7 +4024,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.selected_stock_info = stock_info
 
         if selected_item:
-            stock_info = self.tree.item(selected_item, 'values')
+            stock_info = self.tree.item(selected_item[0], 'values')
             stock_code = stock_info[0]
             stock_name = stock_info[1]
 
@@ -5440,10 +5440,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 根据双击的列执行不同逻辑
         if col_idx == 0:  # code
-            self._run_sbc_test_from_tk(code, use_live=True)
+            self._run_sbc_test_from_tk(code, use_live=True, event=event)
             logger.info(f"Double-click 'code' for Live SBC: {code} ({name})")
         elif col_idx == 1:  # name
-            self._run_sbc_test_from_tk(code, use_live=False)
+            self._run_sbc_test_from_tk(code, use_live=False, event=event)
             logger.info(f"Double-click 'name' for Replay SBC: {code} ({name})")
         else:
             # 其他列保持原有逻辑：查看备注并复制代码
@@ -6268,7 +6268,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Copy Info Error: {e}")
             messagebox.showerror("错误", f"提取信息失败: {e}")
 
-    def _run_sbc_test_from_tk(self, stock_code, use_live=False):
+    def _run_sbc_test_from_tk(self, stock_code, use_live=False, event=None):
         """从 TK 界面触发 SBC 信号验证"""
         if not hasattr(self, 'sector_bidding_panel') or not self.sector_bidding_panel:
             # 如果面板还没初始化，尝试动态加载并执行
@@ -6298,8 +6298,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.warning(f"Failed to extract extra_lines for {stock_code}: {e}")
 
+        # [NEW] 检查 Ctrl/Shift 修饰键，支持多开
+        is_multi = False
+        if event is not None:
+            # Tkinter state: 0x4=Ctrl, 0x1=Shift
+            is_multi = bool(event.state & (0x0004 | 0x0001))
+
         # 调用 PyQt 面板中的测试逻辑 (已重构支持传入 code 和 extra_lines)
-        self.sector_bidding_panel._run_sbc_test(use_live, code=stock_code, extra_lines=extra_lines)
+        self.sector_bidding_panel._run_sbc_test(use_live, code=stock_code, extra_lines=extra_lines, is_multi=is_multi)
         logger.debug(f"SBC {'Live' if use_live else 'Replay'} test triggered for {stock_code} with extra_lines: {extra_lines}")
 
     def add_stock_remark(self, code, name):

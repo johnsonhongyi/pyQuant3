@@ -948,12 +948,28 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                 # 更新当前已知的最高价
                 opt_state["day_high_so_far"] = max(opt_state["day_high_so_far"], cur_high)
 
-            # (B) 决策引擎动态评估 (卖出信号判定)
-            decision = engine.evaluate_dynamic(base_eval, row_dict, snapshot)
+            # (B) 决策引擎动态评估 (支持买入与卖出信号判定)
+            # [ALIGN] 这里的 logic 将与主界面可视化器底部的分时信号完全对齐
+            decision = engine.evaluate(row_dict, snapshot)
             action = decision.get("action", "")
             reason = decision.get("reason", "")
             
-            if action in {"卖出", "止损", "预警止损", "移动止盈", "高位止盈", "趋势止损", "破位减仓", "强制清仓", "主动防守", "主动减仓"}:
+            if action in {"买入", "加仓", "ADD"}:
+                last_idx = last_signal_times.get("ENGINE_BUY", -999)
+                if i - last_idx > 30: # 冷却时间
+                    t_str = get_tick_str(r)
+                    debug_info = decision.get("debug", {})
+                    signals.append(SignalPoint(
+                        code=code, timestamp=str(r.get('ticktime', t_str)), 
+                        bar_index=i, price=p,
+                        signal_type=SignalType.BUY if action=="买入" else SignalType.ADD, 
+                        source=SignalSource.STRATEGY_ENGINE, 
+                        reason=f"[引擎] {reason}",
+                        debug_info={'score': round(debug_info.get('实时买入分', 0), 2)}
+                    ))
+                    last_signal_times["ENGINE_BUY"] = i
+
+            elif action in {"卖出", "止损", "预警止损", "移动止盈", "高位止盈", "趋势止损", "破位减仓", "强制清仓", "主动防守", "主动减仓"}:
                 if any(kw in reason for kw in PRIORITY_SELL_KW):
                     last_idx = last_signal_times.get("EXIT", -999)
                     if i - last_idx > 30:

@@ -196,7 +196,7 @@ class StrategyController:
                     'code': code,
                     'trade': close_v,
                     'close': close_v,
-                    'cycle_stage': int(row_val[s_idx]) if s_idx != -1 else 0
+                    'cycle_stage': int(row_val[s_idx]) if (s_idx != -1 and not pd.isna(row_val[s_idx])) else 0
                 }
                 
                 # 优化：从前一行 vals 中获取 last_close，避免 iloc 查找
@@ -308,7 +308,7 @@ class StrategyController:
                     # 构造行情行
                     row_dict: Dict[str, Any] = row.to_dict() # type: ignore
                     row_dict['code'] = code
-                    row_dict["cycle_stage"] = int(row.get("cycle_stage", 0))
+                    row_dict["cycle_stage"] = int(row.get("cycle_stage", 0)) if not pd.isna(row.get("cycle_stage")) else 0
                     row_dict['trade'] = float(row.get('close', 0.0)) # type: ignore
                     
                     # 更新前一个 bar 的快照信息

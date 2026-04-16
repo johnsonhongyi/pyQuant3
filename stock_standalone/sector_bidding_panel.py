@@ -2093,7 +2093,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.btn_refresh.setText("刷新 🔄")
         except RuntimeError: pass # Handle C++ object deleted
 
-    def _run_sbc_test(self, use_live: bool, code: str = None, extra_lines: dict = None):
+    def _run_sbc_test(self, use_live: bool, code: str = None, extra_lines: dict = None, is_multi: bool = None):
         """调用 SBC 信号验证逻辑"""
         # 检查是否已有线程正在运行
         if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
@@ -2107,10 +2107,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             QMessageBox.warning(self, "未选中个股", "请在个股表或重点表中先选中一只个股再执行测试。")
             return
             
-        from PyQt6.QtGui import QGuiApplication
-        from PyQt6.QtCore import Qt
-        modifiers = QGuiApplication.keyboardModifiers()
-        is_multi_window = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        if is_multi is None:
+            from PyQt6.QtGui import QGuiApplication
+            from PyQt6.QtCore import Qt
+            modifiers = QGuiApplication.keyboardModifiers()
+            is_multi_window = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        else:
+            is_multi_window = is_multi
+
         self._sbc_test_is_multi = is_multi_window
         
         # 尝试获取主窗口的 HDF5 锁
