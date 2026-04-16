@@ -695,3 +695,9 @@ if hasattr(self, 'pattern_detector'):
   - [x] **增加线程锁防冲突 (_TRADE_STATUS_LOCK)**：防止 Tkinter UI 线程与多进程后台服务在同一瞬间涌入执行同步的 I/O。
   - [x] **增加 _LAST_FAILED_TIME 防抖/熔断机制**：如果网络或初始化验证由于某种原因返回了 None/失败，提供一个 5 秒以上的冷却退避期，不要让 Tk 高频心跳不断去发起 ConfigObj IO 解析与强行远程查询。
   - [x] **移除了无意义且致命的 update=True 死循环分支**：不再容忍当返回值等于 None 时原地强行带有 update=True 选项的第二遍暴击。
+
+## 2026-04-16 13:20
+- [x] **恢复信号日志语音播报同步与自动滚动功能**：
+    - [x] **优化滚动锁定逻辑**：针对 trade_visualizer_qt6.py，将交互锁定阈值调优至 1.5s。
+    - [x] **强化“Code 优先”对齐策略**：针对 signal_log_panel.py，引入 PositionAtTop 滚动策略，确保播报个股置于视角中心/顶端。
+    - [x] **归档任务文档**：归档了 20260416_1320 系列文档。

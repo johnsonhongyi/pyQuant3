@@ -24,6 +24,79 @@ class PandasQueryEngine:
         self.logger = logger
 
     @staticmethod
+    def split_sub_conditions(expr: str) -> list[str]:
+        """
+        [NEW] 智慧拆分：支持括号深度感知。
+        第一层：按顶层 'and' 拆分。
+        第二层：对每个子块检测是否为括号包裹，若内部含有顶层 'or'，则进一步平铺拆分。
+        用于生成子条件详情报告，确保不会破坏嵌套的逻辑组，同时能平铺展示分支情况。
+        """
+        if not expr: return []
+        
+        def _get_top_level_parts(s: str, delimiters: list[str]) -> list[str]:
+            depths = []
+            d = 0
+            for char in s:
+                if char == '(':
+                    depths.append(d)
+                    d += 1
+                elif char == ')':
+                    d -= 1
+                    depths.append(d)
+                else:
+                    depths.append(d)
+            
+            pattern = r'\b(' + '|'.join(delimiters) + r')\b'
+            parts = []
+            last_idx = 0
+            for match in re.finditer(pattern, s, re.IGNORECASE):
+                start = match.start()
+                if start < len(depths) and depths[start] == 0:
+                    parts.append(s[last_idx:start].strip())
+                    last_idx = match.end()
+            parts.append(s[last_idx:].strip())
+            return [p for p in parts if p]
+
+        # 1. 第一步：按顶层 'and' 拆分
+        and_parts = _get_top_level_parts(expr, ['and'])
+        
+        final_parts = []
+        for p in and_parts:
+            curr = p
+            # 2. 第二步：若由于括号包裹导致内部有 OR 逻辑但在 AND 层面被视为一个区块，进行脱壳拆分
+            modified = False
+            while curr.startswith('(') and curr.endswith(')'):
+                inner = curr[1:-1].strip()
+                # 确保剥离后依然平衡 (避免剥离 (A) or (B) 这种非单一包裹)
+                if PandasQueryEngine._is_balanced(inner):
+                    curr = inner
+                    modified = True
+                else:
+                    break
+            
+            if modified:
+                # 在脱壳后的内容中寻找 OR
+                or_branches = _get_top_level_parts(curr, ['or'])
+                if len(or_branches) > 1:
+                    final_parts.extend(or_branches)
+                else:
+                    final_parts.append(p) # 虽然脱壳了但内部没 OR (可能是 (A and B))，保留原有层级或展示脱壳后的内容
+            else:
+                final_parts.append(p)
+
+        return [item for item in final_parts if item]
+
+    @staticmethod
+    def _is_balanced(s: str) -> bool:
+        """检查括号是否平衡"""
+        d = 0
+        for char in s:
+            if char == '(': d += 1
+            elif char == ')': d -= 1
+            if d < 0: return False
+        return d == 0
+
+    @staticmethod
     def _greatest(*args):
         if not args: return None
         # 使用 numpy 原生规约
