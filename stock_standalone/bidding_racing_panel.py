@@ -16,7 +16,7 @@ from PyQt6.QtGui import (
 
 from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidgetItem
 from tk_gui_modules.window_mixin import WindowMixin
-from signal_bus import SignalBus
+# from signal_bus import SignalBus
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 # logger.setLevel(LoggerFactory.ERROR)
@@ -417,7 +417,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.cellClicked.connect(self._on_sector_clicked)
         
         # 内部总线
-        self._signal_bus = SignalBus()
+        # self._signal_bus = SignalBus()
 
     def closeEvent(self, event):
         """窗口关闭时保存位置并清理"""
@@ -533,11 +533,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             except Exception:
                 pass
 
-        # 3. 内部 SignalBus 广播 (Standalone 模式或 QT 监控器联动)
-        if hasattr(self, '_signal_bus'):
-            try:
-                self._signal_bus.publish("change_stock", {"code": code, "name": name, "source": source})
-            except: pass
+        # # 3. 内部 SignalBus 广播 (Standalone 模式或 QT 监控器联动)
+        # if hasattr(self, '_signal_bus'):
+        #     try:
+        #         self._signal_bus.publish("change_stock", {"code": code, "name": name, "source": source})
+        #     except: pass
 
     def update_visuals(self):
         """

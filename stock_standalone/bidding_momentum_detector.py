@@ -18,7 +18,7 @@ from typing import Dict, List, Set, Any, Optional, Callable, TYPE_CHECKING
 from collections import defaultdict, deque
 import pandas as pd
 import json
-from signal_bus import SignalBus
+# from signal_bus import SignalBus
 import os
 import gzip
 import numpy as np
@@ -409,8 +409,8 @@ class BiddingMomentumDetector:
         self.sector_map: Dict[str, Set[str]] = defaultdict(set)
         
         # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
-        self._signal_bus = SignalBus()
-        self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
+        # self._signal_bus = SignalBus()
+        # self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
 
         # 最终结果：sector → {leader, followers, score, ts, ...}
         self.active_sectors: Dict[str, Dict[str, Any]] = {}
@@ -477,26 +477,26 @@ class BiddingMomentumDetector:
         # self._load_stock_selector_data()
         
         # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
-        self._signal_bus = SignalBus()
-        self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
+        # self._signal_bus = SignalBus()
+        # self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
 
-    def _on_signal_received(self, msg: Any):
-        """
-        处理来自 SignalBus 的形态信号 (例如 SBC-Breakout)
-        msg 预期格式: {'code': '601138', 'pattern': 'SBC-Breakout', 'desc': '...'}
-        """
-        if not isinstance(msg, dict): return
-        code = msg.get('code')
-        pattern = msg.get('pattern')
+    # def _on_signal_received(self, msg: Any):
+    #     """
+    #     处理来自 SignalBus 的形态信号 (例如 SBC-Breakout)
+    #     msg 预期格式: {'code': '601138', 'pattern': 'SBC-Breakout', 'desc': '...'}
+    #     """
+    #     if not isinstance(msg, dict): return
+    #     code = msg.get('code')
+    #     pattern = msg.get('pattern')
         
-        if not code or not pattern: return
+    #     if not code or not pattern: return
         
-        with self._lock:
-            ts = self._tick_series.get(code)
-            if ts:
-                # 将信号写入形态提示，触发 UI 变色
-                ts.pattern_hint = pattern
-                self.data_version += 1
+    #     with self._lock:
+    #         ts = self._tick_series.get(code)
+    #         if ts:
+    #             # 将信号写入形态提示，触发 UI 变色
+    #             ts.pattern_hint = pattern
+    #             self.data_version += 1
 
     def _load_stock_selector_data(self):
         """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
