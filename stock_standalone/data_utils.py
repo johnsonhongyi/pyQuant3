@@ -2850,7 +2850,7 @@ def fetch_and_process(
                logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
 
             # 4. 执行分段 Sleep (保持灵敏度)
-            if 918 < cct.get_now_time_int() < 926:
+            if 918 < cct.get_now_time_int() < 926 or 929 < cct.get_now_time_int() < 945:
                 loop_sleep_time = int(loop_sleep_time/2)
                 sleep_step = 1
             else:

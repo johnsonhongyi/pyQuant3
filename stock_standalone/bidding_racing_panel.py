@@ -8,9 +8,10 @@ from typing import Dict, List, Any, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QGraphicsDropShadowEffect,QPushButton
+    QAbstractItemView, QGraphicsDropShadowEffect,QPushButton,
+    QMenu, QApplication, QDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
 from PyQt6.QtGui import (
     QPainter, QColor, QFont, QPen, QBrush, QConicalGradient, 
     QLinearGradient, QRadialGradient, QPolygon, QPainterPath
@@ -20,6 +21,34 @@ from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidge
 from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
+
+# --- [🚀 极致性能] 模块级内存缓存，减少磁盘 I/O ---
+_RACING_UI_STATE = {}
+
+def _get_racing_config():
+    """极速获取配置 (内存优先)"""
+    global _RACING_UI_STATE
+    if not _RACING_UI_STATE:
+        try:
+            from JohnsonUtil import commonTips as cct
+            config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v3.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    _RACING_UI_STATE = json.load(f)
+        except: pass
+    return _RACING_UI_STATE
+
+def _save_racing_config(updates: Dict[str, Any]):
+    """增量保存配置到内存，并同步到磁盘"""
+    global _RACING_UI_STATE
+    conf = _get_racing_config()
+    conf.update(updates)
+    try:
+        from JohnsonUtil import commonTips as cct
+        config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v3.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(conf, f, ensure_ascii=False, indent=2)
+    except: pass
 
 class RacingPieWidget(QWidget):
     """
@@ -186,6 +215,209 @@ class RacingPieWidget(QWidget):
         painter.drawText(inner_rect.adjusted(0, -10, 0, -10), Qt.AlignmentFlag.AlignCenter, title)
         font.setPointSize(9); font.setBold(False); painter.setFont(font)
         painter.drawText(inner_rect.adjusted(0, 15, 0, 15), Qt.AlignmentFlag.AlignCenter, count_txt)
+
+class SectorDetailDialog(QDialog, WindowMixin):
+    """板块成分股详情弹窗 - 结构与领军个股一致"""
+    def __init__(self, sector_name, detector, linkage_cb, parent=None):
+        super().__init__(parent)
+        # 必须最先赋值
+        self.detector = detector
+        self.linkage_cb = linkage_cb
+        self.sector_name = sector_name
+        
+        self.setWindowTitle(f"🔭 板块详情: {sector_name}")
+        self.resize(800, 500)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
+        self.setStyleSheet("background-color: #000; color: #EEE;")
+
+        # 记忆位置
+        self.load_window_position_qt(self, "SectorDetail_Unified")
+        
+        self.setUpdatesEnabled(False)
+        self._sort_col = 2 # 默认排序: 结构分
+        self._sort_order = Qt.SortOrder.DescendingOrder
+        
+        # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
+        self._boot_lock = True
+        
+        self._init_ui()
+        
+        # 延迟恢复表头状态 (确保窗口布局已初步完成)
+        QTimer.singleShot(150, self._restore_header_state)
+        
+        # 1秒后解除保护锁
+        QTimer.singleShot(1000, self._release_boot_lock)
+        
+        # 启动定时刷新
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh_data)
+        self.timer.start(500) 
+        self.refresh_data()
+        self.setUpdatesEnabled(True)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        title_lbl = QLabel(f"🔥 {self.sector_name} - 领军个股明细")
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC; margin-bottom: 5px;")
+        layout.addWidget(title_lbl)
+        
+        self.table = EnhancedTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        self.table.setAlternatingRowColors(True)
+        self.table.setStyleSheet("""
+            QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
+            QHeaderView::section { background-color: #222; color: #BBB; padding: 4px; border: 1px solid #333; }
+        """)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setDefaultSectionSize(90)
+        
+        self.table.code_clicked.connect(lambda c, n: self.linkage_cb(c, n, source="sector_dialog_link"))
+        self.table.code_double_clicked.connect(lambda c, n: self.linkage_cb(c, n, source="sector_dialog_double"))
+        
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        self.table.horizontalHeader().sectionResized.connect(self._save_header_state)
+        
+        # 右键菜单支持
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
+        
+        layout.addWidget(self.table)
+        
+        hint = QLabel("💡 单击或双击个股联动主图分析")
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(hint)
+
+    def refresh_data(self):
+        if not hasattr(self, 'detector') or not self.detector: return
+        
+        members = self.detector.sector_map.get(self.sector_name, set())
+        if not members: return
+        
+        with self.detector._lock:
+            data_list = []
+            for code in members:
+                ts = self.detector._tick_series.get(code)
+                if ts: data_list.append(ts)
+            
+            # 排序逻辑
+            col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'pct_diff', 6:'pct_diff'}
+            attr = col_attr_map.get(self._sort_col, 'score')
+            is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
+            data_list.sort(key=lambda x: (getattr(x, attr, 0) if attr != 'pct_diff' else (x.current_pct - x.pct_diff)), reverse=is_rev)
+            
+            display_list = data_list[:100]
+            flattened = []
+            for ts in display_list:
+                flattened.append((
+                    ts.code, ts.name, ts.score, 
+                    getattr(ts, 'signal_count', 0),
+                    ts.current_pct,
+                    ts.current_pct - ts.pct_diff,
+                    ts.pct_diff
+                ))
+        self._render_table(flattened)
+
+    def _render_table(self, data):
+        if self.table.rowCount() != len(data):
+            self.table.setRowCount(len(data))
+        for i, row in enumerate(data):
+            code, name, score, sig, pct, start_pct, dff = row
+            self._update_dialog_cell(i, 0, code)
+            self._update_dialog_cell(i, 1, name)
+            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700"))
+            sig_txt = str(sig) if sig > 0 else ""
+            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC"), Qt.AlignmentFlag.AlignCenter)
+            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
+            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct)
+            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
+            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start)
+            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
+            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff)
+
+    def _update_dialog_cell(self, row, col, text, color=None, align=None):
+        it = self.table.item(row, col)
+        if not it:
+            from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
+            it = NumericTableWidgetItem(text)
+            if color: it.setForeground(color)
+            if align: it.setTextAlignment(align)
+            self.table.setItem(row, col, it)
+        else:
+            if it.text() != text:
+                it.setText(text)
+                if color: it.setForeground(color)
+
+    def _release_boot_lock(self):
+        self._boot_lock = False
+        logger.debug("🔓 [Detail] 初始化保护已解除，开始监听用户列宽调整")
+
+    def _save_header_state(self):
+        """保存明细表各列宽度 (内存优先)"""
+        # 如果处于启动保护期，不保存 (防止覆盖已恢复的值)
+        if hasattr(self, '_boot_lock') and self._boot_lock:
+            return 
+            
+        try:
+            widths = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
+            # 过滤掉全为 0 的异常状态（通常发生在窗口关闭瞬间）
+            if sum(widths) < 100: return
+            
+            _save_racing_config({"detail_column_widths": widths})
+            logger.debug(f"💾 [Detail] 已保存列宽配置: {widths}")
+        except: pass
+
+    def _restore_header_state(self):
+        """恢复明细表各列宽度 (内存优先)"""
+        try:
+            conf = _get_racing_config()
+            widths = conf.get("detail_column_widths")
+            if widths and len(widths) == self.table.columnCount():
+                self.table.horizontalHeader().blockSignals(True)
+                for i, w in enumerate(widths):
+                    if w > 10: self.table.setColumnWidth(i, w)
+                self.table.horizontalHeader().blockSignals(False)
+                logger.debug(f"✅ [Detail] 成功还原 {self.sector_name} 列表宽度")
+        except: pass
+
+    def _on_context_menu(self, pos):
+        """明细表右键菜单"""
+        item = self.table.itemAt(pos)
+        if not item: return
+        row = item.row()
+        code = self.table.item(row, 0).text()
+        name = self.table.item(row, 1).text()
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        act_viz = menu.addAction(f"📊 联动可视化 ({name})")
+        act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="sector_dialog_context"))
+        
+        menu.addSeparator()
+        act_copy = menu.addAction("📋 复制代码")
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
+        
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _on_header_clicked(self, logical_index):
+        if self._sort_col == logical_index:
+            self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+        else:
+            self._sort_col = logical_index
+            self._sort_order = Qt.SortOrder.DescendingOrder
+        self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+        self.refresh_data()
+
+    def closeEvent(self, event):
+        self._save_header_state()
+        self.save_window_position_qt_visual(self, "SectorDetail_Unified")
+        super().closeEvent(event)
 
 class RacingTimeline(QFrame):
     """
@@ -440,7 +672,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.stock_table.setSortingEnabled(False)
         header.sectionClicked.connect(lambda idx: self._on_header_clicked("stock", idx))
-        # header.sectionResized.connect(self._save_ui_state) # Move to end
         rank_layout.addWidget(self.stock_table)
         center_layout.addWidget(rank_frame, stretch=6)
         main_layout.addLayout(center_layout, stretch=7)
@@ -491,30 +722,26 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.sector_table.setSortingEnabled(False)
         s_header.sectionClicked.connect(lambda idx: self._on_header_clicked("sector", idx))
-        # s_header.sectionResized.connect(self._save_ui_state) # Move to end
         bottom_lay.addWidget(self.sector_table)
         main_layout.addWidget(bottom_frame, stretch=3)
 
         self.stock_table.code_clicked.connect(self._on_stock_clicked)
         self.stock_table.code_double_clicked.connect(self._on_stock_double_clicked)
         
-        # [NEW] 右键菜单与快捷键支持
         self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.stock_table.customContextMenuRequested.connect(self._on_stock_context_menu)
         
-        # [NEW] 支持键盘上下键切换个股联动
         self.stock_table.currentCellChanged.connect(self._on_stock_key_nav)
 
         self.sector_table.cellClicked.connect(self._on_sector_clicked)
+        self.sector_table.cellDoubleClicked.connect(self._on_sector_double_clicked)
         self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
 
-        # [NEW] 支持键盘上下键切换板块联动
         self.sector_table.currentCellChanged.connect(
             lambda r, c, pr, pc: self._on_sector_clicked(r, c)
         )
 
-        # [🚀 优化] 延后绑定，防止初始化过程中的 Resize 导致 AttributeError
         self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
 
@@ -529,43 +756,35 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _save_ui_state(self):
         try:
-            from JohnsonUtil import commonTips as cct
-            config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v2.json")
-            state = {
+            updates = {
                 "stock_header": self.stock_table.horizontalHeader().saveState().toHex().data().decode(),
                 "sector_header": self.sector_table.horizontalHeader().saveState().toHex().data().decode(),
                 "reset_cycle_mins": self._reset_cycle_mins
             }
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
+            _save_racing_config(updates)
         except Exception as e:
             logger.debug(f"Save UI state failed: {e}")
 
     def _restore_ui_state(self):
         try:
-            from JohnsonUtil import commonTips as cct
-            from PyQt6.QtCore import QByteArray
-            config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v2.json")
-            if not os.path.exists(config_path):
+            conf = _get_racing_config()
+            if not conf:
                 self.stock_table.resizeColumnsToContents()
                 self.sector_table.resizeColumnsToContents()
                 return
 
-            with open(config_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            
-            if "reset_cycle_mins" in state:
-                self._reset_cycle_mins = state["reset_cycle_mins"]
+            if "reset_cycle_mins" in conf:
+                self._reset_cycle_mins = conf["reset_cycle_mins"]
                 if hasattr(self, 'cycle_label'):
                     self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
             
-            if state.get("stock_header"):
-                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(state["stock_header"].encode()))
+            if "stock_header" in conf:
+                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["stock_header"].encode()))
             else:
                 self.stock_table.resizeColumnsToContents()
                 
-            if state.get("sector_header"):
-                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(state["sector_header"].encode()))
+            if "sector_header" in conf:
+                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["sector_header"].encode()))
             else:
                 self.sector_table.resizeColumnsToContents()
         except Exception as e:
@@ -655,6 +874,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         super().keyPressEvent(event)
 
     def _on_sector_clicked(self, row, col):
+        """单击联动板块龙头"""
         item = self.sector_table.item(row, 2)
         if item:
             import re
@@ -664,6 +884,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 code = match.group(1)
                 name = text.split("(")[0].strip()
                 self._execute_linkage(code, name, source="racing_sector_link")
+
+    def _on_sector_double_clicked(self, row, col):
+        """双击打开板块领军个股详情弹窗"""
+        item = self.sector_table.item(row, 0) # 板块名称列
+        if not item: return
+        sec_name = item.text()
+        
+        dialog = SectorDetailDialog(sec_name, self.detector, self._execute_linkage, parent=self)
+        dialog.show()
 
     def _on_header_clicked(self, table_type, logical_index):
         if table_type == "stock":
@@ -987,6 +1216,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             logger.error(f"❌ [RacingPanel] Update Error: {e}\n{traceback.format_exc()}")
         finally:
             self._is_rendering = False
+
+
 
     def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True):
         it = table.item(row, col)
