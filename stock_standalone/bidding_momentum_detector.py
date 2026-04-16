@@ -223,15 +223,15 @@ class TickSeries:
         if cur_close <= 0 or vwap <= 0 or open_p <= 0: return
 
         # 1. 结构准入：必须是开盘至今极其平稳，且当前站稳均价线与开盘价
-        # 允许万分之二的微小误差
-        is_above_support = (cur_close >= vwap * 0.998) and (cur_close >= open_p * 0.998)
+        # [ADJUST] 允许 0.3% 的微小误差 (原 0.2%)，增加实盘容错
+        is_above_support = (cur_close >= vwap * 0.997) and (cur_close >= open_p * 0.997)
         
-        # [NEW] 开盘最低价结构校验 (User Requirement)
-        # 如果 low_p 显著低于 open_p 或 nlow，说明曾有深幅回撤，不符合赛马模式的“开盘即最低”特征
+        # [FIXED] 开盘最低价结构校验 
+        # 如果当前低点(low_p)或之前最低记录(nlow)显著低于开盘价(超过 0.5%)，说明曾有深幅回撤，视为结构不稳定
         is_structural_stable = True
         if low_p > 0:
-            # 允许 0.2% 的扰动
-            if open_p < low_p * 0.998 or nlow < low_p * 0.998:
+            # 修正此前逻辑反转：应该是 low < open * 0.995 为不稳定
+            if low_p < open_p * 0.995 or nlow < open_p * 0.995:
                 is_structural_stable = False
 
         if is_above_support and is_structural_stable:
@@ -240,8 +240,8 @@ class TickSeries:
             self.last_stable_ts = now_ts
             self.racing_duration = (now_ts - self.racing_start_ts) / 60.0
         else:
-            # 破位判定：如果彻底跌破 (回撤超过 1.5% 或 跌破开盘价 1%)，重置赛马状态
-            if cur_close < vwap * 0.985 or cur_close < open_p * 0.99 or not is_structural_stable:
+            # [ADJUST] 破位判定：如果彻底跌破 (均价回撤 2% 或 跌破开盘价 1.5%)，才重置赛马状态
+            if cur_close < vwap * 0.98 or cur_close < open_p * 0.985 or not is_structural_stable:
                 self.racing_start_ts = 0.0
                 self.racing_duration = 0.0
 
@@ -1669,7 +1669,8 @@ class BiddingMomentumDetector:
         else:
             # [竞赛/追涨模式] 强调当日爆发力 + 极度强调开盘时效
             drawdown_pct = max(0, (s.get('high_day', 0.0) - s.get('price', 0.0)) / s.get('last_close', 1.0) * 100) if s.get('last_close', 0) > 0 else 0
-            penalty = drawdown_pct * 4.0 
+            # [OPTIMIZED] 降低回撤惩罚从 4.0 降至 2.5，避免良性调整导致个股被瞬间清出看板
+            penalty = drawdown_pct * 2.5 
             
             l_score = base_score * 0.6 + s['pct'] * 1.4 - penalty + opening_bonus
             if s.get('is_untradable'): l_score -= 50.0 
@@ -2109,6 +2110,9 @@ class BiddingMomentumDetector:
         elif dur_raw >= 5:
             racing_bonus = 5.0  # [Candidate Class] 5-10m 分化期 (原4.0)
             if "赛马5m" not in final_hint: final_hint = f"赛马5m|{final_hint}"
+        elif dur_raw >= 2.0:     # [NEW] 2分钟预热加成，提升启动期敏感度 (120s)
+            racing_bonus = 2.0
+            if "★赛马启动" not in final_hint: final_hint = f"★赛马启动|{final_hint}"
         
         # 最终评分与活性修正
         # 最终分 = 瞬时分(cycle+bidding+score) + 持续动量分 + 赛马稳定性加分
