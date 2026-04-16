@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QPushButton
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QPushButton, QLabel
 from PyQt6.QtGui import QColor, QPicture, QPainter
 from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer
 # WindowMixin is used for saving/loading window position
@@ -226,10 +226,13 @@ class SignalOverlay:
             self.plot_item.removeItem(item)
         self.text_items.clear()
 
-    def update_signals(self, signals, is_compact=False):
+    def update_signals(self, signals, is_compact=False, concise=True):
         self.clear()
         if not signals:
             return
+        
+        # [NEW] 强制精简模式：如果外部指定为 concise，则忽略窗口宽度判定
+        is_compact = is_compact or concise
 
         xs, ys, brushes, symbols, sizes = [], [], [], [], []
         
@@ -284,6 +287,7 @@ class SignalOverlay:
             action_name = "买" if is_buy else "卖"
             if is_compact:
                 reason_text = f" | {action_name}"
+                score_text = "" # [REFINED] 精简模式彻底隐藏分数，仅保留买卖
             else:
                 if reason:
                     # [REFINED] 常用词汇精简，去除冗余买卖字眼（因为 action_name 已包含）
@@ -354,8 +358,9 @@ class PercentAxisItem(pg.AxisItem):
 
 class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
-    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, refresh_func=None, max_signals=20, max_vlines=12, max_hlines=5):
+    def __init__(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, refresh_func=None, max_signals=20, max_vlines=12, max_hlines=5, concise=True):
         super().__init__()
+        self.concise = concise
         self.max_signals = max_signals
         self.max_vlines = max_vlines
         self.max_hlines = max_hlines
@@ -390,6 +395,11 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         self.btn_link.setStyleSheet("background-color: #AA4444; color: white; border: 1px solid #FF8888; font-weight: bold;")
         self.btn_link.clicked.connect(self._on_linkage_clicked)
         btn_layout.addWidget(self.btn_link)
+        
+        # [NEW] Status label for refresh time
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color: #888; font-size: 10px; margin-left: 10px;")
+        btn_layout.addWidget(self.lbl_status)
         
         btn_layout.addStretch()
 
@@ -430,9 +440,17 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                 print(f"配置加载异常: {e}")
                 duration_sleep_time = 5
                 
+            self.refresh_interval = duration_sleep_time
             self.refresh_timer = QTimer(self)
             self.refresh_timer.timeout.connect(self._on_refresh_timer)
-            self.refresh_timer.start(int(duration_sleep_time * 1000))
+            # [MODIFIED] 增加随机偏移量 (Jitter)，防止多个 SBC 窗口在同一毫秒发起计算竞争
+            import random
+            jitter_ms = random.randint(-1500, 1500)
+            interval_ms = max(3000, int(duration_sleep_time * 1000) + jitter_ms)
+            self.refresh_timer.start(interval_ms)
+        
+        # [NEW] 记忆精简模式
+        self.concise = concise
         
         if "SBC" in title:
             try:
@@ -457,7 +475,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                     uline = res.get('use_line', False)
                     ext = res.get('extra_lines')
                     if df is not None and not df.empty:
-                        self.update_plot(df, sig, ttl, avg, lbl, uline, ext)
+                        self.update_plot(df, sig, ttl, avg, lbl, uline, ext, concise=self.concise)
             except Exception as e:
                 print(f"动态刷新失败: {e}")
 
@@ -502,13 +520,25 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
 
     # --- 统一方法管理 (移除冗余重复定义) ---
 
-    def update_plot(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, init=False):
+    def update_plot(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, init=False, concise=None):
         if signals is not None and "SBC" not in title:
             title = f"SBC Pattern - {title}"
         self.setWindowTitle(title)
         
-        # Only recreate PlotWidget on init to avoid severe flicker and jump
-        is_compact = self.width() < 800
+        # [NEW] 更新状态栏时间
+        if hasattr(self, 'lbl_status'):
+            import datetime
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            interval = getattr(self, 'refresh_interval', 0)
+            if interval > 0:
+                self.lbl_status.setText(f"🔄 {interval}s | {now_str}")
+            else:
+                self.lbl_status.setText(f"✅ {now_str}")
+        
+        # [REFINED] 精简模式判定逻辑
+        if concise is not None:
+            self.concise = concise
+        is_compact = self.width() < 800 or getattr(self, 'concise', False)
 
         if not init and self.pw is not None:
             self.pw.clear()
@@ -667,7 +697,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             signals = signals[-self.max_signals:]
 
         self.overlay = SignalOverlay(self.pw)
-        if signals: self.overlay.update_signals(signals, is_compact=is_compact)
+        if signals: self.overlay.update_signals(signals, is_compact=is_compact, concise=getattr(self, 'concise', False))
             
         # [NEW] 自定义网格：分时图使用默认网格线，K线图使用自定义稀疏网格
         if use_line:
@@ -823,7 +853,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         threading.Thread(target=slow_tdx_link, daemon=True).start()
         print("🚀 联动任务已全部分发")
 
-def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None, skip_focus=False, max_signals=20, max_vlines=12, max_hlines=5):
+def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, existing_win=None, refresh_func=None, skip_focus=False, max_signals=20, max_vlines=12, max_hlines=5, concise=True):
     existing_instance = QApplication.instance()
     app = existing_instance or QApplication(sys.argv)
     is_new_app = (existing_instance is None)
@@ -831,7 +861,7 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=No
     win = None
     if existing_win is not None and hasattr(existing_win, 'update_plot') and existing_win.isVisible():
         try:
-            existing_win.update_plot(df, signals, title, avg_series, time_labels, use_line, extra_lines)
+            existing_win.update_plot(df, signals, title, avg_series, time_labels, use_line, extra_lines, concise=concise)
             if not skip_focus:
                 existing_win.raise_()
                 existing_win.activateWindow()
@@ -840,7 +870,7 @@ def show_chart_with_signals(df, signals=None, title="Stock Chart", avg_series=No
             print(f"Reuse failed: {e}")
             
     if win is None:
-        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines, refresh_func=refresh_func, max_signals=max_signals, max_vlines=max_vlines, max_hlines=max_hlines)
+        win = StandaloneKlineChart(df, signals, title, avg_series, time_labels, use_line, extra_lines, refresh_func=refresh_func, max_signals=max_signals, max_vlines=max_vlines, max_hlines=max_hlines, concise=concise)
         win.show()
 
     if is_new_app: app.exec()

@@ -4293,9 +4293,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.toolbar.addAction(self.chan_action)
 
         # [NEW] SBC 回放 Action
-        self.sbc_replay_action = QAction("SBC回放", self)
-        self.sbc_replay_action.setToolTip("使用本地缓存/日线数据执行SBC逻辑回放")
-        self.sbc_replay_action.triggered.connect(lambda: self._run_sbc_test(False))
+        self.sbc_replay_action = QAction("SBC", self)
+        self.sbc_replay_action.setToolTip("使用本地缓存/日线数据执行SBC逻辑验证 (跟随全局实时开关)")
+        self.sbc_replay_action.triggered.connect(lambda: self._run_sbc_test(None))
         self.toolbar.addAction(self.sbc_replay_action)
 
         # [NEW] Rearrange Action
@@ -4319,7 +4319,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.system_hotkeys_registered = False
 
         if KEYBOARD_AVAILABLE:
-            self.gs_action = QAction("GlobalKeys", self)
+            self.gs_action = QAction("G-Keys", self)
             self.gs_action.setCheckable(True)
             self.gs_action.setToolTip("开启后快捷键为系统级（即使应用失去焦点也有效）")
             self.gs_action.setChecked(self.global_shortcuts_enabled)
@@ -4359,8 +4359,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.toolbar.setStyleSheet("""
         QToolBar#ResampleToolbar QToolButton {
-            padding: 4px 8px;
-            margin: 2px;
+            padding: 2px 4px;
+            margin: 1px;
+            font-size: 11px;
         }
 
         QToolBar#ResampleToolbar QToolButton:checked {
@@ -4502,9 +4503,15 @@ class MainWindow(QMainWindow, WindowMixin):
         if not code: return
 
         # 每 180 秒运行一次刷新 跟随duration_sleep_time
+        # [MODIFIED] 每隔一段时间运行一次刷新，跟随 duration_sleep_time
+        # 并增加随机偏移 (Jitter)，防止多个窗口同时触发导致 HDF5 锁竞争
         timer = QTimer(win)
         timer.timeout.connect(partial(self._refresh_sbc_data, win))
-        timer.start(self.refresh_interval_ms)
+        
+        import random
+        jitter = random.randint(-2000, 2000)
+        interval = max(5000, self.refresh_interval_ms + jitter)
+        timer.start(interval)
 
         self._sbc_windows[win] = {
             "code": code,
@@ -4512,7 +4519,8 @@ class MainWindow(QMainWindow, WindowMixin):
             "timer": timer,
             "thread": None,
             "use_live": data.get("_use_live", True),
-            "realtime": data.get("_realtime", True)
+            "realtime": data.get("_realtime", True),
+            "concise": data.get("concise", True)
         }
 
         # 窗口关闭自动清理
@@ -4534,10 +4542,11 @@ class MainWindow(QMainWindow, WindowMixin):
             thread = SBCTestThread(
                 state['code'],
                 use_live=state.get('use_live', True),
-                hdf5_lock=getattr(self, "hdf5_lock", None),
+                hdf5_lock=getattr(self, "hdf5_mutex", None),
                 extra_lines=state['extra_lines'],
                 realtime=state.get('realtime', True),
-                win_ref=win
+                win_ref=win,
+                concise=state.get('concise', True)
             )
 
             thread.finished_data.connect(self._on_sbc_test_finished)
@@ -4608,10 +4617,15 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.warning(f"Failed to extract extra_lines for SBC test in GUI: {e}")
 
-        # [FIX] 如果是回放模式 (use_live=False)，通常不开启自动刷新，除非明确要求。
-        # 这样可以解决用户反馈的“回放变成了实时模式”的问题。
-        # is_realtime_req = self.realtime if use_live else False
+        # [FIX] 统一 SBC 实时与回放：根据全局 realtime 状态决定是否自动刷新与数据源
         is_realtime_req = self.realtime
+        use_live_req = self.realtime if use_live is None else use_live
+        
+        # 允许通过传参强制指定 (如菜单调用)，否则跟随全局开关
+        if use_live is None:
+            use_live_req = self.realtime
+        else:
+            use_live_req = use_live
         
         # 创建并启动后台线程 (使用独立属性避免阻塞)
         # [MODIFIED] 默认极简模式 (True)
@@ -4622,7 +4636,7 @@ class MainWindow(QMainWindow, WindowMixin):
             concise_mode = False
             logger.info("SBC Test: Alt detected, switching to FULL display mode.")
             
-        self._sbc_req_thread = SBCTestThread(target_code, use_live, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req, concise=concise_mode)
+        self._sbc_req_thread = SBCTestThread(target_code, use_live_req, hdf5_lock=hdf5_lock, extra_lines=extra_lines, realtime=is_realtime_req, concise=concise_mode)
         self._sbc_req_thread.finished_data.connect(self._on_sbc_test_finished)
         self._sbc_req_thread.error_occurred.connect(self._on_sbc_test_error)
         self._sbc_req_thread.start()
@@ -4669,7 +4683,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 use_line=data.get("use_line", False) if realtime else False,
                 extra_lines=data.get("extra_lines"),
                 existing_win=existing_win,
-                skip_focus=bool(win_ref) # 如果是自动刷新，不抢焦点
+                skip_focus=bool(win_ref), # 如果是自动刷新，不抢焦点
+                concise=data.get("concise", True)
             )
 
             if win and win not in self._sbc_test_windows:
@@ -4842,14 +4857,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _init_resample_toolbar(self):
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(QLabel("Resample:"))
+        # self.toolbar.addWidget(QLabel("Resample:"))
 
-        self.resample_group = QActionGroup(self)
-        self.resample_group.setExclusive(True)
-
-        self.resample_actions = {}
-
-        label_map = {
+        self.resample_combo = QComboBox()
+        self.resample_combo.setToolTip("选择周期 (1D/2D/3D/W/M)")
+        self.resample_combo.setFixedWidth(55)
+        self.resample_combo.setObjectName("resampleCombo")
+        self.resample_combo.setStyleSheet("""
+            QComboBox#resampleCombo {
+                background-color: #2a2a2a;
+                color: #FFD700;
+                border: 1px solid #555;
+                font-weight: bold;
+                border-radius: 2px;
+            }
+        """)
+        
+        self.resample_label_map = {
             'd': '1D',
             '2d': '2D',
             '3d': '3D',
@@ -4858,22 +4882,20 @@ class MainWindow(QMainWindow, WindowMixin):
         }
 
         for key in self.resample_keys:
-            act = QAction(label_map.get(key, key), self)
-            act.setCheckable(True)
-            act.setData(key)
+            label = self.resample_label_map.get(key, key)
+            self.resample_combo.addItem(label, key)
 
-            if key == self.resample:
-                act.setChecked(True)
-
-            act.triggered.connect(lambda checked, k=key: self.on_resample_changed(k))
-
-            self.resample_group.addAction(act)
-            self.toolbar.addAction(act)
-            self.resample_actions[key] = act
+        # Set current index
+        if self.resample in self.resample_keys:
+            idx = self.resample_keys.index(self.resample)
+            self.resample_combo.setCurrentIndex(idx)
+        
+        self.resample_combo.currentIndexChanged.connect(self._on_resample_combo_changed)
+        self.toolbar.addWidget(self.resample_combo)
 
         # 分隔符并添加监理详情按钮
         self.toolbar.addSeparator()
-        self.supervision_action = QAction("🛡️监理详情", self)
+        self.supervision_action = QAction("🛡️监理", self) # Shorter
         self.supervision_action.triggered.connect(self.show_supervision_details)
         self.toolbar.addAction(self.supervision_action)
 
@@ -4887,6 +4909,11 @@ class MainWindow(QMainWindow, WindowMixin):
         key = self.resample_keys[self.current_resample_idx]
         self.on_resample_changed(key)
 
+    def _on_resample_combo_changed(self, index):
+        key = self.resample_combo.itemData(index)
+        if key:
+            self.on_resample_changed(key)
+
     def on_resample_changed(self, key):
         if key not in self.resample_keys:
             return
@@ -4898,9 +4925,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.resample = key
         self.current_resample_idx = self.resample_keys.index(key)
 
-        act = self.resample_actions.get(key)
-        if act is not None and not act.isChecked():
-            act.setChecked(True)
+        # 同步更新 ComboBox (如果是通过快捷键等外部方式触发的)
+        if hasattr(self, 'resample_combo'):
+            self.resample_combo.blockSignals(True)
+            self.resample_combo.setCurrentIndex(self.current_resample_idx)
+            self.resample_combo.blockSignals(False)
 
         # ② 启动延迟加载（防抖核心）
         self._pending_resample_key = key

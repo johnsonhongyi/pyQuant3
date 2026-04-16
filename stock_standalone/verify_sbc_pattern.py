@@ -24,6 +24,7 @@ try:
     from signal_types import SignalType
     from stock_visual_utils import show_chart_with_signals
     import sbc_core as sbc_core
+    from strategy_controller import StrategyController
 except ImportError:
     from stock_standalone.JSONData import tdx_data_Day as tdd
     from stock_standalone.JohnsonUtil import johnson_cons as ct
@@ -31,6 +32,7 @@ except ImportError:
     from stock_standalone.signal_types import SignalType
     from stock_standalone.stock_visual_utils import show_chart_with_signals
     import stock_standalone.sbc_core as sbc_core
+    from stock_standalone.strategy_controller import StrategyController
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 MAX_BUY_PER_DAY  = 3   # 每日上图买点上限
@@ -239,9 +241,6 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
                     time_labels.append(t.strftime("%H:%M"))
         else:
             time_labels = [_fts(t) for t in times]
-    else:
-        time_labels = []
-
     # 自动生成日期分割线 (Vertical Lines)
     day_separators = []
     if len(times) > 1:
@@ -251,7 +250,22 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         for pos in breaks:
             day_separators.append((pos, 'gray', 0.8, 'v'))
 
-    # ── 3. 分析逻辑 (使用 sbc_core 核心，支持全量投喂模式) ───────────────────────────────────
+    # ── 3. 增强：集成主界面全策略控制器 (Pullback/Consolidation/Launcher) ──────────────
+    # [NEW] 这里的逻辑用于解决“分时回测与主界面信号不一致”的痛点
+    controller = StrategyController()
+    # 根据 index 2 [全策略] 的标准初始化
+    from strategy_controller import StrategyController as SC
+    controller.enable_strategy(SC.STRATEGY_PULLBACK_MA5)
+    controller.enable_strategy(SC.STRATEGY_STRONG_CONSOLIDATION)
+    controller.enable_strategy(SC.STRATEGY_SUDDEN_LAUNCH)
+    
+    # 获取基于日线历史的“主买/主卖”信号 (映射到 K 线层)
+    hist_signals = controller.evaluate_historical_signals(code, day_df)
+    # 给这些信号打上标识，防止与分时结构信号冲突
+    for s in hist_signals:
+        s.is_kline = True 
+    
+    # ── 4. 分析逻辑 (使用 sbc_core 核心分时结构探测) ───────────────────────────────────
     with timed_ctx("sbc_core_analysis", warn_ms=100):
         # [ALIGN] 全部投喂，内部日期识别
         res = sbc_core.run_sbc_analysis_core(
@@ -299,8 +313,8 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
                 ks.is_kline = True  # ⭐ 关键标识：告诉绘图引擎这是画在 K 线层面的
                 kline_projection.append(ks)
     
-    # 最终发送给可视化的是全量信号 (分时层信号 + K线层投影信号)
-    all_viz_signals = signals + kline_projection
+    # 最终发送给可视化的是全量信号 (分时层信号 + K线层投影信号 + 历史引擎信号)
+    all_viz_signals = signals + kline_projection + hist_signals
 
 
     # 计算 VWAP 曲线
