@@ -13,6 +13,7 @@ except ImportError:
     win32api = None
 
 from JohnsonUtil import LoggerFactory
+import json
 from typing import Any, Optional, Union, List, Tuple
 
 # 获取或创建日志记录器
@@ -265,8 +266,74 @@ def get_centered_window_position_single(parent, win_width, win_height, margin=10
     x,y = clamp_window_to_screens(x, y, win_width, win_height)
     return x, y
 
+def load_window_position_simple(window_name: str, default_width: int, default_height: int) -> tuple[int, int, Optional[int], Optional[int]]:
+    """从统一配置文件加载窗口位置（简化版，支持 DPI 缩放）"""
+    try:
+        from sys_utils import get_base_path
+        from dpi_utils import get_windows_dpi_scale_factor
+        scale = get_windows_dpi_scale_factor()
+        
+        base_dir = get_base_path()
+        config_file = os.path.join(base_dir, "window_config.json")
+        if scale > 1.5:
+            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
+        
+        if os.path.exists(config_file):
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if window_name in data:
+                pos = data[window_name]
+                width = int(pos.get("width", default_width) * scale)
+                height = int(pos.get("height", default_height) * scale)
+                x = int(pos.get("x", 0) * scale)
+                y = int(pos.get("y", 0) * scale)
+                return width, height, x, y
+    except Exception as e:
+        logger.error(f"[load_window_position_simple] 失败: {e}")
+            
+    return default_width, default_height, None, None
+
+def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str):
+    """保存窗口位置到统一配置文件（简化版，支持 DPI 缩放）"""
+    try:
+        from sys_utils import get_base_path
+        from dpi_utils import get_windows_dpi_scale_factor
+        scale = get_windows_dpi_scale_factor()
+
+        base_dir = get_base_path()
+        config_file = os.path.join(base_dir, "window_config.json")
+        if scale > 1.5:
+            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
+        
+        win.update_idletasks()
+        geom = win.geometry().split('+')
+        if len(geom) < 3: return
+        size = geom[0].split('x')
+        if len(size) < 2: return
+        
+        width = int(int(size[0]) / scale)
+        height = int(int(size[1]) / scale)
+        x = int(int(geom[1]) / scale)
+        y = int(int(geom[2]) / scale)
+        
+        pos = {"x": x, "y": y, "width": width, "height": height}
+        
+        data = {}
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except:
+                pass
+        
+        data[window_name] = pos
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"[save_window_position_simple] 失败: {e}")
+
 # def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
-def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "") -> Optional[str]:
+def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "", window_name: Optional[str] = None) -> Optional[str]:
     dlg = tk.Toplevel(parent)
     dlg.transient(parent)
     dlg.title(title)
@@ -282,7 +349,15 @@ def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, pr
     win_width = min(max(base_width, text_len * char_width // 2), screen_width_limit)
     win_height = base_height + (prompt.count("\n") * 20)
 
-    x, y = get_centered_window_position_single(parent, win_width, win_height)
+    if window_name:
+        saved_w, saved_h, saved_x, saved_y = load_window_position_simple(window_name, win_width, win_height)
+        if saved_x is not None and saved_y is not None:
+            win_width, win_height, x, y = saved_w, saved_h, saved_x, saved_y
+        else:
+            x, y = get_centered_window_position_single(parent, win_width, win_height)
+    else:
+        x, y = get_centered_window_position_single(parent, win_width, win_height)
+    
     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
 
     result = {"value": None}
@@ -340,16 +415,22 @@ def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, pr
     text.bind("<Control-Y>", lambda e: do_redo() or "break")
 
     def on_ok():
+        if window_name:
+            save_window_position_simple(dlg, window_name)
         result["value"] = text.get("1.0", "end-1c").replace("\n", " ")
         dlg.destroy()
 
     def on_cancel():
+        if window_name:
+            save_window_position_simple(dlg, window_name)
         dlg.destroy()
 
     frame_btn = tk.Frame(dlg)
     frame_btn.pack(pady=5)
     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
     dlg.bind("<Escape>", lambda e: on_cancel())
     text.bind("<Return>",lambda e: on_ok())       # 回车确认
