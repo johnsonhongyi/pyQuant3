@@ -14763,7 +14763,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 # KLineMonitor class moved to kline_monitor.py
 
-def test_single_thread(single=True, test_strategy=False, resample=None):
+def test_single_thread(single=True, test_strategy=False, resample=None,log_level=LoggerFactory.DEBUG):
     """
     单线程测试函数。
     :param single: 是否单次执行（默认 True，执行一次后返回）
@@ -14785,7 +14785,7 @@ def test_single_thread(single=True, test_strategy=False, resample=None):
         def __init__(self, value=True):
             self.value = value
     flag = Flag(True)   # 或者 flag = Flag(False) 看你的测试需求
-    log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
+    log_level = mp.Value('i', log_level)  # 'i' 表示整数
     detect_calc_support = mp.Value('b', False)  # 'i' 表示整数
     # 直接单线程调用
     df = fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support_var=detect_calc_support,single=single)

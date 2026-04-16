@@ -692,12 +692,218 @@ ealtime_data_service.py �Ŀ���ȱ�ڻز���ackfill_gaps_from_hdf5�
     - [x] **原子化验证**：通过 scratch/verify_query_fix.py 验证了包含中文备注、破折号及复杂逻辑的多种组合查询均能正确解析并执行。
 
 ## 2026-04-13 12:30
+> - **权重算式**: `趋势(0.3) + 上轨攀升(0.4) + 新高(0.3) + 形态分加成(max 0.3)`
+> - **逻辑**: 每日 9:15 触发验证，不达标维持 `WATCHING`，达标晋升 `VALIDATED`。
+>
+> **2. 数据库一致性**
+> - `hot_stock_watchlist` 表必须包含: `daily_patterns`, `pattern_score`, `source`。
+> - `follow_queue` 在 ENTERED 状态时，必须由 `risk_engine` 实时监控 T+0 止盈止损。
+>
+> **3. 状态机流转**
+> - 禁止任何标的跳过 `VALIDATED` 节点直接进入 `ENTERED`（除手动添加外）。
+
+---
+
+## 🔴 当前任务: Phase 5 分析器性能优化 (分页与时间过滤)
+
+**状态**: 🔴 进行中
+**目标**: 解决交易分析器(`trading_analyzerQt6.py`)查询超大记录时渲染引发的严重卡顿。新增时间区间过滤项与表格分页呈现功能。
+
+### 核心子任务
+
+| 序号 | 任务描述 | 状态 |
+|------|----------|------|
+| 1 | **UI 强化**: 在 `TradingGUI` 顶部栏加入 `时间范围` 条件下拉框，底部置入分页导航栏 | ⏳ 待办 |
+| 2 | **数据剥离渲染**: 将 DataFrame 请求与 QTableWidget 循环渲染分开，依靠 `cached_full_df` 控制当页只绘 200 行 | ⏳ 待办 |
+| 3 | **过滤应用**: 在拉取或渲染前拦截 DataFrame，裁切时间以减少无用数据混淆 | ⏳ 待办 |
+
+### 历史记录
+- **实施计划**: [20260301_2320_implementation_plan.md](file:///<USER_HOME>/.gemini/antigravity/brain/72698ac6-1914-495f-be2e-9dbbf4bbd8df/20260301_2320_implementation_plan.md)
+- **任务清单**: [20260301_2320_task.md](file:///<USER_HOME>/.gemini/antigravity/brain/72698ac6-1914-495f-be2e-9dbbf4bbd8df/20260301_2320_task.md)
+
+---
+
+## ⏳ 历史完成任务: Phase 4 留强去弱自动化 (03-01 10:35)
+
+**状态**: ✅ 已完成
+
+### P2: 交易闭环与报警优化 ✅ 已完成
+- [x] **Alert System Hardening**: Created `alert_manager.py` ✅ 01-23
+- [x] **Trading Analytics**: `compute_and_sync_strategy_stats` in `TradingAnalyzer` ✅ 01-23
+
+### P3: 修复交易缺失 (Fix Missing Trades) ✅ 已完成
+- [x] **Trade Execution Implementation**: `_execute_follow_trade` added to `StockLiveStrategy`.
+- [x] **Alert & Monitor Linkage**: Process now triggers Trade + Monitor + Voice Alert.
+
+### P4: 数据一致性与 UI 优化 (Data & UI) ✅ 已完成
+- [x] **Data Consistency**: Verified `TradingHub` vs `TradingLogger` sync.
+- [x] **UI Refresh**: `HotlistPanel` Reason/Phase columns added.
+- [x] **Visuals**: Implemented `flash_screen` and high-priority alerts.
+
+---
+
+### P6: 策略整合 (Strategy Integration) ✅ 已完成
+**目标**: 统一日线形态检测逻辑，标准化策略入口，增强竞价/回踩/突破逻辑。
+
+**完成事项**:
+- [x] `daily_pattern_detector.py` - 日K形态统一检测器 (Volunteer/Platform/BigBull) ✅ 01-23
+- [x] `daily_strategy_loader.py` - 集成检测器并同步到跟单队列 ✅ 01-23
+- [x] `stock_live_strategy.py` - 集成 `DailyPatternDetector` 并标准化 `_process_follow_queue` ✅ 01-23
+- [x] 竞价策略标准化：`_check_auction_conditions` 独立逻辑 ✅ 01-23
+- [x] 成功捕捉形态: V型反转、平台突破、大阳线、竞价高开 ✅ 01-23
+
+---
+
+## 🏗️ 系统架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     数据层                                │
+│  tdx_data_Day.py → realtime_data_service.py → df_all     │
+└──────────────────────────────────────────────────────────┘
+                            ↓
+┌──────────────────────────────────────────────────────────┐
+│                     检测层                                │
+│  IntradayPatternDetector + DailyPatternDetector          │
+│  └── SignalBus(统一事件分发)                              │
+└──────────────────────────────────────────────────────────┘
+                            ↓
+┌──────────────────────────────────────────────────────────┐
+│                     执行层 (P0.5核心)                     │
+│  PositionPhaseEngine: SCOUT→ACCUMULATE→LAUNCH→SURGE→EXIT │
+│  └── 阶段性仓位: 0%→20%→50%→70%→50%→0%                   │
+└──────────────────────────────────────────────────────────┘
+                            ↓
+┌──────────────────────────────────────────────────────────┐
+│                     输出层                                │
+│  VoiceAnnouncer + HotlistPanel + TradingLogger           │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📝 已完成模块
+
+| 模块 | 文件 | 状态 |
+|------|------|------|
+| 热点面板 | `hotlist_panel.py` | ✅ |
+| 热点详情 | `hotspot_popup.py` | ✅ |
+| 策略框架 | `strategy_interface.py` | ✅ |
+| 策略控制 | `strategy_controller.py` | ✅ |
+| 信号系统 | `signal_types.py`, `signal_message_queue.py` | ✅ |
+| 风险引擎 | `risk_engine.py`, `sector_risk_monitor.py` | ✅ |
+| 语音播报 | `VoiceAnnouncer`, `VoiceProcess` | ✅ |
+| 持久化 | `trading_logger.py` | ✅ |
+| **日内形态检测** | `intraday_pattern_detector.py` | ✅ |
+| **日K形态检测** | `daily_pattern_detector.py` | ✅ |
+| **信号总线** | `signal_bus.py` | ✅ |
+| **信号日志面板** | `signal_log_panel.py` | ✅ |
+| **统一数据中心** | `trading_hub.py` | ✅ |
+| **TD 序列信号** | `td_sequence.py` | ✅ |
+| **日线顶部检测** | `daily_top_detector.py` | ✅ |
+| **主升浪持仓保护** | `intraday_decision_engine.py` | ✅ |
+
+---
+
+## 📅 变更日志
+
+| 日期时间 | 变更描述 | 涉及文件 |
+| :--- | :--- | :--- |
+| 04-08 18:35 | **minute_kline_viewer_qt 宽度优化**: 增加时间(160)、名称(110)、代码(75)最小列宽，并扩展 time 字段格式化兼容性 | `minute_kline_viewer_qt.py` |
+| 04-08 16:38 | **minute_kline_viewer_qt 搜索过滤修复**: 解决 textChanged 信号参数导致的 DataFrame 属性缺失报错 | `minute_kline_viewer_qt.py` |
+| 04-08 11:50 | **表格排序回顶优化**: 实现板块、个股、重点表排序及板块切换自动回顶 | `sector_bidding_panel.py` |
+| 04-06 21:09 | **决策引擎信号质量深度改进 v3**: A)热力评分引入 score_diff/follow_ratio/leader_pct_diff 动量加权；B)龙头新增实时弱化追踪 is_leader_strong()；C)形态前置强势过滤（涨幅≥0.5%+站稳VWAP）；D)跟随股排名加入主力dff权重 | `sector_focus_engine.py` |
+| 04-06 02:16 | **手动引擎执行**: 替换清空按钮为[🛠️ 引擎执行]，实现全链路逻辑手动触发与实时刷新 | `sector_focus_engine.py`, `signal_dashboard_panel.py` |
+| 04-06 02:05 | **55188整合与逆势策略**: 实现人气/主力自动提权加分，增加[逆势领涨]检测及指数数据注入链路 | `sector_focus_engine.py`, `instock_MonitorTK.py` |
+| 04-06 01:34 | **决策引擎v2完整打通**: inject_from_detector/inject_detector_sectors/_scan_one_v2/形态4/comparison_interval默认60m | `sector_focus_engine.py`, `bidding_momentum_detector.py`, `instock_MonitorTK.py` |
+| 04-06 01:34 | **新建架构文档**: SYSTEM_ARCHITECTURE.md（全系统架构）+ TRADING_ENGINE_DESIGN.md（交易引擎设计） | `SYSTEM_ARCHITECTURE.md`, `TRADING_ENGINE_DESIGN.md` |
+| 04-05 23:55 | **深度修复 signal_dashboard_panel.py**：统计数量对齐、过滤冲突、下拉精确度、防空优化 | `signal_dashboard_panel.py` |
+| 04-04 23:10 | **深度优化 SectorBiddingPanel**：资源预加载、批量渲染Diff、纯Python排序、分时图预计算、全量索引化搜索、渲染节流 | `sector_bidding_panel.py` |
+| 04-04 22:58 | **深度优化 MarketPulseViewer**：最大行数限制、Dirty Flag、列宽防抖、状态缓存 | `market_pulse_viewer.py` |
+| 04-04 19:10 | **代码修复**: 修复 `stock_live_strategy.py` 中 `code_idx` 未定义错误 | `stock_live_strategy.py` |
+
+| 03-13 15:34 | **信号看板增强与退出修复**: 信号分类、双击复制、右键粘贴、退出死循环修复 | `signal_dashboard_panel.py`, `instock_MonitorTK.py`, `data_utils.py` |
+| 03-10 22:40 | **强势启动与绩效评分**: 集成 `hmax60`/`hmax`/`max5`/`high4` 突破识别，新增信号后动态绩效加分逻辑 | `realtime_data_service.py`, `test_bidding_replay.py` |
+| 03-04 23:55 | **UI 双增强**: 修复标题 hitTest 走漏换行符，新增板块过滤框支持右键粘贴过滤、清空 | `trade_visualizer_qt6.py` |
+| 03-03 11:45 | **编辑体验升级**: 为 edit_query 输入框增加完整的鼠标右键菜单与 Ctrl+Z 撤销/重做支持 | `gui_utils.py` |
+| 03-02 18:50 | **时间戳缓存修复**: 修正 Pandas 时间戳转化的时区偏移错误(UTC->Asia/Shanghai)，增加盘后缓存覆写防御机制 | `realtime_data_service.py` |
+| 02-28 00:37 | **早盘超快抢筹与去弱留强机制**: 实现 early_momentum_buy 高优先级直入及仓位上限(5)，VWAP风控强退出机制解决死拿劣质标的 | `intraday_pattern_detector.py`, `position_phase_engine.py`, `stock_live_strategy.py`, `realtime_data_service.py` |
+| 02-27 20:30 | **报警日志修复**: 增强 AlertManager 代码识别，重构 StockLiveStrategy 报警入口 | `alert_manager.py`, `stock_live_strategy.py` |
+| 02-10 18:00 | **紧急 BUG 修复**: 修复 `trading_hub.py` 的 NameError (Dict) 与 `instock_MonitorTK.py` 的 NoneType 崩溃 | `trading_hub.py`, `instock_MonitorTK.py` |
+| 02-10 17:50 | **P3/P4 统一流水线整合**: 实现以 Watchlist 为核心的状态机，重构验证评分 (Threshold=0.7)，UI 列对齐 | `trading_hub.py`, `hotlist_panel.py`, `stock_live_strategy.py` |
+| 02-10 17:00 | **数据库结构修复**: 恢复损坏的 trading_signals.db，补全 Watchlist 形态字段 | `trading_hub.py`, `sqlite3` |
+| 02-03 02:20 | **P1.6 信号标准化**: 统一 SignalStandard 结构，修复 Visualizer IPC 接收逻辑 | `intraday_pattern_detector.py`, `trade_visualizer_qt6.py` |
+| 02-02 20:30 | **P0.9 完结**: TD/TopScore 实时报警集 | `stock_live_strategy.py`, `strategy_manager.py` |
+| 01-24 03:41 | **P1.5 缺口监控与自动跟单完成**：集成向量化全市场缺口扫描，支持自动加入 `TradingHub` 跟单队列，优化 K 线缺口无限带显示 | `trade_visualizer_qt6.py`, `hotlist_panel.py`, `signal_types.py` |
+| 01-23 16:45 | **P6 策略整合完成**：统一日K形态检测，标准化竞价/盘中跟单逻辑 | `stock_live_strategy.py`, `daily_pattern_detector.py`, `daily_strategy_loader.py` |
+| 01-23 12:14 | 板块联动策略优化：聚焦连阳加速+回踩MA5/10启动模式 | `stock_live_strategy.py` |
+| 01-23 11:51 | 创建 `trading_hub.py` 统一数据中心，整合两个数据库 | `trading_hub.py` (新增) |
+| 01-23 11:45 | 热点面板右键添加「加入跟单队列」功能 | `hotlist_panel.py` |
+| 01-22 22:45 | 修复报警弹窗交互：双击放大回弹、拖拽卡顿、Hover停止震动 | `instock_MonitorTK.py` |
+| 01-22 19:46 | P0.8 Phase 1 完成：信号计数机制、聚合播报、高优先级检测(multi-MA+换手) | `intraday_pattern_detector.py`, `stock_live_strategy.py` |
+| 01-22 19:15 | 新增 P0.8 信号优化任务规划：信号计数、批量播报、高优先级闪屏、分析可视化 | `gemini.md` |
+| 01-22 19:05 | 新增策略信号数据库查看功能：trading_analyzerQt6 支持切换数据源、数据库诊断 | `trading_analyzerQt6.py`, `trading_logger.py`, `trading_analyzer.py` |
+| 01-22 15:00 | 优化加载布局：强制禁用表格列自动宽 (ResizeToContents)，彻底解决面板内容撑大导致图表被挤压的问题 | `trade_visualizer_qt6.py` |
+
+| 01-22 14:35 | 修复加载布局预设时 K 线视图计算错误：强制使用预设宽度而不是不可靠的瞬时物理宽度 | `trade_visualizer_qt6.py` |
+| 01-22 13:46 | 修复 Filter 面板切换时 K 线图被遮挡问题：新增 `_reset_kline_view` 方法，使用 splitter 实际宽度计算可见K线数 | `trade_visualizer_qt6.py` |
+| 01-21 11:27 | 合并监控循环：删除独立30s定时器 | `trade_visualizer_qt6.py` |
+| 01-21 11:10 | 同股去重：弹窗复用 + 消息更新 | `instock_MonitorTK.py` |
+| 01-21 01:26 | 升级全局热键模式，集成信号日志面板 | `trade_visualizer_qt6.py` |
+| 01-21 01:20 | 重构热点监控，支持形态日志流 | `signal_log_panel.py` |
+| 01-21 01:05 | 重构跟踪机制，增加当前任务详情区块 | `gemini.md` |
+| 01-21 00:55 | 批准 P0 收尾实施计划 | `stock_live_strategy.py` |
+| 01-21 00:36 | 整合规划文档，建立长期迭代跟踪 | `gemini.md` |
+| 01-21 00:30 | 规划最后一公里执行问题解决方案 | 新增 `PositionPhaseEngine` 设计 |
+| 01-20 18:38 | 完成 HotSpotPopup 详情弹窗 | `hotspot_popup.py` |
+| 01-20 18:31 | 完成 HotlistPanel 热点面板 | `hotlist_panel.py` |
+| 01-20 18:24 | 创建架构规划，确认设计决策 | - |
+
+---
+
+## 🔗 相关文档
+
+- 信号总线: `signal_bus.py`
+- 形态检测: `intraday_pattern_detector.py`
+- 数据库: `signal_strategy.db` (follow_record表)
+
+## 2026-04-09 17:30
+- [x] ޸ϵͳڴ汩 CPU ƿ (TK ڴ 1.7GB+ Ż)
+    - [x] ** "Sina.all" Ⱦ**Ų鷢ǰع Sina.all Ŀնȡָ 172MB  sina_MultiIndex_data.h5 켣⡣ DataPublisher Ƶѯ Sina.allÿѯǿа 480 ݹ UI ѭɶʽڴй©뿨١˻ h5a.load_hdf_db(self.hdf_name, ...)  sina_data.h5 ģʽжڴ̡
+    - [x] **˫سפ** _load_hdf_hist_unified   gg_cache.setkey ءֹȫֶ  uiltins._MEM_CACHE ֧ŵ³ 500MB ݼ޷ Python ռͷš
+    - [x] **ڴ** sina_data.py  clear_unified_cache ӿڣ 
+ealtime_data_service.py Ŀȱڻز ackfill_gaps_from_hdf5ɺʽ Sina._MEM_CACHE еǧݼǿ gc.collect()ȷ TK عפԤɻ 300MBڵĽ̬
+
+## 2026-04-10 21:45
+- [x] 优化 `SectorBiddingPanel` 宏观查询交互：
+  - [x] **新增历史重载功能**：在“🔍查询”框左侧新增了 `🔄` 刷新按钮。
+  - [x] **实现快捷重载逻辑**：用户点击该按钮即可直接触发当前历史分组（history1-5）的重新加载，无需手动切换下拉框即可获取最新的查询预设。
+  - [x] **增强 UI 反馈**：同步集成了刷新成功的状态栏提示与自动恢复逻辑，提升了实盘操作的流畅度。
+
+## 2026-04-11 02:40
+- [x] 修复宏观查询“备注 (逻辑)”格式导致的 NameError：
+    - [x] **增强引擎预处理**：在 query_engine_util.py 中实现了对 备注 (逻辑) 格式的自动识别与剥离。
+    - [x] **UI 触发层加固**：在 sector_bidding_panel.py 的 _on_query_triggered 中补齐了防御性拆分逻辑，确保启动恢复或手动输入时能自动提取核心逻辑。
+    - [x] **原子化验证**：通过 scratch/verify_query_fix.py 验证了包含中文备注、破折号及复杂逻辑的多种组合查询均能正确解析并执行。
+
+## 2026-04-13 12:30
 - [x] 深度修复 commonTips.py 中 get_trade_date_status 频繁读写配置和死循环重试风暴导致 Tk 卡死的问题：
   - [x] **增加线程锁防冲突 (_TRADE_STATUS_LOCK)**：防止 Tkinter UI 线程与多进程后台服务在同一瞬间涌入执行同步的 I/O。
   - [x] **增加 _LAST_FAILED_TIME 防抖/熔断机制**：如果网络或初始化验证由于某种原因返回了 None/失败，提供一个 5 秒以上的冷却退避期，不要让 Tk 高频心跳不断去发起 ConfigObj IO 解析与强行远程查询。
   - [x] **移除了无意义且致命的 update=True 死循环分支**：不再容忍当返回值等于 None 时原地强行带有 update=True 选项的第二遍暴击。
 
-## 2026-04-16 13:20
+## 2026-04-16 19:18
+- [x] **实现竞价赛马节奏 (Bidding Racing Rhythm) 高性能可视化工具**：
+    - [x] **开发全新 `bidding_racing_panel.py`**：基于 PyQt6 构建，集成了自定义绘图的饼图与进度时间轴。
+    - [x] **引入 RacingPieWidget**：通过自定义 `QPainter` 渲染，实现了龙头 (Leader)、确核 (Winner)、跟涨 (Follower) 与静默 (Quiet) 四大市场角色的占比分布。支持渐变外观与动态发光效果，视觉效果 premium。
+    - [x] **实现 RacingTimeline**：自定义时间轴组件，支持 09:15-15:00 的全时段回放进度显示与互动。
+    - [x] **集成回放引擎 `test_bidding_replay.py`**：
+        - [x] 引入 `ReplayWorker` 异步回放架构，解决了高频计算下的 UI 响应粘滞问题。
+        - [x] 新增 `--ui` 参数，支持一键启动图形化赛马监控界面。
+        - [x] 优化状态判定算法，利用 `pattern_hint` (SBC, V反) 实现了对“确核胜出”个股的精准捕捉。
+    - [x] **UI 持久化与鲁棒性**：集成了窗口退出清理机制，确保回放线程安全释放。
+
+## 2026-04-16 15:25
 - [x] **恢复信号日志语音播报同步与自动滚动功能**：
     - [x] **优化滚动锁定逻辑**：针对 trade_visualizer_qt6.py，将交互锁定阈值调优至 1.5s。
     - [x] **强化“Code 优先”对齐策略**：针对 signal_log_panel.py，引入 PositionAtTop 滚动策略，确保播报个股置于视角中心/顶端。
