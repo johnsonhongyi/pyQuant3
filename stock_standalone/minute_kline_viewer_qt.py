@@ -13,28 +13,32 @@ from tk_gui_modules.gui_config import (MINUTE_KLINE_VIEWER_HISTORY)
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                 QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit)
+                                 QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
+                                 QInputDialog, QMessageBox)
     from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
     from PyQt6.QtGui import QIcon, QFont
 except ImportError:
     try:
         from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                      QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                     QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit)
+                                     QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
+                                     QInputDialog, QMessageBox)
         from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
         from PySide6.QtGui import QIcon, QFont
     except ImportError:
         try:
             from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                          QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                         QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit)
+                                         QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
+                                         QInputDialog, QMessageBox)
             from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
             from PyQt5.QtGui import QIcon, QFont
         except ImportError:
             try:
                 from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                              QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                             QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit)
+                                             QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
+                                             QInputDialog, QMessageBox)
                 from PySide2.QtCore import Qt, QAbstractTableModel, QModelIndex
                 from PySide2.QtGui import QIcon, QFont
             except ImportError:
@@ -192,6 +196,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 print(f"[DEBUG] StockSender init skip/failed: {e}")
 
         self.current_file: Optional[str] = None
+        self.current_key: Optional[str] = None
         self.is_memory_mode: bool = False
         self.setWindowTitle("Minute Kline Cache Viewer (Realtime Service)")
         self.df_file = pd.DataFrame()
@@ -429,6 +434,10 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_save.setStyleSheet("background-color: #f39c12; color: white; font-weight: bold;")
         self.btn_save.clicked.connect(self.on_save_changes)
 
+        self.btn_del_table = QPushButton("🗑️ Delete Table")
+        self.btn_del_table.setStyleSheet("background-color: #607d8b; color: white;")
+        self.btn_del_table.clicked.connect(self.on_delete_table)
+
         # Delete by Time Controls
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("UnixTS or Start, End")
@@ -462,6 +471,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         top_toolbar.addWidget(self.btn_add_row)
         top_toolbar.addWidget(self.btn_del_row)
         top_toolbar.addWidget(self.btn_save)
+        top_toolbar.addWidget(self.btn_del_table)
         top_toolbar.addStretch(1)
         top_toolbar.addWidget(QLabel("Source:"))
         top_toolbar.addWidget(self.source_combo)
@@ -1092,6 +1102,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                         return
 
                 df = pd.read_hdf(file_path, key=key)
+                self.current_key = key
 
             elif ext in (".json", ".gz"):
                 df = self._load_session_json(file_path)
@@ -1592,6 +1603,72 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         except Exception as e:
             self.statusBar().showMessage(f"Save Failed: {e}")
             print(f"DEBUG: Save General Error: {e}")
+
+    def on_delete_table(self):
+        """删除 HDF5 文件中的特定数据集 (Table)"""
+        if not self.current_file or not self.current_file.lower().endswith('.h5'):
+            self.statusBar().showMessage("Only HDF5 files support table deletion.")
+            return
+
+        file_path = self.current_file
+        try:
+            # 1. 获取所有 Key (不直接加载数据，只读 metadata)
+            with pd.HDFStore(file_path, "r") as store:
+                keys = [k.strip("/") for k in store.keys()]
+            
+            if not keys:
+                self.statusBar().showMessage("No datasets found in HDF5 file.")
+                return
+
+            # 2. 弹出选择框
+            key, ok = QInputDialog.getItem(
+                self,
+                "Delete HDF5 Table",
+                f"Choose table to DELETE from {os.path.basename(file_path)}:",
+                keys,
+                0,
+                False
+            )
+            
+            if not (ok and key):
+                return
+
+            # 3. 反复确认，防止误删 (HDF5 删除不可撤销)
+            reply = QMessageBox.question(
+                self, 'Confirm Deletion', 
+                f"Are you sure you want to delete table '{key}'?\n\nThis will PERMANENTLY remove the data from the file.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # 4. 执行删除操作
+            self.statusBar().showMessage(f"Deleting table '{key}'...")
+            with pd.HDFStore(file_path, "a") as store:
+                if "/" + key in store.keys():
+                    del store[key]
+            
+            self.log(f"HDF5 Table Deleted: {key} from {file_path}")
+            self.statusBar().showMessage(f"Table '{key}' deleted successfully.")
+
+            # 5. 如果删除的是当前正在查看的表，清理视图
+            if key == self.current_key:
+                self.current_key = None
+                self.active_df = pd.DataFrame()
+                self.df_file = pd.DataFrame()
+                
+                # 强制刷新 UI 到空状态
+                empty = DataFrameModel(pd.DataFrame())
+                self.summary_table.setModel(empty)
+                self.detail_table.setModel(empty)
+                self.full_results_table.setModel(empty)
+                self.stats_label.setText(f"Table '{key}' was deleted. Please load another dataset.")
+            
+        except Exception as e:
+            self.statusBar().showMessage(f"Delete Table Failed: {e}")
+            self.log(f"Delete Table Error: {e}")
 
     def on_delete_by_time(self):
         """按时间或时间范围删除所有股票的该行数据

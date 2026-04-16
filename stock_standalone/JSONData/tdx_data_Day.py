@@ -5022,37 +5022,37 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
         return lowdate, index_d, df
 
 
-def compute_power_tdx_df_slow(tdx_df,dd):
-    if len(tdx_df) >= 5:
+# def compute_power_tdx_df_slow(tdx_df,dd):
+#     if len(tdx_df) >= 5:
 
-        # idxh = tdx_df.high.argmax()
-        idxl = tdx_df.low.idxmin()
-        idxh = tdx_df.low.idxmax()
-        idxl_date=tdx_df.index.tolist().index(idxl)
-        idxh_date=tdx_df.index.tolist().index(idxh)
-        fibh = len(tdx_df[idxl_date:].query('high > high.shift(1)*0.998 or close > close.shift(1)'))
-        dd['fibl'] = fibh
-        # dd['ldate'] = idx
-        # dd['boll'] = dd.upperL[0]
-        dd['boll'] = dd.upperT[0]
-        dd['ra'] = dd.upperL[0]
-        # dd['ra'] = dd.upperT[0]
-        dd['ma'] = 1
-        dd['oph'] = 1
-        dd['rah'] = 1
-    else:
-        dd['op'] = -1
-        dd['ra'] = -1
-        dd['fib'] = -1
-        dd['fibl'] = -1
-        dd['ldate'] = -1
-        dd['boll'] = -1
+#         # idxh = tdx_df.high.argmax()
+#         idxl = tdx_df.low.idxmin()
+#         idxh = tdx_df.low.idxmax()
+#         idxl_date=tdx_df.index.tolist().index(idxl)
+#         idxh_date=tdx_df.index.tolist().index(idxh)
+#         fibh = len(tdx_df[idxl_date:].query('high > high.shift(1)*0.998 or close > close.shift(1)'))
+#         dd['fibl'] = fibh
+#         # dd['ldate'] = idx
+#         # dd['boll'] = dd.upperL[0]
+#         dd['boll'] = dd.upperT[0]
+#         dd['ra'] = dd.upperL[0]
+#         # dd['ra'] = dd.upperT[0]
+#         dd['ma'] = 1
+#         dd['oph'] = 1
+#         dd['rah'] = 1
+#     else:
+#         dd['op'] = -1
+#         dd['ra'] = -1
+#         dd['fib'] = -1
+#         dd['fibl'] = -1
+#         dd['ldate'] = -1
+#         dd['boll'] = -1
 
-        dd['ma'] = -1
-        dd['oph'] = -1
-        dd['rah'] = -1
-        # log.error("tdx_df is no 9:%s"%(dd.code[0]))
-    return dd
+#         dd['ma'] = -1
+#         dd['oph'] = -1
+#         dd['rah'] = -1
+#         # log.error("tdx_df is no 9:%s"%(dd.code[0]))
+#     return dd
 
 def compute_power_tdx_df(tdx_df, dd):
     if len(tdx_df) >= 5:
@@ -5325,10 +5325,9 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     dfupper = df[-ct.bollupperT:]
     upperT = dfupper['high'][(dfupper['high'] > 0) & (dfupper['high'] > dfupper['upper'])]
     upperL = dfupper['low'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
-    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 5 else ([], [])
+    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([], [])
     dd['upperT'] = len(posLIS)
     dd['upperL'] = len(upperL)
-
     dd['red'] = len(red_cout)
     dd['gren'] = len(green_cout)
 
@@ -7873,13 +7872,15 @@ if __name__ == '__main__':
     # code = '159915'
     code = '999688'
     code = '588930'
+    code = '300905'
     resample = 'd'
     with timed_ctx(f"extract_all_features {code}", warn_ms=50):
         df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
 
     cct.print_timing_summary()
-    # sina = get_sina_data_df('920274')
-    
+    # sina = get_sina_data_df('920274') 
+    import ipdb;ipdb.set_trace()
+
     # time_s = time.time()
     # signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
     # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
