@@ -2631,7 +2631,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 🎤 [NEW] 语音反馈监听定时器：实现声画同步定位
         self.voice_feedback_timer = QTimer()
         self.voice_feedback_timer.timeout.connect(self._poll_voice_feedback)
-        self.voice_feedback_timer.start(500) # 每 500ms 检查一次播报进度
+        self.voice_feedback_timer.start(200) # [REFINED] 提高频率至 200ms，确保同步丝滑
 
         # ⚡ [NEW] Lifecycle check (Self-terminate if parent signals exit)
         self.lifecycle_timer = QTimer(self)
@@ -3893,7 +3893,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Error in signal log sync broadcast: {e}")
 
     def _poll_voice_feedback(self):
-        """轮询语音进程的反馈队列，同步 UI 位置"""
+        """轮询语音进程的反馈队列，同步 UI 位置 (高频统一版)"""
         if not hasattr(self, 'voice_thread') or not self.voice_thread:
             return
             
@@ -3909,8 +3909,23 @@ class MainWindow(QMainWindow, WindowMixin):
                         import time as _time
                         man_diff = _time.time() - getattr(self, '_last_ui_interaction_time', 0)
                         
-                        # 联动 1: 日志面板自动定位与高亮 (仅在用户超过 5 秒未交互时自动滚动)
+                        # 联动 1: 日志面板自动定位与高亮 (仅在用户超过 3.0 秒未交互时自动滚动)
                         self.signal_log_panel.highlight_row_by_content(code, snippet, force_scroll=(man_diff > 3.0))
+
+                    # 联动 2: 实现自发联动标记 (从 _poll_command_queue 整合至此)
+                    if code:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        self.active_time_linkage = {
+                            'code': str(code).zfill(6),
+                            'timestamp': timestamp,
+                            'label': "实时监控播报",
+                            'price': None
+                        }
+                        # 🚀 [NEW] 程序内联联动优化：如果当前显示的正是该个股，立即刷新以显示联动白线
+                        if self.current_code == code:
+                            # logger.debug(f"[Internal] Sync linkage marker for {code}")
+                            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
         except Exception as e:
             pass # 队列空或读取异常不影响主程
 
@@ -5996,26 +6011,8 @@ class MainWindow(QMainWindow, WindowMixin):
                         logger.debug(f"[IPC] Consolidated SWITCH_CODE for {code}")
                         self.load_stock_by_code(code, resample=res)
 
-            # 🚀 [NEW] 同时轮询内部语音反馈队列，实现自发联动标记
-            if hasattr(self, 'voice_thread') and hasattr(self.voice_thread, 'feedback_queue'):
-                try:
-                    while not self.voice_thread.feedback_queue.empty():
-                        fb_data = self.voice_thread.feedback_queue.get_nowait()
-                        if isinstance(fb_data, dict) and 'code' in fb_data:
-                            code = fb_data.get('code')
-                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            self.active_time_linkage = {
-                                'code': str(code).zfill(6),
-                                'timestamp': timestamp,
-                                'label': "实时监控播报",
-                                'price': None
-                            }
-                            # 🚀 [NEW] 程序内联联动优化
-                            if self.current_code == code:
-                                logger.info(f"[Internal] Re-rendering linkage marker for {code}")
-                                self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
-                except Exception as e:
-                    logger.debug(f"Poll voice feedback failed: {e}")
+            # [REMOVED] 语音反馈队列轮询逻辑已迁移至 _poll_voice_feedback，根治 QTimer 竞争导致的同步失效。
+            pass
 
         except (EOFError, BrokenPipeError, ConnectionResetError):
             logger.warning("[Visualizer] Command pipe closed.")
