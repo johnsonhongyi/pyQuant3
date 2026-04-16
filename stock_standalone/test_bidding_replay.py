@@ -41,7 +41,7 @@ def analyze_data_integrity(detector, stop_time):
     
     # 1. 检查基准时间
     elapsed_min = (time.time() - detector.baseline_time) / 60
-    print(f"⌛ 观测窗口已持续: {elapsed_min:.1f} min (预设间隔: {detector.comparison_interval/60:.1f} min)")
+    print(f"? 观测窗口已持续: {elapsed_min:.1f} min (预设间隔: {detector.comparison_interval/60:.1f} min)")
     
     # 2. 采样个股锚点状态
     all_ts = list(detector._tick_series.values())
@@ -60,7 +60,7 @@ def analyze_data_integrity(detector, stop_time):
     # 3. 采样板块锚点状态
     if detector.sector_anchors:
         sec_samples = sorted(detector.sector_anchors.items(), key=lambda x: x[1], reverse=True)[:3]
-        print(f"🗂️ 板块锚点: 已记录={len(detector.sector_anchors)} 个")
+        print(f"🗂? 板块锚点: 已记录={len(detector.sector_anchors)} 个")
         for name, anchor in sec_samples:
             print(f"   [Sample] {name}: 基准分={anchor:.1f}")
     
@@ -82,13 +82,13 @@ def get_mock_cat(code):
     else: market = '其他'
     
     # 模拟概念板块（用于测试联动分析，每组股票共享相同概念）
-    # 600108/600703/600875 → 电网工程
+    # 600108/600703/600875 ? 电网工程
     if c in ('600108', '600703', '600875', '600468'):
         return f'{market};电网工程;特高压;电力设备'
-    # 600545 → 光伏设备
+    # 600545 ? 光伏设备
     if c in ('600545', '603773'):
         return f'{market};光伏设备;新能源'
-    # 002235/002429/002339/002355 → 消费电子
+    # 002235/002429/002339/002355 ? 消费电子
     if c in ('002235', '002429', '002339', '002355'):
         return f'{market};消费电子;半导体'
     # 300x 创业板概念
@@ -122,6 +122,218 @@ class ReplayWorker(QThread):
 
         self.kwargs['ui_callback'] = ui_callback
         run_replay(**self.kwargs)
+        self.finished.emit()
+
+    def stop(self):
+        self.is_running = False
+
+
+class LiveWorker(QThread):
+    """
+    实盘数据拉取工作线程。
+    周期性调用 tdd.getSinaAlldf 获取全量 OHLC 切片行情，
+    推送至 DataPublisher ? BiddingMomentumDetector 驱动 UI 更新。
+    
+    数据流:
+        tdd.getSinaAlldf(market='all') ? publisher.update_batch(df)
+        ? detector.update_scores(active_codes) ? Panel.update_visuals() (via QTimer)
+    """
+    progress_update = pyqtSignal(str)   # 当前时间 HH:MM:SS
+    status_update = pyqtSignal(str)     # 状态文本 (等待中/拉取中/错误)
+    finished = pyqtSignal()
+
+    def __init__(self, detector, publisher, real_df_all, 
+                 resample=None, fetch_interval=5, log_level=None):
+        super().__init__()
+        self.detector = detector
+        self.publisher = publisher
+        self.real_df_all = real_df_all
+        self.resample = resample
+        self.fetch_interval = max(3, fetch_interval)  # 最小 3 秒
+        self.log_level = log_level
+        self.is_running = True
+        self._fetch_count = 0
+        self._last_fetch_ts = 0
+
+    def run(self):
+        """实盘主循环：等待开盘 ? 周期拉取 ? 收盘停止"""
+        from JSONData import tdx_data_Day as tdd
+        from JohnsonUtil import johnson_cons as ct
+
+        logger.info("🔴 [LiveWorker] 实盘模式启动...")
+
+        # Phase 1: 注册代码 (使用启动时获取的 real_df_all 基线数据)
+        self.publisher.register_names(self.real_df_all)
+        self.detector.register_codes(self.real_df_all)
+        
+        # 初始化情绪基准
+        if hasattr(self.publisher, 'emotion_baseline'):
+            self.publisher.emotion_baseline.calculate_baseline(self.real_df_all)
+        
+        logger.info(f"✅ [LiveWorker] 基线注册完成: {len(self.detector._tick_series)} 只个股")
+
+        # ========================================
+        # 实盘循环拉取 (24小时全天候守护)
+        # ========================================
+        logger.info("🚀 [LiveWorker] 进入实盘循环监测...")
+        consecutive_errors = 0
+
+        while self.is_running:
+            now_int = cct.get_now_time_int()
+            
+            # 1. 盘外休息时段 (非交易日，或 15:05以后/09:15以前)
+            if not cct.get_work_time_duration():
+                self.status_update.emit(f"⏳ 非交易时间等待... 当前 {datetime.now().strftime('%H:%M:%S')}")
+                self.progress_update.emit(datetime.now().strftime('%m-%d %H:%M:%S'))
+                
+                # 睡眠30秒再检查时间，分段等待以确保安全退出
+                slept = 0
+                while slept < 30 and self.is_running:
+                    time.sleep(1)
+                    slept += 1
+                continue
+            
+            # 2. 午休时段降频 (交易日 11:30 - 13:00)
+            if not cct.get_work_time():
+                self.status_update.emit("💤 午休中...")
+                self.progress_update.emit(datetime.now().strftime('%H:%M:%S'))
+                
+                # 睡眠30秒
+                slept = 0
+                while slept < 30 and self.is_running:
+                    time.sleep(1)
+                    slept += 1
+                continue
+
+            try:
+                t0 = time.time()
+
+                # 核心：调用 Sina 全量行情接口（实盘切片，对应回放中的 tick_slice）
+                top_now = tdd.getSinaAlldf(
+                    market='all',
+                    vol=ct.json_countVol,
+                    vtype=ct.json_countType
+                )
+
+                if top_now is None or top_now.empty:
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        logger.warning(f"⚠️ [LiveWorker] 连续 {consecutive_errors} 次空数据")
+                    time.sleep(self.fetch_interval)
+                    continue
+
+                consecutive_errors = 0
+                self._fetch_count += 1
+                batch_df = top_now.copy()
+
+                # ── 1. 确保 code 列存在 ──────────────────────────────────────
+                if 'code' not in batch_df.columns:
+                    if batch_df.index.name == 'code' or batch_df.index.dtype == object:
+                        batch_df = batch_df.reset_index()
+                    else:
+                        batch_df['code'] = batch_df.index.astype(str)
+                batch_df['code'] = batch_df['code'].astype(str).str.zfill(6)
+
+                # ── 2. 从 Sina 数据提取时间（ticktime = Sina 数据时间，而非系统时间）──
+                # Sina df 通常含 date(YYYY-MM-DD) + time(HH:MM:SS) 两列
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                if 'time' in batch_df.columns and not batch_df['time'].dropna().empty:
+                    t_str = str(batch_df['time'].dropna().iloc[0])
+                    date_str = str(batch_df['date'].dropna().iloc[0]) if 'date' in batch_df.columns and not batch_df['date'].dropna().empty else today_str
+                elif 'ticktime' in batch_df.columns and not batch_df['ticktime'].dropna().empty:
+                    sample_tt = str(batch_df['ticktime'].dropna().iloc[0])
+                    if ' ' in sample_tt:
+                        date_str, t_str = sample_tt.split(' ', 1)
+                    else:
+                        date_str, t_str = today_str, sample_tt
+                else:
+                    t_str = datetime.now().strftime('%H:%M:%S')
+                    date_str = today_str
+
+                # ── 3. 列名映射（对齐 run_replay：close/price→trade，llastp→settlement）──
+                rename_map = {}
+                if 'trade' not in batch_df.columns:
+                    if 'close' in batch_df.columns:   rename_map['close'] = 'trade'
+                    elif 'price' in batch_df.columns: rename_map['price'] = 'trade'
+                    elif 'now' in batch_df.columns:   rename_map['now']   = 'trade'
+                if 'settlement' not in batch_df.columns and 'llastp' in batch_df.columns:
+                    rename_map['llastp'] = 'settlement'
+                if rename_map:
+                    batch_df.rename(columns=rename_map, inplace=True)
+
+                # ── 4. 同步 Tick 价格到 TickSeries（对齐 run_replay 的 update_meta 步骤）──
+                with self.detector._lock:
+                    for row_t in batch_df.itertuples(index=False):
+                        c = str(getattr(row_t, 'code', '')).zfill(6)
+                        if c in self.detector._tick_series:
+                            self.detector._tick_series[c].update_meta(row_t)
+
+                # ── 5. settlement 补填 + percent 强制重算 ──────────────────────
+                if 'trade' in batch_df.columns:
+                    # 强制转换为数值格式，防止 Sina 数据自带字符串类型导致计算崩溃
+                    batch_df['trade'] = pd.to_numeric(batch_df['trade'], errors='coerce')
+                    if 'settlement' in batch_df.columns:
+                        batch_df['settlement'] = pd.to_numeric(batch_df['settlement'], errors='coerce')
+                    
+                    if 'settlement' not in batch_df.columns or (batch_df['settlement'] == 0).all() or batch_df['settlement'].isna().all():
+                        batch_df['settlement'] = batch_df['code'].map(
+                            lambda x: getattr(self.detector._tick_series.get(x), 'last_close', 0)
+                        )
+                    # 强制重算，去除 Sina 自带的尾盘涨幅
+                    batch_df['percent'] = (
+                        (batch_df['trade'] - batch_df['settlement']) / batch_df['settlement'] * 100
+                    )
+                    batch_df.loc[batch_df['settlement'] <= 0, 'percent'] = 0.0
+
+                if 'ratio' not in batch_df.columns:
+                    batch_df['ratio'] = 1.0
+
+                # ── 6. 注入 timestamp = Sina 数据时间（对齐 run_replay 的 t_str）──
+                batch_df['timestamp'] = f"{date_str} {t_str}"
+
+                # ── 7. 推送到核心系统（与 run_replay 完全相同的下游链路）──────
+                t1 = time.time()
+                self.publisher.update_batch(batch_df)
+                t2 = time.time()
+
+                active_codes = [str(c).zfill(6) for c in batch_df['code'].tolist()]
+                self.detector.update_scores(active_codes=active_codes)
+                t3 = time.time()
+
+                self._last_fetch_ts = time.time()
+
+                # 发射 UI 进度信号（使用 Sina 数据时间，与时间轴对齐）
+                self.progress_update.emit(t_str)
+
+                cost_fetch = (t1 - t0) * 1000
+                cost_pub   = (t2 - t1) * 1000
+                cost_det   = (t3 - t2) * 1000
+
+                if self._fetch_count % 10 == 1:
+                    logger.info(
+                        f"📡 [Live #{self._fetch_count}] {t_str} | "
+                        f"股票: {len(batch_df)} | "
+                        f"Fetch: {cost_fetch:.0f}ms | Pub: {cost_pub:.0f}ms | Det: {cost_det:.0f}ms"
+                    )
+
+                # 等待下次刷新（分段 sleep 以便快速响应停止信号）
+                elapsed = time.time() - t0
+                sleep_time = max(0.5, self.fetch_interval - elapsed)
+                slept = 0
+                while slept < sleep_time and self.is_running:
+                    time.sleep(min(0.5, sleep_time - slept))
+                    slept += 0.5
+                    
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"❌ [LiveWorker] 拉取异常 (#{consecutive_errors}): {e}")
+                if consecutive_errors > 10:
+                    logger.error("❌ [LiveWorker] 连续错误过多，延长等待至 30 秒")
+                    time.sleep(30)
+                else:
+                    time.sleep(self.fetch_interval)
+
+        logger.info(f"🔴 [LiveWorker] 实盘结束. 共拉取 {self._fetch_count} 次.")
         self.finished.emit()
 
     def stop(self):
@@ -690,6 +902,8 @@ if __name__ == "__main__":
     parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
     parser.add_argument("--today", action="store_true", help="Automatically replay today's data")
     parser.add_argument("--ui", action="store_true", help="Launch High-Performance Bidding Racing UI")
+    parser.add_argument("--live", action="store_true", help="Enable Live Trading Mode")
+    parser.add_argument("--interval", type=int, default=30, help="Data fetch interval in seconds for live mode (default: 30)")
     parser.add_argument("--log", type=lambda s: s.upper(), default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Console log level")
     
     args = parser.parse_args()
@@ -742,77 +956,120 @@ if __name__ == "__main__":
             pass
 
     if args.ui and UI_AVAILABLE:
-        logger.info("Starting UI-based Racing Replay...")
         app = QApplication(sys.argv)
-        
-        # 预加载探测器但不运行回放
-        # 为了 UI 同步，我们需要让 Detector 和 ReplayWorker 共享实例
-        # 修改：我们需要把 detector 初始化移出来
-        
-        # 为了 UI 模式，我们先最小化运行 run_replay 的准备部分（数据加载等）
-        # 或者直接让 ReplayWorker 处理
-        
-        from bidding_momentum_detector import BiddingMomentumDetector
-        # 注意：这里需要一个 Mock 或真实的 Publisher，如果不运行 run_replay，UI 可能没数据
-        # 解决方案：UI 模式下全程走 ReplayWorker
-        
-        # 这种模式下，我们需要在 run_replay 内部把 detector 暴露出来，或者在外部创建
-        # 我们对 run_replay 做一点小修改，支持传入 detector 实例
-        
-        worker = ReplayWorker(replay_kwargs)
         
         # --- [SILENT-MODE] 强力压制全局单例 Logger ---
         try:
-            # 获取那个“唯一的”单例并强制封口 (除非指定了 DEBUG)
             global_logger = LoggerFactory.getLogger()
             global_logger.setLevel(user_log_level)
-            
-            # 同时清除 root logger 可能存在的 console handler
             import logging
             logging.getLogger().setLevel(logging.WARNING)
-            
             if user_log_level >= LoggerFactory.WARNING:
                 print(f"🤫 静默模式：当前后台日志级别已设为 {args.log.upper()}")
         except Exception as e:
             logger.exception(f"Log conversion failed: {e}")
 
-        # 启动 UI
-        # 我们需要等到 DataPublisher 和 Detector 在 Worker 线程初始化后再显示 UI 吗？
-        # 简单起见，我们先构造面板，Detector 将在 Worker 中被创建并赋值给面板
         # [LINKAGE] 初始化联动发送器
         from JohnsonUtil.stock_sender import StockSender
-        # 默认不启用 ths/dfcf 以防弹窗，仅开启 tdx 联动
         sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
         
-        panel = BiddingRacingRhythmPanel(sender=sender)
-        
-        def on_progress(t_str):
-            panel.timeline.set_time(t_str)
-        
-        # [ROBUSTNESS] 窗口关闭时停止回放线程
-        def on_panel_closed():
-            worker.stop()
-            worker.wait()
-        
-        panel.closed.connect(on_panel_closed)
-
-        # 修改 run_replay 和 ReplayWorker 以配合 UI 更好的暴露对象
-        # 暂且为了演示，我们假设 Detector 是在 run_replay 逻辑中被成功绑定的。
-        
-        # [REFINED] 在 worker 启动前预创建一个 detector 传进去
+        from bidding_momentum_detector import BiddingMomentumDetector
         from realtime_data_service import DataPublisher
-        # [PERF] 强制 verbose=args.verbose (通常为 False)，避免底层代码中的大量打印造成卡顿
-        publisher = DataPublisher(simulation_mode=True, high_performance=True, verbose=args.verbose)
-        detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
-        panel.detector = detector
         
-        replay_kwargs['detector'] = detector # 给 run_replay 传入现有的 detector
-        replay_kwargs['publisher'] = publisher # 同步注入 publisher
-        
-        worker.progress_update.connect(on_progress)
-        worker.start()
-        
-        panel.show()
-        sys.exit(app.exec())
+        if args.live:
+            # ========================================
+            # 实盘模式 (Live Mode)
+            # ========================================
+            logger.info("🔴 Starting LIVE Trading Mode...")
+            
+            # Step 1: 一次性获取基线数据 (包含 category, lastp1d, ma20 等历史元数据)
+            print("📊 正在获取基线数据 (test_single_thread)，请稍候...")
+            resample = args.resample
+            live_df_all = real_df_all if (real_df_all is not None and not real_df_all.empty) else None
+            if live_df_all is None:
+                live_df_all = test_single_thread(single=True, resample=resample, log_level=user_log_level)
+            if live_df_all is None or live_df_all.empty:
+                print("❌ 基线数据获取失败，无法启动实盘模式。")
+                sys.exit(1)
+            print(f"✅ 基线数据获取成功: {len(live_df_all)} 只股票")
+            
+            # Step 2: 创建 Publisher 和 Detector (实盘模式，非 simulation)
+            publisher = DataPublisher(
+                high_performance=True, 
+                scraper_interval=99999,  # 由 LiveWorker 控制刷新节奏
+                enable_backup=False,
+                simulation_mode=False,   # 实盘模式
+                verbose=args.verbose
+            )
+            detector = BiddingMomentumDetector(
+                realtime_service=publisher, 
+                simulation_mode=False
+            )
+            
+            # Step 3: 创建 Panel
+            panel = BiddingRacingRhythmPanel(sender=sender)
+            panel.detector = detector
+            panel.setWindowTitle("🏁 竞价赛马 🔴 实盘监控")
+            
+            # Step 4: 创建 LiveWorker
+            worker = LiveWorker(
+                detector=detector,
+                publisher=publisher,
+                real_df_all=live_df_all,
+                resample=resample,
+                fetch_interval=args.interval,
+                log_level=user_log_level
+            )
+            
+            def on_live_progress(t_str):
+                panel.timeline.set_time(t_str)
+                panel.timeline.label.setText(f"🔴 实盘监控: {t_str}")
+            
+            def on_live_status(status_text):
+                panel.timeline.label.setText(status_text)
+            
+            def on_panel_closed():
+                worker.stop()
+                worker.wait()
+            
+            panel.closed.connect(on_panel_closed)
+            worker.progress_update.connect(on_live_progress)
+            worker.status_update.connect(on_live_status)
+            worker.start()
+            
+            panel.show()
+            sys.exit(app.exec())
+        else:
+            # ========================================
+            # 回放模式 (Replay Mode) 保持原有逻辑
+            # ========================================
+            logger.info("Starting UI-based Racing Replay...")
+            
+            worker = ReplayWorker(replay_kwargs)
+            
+            panel = BiddingRacingRhythmPanel(sender=sender)
+            
+            def on_progress(t_str):
+                panel.timeline.set_time(t_str)
+            
+            def on_panel_closed():
+                worker.stop()
+                worker.wait()
+            
+            panel.closed.connect(on_panel_closed)
+
+            # 预创建 detector 传进去
+            publisher = DataPublisher(simulation_mode=True, high_performance=True, verbose=args.verbose)
+            detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
+            panel.detector = detector
+            
+            replay_kwargs['detector'] = detector
+            replay_kwargs['publisher'] = publisher
+            
+            worker.progress_update.connect(on_progress)
+            worker.start()
+            
+            panel.show()
+            sys.exit(app.exec())
     else:
         run_replay(**replay_kwargs)
