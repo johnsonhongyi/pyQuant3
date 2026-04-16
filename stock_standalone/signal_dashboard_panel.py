@@ -22,13 +22,19 @@ from PyQt6.QtGui import QColor, QFont, QBrush
 from tk_gui_modules.window_mixin import WindowMixin
 from signal_bus import get_signal_bus, SignalBus, BusEvent
 from JohnsonUtil import commonTips as cct
+import os
+import json
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+
+SETTINGS_SECTION = "signal_dashboard_persistence"
 
 # ✅ 盘中交易引擎（局部导入防止循环依赖）
 def get_engine_controller():
     try:
         from sector_focus_engine import get_focus_controller
         return get_focus_controller()
-    except Exception:
+    except Exception as e:
+        logger.error(f"❌ [Dashboard] Failed to import engine: {e}")
         return None
 
 class VolumeDetailsDialog(QDialog, WindowMixin):
@@ -321,12 +327,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._engine_sync_timer.start(interval_ms)
         logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，节拍: {interval_ms}ms")
         
-        # [MOD] 状态栏轮播定时器与消息池
+        # 恢复 UI 状态 (列宽等)
+        self._restore_ui_state()
+
+        # [MOD] 状态栏 UI 布局优化：废除轮播模式，改为固定/滚动综合展示
         self._carousel_idx = 0
         self._carousel_messages = []
-        self._carousel_timer = QTimer(self)
-        self._carousel_timer.timeout.connect(self._update_status_carousel)
-        self._carousel_timer.start(10000) # 5秒切换一次消息
+        # self._carousel_timer = QTimer(self) # 停止轮播定时器
+        
+        # 监听 Tab 切换，实现“tab当前点击查看的视图的统计信息”实时更新
+        self.tabs.currentChanged.connect(self._update_stats_display)
 
     def stop(self):
         """停止所有计时器和订阅，释放资源"""
@@ -372,6 +382,78 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._save_ui_state()
         self.stop()
         event.accept()
+
+    def _save_ui_state(self):
+        """保存表格布局状态"""
+        try:
+            data_to_save = {}
+            # 保存各个表格的列宽和排序状态 (Hex 格式保存)
+            for name, table in self.tables.items():
+                clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
+                data_to_save[f'table_state_{clean_name}'] = table.horizontalHeader().saveState().toHex().data().decode()
+            
+            config_file = WINDOW_CONFIG_FILE
+            full_data = {}
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        full_data = json.load(f)
+                except Exception: pass
+            
+            full_data[SETTINGS_SECTION] = data_to_save
+            with open(config_file, "w", encoding="utf-8") as f:
+                json.dump(full_data, f, ensure_ascii=False, indent=2)
+            # logger.debug(f"📊 [Dashboard] UI state saved to {config_file}")
+        except Exception as e:
+            logger.error(f"Failed to save UI state: {e}")
+
+    def _restore_ui_state(self):
+        """恢复表格布局设置"""
+        try:
+            config_file = WINDOW_CONFIG_FILE
+            if not os.path.exists(config_file): return
+            with open(config_file, "r", encoding="utf-8") as f:
+                full_data = json.load(f)
+            
+            ui_state = full_data.get(SETTINGS_SECTION)
+            if not ui_state: return
+            
+            for name, table in self.tables.items():
+                clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
+                state_key = f'table_state_{clean_name}'
+                if state_key in ui_state:
+                    table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
+        except Exception as e:
+            logger.error(f"Failed to restore UI state: {e}")
+
+    def _limit_table_column_widths(self, table: QTableWidget):
+        """
+        强制对特定列施加最大宽度限制，防止自适应伸缩导致 UI 崩溃。
+        如果列宽由于 ResizeToContents 变得过大，则手动截断。
+        """
+        header = table.horizontalHeader()
+        # 先触发一次自适应 (如果当前是自适应模式)
+        # table.resizeColumnsToContents() # 慎用，可能会导致死循环或性能抖动
+        
+        column_count = table.columnCount()
+        for i in range(column_count):
+            h_text = table.horizontalHeaderItem(i).text() if table.horizontalHeaderItem(i) else ""
+            curr_width = table.columnWidth(i)
+            
+            # 设定限制规则
+            max_w = 150 # 默认上限
+            if h_text in ["所属板块", "板块名称"]:
+                max_w = 120
+            elif h_text in ["形态/信号", "形态详情", "详情", "捕捉理由", "跟风明细", "标签"]:
+                max_w = 250
+            elif h_text in ["代码", "时间", "评级"]:
+                max_w = 80
+            
+            if curr_width > max_w:
+                # 如果超过限制，将模式改为 Interactive（允许手动调整）或 Fixed 
+                # 这里设为 Interactive 并强制指定宽度
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+                table.setColumnWidth(i, max_w)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -658,6 +740,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # [NEW] 列宽持久化联动
+        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         return table
 
     def _create_decision_table(self) -> QTableWidget:
@@ -680,6 +765,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # [NEW] 列宽持久化联动
+        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         return table
 
     def _create_sector_table(self) -> QTableWidget:
@@ -701,6 +789,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.cellClicked.connect(self._on_sector_table_clicked)
         table.cellDoubleClicked.connect(self._on_sector_table_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # [NEW] 列宽持久化联动
+        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         return table
 
     def _create_dragon_table(self) -> QTableWidget:
@@ -722,6 +813,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # [NEW] 列宽持久化联动
+        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         return table
 
     def _on_sector_table_clicked(self, row, col):
@@ -790,8 +884,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """从 SectorFocusController 同步最新的决策与板块热力"""
         if self._engine_ctrl is None:
             self._engine_ctrl = get_engine_controller()
+            if self._engine_ctrl:
+                logger.info("✅ [DASHBOARD] SectorFocusController connected.")
         
         if self._engine_ctrl is None:
+            self.status_label.setText("未连接决策引擎")
             return
 
         # 1. 更新决策队列表
@@ -799,21 +896,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             decisions = self._engine_ctrl.get_decision_queue()
             self._refresh_decision_table(decisions)
         except Exception as e:
-            logger.debug(f"Refresh decision table failed: {e}")
+            logger.error(f"❌ [DASHBOARD] Refresh decision table failed: {e}", exc_info=True)
+            self.status_label.setText(f"错误: 决策同步失败")
 
         # 2. 更新龙头追踪表 [NEW]
         try:
             dragons = self._engine_ctrl.get_dragon_leaders()
             self._refresh_dragon_table(dragons)
         except Exception as e:
-            logger.debug(f"Refresh dragon table failed: {e}")
+            logger.error(f"❌ [DASHBOARD] Refresh dragon table failed: {e}", exc_info=True)
+            self.status_label.setText(f"错误: 龙头同步失败")
 
         # 3. 更新板块热力表
         try:
             sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
             self._refresh_sector_table(sectors)
         except Exception as e:
-            logger.debug(f"Refresh sector table failed: {e}")
+            logger.error(f"❌ [DASHBOARD] Refresh sector table failed: {e}", exc_info=True)
 
     def _refresh_decision_table(self, decisions: List[dict]):
         table = self.tables.get("🌟 决策队列")
@@ -881,6 +980,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             it.setForeground(QBrush(QColor("#FFD700"))) # 亮金色文字
 
         table.setSortingEnabled(True)
+        # [NEW] 限制过长列宽触发 UI 溢出
+        self._limit_table_column_widths(table)
+        
         # 恢复选中
         if current_selection:
             for r in range(table.rowCount()):
@@ -973,6 +1075,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(i, 11, QTableWidgetItem(d.get('tags', '')))
 
         table.setSortingEnabled(True)
+        # [NEW] 限制过长列宽触发 UI 溢出
+        self._limit_table_column_widths(table)
+        
         # 恢复选中
         if current_selection:
             for r in range(table.rowCount()):
@@ -1028,6 +1133,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setItem(i, 9, QTableWidgetItem(s.get('updated_at', '')))
 
         table.setSortingEnabled(True)
+        # [NEW] 限制过长列宽触发 UI 溢出
+        self._limit_table_column_widths(table)
 
     def _on_signal_received(self, event: BusEvent):
         self.sig_bus_event.emit(event)
@@ -1137,6 +1244,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
+                # [NEW] 限制列宽溢出
+                self._limit_table_column_widths(table)
                 table.viewport().update()
                 
             self._is_updating_ui = False
@@ -1388,6 +1497,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
+                # [NEW] 限制列宽溢出
+                self._limit_table_column_widths(table)
                 table.viewport().update()
                 
         dur = (time.perf_counter() - start_t) * 1000
@@ -1461,14 +1572,32 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             elif temp_val > 20: status = "低迷"
             else: status = "冰点"
             
+            # [MOD] 状态栏综合显示：🌡️ 冰点 (15℃) | tab当前点击查看的视图的统计信息 | 🕒 21:33:59
+            # 1. 获取当前 Tab 统计信息
+            current_tab_name = self.tabs.tabText(self.tabs.currentIndex())
+            tab_stat_info = ""
+            if "🐉 龙头追踪" in current_tab_name:
+                if self._engine_ctrl:
+                    d_counts = self._engine_ctrl.get_dragon_count()
+                    tab_stat_info = f"🐉 真龙:{d_counts.get('dragon', 0)} 候选:{d_counts.get('candidate', 0)}"
+            else:
+                table = self.tabs.currentWidget()
+                if isinstance(table, QTableWidget):
+                    tab_stat_info = f"📊 {current_tab_name.strip()}: {table.rowCount()}条"
+
+            # 2. 组装展示文本 (固定模式，不再跳变)
+            status_text = f"🌡️ {status} ({temp_val:.1f}°C) | {tab_stat_info} | 🕒 {datetime.now().strftime('%H:%M:%S')}"
+            
             self.temp_label.setText(f"市场温度: {status} ({temp_val:.1f}°C)")
             self.ls_ratio_label.setText(f"多空比: {ratio:.2f}")
             
             summary = self._market_stats.get('summary', '')
             if summary:
                 self.temp_label.setToolTip(summary)
-                # [MOD] 状态栏左侧显示温度与更新时间
-                self.status_label.setText(f"🌡️ {status} ({temp_val:.1f}°C) | 🕒 同步: {datetime.now().strftime('%H:%M:%S')}")
+            
+            # [FIX] 更新状态栏显示
+            self.status_label.setText(status_text)
+            self.status_label.setToolTip(f"市场指数概况: {market_up}涨 / {market_down}跌")
             
             # 动态改色
             color = "#ddd"

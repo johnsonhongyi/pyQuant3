@@ -3731,14 +3731,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 from sector_focus_engine import get_focus_controller
                                 fc = get_focus_controller()
 
-                                # ① 核心：直接从已运算完毕的 BiddingMomentumDetector 注入 (零拷贝逻辑)
+                                # ① 注入基础行情表 (确保扫描引擎始终有底层数据支持)
+                                fc.inject_realtime(full_df)
+
+                                # ② 专家通道：从 BiddingMomentumDetector 注入分析结果 (零拷贝逻辑)
                                 _sbp = getattr(self, 'sector_bidding_panel', None)
                                 _detector = getattr(_sbp, 'detector', None) if _sbp else None
                                 if _detector is not None:
                                     fc.inject_from_detector(_detector)
-                                else:
-                                    # 降级：无 detector，仅用 df_all 聚合 (使用 readonly 视图减少 CPU)
-                                    fc.inject_realtime(full_df) 
 
                                 # ② 55188 外部数据（主力/题材/人气）
                                 try:

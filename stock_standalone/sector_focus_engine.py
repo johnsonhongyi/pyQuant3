@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import threading
 import time
-import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,7 +44,8 @@ try:
 except ImportError:
     tdd = None
 
-logger = logging.getLogger(__name__)
+from logger_utils import LoggerFactory
+logger = LoggerFactory.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §0  常量与枚举
@@ -417,16 +417,8 @@ class SectorFocusMap:
                         sector_type = marker
                         break
 
-                # 计算龙头 VWAP（用 klines 均价）
-                leader_vwap = 0.0
-                if leader_klines:
-                    vol_sum = sum(float(k.get('volume', 0)) for k in leader_klines)
-                    amt_sum = sum(
-                        float(k.get('volume', 0)) * float(k.get('close', 0))
-                        for k in leader_klines
-                    )
-                    if vol_sum > 0:
-                        leader_vwap = amt_sum / vol_sum
+                # [FIX] 遵循 SSOT 原则，直接从探测器预计算好的快照中提取 VWAP，不再本地重复计算
+                leader_vwap = float(sec.get('leader_vwap', 0.0))
 
                 # [NEW] 赛马模式：获得跟随股列表 (Move up to fix NameError)
                 followers = sec.get('followers', [])
@@ -844,9 +836,9 @@ class StarFollowEngine:
     v2：确认条件增加对 detector board_score 的直接引用
     """
 
-    LEADER_MIN_ZT_OR_PCT  = 9.0    # [MOD] 龙头门槛巨幅提升：必须触碰或封死涨停(≥9%)，或具备极强爆发力
-    LEADER_MIN_BID_SCORE  = 5.0    # 竞价/detector score 相应提高
-    LEADER_HOT_RANK_MAX   = 100    # [MOD] 收缩人气要求，必须是全市场前 100 名的焦点
+    LEADER_MIN_ZT_OR_PCT  = 7.5    # [MOD] 下调门槛 (从 9.0 -> 7.5)，捕获更多强势启动个股
+    LEADER_MIN_BID_SCORE  = 5.0    
+    LEADER_HOT_RANK_MAX   = 150    # [MOD] 扩大范围 (从 100 -> 150)，包含更多热点个股
 
     def __init__(self, sector_map: SectorFocusMap):
         self._sector_map = sector_map
@@ -1114,9 +1106,19 @@ class DragonLeaderTracker:
             if rec.prev_day_high > 0:
                 is_new_hi = rec.today_high > rec.prev_day_high
                 is_ok_low = rec.today_low  >= rec.prev_day_low * 0.998
+                
+                # [NEW] 识别冲高回落：如果创了新高但目前涨幅回吐严重
+                is_fallback = is_new_hi and current_price < rec.today_high * 0.97
+                
                 if is_new_hi and is_ok_low:
                     if '盘中新高' not in rec.tags:
                         rec.tags.append('盘中新高')
+                    
+                    if is_fallback:
+                        if '冲高回落' not in rec.tags: rec.tags.append('冲高回落')
+                    else:
+                        rec.tags = [t for t in rec.tags if t != '冲高回落']
+                        
                     rec.tags = [t for t in rec.tags if t != '盘中破昨低']
                     if rec.status == DragonStatus.WARNING and rec.today_high > rec.prev_day_high * 1.002:
                         rec.warning_days = max(0, rec.warning_days - 1)
@@ -1149,31 +1151,40 @@ class DragonLeaderTracker:
 
         with self._lock:
             for code, rec in list(self._records.items()):
-                # 当日高低对比昨日
-                if rec.prev_day_high > 0:
-                    made_new_high = rec.today_high > rec.prev_day_high
-                    made_new_low  = rec.today_low  < rec.prev_day_low * 0.998 if rec.prev_day_low > 0 else False
+                # [MOD] 新高天判定逻辑加固：需满足新高且收盘具备一定强度
+                # 1. 物理新高
+                physical_new_high = rec.today_high > rec.prev_day_high
+                # 2. 趋势强度 (收盈上涨 或 收盘价维持在昨日高点 99.5% 以上)
+                is_strong_close = (rec.current_price >= rec.prev_day_close * 1.002) or (rec.current_price > rec.prev_day_high * 0.995)
+                # 3. 破位判定 (跌破昨低 或 当日跌幅过大)
+                made_new_low  = rec.today_low  < rec.prev_day_low * 0.998 if rec.prev_day_low > 0 else False
+                is_fatal_drop = (rec.current_pct < -3.5) # 核心保护：跌幅过大强制 Reset
 
-                    if made_new_high and not made_new_low:
-                        rec.consecutive_new_highs += 1
-                        if '连续新高' not in rec.tags:
-                            rec.tags.append('连续新高')
-                    else:
+                if physical_new_high and is_strong_close and not made_new_low and not is_fatal_drop:
+                    rec.consecutive_new_highs += 1
+                    if '连续新高' not in rec.tags:
+                        rec.tags.append('连续新高')
+                else:
+                    # [MOD] 柔软化归零逻辑：仅在明显跌破昨低或发生 3.5% 以上大跌时重置
+                    # 若只是盘整（未创新高但也未破位），保留原有计数不增加，确保护航持续性
+                    if is_fatal_drop or made_new_low:
                         rec.consecutive_new_highs = 0
                         rec.tags = [t for t in rec.tags if t != '连续新高']
+                        if is_fatal_drop:
+                            if '大跌重置' not in rec.tags: rec.tags.append('大跌重置')
 
-                    if made_new_low:
-                        if rec.status != DragonStatus.WARNING:
-                            rec.status = DragonStatus.WARNING
-                        rec.warning_days += 1
-                        if '创新低' not in rec.tags:
-                            rec.tags.append('创新低')
-                    else:
-                        rec.tags = [t for t in rec.tags if t != '创新低']
-                        if rec.status == DragonStatus.WARNING:
-                            rec.warning_days = max(0, rec.warning_days - 1)
-                            if rec.warning_days == 0:
-                                rec.status = DragonStatus.CANDIDATE
+                if made_new_low:
+                    if rec.status != DragonStatus.WARNING:
+                        rec.status = DragonStatus.WARNING
+                    rec.warning_days += 1
+                    if '创新低' not in rec.tags:
+                        rec.tags.append('创新低')
+                else:
+                    rec.tags = [t for t in rec.tags if t != '创新低']
+                    if rec.status == DragonStatus.WARNING:
+                        rec.warning_days = max(0, rec.warning_days - 1)
+                        if rec.warning_days == 0:
+                            rec.status = DragonStatus.CANDIDATE
 
                 # 淘汰：连续预警超阈值
                 if rec.warning_days >= self.WARNING_ELIM_DAYS:
@@ -1260,8 +1271,11 @@ class DragonLeaderTracker:
             rec = self._records.get(code)
         if rec is None or rec.status in (DragonStatus.ELIMINATED, DragonStatus.WARNING):
             return None
-        # 必须确认盘中新高
-        if rec.prev_day_high > 0 and rec.today_high <= rec.prev_day_high:
+        # [MOD] 信号触发放宽：物理新高 或 涨幅保持在 5% 以上且今日不弱(dff>0)
+        is_physical_new_hi = rec.today_high > rec.prev_day_high
+        is_dynamic_strong  = rec.current_pct >= 5.0 and rec.dff > 0.5
+        
+        if rec.prev_day_high > 0 and not is_physical_new_hi and not is_dynamic_strong:
             return None
         if rec.current_price <= 0:
             return None
@@ -1388,16 +1402,18 @@ class DragonLeaderTracker:
                     c_high, c_low, c_close = float(curr['high']), float(curr['low']), float(curr['close'])
                     p_high, p_low, p_close = float(prev['high']), float(prev['low']), float(prev['close'])
                     
-                    # 核心判定逻辑：显著尝试突破或维持高位
-                    if c_high >= p_high: 
+                    # 核心判定逻辑：显著尝试突破或维持高位 (需满足日高且收盘价相对稳定)
+                    # [FIX] 增加收盘强度校验，并修复计数器不归零的逻辑缺陷
+                    if c_high >= p_high and c_close >= p_close * 0.995: 
                         consecutive_highs += 1
                         if consecutive_highs == 1:
                             entry_p = p_close
                         # 累计涨幅基于入场点
                         cum_pct = (c_close / entry_p - 1) * 100 if entry_p > 0 else 0.0
                         entry_p = min(entry_p, p_close) if entry_p > 0 else entry_p
-                    elif c_low < p_low * 0.985: # 容忍度放宽到 1.5%，防止由于正常波动中断计数
-                        consecutive_highs = 0 
+                    else:
+                        # [FIX] 未创新高或收盈严重不及预期，计数归零
+                        consecutive_highs = 0
                         if c_low < p_low * 0.970: # 严重破位 (3%)
                             has_fatal_break = True
                 
@@ -1464,7 +1480,7 @@ class IntradayPullbackDetector:
     MIN_DROP_FROM_HIGH   = -0.012    # [MOD] 回落容忍度收窄，强者恒强不深调
     MAX_DROP_FROM_VWAP   = -0.003    # [MOD] 必须贴身均线
     MAX_VOL_RATIO_DURING = 0.8       # [MOD] 缩量要求更严格
-    MIN_SECTOR_HEAT      = 35.0      # [MOD] 门槛从 25 提至 35，非超级热点不发信号
+    MIN_SECTOR_HEAT      = 35.0      # [MOD] 门槛适度下调至 30.0，以增强弱势修复市场的灵敏度
 
     def __init__(self, sector_map: SectorFocusMap, star_engine: StarFollowEngine):
         self._sector_map = sector_map
@@ -1537,6 +1553,7 @@ class IntradayPullbackDetector:
         sector_type = sh.sector_type if sh else ''
 
         if sector_heat < self.MIN_SECTOR_HEAT:
+            logger.debug(f"[Pullback] {code} 被拦截: 板块热度({sector_heat:.1f}) < 阈值({self.MIN_SECTOR_HEAT})")
             return None
 
         drop_from_high = (price - day_high) / day_high if day_high > 0 else 0.0
@@ -1546,14 +1563,17 @@ class IntradayPullbackDetector:
         # ── [C] 强势前置条件：必须是启动中的“蛟龙” ──────────────────
         # 1. 启动阳线收盘价不破原则：如果跌破昨日收盘（启动点），直接宣告死亡
         if price < prev_close:
+            logger.debug(f"[Pullback] {code} 被拦截: 价格({price}) < 昨收({prev_close})")
             return None
         
         # 2. 涨幅门槛：非极端强势不入场 (启动点通常在 3%~5% 以上)
-        if change_pct < 2.5:           
+        if change_pct < 2.0:           # [MOD] 门槛下调至 2.0%
+            logger.debug(f"[Pullback] {code} 被拦截: 涨幅({change_pct:.2f}%) < 2.0%")
             return None
         
         # 3. 分时结构：必须在均价线之上运行 (VWAP 是多空生死线)
         if diff_from_vwap < -0.005:    
+            logger.debug(f"[Pullback] {code} 被拦截: 破均线({diff_from_vwap*100:.2f}%)")
             return None
         
         # [NEW] 开盘 10 分钟加权：09:30-09:40 是黄金狙击时段
@@ -1718,7 +1738,7 @@ class DecisionQueue:
     def get_sorted(self, status_filter: Optional[str] = "待处理") -> List[DecisionSignal]:
         with self._lock:
             signals = list(self._signals.values())
-        if status_filter:
+        if status_filter and status_filter != "ALL":
             signals = [s for s in signals if s.status == status_filter]
         return sorted(signals, key=lambda s: s.priority, reverse=True)
 
@@ -1975,10 +1995,11 @@ class SectorFocusController:
     def tick(self, force: bool = False):
         """
         单次行情 Tick 处理
-        - 周期性同步 55188 缓存
-        - 节流30秒做全量板块热力计算（降级通道）
-        - 实时扫描回踩买点并推入决策队列
+        - 决策队列与板块热力的核心驱动泵
         """
+        if force:
+            logger.info("🛠️ [Controller] 引擎手动触发执行 (Manual Run Triggered)")
+        
         now = time.time()
         # [MOD] 手动或周期同步 55188 缓存数据
         if force or (now - self._last_55188_sync > 300):
@@ -2061,10 +2082,14 @@ class SectorFocusController:
         # 实时扫描回踩买点
         if df is not None and not df.empty:
             self._scan_pullbacks(df, force=force)
+        else:
+            if force:
+                logger.warning("⚠️ [Controller] 引擎扫描跳过: _df_realtime 为空")
 
     def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
-        hot_sectors = self.sector_map.get_hot_sectors(top_n=8)
+        # [MOD] 扩大扫描宽度 (从 8 -> 15)，覆盖更广泛的轮动板块
+        hot_sectors = self.sector_map.get_hot_sectors(top_n=15)
 
         for sh in hot_sectors:
             # 龙头自身 + 跟进股
@@ -2085,21 +2110,48 @@ class SectorFocusController:
             dragons = self.dragon_tracker.get_dragons(min_status=DragonStatus.CANDIDATE)
             for rec in dragons:
                 snap = self.sector_map.get_stock_snap(rec.code)
-                if not snap:
-                    continue
+                
+                # --- [FIX] 增加从 df_realtime 回退提取逻辑，防止因 snap 缺失导致数据为 0 ---
+                price, vwap, dff, pct, day_high, day_low = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+                
+                
+                if df is not None and not df.empty:
+                    # 降级：从主行情表匹配
+                    try:
+                        row = df.loc[rec.code] if rec.code in df.index else df[df['code'] == rec.code].iloc[0]
+                        price      = float(row.get('trade', row.get('price', 0)) or 0)
+                        day_high   = float(row.get('high', price) or price)
+                        day_low    = float(row.get('low', price) or price)
+                        vwap       = float(row.get('nclose', row.get('lastp1d', price)) or price)
+                        pct        = float(row.get('percent', 0.0))
+                        dff        = float(row.get('dff', 0.0))
+                    except (KeyError, IndexError):
+                        continue # 两边都找不到，跳过
+                elif snap:
+                    price      = float(snap.get('price', 0.0))
+                    day_high   = float(snap.get('high_day', 0.0))
+                    day_low    = float(snap.get('low_day', snap.get('price', 0.0)))
+                    vwap       = float(snap.get('vwap', snap.get('price', 0.0)))
+                    dff        = float(snap.get('dff', 0.0))
+                    pct        = float(snap.get('pct', 0.0))
+                else:
+                    continue # 无数据源，跳过
+                # ----------------------------------------------------------------------
+
                 try:
                     sec_name = rec.sector or self.sector_map.get_sector_of_code(rec.code) or ''
                     ldr_sh   = self.sector_map.get_sector_heat(sec_name)
                     s_heat   = ldr_sh.heat_score if ldr_sh else 50.0
+                    
                     # 更新盘中实时状态
                     self.dragon_tracker.intraday_update(
                         code=rec.code,
-                        current_price=float(snap.get('price', 0.0)),
-                        day_high=float(snap.get('high_day', 0.0)),
-                        day_low=float(snap.get('low_day', snap.get('price', 0.0))),
-                        vwap=float(snap.get('vwap', 0.0)),
-                        dff=float(snap.get('dff', 0.0)),
-                        current_pct=float(snap.get('pct', 0.0)),
+                        current_price=price,
+                        day_high=day_high,
+                        day_low=day_low,
+                        vwap=vwap,
+                        dff=dff,
+                        current_pct=pct,
                         sector_heat=s_heat,
                     )
                     # 生成龙头专属决策信号
@@ -2164,20 +2216,11 @@ class SectorFocusController:
 
             pct_diff   = float(snap.get('pct_diff', 0.0))
             dff        = float(snap.get('dff', 0.0))
+            vwap       = float(snap.get('vwap', snap.get('price', price)))
             klines     = snap.get('klines', [])
 
-            # 计算 VWAP（来自真实 kline）
-            vol_sum = sum(float(k.get('volume', 0)) for k in klines)
-            amt_sum = sum(float(k.get('volume', 0)) * float(k.get('close', 0)) for k in klines)
-            vwap = amt_sum / vol_sum if vol_sum > 0 else price
-
-            # 量比（用最近 kline 均量）
-            if len(klines) >= 3:
-                recent_vol = float(klines[-1].get('volume', 0))
-                avg_vol = sum(float(k.get('volume', 0)) for k in klines[-5:]) / min(5, len(klines))
-                vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
-            else:
-                vol_ratio = 1.0
+            # [MOD] 移除本地冗余计算，直接信任探测器快照提供的量比数据
+            vol_ratio = float(snap.get('vol_ratio', 1.0))
 
             # 真实 prices5：最近5根 kline 的收盘价
             prices5 = [float(k.get('close', price)) for k in klines[-5:]] if klines else [price]
@@ -2239,7 +2282,8 @@ class SectorFocusController:
         return [s.to_dict() for s in self.sector_map.get_hot_sectors(top_n)]
 
     def get_decision_queue(self) -> List[dict]:
-        return [s.to_dict() for s in self.decision_queue.get_sorted()]
+        # [MOD] 默认返回全部活跃信号，防止因状态过滤导致界面看起来没数据
+        return [s.to_dict() for s in self.decision_queue.get_sorted(status_filter="ALL")]
 
     def check_exit(
         self,

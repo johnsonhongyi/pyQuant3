@@ -185,8 +185,8 @@ class HotlistWorker(QThread):
                 if now - last_pull_time >= self.interval:
                     hub = get_trading_hub()
                     if hub:
-                        df_follow = hub.get_follow_queue_status()
-                        df_watchlist = hub.get_watchlist()
+                        df_follow = hub.get_follow_queue_df()
+                        df_watchlist = hub.get_watchlist_df()
                         
                         # [NEW] 补全板块信息
                         self._augment_watchlist_sectors(df_watchlist)

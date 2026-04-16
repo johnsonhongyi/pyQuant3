@@ -115,45 +115,63 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
         return
         
     # 读取全天所有个股 tick 的快照
-    # df 结构: MultiIndex(code, ticktime), columns=[price, volume, amount, type...]
+    # 适配 MultiIndex (code, ticktime) 或普通 Index
     df = pd.read_hdf(HDF5_FILE, KEY)
     
     logger.info(f"Loaded {len(df)} total records from HDF5.")
 
-    # 展开索引，统一处理逻辑
-    df = df.reset_index()
-    
-    # ticktime 处理与转换
-    if 'ticktime' not in df.columns:
-        if 'time' in df.columns:
-            df.rename(columns={'time': 'ticktime'}, inplace=True)
+    # 1. 展开索引并统一列名
+    if isinstance(df.index, pd.MultiIndex):
+        df = df.reset_index()
+    elif df.index.name in ('ticktime', 'time'):
+        df = df.reset_index()
+        
+    # 统一时间列名为 ticktime
+    if 'ticktime' not in df.columns and 'time' in df.columns:
+        df.rename(columns={'time': 'ticktime'}, inplace=True)
             
-    # 转换为 Datetime 并剔除无效时间戳 (NaT)
-    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+    # 2. 转换为 Datetime 并剔除无效时间戳
+    if not df.empty:
+        df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+        df = df.dropna(subset=['ticktime']).copy()
     prev_len = len(df)
     df = df.dropna(subset=['ticktime'])
     if len(df) < prev_len:
         logger.warning(f"Dropped {prev_len - len(df)} records with invalid timestamps (NaT).")
 
-    # [NEW] 日期过滤检测
+    # 3. 日期过滤检测 (YYYY-MM-DD)
+    if df.empty:
+        logger.error("Dataframe is empty after datetime conversion.")
+        return
+
     if replay_date:
-        # 如果传入的是 "2026-04-15" 字符串
         target_date = pd.to_datetime(replay_date).date()
-        df = df[df['ticktime'].dt.date == target_date]
+        df = df[df['ticktime'].dt.date == target_date].copy()
         if df.empty:
             logger.error(f"No data found for date: {replay_date}")
             return
         logger.info(f"Filtered for date: {replay_date}. Rows: {len(df)}")
     else:
-        # 如果未指定日期，默认取记录中最新的日期
-        # [FIX] 使用 .max() 前确保数据已去重且无空值以防 TypeError
-        latest_date = df['ticktime'].dt.date.max()
-        df = df[df['ticktime'].dt.date == latest_date]
-        logger.info(f"Auto-selected latest recording date: {latest_date}. Rows: {len(df)}")
+        # [FIX] 健壮提取最新日期，避免 .dt.date.max() 触发 AttributeError
+        try:
+            latest_dt = df['ticktime'].max()
+            if pd.isna(latest_dt): 
+                logger.error("No valid timestamps found to determine date.")
+                return
+            latest_date = latest_dt.date()
+            df = df[df['ticktime'].dt.date == latest_date].copy()
+            logger.info(f"Auto-selected latest recording date: {latest_date}. Rows: {len(df)}")
+        except Exception as e:
+            logger.error(f"Failed to infer latest date: {e}")
+            return
 
-    # [NEW] 过滤交易时间段 (09:25 - 15:00)
-    # 提取纯时间字符串 HH:MM:SS
+    # 4. 严格交易时段过滤 (09:25:00 - 15:00:00)
+    # 剔除无效的非交易时段 tick，防止干扰 detector 锚点
     df['_hms'] = df['ticktime'].dt.strftime('%H:%M:%S')
+    start_f = start_time_str if start_time_str else "09:25:00"
+    end_f = end_time_str if end_time_str else "15:00:00"
+    
+    df = df[(df['_hms'] >= start_f) & (df['_hms'] <= end_f)].copy()
     
     # 优先使用 run_replay 传入的参数，如果没有传入则使用默认值
     start_time_filter = start_time_str if start_time_str else "09:25:00"
@@ -410,17 +428,18 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                 # Metadata is now handled by the publisher's df_all seeded with real_df_all
                  
             # [核心]: 送入数据泵
-            # 为了模拟 DataPublisher 中的逻辑，必须添加 time 或 timestamp 字段
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            batch_df['timestamp'] = f"{today_str} {t_str}" 
+            # 注入模拟时间戳，确保 detector 的日期判定逻辑与回放日期一致
+            sim_date = replay_date if replay_date else datetime.now().strftime('%Y-%m-%d')
+            batch_df['timestamp'] = f"{sim_date} {t_str}" 
             
             # 向核心系统泵入 (这里它会自动处理分钟K线切割、情绪计算)
             t0 = time.time()
             publisher.update_batch(batch_df)
             t1 = time.time()
             
-            # 实时让探测器跑分 (使用优化后的 active_codes)
-            detector.update_scores(active_codes=batch_df['code'].tolist())
+            # 实时让探测器跑分 (使用优化后的 active_codes，确保归一化为字符串)
+            active_codes = [str(c).zfill(6) for c in batch_df['code'].tolist()]
+            detector.update_scores(active_codes=active_codes)
             t2 = time.time()
             
             total_ticks_processed += len(tick_slice)
