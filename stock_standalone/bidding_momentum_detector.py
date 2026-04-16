@@ -18,6 +18,7 @@ from typing import Dict, List, Set, Any, Optional, Callable, TYPE_CHECKING
 from collections import defaultdict, deque
 import pandas as pd
 import json
+from signal_bus import SignalBus
 import os
 import gzip
 import numpy as np
@@ -255,16 +256,16 @@ class TickSeries:
             if isinstance(row, dict): return row.get(key, default)
             return getattr(row, key, default)
 
-        v_pre = _val('pre_close', _val('llastp', _val('lastp1d', _val('llastp1d', _val('llstp', 0.0)))))
+        v_pre = _val('lastp1d', _val('lastp', _val('pre_close', _val('llastp', _val('llastp1d', _val('llstp', 0.0))))))
         self.last_close = float(v_pre) if v_pre and v_pre > 0 else 0.0
         
         v_open = _val('open', 0.0)
         self.open_price = float(v_open) if v_open else 0.0
 
-        v_lasth = _val('lasth1d', self.last_close)
+        v_lasth = _val('lasth1d', _val('lasth', self.last_close))
         self.last_high = float(v_lasth) if v_lasth else 0.0
         
-        v_lastl = _val('lastl1d', self.last_close)
+        v_lastl = _val('lastl1d', _val('lastl', self.last_close))
         self.last_low = float(v_lastl) if v_lastl else 0.0
         
         # [FIX] 捕获实时价格
@@ -406,6 +407,10 @@ class BiddingMomentumDetector:
 
         # 板块图：sector → set(codes)
         self.sector_map: Dict[str, Set[str]] = defaultdict(set)
+        
+        # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
+        self._signal_bus = SignalBus()
+        self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
 
         # 最终结果：sector → {leader, followers, score, ts, ...}
         self.active_sectors: Dict[str, Dict[str, Any]] = {}
@@ -469,8 +474,29 @@ class BiddingMomentumDetector:
         self._code_index: Dict[str, str] = {} # code -> name
         self._name_index: Dict[str, str] = {} # name -> code
 
-        # [REFINED] 移除构造函数中的同步加载，改由外部（如 Worker 线程）显式调用或按需加载
         # self._load_stock_selector_data()
+        
+        # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
+        self._signal_bus = SignalBus()
+        self._signal_bus.subscribe("pattern_signal", self._on_signal_received)
+
+    def _on_signal_received(self, msg: Any):
+        """
+        处理来自 SignalBus 的形态信号 (例如 SBC-Breakout)
+        msg 预期格式: {'code': '601138', 'pattern': 'SBC-Breakout', 'desc': '...'}
+        """
+        if not isinstance(msg, dict): return
+        code = msg.get('code')
+        pattern = msg.get('pattern')
+        
+        if not code or not pattern: return
+        
+        with self._lock:
+            ts = self._tick_series.get(code)
+            if ts:
+                # 将信号写入形态提示，触发 UI 变色
+                ts.pattern_hint = pattern
+                self.data_version += 1
 
     def _load_stock_selector_data(self):
         """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
@@ -2497,6 +2523,7 @@ class BiddingMomentumDetector:
                 'staged_diff': round(staged_diff, 2),      # 阶段性变动 (10分阈值重置)
                 'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
+                'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
                 'leader_price': l_data.get('price', 0.0),
                 'leader_klines': list(l_ts.klines)[-35:] if (l_ts and l_ts.klines) else (self.realtime_service.get_minute_klines(leader_code, n=35) if self.realtime_service else []),
                 'leader_last_close': l_data.get('last_close', 0),

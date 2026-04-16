@@ -432,7 +432,7 @@ class MinuteKlineCache:
         # 仅遍历核心列，极大提升 5000+ 个股的更新效率
         df_iter = df[core_cols]
         if self.simulation_mode and self.verbose and not df_iter.empty:
-             print(f"DEBUG: update_batch simulation processing {len(df_iter)} rows. Cols: {core_cols}. First row: {df_iter.iloc[0].to_dict() if len(df_iter)>0 else 'N/A'}")
+             logger.debug(f"DEBUG: update_batch simulation processing {len(df_iter)} rows. Cols: {core_cols}. First row: {df_iter.iloc[0].to_dict() if len(df_iter)>0 else 'N/A'}")
              
         for idx, row in enumerate(df_iter.itertuples(index=False)):
             try:
@@ -534,7 +534,7 @@ class MinuteKlineCache:
                 
                 # 核心更新
                 if self.verbose and self.simulation_mode and idx < 5: # 增加采样
-                     print(f"DEBUG: [{code}] price={price}, vol={current_cum_vol}, time={datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}, hhmm={hhmm}, ts={ts}")
+                     logger.debug(f"DEBUG: [{code}] price={price}, vol={current_cum_vol}, time={datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}, hhmm={hhmm}, ts={ts}")
                 
                 self._update_internal(code, price, current_cum_vol, minute_ts, hhmm=hhmm)
                 updated_codes.add(code)
@@ -2586,30 +2586,31 @@ class DataPublisher:
                 # except Exception as dh_err:
                 #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
 
-                # [REFINED] 强化间隙检测：包含 cache 中完全缺失但在当前 snapshot 活跃的代码
-                now_t = time.time()
-                if not hasattr(self, '_last_gap_log_t'): self._last_gap_log_t = 0
-                
-                # [Optimization] 启动初期加速体检 (前10次批次每60秒一次，之后15分钟一次)
-                gap_interval = 60 if self.update_count < 10 else 900
-                if now_t - self._last_gap_log_t > gap_interval:
-                    # 获取当前 snapshot 中的所有代码，用于发现完全缺失的个股
-                    active_codes = set(df['code'].astype(str).str.strip().str.zfill(6).tolist()) if not df.empty else None
+                # [REFINED] 强化间隙检测 (仅在实盘模式运行)
+                if not self.simulation_mode:
+                    now_t = time.time()
+                    if not hasattr(self, '_last_gap_log_t'): self._last_gap_log_t = 0
                     
-                    # [REFINED] 间隙检测阈值动态适配：要求达到当前上限的 80%
-                    limit_len = self.kline_cache._max_len
-                    target_threshold = int(limit_len * 0.8)
-                    low_tick_codes = self.kline_cache.count_gaps(threshold=target_threshold, active_codes=active_codes)
-                    self._last_gap_log_t = now_t
-                    
-                    if low_tick_codes:
-                        # 启动异步补全，防止阻塞主心跳
-                        codes_to_fix = list(low_tick_codes.keys())
-                        threading.Thread(
-                            target=self.backfill_gaps_from_hdf5,
-                            args=(codes_to_fix,),
-                            daemon=True
-                        ).start()
+                    # [Optimization] 启动初期加速体检 (前10次批次每60秒一次，之后15分钟一次)
+                    gap_interval = 60 if self.update_count < 10 else 900
+                    if now_t - self._last_gap_log_t > gap_interval:
+                        # 获取当前 snapshot 中的所有代码，用于发现完全缺失的个股
+                        active_codes = set(df['code'].astype(str).str.strip().str.zfill(6).tolist()) if not df.empty else None
+                        
+                        # [REFINED] 间隙检测阈值动态适配：要求达到当前上限的 80%
+                        limit_len = self.kline_cache._max_len
+                        target_threshold = int(limit_len * 0.8)
+                        low_tick_codes = self.kline_cache.count_gaps(threshold=target_threshold, active_codes=active_codes)
+                        self._last_gap_log_t = now_t
+                        
+                        if low_tick_codes:
+                            # 启动异步补全，防止阻塞主心跳
+                            codes_to_fix = list(low_tick_codes.keys())
+                            threading.Thread(
+                                target=self.backfill_gaps_from_hdf5,
+                                args=(codes_to_fix,),
+                                daemon=True
+                            ).start()
 
                 # Continue with existing pipeline...
                 self.update_count += 1

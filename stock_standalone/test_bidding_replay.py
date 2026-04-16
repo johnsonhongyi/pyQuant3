@@ -14,12 +14,21 @@ from realtime_data_service import DataPublisher, IntradayEmotionTracker, DailyEm
 from bidding_momentum_detector import BiddingMomentumDetector
 from JohnsonUtil import commonTips as cct
 
+# --- [UI IMPORTS] ---
+try:
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QThread, pyqtSignal
+    from bidding_racing_panel import BiddingRacingRhythmPanel
+    UI_AVAILABLE = True
+except ImportError:
+    UI_AVAILABLE = False
+
 # [NEW] Import real data fetching logic
 from instock_MonitorTK import test_single_thread
 
-import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from JohnsonUtil import LoggerFactory
+# [SILENT-MODE] 使用统一日志工厂，UI模式下默认级别仅 WARNING
+logger = LoggerFactory.getLogger()
 HDF5_FILE = r"g:\sina_MultiIndex_data.h5"
 KEY = "all_30"
 
@@ -90,7 +99,36 @@ def get_mock_cat(code):
         return f'{market};半导体;芯片'
     return market
 
-def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None):
+    print("-" * 50)
+
+
+class ReplayWorker(QThread):
+    """
+    异步回放执行器，用于在不阻塞主 UI 线程的情况下运行回放逻辑。
+    """
+    progress_update = pyqtSignal(str) # 当前回放时间 HH:MM:SS
+    finished = pyqtSignal()
+
+    def __init__(self, kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+        self.is_running = True
+
+    def run(self):
+        def ui_callback(t_str):
+            if t_str is not None:
+                self.progress_update.emit(t_str)
+            return self.is_running
+
+        self.kwargs['ui_callback'] = ui_callback
+        run_replay(**self.kwargs)
+        self.finished.emit()
+
+    def stop(self):
+        self.is_running = False
+
+
+def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None, ui_callback=None, detector=None, publisher=None):
     """
     基于 HDF5 本地 Tick 数据，按时间线回回放并推入 DataPublisher/BiddingMomentumDetector。
     
@@ -108,7 +146,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     if stops is None:
         stops = []
         
-    logger.info(f"Loading data from {HDF5_FILE} (key={KEY})...")
+    is_ui_mode = (ui_callback is not None)
+    if not is_ui_mode:
+        logger.info(f"Loading data from {HDF5_FILE} (key={KEY})...")
     
     if not os.path.exists(HDF5_FILE):
         logger.error(f"Cannot find HDF5 file: {HDF5_FILE}")
@@ -197,7 +237,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     
     # --- [REAL DATA MODE] ---
     logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
-    real_df_all = test_single_thread(single=True, resample=resample)
+    real_df_all = test_single_thread(single=True, resample=resample,log_level=LoggerFactory.ERROR)
     if real_df_all is None or real_df_all.empty:
         logger.error("Failed to fetch real data from production environment.")
         return
@@ -227,8 +267,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info(f"Successfully fetched {len(real_df_all)} real stock records (Data Leakage Protection Active).")
 
     # [Phase 4] 注册代码名称对应关系
-    publisher = DataPublisher(high_performance=True, scraper_interval=99999, enable_backup=False, 
-                               simulation_mode=True, verbose=not concise)
+    if publisher is None:
+        publisher = DataPublisher(high_performance=True, scraper_interval=99999, enable_backup=False, 
+                                   simulation_mode=True, verbose=not concise)
     publisher.register_names(real_df_all)
     pd.options.mode.chained_assignment = None # 避免测试时出现 SettingWithCopyWarning
     
@@ -238,7 +279,11 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     # 我们不需要真实时间自动备份和抓取外部
     publisher.set_paused(True) 
     
-    detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
+    if detector is None:
+        detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
+    else:
+        # [NEW] 重用传入的 detector，绑定 publisher
+        detector.realtime_service = publisher
     
     # --- [阈值放宽]: 测试环境下，我们希望看到即便只有 0.1% 的异动也会上榜 ---
     detector.strategies['pct_change']['min'] = -10.0
@@ -342,6 +387,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info("Pre-grouping tick data by time (this takes a few seconds)...")
     df_grouped = {t: group for t, group in df.groupby('ticktime')}
 
+    _last_emitted_t_str = ""
     try:
         for idx, t_str in enumerate(unique_times):
             # 取出这一时刻所有改动的 tick
@@ -355,11 +401,24 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                 diff_sec = curr_seconds - last_tick_seconds
                 if diff_sec > 0:
                     wait_time = diff_sec / playback_speed
-                    # 扣除脚本运行耗时 
+                    if wait_time > 2.0: wait_time = 0.5 # 遇到长空档压缩等待
+                        
                     elapsed = time.time() - last_real_time
-                    actual_wait = max(0, wait_time - elapsed)
-                    if actual_wait > 0:
-                        time.sleep(actual_wait)
+                    remaining_wait = wait_time - elapsed
+                    
+                    while remaining_wait > 0:
+                        # [THROTTLE] 只有时间真实改变才触发 UI 回调，防止高频空转信号导致界面跳动
+                        if ui_callback:
+                            if t_str != _last_emitted_t_str:
+                                if not ui_callback(t_str): return
+                                _last_emitted_t_str = t_str
+                            else:
+                                # 仅检查运行状态，不发射信号
+                                if not ui_callback(None): return 
+                        
+                        sleep_step = min(remaining_wait, 0.05)
+                        time.sleep(sleep_step)
+                        remaining_wait -= sleep_step
                         
             last_real_time = time.time()
             last_tick_seconds = curr_seconds
@@ -400,6 +459,12 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                         price = float(getattr(row_t, 'trade', 0))
                         if price > 0:
                             ts.now_price = price
+                            # [PERF] 同步昨收，确保 current_pct 属性能够正确计算
+                            if ts.last_close <= 0:
+                                settlement = float(getattr(row_t, 'settlement', 0))
+                                if settlement > 0:
+                                    ts.last_close = settlement
+                                
                             if price > ts.high_day: ts.high_day = price
                             if price < ts.low_day or ts.low_day == 0: ts.low_day = price
             
@@ -410,6 +475,12 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                     # 尝试从 registry 补全昨收
                     batch_df['settlement'] = batch_df['code'].map(lambda x: getattr(detector._tick_series.get(x), 'last_close', 0))
                 
+                # [FIX] 确保 settlement 有效，否则 percent 计算会变成 inf 或 0
+                has_valid_settle = (batch_df['settlement'] > 0).any()
+                if not has_valid_settle:
+                    # 极限兜底：从 df 本身找 (如果是 MultiIndex 可能会有)
+                    pass 
+
                 # 强制覆盖 percent
                 batch_df['percent'] = (batch_df['trade'] - batch_df['settlement']) / batch_df['settlement'] * 100
                 batch_df.loc[batch_df['settlement'] <= 0, 'percent'] = 0.0
@@ -467,9 +538,19 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                 else:
                     sys.stdout.write(f"\r[Playback] {speed_label} Progress: {t_str} | Speed: {speed_x:.1f}x ({tps:.0f} tps) | Pub: {cost_pub:.1f}ms | Det: {cost_det:.1f}ms | Total: {len(publisher.kline_cache.cache)}      ")
                 sys.stdout.flush()
+            
+            # [UI MODE OPTIMIZATION] 释放一点 CPU 给 UI 线程
+            if is_ui_mode:
+                time.sleep(0.001)
+
+            # [UI CALLBACK]
+            if ui_callback:
+                if not ui_callback(t_str):
+                    logger.info("Playback stopped by UI request.")
+                    break
     
-            # 检查是否到达切片观察点
-            if next_stop_idx < len(stops) and str(t_str) >= str(stops[next_stop_idx]):
+            # 检查是否到达切片观察点 (UI 模式下不再控制台停顿)
+            if not is_ui_mode and next_stop_idx < len(stops) and str(t_str) >= str(stops[next_stop_idx]):
                 stop_time = stops[next_stop_idx]
                 sys.stdout.write("\n\n")
                 logger.info(f"=== ⏰ 触发时间切片停顿观测点: {stop_time} ===")
@@ -608,6 +689,8 @@ if __name__ == "__main__":
     parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
     parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
     parser.add_argument("--today", action="store_true", help="Automatically replay today's data")
+    parser.add_argument("--ui", action="store_true", help="Launch High-Performance Bidding Racing UI")
+    parser.add_argument("--log", type=lambda s: s.upper(), default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Console log level")
     
     args = parser.parse_args()
     
@@ -626,7 +709,16 @@ if __name__ == "__main__":
         replay_date = datetime.now().strftime('%Y-%m-%d')
         logger.info(f"Today mode enabled. Targeting date: {replay_date}")
 
-    run_replay(
+    # [LOG-CONTROL] 解析日志级别映射
+    log_level_map = {
+        'DEBUG': LoggerFactory.DEBUG,
+        'INFO': LoggerFactory.INFO,
+        'WARNING': LoggerFactory.WARNING,
+        'ERROR': LoggerFactory.ERROR
+    }
+    user_log_level = log_level_map.get(args.log.upper(), LoggerFactory.WARNING)
+
+    replay_kwargs = dict(
         start_time_str=args.start, 
         end_time_str=args.end, 
         playback_speed=args.speed, 
@@ -636,3 +728,91 @@ if __name__ == "__main__":
         codes=args.codes,
         replay_date=replay_date
     )
+    
+    # --- [REAL DATA MODE] ---
+    if not args.codes:
+        # 获取基准行情时透传日志级别
+        resample = args.resample
+        logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
+        real_df_all = test_single_thread(single=True, resample=resample, log_level=user_log_level)
+        if real_df_all is None or real_df_all.empty:
+            logger.error("Failed to fetch real data from production environment.")
+        else:
+            from bidding_momentum_detector import BiddingMomentumDetector
+            pass
+
+    if args.ui and UI_AVAILABLE:
+        logger.info("Starting UI-based Racing Replay...")
+        app = QApplication(sys.argv)
+        
+        # 预加载探测器但不运行回放
+        # 为了 UI 同步，我们需要让 Detector 和 ReplayWorker 共享实例
+        # 修改：我们需要把 detector 初始化移出来
+        
+        # 为了 UI 模式，我们先最小化运行 run_replay 的准备部分（数据加载等）
+        # 或者直接让 ReplayWorker 处理
+        
+        from bidding_momentum_detector import BiddingMomentumDetector
+        # 注意：这里需要一个 Mock 或真实的 Publisher，如果不运行 run_replay，UI 可能没数据
+        # 解决方案：UI 模式下全程走 ReplayWorker
+        
+        # 这种模式下，我们需要在 run_replay 内部把 detector 暴露出来，或者在外部创建
+        # 我们对 run_replay 做一点小修改，支持传入 detector 实例
+        
+        worker = ReplayWorker(replay_kwargs)
+        
+        # --- [SILENT-MODE] 强力压制全局单例 Logger ---
+        try:
+            # 获取那个“唯一的”单例并强制封口 (除非指定了 DEBUG)
+            global_logger = LoggerFactory.getLogger()
+            global_logger.setLevel(user_log_level)
+            
+            # 同时清除 root logger 可能存在的 console handler
+            import logging
+            logging.getLogger().setLevel(logging.WARNING)
+            
+            if user_log_level >= LoggerFactory.WARNING:
+                print(f"🤫 静默模式：当前后台日志级别已设为 {args.log.upper()}")
+        except Exception as e:
+            logger.exception(f"Log conversion failed: {e}")
+
+        # 启动 UI
+        # 我们需要等到 DataPublisher 和 Detector 在 Worker 线程初始化后再显示 UI 吗？
+        # 简单起见，我们先构造面板，Detector 将在 Worker 中被创建并赋值给面板
+        # [LINKAGE] 初始化联动发送器
+        from JohnsonUtil.stock_sender import StockSender
+        # 默认不启用 ths/dfcf 以防弹窗，仅开启 tdx 联动
+        sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
+        
+        panel = BiddingRacingRhythmPanel(sender=sender)
+        
+        def on_progress(t_str):
+            panel.timeline.set_time(t_str)
+        
+        # [ROBUSTNESS] 窗口关闭时停止回放线程
+        def on_panel_closed():
+            worker.stop()
+            worker.wait()
+        
+        panel.closed.connect(on_panel_closed)
+
+        # 修改 run_replay 和 ReplayWorker 以配合 UI 更好的暴露对象
+        # 暂且为了演示，我们假设 Detector 是在 run_replay 逻辑中被成功绑定的。
+        
+        # [REFINED] 在 worker 启动前预创建一个 detector 传进去
+        from realtime_data_service import DataPublisher
+        # [PERF] 强制 verbose=args.verbose (通常为 False)，避免底层代码中的大量打印造成卡顿
+        publisher = DataPublisher(simulation_mode=True, high_performance=True, verbose=args.verbose)
+        detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
+        panel.detector = detector
+        
+        replay_kwargs['detector'] = detector # 给 run_replay 传入现有的 detector
+        replay_kwargs['publisher'] = publisher # 同步注入 publisher
+        
+        worker.progress_update.connect(on_progress)
+        worker.start()
+        
+        panel.show()
+        sys.exit(app.exec())
+    else:
+        run_replay(**replay_kwargs)

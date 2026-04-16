@@ -302,45 +302,6 @@ def testlog():
     logger.addHandler(fh)
     logger.addHandler(ch)
 
-def getLogger_old_(name=None,logpath=None,writemode='a',show_detail=True):
-
-    if logpath is None:
-        log_f = get_log_file(log_n='stock.log')
-    else:
-        log_f = logpath
-    logger = logging.getLogger(name)
-    '''
-    #jupyter Notebook
-    if len(logger.handlers) > 0:
-        print "name:%s handlers:%s stdout:%s"%(name,logger.handlers,sys.stdout)
-        logger.handlers.pop()
-    else:
-        logger.propagate = False
-        print "name:%s no handlers,stdout:%s"%(name,sys.stdout)
-    if isinstance(type(sys.stderr),ipykernel.iostream.OutStream):
-        print 'ipython'
-        stdout = sys.stdout
-        stderr = sys.stderr
-    '''
-    logger.setLevel(logging.ERROR)
-    ch = logging.StreamHandler()
-
-    handler = MultiprocessHandler(log_f, when='D', encoding="utf-8")
-    if show_detail:
-        handler_logformat = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
-        ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
-    else:
-        handler_logformat = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
-        ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
-    
-    handler.setFormatter(handler_logformat)
-
-    ch.setFormatter(ch_formatter)
-    logger.addHandler(ch)
-    logger.addHandler(handler)
-    return logger
-
-
 import logging
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import multiprocessing
@@ -532,7 +493,7 @@ def _ensure_listener_started(log_f, show_detail=True):
 # 全局保存上一次 log_f
 _GLOBAL_LAST_LOG_F = None
 
-def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
+def getLogger(name=None, logpath='instock_tk.log', show_detail=True,level=logging.ERROR):
     """
     获取全局 logger，支持多进程/多线程
     """
@@ -563,7 +524,7 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
 
     # 创建 logger
     logger = logging.getLogger(_GLOBAL_LOG_NAME)
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(level)
     logger.propagate = False
 
     # # 添加 QueueHandler
@@ -584,72 +545,6 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
 # ---------------- 全局单例 ----------------
 log = getLogger()
 
-
-def getLogger_no_mp(name=None, logpath='instock_tk.log', writemode='a', show_detail=True):
-
-    global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
-
-    if _GLOBAL_LOGGER:
-        return _GLOBAL_LOGGER  # 已经初始化过，直接返回
-
-    # 如果第一次调用传了 name，就用它初始化全局 name
-    if name:
-        _GLOBAL_LOG_NAME = name
-    elif not _GLOBAL_LOG_NAME:
-        _GLOBAL_LOG_NAME = "instock_TK"  # 默认名字
-
-    if logpath is None:
-        # log_f = get_log_file(log_n='stock.log')
-        log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
-    else:
-        log_f = logpath
-        # log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
-
-    logger = logging.getLogger(_GLOBAL_LOG_NAME)
-    # LoggerFactory.log = LoggerFactory.getLogger("instock_TK", logpath=log_file)
-
-    logger.setLevel(logging.ERROR)  # 可以根据需求改为 INFO 或 ERROR
-    # logger.propagate = False  # 避免重复打印到 root logger
-
-    if not logger.handlers:  # 避免重复添加 handler
-        # ---------------- 控制台 ----------------
-        ch = logging.StreamHandler()
-        ch_formatter = logging.Formatter(
-            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
-            if show_detail else
-            "(%(funcName)s:%(lineno)s): %(message)s"
-        )
-        ch.setFormatter(ch_formatter)
-        logger.addHandler(ch)
-
-        # # ---------------- MultiprocessHandler ----------------
-        # mph = MultiprocessHandler(
-        #     log_f,
-        #     when='D',             # 每天轮转
-        #     backupCount=3,        # 保留 3 个历史日志
-        #     encoding='utf-8'
-        # )
-
-        # ---------------- File Handler ----------------
-        mph = RotatingFileHandler(
-            log_f,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8"
-        )
-
-
-        mph_formatter = logging.Formatter(
-            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
-            if show_detail else
-            "(%(funcName)s:%(lineno)s): %(message)s"
-        )
-        mph.setFormatter(mph_formatter)
-        logger.addHandler(mph)
-
-    return logger
-
-
 def set_log_file(console, level_s='DEBUG'):
     console = logging.StreamHandler()
     console.setLevel(eval('logging.%s' % level_s))
@@ -660,5 +555,5 @@ def set_log_file(console, level_s='DEBUG'):
 
 if __name__ == '__main__':
     getLogger("www").debug("www")
-#    log=JohnsonLoger("www").setLevel(DEBUG)
+    # log=JohnsonLoger("www").setLevel(DEBUG)
 #   pass
