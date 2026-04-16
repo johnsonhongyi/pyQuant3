@@ -7,7 +7,7 @@ from typing import Tuple,List,Dict
 from JohnsonUtil import LoggerFactory
 import logging
 import tkinter as tk
-from tkinter import messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext, ttk
 import threading
 
 try:
@@ -125,10 +125,21 @@ RESERVED_SQL_FUNCS = {
 
 
 
-def extract_columns(expr: str) -> set:
+def extract_columns(expr: str) -> list:
+    """
+    从条件表达式中提取列名，保持出现顺序并去重。
+    """
     tokens = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", expr)
     keywords = {"and", "or", "not", "True", "False"}
-    return {t for t in tokens if t not in keywords and t not in RESERVED_SQL_FUNCS and not re.fullmatch(r"e\d+", t)}
+    # 保持顺序去重
+    seen = set()
+    res = []
+    for t in tokens:
+        if t not in keywords and t not in RESERVED_SQL_FUNCS and not re.fullmatch(r"e\d+", t):
+            if t not in seen:
+                res.append(t)
+                seen.add(t)
+    return res
 
 def eval_condition(row: dict, expr: str) -> Tuple[bool, Optional[str]]:
     # 构建执行上下文，支持 SQL 风格函数
@@ -169,11 +180,13 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
             })
             continue
 
-        # 逐子条件拆分
-        # sub_conditions = [x.strip() for x in expr.split("and")]
-        sub_conditions = [x.strip() for x in re.split(r'\band\b', expr)]
+        # 逐子条件拆分 (使用 query_engine 统一的智慧拆分逻辑，确保括号嵌套与 OR 分支能平铺展示)
+        sub_conditions = query_engine.split_sub_conditions(expr)
         sub_results = []
-        all_ok = True
+        
+        # [NEW] 整体判定分离：总判定由原始表达式直接 eval 得到，详情列表仅由拆分器生成的子块构成
+        all_ok, _ = eval_condition(row, expr)
+        
         for cond in sub_conditions:
             ok, err = eval_condition(row, cond)
             sub_results.append({
@@ -181,8 +194,6 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
                 "ok": ok,
                 "values": {c: row[c] for c in extract_columns(cond)}
             })
-            if not ok:
-                all_ok = False
 
         results.append({
             "expr": expr,
@@ -206,8 +217,8 @@ def format_check_result(results: List[Dict[str, Any]]) -> str:
             for c in r["missing"]:
                 lines.append(f"    - {c}")
         elif "sub_conditions" in r:
-            # 1. 显示该表达式中涉及的所有字段当前数值
-            involved_cols = sorted(list(extract_columns(r['expr'])))
+            # 1. 显示该表达式中涉及的所有字段当前数值 (保持出现在表达式中的顺序)
+            involved_cols = extract_columns(r['expr'])
             if involved_cols and "full_data" in r:
                 lines.append("  当前涉及字段数值:")
                 row_data = r["full_data"]
@@ -368,16 +379,83 @@ def check_code(
             dst.config(state=tk.DISABLED)
         search_var.trace_add("write", on_search)
     # 按钮栏
+    # 按钮栏布局重构：增加历史选择与手动测试
     btn_frame = tk.Frame(win, bg=bg_color)
-    btn_frame.pack(fill="x", pady=10)
+    btn_frame.pack(fill="x", pady=10, side="bottom") # 显式设置在底部
+    
+    # [NEW] 优先 pack 左右两端的固定按钮，确保它们可见
+    btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report)
+    btn_close.pack(side="right", padx=20)
+
     btn_details = tk.Button(btn_frame, text="显示详情", command=show_all_details, 
                             bg="#2196F3", fg="white", font=("微软雅黑", 9, "bold"))
     btn_details.pack(side="left", padx=20)
-    btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report)
-    btn_close.pack(side="right", padx=20)
-    # 确保窗口在前台
-    win.lift()
-    win.focus_force()
+
+    # 2. 中间交互区域 (历史驱动 + 手动输入)
+    manual_frame = tk.Frame(btn_frame, bg=bg_color)
+    manual_frame.pack(side="left", fill="x", expand=True)
+
+    tk.Label(manual_frame, text="历史:", bg=bg_color).pack(side="left")
+    
+    # 构建历史选项列表
+    history_options = []
+    _queries_list = queries if isinstance(queries, list) else [queries]
+    for i, q in enumerate(_queries_list):
+        if isinstance(q, dict):
+            q_name = q.get("name") or q.get("expr", "")[:15]
+            history_options.append(f"H{i+1}: {q_name}")
+        elif isinstance(q, str):
+            history_options.append(f"H{i+1}: {q[:15]}")
+    
+    if not history_options:
+        history_options = ["(无历史查询)"]
+    
+    # 使用 tk.OptionMenu 替代 ttk.Combobox 提升稳定性
+    selected_hist = tk.StringVar(manual_frame)
+    selected_hist.set("选择历史...")
+    
+    def on_history_change(*args):
+        val = selected_hist.get()
+        if ":" in val:
+            try:
+                idx = int(val.split(":")[0][1:]) - 1
+                expr = _queries_list[idx]
+                if isinstance(expr, dict): expr = expr.get("expr", "")
+                manual_expr_var.set(expr)
+                run_manual_test(expr)
+            except: pass
+
+    opt_menu = tk.OptionMenu(manual_frame, selected_hist, *history_options, command=on_history_change)
+    opt_menu.config(width=12)
+    opt_menu.pack(side="left", padx=5)
+
+    tk.Label(manual_frame, text="手动测试:", bg=bg_color).pack(side="left", padx=(10, 0))
+    manual_expr_var = tk.StringVar()
+    manual_entry = tk.Entry(manual_frame, textvariable=manual_expr_var)
+    manual_entry.pack(side="left", fill="x", expand=True, padx=5)
+
+    def run_manual_test(expr=None):
+        """执行手动测试逻辑并追加到报告"""
+        target_expr = expr or manual_expr_var.get().strip()
+        if not target_expr or target_expr == "选择历史...": return
+        
+        # 实时评估
+        res = test_code_query(df_code, [{"expr": target_expr}])
+        summary = format_check_result(res)
+        
+        # 解锁 ScrolledText 并追加内容
+        st.config(state=tk.NORMAL)
+        st.insert(tk.END, f"\n{'='*20} 手动测试: {datetime.now().strftime('%H:%M:%S')} {'='*20}\n")
+        st.insert(tk.END, summary)
+        st.see(tk.END) # 自动滚动到底部
+        st.config(state=tk.DISABLED)
+
+    # 绑定回车事件
+    manual_entry.bind("<Return>", lambda e: run_manual_test())
+
+    btn_test = tk.Button(manual_frame, text="执行测试", command=run_manual_test, 
+                         bg="#4CAF50", fg="white", font=("微软雅黑", 8, "bold"))
+    btn_test.pack(side="left", padx=5)
     return report
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
