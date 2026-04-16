@@ -368,21 +368,30 @@ class SectorDetailDialog(QDialog, WindowMixin):
             # 过滤掉全为 0 的异常状态（通常发生在窗口关闭瞬间）
             if sum(widths) < 100: return
             
-            _save_racing_config({"detail_column_widths": widths})
-            logger.debug(f"💾 [Detail] 已保存列宽配置: {widths}")
+            # [🚀 增强] 将窗口位置也存入内存快照
+            geom = self.saveGeometry().toHex().data().decode()
+            _save_racing_config({
+                "detail_column_widths": widths,
+                "detail_geometry": geom
+            })
+            logger.debug(f"💾 [Detail] 已保存内存状态与列宽快照")
         except: pass
 
     def _restore_header_state(self):
         """恢复明细表各列宽度 (内存优先)"""
         try:
             conf = _get_racing_config()
+            # 优先还原几何位置
+            if "detail_geometry" in conf:
+                self.restoreGeometry(QByteArray.fromHex(conf["detail_geometry"].encode()))
+                
             widths = conf.get("detail_column_widths")
             if widths and len(widths) == self.table.columnCount():
                 self.table.horizontalHeader().blockSignals(True)
                 for i, w in enumerate(widths):
                     if w > 10: self.table.setColumnWidth(i, w)
                 self.table.horizontalHeader().blockSignals(False)
-                logger.debug(f"✅ [Detail] 成功还原 {self.sector_name} 列表宽度")
+                logger.debug(f"✅ [Detail] 成功还原 {self.sector_name} 内存状态")
         except: pass
 
     def _on_context_menu(self, pos):
@@ -756,7 +765,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _save_ui_state(self):
         try:
+            geom = self.saveGeometry().toHex().data().decode()
             updates = {
+                "geom": geom,
                 "stock_header": self.stock_table.horizontalHeader().saveState().toHex().data().decode(),
                 "sector_header": self.sector_table.horizontalHeader().saveState().toHex().data().decode(),
                 "reset_cycle_mins": self._reset_cycle_mins
@@ -772,6 +783,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.stock_table.resizeColumnsToContents()
                 self.sector_table.resizeColumnsToContents()
                 return
+
+            # 还原窗口位置
+            if "geom" in conf:
+                self.restoreGeometry(QByteArray.fromHex(conf["geom"].encode()))
 
             if "reset_cycle_mins" in conf:
                 self._reset_cycle_mins = conf["reset_cycle_mins"]
