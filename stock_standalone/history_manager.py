@@ -434,7 +434,7 @@ class QueryHistoryManager:
         if idx is None:
             return
         record = self.current_history[idx]
-        new_query = askstring_at_parent_single(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
+        new_query = askstring_at_parent_single(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""), window_name="QueryHistoryManager_EditQuery")
         if new_query and new_query.strip():
             new_query = new_query.strip()
             old_query = record["query"]
