@@ -2274,7 +2274,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     h5.close() 
                     
                     # 🚀 安全替换原文件逻辑：不再调用全局 tables.file._open_files.close_all() 以免中断其他线程
-                    max_retry = 3  # 增加重试次数，应对高频读写冲突
+                    max_retry = 5  # 增加重试次数，应对高频读写冲突
                     for r in range(max_retry):
                         try:
                             # [FIX] ⚡ 核心保护：原子替换前必须预检源文件是否存在
@@ -2303,9 +2303,9 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             
                             # 深度清理句柄记录，不执行全局关闭
                             gc.collect()
-                            
+                            is_last = (r == max_retry - 1)
                             # 若前三次 replace 都失败，尝试强制删除原文件以打破死锁
-                            if r >= 3:
+                            if is_last:
                                 try:
                                     if os.path.exists(fname_path):
                                         os.remove(fname_path)

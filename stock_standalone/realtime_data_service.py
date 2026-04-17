@@ -1775,6 +1775,7 @@ class DataPublisher:
     max_batch_time: float
     _last_batch_fp: str
     _enable_backup: bool
+    racing_detector: Optional[Any] # [NEW] 挂载赛道/赛马探测器逻辑
     def __init__(self, high_performance: bool = True, scraper_interval: int = 3600, 
                  enable_backup: bool = False, validation_mode: bool = False,
                  simulation_mode: bool = False, verbose: bool = False):
@@ -1843,6 +1844,7 @@ class DataPublisher:
         self.emotion_baseline = DailyEmotionBaseline(verbose=verbose)
         self.emotion_tracker = IntradayEmotionTracker()
         self.subscribers = defaultdict(lambda: cast(list[Callable[..., object]], []))
+        self.racing_detector = None # [NEW] 初始化为空，由外部(TK) 注入
         
         # [Phase 4] Central Name Mapping
         self._code_to_name: dict[str, str] = {}
@@ -2627,6 +2629,15 @@ class DataPublisher:
                 
                 if any(col in df.columns for col in ['trade', 'now', 'price', 'close', 'hq_last', 'llastp']):
                     self.kline_cache.update_batch(df, self.subscribers)
+                
+                # [NEW] ⚡ 赛马/赛道探测逻辑嵌入 (One Calculation, Global Availability)
+                if self.racing_detector is not None:
+                    try:
+                        self.racing_detector.register_codes(df)
+                        # 传入 enriched_df (含 detect_signals 后分值) 提高精度
+                        self.racing_detector.update_scores(active_codes=df['code'].tolist() if 'code' in df.columns else None)
+                    except Exception as rd_err:
+                        logger.error(f"[RacingDetector] Error in DataPublisher flow: {rd_err}")
                 
                 # 3. 性能统计
                 self.total_rows_processed += len(df)

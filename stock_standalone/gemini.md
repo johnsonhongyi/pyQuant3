@@ -922,3 +922,23 @@ ealtime_data_service.py Ŀȱڻز ackfill_gaps_from_hdf5ɺʽ Sina._MEM_CACHE еǧ
     - [x] **增强窗口生命周期劫持**：通过 `WM_DELETE_WINDOW` 协议劫持与按钮回调联动，确保无论用户点击“确定/取消”还是直接关闭窗口，位置信息都能得到实时更新。
     - [x] **QueryHistoryManager 适配集成**：将 `history_manager.py` 中的 `edit_query` 逻辑接入持久化链条，分配了专用标识符 `QueryHistoryManager_EditQuery`。
 
+
+## 2026-04-17 14:21
+- [x] **修复赛道探测器在MonitorTK集成模式下数据不更新的Bug**：
+    - [x] **打通数据回流链路**：在 `realtime_data_service.py` （`DataPublisher.update_batch`）中，在执行 `self.racing_detector.update_scores` 前，强制调用并补齐了 `self.racing_detector.register_codes(df)`，使得集成在 TK 主循环中的 `df_all` 行情快照，能够以极低开销顺利同步 `now_price`, `last_close`, `low`, `high` 等元信息到底层 `TickSeries`。
+    - [x] **复用UI渲染刷新机制**：此举彻底根治了在集成架构下 `BiddingMomentumDetector` 在启动后价格与分数冻结的问题。由于 `BiddingRacingRhythmPanel` 每秒都在从探测器拉取结果池，探测器内的活水更新使得看板在 TK 模式下重新恢复了心跳与流转。
+
+## 2026-04-17 14:30
+- [x] **修复赛马面板“竞技进度”时间轴进度不同步的问题**：
+    - [x] **打通视觉进度反馈**：由于此前组件被重构为水平大合并模式，`update_visuals` 内部意外遗漏了向内部 `RacingTimeline` 组件实时下发数据的调用。我在刷新总控中提取了 `self.detector.last_data_ts` 这一底层随行情跳动的真实物理时间（或者模拟时间），并解析为 `%H:%M:00` 即时发送到 `self.timeline.set_time()`。
+    - [x] 此修复极大提升了与后台引擎行情的适配与体感，拖动或自动巡航皆可完美反映底层真实行情时间断面。
+
+## 2026-04-17 14:36
+- [x] **修复 TK 环境下 `open_racing_panel` 的跟随退出逻辑**：
+    - [x] **补齐应用退出时竞价赛马面板的销毁链**：修复了当用户关闭 `instock_MonitorTK.py` 主程序后，`BiddingRacingRhythmPanel` 后台由于没有任何针对它的强平清理（`self._racing_panel_win.close()`），而导致状态存盘丢失并造成主进程残留假死（或窗口无法彻底析构）的隐患。不仅释放了引用计数，还能在强平前顺利触发其自身的 `closeEvent()` 将最后一次宽高等参数进行状态保护与快照持久化。
+
+## 2026-04-17 14:40
+- [x] **修复子窗口 `SectorDetailDialog` 在主控关闭时的归档失效问题**：
+    - [x] 由于 PyQt 的机制，父窗口 `BiddingRacingRhythmPanel` 在接收到主程序的强制 `close()` 信号时，只触发自身的 `closeEvent`，即使它管理了多个通过底栏双击弹出的子窗体 `SectorDetailDialog`，这些子窗体也会随父组件一同“寂灭”，而不会获得分发 `closeEvent()` 的机会。
+    - [x] 这解释了为什么子窗体内的 `self._save_header_state()` 在极端跟随退出条件下从未被激活。
+    - [x] **架构补充**：重构了 `BiddingRacingRhythmPanel.closeEvent`，在自杀与保存自身之前，利用 `self.findChildren(QDialog)` 强势轮询所有当前挂接尚未释放的子弹窗，并对它们显式发送 `.close()`。确保多层级存档机制层层传递，不漏掉任何一个用户辛辛苦苦调出并在屏幕上定位过的板块分析页。
