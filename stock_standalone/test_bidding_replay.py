@@ -174,10 +174,19 @@ class LiveWorker(QThread):
 
         try:
             logger.info(f"🔄 [Recovery] Attempting to recover intraday history from {h5_path}...")
-            # 1. 加载今日数据 (sina_MultiIndex_data.h5 通常使用 'all' 作为 table 名)
+            # 1. 加载今日数据
+            # [FIX] sina_MultiIndex_data.h5 使用 'll_YYYYMMDD' 格式存储，而非 'all'
+            today_key = f"ll_{now_dt.strftime('%Y%m%d')}"
             try:
                 # 使用读取模式，避免锁竞争
-                df_hist = pd.read_hdf(h5_path, key='all')
+                df_hist = pd.read_hdf(h5_path, key=today_key)
+            except KeyError:
+                # 兼容旧格式或特殊情况
+                try:
+                    df_hist = pd.read_hdf(h5_path, key='all')
+                except Exception as e2:
+                    logger.warning(f"ℹ️ [Recovery] No table '{today_key}' or 'all' found: {e2}")
+                    return
             except Exception as e:
                 logger.error(f"❌ [Recovery] Failed to read HDF5: {e}")
                 return
