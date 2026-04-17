@@ -942,3 +942,9 @@ ealtime_data_service.py Ŀȱڻز ackfill_gaps_from_hdf5ɺʽ Sina._MEM_CACHE еǧ
     - [x] 由于 PyQt 的机制，父窗口 `BiddingRacingRhythmPanel` 在接收到主程序的强制 `close()` 信号时，只触发自身的 `closeEvent`，即使它管理了多个通过底栏双击弹出的子窗体 `SectorDetailDialog`，这些子窗体也会随父组件一同“寂灭”，而不会获得分发 `closeEvent()` 的机会。
     - [x] 这解释了为什么子窗体内的 `self._save_header_state()` 在极端跟随退出条件下从未被激活。
     - [x] **架构补充**：重构了 `BiddingRacingRhythmPanel.closeEvent`，在自杀与保存自身之前，利用 `self.findChildren(QDialog)` 强势轮询所有当前挂接尚未释放的子弹窗，并对它们显式发送 `.close()`。确保多层级存档机制层层传递，不漏掉任何一个用户辛辛苦苦调出并在屏幕上定位过的板块分析页。
+
+## 2026-04-17 14:55
+- [x] **跨组件融合全盘核心温度数据至竞价赛马监控面板**：
+    - [x] **底层打通**：在 `instock_MonitorTK.py` 中的 `_aggregate_market_dashboard_stats` 系统心跳里，加入了向并行的 `_racing_panel_win` 安全发送解析完成的 `final_stats` 字典流的挂载代码。
+    - [x] **无损前端渲染**：在 `bidding_racing_panel.py` 的顶部 `RacingTimeline` （即“🚩 竞技进度”）控制器里，将其原本单一的纵向结构转为弹性流水平布局 `QHBoxLayout`。利用右侧的大量闲置黑场以及弹性占位（Stretch），在屏幕极右侧原汁原味地嵌入了一个极其精炼的一体化小看板标签。
+    - [x] **精炼展示**：小看板用富文本颜色引擎渲染，实时映射全市场温度、家数红绿（📈 涨: XXX 跌: XXX）、上证指数切片反馈。颜色编码随冷暖动态闪烁（如 >=60℃ 标红，<=30℃ 挂绿），既保持了面板的视觉一致性与冷峻科技感，又完全省去了另外开启系统主面板才能看市场情绪的割裂式操作。
