@@ -4,11 +4,13 @@ import os
 import json
 import time
 import datetime
+import re
+import traceback
 from typing import Dict, List, Any, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QGraphicsDropShadowEffect,QPushButton,
+    QAbstractItemView, QGraphicsDropShadowEffect, QPushButton,
     QMenu, QApplication, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
@@ -22,33 +24,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
-# --- [🚀 极致性能] 模块级内存缓存，减少磁盘 I/O ---
-_RACING_UI_STATE = {}
-
-def _get_racing_config():
-    """极速获取配置 (内存优先)"""
-    global _RACING_UI_STATE
-    if not _RACING_UI_STATE:
-        try:
-            from JohnsonUtil import commonTips as cct
-            config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v3.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    _RACING_UI_STATE = json.load(f)
-        except: pass
-    return _RACING_UI_STATE
-
-def _save_racing_config(updates: Dict[str, Any]):
-    """增量保存配置到内存，并同步到磁盘"""
-    global _RACING_UI_STATE
-    conf = _get_racing_config()
-    conf.update(updates)
-    try:
-        from JohnsonUtil import commonTips as cct
-        config_path = os.path.join(cct.get_base_path(), "bidding_racing_ui_state_v3.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(conf, f, ensure_ascii=False, indent=2)
-    except: pass
+# [🚀 极致性能] 模块级清理，相关逻辑已迁移至类成员
 
 class RacingPieWidget(QWidget):
     """
@@ -62,10 +38,10 @@ class RacingPieWidget(QWidget):
         self.setMouseTracking(True)
         self.data = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 100}
         self.colors = {
-            "龙头": QColor("#FF2D55"),  # 活力红
+            "龙头": QColor("#FF3B30"),  # 苹果红 (更有力)
             "确核": QColor("#FF9500"),  # 橙色
             "跟涨": QColor("#5856D6"),  # 紫色
-            "静默": QColor("#2C2C2E")   # 暗浅灰
+            "静默": QColor("#3A3A3C")   # 稍亮一点的深灰，防止背景融合
         }
         self.selected_category = None
         self._hover_category = None
@@ -187,7 +163,8 @@ class RacingPieWidget(QWidget):
             grad.setAngle(270 - self._animation_angle)
             
             painter.setBrush(grad)
-            painter.setPen(QPen(QColor(0, 0, 0, 150), 1))
+            # 强化边界感，确保 100% 占比时也能看到一个完整的圆环
+            painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
             painter.drawPie(draw_rect, start_angle, span_angle)
             start_angle += span_angle
 
@@ -305,11 +282,22 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 ts = self.detector._tick_series.get(code)
                 if ts: data_list.append(ts)
             
-            # 排序逻辑
-            col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'pct_diff', 6:'pct_diff'}
+            # 排序逻辑: 修正列映射，区分起点(5)与DFF(6)
+            col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
             attr = col_attr_map.get(self._sort_col, 'score')
             is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
-            data_list.sort(key=lambda x: (getattr(x, attr, 0) if attr != 'pct_diff' else (x.current_pct - x.pct_diff)), reverse=is_rev)
+            
+            # 使用稳定性排序 (数值, 代码)
+            def get_sort_key(ts):
+                if attr == 'start_pct':
+                    val = ts.current_pct - ts.pct_diff
+                elif attr == 'pct_diff':
+                    val = ts.pct_diff
+                else:
+                    val = getattr(ts, attr, 0)
+                return (val, ts.code)
+            
+            data_list.sort(key=get_sort_key, reverse=is_rev)
             
             display_list = data_list[:100]
             flattened = []
@@ -508,6 +496,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.detector = detector
         self.main_app = main_app
         self.on_code_callback = on_code_callback
+        self._anchor_history = [] 
+        self._last_anchor_reset_data_ts = 0
+        self._last_data_version = -1
+        self._is_rendering = False
+        self._is_loading = False 
+        self._table_highlights = {} 
+        self._pending_auto_restore_idx = -1
+        self._auto_restore_pending = False
+        self._auto_capture_today_first = False
+        self._first_boot_render = True # [NEW] 启动强制首次渲染标记
+        self._startup_time = time.time()
         
         if sender:
             self.sender = sender
@@ -516,7 +515,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 from JohnsonUtil.stock_sender import StockSender
                 self.sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
             except Exception as e:
-                print(f"Standalone StockSender init failed: {e}")
                 self.sender = None
         else:
             self.sender = None
@@ -527,20 +525,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.setMinimumSize(1000, 700)
         self.setStyleSheet("background-color: #000000; color: white;")
         
-        self._last_data_version = -1
         self._last_rendered_time = 0
         self._last_ui_update_ts = 0 
-        self._is_rendering = False
         self._table_highlights = {}
         
         self._sort_col = 2 
         self._sort_order = Qt.SortOrder.DescendingOrder
-        self._sort_col_sector = 1 # 默认按强度得分排序
+        self._sort_col_sector = 1 
         self._sort_order_sector = Qt.SortOrder.DescendingOrder
         
-        self._reset_cycle_mins = 60 # 默认 60 分钟重置一次基准
-        self._last_anchor_reset_data_ts = 0
-        self._anchor_history = [] 
+        self._reset_cycle_mins = 60 
         
         self._UI_CACHE = {
             "COLOR_GOLD": QColor("#FFD700"),
@@ -555,6 +549,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         }
         
         self._init_ui()
+        self._load_session_v3()
         
         self.stock_table.setSortingEnabled(False)
         self.sector_table.setSortingEnabled(False)
@@ -566,13 +561,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.refresh_timer.start(100)
         
         QTimer.singleShot(5000, self._check_auto_anchor)
-        QTimer.singleShot(200, self._restore_ui_state)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(15)
         
-        # [🚀 极限合并] 顶层综合控制条
         top_bar = QFrame()
         top_bar.setFixedHeight(90)
         top_bar.setStyleSheet("background-color: #1C1C1E; border-radius: 12px; border: 1px solid #2C2C2E;")
@@ -580,12 +573,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         top_bar_layout.setContentsMargins(15, 5, 15, 5)
         top_bar_layout.setSpacing(20)
         
-        # 左侧: 进度时间轴 (保持原有逻辑，嵌套在布局中)
         self.timeline = RacingTimeline()
         self.timeline.setStyleSheet("background: transparent; border: none;")
         top_bar_layout.addWidget(self.timeline, stretch=7)
         
-        # 右侧: 切片周期控制组
         cycle_group = QFrame()
         cycle_group.setFixedWidth(240)
         cycle_group.setStyleSheet("background-color: #262629; border-radius: 8px; border: 1px solid #3A3A3C;")
@@ -593,17 +584,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         cycle_layout.setContentsMargins(10, 8, 10, 8)
         cycle_layout.setSpacing(5)
         
-        # 周期标题与显示
         self.cycle_label = QLabel(f"📊 起点参考周期: {self._reset_cycle_mins}m")
         self.cycle_label.setStyleSheet("color: #FFD700; font-weight: bold; font-family: 'Segoe UI'; font-size: 11px;")
         self.cycle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cycle_layout.addWidget(self.cycle_label)
         
-        # 按钮行
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
         
-        # 减 10m
         self.btn_minus = QPushButton("-10m")
         self.btn_minus.setFixedSize(45, 26)
         self.btn_minus.setStyleSheet("""
@@ -613,7 +601,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_minus.clicked.connect(lambda: self._adjust_cycle(-10))
         btn_layout.addWidget(self.btn_minus)
         
-        # 加 10m
         self.btn_plus = QPushButton("+10m")
         self.btn_plus.setFixedSize(45, 26)
         self.btn_plus.setStyleSheet("""
@@ -623,7 +610,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_plus.clicked.connect(lambda: self._adjust_cycle(10))
         btn_layout.addWidget(self.btn_plus)
         
-        # 立即重置按钮 (醒目红色)
         self.reset_btn = QPushButton("🔄 即时重置")
         self.reset_btn.setFixedSize(65, 26)
         self.reset_btn.setStyleSheet("""
@@ -691,15 +677,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         bottom_lay = QVBoxLayout(bottom_frame)
         
         sec_title_lay = QHBoxLayout()
+        sec_title_lay.setContentsMargins(10, 5, 10, 5)
+        
         sec_title = QLabel("🔥 最强板块赛道")
-        sec_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #00FFCC; padding: 5px;")
+        sec_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #00FFCC;")
         sec_title_lay.addWidget(sec_title)
         
-        sec_title_lay.addSpacing(15)
         self.history_layout = QHBoxLayout()
-        self.history_layout.setSpacing(6)
+        self.history_layout.setSpacing(10)
         sec_title_lay.addLayout(self.history_layout)
-        sec_title_lay.addStretch()
+        sec_title_lay.addStretch(1)
         
         bottom_lay.addLayout(sec_title_lay)
         
@@ -742,70 +729,99 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self.stock_table.currentCellChanged.connect(self._on_stock_key_nav)
 
-        self.sector_table.cellClicked.connect(self._on_sector_clicked)
         self.sector_table.cellDoubleClicked.connect(self._on_sector_double_clicked)
         self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        
         self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
 
         self.sector_table.currentCellChanged.connect(
             lambda r, c, pr, pc: self._on_sector_clicked(r, c)
         )
 
-        self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
-        self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
-
-
     def closeEvent(self, event):
-        try:
-            self._save_ui_state()
-            self.save_window_position_qt_visual(self, "BiddingRacingRhythmPanel")
-        except: pass
-        self.closed.emit()
+        """[🚀 唯一持久化入口] 仅在退出时执行写盘"""
+        self._save_session_v3()
         super().closeEvent(event)
 
-    def _save_ui_state(self):
+    def _load_session_v3(self):
+        """[🚀 极简载入] 启动时唯一一次盘查"""
         try:
-            geom = self.saveGeometry().toHex().data().decode()
-            updates = {
-                "geom": geom,
-                "stock_header": self.stock_table.horizontalHeader().saveState().toHex().data().decode(),
-                "sector_header": self.sector_table.horizontalHeader().saveState().toHex().data().decode(),
-                "reset_cycle_mins": self._reset_cycle_mins
-            }
-            _save_racing_config(updates)
-        except Exception as e:
-            logger.debug(f"Save UI state failed: {e}")
-
-    def _restore_ui_state(self):
-        try:
-            conf = _get_racing_config()
-            if not conf:
-                self.stock_table.resizeColumnsToContents()
-                self.sector_table.resizeColumnsToContents()
-                return
-
-            # 还原窗口位置
-            if "geom" in conf:
-                self.restoreGeometry(QByteArray.fromHex(conf["geom"].encode()))
-
-            if "reset_cycle_mins" in conf:
-                self._reset_cycle_mins = conf["reset_cycle_mins"]
-                if hasattr(self, 'cycle_label'):
-                    self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
+            import gzip, json
+            from JohnsonUtil import commonTips as cct
+            local_dir = os.path.join(os.path.dirname(__file__), "snapshots")
+            root_dir = os.path.join(cct.get_base_path(), "snapshots")
             
+            conf = {}
+            for folder in [local_dir, root_dir]:
+                path = os.path.join(folder, "bidding_racing_ui_state_v3.json.gz")
+                if os.path.exists(path):
+                    try:
+                        with gzip.open(path, "rt", encoding="utf-8") as f:
+                            conf = json.load(f)
+                        if conf: 
+                            logger.info(f"✅ Loaded session from: {path}")
+                            break
+                    except: continue
+
+            if not conf: return
+            
+            self._reset_cycle_mins = conf.get("reset_cycle", 10)
+            if hasattr(self, 'cycle_label'):
+                self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
+            
+            self._anchor_history = conf.get("anchor_history", [])
+            if self._anchor_history:
+                self._anchor_history.sort(key=lambda x: x.get('ts', 0))
+                self._refresh_history_buttons()
+                self._auto_restore_pending = True
+            
+            self.stock_table.blockSignals(True)
+            self.sector_table.blockSignals(True)
             if "stock_header" in conf:
                 self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["stock_header"].encode()))
-            else:
-                self.stock_table.resizeColumnsToContents()
-                
             if "sector_header" in conf:
                 self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["sector_header"].encode()))
-            else:
-                self.sector_table.resizeColumnsToContents()
+            self.stock_table.blockSignals(False)
+            self.sector_table.blockSignals(False)
+            
         except Exception as e:
-            logger.debug(f"Restore UI state failed: {e}")
-            self.stock_table.resizeColumnsToContents()
-            self.sector_table.resizeColumnsToContents()
+            logger.error(f"Session load failed: {e}")
+
+    def _save_session_v3(self):
+        """[🚀 全干货持久化] 退出瞬间执行备份与收口"""
+        try:
+            if not self._anchor_history and time.time() - self._startup_time < 30:
+                return
+            
+            conf = {
+                "persistence_date": datetime.date.today().strftime("%Y-%m-%d"),
+                "reset_cycle": self._reset_cycle_mins,
+                "anchor_history": self._anchor_history,
+                "stock_header": self.stock_table.horizontalHeader().saveState().toHex().data().decode(),
+                "sector_header": self.sector_table.horizontalHeader().saveState().toHex().data().decode()
+            }
+            
+            def _s(obj):
+                if isinstance(obj, dict): return {k: _s(v) for k, v in obj.items()}
+                if isinstance(obj, list): return [_s(x) for x in obj]
+                if hasattr(obj, 'item'): return obj.item()
+                return obj
+            
+            import gzip, shutil, json
+            safe_conf = _s(conf)
+            target_dir = os.path.join(os.path.dirname(__file__), "snapshots")
+            os.makedirs(target_dir, exist_ok=True)
+            
+            path_gz = os.path.join(target_dir, "bidding_racing_ui_state_v3.json.gz")
+            if os.path.exists(path_gz):
+                shutil.copy2(path_gz, path_gz + ".bak")
+                
+            with gzip.open(path_gz, "wt", encoding="utf-8") as f:
+                json.dump(safe_conf, f, ensure_ascii=False, separators=(',', ':'))
+            
+            logger.info(f"💾 Session persisted smoothly on exit.")
+        except Exception as e:
+            logger.error(f"Session save failed: {e}")
 
     def _on_pie_filter(self, category):
         if category == "ALL":
@@ -927,16 +943,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self.sector_table.horizontalHeader().setSortIndicator(logical_index, self._sort_order_sector)
             self.sector_table.scrollToTop()
         
-        # 强制触发重绘，即使数据版本未变 (解决点击表头排序无反应的问题)
         self._last_data_version = -1 
         self.update_visuals()
-        self._save_ui_state()
 
     def _on_cycle_changed(self, val):
         self._reset_cycle_mins = val
         if hasattr(self, 'cycle_label'):
             self.cycle_label.setText(f"📊 起点参考周期: {val}m")
-        self._save_ui_state()
 
     def _adjust_cycle(self, offset):
         new_val = max(5, min(240, self._reset_cycle_mins + offset))
@@ -945,10 +958,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def _manual_reset_anchors(self):
         """[IMMEDIATE] 瞬间重置 DFF 与起点涨幅 (上下同步) - 修复死锁"""
         if self.detector:
-            # 1. 首先调用 Detector 内部带锁的方法 (内部会申请并释放锁)
             self.detector.reset_observation_anchors()
             
-            # 2. 然后再申请锁来进行手动内存操作，避免重入死锁
             with self.detector._lock:
                 for ts in self.detector._tick_series.values():
                     ts.pct_diff = 0.0
@@ -956,9 +967,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 for sec in self.detector.active_sectors.values():
                     sec['leader_pct_diff'] = 0.0
             
-            # 3. 记录历史快照
             snap = self._create_anchor_snapshot()
-            if snap: self._add_to_history(snap)
+            if snap: 
+                self._add_to_history(snap)
+                self._refresh_history_buttons()
 
             curr_time = getattr(self.detector, 'last_data_ts', 0)
             if curr_time == 0: curr_time = time.time()
@@ -966,68 +978,135 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._last_anchor_reset_data_ts = curr_time
             self._last_data_version = -1 
             self.update_visuals()
-            logger.info("⚡ [Panel] 已完成即时全局基准重置并存入历史。")
             
     def _check_auto_anchor(self):
-        """[EMERGENCY] 5秒后兜底检查是否捕捉到起点"""
+        """[🚀 启动静默模式] 仅捕捉不写盘"""
         if not self._anchor_history and self.detector:
             snap = self._create_anchor_snapshot()
-            if snap and len(snap["anchors"]) > 10:
+            if snap and len(snap.get("c", [])) > 10:
                 self._add_to_history(snap)
                 self._apply_history_anchor(0)
-                logger.info(f"🚩 [Panel] 兜底逻辑成功捕捉并自动应用初始起点 ({len(snap['anchors'])} 只)。")
 
     def _create_anchor_snapshot(self):
-        """记录当前所有个股的价格锚点快照"""
+        """记录当前所有个股的价格锚点快照 - [🚀 精准行情时间模式]"""
         if not self.detector: return None
+        
+        # 优先使用行情时间，如果尚未到开盘时间/无数据，则不创建空快照
         curr_time = getattr(self.detector, 'last_data_ts', 0)
-        if curr_time == 0: curr_time = time.time()
+        
+        # [🚀 精准化] 如果实盘还没开始（ts=0），不要用系统时间滥竽充数
+        if curr_time <= 0:
+            return None
+            
         with self.detector._lock:
-            # [关键] 记录当前成交价作为快照基准
-            anchors = {code: ts.current_price for code, ts in self.detector._tick_series.items() if ts.current_price > 0}
-            return {"ts": curr_time, "anchors": anchors}
+            codes, prices = [], []
+            for code, ts in self.detector._tick_series.items():
+                if ts.current_price > 0:
+                    codes.append(str(code))
+                    prices.append(round(float(ts.current_price), 2))
+            
+            if not codes: return None # 无有效价格
+
+            return {
+                "ts": float(curr_time), 
+                "c": codes,   
+                "p": prices   
+            }
 
     def _add_to_history(self, snapshot):
         if not snapshot: return
+        
+        # [🚀 极限排序与去重] 确保时间轴顺序且不重复
+        now_ts = snapshot.get('ts', 0)
+        
+        # 30秒内不重复捕捉相同起点的防护
+        if self._anchor_history:
+            last_ts = self._anchor_history[-1].get('ts', 0)
+            if abs(now_ts - last_ts) < 30:
+                logger.debug("🛡️ [Panel] 忽略 30 秒内的重复起点捕捉回调。")
+                return
+
         self._anchor_history.append(snapshot)
-        if len(self._anchor_history) > 6:
+        # 始终按时间排序
+        self._anchor_history.sort(key=lambda x: x.get('ts', 0))
+        
+        # 保持 8 个槽位
+        if len(self._anchor_history) > 8:
             self._anchor_history.pop(0)
+            
         self._refresh_history_buttons()
+        # [NEW] 立即持久化
+        self._save_ui_state()
 
     def _refresh_history_buttons(self):
-        # 清空现有按钮
-        while self.history_layout.count():
-            item = self.history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        # 重新生成按钮
-        for i, snap in enumerate(self._anchor_history):
-            t_str = datetime.datetime.fromtimestamp(snap["ts"]).strftime("%H:%M")
-            btn = QPushButton(f"📍 起点{i+1}({t_str})")
-            btn.setFixedSize(82, 22)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet("""
-                QPushButton { 
-                    background: #1C1C1E; color: #00FFCC; border: 1px solid #333; 
-                    border-radius: 3px; font-size: 9px; font-family: 'Segoe UI';
-                }
-                QPushButton:hover { background: #2C2C2E; border: 1px solid #00FFCC; color: white; }
-            """)
-            btn.clicked.connect(lambda checked, idx=i: self._apply_history_anchor(idx))
-            self.history_layout.addWidget(btn)
+        try:
+            # 清空现有按钮
+            while self.history_layout.count():
+                item = self.history_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            count = len(self._anchor_history)
+            print(f"🎨 [Panel] UI Button Refresh START: {count} anchors in memory.")
+            
+            # [🚀 布局强化] 防止按钮被挤压为 0
+            self.history_layout.setSpacing(8)
+            self.history_layout.setContentsMargins(15, 2, 15, 2)
+
+            # 重新生成按钮
+            for i, snap in enumerate(self._anchor_history):
+                try:
+                    ts_val = snap.get("ts", 0)
+                    t_str = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M")
+                    btn = QPushButton(f"📍 起点{i+1}({t_str})")
+                    btn.setFixedSize(94, 26)
+                    btn.setMinimumWidth(94)
+                    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    # [🚀 极简主题] 
+                    btn.setStyleSheet("""
+                        QPushButton { 
+                            background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; 
+                            border-radius: 4px; font-size: 11px; font-weight: bold;
+                        }
+                        QPushButton:hover { background: #2C2C2E; color: white; border: 1px solid #55FFDD; }
+                    """)
+                    btn.clicked.connect(lambda checked, idx=i: self._apply_history_anchor(idx))
+                    self.history_layout.addWidget(btn)
+                    btn.show()
+                except Exception as e:
+                    print(f"⚠️ [Panel] Render individual anchor {i} failed: {e}")
+            
+            # [🚀 几何诊断] 输出布局位置，防止被挤压
+            geo = self.history_layout.contentsRect()
+            print(f"✅ [Panel] UI Button Refresh DONE. Layout Geometry: {geo.width()}x{geo.height()}")
+            self.history_layout.update()
+        except Exception as e:
+            print(f"❌ [Panel] CRITICAL RefreshButtons Error:\n{traceback.format_exc()}")
 
     def _apply_history_anchor(self, idx):
-        """恢复历史锚点"""
-        if idx >= len(self._anchor_history): return
+        """恢复历史锚点 - 兼容列式压缩协议"""
+        if idx >= len(self._anchor_history): return False
         snap = self._anchor_history[idx]
+        
+        # [🚀 极限解压] 兼容 Columnar (c, p) 与 Dict (anchors) 两种格式
+        if "c" in snap and "p" in snap:
+            anchors_map = dict(zip(snap["c"], snap["p"]))
+        else:
+            anchors_map = snap.get("anchors", {})
+        
+        applied_count = 0
         if self.detector:
             with self.detector._lock:
+                # 检查 Detector 是否已经就绪
+                if not self.detector._tick_series:
+                    return False
+
                 # 1. 恢复价格锚点
-                for code, price in snap["anchors"].items():
+                for code, price in anchors_map.items():
                     if code in self.detector._tick_series:
                         ts = self.detector._tick_series[code]
                         ts.price_anchor = price
+                        applied_count += 1
                         # [IMMEDIATE] 瞬间重算 pct_diff，确保 UI 瞬间看到变化
                         if ts.last_close > 0:
                             ts.pct_diff = (ts.current_price - ts.price_anchor) / ts.last_close * 100.0
@@ -1041,11 +1120,22 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         l_ts = self.detector._tick_series[leader_code]
                         sec_data['leader_pct_diff'] = l_ts.pct_diff
             
-            # 3. 重置自动刷新计时器
+            # 3. 重置自动刷新计时器与节流阀，确保 UI 瞬间 100% 重绘
             self._last_anchor_reset_data_ts = getattr(self.detector, 'last_data_ts', time.time())
-            self._last_data_version = -1
+            self._last_ui_update_ts = 0      # 绕过 100ms 刷新限制
+            self._last_data_version = -1     # 绕过数据版本缓存
+            self._last_rendered_time = 0     # 绕过时间戳缓存
+            
+            # 4. [🚀 视觉增强] 为所有受影响的列预设高亮，产生即时刷新感
+            now = time.time()
+            for code in anchors_map.keys():
+                self._table_highlights[("stock", code, 5)] = now # 起点
+                self._table_highlights[("stock", code, 6)] = now # DFF
+            
             self.update_visuals()
-            logger.info(f"♻️ [Panel] 已恢复至历史起点 {idx+1} ({datetime.datetime.fromtimestamp(snap['ts']).strftime('%H:%M:%S')})")
+            logger.info(f"♻️ [Panel] 已恢复至历史起点 {idx+1} ({datetime.datetime.fromtimestamp(snap['ts']).strftime('%H:%M:%S')})，生效个股: {applied_count}。")
+            return applied_count > 0
+        return False
 
     def _execute_linkage(self, code, name="", source="racing_panel"):
         if not code or self._select_code == str(code):
@@ -1071,14 +1161,46 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if not self.detector: return
         if self._is_rendering: return
         
+        # --- [⚡ 核心生命周期：心跳驱动自启动逻辑] ---
+        with self.detector._lock:
+            has_data = len(self.detector._tick_series) > 0
+            
+        if has_data:
+            # A. 恢复今日已有历史
+            if self._auto_restore_pending:
+                self._auto_restore_pending = False
+                last_idx = len(self._anchor_history) - 1
+                if self._apply_history_anchor(last_idx):
+                    logger.info(f"🚀 [Panel] 行情心跳到达，成功同步今日历史起点 ({last_idx+1})。")
+                else:
+                    logger.debug("⚠️ [Panel] 行情到达但尝试恢复历史失败。")
+            
+            # B. 启动时自动捕捉首个新起点 (如果历史为空或日期更迭)
+            elif self._auto_capture_today_first:
+                self._auto_capture_today_first = False # 仅执行一次
+                if not self._anchor_history:
+                    snap = self._create_anchor_snapshot()
+                    # 确保个股数足够
+                    if snap and len(snap.get("c", [])) > 10:
+                        self._add_to_history(snap)
+                        self._apply_history_anchor(0)
+                        logger.info("✨ [Panel] 启动观测到首波行情，已自动创建并激活今日首个起点。")
+            
+            # C. 处理之前的待处理强制恢复任务 (用户点击驱动)
+            if self._pending_auto_restore_idx >= 0:
+                idx = self._pending_auto_restore_idx
+                self._pending_auto_restore_idx = -1 
+                self._apply_history_anchor(idx)
+
         # [NEW] 自动捕捉首个起点 (仅在历史为空时执行一次，优先于版本检查)
         curr_time = getattr(self.detector, 'last_data_ts', 0)
         if curr_time > 0 and not self._anchor_history:
             snap = self._create_anchor_snapshot()
-            if snap and len(snap["anchors"]) > 0:
+            # [🚀 极限压缩] 使用 'c' 列表长度判定
+            if snap and len(snap.get("c", [])) > 0:
                 self._add_to_history(snap)
                 self._apply_history_anchor(0)
-                logger.debug(f"🚩 [Panel] 捕获并激活全天首个起点 ({len(snap['anchors'])} 只个股)。")
+                logger.debug(f"🚩 [Panel] 捕获并激活全天首个起点 ({len(snap['c'])} 只个股)。")
 
         now = time.time()
         if now - self._last_ui_update_ts < 0.1:
@@ -1100,27 +1222,103 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._last_anchor_reset_data_ts = curr_time
                 curr_ver = -1 # 强制后续刷新
 
-        if curr_ver == self._last_data_version and curr_time == getattr(self, "_last_rendered_time", 0):
+        # [🚀 优化与边界保护] 只有数据版本变化才触发全量渲染；午盘/收盘/首次启动强制渲染
+        is_break = (113000 <= curr_time < 130100)
+        is_closing = (curr_time >= 150000 or (0 < curr_time < 91500) or is_break)
+        
+        # 旁路判定：正常跳过渲染的条件
+        skip_optimization = (curr_ver == self._last_data_version and curr_time == getattr(self, "_last_rendered_time", 0))
+        
+        # [🚀 启动保护] 如果是首次启动，无论如何都要跑一遍流程
+        if self._first_boot_render:
+            is_closing = True # 借用 is_closing 强制通过
+            self._first_boot_render = False
+            logger.info("🎬 [Panel] Bootstrap: Initial rendering process triggered.")
+
+        if skip_optimization and not is_closing:
             if self._table_highlights: self._refresh_fading_only()
             return
+        
         self._is_rendering = True
         try:
             with self.detector._lock:
                 raw_ts_list = list(self.detector._tick_series.values())
                 active_sectors = list(self.detector.active_sectors.values())
             
+            # --- [🚀 兜底逻辑] 如果 Detector 处于冷启动(HDF5缺失)，UI 层反向聚合板块 ---
+            # 修复：即便 active_sectors 不为空，如果数据极少（例如只有不到3个板块），也尝试从现有个股中补充
+            if (not active_sectors or len(active_sectors) < 3) and raw_ts_list:
+                temp_sectors = {}
+                # 为了加速，仅循环 raw_ts_list
+                for ts in raw_ts_list:
+                    # 只要有板块信息且不是空数据
+                    if not ts.category or (ts.current_pct == 0 and ts.score < 0.1): continue
+                    # 容错处理：多种分隔符支持
+                    cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(ts.category)) if c.strip()]
+                    for cat in cats:
+                        if cat not in temp_sectors:
+                            temp_sectors[cat] = {
+                                'sector': cat, 'score': 0.0, 'leader': '', 
+                                'leader_name': '', 'leader_pct': -100.0, 
+                                'leader_pct_diff': 0.0,  # [FIX] 补齐关键 DFF 字段
+                                'count': 0,
+                                'followers': [] 
+                            }
+                        s = temp_sectors[cat]
+                        s['count'] += 1
+                        
+                        # [🚀 分数反推] 简单启发式得分：个股数权重 + 领涨表现
+                        # 使得 结构分 不再显示为 0.0
+                        ts_contrib = 1.0 + (ts.current_pct / 5.0) if ts.current_pct > 0 else 0.5
+                        s['score'] += ts_contrib
+                        
+                        # 记录所有个股用于后续挑选联动详情
+                        s['followers'].append({'name': ts.name, 'pct': ts.current_pct})
+                        
+                        if ts.current_pct > s['leader_pct']:
+                            s['leader_pct'] = ts.current_pct
+                            s['leader_name'] = ts.name
+                            s['leader'] = ts.code
+                            s['leader_pct_diff'] = ts.pct_diff # [FIX] 同步记录龙头的 DFF
+                
+                # 合并现有的和推算的，并对联动详情排序
+                existing_names = {s.get('sector') for s in active_sectors}
+                for s_name, s_data in temp_sectors.items():
+                    if s_name not in existing_names:
+                         # 聚合最终得分并规范化
+                         s_data['score'] = round(min(s_data['score'] * 1.2, 99.9), 1)
+                         # 联动详情：排除龙头本身，取前3名非龙头
+                         l_code = s_data['leader']
+                         f_list = [f for f in s_data['followers'] if f['name'] != s_data['leader_name']]
+                         f_list.sort(key=lambda x: x['pct'], reverse=True)
+                         s_data['followers'] = f_list[:3]
+                         active_sectors.append(s_data)
+                
+            # --- [🚀 极致同步] 无论数据来源，实时校准板块龙头的最新行情 (Pct / DFF) ---
+            for sec in active_sectors:
+                leader_code = sec.get('leader')
+                if leader_code and leader_code in self.detector._tick_series:
+                    l_ts = self.detector._tick_series[leader_code]
+                    sec['leader_pct'] = l_ts.current_pct
+                    sec['leader_name'] = l_ts.name
+                    # [🚀 极速重算] 确保 DFF 在应用锚点后立即刷新，不依赖后台周期
+                    if l_ts.price_anchor > 0 and l_ts.last_close > 0:
+                        sec['leader_pct_diff'] = ((l_ts.current_price - l_ts.price_anchor) / l_ts.last_close) * 100
+                    else:
+                        sec['leader_pct_diff'] = 0.0
+
             # --- 2. [WORK-ZONE] 锁外分析计算 ---
-            # [🚀 优化6] 视图数据扁平化 (Idx: 0:code, 1:name, 2:score, 3:sig, 4:pct, 5:diff, 6:dff)
-            active_ts = [ts for ts in raw_ts_list if ts.score > 0.5 or ts.current_pct != 0]
+            # 宽放个股显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股
+            active_ts = [ts for ts in raw_ts_list if abs(ts.current_pct) > 0.001 or ts.score > 0.05 or ts.momentum_score > 0]
             dist = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 0}
             
-            # [NEW] 角色判定函数，用于分布统计与过滤
             def get_role(ts):
                 is_leader = (ts.market_role == "主帅" or (ts.score > 60 and ts.first_breakout_ts > 0))
                 if is_leader: return "龙头"
                 is_confirmed = any(word in ts.pattern_hint for word in ["确认", "突破", "确核", "V反", "SBC"])
                 if is_confirmed: return "确核"
-                if ts.score > getattr(self.detector, 'score_threshold', 1.0): return "跟涨"
+                # [🚀 门槛下调] 只要有涨跌幅，就算作“跟涨”，确保饼图有颜色
+                if ts.score > 0.5 or abs(ts.current_pct) > 0.01: return "跟涨"
                 return "静默"
 
             filtered_ts = []
@@ -1151,13 +1349,22 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 sec_name = sec_item.text() if sec_item else ""
                 sec_scroll = self.sector_table.verticalScrollBar().value()
 
-                # --- [🚀 优化2] 手动排序逻辑 ---
-                sort_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'pct_diff', 6:'dff'}
+                # --- [🚀 优化2] 手动排序逻辑 (对齐全局与本地) ---
+                sort_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
                 s_attr = sort_attr_map.get(self._sort_col, 'score')
                 is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
                 
-                # 执行排行榜处理 (基于过滤后的结果)
-                sorted_raw = sorted(filtered_ts, key=lambda x: (getattr(x, s_attr), x.code), reverse=is_rev)[:10]
+                # 执行排行榜处理 (基于过滤后的结果，增加稳定性排序)
+                def get_stock_sort_key(ts):
+                    if s_attr == 'start_pct':
+                        val = ts.current_pct - ts.pct_diff
+                    elif s_attr == 'pct_diff':
+                        val = ts.pct_diff
+                    else:
+                        val = getattr(ts, s_attr, 0)
+                    return (val, ts.code)
+                
+                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:10]
                 flattened_ts = [flatten_ts(ts) for ts in sorted_raw]
                 
                 self.stock_table.blockSignals(True)
@@ -1168,7 +1375,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 s_attr_sec = sort_attr_map_sector.get(self._sort_col_sector, 'score')
                 is_rev_sec = (self._sort_order_sector == Qt.SortOrder.DescendingOrder)
                 
-                # [🚀 优化] 板块表手动排序逻辑
+                # [🚀 优化] 板块表手动排序逻辑 (对齐 DFF 与起点逻辑)
                 def get_sec_val(sec, attr):
                     if attr == 'leader_start_pct':
                         return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
@@ -1300,9 +1507,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not is_first_init: self._table_highlights[("sector", s_name, 1)] = time.time()
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
                 
-            # 2. 领涨龙头
+            # 2. 领涨龙头与 DFF 校准
             l_total_pct = sec.get('leader_pct', 0.0)
             l_dff = sec.get('leader_pct_diff', 0.0)
+            # [🚀 核心数学公式修复] Start + Diff = Total (均基于 last_close 才有意义)
             l_start_pct = l_total_pct - l_dff
             leader_display = f"{sec.get('leader_name')} ({sec.get('leader')})"
             self._update_cell(table, i, 2, leader_display, is_numeric=False)
