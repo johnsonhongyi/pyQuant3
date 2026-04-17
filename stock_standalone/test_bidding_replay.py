@@ -155,60 +155,130 @@ class LiveWorker(QThread):
         self._fetch_count = 0
         self._last_fetch_ts = 0
 
+    def _recover_intraday_history(self):
+        """
+        [BRIDGE] ⚡ 实盘恢复桥接：
+        如果系统是在盘中启动（如 09:30 以后），尝试从 g:\sina_MultiIndex_data.h5 
+        获取今日已发生的历史切片并补齐到 detector 和 publisher。
+        """
+        from JSONData import tdx_data_Day as tdd
+        now_dt = datetime.now()
+        # 如果是 9:15 以前，没必要恢复，直接从零开始
+        if now_dt.hour < 9 or (now_dt.hour == 9 and now_dt.minute < 15):
+            return
+
+        h5_path = r"g:\sina_MultiIndex_data.h5"
+        if not os.path.exists(h5_path):
+            logger.warning(f"⚠️ [Recovery] HDF5 recovery file not found: {h5_path}")
+            return
+
+        try:
+            logger.info(f"🔄 [Recovery] Attempting to recover intraday history from {h5_path}...")
+            # 1. 加载今日数据 (sina_MultiIndex_data.h5 通常使用 'all' 作为 table 名)
+            try:
+                # 使用读取模式，避免锁竞争
+                df_hist = pd.read_hdf(h5_path, key='all')
+            except Exception as e:
+                logger.error(f"❌ [Recovery] Failed to read HDF5: {e}")
+                return
+
+            if df_hist is None or df_hist.empty:
+                logger.info("ℹ️ [Recovery] No historical data found in HDF5 for today.")
+                return
+
+            # 2. 时间过滤：仅保留今日数据
+            today_prefix = now_dt.strftime('%Y-%m-%d')
+            if isinstance(df_hist.index, pd.MultiIndex):
+                times = df_hist.index.get_level_values('ticktime')
+                if pd.api.types.is_datetime64_any_dtype(times):
+                    mask = (times.date == now_dt.date())
+                else:
+                    mask = times.astype(str).str.contains(today_prefix)
+                df_today = df_hist[mask].copy()
+            else:
+                if 'ticktime' in df_hist.columns:
+                    mask = df_hist['ticktime'].astype(str).str.contains(today_prefix)
+                    df_today = df_hist[mask].copy()
+                else:
+                    df_today = pd.DataFrame()
+
+            if df_today.empty:
+                logger.info(f"ℹ️ [Recovery] No historical snapshots found for date {today_prefix}")
+                return
+
+            # 3. 按时间顺序重放注入
+            logger.info(f"🚀 [Recovery] Replaying {len(df_today)} historical rows for {len(df_today.index.get_level_values('code').unique()) if isinstance(df_today.index, pd.MultiIndex) else 'N/A'} codes...")
+            
+            if 'ticktime' not in df_today.columns:
+                df_today = df_today.reset_index()
+            
+            time_groups = df_today.groupby('ticktime')
+            sorted_times = sorted(time_groups.groups.keys())
+            
+            for t in sorted_times:
+                snap = time_groups.get_group(t).copy()
+                # 统一映射
+                if 'trade' not in snap.columns and 'close' in snap.columns:
+                    snap.rename(columns={'close': 'trade'}, inplace=True)
+                
+                # 基础注入
+                self.publisher.update_batch(snap)
+                self.detector.register_codes(snap)
+            
+            logger.info(f"✅ [Recovery] Successfully replayed {len(sorted_times)} time snapshots.")
+
+        except Exception as e:
+            logger.exception(f"❌ [Recovery] Critical error during history recovery: {e}")
+
     def run(self):
         """实盘主循环：等待开盘 ? 周期拉取 ? 收盘停止"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
 
-        logger.info("🔴 [LiveWorker] 实盘模式启动...")
+        logger.info("🔴 [LiveWorker] 实盘模式正在热启动...")
 
-        # Phase 1: 注册代码 (使用启动时获取的 real_df_all 基线数据)
+        # Step 0: [ALIGNED] 执行每日状态重置 (对齐回放初始化)
+        self.detector._reset_daily_state(datetime.now())
+        
+        # Step 1: 注册基线
         self.publisher.register_names(self.real_df_all)
         self.detector.register_codes(self.real_df_all)
         
-        # 初始化情绪基准
         if hasattr(self.publisher, 'emotion_baseline'):
             self.publisher.emotion_baseline.calculate_baseline(self.real_df_all)
+
+        # Step 2: [NEW] 尝试从 HDF5 恢复今日历史
+        self._recover_intraday_history()
         
-        logger.info(f"✅ [LiveWorker] 基线注册完成: {len(self.detector._tick_series)} 只个股")
+        logger.info(f"✅ [LiveWorker] 初始化与恢复完成: {len(self.detector._tick_series)} 只个股")
 
         # ========================================
-        # 实盘循环拉取 (24小时全天候守护)
+        # 实盘循环拉取
         # ========================================
         logger.info("🚀 [LiveWorker] 进入实盘循环监测...")
         consecutive_errors = 0
 
         while self.is_running:
-            now_int = cct.get_now_time_int()
+            now_dt = datetime.now()
             
-            # 1. 盘外休息时段 (非交易日，或 15:05以后/09:15以前)
+            # 1. 盘外休息时段
             if not cct.get_work_time_duration():
-                self.status_update.emit(f"⏳ 非交易时间等待... 当前 {datetime.now().strftime('%H:%M:%S')}")
-                self.progress_update.emit(datetime.now().strftime('%m-%d %H:%M:%S'))
-                
-                # 睡眠30秒再检查时间，分段等待以确保安全退出
-                slept = 0
-                while slept < 30 and self.is_running:
-                    time.sleep(1)
-                    slept += 1
+                self.status_update.emit(f"⏳ 非交易时间等待... 当前 {now_dt.strftime('%H:%M:%S')}")
+                self.progress_update.emit(now_dt.strftime('%m-%d %H:%M:%S'))
+                time.sleep(30)
                 continue
             
-            # 2. 午休时段降频 (交易日 11:30 - 13:00)
+            # 2. 午休时段
             if not cct.get_work_time():
                 self.status_update.emit("💤 午休中...")
-                self.progress_update.emit(datetime.now().strftime('%H:%M:%S'))
-                
-                # 睡眠30秒
-                slept = 0
-                while slept < 30 and self.is_running:
-                    time.sleep(1)
-                    slept += 1
+                self.progress_update.emit(now_dt.strftime('%H:%M:%S'))
+                time.sleep(30)
                 continue
 
             try:
                 t0 = time.time()
 
-                # 核心：调用 Sina 全量行情接口（实盘切片，对应回放中的 tick_slice）
+                # ── 1. Fetch ────────────────────────────────────────────────
                 top_now = tdd.getSinaAlldf(
                     market='all',
                     vol=ct.json_countVol,
@@ -217,8 +287,6 @@ class LiveWorker(QThread):
 
                 if top_now is None or top_now.empty:
                     consecutive_errors += 1
-                    if consecutive_errors > 5:
-                        logger.warning(f"⚠️ [LiveWorker] 连续 {consecutive_errors} 次空数据")
                     time.sleep(self.fetch_interval)
                     continue
 
@@ -226,112 +294,85 @@ class LiveWorker(QThread):
                 self._fetch_count += 1
                 batch_df = top_now.copy()
 
-                # ── 1. 确保 code 列存在 ──────────────────────────────────────
+                # ── 2. Normalize ─────────────────────────────────────────────
                 if 'code' not in batch_df.columns:
-                    if batch_df.index.name == 'code' or batch_df.index.dtype == object:
-                        batch_df = batch_df.reset_index()
-                    else:
-                        batch_df['code'] = batch_df.index.astype(str)
+                    batch_df = batch_df.reset_index()
                 batch_df['code'] = batch_df['code'].astype(str).str.zfill(6)
-
-                # ── 2. 从 Sina 数据提取时间（ticktime = Sina 数据时间，而非系统时间）──
-                # Sina df 通常含 date(YYYY-MM-DD) + time(HH:MM:SS) 两列
-                today_str = datetime.now().strftime('%Y-%m-%d')
-                if 'time' in batch_df.columns and not batch_df['time'].dropna().empty:
-                    t_str = str(batch_df['time'].dropna().iloc[0])
-                    date_str = str(batch_df['date'].dropna().iloc[0]) if 'date' in batch_df.columns and not batch_df['date'].dropna().empty else today_str
-                elif 'ticktime' in batch_df.columns and not batch_df['ticktime'].dropna().empty:
-                    sample_tt = str(batch_df['ticktime'].dropna().iloc[0])
-                    if ' ' in sample_tt:
-                        date_str, t_str = sample_tt.split(' ', 1)
-                    else:
-                        date_str, t_str = today_str, sample_tt
-                else:
-                    t_str = datetime.now().strftime('%H:%M:%S')
-                    date_str = today_str
-
-                # ── 3. 列名映射（对齐 run_replay：close/price→trade，llastp→settlement）──
+                
                 rename_map = {}
                 if 'trade' not in batch_df.columns:
-                    if 'close' in batch_df.columns:   rename_map['close'] = 'trade'
-                    elif 'price' in batch_df.columns: rename_map['price'] = 'trade'
-                    elif 'now' in batch_df.columns:   rename_map['now']   = 'trade'
+                    for col in ['close', 'price', 'now', 'open']:
+                        if col in batch_df.columns:
+                            rename_map[col] = 'trade'
+                            break
                 if 'settlement' not in batch_df.columns and 'llastp' in batch_df.columns:
                     rename_map['llastp'] = 'settlement'
                 if rename_map:
                     batch_df.rename(columns=rename_map, inplace=True)
 
-                # ── 4. 同步 Tick 价格到 TickSeries（对齐 run_replay 的 update_meta 步骤）──
+                # 强制数值化
+                for col in ['trade', 'settlement', 'open', 'high', 'low']:
+                    if col in batch_df.columns:
+                        batch_df[col] = pd.to_numeric(batch_df[col], errors='coerce').fillna(0.0)
+
+                # ── 3. [FIXED] 统一数据源：使用 TickSeries 昨收 ─────────────────
+                batch_df['settlement'] = batch_df['code'].map(
+                    lambda x: getattr(self.detector._tick_series.get(x), 'last_close', 0)
+                )
+
+                # ── 4. [FIXED] 同步到 TickSeries (手动赋值) ─────────────────────
                 with self.detector._lock:
                     for row_t in batch_df.itertuples(index=False):
-                        c = str(getattr(row_t, 'code', '')).zfill(6)
+                        r_dict = row_t._asdict()
+                        c = r_dict.get('code')
                         if c in self.detector._tick_series:
-                            self.detector._tick_series[c].update_meta(row_t)
+                            ts = self.detector._tick_series[c]
+                            price = r_dict.get('trade', 0)
+                            settlement = r_dict.get('settlement', 0)
+                            
+                            if price > 0:
+                                ts.now_price = price
+                                if ts.last_close <= 0 and settlement > 0:
+                                    ts.last_close = settlement
+                                
+                                if price > ts.high_day: ts.high_day = price
+                                if price < ts.low_day or ts.low_day == 0: ts.low_day = price
+                                
+                                if ts.open_price <= 0 and r_dict.get('open', 0) > 0:
+                                    ts.open_price = r_dict['open']
 
-                # ── 5. settlement 补填 + percent 强制重算 ──────────────────────
-                if 'trade' in batch_df.columns:
-                    # 强制转换为数值格式，防止 Sina 数据自带字符串类型导致计算崩溃
-                    batch_df['trade'] = pd.to_numeric(batch_df['trade'], errors='coerce')
-                    if 'settlement' in batch_df.columns:
-                        batch_df['settlement'] = pd.to_numeric(batch_df['settlement'], errors='coerce')
-                    
-                    if 'settlement' not in batch_df.columns or (batch_df['settlement'] == 0).all() or batch_df['settlement'].isna().all():
-                        batch_df['settlement'] = batch_df['code'].map(
-                            lambda x: getattr(self.detector._tick_series.get(x), 'last_close', 0)
-                        )
-                    # 强制重算，去除 Sina 自带的尾盘涨幅
-                    batch_df['percent'] = (
-                        (batch_df['trade'] - batch_df['settlement']) / batch_df['settlement'] * 100
-                    )
-                    batch_df.loc[batch_df['settlement'] <= 0, 'percent'] = 0.0
+                # ── 5. [FIXED] 计算 Percent & 同步 High/Low ─────────────────────
+                # 强制使用最新的 settlement 算涨幅
+                batch_df['percent'] = ((batch_df['trade'] - batch_df['settlement']) / 
+                                      batch_df['settlement'].mask(batch_df['settlement'] == 0, 1) * 100).round(2)
+                
+                # 强制同步价格，防止 detector 使用 sina 历史脏数据
+                batch_df['high'] = batch_df['trade']
+                batch_df['low'] = batch_df['trade']
 
-                if 'ratio' not in batch_df.columns:
-                    batch_df['ratio'] = 1.0
+                # ── 6. [FIXED] 时间戳使用系统时间 ────────────────────────────────
+                t_str = now_dt.strftime('%H:%M:%S')
+                batch_df['timestamp'] = now_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-                # ── 6. 注入 timestamp = Sina 数据时间（对齐 run_replay 的 t_str）──
-                batch_df['timestamp'] = f"{date_str} {t_str}"
+                # ── 7. 每开盘首笔数据清理 ─────────────────────────────────────
+                if self._fetch_count == 1:
+                    with self.detector._lock:
+                        self.detector.active_sectors.clear()
+                        self.detector.daily_watchlist.clear()
 
-                # ── 7. 推送到核心系统（与 run_replay 完全相同的下游链路）──────
-                t1 = time.time()
+                # ── 8. Downstream Flow ──────────────────────────────────────
                 self.publisher.update_batch(batch_df)
-                t2 = time.time()
+                self.detector.update_scores() 
 
-                active_codes = [str(c).zfill(6) for c in batch_df['code'].tolist()]
-                self.detector.update_scores(active_codes=active_codes)
-                t3 = time.time()
-
-                self._last_fetch_ts = time.time()
-
-                # 发射 UI 进度信号（使用 Sina 数据时间，与时间轴对齐）
+                dt = time.time() - t0
+                self.status_update.emit(f"🔴 实盘中 (耗时:{dt:.2f}s) | 计数:{self._fetch_count}")
                 self.progress_update.emit(t_str)
 
-                cost_fetch = (t1 - t0) * 1000
-                cost_pub   = (t2 - t1) * 1000
-                cost_det   = (t3 - t2) * 1000
+                time.sleep(max(0.1, self.fetch_interval - dt))
 
-                if self._fetch_count % 10 == 1:
-                    logger.info(
-                        f"📡 [Live #{self._fetch_count}] {t_str} | "
-                        f"股票: {len(batch_df)} | "
-                        f"Fetch: {cost_fetch:.0f}ms | Pub: {cost_pub:.0f}ms | Det: {cost_det:.0f}ms"
-                    )
-
-                # 等待下次刷新（分段 sleep 以便快速响应停止信号）
-                elapsed = time.time() - t0
-                sleep_time = max(0.5, self.fetch_interval - elapsed)
-                slept = 0
-                while slept < sleep_time and self.is_running:
-                    time.sleep(min(0.5, sleep_time - slept))
-                    slept += 0.5
-                    
             except Exception as e:
-                consecutive_errors += 1
-                logger.error(f"❌ [LiveWorker] 拉取异常 (#{consecutive_errors}): {e}")
-                if consecutive_errors > 10:
-                    logger.error("❌ [LiveWorker] 连续错误过多，延长等待至 30 秒")
-                    time.sleep(30)
-                else:
-                    time.sleep(self.fetch_interval)
+                logger.exception(f"❌ [LiveWorker] 循环异常: {e}")
+                time.sleep(self.fetch_interval)
 
         logger.info(f"🔴 [LiveWorker] 实盘结束. 共拉取 {self._fetch_count} 次.")
         self.finished.emit()
