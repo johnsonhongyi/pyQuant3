@@ -26,6 +26,50 @@ from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory, commonTips as cct
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
+GLOBAL_SCROLLBAR_STYLE = """
+QScrollBar:vertical {
+    border: none;
+    background: transparent;
+    width: 4px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #3A3A3C;
+    min-height: 20px;
+    border-radius: 2px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #555555;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar:horizontal {
+    border: none;
+    background: transparent;
+    height: 4px;
+    margin: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: #3A3A3C;
+    min-width: 20px;
+    border-radius: 2px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #555555;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}
+"""
+
 # [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
 def _get_racing_config_path():
     """获取标准化的绝对路径，确保集成与独立模式路径对齐"""
@@ -84,7 +128,7 @@ class RacingPieWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(150, 150)
         self.setMouseTracking(True)
         self.data = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 100}
         self.colors = {
@@ -351,11 +395,13 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        if self.table.horizontalHeaderItem(6):
+            self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
             QHeaderView::section { background-color: #222; color: #BBB; padding: 4px; border: 1px solid #333; }
-        """)
+        """ + GLOBAL_SCROLLBAR_STYLE)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         
@@ -376,9 +422,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         layout.addWidget(self.table)
         
-        hint = QLabel("💡 单击或双击个股联动主图分析")
-        hint.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(hint)
+
         
         # [🚀 新增] 底部统计信息栏
         self.status_lbl = QLabel("统计: --")
@@ -500,11 +544,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
             sig_txt = str(sig) if sig > 0 else ""
             self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC"), Qt.AlignmentFlag.AlignCenter)
             c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct)
+            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start)
+            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff)
+            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     def _update_dialog_cell(self, row, col, text, color=None, align=None):
         it = self.table.item(row, col)
@@ -591,7 +635,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
     def closeEvent(self, event):
         # [统一管理] 不再独立存档，由主面板 closeEvent 统一调用状态导出
-        # self._save_header_state()
+        self._save_header_state()
         # self.save_window_position_qt_visual(self, "SectorDetail_Unified")
         super().closeEvent(event)
 
@@ -638,11 +682,13 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        if self.table.horizontalHeaderItem(6):
+            self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
             QHeaderView::section { background-color: #222; color: #BBB; padding: 4px; border: 1px solid #333; }
-        """)
+        """ + GLOBAL_SCROLLBAR_STYLE)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         
@@ -662,9 +708,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         layout.addWidget(self.table)
         
-        hint = QLabel("💡 单击或双击个股联动主图分析 | 默认已展示该分类前300强")
-        hint.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(hint)
+
         
         # [🚀 新增] 底部统计信息栏
         self.status_lbl = QLabel("统计: --")
@@ -752,11 +796,11 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             sig_txt = str(sig) if sig > 0 else ""
             self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC"), Qt.AlignmentFlag.AlignCenter)
             c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct)
+            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start)
+            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff)
+            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     def _update_dialog_cell(self, row, col, text, color=None, align=None):
         it = self.table.item(row, col)
@@ -832,6 +876,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
     def closeEvent(self, event):
         # [统一管理] 不再独立存档
+        self._save_header_state()
         super().closeEvent(event)
 
 
@@ -984,7 +1029,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._select_code = "" 
         
         self.setWindowTitle("🏁 竞价赛马与节奏监控")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(400, 300)
         self.setStyleSheet("background-color: #000000; color: white;")
         
         self._last_rendered_time = 0
@@ -1124,6 +1169,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self.stock_table = EnhancedTableWidget(0, 7)
         self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        if self.stock_table.horizontalHeaderItem(6):
+            self.stock_table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header = self.stock_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setDefaultSectionSize(80) 
@@ -1145,7 +1192,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             }
             QTableWidget::item:selected { background-color: #005BB7; }
             QHeaderView::section { padding: 4px; background-color: #2C2C2E; font-size: 11px; color: #BBB; }
-        """)
+        """ + GLOBAL_SCROLLBAR_STYLE)
         
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1194,7 +1241,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             }
             QTableWidget::item:selected { background-color: #005BB7; }
             QHeaderView::section { padding: 4px; background-color: #2C2C2E; font-size: 11px; color: #BBB; }
-        """)
+        """ + GLOBAL_SCROLLBAR_STYLE)
         
         self.sector_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sector_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
