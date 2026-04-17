@@ -478,9 +478,21 @@ class RacingTimeline(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 10, 20, 10)
         
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.label = QLabel("🚩 竞技进度: 09:25:00")
         self.label.setStyleSheet("color: #00FFCC; font-weight: bold;")
-        layout.addWidget(self.label)
+        top_layout.addWidget(self.label)
+        
+        top_layout.addStretch()
+        
+        self.stats_label = QLabel('🌡 温度: <span style="color:#FFF;">--℃</span> &nbsp;&nbsp;|&nbsp;&nbsp; 📈 涨: <span style="color:#FF4444;">--</span> 跌: <span style="color:#44CC44;">--</span> &nbsp;&nbsp;|&nbsp;&nbsp; 上证: <span style="color:#FFF;">--</span>')
+        self.stats_label.setTextFormat(Qt.TextFormat.RichText)
+        self.stats_label.setStyleSheet("color: #AAA; font-size: 11px;")
+        top_layout.addWidget(self.stats_label)
+        
+        layout.addLayout(top_layout)
         
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 330)
@@ -532,6 +544,34 @@ class RacingTimeline(QFrame):
             self.slider.setValue(max(0, total_m))
             self.slider.blockSignals(False)
         except: pass
+
+    def update_market_stats(self, stats: dict):
+        try:
+            temp = stats.get("temperature", 0.0)
+            up = stats.get("up", 0)
+            down = stats.get("down", 0)
+            
+            if temp >= 60: t_c = "#FF4444"
+            elif temp <= 30: t_c = "#44CC44"
+            else: t_c = "#FFD700"
+                
+            sh_pct = "--"
+            sh_c = "#FFF"
+            for idx in stats.get("indices", []):
+                if idx.get("name") in ["上证", "000001", "999999"]:
+                    p = idx.get("percent", 0.0)
+                    sh_pct = f"{p:+.2f}%"
+                    sh_c = "#FF4444" if p > 0 else ("#44CC44" if p < 0 else "#FFF")
+                    break
+            
+            self.stats_label.setText(
+                f'🌡 温度: <span style="color:{t_c}; font-weight:bold;">{temp:.1f}℃</span> &nbsp;&nbsp;|&nbsp;&nbsp; '
+                f'📈 涨: <span style="color:#FF4444; font-weight:bold;">{up}</span> '
+                f'跌: <span style="color:#44CC44; font-weight:bold;">{down}</span> &nbsp;&nbsp;|&nbsp;&nbsp; '
+                f'上证: <span style="color:{sh_c}; font-weight:bold;">{sh_pct}</span>'
+            )
+        except Exception: pass
+
 
 class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     """
@@ -1233,6 +1273,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 else:
                     self.on_code_callback(str(code))
             except Exception: pass
+
+    def update_market_stats(self, stats: dict):
+        """接收外部传输的系统级全盘温度及涨跌并渲染到顶部时间组件上"""
+        if hasattr(self, 'timeline'):
+            self.timeline.update_market_stats(stats)
 
     def update_visuals(self):
         if not self.detector: return

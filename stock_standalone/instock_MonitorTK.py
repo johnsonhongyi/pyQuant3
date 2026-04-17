@@ -891,6 +891,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._racing_panel_win.show()
             self._racing_panel_win.raise_()
             self._racing_panel_win.activateWindow()
+            self._racing_first_sync_done = False # [NEW] ⚡ 强制触发立即同步大盘温度数据
             toast_message(self, "🏁 竞价赛马监控已启动")
 
         except Exception as e:
@@ -3904,13 +3905,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         try:
             dashboard = getattr(self, '_signal_dashboard_win', None)
+            racing = getattr(self, '_racing_panel_win', None)
             now = time.time()
-            # Throttling: 实时同步每 60 秒一次，或看板首次打开时强制同步
-            if (dashboard and not getattr(self, '_dashboard_first_sync_done', False)) or \
-               (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60):
-                
+            
+            # Throttling: 实时同步每 60 秒一次，或看板/赛马首次打开时强制同步
+            trigger_dash = dashboard and not getattr(self, '_dashboard_first_sync_done', False)
+            trigger_racing = racing and not getattr(self, '_racing_first_sync_done', False)
+            trigger_time = (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60)
+            
+            if trigger_dash or trigger_racing or trigger_time:
                 self._last_dashboard_sync_ts = now
                 if dashboard: self._dashboard_first_sync_done = True
+                if racing: self._racing_first_sync_done = True
                 
                 def _async_stats_aggregation():
                     try:
@@ -4002,6 +4008,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         
                         if dashboard:
                             self.tk_dispatch_queue.put(lambda s=final_stats: self._signal_dashboard_win.update_market_stats(s))
+                            
+                        # [NEW] 将处理好的温度指数数据挂载到竞价赛马监控
+                        racing_panel = getattr(self, '_racing_panel_win', None)
+                        if racing_panel and hasattr(racing_panel, 'update_market_stats'):
+                            self.tk_dispatch_queue.put(lambda s=final_stats: racing_panel.update_market_stats(s))
                         
                         try:
                             # [NEW] 将指数数据注入交易决策引擎，支持逆势策略计算
