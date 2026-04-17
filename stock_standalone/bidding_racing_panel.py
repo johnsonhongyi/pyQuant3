@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGraphicsDropShadowEffect, QPushButton,
-    QMenu, QApplication, QDialog
+    QMenu, QApplication, QDialog, QSplitter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
 from PyQt6.QtGui import (
@@ -1200,10 +1200,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         header.sectionClicked.connect(lambda idx: self._on_header_clicked("stock", idx))
         rank_layout.addWidget(self.stock_table)
         center_layout.addWidget(rank_frame, stretch=6)
-        main_layout.addLayout(center_layout, stretch=7)
+        
+        # [🚀 可调整高度] 引入垂直分栏器，让用户可以上下拖动调整板块视图高度
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.setHandleWidth(4)
+        self.main_splitter.setStyleSheet("QSplitter::handle { background: #333; }")
+        
+        center_container = QWidget()
+        center_container.setLayout(center_layout)
+        self.main_splitter.addWidget(center_container)
         
         bottom_frame = QFrame()
-        bottom_frame.setFixedHeight(220)
+        # bottom_frame.setFixedHeight(220) # 取消定死高度
         bottom_frame.setStyleSheet("background-color: #1C1C1E; border-radius: 12px;")
         bottom_lay = QVBoxLayout(bottom_frame)
         
@@ -1248,7 +1256,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.setSortingEnabled(False)
         s_header.sectionClicked.connect(lambda idx: self._on_header_clicked("sector", idx))
         bottom_lay.addWidget(self.sector_table)
-        main_layout.addWidget(bottom_frame, stretch=3)
+        self.main_splitter.addWidget(bottom_frame)
+        
+        # 设置默认比例 (7:3)
+        self.main_splitter.setStretchFactor(0, 7)
+        self.main_splitter.setStretchFactor(1, 3)
+        
+        main_layout.addWidget(self.main_splitter)
 
         self.stock_table.code_clicked.connect(self._on_stock_clicked)
         self.stock_table.code_double_clicked.connect(self._on_stock_double_clicked)
@@ -1736,6 +1750,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             conf = {
                 "header_stock": state_stock,
                 "header_sector": state_sector,
+                "splitter_main": self.main_splitter.saveState().toHex().data().decode(),
                 "history": self._anchor_history[-20:],
                 "reset_cycle": self._reset_cycle_mins,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
@@ -1787,9 +1802,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._refresh_history_buttons()
                 logger.info(f"✅ [RacingPanel] 已恢复 {len(hist)} 个历史起点。")
 
-            # 4. 恢复主窗口几何尺寸
+            # 4. 恢复主窗口几何尺寸与分栏器布局
             if "window_geometry" in conf:
                 self.restoreGeometry(QByteArray.fromHex(conf["window_geometry"].encode()))
+            if "splitter_main" in conf:
+                self.main_splitter.restoreState(QByteArray.fromHex(conf["splitter_main"].encode()))
                 
             # 5. [🚀 自动恢复 V2] 批量重开所有未关闭的明细窗口并还原其内部布局
             open_list = conf.get("open_details_v2", [])
@@ -1833,45 +1850,81 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._ui_ready = True
 
     def _arrange_detail_windows(self):
-        """[🚀 垂直联排优化] 参照图片效果：在主面板右侧边缘垂直堆叠排列"""
+        """[🚀 垂直联排优化] 极限收缩 + 磁吸叠层 + 阶梯分栏(优先对齐主窗)"""
         dlgs = [dlg for dlg in self._detail_dialogs.values() if not dlg.isHidden()]
         if not dlgs: 
             logger.info("ℹ️ [Panel] 当前没有打开的详情窗口。")
             return
         
-        main_geo = self.geometry()
+        main_geo = self.frameGeometry()
         screen_geo = self.screen().availableGeometry()
         
-        # 设置排布起点：紧贴主面板右侧
-        # [NEW] 垂直堆叠：x 不变，y 逐渐累加
-        col_x = main_geo.right() + 4
-        curr_y = main_geo.top()
+        # [✨ 规格决策]
+        # min_h 设为 210px，确保能稳稳看到4行数据
+        min_h = 210
+        title_bar_h = 32
         
-        # 如果右侧物理空间太小(小于 150px)，则从主面板左边缘对齐右侧
-        if col_x > screen_geo.right() - 150:
-            col_x = screen_geo.right() - 350 # 强制预留空间
+        # 初始策略：优先高度对齐主窗口，如果窗口非常多(超过3列)，则释放到屏幕高度
+        num_per_main_col = max(1, main_geo.height() // min_h)
+        if len(dlgs) > num_per_main_col * 3:
+            # 只有“超多”时才考虑上下铺满屏幕
+            limit_y_bottom = screen_geo.bottom()
+            col_base_y = screen_geo.top()
+            target_h = max(min_h, screen_geo.height() // (len(dlgs) // 3 + 1))
+        else:
+            # 优先在主窗口的高度范围内铺
+            limit_y_bottom = main_geo.bottom()
+            col_base_y = main_geo.top()
+            target_h = main_geo.height() // num_per_main_col
+
+        # [✨ 磁吸起点]
+        # -6px 抵消第一列与主窗口之间的隐形边框，留出1px缝隙防止压死
+        col_x = main_geo.right() - 6
+        curr_y = col_base_y
+        padding = 1 # 极微小间距，保留磁吸感同时防止压盖
+        max_w_in_col = 0
         
-        padding = 5
         for i, dlg in enumerate(dlgs):
+            dlg.table.resizeColumnsToContents()
+            table_w = dlg.table.verticalHeader().width() + dlg.table.horizontalHeader().length()
+            # 容纳极窄滚动条与边框
+            target_w = table_w + 35
+            
+            # [✨ 智能换列] 超过主窗口底边(或屏幕底边)则换列
+            if curr_y + target_h > limit_y_bottom + 10:
+                # 换列磁吸微调：从 -14px 放宽到 -11px，防止横向压盖
+                col_x += (max_w_in_col - 11 + padding)
+                curr_y = col_base_y
+                max_w_in_col = target_w 
+            else:
+                max_w_in_col = max(max_w_in_col, target_w)
+            
+            # 空间防护
+            if col_x > screen_geo.right() - target_w:
+                col_x = max(screen_geo.left(), screen_geo.right() - target_w - 4)
+                
+            dlg.resize(target_w, target_h)
             dlg_w = dlg.width()
             dlg_h = dlg.height()
             
-            # 检查高度是否溢出屏幕底边
-            if curr_y + dlg_h > screen_geo.bottom():
-                # [自动分栏] 开启新的一列
-                col_x += (dlg_w + padding)
-                curr_y = main_geo.top()
-                
-            # 最终坐标限制
             final_x = min(col_x, screen_geo.right() - dlg_w)
             final_y = min(curr_y, screen_geo.bottom() - dlg_h)
             
             dlg.move(final_x, final_y)
-            dlg.raise_()
             dlg.activateWindow()
             
-            # y 轴递增，下一个窗口贴在上一个下面
-            curr_y += (dlg_h + padding)
+            # 下一个位置(垂直垂直叠层)
+            curr_y += target_h
+            
+        # [✨ 倒序 Z-Order 叠层] 压盖标题栏
+        for dlg in reversed(dlgs):
+            dlg.raise_()
+        
+        logger.info(f"📐 [Panel] 已完成 {len(dlgs)} 个详情窗口的阶梯式分栏(磁吸微调)联排。")
+
+    def _get_synthetic_score(self, ts):
+        # 原有逻辑...
+        pass
         
         logger.info(f"📐 [Panel] 已完成 {len(dlgs)} 个详情窗口的垂直堆叠联排。")
 

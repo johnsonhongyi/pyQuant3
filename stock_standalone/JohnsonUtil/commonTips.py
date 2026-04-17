@@ -341,7 +341,7 @@ def get_base_path() -> str:
             path: str = os.path.dirname(os.path.abspath(__file__))
             if os.path.basename(path) == 'JohnsonUtil':
                 path = os.path.dirname(path)
-            log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            log.debug(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
             return path
         except NameError:
              pass # 忽略交互模式
