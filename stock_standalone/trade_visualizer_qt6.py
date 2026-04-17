@@ -2817,19 +2817,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
             /* 垂直滚动条 */
             QTableWidget QScrollBar:vertical {
-                width: 6px;
+                width: 4px;
                 background: transparent;
                 margin: 0px;
             }
 
             QTableWidget QScrollBar::handle:vertical {
-                background: rgba(180, 180, 180, 120);
-                min-height: 30px;
-                border-radius: 3px;
+                background: #3A3A3C;
+                min-height: 20px;
+                border-radius: 2px;
             }
 
             QTableWidget QScrollBar::handle:vertical:hover {
-                background: rgba(220, 220, 220, 180);
+                background: #555555;
             }
 
             QTableWidget QScrollBar::add-line:vertical,
@@ -2844,19 +2844,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
             /* 水平滚动条 */
             QTableWidget QScrollBar:horizontal {
-                height: 6px;
+                height: 4px;
                 background: transparent;
                 margin: 0px;
             }
 
             QTableWidget QScrollBar::handle:horizontal {
-                background: rgba(180, 180, 180, 120);
-                min-width: 30px;
-                border-radius: 3px;
+                background: #3A3A3C;
+                min-width: 20px;
+                border-radius: 2px;
             }
 
             QTableWidget QScrollBar::handle:horizontal:hover {
-                background: rgba(220, 220, 220, 180);
+                background: #555555;
             }
 
             QTableWidget QScrollBar::add-line:horizontal,
@@ -2882,8 +2882,8 @@ class MainWindow(QMainWindow, WindowMixin):
         """)
 
         # 设置滚动条固定大小
-        self.stock_table.verticalScrollBar().setFixedWidth(6)
-        self.stock_table.horizontalScrollBar().setFixedHeight(6)
+        self.stock_table.verticalScrollBar().setFixedWidth(4)
+        self.stock_table.horizontalScrollBar().setFixedHeight(4)
 
         # ⭐ 安装全局事件过滤器，实现应用程序级别的快捷键捕捉
         self.input_filter = GlobalInputFilter(self)
@@ -3145,21 +3145,42 @@ class MainWindow(QMainWindow, WindowMixin):
             QScrollBar:vertical {
                 border: none;
                 background: transparent;
-                width: 8px;
+                width: 4px;
                 margin: 0px;
             }
             QScrollBar::handle:vertical {
-                background: rgba(180, 180, 180, 120);
+                background: #3A3A3C;
                 min-height: 20px;
-                border-radius: 4px;
+                border-radius: 2px;
             }
             QScrollBar::handle:vertical:hover {
-                background: rgba(220, 220, 220, 180);
+                background: #555555;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            
+            QScrollBar:horizontal {
+                border: none;
+                background: transparent;
+                height: 4px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #3A3A3C;
+                min-width: 20px;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #555555;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: transparent;
             }
         """
