@@ -187,34 +187,7 @@ def send_signal_to_visualizer_ipc(data: dict):
             _ipc_sender_thread = threading.Thread(target=_ipc_sender_worker, daemon=True, name="IPCSenderWorker")
             _ipc_sender_thread.start()
 
-        # 2. ---------- SignalBus (Main process only) ----------
-        sig_type = data.get('pattern', 'ALERT')
-        bus_start = time.perf_counter()
-        try:
-            from signal_bus import SignalBus, StandardSignal, publish_standard_signal
-            std_sig = StandardSignal(
-                code=data.get('code', ''),
-                name=data.get('name', ''),
-                type=SignalBus.EVENT_PATTERN if sig_type != 'ALERT' else SignalBus.EVENT_ALERT,
-                subtype=sig_type,
-                price=data.get('price', 0.0),
-                timestamp=data.get('timestamp', datetime.datetime.now().strftime("%H:%M:%S")),
-                detail=data.get('message', ''),
-                source="LiveStrategy",
-                is_high_priority=data.get('is_high_priority', False),
-                score=float(data.get('score', 0.0)),
-                grade=data.get('grade', '')
-            )
-            # 🚀 [PERF] 统计发布到本地总线的耗时
-            publish_standard_signal(std_sig)
-            bus_dur = (time.perf_counter() - bus_start) * 1000
-            if bus_dur > 50:
-                logger.warning(f"⚠️ [PERF] SignalBus publish {code} too slow: {bus_dur:.1f}ms")
-            
-        except Exception as e:
-            logger.debug(f"SignalBus publish failed: {e}")
-
-        # 3. ---------- IPC (Queue it for Async worker) ----------
+        # 2. ---------- IPC (Queue it for Async worker) ----------
         queue_start = time.perf_counter()
         if ipc_queue:
             # ⭐ [DEBUG] 监测队列是否发生挤压
@@ -226,7 +199,7 @@ def send_signal_to_visualizer_ipc(data: dict):
             
             queue_dur = (time.perf_counter() - queue_start) * 1000
             total_dur = (time.perf_counter() - start_t) * 1000
-            logger.debug(f"✨ [IPC_SEND] {code}({sig_type}) - Bus:{bus_dur:.1f}ms, Queue:{queue_dur:.1f}ms, Total:{total_dur:.1f}ms (Q={q_size})")
+            logger.debug(f"✨ [IPC_SEND] {code} - Queue:{queue_dur:.1f}ms, Total:{total_dur:.1f}ms (Q={q_size})")
         else:
              logger.warning(f"[IPC_SEND] ipc_queue is None, signal {code} skipped.")
              
@@ -4490,19 +4463,31 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.debug(f"Async DB submission failed: {e}")
 
-            # --- B. IPC 实时推送 (Throttled/Batched inside sender) ---
+            # --- B. 信号分发 (Signal Distribution: Bus & IPC) ---
             try:
-                # [FIX] 仅当 UI 开启了可视化开关时才发送 IPC，避免无效消耗与 GIL 线程冲突
+                # 1. ---------- SignalBus (本地总线推送，供 RacingPanel 等内部组件消费) ----------
+                # [FIX] 即使外部可视化开关关闭，内部总线也必须同步，否则赛马面板无法接收信号
+                from signal_bus import SignalBus, StandardSignal, publish_standard_signal
+                std_sig = StandardSignal(
+                    code=code, name=name,
+                    type=SignalBus.EVENT_PATTERN if sig_type != 'ALERT' else SignalBus.EVENT_ALERT,
+                    subtype=sig_type, price=price, timestamp=now_str,
+                    detail=message, source="LiveStrategy",
+                    is_high_priority=is_priority, score=score, grade=grade
+                )
+                publish_standard_signal(std_sig)
+
+                # 2. ---------- IPC 推送 (仅限外部可视化客户端) ----------
                 if self.master and getattr(self.master, "_vis_enabled_cache", False):
                     ipc_data = {
-                        "code": code, "name": name, "pattern": sig_type if 'sig_type' in locals() else "ALERT",
+                        "code": code, "name": name, "pattern": sig_type,
                         "message": message, "is_high_priority": is_priority, "timestamp": now_str, 
                         "priority": 100 if is_priority else 50,
-                        "grade": grade,
-                        "score": score
+                        "grade": grade, "score": score, "price": price
                     }
                     send_signal_to_visualizer_ipc(ipc_data)
-            except Exception: pass
+            except Exception as e:
+                logger.debug(f"Signal distribution failed: {e}")
 
             # --- C. UI 回调 (执行外部注册函数) ---
             if self.alert_callback and not should_skip_ui and not silent:
@@ -4511,8 +4496,11 @@ class StockLiveStrategy:
                 except Exception as e:
                     logger.error(f"Async Alert callback error: {e}")
 
-            # --- D. 语音播报 ---
-            if self.voice_enabled and not silent:
+            # --- D. 报警追踪与语音播报 (Tracking & Voice) ---
+            if not silent:
+                # ⚡ [DECOUPLED] 即使语音关闭也触发 announce，以确保 AlertManager 完成会话追踪 (session tracking)
+                # AlertManager 内部会根据其自身的 voice_enabled 状态决定是否真正播放声音
+                
                 # 语义清理
                 clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
                 import re

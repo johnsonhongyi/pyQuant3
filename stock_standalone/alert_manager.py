@@ -431,6 +431,9 @@ class AlertManager:
 
     def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
         """发送报警 (支持合并)"""
+        # ⚡ [NEW] 即使在全局报警禁用的情况下，也进行会话追踪 (用于同步赛马面板等可视化组件)
+        self._track_session_code(message, key)
+
         if not self.enabled: return
         
         # 1. 冷却检查
@@ -457,11 +460,11 @@ class AlertManager:
         # 3. 全局/无 Key 消息：直接即时发送
         self._do_send_alert(message, priority, key, cooldown)
 
-    def _do_send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
-        """实际的消息分发与记录逻辑"""
-        now = time.time()
-        
-        # ⚡ [NEW] 记录到会话报警列表 (Extract key from message if missing)
+    def _track_session_code(self, message: str, key: Optional[str] = None):
+        """
+        [INTERNAL] 提取个股代码并记录到当前会话的已报警集合中
+        这是竞价赛马面板同步个股信号的核心依据
+        """
         actual_code = None
         # 1. 尝试从 key 提取 (处理 sz000001 等复杂格式)
         if key:
@@ -480,7 +483,11 @@ class AlertManager:
                 if actual_code not in self.session_alerted_codes:
                     self.session_alerted_codes.add(str(actual_code))
                     logger.debug(f"✅ [SessionTrack] Added {actual_code} to alerted codes")
-            
+
+    def _do_send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
+        """实际的消息分发与记录逻辑"""
+        now = time.time()
+        
         # 2. 日志记录
         is_high = (priority <= 1)
         log_allowed = True
