@@ -30,6 +30,20 @@
 
 ---
 
+## 2026-04-17 17:45
+- [x] **新增分类详情视图 (`CategoryDetailDialog`)**：
+    - [x] 实现对赛马场饼图内特定角色类别（如“龙头”）的双击联动响应。
+    - [x] 可以弹出类似板块详情的高性能窗口查看全品类个股，默认渲染前 300 数据通过内建滚动优化显示性能。
+    - [x] **重构角色判定引擎**：将 `get_role` 从局部提取为顶层 `get_racing_role(ts)` 可复用方法，确保底层检测标准在主表与分类视图之间绝对一致。
+    - [x] **饼图交互双击支持**：为 `RacingPieWidget` 新增 `mouseDoubleClickEvent` 与 `category_double_clicked` 信号以平滑集成新窗口。
+
+## 2026-04-17 17:45
+- [x] **新增分类详情视图 (`CategoryDetailDialog`)**：
+    - [x] 实现对赛马场饼图内特定角色类别（如“龙头”）的双击联动响应。
+    - [x] 可以弹出类似板块详情的高性能窗口查看全品类个股，默认渲染前 300 数据通过内建滚动优化显示性能。
+    - [x] **重构角色判定引擎**：将 `get_role` 从局部提取为顶层 `get_racing_role(ts)` 可复用方法，确保底层检测标准在主表与分类视图之间绝对一致。
+    - [x] **饼图交互双击支持**：为 `RacingPieWidget` 新增 `mouseDoubleClickEvent` 与 `category_double_clicked` 信号以平滑集成新窗口。
+
 ## ✅ 最近完成任务：深度修复 TickSeries 崩溃异常与逻辑错误 (04-08 22:05)
 - [x] **补全 TickSeries 内存模型**：在 `__slots__` 中补齐了缺失的 `total_vol`, `vol_ratio`, `lvol`, `last6vol`, `market_role` 字段，彻底解决了历史快照加载及实盘运行中因属性非法导致的 `AttributeError`。
 - [x] **修正算法逻辑指向**：修复了 `_evaluate_code` 中 3 处由于 `self` 指向错误导致的属性访问故障，确保量能评分、角色判定及地量启动逻辑正确作用于个股实例而非检测器引擎。
