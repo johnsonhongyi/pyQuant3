@@ -24,7 +24,38 @@ from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
-# [🚀 极致性能] 模块级清理，相关逻辑已迁移至类成员
+# [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
+RACING_CONFIG_PATH = "snapshots/bidding_racing_ui_state_v3.json.gz"
+
+def _get_racing_config():
+    """读取全局持久化配置"""
+    if not os.path.exists(RACING_CONFIG_PATH):
+        return {}
+    try:
+        import gzip
+        with gzip.open(RACING_CONFIG_PATH, "rb") as f:
+            return json.loads(f.read().decode('utf-8'))
+    except Exception:
+        return {}
+
+def _save_racing_config(conf: dict):
+    """保存配置并合并历史记录"""
+    try:
+        os.makedirs(os.path.dirname(RACING_CONFIG_PATH), exist_ok=True)
+        old_conf = _get_racing_config()
+        # 合并关键字段，防止被单次操作覆盖全局
+        for k, v in conf.items():
+            if isinstance(v, list) and k in old_conf and isinstance(old_conf[k], list):
+                # 如果是列表(如 history)，逻辑上建议保留最新
+                old_conf[k] = v
+            else:
+                old_conf[k] = v
+        
+        import gzip
+        with gzip.open(RACING_CONFIG_PATH, "wb") as f:
+            f.write(json.dumps(old_conf).encode('utf-8'))
+    except Exception as e:
+        logger.error(f"❌ [RacingConfig] Save Failed: {e}")
 
 class RacingPieWidget(QWidget):
     """
@@ -270,6 +301,18 @@ class SectorDetailDialog(QDialog, WindowMixin):
         hint.setStyleSheet("color: #666; font-size: 10px;")
         layout.addWidget(hint)
 
+    def _get_synthetic_score(self, ts):
+        """[🚀 性能加速版] 动态合成显示分数"""
+        try:
+            # 优先尝试直接访问，消除 getattr 的字典查找开销
+            main_score = ts.score
+            if main_score < 0.01:
+                activity_score = (getattr(ts, 'signal_count', 0) * 1.5) + (abs(ts.current_pct) * 0.2)
+                return max(activity_score, getattr(ts, 'momentum_score', 0) * 0.05)
+            return main_score
+        except AttributeError:
+            return 0.0
+
     def refresh_data(self):
         if not hasattr(self, 'detector') or not self.detector: return
         
@@ -287,12 +330,17 @@ class SectorDetailDialog(QDialog, WindowMixin):
             attr = col_attr_map.get(self._sort_col, 'score')
             is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
             
+            # [🚀 性能优化] 预计算合成评分，避免在排序热点路径中重复调用 getattr
+            score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
+            
             # 使用稳定性排序 (数值, 代码)
             def get_sort_key(ts):
                 if attr == 'start_pct':
                     val = ts.current_pct - ts.pct_diff
                 elif attr == 'pct_diff':
                     val = ts.pct_diff
+                elif attr == 'score':
+                    val = score_cache.get(ts.code, 0)
                 else:
                     val = getattr(ts, attr, 0)
                 return (val, ts.code)
@@ -303,7 +351,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             flattened = []
             for ts in display_list:
                 flattened.append((
-                    ts.code, ts.name, ts.score, 
+                    ts.code, ts.name, score_cache.get(ts.code, 0), 
                     getattr(ts, 'signal_count', 0),
                     ts.current_pct,
                     ts.current_pct - ts.pct_diff,
@@ -413,7 +461,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
     def closeEvent(self, event):
         self._save_header_state()
-        self.save_window_position_qt_visual(self, "SectorDetail_Unified")
+        self.save_window_position_qt_visual(self, f"SectorDetail_{self.sector_name}")
         super().closeEvent(event)
 
 class RacingTimeline(QFrame):
@@ -509,15 +557,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._startup_time = time.time()
         
         if sender:
-            self.sender = sender
+            self.stock_sender = sender
         elif not main_app:
             try:
                 from JohnsonUtil.stock_sender import StockSender
-                self.sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
+                self.stock_sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
             except Exception as e:
-                self.sender = None
+                self.stock_sender = None
         else:
-            self.sender = None
+            self.stock_sender = None
             
         self._select_code = "" 
         
@@ -549,7 +597,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         }
         
         self._init_ui()
-        self._load_session_v3()
+        self._restore_ui_state()
         
         self.stock_table.setSortingEnabled(False)
         self.sector_table.setSortingEnabled(False)
@@ -558,7 +606,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.update_visuals)
-        self.refresh_timer.start(100)
+        self.refresh_timer.start(200) # [⚡ 性能均衡] 5FPS 既能满足实时感，又能大幅降低 CPU 负载
         
         QTimer.singleShot(5000, self._check_auto_anchor)
 
@@ -619,6 +667,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.reset_btn.clicked.connect(self._manual_reset_anchors)
         btn_layout.addWidget(self.reset_btn)
         
+        # # [🚀 新增] 手动存档按钮
+        # self.btn_save_manually = QPushButton("存档")
+        # self.btn_save_manually.setFixedSize(50, 26)
+        # self.btn_save_manually.setStyleSheet("""
+        #     QPushButton { background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
+        #     QPushButton:hover { background: #00FFCC; color: black; }
+        # """)
+        # self.btn_save_manually.clicked.connect(self._save_ui_state)
+        # btn_layout.addWidget(self.btn_save_manually)
+        
         cycle_layout.addLayout(btn_layout)
         top_bar_layout.addWidget(cycle_group)
         
@@ -647,6 +705,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         header.setMinimumSectionSize(30)
         self.stock_table.setColumnWidth(0, 65)
         self.stock_table.setColumnWidth(1, 75)
+        # self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state) # 移动到 _init_ui 末尾，防止初始化时 AttributeError
         
         self.stock_table.setAlternatingRowColors(True)
         self.stock_table.setStyleSheet("""
@@ -694,10 +753,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.setHorizontalHeaderLabels(["板块名称", "强度得分", "领涨龙头", "龙头涨幅", "起点涨幅", "龙头DFF", "联动详情"])
         s_header = self.sector_table.horizontalHeader()
         s_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        s_header.setMinimumSectionSize(30)
-        s_header.setDefaultSectionSize(100)
-        self.sector_table.setColumnWidth(0, 80)
-        self.sector_table.setColumnWidth(2, 110)
+        # [🚀 实时持久化] 当列宽变动时，即时记录
+        # self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state) # 移动到 _init_ui 末尾
         
         self.sector_table.setAlternatingRowColors(True)
         self.sector_table.setStyleSheet("""
@@ -737,91 +794,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.currentCellChanged.connect(
             lambda r, c, pr, pc: self._on_sector_clicked(r, c)
         )
+        
+        # [🚀 最终关联] 确保所有组件初始化完成后才开启持久化监听
+        self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
 
-    def closeEvent(self, event):
-        """[🚀 唯一持久化入口] 仅在退出时执行写盘"""
-        self._save_session_v3()
-        super().closeEvent(event)
-
-    def _load_session_v3(self):
-        """[🚀 极简载入] 启动时唯一一次盘查"""
-        try:
-            import gzip, json
-            from JohnsonUtil import commonTips as cct
-            local_dir = os.path.join(os.path.dirname(__file__), "snapshots")
-            root_dir = os.path.join(cct.get_base_path(), "snapshots")
-            
-            conf = {}
-            for folder in [local_dir, root_dir]:
-                path = os.path.join(folder, "bidding_racing_ui_state_v3.json.gz")
-                if os.path.exists(path):
-                    try:
-                        with gzip.open(path, "rt", encoding="utf-8") as f:
-                            conf = json.load(f)
-                        if conf: 
-                            logger.info(f"✅ Loaded session from: {path}")
-                            break
-                    except: continue
-
-            if not conf: return
-            
-            self._reset_cycle_mins = conf.get("reset_cycle", 10)
-            if hasattr(self, 'cycle_label'):
-                self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
-            
-            self._anchor_history = conf.get("anchor_history", [])
-            if self._anchor_history:
-                self._anchor_history.sort(key=lambda x: x.get('ts', 0))
-                self._refresh_history_buttons()
-                self._auto_restore_pending = True
-            
-            self.stock_table.blockSignals(True)
-            self.sector_table.blockSignals(True)
-            if "stock_header" in conf:
-                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["stock_header"].encode()))
-            if "sector_header" in conf:
-                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["sector_header"].encode()))
-            self.stock_table.blockSignals(False)
-            self.sector_table.blockSignals(False)
-            
-        except Exception as e:
-            logger.error(f"Session load failed: {e}")
-
-    def _save_session_v3(self):
-        """[🚀 全干货持久化] 退出瞬间执行备份与收口"""
-        try:
-            if not self._anchor_history and time.time() - self._startup_time < 30:
-                return
-            
-            conf = {
-                "persistence_date": datetime.date.today().strftime("%Y-%m-%d"),
-                "reset_cycle": self._reset_cycle_mins,
-                "anchor_history": self._anchor_history,
-                "stock_header": self.stock_table.horizontalHeader().saveState().toHex().data().decode(),
-                "sector_header": self.sector_table.horizontalHeader().saveState().toHex().data().decode()
-            }
-            
-            def _s(obj):
-                if isinstance(obj, dict): return {k: _s(v) for k, v in obj.items()}
-                if isinstance(obj, list): return [_s(x) for x in obj]
-                if hasattr(obj, 'item'): return obj.item()
-                return obj
-            
-            import gzip, shutil, json
-            safe_conf = _s(conf)
-            target_dir = os.path.join(os.path.dirname(__file__), "snapshots")
-            os.makedirs(target_dir, exist_ok=True)
-            
-            path_gz = os.path.join(target_dir, "bidding_racing_ui_state_v3.json.gz")
-            if os.path.exists(path_gz):
-                shutil.copy2(path_gz, path_gz + ".bak")
-                
-            with gzip.open(path_gz, "wt", encoding="utf-8") as f:
-                json.dump(safe_conf, f, ensure_ascii=False, separators=(',', ':'))
-            
-            logger.info(f"💾 Session persisted smoothly on exit.")
-        except Exception as e:
-            logger.error(f"Session save failed: {e}")
 
     def _on_pie_filter(self, category):
         if category == "ALL":
@@ -967,9 +944,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 for sec in self.detector.active_sectors.values():
                     sec['leader_pct_diff'] = 0.0
             
-            snap = self._create_anchor_snapshot()
+            snap = self._create_anchor_snapshot(allow_system_time=True)
             if snap: 
-                self._add_to_history(snap)
+                self._add_to_history(snap, force=True)
                 self._refresh_history_buttons()
 
             curr_time = getattr(self.detector, 'last_data_ts', 0)
@@ -987,16 +964,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._add_to_history(snap)
                 self._apply_history_anchor(0)
 
-    def _create_anchor_snapshot(self):
+    def _create_anchor_snapshot(self, allow_system_time=False):
         """记录当前所有个股的价格锚点快照 - [🚀 精准行情时间模式]"""
         if not self.detector: return None
         
-        # 优先使用行情时间，如果尚未到开盘时间/无数据，则不创建空快照
+        # 优先使用行情时间，如果尚未到开盘时间/无数据，则根据标志决定是否回退系统时间
         curr_time = getattr(self.detector, 'last_data_ts', 0)
         
-        # [🚀 精准化] 如果实盘还没开始（ts=0），不要用系统时间滥竽充数
+        # [🚀 精准化] 如果实盘还没开始（ts=0），正常逻辑该返回 None，但手动重置需要个时间戳
         if curr_time <= 0:
-            return None
+            if not allow_system_time:
+                return None
+            curr_time = time.time()
             
         with self.detector._lock:
             codes, prices = [], []
@@ -1013,14 +992,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "p": prices   
             }
 
-    def _add_to_history(self, snapshot):
+    def _add_to_history(self, snapshot, force=False):
         if not snapshot: return
         
         # [🚀 极限排序与去重] 确保时间轴顺序且不重复
         now_ts = snapshot.get('ts', 0)
         
-        # 30秒内不重复捕捉相同起点的防护
-        if self._anchor_history:
+        # 30秒内不重复捕捉相同起点的防护 (手动重置除外)
+        if self._anchor_history and not force:
             last_ts = self._anchor_history[-1].get('ts', 0)
             if abs(now_ts - last_ts) < 30:
                 logger.debug("🛡️ [Panel] 忽略 30 秒内的重复起点捕捉回调。")
@@ -1047,41 +1026,66 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     item.widget().deleteLater()
             
             count = len(self._anchor_history)
-            print(f"🎨 [Panel] UI Button Refresh START: {count} anchors in memory.")
-            
-            # [🚀 布局强化] 防止按钮被挤压为 0
-            self.history_layout.setSpacing(8)
-            self.history_layout.setContentsMargins(15, 2, 15, 2)
-
             # 重新生成按钮
             for i, snap in enumerate(self._anchor_history):
-                try:
-                    ts_val = snap.get("ts", 0)
-                    t_str = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M")
-                    btn = QPushButton(f"📍 起点{i+1}({t_str})")
-                    btn.setFixedSize(94, 26)
-                    btn.setMinimumWidth(94)
-                    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    # [🚀 极简主题] 
-                    btn.setStyleSheet("""
-                        QPushButton { 
-                            background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; 
-                            border-radius: 4px; font-size: 11px; font-weight: bold;
-                        }
-                        QPushButton:hover { background: #2C2C2E; color: white; border: 1px solid #55FFDD; }
-                    """)
-                    btn.clicked.connect(lambda checked, idx=i: self._apply_history_anchor(idx))
-                    self.history_layout.addWidget(btn)
-                    btn.show()
-                except Exception as e:
-                    print(f"⚠️ [Panel] Render individual anchor {i} failed: {e}")
-            
-            # [🚀 几何诊断] 输出布局位置，防止被挤压
-            geo = self.history_layout.contentsRect()
-            print(f"✅ [Panel] UI Button Refresh DONE. Layout Geometry: {geo.width()}x{geo.height()}")
+                ts_val = snap.get("ts", 0)
+                t_str = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M")
+                btn = QPushButton(f"📍 起点{i+1}({t_str})")
+                btn.setFixedSize(94, 26)
+                btn.setMinimumWidth(94)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                # [🚀 极简主题] 
+                btn.setStyleSheet("""
+                    QPushButton { 
+                        background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; 
+                        border-radius: 4px; font-size: 11px; font-weight: bold;
+                    }
+                    QPushButton:hover { background: #2C2C2E; color: white; border: 1px solid #55FFDD; }
+                """)
+                btn.clicked.connect(lambda checked, idx=i: self._apply_history_anchor(idx))
+                
+                # [🚀 新增] 右键删除支持
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(lambda pos, idx=i: self._on_anchor_context_menu(pos, idx))
+                
+                self.history_layout.addWidget(btn)
+                btn.show()
+                
+            # [🚀 几何诊断] 确保布局及时刷新
             self.history_layout.update()
         except Exception as e:
-            print(f"❌ [Panel] CRITICAL RefreshButtons Error:\n{traceback.format_exc()}")
+            logger.error(f"❌ [Panel] RefreshButtons Error: {e}")
+
+    def _on_anchor_context_menu(self, pos, idx):
+        """处理锚点按钮的右键删除菜单"""
+        if idx >= len(self._anchor_history): return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #FF2D55; }")
+        
+        act_del = menu.addAction("🗑️ 删除此起点")
+        act_del.triggered.connect(lambda: self._remove_anchor(idx))
+        
+        menu.addSeparator()
+        act_clear = menu.addAction("💣 清空所有起点")
+        act_clear.triggered.connect(self._clear_all_anchors)
+        
+        target_btn = self.sender()
+        if isinstance(target_btn, QPushButton):
+            menu.exec(target_btn.mapToGlobal(pos))
+
+    def _remove_anchor(self, idx):
+        if 0 <= idx < len(self._anchor_history):
+            self._anchor_history.pop(idx)
+            self._refresh_history_buttons()
+            self._save_ui_state()
+            logger.info(f"🗑️ [Panel] 已删除历史起点 {idx+1}")
+
+    def _clear_all_anchors(self):
+        self._anchor_history = []
+        self._refresh_history_buttons()
+        self._save_ui_state()
+        logger.info("💣 [Panel] 已清空所有历史起点")
 
     def _apply_history_anchor(self, idx):
         """恢复历史锚点 - 兼容列式压缩协议"""
@@ -1137,13 +1141,80 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             return applied_count > 0
         return False
 
+    def closeEvent(self, event):
+        self._save_ui_state()
+        self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
+        super().closeEvent(event)
+
+    def _save_ui_state(self):
+        """[🚀 极致持久化] 保存列宽、排序、历史、重置周期"""
+        # [🛡️ 安全保护] 如果初始化未完成（信号提前触发），静默退出
+        if not hasattr(self, 'stock_table') or not hasattr(self, 'sector_table'):
+            return
+
+        try:
+            state_stock = self.stock_table.horizontalHeader().saveState().toHex().data().decode()
+            state_sector = self.sector_table.horizontalHeader().saveState().toHex().data().decode()
+            
+            conf = {
+                "header_stock": state_stock,
+                "header_sector": state_sector,
+                "history": self._anchor_history[-20:], # 仅保留最近20个锚点
+                "reset_cycle": self._reset_cycle_mins,
+                "window_geometry": self.saveGeometry().toHex().data().decode()
+            }
+            _save_racing_config(conf)
+            logger.info("💾 [RacingPanel] UI状态与起点历史已安全存档。")
+        except Exception as e:
+            logger.error(f"⚠️ [RacingPanel] Save UI State Error: {e}")
+
+    def _restore_ui_state(self):
+        """[🚀 状态还原] 恢复全量布局与历史"""
+        try:
+            conf = _get_racing_config()
+            if not conf: return
+            
+            # 1. 恢复列宽与排序状态 (Header States)
+            if "header_stock" in conf:
+                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_stock"].encode()))
+            if "header_sector" in conf:
+                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_sector"].encode()))
+            
+            # 2. 恢复重置周期
+            self._reset_cycle_mins = conf.get("reset_cycle", 60)
+            self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
+            
+            # 3. 恢复历史锚点并渲染按钮
+            hist = conf.get("history", [])
+            if hist:
+                self._anchor_history = hist
+                self._refresh_history_buttons()
+                logger.info(f"✅ [RacingPanel] 已恢复 {len(hist)} 个历史起点。")
+
+            # 4. 恢复窗口位置
+            if "window_geometry" in conf:
+                self.restoreGeometry(QByteArray.fromHex(conf["window_geometry"].encode()))
+        except Exception as e:
+            logger.error(f"⚠️ [RacingPanel] Restore UI State Error: {e}")
+
+    def _get_synthetic_score(self, ts):
+        """[🚀 性能加速版] 动态合成显示分数"""
+        try:
+            main_score = ts.score
+            if main_score < 0.01:
+                activity_score = (getattr(ts, 'signal_count', 0) * 1.5) + (abs(ts.current_pct) * 0.2)
+                return max(activity_score, getattr(ts, 'momentum_score', 0) * 0.05)
+            return main_score
+        except AttributeError:
+            return 0.0
+
     def _execute_linkage(self, code, name="", source="racing_panel"):
         if not code or self._select_code == str(code):
             return
         self._select_code = str(code)
-        if self.sender:
+        if self.stock_sender:
             try:
-                self.sender.send(str(code))
+                self.stock_sender.send(str(code))
             except Exception: pass
         
         if self.main_app and self.on_code_callback:
@@ -1285,8 +1356,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 existing_names = {s.get('sector') for s in active_sectors}
                 for s_name, s_data in temp_sectors.items():
                     if s_name not in existing_names:
-                         # 聚合最终得分并规范化
-                         s_data['score'] = round(min(s_data['score'] * 1.2, 99.9), 1)
+                         # [🚀 评分公式重构] 防止大板块直接 99.9 饱和
+                         # 基础分 = log2(个股数) * 12 + 龙头系数
+                         import math
+                         base_score = math.log2(max(1, s_data['count'])) * 12
+                         perf_score = max(0, s_data['leader_pct']) * 2.5
+                         s_data['score'] = round(min(base_score + perf_score, 98.5), 1)
+                         
                          # 联动详情：排除龙头本身，取前3名非龙头
                          l_code = s_data['leader']
                          f_list = [f for f in s_data['followers'] if f['name'] != s_data['leader_name']]
@@ -1328,9 +1404,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 dist[role] += 1
                 if not sel_cat or role == sel_cat:
                     filtered_ts.append(ts)
+
+            # [🚀 性能优化] 预计算所有过滤后个股的合成评分，避免在排序循环中重复计算
+            score_cache = {ts.code: self._get_synthetic_score(ts) for ts in filtered_ts}
             
             def flatten_ts(ts):
-                return (ts.code, ts.name, ts.score, ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff)
+                # [🚀 结构分展示优化] 统一调用合成评分公式 (命中缓存)
+                display_score = score_cache.get(ts.code, 0)
+                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff)
 
             self.stock_table.setUpdatesEnabled(False)
             self.sector_table.setUpdatesEnabled(False)
@@ -1360,6 +1441,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         val = ts.current_pct - ts.pct_diff
                     elif s_attr == 'pct_diff':
                         val = ts.pct_diff
+                    elif s_attr == 'score':
+                        val = score_cache.get(ts.code, 0)
                     else:
                         val = getattr(ts, s_attr, 0)
                     return (val, ts.code)

@@ -385,12 +385,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _save_ui_state(self):
         """保存表格布局状态"""
+        # [🛡️ 安全保护] 如果初始化未完成（信号提前触发），静默退出
+        if not hasattr(self, 'tables') or not self.tables:
+            return
+
         try:
             data_to_save = {}
             # 保存各个表格的列宽和排序状态 (Hex 格式保存)
             for name, table in self.tables.items():
-                clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
-                data_to_save[f'table_state_{clean_name}'] = table.horizontalHeader().saveState().toHex().data().decode()
+                try:
+                    clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
+                    data_to_save[f'table_state_{clean_name}'] = table.horizontalHeader().saveState().toHex().data().decode()
+                except Exception: continue
             
             config_file = WINDOW_CONFIG_FILE
             full_data = {}
@@ -403,7 +409,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             full_data[SETTINGS_SECTION] = data_to_save
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump(full_data, f, ensure_ascii=False, indent=2)
-            # logger.debug(f"📊 [Dashboard] UI state saved to {config_file}")
         except Exception as e:
             logger.error(f"Failed to save UI state: {e}")
 
@@ -1809,22 +1814,24 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
 
     def _on_selection_changed(self):
-        """处理键盘上下键切换时的联动"""
+        """处理键盘上下键切换时的联动 - 带更新锁保护版"""
+        if getattr(self, '_is_updating_ui', False): return
         table = self.sender()
         if not isinstance(table, QTableWidget): return
+        
         # 获取当前选中的行（取第一个）
         items = table.selectedItems()
         if not items: return
         row = items[0].row()
         
-        # 动态获取列
+        # 动态查找当前表格的【代码】和【名称】所在列索引
         code_col, name_col = -1, -1
         for i in range(table.columnCount()):
             header = table.horizontalHeaderItem(i)
             if header:
-                t = header.text()
-                if t in ["代码", "龙头"]: code_col = i
-                elif t in ["名称", "龙头名称"]: name_col = i
+                text = header.text()
+                if text in ["代码", "龙头"]: code_col = i
+                elif text in ["名称", "龙头名称"]: name_col = i
         
         if code_col >= 0:
             c_it = table.item(row, code_col)
@@ -1976,44 +1983,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_search_context_menu(self, pos):
         QTimer.singleShot(30, lambda: self.search_input.setText(QApplication.clipboard().text().strip()))
-
-    def _on_selection_changed(self):
-        if getattr(self, '_is_updating_ui', False): return
-        table = self.sender()
-        items = table.selectedItems()
-        if items:
-            row = items[0].row()
-            code_col = 2
-            name_col = 3
-            
-            # 动态查找当前表格的【代码】和【名称】所在列索引
-            for i in range(table.columnCount()):
-                header = table.horizontalHeaderItem(i)
-                if header:
-                    text = header.text()
-                    if text in ["代码", "龙头"]: code_col = i
-                    elif text in ["名称", "龙头名称"]: name_col = i
-                    
-            code_item = table.item(row, code_col)
-            name_item = table.item(row, name_col)
-            if code_item and name_item:
-                self.code_clicked.emit(code_item.text(), name_item.text())
-
-    def _save_ui_state(self):
-        try:
-            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
-            state = self.tables["全部信号"].horizontalHeader().saveState().toHex().data().decode()
-            import json, os
-            path = self._get_config_file_path(WINDOW_CONFIG_FILE, self._get_dpi_scale_factor())
-            data = {}
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f: data = json.load(f)
-            data["signal_dashboard_ui_state"] = {'header': state}
-            with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
-        except: pass
-
-    def _restore_ui_state(self):
-        pass # 禁用布局自动恢复以避免由历史缓存引起的列宽失控异常
 
     def _clear_filters(self):
         """一键清空搜索框和下拉过滤状态"""
