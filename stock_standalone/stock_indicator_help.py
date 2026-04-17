@@ -61,10 +61,17 @@ class IndicatorHelpWindow:
             ("blue_row", "#444444", "弱势状态：价格低于 MA5，短线趋势偏空"),
             ("purple_row", "#a855f7", "特殊信号：成交量异常或策略触发"),
             ("yellow_row", "#ffd400", "临界预警：价格接近或跌破 MA20，需要关注趋势变化"),
+            ("alert_row", "#4B0082", "实时报警：本会话触发了语音/日志报警 (标注 🔔)"),
         ]
         # 配置 Treeview 标签颜色
         for tag_name, color, _ in self.tree_row_tags:
-            self.tree.tag_configure(tag_name, foreground=color)
+            if tag_name == "alert_row":
+                self.tree.tag_configure(tag_name, background=color, foreground="white")
+            else:
+                self.tree.tag_configure(tag_name, foreground=color)
+
+        # [FIX] 重新绑定双击事件 (之前手动编辑中丢失)
+        self.tree.bind("<Double-1>", self.on_item_double_click)
 
         # 指标详细数据源 (字段, 简述, 详细逻辑/Query)
         self.all_data = [
@@ -133,6 +140,7 @@ class IndicatorHelpWindow:
             ("support", "动态支撑位", "计算逻辑：LLV(high, 30)。取最近 30 个交易日的最高价序列中的最低点。"),
             ("fib / fibl", "主升连贯性", "计算逻辑：((high > high.shift(1)*0.998) | (close > close.shift(1))).sum()\n衡量自近期低点以来股价维持强势运作的连贯次数。"),
             ("op", "区间累计涨幅", "((close / base_price) * 100 - 100)。相对于 30 天内最低价格的累计涨跌幅百分比。"),
+            ("alert_info", "【系统】🔔 实时报警标注", "逻辑说明：\n当前个股在本会话中触发了实盘报警（语音播报或日志预警）。\n其背景将变为深紫色 (#4B0082)，名称前缀增加 🔔，便于在全系统中快速定位与追踪。"),
         ]
 
         # [NEW] 绑定退出事件以保存位置
@@ -199,7 +207,11 @@ class IndicatorHelpWindow:
         # 插入 (Treeview 只展示前两列)
         tag_names = [t[0] for t in self.tree_row_tags]
         for row in data:
-            tag = row[0] if row[0] in tag_names else ""
+            tag = ""
+            if row[0] in tag_names:
+                tag = row[0]
+            elif row[0] == "alert_info":
+                tag = "alert_row"
             self.tree.insert("", "end", values=(row[0], row[1]), tags=(tag,))
 
     def on_search(self, *args):
