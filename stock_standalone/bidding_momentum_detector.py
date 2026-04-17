@@ -23,6 +23,7 @@ import os
 import gzip
 import numpy as np
 from JohnsonUtil import commonTips as cct
+from linkage_service import get_link_manager
 
 def compress_klines(klines):
     """
@@ -383,10 +384,12 @@ class BiddingMomentumDetector:
     - 发现龙头后展开板块，找出跟随股
     """
 
-    def __init__(self, realtime_service: Optional["DataPublisher"] = None, simulation_mode: bool = False, silent_mode: bool = False):
+    def __init__(self, realtime_service: Optional["DataPublisher"] = None, simulation_mode: bool = False, lazy_load: bool = False, silent_mode: bool = False):
         # ---- 数据服务 ----
         self.realtime_service = realtime_service
         self.simulation_mode = simulation_mode
+        self._is_ready = False if lazy_load else True
+        self._loading_thread = None
         self.silent_mode = silent_mode # [NEW] 集成模式下抑制重复日志打印
 
         # ---- 策略参数：支持动态配置 ----
@@ -473,11 +476,16 @@ class BiddingMomentumDetector:
         self._dragon_init_done = False
         self._last_dragon_update_v = -1  # [NEW] 记录上次执行龙三更新时的版本号
         
-        # [NEW] 极限性能索引：支持 O(1) 的代码与名称检索
         self._code_index: Dict[str, str] = {} # code -> name
         self._name_index: Dict[str, str] = {} # name -> code
+        
+        # [NEW] [ROOT-FIX] 初始化联动代理
+        self.link_manager = get_link_manager()
 
-        self._load_stock_selector_data()
+        if not lazy_load:
+            self._load_stock_selector_data()
+        else:
+            logger.info("📡 [Detector] Lazy load enabled. Synchronous init skipped.")
         
         # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
         # self._signal_bus = SignalBus()
@@ -524,6 +532,31 @@ class BiddingMomentumDetector:
                 logger.info("[Detector] Simulation Mode Active: Skipping persistent session data load.")
         except Exception as e:
             logger.warning(f"[Detector] 种子加载或持久化恢复失败: {e}")
+
+    def ensure_data_ready_async(self, on_ready_callback: Callable = None):
+        """[ROOT-FIX] 真正的异步懒加载入口：启动后台线程读取 IO"""
+        if self._is_ready:
+            if on_ready_callback: on_ready_callback()
+            return
+
+        def _worker():
+            try:
+                start_t = time.time()
+                logger.info("📡 [Detector] Background data loading started...")
+                self._load_stock_selector_data()
+                self._is_ready = True
+                dur = time.time() - start_t
+                logger.info(f"✅ [Detector] Background loading completed in {dur:.2f}s.")
+                if on_ready_callback:
+                    on_ready_callback()
+            except Exception as e:
+                logger.error(f"❌ [Detector] Background loading failed: {e}")
+
+        if self._loading_thread is None or not self._loading_thread.is_alive():
+            self._loading_thread = threading.Thread(target=_worker, name="DetectorAsyncLoad", daemon=True)
+            self._loading_thread.start()
+        else:
+            logger.warning("📡 [Detector] Background loading already in progress.")
 
     # =========================================================
     # 公共接口
@@ -1626,6 +1659,9 @@ class BiddingMomentumDetector:
                     'base_vol_ratio': c_vr
                 })
                 seen.add(code)
+                # [FIX] 仅在非复盘模式下投递联动，防止历史加载时队列溢出
+                if not self.in_history_mode:
+                    self.link_manager.push(code)
         
         # [UPGRADE] 今日全局势能排序 Top 30
         potential_today.sort(key=lambda x: x['score'], reverse=True)

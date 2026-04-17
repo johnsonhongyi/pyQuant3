@@ -6003,7 +6003,6 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             while commands_count < max_commands_per_poll and self.command_conn.poll():
                 commands_count += 1
-                commands_count += 1
                 cmd_data = self.command_conn.recv()
                 if not cmd_data: break
                 

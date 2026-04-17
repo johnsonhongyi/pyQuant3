@@ -850,6 +850,7 @@ class GlobalConfig:
         self.mem_threshold_mb = self.get_with_writeback("general", "mem_threshold_mb", fallback=1800, value_type="int")
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.sector_write_blk = self.get_with_writeback("general", "sector_write_blk", fallback='098.blk', value_type="str")
+        self.multiprocessingQueue = self.get_with_writeback("general", "multiprocessingQueue", fallback=300, value_type="int")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",
@@ -1148,6 +1149,7 @@ mem_threshold_mb: int = CFG.mem_threshold_mb
 voice_volume: float = CFG.voice_volume
 vis_column_map: Dict[str] = CFG.vis_column_map
 sector_write_blk: Dict[str] = CFG.sector_write_blk
+multiprocessingQueue: int = CFG.multiprocessingQueue
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

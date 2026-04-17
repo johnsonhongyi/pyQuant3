@@ -120,6 +120,7 @@ from sys_utils import assert_main_thread
 import struct, pickle
 from queue import Full
 from alert_manager import AlertManager,get_alert_manager
+from linkage_service import get_link_manager
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
@@ -138,6 +139,10 @@ if sys.platform.startswith('win'):
     # 打印检查
     logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
+
+from linkage_service import get_link_manager
+import faulthandler
+faulthandler.enable()
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
 # from trading_analyzerQt6 import TradingGUI
@@ -448,9 +453,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._open_column_manager_job = None
 
         self._last_visualizer_code = None
+        
+        # ---------------------------------------------------------
+        # 🚀 [ROOT-FIX] 核心稳定性：UI心跳、诊断看门狗、多进程联动中心
+        # ---------------------------------------------------------
+        # [NEW] 初始化全局 Debug 模式开关，用于控制高成本诊断（如 faulthandler）
+        # 优先级：环境变量 > 全局配置 > 命令行日志等级 (-log debug)
+        self._debug_mode = (logger.getEffectiveLevel() <= LoggerFactory.DEBUG or 
+                            os.getenv("APP_DEBUG", "0") == "1" or 
+                            getattr(cct.CFG, "DEBUG", False) 
+                            )
+        # [ROOT-FIX] 初始化联动代理与防重标志
+        self.link_manager = get_link_manager()
         self._last_visualizer_time = 0
-        self._last_linkage_data = None # 存储 (code, timestamp) 用于联动去重
-        self._visualizer_debounce_sec = 0.5  # 防抖 0.5 秒
+        self._last_linkage_data = None 
+        self._visualizer_debounce_sec = 0.5
+        self._enable_clipboard_linkage = True # [NEW] 初始化剪切板联动标志位，防止 AttributeError
 
         self._concept_dict_global = {}
 
@@ -486,15 +504,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 from bidding_momentum_detector import BiddingMomentumDetector
                 self.racing_detector = BiddingMomentumDetector(
                     realtime_service=self.realtime_service, 
+                    lazy_load=True, # [ROOT-FIX] 开启懒加载，避开启动 IO 峰值
                     silent_mode=True # 集成模式下抑制独立日志，数据流由 DataPublisher 统一驱动
                 )
                 self.realtime_service.racing_detector = self.racing_detector
-                logger.info("✅ BiddingMomentumDetector 已全局就绪并挂载至 DataPublisher")
+                # 🚀 [NEW] 启动时即刻触发后台异步加载探测器种子数据，无需等到打开面板
+                self.racing_detector.ensure_data_ready_async()
+                logger.info("✅ BiddingMomentumDetector 已全局就绪并在后台初始化")
             except Exception as rd_e:
                 self.racing_detector = None
                 logger.error(f"⚠️ BiddingMomentumDetector 初始化失败: {rd_e}")
 
             logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
+            
+            # [ROOT-FIX] 核心稳定性：在重型初始化 (SyncManager) 完成后开启心跳与监控
+            self._last_ui_heartbeat = time.time()
+            self._ui_heartbeat()
+            self.after(2000, self._start_watchdog) 
+            logger.info("✅ [ROOT-FIX] UI Heartbeat & Watchdog (Delayed) initialized.")
 
         except Exception as e:
             logger.error(f"❌ SyncManager 初始化失败: {e}\n{traceback.format_exc()}")
@@ -780,30 +807,60 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             cct.print_timing_summary(top_n=6)
 
     def _ipc_worker_loop(self):
-        """[OPTIMIZATION] 唯一背景线程处理发往 Visualizer 的指令，解耦 UI 且防止线程溢出"""
+        """[ROOT-FIX] 核心稳定性：唯一背景线程处理发往 Visualizer 的指令。
+        采用“状态驱动”而非“任务驱动”，如果积压了多个更新，只执行最后一次以节省 IO。
+        """
         logger.info("🚀 MonitorTK IPC Background Worker started.")
+        latest_tasks = {} # 用于存储不同类型的最新指令 {'DF_UPDATE': payload, 'SWITCH_CODE': payload}
+        
         while not self._ipc_worker_stop.is_set():
             try:
-                # 阻塞获取任务
-                cmd_tuple = self._ipc_task_queue.get(timeout=1.0)
-                if not cmd_tuple:
-                    self._ipc_task_queue.task_done()
-                    continue
+                # 1. 尽可能清空队列，捕捉最新的状态意图
+                got_any = False
+                while True:
+                    try:
+                        # 快速非阻塞弹出所有堆积任务
+                        cmd_tuple = self._ipc_task_queue.get_nowait()
+                        if cmd_tuple:
+                            cmd_type, payload = cmd_tuple
+                            latest_tasks[cmd_type] = payload  # 覆盖旧状态，保留最后一次意图
+                            got_any = True
+                        self._ipc_task_queue.task_done()
+                    except Empty:
+                        break
+
+                # 2. 如果没获取到新任务，则阻塞等待 0.5s
+                if not got_any:
+                    try:
+                        cmd_tuple = self._ipc_task_queue.get(timeout=0.5)
+                        if cmd_tuple:
+                            cmd_type, payload = cmd_tuple
+                            latest_tasks[cmd_type] = payload
+                            got_any = True
+                        self._ipc_task_queue.task_done()
+                    except Empty:
+                        continue
+
+                # 3. 执行当前收集到的所有“最终意图”
+                if got_any and latest_tasks:
+                    # 检查 Qt 进程存活性
+                    if hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive():
+                        if hasattr(self, 'viz_conn') and self.viz_conn:
+                            conn = self.viz_conn[0]
+                            # [FIX] 统一 IPC 协议：直接发送 (cmd_type, payload) 二元组。
+                            # 防止 Visualizer 在解包时报 "too many values to unpack (expected 2)"
+                            for t_type in list(latest_tasks.keys()):
+                                payload = latest_tasks.pop(t_type)
+                                try:
+                                    conn.send((t_type, payload))
+                                except Exception as e:
+                                    logger.error(f"Pipe send error [{t_type}]: {e}")
+                                    break # 管道可能已断开
                 
-                # 真正的发送操作 (IO 密集型，可能阻塞)
-                try:
-                    # 检查存活性
-                    if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
-                        if hasattr(self, 'viz_conn') and self.viz_conn is not None:
-                            self.viz_conn[0].send(cmd_tuple)
-                except Exception as e:
-                    logger.debug(f"IPC Send (BG Worker) failed: {e}")
-                
-                self._ipc_task_queue.task_done()
-            except Empty:
-                continue
+                time.sleep(0.01) # 微小休眠防止空转
+
             except Exception as e:
-                logger.error(f"IPC Worker Error: {e}")
+                logger.error(f"IPC Worker Error: {e}\n{traceback.format_exc()}")
                 time.sleep(1)
 
     def _async_viz_send(self, cmd, payload):
@@ -887,6 +944,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 跨线程联动安全：双击个股跳转
                 self._racing_panel_win.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+
+            # [ROOT-FIX] ⚡ 确保赛马探测器数据已加载并立即同步当前快照，防止首屏空洞
+            if hasattr(self, 'racing_detector') and self.racing_detector:
+                self.racing_detector.ensure_data_ready_async()
+                
+                # 如果当前内存中有全量行情快照，立即喂给探测器进行首轮聚合
+                curr_df = getattr(self, 'current_df', None)
+                if curr_df is not None and not curr_df.empty:
+                    self.racing_detector.register_codes(curr_df)
+                    # 触发首波评分计算
+                    self.racing_detector.update_scores(force=True)
 
             self._racing_panel_win.show()
             self._racing_panel_win.raise_()
@@ -1033,8 +1101,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     task_dur = (time.perf_counter() - task_start) * 1000
                     
                     # ⭐ [PERFORMANCE] 监测主线程耗时任务
-                    if task_dur > 100:
-                        logger.warning(f"⚠️ [UI_BLOCK] Task '{t_name}' took {task_dur:.2f}ms (Budget={TIME_BUDGET_S*1000}ms)")
+                    # if task_dur > 500:
+                    #     logger.warning(f"⚠️ [UI_BLOCK] Task '{t_name}' took {task_dur:.2f}ms (Budget={TIME_BUDGET_S*1000}ms)")
                     
                     processed_count += 1
                     
@@ -1058,8 +1126,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         max_single_task.update({"name": t_name, "dur": task_dur})
 
                     # 统计慢任务
-                    if task_dur > SLOW_TASK_WARN_MS:
-                        logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} {task_dur:.1f}ms")
+                    # if task_dur > SLOW_TASK_WARN_MS:
+                    #     logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} {task_dur:.1f}ms")
 
                     # 🚀 [YIELD] 每 5 个任务主动呼吸一次，保持窗口可拖动
                     if processed_count % 5 == 0:
@@ -1328,6 +1396,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info(f"已取消 {cancelled} 个 Tkinter after 调度任务")
 
     def signal_handler(self, sig, frame):
+        """[ROOT-FIX] 增强信号处理，确保安全关闭看门狗与后台服务"""
+        self._is_closing = True
+        if hasattr(self, 'link_manager'):
+            self.link_manager.stop()
         """捕获 Ctrl+C 信号"""
         global _exit_ctrl_c_count, _exit_ctrl_c_time
         now = time.time()
@@ -1371,6 +1443,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """弹出确认框，询问是否退出"""
         if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
             self.on_close()
+
     # ========== Win32 RegisterHotKey 全局快捷键 ==========
     # 使用系统级 RegisterHotKey API 替代 keyboard 库的低级钩子，
     # 彻底解决长时间运行后 WH_KEYBOARD_LL 被 Windows 自动卸载的问题。
@@ -2066,13 +2139,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
             
-            if hasattr(self, 'executor') and self.executor:
-                try:
-                    logger.info("正在关闭主线程池...")
-                    # wait=False 确保不阻塞 GUI 退出
-                    self.executor.shutdown(wait=False)
-                except Exception as e:
-                    logger.debug(f"Executor shutdown error: {e}")
+            # 🚀 [FIX] 显式关闭所有分层线程池，防止退出时线程残留 (如 pump_0 STILL ALIVE)
+            for pool_name in ['pump_executor', 'compute_executor', 'executor']:
+                pool = getattr(self, pool_name, None)
+                if pool:
+                    try:
+                        logger.info(f"正在关闭线程池 {pool_name}...")
+                        pool.shutdown(wait=False)
+                    except Exception as e:
+                        logger.debug(f"Error shutting down {pool_name}: {e}")
 
             if getattr(self, 'live_strategy', None) is not None:
                 try:
@@ -2316,17 +2391,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         print("正在停止 Qt 可视化子进程 (qt_process)...")
                         # self.viz_lifecycle_flag.value = False # 已经在开头设置过
                         
-                        qtz_proc.join(timeout=0.2)
+                        qtz_proc.join(timeout=0.5)
                         if qtz_proc.is_alive():
                             print("Qt 子进程未响，正在强制终止...")
                             qtz_proc.terminate()
-                            qtz_proc.join(timeout=0.1)
+                            qtz_proc.join(timeout=0.3)
                             print("Qt 子进程已强制终止")
                         else:
                             print("Qt 子进程已安全退出")
                 except Exception as e:
                     print(f"Error stopping qt_process: {e}")
                 self.qt_process = None
+
+            # 2.5 停止联动系统 (Linkage Service)
+            if hasattr(self, 'link_manager'):
+                try:
+                    print("正在停止系统联动进程 (Linkage)...")
+                    self.link_manager.stop()
+                except Exception as e:
+                    logger.debug(f"Linkage stop error: {e}")
 
             # 3. 停止 df_all 同步线程 (DFSyncThread)
             if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
@@ -2409,7 +2492,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # ⭐ [CRITICAL] 物理强杀进程，跳过 Python 的 atexit 挂起和非 daemon 线程等待
             # 只有走到这一步，才说明所有保存工作（如 K 线快照）已安全落地
             print("正在最终清理 PyQt 与后台线程资源...")
-            time.sleep(0.5) # 稍微加长缓冲，确保 QThread/ThreadPool 真正释放 GIL
+            
+            # 🛡️ [NEW] 最终阶段：清理所有遗留的子进程，确保 _MEI 临时目录能被 PyInstaller Bootloader 删除
+            try:
+                import multiprocessing as mp
+                active_procs = mp.active_children()
+                if active_procs:
+                    logger.info(f"清理遗留子进程: {[p.name for p in active_procs]}")
+                    for p in active_procs:
+                        try:
+                            p.terminate()
+                        except: pass
+                
+                # 稍微等待 handle 释放 (给 OS 亚毫秒级回收时间)
+                time.sleep(0.3)
+            except: pass
             
             # 停止日志服务 (最后一步)
             try:
@@ -4035,7 +4132,91 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except:
             pass
 
-    
+    def _ensure_visualizer_alive(self, code, resample=None):
+        """[GUARD] 确保可视化器进程存在且存活，否则自动重启"""
+        try:
+            if not hasattr(self, 'qt_process') or not self.qt_process or not self.qt_process.is_alive():
+                logger.warning(f"[Visualizer] process not alive for {code}, restarting...")
+                self._start_visualizer_process(code, resample)
+        except Exception as e:
+            logger.error(f"[Visualizer] ensure alive failed: {e}")
+
+    def open_visualizer(self, code, timestamp=None):
+        """[ROOT-FIX] 解耦联动：TDX/剪切板由 LinkageService 处理，UI 由原链路执行"""
+        if not code: return
+        
+        is_linkage = timestamp is not None
+        
+        # 1. [IO进程] 投递到状态中心 (处理 TDX 发送与剪切板)
+        # 只有在非联动（用户主动点选）或明确心跳触发时投递
+        self.link_manager.push(code, copy=self._enable_clipboard_linkage)
+
+        # 2. [UI通讯] 处理 Qt 进程的可视化器同步
+        resample_now = 'd'
+        try: resample_now = self.resample_combo.get()
+        except: pass
+        
+        # 2.5 [GUARD] 确保可视化进程存在，使用当前状态参数拉起
+        self._ensure_visualizer_alive(code, resample_now)
+        
+        payload = {'code': code, 'resample': resample_now, 'timestamp': timestamp}
+        if is_linkage:
+            self._async_viz_send('TIME_LINK', payload)
+        else:
+            self._async_viz_send('SWITCH_CODE', payload)
+
+    def _ui_heartbeat(self):
+        """[CORRECTION 2] UI线程主心跳，每100ms跳动一次"""
+        self._last_ui_heartbeat = time.time()
+        if not getattr(self, "_is_closing", False):
+            self.after(100, self._ui_heartbeat)
+
+    def _start_watchdog(self):
+        """[CORRECTION 2] 独立守护线程检测 UI 假死"""
+        def watchdog_loop():
+            # [ROOT-FIX] 线程启动瞬间重置心跳，确保不把初始化耗时计算在内
+            self._last_ui_heartbeat = time.time()
+            already_warned = False # 🛡️ [NEW] 防重复报警标志位
+            
+            logger.info("📡 Diagnostic Watchdog active (Threshold: 2.0s).")
+            while not getattr(self, "_is_closing", False):
+                time.sleep(0.5)
+                # 计算与最后心跳的时间差
+                delay = time.time() - getattr(self, "_last_ui_heartbeat", 0)
+                
+                if delay > 5:  # 判定为卡死阈值
+                    if not already_warned:
+                        q_size = -1
+                        try:
+                            if hasattr(self, 'queue') and self.queue:
+                                q_size = self.queue.qsize()  # 获取积压深度
+                        except: pass
+                        
+                        logger.warning(f"🚨 [UI_BLOCK] 主线程假死检测! 延迟: {delay:.2f}s | Queue积压: {q_size if q_size >= 0 else 'N/A'}")
+                        # 🧬 [NEW] 联动自动画像审计：同步输出最近周期的 Top 10 耗时任务
+                        # self.show_ui_performance_audit(reset=False)
+                        self._dump_ui_stack()
+                        already_warned = True
+                else:
+                    if already_warned:
+                        logger.debug(f"✅ [UI_RECOVER] 主线程已恢复响应. 曾阻塞: {delay:.2f}s")
+                    already_warned = False # 恢复后重置标志
+            logger.info("📡 Diagnostic Watchdog exited.")
+            
+        t = threading.Thread(target=watchdog_loop, name="GuardDog", daemon=True)
+        t.start()
+
+    def _dump_ui_stack(self):
+        """[ENGINEERING] 仅在 Debug 模式下执行高成本的堆栈 Dump 操作"""
+        if not getattr(self, "_debug_mode", False):
+            return
+            
+        try:
+            import faulthandler
+            # 直接输出当前解释器所有线程的 traceback 到 stderr (控制台/日志捕获)
+            faulthandler.dump_traceback()
+        except Exception as e:
+            logger.error(f"[DumpStack] Failed to dump stack: {e}")
 
     def push_stock_info(self,stock_code, row):
         """
@@ -4103,7 +4284,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug(f'stock_code:{stock_code}')
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
-                self.sender.send(stock_code)
+                self.link_manager.push(stock_code, copy=self._enable_clipboard_linkage)
             # Auto-launch Visualizer if enabled
             if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
                 self.open_visualizer(stock_code)
@@ -4412,219 +4593,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     #     if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
     #         self.open_visualizer(stock_code)
-
-    def open_visualizer(self, code, timestamp=None):
-        logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
-        # =========================
-        # 0. 基础过滤（UI线程安全）
-        # =========================
-        if not code and self._last_resample != self.global_values.getkey("resample"):
-            return
-
-        now = time.time()
-        is_linkage = timestamp is not None
-
-        # =========================
-        # 1. 联动去重（严格）
-        # =========================
-        if is_linkage:
-            link_key = (str(code), str(timestamp))
-            if getattr(self, '_last_linkage_data', None) == link_key:
-                return
-            self._last_linkage_data = link_key
-
-        # =========================
-        # 2. 普通选择去重
-        # =========================
-        if not is_linkage:
-            if self.vis_select_code == code:
-                return
-            self.vis_select_code = code
-
-            if (self._last_visualizer_code == code and
-                (now - self._last_visualizer_time) < self._visualizer_debounce_sec):
-                return
-
-            self._last_visualizer_code = code
-            self._last_visualizer_time = now
-
-        # =========================
-        # 3. UI安全读取（只在主线程执行）
-        # =========================
-        try:
-            resample_now = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
-        except Exception:
-            resample_now = 'd'
-
-        self._df_sync_running = True
-
-        # =========================
-        # 4. worker（纯 IO / IPC，无 UI）
-        # =========================
-        def _worker(code, timestamp, resample):
-
-            def try_queue_send():
-                try:
-                    if hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive():
-
-                        payload = {
-                            'code': code,
-                            'resample': resample,
-                            'timestamp': timestamp
-                        }
-
-                        if is_linkage:
-                            self._async_viz_send('TIME_LINK', payload)
-                        else:
-                            self._async_viz_send('SWITCH_CODE', payload)
-
-                        return True
-                except Exception as e:
-                    logger.error(f"[IPC][QUEUE] failed: {e}")
-                return False
-
-            def try_socket_send():
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.3)
-                        s.connect(('127.0.0.1', 26668))
-
-                        if is_linkage:
-                            msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
-                        else:
-                            msg = f"CODE|{code}|resample={resample}"
-
-                        s.send(msg.encode("utf-8"))
-                        return True
-
-                except (ConnectionRefusedError, socket.timeout, OSError) as e:
-                    logger.debug(f"[IPC][SOCKET] failed: {e}")
-                except Exception as e:
-                    logger.error(f"[IPC][SOCKET] unexpected: {e}")
-
-                return False
-
-            try:
-                if try_queue_send():
-                    return
-
-                if try_socket_send():
-                    return
-
-                # =========================
-                # 5. 最后兜底：启动进程
-                # =========================
-                if not hasattr(self, 'qt_process') or not self.qt_process or not self.qt_process.is_alive():
-                    self._start_visualizer_process(code, resample)
-            except Exception as e:
-                logger.error(f"[WORKER] open_visualizer fatal error: {e}")
-
-        # =========================
-        # 6. 启动线程（只做调度）
-        # =========================
-        threading.Thread(
-            target=_worker,
-            args=(code, timestamp, resample_now),
-            daemon=True
-        ).start()
-
-        # =========================
-        # 7. UI提示（主线程安全）
-        # =========================
-        try:
-            if hasattr(self, 'status_bar') and self.status_bar:
-                self.status_bar.config(text=f"🚀 可视化指令已发出: {code}")
-        except Exception:
-            pass
-            
-    def open_visualizer_bug(self, code, timestamp=None):
-        
-        if not code and self._last_resample != self.global_values.getkey("resample"):
-            return
-
-        # 如果有联动数据，强制发送，不走防抖
-        is_linkage = timestamp is not None
-        
-        # ⭐ [NEW] 联动去重：如果 code 和 timestamp 与上次一致，拦截发送
-        if is_linkage:
-            link_key = (str(code), str(timestamp))
-            if getattr(self, '_last_linkage_data', None) == link_key:
-                # logger.debug(f"TIME_LINK deduplicated for {code} at {timestamp}")
-                return
-            self._last_linkage_data = link_key
-        
-        if not is_linkage and self.vis_select_code == code:
-            return
-        else:
-            self.vis_select_code = code
-            
-        now = time.time()
-        # 防抖：同一 code 在 0.5 秒内不重复发送 (联动消息除外)
-        if not is_linkage and self._last_visualizer_code == code and (now - self._last_visualizer_time) < self._visualizer_debounce_sec:
-            return
-
-        self._last_visualizer_code = code
-        self._last_visualizer_time = now
-        # ===== 初始化和定时线程 =====
-        self._df_sync_running = True
-        
-        def _do_open_visualizer(resample_val):
-            try:
-                ipc_host, ipc_port = '127.0.0.1', 26668
-                resample = resample_val
-                sent = False
-
-                # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 ---
-                if hasattr(self, 'qt_process') and self.qt_process is not None and self.qt_process.is_alive():
-                    try:
-                        if is_linkage:
-                            # 🚀 [OPTIMIZED] 使用单例后台 worker 发送
-                            payload = {'code': code, 'resample': resample, 'timestamp': timestamp}
-                            self._async_viz_send('TIME_LINK', payload)
-                            logger.debug(f"[IPC] Queue TIME_LINK for {code}")
-                        else:
-                            self._async_viz_send('SWITCH_CODE', {'code': code, 'resample': resample})
-                            logger.debug(f"[IPC] Queue SWITCH_CODE {code}")
-                        sent = True
-                    except Exception as e:
-                        logger.error(f"Async send queue failed: {e}")
-                    except Exception as e:
-                        logger.error(f"Queue send failed: {e}")
-
-                # --- 2️⃣ 如果内部队列没发送，尝试 Socket ---
-                if not sent:
-                    try:
-                        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        client_socket.settimeout(0.3) # 进一步缩短
-                        client_socket.connect((ipc_host, ipc_port))
-                        if is_linkage:
-                            # 🚀 [IPC UPGRADE] Socket 通道也适配联动协议
-                            ipc_msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
-                            logger.debug(f"[IPC/Socket] Sent TIME_LINK for {code} at {timestamp}")
-                        else:
-                            ipc_msg = f"CODE|{code}|resample={resample}"
-                        
-                        client_socket.send(ipc_msg.encode('utf-8'))
-                        client_socket.close()
-                        sent = True
-                    except:
-                        pass
-
-                # --- 3️⃣ 如果仍未发送，启动新进程 ---
-                if not sent:
-                    if not hasattr(self, 'qt_process') or self.qt_process is None or not self.qt_process.is_alive():
-                        # 在后台线程直接启动，不经过 _schedule_after 以免阻塞 UI (因其内部包含 sleep)
-                        self._start_visualizer_process(code, resample)
-            except Exception as e:
-                logger.error(f"Async open_visualizer error: {e}")
-
-        # 提前在 UI 线程获取关键参数，防止后台线程访问 Tk 导致崩溃
-        resample_now = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
-        threading.Thread(target=lambda: _do_open_visualizer(resample_now), daemon=True).start()
-        
-        # 交互提示（UI 线程）
-        if hasattr(self, 'status_bar'):
-            self.status_bar.config(text=f"🚀 可视化指令已发出: {code}")
 
     def link_to_visualizer(self, code, timestamp):
         """🚀 [SIMPLIFIED] 跨工具联动接口：仅传日期"""
@@ -10091,15 +10059,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # logger.info(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
     def tree_scroll_to_code(self, code, select_win=False, vis=False):
-        """外部调用：定位特定代码 (Thread-Safe via Queue)"""
+        """外部调用：定位特定代码 (Thread-Safe via LinkageManagerProxy)"""
         if not code:
             return False
 
+        # [ROOT-FIX] 1. 立即非阻塞投递联动指令 (多进程处理 TDX/剪切板)
+        if vis:
+            self.link_manager.push(code)
+                
         def _ui_action():
             try:
+                # 2. [GUI] 同步启动可视化器进程/指令 (主线程安全)
                 if vis and hasattr(self, 'vis_var') and self.vis_var.get():
                     self.open_visualizer(code)
-                
+
+                # 3. [GUI] 树视图滚动定位
                 found = False
                 for iid in self.tree.get_children():
                     values = self.tree.item(iid, "values")
@@ -10110,20 +10084,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         found = True
                         break
                 
-                if not found:
-                    pass
-                    # toast_message(self, f"{code} not in list")
-                
                 if select_win:
                     self.original_push_logic(code)
 
             except Exception as e:
                 logger.error(f"tree_scroll_to_code error: {e}")
 
-        if hasattr(self, "tk_dispatch_queue"):
-             self.tk_dispatch_queue.put(_ui_action)
-        else:
-             self._schedule_after(0, _ui_action)
+        # 4. 派发到 UI 线程执行 GUI 任务
+        self._schedule_after(0, _ui_action)
         return True
         
     # def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
