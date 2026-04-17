@@ -1224,17 +1224,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         super().__init__(None)         # 独立窗口
         self.main_window = main_window
         rs = getattr(main_window, 'realtime_service', None)
-        self.detector = BiddingMomentumDetector(realtime_service=rs)
+        # [ROOT-FIX] 开启懒加载模式，确保 UI 瞬间启动，不被 IO 阻塞
+        self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
+        self.detector.ensure_data_ready_async(on_ready_callback=self._on_detector_ready)
 
-        # [NEW] 1. 本地化联动：尝试初始化 StockSender
-        try:
-            from JohnsonUtil.stock_sender import StockSender
-            # 使用默认变量，兼容 Tk/Qt 灵活包装
-            self.sender = StockSender(callback=None)
-            logger.info("📡 [SectorPanel] StockSender initialized for standalone linkage.")
-        except Exception as e:
-            logger.warning(f"⚠️ [SectorPanel] StockSender init failed (Expected on fresh env): {e}")
-            self.sender = None
+        # [ROOT-FIX] 使用 LinkageManagerProxy 替代原始 StockSender 以防 IO 阻塞
+        from linkage_service import get_link_manager
+        self.link_manager = get_link_manager()
+        self.sender = None # 废弃旧 sender
 
         # 排序状态：(col_index, ascending)
         self._sort_col = 4             # 默认按涨幅排序
@@ -2144,6 +2141,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._sbc_thread.start()
         
         logger.info(f"⏳ SBC 信号测试已启动后台线程: {code} (Live Mode: {use_live})")
+
+    def _on_detector_ready(self):
+        """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
+        logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh.")
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage("✅ 竞价数据加载完成", 3000)
+        # 强制触发一次刷新
+        self._force_update_requested = True
 
     def _on_sbc_test_finished(self, data: dict):
         """SBC 测试完成回调"""

@@ -10,8 +10,8 @@ import psutil
 import pyperclip
 import json
 import os
-# import re
-# import LoggerFactory 
+import queue
+import time
 
 FAGE_READWRITE = 0x04
 PROCESS_ALL_ACCESS = 0x001F0FFF
@@ -68,6 +68,21 @@ class StockSender:
         # if self.dfcf_var.get():
         self.find_dfcf_handle()
 
+        # --- 极限性能优化组件 ---
+        self._task_queue = queue.Queue(maxsize=1)  # 状态覆盖队列
+        self._latest_task = None
+        self._last_exec_ts = 0
+        self._last_ui_cb = 0
+        self._last_clip = None
+        self._running = True
+
+        # 缓存消息 ID (核心优化：避免高频系统调用)
+        self._UWM_STOCK = win32api.RegisterWindowMessage('stock')
+
+        # 启动单实例工作线程 (核心优化：杜绝线程风暴)
+        self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
+        self._worker.start()
+
     def _get_flag(self, var):
         """
         兼容 tk.BooleanVar / bool
@@ -79,37 +94,11 @@ class StockSender:
                 return False
         return bool(var)
 
-    # def reload_old(self):
-    #     # 句柄初始化
-    #     # print(f'reload process_hwnd')
-    #     # print(f'self.tdx_var : {self.tdx_var.get()} self.ths_var : {self.ths_var.get()} self.dfcf_var : {self.dfcf_var.get()}')
-    #     if  self.tdx_var.get():
-    #         self.tdx_window_handle = 0
-    #         self.find_tdx_window()
-    #         print(f'reload  tdx_window_handle: {self.tdx_window_handle}')
-    #     if  self.ths_var.get():
-    #         self.ths_process_hwnd = 0
-    #         self.ths_window_handle = 0
-    #         self.find_ths_window()
-    #         print(f'reload ths_process_hwnd: {self.ths_process_hwnd} ths_window_handle :{self.ths_window_handle}')
-
-    #     if  self.dfcf_var.get():
-    #         self.dfcf_process_hwnd = 0
-    #         self.ahk_process_hwnd = 0
-    #         # self.thsweb_process_hwnd = 0
-    #         self.find_dfcf_handle()
-    #         print(f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} ahk_process_hwnd: {self.ahk_process_hwnd}')
-
     def reload(self):
         """
         重新查找各交易软件窗口句柄
         兼容 Tk BooleanVar / bool
         """
-
-        # print('reload process_hwnd')
-        # print(f'tdx:{self._get_flag(self.tdx_var)} '
-        #       f'ths:{self._get_flag(self.ths_var)} '
-        #       f'dfcf:{self._get_flag(self.dfcf_var)}')
 
         if self._get_flag(self.tdx_var):
             self.tdx_window_handle = 0
@@ -137,81 +126,114 @@ class StockSender:
 
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
+    # ----------------- 核心分发与工作循环 ----------------- #
     def send(self, stock_code):
-        # [FIX] 在主线程预先提取所有 Tkinter 变量的值，防止子线程访问触发 GIL 崩溃
+        """
+        投递一个发送意图 (State Overwrite)
+        """
+        if not stock_code: return
+
+        # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (IPC)
+        if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
+            try:
+                from linkage_service import get_link_manager
+                # 投递到独立的后台进程进行节流与重叠执行
+                get_link_manager().push(stock_code, copy=True)
+                return
+            except Exception:
+                pass
+
+        # [FIX] 在物理执行路径（或降级路径）上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
         flags = {
             'tdx': self._get_flag(self.tdx_var),
             'ths': self._get_flag(self.ths_var),
             'dfcf': self._get_flag(self.dfcf_var)
         }
-        threading.Thread(target=self._send_thread, args=(stock_code, flags)).start()
 
-    def _send_thread(self, stock_code, flags):
+        # 状态覆盖：如果队列满了，丢弃旧任务，确保时效性
+        try:
+            if self._task_queue.full():
+                self._task_queue.get_nowait()
+            self._task_queue.put_nowait((stock_code, flags))
+        except:
+            pass
+
+    def _worker_loop(self):
         """
-        发送股票代码到各客户端
-        使用预先提取的 flags 快照
+        单 Worker 线程循环：负责调度、物理节流与 UI 回调控制
         """
+        while self._running:
+            try:
+                # 1. 尽可能清空队列，直到获取最新的一项意图 (State Overwrite)
+                task = None
+                while True:
+                    try:
+                        task = self._task_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                
+                if task:
+                    self._latest_task = task
+
+                if self._latest_task:
+                    now = time.time()
+                    # 2. 物理节流（50ms）：防止高频触发导致 Windows 消息阻塞
+                    if now - self._last_exec_ts >= 0.05:
+                        code, flags = self._latest_task
+                        self._do_send(code, flags)
+                        self._latest_task = None
+                        self._last_exec_ts = now
+
+                time.sleep(0.01)  # 降低 CPU 占用
+
+            except Exception as e:
+                # 不抛出异常，记录日志并继续
+                print(f"❌ StockSender Worker Error: {e}")
+                time.sleep(0.5)
+
+    def _do_send(self, stock_code, flags):
+        """执行具体的物理发送动作并汇总状态"""
         tdx_enabled = flags.get('tdx', False)
         ths_enabled = flags.get('ths', False)
         dfcf_enabled = flags.get('dfcf', False)
 
-        # === TDX ===
-        if tdx_enabled:
-            self.send_to_tdx(stock_code)
-            self.tdx_status = f"TDX-> 已发送 {stock_code}"
-        else:
-            self.tdx_status = "TDX-> 未选中"
+        # 1. 执行物理发送
+        if tdx_enabled: self.send_to_tdx(stock_code)
+        else: self.tdx_status = "TDX-> 未选中"
 
-        # === THS ===
-        if ths_enabled:
-            self.send_to_ths(stock_code)
-            self.ths_status = f"THS-> 已发送 {stock_code}"
-        else:
-            self.ths_status = "THS-> 未选中"
+        if ths_enabled: self.send_to_ths(stock_code)
+        else: self.ths_status = "THS-> 未选中"
 
-        # === 东方财富 ===
-        if dfcf_enabled:
-            self.send_to_dfcf(stock_code)
-            self.dfcf_status = f"DC-> 已发送 {stock_code}"
-        else:
-            self.dfcf_status = "DC-> 未选中"
+        if dfcf_enabled: self.send_to_dfcf(stock_code)
+        else: self.dfcf_status = "DC-> 未选中"
 
+        # 2. 汇总状态
         status_dict = {
             "TDX": self.tdx_status,
             "THS": self.ths_status,
             "DC": self.dfcf_status
         }
 
-        # === 回调 UI ===
+        # 3. 回调 UI (加入 100ms 频率保护)
         if self.callback:
-            self.callback(status_dict)
+            now = time.time()
+            if now - self._last_ui_cb > 0.1:
+                try:
+                    self.callback(status_dict)
+                    self._last_ui_cb = now
+                except: pass
 
-    # def _send_thread_old(self, stock_code):
-    #     # print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
-    #     if self.tdx_var.get():
-    #         self.send_to_tdx(stock_code)
-    #     else:
-    #         self.tdx_status = "TDX-> 未选中"
-
-    #     if self.ths_var.get():
-    #         self.send_to_ths(stock_code)
-    #     else:
-    #         self.ths_status = "THS-> 未选中"
-
-    #     if self.dfcf_var.get():
-    #         self.send_to_dfcf(stock_code)
-    #     else:
-    #         self.dfcf_status = "DC-> 未选中"
-
-    #     status_dict = {
-    #         "TDX": self.tdx_status,
-    #         "THS": self.ths_status,
-    #         "DC": self.dfcf_status
-    #     }
-
-    #     # 回调 UI 更新状态栏
-    #     if self.callback:
-    #         self.callback(status_dict)
+    def _safe_clip(self, stock_code):
+        """安全且带去重的剪切板写入"""
+        if stock_code == self._last_clip:
+            return
+            
+        try:
+            pyperclip.copy(stock_code)
+            self._last_clip = stock_code
+        except:
+            # 记录失败但不中断流程
+            self._last_clip = None 
 
     # ----------------- 加载 THS 股票列表 ----------------- #
     def load_ths_code(self):
@@ -225,17 +247,6 @@ class StockSender:
     def get_pids(pname):
         return [p.pid for p in psutil.process_iter() if pname.lower() in p.name().lower()]
 
-    # @staticmethod    
-    # def get_pids_values(pname):
-    #     # print(pname)
-    #     # find AutoHotkeyU64.exe
-    #     pids = 0
-    #     for proc in psutil.process_iter():
-    #         if pname in proc.name():
-    #             # pids.append(proc.pid)
-    #             pids = proc.pid
-    #     return pids
-    
     @staticmethod
     def get_handle_by_pid(pid):
         handles = []
@@ -290,7 +301,6 @@ class StockSender:
         self.dfcf_process_hwnd = self.get_handle_by_name("mainfree.exe")
         self.ahk_process_hwnd = self.get_pids("AutoHotkey")
         print(f'dfcf_process_hwnd : {self.dfcf_process_hwnd}  ahk_process_hwnd :{self.ahk_process_hwnd }' )
-        # LoggerFactory.info(f'dfcf_process_hwnd : {self.dfcf_process_hwnd}  ahk_process_hwnd :{self.ahk_process_hwnd }' )
 
     # ----------------- 代码转换 ----------------- #
     def bytes_16(self, dec_num, code):
@@ -298,22 +308,6 @@ class StockSender:
         codex = ascii_char + str(code)
         return codex.encode('ascii', 'ignore')
 
-    # def ths_convert_code(self, code):
-    #     c = str(code)
-    #     dec_num = 0x21
-    #     if c[0] == '6':
-    #         dec_num = 0x16 if code in self.ths_code else 0x16
-    #     elif c.startswith('11'):
-    #         dec_num = 0x13
-    #     elif c.startswith('12'):
-    #         dec_num = 0x23
-    #     elif c.startswith('15'):
-    #         dec_num = 0x24
-    #     elif c.startswith('90'):
-    #         dec_num = 0x12
-    #     elif c.startswith('20'):
-    #         dec_num = 0x22
-    #     return self.bytes_16(dec_num, code)
     def ths_convert_code(self,code):
 
         # 上海，深圳股票判断;
@@ -327,7 +321,7 @@ class StockSender:
         elif str(code).startswith('11'):
             # 将16进制数转换为整数
             dec_num = int('13', 16)
-            bytes_codex = bself.ytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
         # 12开头的可转债
         elif str(code).startswith('12'):
             # 将16进制数转换为整数
@@ -356,9 +350,8 @@ class StockSender:
 
     # ----------------- 发送函数 ----------------- #
     def send_to_dfcf(self, stock_code):
-        # print(self.dfcf_process_hwnd , self.ahk_process_hwnd)
         if self.dfcf_process_hwnd and self.ahk_process_hwnd:
-            pyperclip.copy(stock_code)
+            self._safe_clip(stock_code)
             self.dfcf_status = f"DC-> 成功"
         else:
             self.dfcf_status = "未找到DC"
@@ -375,39 +368,42 @@ class StockSender:
             self.ths_status = "未找到THS"
         return self.ths_status
 
-    def send_to_tdx(self,stock_code,message_type='stock'):
+    def send_to_tdx(self, stock_code, message_type='stock'):
+        if not self.tdx_window_handle or not win32gui.IsWindow(self.tdx_window_handle):
+            self.find_tdx_window() # 句柄失效则重连
+
         if self.tdx_window_handle:
             try:
-                message_code = int(stock_code)
-            except ValueError:
-                message_code = 0
-
-            if isinstance(stock_code, dict):
-                stock_code = stock_code['content']
-                stock_code = stock_code.strip()
-            if len(stock_code) == 6:
-                codex = int(stock_code)
-                if str(message_type) == 'stock':
-                    if str(stock_code)[0] in ['0','3','1']:
-                        codex = '6' + str(stock_code)
-                    elif str(stock_code)[:3] in ['999']:
-                        codex = '7' + str(stock_code)
-                    elif str(stock_code)[0] in ['6','5']:
-                        codex = '7' + str(stock_code)
-                    # elif str(stock_code)[0] == '9':
-                    #     codex = '2' + str(stock_code)
-                    else:
-                        codex = '4' + str(stock_code)
+                # 转换代码格式为 TDX 内部识别格式 (如 6xxxxxx 或 7xxxxxx)
+                if isinstance(stock_code, dict):
+                    stock_code = stock_code.get('content', '').strip()
+                
+                if len(stock_code) == 6:
+                    codex = stock_code
+                    if str(message_type) == 'stock':
+                        if stock_code[0] in ['0', '3', '1']:
+                            codex = '6' + stock_code
+                        elif stock_code.startswith('999'):
+                            codex = '7' + stock_code
+                        elif stock_code[0] in ['6', '5']:
+                            codex = '7' + stock_code
+                        else:
+                            codex = '4' + stock_code
+                    
+                    # 核心优化：不再使用广播，精准投递给句柄
+                    win32gui.PostMessage(self.tdx_window_handle, self._UWM_STOCK, int(codex), 0)
+                    self.tdx_status = "TDX-> 成功"
                 else:
-                    codex = int(stock_code)
-                UWM_STOCK = win32api.RegisterWindowMessage('stock')
-                # print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
-                #系统广播
-                win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
-            self.tdx_status = "TDX-> 成功"
+                    self.tdx_status = "TDX-> 代码非法"
+            except Exception as e:
+                self.tdx_status = f"TDX-> 异常: {e}"
+                # 出错时尝试在下次任务前清空句柄强制重连
+                self.tdx_window_handle = 0
         else:
             self.tdx_status = "未找到TDX"
         return self.tdx_status
+
+
     # def send_to_tdx(self, stock_code):
     #     UWM_STOCK = RegisterWindowMessageW("Stock")
     #     if self.tdx_window_handle:

@@ -1,3 +1,33 @@
+## 2026-04-18 04:45
+- [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
+    - [x] **补全分层线程池关闭逻辑**：在 `instock_MonitorTK.py` 的 `on_close` 方法中补齐了对 `pump_executor` 和 `compute_executor` 的显式 `shutdown()` 调用。这彻底解决了退出时由于 `ThreadPoolExecutor` 默认创建非守护线程导致的 `[STILL ALIVE] pump_0` 错误警告，确保了应用能够更优雅、快速地完成资源回收。
+    - [x] **根治 PyInstaller 临时目录占用 (Fixed _MEI Directory Lock)**：
+        - [x] **补齐联动进程关闭**：在 `on_close` 中增加了 `link_manager.stop()` 调用，确保 Linkage 子进程被显式回收，释放了对共享 DLL 文件的占用。
+        - [x] **实施全量进程兜底清理**：引入了 `multiprocessing.active_children()` 全力扫描机制，在主进程退出物理切断前，强制终止所有遗留的子进程（包含 `SyncManager` 遗留句柄）。
+        - [x] **优化退出步进延时**：通过延长 `join(timeout)` 以及增加最终物理退出前的 `time.sleep(0.3)` 缓冲，给予 OS 充足的时间回收文件描述符，解决了 `[PYI-WARNING] Failed to remove temporary directory` 的报错。
+    - [x] **增强退出可靠性**：通过对所有分层线程池（Pump/Compute/Main）的循环遍历关闭，消除了高频行情驱动下可能存在的指令堆积，配合原有的 15s 强退保险（Failsafe Timer），进一步提升了系统在极端负载下的退出稳定性。
+
+## 2026-04-18 03:45
+- [x] **修复竞价赛马面板首屏数据显示 (Fixed Racing Panel Initial Data Blank)**：
+    - [x] **实现即时数据灌入 (Immediate Data Injection)**：在 `open_racing_panel` 中引入了强制拉起逻辑。面板打开时，立即通过 `ensure_data_ready_async()` 启动探测器种子加载，并瞬间同步内存中的 `current_df` 行情快照至 `racing_detector`。
+    - [x] **强制首轮计算触发**：通过调用 `update_scores(force=True)` 彻底消除了面板开启后由于等待行情周期导致的“白屏”或“冷启动空洞”，实现了即点即看。
+    - [x] **修复 IPC 协议解包报错 (Fixed IPC Unpacking Error)**：修复了 `_ipc_worker_loop` 中发送格式错误的问题。将原先错误的字典发送方式修正为标准的 `(cmd_type, payload)` 二元组协议，解决了可视化进程中报出的 `too many values to unpack` 指令解析崩溃。
+    - [x] **工程化重构 Watchdog 诊断逻辑 (Engineering Refactor)**：
+        - [x] **引入统一 Debug 开关**：在 `__init__` 中增加了 `self._debug_mode`，全面支持环境变量 `APP_DEBUG`、配置项 `DEBUG` 以及命令行参数 `-log debug` 触发。
+        - [x] **职责分离**：解耦了 `Watchdog` 线程与诊断策略。现在监视线程仅负责逻辑判定，具体诊断动作交由 `_dump_ui_stack` 处理。
+        - [x] **安全堆栈导出**：封装了 `_dump_ui_stack` 方法，仅在 Debug 模式启用时调用 `faulthandler`，并在执行过程中增加了异常保护，增强了系统的工程化水准。
+    - [x] **修复 SBC-Breakdown 集中破位误报与 UI 假死 (Fixed Breakdown Spam & UI Lag)**：
+        - [x] **实现非交易时段短路机制 (SBC Bypass)**：在 `IntradayEmotionTracker` 中增加了全局时间判定，非交易时段（盘前/盘后/凌晨）直接跳过整个复杂的 SBC 信号判定循环。这彻底消除了凌晨运行或系统冷启动时由于数据源异常导致的“150+只集中破位”误报，并解决了因此引发的 3-7s UI 假死。
+        - [x] **实施冷启动抑制 (Cold-start Throttling)**：引入 `_update_count` 计数器，跳过启动后的前 3 轮计算周期。这确保了系统在基准数据未对齐或前态位 (prev_sbc) 尚未就绪时不会触发伪破位信号。
+        - [x] **缓解 UI 假死与 IO 压力**：通过抑制无效的日志输出，减少了高频刷新时的 I/O 阻塞，显著降低了 `Watchdog` 报出 3-6s UI 挂起的概率。
+    - [x] **闭环自愈保障**：配合此前实现的可视化进程存活监测，确保了全系统多维看板（Visualizer + Racing Panel）在任何启动/崩溃场景下都能自动恢复至可用状态。
+
+## 2026-04-18 03:25
+- [x] **补全可视化进程状态闭环与自愈保障 (Visualizer Process Auto-Restart & Fail-safe)**：
+    - [x] **实现存活检测机制**：在 `instock_MonitorTK.py` 中引入 `_ensure_visualizer_alive` 私有方法。通过 `is_alive()` 实时判定子进程状态，废除了“只发送、不自愈”的投递黑盒。
+    - [x] **集成启动保障层**：在 `open_visualizer` 投递 `SWITCH_CODE` 或 `TIME_LINK` 指令前强制注入存活判定。当检测到可视化进程崩溃或未启动时，通过 `_ensure_visualizer_alive(code, resample)` 自动拉起，深度对齐了原有的逻辑结构参数，彻底根治了 IPC 指令“静默丢失”的问题。
+    - [x] **优化冷启动体验**：确保在任何联动触发点，若可视化终端缺失，系统都能在亚毫秒级内完成状态感知并执行后台重联，极大提升了多进程联动系统的健壮性。
+
 ## 2026-04-18 01:25
 - [x] **深度对齐系统标准交易时间判定 (Standardized Trading Time Alignment)**：
     - [x] **接入标准 cct 工具函数**：废弃了 `bidding_racing_panel.py` 中的自定义 HHMMSS 判定。全面接入 `cct.get_work_time()` 和 `cct.get_trade_date_status()`。

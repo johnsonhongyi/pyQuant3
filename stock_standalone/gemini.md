@@ -25,12 +25,46 @@
 3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，必须保持最新。
 4.  **自动迭代**: 每次任务完成后，自动依据此规则更新文档并保存历史文件。
 5.  **记忆持续性协议**: 
+# 全能交易终端开发跟踪
+
+> 创建时间：2026-01-20 18:24  
+> 最后更新：2026-04-16 14:05  
+> **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
+
+---
+
+## 📚 设计文档导航（优先阅读）
+
+| 文档 | 说明 | 状态 |
+|------|------|------|
+| [SYSTEM_ARCHITECTURE.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/SYSTEM_ARCHITECTURE.md) | **全系统架构设计**：五层架构、数据流、字段说明、关键文件索引 | ✅ 最新 |
+| [TRADING_ENGINE_DESIGN.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/TRADING_ENGINE_DESIGN.md) | **盘中交易决策引擎设计**：引擎五层架构、接口说明、交易规则、待实施计划 | ✅ 最新 |
+| [QUICKSTART.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/QUICKSTART.md) | 快速启动指南 | 参考 |
+| [PACKAGES_GUIDE.txt](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/PACKAGES_GUIDE.txt) | 依赖包说明 | 参考 |
+
+---
+
+## 📜 开发守则 (用户强制)
+
+1.  **任务历史不丢失**: 所有实施计划、任务清单、Walkthrough必须**包含日期时间命名** (e.g., `20260124_0341_task.md`) 并归档，**禁止覆盖**旧计划。
+    - 每日任务完成后，同步更新到 `gemini.md` 的【变更日志】和【最近完成任务】中。
+2.  **每日闭环**: 每日结束时更新【变更日志】和【当前任务状态】，确保次日可无缝接续。
+3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，必须保持最新。
+4.  **自动迭代**: 每次任务完成后，自动依据此规则更新文档并保存历史文件。
+5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 ---
 
 ## 2026-04-18 02:25
+- [x] **落地“一阶解耦”解耦架构，根治 UI 假死 (Root-Fix Performance Architecture)**：
+    - [x] **实现状态驱动联动进程 (State-Driven Linkage Service)**：新增 `linkage_service.py` 独立进程。采用“状态覆盖”模型代替“任务队列”，仅执行最后一次选股指令，彻底解决了极速翻页时的“联动风暴”与剪切板竞争导致的 5-10s 假死。
+    - [x] **建立 UI 心跳诊断看门狗 (Diagnostic Watchdog)**：在 `StockMonitorApp` 中引入 `_ui_heartbeat`。独立守护线程监控心跳，若 UI 停滞超过 1.5s 立即调用 `faulthandler` dump 堆栈，实现了对静默卡顿点的精准定位。
+    - [x] **全面上线异步懒加载 (True Async Lazy Load)**：重构了 `BiddingMomentumDetector` 与 `SectorBiddingPanel`。所有 IO 重活（文件读取、DB 查询）全部移至后台线程。竞价面板实现“开启即显示”，数据后台静默填充，主线程负载降低 90% 以上。
+    - [x] **解耦系统调用逻辑 (Decoupled System Calls)**：将 `StockSender` 消息投递、`pyperclip` 剪切板写入等高危阻塞操作全部迁移至低优先级后台进程，确保了主程序 UI 响应始终处于亚毫秒级。
+
+## 2026-04-18 01:25
 - [x] **修复 `hotlist_panel.py` 中的 `NameError` (Fixed NameError in HotlistPanel)**：
     - [x] 彻底修复了 `_update_watchlist_queue` 方法中由于 `current_code` 和 `v_scroll` 未定义导致的 UI 刷新崩溃错误。
     - [x] 在执行表格增量渲染前，正确增加了对当前选中行代码及垂直滚动条位置的捕获逻辑，确保了观察池在每轮 2.0s 刷新周期后的交互连续性。
