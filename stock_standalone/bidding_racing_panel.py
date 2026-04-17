@@ -23,41 +23,45 @@ from PyQt6.QtGui import (
 
 from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidgetItem
 from tk_gui_modules.window_mixin import WindowMixin
-from JohnsonUtil import LoggerFactory
+from JohnsonUtil import LoggerFactory, commonTips as cct
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
 # [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
-RACING_CONFIG_PATH = "snapshots/bidding_racing_ui_state_v3.json.gz"
-RACING_CONFIG_LOCK = threading.Lock() # [NEW] 全局配置锁，防止多窗口并发写入冲突
+def _get_racing_config_path():
+    """获取标准化的绝对路径，确保集成与独立模式路径对齐"""
+    try:
+        base_dir = cct.get_base_path()
+        path = os.path.join(base_dir, "snapshots", "bidding_racing_ui_state_v3.json.gz")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+    except:
+        return "snapshots/bidding_racing_ui_state_v3.json.gz"
+
+RACING_CONFIG_LOCK = threading.Lock() 
 
 def _get_racing_config():
     """读取全局持久化配置"""
-    if not os.path.exists(RACING_CONFIG_PATH):
+    path = _get_racing_config_path()
+    if not os.path.exists(path):
         return {}
     try:
-        import gzip
-        with gzip.open(RACING_CONFIG_PATH, "rb") as f:
+        with gzip.open(path, "rb") as f:
             return json.loads(f.read().decode('utf-8'))
     except Exception:
         return {}
 
 def _save_racing_config(conf: dict):
     """保存配置并合并历史记录 - [🔒 线程安全版]"""
+    path = _get_racing_config_path()
     with RACING_CONFIG_LOCK:
         try:
-            os.makedirs(os.path.dirname(RACING_CONFIG_PATH), exist_ok=True)
             old_conf = _get_racing_config()
-            # 合并关键字段，防止被单次操作覆盖全局
             for k, v in conf.items():
-                if isinstance(v, list) and k in old_conf and isinstance(old_conf[k], list):
-                    # 如果是列表(如 history)，逻辑上建议保留最新
-                    old_conf[k] = v
-                else:
-                    old_conf[k] = v
-            
-            import gzip
-            with gzip.open(RACING_CONFIG_PATH, "wb") as f:
+                old_conf[k] = v
+            with gzip.open(path, "wb") as f:
                 f.write(json.dumps(old_conf).encode('utf-8'))
+        except Exception as e:
+            logger.error(f"❌ [RacingConfig] Save Failed: {e}")
         except Exception as e:
             logger.error(f"❌ [RacingConfig] Save Failed: {e}")
 
@@ -259,7 +263,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.setStyleSheet("background-color: #000; color: #EEE;")
 
         # 记忆位置
-        self.load_window_position_qt(self, "SectorDetail_Unified")
+        # self.load_window_position_qt(self, "SectorDetail_Unified")
         
         self.setUpdatesEnabled(False)
         self._sort_col = 2 # 默认排序: 结构分
@@ -293,19 +297,49 @@ class SectorDetailDialog(QDialog, WindowMixin):
         except:
             return None
 
-    def apply_ui_state(self, state):
-        """应用外部恢复的状态"""
-        if not state: return
+    def apply_ui_state(self, state, _retry_ts=None):
+        """应用外部恢复的状态（带启动保护锁 + 超时兜底）"""
+        if not state:
+            return
+
+        # 初始化首次时间戳
+        if _retry_ts is None:
+            _retry_ts = time.time()
+
         try:
+            # --- 启动保护锁 ---
+            if hasattr(self, '_boot_lock') and self._boot_lock:
+                # 超时 3 秒强制执行
+                if time.time() - _retry_ts < 3:
+                    QTimer.singleShot(
+                        100, 
+                        lambda: self.apply_ui_state(state, _retry_ts)
+                    )
+                    return
+                # 超时后继续执行（兜底）
+                # print("[UI_STATE] boot lock timeout, force apply")
+
+            # --- 恢复 geometry ---
             if "geometry" in state:
-                self.restoreGeometry(QByteArray.fromHex(state["geometry"].encode()))
+                self.restoreGeometry(
+                    QByteArray.fromHex(state["geometry"].encode())
+                )
+
+            # --- 恢复列宽 ---
             widths = state.get("column_widths")
             if widths and len(widths) == self.table.columnCount():
-                self.table.horizontalHeader().blockSignals(True)
-                for i, w in enumerate(widths):
-                    if w > 10: self.table.setColumnWidth(i, w)
-                self.table.horizontalHeader().blockSignals(False)
-        except: pass
+                header = self.table.horizontalHeader()
+                header.blockSignals(True)
+                try:
+                    for i, w in enumerate(widths):
+                        if w > 10:
+                            self.table.setColumnWidth(i, w)
+                finally:
+                    header.blockSignals(False)
+
+        except Exception as e:
+            # 建议至少打日志，裸 except 很危险
+            print(f"[UI_STATE] apply failed: {e}")
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -557,6 +591,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
     def closeEvent(self, event):
         # [统一管理] 不再独立存档，由主面板 closeEvent 统一调用状态导出
+        # self._save_header_state()
+        # self.save_window_position_qt_visual(self, "SectorDetail_Unified")
         super().closeEvent(event)
 
 class CategoryDetailDialog(QDialog, WindowMixin):
@@ -932,7 +968,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._first_boot_render = True # [NEW] 启动强制首次渲染标记
         self._startup_time = time.time()
         self._detail_dialogs = {} # [NEW] 追踪活跃的明细窗体实例
-        
+        self._ui_ready = False
+
         if sender:
             self.stock_sender = sender
         elif not main_app:
@@ -974,7 +1011,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         }
         
         self._init_ui()
-        self._restore_ui_state()
+        QTimer.singleShot(500,self._restore_ui_state)
         
         self.stock_table.setSortingEnabled(False)
         self.sector_table.setSortingEnabled(False)
@@ -1054,16 +1091,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.reset_btn.clicked.connect(self._manual_reset_anchors)
         btn_layout.addWidget(self.reset_btn)
         
-        # # [🚀 新增] 手动存档按钮
-        # self.btn_save_manually = QPushButton("存档")
-        # self.btn_save_manually.setFixedSize(50, 26)
+        # # [🚀 已激活] 手动存档按钮 (点击后立即物理锁定当前全量布局)
+        # self.btn_save_manually = QPushButton("💾 保存布局")
+        # self.btn_save_manually.setFixedSize(70, 26)
         # self.btn_save_manually.setStyleSheet("""
         #     QPushButton { background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
         #     QPushButton:hover { background: #00FFCC; color: black; }
         # """)
         # self.btn_save_manually.clicked.connect(self._save_ui_state)
         # btn_layout.addWidget(self.btn_save_manually)
-        
+
         cycle_layout.addLayout(btn_layout)
         top_bar_layout.addWidget(cycle_group)
         
@@ -1184,8 +1221,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         )
         
         # [🚀 最终关联] 确保所有组件初始化完成后才开启持久化监听
-        self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
-        self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
 
 
     def _on_pie_filter(self, category):
@@ -1561,8 +1598,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行原子联行保存"""
-        # 1. 优先保存 UI 状态 (内含所有子窗状态导出)
-        self._save_ui_state()
+        # 1. 强制执行一次安全的原子持久化
+        try:
+            self._save_ui_state(force=True)
+        except: pass
         
         # 2. 批量静默关闭子窗
         for child in list(self._detail_dialogs.values()):
@@ -1570,44 +1609,113 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not child.isHidden():
                     child.close()
             except: pass
-                
+        # 2️⃣ 强制处理一次事件队列（关键）
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+
         self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
+        # ✅ 关键：允许 Qt 删除对象
+        self.deleteLater()
+
+        # ✅ 通知外部引用失效（关键！）
+        if hasattr(self, "main_app") and self.main_app:
+            self.main_app._racing_panel_win = None
         super().closeEvent(event)
 
-    def _save_ui_state(self):
-        """[🚀 极致持久化] 保存列宽、排序、历史、重置周期"""
-        # [🛡️ 安全保护] 如果初始化未完成（信号提前触发），静默退出
-        if not hasattr(self, 'stock_table') or not hasattr(self, 'sector_table'):
+    def _save_ui_state(self,force=False):
+        """[🚀 物理存盘执行体] 防抖 + 去重 + 生命周期保护（增强版）"""
+
+        # ==============================
+        # 0️⃣ 初始化期禁止写入（核心防护）
+        # ==============================
+        if not getattr(self, "_ui_ready", False):
             return
 
+        # ==============================
+        # 1️⃣ 基础生存期保护（防 Qt 崩溃）
+        # ==============================
         try:
+            if (not hasattr(self, 'stock_table') or 
+                not self.stock_table or 
+                self.stock_table.isHidden()):
+                return
+        except RuntimeError:
+            return
+
+        # ==============================
+        # 2️⃣ 时间防抖（硬限流，防止高频触发）
+        # ==============================
+        import time
+        now = time.time()
+        last_ts = getattr(self, "_last_save_ts", 0)
+
+        # 300ms 内不允许重复写
+        if not force and now - last_ts < 0.3:
+            logger.debug(f"💾 [RacingPanel] 原子未存档 last_ts={last_ts}, now={now}, diff={now-last_ts}")
+            return
+        self._last_save_ts = now
+
+        try:
+            # ==============================
+            # 3️⃣ 采集主表状态
+            # ==============================
             state_stock = self.stock_table.horizontalHeader().saveState().toHex().data().decode()
             state_sector = self.sector_table.horizontalHeader().saveState().toHex().data().decode()
-            
-            # [🚀 统一管理] 记录当前所有详情窗口及其精确布局
+
+            # ==============================
+            # 4️⃣ 采集详情窗口状态
+            # ==============================
             open_windows = []
             for key, dlg in list(self._detail_dialogs.items()):
                 try:
-                    if not dlg.isHidden():
+                    if not dlg.isHidden() and hasattr(dlg, 'get_ui_state'):
                         state = dlg.get_ui_state()
                         if state:
-                            type_str, name = key.split(":", 1)
+                            # 更安全的 key 解析
+                            if ":" in key:
+                                type_str, name = key.split(":", 1)
+                            else:
+                                type_str, name = "unknown", key
+
                             state.update({"type": type_str, "name": name})
                             open_windows.append(state)
-                except: pass
-                
+                except Exception as e:
+                    logger.debug(f"[UIState] detail save failed: {e}")
+
+            # ==============================
+            # 5️⃣ 构建配置
+            # ==============================
             conf = {
                 "header_stock": state_stock,
                 "header_sector": state_sector,
-                "history": self._anchor_history[-20:], 
+                "history": self._anchor_history[-20:],
                 "reset_cycle": self._reset_cycle_mins,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
-                "open_details_v2": open_windows # [NEW] 使用 V2 协议存储组合状态
+                "open_details_v2": open_windows
             }
+
+            # ==============================
+            # 6️⃣ hash 去重（关键优化）
+            # ==============================
+            import json, hashlib
+            conf_str = json.dumps(conf, sort_keys=True)
+            new_hash = hashlib.md5(conf_str.encode()).hexdigest()
+
+            if getattr(self, "_last_save_hash", None) == new_hash:
+                return
+
+            self._last_save_hash = new_hash
+
+            # ==============================
+            # 7️⃣ 原子写入
+            # ==============================
             _save_racing_config(conf)
-            logger.info(f"💾 [RacingPanel] 已执行原子存档，包含 {len(open_windows)} 个详情窗状态。")
+
+            logger.info(f"💾 [RacingPanel] 原子存档完成 ({len(open_windows)} 窗口)")
+
         except Exception as e:
-            logger.error(f"⚠️ [RacingPanel] Save UI State Error: {e}")
+            logger.debug(f"⚠️ [RacingPanel] Save Ignored: {e}")
 
     def _restore_ui_state(self):
         """[🚀 状态还原] 恢复全量布局与历史"""
@@ -1658,9 +1766,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     self.data_updated.connect(dialog.refresh_data)
                     self._detail_dialogs[dlg_key] = dialog
                     
-                    # 关键：应用保存的精确状态 (列宽/几何)
-                    dialog.apply_ui_state(win_info)
+                    # 关键补丁：先显示窗口，再应用位置，确保 OS 接受布局变更
                     dialog.show()
+                    dialog.apply_ui_state(win_info)
                     # [🚀 即时触发] 尝试首次渲染
                     dialog.refresh_data()
                 except Exception as e:
@@ -1674,6 +1782,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         QTimer.singleShot(800, self.data_updated.emit)
         except Exception as e:
             logger.error(f"⚠️ [RacingPanel] Restore UI State Error: {e}")
+        finally:
+            self._ui_ready = True
 
     def _arrange_detail_windows(self):
         """[🚀 垂直联排优化] 参照图片效果：在主面板右侧边缘垂直堆叠排列"""
