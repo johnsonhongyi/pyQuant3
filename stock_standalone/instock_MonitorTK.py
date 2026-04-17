@@ -480,6 +480,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 🔥 同步初始化 DataPublisher (启动时直接加载)
             self.realtime_service = DataPublisher(high_performance=True)
             self._realtime_service_ready = True
+            
+            # 🚀 [NEW] 全局初始化赛道探测器 (One Calculation, Global Availability)
+            try:
+                from bidding_momentum_detector import BiddingMomentumDetector
+                self.racing_detector = BiddingMomentumDetector(
+                    realtime_service=self.realtime_service, 
+                    silent_mode=True # 集成模式下抑制独立日志，数据流由 DataPublisher 统一驱动
+                )
+                self.realtime_service.racing_detector = self.racing_detector
+                logger.info("✅ BiddingMomentumDetector 已全局就绪并挂载至 DataPublisher")
+            except Exception as rd_e:
+                self.racing_detector = None
+                logger.error(f"⚠️ BiddingMomentumDetector 初始化失败: {rd_e}")
+
             logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
 
         except Exception as e:
@@ -848,9 +862,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._signal_dashboard_win.activateWindow()
 
             toast_message(self, "实时信号仪表盘已启动")
+            
         except Exception as e:
-            logger.error(f"❌ 打开信号仪表盘失败: {e}\n{traceback.format_exc()}")
-            messagebox.showerror("错误", f"启动信号仪表盘失败: {e}")
+            logger.error(f"打开实时信号仪表盘失败: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("Error", f"Failed to open Signal Dashboard: {e}")
+
+    def open_racing_panel(self):
+        """打开竞价赛马与节奏监控面板 (Alt+M)"""
+        try:
+            if not hasattr(self, "_racing_panel_win") or self._racing_panel_win is None:
+                # 确保 Qt 环境已初始化
+                from PyQt6 import QtWidgets
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+
+                from bidding_racing_panel import BiddingRacingRhythmPanel
+                
+                # 关键：传入全局唯一的 racing_detector，实现数据下沉复用
+                self._racing_panel_win = BiddingRacingRhythmPanel(
+                    detector=self.racing_detector,
+                    main_app=self,
+                    on_code_callback=self.on_code_click
+                )
+                
+                # 跨线程联动安全：双击个股跳转
+                self._racing_panel_win.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+
+            self._racing_panel_win.show()
+            self._racing_panel_win.raise_()
+            self._racing_panel_win.activateWindow()
+            toast_message(self, "🏁 竞价赛马监控已启动")
+
+        except Exception as e:
+            logger.error(f"打开竞价赛马面板失败: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("Error", f"Failed to open Racing Panel: {e}")
 
     def open_indicator_help(self):
         """Open the Indicator Help and Search window (Ctrl + /)"""
@@ -1340,6 +1385,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         4: (win32con.MOD_ALT, 0x4C, "Alt+L"),  # Q - 实时信号仪表盘
         5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H - 切换Hotlist
         6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
+        7: (win32con.MOD_ALT, 0x4D, "Alt+M"),  # M - 竞价赛马监控
     }
 
 
@@ -1362,6 +1408,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             4: lambda: self._schedule_after(0, self.open_live_signal_viewer),
             5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
             6: lambda: self._schedule_after(0, self._run_live_strategy_process),
+            7: lambda: self._schedule_after(0, self.open_racing_panel),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -2042,6 +2089,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._signal_dashboard_win = None # 立即解引用
                 except Exception as e:
                     logger.debug(f"Dashboard close error: {e}")
+                    
+            if getattr(self, '_racing_panel_win', None) is not None:
+                try:
+                    logger.info("正在关闭竞价赛马监控面板...")
+                    if hasattr(self._racing_panel_win, 'close'):
+                        self._racing_panel_win.close()
+                    self._racing_panel_win = None
+                except Exception as e:
+                    logger.debug(f"RacingPanel close error: {e}")
             
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
@@ -3058,6 +3114,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="策略", command=lambda: self.open_strategy_manager(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="赛马🏁", command=lambda: self.open_racing_panel(), font=self.default_font_bold, fg="darkred", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)

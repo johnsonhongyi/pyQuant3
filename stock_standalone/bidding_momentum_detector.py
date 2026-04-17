@@ -383,10 +383,11 @@ class BiddingMomentumDetector:
     - 发现龙头后展开板块，找出跟随股
     """
 
-    def __init__(self, realtime_service: Optional["DataPublisher"] = None, simulation_mode: bool = False):
+    def __init__(self, realtime_service: Optional["DataPublisher"] = None, simulation_mode: bool = False, silent_mode: bool = False):
         # ---- 数据服务 ----
         self.realtime_service = realtime_service
         self.simulation_mode = simulation_mode
+        self.silent_mode = silent_mode # [NEW] 集成模式下抑制重复日志打印
 
         # ---- 策略参数：支持动态配置 ----
         self.strategies: Dict[str, Dict[str, Any]] = {
@@ -476,7 +477,7 @@ class BiddingMomentumDetector:
         self._code_index: Dict[str, str] = {} # code -> name
         self._name_index: Dict[str, str] = {} # name -> code
 
-        # self._load_stock_selector_data()
+        self._load_stock_selector_data()
         
         # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
         # self._signal_bus = SignalBus()

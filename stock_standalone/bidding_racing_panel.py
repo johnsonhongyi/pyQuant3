@@ -1142,6 +1142,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         return False
 
     def closeEvent(self, event):
+        # [⭐ NEW] 显式关闭所有子窗口（如 SectorDetailDialog），强行触发其各自的 closeEvent 落盘存档
+        from PyQt6.QtWidgets import QDialog
+        for child in self.findChildren(QDialog):
+            if not child.isHidden():
+                child.close()
+                
         self._save_ui_state()
         self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
         super().closeEvent(event)
@@ -1281,6 +1287,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         curr_ver = getattr(self.detector, 'data_version', 0)
         curr_time = getattr(self.detector, 'last_data_ts', 0)
         
+        # [NEW] 同步赛马竞技进度时间轴
+        if curr_time > 0 and hasattr(self, 'timeline'):
+            t_str = datetime.datetime.fromtimestamp(curr_time).strftime("%H:%M:00")
+            self.timeline.set_time(t_str)
+            
         # [NEW] 周期性自动重置基准锚点
         if curr_time > 0:
             if self._last_anchor_reset_data_ts == 0:
