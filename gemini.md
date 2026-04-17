@@ -1,9 +1,15 @@
-## 2026-04-17 04:35
-- [x] **深度重构 LiveWorker 实盘链路与稳定性**：
-    - [x] **24小时无缝值守主循环与节假日自适应**：彻底重构 `LiveWorker.run` 的多阶段逻辑。废弃了原有的硬挂断策略，合并为单一的 `while self.is_running:` 循环守护。全面接入底层的原生 `cct.get_work_time_duration()` 与 `cct.get_work_time()` 接口，现在系统不仅能正确识别每日盘外（15:05-09:15），还能自动判别周末与法定节假日，进入彻底的休眠护航状态。而在交易时间和午休时间（11:35 - 12:55）则展现出不同的降频响应，真正实现了无需人工干预的“一直挂机一直爽”。
-    - [x] **命令行参数补齐 (`argparse`)**：修复了通过 `test_bidding_replay.py --live --ui` 启动报错 `unrecognized arguments` 的问题。将隐藏参数 `--live` 与 `--interval` 添加到 `ArgumentParser` 参数表，恢复正常传参启动。
-    - [x] **双重乱码问题终结**：针对文件多处中文字符产生“被 GBK 二次污染成繁体或问号”的恶性情况，使用安全正则表达式实施清理。保留逻辑骨架完全无损的同时避免了由于原版回写引入的 `IndentationError`，确保脚本健壮及正常运行。
-    - [x] **对齐底层 TickSeries 流向**：实盘模式下的时间戳严格变更为底层数据提供的自身切片时间 (`tdd.getSinaAlldf`)，消除了前端时间戳被错误设为系统 `datetime.now()` 引发的计算与面板流漂移问题。
+## 2026-04-18 01:25
+- [x] **深度对齐系统标准交易时间判定 (Standardized Trading Time Alignment)**：
+    - [x] **接入标准 cct 工具函数**：废弃了 `bidding_racing_panel.py` 中的自定义 HHMMSS 判定。全面接入 `cct.get_work_time()` 和 `cct.get_trade_date_status()`。
+    - [x] **自动化起点历史一致性**：通过 `time_hhmm` 整数格式适配，确保 60 分钟自动快照逻辑仅在系统认定的“有效工作时间”（包含节假日过滤）内执行，彻底对齐全平台的交易日历。
+    - [x] **全时段逻辑修复**：利用 `time_hhmm` 同步修复了 `is_break` 和 `is_closing` 状态位判定，解决了旧代码中长整数比对导致的渲染泵逻辑失效，恢复了午间及收盘后的 UI 资源保护。
+
+## 2026-04-18 01:10
+- [x] **实现自动重置锚点与交易时间判定加固 (Automated Reset Anchors & Time Logic Hardening)**：
+    - [x] **自动化起点历史记录**：重构了 `BiddingRacingRhythmPanel` 的 60 分钟（可调）自动重置逻辑。现在触发重置时会自发调用 `_manual_reset_anchors`，将当前价格状态自动拍摄快照并存入 **📍 起点历史** 槽位，无需人工干预即可追溯盘中异动。
+    - [x] **交易时间段精准触发保护 (Trading Time Gate)**：引入了 `time_int` 标准化变量。确保自动重置仅在 (09:15-11:30) 或 (13:00-15:05) 交易活跃期触发。若在午休或收盘期间到达周期，仅同步计时起点而不产生冗余快照，避免了开盘瞬时的逻辑空转。
+    - [x] **深度修复全局时间判定 Bug (Fixed Time Logic Bug)**：彻底根治了 `refresh_data` 中 `is_break` 与 `is_closing` 逻辑长期存在的格式比对错误。将原先直接使用 Unix 时间戳（秒级长整数）与 `HHMMSS` 常数比对的逻辑修正为标准化 `time_int` 对比，恢复了系统对午盘及收盘状态的正确感知。
+
 
 ## 2026-04-16 18:00
 - [x] **重构 Bidding Racing 顶层综合控制条，实现极致布局效率**：

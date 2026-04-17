@@ -10,7 +10,7 @@ import queue
 from queue import Queue, Empty, Full
 import time
 import logging
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 import re
 import os
 from JohnsonUtil import commonTips as cct
@@ -266,6 +266,10 @@ class AlertManager:
         self.cooldowns: Dict[str, float] = {}
         self.global_last_alert: float = 0
         
+        # [NEW] 会话中已报警代码列表 (Session-based highlights)
+        self.session_alerted_codes = set()
+        self._session_lock = threading.Lock()
+        
         self.start()
         self._start_feedback_listener()
 
@@ -319,8 +323,32 @@ class AlertManager:
                 codes_str = ",".join(map(str, codes_list))
             self.current_state['active_codes'] = codes_str
             self.current_state['last_sync_time'] = time.time()
+            
+            # ⚡ [NEW] 同时也自动汇入会话追踪列表 (Session-based highlights)
+            if codes_list:
+                with self._session_lock:
+                    added_any = False
+                    for c in codes_list:
+                        sc = str(c)
+                        if len(sc) == 6 and sc not in self.session_alerted_codes:
+                            self.session_alerted_codes.add(sc)
+                            added_any = True
+                    if added_any:
+                        logger.debug(f"AlertManager: Synced {len(codes_list)} codes from UI Alarm Pool.")
         except:
             pass
+
+    def get_alerted_codes(self) -> List[str]:
+        """获取本会话中已报警的所有代码"""
+        if not hasattr(self, 'session_alerted_codes'): return []
+        with self._session_lock:
+            return list(self.session_alerted_codes)
+
+    def is_alerted(self, code: str) -> bool:
+        """检查特定代码是否在本会话中报警过"""
+        if not hasattr(self, 'session_alerted_codes'): return False
+        with self._session_lock:
+            return str(code) in self.session_alerted_codes
 
     def stop_current_speech(self, key=None):
         """非破坏式中断"""
@@ -433,11 +461,25 @@ class AlertManager:
         """实际的消息分发与记录逻辑"""
         now = time.time()
         
-        # 1. 最终冷却确认 (针对即时或 Batch 后的消息更新时间戳)
-        if key and cooldown > 0:
-            # 此处再次检查是确保在 Batch 期间产生的重复在发送时也能被拦截
-            if now - self.cooldowns.get(key, 0) < cooldown: return
-            self.cooldowns[key] = now
+        # ⚡ [NEW] 记录到会话报警列表 (Extract key from message if missing)
+        actual_code = None
+        # 1. 尝试从 key 提取 (处理 sz000001 等复杂格式)
+        if key:
+            code_match = re.search(r'(\d{6})', str(key))
+            if code_match:
+                actual_code = code_match.group(1)
+        
+        # 2. 如果 key 无效，尝试从 message 提取
+        if not actual_code and message:
+            code_match = re.search(r'(\d{6})', str(message))
+            if code_match:
+                actual_code = code_match.group(1)
+                
+        if actual_code:
+            with self._session_lock:
+                if actual_code not in self.session_alerted_codes:
+                    self.session_alerted_codes.add(str(actual_code))
+                    logger.debug(f"✅ [SessionTrack] Added {actual_code} to alerted codes")
             
         # 2. 日志记录
         is_high = (priority <= 1)

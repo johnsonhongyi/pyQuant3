@@ -58,6 +58,7 @@ from strong_consolidation_strategy import StrongConsolidationStrategy
 from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,PIPE_NAME_TK)
 from hotlist_panel import HotlistPanel
+from alert_manager import get_alert_manager
 from signal_log_panel import SignalLogPanel
 from hotspot_popup import HotSpotPopup
 from signal_message_queue import SignalMessage, SignalMessageQueue
@@ -7549,14 +7550,35 @@ class MainWindow(QMainWindow, WindowMixin):
         RED, GREEN, BLACK = color_cache if color_cache else (QColor('red'), QColor('green'), QColor('black'))
 
         # 1. Code & Name 列 (脏检测，使用安全获取助手)
+        is_alerted = get_alert_manager().is_alerted(stock_code)
+        display_name = f"🔔{stock_name}" if is_alerted else stock_name
+        alert_bg = QColor("#4B0082") if is_alerted else None
+        alert_fg = QColor("#FFFFFF") if is_alerted else None
+
         item0 = self._get_or_create_item(row_idx, 0)
+        # 强制更新 alerted 状态下的背景，即使代码没变也可能 alert 状态变了
+        if is_alerted:
+            item0.setBackground(alert_bg)
+            item0.setForeground(alert_fg)
+        else:
+            item0.setBackground(QColor(0,0,0,0))
+            # 恢复默认颜色
+            item0.setForeground(Qt.GlobalColor.white)
+
         if item0.text() != stock_code: 
             item0.setText(stock_code)
             item0.setData(Qt.ItemDataRole.UserRole, stock_code)
 
         item1 = self._get_or_create_item(row_idx, 1)
-        if item1.text() != stock_name:
-            item1.setText(stock_name)
+        if is_alerted:
+            item1.setBackground(alert_bg)
+            item1.setForeground(alert_fg)
+        else:
+            item1.setBackground(QColor(0,0,0,0))
+            item1.setForeground(Qt.GlobalColor.white)
+
+        if item1.text() != display_name:
+            item1.setText(display_name)
 
         # 3. 可选列 (Column 2+)
         # 🚀 [OPTIMIZATION] 预取 columns 数组提高局部性
@@ -8925,14 +8947,25 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.insertRow(row)
 
             # Code
+            is_alerted = get_alert_manager().is_alerted(code)
+            display_name = f"🔔{name}" if is_alerted else name
+            alert_bg = QColor("#4B0082") if is_alerted else None
+            alert_fg = QColor("#FFFFFF") if is_alerted else None
+
             code_item = QTableWidgetItem(str(code))
             code_item.setData(Qt.ItemDataRole.UserRole, str(code))
             code_item.setFlags(code_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if is_alerted:
+                code_item.setBackground(alert_bg)
+                code_item.setForeground(alert_fg)
             self.stock_table.setItem(row, 0, code_item)
 
             # Name
-            name_item = QTableWidgetItem(str(name))
+            name_item = QTableWidgetItem(str(display_name))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if is_alerted:
+                name_item.setBackground(alert_bg)
+                name_item.setForeground(alert_fg)
             self.stock_table.setItem(row, 1, name_item)
 
             # Update maps

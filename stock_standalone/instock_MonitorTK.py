@@ -8129,9 +8129,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             am = getattr(self.live_strategy, '_voice', None)
         
         if am and not getattr(am, '_linked_to_viz', False):
-             # 🚀 [SIMPLIFIED] 语音播报时自动触发可视化标记
-             am.on_speak_start = lambda code: self.after_idle(lambda: self._on_alert_speak_visual_link(code))
+             # 🚀 [FIXED] 恢复并聚合所有播报联动逻辑：视觉提示(震动/闪烁) + 外部可视化联动
+             # 避免直接覆盖造成的逻辑丢失
+             def wrapped_on_start(code):
+                 # 1. 触发本地视觉反馈 (震动、闪烁、任务栏提示)
+                 self.on_voice_speak_start(code)
+                 # 2. 触发外部可视化联动
+                 self._on_alert_speak_visual_link(code)
+             
+             am.on_speak_start = wrapped_on_start
+             am.on_speak_end = self.on_voice_speak_end # 恢复：播报结束后的状态恢复 (恢复标题等)
              am._linked_to_viz = True
+             logger.info("[Linkage] AlertManager callbacks aggregated (Visual Effects + IPC).")
         return am
 
     def _on_alert_speak_visual_link(self, code):

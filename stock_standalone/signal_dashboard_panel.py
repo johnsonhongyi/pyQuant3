@@ -24,6 +24,7 @@ from signal_bus import get_signal_bus, SignalBus, BusEvent
 from JohnsonUtil import commonTips as cct
 import os
 import json
+from alert_manager import get_alert_manager
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 
 SETTINGS_SECTION = "signal_dashboard_persistence"
@@ -1410,10 +1411,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 f = grade_item.font(); f.setBold(True); grade_item.setFont(f)
 
             # 核心列 (存入缓存)
+            is_alerted = get_alert_manager().is_alerted(code)
+            display_name = f"🔔{name}" if is_alerted else name
+            alert_bg = QColor("#4B0082") if is_alerted else None
+            alert_fg = QColor("#FFFFFF") if is_alerted else None
+            
             code_item = QTableWidgetItem(code)
             table_cache[code] = code_item
 
-            name_item = QTableWidgetItem(name)
+            name_item = QTableWidgetItem(display_name)
             if payload:
                 name_item.setData(Qt.ItemDataRole.UserRole, payload.get('sector', ''))
 
@@ -1431,9 +1437,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.setRowHidden(0, True)
             
             color = self._get_item_color(pattern, detail)
+            if is_alerted: color = alert_fg
+            
             for i in [0, 2, 3, 4, 5, 6, 7]:
                 it = table.item(0, i)
-                if it: it.setForeground(color)
+                if it: 
+                    it.setForeground(color)
+                    if is_alerted: it.setBackground(alert_bg)
             
             # [NEW] 重点信号行高亮 (赛马模式深度加成)
             if "[重点]" in detail or "[重点]" in pattern:

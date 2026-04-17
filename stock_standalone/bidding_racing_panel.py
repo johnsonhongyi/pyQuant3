@@ -24,6 +24,7 @@ from PyQt6.QtGui import (
 from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidgetItem
 from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory, commonTips as cct
+from alert_manager import get_alert_manager
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
 GLOBAL_SCROLLBAR_STYLE = """
@@ -450,32 +451,40 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if not self.detector:
             self.status_lbl.setText("❌ 探测器连接丢失，等待主程序响应...")
             return
-        
-        # [🚀 暴力自愈逻辑] 若映射表缺失，全量扫描并强制回写（彻底解决同步孤岛）
-        members = self.detector.sector_map.get(self.sector_name)
-        if not members:
-            new_members = set()
-            target_name = self.sector_name.strip()
-            with self.detector._lock:
-                for code, ts in self.detector._tick_series.items():
-                    # [🚀 多维字段匹配 + 复杂正则切分] 对齐主面板推导逻辑
-                    cat_val = str(getattr(ts, 'category', '')) + " " + str(getattr(ts, 'block', ''))
-                    if not cat_val or len(cat_val) < 2: continue
-                    
-                    # 使用正则表达式进行切分对比
-                    cats = [c.strip() for c in re.split(r'[;；,，/\- ]', cat_val) if c.strip()]
-                    if target_name in cats: 
-                        new_members.add(code)
-            
-            if new_members:
-                self.detector.sector_map[self.sector_name] = new_members
-                members = new_members
-                # logger.info(f"✅ [Detail] '{self.sector_name}' 自愈成功，注入 {len(members)} 个成员")
-        
-        if not members: 
-            self.status_lbl.setText(f"❌ '{self.sector_name}' 成员库仍处于冷启动状态...")
-            return
-        
+
+        # --- [⚡ 报警专用逻辑] 优先级最高，用于处理虚拟板块 ---
+        if self.sector_name == "🔔 实时报警":
+            alerted_codes = get_alert_manager().get_alerted_codes()
+            members = set(alerted_codes)
+            if not members:
+                self.status_lbl.setText("ℹ️ 当前会话暂无报警品种...")
+                self.table.setRowCount(0)
+                return
+        else:
+            # [🚀 暴力自愈逻辑] 若映射表缺失，全量扫描并强制回写（彻底解决同步孤岛）
+            members = self.detector.sector_map.get(self.sector_name)
+            if not members:
+                new_members = set()
+                target_name = self.sector_name.strip()
+                with self.detector._lock:
+                    for code, ts in self.detector._tick_series.items():
+                        # [🚀 多维字段匹配 + 复杂正则切分] 对齐主面板推导逻辑
+                        cat_val = str(getattr(ts, 'category', '')) + " " + str(getattr(ts, 'block', ''))
+                        if not cat_val or len(cat_val) < 2: continue
+                        
+                        # 使用正则表达式进行切分对比
+                        cats = [c.strip() for c in re.split(r'[;；,，/\- ]', cat_val) if c.strip()]
+                        if target_name in cats: 
+                            new_members.add(code)
+                
+                if new_members:
+                    self.detector.sector_map[self.sector_name] = new_members
+                    members = new_members
+                    # logger.info(f"✅ [Detail] '{self.sector_name}' 自愈成功，注入 {len(members)} 个成员")
+                else:
+                    self.status_lbl.setText(f"❌ '{self.sector_name}' 成员库仍处于冷启动状态...")
+                    return
+
         render_start_t = time.time()
         
         with self.detector._lock:
@@ -538,30 +547,49 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
             code, name, score, sig, pct, start_pct, dff = row
-            self._update_dialog_cell(i, 0, code)
-            self._update_dialog_cell(i, 1, name)
-            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700"))
-            sig_txt = str(sig) if sig > 0 else ""
-            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC"), Qt.AlignmentFlag.AlignCenter)
-            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            
+            # [⚡ 报警核验]
+            is_alerted = get_alert_manager().is_alerted(code)
+            bg_c = QColor("#4B0082") if is_alerted else None
+            txt_c = QColor("#FFFFFF") if is_alerted else None
+            d_name = f"🔔{name}" if is_alerted else name
 
-    def _update_dialog_cell(self, row, col, text, color=None, align=None):
+            self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
+            self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
+            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c)
+            sig_txt = str(sig) if sig > 0 else ""
+            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC") if not is_alerted else txt_c, Qt.AlignmentFlag.AlignCenter, bg_color=bg_c)
+            
+            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_pct = txt_c
+            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            
+            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_start = txt_c
+            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            
+            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_dff = txt_c
+            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+
+    def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
         it = self.table.item(row, col)
         if not it:
             from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
             it = NumericTableWidgetItem(text)
             if color: it.setForeground(color)
+            if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             self.table.setItem(row, col, it)
         else:
             if it.text() != text:
                 it.setText(text)
-                if color: it.setForeground(color)
+            if color:
+                it.setForeground(color)
+            if bg_color:
+                it.setBackground(bg_color)
+            elif it.background().color().alpha() != 0:
+                it.setBackground(QColor(0,0,0,0))
 
     def _release_boot_lock(self):
         self._boot_lock = False
@@ -790,30 +818,49 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
             code, name, score, sig, pct, start_pct, dff = row
-            self._update_dialog_cell(i, 0, code)
-            self._update_dialog_cell(i, 1, name)
-            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700"))
-            sig_txt = str(sig) if sig > 0 else ""
-            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC"), Qt.AlignmentFlag.AlignCenter)
-            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            
+            # [⚡ 报警核验]
+            is_alerted = get_alert_manager().is_alerted(code)
+            bg_c = QColor("#4B0082") if is_alerted else None
+            txt_c = QColor("#FFFFFF") if is_alerted else None
+            d_name = f"🔔{name}" if is_alerted else name
 
-    def _update_dialog_cell(self, row, col, text, color=None, align=None):
+            self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
+            self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
+            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c)
+            sig_txt = str(sig) if sig > 0 else ""
+            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC") if not is_alerted else txt_c, Qt.AlignmentFlag.AlignCenter, bg_color=bg_c)
+            
+            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_pct = txt_c
+            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            
+            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_start = txt_c
+            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            
+            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
+            if is_alerted: c_dff = txt_c
+            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+
+    def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
         it = self.table.item(row, col)
         if not it:
             from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
             it = NumericTableWidgetItem(text)
             if color: it.setForeground(color)
+            if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             self.table.setItem(row, col, it)
         else:
             if it.text() != text:
                 it.setText(text)
-                if color: it.setForeground(color)
+            if color:
+                it.setForeground(color)
+            if bg_color:
+                it.setBackground(bg_color)
+            elif it.background().color().alpha() != 0:
+                it.setBackground(QColor(0,0,0,0))
 
     def _release_boot_lock(self):
         self._boot_lock = False
@@ -1052,7 +1099,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             "COLOR_CORAL": QColor("#FF2D55"),
             "COLOR_TRANSPARENT": QColor(0, 0, 0, 0),
             "COLOR_FLASH_BASE": QColor(255, 215, 0),
-            "FONT_FOLLOWERS": QFont("Segoe UI", 9)
+            "FONT_FOLLOWERS": QFont("Segoe UI", 9),
+            "COLOR_ALERT_BG": QColor("#4B0082"), # Indigo/Deep Purple
+            "COLOR_ALERT_TEXT": QColor("#FFFFFF")
         }
         
         self._init_ui()
@@ -1088,16 +1137,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         cycle_group.setFixedWidth(240)
         cycle_group.setStyleSheet("background-color: #262629; border-radius: 8px; border: 1px solid #3A3A3C;")
         cycle_layout = QVBoxLayout(cycle_group)
-        cycle_layout.setContentsMargins(10, 8, 10, 8)
-        cycle_layout.setSpacing(5)
+        cycle_layout.setContentsMargins(8, 8, 8, 8)
+        cycle_layout.setSpacing(6)
         
-        self.cycle_label = QLabel(f"📊 起点参考周期: {self._reset_cycle_mins}m")
-        self.cycle_label.setStyleSheet("color: #FFD700; font-weight: bold; font-family: 'Segoe UI'; font-size: 11px;")
-        self.cycle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cycle_layout.addWidget(self.cycle_label)
-        
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
+        # [🚀 布局优化] 第一行：减号 + 周期标签 + 加号
+        header_row = QHBoxLayout()
+        header_row.setSpacing(2)
         
         self.btn_minus = QPushButton("-10m")
         self.btn_minus.setFixedSize(45, 26)
@@ -1106,7 +1151,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             QPushButton:hover { background: #48484A; color: white; }
         """)
         self.btn_minus.clicked.connect(lambda: self._adjust_cycle(-10))
-        btn_layout.addWidget(self.btn_minus)
+        header_row.addWidget(self.btn_minus)
+        
+        self.cycle_label = QLabel(f"📊 起点参考周期: {self._reset_cycle_mins}m")
+        self.cycle_label.setStyleSheet("color: #FFD700; font-weight: bold; font-family: 'Segoe UI'; font-size: 11px;")
+        self.cycle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_row.addWidget(self.cycle_label, stretch=1)
         
         self.btn_plus = QPushButton("+10m")
         self.btn_plus.setFixedSize(45, 26)
@@ -1115,11 +1165,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             QPushButton:hover { background: #48484A; color: white; }
         """)
         self.btn_plus.clicked.connect(lambda: self._adjust_cycle(10))
-        btn_layout.addWidget(self.btn_plus)
-
-        # [🚀 新增] 窗口整理按钮
+        header_row.addWidget(self.btn_plus)
+        
+        cycle_layout.addLayout(header_row)
+        
+        # [🚀 布局优化] 第二行：功能按键大集合
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+        
         self.btn_arrange = QPushButton("📏 整理")
-        self.btn_arrange.setFixedSize(55, 26)
+        self.btn_arrange.setFixedSize(65, 26)
         self.btn_arrange.setStyleSheet("""
             QPushButton { background: #3A3A3C; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
             QPushButton:hover { background: #00FFCC; color: black; }
@@ -1128,7 +1183,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         btn_layout.addWidget(self.btn_arrange)
         
         self.reset_btn = QPushButton("🔄 即时重置")
-        self.reset_btn.setFixedSize(65, 26)
+        self.reset_btn.setFixedSize(75, 26)
         self.reset_btn.setStyleSheet("""
             QPushButton { background: #FF2D55; color: white; border-radius: 4px; font-weight: bold; font-size: 10px; }
             QPushButton:hover { background: #FF375F; border: 1px solid white; }
@@ -1136,16 +1191,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.reset_btn.clicked.connect(self._manual_reset_anchors)
         btn_layout.addWidget(self.reset_btn)
         
-        # # [🚀 已激活] 手动存档按钮 (点击后立即物理锁定当前全量布局)
-        # self.btn_save_manually = QPushButton("💾 保存布局")
-        # self.btn_save_manually.setFixedSize(70, 26)
-        # self.btn_save_manually.setStyleSheet("""
-        #     QPushButton { background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
-        #     QPushButton:hover { background: #00FFCC; color: black; }
-        # """)
-        # self.btn_save_manually.clicked.connect(self._save_ui_state)
-        # btn_layout.addWidget(self.btn_save_manually)
-
+        self.btn_show_alerts = QPushButton("🔔 报警关注")
+        self.btn_show_alerts.setFixedSize(85, 26)
+        self.btn_show_alerts.setStyleSheet("""
+            QPushButton { 
+                background: #4B0082; color: #FFD700; border: 1px solid #FFD700; 
+                border-radius: 4px; font-weight: bold; font-size: 11px; 
+            }
+            QPushButton:hover { background: #8B0000; color: white; border: 1px solid white; }
+        """)
+        self.btn_show_alerts.clicked.connect(self._on_show_alerts_clicked)
+        btn_layout.addWidget(self.btn_show_alerts)
+        
         cycle_layout.addLayout(btn_layout)
         top_bar_layout.addWidget(cycle_group)
         
@@ -1414,6 +1471,23 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         dialog = SectorDetailDialog(sec_name, self.detector, self._execute_linkage, parent=self)
         dialog.finished.connect(lambda: self._detail_dialogs.pop(dlg_key, None))
         # [🚀 极速联动] 挂载主面板刷新信号
+        self.data_updated.connect(dialog.refresh_data)
+        self._detail_dialogs[dlg_key] = dialog
+        dialog.show()
+
+    def _on_show_alerts_clicked(self):
+        """专用按钮打开报警个股追踪窗口"""
+        sec_name = "🔔 实时报警"
+        dlg_key = f"sector:{sec_name}"
+        if dlg_key in self._detail_dialogs:
+            dlg = self._detail_dialogs[dlg_key]
+            try:
+                dlg.show(); dlg.raise_(); dlg.activateWindow()
+                return
+            except: pass
+            
+        dialog = SectorDetailDialog(sec_name, self.detector, self._execute_linkage, parent=self)
+        dialog.finished.connect(lambda: self._detail_dialogs.pop(dlg_key, None))
         self.data_updated.connect(dialog.refresh_data)
         self._detail_dialogs[dlg_key] = dialog
         dialog.show()
@@ -2022,21 +2096,36 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             t_str = datetime.datetime.fromtimestamp(curr_time).strftime("%H:%M:00")
             self.timeline.set_time(t_str)
             
-        # [NEW] 周期性自动重置基准锚点
+        # [🚀 标准化时间判定] 使用标准 cct 函数判定交易日与交易时间
+        time_hhmm = 0
         if curr_time > 0:
+            try:
+                # 转换 Unix 时间戳为 HHMM 格式以适配 cct.get_work_time
+                time_hhmm = int(datetime.datetime.fromtimestamp(curr_time).strftime("%H%M"))
+            except:
+                pass
+            
+        # [NEW] 周期性自动重置基准锚点
+        if curr_time > 0 and time_hhmm > 0:
             if self._last_anchor_reset_data_ts == 0:
                 self._last_anchor_reset_data_ts = curr_time
             
             interval_sec = self._reset_cycle_mins * 60
             if curr_time - self._last_anchor_reset_data_ts > interval_sec:
-                logger.info(f"⏰ [Panel] 到达基准重置周期 ({self._reset_cycle_mins} min), 正在执行全局锚点刷新...")
-                self.detector.reset_observation_anchors()
-                self._last_anchor_reset_data_ts = curr_time
-                curr_ver = -1 # 强制后续刷新
+                # [FIX] 使用系统标准函数：判断是否为交易时间且为交易日
+                is_trading_time = cct.get_work_time(time_hhmm) and cct.get_trade_date_status()
+                
+                if is_trading_time:
+                    logger.info(f"⏰ [Panel] 到达基准重置周期 ({self._reset_cycle_mins} min), 正在自动录入起点快照并执行刷新...")
+                    self._manual_reset_anchors()
+                    curr_ver = -1 # 强制后续刷新
+                else:
+                    # 如果不在交易时间，仅平移重置参考点，避免开盘瞬发触发
+                    self._last_anchor_reset_data_ts = curr_time
 
-        # [🚀 优化与边界保护] 只有数据版本变化才触发全量渲染；午盘/收盘/首次启动强制渲染
-        is_break = (113000 <= curr_time < 130100)
-        is_closing = (curr_time >= 150000 or (0 < curr_time < 91500) or is_break)
+        # [🚀 优化与边界保护] 同步 cct 阈值修复时间判定逻辑
+        is_break = (1130 <= time_hhmm < 1300)
+        is_closing = (time_hhmm >= 1505 or (0 < time_hhmm < 915) or is_break)
         
         # 旁路判定：正常跳过渲染的条件
         skip_optimization = (curr_ver == self._last_data_version and curr_time == getattr(self, "_last_rendered_time", 0))
@@ -2267,19 +2356,26 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
 
 
-    def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True):
+    def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True, bg_color=None):
         it = table.item(row, col)
         if not it:
             it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(text)
             if color: it.setForeground(color)
+            if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             table.setItem(row, col, it)
             return True
+        changed = False
         if it.text() != text:
              it.setText(text)
-             if color: it.setForeground(color)
-             return True 
-        return False
+             changed = True
+        if color and it.foreground().color() != color:
+             it.setForeground(color)
+             changed = True
+        if bg_color and it.background().color() != bg_color:
+             it.setBackground(bg_color)
+             changed = True
+        return changed
 
     def _update_table_optimized(self, table, flattened_data):
         is_first_init = table.rowCount() == 0
@@ -2287,8 +2383,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             table.setRowCount(len(flattened_data))
         for i, row_data in enumerate(flattened_data):
             code, name, score, sig, pct, diff, dff = row_data
-            self._update_cell(table, i, 0, code, is_numeric=False)
-            self._update_cell(table, i, 1, name, is_numeric=False)
+            
+            # [⚡ 报警核验] 针对命中报警的个股应用高对比度
+            is_alerted = get_alert_manager().is_alerted(code)
+            bg_c = self._UI_CACHE["COLOR_ALERT_BG"] if is_alerted else None
+            txt_c = self._UI_CACHE["COLOR_ALERT_TEXT"] if is_alerted else None
+            display_name = f"🔔{name}" if is_alerted else name
+
+            self._update_cell(table, i, 0, code, color=txt_c, is_numeric=False, bg_color=bg_c)
+            self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c)
             score_txt = str(round(score, 1))
             if self._update_cell(table, i, 2, score_txt, self._UI_CACHE["COLOR_GOLD"]):
                 if not is_first_init: self._table_highlights[("stock", code, 2)] = time.time()
