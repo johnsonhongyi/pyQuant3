@@ -1229,6 +1229,14 @@ class HotlistPanel(QWidget, WindowMixin):
                     if hasattr(self, 'watchlist_table'): self.watchlist_table.setRowCount(0)
                     return
 
+                # [FIX] 保存选中项和滚动条
+                current_code = None
+                curr_row = self.watchlist_table.currentRow()
+                if curr_row >= 0:
+                    it = self.watchlist_table.item(curr_row, 2) # Code col
+                    if it: current_code = it.text()
+                v_scroll = self.watchlist_table.verticalScrollBar().value()
+
                 # --- 准备更新 ---
                 self.watchlist_table.blockSignals(True)
                 is_sorted = self.watchlist_table.isSortingEnabled()

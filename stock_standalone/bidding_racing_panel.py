@@ -1172,16 +1172,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # [🚀 布局优化] 第二行：功能按键大集合
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
-        
-        self.btn_arrange = QPushButton("📏 整理")
-        self.btn_arrange.setFixedSize(65, 26)
-        self.btn_arrange.setStyleSheet("""
-            QPushButton { background: #3A3A3C; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
-            QPushButton:hover { background: #00FFCC; color: black; }
-        """)
-        self.btn_arrange.clicked.connect(self._arrange_detail_windows)
-        btn_layout.addWidget(self.btn_arrange)
-        
+
         self.reset_btn = QPushButton("🔄 即时重置")
         self.reset_btn.setFixedSize(75, 26)
         self.reset_btn.setStyleSheet("""
@@ -1190,7 +1181,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """)
         self.reset_btn.clicked.connect(self._manual_reset_anchors)
         btn_layout.addWidget(self.reset_btn)
-        
+
         self.btn_show_alerts = QPushButton("🔔 报警关注")
         self.btn_show_alerts.setFixedSize(85, 26)
         self.btn_show_alerts.setStyleSheet("""
@@ -1202,6 +1193,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """)
         self.btn_show_alerts.clicked.connect(self._on_show_alerts_clicked)
         btn_layout.addWidget(self.btn_show_alerts)
+
+        btn_layout.addStretch()
+
+        self.btn_arrange = QPushButton("📏 整理")
+        self.btn_arrange.setFixedSize(65, 26)
+        self.btn_arrange.setStyleSheet("""
+            QPushButton { background: #3A3A3C; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
+            QPushButton:hover { background: #00FFCC; color: black; }
+        """)
+        self.btn_arrange.clicked.connect(self._arrange_detail_windows)
+        btn_layout.addWidget(self.btn_arrange)
         
         cycle_layout.addLayout(btn_layout)
         top_bar_layout.addWidget(cycle_group)

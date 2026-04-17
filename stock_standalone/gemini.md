@@ -30,6 +30,12 @@
 
 ---
 
+## 2026-04-18 02:25
+- [x] **修复 `hotlist_panel.py` 中的 `NameError` (Fixed NameError in HotlistPanel)**：
+    - [x] 彻底修复了 `_update_watchlist_queue` 方法中由于 `current_code` 和 `v_scroll` 未定义导致的 UI 刷新崩溃错误。
+    - [x] 在执行表格增量渲染前，正确增加了对当前选中行代码及垂直滚动条位置的捕获逻辑，确保了观察池在每轮 2.0s 刷新周期后的交互连续性。
+    - [x] 解决了切换到“观察池”标签页时由于上述错误导致的 UI 渲染假死及 270ms+ 的响应延迟。
+
 ## 2026-04-17 17:45
 - [x] **新增分类详情视图 (`CategoryDetailDialog`)**：
     - [x] 实现对赛马场饼图内特定角色类别（如“龙头”）的双击联动响应。
