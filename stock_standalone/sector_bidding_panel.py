@@ -1425,6 +1425,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _save_ui_state(self):
         """保存表格布局和状态"""
+        # [🛡️ 安全保护] 如果初始化未完成（信号提前触发），静默退出
+        if not hasattr(self, 'sector_table') or not hasattr(self, 'stock_table') or not hasattr(self, 'watchlist_table'):
+            return
+
         try:
             scale = self._get_dpi_scale_factor()
             data_to_save = {}
@@ -1435,8 +1439,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             data_to_save['watchlist_table_state'] = self.watchlist_table.horizontalHeader().saveState().toHex().data().decode()
             
             # 保存 Splitter 状态
-            data_to_save['splitter_h_state'] = self.splitter.saveState().toHex().data().decode()
-            data_to_save['v_splitter_state'] = self.v_splitter.saveState().toHex().data().decode()
+            if hasattr(self, 'splitter'):
+                data_to_save['splitter_h_state'] = self.splitter.saveState().toHex().data().decode()
+            if hasattr(self, 'v_splitter'):
+                data_to_save['v_splitter_state'] = self.v_splitter.saveState().toHex().data().decode()
             
             # [NEW] 保存搜索历史与宏观查询状态
             data_to_save['search_history'] = self._search_history
@@ -2008,6 +2014,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         for table in [self.sector_table, self.stock_table, self.watchlist_table]:
             table.installEventFilter(self)
             table._reset_on_next_sort = False
+            
+        # [🚀 最终关联] 确保所有组件初始化完成后才开启持久化监听
+        self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        self.watchlist_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
 
     # ------------------------------------------------------------------ helpers
     def eventFilter(self, obj, event):
