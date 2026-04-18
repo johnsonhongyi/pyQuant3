@@ -949,12 +949,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, 'racing_detector') and self.racing_detector:
                 self.racing_detector.ensure_data_ready_async()
                 
-                # 如果当前内存中有全量行情快照，立即喂给探测器进行首轮聚合
-                curr_df = getattr(self, 'current_df', None)
-                if curr_df is not None and not curr_df.empty:
-                    self.racing_detector.register_codes(curr_df)
-                    # 触发首波评分计算
-                    self.racing_detector.update_scores(force=True)
+                # [OPTIMIZED] ⚡ 判定数据新鲜度：如果后台 DataPublisher 已经唤醒了探测器 (data_version > 0)，
+                # 则无需重复执行昂贵的 register_codes 与全量 update_scores(force=True)。
+                # 这避免了在主线程中重复处理 5000+ 只股票导致的 100-500ms UI 假死。
+                if getattr(self.racing_detector, 'data_version', 0) == 0:
+                    # 如果当前内存中有全量行情快照，立即喂给探测器进行首轮聚合 (Cold Start Bootstrap)
+                    curr_df = getattr(self, 'df_all', None)
+                    if curr_df is not None and not curr_df.empty:
+                        logger.info("⚡ Racing Panel: Bootstrap initial data for detector (Cold Start)...")
+                        self.racing_detector.register_codes(curr_df)
+                        # 触发首波全量评分计算
+                        self.racing_detector.update_scores(force=True)
+                else:
+                    logger.debug(f"⚡ Racing Panel: Using pre-warmed detector (Version: {self.racing_detector.data_version})")
 
             self._racing_panel_win.show()
             self._racing_panel_win.raise_()

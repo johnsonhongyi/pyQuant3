@@ -739,34 +739,46 @@ class BiddingMomentumDetector:
         }
 
     def _check_day_switch(self, current_dt: datetime.datetime):
-        """[NEW] 核心逻辑：检测交易日切换，执行内容与日期双重维度的重置清理，防止昨日残留影响今日看板"""
+        """[OPTIMIZED] 基于数据日期的核心切换逻辑：兼容模拟回测，消除冗余触发"""
         if self.in_history_mode: return # 复盘模式由 load_from_snapshot 统一重置
         
         today_str = current_dt.strftime('%Y-%m-%d')
-        is_fresh_start = (not self._last_data_date)
         
-        # [HEALING] 保险措施：即便日期标记可能由于文件 mtime 被带偏，只要到了交易准备段且表里有昨日残留，就强制清理
-        # 这里的 hour >= 9 指的是 09:00 之后开始执行主动侦测
+        # [GATEKEEPER] ⚡ 日期未变直接秒回。
+        # 1. 解决了实时流 1-3 次冗余触发问题；
+        # 2. 完美支持模拟回测（不依赖系统墙上时钟）；
+        # 3. 确保了后续重压力逻辑在数据日期维度上的幂等性。
+        if self._last_data_date == today_str:
+            return
+
+        is_work_day = cct.is_trade_date(current_dt)
+        is_fresh_start = (not self._last_data_date)
+
+        # 1. 非交易日静默逻辑
+        if not is_work_day:
+            # 即使不是交易日，如果它是 Cold Start，我们也记录一下当前日期
+            if is_fresh_start: self._last_data_date = today_str
+            return
+
+        # 2. 核心重置逻辑 (仅在交易日 09:00 后触发)
         if current_dt.hour >= 9:
-            # 抽样/触发式清理：如果表中存在日期早于今日的信号，强制执行重置
+            # [HEALING] 保险：盘中侦测昨日信号残留
             if self._prune_expired_signals(current_dt):
-                self._last_data_date = today_str # 强制更新日期标记
+                self._last_data_date = today_str 
                 return
 
-        if is_fresh_start:
-            self._last_data_date = today_str
-            return
-            
-        if self._last_data_date != today_str:
-            # ⭐ [C-Reinforcement] 只有在开盘交易准备段 (09:00+) 才自动触发清理
-            # 防止在凌晨重启程序时意外清空了正在分析的昨日数据
-            if current_dt.hour < 9:
+            # [SWITCH] 标准日期切换
+            if is_fresh_start:
+                self._last_data_date = today_str
+            elif self._last_data_date != today_str:
+                # ⭐ [C-Reinforcement] 只有在开盘交易准备段 (09:00+) 才自动触发清理
+                # 防止在凌晨重启程序时意外清空了正在分析的昨日数据
+                if current_dt.hour < 9:
+                    return
+                logger.info(f"📅 [Detector] 日期切换确认 ({self._last_data_date} -> {today_str})，正在执行重置...")
+                self._reset_daily_state(current_dt)
+                self._last_data_date = today_str
                 return
-
-            logger.info(f"📅 [Detector] 检测到交易日切换 ({self._last_data_date} -> {today_str})，正在重置内存状态...")
-            self._reset_daily_state(current_dt)
-            self._last_data_date = today_str
-            return
 
     def _prune_expired_signals(self, current_dt: datetime.datetime) -> bool:
         """

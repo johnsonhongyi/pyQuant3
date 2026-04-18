@@ -1060,6 +1060,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._first_boot_render = True # [NEW] 启动强制首次渲染标记
         self._startup_time = time.time()
         self._detail_dialogs = {} # [NEW] 追踪活跃的明细窗体实例
+        self._current_anchor_ts = 0 # [NEW] 追踪当前正在使用的锚点时间戳
         self._ui_ready = False
 
         if sender:
@@ -1539,6 +1540,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             snap = self._create_anchor_snapshot(allow_system_time=True)
             if snap: 
                 self._add_to_history(snap, force=True)
+                self._current_anchor_ts = snap.get("ts", 0) # [NEW] 手动重置后立即设为当前锚点
                 self._refresh_history_buttons()
 
             curr_time = getattr(self.detector, 'last_data_ts', 0)
@@ -1627,13 +1629,23 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 btn.setMinimumWidth(94)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 # [🚀 极简主题] 
-                btn.setStyleSheet("""
-                    QPushButton { 
-                        background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; 
-                        border-radius: 4px; font-size: 11px; font-weight: bold;
-                    }
-                    QPushButton:hover { background: #2C2C2E; color: white; border: 1px solid #55FFDD; }
-                """)
+                is_current = (abs(ts_val - self._current_anchor_ts) < 1.0)
+                if is_current:
+                    btn.setStyleSheet("""
+                        QPushButton { 
+                            background: #008B8B; color: white; border: 2px solid #00FFCC; 
+                            border-radius: 4px; font-size: 11px; font-weight: bold;
+                        }
+                        QPushButton:hover { background: #00AAAA; color: white; border: 2px solid #55FFDD; }
+                    """)
+                else:
+                    btn.setStyleSheet("""
+                        QPushButton { 
+                            background: #1C1C1E; color: #00FFCC; border: 1px solid #00FFCC; 
+                            border-radius: 4px; font-size: 11px; font-weight: bold;
+                        }
+                        QPushButton:hover { background: #2C2C2E; color: white; border: 1px solid #55FFDD; }
+                    """)
                 btn.clicked.connect(lambda checked, idx=i: self._apply_history_anchor(idx))
                 
                 # [🚀 新增] 右键删除支持
@@ -1668,13 +1680,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _remove_anchor(self, idx):
         if 0 <= idx < len(self._anchor_history):
-            self._anchor_history.pop(idx)
+            snap = self._anchor_history.pop(idx)
+            if abs(snap.get("ts", 0) - self._current_anchor_ts) < 1.0:
+                 self._current_anchor_ts = 0
             self._refresh_history_buttons()
             self._save_ui_state()
             logger.info(f"🗑️ [Panel] 已删除历史起点 {idx+1}")
 
     def _clear_all_anchors(self):
         self._anchor_history = []
+        self._current_anchor_ts = 0
         self._refresh_history_buttons()
         self._save_ui_state()
         logger.info("💣 [Panel] 已清空所有历史起点")
@@ -1683,6 +1698,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """恢复历史锚点 - 兼容列式压缩协议"""
         if idx >= len(self._anchor_history): return False
         snap = self._anchor_history[idx]
+        self._current_anchor_ts = snap.get("ts", 0) # [NEW] 记录当前应用的锚点
+        self._refresh_history_buttons() # [NEW] 触发按钮重绘高亮
         
         # [🚀 极限解压] 兼容 Columnar (c, p) 与 Dict (anchors) 两种格式
         if "c" in snap and "p" in snap:
@@ -1828,6 +1845,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "header_sector": state_sector,
                 "splitter_main": self.main_splitter.saveState().toHex().data().decode(),
                 "history": self._anchor_history[-20:],
+                "current_anchor_ts": self._current_anchor_ts,
                 "reset_cycle": self._reset_cycle_mins,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
                 "open_details_v2": open_windows
@@ -1873,6 +1891,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # 3. 恢复历史锚点并渲染按钮
             hist = conf.get("history", [])
+            self._current_anchor_ts = conf.get("current_anchor_ts", 0) # [NEW] 恢复当前选中状态
             if hist:
                 self._anchor_history = hist
                 self._refresh_history_buttons()
