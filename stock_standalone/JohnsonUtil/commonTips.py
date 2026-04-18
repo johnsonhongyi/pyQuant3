@@ -1964,14 +1964,14 @@ def read_ini(inifile: str = 'filter.ini', setrule: Optional[str] = None, categor
         rule = (f' category:{category} key:{read_config[category].keys()}\n{read_config[category][filterkey]}')
     return rule
 
-def is_trade_date(date: Union[datetime.date, str] = None) -> bool:
-    if date is None:
-        date = datetime.date.today()
+def is_trade_date(tdate: Union[datetime.date, str] = None) -> bool:
+    if tdate is None:
+        tdate = datetime.date.today()
 
-    if isinstance(date, datetime.date):
-        date_str = date.strftime('%Y-%m-%d')
+    if isinstance(tdate, datetime.date):
+        date_str = tdate.strftime('%Y-%m-%d')
     else:
-        date_str = parse_date_safe(date, to_str=True) or str(date)
+        date_str = parse_date_safe(tdate, to_str=True) or str(tdate)
 
     today = get_today()
 

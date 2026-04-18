@@ -6956,7 +6956,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 
-    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra','obv']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra','obv','gren']    
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
