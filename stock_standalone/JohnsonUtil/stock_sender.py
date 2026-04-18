@@ -136,9 +136,15 @@ class StockSender:
         # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (IPC)
         if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
             try:
+                # 在物理执行路径上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
+                flags = {
+                    'tdx': self._get_flag(self.tdx_var),
+                    'ths': self._get_flag(self.ths_var),
+                    'dfcf': self._get_flag(self.dfcf_var)
+                }
                 from linkage_service import get_link_manager
                 # 投递到独立的后台进程进行节流与重叠执行
-                get_link_manager().push(stock_code, copy=True)
+                get_link_manager().push(stock_code, flags=flags)
                 return
             except Exception:
                 pass

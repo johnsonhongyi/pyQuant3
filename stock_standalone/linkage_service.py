@@ -72,22 +72,16 @@ class LinkageService:
     def _execute(self, cmd_opt):
         """处理具体联动指令"""
         code = cmd_opt.get('code')
-        copy_flag = cmd_opt.get('copy', False)
+        flags = cmd_opt.get('flags', {})
         
         if not code: return
 
         try:
             self._init_sender()
             
-            # 1. 核心联动 (TDX/THS)
+            # 1. 核心物理联动派发
             if self.sender:
-                self.sender.send(code)
-            
-            # 2. 剪切板 (独立异步执行，不干扰 TDX 发送)
-            if copy_flag:
-                try:
-                    pyperclip.copy(code)
-                except: pass
+                self.sender._do_send(code, flags)
                 
         except Exception as e:
             logger.error(f"Execution error for {code}: {e}")
@@ -118,9 +112,10 @@ class LinkageManagerProxy:
         self.process.start()
         logger.info(f"Linkage process launched. PID: {self.process.pid}")
 
-    def push(self, code, copy=False):
+    def push(self, code, flags=None):
         """投递一个联动意图 (State Overwrite)"""
         if not code: return
+        flags = flags or {'tdx': True, 'ths': True, 'dfcf': True}
 
         # 状态覆盖：如果队列已满，尝试清理旧数据
         if self.queue.full():
@@ -133,7 +128,7 @@ class LinkageManagerProxy:
         try:
             self.queue.put_nowait({
                 'code': code,
-                'copy': copy,
+                'flags': flags,
                 'ts': time.time()
             })
         except queue.Full:

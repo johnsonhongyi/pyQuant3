@@ -140,7 +140,6 @@ if sys.platform.startswith('win'):
     logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
-from linkage_service import get_link_manager
 import faulthandler
 faulthandler.enable()
 
@@ -4223,7 +4222,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         is_linkage = timestamp is not None
 
         # [ROOT-FIX] 联动到状态中心 (处理 TDX / 剪切板)
-        self.link_manager.push(code, copy=self._enable_clipboard_linkage)
+        self.sender.send(code)
 
         # =========================
         # 1. 联动去重（严格）
@@ -4465,7 +4464,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug(f'stock_code:{stock_code}')
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
-                self.link_manager.push(stock_code, copy=self._enable_clipboard_linkage)
+                self.sender.send(stock_code)
             # Auto-launch Visualizer if enabled
             if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
                 self.open_visualizer(stock_code)
@@ -10246,7 +10245,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # [ROOT-FIX] 1. 立即非阻塞投递联动指令 (多进程处理 TDX/剪切板)
         if vis:
-            self.link_manager.push(code)
+            self.sender.send(code)
                 
         def _ui_action():
             try:
