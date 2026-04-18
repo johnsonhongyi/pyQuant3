@@ -57,6 +57,14 @@
 
 ---
 
+## 2026-04-18 18:20
+- [x] **重构可视化器指令发送逻辑 (Refactored Visualizer IPC & Fallback)**：
+    - [x] **实现多通道 IPC 兜底 (Multi-channel IPC Fallback)**：重写了 `open_visualizer`，引入了 `try_queue_send` -> `try_socket_send` -> `_start_visualizer_process` 的三级降级链路。
+    - [x] **清理冗余逻辑 (Cleaned Redundant Guard)**：删除了旧的 `_ensure_visualizer_alive` 方法。该方法因无法感知端口占用且逻辑已被 `open_visualizer` 的异步 Worker 完整覆盖而被移除。
+    - [x] **解决端口占用冲突 (Fixed Port 26668 Conflict)**：通过在启动新进程前强制进行 Socket 探测发送，解决了“端口被占用但指令未到达”的痛点，确保了即使托管进程失效，也能复用已存在的独立可视化器窗口。
+    - [x] **根治切换股票 UI 假死 (Fixed UI Freeze on Switch)**：将所有 IPC 逻辑（包含 Socket 连接超时等待）移至后台 `VizWorker` 线程执行。这彻底消除了在网络/IO 抖动或可视化器响应缓慢时导致的 1-3s 主界面视觉假死。
+    - [x] **增强去重与防抖 (Enhanced Debounce)**：补全了联动数据的严格去重（`_last_linkage_data`）以及普通点选的代码防抖（`_visualizer_debounce_sec`），大幅降低了极速翻页时的指令风暴压力。
+
 ## 2026-04-18 02:25
 - [x] **落地“一阶解耦”解耦架构，根治 UI 假死 (Root-Fix Performance Architecture)**：
     - [x] **实现状态驱动联动进程 (State-Driven Linkage Service)**：新增 `linkage_service.py` 独立进程。采用“状态覆盖”模型代替“任务队列”，仅执行最后一次选股指令，彻底解决了极速翻页时的“联动风暴”与剪切板竞争导致的 5-10s 假死。

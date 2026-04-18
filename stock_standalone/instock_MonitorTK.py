@@ -34,7 +34,7 @@ import win32api
 import win32file
 import win32con
 import tkinter as tk
-from tkinter import ttk, messagebox, font as tkfont
+from tkinter import ttk, messagebox, font as tkfont, scrolledtext
 from tkinter import filedialog,Menu,simpledialog
 from concurrent.futures import ThreadPoolExecutor
 # import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
@@ -767,6 +767,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                  font=self.default_font_bold,
                                  command=self.open_market_pulse)
              pulse_btn.pack(side="left", padx=5)
+             
+             # [NEW] DNA 意图审计按钮
+             dna_btn = tk.Button(ctrl_frame, text="🔍 DNA审计", 
+                                 bg="#004d99", fg="white", 
+                                 font=self.default_font_bold,
+                                 command=self.open_dna_auditor_top50)
+             dna_btn.pack(side="left", padx=5)
         except ImportError as e:
              logger.error(f"Failed to import MarketPulseViewer: {e}")
              self._pulse_viewer_class = None
@@ -779,6 +786,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-k>", lambda event: self.open_market_pulse())
         self.bind("<Alt-l>", lambda event: self.open_live_signal_viewer())
         self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
+        self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
         self._schedule_after(3000, self._check_dpi_change)
@@ -874,6 +882,58 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._ipc_task_queue.put((cmd, payload), block=False)
             except: pass
 
+
+    def open_dna_auditor_top50(self):
+        """[NEW] 对当前列表前 50 只股票执行 DNA 审计"""
+        items = self.tree.get_children()
+        if not items:
+            messagebox.showinfo("提示", "当前列表为空，无法进行审计")
+            return
+            
+        target_items = items[:10]
+        codes = [self.tree.item(it, "values")[0] for it in target_items]
+        
+        toast_message(self, f"正在对 Top {len(codes)} 只个股进行 DNA 深度审计，请稍候...", duration=3000)
+        threading.Thread(target=self._inner_run_dna_audit, args=(codes,), daemon=True).start()
+
+    def _inner_run_dna_audit(self, codes):
+        try:
+            from backtest_feature_auditor import audit_multiple_codes
+            summaries = audit_multiple_codes(codes)
+            self.after(0, lambda: self._display_dna_audit_results(summaries))
+        except Exception as e:
+            logger.error(f"DNA 审计执行失败: {e}")
+            self.after(0, lambda: messagebox.showerror("审计失败", f"错误详情: {e}"))
+
+    def _display_dna_audit_results(self, summaries):
+        if not summaries:
+            messagebox.showinfo("提示", "审计完成，但未发现有效结果")
+            return
+            
+        res_win = tk.Toplevel(self)
+        res_win.title(f"DNA 意图审计报告 (Top {len(summaries)}) - {datetime.now().strftime('%H:%M:%S')}")
+        res_win.geometry(f"{int(900 * self.scale_factor)}x{int(650 * self.scale_factor)}")
+        
+        txt = scrolledtext.ScrolledText(res_win, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 10))
+        txt.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        report = ["="*85, f"{' [ CROSS-STOCK INTENT SCOREBOARD ] ':=^85}", "="*85]
+        report.append(f"{'Code':<8} {'Name':<10} {'Score':<10} {'Gain%':<10} {'Classification'}")
+        report.append("-" * 85)
+        
+        sorted_s = sorted(summaries, key=lambda x: x.intent_score, reverse=True)
+        for s in sorted_s:
+            report.append(f"{s.code:<8} {s.name:<10} {s.intent_score:>8.1f} {s.total_pct:>9.1f}%   {s.verdict}")
+        
+        report.append("="*85 + f"\n[ 审计专家判定报告 (评价总计同步) ]")
+        for s in sorted_s:
+            report.append(f"\n>>> {s.name} ({s.code}) -> {s.verdict}")
+            for sug in s.suggestions: report.append(sug)
+        report.append("\n" + "="*85)
+        
+        txt.insert("end", "\n".join(report))
+        txt.configure(state="disabled")
+        res_win.focus_force()
 
     def open_market_pulse(self):
         """Open the Daily Market Pulse Dashboard."""
@@ -4147,38 +4207,144 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except:
             pass
 
-    def _ensure_visualizer_alive(self, code, resample=None):
-        """[GUARD] 确保可视化器进程存在且存活，否则自动重启"""
-        try:
-            if not hasattr(self, 'qt_process') or not self.qt_process or not self.qt_process.is_alive():
-                logger.warning(f"[Visualizer] process not alive for {code}, restarting...")
-                self._start_visualizer_process(code, resample)
-        except Exception as e:
-            logger.error(f"[Visualizer] ensure alive failed: {e}")
+
 
     def open_visualizer(self, code, timestamp=None):
-        """[ROOT-FIX] 解耦联动：TDX/剪切板由 LinkageService 处理，UI 由原链路执行"""
-        if not code: return
+        """🚀 [ROOT-FIX] 智能联动：优先现有进程，支持 Socket 兜底，彻底解决切换假死与端口冲突"""
+        logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
         
+        # =========================
+        # 0. 基础过滤（UI线程安全）
+        # =========================
+        if not code:
+            return
+
+        now = time.time()
         is_linkage = timestamp is not None
-        
-        # 1. [IO进程] 投递到状态中心 (处理 TDX 发送与剪切板)
-        # 只有在非联动（用户主动点选）或明确心跳触发时投递
+
+        # [ROOT-FIX] 联动到状态中心 (处理 TDX / 剪切板)
         self.link_manager.push(code, copy=self._enable_clipboard_linkage)
 
-        # 2. [UI通讯] 处理 Qt 进程的可视化器同步
-        resample_now = 'd'
-        try: resample_now = self.resample_combo.get()
-        except: pass
-        
-        # 2.5 [GUARD] 确保可视化进程存在，使用当前状态参数拉起
-        self._ensure_visualizer_alive(code, resample_now)
-        
-        payload = {'code': code, 'resample': resample_now, 'timestamp': timestamp}
+        # =========================
+        # 1. 联动去重（严格）
+        # =========================
         if is_linkage:
-            self._async_viz_send('TIME_LINK', payload)
-        else:
-            self._async_viz_send('SWITCH_CODE', payload)
+            link_key = (str(code), str(timestamp))
+            if getattr(self, '_last_linkage_data', None) == link_key:
+                return
+            self._last_linkage_data = link_key
+
+        # =========================
+        # 2. 普通选择去重与防抖
+        # =========================
+        if not is_linkage:
+            if self.vis_select_code == code:
+                # 如果代码没变，尝试检查周期是否变动
+                try:
+                    res_cur = self.resample_combo.get()
+                    if getattr(self, '_last_resample', None) == res_cur:
+                        return
+                except: pass
+                
+            self.vis_select_code = code
+
+            if (self._last_visualizer_code == code and
+                (now - self._last_visualizer_time) < getattr(self, '_visualizer_debounce_sec', 0.5)):
+                return
+
+            self._last_visualizer_code = code
+            self._last_visualizer_time = now
+
+        # =========================
+        # 3. UI参数读取（主线程安全）
+        # =========================
+        resample_now = 'd'
+        try:
+            resample_now = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
+            self._last_resample = resample_now
+        except Exception:
+            resample_now = 'd'
+
+        # =========================
+        # 4. Worker 线程（跨线程 IPC，不阻塞 UI）
+        # =========================
+        def _worker(code, timestamp, resample):
+
+            def try_queue_send():
+                """优先尝试本程序持有的托管进程管道"""
+                try:
+                    # 检查进程句柄是否存在且存活
+                    if hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive():
+                        payload = {
+                            'code': code,
+                            'resample': resample,
+                            'timestamp': timestamp
+                        }
+                        # 使用现有的 _async_viz_send 进入指令队列
+                        if is_linkage:
+                            self._async_viz_send('TIME_LINK', payload)
+                        else:
+                            self._async_viz_send('SWITCH_CODE', payload)
+                        return True
+                except Exception as e:
+                    logger.error(f"[IPC][QUEUE] failed: {e}")
+                return False
+
+            def try_socket_send():
+                """兜底尝试 Socket 通道 (处理外部启动的可视化器或残留进程)"""
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.3) # 极短超时，防止 UI 卡滞感
+                        s.connect(('127.0.0.1', 26668)) # 标准监听端口
+
+                        if is_linkage:
+                            msg = f"TIME_LINK|{code}|{timestamp}|resample={resample}"
+                        else:
+                            msg = f"CODE|{code}|resample={resample}"
+
+                        s.send(msg.encode("utf-8"))
+                        logger.debug(f"✅ [IPC][SOCKET] Command sent via fallback port 26668: {msg[:40]}...")
+                        return True
+                except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                    # 仅在调试时输出，因为这是正常的 fallback 路径
+                    logger.debug(f"[IPC][SOCKET] port 26668 connection failed: {e}")
+                except Exception as e:
+                    logger.error(f"[IPC][SOCKET] unexpected: {e}")
+                return False
+
+            try:
+                # P1: 尝试托管 Queue
+                if try_queue_send():
+                    return
+
+                # P2: 尝试独立 Socket
+                # 这解决了 "Listening 被占用" 但本程序认为进程已死的情况
+                if try_socket_send():
+                    self._viz_ready = True # 标记为就绪，以便 send_df 能尝试推送
+                    return
+
+                # P3: 都不行，启动进程
+                logger.info(f"📡 No active visualizer detected via Pipe/Socket. Starting new process for {code}...")
+                self._start_visualizer_process(code, resample)
+                
+            except Exception as e:
+                logger.error(f"[WORKER] open_visualizer fatal error: {e}")
+                traceback.print_exc()
+
+        # 启动后台守护线程
+        threading.Thread(
+            target=_worker,
+            args=(code, timestamp, resample_now),
+            daemon=True,
+            name="OpenVisWorker"
+        ).start()
+
+        # UI 状态提示
+        try:
+            if hasattr(self, 'status_var'):
+                self.status_var.set(f"🚀 可视化指令已发出: {code}")
+        except: pass
+
 
     def _ui_heartbeat(self):
         """[CORRECTION 2] UI线程主心跳，每100ms跳动一次"""

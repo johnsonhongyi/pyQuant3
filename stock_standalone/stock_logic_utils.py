@@ -257,12 +257,16 @@ def check_code(
         )
         return None
     df_code = df.loc[[code]]
+    name = df.at[code, 'name'] if 'name' in df.columns else ""
     # 使用 test_code_query 获取拆分后的结果
     report = test_code_query(df_code, queries)
-    summary_text = format_check_result(report)
+    
+    header = f"股票: {code} {name}\n" + "="*40 + "\n"
+    summary_text = header + format_check_result(report)
+    
     # 创建自定义报告窗口
     win = tk.Toplevel(parent)
-    win.title(f"股票检查报告 - {code}")
+    win.title(f"股票检查报告 - {code} {name}")
     bg_color = "#E3F2FD"  # 淡蓝色背景
     win.configure(bg=bg_color)
     report_win_name = "check_report_win"
@@ -310,7 +314,7 @@ def check_code(
     def show_all_details():
         """显示所有字段的值 (按顺序 col: 值)"""
         details_win = tk.Toplevel(win)
-        details_win.title(f"数据详情内容 - {code}")
+        details_win.title(f"数据详情内容 - {code} {name}")
         details_win.configure(bg=bg_color)
         detail_win_name = "check_details_win"
         w_det, h_det = 500, 800
