@@ -2448,6 +2448,13 @@ def get_tdx_Exp_day_to_df(
     if df.empty:
         return pd.DataFrame()
 
+    if start is not None:
+        start = cct.day8_to_day10(start)
+        df = df[df.date >= start]
+    if end is not None:
+        end = cct.day8_to_day10(end)
+        df = df[df.date <= end]
+
     df['code'] = code
     df = df.set_index('date').sort_index()
 
@@ -7874,6 +7881,12 @@ if __name__ == '__main__':
     code = '588930'
     code = '300905'
     resample = 'd'
+
+    code = '002990'
+    df=get_tdx_Exp_day_to_df(code,end='20260408',resample=resample)
+    print(f'df:{df[-3:]}')
+    import ipdb;ipdb.set_trace()
+
     with timed_ctx(f"extract_all_features {code}", warn_ms=50):
         df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
 
@@ -7921,6 +7934,7 @@ if __name__ == '__main__':
     # code = '300063'
     # code = '300377'
     code = '003009'
+
     # dm = sina_data.Sina().market('all').loc['000002']
     # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
     df = get_tdx_append_now_df_api('001236', dl=5)
@@ -7928,6 +7942,8 @@ if __name__ == '__main__':
 
     # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+
+
     dff=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample,fastohlc=True)
     
     
