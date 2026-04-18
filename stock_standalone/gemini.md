@@ -57,6 +57,12 @@
 
 ---
 
+## 2026-04-18 19:09
+- [x] **修复联动闭环失效与防泄漏 (Fixed THS/TDX Linkage Desync)**：
+    - [x] **重构 `linkage_service.py` 状态承载**：修改 IPC 队列通道属性，不仅传递交易代码，同时传输来自主界面的 `tdx_var`、`ths_var` 及 `dfcf` 复选框的实时快照。
+    - [x] **根治“关闭仍联动”缺陷**：修复旧版 `StockSender` 投递至多进程服务时，意外将一切布尔值重置失效的问题。现后台进程处理时将完全尊重主 UI 层设定的开关状态。
+    - [x] **联动事件溯源注入**：在 `instock_MonitorTK.py` 中的每一处 `self.link_manager.push(code...)` 手动干预点补充强制布尔解析 `bool(self.tdx_var.get())` 的传值注入，确保所有快捷键和点击流都能被状态守卫识别。
+
 ## 2026-04-18 18:20
 - [x] **重构可视化器指令发送逻辑 (Refactored Visualizer IPC & Fallback)**：
     - [x] **实现多通道 IPC 兜底 (Multi-channel IPC Fallback)**：重写了 `open_visualizer`，引入了 `try_queue_send` -> `try_socket_send` -> `_start_visualizer_process` 的三级降级链路。
