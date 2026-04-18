@@ -13857,9 +13857,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 优化状态栏显示：匹配数/总数 | 查询缩略
         rows_all = len(self.df_all)
         rows_hit = len(df_filtered)
-        disp_query = combined_query[:30].replace('\n', ' ')
-        self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
-        self.status_var2.set("")
+        # disp_query = combined_query[:30].replace('\n', ' ')
+        # self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
+        # self.status_var2.set("")
         
         # 异步刷新 Treeview 提高响应性
         self._schedule_after(10, lambda: self.refresh_tree(df_filtered, force=True))
@@ -14658,7 +14658,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         resample = self.resample_combo.get()
         # search = self.search_entry.get()
         search = self.search_var1.get()
-        self.status_var.set(f"Rows: {cnt} | blkname: {self.blkname} | resample: {resample} | st: {self.st_key_sort} | search: {search}")
+         # 对查询语句进行脱敏预处理 (剥离注释、赋值等)
+        eff_query = query_engine._preprocess_query(search) if query_engine else search
+        disp_query = eff_query[:120].replace('\n', ' ').strip()
+        self.status_var.set(f"Rows: {cnt} | blkname: {self.blkname} | resample: {resample} | st: {self.st_key_sort} | search: {disp_query}")
 
 
     def save_data_to_csv(self):

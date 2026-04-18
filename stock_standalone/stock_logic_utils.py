@@ -167,7 +167,8 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
         queries = [{"expr": queries}]
     for que in queries:
         logger.debug(f'que: {que}')
-        expr = que["expr"]
+        # 🚀 [NEW] 对原始表达式进行预处理，确保支持 ( "a" "b" ) 结构及剥离注释
+        expr = query_engine._preprocess_query(que["expr"])
         cols = extract_columns(expr)
         missing_cols = [c for c in cols if c not in row]
 

@@ -6,13 +6,12 @@ from typing import Optional, Any, Dict, Union
 
 class PandasQueryEngine:
     """
-    高级 Pandas 查询引擎工具
+    高级 Pandas 查询引擎工具 (V11-PRECISION)
     支持：
-    - SQL 风格函数映射 (greatest, least, abs, max, min)
-    - 多级智能执行链 (df.query -> df.eval -> pd.eval -> exec)
-    - 脚本模式 (支持 result = ... 或 signal = ... 赋值)
-    - 智能列注入 (仅注入表达式中提到的列)
-    - 鲁棒的预处理 (剥离注释、处理三引号赋值)
+    - 精准解构：仅针对全行引号包裹的行执行隐式字符串合并，保护函数内部引号
+    - 赋值容忍：自动剥离 assignment (=) 干扰
+    - 深度组合：支持 (源码块) and (普通表达式) 混合模式
+    - 备注裁剪：自动抑制中文标签/备注
     """
     
     def __init__(self, logger: Optional[logging.Logger] = None):
@@ -20,35 +19,19 @@ class PandasQueryEngine:
         self.last_error = ""
 
     def set_logger(self, logger: logging.Logger):
-        """支持主程序注入一致的 logger"""
         self.logger = logger
 
     @staticmethod
     def split_sub_conditions(expr: str) -> list[str]:
-        """
-        [NEW] 智慧拆分：支持括号深度感知。
-        第一层：按顶层 'and' 拆分。
-        第二层：对每个子块检测是否为括号包裹，若内部含有顶层 'or'，则进一步平铺拆分。
-        用于生成子条件详情报告，确保不会破坏嵌套的逻辑组，同时能平铺展示分支情况。
-        """
         if not expr: return []
-        
         def _get_top_level_parts(s: str, delimiters: list[str]) -> list[str]:
-            depths = []
-            d = 0
+            depths, d = [], 0
             for char in s:
-                if char == '(':
-                    depths.append(d)
-                    d += 1
-                elif char == ')':
-                    d -= 1
-                    depths.append(d)
-                else:
-                    depths.append(d)
-            
+                if char == '(': depths.append(d); d += 1
+                elif char == ')': d -= 1; depths.append(d)
+                else: depths.append(d)
             pattern = r'\b(' + '|'.join(delimiters) + r')\b'
-            parts = []
-            last_idx = 0
+            parts, last_idx = [], 0
             for match in re.finditer(pattern, s, re.IGNORECASE):
                 start = match.start()
                 if start < len(depths) and depths[start] == 0:
@@ -56,39 +39,26 @@ class PandasQueryEngine:
                     last_idx = match.end()
             parts.append(s[last_idx:].strip())
             return [p for p in parts if p]
-
-        # 1. 第一步：按顶层 'and' 拆分
         and_parts = _get_top_level_parts(expr, ['and'])
-        
         final_parts = []
         for p in and_parts:
             curr = p
-            # 2. 第二步：若由于括号包裹导致内部有 OR 逻辑但在 AND 层面被视为一个区块，进行脱壳拆分
             modified = False
             while curr.startswith('(') and curr.endswith(')'):
                 inner = curr[1:-1].strip()
-                # 确保剥离后依然平衡 (避免剥离 (A) or (B) 这种非单一包裹)
                 if PandasQueryEngine._is_balanced(inner):
                     curr = inner
                     modified = True
-                else:
-                    break
-            
+                else: break
             if modified:
-                # 在脱壳后的内容中寻找 OR
                 or_branches = _get_top_level_parts(curr, ['or'])
-                if len(or_branches) > 1:
-                    final_parts.extend(or_branches)
-                else:
-                    final_parts.append(p) # 虽然脱壳了但内部没 OR (可能是 (A and B))，保留原有层级或展示脱壳后的内容
-            else:
-                final_parts.append(p)
-
+                if len(or_branches) > 1: final_parts.extend(or_branches)
+                else: final_parts.append(p)
+            else: final_parts.append(p)
         return [item for item in final_parts if item]
 
     @staticmethod
     def _is_balanced(s: str) -> bool:
-        """检查括号是否平衡"""
         d = 0
         for char in s:
             if char == '(': d += 1
@@ -99,20 +69,14 @@ class PandasQueryEngine:
     @staticmethod
     def _greatest(*args):
         if not args: return None
-        # 使用 numpy 原生规约
         try:
             res = np.maximum.reduce(args)
-            # 如果输入中有 Series，确保返回 Series 以保持索引对齐，防止 "cannot evaluate scalar only bool ops"
             for a in args:
-                if isinstance(a, pd.Series):
-                    return pd.Series(res, index=a.index, name=a.name)
+                if isinstance(a, pd.Series): return pd.Series(res, index=a.index, name=a.name)
             return res
         except Exception:
-            # 兜底方案：使用 pandas 缓慢但兼容性强的方法
-            try:
-                return pd.concat(args, axis=1).max(axis=1)
-            except Exception:
-                return None
+            try: return pd.concat(args, axis=1).max(axis=1)
+            except Exception: return None
 
     @staticmethod
     def _least(*args):
@@ -120,222 +84,164 @@ class PandasQueryEngine:
         try:
             res = np.minimum.reduce(args)
             for a in args:
-                if isinstance(a, pd.Series):
-                    return pd.Series(res, index=a.index, name=a.name)
+                if isinstance(a, pd.Series): return pd.Series(res, index=a.index, name=a.name)
             return res
         except Exception:
-            try:
-                return pd.concat(args, axis=1).min(axis=1)
-            except Exception:
-                return None
+            try: return pd.concat(args, axis=1).min(axis=1)
+            except Exception: return None
 
     def _prepare_context(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """构建基础执行上下文"""
         ctx = {
-            'df': df,
-            'pd': pd,
-            'np': np,
-            'result': None,
-            'signal': None,
-            'GREATEST': self._greatest,
-            'LEAST': self._least,
-            'ABS': np.abs,
-            'MAX': self._greatest,
-            'MIN': self._least,
-            'greatest': self._greatest,
-            'least': self._least,
-            'max': self._greatest,
-            'min': self._least,
-            'abs': np.abs
+            'df': df, 'pd': pd, 'np': np, 'result': None, 'signal': None,
+            'GREATEST': self._greatest, 'LEAST': self._least, 'ABS': np.abs,
+            'MAX': self._greatest, 'MIN': self._least,
+            'greatest': self._greatest, 'least': self._least,
+            'max': self._greatest, 'min': self._least, 'abs': np.abs
         }
-        # 别名映射与智能注入
         col_map = {
-            'lastp0d': ['close', 'lastp0d'],
-            'lastp1d': ['lastp1d', 'lastp'],
-            'lastp2d': ['lastp2d'],
-            'lastdu': ['lastdu4', 'lastdu1', 'lastdu'],
-            'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
-            'resist': ['upper', 'high4', 'max5', 'resist'],
-            'support': ['lower', 'low4', 'min5', 'support'],
-            'green': ['gren', 'green'],
-            'red': ['red']
+            'lastp0d': ['close', 'lastp0d'], 'lastp1d': ['lastp1d', 'lastp'], 'lastp2d': ['lastp2d'],
+            'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
+            'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
+            'green': ['gren', 'green'], 'red': ['red']
         }
-        
-        # 处理 MultiIndex 情况 (多周期联合)
         is_multi = isinstance(df.columns, pd.MultiIndex)
-        
         if is_multi:
-            # 自动解构二级索引：Level 0 为 Period, Level 1 为 Metric
-            # 生成 D_close, W_ma5 等变量
             for (period, metric) in df.columns:
                 alias = f"{period}_{metric}"
-                if alias not in ctx:
-                    ctx[alias] = df[(period, metric)]
-            self.logger.info(f" [QueryEngine] MultiIndex detected. Injected {len(df.columns)} period-prefixed aliases.")
-
+                if alias not in ctx: ctx[alias] = df[(period, metric)]
         for alias, targets in col_map.items():
-            # 1. 优先尝试直接匹配 (如果是 MultiIndex，则不直接映射基础别名，除非主表已对齐)
             if not is_multi and alias in df.columns and (alias not in ctx or ctx[alias] is None):
                 ctx[alias] = df[alias]
-                self.logger.debug(f" [QueryEngine] Column '{alias}' injected directly.")
                 continue
-            
-            # 2. 尝试从目标列表中找到第一个存在的列
-            target_list = [targets] if isinstance(targets, str) else targets
-            for target in target_list:
+            for target in ([targets] if isinstance(targets, str) else targets):
                 if is_multi:
-                    # MultiIndex 下优先找第一个周期中的目标列
                     found = False
                     for period in df.columns.levels[0]:
                         if (period, target) in df.columns:
                             ctx[alias] = df[(period, target)]
-                            self.logger.debug(f" [QueryEngine] MultiIndex Alias: '{alias}' -> ('{period}', '{target}')")
-                            found = True
-                            break
+                            found = True; break
                     if found: break
                 else:
-                    if target in df.columns:
-                        ctx[alias] = df[target]
-                        self.logger.debug(f" [QueryEngine] Alias Map: '{alias}' -> '{target}'")
-                        break
-        
-        # 3. 动态计算特殊标记 (green/red)
+                    if target in df.columns: ctx[alias] = df[target]; break
+
+        # 动态标记补齐
         if 'green' not in ctx or ctx.get('green') is None:
-            # MultiIndex 下寻找第一个周期的 close/open
             if is_multi:
                 p0 = df.columns.levels[0][0]
                 if (p0, 'close') in df.columns and (p0, 'open') in df.columns:
                     ctx['green'] = df[(p0, 'close')] < df[(p0, 'open')]
-            elif 'close' in df.columns and 'open' in df.columns:
-                ctx['green'] = df['close'] < df['open']
-        
+            elif 'close' in df.columns and 'open' in df.columns: ctx['green'] = df['close'] < df['open']
         if 'red' not in ctx or ctx.get('red') is None:
             if is_multi:
                 p0 = df.columns.levels[0][0]
                 if (p0, 'close') in df.columns and (p0, 'open') in df.columns:
                     ctx['red'] = df[(p0, 'close')] > df[(p0, 'open')]
-            elif 'close' in df.columns and 'open' in df.columns:
-                ctx['red'] = df['close'] > df['open']
-            
-        return ctx
-            
-        # 兜底注入：如果 query 中提到了某些常见别名但没映射上，且 df 中有类似列，尝试自动映射
-        # (这部分通常由 execute 中的 mentioned_words 处理，但这里可以做显式映射)
-        
+            elif 'close' in df.columns and 'open' in df.columns: ctx['red'] = df['close'] > df['open']
         return ctx
 
     def _preprocess_query(self, query_str: str) -> str:
-        """剥离注释并提取核心表达式"""
+        """精准预处理：解构隐式字符串连接的同时，保护函数内部合法的引号"""
         raw_input = query_str.strip()
-        
-        # 1. 提取赋值右侧内容 (例如 final_query = """ ... """)
-        triple_match = re.search(r'^\s*\w+\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', raw_input, re.DOTALL | re.MULTILINE)
-        assign_match = re.search(r'^\s*(\w+)\s*=\s*(.*)', raw_input, re.DOTALL | re.MULTILINE)
-        
-        process_content = raw_input
-        if triple_match:
-            process_content = triple_match.group(1)
-        elif assign_match and assign_match.group(1).lower() not in ('result', 'signal', 'import', 'from'):
-            process_content = assign_match.group(2)
-        elif '(' in raw_input and raw_input.endswith(')'):
-            # 处理 "备注 (逻辑)" 格式 (来自 UI 组合框显示)
-            label_match = re.search(r'^(.*?)\s*\((.*)\)$', raw_input, re.DOTALL)
-            if label_match:
-                note_part, inner_logic = label_match.groups()
-                # 判定规则：note 包含中文或破折号，且 inner 包含逻辑操作符
-                if re.search(r'[\u4e00-\u9fa5\-]', note_part) and any(op in inner_logic.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
-                    process_content = inner_logic
+        if not raw_input: return ""
 
-        # 2. 清洗注释与换行
-        lines = []
-        for line in process_content.splitlines():
-            code_part = line.split('#')[0].strip()
-            if code_part:
-                lines.append(code_part)
+        # Step 1: 逐行扫描与智能脱敏
+        processed_lines = []
+        for line in raw_input.splitlines():
+            # 1. 物理移除行首赋值: var = 
+            line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=\s*', '', line)
+            
+            # 2. 剥离行内注释
+            code = line_no_assign.split('#')[0].rstrip()
+            if not code.strip(): continue
+            
+            # 3. [KEY FIX] 精准识别 Implicit Concatenation 特征
+            # 如果全行被引号包裹（允许首尾有括号），则执行解构
+            # 模式：^ (可选括号) "内容" "内容" (可选括号) $
+            if re.match(r'^\s*[\(\s]*(["\']).*\1[\)\s]*$', code):
+                # 提取所有引号内的字面量
+                quotes = re.findall(r'(["\'])(.*?)\1', code)
+                if quotes:
+                    # 将引号内的内容取出，并保留引号外的括号
+                    inner_merged = "".join([q[1] for q in quotes])
+                    # 恢复该行原本的括号结构 (简单处理：提取 code 中所有非引号内容)
+                    shell = re.sub(r'(["\']).*?\1', ' {} ', code)
+                    reconstructed = shell.format(inner_merged)
+                    processed_lines.append(reconstructed)
+                else:
+                    processed_lines.append(code)
+            else:
+                # 含有函数调用（如 contains("X")）或原始逻辑的行，保持原样（保护引号）
+                processed_lines.append(code)
         
-        return " ".join(lines).replace('df_all', 'df')
+        # Step 2: 空间转换与备注过滤
+        res = " ".join(processed_lines).replace('df_all', 'df').strip()
+        # 情况 A: (中文字符标签) (逻辑) -> (逻辑)
+        res = re.sub(r'^\s*\(([\u4e00-\u9fa5\-]+)\)\s*(?=\()', '', res) 
+        # 情况 B: 中文字符标签 (逻辑) -> (逻辑)
+        res = re.sub(r'^\s*[\u4e00-\u9fa5\-]+\s*(?=\()', '', res)
+        
+        return res.strip()
 
     def execute(self, df: pd.DataFrame, query_str: str) -> pd.DataFrame:
-        """执行查询的核心入口"""
+        """执行引擎：回归稳定链"""
         self.last_error = ""
-        if df is None or df.empty or not query_str.strip():
-            return df
-
+        if df is None or df.empty or not query_str.strip(): return df
         cleaned_expr = self._preprocess_query(query_str)
+        if not cleaned_expr: return df
         context = self._prepare_context(df)
         
-        # 探测是否为显式脚本
-        lines = query_str.strip().splitlines()
-        is_explicit_script = any(line.strip().startswith(('result =', 'signal =', 'import ', 'from ')) for line in lines)
-        has_sql_func = bool(re.search(r'\b(GREATEST|LEAST|ABS|MAX|MIN)\b', cleaned_expr, re.IGNORECASE))
+        is_explicit = any(l.strip().startswith(('result =', 'signal =', 'import ', 'from ')) for l in query_str.splitlines())
+        has_sql = bool(re.search(r'\b(GREATEST|LEAST|ABS|MAX|MIN)\b', cleaned_expr, re.IGNORECASE))
         
         try:
-            if is_explicit_script:
+            if is_explicit:
                 exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
                 return self._extract_result(df, context)
 
-            # 智能尝试链：df.query -> df.eval -> pd.eval (Stage 3)
-            pd_expr = re.sub(r'\bdf\b', '@df', cleaned_expr)
-            
-            # 阶段 1 & 2 (仅在无复杂 SQL 函数时尝试)
-            if not has_sql_func:
-                try:
-                    return df.query(pd_expr, local_dict=context, engine='python')
-                except Exception:
-                    try:
-                        res = df.eval(pd_expr, engine='python', local_dict=context)
-                        if isinstance(res, (pd.Series, pd.DataFrame)):
-                            return self._wrap_result(df, res)
-                    except Exception:
-                        pass
-            
-            # 终极阶段：注入列名运行向量化计算
             local_scope = context.copy()
-            # 动态检测并注入提及的列 (优化内存占用)
-            mentioned_words = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned_expr))
+            mentioned = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned_expr))
             for col in df.columns:
-                if str(col) in mentioned_words:
-                    local_scope[str(col)] = df[col]
+                if str(col) in mentioned: local_scope[str(col)] = df[col]
             
-            # 转换为位运算符并执行
-            exec_expr = re.sub(r'\band\b', '&', cleaned_expr)
-            exec_expr = re.sub(r'\bor\b', '|', exec_expr)
-            engine = 'python' if has_sql_func else 'numexpr'
-            
-            res = pd.eval(exec_expr, engine=engine, local_dict=local_scope)
-            return self._wrap_result(df, res)
+            # 使用 @ 前缀保护关键字
+            pd_expr = cleaned_expr
+            py_restricted = {'open', 'id', 'type', 'dir', 'sum', 'abs', 'max', 'min'}
+            for var in py_restricted:
+                if var in mentioned and var in local_scope:
+                    pd_expr = re.sub(r'\b' + var + r'\b', f'@{var}', pd_expr)
 
+            try:
+                if not has_sql:
+                    try: return df.query(pd_expr, local_dict=local_scope, engine='python')
+                    except: pass
+                # pd.eval 向量化执行
+                res = pd.eval(cleaned_expr, engine='python', local_dict=local_scope)
+                return self._wrap_result(df, res)
+            except:
+                exec_expr = re.sub(r'\band\b', '&', cleaned_expr, flags=re.IGNORECASE)
+                exec_expr = re.sub(r'\bor\b', '|', exec_expr, flags=re.IGNORECASE)
+                res = pd.eval(exec_expr, engine='python', local_dict=local_scope)
+                return self._wrap_result(df, res)
         except Exception as e:
             self.last_error = str(e)
-            self.logger.warning(f"Query Execution Error: {e} | Query: {query_str}")
-            # 最后一级兜底：全文 exec
+            self.logger.warning(f"Query Error: {e}")
             try:
                 exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
                 return self._extract_result(df, context)
-            except Exception:
-                return df
+            except: return df
 
     def _wrap_result(self, df: pd.DataFrame, res: Any) -> pd.DataFrame:
-        """统一包装计算结果"""
-        if res is None:
-            return df
+        if res is None: return df
         if isinstance(res, pd.Series) and len(res) == len(df):
-            if res.dtype == bool:
-                return df[res]
-        if isinstance(res, pd.DataFrame):
-            return res
-        # 如果返回的是 scalar bool，且为 False，返回空 DataFrame
-        if isinstance(res, (bool, np.bool_)):
-            return df if res else df.iloc[:0]
+            if res.dtype == bool: return df[res]
+        if isinstance(res, pd.DataFrame): return res
+        if isinstance(res, (bool, np.bool_)): return df if res else df.iloc[:0]
         return df
 
     def _extract_result(self, df: pd.DataFrame, context: Dict) -> pd.DataFrame:
-        """从上下文中提取变量"""
-        if context.get('result') is not None:
-            return context['result']
+        if context.get('result') is not None: return context['result']
         if context.get('signal') is not None and isinstance(context['signal'], pd.Series):
             return df[context['signal']]
         return df
 
-# 单例或快速访问实例
 query_engine = PandasQueryEngine()

@@ -61,6 +61,10 @@ class QueryHistoryManager:
         self.search_combo5 = search_combo5
         self.deleted_stack = []  # 保存被删除的 query 记录
         self._history_changed = False  # 追踪本次打开期间是否有过修改
+        
+        # [NEW] 状态展示变量，与主程序保持一致
+        self.status_var = tk.StringVar(value="准备就绪")
+        self.status_var2 = tk.StringVar(value="")
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback
@@ -178,6 +182,12 @@ class QueryHistoryManager:
 
         self.tree.pack(expand=True, fill="both")
 
+        # [NEW] 状态栏展示区: 展示匹配数及清理后的 Q 片段
+        self.status_frame = tk.Frame(self.editor_frame)
+        self.status_frame.pack(fill="x", side="bottom")
+        tk.Label(self.status_frame, textvariable=self.status_var, fg="blue", font=("微软雅黑", 9)).pack(side="left", padx=5)
+        tk.Label(self.status_frame, textvariable=self.status_var2, fg="darkgreen", font=("微软雅黑", 9)).pack(side="right", padx=5)
+
         def adjust_column_widths():
             if not hasattr(self, "tree") or not self.tree.winfo_exists():
                 return
@@ -201,6 +211,7 @@ class QueryHistoryManager:
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.show_context_menu)
         self.tree.bind("<Delete>", self.on_delete_key)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         self.root.bind("<Control-z>", self.undo_delete)
         self.root.bind("<Escape>", lambda event: self.open_editor())
@@ -809,6 +820,16 @@ class QueryHistoryManager:
         elif code and not (code.isdigit() and len(code) == 6):
             df_code = self.df_all
         elif code and code.isdigit() and len(code) == 6:
+            # [FIX] 如果 df_all 为空，尝试自动注入测试数据
+            if self.df_all is None:
+                try:
+                    toast_message(self.root, "正在通过 test_single 自动注入测试基准数据...", 2000)
+                    from instock_MonitorTK import test_single_thread
+                    self.df_all = test_single_thread(single=True)
+                    logger.info(f"✅ 自动注入测试数据成功，共 {len(self.df_all) if self.df_all is not None else 0} 条")
+                except Exception as e:
+                    logger.error(f"❌ 自动注入数据失败: {e}")
+
             if not hasattr(self, "_select_on_test_code"):
                 self._select_on_test_code = None
 
@@ -827,6 +848,8 @@ class QueryHistoryManager:
                         from stock_logic_utils import check_code
                         results = check_code(self.df_all, code, self.search_var1.get() if self.search_var1 else "")
                         logger.info(f'check_code: {results}')
+                        # 更新状态栏
+                        self.update_status(rows_hit=1 if results else 0, rows_all=len(self.df_all), query=self.search_var1.get() if self.search_var1 else "")
                     else:
                         df_code = None
 
@@ -837,10 +860,30 @@ class QueryHistoryManager:
                 else:
                     df_code = self.df_all
         else:
+            # [FIX] 全部测试模式下的数据补齐逻辑
+            if self.df_all is None:
+                try:
+                    from instock_MonitorTK import test_single_thread
+                    self.df_all = test_single_thread(single=True)
+                except: pass
             df_code = self.df_all
 
         if df_code is not None:
             results = self.test_code(df_code)
+            
+            # [NEW] 优化状态栏展示逻辑：区分单条测试与批量回测
+            input_query = self.entry_query.get().strip()
+            total_stocks = len(df_code)
+            if not input_query:
+                # 批量模式：展示列表汇总
+                queries_count = len(self.current_history)
+                self.status_var.set(f"📊 批量回测完成 | 列表:{queries_count} 条 | 样本:{total_stocks} 只")
+                self.status_var2.set("所有历史已同步")
+            else:
+                # 单条模式：展示该查询的具体命中
+                # 寻找 results 中第一个匹配 input_query 的命中数（如果存在）
+                hit_count = sum(1 for r in results if r.get("hit") and str(r.get("hit")) != "0")
+                self.update_status(rows_hit=hit_count, rows_all=total_stocks, query=input_query)
 
             for i, r in enumerate(results):
                 if i < len(self.current_history):
@@ -852,6 +895,40 @@ class QueryHistoryManager:
         queries = getattr(self, "current_history", [])
         return test_code_against_queries(code_data, queries)
 
+
+
+    def on_tree_select(self, event):
+        """[NEW] 增强联动：点击表格行时，状态栏同步显示该行的命中信息"""
+        try:
+            selected = self.tree.selection()
+            if not selected: return
+            vals = self.tree.item(selected[0], "values")
+            if not vals: return
+            
+            q_text = str(vals[0])
+            hit_str = str(vals[3]) if len(vals) > 3 else "0"
+            try:
+                hit_val = int(hit_str)
+            except:
+                hit_val = 0
+                
+            rows_all = len(self.df_all) if self.df_all is not None else 0
+            self.update_status(rows_hit=hit_val, rows_all=rows_all, query=q_text)
+        except Exception as e:
+            logger.debug(f"on_tree_select error: {e}")
+
+    def update_status(self, rows_hit=0, rows_all=0, query=""):
+        """同步展示状态栏信息，支持预处理清洗后的 Q 展示"""
+        try:
+            from query_engine_util import query_engine
+            # 对查询语句进行脱敏预处理 (剥离注释、赋值等)
+            eff_query = query_engine._preprocess_query(query) if query_engine else query
+            disp_query = eff_query[:120].replace('\n', ' ').strip()
+        except Exception:
+            disp_query = query[:120].strip()
+            
+        self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
+        self.status_var2.set("")
 
 
 def quick_save_specific_history(query, history_key="history5", note=""):
@@ -1001,4 +1078,16 @@ def run_manager_process(history_path=None, df_all=None):
     root.mainloop()
 
 if __name__ == "__main__":
-    run_manager_process()
+    # [NEW] 支持通过 -test 参数直接注入测试数据
+    import sys
+    df_all_inject = None
+    if "-test" in sys.argv:
+        try:
+            print("🚀 正在通过 test_single_thread 注入测试数据...")
+            from instock_MonitorTK import test_single_thread
+            df_all_inject = test_single_thread(single=True)
+            print(f"✅ 数据注入完成: {len(df_all_inject) if df_all_inject is not None else 0} 条")
+        except Exception as e:
+            print(f"❌ 数据注入失败: {e}")
+            
+    run_manager_process(df_all=df_all_inject)
