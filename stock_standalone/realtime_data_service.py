@@ -2687,13 +2687,15 @@ class DataPublisher:
                         if not (1500 <= hhmm <= 1600) and self._last_save_ts > 0:
                             if not self.kline_cache._is_dirty:
                                 return
-                
+                        else:
+                            # 其余非交易时间返回
+                            return                        
                 # 如果不脏，则只更新时间戳
                 if not self.kline_cache._is_dirty and self._last_save_ts > 0:
                     self._last_save_ts = now
                     return
 
-                with timed_ctx("save_kline_cache", warn_ms=1500):
+                with timed_ctx("save_kline_cache", warn_ms=1000):
                     save_cache_df = self.kline_cache.to_dataframe()
                     if not save_cache_df.empty:
                         # [PROTECTION] 如果启动时加载失败，且当前数据量依然不足 (如 < 10000 行)，禁止自动保存覆盖
