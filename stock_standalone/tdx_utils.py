@@ -12,6 +12,11 @@ except ImportError:
 import pandas as pd
 from datetime import datetime
 from typing import Any, Optional, Union, Callable
+try:
+    import win32api
+    import win32con
+except ImportError:
+    win32api = win32con = None
 from JohnsonUtil import commonTips as cct
 import re
 
@@ -195,6 +200,85 @@ def isDigit(x):
     except ValueError:
         return False
 
+# ==============================================================================
+# 🐭 [NEW] Mouse Hook Trigger Integration
+# ==============================================================================
+class MouseClickState:
+    __slots__ = ("last_click", "clicks", "double_flag")
+    def __init__(self):
+        self.last_click = 0.0
+        self.clicks = 0
+        self.double_flag = False
+
+def trigger_key_copy():
+    """执行 ESC (清除干扰) 然后 Ctrl+Ins (更通用的复制)"""
+    if not win32api: return
+    try:
+        # 发送 ESC
+        win32api.keybd_event(0x1B, 0, 0, 0)
+        win32api.keybd_event(0x1B, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.01)
+        # 发送 Ctrl + Ins
+        win32api.keybd_event(0x11, 0, 0, 0) # Ctrl down
+        win32api.keybd_event(0x2D, 0, 0, 0) # Ins down
+        win32api.keybd_event(0x2D, 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(0x11, 0, win32con.KEYEVENTF_KEYUP, 0)
+    except Exception as e:
+        logger.error(f"[MouseHook] trigger_key_copy error: {e}")
+
+async def mouse_hook_loop(click_timeout=0.25, double_min=0.05, right_timeout=1.5):
+    """
+    状态机检测：双击左键后在 1.5s 内抬起右键 -> 触发复制
+    """
+    if not win32api:
+        logger.warning("[MouseHook] win32api not found. Mouse trigger disabled.")
+        return
+
+    state = MouseClickState()
+    try:
+        state_left = win32api.GetKeyState(0x01)
+        state_right = win32api.GetKeyState(0x02)
+    except Exception:
+        return
+
+    while True:
+        try:
+            a = win32api.GetKeyState(0x01)
+            b = win32api.GetKeyState(0x02)
+            
+            # 1. 左键逻辑：处理双击检测
+            if a != state_left:
+                state_left = a
+                if a >= 0: # Left UP
+                    now = time.perf_counter()
+                    dt = now - state.last_click
+                    if dt > click_timeout:
+                        state.clicks = 1
+                        state.double_flag = False
+                    else:
+                        state.clicks += 1
+                        if state.clicks == 2 and dt > double_min:
+                            state.double_flag = True
+                    state.last_click = now
+            
+            # 2. 右键逻辑：双击后的组合触发
+            if b != state_right:
+                state_right = b
+                if b >= 0: # Right UP
+                    now = time.perf_counter()
+                    if state.double_flag and (now - state.last_click < right_timeout):
+                        logger.info(f"🐭 [MouseHook] Double-Left + Right triggered! Executing Copy...")
+                        # 使用 to_thread 执行同步按键模拟，防止阻塞事件循环
+                        await asyncio.to_thread(trigger_key_copy)
+                    # 无论是否触发，右键抬起均重置双击标志
+                    state.double_flag = False
+                    state.clicks = 0
+            
+            await asyncio.sleep(0.005) # 5ms 高频轮询
+        except Exception as e:
+            logger.error(f"[MouseHook] loop error: {e}")
+            await asyncio.sleep(1)
+
 async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipboard=False):
     """
     异步生成器：监控剪贴板并返回符合条件的股票代码。
@@ -255,6 +339,9 @@ def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswit
         asyncio.set_event_loop(new_loop)
         
         async def _task():
+            # [NEW] 启动鼠标钩子任务
+            asyncio.create_task(mouse_hook_loop())
+            
             async for code in get_clipboard_contents(timesleep, code_startswith, keep_clipboard=keep_clipboard):
                 try:
                     # 如果提供了外部逻辑检查（如：与 UI 选中代码重复），则忽略
