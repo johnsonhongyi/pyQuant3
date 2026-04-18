@@ -883,56 +883,54 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def open_dna_auditor_top50(self):
-        """[NEW] 对当前列表前 50 只股票执行 DNA 审计"""
-        items = self.tree.get_children()
+        """🚀 [DNA-BATCH] 极限审计：支持从选中行开始向下选取 50 只，无选中则默认前 50"""
+        items = list(self.tree.get_children())
         if not items:
+            from tkinter import messagebox
             messagebox.showinfo("提示", "当前列表为空，无法进行审计")
             return
             
-        target_items = items[:10]
-        codes = [self.tree.item(it, "values")[0] for it in target_items]
+        # 🚀 [NEW] 确定选取起点：如果有选中则从选中行开始，否则从头开始
+        selection = self.tree.selection()
+        start_idx = 0
+        if selection:
+            try:
+                # 获取选中项中的第一个
+                target_item = selection[0]
+                start_idx = items.index(target_item)
+            except (ValueError, IndexError):
+                start_idx = 0
         
-        toast_message(self, f"正在对 Top {len(codes)} 只个股进行 DNA 深度审计，请稍候...", duration=3000)
-        threading.Thread(target=self._inner_run_dna_audit, args=(codes,), daemon=True).start()
+        # 🚀 [FIX] 智能检测列索引，适配用户自定义列排序
+        all_cols = list(self.tree["columns"])
+        idx_code, idx_name = -1, -1
+        for i, col in enumerate(all_cols):
+            c_lower = str(col).lower()
+            if c_lower in ["code", "代码"]: idx_code = i
+            if c_lower in ["name", "名称"]: idx_name = i
+        
+        # 兜底：如果没找到 ID，尝试物理位置 0 和 1
+        if idx_code == -1: idx_code = 0
+        if idx_name == -1: idx_name = 1
 
-    def _inner_run_dna_audit(self, codes):
-        try:
-            from backtest_feature_auditor import audit_multiple_codes
-            summaries = audit_multiple_codes(codes)
-            self.after(0, lambda: self._display_dna_audit_results(summaries))
-        except Exception as e:
-            logger.error(f"DNA 审计执行失败: {e}")
-            self.after(0, lambda: messagebox.showerror("审计失败", f"错误详情: {e}"))
+        # 从起点开始向后选取最多 50 只
+        target_items = items[start_idx : start_idx + 50]
+        code_to_name = {}
+        for it in target_items:
+            try:
+                vals = self.tree.item(it, 'values')
+                if not vals: continue
+                c = str(vals[idx_code]).zfill(6)
+                n = str(vals[idx_name])
+                if c and c != "N/A":
+                    code_to_name[c] = n
+            except Exception:
+                continue
+        
+        if code_to_name:
+            self._run_dna_audit_batch(code_to_name)
 
-    def _display_dna_audit_results(self, summaries):
-        if not summaries:
-            messagebox.showinfo("提示", "审计完成，但未发现有效结果")
-            return
-            
-        res_win = tk.Toplevel(self)
-        res_win.title(f"DNA 意图审计报告 (Top {len(summaries)}) - {datetime.now().strftime('%H:%M:%S')}")
-        res_win.geometry(f"{int(900 * self.scale_factor)}x{int(650 * self.scale_factor)}")
         
-        txt = scrolledtext.ScrolledText(res_win, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 10))
-        txt.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        report = ["="*85, f"{' [ CROSS-STOCK INTENT SCOREBOARD ] ':=^85}", "="*85]
-        report.append(f"{'Code':<8} {'Name':<10} {'Score':<10} {'Gain%':<10} {'Classification'}")
-        report.append("-" * 85)
-        
-        sorted_s = sorted(summaries, key=lambda x: x.intent_score, reverse=True)
-        for s in sorted_s:
-            report.append(f"{s.code:<8} {s.name:<10} {s.intent_score:>8.1f} {s.total_pct:>9.1f}%   {s.verdict}")
-        
-        report.append("="*85 + f"\n[ 审计专家判定报告 (评价总计同步) ]")
-        for s in sorted_s:
-            report.append(f"\n>>> {s.name} ({s.code}) -> {s.verdict}")
-            for sug in s.suggestions: report.append(sug)
-        report.append("\n" + "="*85)
-        
-        txt.insert("end", "\n".join(report))
-        txt.configure(state="disabled")
-        res_win.focus_force()
 
     def open_market_pulse(self):
         """Open the Daily Market Pulse Dashboard."""
@@ -4340,8 +4338,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # UI 状态提示
         try:
-            if hasattr(self, 'status_var'):
-                self.status_var.set(f"🚀 可视化指令已发出: {code}")
+            if hasattr(self, 'status_var2'):
+                self.status_var2.set(f"🚀 可视化指令已发出: {code}")
         except: pass
 
 
@@ -4891,15 +4889,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vis_enabled = getattr(self, '_vis_enabled_cache', True)
             viz_ready   = getattr(self, '_viz_ready', False)
             proc_alive  = hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()
-            # ⭐ 只有状态发生变化才更新
+            # ⭐ 只有标记为就绪后的掉线判定 (仅针对托管进程)
             if getattr(self, "_df_first_send_done", False) and not getattr(self, '_force_full_sync_pending', False):
-                if not proc_alive and getattr(self, '_viz_ready', False):
-                    logger.warning("[VIZ] process died → set _viz_ready=False")
+                # 只有明确持有进程句柄且进程已关闭时，才判定为掉线
+                managed_proc_dead = hasattr(self, 'qt_process') and self.qt_process and not self.qt_process.is_alive()
+                if managed_proc_dead and getattr(self, '_viz_ready', False):
+                    logger.warning("[VIZ] managed process died → set _viz_ready=False")
                     self._viz_ready = False
-                if (
-                    (not vis_enabled or not proc_alive or not viz_ready)
-                    and not getattr(self, '_force_full_sync_pending', False)
-                ):
+
+            # ⭐ 核心判断：是否需要跳过本轮同步（没开、或既没进程也没 Socket 就绪）
+            if (
+                (not vis_enabled or (not proc_alive and not viz_ready))
+                and not getattr(self, '_force_full_sync_pending', False)
+            ):
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
                         if getattr(self, '_vis_enabled_cache', False) and getattr(self, '_viz_ready', False):
@@ -5726,14 +5728,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not item_id:
             return
 
-        # 选中该行
-        self.tree.selection_set(item_id)
+        # 如果点击的行不在已选中的行中才清空并选中单行，否则保留多选支持批量操作
+        selected_items = self.tree.selection()
+        if item_id not in selected_items:
+            self.tree.selection_set(item_id)
+            selected_items = (item_id,)
+            
         self.tree.focus(item_id)
 
-        # 获取股票信息
-        values = self.tree.item(item_id, 'values')
-        stock_code = values[0]
-        stock_name = values[1] if len(values) > 1 else "未知"
+        # 🚀 [FIX] 智能检测列索引
+        all_cols = list(self.tree["columns"])
+        idx_code, idx_name = -1, -1
+        for i, col in enumerate(all_cols):
+            c_lower = str(col).lower()
+            if c_lower in ["code", "代码"]: idx_code = i
+            if c_lower in ["name", "名称"]: idx_name = i
+        if idx_code == -1: idx_code = 0
+        if idx_name == -1: idx_name = 1
+
+        # 收集选中的代码字典
+        code_to_name = {}
+        for sid in selected_items:
+            try:
+                vals = self.tree.item(sid, 'values')
+                if not vals: continue
+                c = str(vals[idx_code]).zfill(6)
+                n = str(vals[idx_name])
+                if c and c != "N/A":
+                    code_to_name[c] = n
+            except Exception:
+                continue
+
+        # 用于基础单项操作（兼容旧逻辑）
+        try:
+            vals = self.tree.item(item_id, 'values')
+            stock_code = str(vals[idx_code]).zfill(6)
+            stock_name = str(vals[idx_name])
+        except Exception:
+            stock_code = "000000"
+            stock_name = "未知"
 
         # ================= 主菜单 =================
         menu = tk.Menu(self, tearoff=0)
@@ -5763,6 +5796,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             label="🔍 策略白盒评估...",
             command=lambda: self.open_strategy_manager(verify_code=stock_code),
             foreground="blue"
+        )
+        
+        batch_text = f"🧬 DNA 专项审计... ({len(code_to_name)}只)" if len(code_to_name) > 1 else "🧬 DNA 专项审计..."
+        menu.add_command(
+            label=batch_text,
+            command=lambda: self._run_dna_audit_batch(code_to_name),
+            foreground="purple"
         )
 
         menu.add_separator()
@@ -5839,6 +5879,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         menu.add_cascade(label="🧹 信号清理", menu=cleanup_menu)
 
+        menu.add_command(
+            label="🔄 刷新",
+            command=lambda: self._schedule_after(0, self.update_tree)
+        )
+
         menu.add_separator()
 
         # —— 其他管理 ——
@@ -5847,22 +5892,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=self.open_blacklist_manager
         )
 
-        # menu.add_command(
-        #     label="⌨️ 重新初始化全局快捷键",
-        #     command=lambda: self.setup_global_hotkey(show_toast=True)
-        # )
-
-        menu.add_command(
-            label="🔄 刷新",
-            command=lambda: self._schedule_after(0, self.update_tree)
-        )
-
         # 弹出菜单
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        menu.post(event.x_root, event.y_root)
 
+    def _run_dna_audit_batch(self, code_to_name):
+        import threading
+        from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+        from tkinter import messagebox
+        
+        codes = list(code_to_name.keys())
+        if not codes: return
+        
+        # 弹一个简单提示
+        top = tk.Toplevel(self)
+        top.title("DNA 审计运行中...")
+        top.geometry("300x100")
+        tk.Label(top, text=f"正在对 {len(codes)} 只股票进行极限深度DNA审计...\n请勿操作界面", font=("微软雅黑", 10)).pack(expand=True)
+        top.update()
+        
+        def run_task():
+            try:
+                # 调用批量接口
+                summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+                # 切回主线程展示
+                self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self)])
+            except Exception as e:
+                self.after(0, lambda: [top.destroy(), messagebox.showerror("DNA 审计出错", str(e), parent=self)])
+                
+        threading.Thread(target=run_task, daemon=True).start()
 
 
     def get_stock_info_text(self, code):

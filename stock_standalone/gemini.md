@@ -57,6 +57,13 @@
 
 ---
 
+## 2026-04-18 19:31
+- [x] **深度集成 DNA 专项审计能力与批处理加速 (Integrated DNA Backtest Auditor in Tkinter)**：
+    - [x] **Tkinter 右键菜单无缝接入**：重构 `instock_MonitorTK.py` 中的 `on_tree_right_click` 方法，使其完美支持选区（无论是单选还是多选）并保留焦点。在右键弹出的菜单中添加了 `[🧬 DNA 专项审计...]` 动态按钮，实现了操作闭环体验。
+    - [x] **根治 IO 延迟消除单次发卡**：将多选项代码及其本身携带的名字字典直接注入 `audit_multiple_codes`。取消了从 `backtest_feature_auditor.py` 需要重新调起名字解析器查询 HDF5 库的 IO 操作。
+    - [x] **ThreadPoolExecutor 极限验证提速**：在 `backtest_feature_auditor.py` 的处理流程中，引进了 8 路多线程并发 `ThreadPoolExecutor` 操作，由单线程串行处理转变为超快并发算子，极大释放了批量处理个股时的性能。
+    - [x] **新增专业分析报告窗口界面**：彻底告别只在 Terminal 后台输出打印的情况，引入 `Tkinter.PanedWindow` 层，打造了顶层列表清单排名 + 底层交互式报告展开详情的独立透视窗口 (`show_dna_audit_report_window`) 予以直观展示成果。
+
 ## 2026-04-18 19:09
 - [x] **修复联动闭环失效与防泄漏 (Fixed THS/TDX Linkage Desync)**：
     - [x] **重构 `linkage_service.py` 状态承载**：修改 IPC 队列通道属性，不仅传递交易代码，同时传输来自主界面的 `tdx_var`、`ths_var` 及 `dfcf` 复选框的实时快照。
