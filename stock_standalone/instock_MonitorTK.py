@@ -3809,16 +3809,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 # 1. [CORE] 更新主内存及其版本 (必须每轮执行)
                 # 计算快照 Hash 用于版本校验，若数据完全无变动则跳过后续昂贵的 UI 渲染
-                # (优先尝试常用价格列：'price', 'trade', 'close', 'now')
                 df_hash = 0
                 if not full_df.empty:
-                    # [OPTIMIZE] 哈希指纹改进：取首、中、尾多点价格采样，避免单点更新漏跳
+                    # [OPTIMIZE] 哈希指纹改进：取 5 点价格采样，提高变动检测精度
                     p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
                     if p_col:
                         n = len(full_df)
-                        sample_idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
-                        p_val = full_df[p_col].iloc[sample_idx].sum()
-                        df_hash = hash(n) ^ hash(p_val)
+                        sample_idx = [0, n // 4, n // 2, 3 * n // 4, n - 1] if n > 4 else list(range(n))
+                        # 使用采样点的值元组计算哈希，比 sum() 更稳健
+                        p_val_tuple = tuple(full_df[p_col].iloc[sample_idx].values)
+                        df_hash = hash(n) ^ hash(p_val_tuple)
                     else:
                         df_hash = hash(full_df.index.size)
                 
@@ -3836,9 +3836,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
-                # [STABILITY] 极其重要的限流：如果数据毫无变动，且上一轮渲染不足 1s，本轮直接跳过 UI 层面工作
-                if df_hash == last_hash and (now - getattr(self, '_last_tree_render_ts', 0) < 1.0):
-                    return
+                # [STABILITY] 极其重要的限流：如果数据毫无变动，且过滤条件未发生变化，且非强制刷新，直接跳回
+                current_query = getattr(self, '_last_value', "")
+                last_render_query = getattr(self, '_last_render_query', "")
+                
+                if df_hash == last_hash and current_query == last_render_query and not force:
+                    # 30s 兜底保护，防止 UI 状态刷新失效
+                    if now - getattr(self, '_last_tree_render_ts', 0) < 30.0:
+                        return
+                    # 否则进入 30s 兜底刷新
+                
+                self._last_render_query = current_query
                 
                 # ⭐ [RESTORE] 激活数据更新标志位 (确保下一步联动恢复能触发)
                 if df_hash != last_hash:
@@ -10475,7 +10483,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.feature_marker.set_enable_colors(enable_colors)
             logger.debug(f"self.feature_marker : {hasattr(self, 'feature_marker')}")
             # 立即刷新显示以应用新的颜色状态
-            self.refresh_tree()
+            self.refresh_tree(force=True)
             
             logger.info(f"✅ 特征颜色显示已{'开启' if enable_colors else '关闭'}")
         except Exception as e:
@@ -10521,22 +10529,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.update_status()
             return
 
-        # ⚡ 非交易时间优化：仅在数据或列配置真正变化时刷新
-        # 交易时间：9:15-11:30, 13:00-15:00
-        now_time = cct.get_now_time_int()
-        is_trading_time = cct.get_trade_date_status() and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1500))
-        
-        # 定义状态指纹：包含代码哈希、列配置哈希
-        # code_hash = hash(tuple(tuple(sorted(df['code'].astype(str).values)))) if 'code' in df.columns else hash(len(df))
-
+        # ⚡ UI 渲染指纹防抖：仅在数据变化或强制刷新时执行
+        # 定义状态指纹：包含代码列表、列配置以及核心数值的采样 Hash
+        # code_hash 决定了行数和顺序
         code_hash = hash(tuple(df['code'].astype(str).values)) if 'code' in df.columns else hash(len(df))
         cols_hash = hash(tuple(self.current_cols))
-        current_fingerprint = (code_hash, cols_hash)
+        
+        # 数值 Hash (采样): 决定了单元格内容是否有变
+        p_col = next((c for c in ['trade', 'percent', 'price', 'now'] if c in df.columns), None)
+        df_val_hash = 0
+        if p_col:
+            n = len(df)
+            samples = [0, n//4, n//2, 3*n//4, n-1] if n > 4 else list(range(n))
+            df_val_hash = hash(tuple(df[p_col].iloc[samples].values))
+            
+        current_fingerprint = (code_hash, cols_hash, df_val_hash)
 
-        if not is_trading_time and not force:
+        # 触发判断：非强制刷新时，如果指纹一致则跳过
+        if not force:
             if hasattr(self, '_last_refresh_fingerprint') and self._last_refresh_fingerprint == current_fingerprint:
-                # 非交易时间且状态无变化，跳过以节省 CPU
+                # 盘中通过 _apply_tree_data_sync 的 30s 兜底，此处指纹一致直接返回
                 return
+        
+        self._last_real_refresh_ts = time.time()
         
         self._last_refresh_fingerprint = current_fingerprint
         # df = df.copy()  # ⚡ 移除 redundant copy()
@@ -10552,9 +10567,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self._use_incremental_update and hasattr(self, 'tree_updater'):
             try:
                 # 更新列配置（如果列发生变化）
-                if self.tree_updater.columns != cols_to_show:
+                if tuple(self.tree_updater.columns) != tuple(cols_to_show):
+                    diff_cols = set(self.tree_updater.columns) ^ set(cols_to_show)
                     self.tree_updater.columns = cols_to_show
-                    logger.info(f"[TreeUpdater] 列配置已更新: {len(cols_to_show)}列")
+                    logger.info(f"[TreeUpdater] 列配置变更: {len(cols_to_show)}列 (差异示例: {list(diff_cols)[:3]})")
                 
                 # ✅ 检测是否只是排序（数据相同但顺序不同）
                 # 如果是排序操作，强制全量刷新以确保顺序正确
