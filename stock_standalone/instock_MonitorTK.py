@@ -481,6 +481,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
         self._viz_ready = False
+        self._df_sync_running = False  # ⭐ [FIX] 初始化同步运行状态位，防止 send_df AttributeError
+        self._df_first_send_done = False # ⭐ [FIX] 初始化首发标志
+        self._force_full_sync_pending = False # ⭐ [FIX] 初始化强制全量同步标志
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
@@ -4854,6 +4857,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 启动/确认同步线程
             thread_start = time.time()
             if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+                self._df_sync_running = True # ⭐ [FIX] 确保在启动线程前设置运行标志
                 self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
                 self._df_sync_thread.start()
                 logger.debug(f"[Visualizer] df_sync_thread start cost {(time.time() - thread_start)*1000:.1f}ms")
