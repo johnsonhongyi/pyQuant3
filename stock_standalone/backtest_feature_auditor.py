@@ -124,12 +124,19 @@ class AuditSummary:
         self.leverage_count = 0   # 大盘涨更涨
         self.shield_count = 0     # 大盘回调他微调
         self.dragon_squeeze_days = 0 # 龙息蓄势 (上轨突破后缩量回调)
+        self.bottom_stable_days = 0  # 筑底企稳 (缩量回踩，支撑确认)
+        self.extreme_shrink_count = 0 # 地量基因 (地量见底)
+        self.pivot_signal_found = False # 变盘基因 (缩量十字星)
         self.suggestions = []
         self.history = []
 
     def finalize(self, rows):
         self.alpha_sum = sum(r['alpha'] for r in rows)
-        self.total_pct = (rows[-1]['close'] / rows[0]['prev_close'] - 1) * 100
+        p_close = rows[0]['prev_close']
+        if p_close != 0:
+            self.total_pct = (rows[-1]['close'] / p_close - 1) * 100
+        else:
+            self.total_pct = 0
         streak = 0
         for r in rows:
             if r['c_upper'] >= 1.0:
@@ -153,11 +160,21 @@ class AuditSummary:
             if self.max_adhesion >= 1 and r['v_ratio'] < 1.05 and 0.98 <= r['c_ma8'] <= 1.03:
                 if abs(r['alpha']) < 2.0: self.dragon_squeeze_days += 1
             
+            # 5. [🏗️ 筑底企稳] 连续下跌后的缩量平衡点 (转折点)
+            # 条件：成交量萎缩(v_ratio<0.85)，回踩 MA20 强支撑(0.98~1.05)，且下跌速率放缓或相对抗跌
+            if r['v_ratio'] < 0.85 and 0.98 <= r['c_ma20'] <= 1.05:
+                if r['idx_pct'] < -0.3 and r['pct'] > r['idx_pct']: # 比大盘跌得少
+                    self.bottom_stable_days += 1
+            
+            # 6. [🧊 地量见底] 
+            if r['v_ratio'] < 0.6:
+                self.extreme_shrink_count += 1
+            
             self.history.append(r) 
 
         self.intent_score = (self.alpha_sum * 0.4) + (self.max_adhesion * 5) + (self.squeeze_days * 3) + \
                             (self.anti_drop_count * 8) + (self.leverage_count * 5) + (self.shield_count * 6) + \
-                            (self.dragon_squeeze_days * 10)
+                            (self.dragon_squeeze_days * 10) + (self.bottom_stable_days * 8) + (self.extreme_shrink_count * 12)
         
         if self.intent_score > 50 and (self.max_adhesion >= 3 or self.anti_drop_count >= 2 or self.dragon_squeeze_days >= 2):
             self.verdict = "💎 [金身种子] 核心主升"
@@ -166,6 +183,12 @@ class AuditSummary:
             else:
                 self.suggestions.append("- 探测到极强独立进攻基因，在指数走弱时具备卓越的抗风险与上攻动力")
             self.suggestions.append(f"- 轨道接力稳固({self.max_adhesion}天)，表现出明显的‘大盘跌他涨’特征({self.anti_drop_count}天)")
+        elif self.intent_score > 35 or (self.bottom_stable_days >= 3 and self.intent_score > 20):
+            self.verdict = "🛡️ [筑底种子] 企稳待发"
+            self.suggestions.append(f"- 探测到明显的‘筑底企稳’基因({self.bottom_stable_days}天)，股价在支撑位缩量平衡")
+            if self.extreme_shrink_count >= 1:
+                self.suggestions.append(f"- 伴随 {self.extreme_shrink_count} 天极度地量，主力惜售明显，反转预期极强")
+            if self.shield_count >= 1: self.suggestions.append("- 回调期间表现出极强的韧性，属于‘给点阳光就灿烂’的品种")
         elif self.intent_score > 20:
             self.verdict = "🚀 [加速跑道] 意图确认"
             self.suggestions.append("- 正在脱离结构压力位，具备较好的‘补涨+领涨’混合属性")
@@ -212,16 +235,19 @@ def run_optimized_audit(code, start_date, end_date):
         if df is None: return None
         
         idx_code = get_corresponding_index(code)
-        if code.startswith(('0', '3')): idx_code = "399001"
-        elif code.startswith('8'): idx_code = "899050" 
+        # 🚀 [FIX] 对齐 GEM 指数映射：30开头应使用 399006 而非 399001
+        if code.startswith('30'): idx_code = "399006"
+        elif code.startswith(('00', '39')): idx_code = "399001"
+        elif code.startswith(('8', '9')): idx_code = "899050" 
         
         if idx_code in INDEX_DATA_CACHE:
             df_idx = INDEX_DATA_CACHE[idx_code]
         else:
             with timed_ctx(f"Load Index {idx_code}"):
                 df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
+                if df_idx is not None and not df_idx.empty:
+                    df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
                 INDEX_DATA_CACHE[idx_code] = df_idx
-        df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
         
         # 🚀 [FIX] 增强日期格式鲁棒性：支持 YYYYMMDD 和 YYYY-MM-DD
         def normalize_dt(d_str):
@@ -234,16 +260,40 @@ def run_optimized_audit(code, start_date, end_date):
         s_dt = normalize_dt(start_date)
         e_dt = normalize_dt(end_date) if end_date else df.index[-1]
         
-        audit_dates = df.index[(df.index >= s_dt) & (df.index <= e_dt)]
-        if len(audit_dates) == 0: return None
+        # [🚀 OPTIMIZED] 使用整数位置避免 get_loc 的切片冲突
+        date_mask = (df.index >= s_dt) & (df.index <= e_dt)
+        locs = np.where(date_mask)[0]
+        if len(locs) == 0: return None
         
         summary = AuditSummary(code, name)
         audit_rows = []
-        # print(f"\n>>> [ DNA 审计 ] {code} ({name})") # reduce noise in batch processing
-        for dt in audit_dates:
-            row = df.loc[dt]
-            idx_p = df_idx.loc[dt, 'idx_pct'] if dt in df_idx.index else 0
+        
+        for idx in locs:
+            dt = df.index[idx]
+            row = df.iloc[idx]
+            
+            # 获取 idx_pct，考虑指数缺失或 duplicates
+            idx_p = 0
+            if df_idx is not None and dt in df_idx.index:
+                try:
+                    idx_val = df_idx.loc[dt, 'idx_pct']
+                    # 如果有重复日期，取第一个
+                    idx_p = idx_val.iloc[0] if hasattr(idx_val, 'iloc') else idx_val
+                except:
+                    idx_p = 0
+                if np.isnan(idx_p): idx_p = 0
+                
             alpha = row['pct'] - idx_p
+            
+            # 获取上个交易日收盘价 (用于累计涨幅计算)
+            prev_idx = idx - 1
+            if prev_idx >= 0:
+                prev_close = df.iloc[prev_idx]['close']
+            else:
+                # 处于 df 边界，通过 pct 反算
+                p = row.get('pct', 0)
+                prev_close = row['close'] / (1 + p/100.0) if p != -100 else row['close']
+
             audit_rows.append({
                 'date': dt,
                 'alpha': alpha, 
@@ -254,8 +304,9 @@ def run_optimized_audit(code, start_date, end_date):
                 'c_ma20': row['c_ma20'],
                 'v_ratio': row['v_ratio'], 
                 'close': row['close'], 
-                'prev_close': df.iloc[df.index.get_loc(dt)-1]['close']
+                'prev_close': prev_close
             })
+            
         summary.finalize(audit_rows)
         # 存入缓存
         DNA_CALC_CACHE[cache_key] = (summary, time.time())
@@ -308,8 +359,9 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
 
 class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
     def __init__(self, summaries, parent=None, end_date=None):
-        super().__init__(parent)
-        self.withdraw()  # 🚀 [NEW] 立即隐藏，防止初始化时的默认小窗口闪烁与跳跃
+        tk.Toplevel.__init__(self, parent)
+        self.withdraw()  # 🚀 [CRITICAL] 立即隐藏，配合 alpha=0 彻底杜绝初始化瞬间的默认小窗口
+        self.attributes("-alpha", 0.0)
         
         self.summaries = summaries
         self.monitor_app = parent
@@ -347,22 +399,41 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 绑快捷键
         self.bind("<Escape>", lambda e: self.on_close())
         
-        # 🚀 [NEW] 布局完成后一次性展现
-        self.after(100, self._reveal_window)
+        # 🚀 [NEW] 极致对齐：推迟展现时机，确保在分割线(200ms)和数据填充完成后再平滑露面
+        self.after(350, self._reveal_window)
         
         # 确保表格本身获得键盘焦点
         self.tree.focus_set() 
 
     def _reveal_window(self):
         """🚀 [NEW] 布局就绪后平滑展示，消除跳跃感"""
-        self.deiconify() # 显示窗口
-        self.lift()
-        self.focus_force()
+        # 强制绘制所有组件以确定最终几何尺寸
+        self.update_idletasks()
+        
+        # 再次确认位置与尺寸 (在 deiconify 之前)
+        self.load_window_position(self, self.window_name, default_width=1000, default_height=750)
+        
+        # 确保位置更新已送达桌面管理器
+        self.update_idletasks()
+        
+        self.deiconify() # 显示窗口 (此时位置已修正且 alpha=0)
+        
+        # [🚀 SMOOTH FADE IN] 渐变展现，消除视觉冲击
+        def fade_in(alpha=0.0):
+            if alpha < 1.0:
+                alpha += 0.2
+                self.attributes("-alpha", alpha)
+                self.after(20, lambda: fade_in(alpha))
+            else:
+                self.attributes("-alpha", 1.0)
+                self.lift()
+                self.focus_force()
+                self.tree.focus_set()
+                
+        self.after(50, fade_in)
+        
         # 初始选中并滚动
         self._auto_scroll_to_focus()
-        
-        # 确保表格本身获得键盘焦点
-        self.tree.focus_set() 
 
     def _auto_scroll_to_focus(self):
         """🚀 [NEW] 自动滚动到指定的个股行"""
@@ -453,18 +524,25 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
             self.tree.column(col, width=max_w)
 
     def _sort_column(self, col, reverse):
-        data = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        """🚀 [UPGRADE] 支持数值、百分比与普通字符串的智能排序"""
+        items = self.tree.get_children('')
         
-        # 尝试数值排序
-        try:
-            data.sort(key=lambda t: float(t[0]), reverse=reverse)
-        except ValueError:
-            data.sort(reverse=reverse)
+        def try_parse_numeric(val):
+            # 处理百分比符号或多余字符
+            clean_s = str(val).replace('%', '').strip()
+            try:
+                return float(clean_s)
+            except ValueError:
+                return str(val).lower()
+
+        data = [(try_parse_numeric(self.tree.set(k, col)), k) for k in items]
+        data.sort(key=lambda t: t[0], reverse=reverse)
 
         for index, (val, k) in enumerate(data):
             self.tree.move(k, '', index)
 
-        self.tree.heading(col, command=lambda: self._sort_column(col, not reverse))
+        # 🚀 [FIX] 更新表头点击事件，确保 toggle 排序方向
+        self.tree.heading(col, command=lambda _c=col: self._sort_column(_c, not reverse))
 
     def _show_detail(self, event):
         sel = self.tree.selection()

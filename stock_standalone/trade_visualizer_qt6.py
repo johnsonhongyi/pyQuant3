@@ -9025,10 +9025,8 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.active_time_linkage['auto_scroll'] = True 
                         logger.debug(f"[Linkage] History session drifted to {code} at {self.active_time_linkage.get('timestamp')}")
                 elif not kwargs.get('timestamp') and not kwargs.get('signal_date'):
-                    # ⭐ [NEW CORE FIX] 如果代码相同且未传时间，则判定为“退出复盘，回归实时”
-                    self.active_time_linkage = {}
-                    has_reset_linkage = True
-                    logger.info(f"🔄 [Linkage] Exiting history session and resetting to REALTIME for: {code}")
+                    # 🚀 [ALIGNED] 同代码重复点击时，保持当前历史会话，不再意外退出回归实时
+                    logger.debug(f"[Linkage] Staying in history session for {code}")
             else:
                 # 🚀 [REALTIME] 如果是今天的联动（实时联动不具备“会话持续性”），代码不匹配时清理
                 if self.active_time_linkage.get('code') != code or (not kwargs.get('timestamp') and not kwargs.get('signal_date')):

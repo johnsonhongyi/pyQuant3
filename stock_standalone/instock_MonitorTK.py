@@ -941,11 +941,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         if code_to_name:
             # 🚀 [NEW] 检测历史截止日期
-            end_date = None
-            if hasattr(self, 'sector_bidding_panel') and getattr(self.sector_bidding_panel, '_is_history_mode', False):
-                end_date = getattr(self.sector_bidding_panel, '_history_date', None)
-                
-            self._run_dna_audit_batch(code_to_name, end_date=end_date)
+            # end_date = None
+            # if hasattr(self, 'sector_bidding_panel') and getattr(self.sector_bidding_panel, '_is_history_mode', False):
+            #     end_date = getattr(self.sector_bidding_panel, '_history_date', None)
+            self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date())
+            # self._run_dna_audit_batch(code_to_name, end_date=end_date)
 
         
 
@@ -5826,7 +5826,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         batch_text = f"🧬 DNA 专项审计... ({len(code_to_name)}只)" if len(code_to_name) > 1 else "🧬 DNA 专项审计..."
         menu.add_command(
             label=batch_text,
-            command=lambda: self._run_dna_audit_batch(code_to_name),
+            command=lambda: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date()),
             foreground="purple"
         )
 
@@ -5920,20 +5920,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 弹出菜单
         menu.post(event.x_root, event.y_root)
 
+    def _get_audit_end_date(self):
+        """探测当前主窗口或核心面板的活跃截止日期 [🚀 数据对齐核心]"""
+        # 1. 优先从竞价赛马面板提取历史模式状态
+        if hasattr(self, 'sector_bidding_panel') and getattr(self.sector_bidding_panel, '_is_history_mode', False):
+            t_str = getattr(self.sector_bidding_panel, '_history_date', None)
+            if t_str:
+                last_td = str(cct.get_last_trade_date()).replace("-", "")
+                if t_str < last_td:
+                    return t_str
+            # return getattr(self.sector_bidding_panel, '_history_date', None)
+        # 2. 从策略选股主窗口提取 (如有)
+        if hasattr(self, '_stock_selection_win') and getattr(self._stock_selection_win, 'current_date', False):
+            t_str = getattr(self._stock_selection_win, 'current_date', None)
+            if t_str:
+                last_td = str(cct.get_last_trade_date())
+                if t_str < last_td:
+                    return t_str
+        return None
+
     def _run_dna_audit_batch(self, code_to_name, end_date=None):
         import threading
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
         from tkinter import messagebox
         
+        # 🚀 [NEW] 防重入保护
+        if getattr(self, '_dna_audit_running', False):
+            return
+        self._dna_audit_running = True
+        
         codes = list(code_to_name.keys())
-        if not codes: return
+        if not codes:
+            self._dna_audit_running = False
+            return
         
         # 弹一个简单提示
         top = tk.Toplevel(self)
+        top.withdraw() # 🚀 [NEW] 立即隐藏
+        top.attributes("-alpha", 0.0) # 🚀 [NEW] 彻底透明防止瞬间闪烁
         top.title("DNA 审计运行中...")
-        top.geometry("300x100")
-        tk.Label(top, text=f"正在对 {len(codes)} 只股票进行极限深度DNA审计...\n请勿操作界面", font=("微软雅黑", 10)).pack(expand=True)
-        top.update()
+        
+        # 界面美化
+        top.configure(bg='#f0f0f0')
+        content_frame = tk.Frame(top, bg='#f0f0f0', padx=20, pady=20)
+        content_frame.pack(expand=True, fill='both')
+        
+        msg = f"正在对 {len(codes)} 只股票进行极限深度DNA审计...\n请勿操作界面"
+        tk.Label(content_frame, text=msg, font=("微软雅黑", 10, "bold"), bg='#f0f0f0', fg='#333').pack(expand=True)
+        
+        # 置顶并居中
+        top.attributes("-topmost", True)
+        # 计算位置
+        w, h = 350, 120
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        
+        top.update_idletasks()
+        # top.deiconify() # 🚀 [OFF] 用户要求“先隐藏不显示”，故保持 withdrawn 状态静默运行
         
         def run_task():
             try:
@@ -5943,6 +5989,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self, end_date=end_date)])
             except Exception as e:
                 self.after(0, lambda: [top.destroy(), messagebox.showerror("DNA 审计出错", str(e), parent=self)])
+            finally:
+                self._dna_audit_running = False
                 
         threading.Thread(target=run_task, daemon=True).start()
 
