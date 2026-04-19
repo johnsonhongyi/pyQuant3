@@ -1236,7 +1236,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     
         if code_to_name:
             if hasattr(self.master, '_run_dna_audit_batch'):
-                self.master._run_dna_audit_batch(code_to_name)
+                # 🚀 [NEW] 支持历史截止日期审计
+                end_date = self.current_date
+                self.master._run_dna_audit_batch(code_to_name, end_date=end_date)
             else:
                 logger.error("No access to main monitor app for DNA audit.")
     

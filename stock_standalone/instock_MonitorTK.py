@@ -940,7 +940,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 continue
         
         if code_to_name:
-            self._run_dna_audit_batch(code_to_name)
+            # 🚀 [NEW] 检测历史截止日期
+            end_date = None
+            if hasattr(self, 'sector_bidding_panel') and getattr(self.sector_bidding_panel, '_is_history_mode', False):
+                end_date = getattr(self.sector_bidding_panel, '_history_date', None)
+                
+            self._run_dna_audit_batch(code_to_name, end_date=end_date)
 
         
 
@@ -1797,13 +1802,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         elif obj and obj.get("cmd") == "DNA_AUDIT":
                             codes_dict = obj.get("codes", {})
+                            end_date = obj.get("end_date")
                             if codes_dict:
-                                logger.info(f"[Pipe] Recv DNA_AUDIT for {len(codes_dict)} stocks")
-                                def trigger_audit():
-                                    from backtest_feature_auditor import audit_multiple_codes
-                                    # 注意：主程序中的 open_dna_auditor_top50 也调用了 audit_multiple_codes
-                                    audit_multiple_codes(codes_dict, self)
-                                self.tk_dispatch_queue.put(trigger_audit)
+                                logger.info(f"[Pipe] Recv DNA_AUDIT for {len(codes_dict)} stocks. EndDate: {end_date}")
+                                self.tk_dispatch_queue.put(lambda c=codes_dict, ed=end_date: self._run_dna_audit_batch(c, end_date=ed))
 
                         elif obj and obj.get("cmd") == "EXEC_MACRO":
                             macro = obj.get("macro")
@@ -5918,7 +5920,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 弹出菜单
         menu.post(event.x_root, event.y_root)
 
-    def _run_dna_audit_batch(self, code_to_name):
+    def _run_dna_audit_batch(self, code_to_name, end_date=None):
         import threading
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
         from tkinter import messagebox
@@ -5936,9 +5938,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def run_task():
             try:
                 # 调用批量接口
-                summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+                summaries = audit_multiple_codes(codes, end_date=end_date, code_to_name=code_to_name)
                 # 切回主线程展示
-                self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self)])
+                self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self, end_date=end_date)])
             except Exception as e:
                 self.after(0, lambda: [top.destroy(), messagebox.showerror("DNA 审计出错", str(e), parent=self)])
                 
@@ -11422,7 +11424,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"[update_category_result] 更新概念信息出错: {e}", exc_info=True)
 
-    def on_code_click(self, code):
+    def on_code_click(self, code, date=None):
         """点击异动窗口中的股票代码 - 线程安全异步版"""
         if not code: return
         
@@ -11430,11 +11432,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 if code != getattr(self, 'select_code', None):
                     self.select_code = code
-                    logger.debug(f"select_code activated: {code}")
+                    logger.debug(f"select_code activated: {code} Date: {date}")
                     self.sender.send(code)
                     # 联动 Visualizer (如果启用)
                     if hasattr(self, 'vis_var') and self.vis_var.get():
-                        self.open_visualizer(code)
+                        self.open_visualizer(code, timestamp=date)
             except Exception as e:
                 logger.error(f"Error in on_code_click async logic: {e}")
 
@@ -12168,10 +12170,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame.pack(side="left", padx=6)
 
         chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto,takefocus=False)
+        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
         chk_btn.pack(side="left")
 
-        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5,takefocus=False)
+        # 🚀 [NEW] 添加精简“审计”按钮
+        def _do_concept_audit():
+            items = tree.get_children()
+            if not items: return
+            c_dict = {str(tree.item(i, 'values')[0]).zfill(6): str(tree.item(i, 'values')[1]) for i in items}
+            if c_dict: self._run_dna_audit_batch(c_dict)
+
+        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit, 
+                              relief="flat", cursor="hand2", padx=2, font=("微软雅黑", 8))
+        btn_audit.pack(side="left", padx=(0, 4))
+
+        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=4, takefocus=False)
         spin_interval.delete(0, "end")
         spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")
@@ -12497,10 +12510,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame.pack(side="left", padx=6)
 
         chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto,takefocus=False)
+        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
         chk_btn.pack(side="left")
 
-        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5,takefocus=False)
+        # 🚀 [NEW] 添加精简“审计”按钮
+        def _do_concept_audit_full():
+            items = tree.get_children()
+            if not items: return
+            c_dict = {str(tree.item(i, 'values')[0]).zfill(6): str(tree.item(i, 'values')[1]) for i in items}
+            if c_dict: self._run_dna_audit_batch(c_dict)
+
+        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit_full, 
+                              relief="flat", cursor="hand2", padx=2, font=("微软雅黑", 8))
+        btn_audit.pack(side="left", padx=(0, 4))
+
+        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=4, takefocus=False)
         spin_interval.delete(0, "end")
         spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")

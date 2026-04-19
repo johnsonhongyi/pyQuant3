@@ -3928,7 +3928,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if code_to_name:
             main_app = getattr(self, 'main_window', None)
             if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
-                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+                # 🚀 [NEW] 历史复盘模式自动透传截止日期
+                end_date = self._history_date if getattr(self, '_is_history_mode', False) else None
+                main_app.tk_dispatch_queue.put(lambda c=code_to_name, ed=end_date: main_app._run_dna_audit_batch(c, end_date=ed))
             else:
                 logger.error("未连接到主监视器程序，无法启动 DNA 审计")
 
