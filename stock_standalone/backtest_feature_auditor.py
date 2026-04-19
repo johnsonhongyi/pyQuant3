@@ -92,6 +92,7 @@ def calculate_dna_indicators(df):
     with timed_ctx("DNA Indicators Calculate"):
         if df is None or len(df) < 20: return None
         df['pct'] = df['close'].pct_change() * 100
+        df['ma8'] = df['close'].rolling(8).mean()
         df['ma10'] = df['close'].rolling(10).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma10_vol'] = df['vol'].rolling(10).mean()
@@ -100,8 +101,9 @@ def calculate_dna_indicators(df):
         df['high4'] = df['high'].rolling(4).max().shift(1)
         df['c_upper'] = df['close'] / df['upper']
         df['c_h4'] = df['close'] / df['high4']
+        df['c_ma8'] = df['close'] / df['ma8']
+        df['c_ma20'] = df['close'] / df['ma20']
         df['v_ratio'] = df['vol'] / df['ma10_vol']
-        df['c_ma10'] = df['close'] / df['ma10']
         df['is_bid_low'] = (df['open'] == df['low'])
         return df
 
@@ -111,7 +113,12 @@ class AuditSummary:
         self.alpha_sum, self.max_adhesion = 0, 0
         self.squeeze_days, self.divergence_days = 0, 0
         self.intent_score, self.verdict, self.total_pct = 0, "", 0
+        self.anti_drop_count = 0  # 大盘跌他涨
+        self.leverage_count = 0   # 大盘涨更涨
+        self.shield_count = 0     # 大盘回调他微调
+        self.dragon_squeeze_days = 0 # 龙息蓄势 (上轨突破后缩量回调)
         self.suggestions = []
+        self.history = []
 
     def finalize(self, rows):
         self.alpha_sum = sum(r['alpha'] for r in rows)
@@ -122,22 +129,49 @@ class AuditSummary:
                 streak += 1
                 self.max_adhesion = max(self.max_adhesion, streak)
             else: streak = 0
+            
             if r['v_ratio'] < 0.76 and abs(r['alpha']) < 1.0: self.squeeze_days += 1
             if r['pct'] > 0 and r['idx_pct'] < -0.3: self.divergence_days += 1
-        self.intent_score = (self.alpha_sum * 0.4) + (self.max_adhesion * 5) + (self.squeeze_days * 3)
+            
+            # [💎 DNA 核心特征提炼]
+            # 1. 大盘跌他涨 (逆势特征)
+            if r['idx_pct'] < -0.5 and r['pct'] > 0: self.anti_drop_count += 1
+            # 2. 大盘涨更涨 (进攻杠杆)
+            if r['idx_pct'] > 0.5 and r['pct'] > r['idx_pct'] * 1.5: self.leverage_count += 1
+            # 3. 大盘回调他微调 (抗跌韧性)
+            if r['idx_pct'] < -1.0 and r['pct'] > r['idx_pct'] * 0.4 and r['pct'] < 0: self.shield_count += 1
+            
+            # 4. [🚀 龙息蓄势] 突破上轨后的缩量踩线 (关键预判)
+            # 条件：最近有过强力贴轨，当前缩量(v_ratio<1)，且价格回踩 MA8/MA20 附近 (0.98~1.03)
+            if self.max_adhesion >= 1 and r['v_ratio'] < 1.05 and 0.98 <= r['c_ma8'] <= 1.03:
+                if abs(r['alpha']) < 2.0: self.dragon_squeeze_days += 1
+            
+            self.history.append(r) 
+
+        self.intent_score = (self.alpha_sum * 0.4) + (self.max_adhesion * 5) + (self.squeeze_days * 3) + \
+                            (self.anti_drop_count * 8) + (self.leverage_count * 5) + (self.shield_count * 6) + \
+                            (self.dragon_squeeze_days * 10)
         
-        if self.intent_score > 35 and self.max_adhesion >= 3:
+        if self.intent_score > 50 and (self.max_adhesion >= 3 or self.anti_drop_count >= 2 or self.dragon_squeeze_days >= 2):
             self.verdict = "💎 [金身种子] 核心主升"
-            self.suggestions.append("- 探测到极高 Alpha 浓度，展现出极其罕见的独立主升意图")
-            self.suggestions.append(f"- 轨道接力稳固({self.max_adhesion}天)，股价贴合 Upper 强轴爬行")
-        elif self.intent_score > 15:
+            if self.dragon_squeeze_days >= 2:
+                self.suggestions.append(f"- 探测到极高价值的‘龙息蓄势’基因({self.dragon_squeeze_days}天)，属于典型的强突破后缩量回踩 MA 企稳")
+            else:
+                self.suggestions.append("- 探测到极强独立进攻基因，在指数走弱时具备卓越的抗风险与上攻动力")
+            self.suggestions.append(f"- 轨道接力稳固({self.max_adhesion}天)，表现出明显的‘大盘跌他涨’特征({self.anti_drop_count}天)")
+        elif self.intent_score > 20:
             self.verdict = "🚀 [加速跑道] 意图确认"
-            self.suggestions.append("- 正在脱离结构压力位，处于爆发初期的轨道切换阶段")
+            self.suggestions.append("- 正在脱离结构压力位，具备较好的‘补涨+领涨’混合属性")
+            if self.leverage_count >= 2: self.suggestions.append(f"- 具备高度的进攻杠杆({self.leverage_count}天)，属于‘大盘涨更涨’的活跃品种")
         else:
             self.verdict = "⚠️ [诱多陷阱] 杂毛跟风"
-            self.suggestions.append("- 缺乏独立进攻基因，轨道拒斥明显，跟风属性重")
-        if self.divergence_days >= 2:
-            self.suggestions.append(f"- 存在 {self.divergence_days} 天抗跌背离，符合泥沙俱下中的种子特征")
+            self.suggestions.append("- 缺乏独立基因，在指数回调时回撤过大，大概率属于被动跟风")
+
+        if self.shield_count >= 1:
+            self.suggestions.append(f"- 展现出‘大盘深度回调，个股韧性维持’的特征，具备较好的安全垫")
+        
+        if self.divergence_days >= 2 and self.anti_drop_count == 0:
+             self.suggestions.append(f"- 存在 {self.divergence_days} 天抗跌背离，符合泥沙俱下中的种子特征")
 
 def run_optimized_audit(code, start_date, end_date):
     with timed_ctx(f"Load & Audit {code}"):
@@ -151,11 +185,13 @@ def run_optimized_audit(code, start_date, end_date):
         if df is None: return None
         
         idx_code = get_corresponding_index(code)
+        if code.startswith(('0', '3')): idx_code = "399001"
+        elif code.startswith('8'): idx_code = "899050" 
+        
         if idx_code in INDEX_DATA_CACHE:
             df_idx = INDEX_DATA_CACHE[idx_code]
         else:
             with timed_ctx(f"Load Index {idx_code}"):
-                # [🚀 LIGHTWEIGHT LOAD] 指数同样使用极速模式
                 df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
                 INDEX_DATA_CACHE[idx_code] = df_idx
         df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
@@ -170,7 +206,19 @@ def run_optimized_audit(code, start_date, end_date):
         for dt in audit_dates:
             row = df.loc[dt]
             idx_p = df_idx.loc[dt, 'idx_pct'] if dt in df_idx.index else 0
-            audit_rows.append({'alpha': row['pct'] - idx_p, 'idx_pct': idx_p, 'pct': row['pct'], 'c_upper': row['c_upper'], 'v_ratio': row['v_ratio'], 'close': row['close'], 'prev_close': df.iloc[df.index.get_loc(dt)-1]['close']})
+            alpha = row['pct'] - idx_p
+            audit_rows.append({
+                'date': dt,
+                'alpha': alpha, 
+                'idx_pct': idx_p, 
+                'pct': row['pct'], 
+                'c_upper': row['c_upper'], 
+                'c_ma8': row['c_ma8'],
+                'c_ma20': row['c_ma20'],
+                'v_ratio': row['v_ratio'], 
+                'close': row['close'], 
+                'prev_close': df.iloc[df.index.get_loc(dt)-1]['close']
+            })
         summary.finalize(audit_rows)
         return summary
 
@@ -336,10 +384,22 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
             self.txt_detail.insert(tk.END, "-"*60 + "\n[ 审计专家洞察 ]\n")
             for sug in target_s.suggestions:
                 self.txt_detail.insert(tk.END, f"● {sug}\n")
-            self.txt_detail.insert(tk.END, "\n" + "="*60 + "\n")
+            
+            # [🚀 NEW] 指标演进提炼表格
+            self.txt_detail.insert(tk.END, "\n[ 指标演进提炼 (Indicator Evolution) ]\n", "title_small")
+            header = f"{'日期':<12} {'Alpha':>8} {'涨幅%':>8} {'指数%':>8} {'Bol-U':>8} {'量比':>8}\n"
+            self.txt_detail.insert(tk.END, header, "header")
+            for h in target_s.history[-15:]: # 显示最近 15 天
+                row_str = f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}\n"
+                self.txt_detail.insert(tk.END, row_str, "row")
+                
+            self.txt_detail.insert(tk.END, "\n" + "="*48 + "\n")
             
             # 设置简单的富文本样式
             self.txt_detail.tag_configure("title", font=("微软雅黑", 12, "bold"), foreground="#2c3e50")
+            self.txt_detail.tag_configure("title_small", font=("微软雅黑", 10, "bold"), foreground="#34495e")
+            self.txt_detail.tag_configure("header", font=("Consolas", 9, "bold"), foreground="#7f8c8d")
+            self.txt_detail.tag_configure("row", font=("Consolas", 9), foreground="#2c3e50")
 
     def _on_double_click(self, event):
         sel = self.tree.selection()
@@ -426,15 +486,81 @@ def show_dna_audit_report_window(summaries, parent=None):
     DnaAuditReportWindow(summaries, parent=parent)
 
 def main():
-    parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8")
-    parser.add_argument("-c", "--code", type=str, default="002990,603698,300058")
-    parser.add_argument("-s", "--start", type=str, default="20260328")
-    parser.add_argument("-e", "--end", type=str)
+    parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")
+    parser.add_argument("-c", "--code", type=str, help="指定股票代码，用逗号分隔 (如 000001,600000)")
+    parser.add_argument("-n", "--top_n", type=int, help="自动从最新共享池中提取 Top N 个股进行批量审计")
+    parser.add_argument("-f", "--follow", action="store_true", help="自动提取当前具有 'signal' 信号的个股进行审计")
+    parser.add_argument("-m", "--mine", action="store_true", help="全盘挖掘全盘挖掘模式：扫描全市场寻找具备‘龙息蓄势’或‘金身种子’特征的潜伏个股")
+    parser.add_argument("-v", "--verbose", action="store_true", help="输出详细的每日指标演进提炼报告")
+    parser.add_argument("-s", "--start", type=str, help="审计起始日期 (YYYYMMDD), 默认最近25天")
+    parser.add_argument("-e", "--end", type=str, help="审计结束日期 (YYYYMMDD)")
     args = parser.parse_args()
     
+    codes = []
+    code_to_name = {}
+    
     with timed_ctx("Total Execution"):
-        codes = [c.strip().zfill(6) for c in args.code.split(',')]
-        summaries = audit_multiple_codes(codes, args.start, args.end)
+        # 1. 确定代码来源
+        if args.code:
+            codes = [c.strip().zfill(6) for c in args.code.split(',')]
+        elif args.top_n or args.follow or args.mine:
+            # 从 HDF5 动态加载
+            import glob
+            h5_files = glob.glob("g:/shared_df_all-*.h5")
+            if h5_files:
+                latest_h5 = sorted(h5_files)[-1]
+                print(f"[*] 正在从最新池加载数据: {os.path.basename(latest_h5)}")
+                try:
+                    with pd.HDFStore(latest_h5, mode='r') as store:
+                        key = store.keys()[0]
+                        df_all = store.select(key)
+                        
+                        if args.follow:
+                            # 过滤有信号的
+                            if 'signal' in df_all.columns:
+                                df_all['signal'] = df_all['signal'].fillna('')
+                                df_follow = df_all[df_all['signal'].str.len() > 0]
+                                if df_follow.empty and 'trade_signal' in df_all.columns:
+                                    df_all['trade_signal'] = df_all['trade_signal'].fillna('')
+                                    df_follow = df_all[df_all['trade_signal'].str.len() > 0]
+                            else:
+                                df_follow = pd.DataFrame()
+                                
+                            if not df_follow.empty:
+                                # 只取涨幅前 50，避免全市场审计导致慢死
+                                df_follow = df_follow.sort_values(by='percent', ascending=False).head(50)
+                                codes = df_follow.index.tolist()
+                                if 'name' in df_follow.columns:
+                                    code_to_name = df_follow['name'].to_dict()
+                            print(f"[*] 发现 {len(codes)} 只带信号个股 (已取 Top 50)")
+                        
+                        if args.mine and not codes:
+                            # [全盘挖掘] 扫描全市场
+                            codes = df_all.index.tolist()
+                            if 'name' in df_all.columns:
+                                code_to_name = df_all['name'].to_dict()
+                            print(f"[*] 全力开启全盘挖掘模式，扫描 {len(codes)} 只个股...")
+                            
+                        if args.top_n and not codes:
+                            # 按涨幅排序取 Top N (最高 100)
+                            n = min(args.top_n, 100)
+                            if 'percent' in df_all.columns:
+                                df_top = df_all.sort_values(by='percent', ascending=False).head(n)
+                                codes = df_top.index.tolist()
+                                if 'name' in df_top.columns:
+                                    code_to_name = df_top['name'].to_dict()
+                            print(f"[*] 提取涨幅 Top {n} 个股进行深度审计")
+                except Exception as e:
+                    print(f"[!] 加载共享池失败: {e}")
+            else:
+                print("[!] 未找到共享 HDF5 数据文件，无法执行批量审计。")
+        
+        # 兜底
+        if not codes:
+            codes = ["002990", "603698", "300058"]
+            print(f"[*] 使用默认演示代码: {codes}")
+            
+        summaries = audit_multiple_codes(codes, args.start, args.end, code_to_name=code_to_name)
         
         if summaries:
             print("\n" + "="*85)
@@ -449,7 +575,34 @@ def main():
             for s in sorted(summaries, key=lambda x: x.intent_score, reverse=True):
                 print(f"\n>>> {s.name} ({s.code}) -> {s.verdict}")
                 for sug in s.suggestions: print(sug)
+                
+                if args.verbose:
+                    print(f"\n    [ 指标演进提炼 (Indicator Evolution) ]")
+                    print(f"    {'Date':<12} {'Alpha':>8} {'Pct%':>8} {'Idx%':>8} {'C/Upper':>8} {'V-Ratio':>8}")
+                    # 只显示最近 10 天
+                    for h in s.history[-10:]:
+                        print(f"    {h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}")
             print("\n" + "="*85)
+            
+            # 如果是全盘挖掘模式，输出专门的潜伏报告
+            if args.mine:
+                print("\n" + "="*85)
+                print(f"{' [ 🕵️ 全盘潜伏基因种子挖掘报告 ] ':=^85}")
+                print("="*85)
+                print(f"{'Code':<8} {'Name':<10} {'Score':<10} {'Squeeze':<10} {'Today%':<10} {'Verdict'}")
+                print("-" * 85)
+                # 挖掘过滤器：分数较高、涨幅未爆发(<5%)、且具备蓄势或韧性基因
+                mining_seeds = [s for s in summaries if s.intent_score > 35 and s.history[-1]['pct'] < 5.0]
+                # 优先展示有“龙息蓄势”或“韧性”的
+                mining_seeds = sorted(mining_seeds, key=lambda x: (x.dragon_squeeze_days > 0, x.intent_score), reverse=True)
+                
+                for s in mining_seeds[:30]: # 只透视最有潜力的 30 个
+                    now_pct = s.history[-1]['pct']
+                    print(f"{s.code:<8} {s.name:<10} {s.intent_score:>8.1f} {s.dragon_squeeze_days:>8} {now_pct:>9.2f}%   {s.verdict}")
+                
+                print("-" * 85)
+                print(f"[*] 全盘挖掘完成。从 {len(summaries)} 只个股中提炼出 {len(mining_seeds)} 只潜伏种子。")
+                print("="*85)
 
     # 打印全局性能汇总
     print("\n" + "="*45)
