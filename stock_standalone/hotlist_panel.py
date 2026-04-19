@@ -1223,7 +1223,7 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _update_watchlist_queue(self, df=None):
         """刷新观察池可视化 (智能增量渲染)"""
-        with timed_ctx("update_watchlist", warn_ms=100):
+        with timed_ctx("update_watchlist", warn_ms=10000):
             try:
                 if df is None:
                     df = getattr(self, '_last_df_watchlist', None)
@@ -1375,7 +1375,7 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _on_watchlist_click(self, row, col):
         if row < 0: return
-        with timed_ctx("watchlist_click", warn_ms=100):
+        with timed_ctx("watchlist_click", warn_ms=10000):
             try:
                 code_item = self.watchlist_table.item(row, 2)
                 name_item = self.watchlist_table.item(row, 3)
@@ -1400,7 +1400,7 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _on_watchlist_double_click(self, row, col):
         if row < 0: return
-        with timed_ctx("watchlist_double_click", warn_ms=2000):
+        with timed_ctx("watchlist_double_click", warn_ms=10000):
             try:
                 code_item = self.watchlist_table.item(row, 2)
                 name_item = self.watchlist_table.item(row, 3)
@@ -1769,7 +1769,7 @@ class HotlistPanel(QWidget, WindowMixin):
     
     def _on_tab_changed(self, index):
         """Tab 切换回调"""
-        with timed_ctx(f"tab_changed_{index}", warn_ms=100):
+        with timed_ctx(f"tab_changed_{index}", warn_ms=10000):
             if index == 1: # Follow
                 if (df := getattr(self, '_last_df_follow', None)) is not None:
                     self._update_follow_queue(df)
@@ -2547,7 +2547,7 @@ class HotlistPanel(QWidget, WindowMixin):
     def _on_click(self, row: int, col: int):
         """单击切换股票 (带去重)"""
         if row < 0: return
-        with timed_ctx("hotlist_click", warn_ms=100):
+        with timed_ctx("hotlist_click", warn_ms=10000):
             item = self._get_item_from_row(row)
             if item:
                 # [DEBUNCE] 增加去重逻辑，防止重复联动主窗口
