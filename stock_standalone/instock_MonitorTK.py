@@ -381,7 +381,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #   pump_executor  (1线程) = 轻量编排: 解包/过滤/排序/调度 → Compute 返回后单点写 UI
         #   compute_executor (N线程) = CPU重计算: 信号检测/策略/情绪评分
         #   compute 线程永远不直接触碰 UI，结果必须回流 pump 后统一写入
-        _compute_workers = max(10, cct.livestrategy_max_workers)
+        cpu_count = int(os.cpu_count()/2) or 4
+        _compute_workers = min(cpu_count, cct.livestrategy_max_workers)
         self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
         self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")
         self.executor = self.compute_executor  # 🛡️ 向后兼容别名
@@ -764,18 +765,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
              from market_pulse_viewer import MarketPulseViewer
              self._pulse_viewer_class = MarketPulseViewer
-             pulse_btn = tk.Button(ctrl_frame, text="每日复盘", 
-                                 bg="purple", fg="white", 
-                                 font=self.default_font_bold,
-                                 command=self.open_market_pulse)
-             pulse_btn.pack(side="left", padx=5)
+             # [NEW] 存档按钮 (对调至此)
+             archive_btn = tk.Button(ctrl_frame, text="存档", 
+                                 font=self.default_font, pady=2,
+                                 command=self.open_archive_loader)
+             archive_btn.pack(side="left", padx=5)
              
-             # [NEW] DNA 意图审计按钮
-             dna_btn = tk.Button(ctrl_frame, text="🔍 DNA审计", 
-                                 bg="#004d99", fg="white", 
-                                 font=self.default_font_bold,
-                                 command=self.open_dna_auditor_top50)
-             dna_btn.pack(side="left", padx=5)
+             # [NEW] 策略按钮 (对调至此)
+             str_btn = tk.Button(ctrl_frame, text="策略", 
+                                 fg="blue", font=self.default_font_bold, pady=2,
+                                 command=lambda: self.open_strategy_manager())
+             str_btn.pack(side="left", padx=5)
         except ImportError as e:
              logger.error(f"Failed to import MarketPulseViewer: {e}")
              self._pulse_viewer_class = None
@@ -1178,7 +1178,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     t_name = t_name.replace("StockMonitorApp.", "").replace(".<locals>", "")
 
                     task_start = time.perf_counter()
-                    task()
+                    try:
+                        task()
+                    except tk.TclError as te:
+                        # 🛡️ [GUARD] 屏蔽由于窗口销毁导致的无效命令报错
+                        if "invalid command name" not in str(te):
+                            logger.error(f"TclError in Dispatch [{t_name}]: {te}")
                     task_dur = (time.perf_counter() - task_start) * 1000
                     
                     # ⭐ [PERFORMANCE] 监测主线程耗时任务
@@ -3294,17 +3299,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # tk.Button(ctrl_frame, text="清空4", command=lambda: self.clean_search(3)).pack(side="left", padx=2)
         # tk.Button(ctrl_frame, text="删除4", command=lambda: self.delete_search_history(3)).pack(side="left", padx=2)
         
-        tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init()).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window()).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="策略", command=lambda: self.open_strategy_manager(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="赛马🏁", command=lambda: self.open_racing_panel(), font=self.default_font_bold, fg="darkred", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", padx=2, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="复盘", command=self.open_market_pulse, font=self.default_font_bold, 
+                  bg="purple", fg="white", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="审计", command=self.open_dna_auditor_top50, font=self.default_font_bold, 
+                  bg="#004d99", fg="white", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="赛马🏁", command=lambda: self.open_racing_panel(), font=self.default_font_bold, fg="darkred", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -3886,7 +3893,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         now = time.time()
         has_update = False
-        with timed_ctx("apply_tree_data_sync_timed", warn_ms=1000):
+        with timed_ctx("apply_tree_data_sync_timed", warn_ms=10000):
             try:
                 # 1. [CORE] 更新主内存及其版本 (必须每轮执行)
                 # 计算快照 Hash 用于版本校验，若数据完全无变动则跳过后续昂贵的 UI 渲染
@@ -5001,7 +5008,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
                 if hasattr(self, 'df_ui_prev') and not self._cold_start:
                     try:
-                        with timed_ctx("viz_df_compare", warn_ms=1000):
+                        with timed_ctx("viz_df_compare", warn_ms=10000):
                             # 仅在已有缓存且不是冷启动时才 compare
                             df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
                             
@@ -5082,14 +5089,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not sent and vis_enabled and now_ipc > ipc_cooldown:
                     try:
                         # 1️⃣ pickle 单独计时
-                        with timed_ctx("viz_IPC_pickle", warn_ms=300):
+                        with timed_ctx("viz_IPC_pickle", warn_ms=10000):
                             payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
                                      protocol=pickle.HIGHEST_PROTOCOL)
 
                         header = struct.pack("!I", len(payload))
 
                         # 2️⃣ socket 单独计时
-                        with timed_ctx("viz_IPC_send", warn_ms=400):
+                        with timed_ctx("viz_IPC_send", warn_ms=10000):
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                                 s.settimeout(0.4) # 缩短超时到 400ms
                                 s.connect((ipc_host, ipc_port))
@@ -5954,40 +5961,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._dna_audit_running = False
             return
         
-        # 弹一个简单提示
+        # 弹一个带进度条的提示
         top = tk.Toplevel(self)
-        top.withdraw() # 🚀 [NEW] 立即隐藏
-        top.attributes("-alpha", 0.0) # 🚀 [NEW] 彻底透明防止瞬间闪烁
-        top.title("DNA 审计运行中...")
+        top.withdraw() 
+        top.attributes("-alpha", 0.0) 
+        top.title("🧬 DNA 审计中...")
         
         # 界面美化
-        top.configure(bg='#f0f0f0')
-        content_frame = tk.Frame(top, bg='#f0f0f0', padx=20, pady=20)
+        top.configure(bg='#f8f9fa')
+        content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
         content_frame.pack(expand=True, fill='both')
         
-        msg = f"正在对 {len(codes)} 只股票进行极限深度DNA审计...\n请勿操作界面"
-        tk.Label(content_frame, text=msg, font=("微软雅黑", 10, "bold"), bg='#f0f0f0', fg='#333').pack(expand=True)
+        msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
+                           font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
+        msg_label.pack(pady=(0, 10))
         
-        # 置顶并居中
-        top.attributes("-topmost", True)
-        # 计算位置
-        w, h = 350, 120
+        # 进度条
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(content_frame, variable=progress_var, maximum=len(codes), mode='determinate', length=280)
+        progress_bar.pack(pady=5)
+        
+        status_label = tk.Label(content_frame, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
+        status_label.pack()
+        
+        # 初始化展示位置
+        w, h = 320, 140
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
+        x, y = (sw - w) // 2, (sh - h) // 2
         top.geometry(f"{w}x{h}+{x}+{y}")
+        top.attributes("-topmost", True)
+        top.deiconify() # 直接显示
         
-        top.update_idletasks()
-        # top.deiconify() # 🚀 [OFF] 用户要求“先隐藏不显示”，故保持 withdrawn 状态静默运行
-        
+        def progress_cb(curr, total, msg):
+            """跨线程进度回调"""
+            def _update():
+                try:
+                    # 🛡️ [GUARD] 若窗口已被用户关闭，静默退出，防止 TclError: invalid command name
+                    if not top.winfo_exists(): return
+                    progress_var.set(curr)
+                    status_label.config(text=msg)
+                    if curr >= total:
+                        status_label.config(text="✅ 正在呼出报告...")
+                except tk.TclError:
+                    pass # 窗体已销毁
+                    
+            # 🚀 [THREAD-SAFE] 通过 dispatch 队列回传 UI 更新
+            if hasattr(self, 'tk_dispatch_queue'):
+                self.tk_dispatch_queue.put(_update)
+
         def run_task():
             try:
                 # 调用批量接口
-                summaries = audit_multiple_codes(codes, end_date=end_date, code_to_name=code_to_name)
+                summaries = audit_multiple_codes(codes, 
+                                               end_date=end_date, 
+                                               code_to_name=code_to_name,
+                                               progress_callback=progress_cb)
                 # 切回主线程展示
                 self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self, end_date=end_date)])
             except Exception as e:
+                logger.error(f"DNA Audit failed: {e}")
                 self.after(0, lambda: [top.destroy(), messagebox.showerror("DNA 审计出错", str(e), parent=self)])
             finally:
                 self._dna_audit_running = False
@@ -12217,10 +12250,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame = tk.Frame(btn_frame)
         ctrl_frame.pack(side="left", padx=6)
 
-        chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
-        chk_btn.pack(side="left")
-
         # 🚀 [NEW] 添加精简“审计”按钮
         def _do_concept_audit():
             items = tree.get_children()
@@ -12228,9 +12257,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             c_dict = {str(tree.item(i, 'values')[0]).zfill(6): str(tree.item(i, 'values')[1]) for i in items}
             if c_dict: self._run_dna_audit_batch(c_dict)
 
-        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit, 
-                              relief="flat", cursor="hand2", padx=2, font=("微软雅黑", 8))
-        btn_audit.pack(side="left", padx=(0, 4))
+        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit)
+        btn_audit.pack(side="left", padx=2)
+
+        chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
+        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
+        chk_btn.pack(side="left")
 
         spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=4, takefocus=False)
         spin_interval.delete(0, "end")
@@ -12557,10 +12589,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame = tk.Frame(btn_frame)
         ctrl_frame.pack(side="left", padx=6)
 
-        chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
-        chk_btn.pack(side="left")
-
         # 🚀 [NEW] 添加精简“审计”按钮
         def _do_concept_audit_full():
             items = tree.get_children()
@@ -12568,9 +12596,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             c_dict = {str(tree.item(i, 'values')[0]).zfill(6): str(tree.item(i, 'values')[1]) for i in items}
             if c_dict: self._run_dna_audit_batch(c_dict)
 
-        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit_full, 
-                              relief="flat", cursor="hand2", padx=2, font=("微软雅黑", 8))
-        btn_audit.pack(side="left", padx=(0, 4))
+        btn_audit = tk.Button(ctrl_frame, text="🧬审计", command=_do_concept_audit_full)
+        btn_audit.pack(side="left", padx=2)
+
+        chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
+        chk_btn = tk.Checkbutton(ctrl_frame, text="", variable=chk_auto, takefocus=False)
+        chk_btn.pack(side="left")
 
         spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=4, takefocus=False)
         spin_interval.delete(0, "end")

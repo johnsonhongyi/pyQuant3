@@ -57,6 +57,17 @@
 
 ---
 
+## 2026-04-19 17:35
+- [x] **修复 DNA 审计切片错误与数据处理鲁棒性 (Fixed DNA Audit Slice Error & Robustness)**：
+    - [x] **根治 `TypeError: slice indices must be integers`**：重构了 `run_optimized_audit` 内部的审计循环。将原先基于 `Index.get_loc(dt)` 的元素提取逻辑重构为基于 `np.where` 预计算的整数位置偏移（Integer Offsets）。这彻底消除了在 DataFrame 索引（Index）包含重复日期或非唯一键时，`get_loc` 返回切片/掩码导致的数学运算崩溃，恢复了批量审计的稳定性。
+    - [x] **完善数据加载边界保护**：在指数数据加载路径中增加了 `df_idx is None` 与 `.empty` 判定，防止由于特定指数（如北交所指数）数据缺失导致的属性访问异常。
+    - [x] **优化 `prev_close` 起点算法**：通过简单的 `row.get` 与百分比反算逻辑，补全了历史数据处理第一行的 `prev_close` 缺口，确保了全时段累计涨幅与超额收益（Alpha）计算的连续性。
+    - [x] **加固审计总结器 (AuditSummary)**：为 `finalize` 引入了除零保护，确保在极端数据（如股价为零或缺失）情况下系统不会报出异常。
+    - [x] **上线“变盘结构”与“地量筑底”基因探测 (DNA Analytics Upgrade)**：
+        - [x] **探测大跌地量筑底**：引入 `drop_10d` 指标，专项识别 10 日大跌后的极度缩量（v_ratio < 0.65），将其定义为高价值“筑底基因”并给予额外评分加权。
+        - [x] **识别缩量十字星变盘**：新增 `is_doji` 算法，实时捕捉尾盘出现的缩量十字星（变盘结构）。针对近 2 日出现的临界信号给予 +15 分的高额权重，并输出“临界变盘”专项提示，强化对方向选择点的洞察力。
+        - [x] **优化窗口启动动画**：采用 `alpha=0` 预置与 `fade_in` 渐变展现方案，彻底消除了 DNA 审计窗口初始化时的小方块闪烁与跳跃问题。
+
 ## 2026-04-19 12:15
 - [x] **深度优化 DNA 审计交互与焦点感知闭环 (Optimized DNA Audit UI & Context Awareness)**：
     - [x] **深化选股窗口“历史视图”联动审计 (Deep Linkage in StockSelectionWindow)**：

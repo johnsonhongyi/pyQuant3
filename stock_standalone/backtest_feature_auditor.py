@@ -22,7 +22,7 @@ sys.path.append(BASE_DIR)
 sys.path.append(os.path.join(BASE_DIR, 'JSONData'))
 
 try:
-    import JSONData.constant as cct
+    from JohnsonUtil import commonTips as cct
 except ImportError:
     cct = None
 
@@ -53,66 +53,90 @@ NAME_CACHE = {}
 INDEX_DATA_CACHE = {} # [🚀 全局加速缓存]
 DNA_CALC_CACHE = {}   # [🚀 DNA计算缓存：(code, start, end) -> (summary, ts)]
 
+# [🚀 THREAD SAFETY] 为全局缓存引入锁，解决多线程审计时的 GIL/Race 冲突
+import threading
+CACHE_LOCK = threading.Lock()
+
 def get_corresponding_index(code):
+    # 🚀 [FIX] 对齐全市场指数映射：30开头(创业板)应使用 399006，8/9开头(北交所)使用 899050
+    if code.startswith('30'): return "399006"
+    if code.startswith(('00', '39')): return "399001"
+    if code.startswith(('8', '9')): return "899050" 
+    if code.startswith('6'): return "999999"
     return INDEX_MAP.get(code[:2], '999999')
+
+# [🚀 PROGRESS SUPPORT] 定义进度回调协议
+# progress_callback(current: int, total: int, msg: str)
 
 def preheat_names(codes):
     """[🚀 极致优化] 批量预热股票名称，消除循环内频繁打开 HDF5 的灾难级 IO"""
-    with timed_ctx("Preheat Names"):
+    with CACHE_LOCK:
         missing_codes = [c for c in codes if c not in NAME_CACHE]
-        if not missing_codes: return
+    if not missing_codes: return
         
-        # 默认内置一些核心标的
-        meta_names = {'002990': '盛视科技', '603698': '航天工程', '300058': '蓝色光标'}
-        for c, n in meta_names.items():
-            if c in missing_codes:
+    # 默认内置一些核心标的
+    meta_names = {'002990': '盛视科技', '603698': '航天工程', '300058': '蓝色光标'}
+    for c, n in meta_names.items():
+        if c in missing_codes:
+            with CACHE_LOCK:
                 NAME_CACHE[c] = n
-        
+    
+    with CACHE_LOCK:
         missing_codes = [c for c in codes if c not in NAME_CACHE]
-        if not missing_codes: return
-        
-        try:
-            import glob
-            h5_files = glob.glob("g:/shared_df_all-*.h5")
-            if h5_files:
-                latest_h5 = sorted(h5_files)[-1]
-                with pd.HDFStore(latest_h5, mode='r') as store:
-                    target_key = None
-                    if '/df' in store.keys(): target_key = '/df'
-                    elif '/all' in store.keys(): target_key = '/all'
-                    
-                    if target_key:
-                        codes_str = [str(c) for c in missing_codes]
-                        df_names = store.select(target_key, columns=['name'], where="index in codes_str")
-                        if not df_names.empty:
+    if not missing_codes: return
+    
+    try:
+        import glob
+        h5_files = glob.glob("g:/shared_df_all-*.h5")
+        if h5_files:
+            latest_h5 = sorted(h5_files)[-1]
+            with pd.HDFStore(latest_h5, mode='r') as store:
+                target_key = None
+                if '/df' in store.keys(): target_key = '/df'
+                elif '/all' in store.keys(): target_key = '/all'
+                
+                if target_key:
+                    codes_str = [str(c) for c in missing_codes]
+                    df_names = store.select(target_key, columns=['name'], where="index in codes_str")
+                    if not df_names.empty:
+                        with CACHE_LOCK:
                             for code, row in df_names.iterrows():
                                 NAME_CACHE[str(code).zfill(6)] = row.get('name', str(code))
-        except Exception as e:
-            # print(f"DEBUG: Name Preheat failed: {e}")
-            pass
-            
-        # 补齐未找到的
+    except Exception as e:
+        # print(f"DEBUG: Name Preheat failed: {e}")
+        pass
+        
+    # 补齐未找到的
+    with CACHE_LOCK:
         for c in codes:
             if c not in NAME_CACHE: NAME_CACHE[c] = c
 
 def calculate_dna_indicators(df):
-    with timed_ctx("DNA Indicators Calculate"):
-        if df is None or len(df) < 20: return None
-        df['pct'] = df['close'].pct_change() * 100
-        df['ma8'] = df['close'].rolling(8).mean()
-        df['ma10'] = df['close'].rolling(10).mean()
-        df['ma20'] = df['close'].rolling(20).mean()
-        df['ma10_vol'] = df['vol'].rolling(10).mean()
-        std = df['close'].rolling(20).std()
-        df['upper'] = df['ma20'] + 2 * std
-        df['high4'] = df['high'].rolling(4).max().shift(1)
-        df['c_upper'] = df['close'] / df['upper']
-        df['c_h4'] = df['close'] / df['high4']
-        df['c_ma8'] = df['close'] / df['ma8']
-        df['c_ma20'] = df['close'] / df['ma20']
-        df['v_ratio'] = df['vol'] / df['ma10_vol']
-        df['is_bid_low'] = (df['open'] == df['low'])
-        return df
+    if df is None or len(df) < 20: return None
+    df['pct'] = df['close'].pct_change() * 100
+    df['ma8'] = df['close'].rolling(8).mean()
+    df['ma10'] = df['close'].rolling(10).mean()
+    df['ma20'] = df['close'].rolling(20).mean()
+    df['ma10_vol'] = df['vol'].rolling(10).mean()
+    std = df['close'].rolling(20).std()
+    df['upper'] = df['ma20'] + 2 * std
+    df['high4'] = df['high'].rolling(4).max().shift(1)
+    df['c_upper'] = df['close'] / df['upper']
+    df['c_h4'] = df['close'] / df['high4']
+    df['c_ma8'] = df['close'] / df['ma8']
+    df['c_ma20'] = df['close'] / df['ma20']
+    df['v_ratio'] = df['vol'] / df['ma10_vol']
+    df['is_bid_low'] = (df['open'] == df['low'])
+    
+    # [🚀 NEW] 探测大跌背景 (用于审计“地量筑底”)
+    # 10日内股价相对于高点的回撤百分比
+    h10 = df['high'].rolling(10).max()
+    df['drop_10d'] = (df['close'] / h10 - 1) * 100
+    
+    # [🚀 NEW] 十字星识别 (变盘基因)
+    # 实体极小：实体长度 / 开盘价 < 0.3%
+    df['is_doji'] = (abs(df['open'] - df['close']) / df['open'] < 0.003)
+    return df
 
 class AuditSummary:
     def __init__(self, code, name):
@@ -167,14 +191,35 @@ class AuditSummary:
                     self.bottom_stable_days += 1
             
             # 6. [🧊 地量见底] 
-            if r['v_ratio'] < 0.6:
-                self.extreme_shrink_count += 1
+            # 逻辑：地量即惜售。特别强化“大跌后地量” (筑底结构)
+            if r['v_ratio'] < 0.65:
+                # 如果 10 日内跌幅 > 10% 且缩量，视为极佳的筑底基因
+                if r.get('drop_10d', 0) < -10:
+                    self.extreme_shrink_count += 2 # 加倍权重
+                else:
+                    self.extreme_shrink_count += 1
+            
+            # 7. [⚖️ 变盘结构] 缩量十字星 (Pivot Doji)
+            if r.get('is_doji', False) and r['v_ratio'] < 0.75:
+                # 标记找到过变盘基因
+                self.pivot_signal_found = True
             
             self.history.append(r) 
+        
+        # [🚀 NEW] 变盘基因加权：如果“最后 2 日”出现缩量十字星，给予高额评估分
+        recent_pivot = False
+        for r in rows[-2:]:
+             if r.get('is_doji', False) and r['v_ratio'] < 0.75:
+                 recent_pivot = True
+                 break
 
         self.intent_score = (self.alpha_sum * 0.4) + (self.max_adhesion * 5) + (self.squeeze_days * 3) + \
                             (self.anti_drop_count * 8) + (self.leverage_count * 5) + (self.shield_count * 6) + \
-                            (self.dragon_squeeze_days * 10) + (self.bottom_stable_days * 8) + (self.extreme_shrink_count * 12)
+                            (self.dragon_squeeze_days * 10) + (self.bottom_stable_days * 8) + (self.extreme_shrink_count * 12) + \
+                            (15 if recent_pivot else (5 if self.pivot_signal_found else 0))
+        
+        if recent_pivot:
+            self.suggestions.append("- 探测到‘临界变盘’信号：尾盘出现缩量十字星，多空达到极度平衡，通常预示方向选择在即")
         
         if self.intent_score > 50 and (self.max_adhesion >= 3 or self.anti_drop_count >= 2 or self.dragon_squeeze_days >= 2):
             self.verdict = "💎 [金身种子] 核心主升"
@@ -205,49 +250,57 @@ class AuditSummary:
 
 def run_optimized_audit(code, start_date, end_date):
     # [🚀 CACHE CHECK] 极致性能：同一天 30 分钟内共用结果
-    # 逻辑优化：交易时段 30 分钟过期；非交易时段（盘后/周末）数据不更新，缓存永久有效
     cache_key = (code, start_date, end_date)
-    if cache_key in DNA_CALC_CACHE:
-        summary, ts = DNA_CALC_CACHE[cache_key]
+    # [🚀 UI-SAFE] 极致优化：先尝试不加锁读取
+    cached_val = DNA_CALC_CACHE.get(cache_key)
+    if cached_val:
+        summary, ts = cached_val
         
+        # 判定是否需要重新刷新（逻辑分支移出锁外）
         is_trading = True
         if cct:
-            try:
-                # 使用 cct.get_work_time() 判定当前是否处于活跃交易窗口
-                is_trading = cct.get_work_time()
+            try: is_trading = cct.get_work_time()
             except: pass
             
         if not is_trading:
-            # 盘后或非交易日，只要当天算过，直接返回
             return summary
             
-        if time.time() - ts < 1800: # 交易时间内 30 分钟生存期
+        if time.time() - ts < 1800:
             return summary
 
-    with timed_ctx(f"Load & Audit {code}"):
-        with timed_ctx("Data Loading"):
-            # [🚀 LIGHTWEIGHT LOAD] 使用 fastohlc=True 跳过不使用的 MACD/OBV 等重型指标计算
-            df_raw = get_tdx_Exp_day_to_df(code, dl=800, fastohlc=True)
+    # [🚀 EXTREME SPEED] 极速模式：不再进行微睡，全力压榨 IO 与 CPU
+
+    with timed_ctx(f"Load & Audit {code}", warn_ms=10000):
+        # 🛡️ [CACHE_CHECK] 再次校验缓存
+        with CACHE_LOCK:
+            if cache_key in DNA_CALC_CACHE:
+                return DNA_CALC_CACHE[cache_key][0]
+
+        # [🚀 LIGHTWEIGHT LOAD] 使用 fastohlc=True 跳过不使用的 MACD/OBV 等重型指标计算
+        df_raw = get_tdx_Exp_day_to_df(code, dl=800, fastohlc=True)
         
         if df_raw is None or df_raw.empty: return None
-        name = NAME_CACHE.get(code, code)
-        df = calculate_dna_indicators(df_raw.copy())
+        
+        with CACHE_LOCK:
+            name = NAME_CACHE.get(code, code)
+        
+        # 🚀 [PERF-OPTIMIZED] 移除 redundant .copy()，直接在原始 DataFrame 上计算，节省内存分配开销
+        df = calculate_dna_indicators(df_raw)
         if df is None: return None
         
         idx_code = get_corresponding_index(code)
-        # 🚀 [FIX] 对齐 GEM 指数映射：30开头应使用 399006 而非 399001
-        if code.startswith('30'): idx_code = "399006"
-        elif code.startswith(('00', '39')): idx_code = "399001"
-        elif code.startswith(('8', '9')): idx_code = "899050" 
         
-        if idx_code in INDEX_DATA_CACHE:
-            df_idx = INDEX_DATA_CACHE[idx_code]
-        else:
-            with timed_ctx(f"Load Index {idx_code}"):
-                df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
-                if df_idx is not None and not df_idx.empty:
-                    df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
-                INDEX_DATA_CACHE[idx_code] = df_idx
+        # 尝试从缓存读取指数
+        df_idx = INDEX_DATA_CACHE.get(idx_code)
+        
+        if df_idx is None:
+            # 🚀 [FIX] 加载指数数据（完全脱离锁环境进行 IO）
+            df_idx_raw = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
+            if df_idx_raw is not None and not df_idx_raw.empty:
+                df_idx_raw['idx_pct'] = df_idx_raw['close'].pct_change() * 100
+                with CACHE_LOCK:
+                    INDEX_DATA_CACHE[idx_code] = df_idx_raw
+                df_idx = df_idx_raw
         
         # 🚀 [FIX] 增强日期格式鲁棒性：支持 YYYYMMDD 和 YYYY-MM-DD
         def normalize_dt(d_str):
@@ -309,16 +362,19 @@ def run_optimized_audit(code, start_date, end_date):
             
         summary.finalize(audit_rows)
         # 存入缓存
-        DNA_CALC_CACHE[cache_key] = (summary, time.time())
+        with CACHE_LOCK:
+            DNA_CALC_CACHE[cache_key] = (summary, time.time())
         return summary
 
-def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None):
+def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None, progress_callback=None):
     """
     供外部调用的批量审计接口
-    :param code_to_name: 可选字典 {code: name}，若提供则跳过 HDF5 磁盘查询提升性能
+    :param progress_callback: 进度回调函数 f(current, total, msg)
     """
+    if not codes: return []
+    
     if start_date is None:
-        # 🚀 [FIX] 如果指定了截止日期，起点动态对齐截止日期前25天，避免“起点 > 终点”导致无数据
+        # 🚀 [FIX] 起点动态对齐截止日期前25天
         base_dt = datetime.now()
         if end_date:
             try:
@@ -327,34 +383,66 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
             except: pass
         start_date = (base_dt - pd.Timedelta(days=25)).strftime("%Y%m%d")
     
+    # 🚀 [Standardize] 全部代码标准化，避免 N/A 或 散兵代码 进入循环
+    codes = [str(c).strip().zfill(6) for c in codes if c and str(c).strip().isdigit() and len(str(c).strip()) >= 5]
+    if not codes: return []
+    
+    total = len(codes)
+    if progress_callback:
+        progress_callback(0, total, f"正在准备审计 {total} 只个股...")
+
     # [🚀 极速注入] 如果外部提供了名称对照表，直接存入内存缓存
     if code_to_name:
-        for c, n in code_to_name.items():
-            NAME_CACHE[c] = n
+        with CACHE_LOCK:
+            for c, n in code_to_name.items():
+                NAME_CACHE[c] = n
             
     preheat_names(codes)
     summaries = []
     
-    with timed_ctx("Batch Execution"):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            # 🚀 [FIX] 确保处理完成后能按原始 'codes' 顺序重构 summaries
-            # concurrent.futures.as_completed 不保证顺序，但能最快获取所有结果
+    # [🚀 PERF] 统一预加载指数数据（修正：IO 必须在锁外）
+    unique_indices = set(get_corresponding_index(c) for c in codes)
+    for idx_code in unique_indices:
+        if idx_code not in INDEX_DATA_CACHE:
+            # 预读指数 (IO 在锁外执行)
+            df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
+            if df_idx is not None and not df_idx.empty:
+                df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
+                with CACHE_LOCK:
+                    INDEX_DATA_CACHE[idx_code] = df_idx
+
+    with timed_ctx("Batch Execution", warn_ms=10000):
+        # 🚀 [UI-SAFE] 降低并发数至 2-3，极大缓解 GIL 竞争引发的 UI 粘滞感
+        # 对于 IO 密集型任务，过高并发在 Windows+Python 环境下反而会导致主线程失去响应
+        # 🚀 [PERF] 极速模式：强力开放 16 路并发，彻底消除 IO 等待瓶颈
+        # max_workers = 16 if total > 5 else 1
+        cpu_count = int(os.cpu_count()/2) or 4
+        max_workers = min(cpu_count, cct.livestrategy_max_workers) if total > 5 else 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date): code for code in codes}
             
             res_dict = {}
+            count = 0
             for future in concurrent.futures.as_completed(future_to_code):
                 c = future_to_code[future]
+                count += 1
                 try:
                     res_dict[c] = future.result()
+                    if progress_callback and (count % 20 == 0 or count == total):
+                        nm = NAME_CACHE.get(c, c)
+                        progress_callback(count, total, f"已完成: {nm} ({count}/{total})")
                 except Exception as e:
-                    print(f"Error auditing {c}: {e}")
+                    logger.error(f"Error auditing {c}: {e}")
                     res_dict[c] = None
             
-            # 最终按照原始 codes 顺序装填 summaries，确保总结列表第一个就是 Focus Code
+            # 最终按照原始 codes 顺序装填 summaries
             for code in codes:
                 s = res_dict.get(code)
                 if s: summaries.append(s)
                     
+    if progress_callback:
+        progress_callback(total, total, "审计完成，正在生成报告...")
+        
     return summaries
 
 class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
@@ -399,8 +487,8 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 绑快捷键
         self.bind("<Escape>", lambda e: self.on_close())
         
-        # 🚀 [NEW] 极致对齐：推迟展现时机，确保在分割线(200ms)和数据填充完成后再平滑露面
-        self.after(350, self._reveal_window)
+        # 🚀 [INSTANT] 极速模式：缩短展示延迟，放弃渐变，直接呼出结果
+        self.after(50, self._reveal_window)
         
         # 确保表格本身获得键盘焦点
         self.tree.focus_set() 
@@ -416,21 +504,11 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 确保位置更新已送达桌面管理器
         self.update_idletasks()
         
-        self.deiconify() # 显示窗口 (此时位置已修正且 alpha=0)
-        
-        # [🚀 SMOOTH FADE IN] 渐变展现，消除视觉冲击
-        def fade_in(alpha=0.0):
-            if alpha < 1.0:
-                alpha += 0.2
-                self.attributes("-alpha", alpha)
-                self.after(20, lambda: fade_in(alpha))
-            else:
-                self.attributes("-alpha", 1.0)
-                self.lift()
-                self.focus_force()
-                self.tree.focus_set()
-                
-        self.after(50, fade_in)
+        self.deiconify() # 直接显示窗口 (此时位置已修正)
+        self.attributes("-alpha", 1.0)
+        self.lift()
+        self.focus_force()
+        self.tree.focus_set()
         
         # 初始选中并滚动
         self._auto_scroll_to_focus()
@@ -784,10 +862,11 @@ def main():
                 print(f"[*] 全盘挖掘完成。从 {len(summaries)} 只个股中提炼出 {len(mining_seeds)} 只潜伏种子。")
                 print("="*85)
 
-    # 打印全局性能汇总
-    print("\n" + "="*45)
-    print_timing_summary()
-    print("="*45)
+    # 打印全局性能汇总 (仅在 verbose 模式显示)
+    if hasattr(args, 'verbose') and args.verbose:
+        print("\n" + "="*45)
+        print_timing_summary()
+        print("="*45)
 
 if __name__ == "__main__":
     main()

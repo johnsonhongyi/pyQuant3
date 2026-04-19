@@ -2481,10 +2481,10 @@ def get_tdx_Exp_day_to_df(
     # =========================
     # 5. 核心指标（极速）
     # =========================
-    with timed_ctx("get_tdx_macd", warn_ms=100):
+    with timed_ctx("get_tdx_macd", warn_ms=2000):
         df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
     
-    with timed_ctx("compute_lastdays_percent", warn_ms=200):
+    with timed_ctx("compute_lastdays_percent", warn_ms=2000):
         df = compute_lastdays_percent(
             df, lastdays=lastdays,
             resample=resample, normalized=normalized

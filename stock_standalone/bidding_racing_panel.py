@@ -497,58 +497,57 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
         render_start_t = time.time()
         
-        with self.detector._lock:
-            data_list = []
-            for code in members:
-                ts = self.detector._tick_series.get(code)
-                if ts: data_list.append(ts)
+        # [🚀 极致性能] 非阻塞锁：后台正在进行重算时，UI 层拒绝等待直接返回
+        if not self.detector._lock.acquire(blocking=False): return
             
-            # 排序逻辑: 修正列映射，区分起点(5)与DFF(6)
-            col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
-            attr = col_attr_map.get(self._sort_col, 'score')
-            is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        try:
+            data_list = [self.detector._tick_series[c] for c in members if c in self.detector._tick_series]
+        finally:
+            self.detector._lock.release()
             
-            # [🚀 性能优化] 预计算合成评分，避免在排序热点路径中重复调用 getattr
-            score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
-            
-            # 使用稳定性排序 (数值, 代码)
-            def get_sort_key(ts):
-                if attr == 'start_pct':
-                    val = ts.current_pct - ts.pct_diff
-                elif attr == 'pct_diff':
-                    val = ts.pct_diff
-                elif attr == 'score':
-                    val = score_cache.get(ts.code, 0)
-                else:
-                    val = getattr(ts, attr, 0)
-                return (val, ts.code)
-            
-            data_list.sort(key=get_sort_key, reverse=is_rev)
-            
-            display_list = data_list[:100]
-            flattened = []
-            for ts in display_list:
-                flattened.append((
-                    ts.code, ts.name, score_cache.get(ts.code, 0), 
-                    getattr(ts, 'signal_count', 0),
-                    ts.current_pct,
-                    ts.current_pct - ts.pct_diff,
-                    ts.pct_diff
-                ))
+        if not data_list:
+            return
 
-            # [🚀 性能优化] 统计全量数据(不只是显示的100只)
-            total = len(data_list)
-            up = len([x for x in data_list if x.current_pct > 0])
-            down = len([x for x in data_list if x.current_pct < 0])
-            avg_pct = sum([x.current_pct for x in data_list]) / total if total > 0 else 0
-            
-            stats_text = (
-                f"📊 共 {total} 只 | 涨跌: <span style='color:#FF4444;'>{up}</span>/<span style='color:#44CC44;'>{down}</span> | "
-                f"🏁 均涨: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span> | "
-                f"📡 同步: {datetime.datetime.now().strftime('%H:%M:%S')}"
-            )
-            self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
-            self.status_lbl.setText(stats_text)
+        # --- [🔒 锁外计算] 排序与统计全部移到临界区外执行，降低 GIL 竞争 ---
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
+        attr = col_attr_map.get(self._sort_col, 'score')
+        is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        
+        # 预计算合成评分
+        score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
+        
+        def get_sort_key(ts):
+            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
+            elif attr == 'pct_diff': val = ts.pct_diff
+            elif attr == 'score': val = score_cache.get(ts.code, 0)
+            else: val = getattr(ts, attr, 0)
+            return (val, ts.code)
+        
+        data_list.sort(key=get_sort_key, reverse=is_rev)
+        
+        display_list = data_list[:100]
+        flattened = []
+        for ts in display_list:
+            flattened.append((
+                ts.code, ts.name, score_cache.get(ts.code, 0), 
+                getattr(ts, 'signal_count', 0),
+                ts.current_pct,
+                ts.current_pct - ts.pct_diff,
+                ts.pct_diff
+            ))
+
+        total = len(data_list)
+        up = sum(1 for x in data_list if x.current_pct > 0)
+        down = sum(1 for x in data_list if x.current_pct < 0)
+        avg_pct = sum(x.current_pct for x in data_list) / total if total > 0 else 0
+        
+        stats_text = (
+            f"📊 共 {total} 只 | 涨跌: <span style='color:#FF4444;'>{up}</span>/<span style='color:#44CC44;'>{down}</span> | "
+            f"🏁 均涨: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span> | "
+            f"📡 同步: {datetime.datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self.status_lbl.setText(stats_text)
 
         self._render_table(flattened)
 
@@ -823,60 +822,46 @@ class CategoryDetailDialog(QDialog, WindowMixin):
     def refresh_data(self):
         if not hasattr(self, 'detector') or not self.detector: return
         
-        with self.detector._lock:
+        if not self.detector._lock.acquire(blocking=False): return
+        try:
             data_list = []
             for ts in self.detector._tick_series.values():
                 if get_racing_role(ts) == self.category_name:
                     data_list.append(ts)
             
             if not data_list:
-                if self.table.rowCount() > 0:
-                    self.table.setRowCount(0)
+                if self.table.rowCount() > 0: self.table.setRowCount(0)
                 return
-            
-            col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
-            attr = col_attr_map.get(self._sort_col, 'score')
-            is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
-            
-            score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
-            
-            def get_sort_key(ts):
-                if attr == 'start_pct':
-                    val = ts.current_pct - ts.pct_diff
-                elif attr == 'pct_diff':
-                    val = ts.pct_diff
-                elif attr == 'score':
-                    val = score_cache.get(ts.code, 0)
-                else:
-                    val = getattr(ts, attr, 0)
-                return (val, ts.code)
-            
-            data_list.sort(key=get_sort_key, reverse=is_rev)
-            
-            # [🚀 性能优化] 截断超大队列，只渲染前300个（足以观察）
-            display_list = data_list[:300]
-            flattened = []
-            for ts in display_list:
-                flattened.append((
-                    ts.code, ts.name, score_cache.get(ts.code, 0), 
-                    getattr(ts, 'signal_count', 0),
-                    ts.current_pct,
-                    ts.current_pct - ts.pct_diff,
-                    ts.pct_diff
-                ))
+        finally:
+            self.detector._lock.release()
 
-            total = len(data_list)
-            up = len([x for x in data_list if x.current_pct > 0])
-            down = len([x for x in data_list if x.current_pct < 0])
-            avg_pct = sum([x.current_pct for x in data_list]) / total if total > 0 else 0
-            
-            stats_text = (
-                f"📊 统计: 共 {total} 只 | 涨跌: <span style='color:#FF4444;'>{up}</span>/<span style='color:#44CC44;'>{down}</span> | "
-                f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span> | "
-                f"📡 同步: {datetime.datetime.now().strftime('%H:%M:%S')}"
-            )
-            self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
-            self.status_lbl.setText(stats_text)
+        # [🔒 锁外计算]
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
+        attr = col_attr_map.get(self._sort_col, 'score')
+        is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        
+        score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
+        
+        def get_sort_key(ts):
+            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
+            else: val = getattr(ts, attr, 0 if attr != 'score' else score_cache.get(ts.code, 0))
+            return (val, ts.code)
+
+        data_list.sort(key=get_sort_key, reverse=is_rev)
+        
+        flattened = []
+        for ts in data_list[:300]:
+            flattened.append((ts.code, ts.name, score_cache.get(ts.code, 0), 
+                             getattr(ts, 'signal_count', 0),
+                             ts.current_pct,
+                             ts.current_pct - ts.pct_diff,
+                             ts.pct_diff))
+
+        avg_pct = sum(x.current_pct for x in data_list) / len(data_list)
+        stats_text = (f"📊 统计: 共 {len(data_list)} 只 | "
+                      f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span>")
+        self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self.status_lbl.setText(stats_text)
 
         self._render_table(flattened)
 

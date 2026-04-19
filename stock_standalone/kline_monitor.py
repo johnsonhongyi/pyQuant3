@@ -159,6 +159,12 @@ class KLineMonitor(tk.Toplevel):
         self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
         self.search_combo3.bind("<<ComboboxSelected>>", lambda e=None: self.search_code_status(onclick=True))
 
+        # 🧬 DNA 审计按钮
+        self.audit_btn = tk.Button(
+            self.status_frame, text="🧬审计", cursor="hand2", command=self._do_dna_audit
+        )
+        self.audit_btn.pack(side="left", padx=3)
+
         self.search_btn = tk.Button(
             self.status_frame, text="查询", cursor="hand2", command=lambda: self.search_code_status(onclick=True)
         )
@@ -179,6 +185,55 @@ class KLineMonitor(tk.Toplevel):
             self.master.load_window_position(self, "KLineMonitor", default_width=860, default_height=560)
         except Exception:
             self.geometry("760x460")
+
+    def _do_dna_audit(self) -> None:
+        """🚀 [SMART-ROUTING] 智能选区路由算法：对齐全局审计逻辑"""
+        try:
+            all_items = self.tree.get_children()
+            if not all_items:
+                toast_message(self, "当前列表中没有可供审计的股票")
+                return
+
+            selection = self.tree.selection()
+            target_items = []
+
+            if not selection:
+                # 1. 无选区：默认前 20 只
+                target_items = all_items[:20]
+                msg = f"未选择标的，默认审计前 {len(target_items)} 只..."
+            elif len(selection) > 1:
+                # 2. 多选：仅审计选区 (最高 50 只)
+                target_items = selection[:50]
+                msg = f"正在对选中的 {len(target_items)} 只标的进行专项审计..."
+            else:
+                # 3. 单选：从当前行开始顺延 20 只
+                try:
+                    start_idx = all_items.index(selection[0])
+                    target_items = all_items[start_idx : start_idx + 20]
+                    msg = f"从当前选中行起顺延审计 {len(target_items)} 只标的..."
+                except ValueError:
+                    target_items = all_items[:20]
+                    msg = f"选区同步异常，降级审计前 {len(target_items)} 只..."
+
+            # 🛠️ 提取标准化代码和名称字典
+            c_dict = {}
+            for iid in target_items:
+                vals = self.tree.item(iid, 'values')
+                if len(vals) >= 2:
+                    code = str(vals[0]).zfill(6)
+                    name = str(vals[1])
+                    # 剔除 UI 装饰符
+                    code = re.sub(r'[^\d]', '', code).zfill(6)
+                    c_dict[code] = name
+
+            if c_dict and hasattr(self.master, "_run_dna_audit_batch"):
+                # toast_message(self, msg)
+                # 🚀 调度主进程并发审计引擎
+                self.master._run_dna_audit_batch(c_dict)
+            else:
+                logger.warning("[KLineMonitor] DNA 审计调度失败: c_dict 为空或主程序接口缺失")
+        except Exception as e:
+            logger.error(f"[KLineMonitor] DNA Audit 触发失败: {e}")
 
     def refresh_search_combo3(self) -> None:
         if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
