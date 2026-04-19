@@ -1386,6 +1386,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             event.ignore()
             return
 
+        # ✅ [FIX] 清除主窗口中的引用，防止对象已销毁但引用依然存在的异常
+        if hasattr(self.main_window, 'sector_bidding_panel'):
+           self.main_window.sector_bidding_panel = None
         # --- 以下是真正关闭时的资源回收和保存 ---
         # 1. 先停止定时器，不产生新任务
         if hasattr(self, '_refresh_timer'):

@@ -11,7 +11,7 @@ from collections import Counter
 import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
 import logging
-
+from JohnsonUtil import commonTips as cct
 logger = logging.getLogger(__name__)
 
 # ✅ 盘中交易引擎（懒加载，避免启动依赖）
@@ -128,6 +128,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        # ✅ [FIX] 清除主窗口中的引用，防止对象已销毁但引用依然存在的异常
+        if hasattr(self.master, '_stock_selection_win'):
+            self.master._stock_selection_win = None
+            
         # ✅ 移除 win_var 绑定
         if hasattr(self, '_win_var_trace_id') and hasattr(self.master, 'win_var'):
             try:
@@ -1237,7 +1241,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if code_to_name:
             if hasattr(self.master, '_run_dna_audit_batch'):
                 # 🚀 [NEW] 支持历史截止日期审计
-                end_date = self.current_date
+                end_date = None
+                # last_td = str(cct.get_last_trade_date()).replace("-", "")
+                last_td = str(cct.get_last_trade_date())
+                if self.current_date < last_td:
+                    end_date = self.current_date
                 self.master._run_dna_audit_batch(code_to_name, end_date=end_date)
             else:
                 logger.error("No access to main monitor app for DNA audit.")
