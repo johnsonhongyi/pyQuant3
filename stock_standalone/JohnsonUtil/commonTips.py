@@ -8667,6 +8667,7 @@ if __name__ == '__main__':
     mdf.shape
     '''
     # rzrq['all']='nan'
+    print(get_last_trade_date())
     print(get_last_trade_date('2025-06-01'))
     print(f"get_day_istrade_date('2026-03-01'): {get_day_istrade_date('2026-03-01')}")
     print(f"get_day_istrade_date('2026-02-27'): {get_day_istrade_date('2026-02-27')}")

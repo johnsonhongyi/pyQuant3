@@ -4099,17 +4099,16 @@ class MainWindow(QMainWindow, WindowMixin):
         if self._pending_ipc_code:
             payload = self._pending_ipc_code
             self._pending_ipc_code = None
-            
             # 解析可能的复合指令 (如 TIME_LINK|000001|2023-10-27)
             target_code = payload
-            target_res = None
-            
+            target_ts = None
             if '|' in payload:
                 parts = payload.split('|')
                 # 情况 A: TIME_LINK|code|ts|res=...
-                if payload.startswith("TIME_LINK|") and len(parts) >= 2:
+                if payload.startswith("TIME_LINK|") and len(parts) >= 3:
                     target_code = parts[1].zfill(6)
-                    for p in parts[2:]:
+                    target_ts = parts[2]
+                    for p in parts[3:]:
                          if p.startswith("resample="): target_res = p.split('=')[1]
                 # 情况 B: code|res=...
                 elif parts[0].strip().isdigit() and len(parts[0].strip()) == 6:
@@ -4117,8 +4116,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     for p in parts[1:]:
                          if p.startswith("resample="): target_res = p.split('=')[1]
 
-            logger.debug(f"[IPC] Debounced loading target: {target_code} (res={target_res})")
-            self.load_stock_by_code(target_code, resample=target_res)
+            logger.debug(f"[IPC] Debounced loading target: {target_code} (res={target_res}, ts={target_ts})")
+            # 🚀 [FIX] 如果是通过 Socket 传递的普通代码切换（无时间戳），则明确触发历史状态重置
+            self.load_stock_by_code(target_code, resample=target_res, timestamp=target_ts, reset_history=(target_ts is None))
 
     def _flush_ipc_signals(self):
         """批量处理缓冲区中的 IPC 信号"""
@@ -6051,7 +6051,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if last_link_payload:
                 code = last_link_payload.get('code')
                 timestamp = last_link_payload.get('timestamp')
-                logger.info(f"📥 [IPC] Recv TIME_LINK: {code} at {timestamp}")
+                logger.debug(f"📥 [IPC] Recv TIME_LINK: {code} at {timestamp}")
                 if code and timestamp:
                     self.active_time_linkage = {
                         'code': str(code).zfill(6),
@@ -6061,15 +6061,16 @@ class MainWindow(QMainWindow, WindowMixin):
                         'auto_scroll': True
                     }
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        self.load_stock_by_code(code, skip_tdx=True)
+                        self.load_stock_by_code(code, skip_tdx=True, timestamp=timestamp)
             
             elif last_switch_payload:
                 code = last_switch_payload.get('code')
                 res = last_switch_payload.get('resample', 'd')
-                logger.info(f"📥 [IPC] Recv SWITCH_CODE: {code} (res={res})")
+                logger.debug(f"📥 [IPC] Recv SWITCH_CODE: {code} (res={res})")
                 if code:
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        self.load_stock_by_code(code, resample=res)
+                        # 🚀 [FIX] 从 IPC 队列来的普通切换，明确触发历史重置
+                        self.load_stock_by_code(code, resample=res, reset_history=True)
 
             # [REMOVED] 语音反馈队列轮询逻辑已迁移至 _poll_voice_feedback，根治 QTimer 竞争导致的同步失效。
             pass
@@ -8062,24 +8063,19 @@ class MainWindow(QMainWindow, WindowMixin):
                     code_to_name[c_val] = n_val
 
         if code_to_name:
+            # 🚀 [NEW] 支持历史截止日期审计 (如果当前处于时间联动模式)
+            end_date = None
+            if hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('timestamp'):
+                # 🚀 [UPGRADE] 全局历史审计：只要当前处于历史联动状态（无论代码是否对齐），都使用该日期进行复盘
+                t_str = str(self.active_time_linkage.get('timestamp')).replace("-", "")
+                last_td = str(cct.get_last_trade_date()).replace("-", "")
+                if t_str < last_td:
+                    end_date = self.active_time_linkage.get('timestamp')
+                
             # 🚀 发送到主进程执行审计
-            cmd = {"cmd": "DNA_AUDIT", "codes": code_to_name}
+            cmd = {"cmd": "DNA_AUDIT", "codes": code_to_name, "end_date": end_date}
             send_code_via_pipe(cmd, logger, pipe_name=PIPE_NAME_TK)
             self.show_status_message(f"🧬 已请求 DNA 审计 ({len(code_to_name)}只)...")
-        price = 0.0
-        if row is not None:
-            price = float(row.get('close', row.get('price', 0)))
-        
-        if hasattr(self, 'hotlist_panel'):
-            if self.hotlist_panel.contains(code):
-                self.show_status_message(f"热点已存在: {code} {name}")
-            else:
-                success = self.hotlist_panel.add_stock(code, name, price, "右键添加")
-                if success:
-                    self.show_status_message(f"🔥 添加热点: {code} {name}")
-                    # 自动显示面板
-                    if not self.hotlist_panel.isVisible():
-                        self.hotlist_panel.show()
 
     def on_header_section_clicked(self, _logicalIndex):
         """
@@ -9007,12 +9003,50 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 但内部有相同 code/resample 的拦截逻辑
                 self.on_resample_changed(target_resample)
 
+        # 🚀 [UPGRADE] 智能时间会话管理：支持历史会话“漂移”与实时状态自动重置
+        has_reset_linkage = False
+        # ⭐ 核心补强：如果外部显式要求重置历史（reset_history=True），则直接清理
+        if kwargs.get('reset_history') and hasattr(self, 'active_time_linkage'):
+             self.active_time_linkage = {}
+             has_reset_linkage = True
+             logger.debug(f"[Linkage] Explicitly reset due to reset_history=True")
+
+        if not has_reset_linkage and hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('timestamp'):
+            t_str = str(self.active_time_linkage.get('timestamp')).replace("-", "")
+            last_td = str(cct.get_last_trade_date()).replace("-", "")
+            
+            if t_str < last_td:
+                # 🚀 [HISTORY SESSION] 处于历史回放会话中
+                if self.active_time_linkage.get('code') != code:
+                    # 如果是普通代码切换（内部点击或搜索，未带新时间戳），则让历史会话“漂移”到新代码上
+                    if not kwargs.get('timestamp') and not kwargs.get('signal_date'):
+                        self.active_time_linkage['code'] = code
+                        # 重置 auto_scroll 以便于新图表能自动定位到该历史点
+                        self.active_time_linkage['auto_scroll'] = True 
+                        logger.debug(f"[Linkage] History session drifted to {code} at {self.active_time_linkage.get('timestamp')}")
+                elif not kwargs.get('timestamp') and not kwargs.get('signal_date'):
+                    # ⭐ [NEW CORE FIX] 如果代码相同且未传时间，则判定为“退出复盘，回归实时”
+                    self.active_time_linkage = {}
+                    has_reset_linkage = True
+                    logger.info(f"🔄 [Linkage] Exiting history session and resetting to REALTIME for: {code}")
+            else:
+                # 🚀 [REALTIME] 如果是今天的联动（实时联动不具备“会话持续性”），代码不匹配时清理
+                if self.active_time_linkage.get('code') != code or (not kwargs.get('timestamp') and not kwargs.get('signal_date')):
+                    self.active_time_linkage = {}
+                    has_reset_linkage = True
+                    logger.debug(f"[Linkage] Realtime linkage reset due to code switch/refresh for {code}")
+
+        # --- 周期同步拦截 ---
         if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
-            # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号，检查时间戳是否变化以决定是否重新标记渲染
+            # 如果仅仅是重置了联动状态，我们需要强制重新渲染一次以抹除标记
+            if has_reset_linkage:
+                self.render_charts(code, self.day_df, None, force=True)
+                return
+
+            # 🚀 [IPC OPTIMIZATION] 如果代码没变但是有待处理的联动信号
             if hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code:
                 current_ts = self.active_time_linkage.get('timestamp')
                 last_processed_ts = getattr(self, '_last_ipc_linkage_ts', None)
-                
                 if current_ts != last_processed_ts:
                     logger.info(f"[IPC] New linkage timestamp ({current_ts}) for {code}, triggering redraw.")
                     self.render_charts(code, self.day_df, None, force=True)
@@ -9023,7 +9057,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
         self.current_code = code
-        self._render_seq += 1 # [NEW] 递增渲染序列号，用于使旧的异步渲染任务失效
+        self._render_seq += 1 # [NEW] 递增渲染序列号
         self._last_stock_switch_time = time.time()  # 记录切股时间
         self.select_resample = self.resample
         self.tick_prices = np.array([])
@@ -10533,6 +10567,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ----------------- 🚀 [IPC/FIXED] 恢复联动信息富文本看板展示 -----------------
         has_valid_linkage = hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code
+        
+        # [🚀 NEW] 如果联动日期是最后一个交易日及以后，则判定为“实时查看”，不显示特殊的黄色竖线标记
+        if has_valid_linkage:
+            t_ts = self.active_time_linkage.get('timestamp')
+            if t_ts:
+                t_str = str(t_ts).replace("-", "")
+                last_td = str(cct.get_last_trade_date()).replace("-", "")
+                if t_str >= last_td:
+                    has_valid_linkage = False # 降低标记权重，隐藏竖线和 Label
         
         if not has_valid_linkage:
             if hasattr(self, 'linkage_v_line'): self.linkage_v_line.hide()

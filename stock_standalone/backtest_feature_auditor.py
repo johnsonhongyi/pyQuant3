@@ -222,8 +222,18 @@ def run_optimized_audit(code, start_date, end_date):
                 df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
                 INDEX_DATA_CACHE[idx_code] = df_idx
         df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
-        s_dt = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-        e_dt = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}" if end_date else df.index[-1]
+        
+        # 🚀 [FIX] 增强日期格式鲁棒性：支持 YYYYMMDD 和 YYYY-MM-DD
+        def normalize_dt(d_str):
+            if not d_str: return None
+            s = str(d_str).strip().replace('-', '').replace('/', '')
+            if len(s) == 8:
+                return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+            return d_str
+            
+        s_dt = normalize_dt(start_date)
+        e_dt = normalize_dt(end_date) if end_date else df.index[-1]
+        
         audit_dates = df.index[(df.index >= s_dt) & (df.index <= e_dt)]
         if len(audit_dates) == 0: return None
         
@@ -257,7 +267,14 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
     :param code_to_name: 可选字典 {code: name}，若提供则跳过 HDF5 磁盘查询提升性能
     """
     if start_date is None:
-        start_date = (datetime.now() - pd.Timedelta(days=25)).strftime("%Y%m%d")
+        # 🚀 [FIX] 如果指定了截止日期，起点动态对齐截止日期前25天，避免“起点 > 终点”导致无数据
+        base_dt = datetime.now()
+        if end_date:
+            try:
+                s = str(end_date).strip().replace('-', '').replace('/', '')
+                if len(s) == 8: base_dt = datetime.strptime(s, "%Y%m%d")
+            except: pass
+        start_date = (base_dt - pd.Timedelta(days=25)).strftime("%Y%m%d")
     
     # [🚀 极速注入] 如果外部提供了名称对照表，直接存入内存缓存
     if code_to_name:
@@ -269,26 +286,43 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
     
     with timed_ctx("Batch Execution"):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(run_optimized_audit, code, start_date, end_date): code for code in codes}
-            for future in concurrent.futures.as_completed(futures):
+            # 🚀 [FIX] 确保处理完成后能按原始 'codes' 顺序重构 summaries
+            # concurrent.futures.as_completed 不保证顺序，但能最快获取所有结果
+            future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date): code for code in codes}
+            
+            res_dict = {}
+            for future in concurrent.futures.as_completed(future_to_code):
+                c = future_to_code[future]
                 try:
-                    s = future.result()
-                    if s: summaries.append(s)
+                    res_dict[c] = future.result()
                 except Exception as e:
-                    print(f"Error auditing {futures[future]}: {e}")
+                    print(f"Error auditing {c}: {e}")
+                    res_dict[c] = None
+            
+            # 最终按照原始 codes 顺序装填 summaries，确保总结列表第一个就是 Focus Code
+            for code in codes:
+                s = res_dict.get(code)
+                if s: summaries.append(s)
                     
     return summaries
 
 class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
-    def __init__(self, summaries, parent=None):
+    def __init__(self, summaries, parent=None, end_date=None):
         super().__init__(parent)
+        self.withdraw()  # 🚀 [NEW] 立即隐藏，防止初始化时的默认小窗口闪烁与跳跃
+        
         self.summaries = summaries
         self.monitor_app = parent
+        self.end_date = end_date
+        
+        # 🚀 [NEW] 核心逻辑：如果没有外部强制焦点，默认取审计列表第一个作为焦点
+        self.focus_code = summaries[0].code if summaries else None
+        
         self.window_name = "dna_audit_report_v2"
         self.scale_factor = getattr(parent, 'scale_factor', 1.0) if parent else 1.0
         
-        self.title(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只")
-        self.attributes("-topmost", False)
+        title_suffix = f" (截止: {self.end_date})" if self.end_date else ""
+        self.title(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只{title_suffix}")
         
         self._setup_ui()
         
@@ -304,15 +338,51 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 绑定关闭保存
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # 初始选中 (仅选中，不强制触发 Linkage 避免主程序意外跳转)
+        # 初始选中
         if self.tree.get_children():
             first = self.tree.get_children()[0]
             self.tree.selection_set(first)
             self.tree.focus(first)
 
-        # [NEW] 支持 ESC 键自动关闭窗口
+        # 绑快捷键
         self.bind("<Escape>", lambda e: self.on_close())
-        self.focus_set() # 确保快捷键命中
+        
+        # 🚀 [NEW] 布局完成后一次性展现
+        self.after(100, self._reveal_window)
+        
+        # 确保表格本身获得键盘焦点
+        self.tree.focus_set() 
+
+    def _reveal_window(self):
+        """🚀 [NEW] 布局就绪后平滑展示，消除跳跃感"""
+        self.deiconify() # 显示窗口
+        self.lift()
+        self.focus_force()
+        # 初始选中并滚动
+        self._auto_scroll_to_focus()
+        
+        # 确保表格本身获得键盘焦点
+        self.tree.focus_set() 
+
+    def _auto_scroll_to_focus(self):
+        """🚀 [NEW] 自动滚动到指定的个股行"""
+        found_item = None
+        if self.focus_code:
+            for item in self.tree.get_children():
+                # 🚀 [FIX] 列名必须是定义的 ID 'code'，而不是显示文本 '代码'
+                if self.tree.set(item, "code") == self.focus_code:
+                    found_item = item
+                    break
+        
+        if not found_item and self.tree.get_children():
+            found_item = self.tree.get_children()[0]
+            
+        if found_item:
+            self.tree.selection_set(found_item)
+            self.tree.focus(found_item)
+            self.tree.see(found_item)
+            # 🚀 [FIX] 事件回调方法名应为 _show_detail
+            self._show_detail(None)
 
     def _setup_ui(self):
         # 主容器
@@ -404,7 +474,7 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         
         # [🚀 LINKAGE] 单击同步联动 TDX 与可视化终端
         if self.monitor_app and hasattr(self.monitor_app, 'on_code_click'):
-            self.monitor_app.on_code_click(code)
+            self.monitor_app.on_code_click(code, date=self.end_date)
             
         target_s = next((x for x in self.summaries if str(x.code).zfill(6) == code), None)
         if target_s:
@@ -508,14 +578,14 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self._save_sash_position()
         self.destroy()
 
-def show_dna_audit_report_window(summaries, parent=None):
+def show_dna_audit_report_window(summaries, parent=None, end_date=None):
     if not summaries:
         from tkinter import messagebox
         messagebox.showinfo("DNA 审计", "没有产生足够的历史数据，或没有命中任何结论。", parent=parent)
         return
     
     # 使用新定义的类
-    DnaAuditReportWindow(summaries, parent=parent)
+    DnaAuditReportWindow(summaries, parent=parent, end_date=end_date)
 
 def main():
     parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")
