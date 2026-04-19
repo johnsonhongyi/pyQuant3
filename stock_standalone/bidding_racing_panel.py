@@ -390,9 +390,19 @@ class SectorDetailDialog(QDialog, WindowMixin):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        top_layout = QHBoxLayout()
         title_lbl = QLabel(f"🔥 {self.sector_name} - 领军个股明细")
         title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC; margin-bottom: 5px;")
-        layout.addWidget(title_lbl)
+        top_layout.addWidget(title_lbl)
+        
+        top_layout.addStretch()
+        
+        self.btn_dna = QPushButton("🧬 DNA审计")
+        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
+        self.btn_dna.clicked.connect(self._run_dna_audit_top20)
+        top_layout.addWidget(self.btn_dna)
+        
+        layout.addLayout(top_layout)
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
@@ -646,6 +656,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="sector_dialog_context"))
         
+        selected_rows = set([it.row() for it in self.table.selectedItems()])
+        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        act_dna = menu.addAction(title_dna)
+        act_dna.triggered.connect(self._run_dna_audit_top20)
+
         menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
@@ -666,6 +681,48 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._save_header_state()
         # self.save_window_position_qt_visual(self, "SectorDetail_Unified")
         super().closeEvent(event)
+
+    def _run_dna_audit_top20(self):
+        """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
+        row_count = self.table.rowCount()
+        if row_count == 0:
+            return
+            
+        selected_items = self.table.selectedItems()
+        selected_rows = sorted(list(set([item.row() for item in selected_items])))
+        
+        if len(selected_rows) > 1:
+            target_rows = selected_rows[:50]
+        elif len(selected_rows) == 1:
+            start_idx = selected_rows[0]
+            target_rows = range(start_idx, min(start_idx + 20, row_count))
+        else:
+            target_rows = range(min(20, row_count))
+            
+        code_to_name = {}
+        for row in target_rows:
+            if row >= row_count: break
+            c_item = self.table.item(row, 0)
+            n_item = self.table.item(row, 1)
+            if c_item:
+                c = str(c_item.text()).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(n_item.text()).strip() if n_item else ""
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+                
+                if c and c != "N/A" and len(c) == 6:
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            main_app = getattr(self.parent(), 'main_app', None)
+            if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
+                # 回调委托给 tk_dispatch_queue，脱离 Qt 线程在 Tkinter 线程里执行
+                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+            else:
+                logger.error("未连接到主监视器程序，无法启动 DNA 审计")
 
 class CategoryDetailDialog(QDialog, WindowMixin):
     """饼图分类成分股详情弹窗 - 结构与板块详情一致"""
@@ -704,9 +761,19 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        top_layout = QHBoxLayout()
         title_lbl = QLabel(f"🔥 {self.category_name} - 个股明细")
         title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC; margin-bottom: 5px;")
-        layout.addWidget(title_lbl)
+        top_layout.addWidget(title_lbl)
+        
+        top_layout.addStretch()
+        
+        self.btn_dna = QPushButton("🧬 DNA审计")
+        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
+        self.btn_dna.clicked.connect(self._run_dna_audit_top20)
+        top_layout.addWidget(self.btn_dna)
+        
+        layout.addLayout(top_layout)
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
@@ -906,6 +973,11 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="category_dialog_context"))
         
+        selected_rows = set([it.row() for it in self.table.selectedItems()])
+        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        act_dna = menu.addAction(title_dna)
+        act_dna.triggered.connect(self._run_dna_audit_top20)
+
         menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
@@ -925,6 +997,47 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         # [统一管理] 不再独立存档
         self._save_header_state()
         super().closeEvent(event)
+
+    def _run_dna_audit_top20(self):
+        """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
+        row_count = self.table.rowCount()
+        if row_count == 0:
+            return
+            
+        selected_items = self.table.selectedItems()
+        selected_rows = sorted(list(set([item.row() for item in selected_items])))
+        
+        if len(selected_rows) > 1:
+            target_rows = selected_rows[:50]
+        elif len(selected_rows) == 1:
+            start_idx = selected_rows[0]
+            target_rows = range(start_idx, min(start_idx + 20, row_count))
+        else:
+            target_rows = range(min(20, row_count))
+            
+        code_to_name = {}
+        for row in target_rows:
+            if row >= row_count: break
+            c_item = self.table.item(row, 0)
+            n_item = self.table.item(row, 1)
+            if c_item:
+                c = str(c_item.text()).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(n_item.text()).strip() if n_item else ""
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+
+                if c and c != "N/A" and len(c) == 6:
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            main_app = getattr(self.parent(), 'main_app', None)
+            if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
+                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+            else:
+                logger.error("未连接到主监视器程序，无法启动 DNA 审计")
 
 
 class RacingTimeline(QFrame):

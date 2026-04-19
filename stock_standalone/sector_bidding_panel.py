@@ -1775,9 +1775,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         bar_lay_3.addWidget(QLabel("🎯 个股分≥"))
         self.spin_score_threshold = self._make_spin(0.0, 20.0, 0.5, self.detector.score_threshold)
-        self.spin_score_threshold.valueChanged.connect(self._on_strategy_changed)
         bar_lay_3.addWidget(self.spin_score_threshold)
         
+        # [RE-ADDED] [FIXED] 补全缺失的板块过滤参数，防止 AttributeError
+        bar_lay_3.addWidget(QLabel(" 🎯 板块个股偏置≥"))
+        self.spin_sector_min_score = self._make_spin(0.0, 10.0, 0.5, self.detector.sector_min_score)
+        bar_lay_3.addWidget(self.spin_sector_min_score)
+        
+        bar_lay_3.addWidget(QLabel(" 🔥 板块强度≥"))
+        self.spin_sector_score_threshold = self._make_spin(0.0, 50.0, 1.0, self.detector.sector_score_threshold)
+        bar_lay_3.addWidget(self.spin_sector_score_threshold)
+
         bar_lay_3.addWidget(self._sep())
         
         bar_lay_3.addWidget(QLabel(" 观测时长:"))
@@ -1796,17 +1804,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_add_10.clicked.connect(lambda: self._adjust_interval(10))
         bar_lay_3.addWidget(self.btn_add_10)
 
-        bar_lay_3.addStretch()
-
-        bar_lay_3.addWidget(QLabel(" 🏗️ 板块分≥"))
-        self.spin_sector_min_score = self._make_spin(0.0, 50.0, 0.5, self.detector.sector_min_score)
-        bar_lay_3.addWidget(self.spin_sector_min_score)
-
-        bar_lay_3.addWidget(QLabel(" 🔥 强度≥"))
-        self.spin_sector_score_threshold = self._make_spin(0.0, 500.0, 5.0, getattr(self.detector, 'sector_score_threshold', 5.0))
-        bar_lay_3.addWidget(self.spin_sector_score_threshold)
-
         bar_lay_3.addWidget(self._sep())
+        
+        # [NEW] 全局 DNA 审计按钮 (智能识别焦点面板)
+        self.btn_dna_audit_global = QPushButton("🧬 DNA审计")
+        self.btn_dna_audit_global.setFixedWidth(85)
+        self.btn_dna_audit_global.setToolTip("智能识别当前选中的 [板块/个股/重点表] 面板，并对前 20 只进行 DNA 基因审计")
+        self.btn_dna_audit_global.setStyleSheet("""
+            QPushButton { 
+                background: #2C2C2E; 
+                color: #ffffff; 
+                border: 1px solid #555; 
+                border-radius: 4px; 
+                padding: 3px; 
+                font-size: 8.5pt; 
+                font-weight: bold; 
+            } 
+            QPushButton:hover { background: #3A3A3C; border-color: #00ff88; }
+        """)
+        self.btn_dna_audit_global.clicked.connect(self._run_dna_audit_focused)
+        bar_lay_3.addWidget(self.btn_dna_audit_global)
+
+        bar_lay_3.addStretch()
 
         bar_lay_3.addWidget(QLabel(" 📉 最小振幅%:"))
         self.spin_amplitude_min = self._make_spin(0.0, 10.0, 0.5, self.detector.strategies['amplitude']['min'])
@@ -1962,6 +1981,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         h_header_lay.addWidget(self.macro_info_lbl)
         
         # [NEW] 写入板块功能按钮 - 移至右侧并缩小尺寸
+        self.btn_dna_audit_watchlist = QPushButton("🧬 DNA审计")
+        self.btn_dna_audit_watchlist.setToolTip("执行批量 DNA 审计与特征提炼分析")
+        self.btn_dna_audit_watchlist.setStyleSheet("QPushButton { background: #333; color: white; font-size: 11px; padding: 1px 5px; border: 1px solid #555; border-radius: 3px; } QPushButton:hover { background: #444; }")
+        self.btn_dna_audit_watchlist.clicked.connect(lambda: self._run_dna_audit_selected(self.watchlist_table))
+        h_header_lay.addWidget(self.btn_dna_audit_watchlist)
+
         self.btn_append_blk = QPushButton("➕ 追加板块")
         self.btn_append_blk.setToolTip("将当前重点表数据‘追加’到 TDX 自定义板块")
         self.btn_append_blk.setStyleSheet("QPushButton { background: #1a2a1a; color: #00ff88; font-size: 11px; padding: 1px 5px; border: 1px solid #00ff88; border-radius: 3px; } QPushButton:hover { background: #1b3d1b; }")
@@ -2592,28 +2617,40 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ------------------------------------------------------------------ Event Handling
     def eventFilter(self, source, event):
         """拦截并处理特定组件的底层事件"""
-        # 1. 拦截搜索历史下拉列表的点击，防止误触发选择
-        if hasattr(self, 'search_input') and source == self.search_input.view().viewport():
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                pos = event.pos()
-                view = self.search_input.view()
-                index = view.indexAt(pos)
-                if index.isValid():
-                    # 获取该项的物理矩形
-                    visual_rect = view.visualRect(index)
-                    # 模拟 option 以复用 Delegate 的位置算法
-                    option = QStyleOptionViewItem()
-                    option.rect = visual_rect
-                    
-                    btn_rect = SearchHistoryDelegate.get_btn_rect(option)
-                    if btn_rect.contains(pos):
-                        # 确认为删除按钮点击
-                        if index.data() != "龙头":
-                            self._delete_history_item_by_row(index.row())
-                        # 🛡️ 核心：返回 True 彻底截断该按下事件，让 ComboBox 无法触发 activated 信号
-                        return True
+        # 🛡️ [FIXED] 针对 "wrapped C/C++ object has been deleted" 异常的极致加固
+        # 统一保护搜索/查询框的历史删除按钮交互，支持 search_input 与 query_input
+        for attr_name in ['search_input', 'query_input']:
+            try:
+                combo = getattr(self, attr_name, None)
+                # 必须检查 combo 及其视图是否还存活
+                if combo is not None and not isinstance(combo, str):
+                    view = combo.view()
+                    if view and source == view.viewport():
+                        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                            pos = event.pos()
+                            index = view.indexAt(pos)
+                            if index.isValid():
+                                visual_rect = view.visualRect(index)
+                                # 模拟 option 以复用 Delegate 的位置算法
+                                option = QStyleOptionViewItem()
+                                option.rect = visual_rect
+                                
+                                btn_rect = SearchHistoryDelegate.get_btn_rect(option)
+                                if btn_rect.contains(pos):
+                                    # 确认为删除按钮点击
+                                    if index.data() != "龙头":
+                                        if attr_name == 'search_input':
+                                            self._delete_history_item_by_row(index.row())
+                                        else:
+                                            # query_input 暂时仅作交互拦截，不联动底层删除
+                                            pass
+                                    return True
+            except (RuntimeError, AttributeError, Exception):
+                # 捕获并跳过所有 C++ 对象销毁相关的底层错误
+                continue
         
         return super().eventFilter(source, event)
+        
 
     # ------------------------------------------------------------------ search functionality
     def _on_search_triggered(self):
@@ -3795,43 +3832,105 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.status_lbl.setText(f"[{sess}] 📊 已打开个股详情: {name} ({code})")
 
     def _on_watchlist_context_menu(self, pos):
-        """重点表右键点击：联动到活跃板块"""
+        """重点表右键点击"""
         item = self.watchlist_table.itemAt(pos)
         if not item: return
         
         row = item.row()
         col = item.column()
+        code = (self.watchlist_table.item(row, 0) or QTableWidgetItem()).text()
+        name = (self.watchlist_table.item(row, 1) or QTableWidgetItem()).text()
         
-        # 仅在点击核心板块列(3)时触发联动
-        if col == 3:
-            sector_name = item.text().strip()
-            if not sector_name: return
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        sector_name = (self.watchlist_table.item(row, 3) or QTableWidgetItem()).text().strip()
+        if sector_name:
+            menu.addAction(f"📂 定位所属板块: {sector_name[:12]}...", lambda: self._locate_sector(sector_name))
             
-            # 自动联动到活跃板块列表
-            target_sector = None
-            # 兼容多板块字符串
-            parts = [p.strip() for p in sector_name.split(';') if p.strip()]
+        menu.addSeparator()
+        
+        selected_rows = set([it.row() for it in self.watchlist_table.selectedItems()])
+        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        act_dna = menu.addAction(title_dna)
+        act_dna.triggered.connect(lambda: self._run_dna_audit_selected(self.watchlist_table))
+        
+        menu.addSeparator()
+        menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
+        
+        menu.exec(self.watchlist_table.viewport().mapToGlobal(pos))
+
+    def _run_dna_audit_focused(self):
+        """🚀 [DNA-BATCH] 智能审计：探测当前焦点表格并执行审计"""
+        # 优先级：上次点击/获得焦点的组件
+        target_table = self._last_focused_widget
+        
+        # 兜底探测
+        if not target_table or not isinstance(target_table, QTableWidget):
+            # 尝试根据当前选区判定
+            if self.stock_table.selectedItems(): target_table = self.stock_table
+            elif self.watchlist_table.selectedItems(): target_table = self.watchlist_table
+            elif self.sector_table.selectedItems(): target_table = self.sector_table
+            else: target_table = self.stock_table # Final fallback
             
-            # 遍历左侧列表项寻找匹配
-            found = False
-            for i in range(self.sector_table.rowCount()):
-                list_item = self.sector_table.item(i, 0)
-                sn = list_item.data(Qt.ItemDataRole.UserRole)
-                if sn in parts or any(p in sn for p in parts) or sn == sector_name:
-                    self.sector_table.setCurrentCell(i, 0)
-                    # 联动后焦点保留在重点表
-                    self.watchlist_table.setFocus()
-                    found = True
-                    target_sector = sn
-                    break
+        self._run_dna_audit_selected(target_table)
+
+    def _run_dna_audit_selected(self, table_widget):
+        """🚀 [DNA-BATCH] 极限审计：支持多选审计，单个选中则从当前行开始往下审计 20 只"""
+        row_count = table_widget.rowCount()
+        if row_count == 0:
+            return
             
-            # 状态栏提示结果
-            if hasattr(self, 'status_lbl'):
-                sess = self._session_str()
-                if found:
-                    self.status_lbl.setText(f"[{sess}] 🔗 已联动活跃板块: {target_sector}")
-                else:
-                    self.status_lbl.setText(f"[{sess}] ❌ 未在活跃板块中匹配到: {sector_name}")
+        # 1. 动态获取代码和名称列索引 (适配个股表 vs 板块表)
+        code_col, name_col = -1, -1
+        for i in range(table_widget.columnCount()):
+            header = table_widget.horizontalHeaderItem(i)
+            if header:
+                txt = header.text()
+                # 板块表用 "龙头" 列，个股表用 "代码" 列
+                if txt in ["代码", "龙头"]: code_col = i
+                if txt in ["名称", "龙头名称"]: name_col = i
+        
+        if code_col == -1: return
+
+        # 2. 确定目标行集合
+        selected_items = table_widget.selectedItems()
+        selected_rows = sorted(list(set([item.row() for item in selected_items])))
+        
+        if len(selected_rows) > 1:
+            # 多选模式：仅审计选中的 (上限 50)
+            target_rows = selected_rows[:50]
+        elif len(selected_rows) == 1:
+            # 单选模式：从当前选中行开始向下选取 20 只 (包含选中行本身)
+            start_idx = selected_rows[0]
+            target_rows = range(start_idx, min(start_idx + 20, row_count))
+        else:
+            # 无选区：默认前 20 只
+            target_rows = range(min(20, row_count))
+            
+        # 3. 提取代码与名称
+        code_to_name = {}
+        for row in target_rows:
+            c_item = table_widget.item(row, code_col)
+            n_item = table_widget.item(row, name_col) if name_col != -1 else None
+            if c_item:
+                c = str(c_item.text()).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(n_item.text()).strip() if n_item else ""
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+                
+                if c and c != "N/A" and len(c) == 6:
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            main_app = getattr(self, 'main_window', None)
+            if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
+                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+            else:
+                logger.error("未连接到主监视器程序，无法启动 DNA 审计")
 
     def _on_watchlist_cell_changed(self, row, col, old_row, old_col):
         """重点表键盘光标联动"""
@@ -4114,6 +4213,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if sector_name:
             menu.addAction(f"📂 定位所属板块: {sector_name}", lambda: self._locate_sector(sector_name))
             
+        menu.addSeparator()
+        
+        selected_rows = set([it.row() for it in self.stock_table.selectedItems()])
+        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        act_dna = menu.addAction(title_dna)
+        act_dna.triggered.connect(lambda: self._run_dna_audit_selected(self.stock_table))
+
         menu.addSeparator()
         menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
         menu.addAction("📋 复制名称", lambda: self._copy_to_clipboard(name))

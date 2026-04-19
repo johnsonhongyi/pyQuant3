@@ -225,6 +225,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         tk.Button(toolbar, text="◀", command=lambda: self.shift_date(-1), width=2).pack(side="left", padx=1)
         tk.Button(toolbar, text="▶", command=lambda: self.shift_date(1), width=2).pack(side="left", padx=1)
 
+        # 🚀 [NEW] DNA审计按钮贴行附加
+        tk.Button(toolbar, text="🧬 DNA审计", bg="#333333", fg="#ffffff", font=("Arial", 9, "bold"), command=self._run_dna_audit_selected).pack(side="left", padx=5, pady=5)
+
         tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
 
         # 🔍 Multi-day Tracking Button
@@ -587,6 +590,15 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # 4. 恢复渲染并强制刷新
             self.tree.configure(displaycolumns=all_cols)
             self.tree.update_idletasks()
+
+        # 🚀 [NEW] 加载完成后，自动选中第一行，避免用户需要手动点选才能锁定“最新视图”进行审计
+        all_items = self.tree.get_children()
+        if all_items:
+            try:
+                self.tree.selection_set(all_items[0])
+                self.tree.see(all_items[0])
+                self.tree.focus(all_items[0])
+            except: pass
 
         # 5. 列宽自适应
         if not self._column_widths_cached:
@@ -1103,31 +1115,130 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
 
     def show_context_menu(self, event):
-        """显示右键菜单"""
-        item_id = self.tree.identify_row(event.y)
+        """显示右键菜单 (通用)"""
+        tree = event.widget
+        item_id = tree.identify_row(event.y)
         if not item_id:
             return
 
-        self.tree.selection_set(item_id)
+        sel = tree.selection()
+        if item_id not in sel:
+            tree.selection_set(item_id)
+            sel = (item_id,)
+            
         code = item_id
+        vals = tree.item(item_id, "values")
+        if vals:
+            c = str(vals[0]).strip()
+            import re
+            c = re.sub(r'[^\d]', '', c).zfill(6)
+            if c:
+                code = c
 
-        menu = tk.Menu(self, tearoff=0)
+        menu = tk.Menu(self, tearoff=0, bg="#2C2C2E", fg="white", activebackground="#005BB7")
 
         # 定义命令（先保存）
         cmd = lambda: self.tree_scroll_to_code(code)
 
         menu.add_command(
-            label=f"定位股票代码: {code}",
+            label=f"📂 定位股票代码: {code}",
             command=cmd
         )
 
-        # === 关键逻辑 ===
-        if menu.index("end") == 0:
-            # 只有一项，直接执行
-            cmd()
+        menu.add_separator()
+        
+        title_dna = f"🧬 执行 DNA 审计 ({len(sel)}只...)" if len(sel) > 1 else f"🧬 执行 DNA 审计"
+        menu.add_command(label=title_dna, command=self._run_dna_audit_selected)
+
+        menu.post(event.x_root, event.y_root)
+
+    def _get_active_tree(self):
+        """🚀 [DNA-BATCH] 探测当前活跃（聚焦或页签内）的 Treeview"""
+        # 1. 首先尝试获取当前拥有焦点的 Treeview
+        focused = self.focus_get()
+        if isinstance(focused, ttk.Treeview):
+            return focused
+            
+        # 2. 否则根据页签判定
+        tab_id = self._notebook.select()
+        if not tab_id: return self.tree
+        tab_text = self._notebook.tab(tab_id, "text")
+        
+        if "策略选股" in tab_text: 
+            return self.tree
+        elif "板块聚焦" in tab_text:
+            # 优先返回选股详情成员表，如果没有则返回板块排行榜
+            if hasattr(self, '_member_tree') and (self._member_tree.selection() or self._member_tree.get_children()):
+                return self._member_tree
+            if hasattr(self, '_sector_tree'): return self._sector_tree
+        elif "实时决策" in tab_text:
+            if hasattr(self, '_signal_tree'): return self._signal_tree
+            
+        return self.tree # Final fallback
+
+    def _run_dna_audit_selected(self):
+        """🚀 [DNA-BATCH] 极限审计当前视图所选 / Top20 (智能适配多列名)"""
+        tree = self._get_active_tree()
+        if not tree: 
+            messagebox.showinfo("提示", "当前没有可用于审计的展示列表")
+            return
+            
+        # 🛡️ 强制刷新渲染状态，确保审计拿到的是最新视图数据
+        tree.update_idletasks()
+        
+        items = list(tree.get_children())
+        if not items: return
+        
+        # 1. 动态映射列索引 (寻找 代码/龙头代码 和 名称/龙头名)
+        col_ids = tree.cget("columns")
+        idx_code, idx_name = -1, -1
+        for i, cid in enumerate(col_ids):
+            c_lower = str(cid).lower()
+            header_text = str(tree.heading(cid, "text")).lower()
+            if "code" in c_lower or "代码" in header_text: idx_code = i
+            if "name" in c_lower or "名称" in header_text: idx_name = i
+            
+        # 兜底：如果没找到，默认用第 0, 1 列
+        if idx_code == -1: idx_code = 0
+        if idx_name == -1: idx_name = 1
+
+        # 2. 确定目标项
+        selection = tree.selection()
+        target_items = []
+        if len(selection) > 1:
+            # 多选模式：仅审计选中的 (上限 50)
+            target_items = list(selection)[:50]
+        elif len(selection) == 1:
+            # 单选模式：从选中行开始向下选取 20 只 (包含选中项)
+            try:
+                start_idx = items.index(selection[0])
+            except ValueError:
+                start_idx = 0
+            target_items = items[start_idx : start_idx + 20]
         else:
-            # 多项才弹出菜单
-            menu.post(event.x_root, event.y_root)
+            # 无选区：默认前 20 只
+            target_items = items[:20]
+            
+        code_to_name = {}
+        for it in target_items:
+            vals = tree.item(it, "values")
+            if vals and len(vals) > idx_code:
+                c = str(vals[idx_code]).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(vals[idx_name]).strip() if len(vals) > idx_name else ""
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+                
+                if c and c != "N/A" and len(c) == 6:
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            if hasattr(self.master, '_run_dna_audit_batch'):
+                self.master._run_dna_audit_batch(code_to_name)
+            else:
+                logger.error("No access to main monitor app for DNA audit.")
     
 
 
@@ -1549,6 +1660,7 @@ def _init_sector_tab(self, parent: tk.Frame):
 
     self._member_tree.bind("<<TreeviewSelect>>", self._on_member_selected)
     self._member_tree.bind("<Double-1>", self._on_member_selected)
+    self._member_tree.bind("<Button-3>", self.show_context_menu)
 
 
 def _init_decision_tab(self, parent: tk.Frame):
@@ -1631,6 +1743,7 @@ def _init_decision_tab(self, parent: tk.Frame):
 
     self._signal_tree.bind("<Double-1>", self._on_signal_double_click)
     self._signal_tree.bind("<<TreeviewSelect>>", self._on_signal_selected)
+    self._signal_tree.bind("<Button-3>", self.show_context_menu)
 
     self._sig_tooltip_win = None
     self._sig_last_hover_id = None

@@ -60,9 +60,25 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         layout.setSpacing(2)
         
         # 头部说明 (精简版)
+        header_frame = QFrame()
+        header_lay = QHBoxLayout(header_frame)
+        header_lay.setContentsMargins(0, 0, 0, 0)
+        
         header = QLabel("🔥 异动放量 | 双击行联动")
         header.setStyleSheet("color: #ffa500; font-size: 12px; padding-left: 5px; font-weight: bold;")
-        layout.addWidget(header)
+        header_lay.addWidget(header)
+        
+        header_lay.addStretch()
+        self.btn_dna_audit_vol = QPushButton("🧬 DNA审计")
+        self.btn_dna_audit_vol.setFixedWidth(85)
+        self.btn_dna_audit_vol.setStyleSheet("""
+            QPushButton { background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; font-size: 8pt; font-weight: bold; height: 20px; }
+            QPushButton:hover { background: #444; border-color: #00ff88; }
+        """)
+        self.btn_dna_audit_vol.clicked.connect(self._run_dna_audit_selected)
+        header_lay.addWidget(self.btn_dna_audit_vol)
+        
+        layout.addWidget(header_frame)
         
         # 表格展示
         self.table = QTableWidget(0, 4)
@@ -167,6 +183,45 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
             
         self.table.setSortingEnabled(True) # 恢复自适应排序
         self._is_updating = False
+
+    def _run_dna_audit_selected(self):
+        """🚀 [DNA-BATCH] 极限审计：针对异动放量列表"""
+        items = []
+        for r in range(self.table.rowCount()):
+            c_it = self.table.item(r, 0)
+            n_it = self.table.item(r, 1)
+            if c_it and n_it:
+                items.append((c_it.text(), n_it.text()))
+        
+        if not items: return
+        
+        # 确定候选名单
+        sel_rows = sorted(list(set(i.row() for i in self.table.selectedItems())))
+        target_items = []
+        
+        if len(sel_rows) > 1:
+            # 锁定多选
+            for r in sel_rows[:50]:
+                target_items.append((self.table.item(r, 0).text(), self.table.item(r, 1).text()))
+        elif len(sel_rows) == 1:
+            # 向下 20
+            start = sel_rows[0]
+            for r in range(start, min(start + 20, self.table.rowCount())):
+                target_items.append((self.table.item(r, 0).text(), self.table.item(r, 1).text()))
+        else:
+            # 默认前 20
+            for r in range(min(20, self.table.rowCount())):
+                target_items.append((self.table.item(r, 0).text(), self.table.item(r, 1).text()))
+        
+        code_to_name = {c: n for c, n in target_items if c and c != "N/A"}
+        if code_to_name:
+            main_app = getattr(self.parent(), 'parent_app', None)
+            if not main_app: main_app = getattr(self.window(), 'parent_app', None)
+            
+            if main_app and hasattr(main_app, '_run_dna_audit_batch'):
+                main_app._run_dna_audit_batch(code_to_name)
+            else:
+                logger.error("No access to main monitor app for DNA audit.")
 
     def closeEvent(self, event):
         """关闭事件时保存位置"""
@@ -633,6 +688,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """)
         self.manual_run_btn.clicked.connect(self._on_engine_manual_run)
 
+        # [NEW] DNA审计按钮
+        self.btn_dna_audit_signal = QPushButton("🧬 DNA审计")
+        self.btn_dna_audit_signal.setFixedWidth(85)
+        self.btn_dna_audit_signal.setStyleSheet("""
+            QPushButton { 
+                background: #2C2C2E; 
+                color: #ffffff; 
+                border: 1px solid #555; 
+                border-radius: 4px; 
+                padding: 3px; 
+                font-size: 8.5pt; 
+                font-weight: bold; 
+            } 
+            QPushButton:hover { background: #3A3A3C; border-color: #00ff88; }
+        """)
+        self.btn_dna_audit_signal.clicked.connect(self._run_dna_audit_selected)
+
         # [NEW] 重置按钮
         self.reset_btn = QPushButton("♻️ 重置")
         self.reset_btn.setFixedWidth(70)
@@ -647,6 +719,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         corner_lay.setSpacing(5)
         corner_lay.addWidget(self.type_filter)
         corner_lay.addWidget(self.search_input)
+        corner_lay.addWidget(self.btn_dna_audit_signal)
         corner_lay.addWidget(self.manual_run_btn)
         corner_lay.addWidget(self.reset_btn)
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
@@ -749,6 +822,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # [NEW] 列宽持久化联动
         table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
         return table
 
     def _create_decision_table(self) -> QTableWidget:
@@ -774,6 +849,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # [NEW] 列宽持久化联动
         table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
         return table
 
     def _create_sector_table(self) -> QTableWidget:
@@ -798,6 +875,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # [NEW] 列宽持久化联动
         table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
         return table
 
     def _create_dragon_table(self) -> QTableWidget:
@@ -822,6 +901,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # [NEW] 列宽持久化联动
         table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
         return table
 
     def _on_sector_table_clicked(self, row, col):
@@ -1848,6 +1929,104 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             n_it = table.item(row, name_col) if name_col >= 0 else None
             if c_it and c_it.text():
                 self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
+
+    def _show_context_menu(self, pos):
+        """通用右键菜单"""
+        table = self.sender()
+        if not isinstance(table, QTableWidget): return
+        
+        index = table.indexAt(pos)
+        if not index.isValid(): return
+        
+        row = index.row()
+        item = table.item(row, 0)
+        if not item: return
+
+        # 发现选中行
+        sel_rows = sorted(list(set(i.row() for i in table.selectedItems())))
+        if row not in sel_rows:
+            table.selectRow(row)
+            sel_rows = [row]
+
+        # 动态获取代码
+        code_col = -1
+        name_col = -1
+        for i in range(table.columnCount()):
+            h = table.horizontalHeaderItem(i)
+            if h:
+                if h.text() in ["代码", "龙头"]: code_col = i
+                elif h.text() in ["名称", "龙头名称"]: name_col = i
+        
+        if code_col == -1: return
+        code = table.item(row, code_col).text()
+        name = table.item(row, name_col).text() if name_col != -1 else ""
+
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #1a1c2c; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #2a2d42; }")
+        
+        # 1. 复制
+        copy_action = menu.addAction(f"📋 复制代码: {code}")
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
+        
+        menu.addSeparator()
+
+        # 2. DNA 审计
+        title = f"🧬 执行 DNA 审计 ({len(sel_rows)}只...)" if len(sel_rows) > 1 else f"🧬 执行 DNA 审计"
+        dna_action = menu.addAction(title)
+        dna_action.triggered.connect(lambda: self._run_dna_audit_selected(table))
+
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def _run_dna_audit_selected(self, source_table=None):
+        """🚀 [DNA-BATCH] 极限审计：当前 Tab 选区 / Top20"""
+        table = source_table if source_table else self.tabs.currentWidget()
+        if not isinstance(table, QTableWidget): 
+            # 兜底：如果是按钮触发且当前Tab没有Table（绝大多数Tab都有），则尝试获取当前
+            table = self.tabs.currentWidget()
+        
+        if not isinstance(table, QTableWidget): return
+        
+        rowCount = table.rowCount()
+        if rowCount == 0: return
+
+        # 动态找出代码和名称列
+        code_col, name_col = -1, -1
+        for i in range(table.columnCount()):
+            h = table.horizontalHeaderItem(i)
+            if h:
+                if h.text() in ["代码", "龙头"]: code_col = i
+                elif h.text() in ["名称", "龙头名称"]: name_col = i
+        
+        if code_col == -1: return
+
+        sel_rows = sorted(list(set(i.row() for i in table.selectedItems())))
+        target_rows = []
+        
+        if len(sel_rows) > 1:
+            target_rows = sel_rows[:50]
+        elif len(sel_rows) == 1:
+            start = sel_rows[0]
+            target_rows = list(range(start, min(start + 20, rowCount)))
+        else:
+            target_rows = list(range(min(20, rowCount)))
+            
+        code_to_name = {}
+        for r in target_rows:
+            c_it = table.item(r, code_col)
+            n_it = table.item(r, name_col) if name_col != -1 else None
+            if c_it and c_it.text():
+                c = c_it.text().strip()
+                n = n_it.text().strip() if n_it else ""
+                if c and c != "N/A":
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            # 这里的 SignalDashboard 一般被 MainWindow 挂载了 .parent_app
+            main_app = getattr(self, 'parent_app', None)
+            if main_app and hasattr(main_app, '_run_dna_audit_batch'):
+                main_app._run_dna_audit_batch(code_to_name)
+            else:
+                logger.error("No access to main monitor app for DNA audit.")
 
     # def _on_cell_double_clicked(self, row, col):
     #     table = self.sender()

@@ -23,7 +23,7 @@ import JohnsonUtil.commonTips as cct
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
-    QFrame, QTabWidget, QApplication
+    QFrame, QTabWidget, QApplication, QTreeWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint
 from PyQt6.QtGui import QColor, QAction
@@ -108,6 +108,8 @@ except ImportError:
 from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
 from db_utils import SQLiteConnectionManager
+
+from data_utils import send_code_via_pipe, PIPE_NAME_TK
 
 logger = LoggerFactory.getLogger(__name__)
 
@@ -1435,6 +1437,12 @@ class HotlistPanel(QWidget, WindowMixin):
         
         menu.addAction("🎯 加入跟单队列", lambda: self._add_to_follow_queue(code, name, price, "观察池晋升"))
         menu.addSeparator()
+        
+        # 🧬 DNA 专项审计
+        dna_action = menu.addAction("🧬 DNA 专项审计")
+        dna_action.triggered.connect(self._trigger_dna_audit_focused)
+        
+        menu.addSeparator()
         menu.addAction("🗑️ 从观察池移除", lambda: self._remove_from_watchlist(code))
         menu.exec(self.watchlist_table.mapToGlobal(pos))
 
@@ -2374,6 +2382,12 @@ class HotlistPanel(QWidget, WindowMixin):
         menu.addAction(action_entered)
 
         menu.addSeparator()
+        
+        # 🧬 DNA 专项审计
+        dna_action = menu.addAction("🧬 DNA 专项审计")
+        dna_action.triggered.connect(self._trigger_dna_audit_focused)
+        
+        menu.addSeparator()
 
         # 动作：强制移除 (Physical Delete)
         action_delete = QAction("🗑️ 彻底删除 (Delete)", self)
@@ -2612,6 +2626,12 @@ class HotlistPanel(QWidget, WindowMixin):
             action.triggered.connect(lambda checked, grp=g, code=current_code: self._set_group(code, grp))
             group_menu.addAction(action)
         
+        menu.addSeparator()
+        
+        # 🧬 DNA 专项审计
+        dna_action = menu.addAction("🧬 DNA 专项审计")
+        dna_action.triggered.connect(self._trigger_dna_audit_focused)
+
         menu.exec(self.table.mapToGlobal(pos))
     
     def _add_to_follow_queue(self, code: str, name: str, price: float, signal_type: str):
@@ -2770,3 +2790,63 @@ class HotlistPanel(QWidget, WindowMixin):
         """隐藏时保存位置"""
         super().hideEvent(event)
 
+    def _trigger_dna_audit_focused(self):
+        """🚀 [DNA-BATCH] 针对热点面板当前焦点视图执行审计 (通过 Pipe 发送至主进程)"""
+        f_widget = self.focusWidget()
+        if not f_widget or not isinstance(f_widget, (QTableWidget, QTreeWidget)):
+            # 兜底：寻找当前活动的 Tab
+            if self.tabs:
+                f_widget = self.tabs.currentWidget()
+                # 如果当前 Tab 的子项是表格
+                if hasattr(f_widget, 'findChild'):
+                   child_table = f_widget.findChild(QTableWidget)
+                   if child_table: f_widget = child_table
+
+        if not isinstance(f_widget, (QTableWidget, QTreeWidget)):
+            # 最终兜底
+            f_widget = self.table
+
+        code_to_name = {}
+        limit = 20
+        
+        if isinstance(f_widget, QTableWidget):
+            table = f_widget
+            items_count = table.rowCount()
+            selection = table.selectedItems()
+            selected_rows = sorted(list(set(i.row() for i in selection)))
+            
+            # 列索引探测 (Hotlist/Follow/Watchlist 结构不同，动态映射)
+            idx_code, idx_name = -1, -1
+            for c in range(table.columnCount()):
+                txt = (table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else "").lower()
+                if "代码" in txt or "code" in txt: idx_code = c
+                if "名称" in txt or "name" in txt: idx_name = c
+            
+            if idx_code == -1: idx_code = 1 # 默认大部分表第 2 列是代码
+            if idx_name == -1: idx_name = 2
+                
+            rows_to_audit = []
+            if len(selected_rows) > 1:
+                rows_to_audit = selected_rows[:limit]
+            elif len(selected_rows) == 1:
+                start_row = selected_rows[0]
+                rows_to_audit = list(range(start_row, min(start_row + limit, items_count)))
+            else:
+                rows_to_audit = list(range(min(limit, items_count)))
+                
+            for r in rows_to_audit:
+                c_item = table.item(r, idx_code)
+                n_item = table.item(r, idx_name)
+                c_val = c_item.text() if c_item else ""
+                n_val = n_item.text() if n_item else ""
+                
+                c_val = re.sub(r'[^\d]', '', c_val)
+                if len(c_val) < 6 and c_val.isdigit(): c_val = c_val.zfill(6)
+                if n_val.startswith("🔔"): n_val = n_val.replace("🔔", "").strip()
+                
+                if len(c_val) == 6: code_to_name[c_val] = n_val
+
+        if code_to_name:
+            cmd = {"cmd": "DNA_AUDIT", "codes": code_to_name}
+            send_code_via_pipe(cmd, logger, pipe_name=PIPE_NAME_TK)
+            logger.info(f"🧬 HotlistPanel: Sent DNA_AUDIT via Pipe for {len(code_to_name)} stocks")

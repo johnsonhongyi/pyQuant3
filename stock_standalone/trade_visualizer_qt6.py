@@ -2598,6 +2598,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⚡ [NEW] DataLoaderThread 防抖计时器 (解决快速预览卡顿)
         self._data_load_debounce_ms = 50 
         self._data_load_timer = QTimer(self)
+
+        # 🚀 [NEW] 焦点感知追踪 (用于 DNA 审计等)
+        self._last_focused_view = None
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
         self._data_load_timer.setSingleShot(True)
         self._data_load_timer.timeout.connect(self._execute_delayed_load)
         self._pending_load_params = None
@@ -4369,6 +4373,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.linkage_action.triggered.connect(self.on_toggle_linkage)
         self.toolbar.addAction(self.linkage_action)
 
+        # 🧬 [NEW] DNA 专项审计 (一键透视)
+        self.dna_action = QAction("🧬 DNA", self)
+        self.dna_action.setToolTip("🚀 [DNA-BATCH] 对当前焦点视图执行基因审计 (顺延前20只)")
+        self.dna_action.triggered.connect(self._run_dna_audit_focused)
+        self.toolbar.addAction(self.dna_action)
+
         # # [NEW] 渲染模式切换
         # self.toolbar.addSeparator()
         # self.render_mode_cb = QCheckBox("标准")
@@ -6041,6 +6051,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if last_link_payload:
                 code = last_link_payload.get('code')
                 timestamp = last_link_payload.get('timestamp')
+                logger.info(f"📥 [IPC] Recv TIME_LINK: {code} at {timestamp}")
                 if code and timestamp:
                     self.active_time_linkage = {
                         'code': str(code).zfill(6),
@@ -6049,16 +6060,15 @@ class MainWindow(QMainWindow, WindowMixin):
                         'price': None,
                         'auto_scroll': True
                     }
-                    logger.debug(f"[IPC] Consolidated TIME_LINK for {code} at {timestamp}")
                     if getattr(self, 'tk_linkage_auto_display', True):
                         self.load_stock_by_code(code, skip_tdx=True)
             
             elif last_switch_payload:
                 code = last_switch_payload.get('code')
                 res = last_switch_payload.get('resample', 'd')
+                logger.info(f"📥 [IPC] Recv SWITCH_CODE: {code} (res={res})")
                 if code:
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        logger.debug(f"[IPC] Consolidated SWITCH_CODE for {code}")
                         self.load_stock_by_code(code, resample=res)
 
             # [REMOVED] 语音反馈队列轮询逻辑已迁移至 _poll_voice_feedback，根治 QTimer 竞争导致的同步失效。
@@ -7888,6 +7898,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # [NEW] SBC 回放分析
         sbc_action = menu.addAction("📊 SBC 回放分析")
         sbc_action.triggered.connect(lambda: self._run_sbc_test(False, stock_code))
+
+        # [NEW] DNA 专项审计
+        dna_action = menu.addAction("🧬 DNA 专项审计")
+        dna_action.triggered.connect(self._run_dna_audit_focused)
         
         menu.addSeparator()
         
@@ -7923,6 +7937,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # [NEW] SBC 回放分析
         sbc_action = menu.addAction("📊 SBC 回放分析")
         sbc_action.triggered.connect(lambda: self._run_sbc_test(False, stock_code))
+
+        # [NEW] DNA 专项审计
+        dna_action = menu.addAction("🧬 DNA 专项审计")
+        dna_action.triggered.connect(self._run_dna_audit_focused)
         
         menu.addSeparator()
         
@@ -7948,6 +7966,106 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_add_to_hotlist_from_menu(self, code: str, name: str, row):
         """从右键菜单添加到热点"""
+        self.add_to_hotlist(code, name, row)
+
+    def _on_focus_changed(self, old, new):
+        """记录最后一次获得焦点的表格或树"""
+        if isinstance(new, (QTableWidget, QTreeWidget)):
+            self._last_focused_view = new
+
+    def _run_dna_audit_focused(self):
+        """🚀 [DNA-BATCH] 针对当前焦点视图执行审计 (同步发送至主进程)"""
+        f_widget = self.focusWidget()
+        # 如果当前焦点不是表，或者正在点击工具栏按钮，则使用最后记录的视图
+        if not f_widget or not isinstance(f_widget, (QTableWidget, QTreeWidget)):
+            f_widget = self._last_focused_view
+            
+        # 兜底机制：如果还是没有，则寻找当前活动的视图
+        if not f_widget:
+            # 优先检查最常用的 stock_table
+            if hasattr(self, 'stock_table') and self.stock_table.rowCount() > 0:
+                f_widget = self.stock_table
+            elif hasattr(self, 'filter_tree') and self.filter_tree.topLevelItemCount() > 0:
+                f_widget = self.filter_tree
+            else:
+                return
+
+        code_to_name = {}
+        limit = 20
+        
+        if isinstance(f_widget, QTableWidget):
+            table = f_widget
+            items_count = table.rowCount()
+            selection = table.selectedItems()
+            selected_rows = sorted(list(set(i.row() for i in selection)))
+            
+            # 列索引探测
+            idx_code, idx_name = 0, 1
+            for c in range(table.columnCount()):
+                txt = table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else ""
+                if "代码" in txt or "code" in txt.lower(): idx_code = c
+                if "名称" in txt or "name" in txt.lower(): idx_name = c
+            
+            rows_to_audit = []
+            if len(selected_rows) > 1:
+                rows_to_audit = selected_rows[:limit]
+            elif len(selected_rows) == 1:
+                start_row = selected_rows[0]
+                rows_to_audit = list(range(start_row, min(start_row + limit, items_count)))
+            else:
+                rows_to_audit = list(range(min(limit, items_count)))
+                
+            for r in rows_to_audit:
+                c_item = table.item(r, idx_code)
+                n_item = table.item(r, idx_name)
+                c_val = c_item.text() if c_item else ""
+                n_val = n_item.text() if n_item else ""
+                
+                # 预处理代码
+                c_val = re.sub(r'[^\d]', '', c_val)
+                if len(c_val) < 6 and c_val.isdigit(): c_val = c_val.zfill(6)
+                if n_val.startswith("🔔"): n_val = n_val.replace("🔔", "").strip()
+                
+                if len(c_val) == 6:
+                    code_to_name[c_val] = n_val
+
+        elif isinstance(f_widget, QTreeWidget):
+            tree = f_widget
+            selection = tree.selectedItems()
+            
+            # 获取所有项 (扁平化)
+            all_items = []
+            root = tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                all_items.append(root.child(i))
+            
+            items_to_audit = []
+            if len(selection) > 1:
+                items_to_audit = selection[:limit]
+            elif len(selection) == 1:
+                try:
+                    start_idx = all_items.index(selection[0])
+                except ValueError: start_idx = 0
+                items_to_audit = all_items[start_idx : start_idx + limit]
+            else:
+                items_to_audit = all_items[:limit]
+                
+            for it in items_to_audit:
+                c_val = it.text(0)
+                n_val = it.text(1) if it.columnCount() > 1 else ""
+                
+                c_val = re.sub(r'[^\d]', '', c_val)
+                if len(c_val) < 6 and c_val.isdigit(): c_val = c_val.zfill(6)
+                if n_val.startswith("🔔"): n_val = n_val.replace("🔔", "").strip()
+                
+                if len(c_val) == 6:
+                    code_to_name[c_val] = n_val
+
+        if code_to_name:
+            # 🚀 发送到主进程执行审计
+            cmd = {"cmd": "DNA_AUDIT", "codes": code_to_name}
+            send_code_via_pipe(cmd, logger, pipe_name=PIPE_NAME_TK)
+            self.show_status_message(f"🧬 已请求 DNA 审计 ({len(code_to_name)}只)...")
         price = 0.0
         if row is not None:
             price = float(row.get('close', row.get('price', 0)))

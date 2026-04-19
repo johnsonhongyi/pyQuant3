@@ -81,6 +81,10 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.status_label = tk.Label(self.status_frame, text="正在加载数据...", anchor="w", padx=10, font=("微软雅黑", 9))
         self.status_label.pack(side="left")
         
+        # 🚀 [NEW] DNA审计按钮贴行附加
+        self.btn_dna = tk.Button(self.status_frame, text="🧬 DNA审计", font=("微软雅黑", 9, "bold"), fg="#ffffff", bg="#333333", relief="flat", command=self._run_dna_audit_selected, width=12)
+        self.btn_dna.pack(side="right", padx=5, pady=2)
+        
         # 存储各 Tab 的计数
         self.counts = {"主力排名": 0, "人气榜单": 0, "题材挖掘": 0}
         
@@ -168,7 +172,15 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             parent = self.master
             if parent and getattr(parent, "_vis_enabled_cache", False) and stock_code:
                 if hasattr(parent, 'open_visualizer'):
-                    parent.open_visualizer(stock_code)
+                    # [NEW] 题材挖掘 Tab 传递日期联动
+                    stock_date = None
+                    if tree == self.tree_theme and len(vals) > 2:
+                        raw_date = str(vals[2]).strip().replace('/', '-')
+                        if raw_date and raw_date != '-':
+                            stock_date = raw_date
+                    if stock_date:
+                        logger.info(f"🚀 [Linkage] 题材联动: {stock_code} date={stock_date}")
+                    parent.open_visualizer(stock_code, timestamp=stock_date)
 
     def _on_tree_click(self, event, tree, button_type):
         """处理树视图点击联动"""
@@ -193,10 +205,98 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
                 parent = self.master
                 if parent and getattr(parent, "_vis_enabled_cache", False) and stock_code:
                     if hasattr(parent, 'open_visualizer'):
-                        parent.open_visualizer(stock_code)
+                        # [NEW] 题材挖掘 Tab 传递日期联动
+                        stock_date = None
+                        if tree == self.tree_theme and len(vals) > 2:
+                            raw_date = str(vals[2]).strip().replace('/', '-')
+                            if raw_date and raw_date != '-':
+                                stock_date = raw_date
+                        if stock_date:
+                            logger.info(f"🚀 [Linkage] 题材联动 (Click): {stock_code} date={stock_date}")
+                        parent.open_visualizer(stock_code, timestamp=stock_date)
         elif button_type == "right":
+            # [NEW] Right Click Context Menu
+            menu = tk.Menu(self, tearoff=0, bg="#2C2C2E", fg="white", activebackground="#005BB7")
             if self.on_tree_scroll_to_code:
-                self.on_tree_scroll_to_code(stock_code)
+                menu.add_command(label=f"📂 滚动主表定位代码: {stock_code}", command=lambda: self.on_tree_scroll_to_code(stock_code))
+                menu.add_separator()
+            
+            sel = tree.selection()
+            if item not in sel:
+                tree.selection_set(item)
+                sel = (item,)
+                
+            title_dna = f"🧬 执行 DNA 审计 ({len(sel)}只...)" if len(sel) > 1 else f"🧬 执行 DNA 审计 ({vals[1]})"
+            menu.add_command(label=title_dna, command=self._run_dna_audit_selected)
+            
+            # [NEW] 手动触发可视化联动
+            if len(sel) == 1:
+                menu.add_separator()
+                def _manual_vis():
+                    parent = self.master
+                    if hasattr(parent, 'open_visualizer'):
+                        stock_date = None
+                        if tree == self.tree_theme and len(vals) > 2:
+                            raw_date = str(vals[2]).strip().replace('/', '-')
+                            if raw_date and raw_date != '-':
+                                stock_date = raw_date
+                        if stock_date:
+                            logger.info(f"🚀 [Linkage] 题材联动 (Manual): {stock_code} date={stock_date}")
+                        parent.open_visualizer(stock_code, timestamp=stock_date)
+                menu.add_command(label="📈 联动可视化 (指引日期)", command=_manual_vis)
+            
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+    def _get_active_tree(self):
+        tab_id = self.notebook.select()
+        if not tab_id: return None
+        tab_text = self.notebook.tab(tab_id, "text")
+        if tab_text == "主力排名": return self.tree_zhuli
+        elif tab_text == "人气榜单": return self.tree_hot
+        elif tab_text == "题材挖掘": return self.tree_theme
+        return None
+
+    def _run_dna_audit_selected(self):
+        """🚀 [DNA-BATCH] 极限审计当前视图所选 / Top20"""
+        tree = self._get_active_tree()
+        if not tree: return
+        
+        items = list(tree.get_children())
+        if not items: return
+        
+        selection = tree.selection()
+        target_items = []
+        if len(selection) > 1:
+            target_items = selection[:50]
+        elif len(selection) == 1:
+            try:
+                start_idx = items.index(selection[0])
+            except ValueError:
+                start_idx = 0
+            target_items = items[start_idx : start_idx + 20]
+        else:
+            target_items = items[:20]
+            
+        code_to_name = {}
+        for it in target_items:
+            vals = tree.item(it, "values")
+            if vals:
+                # The first two columns should be code and name in all three tables
+                c = str(vals[0]).strip().zfill(6)
+                n = str(vals[1]).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if c and c != "N/A":
+                    code_to_name[c] = n
+                    
+        if code_to_name:
+            if hasattr(self.master, '_run_dna_audit_batch'):
+                self.master._run_dna_audit_batch(code_to_name)
+            else:
+                logger.error("No access to main monitor app for DNA audit.")
 
     def _on_double_click(self, event, tree):
         """双击打开详情窗口"""

@@ -885,26 +885,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except: pass
 
 
-    def open_dna_auditor_top50(self):
-        """🚀 [DNA-BATCH] 极限审计：支持从选中行开始向下选取 50 只，无选中则默认前 50"""
+    def open_dna_auditor_top50(self,limitCode=20):
+        """🚀 [DNA-BATCH] 极限审计：支持多选审计，单选则从当前行向下 20 只 (包含选中项)"""
         items = list(self.tree.get_children())
         if not items:
             from tkinter import messagebox
             messagebox.showinfo("提示", "当前列表为空，无法进行审计")
             return
             
-        # 🚀 [NEW] 确定选取起点：如果有选中则从选中行开始，否则从头开始
         selection = self.tree.selection()
-        start_idx = 0
-        if selection:
-            try:
-                # 获取选中项中的第一个
-                target_item = selection[0]
-                start_idx = items.index(target_item)
-            except (ValueError, IndexError):
-                start_idx = 0
         
-        # 🚀 [FIX] 智能检测列索引，适配用户自定义列排序
+        # 🚀 [FIX] 智能检测列索引
         all_cols = list(self.tree["columns"])
         idx_code, idx_name = -1, -1
         for i, col in enumerate(all_cols):
@@ -912,20 +903,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if c_lower in ["code", "代码"]: idx_code = i
             if c_lower in ["name", "名称"]: idx_name = i
         
-        # 兜底：如果没找到 ID，尝试物理位置 0 和 1
         if idx_code == -1: idx_code = 0
         if idx_name == -1: idx_name = 1
 
-        # 从起点开始向后选取最多 50 只
-        target_items = items[start_idx : start_idx + 50]
+        target_items = []
+        if len(selection) > 1:
+            # 多选模式：仅审计选中的 (上限 20)
+            target_items = list(selection)[:limitCode]
+        elif len(selection) == 1:
+            # 单选模式：从选中行开始向下 20 只 (包含本身)
+            try:
+                start_idx = items.index(selection[0])
+            except ValueError:
+                start_idx = 0
+            target_items = items[start_idx : start_idx + limitCode]
+        else:
+            # 默认：前 20 只
+            target_items = items[:limitCode]
+        
         code_to_name = {}
         for it in target_items:
             try:
                 vals = self.tree.item(it, 'values')
                 if not vals: continue
-                c = str(vals[idx_code]).zfill(6)
-                n = str(vals[idx_name])
-                if c and c != "N/A":
+                c = str(vals[idx_code]).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(vals[idx_name]).strip()
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+                
+                if c and c != "N/A" and len(c) == 6:
                     code_to_name[c] = n
             except Exception:
                 continue
@@ -1785,6 +1794,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.info(f"✅ Main App voice state synced to: {enabled}")
                             
                             self.tk_dispatch_queue.put(sync_voice_ui)
+
+                        elif obj and obj.get("cmd") == "DNA_AUDIT":
+                            codes_dict = obj.get("codes", {})
+                            if codes_dict:
+                                logger.info(f"[Pipe] Recv DNA_AUDIT for {len(codes_dict)} stocks")
+                                def trigger_audit():
+                                    from backtest_feature_auditor import audit_multiple_codes
+                                    # 注意：主程序中的 open_dna_auditor_top50 也调用了 audit_multiple_codes
+                                    audit_multiple_codes(codes_dict, self)
+                                self.tk_dispatch_queue.put(trigger_audit)
 
                         elif obj and obj.get("cmd") == "EXEC_MACRO":
                             macro = obj.get("macro")

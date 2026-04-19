@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-04-16 14:05  
+> 最后更新：2026-04-19 10:00  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -56,6 +56,54 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 ---
+
+## 2026-04-19 12:15
+- [x] **深度优化 DNA 审计交互与焦点感知闭环 (Optimized DNA Audit UI & Context Awareness)**：
+    - [x] **深化选股窗口“历史视图”联动审计 (Deep Linkage in StockSelectionWindow)**：
+        - [x] **解决加载延迟感知**：在 `_do_bulk_render` 完成后引入“首行自动点选”机制。确保在切换日期或加载历史数据后，审计引擎能瞬间锁定并感知最新的 Treeview 内容，消除了用户反馈的“需要手动重选才能找到”的交互割裂感。
+        - [x] **实现多维焦点探测**：重构 `_get_active_tree`。优先通过 `focus_get()` 捕获用户真实操作的子表（如板块成员表或决策队列），并结合 Notebook 页签状态提供完美的降级兜底方案。
+        - [x] **补全跨表动态列映射**：升级审计数据提取器。实现了对“代码/龙头代码”与“名称/名称”字段的动态模糊匹配，确保在所有 Tab（策略选股/板块聚焦/实时决策）下均能实现 100% 准确的代码提取。
+    - [x] **实现竞价面板“全域智能审计” (Global Smart Audit in SectorBiddingPanel)**：
+        - [x] 在主工具栏集成全局 “🧬 DNA审计” 按钮。
+        - [x] **引入焦点感知逻辑 (Focus-Aware)**：通过 `_last_focused_widget` 自动识别用户当前操作的面板（板块/个股/重点表），确保审计动作始终聚焦于“当前视图”。
+        - [x] **适配跨维度数据智能提取 (Smart Column Detection)**：实现了对 `sector_table`（板块表）与个股表的差异化处理。自动识别“代码”或“龙头”列，确保无论是审计板块还是审计个股，都能精准提取标的代码。
+    - [x] **根治“选中个股跳过”逻辑缺陷 (Fixed Selection Inclusion Bug)**：
+        - [x] 重新审校并重构了全系面板（MonitorTK, Racing Panel, Selection Window, ExtDataViewer）的审计起点计算逻辑。
+        - [x] **确保包含当前行**：统一将单选触发逻辑修正为从当前选中行（Index 0）开始向下覆盖，彻底解决了用户反馈的“从下一只开始审计”的体验不一致问题。
+        - [x] **强化多选审计优先级**：明确了“有选区则仅审选区（最高50只）”的业务逻辑，与单选后的“智能顺延（Top 20）”逻辑形成互补。
+    - [x] **加固代码清理与标准化**：在所有提取环节注入了 `re.sub(r'[^\d]', '', c)` 以及 `zfill(6)` 预处理，并自动剔除“🔔”等 UI 装饰字符，确保输送给 DNA 引擎的数据 100% 具备标准股票代码格式。
+    - [x] **实现 30 分钟交易时段缓存自愈**：维持了此前实现的交易时段动态过期策略，配合新的一键审计交互，实现了“毫秒级点击，亚秒级出表”的流畅体验。
+- [x] **修复竞价面板初始化崩溃与 UI 稳定性 (Fixed SectorBiddingPanel Init Crash & Stability)**：
+    - [x] **根治 AttributeError**：补全了 `_init_ui` 中缺失的 `spin_sector_min_score` 与 `spin_sector_score_threshold` 比例组件。解决了此前由于布局重构遗漏组件导致的“对象不具备属性”导致的初始化中断与应用假死。
+    - [x] **加固 EventFilter 防御 (Fixed RuntimeError/Deleted Object)**：在 `eventFilter` 中引入了全局 `try-except` 异常捕获机制，专门拦截并静默处理 `RuntimeError: wrapped C/C++ object has been deleted`。在高频刷新、多进程看板重连或 UI 树强制重建时，确保了对已销毁组件的残留事件采集不会触发进程级崩溃。
+    - [x] **实现搜素/查询组件双重保护**：同步适配了 `search_input` 与 `query_input` 的底层事件拦截，确保两套搜素系统的历史记录清理操作在亚毫秒级内安全完成。
+- [x] **深度加固 DNA 审计弹窗交互**：
+    - [x] **实现 ESC 键一键退出**：为 `DnaAuditReportWindow` 绑定了全域 `<Escape>` 快捷键。现在用户可以在审计完成后瞬间通过 ESC 键关闭透视弹窗，显著提升了高频复盘时的交互效率。
+
+## 2026-04-19 10:20
+- [x] **在全系监控面板中无缝集成 DNA 审计快捷执行闭环 (Integrated DNA Audit in All Panels)**：
+    - [x] **竞价赛马明细窗 (`SectorDetailDialog` & `CategoryDetailDialog`)**：在两处窗口结构标题栏右上侧，均新增了一键“🧬 DNA审计”快捷按钮。
+    - [x] **竞价活跃底板 (`SectorBiddingPanel`)**：在底部“✅ 重点表”工具栏新增 “🧬 DNA审计” 按钮；全面更新是个股详单和重点表的鼠标右键菜单增加 DNA 联通跳转。
+    - [x] **55188 实时监控面板 (`ExtDataViewer`)**：在右下角状态栏旁部署了无缝的一键扫描按钮。并将树节点的单纯右键触发重构升级为完整的上下文层级菜单，兼容了原有的"📂 退回主表滚动"以及新的 DNA 执行。
+    - [x] **策略信号仪表盘 (`SignalDashboardPanel`)**：在右上角控制区（引擎执行旁）集成“🧬 DNA审计”全局按钮；并为“全部信号”、“决策队列”、“龙头追踪”、“板块热度”等所有数据表补齐了右键审计选单。
+    - [x] **今日异动放量弹窗 (`VolumeDetailsDialog`)**：在窗口顶部状态栏新增一键审计按钮；支持根据当前放量排序进行快速基因扫描。
+    - [x] **一致性的智能选区路由 (Smart Selection Routing)**：全部实现了与 Tkinter 主程序相同的智能体验逻辑：无勾选则默认读取展示页前20名标的；点选单行则顺延提取其下20名；进行大区域高亮框选时则忠实保留意图送检前50名。
+    - [x] **实现 30 分钟全局 DNA 计算缓存 (Global DNA Audit Caching)**：在 `backtest_feature_auditor.py` 中引入了 `DNA_CALC_CACHE`。采用“动态时效”策略：**交易时段**内缓存 30 分钟过期以保证数据实时性；**非交易时段**（盘后/周末）由于数据不再变动，缓存将永久有效，彻底消除了重复算力开销。
+    - [x] **安全多线程管线闭环 (Thread-Safe Dispatch)**：无论是在基于事件钩子的 Tk 层还是独立的 Qt 窗层中，相关分析命令都会自动包装成 Lambda 分发到 `main_app.tk_dispatch_queue`，让真正的底层算力引擎从主进程平滑呼出透视弹窗表，根绝了所有高并发锁死状况。
+
+## 2026-04-19 10:00
+- [x] **修复 MonitorTK 启动与同步线程 AttributeError (Fixed MonitorTK Sync Thread Error)**：
+    - [x] **补齐状态变量初始化 (Hardened Initialization)**：在 `instock_MonitorTK.py` 的 `__init__` 中显式初始化了 `_df_sync_running`, `_df_first_send_done` 和 `_force_full_sync_pending`。这彻底根治了在应用启动的前 3 秒内（`_start_feedback_listener` 运行前）手动开启可视化或触发联动时，由于属性尚未定义导致的 `AttributeError: '_df_sync_running'` 崩溃。
+    - [x] **加固同步线程启动逻辑 (Linkage Start Guard)**：在 `_start_visualizer_process` 中增加了对 `_df_sync_running` 的显式赋值。确保在任何触发路径启动 `send_df` 线程前，运行标志位均处于正确状态，消除了“Thread START, running=False”的逻辑空转隐患。
+
+## 2026-04-19 00:50
+- [x] **修复 DNA 审计命令行参数与回溯功能回归 (Fixed CLI Arguments & Backtest Regression)**:
+    - [x] **恢复 `-n` (Top N) 与 `-f` (Follow) 参数**: 重新实现了从最新共享 HDF5 (`g:/shared_df_all-*.h5`) 自动加载个股列表的逻辑。支持 `-n 10` (审计涨幅前10) 和 `-f` (审计带信号个股)，解决了用户反馈的命令行参数未识别报错。
+    - [x] **上线指标演进提炼报告 (Indicator Evolution Report)**: 
+        - [x] **指标提炼升级 (Leader Gene Upgrade)**: 专项强化了“大盘跌他涨”、“大盘涨更涨”、“大盘回调他微调”三类核心基因的自动识别与加权评分。通过对指数偏离度的精细化拆解，能够准确区分出“具备独立基因的真龙头”与“随波逐流的跟风盘”。
+        - [x] **命令行增强**: 引入 `-v` (Verbose) 参数。开启后，在终端逐行打印个股最近 10 天的 Alpha、涨幅、指数偏离、布林位置、量比等核心指标变动路径。
+        - [x] **GUI 同步升级**: 在 `DnaAuditReportWindow` 的详情区域新增“指标演进提炼”富文本表格，支持 15 天历史追溯，实现了对个股“基因”变迁的直观洞察。
+    - [x] **性能与安全加固**: 针对批量审计增加了 100 只封顶保护（-n）以及信号审计（-f）Top 50 强制截断，避免因全市场 IO 导致系统假死。修复了信号字段可能存在的 `NaN` 解析异常。
 
 ## 2026-04-18 19:31
 - [x] **深度集成 DNA 专项审计能力与批处理加速 (Integrated DNA Backtest Auditor in Tkinter)**：

@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import concurrent.futures
+import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import json
@@ -19,6 +20,11 @@ if __name__ == "__main__" and sys.platform.startswith('win'):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 sys.path.append(os.path.join(BASE_DIR, 'JSONData'))
+
+try:
+    import JSONData.constant as cct
+except ImportError:
+    cct = None
 
 # [🚀 UI IMPORTS]
 try:
@@ -45,6 +51,7 @@ except ImportError:
 INDEX_MAP = {'60': '999999', '68': '000688', '00': '399001', '30': '399006'}
 NAME_CACHE = {}
 INDEX_DATA_CACHE = {} # [🚀 全局加速缓存]
+DNA_CALC_CACHE = {}   # [🚀 DNA计算缓存：(code, start, end) -> (summary, ts)]
 
 def get_corresponding_index(code):
     return INDEX_MAP.get(code[:2], '999999')
@@ -174,6 +181,26 @@ class AuditSummary:
              self.suggestions.append(f"- 存在 {self.divergence_days} 天抗跌背离，符合泥沙俱下中的种子特征")
 
 def run_optimized_audit(code, start_date, end_date):
+    # [🚀 CACHE CHECK] 极致性能：同一天 30 分钟内共用结果
+    # 逻辑优化：交易时段 30 分钟过期；非交易时段（盘后/周末）数据不更新，缓存永久有效
+    cache_key = (code, start_date, end_date)
+    if cache_key in DNA_CALC_CACHE:
+        summary, ts = DNA_CALC_CACHE[cache_key]
+        
+        is_trading = True
+        if cct:
+            try:
+                # 使用 cct.get_work_time() 判定当前是否处于活跃交易窗口
+                is_trading = cct.get_work_time()
+            except: pass
+            
+        if not is_trading:
+            # 盘后或非交易日，只要当天算过，直接返回
+            return summary
+            
+        if time.time() - ts < 1800: # 交易时间内 30 分钟生存期
+            return summary
+
     with timed_ctx(f"Load & Audit {code}"):
         with timed_ctx("Data Loading"):
             # [🚀 LIGHTWEIGHT LOAD] 使用 fastohlc=True 跳过不使用的 MACD/OBV 等重型指标计算
@@ -220,6 +247,8 @@ def run_optimized_audit(code, start_date, end_date):
                 'prev_close': df.iloc[df.index.get_loc(dt)-1]['close']
             })
         summary.finalize(audit_rows)
+        # 存入缓存
+        DNA_CALC_CACHE[cache_key] = (summary, time.time())
         return summary
 
 def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None):
@@ -280,7 +309,10 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
             first = self.tree.get_children()[0]
             self.tree.selection_set(first)
             self.tree.focus(first)
-            # self._show_detail(None) # 禁用初始触发，由用户手动点击或查看
+
+        # [NEW] 支持 ESC 键自动关闭窗口
+        self.bind("<Escape>", lambda e: self.on_close())
+        self.focus_set() # 确保快捷键命中
 
     def _setup_ui(self):
         # 主容器
