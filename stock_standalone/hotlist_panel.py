@@ -894,14 +894,19 @@ class HotlistPanel(QWidget, WindowMixin):
             # 但仅当 Tab 可见时渲染可节省性能，已有数据缓存兜底
             self._update_follow_queue()
             self._pending_table_refresh_follow = False
+            # ⭐ [FIX] 结构刷新后立即触发价格更新，确保现价/盈亏列不丢失
+            self._refresh_pnl_ui_only()
 
         if self._pending_table_refresh_watchlist:
             # ⭐ [FIX] 同上，由 _update_watchlist_queue 内部脏检查保证增量渲染性能
             self._update_watchlist_queue()
             self._pending_table_refresh_watchlist = False
+            # ⭐ [FIX] 结构刷新后立即触发价格更新，确保现价/盈亏列不丢失
+            self._refresh_pnl_ui_only()
             
         # 总是更新状态栏
         self._update_status_bar()
+
 
     def _sync_voice_ui(self):
         """主动从主窗口同步语音状态"""
@@ -1774,27 +1779,38 @@ class HotlistPanel(QWidget, WindowMixin):
             self._refresh_table()
     
     def _on_tab_changed(self, index):
-        """Tab 切换回调 [PERF-FIX] 改为 pending flag 驱动，避免在 Qt 主线程同步执行重量级刷新"""
+        """Tab 切换回调 [PERF-FIX] 有缓存时立即渲染，无缓存时 pending flag 兜底"""
         if index == 1: # Follow
-            # ⭐ [FIX] 只打标记，不在此处调用同步函数；由 refresh_ui_timer 消费
-            self._pending_table_refresh_follow = True
+            df_follow = getattr(self, '_last_df_follow', None)
+            if df_follow is not None:
+                # 有缓存数据：立即渲染（用户切 Tab 时不应该等 1 秒）
+                self._update_follow_queue(df_follow)
+            else:
+                # 无缓存：打标记等 Worker 数据到来后刷新
+                self._pending_table_refresh_follow = True
         elif index == 2: # Watchlist
-            # ⭐ [FIX] 同上，避免同步阻塞
-            self._pending_table_refresh_watchlist = True
-            # 如果是非交易时间手动打开且缓存为空，异步补刷一次
-            if not cct.get_work_time() and getattr(self, '_last_df_watchlist', None) is None:
-                try:
-                    hub = get_trading_hub()
-                    if hasattr(hub, 'get_watchlist_df'):
-                        df = hub.get_watchlist_df()
-                        if df is not None and not df.empty:
-                            self.data_worker._augment_watchlist_sectors(df)
-                            self._last_df_watchlist = df
-                except Exception as _e:
-                    logger.debug(f"Tab watchlist fallback fetch: {_e}")
+            df_watch = getattr(self, '_last_df_watchlist', None)
+            if df_watch is not None:
+                # 有缓存数据：立即渲染
+                self._update_watchlist_queue(df_watch)
+            else:
+                # 无缓存时主动拉一次（非交易时间兜底）
+                self._pending_table_refresh_watchlist = True
+                if not cct.get_work_time():
+                    try:
+                        hub = get_trading_hub()
+                        if hasattr(hub, 'get_watchlist_df'):
+                            df = hub.get_watchlist_df()
+                            if df is not None and not df.empty:
+                                self.data_worker._augment_watchlist_sectors(df)
+                                self._last_df_watchlist = df
+                                self._update_watchlist_queue(df)
+                    except Exception as _e:
+                        logger.debug(f"Tab watchlist fallback fetch: {_e}")
         
-        # [OPTIMIZE] 仅当数据源可用时才执行同步刷新，且增加冷却控制
+        # 不论哪个 Tab，总是刷新价格（更新现价/盈亏列）
         self._refresh_pnl_ui_only()
+
 
     def _refresh_pnl(self):
         """手动刷新按钮回调"""
