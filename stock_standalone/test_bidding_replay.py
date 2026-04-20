@@ -1072,6 +1072,8 @@ if __name__ == "__main__":
             )
             
             def on_live_progress(t_str):
+                from PyQt6.sip import isdeleted
+                if isdeleted(panel): return
                 panel.timeline.set_time(t_str)
                 panel.timeline.label.setText(f"🔴 实盘监控: {t_str}")
             
@@ -1100,6 +1102,8 @@ if __name__ == "__main__":
             panel = BiddingRacingRhythmPanel(sender=sender)
             
             def on_progress(t_str):
+                from PyQt6.sip import isdeleted
+                if isdeleted(panel): return
                 panel.timeline.set_time(t_str)
             
             def on_panel_closed():

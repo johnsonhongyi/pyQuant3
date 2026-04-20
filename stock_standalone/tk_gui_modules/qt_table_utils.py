@@ -80,33 +80,20 @@ class EnhancedTableWidget(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.set_theme(dark=True)
 
-    def set_theme(self, dark: bool = True):
-        """一键切换深浅色增强主题 (处理对比度)"""
-        if dark:
-            self.setStyleSheet("""
-                QTableWidget {
-                    background-color: #0d121f;
-                    color: #ffffff;
-                    gridline-color: #2a2d42;
-                    selection-background-color: #3d425c;
-                    selection-color: #00ffcc;
-                    alternate-background-color: #161b2e;
-                }
-                QHeaderView::section {
-                    background-color: #1a1c2c;
-                    color: #aaa;
-                    padding: 4px;
-                    border: 0.5px solid #2a2d42;
-                    font-weight: bold;
-                }
-            """)
-        else:
-            self.setStyleSheet("")
-        # 默认使用深色增强主题 (符合系统调性)
-        self.set_theme(dark=True)
+    def _init_default_style(self):
+        """初始化表格默认样式与行为"""
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setAlternatingRowColors(True)
+        self.setSortingEnabled(True)
+        self.verticalHeader().setVisible(False)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setWordWrap(False)
+        self.setShowGrid(False)
         
     def set_theme(self, dark: bool = True):
-        """一键切换深浅色增强主题"""
+        """一键切换深浅色增强主题 (处理对比度)"""
         if dark:
             self.setStyleSheet("""
                 QTableWidget {
@@ -176,7 +163,11 @@ class EnhancedTableWidget(QTableWidget):
             return None, ""
 
     def _on_context_menu(self, pos: QPoint):
-        """弹出标准右键菜单"""
+        """弹出标准右键菜单 - [🚀 架构改进] 支持子类/外部禁用默认项"""
+        # 如果当前实例已被外部显式禁用了默认菜单（例如赛马面板），则直接返回
+        if not getattr(self, '_enable_default_menu', True):
+            return
+
         item = self.itemAt(pos)
         if not item: return
         
