@@ -3246,6 +3246,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             values=options, state="readonly", width=10
         )
         self.action_combo.set("功能选择")
+        
+        # [NEW] 回测按钮 - 放在功能选择框前面
+        self.backtest_btn = tk.Button(bottom_search_frame, text=" 回测 ", 
+                                      fg="#FF4500", font=self.default_font_bold, pady=1,
+                                      command=self.open_backtest_replay_dialog)
+        self.backtest_btn.pack(side="left", padx=5)
+
         self.action_combo.pack(side="left", padx=10, pady=1, ipady=1)
 
         def run_action(action):
@@ -3328,6 +3335,165 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.setup_global_hotkey()
         self._schedule_after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
         self.open_column_manager_init()
+
+    def open_backtest_replay_dialog(self):
+        """弹出赛马回测配置对话框，支持日期选择与时间点跳转 (适配 DPI 缩放与居中)"""
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+        
+        try:
+            from tkcalendar import DateEntry
+            use_calendar = True
+        except ImportError:
+            use_calendar = False
+            logger.warning("tkcalendar not found, falling back to entry.")
+            
+        dialog = tk.Toplevel(self)
+        dialog.title("赛马回测/回放配置")
+        
+        # 🚀 [FIX] 适配 DPI 缩放：完全基于内容自适应布局
+        scale = getattr(self, 'dpi_scale', 1.0)
+        dialog.resizable(True, True)
+        
+        # 居中对齐与锁定
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # 增加内部边距填充
+        main_frame = tk.Frame(dialog, padx=int(30*scale), pady=int(25*scale))
+        main_frame.pack(fill="both", expand=True)
+        
+        title_font = (self.default_font.cget("family"), int(13*scale), "bold")
+        label_font = (self.default_font.cget("family"), int(10*scale))
+        
+        # 1. 标题
+        tk.Label(main_frame, text="🏁 赛马回放分析系统", font=title_font, fg="#CF6679").pack(pady=(0, int(20*scale)))
+        
+        # 2. 日期选择
+        tk.Label(main_frame, text="📅 选择日期 (YYYY-MM-DD):", font=label_font).pack(anchor="w")
+        if use_calendar:
+            date_entry = DateEntry(main_frame, width=20, background='#333',
+                                  foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd',
+                                  font=label_font)
+            date_entry.pack(fill="x", pady=(int(8*scale), int(15*scale)))
+        else:
+            date_entry = tk.Entry(main_frame, font=label_font)
+            date_entry.insert(0, datetime.now().strftime('%Y-%m-%d'))
+            date_entry.pack(fill="x", pady=(int(8*scale), int(15*scale)))
+        
+        # 3. 时间选择 (下拉)
+        tk.Label(main_frame, text="🕒 启动时间点 (回放起点):", font=label_font).pack(anchor="w")
+        time_var = tk.StringVar(value="09:25:00")
+        time_values = ["09:25:00", "09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", 
+                       "13:00:00", "13:30:00", "14:00:00", "14:30:00", "14:45:00"]
+        time_combo = ttk.Combobox(main_frame, textvariable=time_var, values=time_values, state="readonly",
+                                 font=label_font)
+        time_combo.pack(fill="x", pady=(int(8*scale), int(15*scale)))
+
+        # 4. 运行选项 (详细日志与日志等级)
+        opts_frame = tk.Frame(main_frame)
+        opts_frame.pack(fill="x", expand=True, pady=(int(5*scale), int(20*scale)))
+
+        verbose_var = tk.BooleanVar(value=True)
+        verbose_chk = tk.Checkbutton(opts_frame, text=" 📊 详细日志", variable=verbose_var,
+                                     font=label_font)
+        verbose_chk.pack(side="left")
+
+        tk.Label(opts_frame, text=" | 等级:", font=label_font, fg="#666").pack(side="left")
+        log_var = tk.StringVar(value="INFO") # 🚀 默认 INFO，更适合普通用户
+        log_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
+        log_combo = ttk.Combobox(opts_frame, textvariable=log_var, values=log_levels, state="readonly",
+                                width=8, font=label_font)
+        log_combo.pack(side="left", padx=int(5*scale))
+
+        def on_run():
+            selected_date = date_entry.get()
+            selected_time = time_var.get()
+            is_verbose = verbose_var.get()
+            selected_log = log_var.get()
+            if not re.match(r'\d{4}-\d{2}-\d{2}', selected_date):
+                messagebox.showerror("格式错误", "日期格式应为 YYYY-MM-DD\n例如: 2026-04-20")
+                return
+            dialog.destroy()
+            self._run_backtest_replay_process(selected_date, selected_time, is_verbose, selected_log)
+            
+        run_btn = tk.Button(main_frame, text=" 🚀 启动回放分析 ", bg="#121212", fg="#03DAC6", 
+                           font=(self.default_font.cget("family"), int(11*scale), "bold"),
+                           relief="groove", pady=int(10*scale),
+                           command=on_run)
+        run_btn.pack(fill="x")
+
+        # 🚀 [NEW] 强力确保可见性
+        dialog.update_idletasks()
+        dialog.lift()
+        dialog.focus_force()
+        
+        req_w = dialog.winfo_reqwidth()
+        req_h = dialog.winfo_reqheight()
+        
+        # 居中逻辑优化
+        main_x, main_y = self.winfo_x(), self.winfo_y()
+        main_w, main_h = self.winfo_width(), self.winfo_height()
+            
+        x = main_x + (main_w - req_w) // 2
+        y = main_y + (main_h - req_h) // 2
+        dialog.geometry(f"{req_w}x{req_h}+{max(0, x)}+{max(0, y)}") # 强制固定宽高一次
+        
+        # 🚀 [NEW] 支持回车键确认
+        dialog.bind("<Return>", lambda e: on_run())
+
+    def _run_backtest_replay_process(self, replay_date, start_time, verbose=True, log_level="ERROR"):
+        """独立多进程启动 test_bidding_replay.py，兼容 EXE 打包环境 (高性能透传模式)"""
+        from types import SimpleNamespace
+        import test_bidding_replay as replay_module
+        import multiprocessing as mp
+        import time
+        from tkinter import messagebox
+        
+        # 🚀 [OPTIMIZED] 记录启动时间
+        launch_start = time.time()
+        
+        # 构造模拟参数，对齐 test_bidding_replay.py 的 main 函数需求
+        # 注意：这里透传了 [log_level, speed, ui, verbose, start, date, resample] 等核心字段
+        args_namespace = SimpleNamespace(
+            speed=20.0,
+            observation=None,
+            start=start_time,
+            end="15:00:00",
+            verbose=verbose,
+            resample=self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd',
+            codes=None,
+            date=replay_date,
+            today=False,
+            ui=True,
+            live=False,
+            interval=30,
+            log=log_level
+        )
+        
+        # 获取当前主进程持有的行情全量快照，实现秒开
+        current_df_all = getattr(self, 'df_all', None)
+        
+        try:
+            # 🚀 使用 mp.Process 启动，避开 subprocess 的 IO 判定与重复抓取
+            self.backtest_process = mp.Process(
+                target=replay_module.main,
+                args=(args_namespace, current_df_all),
+                daemon=False
+            )
+            self.backtest_process.start()
+            
+            elapsed = (time.time() - launch_start) * 1000
+            msg = f"🏁 已下发回测指令 ({replay_date} {start_time}) | 唤起耗时: {elapsed:.1f}ms"
+            logger.info(msg)
+            
+            if hasattr(self, 'status_var2'):
+                self.status_var2.set(msg)
+                
+        except Exception as e:
+            logger.exception(f"Failed to launch backtest via mp.Process: {e}")
+            # 降级回退到子进程方式 (不推荐，但作为兜底)
+            messagebox.showerror("启动异常", f"回测进程 (mp) 启动失败:\n{str(e)}")
 
     def _run_live_strategy_process(self, full_df=None):
         """

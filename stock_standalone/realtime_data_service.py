@@ -1400,20 +1400,25 @@ class IntradayEmotionTracker:
                             # 特征 2: 突破多日高点 (Structural Breakout)
                             structural_high = max(y_high, p_high, high4, 0)
                             if price > structural_high > 0:
-                                status.append("创多日高")
+                                high_label = "创多日新高" if price > max(y_high, p_high) else "突破波段高"
+                                status.append(high_label)
                                 
                             # --- ⚡ [NEW] 强势启动 / 大回归识别 ---
                             is_strong_start = False
+                            # 预计算量能后缀，增加参考价值
+                            vol_r = float(row.get(active_ratio_col, 1.0))
+                            vol_suffix = "⚡" if vol_r > 2.0 else ("+" if vol_r > 1.5 else "")
+                            
                             if hmax60 > 0 and price > hmax60:
-                                label = "强势启动" if last_c < hmax60 else "大回归突破"
+                                label = f"强势启动{vol_suffix}" if last_c < hmax60 else f"大回归突破{vol_suffix}"
                                 status.append(label)
                                 is_strong_start = (last_c < hmax60)
                             elif hmax > 0 and price > hmax:
-                                label = "强启动" if last_c < hmax else "30D突破"
+                                label = f"强启动{vol_suffix}" if last_c < hmax else f"30D突破{vol_suffix}"
                                 status.append(label)
                                 is_strong_start = (last_c < hmax)
                             elif max5 > 0 and price > max5:
-                                status.append("5D突破")
+                                status.append(f"5D突破{vol_suffix}")
                                 is_strong_start = (last_c < max5)
                                 
                             # 特征 3: MA60 支撑位反弹
@@ -1518,8 +1523,27 @@ class IntradayEmotionTracker:
                             is_rising = anchors.get('is_rising_struct', False)
                             is_sbc_buy = (("均线上" in status and any(kw in status for kw in ("创多日高", "诱空转多", "强势启动", "强启动", "大回归突破", "30D突破", "5D突破"))) 
                                          or ("🔥趋势加速" in status) or sbc_opt_buy)
-                            is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             
+                            # --- [Hard Throttling] 交易策略量价配合过滤门槛 ---
+                            if is_sbc_buy:
+                                cur_percent = float(row.get('percent', 0))
+                                # 1. 涨幅最低起步价：涨幅小于 2% 的不用报警
+                                if cur_percent < 2.0:
+                                    is_sbc_buy = False
+                                else:
+                                    # [NEW] 极端强势豁免：如果涨幅已达 5% 且量能 > 2.0，直接视为通过，无需执行更严苛的早盘量比过滤
+                                    is_ultra_strong = (cur_percent >= 5.0 and vol_r >= 2.0)
+                                    
+                                    if not is_ultra_strong:
+                                        # 2. 标准分时量比过滤逻辑
+                                        if t_str < "10:00" and vol_r < 5.0:
+                                            is_sbc_buy = False # 早盘要求极高量能 (除非已达 5%)
+                                        elif "10:00" <= t_str < "14:00" and vol_r < 2.0:
+                                            is_sbc_buy = False # 盘中维持活跃
+                                        elif t_str >= "14:00" and vol_r < 1.5:
+                                            is_sbc_buy = False # 尾盘适度放量即可
+                            
+                            is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
                             is_sbc = is_sbc_buy or is_sbc_sell
                             prev_sbc = self._last_sbc_status.get(code_str, False)
                             
@@ -1557,10 +1581,25 @@ class IntradayEmotionTracker:
                                          if is_sbc_buy:
                                              bonus = 15 if is_strong_start else 10
                                              scores_dict[idx_val] += bonus # 触发瞬间额外加分
-                                             msg = f"🚀 [SBC-Breakout] {code_str}{name_display} "
-                                             if is_strong_start: msg += "强势启动确认: "
-                                             else: msg += "强势结构确认: "
-                                             logger.warning(f"{msg}{r_time_str} 突破关键高位并站稳均线 ({avg_p:.2f})")
+
+                                             # [REFINED] 构造多维度详细预警信息
+                                             perc = float(row.get('percent', 0))
+                                             emo_score = float(scores_dict[idx_val])
+                                             v_r_str = f"{vol_r:.1f}{vol_suffix}"
+                                             sub_label = "启动" if is_strong_start else "确认"
+                                             clean_sig = sig_text.replace('🚀', '').replace('🔥', '').strip()
+                                             
+                                             # [Task 1] 极致压缩日志格式，提升盘中观测效率
+                                             msg = f"🚀[SBC] {code_str}{name_display} {r_time_str} {sub_label}:{clean_sig}"
+                                             msg += f" | 现:{price:.2f} 涨:{perc:+.1f}% 量:{v_r_str} 情:{emo_score:.0f}"
+                                             
+                                             trends = float(row.get('TrendS', 0))
+                                             rank = int(row.get('Rank', 0))
+                                             if trends > 0: msg += f" 趋:{trends:.0f}"
+                                             if rank > 0: msg += f" 排:{rank}"
+                                             if structural_high > 0: msg += f" 突:{structural_high:.2f}"
+                                             
+                                             logger.warning(msg)
                                              
                                              # [Performance Feedback] 记录起始价格
                                              if code_str not in self._signal_start_price:

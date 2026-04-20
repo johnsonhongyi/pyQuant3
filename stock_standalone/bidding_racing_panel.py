@@ -1644,7 +1644,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         item = self.sector_table.itemAt(pos)
         if not item: return
         row = item.row()
-        leader_item = self.sector_table.item(row, 2)
+        leader_item = self.sector_table.item(row, 3)
         if not leader_item: return
         
         import re
@@ -1681,7 +1681,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _on_sector_clicked(self, row, col):
         """单击联动板块龙头"""
-        item = self.sector_table.item(row, 2)
+        item = self.sector_table.item(row, 3)
         if item:
             import re
             text = item.text()
@@ -1805,7 +1805,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # --- [核心排序逻辑] 默认按评分大小排序显示，但底层 _sector_history 保持 MRU 顺序 ---
             temp_list = []
             for sec in self._sector_history:
-                score = self.detector.active_sectors.get(sec, {}).get('score', 0.0)
+                # [🚀 深度防护] 增加 detector 非空校验，防止初始化未完成时崩溃
+                score = 0.0
+                if self.detector and hasattr(self.detector, 'active_sectors'):
+                    score = self.detector.active_sectors.get(sec, {}).get('score', 0.0)
                 temp_list.append((score, sec))
             
             # 按评分降序排列

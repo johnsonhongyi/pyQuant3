@@ -54,20 +54,32 @@ def get_base_path():
     # return base_path
     
 def get_conf_path(fname, base_dir=None):
-    """获取并验证配置文件路径，如果不存在则释放资源"""
+    """获取并验证配置文件路径，如果不存在则对于内置资源执行释放，对于用户数据则直接返回路径"""
     if base_dir is None:
-        # 这是一个循环依赖问题，如果 sys_utils 需要 get_base_path
-        # 我们可以在调用处传入 BASE_DIR
-        return None
+        base_dir = get_base_path()
         
     default_path = os.path.join(base_dir, fname)
 
+    # 🚀 [NEW] 精确识别用户动态生成文件，避免误触 get_resource_file 逻辑引发报错
+    # 这些文件不应存在于内置资源包中，而是由应用在运行过程中持久化的
+    user_data_keywords = ["window_config", "ui_state", "history", "monitor_category_list", "display_cols"]
+    is_user_save = any(k in fname.lower() for k in user_data_keywords) or fname.lower().endswith(".json")
+    
+    # 路径存在且有效，直接返回
     if os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
             return default_path
+        elif is_user_save:
+            # 用户存盘文件如果为空，可能是意外断电或正在初始化，属于合法预期
+            return default_path
         else:
-            logger.warning(f"配置文件 {fname} 存在但为空，将尝试重新释放")
+            logger.warning(f"配置文件 {fname} 存在但为空，尝试从资源包恢复...")
 
+    # 如果是用户数据且不存在，直接返回预测路径，由业务逻辑后续通过 save_xxx 进行创建
+    if is_user_save:
+        return default_path
+
+    # 只有对于系统核心资源 (config.ini, global.ini 等) 才尝试从包内释放
     cfg_file = cct.get_resource_file(
         rel_path=f"{fname}",
         out_name=fname,
@@ -75,8 +87,10 @@ def get_conf_path(fname, base_dir=None):
     )
 
     if not cfg_file or not os.path.exists(cfg_file) or os.path.getsize(cfg_file) == 0:
-        logger.error(f"获取 {fname} 失败")
-        return None
+        # 如果不是 .json (存盘类)，说明是真的核心资源丢失了，打 log 告知
+        if not fname.lower().endswith(".json"):
+            logger.error(f"⚠️ [Config] 核心资源 {fname} 丢失且无法从包内释放")
+        return default_path # 降级返回，尝试让后续 open() 去捕捉实际 IO 异常
 
     return cfg_file
 
