@@ -642,7 +642,6 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
 
     initial_sim_seconds = time_str_to_seconds(first_tick_str)
     total_ticks_processed = 0
-
     today_str = datetime.now().strftime('%Y-%m-%d')
     
     # [OPTIMIZED] 预分组数据，极大提升回放时的切片速度
@@ -711,24 +710,25 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             
             batch_df.rename(columns=rename_map, inplace=True)
             
-            # [FIX] 同步 Tick 级别价格数据到 Detector 的 TickSeries 中
-            # 这样 detector.update_scores 才能基于最新 Tick 价格计算现价涨幅和异动
+            # [PERF] 利用 Vectorized 方式同步 Tick 级别价格数据到 Detector 中
+            # 避免使用 5000 次 itertuples(), 直接通过 Series.map 或 dict 批量注入
+            batch_prices = batch_df.set_index('code')['trade'].to_dict()
+            batch_settlements = batch_df.set_index('code')['settlement'].to_dict() if 'settlement' in batch_df.columns else {}
+            
             with detector._lock:
-                for row_t in batch_df.itertuples():
-                    c = str(row_t.code).zfill(6)
-                    if c in detector._tick_series:
-                        ts = detector._tick_series[c]
-                        price = float(getattr(row_t, 'trade', 0))
-                        if price > 0:
-                            ts.now_price = price
-                            # [PERF] 同步昨收，确保 current_pct 属性能够正确计算
+                for c, price in batch_prices.items():
+                    c_str = str(c).zfill(6)
+                    if c_str in detector._tick_series:
+                        ts = detector._tick_series[c_str]
+                        p_val = float(price)
+                        if p_val > 0:
+                            ts.now_price = p_val
                             if ts.last_close <= 0:
-                                settlement = float(getattr(row_t, 'settlement', 0))
-                                if settlement > 0:
-                                    ts.last_close = settlement
+                                s_val = float(batch_settlements.get(c, 0))
+                                if s_val > 0: ts.last_close = s_val
                                 
-                            if price > ts.high_day: ts.high_day = price
-                            if price < ts.low_day or ts.low_day == 0: ts.low_day = price
+                            if p_val > ts.high_day: ts.high_day = p_val
+                            if p_val < ts.low_day or ts.low_day == 0: ts.low_day = p_val
             
             # [DATA LEAKAGE PROTECTION] 强制重新计算涨幅，防止 HDF5 中自带的 EOD 涨幅干扰回测
             if 'trade' in batch_df.columns:
@@ -770,9 +770,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             publisher.update_batch(batch_df)
             t1 = time.time()
             
-            # 实时让探测器跑分 (使用优化后的 active_codes，确保归一化为字符串)
+            # 实时让探测器跑分 (使用 skip_evaluate=True，因为前面的 update_batch 已通过回调执行过 _evaluate_code)
             active_codes = [str(c).zfill(6) for c in batch_df['code'].tolist()]
-            detector.update_scores(active_codes=active_codes)
+            detector.update_scores(active_codes=active_codes, skip_evaluate=True)
             t2 = time.time()
             
             total_ticks_processed += len(tick_slice)
