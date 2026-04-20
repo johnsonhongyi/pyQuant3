@@ -570,19 +570,39 @@ class DetailedChartDialog(QDialog, WindowMixin):
         except Exception: pass
 
     def _save_geometry(self):
+        """保存详细图表窗口几何信息 (原子化+DPI适配)"""
         try:
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
             config = {}
-            if os.path.exists(WINDOW_CONFIG_FILE):
-                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except: pass
+            
             key = self._get_config_key()
             if key not in config: config[key] = {}
-            geometry = self.saveGeometry()
-            config[key]["geometry"] = bytes(geometry.toHex().data()).decode('ascii')
+            
+            geometry_hex = bytes(self.saveGeometry().toHex().data()).decode('ascii')
+            # 变化检查
+            if config[key].get("geometry") == geometry_hex:
+                return
+                
+            config[key]["geometry"] = geometry_hex
             config[key]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            tmp_file = config_file_path + ".tmp"
+            try:
+                with open(tmp_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+                os.replace(tmp_file, config_file_path)
+            except Exception as e:
+                logger.error(f"DetailedChartDialog save failed: {e}")
+                if os.path.exists(tmp_file): os.remove(tmp_file)
         except Exception: pass
+
 
     def closeEvent(self, event):
         self._save_geometry()
@@ -882,19 +902,39 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         except Exception: pass
 
     def _save_geometry(self):
+        """保存板块详情窗口几何信息 (原子化+DPI适配)"""
         try:
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
             config = {}
-            if os.path.exists(WINDOW_CONFIG_FILE):
-                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except: pass
+            
             key = self._get_config_key()
             if key not in config: config[key] = {}
-            geometry = self.saveGeometry()
-            config[key]["geometry"] = bytes(geometry.toHex().data()).decode('ascii')
+            
+            geometry_hex = bytes(self.saveGeometry().toHex().data()).decode('ascii')
+            # 变化检查
+            if config[key].get("geometry") == geometry_hex:
+                return
+
+            config[key]["geometry"] = geometry_hex
             config[key]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            tmp_file = config_file_path + ".tmp"
+            try:
+                with open(tmp_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+                os.replace(tmp_file, config_file_path)
+            except Exception as e:
+                logger.error(f"SectorDetailDialog save failed: {e}")
+                if os.path.exists(tmp_file): os.remove(tmp_file)
         except Exception: pass
+
 
     def closeEvent(self, event):
         self._save_geometry()
@@ -1310,10 +1350,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._worker_thread.start()
 
 
+        self._is_initializing = True
         self._init_ui()
         # [FIX] Implementation of geometry methods locally
         self._restore_geometry()
         self._restore_ui_state()
+        self._is_initializing = False
 
         # UI 刷新计时器 (保持定义但默认不启动，作为 fallback 或数据中断时的兜底)
         self._refresh_timer = QTimer(self)
@@ -4313,13 +4355,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ------------------------------------------------------------------ window state
     def _restore_geometry(self):
-        """[NEW] 从 window_config.json 恢复 UI 布局 (弃用注册表)避色 HKEY_CURRENT_USER 污染"""
+        """[NEW] 从 window_config.json 恢复 UI 布局 (DPI 适配版)"""
         try:
-            if not os.path.exists(WINDOW_CONFIG_FILE):
-                return
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
-            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            if not os.path.exists(config_file_path):
+                # 尝试降级加载无缩放版本，防止首次切换缩放后参数丢失
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    config_file_path = WINDOW_CONFIG_FILE
+                else:
+                    return
+            
+            with open(config_file_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
+
             
             p_data = config.get(SETTINGS_SECTION, {})
             if not isinstance(p_data, dict) or not p_data:
@@ -4407,67 +4457,85 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.warning(f"⚠️ [UI] 恢复布局失败: {e}")
 
     def _save_geometry(self):
-        """[NEW] 将 UI 布局保存至 window_config.json (弃用注册表)"""
+        """[NEW] 将 UI 布局保存至 window_config.json (带变化检测与初始化保护)"""
+        # 1. 初始化保护：防止在加载过程中由于各种信号导致的自动存盘
+        if getattr(self, '_is_initializing', False):
+            return
+            
         try:
+            # [DPI AWARE] 使用适配缩放的文件名
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+
             config: dict[str, Any] = {}
-            if os.path.exists(WINDOW_CONFIG_FILE):
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            config = data
+                except: pass
+            elif os.path.exists(WINDOW_CONFIG_FILE):
                 try:
                     with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         if isinstance(data, dict):
                             config = data
-                except Exception:
-                    pass
-            
-            # Helper: QByteArray -> Hex string
+                except: pass
+
             def to_hex(qba: QByteArray) -> str:
-                # QByteArray.toHex() returns another QByteArray in PyQt6.
-                # Convert to bytes then decode.
                 return bytes(qba.toHex().data()).decode('ascii')
 
-            p_data = config.get(SETTINGS_SECTION, {})
-            if not isinstance(p_data, dict):
-                p_data = {}
-                
-            p_data["geometry"] = to_hex(self.saveGeometry())
-            p_data["splitter_state"] = to_hex(self.splitter.saveState())
-            p_data["v_splitter_state"] = to_hex(self.v_splitter.saveState())
-            
-            # [NEW] 持久化所有过滤设置
-            p_data["score_threshold"] = self.spin_score_threshold.value()
-            p_data["sector_score_threshold"] = self.spin_sector_score_threshold.value()
-            p_data["sector_min_score"] = self.spin_sector_min_score.value()
-            p_data["amplitude_min"] = self.spin_amplitude_min.value()
-            p_data["consec_bars"] = self.spin_consec_bars.value()
-            
-            p_data["pct_min"] = self.spin_pct_min.value()
-            p_data["pct_max"] = self.spin_pct_max.value()
-            p_data["vol_ratio"] = self.spin_vol_ratio.value()
-            p_data["comparison_interval_min"] = int(self.detector.comparison_interval / 60)
-            
-            # 策略勾选状态
-            p_data["strategies"] = {
-                k: v.get('enabled', False) for k, v in self.detector.strategies.items()
+            # 2. 提取当前业务与几何状态
+            p_data_new = {
+                "geometry": to_hex(self.saveGeometry()),
+                "splitter_state": to_hex(self.splitter.saveState()),
+                "v_splitter_state": to_hex(self.v_splitter.saveState()),
+                "score_threshold": self.spin_score_threshold.value(),
+                "sector_score_threshold": self.spin_sector_score_threshold.value(),
+                "sector_min_score": self.spin_sector_min_score.value(),
+                "amplitude_min": self.spin_amplitude_min.value(),
+                "consec_bars": self.spin_consec_bars.value(),
+                "pct_min": self.spin_pct_min.value(),
+                "pct_max": self.spin_pct_max.value(),
+                "vol_ratio": self.spin_vol_ratio.value(),
+                "comparison_interval_min": int(self.detector.comparison_interval / 60),
+                "strategies": {k: v.get('enabled', False) for k, v in self.detector.strategies.items()},
+                "cb_log": self.cb_log.isChecked(),
+                "history_selector_index": self.history_selector.currentIndex() if hasattr(self, 'history_selector') else 4,
+                "macro_query": self.query_input.currentText() if hasattr(self, 'query_input') else ""
             }
-            p_data["cb_log"] = self.cb_log.isChecked()
             
-            if hasattr(self, 'history_selector'):
-                p_data["history_selector_index"] = self.history_selector.currentIndex()
-            
-            # [NEW] 保存宏观查询内容
-            if hasattr(self, 'query_input'):
-                p_data["macro_query"] = self.query_input.currentText()
-                
-            p_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 3. 变化检测 (Dirty Check)
+            # 对比 cache 中的数据或文件中已有的数据
+            old_p_data = config.get(SETTINGS_SECTION, {})
+            if isinstance(old_p_data, dict):
+                is_changed = False
+                for k, v in p_data_new.items():
+                    if old_p_data.get(k) != v:
+                        is_changed = True
+                        break
+                if not is_changed:
+                    # logger.debug("🚫 [UI] 检测到数据无变化，跳过存盘")
+                    return
 
-            config[SETTINGS_SECTION] = p_data
+            # 如果有变化，更新时间并保存
+            p_data_new["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            config[SETTINGS_SECTION] = p_data_new
             
-            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"💾 [UI] 布局已同步至 {os.path.basename(WINDOW_CONFIG_FILE)}")
+            # 4. 原子化写入
+            tmp_file = config_file_path + ".tmp"
+            try:
+                with open(tmp_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+                os.replace(tmp_file, config_file_path)
+                logger.info(f"💾 [UI] 布局参数由于检测到变化已同步至 {os.path.basename(config_file_path)}")
+            except Exception as e:
+                logger.error(f"❌ [UI] 原子存盘物理 IOError: {e}")
+                if os.path.exists(tmp_file): os.remove(tmp_file)
         except Exception as e:
-            logger.error(f"❌ [UI] 保存布局失败: {e}")
+            logger.error(f"❌ [UI] 计算存盘逻辑异常: {e}")
+
 
     def _on_history_load_clicked(self):
         """弹出【增强型日历】选择框加载历史快照"""

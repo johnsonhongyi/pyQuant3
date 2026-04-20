@@ -3652,7 +3652,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     #     self.executor = ThreadPoolExecutor(max_workers=1)
                     
                     # 提交最新的包到 pump_executor (1线程串行，保证快照顺序一致性)
-                    self.pump_executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query)
+                    # [OPTIMIZE] 检查是否需要强制全量刷新 (例如搜索条件变化或手动触发)
+                    force_val = getattr(self, '_force_full_sync_pending', False)
+                    if force_val: self._force_full_sync_pending = False # 消费掉
+                    
+                    self.pump_executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query, force=force_val)
                 else:
                     # Check if subprocess is still alive
                     if hasattr(self, 'proc') and self.proc is not None:
@@ -3667,7 +3671,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Re-schedule next check
             self._schedule_after(5000, self.update_tree)
 
-    def _process_tree_data_async(self, data_packet, sync_ui=True, query=""):
+    def _process_tree_data_async(self, data_packet, sync_ui=True, query="", force=False):
         """
         [Pump Thread - Lightweight Orchestrator]
         严禁做任何 CPU 重计算。职责: 解包->净化->脏检查->过滤->排序->提交 compute。
@@ -3710,7 +3714,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 n = len(full_df)
                 idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
                 df_hash = hash(n) ^ hash(full_df[p_col].iloc[idx].sum())
-            if not query and getattr(self, '_last_processed_df_hash', -1) == df_hash:
+            if not query and not force and getattr(self, '_last_processed_df_hash', -1) == df_hash:
                 return
             self._last_processed_df_hash = df_hash
 
@@ -3755,10 +3759,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._run_compute_async,
                 full_df.copy(),
                 df.copy() if df is not None and not df.empty else None,
-                sync_ui, cur_res, version
+                sync_ui, cur_res, version, force
             )
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
-            fut.add_done_callback(lambda f, v=version: self._on_compute_done(f, v))
+            fut.add_done_callback(lambda f, v=version, frc=force: self._on_compute_done(f, v, frc))
 
         except Exception as e:
             logger.exception(f"[Pump] Error in _process_tree_data_async: {e}")
@@ -3766,7 +3770,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
 
-    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version):
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False):
         """
         [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
         结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
@@ -3823,13 +3827,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not full_df.empty:
                 self._run_live_strategy_process(full_df)
 
-            return (full_df, df, sync_ui, cur_res)
+            return (full_df, df, sync_ui, cur_res, force)
 
         except Exception as e:
             logger.exception(f"[Compute] v{version} error: {e}")
             return None
 
-    def _on_compute_done(self, fut, version):
+    def _on_compute_done(self, fut, version, force=False):
         """
         [Compute Thread Callback] 严禁直接触 UI。
         通过 pump_executor.submit 强制回流，确保 UI 写入永远只有 pump 一个入口。
@@ -3846,9 +3850,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # 强制回流 pump — UI 单入口封口
-        self.pump_executor.submit(self._handle_compute_result, result, version)
+        self.pump_executor.submit(self._handle_compute_result, result, version, force)
 
-    def _handle_compute_result(self, result, version):
+    def _handle_compute_result(self, result, version, force=False):
         """
         [Pump Thread] 版本检查 + 单点写 UI。
         tk_dispatch_queue 的唯一合法写入点。
@@ -3862,7 +3866,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         try:
-            full_df, df, sync_ui, cur_res = result
+            full_df, df, sync_ui, cur_res, force_res = result
+            # 这里的 force_res 优先级更高
+            final_force = force or force_res
         except Exception as e:
             logger.error(f"[Pump] Unpack result failed v{version}: {e}")
             return
@@ -3873,19 +3879,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # [VERSION] UI 层: 再次校验 (第二层防护)
                 if version < getattr(self, '_snapshot_version', 0):
                     return
-                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res)
+                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res, final_force)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_sync)
         elif full_df is not None and not full_df.empty:
             def _do_mem_sync():
                 if version < getattr(self, '_snapshot_version', 0):
                     return
-                self._apply_tree_data_sync(full_df, None, cur_res)
+                self._apply_tree_data_sync(full_df, None, cur_res, final_force)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_mem_sync)
 
 
-    def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d'):
+    def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d', force=False):
         """
         Sync step: update internal state and Tkinter UI on the main thread.
         - full_df: 全量市场行情 (用于 Top10/策略/信号追踪)

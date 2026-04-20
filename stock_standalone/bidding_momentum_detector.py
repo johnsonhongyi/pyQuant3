@@ -2639,12 +2639,12 @@ class BiddingMomentumDetector:
         # [REFINED] 动态获取 sleep 时间，如果 CFG 没变，尝试从文件重新加载或使用合理默认值
         # 考虑到 cct.CFG 可能不会实时响应 global.ini 变化，这里我们强制获取最新
         try:
-            limit = float(getattr(cct.CFG, 'duration_sleep_time', 5.0)) if cct else 5.0
+            limit = float(getattr(cct.CFG, 'duration_sleep_time', 120.0)) if cct else 120.0
         except:
-            limit = 5.0
+            limit = 60.0
             
         # 允许竞价期间更快速刷新 (最低 1s)
-        limit = max(1.0, limit)
+        limit = max(60.0, limit)
         
         if getattr(self, '_force_update_requested', False) or (now - self._last_refresh_ts >= limit):
             with self._lock:
