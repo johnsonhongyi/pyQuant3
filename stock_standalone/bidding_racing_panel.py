@@ -572,15 +572,27 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         data_list.sort(key=get_sort_key, reverse=is_rev)
         
+        # 获取 SBC 注册表
+        tracker = None
+        if self.detector and self.detector.realtime_service:
+            tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
+        sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
+
         display_list = data_list[:100]
         flattened = []
         for ts in display_list:
+            # # 提取形态理由
+            # reason = ""
+            # if ts.code in sbc_registry: reason = sbc_registry[ts.code].get('desc', '')
+            # if not reason: reason = getattr(ts, 'pattern_hint', "")
+
             flattened.append((
                 ts.code, ts.name, score_cache.get(ts.code, 0), 
                 getattr(ts, 'signal_count', 0),
                 ts.current_pct,
                 ts.current_pct - ts.pct_diff,
                 ts.pct_diff
+                # reason
             ))
 
         total = len(data_list)
@@ -603,6 +615,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
             code, name, score, sig, pct, start_pct, dff = row
+            # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
             is_alerted = get_alert_manager().is_alerted(code)
@@ -627,6 +640,12 @@ class SectorDetailDialog(QDialog, WindowMixin):
             c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
             if is_alerted: c_dff = txt_c
             self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+
+            # # [NEW] 第 7 列：形态/报警理由
+            # reason = row[7] if len(row) > 7 else ""
+            # c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
+            # if is_alerted: c_reason = txt_c
+            # self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
 
     def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
         it = self.table.item(row, col)
@@ -936,14 +955,25 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
         data_list.sort(key=get_sort_key, reverse=is_rev)
         
+        # # 获取 SBC 注册表引用
+        # tkr = None
+        # if self.detector and self.detector.realtime_service:
+        #     tkr = getattr(self.detector.realtime_service, 'emotion_tracker', None)
+        # s_registry = getattr(tkr, '_sbc_signals_registry', {}) if tkr else {}
+
         flattened = []
         for ts in data_list[:300]:
+            # # 提取形态理由
+            # rsn = ""
+            # if ts.code in s_registry: rsn = s_registry[ts.code].get('desc', '')
+            # if not rsn: rsn = getattr(ts, 'pattern_hint', "")
+
             flattened.append((ts.code, ts.name, score_cache.get(ts.code, 0), 
                              getattr(ts, 'signal_count', 0),
                              ts.current_pct,
                              ts.current_pct - ts.pct_diff,
                              ts.pct_diff))
-
+                             #  rsn))
         avg_pct = sum(x.current_pct for x in data_list) / len(data_list)
         stats_text = (f"📊 统计: 共 {len(data_list)} 只 | "
                       f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span>")
@@ -957,6 +987,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
             code, name, score, sig, pct, start_pct, dff = row
+            # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
             is_alerted = get_alert_manager().is_alerted(code)
@@ -1445,6 +1476,22 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         history_lay.addWidget(self.btn_del_history)
 
         pie_vbox.addLayout(history_lay)
+        
+        # [NEW] 🧬 SBC 基因报警实时统计卡片 (放在饼图上方，极其醒目)
+        self.card_sbc_stats = QPushButton("🧬 实时基因报警: 0")
+        self.card_sbc_stats.setFixedSize(160, 32)
+        self.card_sbc_stats.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_sbc_stats.setStyleSheet("""
+            QPushButton { 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4B0082, stop:1 #800080); 
+                color: #00FFCC; border: 1px solid #FFD700; border-radius: 6px; 
+                font-weight: bold; font-size: 11px; text-align: center;
+            }
+            QPushButton:hover { background: #9400D3; border: 1px solid white; color: white; }
+        """)
+        # 点击直接打开虚拟板块详情窗
+        self.card_sbc_stats.clicked.connect(lambda: self._on_category_double_clicked("🔔 实时报警"))
+        pie_vbox.addWidget(self.card_sbc_stats, alignment=Qt.AlignmentFlag.AlignCenter)
         
         self.pie_widget = RacingPieWidget()
         self.pie_widget.category_selected.connect(self._on_pie_filter)
@@ -2081,8 +2128,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 重新生成按钮
             for i, snap in enumerate(self._anchor_history):
                 ts_val = snap.get("ts", 0)
-                t_str = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M")
-                btn = QPushButton(f"📍 起点{i+1}({t_str})")
+                dt = datetime.datetime.fromtimestamp(ts_val)
+                t_str = dt.strftime("%H:%M")
+                d_str = dt.strftime("%d") # 0406->06, 0420->20
+                btn = QPushButton(f"📍 {d_str} {t_str}")
                 btn.setFixedSize(94, 26)
                 btn.setMinimumWidth(94)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2582,6 +2631,34 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if self._table_highlights: self._refresh_fading_only() 
             return
         self._last_ui_update_ts = now
+        
+        # [NEW] 🧬 更新 🧬 SBC 基因报警实时统计
+        if hasattr(self, 'card_sbc_stats') and self.detector and self.detector.realtime_service:
+            tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
+            if tracker:
+                reg = getattr(tracker, '_sbc_signals_registry', {})
+                sbc_count = len(reg)
+                self.card_sbc_stats.setText(f"🧬 实时基因报警: {sbc_count}")
+                # 如果有报警，使用更醒目的边框亮色
+                if sbc_count > 0:
+                    self.card_sbc_stats.setStyleSheet("""
+                        QPushButton { 
+                            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8B0000, stop:1 #FF4500); 
+                            color: white; border: 2px solid #FFD700; border-radius: 6px; 
+                            font-weight: bold; font-size: 11px; text-align: center;
+                        }
+                        QPushButton:hover { background: #FF0000; border: 2px solid white; }
+                    """)
+                else:
+                    self.card_sbc_stats.setStyleSheet("""
+                        QPushButton { 
+                            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4B0082, stop:1 #800080); 
+                            color: #00FFCC; border: 1px solid #444; border-radius: 6px; 
+                            font-weight: bold; font-size: 11px; text-align: center;
+                        }
+                        QPushButton:hover { background: #9400D3; border: 1px solid white; color: white; }
+                    """)
+
         curr_ver = getattr(self.detector, 'data_version', 0)
         curr_time = getattr(self.detector, 'last_data_ts', 0)
         
@@ -2905,9 +2982,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             is_alerted = is_generic_alert or is_sbc_active
             bg_c = self._UI_CACHE["COLOR_ALERT_BG"] if is_alerted else None
             txt_c = self._UI_CACHE["COLOR_ALERT_TEXT"] if is_alerted else None
+            
+            # [NEW] SBC 系统标记：⚡ 表示基因强度，🔔 表示通用报警
+            display_code = f"⚡{code}" if is_sbc_active else code
             display_name = f"🔔{name}" if is_alerted else name
 
-            self._update_cell(table, i, 0, code, color=txt_c, is_numeric=False, bg_color=bg_c)
+            self._update_cell(table, i, 0, display_code, color=txt_c, is_numeric=False, bg_color=bg_c)
             self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c)
             score_txt = str(round(score, 1))
             if self._update_cell(table, i, 2, score_txt, self._UI_CACHE["COLOR_GOLD"]):
@@ -2953,11 +3033,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not is_first_init: self._table_highlights[("sector", s_name, 1)] = time.time()
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
 
-            # 2. 得分增量 (🚀 新增独立列：展示相对于锚点的强度增量)
+            # 2. 得分增量 (展示相对于锚点的强度增量)
             score_anchor = sec.get('score_anchor', score)
             score_diff = score - score_anchor
             diff_txt = f"{score_diff:+.1f}"
             c_diff = self._UI_CACHE["COLOR_RED"] if score_diff > 0.05 else (self._UI_CACHE["COLOR_GREEN"] if score_diff < -0.05 else Qt.GlobalColor.white)
+            
             if self._update_cell(table, i, 2, diff_txt, c_diff):
                 if not is_first_init: self._table_highlights[("sector", s_name, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("sector", s_name, 2))
