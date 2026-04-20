@@ -4032,6 +4032,74 @@ def get_work_duration():
     # if now is None:
     #     now = dt.datetime.now()
 
+def get_work_time_ratio_sbc(resample='d', now_time=None):
+    if now_time is None:
+        now = datetime.datetime.now()
+    else:
+        now = now_time
+
+    # ---------- 日内进度 ----------
+    t = now.time()
+    minutes = t.hour * 60 + t.minute
+
+    segments = [
+        (9*60+30, 10*60, 0.35),   # 开盘 30 分钟权重提升到 35%
+        (10*60, 11*30, 0.65),   # 11:30 达到早盘总权重的 65%
+        (13*60, 14*00, 0.80),   # 14:00 达到 80% (午后量能相对较小)
+        (14*00, 15*00, 1.00),   # 15:00 收盘 100%
+    ]
+
+    prev_ratio = 0.0
+    passed_ratio = 0.0
+
+    for start, end, ratio in segments:
+        if minutes <= start:
+            passed_ratio = prev_ratio
+            break
+        elif start < minutes <= end:
+            p = (minutes - start) / (end - start)
+            passed_ratio = prev_ratio + (ratio - prev_ratio) * p
+            break
+        prev_ratio = ratio
+    else:
+        passed_ratio = 1.0
+
+    passed_ratio = max(passed_ratio, 0.05)
+
+    # ---------- resample 处理 ----------
+    if resample == 'd':
+        return passed_ratio
+
+    # ---------- 周交易日计算 ----------
+    start_week = today - pd.Timedelta(days=today.weekday())
+    week_days = pd.bdate_range(start_week, today)
+    week_idx = len(week_days)        # 今天是第几个交易日
+    week_total = 5
+
+    # ---------- 月交易日计算 ----------
+    month_start = today.replace(day=1)
+    month_all = pd.bdate_range(
+        month_start,
+        (month_start + pd.offsets.MonthEnd())
+    )
+    month_idx = len(pd.bdate_range(month_start, today))
+    month_total = len(month_all)
+
+    # ---------- 周期比例计算 ----------
+    if resample == '3d':
+        ratio = ((min(week_idx - 1, 2)) + passed_ratio) / 3
+
+    elif resample == 'w':
+        ratio = ((week_idx - 1) + passed_ratio) / week_total
+
+    elif resample == 'm':
+        ratio = ((month_idx - 1) + passed_ratio) / month_total
+
+    else:
+        ratio = passed_ratio
+
+    return min(max(round(float(ratio),6), 0.01), 1.0)
+
 def get_work_time_ratio(resample='d'):
     now = datetime.datetime.now()
 

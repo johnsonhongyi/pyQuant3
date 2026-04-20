@@ -279,8 +279,19 @@ def load_window_position_simple(window_name: str, default_width: int, default_he
             config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
         
         if os.path.exists(config_file):
-            with open(config_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if os.path.getsize(config_file) == 0:
+                logger.warning(f"检测到 {os.path.basename(config_file)} 为 0 字节，可能正在被写入或已损坏。")
+                import time
+                for _ in range(3): # 尝试重试 3 次
+                    time.sleep(0.1)
+                    if os.path.getsize(config_file) > 0: break
+            
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as jse:
+                logger.error(f"JSON 解析失败 {config_file}: {jse}")
+                return default_width, default_height, None, None
             if window_name in data:
                 pos = data[window_name]
                 width = int(pos.get("width", default_width) * scale)
@@ -327,8 +338,23 @@ def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str
                 pass
         
         data[window_name] = pos
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # 🚀 [原子化写入] 使用临时文件 + os.replace 确保写入完整，防止 Windows 下并发导致的 0 字节
+        import tempfile
+        fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(config_file), text=True)
+        try:
+            with os.fdopen(fd, 'w', encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            # 必须关闭后才能进行 replace
+            if os.path.exists(config_file):
+                try: os.chmod(config_file, 0o666) # 尝试修复权限
+                except: pass
+            os.replace(temp_path, config_file)
+        except Exception as e:
+            if os.path.exists(temp_path):
+                try: os.remove(temp_path)
+                except: pass
+            raise e
     except Exception as e:
         logger.error(f"[save_window_position_simple] 失败: {e}")
 

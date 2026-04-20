@@ -23,8 +23,7 @@ try:
 except ImportError:
     UI_AVAILABLE = False
 
-# [NEW] Import real data fetching logic
-from instock_MonitorTK import test_single_thread
+# [NEW] Import real data fetching logic moved to local scopes to avoid circular import with MonitorTK
 
 from JohnsonUtil import LoggerFactory
 # [SILENT-MODE] 使用统一日志工厂，UI模式下默认级别仅 WARNING
@@ -390,7 +389,7 @@ class LiveWorker(QThread):
         self.is_running = False
 
 
-def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None, ui_callback=None, detector=None, publisher=None):
+def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None, ui_callback=None, detector=None, publisher=None, real_df_all=None, panel=None):
     """
     基于 HDF5 本地 Tick 数据，按时间线回回放并推入 DataPublisher/BiddingMomentumDetector。
     
@@ -405,6 +404,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     resample: str
       指定回测 baseline 的周期 (e.g., 'd', '2d', '3d', 'w', 'm')
     """
+    # [CIRCULAR-FIX] 局部导入以避免与 MonitorTK 产生循环引用
+    from instock_MonitorTK import test_single_thread
+    
     if stops is None:
         stops = []
         
@@ -498,19 +500,30 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info(f"Final slice range: {start_time_filter} - {end_time_filter}. Total ticks: {len(df)}")
     
     # --- [REAL DATA MODE] ---
-    logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
-    real_df_all = test_single_thread(single=True, resample=resample,log_level=LoggerFactory.ERROR)
+    if real_df_all is None:
+        logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
+        real_df_all = test_single_thread(single=True, resample=resample, log_level=LoggerFactory.ERROR)
+    else:
+        logger.info(f"🚀 [OPTIMIZED] Using injected real_df_all (count={len(real_df_all)}) from parent process.")
+        
     if real_df_all is None or real_df_all.empty:
         logger.error("Failed to fetch real data from production environment.")
         return
 
-    # [NEW] Verify Metadata Columns
-    required_cols = ['category', 'lastp1d', 'ma20', 'lastdu4', 'ral', 'top0', 'top15']
-    missing = [c for c in required_cols if c not in real_df_all.columns]
-    if missing:
-        logger.warning(f"⚠️ Real data missing critical metadata columns: {missing}")
+    # [NEW] Verify Metadata Columns (Including Base Volume for Ratio Calculation)
+    required_cols = ['category', 'lastp1d', 'ma20d', 'lastdu4', 'ral', 'top0', 'top15']
+    if 'lastv1d' not in real_df_all.columns and 'last6vol' not in real_df_all.columns:
+        logger.warning("⚠️ Real data missing volume baseline (lastv1d/last6vol). Ratio calc may fallback.")
+    
+    # [INDEX-STANDARDIZATION] 强制将 real_df_all 索引标准化为 6 位字符串代码
+    if 'code' in real_df_all.columns:
+        real_df_all['code'] = real_df_all['code'].astype(str).str.zfill(6)
+        real_df_all.set_index('code', inplace=True)
     else:
-        logger.info("✅ Real data contains all required metadata columns.")
+        real_df_all.index = real_df_all.index.astype(str).str.zfill(6)
+        real_df_all.index.name = 'code'
+        
+    logger.info(f"Successfully fetched {len(real_df_all)} real stock records (Index Standardized).")
     
     # [DATA INTEGRITY] Reset real-time columns to ensure we don't leak "future" 
     # final percentages into early simulation stages.
@@ -520,13 +533,12 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             real_df_all[col] = 0.0
             
     # [NEW] Filter the registry/baseline data if specific codes are targeted
+    
     if codes:
-        if 'code' in real_df_all.columns:
-            real_df_all = real_df_all[real_df_all['code'].astype(str).str.zfill(6).isin(codes)]
-        else:
-            real_df_all = real_df_all[real_df_all.index.astype(str).str.zfill(6).isin(codes)]
-        
-    logger.info(f"Successfully fetched {len(real_df_all)} real stock records (Data Leakage Protection Active).")
+        if isinstance(codes, str):
+            codes = [c.strip().zfill(6) for c in codes.split(',')]
+        real_df_all = real_df_all[real_df_all.index.isin(codes)]
+        logger.info(f"Filtered baseline registry for {len(codes)} stocks.")
 
     # [Phase 4] 注册代码名称对应关系
     if publisher is None:
@@ -648,6 +660,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info("Pre-grouping tick data by time (this takes a few seconds)...")
     df_grouped = {t: group for t, group in df.groupby('ticktime')}
 
+    # [SIM-DATE] 提前确定模拟日期，用于量比计算与时间戳生成
+    sim_date = replay_date if replay_date else datetime.now().strftime('%Y-%m-%d')
+
     _last_emitted_t_str = ""
     try:
         for idx, t_str in enumerate(unique_times):
@@ -751,8 +766,31 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                 batch_df['high'] = batch_df['trade']
                 batch_df['low'] = batch_df['trade']
                 
-            if 'ratio' not in batch_df.columns:
-                 batch_df['ratio'] = 1.0 # 占位量比
+            # [Task] 基于上一日成交量与日内进度的动态量比校准 (仿真模式核心逻辑)
+            # 我们需要对比 (当前时刻成交量) / (上一日总成交量 * 时间比例)
+            if 'volume' in batch_df.columns:
+                # 1. 对齐生产列名：将 HDF5 原始成交量重命名为 'vol' (Original Volume)
+                # 腾出 'volume' 位置给量比计算结果 (Ratio)
+                batch_df.rename(columns={'volume': 'vol'}, inplace=True)
+                
+                # 2. 映射基座成交量 (优先 lastv1d, 否则 last6vol)
+                base_v_series = real_df_all['lastv1d'] if 'lastv1d' in real_df_all.columns else real_df_all.get('last6vol', pd.Series(0, index=real_df_all.index))
+                
+                # 3. 计算物理时刻比例与基座
+                sim_dt = datetime.strptime(f"{sim_date} {t_str}", '%Y-%m-%d %H:%M:%S')
+                time_ratio = cct.get_work_time_ratio_sbc(now_time=sim_dt)
+                batch_df['base_vol'] = batch_df['code'].map(base_v_series)
+                
+                # 4. 矢量化计算量比写入 'volume' (对齐 strategy_config.py 中的 "量比" 定义)
+                batch_df['volume'] = (batch_df['vol'] / (batch_df['base_vol'] * time_ratio)).round(2)
+                
+                # 5. 边界处理与占位符填充
+                batch_df.loc[(batch_df['base_vol'] <= 0) | (pd.isna(batch_df['volume'])), 'volume'] = 1.0
+                batch_df['ratio'] = batch_df['volume'] # 双保险备份
+                batch_df.drop(columns=['base_vol'], inplace=True)
+            else:
+                 batch_df['volume'] = 1.0
+                 batch_df['ratio'] = 1.0
                  
             # 结合内置的规则模拟 metadata (保证能被 BiddingMomentumDetector 按概念切分)
             if 'code' in batch_df.columns:
@@ -762,7 +800,6 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                  
             # [核心]: 送入数据泵
             # 注入模拟时间戳，确保 detector 的日期判定逻辑与回放日期一致
-            sim_date = replay_date if replay_date else datetime.now().strftime('%Y-%m-%d')
             batch_df['timestamp'] = f"{sim_date} {t_str}" 
             
             # 向核心系统泵入 (这里它会自动处理分钟K线切割、情绪计算)
@@ -939,29 +976,45 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     end_time_real = time.time()
     logger.info(f"\n✅ Playback complete! Total real time elapsed: {end_time_real - start_time_real:.2f}s")
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Sector Bidding Slice Backtest/Replay Tool")
-    parser.add_argument("--speed", type=float, default=0.0, help="Playback speed multiplier (e.g. 1.0, 10.0). 0.0 means full speed.")
-    parser.add_argument("--observation", type=str, action="append", help="Observation timestamps (HH:MM:SS) to pause and inspect. Can be specified multiple times.")
-    parser.add_argument("--start", type=str, default="09:25:00", help="Simulation start time (HH:MM:SS)")
-    parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
-    parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
-    parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', 'w', 'm'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
-    parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
-    parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
-    parser.add_argument("--today", action="store_true", help="Automatically replay today's data")
-    parser.add_argument("--ui", action="store_true", help="Launch High-Performance Bidding Racing UI")
-    parser.add_argument("--live", action="store_true", help="Enable Live Trading Mode")
-    parser.add_argument("--interval", type=int, default=30, help="Data fetch interval in seconds for live mode (default: 30)")
-    parser.add_argument("--log", type=lambda s: s.upper(), default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Console log level")
-    
-    args = parser.parse_args()
-    
+def main(args=None, df_all_target=None):
+    """
+    [REFACTORED] 赛马回测入口，支持通过 mp.Process 直接透传 df_all 数据。
+    """
+    if args is None:
+        import argparse
+        parser = argparse.ArgumentParser(description="Sector Bidding Slice Backtest/Replay Tool")
+        parser.add_argument("--speed", type=float, default=0.0, help="Playback speed multiplier (e.g. 1.0, 10.0). 0.0 means full speed.")
+        parser.add_argument("--observation", type=str, action="append", help="Observation timestamps (HH:MM:SS) to pause and inspect. Can be specified multiple times.")
+        parser.add_argument("--start", type=str, default="09:25:00", help="Simulation start time (HH:MM:SS)")
+        parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
+        parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
+        parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', 'w', 'm'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
+        parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
+        parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
+        parser.add_argument("--today", action="store_true", help="Automatically replay today's data")
+        parser.add_argument("--ui", action="store_true", help="Launch High-Performance Bidding Racing UI")
+        parser.add_argument("--live", action="store_true", help="Enable Live Trading Mode")
+        parser.add_argument("--interval", type=int, default=30, help="Data fetch interval in seconds for live mode (default: 30)")
+        parser.add_argument("--log", type=lambda s: s.upper(), default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Console log level")
+        args = parser.parse_args()
+
+    # --- [LOG-CONTROL] 解析日志级别映射 ---
+    log_level_map = {
+        'DEBUG': LoggerFactory.DEBUG,
+        'INFO': LoggerFactory.INFO,
+        'WARNING': LoggerFactory.WARNING,
+        'ERROR': LoggerFactory.ERROR
+    }
+    # 如果 args.log 是字符串（来自 CLI），则转换；如果是 int（来自 mp.Process 注入），则直接使用
+    if isinstance(args.log, str):
+        user_log_level = log_level_map.get(args.log.upper(), LoggerFactory.WARNING)
+    else:
+        user_log_level = args.log if args.log is not None else LoggerFactory.WARNING
+
     logger.info("Initializing Sector Bidding Slice Backtest Tool...")
     # 默认观测点
     slice_stops = []
-    if args.observation:
+    if hasattr(args, 'observation') and args.observation:
         for s in args.observation:
             slice_stops.extend([x.strip() for x in s.split(',')])
     else:
@@ -969,44 +1022,43 @@ if __name__ == "__main__":
     
     # 日期逻辑处理
     replay_date = args.date
-    if args.today:
+    if hasattr(args, 'today') and args.today:
         replay_date = datetime.now().strftime('%Y-%m-%d')
         logger.info(f"Today mode enabled. Targeting date: {replay_date}")
-
-    # [LOG-CONTROL] 解析日志级别映射
-    log_level_map = {
-        'DEBUG': LoggerFactory.DEBUG,
-        'INFO': LoggerFactory.INFO,
-        'WARNING': LoggerFactory.WARNING,
-        'ERROR': LoggerFactory.ERROR
-    }
-    user_log_level = log_level_map.get(args.log.upper(), LoggerFactory.WARNING)
 
     replay_kwargs = dict(
         start_time_str=args.start, 
         end_time_str=args.end, 
         playback_speed=args.speed, 
         stops=slice_stops,
-        concise=not args.verbose,
+        concise=not getattr(args, 'verbose', False),
         resample=args.resample,
         codes=args.codes,
         replay_date=replay_date
     )
     
-    # --- [REAL DATA MODE] ---
+    # --- [REAL DATA MODE] --- 获取基准行情时透传日志级别
+    real_df_all = None
     if not args.codes:
-        # 获取基准行情时透传日志级别
         resample = args.resample
-        logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
-        real_df_all = test_single_thread(single=True, resample=resample, log_level=user_log_level)
+        # 🚀 [OPTIMIZED] 如果外部注入了 df_all，直接使用，杜绝重复计算
+        if df_all_target is not None and not df_all_target.empty:
+            logger.info(f"✅ Receiving injected df_all (count={len(df_all_target)}) from parent process.")
+            real_df_all = df_all_target
+        else:
+            logger.info(f"Fetching REAL production data (resample={resample}) for baseline registry...")
+            from instock_MonitorTK import test_single_thread
+            real_df_all = test_single_thread(single=True, resample=resample, log_level=user_log_level)
+            
         if real_df_all is None or real_df_all.empty:
             logger.error("Failed to fetch real data from production environment.")
         else:
-            from bidding_momentum_detector import BiddingMomentumDetector
+            # from bidding_momentum_detector import BiddingMomentumDetector
             pass
 
     if args.ui and UI_AVAILABLE:
-        app = QApplication(sys.argv)
+        # 在子进程中创建 QApplication 时，需要确保 sys.argv 有效
+        app = QApplication(sys.argv if sys.argv else ['test_bidding_replay.py'])
         
         # --- [SILENT-MODE] 强力压制全局单例 Logger ---
         try:
@@ -1015,7 +1067,7 @@ if __name__ == "__main__":
             import logging
             logging.getLogger().setLevel(logging.WARNING)
             if user_log_level >= LoggerFactory.WARNING:
-                print(f"🤫 静默模式：当前后台日志级别已设为 {args.log.upper()}")
+                print(f"🤫 静默模式：当前后台日志级别已设为 {str(args.log).upper()}")
         except Exception as e:
             logger.exception(f"Log conversion failed: {e}")
 
@@ -1032,23 +1084,21 @@ if __name__ == "__main__":
             # ========================================
             logger.info("🔴 Starting LIVE Trading Mode...")
             
-            # Step 1: 一次性获取基线数据 (包含 category, lastp1d, ma20 等历史元数据)
-            print("📊 正在获取基线数据 (test_single_thread)，请稍候...")
+            # Step 1: 获取基准数据
             resample = args.resample
-            live_df_all = real_df_all if (real_df_all is not None and not real_df_all.empty) else None
-            if live_df_all is None:
+            live_df_all = real_df_all
+            if live_df_all is None or live_df_all.empty:
                 live_df_all = test_single_thread(single=True, resample=resample, log_level=user_log_level)
             if live_df_all is None or live_df_all.empty:
                 print("❌ 基线数据获取失败，无法启动实盘模式。")
-                sys.exit(1)
-            print(f"✅ 基线数据获取成功: {len(live_df_all)} 只股票")
+                return # In main context, return is safer than sys.exit
             
-            # Step 2: 创建 Publisher 和 Detector (实盘模式，非 simulation)
+            # Step 2: 创建 Publisher 和 Detector
             publisher = DataPublisher(
                 high_performance=True, 
-                scraper_interval=99999,  # 由 LiveWorker 控制刷新节奏
+                scraper_interval=99999,
                 enable_backup=False,
-                simulation_mode=False,   # 实盘模式
+                simulation_mode=False,
                 verbose=args.verbose
             )
             detector = BiddingMomentumDetector(
@@ -1090,40 +1140,59 @@ if __name__ == "__main__":
             worker.start()
             
             panel.show()
-            sys.exit(app.exec())
+            app.exec()
         else:
             # ========================================
-            # 回放模式 (Replay Mode) 保持原有逻辑
+            # 回放模式 (Replay Mode)
             # ========================================
             logger.info("Starting UI-based Racing Replay...")
             
-            worker = ReplayWorker(replay_kwargs)
+            # 创建仿真 Publisher (从 HDF5 读取)
+            # 注意：此处必须使用本地导入以防多进程冲突
+            from realtime_data_service import DataPublisher
+            from bidding_momentum_detector import BiddingMomentumDetector
             
-            panel = BiddingRacingRhythmPanel(sender=sender)
+            publisher = DataPublisher(
+                high_performance=True,
+                scraper_interval=99999,
+                enable_backup=False,
+                simulation_mode=True,  # 仿真读取模式
+                verbose=args.verbose
+            )
+            
+            detector = BiddingMomentumDetector(
+                realtime_service=publisher,
+                simulation_mode=True
+            )
+            
+            # 初始化 Panel (必须在 detector 创建后，以便传入引用)
+            panel = BiddingRacingRhythmPanel(sender=sender, detector=detector)
+            panel.setWindowTitle(f"🏁 竞价赛马回放 : {replay_date or 'ALL'}")
+            
+            replay_kwargs['detector'] = detector
+            replay_kwargs['publisher'] = publisher
+            replay_kwargs['real_df_all'] = real_df_all
+            replay_kwargs['panel'] = panel
+            
+            # 开启后台回放线程
+            worker = ReplayWorker(replay_kwargs)
             
             def on_progress(t_str):
                 from PyQt6.sip import isdeleted
                 if isdeleted(panel): return
                 panel.timeline.set_time(t_str)
-            
-            def on_panel_closed():
-                worker.stop()
-                worker.wait()
-            
-            panel.closed.connect(on_panel_closed)
+                panel.timeline.label.setText(f"🎥 录像回放中: {t_str} ({int(args.speed)}x)")
 
-            # 预创建 detector 传进去
-            publisher = DataPublisher(simulation_mode=True, high_performance=True, verbose=args.verbose)
-            detector = BiddingMomentumDetector(realtime_service=publisher, simulation_mode=True)
-            panel.detector = detector
-            
-            replay_kwargs['detector'] = detector
-            replay_kwargs['publisher'] = publisher
-            
             worker.progress_update.connect(on_progress)
+            panel.show()
             worker.start()
             
-            panel.show()
-            sys.exit(app.exec())
+            app.exec() # 等待 UI 退出
     else:
+        # 无 UI 命令行模式
         run_replay(**replay_kwargs)
+
+if __name__ == "__main__":
+    import multiprocessing as mp
+    mp.freeze_support()
+    main()
