@@ -2550,7 +2550,12 @@ class DataPublisher:
             # [REFINED] 将分钟级时间加入指纹，并增加首尾及中间全场采样
             # 确保即使前 50 只个股不跳动，整批次数据更新也能正常驱动
             batch_fp = f"{hhmm}_" + df_fingerprint(check_sample, cols=fp_cols)
-            is_new_batch = (batch_fp != self._last_batch_fp)
+            
+            # [HEARTBEAT] Force update every 30s even if fingerprint matches, to keep UI heartbeat alive
+            time_since_last = time.time() - getattr(self, '_last_update_wall_time', 0)
+            is_new_batch = (batch_fp != self._last_batch_fp) or (time_since_last > 30)
+            if is_new_batch:
+                self._last_update_wall_time = time.time()
 
             # 无论是否实时，若基准尚未计算，优先尝试一次
             if self.emotion_baseline.get_last_calc_date() is None:
