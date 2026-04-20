@@ -994,6 +994,8 @@ class DragonLeaderTracker:
         self._persist_path = persist_path or _DRAGON_PERSIST_PATH
         self._today_str: str = datetime.now().strftime('%Y%m%d')
         self._next_day_done: bool = False
+        self.breakdown_details: List[str] = []  # [NEW] 破位聚合记录
+        self.dragon_details: List[str] = []     # [NEW] 龙头信号聚合记录
         self._load_persist()
 
     # ── 持久化 ────────────────────────────────────────────────────────────────
@@ -1095,11 +1097,16 @@ class DragonLeaderTracker:
                     rec.warning_days = max(rec.warning_days, 1)
                 if '破启动收盘价' not in rec.tags:
                     rec.tags.append('破启动收盘价')
-                logger.info(f"[DragonTracker] 核心预警: {code} 跌破启动收盘位 {rec.prev_day_close:.2f}")
+                
+                # [MOD] 采用聚合日志，避免刷屏
+                info_entry = f"{code:<7} {rec.name:<8} | 核心预警: 跌破启动位 {rec.prev_day_close:.2f}"
+                self.breakdown_details.append(info_entry)
 
             # ② 盘中跌破昨日最低 ➜ 加重预警
             if rec.prev_day_low > 0 and current_price < rec.prev_day_low * 0.995:
-                logger.info(f"[DragonTracker] ⚠️ 盘中破昨低: {code} 当前={current_price:.3f} 昨低={rec.prev_day_low:.3f}")
+                # [MOD] 采用聚合日志，避免刷屏
+                info_entry = f"{code:<7} {rec.name:<8} | ⚠️破昨低: 当前{current_price:.2f} 昨低{rec.prev_day_low:.2f}"
+                self.breakdown_details.append(info_entry)
                 return
 
             # ② 盘中新高不新低 ➜ 去掉破位标记，WARNING 给一次修复机会
@@ -1857,6 +1864,7 @@ class SectorFocusController:
         self._df_realtime: Optional[pd.DataFrame] = None
         self._index_pct_diff: float = 0.0          # [NEW] 指数基准涨幅
         self._last_55188_sync: float = 0.0        # [NEW] 55188 同步节拍
+        self.decision_buy_details: List[str] = [] # [NEW] 买点信号聚合记录
 
         self._last_full_update: float = 0.0
         self._full_update_interval = float(getattr(cct.CFG, 'duration_sleep_time', 60.0)) #30.0   # 全量计算30秒一次
@@ -2158,12 +2166,46 @@ class SectorFocusController:
                     dragon_sig = self.dragon_tracker.get_dragon_signal(rec.code, s_heat)
                     if dragon_sig:
                         self.decision_queue.push(dragon_sig)
-                        logger.info(
-                            f"[Dragon] 🐉 {rec.code}({rec.name}) "
-                            f"priority={dragon_sig.priority} {dragon_sig.reason}"
+                        # [MOD] 采用聚合日志，避免刷屏
+                        self.dragon_tracker.dragon_details.append(
+                            f"🐉 {rec.code}({rec.name}) priority={dragon_sig.priority} {dragon_sig.reason}"
                         )
                 except Exception as e:
                     logger.debug(f"[Dragon] scan {rec.code}: {e}")
+            
+            # [NEW] 集中打印破位报警，防止刷屏
+            if self.dragon_tracker.breakdown_details:
+                count = len(self.dragon_tracker.breakdown_details)
+                if count > cct.loop_counter_limit:
+                    summary = "\n".join(self.dragon_tracker.breakdown_details[:cct.loop_counter_limit])
+                    logger.warning(f"⚠️ [Dragon-Breakdown] 集中破位(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
+                else:
+                    summary = "\n".join(self.dragon_tracker.breakdown_details)
+                    logger.warning(f"⚠️ [Dragon-Breakdown] 发现破位:\n{summary}")
+                self.dragon_tracker.breakdown_details.clear()
+            
+            # [NEW] 集中打印龙头信号，防止刷屏
+            if self.dragon_tracker.dragon_details:
+                count = len(self.dragon_tracker.dragon_details)
+                if count > cct.loop_counter_limit:
+                    summary = "\n".join(self.dragon_tracker.dragon_details[:cct.loop_counter_limit])
+                    logger.warning(f"🚀 [Dragon-Signals] 发现强势信号(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
+                else:
+                    summary = "\n".join(self.dragon_tracker.dragon_details)
+                    logger.warning(f"🚀 [Dragon-Signals] 触发信号:\n{summary}")
+                self.dragon_tracker.dragon_details.clear()
+                
+            # [NEW] 集中打印买点信号，防止刷屏
+            if self.decision_buy_details:
+                count = len(self.decision_buy_details)
+                if count > cct.loop_counter_limit:
+                    summary = "\n".join(self.decision_buy_details[:cct.loop_counter_limit])
+                    logger.warning(f"✅ [Decision-Buy] 发现买点(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
+                else:
+                    summary = "\n".join(self.decision_buy_details)
+                    logger.warning(f"✅ [Decision-Buy] 触发买点:\n{summary}")
+                self.decision_buy_details.clear()
+
         except Exception as e:
             logger.debug(f"[Dragon] dragon scan failed: {e}")
 
@@ -2269,11 +2311,10 @@ class SectorFocusController:
 
         if signal:
             self.decision_queue.push(signal)
-            logger.info(
-                f"[Decision] 买点信号 {code}({name}) "
-                f"优先级={signal.priority} 类型={signal.signal_type.name} "
-                f"pct_diff={pct_diff:+.2f}% dff={dff:+.2f} "
-                f"原因: {signal.reason}"
+            # [MOD] 采用聚合日志，避免刷屏
+            self.decision_buy_details.append(
+                f"✅ {code}({name}) priority={signal.priority} type={signal.signal_type.name} "
+                f"pct={pct_diff:+.2f}% dff={dff:+.2f} {signal.reason}"
             )
 
     # ── 对外查询接口 ─────────────────────────────────────────────────────────
