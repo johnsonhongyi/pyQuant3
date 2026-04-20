@@ -7319,12 +7319,26 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.voice_thread.resume()
 
+        # 4.5 ⭐ [FIX] 同步 signal_log_panel 的暂停状态，确保停播时不再产生 log_added 语音
+        if hasattr(self, 'signal_log_panel') and self.signal_log_panel:
+            slp = self.signal_log_panel
+            if getattr(slp, '_paused', False) != new_is_paused:
+                slp._paused = new_is_paused
+                if hasattr(slp, 'pause_btn'):
+                    slp.pause_btn.setText("▶" if new_is_paused else "⏸")
+                if hasattr(slp, 'status_label'):
+                    slp.status_label.setText("已暂停" if new_is_paused else "运行中")
+        # 关闭时立即清空语音批量缓冲区，防止残留任务被播报
+        if new_is_paused and hasattr(self, 'voice_batch_buffer'):
+            self.voice_batch_buffer.clear()
+
         # 5. [OPTIMIZED] 采用延迟保存，防止主线程 IO 导致的 UI 卡死
         QTimer.singleShot(1000, self._save_visualizer_config)
 
         # 6. [IPC] 反向同步给主程序监控进程 (确保互斥同步)
         enabled = new_is_paused
         self._send_voice_state_to_main_app(enabled=enabled)
+
 
     def _toggle_verbose_log(self):
         """切换详细计算日志显示并触发延迟持久化 (避免主线程卡死)"""
@@ -12866,6 +12880,20 @@ class MainWindow(QMainWindow, WindowMixin):
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
+
+        # 0.0️⃣ ⭐ [FIX] 立即停止语音系统（最高优先级，防止退出过程中继续播报）
+        # 必须在停止所有 QTimer 之前，确保 voice_batch_timer 不再触发新任务
+        try:
+            if hasattr(self, 'voice_batch_timer') and self.voice_batch_timer:
+                self.voice_batch_timer.stop()
+            if hasattr(self, 'voice_batch_buffer'):
+                self.voice_batch_buffer.clear()
+            if hasattr(self, 'voice_thread') and self.voice_thread:
+                logger.debug("🛑 [closeEvent] Pre-stop voice system immediately...")
+                self.voice_thread.stop()
+                self.voice_thread = None
+        except Exception as _ve:
+            logger.debug(f"Voice pre-stop error (non-critical): {_ve}")
         
         # 0.15️⃣ 停止 SBC 自动刷新 Timer
         if hasattr(self, "_sbc_timer") and self._sbc_timer:
@@ -12897,6 +12925,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     obj.stop()
                 except:
                     pass
+
 
         # 0.31️⃣ 清理打开的 SBC 回放窗口
         if hasattr(self, '_sbc_test_windows'):

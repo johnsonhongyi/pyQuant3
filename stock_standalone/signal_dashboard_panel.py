@@ -2038,7 +2038,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if main_app and hasattr(main_app, '_run_dna_audit_batch'):
                 if hasattr(main_app, 'tk_dispatch_queue'):
                     # 🚀 [THREAD-SAFE] 通过 Tk 调度队列跨进程/线程安全调用
-                    main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+                    # ⭐ [FIX] 仅入队，不再同时直接调用，避免主线程同步阻塞
+                    _cn = dict(code_to_name)  # 捕获闭包副本
+                    main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
                 else:
                     # 兜底：直接调用
                     main_app._run_dna_audit_batch(code_to_name)

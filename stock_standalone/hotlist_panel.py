@@ -890,13 +890,14 @@ class HotlistPanel(QWidget, WindowMixin):
             self._pending_pnl_refresh = False
             
         if self._pending_table_refresh_follow:
-            if self.tabs.currentIndex() == 1:
-                self._update_follow_queue()
+            # ⭐ [FIX] 无论是否当前在 Follow Tab，都需要渲染（避免切换时空白）
+            # 但仅当 Tab 可见时渲染可节省性能，已有数据缓存兜底
+            self._update_follow_queue()
             self._pending_table_refresh_follow = False
 
         if self._pending_table_refresh_watchlist:
-            if self.tabs.currentIndex() == 2:
-                self._update_watchlist_queue()
+            # ⭐ [FIX] 同上，由 _update_watchlist_queue 内部脏检查保证增量渲染性能
+            self._update_watchlist_queue()
             self._pending_table_refresh_watchlist = False
             
         # 总是更新状态栏
@@ -946,6 +947,21 @@ class HotlistPanel(QWidget, WindowMixin):
         if hasattr(main_window, 'voice_action'):
             text = "🔇 热点播报: 关(Alt+O)" if self._voice_paused else "🔊 热点播报: 开(Alt+O)"
             main_window.voice_action.setText(text)
+
+        # ⭐ [FIX] 同步 signal_log_panel 的暂停状态，确保停播时不再触发 log_added 语音
+        if hasattr(main_window, 'signal_log_panel') and main_window.signal_log_panel:
+            slp = main_window.signal_log_panel
+            # 仅在状态不一致时才同步，避免死循环
+            if getattr(slp, '_paused', False) != self._voice_paused:
+                slp._paused = self._voice_paused
+                # 同步按钮图标 (⏸ = 运行中, ▶ = 已暂停)
+                if hasattr(slp, 'pause_btn'):
+                    slp.pause_btn.setText("▶" if self._voice_paused else "⏸")
+                if hasattr(slp, 'status_label'):
+                    slp.status_label.setText("已暂停" if self._voice_paused else "运行中")
+            # 如果是关闭状态，同步清空语音批量缓冲区，立即生效
+            if self._voice_paused and hasattr(main_window, 'voice_batch_buffer'):
+                main_window.voice_batch_buffer.clear()
              
         # ⭐ [NEW] 立即触发主窗口配置保存
         if hasattr(main_window, '_save_visualizer_config'):
@@ -1241,6 +1257,7 @@ class HotlistPanel(QWidget, WindowMixin):
 
                 # --- 准备更新 ---
                 self.watchlist_table.blockSignals(True)
+                self.watchlist_table.setUpdatesEnabled(False)  # ⭐ [FIX] 批量更新前关闭重绘，防止重绘风暴
                 is_sorted = self.watchlist_table.isSortingEnabled()
                 if is_sorted:
                     _ = self.watchlist_table.setSortingEnabled(False)
@@ -1446,20 +1463,9 @@ class HotlistPanel(QWidget, WindowMixin):
         menu.addAction("🗑️ 从观察池移除", lambda: self._remove_from_watchlist(code))
         menu.exec(self.watchlist_table.mapToGlobal(pos))
 
-    def _on_tab_changed(self, index):
-        """当切换到观察池 Tab 时，强制触发一轮刷新"""
-        if index == 2: # Watchlist Tab
-            self._pending_table_refresh_watchlist = True
-            # 如果是非交易时间手动打开，主动从 hub 补刷一次
-            if not cct.get_work_time():
-                hub = get_trading_hub()
-                if hasattr(hub, 'get_watchlist_df'):
-                    df = hub.get_watchlist_df()
-                    if not df.empty:
-                        self.data_worker._augment_watchlist_sectors(df)
-                        self._last_df_watchlist = df
-                        # 触发队列更新
-                        self._update_watchlist_queue()
+    def _on_tab_changed_watchlist_compat(self, index):
+        """[DEPRECATED] 旧版回调，已被下方新版 _on_tab_changed 覆盖，此函数已废弃保留以兼容"""
+        pass
     
     def _remove_from_watchlist(self, code):
         try:
@@ -1768,17 +1774,27 @@ class HotlistPanel(QWidget, WindowMixin):
             self._refresh_table()
     
     def _on_tab_changed(self, index):
-        """Tab 切换回调"""
-        with timed_ctx(f"tab_changed_{index}", warn_ms=10000):
-            if index == 1: # Follow
-                if (df := getattr(self, '_last_df_follow', None)) is not None:
-                    self._update_follow_queue(df)
-            elif index == 2: # Watchlist
-                if (df := getattr(self, '_last_df_watchlist', None)) is not None:
-                    self._update_watchlist_queue(df)
-            
-            # [OPTIMIZE] 仅当数据源可用时才执行同步刷新，且增加冷却控制
-            self._refresh_pnl_ui_only()
+        """Tab 切换回调 [PERF-FIX] 改为 pending flag 驱动，避免在 Qt 主线程同步执行重量级刷新"""
+        if index == 1: # Follow
+            # ⭐ [FIX] 只打标记，不在此处调用同步函数；由 refresh_ui_timer 消费
+            self._pending_table_refresh_follow = True
+        elif index == 2: # Watchlist
+            # ⭐ [FIX] 同上，避免同步阻塞
+            self._pending_table_refresh_watchlist = True
+            # 如果是非交易时间手动打开且缓存为空，异步补刷一次
+            if not cct.get_work_time() and getattr(self, '_last_df_watchlist', None) is None:
+                try:
+                    hub = get_trading_hub()
+                    if hasattr(hub, 'get_watchlist_df'):
+                        df = hub.get_watchlist_df()
+                        if df is not None and not df.empty:
+                            self.data_worker._augment_watchlist_sectors(df)
+                            self._last_df_watchlist = df
+                except Exception as _e:
+                    logger.debug(f"Tab watchlist fallback fetch: {_e}")
+        
+        # [OPTIMIZE] 仅当数据源可用时才执行同步刷新，且增加冷却控制
+        self._refresh_pnl_ui_only()
 
     def _refresh_pnl(self):
         """手动刷新按钮回调"""
@@ -2159,6 +2175,10 @@ class HotlistPanel(QWidget, WindowMixin):
                             it.setText(notes)
                             it.setToolTip(notes)
 
+                # in-place update done -- 恢复排序和信号状态后返回
+                if is_sorted:
+                    self.follow_table.setSortingEnabled(True)
+                self.follow_table.blockSignals(False)
                 return
 
             # --- FULL REBUILD (Structure Changed or Sorted) ---
@@ -2256,11 +2276,11 @@ class HotlistPanel(QWidget, WindowMixin):
 
     def _on_follow_cell_changed(self, currentRow, _currentColumn, _previousRow, _previousColumn):
         """跟单队列键盘导航：联动K线"""
-        # 复用单击逻辑，确保行为一致
+        # ⭐ [FIX] 刷新态（包括 Tab 切换后 setCurrentCell 恢复）、或行号未真正改变时，直接跳过
         if getattr(self, '_is_refreshing', False): return
+        if currentRow < 0 or currentRow == _previousRow: return
         with timed_ctx("follow_cell_changed", warn_ms=100):
-            if currentRow >= 0:
-                self._on_follow_click(currentRow, 0)
+            self._on_follow_click(currentRow, 0)
         
     def _on_follow_click(self, row, col):
         """跟单队列单击：联动K线"""
