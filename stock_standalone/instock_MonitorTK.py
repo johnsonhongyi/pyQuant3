@@ -3400,7 +3400,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         verbose_chk.pack(side="left")
 
         tk.Label(opts_frame, text=" | 等级:", font=label_font, fg="#666").pack(side="left")
-        log_var = tk.StringVar(value="INFO") # 🚀 默认 INFO，更适合普通用户
+        log_var = tk.StringVar(value="WARNING") # 🚀 默认 INFO，更适合普通用户
         log_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
         log_combo = ttk.Combobox(opts_frame, textvariable=log_var, values=log_levels, state="readonly",
                                 width=8, font=label_font)

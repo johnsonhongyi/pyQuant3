@@ -166,7 +166,8 @@ class TickSeries:
                  '_splitted_cats', '_total_vol', '_total_amt',
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
-                 'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min')
+                 'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min',
+                 '_bar_active_reward', '_last_active_price')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -221,6 +222,8 @@ class TickSeries:
         self.cycle_stage: int = 2
         self.signal_count: int = 0
         self._last_sig_min: int = 0
+        self._bar_active_reward: int = 0 # [NEW] 活跃奖励锁
+        self._last_active_price: float = 0.0 # [NEW] 最近一次活跃价格基准
 
     def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
         """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
@@ -325,6 +328,9 @@ class TickSeries:
 
     def push_kline(self, kline: dict):
         """追加一根分钟 K 线"""
+        # [NEW] 重置分钟活跃奖励锁，允许每分钟重新获取额外活跃分
+        self._bar_active_reward = 0
+
         # 如果队列满了，减去最老的统计
         if len(self.klines) == self.klines.maxlen:
             oldest = self.klines[0]
@@ -2261,12 +2267,30 @@ class BiddingMomentumDetector:
             if (final_score >= 5.0 or is_at_limit) and ts_obj.first_breakout_ts == 0:
                 ts_obj.first_breakout_ts = data_ts
 
-            if final_score >= 5.0:
-                # [NEW] 信号活跃度计数：每分钟异动分达标即计为一次活跃
-                current_min = int(data_ts // 60)
-                if ts_obj._last_sig_min != current_min:
+            # [UPGRADE] 活跃数据统计能力：价格变动驱动活跃数 (USER-RULE: 活跃信号总数一定是价格有变动的数据)
+            current_min = int(data_ts // 60)
+            price_changed = abs(cur_close - ts_obj._last_active_price) > 0.005 # 容差，确保至少有 1 分钱变动
+            
+            # 1. 基础活性：得分达标、分钟切换 且 价格有实质变动
+            if final_score >= 5.0 and ts_obj._last_sig_min != current_min:
+                if price_changed:
                     ts_obj.signal_count += 1
                     ts_obj._last_sig_min = current_min
+                    ts_obj._last_active_price = cur_close # 更新基准价格
+                
+            # 2. 动能活性：价格持续上涨奖励 (脉冲级活性)
+            # 如果价格较上一次触发活跃时显著上涨，且强度达标，即便在同一分钟也额外奖励活跃数
+            if ts_obj._last_active_price > 0 and final_score >= 3.0:
+                # 强度越高，触发连续奖励的门槛越低 (如 0.3% - 0.5%)
+                surge_threshold = 0.005 if final_score < 10 else 0.003 
+                if cur_close > ts_obj._last_active_price * (1 + surge_threshold):
+                    # 限制同一分钟内只能额外奖励一次，防止 Tick 过频导致数值失真
+                    if ts_obj._bar_active_reward < 1:
+                        ts_obj.signal_count += 1
+                        ts_obj._bar_active_reward += 1
+                        ts_obj._last_active_price = cur_close
+                        # logger.debug(f"🚀 [Bonus-Active] {ts_obj.code} Surge-Active (+1), Price: {cur_close}")
+
             
             # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0）且不处于涨停状态，重置异动时间
             if final_score < 2.0 and not is_at_limit:
