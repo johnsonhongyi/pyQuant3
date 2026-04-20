@@ -316,6 +316,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
         self._boot_lock = True
+        self._is_height_doubled = False # [NEW] 高度翻倍状态位
         
         self._init_ui()
         
@@ -390,19 +391,26 @@ class SectorDetailDialog(QDialog, WindowMixin):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        top_layout = QHBoxLayout()
-        title_lbl = QLabel(f"🔥 {self.sector_name} - 领军个股明细")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC; margin-bottom: 5px;")
-        top_layout.addWidget(title_lbl)
+        # [🚀 标题栏交互增强] 创建可交互标题区域
+        self.header_frame = QFrame()
+        self.header_frame.setObjectName("header_frame")
+        self.header_frame.mouseDoubleClickEvent = lambda e: self._on_header_double_click(e)
+        header_layout = QHBoxLayout(self.header_frame)
+        header_layout.setContentsMargins(0, 0, 0, 5)
+        header_layout.setSpacing(10)
         
-        top_layout.addStretch()
+        title_lbl = QLabel(f"🔥 {self.sector_name} - 领军个股明细")
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC;")
+        header_layout.addWidget(title_lbl)
+        
+        header_layout.addStretch()
         
         self.btn_dna = QPushButton("🧬 DNA审计")
         self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
-        top_layout.addWidget(self.btn_dna)
+        header_layout.addWidget(self.btn_dna)
         
-        layout.addLayout(top_layout)
+        layout.addWidget(self.header_frame)
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
@@ -439,6 +447,24 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.status_lbl = QLabel("统计: --")
         self.status_lbl.setStyleSheet("color: #AAA; font-size: 11px; padding: 2px; background-color: #111; border-top: 1px solid #333;")
         layout.addWidget(self.status_lbl)
+
+    def _on_header_double_click(self, event):
+        """[🚀 交互增强] 双击标题栏高度翻倍/恢复"""
+        if not self._is_height_doubled:
+            # 记录当前高度并翻倍
+            self._original_height_snap = self.height()
+            screen_h = QApplication.primaryScreen().availableGeometry().height()
+            # 计算翻倍后的高度，但不超过屏幕高度
+            target_h = min(self._original_height_snap * 2, screen_h - 100)
+            self.resize(self.width(), target_h)
+            self._is_height_doubled = True
+            logger.debug(f"📐 [Detail] {self.sector_name} 高度已翻倍至 {target_h}")
+        else:
+            # 恢复高度
+            h = getattr(self, '_original_height_snap', 500)
+            self.resize(self.width(), h)
+            self._is_height_doubled = False
+            logger.debug(f"📐 [Detail] {self.sector_name} 高度已恢复至 {h}")
 
     def _get_synthetic_score(self, ts):
         """[🚀 性能加速版] 动态合成显示分数"""
@@ -745,6 +771,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._sort_order = Qt.SortOrder.DescendingOrder
         
         self._boot_lock = True
+        self._is_height_doubled = False # [NEW] 高度翻倍状态位
         
         self._init_ui()
         QTimer.singleShot(150, self._restore_header_state)
@@ -760,19 +787,26 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        top_layout = QHBoxLayout()
-        title_lbl = QLabel(f"🔥 {self.category_name} - 个股明细")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC; margin-bottom: 5px;")
-        top_layout.addWidget(title_lbl)
+        # [🚀 标题栏交互增强] 创建可交互标题区域
+        self.header_frame = QFrame()
+        self.header_frame.setObjectName("header_frame")
+        self.header_frame.mouseDoubleClickEvent = lambda e: self._on_header_double_click(e)
+        header_layout = QHBoxLayout(self.header_frame)
+        header_layout.setContentsMargins(0, 0, 0, 5)
+        header_layout.setSpacing(10)
         
-        top_layout.addStretch()
+        title_lbl = QLabel(f"🔥 {self.category_name} - 个股明细")
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC;")
+        header_layout.addWidget(title_lbl)
+        
+        header_layout.addStretch()
         
         self.btn_dna = QPushButton("🧬 DNA审计")
         self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
-        top_layout.addWidget(self.btn_dna)
+        header_layout.addWidget(self.btn_dna)
         
-        layout.addLayout(top_layout)
+        layout.addWidget(self.header_frame)
         
         self.table = EnhancedTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
@@ -808,6 +842,21 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.status_lbl = QLabel("统计: --")
         self.status_lbl.setStyleSheet("color: #AAA; font-size: 11px; padding: 2px; background-color: #111; border-top: 1px solid #333;")
         layout.addWidget(self.status_lbl)
+
+    def _on_header_double_click(self, event):
+        """[🚀 交互增强] 双击标题栏高度翻倍/恢复"""
+        if not self._is_height_doubled:
+            self._original_height_snap = self.height()
+            screen_h = QApplication.primaryScreen().availableGeometry().height()
+            target_h = min(self._original_height_snap * 2, screen_h - 100)
+            self.resize(self.width(), target_h)
+            self._is_height_doubled = True
+            logger.debug(f"📐 [Detail] {self.category_name} 高度已翻倍至 {target_h}")
+        else:
+            h = getattr(self, '_original_height_snap', 800)
+            self.resize(self.width(), h)
+            self._is_height_doubled = False
+            logger.debug(f"📐 [Detail] {self.category_name} 高度已恢复至 {h}")
 
     def _get_synthetic_score(self, ts):
         try:
@@ -1321,7 +1370,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         rank_frame.setStyleSheet("background-color: #1C1C1E; border-radius: 12px;")
         rank_layout = QVBoxLayout(rank_frame)
         
-        title_lbl = QLabel("🏆 当下领军个股 (Top 10)")
+        title_lbl = QLabel("🏆 当下领军个股 (Top 20)")
         title_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFD700; padding: 10px;")
         rank_layout.addWidget(title_lbl)
         
@@ -2396,7 +2445,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         val = getattr(ts, s_attr, 0)
                     return (val, ts.code)
                 
-                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:10]
+                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:20]
                 flattened_ts = [flatten_ts(ts) for ts in sorted_raw]
                 
                 self.stock_table.blockSignals(True)
@@ -2437,7 +2486,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         seen_leaders.add(l_id)
                     
                     unique_leader_sectors.append(sec)
-                    if len(unique_leader_sectors) >= 10:
+                    if len(unique_leader_sectors) >= 20:
                         break
 
                 self._update_sector_table_optimized(self.sector_table, unique_leader_sectors)
