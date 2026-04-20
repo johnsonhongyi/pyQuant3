@@ -3871,52 +3871,50 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Failed to view correction log: {e}")
 
     def _on_signal_log_added(self, code: str, name: str, pattern: str, message: str):
-        """同步播报信号日志中新增的内容 (所见即所播)"""
+        """同步播报信号日志中新增的内容 (所见即所播)
+        注：message 已是 signal_log_panel.append_log 清理后的 clean_msg，无需再次处理。
+        """
         try:
             # 1. 状态环境检查
             if not hasattr(self, 'voice_thread') or not self.voice_thread:
                 return
             
-            # [FIX] 使用 MainWindow 自身的语音标志，增强独立性
             is_muted = getattr(self, '_voice_paused', False)
             if is_muted:
                 return
 
-            # 2. 处理播报内容
-            speak_msg = message
+            # 2. message 已经是 clean_msg，直接使用
+            speak_msg = message.strip() if message else ''
             
-            # --- 深度去重与格式化处理 ---
+            # 仅去除可能残留的 (N次) 前缀和开头冒号/空白
             import re
-            # (1) 移除时间戳前缀 [HH:MM:SS]
-            speak_msg = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', speak_msg)
-            
-            # (2) 移除名称和代码组合 (稍后会统一加上)
-            if name:
-                speak_msg = speak_msg.replace(name, '').strip()
-            speak_msg = re.sub(r'\(?\[?\d{6}\]?\)?', '', speak_msg).strip()
-            
-            # (3) 移除冗余的前缀 (如 "动量信号:", "报警触发:" 等)
-            from signal_log_panel import SignalLogPanel
-            pattern_names = getattr(SignalLogPanel, 'PATTERN_NAMES', {})
-            for pat_val in pattern_names.values():
-                if speak_msg.startswith(pat_val):
-                    speak_msg = speak_msg[len(pat_val):].strip()
-            
-            # (4) 最终修整空白和多余冒号
-            speak_msg = re.sub(r'^[:：\s]+', '', speak_msg).strip()
-            
-            # ⭐ [关键修复] 捕获用于 UI 匹配的片段 (保持精简形式)
-            match_snippet = speak_msg[:20] 
+            speak_msg = re.sub(r'^\(\d+次\)\s*', '', speak_msg).strip()
+            speak_msg = re.sub(r'^[：:\s]+', '', speak_msg).strip()
 
-            if speak_msg:
-                # 放入缓冲池，等待定时器统一处理 (去重合并)
-                if code not in self.voice_batch_buffer:
-                    self.voice_batch_buffer[code] = {'name': name, 'messages': set(), 'meta': {'code': code, 'snippet': match_snippet}}
-                
-                self.voice_batch_buffer[code]['messages'].add(speak_msg)
-                
+            if not speak_msg:
+                return
+
+            # 3. match_snippet 直接取 speak_msg 前 20 字符，与表格 display_msg 内容对齐
+            #    这确保 highlight_row_by_content 能准确定位到对应行，修复同步滚动失效问题
+            match_snippet = speak_msg[:20]
+
+            # 4. 放入缓冲池，等待定时器统一处理 (去重合并)
+            if code not in self.voice_batch_buffer:
+                self.voice_batch_buffer[code] = {
+                    'name': name,
+                    'messages': set(),
+                    'meta': {'code': code, 'snippet': match_snippet}
+                }
+            else:
+                # 已存在该代码时，用最新 meta 更新 snippet，确保匹配最新消息
+                self.voice_batch_buffer[code]['meta'] = {'code': code, 'snippet': match_snippet}
+            
+            self.voice_batch_buffer[code]['messages'].add(speak_msg)
+            
         except Exception as e:
             logger.error(f"Error in signal log sync broadcast: {e}")
+
+
 
     def _poll_voice_feedback(self):
         """轮询语音进程的反馈队列，同步 UI 位置 (高频统一版)"""
