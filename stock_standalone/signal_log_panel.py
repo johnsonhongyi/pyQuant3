@@ -659,7 +659,9 @@ class SignalLogPanel(QWidget, WindowMixin):
             self.flash_for_high_priority()
         
         # 发射日志已添加信号，用于同步语音播报
-        self.log_added.emit(code, name, pattern, message)
+        # ⭐ [FIX] 统一发射 clean_msg（已清理的消息），与更新行保持一致。
+        # snippet 用于语音同步滚动定位，必须与表格内容对齐。
+        self.log_added.emit(code, name, pattern, clean_msg)
 
     def highlight_row_by_content(self, code: str, message_snippet: str, force_scroll: bool = True):
         """
@@ -691,12 +693,19 @@ class SignalLogPanel(QWidget, WindowMixin):
                 target_item = code_items[0]
             else:
                 # 遍历查找匹配消息的
+                import re as _re
                 for it in code_items:
                     row = it.row()
                     msg_item = self.log_table.item(row, 5)
-                    if msg_item and (message_snippet in msg_item.text() or msg_item.text() in message_snippet):
-                        target_item = it
-                        break
+                    if msg_item:
+                        # ⭐ [FIX] 去除 (N次) 计数前缀再比较，确保新旧行均能命中
+                        raw_text = msg_item.text()
+                        clean_text = _re.sub(r'^\(\d+次\)\s*', '', raw_text).strip()
+                        if (message_snippet in clean_text or
+                                clean_text[:len(message_snippet)] == message_snippet or
+                                message_snippet in raw_text):
+                            target_item = it
+                            break
                 
                 # 如果没找到匹配详细内容的，降级到最新的代码匹配
                 if not target_item:
