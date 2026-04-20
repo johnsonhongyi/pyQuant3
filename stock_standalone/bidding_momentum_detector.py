@@ -2647,6 +2647,58 @@ class BiddingMomentumDetector:
                 'linked_concepts': linked_concepts[:3]
             }
 
+        # --- [NEW] 虚拟板块注入：🔔 实时报警 (SBC Pattern Tracker) ---
+        if self.realtime_service and self.realtime_service.emotion_tracker:
+            registry = getattr(self.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+            if registry:
+                sbc_codes = list(registry.keys())
+                # 提取 snap 中的最新行情数据
+                sbc_stocks = []
+                for c in sbc_codes:
+                    if c in snap:
+                        # [FIX] 增强鲁棒性：确保 name 字段始终存在 (registry 可能缺失 name)
+                        node = {**snap[c], **registry[c]}
+                        if not node.get('name'):
+                            node['name'] = snap[c].get('name') or c
+                        sbc_stocks.append(node)
+                
+                if sbc_stocks:
+                    # 按时间倒序排列 (最新触发的在最前) 或按评分排序
+                    sbc_stocks.sort(key=lambda x: x.get('ts', 0), reverse=True)
+                    
+                    v_leader = sbc_stocks[0]
+                    v_sector = "🔔 实时报警"
+                    v_board_score = max(5.0, sum(s['score'] for s in sbc_stocks) / len(sbc_stocks))
+                    
+                    # 虚拟板块锚点保护
+                    if v_sector not in self.sector_anchors:
+                        self.sector_anchors[v_sector] = v_board_score
+                    
+                    new_active[v_sector] = {
+                        'sector': v_sector, 'score': round(v_board_score, 2), 'tags': "🚀 实时异动",
+                        'ts': time.time(),
+                        'score_diff': round(v_board_score - self.sector_anchors[v_sector], 2),
+                        'staged_diff': 0.0,
+                        'follow_ratio': 1.0, # 虚拟板块始终保持 100% 联动
+                        'leader': v_leader['code'],
+                        'leader_name': v_leader['name'],
+                        'leader_pct': round(v_leader['pct'], 2),
+                        'leader_price': v_leader.get('price', 0.0),
+                        'leader_high_day': v_leader.get('high_day', 0),
+                        'leader_last_close': v_leader.get('last_close', 0),
+                        'race_candidates': [],
+                        'followers': [
+                            {
+                                'code': s['code'], 'name': s['name'], 'pct': s['pct'],
+                                'score': s.get('score', 0.0), 'price': s.get('price', 0.0),
+                                'first_ts': s.get('ts', 0), 'pattern_hint': 'SBC',
+                                'klines': s.get('klines', []),
+                                'last_close': s.get('last_close', 0.0)
+                            } for s in sbc_stocks # 这里展示全部预警股
+                        ],
+                        'linked_concepts': []
+                    }
+
         with self._lock:
             self.active_sectors = new_active
             self.data_version += 1

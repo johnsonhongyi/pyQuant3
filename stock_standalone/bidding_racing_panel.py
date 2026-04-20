@@ -497,12 +497,19 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
         # --- [⚡ 报警专用逻辑] 优先级最高，用于处理虚拟板块 ---
         if self.sector_name == "🔔 实时报警":
-            alerted_codes = get_alert_manager().get_alerted_codes()
-            members = set(alerted_codes)
+            # [FIX] 从 active_sectors 直接获取已注册成员，确保与看板数据绝对对齐
+            sec_dict = self.detector.active_sectors.get(self.sector_name, {})
+            followers = sec_dict.get('followers', [])
+            members = [f['code'] for f in followers]
+            if not members:
+                # 兜底：尝试从 AlertManager 获取（仅作实盘回退）
+                members = get_alert_manager().get_alerted_codes()
+            
             if not members:
                 self.status_lbl.setText("ℹ️ 当前会话暂无报警品种...")
                 self.table.setRowCount(0)
                 return
+            members = set(members)
         else:
             # [🚀 暴力自愈逻辑] 若映射表缺失，全量扫描并强制回写（彻底解决同步孤岛）
             members = self.detector.sector_map.get(self.sector_name)
@@ -898,7 +905,15 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         try:
             data_list = []
             for ts in self.detector._tick_series.values():
-                if get_racing_role(ts) == self.category_name:
+                # [FIX] 虚拟板块逻辑适配：分析报警状态
+                is_alerted = get_alert_manager().is_alerted(ts.code)
+                # [NEW] 补全回测模式下的信号感知：检查 SBC 注册表
+                if not is_alerted and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
+                    reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+                    if ts.code in reg: is_alerted = True
+
+                role = get_racing_role(ts)
+                if role == self.category_name or (self.category_name == "🔔 实时报警" and is_alerted):
                     data_list.append(ts)
             
             if not data_list:
@@ -2727,7 +2742,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             def flatten_ts(ts):
                 # [🚀 结构分展示优化] 统一调用合成评分公式 (命中缓存)
                 display_score = score_cache.get(ts.code, 0)
-                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff)
+                # [NEW] SBC 信号标记：如果个股有活跃的 SBC 信号，则标记为 True
+                is_sbc_active = False
+                if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
+                    is_sbc_active = ts.code in getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+                
+                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff, is_sbc_active)
 
             self.stock_table.setUpdatesEnabled(False)
             self.sector_table.setUpdatesEnabled(False)
@@ -2878,10 +2898,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if table.rowCount() != len(flattened_data):
             table.setRowCount(len(flattened_data))
         for i, row_data in enumerate(flattened_data):
-            code, name, score, sig, pct, diff, dff = row_data
+            code, name, score, sig, pct, diff, dff, is_sbc_active = row_data
             
-            # [⚡ 报警核验] 针对命中报警的个股应用高对比度
-            is_alerted = get_alert_manager().is_alerted(code)
+            # [⚡ 报警核验] 针对命中报警或有 SBC 信号的个股应用高对比度
+            is_generic_alert = get_alert_manager().is_alerted(code)
+            is_alerted = is_generic_alert or is_sbc_active
             bg_c = self._UI_CACHE["COLOR_ALERT_BG"] if is_alerted else None
             txt_c = self._UI_CACHE["COLOR_ALERT_TEXT"] if is_alerted else None
             display_name = f"🔔{name}" if is_alerted else name
@@ -2971,7 +2992,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
             # 7. 联动详情
             followers = sec.get('followers', [])
-            f_txt = ",".join([f"{f['name']}({f['pct']:+.1f}%)" for f in followers[:3]])
+            f_items = []
+            for f in followers[:3]:
+                # [FIX] 名称空缺治理：若 f['name'] 为空，则从探测器回填，否则回退到代码
+                f_name = f.get('name') or ""
+                if not f_name:
+                    ts_ref = self.detector._tick_series.get(f.get('code'))
+                    if ts_ref: f_name = ts_ref.name
+                if not f_name: f_name = f.get('code', "")
+                f_items.append(f"{f_name}({f['pct']:+.1f}%)")
+            
+            f_txt = ",".join(f_items)
             if self._update_cell(table, i, 7, f_txt, is_numeric=False):
                 if not is_first_init: self._table_highlights[("sector", s_name, 7)] = time.time()
             self._apply_flash_effect(table.item(i, 7), ("sector", s_name, 7))

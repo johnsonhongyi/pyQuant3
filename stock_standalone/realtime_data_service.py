@@ -1150,6 +1150,7 @@ class IntradayEmotionTracker:
     """
     scores: dict[str, float]
     _sbc_alert_set: set[str]
+    _sbc_signals_registry: dict[str, dict] # [NEW] 记录今日已生成的 SBC 信号快照
     _last_sbc_status: dict[str, bool]
     _last_vol: dict[str, float]      # 记录上一笔成交总量，用于计算增量
     _cumulative_amt: dict[str, float] # 记录累积成交额，用于合成 VWAP
@@ -1160,6 +1161,7 @@ class IntradayEmotionTracker:
     def __init__(self):
         self.scores = {} # {code: score}
         self._sbc_alert_set = set() # 记录今日已提醒过的强势结构代码
+        self._sbc_signals_registry = {} # {code: {desc, time, score, ...}}
         self._last_sbc_status = {}  # {code: bool} 记录上一状态，实现触发式而非持续式信号
         self._last_vol = {}
         self._cumulative_amt = {}
@@ -1180,6 +1182,7 @@ class IntradayEmotionTracker:
     def clear(self):
         self.scores.clear()
         self._sbc_alert_set.clear()
+        self._sbc_signals_registry.clear()
         self._last_vol.clear()
         self._cumulative_amt.clear()
         self._intraday_high.clear()
@@ -1604,6 +1607,19 @@ class IntradayEmotionTracker:
                                              # [Performance Feedback] 记录起始价格
                                              if code_str not in self._signal_start_price:
                                                  self._signal_start_price[code_str] = price
+
+                                             # [NEW] 赛马面板联动：登记到虚拟板块注册表
+                                             self._sbc_signals_registry[code_str] = {
+                                                 'code': code_str,
+                                                 'name': name_str,
+                                                 'desc': sig_text,
+                                                 'time': r_time_str,
+                                                 'score': float(scores_dict[idx_val]),
+                                                 'price': price,
+                                                 'pct': perc,
+                                                 'vol_r': vol_r,
+                                                 'ts': time.time()
+                                             }
                                          else:
                                              # 构造统一长度/格式的信息条目
                                              # 使用 :<8 (左对齐占8位) 来保证代码和名称对齐

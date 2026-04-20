@@ -105,7 +105,7 @@ class ReplayWorker(QThread):
     """
     异步回放执行器，用于在不阻塞主 UI 线程的情况下运行回放逻辑。
     """
-    progress_update = pyqtSignal(str) # 当前回放时间 HH:MM:SS
+    progress_update = pyqtSignal(str, name='progress_update') 
     finished = pyqtSignal()
 
     def __init__(self, kwargs):
@@ -116,7 +116,10 @@ class ReplayWorker(QThread):
     def run(self):
         def ui_callback(t_str):
             if t_str is not None:
-                self.progress_update.emit(t_str)
+                try:
+                    self.progress_update.emit(str(t_str))
+                except Exception as e:
+                    logger.debug(f"Signal emit failed: {e}")
             return self.is_running
 
         self.kwargs['ui_callback'] = ui_callback
@@ -137,7 +140,7 @@ class LiveWorker(QThread):
         tdd.getSinaAlldf(market='all') ? publisher.update_batch(df)
         ? detector.update_scores(active_codes) ? Panel.update_visuals() (via QTimer)
     """
-    progress_update = pyqtSignal(str)   # 当前时间 HH:MM:SS
+    progress_update = pyqtSignal(str, name='progress_update')   # 当前时间 HH:MM:SS
     status_update = pyqtSignal(str)     # 状态文本 (等待中/拉取中/错误)
     finished = pyqtSignal()
 
@@ -1183,11 +1186,20 @@ def main(args=None, df_all_target=None):
                 panel.timeline.set_time(t_str)
                 panel.timeline.label.setText(f"🎥 录像回放中: {t_str} ({int(args.speed)}x)")
 
+            def on_panel_closed():
+                worker.stop()
+                worker.wait()
+            
+            panel.closed.connect(on_panel_closed)
             worker.progress_update.connect(on_progress)
             panel.show()
             worker.start()
             
             app.exec() # 等待 UI 退出
+            
+            # [EXIT-GUARD] 确保退出时回收线程
+            worker.stop()
+            worker.wait(1000)
     else:
         # 无 UI 命令行模式
         run_replay(**replay_kwargs)
