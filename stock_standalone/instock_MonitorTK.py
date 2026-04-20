@@ -381,7 +381,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #   pump_executor  (1线程) = 轻量编排: 解包/过滤/排序/调度 → Compute 返回后单点写 UI
         #   compute_executor (N线程) = CPU重计算: 信号检测/策略/情绪评分
         #   compute 线程永远不直接触碰 UI，结果必须回流 pump 后统一写入
-        cpu_count = int(os.cpu_count()/2) or 4
+        cpu_count = int(os.cpu_count()/2) + 2 or 4
         _compute_workers = min(cpu_count, cct.livestrategy_max_workers)
         self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
         self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")

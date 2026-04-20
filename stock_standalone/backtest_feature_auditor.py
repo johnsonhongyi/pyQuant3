@@ -416,7 +416,7 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
         # 对于 IO 密集型任务，过高并发在 Windows+Python 环境下反而会导致主线程失去响应
         # 🚀 [PERF] 极速模式：强力开放 16 路并发，彻底消除 IO 等待瓶颈
         # max_workers = 16 if total > 5 else 1
-        cpu_count = int(os.cpu_count()/2) or 4
+        cpu_count = int(os.cpu_count()/2) + 2 or 4
         max_workers = min(cpu_count, cct.livestrategy_max_workers) if total > 5 else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date): code for code in codes}
