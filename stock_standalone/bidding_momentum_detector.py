@@ -672,26 +672,28 @@ class BiddingMomentumDetector:
         with self._lock:
             return list(self.daily_watchlist.values())
 
-    def update_scores(self, active_codes=None, force: bool = False):
+    def update_scores(self, active_codes=None, force: bool = False, skip_evaluate: bool = False):
         """
         主入口：计算个股分值并聚合板块。
         active_codes: 如果提供，则执行增量更新 (O(Delta) 复杂度)，极度节省性能。
         force: 是否强制全量计算 (通常用于每 5 分钟的全局对齐)。
+        skip_evaluate: 是否跳过个股评估阶段 (如果之前已执行过 _evaluate_code)。
         """
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
         self._check_day_switch(datetime.datetime.now())
 
-        with self._lock:
-            if active_codes is not None and not force:
-                # [INCREMENTAL] 增量模式：仅对当前变动的代码进行评估
-                codes = [c for c in active_codes if c in self._tick_series]
-            else:
-                # [FULL-SWEEP] 全量模式
-                codes = list(self._tick_series.keys())
-                
-        # [PERF] 针对 5000+ 品种，_evaluate_code 已优化为纯数值计算
-        for code in codes:
-            self._evaluate_code(code)
+        if not skip_evaluate:
+            with self._lock:
+                if active_codes is not None and not force:
+                    # [INCREMENTAL] 增量模式：仅对当前变动的代码进行评估
+                    codes = [c for c in active_codes if c in self._tick_series]
+                else:
+                    # [FULL-SWEEP] 全量模式
+                    codes = list(self._tick_series.keys())
+                    
+            # [PERF] 针对 5000+ 品种，_evaluate_code 已优化为纯数值计算
+            for code in codes:
+                self._evaluate_code(code)
         
         self.data_version += 1 # 评分更新后递增版本号
         
