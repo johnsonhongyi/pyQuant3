@@ -436,7 +436,7 @@ class BiddingMomentumDetector:
         # 板块入场所需个股最低分
         self.sector_min_score = 2.0
         # [NEW] 板块综合强度门槛 (board_score)
-        self.sector_score_threshold: float = 5.0
+        self.sector_score_threshold: float = 4.0
         self.last_data_ts = 0.0
 
         # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
@@ -2320,7 +2320,7 @@ class BiddingMomentumDetector:
                         'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
                         'last_low': ts.last_low, 'first_breakout_ts': ts.first_breakout_ts, 
                         'pattern_hint': getattr(ts, 'pattern_hint', ""),
-                        'klines': list(ts.klines) if ts.klines else (self.realtime_service.get_minute_klines(code, n=30) if self.realtime_service else []), # [Phase 4] 必须包含 K 线用于 UI 渲染
+                        'klines': list(ts.klines) if ts.klines else (self.realtime_service.get_minute_klines(code, n=30) if self.realtime_service else []), 
                         'is_untradable': getattr(ts, 'is_untradable', False),
                         'is_counter_trend': getattr(ts, 'is_counter_trend', False),
                         'is_accumulating': getattr(ts, 'is_accumulating', False),
@@ -2438,6 +2438,7 @@ class BiddingMomentumDetector:
                 new_active = {}
         
         # --- [PERF-OPTIMIZE] 极限性能优化：预初选活跃板块 ---
+        skipped_reasons = {}  # [FIX] 初始化诊断字典，防止 NameError
         # 仅对有成员超过 score_threshold 的板块进行后续复杂的 board_score 计算
         # 这一步能过滤掉 ~90% 的僵尸板块，极大降低 CPU 负载并解决 TK 卡顿
         active_stocks_global = {code for code, ts in self._tick_series.items() if ts.score >= self.score_threshold}
@@ -2495,12 +2496,20 @@ class BiddingMomentumDetector:
                         active_member_count += 1
                         total_pct += mc_pct
             
-            # 联动分析与强度综合评分
-            follow_ratio = active_member_count / len(all_member_codes) if all_member_codes else 0
-            avg_pct = total_pct / len(all_member_codes) if all_member_codes else 0
+            # 聚合计算：分母判定
+            actual_data_count = sum(1 for c in all_member_codes if c in snap)
+            if actual_data_count < 1:
+                # 没有任何成员在 snap 中有数据，跳过
+                continue
             
-            # [REFINED] 噪点过滤：成员数过少（少于 4 只股）的概念通常是虚假的，剔除。
-            if len(all_member_codes) < 4:
+            # [FIX] 联动分析与强度综合评分：分母应使用实际参与统计的样本数，而非板块全员数
+            # 否则在局部更新或数据源不全时，avg_pct 会被严重稀释
+            follow_ratio = active_member_count / actual_data_count
+            avg_pct = total_pct / actual_data_count
+            
+            # [REFINED] 噪点过滤：成员数过少（少于 3 只股，原为 4）的概念通常是虚假的，剔除。
+            if len(all_member_codes) < 3:
+                skipped_reasons[sector] = f"too_few_members({len(all_member_codes)})"
                 if sector in new_active: del new_active[sector]
                 continue
 
@@ -2537,9 +2546,16 @@ class BiddingMomentumDetector:
                 if leader_code in self.stock_selector_seeds and board_score > 5.5:
                     tags.append("🔥 延续")
 
-            # 基础门槛：即便个股分高，如果联动性极其平淡 (低于 15%) 且平均涨幅低，排除该板块。
-            # 这是“369个活跃板块”缩减到“15-30个”的关键。
-            if follow_ratio < 0.15 and avg_pct < 1.5:
+            # 基础门槛：下调门槛，增强对竞价初期及异动概念的捕捉灵敏度
+            # 原条件: follow_ratio < 0.15 and avg_pct < 1.5
+            if follow_ratio < 0.10 and avg_pct < 1.0:
+                 skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f})"
+                 if sector in new_active: del new_active[sector]
+                 continue
+            
+            # 最终入榜门槛校验
+            if board_score < self.sector_score_threshold:
+                 skipped_reasons[sector] = f"low_board_score({board_score:.1f} < {self.sector_score_threshold})"
                  if sector in new_active: del new_active[sector]
                  continue
             
@@ -2561,20 +2577,20 @@ class BiddingMomentumDetector:
                     if concept == sector: continue
                     members = self.sector_map.get(concept)
                     if not members or len(members) < 3: continue
-                    f_count = sum(1 for mc in members if mc in snap and (1 if snap[mc]['pct']>0 else -1) == leader_sign)
-                    total_c_pct = sum(snap[mc]['pct'] for mc in members if mc in snap and (1 if snap[mc]['pct']>0 else -1) == leader_sign)
-                    c_follow = f_count / len(members)
-                    c_avg_pct = total_c_pct / len(members) if len(members) > 0 else 0
+                    # [FIX] 联动分母修正：使用 snap 中存在的有效成员数
+                    members_in_snap = [mc for mc in members if mc in snap]
+                    if not members_in_snap: continue
+                    f_count = sum(1 for mc in members_in_snap if (1 if snap[mc]['pct']>0 else -1) == leader_sign)
+                    total_c_pct = sum(snap[mc]['pct'] for mc in members_in_snap if (1 if snap[mc]['pct']>0 else -1) == leader_sign)
+                    c_follow = f_count / len(members_in_snap)
+                    c_avg_pct = total_c_pct / len(members_in_snap)
                     if c_follow > 0.4: linked_concepts.append({
                         'concept': concept, 
                         'follow_ratio': round(c_follow, 2),
                         'avg_pct': round(c_avg_pct, 2)
                     })
 
-            # [NEW] 板块综合强度过滤
-            if board_score < self.sector_score_threshold:
-                 if sector in new_active: del new_active[sector]
-                 continue
+            # [REM] 移除此处冗余的基准重置逻辑，已由外层校验覆盖。
                  
             # [REM] 移除此处冗余的基准重置逻辑，已在循环外部(Line 1054) 统一处理。
             # 保持逻辑单一职责，避免在循环内部重复刷新全局状态。
@@ -2634,6 +2650,12 @@ class BiddingMomentumDetector:
         with self._lock:
             self.active_sectors = new_active
             self.data_version += 1
+            
+        # [DEBUG] 打印高评分但被过滤的板块（辅助诊断为何板块缺失）
+        if logger.isEnabledFor(logging.DEBUG) and skipped_reasons:
+            interesting = {s: r for s, r in skipped_reasons.items() if "low_board_score" in r and float(r.split('(')[1].split(' ')[0]) > 3.0}
+            if interesting:
+                logger.debug(f"ℹ️ [Detector] Potential High-score Sectors filtered: {interesting}")
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
@@ -2670,7 +2692,6 @@ class BiddingMomentumDetector:
             return
         new_map: Dict[str, Set[str]] = defaultdict(set)
         for row in df.itertuples(index=False):
-            # [FIX] 使用显式属性 code 代替 Index
             code = str(getattr(row, 'code', '')).strip().zfill(6)
             if not code or code == '000000':
                 continue
@@ -2682,15 +2703,45 @@ class BiddingMomentumDetector:
                 if p:
                     new_map[p].add(code)
         
-        # [REFINED] 激进清理改为温和差异判断：仅当新旧板块架构差异极大时重置
-        if self.sector_map and len(new_map) > 0:
-            diff_ratio = len(set(new_map.keys()) ^ set(self.sector_map.keys())) / max(len(new_map), 1)
-            # 如果板块名单变动超过 80%，可能切换了市场或数据源，清理缓存
-            if diff_ratio > 0.8:
-                logger.info(f"♻️ [Detector] Market context shifted (diff={diff_ratio:.1f}), resetting persistent cache")
-                self._sector_active_stocks_persistent.clear()
+        # [ROOT-FIX] 稳健更新策略：判定是全量市场数据还是局部更新
+        is_full_market = len(df) > 3000
+        
+        if is_full_market:
+            # 差异比对逻辑（仅在全量更新时应用）
+            if self.sector_map and len(new_map) > 0:
+                diff_ratio = len(set(new_map.keys()) ^ set(self.sector_map.keys())) / max(len(self.sector_map), 1)
+                # 如果板块名单变动超过 80%，重置持久化缓存
+                if diff_ratio > 0.8:
+                    logger.info(f"♻️ [Detector] Market context shifted (diff={diff_ratio:.1f}), resetting persistent cache")
+                    self._sector_active_stocks_persistent.clear()
             
-        self.sector_map = new_map
+            self.sector_map = new_map
+            logger.debug(f"📊 Sector map fully rebuilt from {len(df)} stocks (Sectors: {len(self.sector_map)})")
+        else:
+            # 局部更新逻辑：仅更新 df 中涉及代码的映射，不清理其他代码的映射
+            if not self.sector_map:
+                self.sector_map = new_map
+            else:
+                # 1. 提取当前 df 涉及的所有代码
+                incoming_codes = set()
+                for p_set in new_map.values():
+                    incoming_codes.update(p_set)
+                
+                # 2. 将这些代码从 global sector_map 中由于旧归属引起的集合中剥离
+                for sector, members in self.sector_map.items():
+                    # 这是一个 inplace 操作
+                    members.difference_update(incoming_codes)
+                
+                # 3. 注入新的映射
+                for sector, members in new_map.items():
+                    self.sector_map[sector].update(members)
+                
+                # 4. 清理空板块
+                empty_secs = [s for s, m in self.sector_map.items() if not m]
+                for s in empty_secs:
+                    del self.sector_map[s]
+            
+            logger.debug(f"🧩 Sector map incrementally updated for {len(df)} stocks (Total Sectors: {len(self.sector_map)})")
 
     # =========================================================
     # 时间窗口判断（只在竞价/尾盘生效）

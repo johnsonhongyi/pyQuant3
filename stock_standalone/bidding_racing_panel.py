@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGraphicsDropShadowEffect, QPushButton,
-    QMenu, QApplication, QDialog, QSplitter
+    QMenu, QApplication, QDialog, QSplitter, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
 from PyQt6.QtGui import (
@@ -303,9 +303,13 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.sector_name = sector_name
         
         self.setWindowTitle(f"🔭 板块详情: {sector_name}")
-        self.resize(800, 500)
+        self.resize(850, 520)
+        # [🚀 视觉升级] 移除嵌入式半透明感，锁定专业实色深幕
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
-        self.setStyleSheet("background-color: #000; color: #EEE;")
+        self.setStyleSheet("""
+            QWidget { background-color: #060608; color: #E0E0E0; font-family: 'Segoe UI', 'Microsoft YaHei'; }
+            QDialog { border: 1px solid #333; }
+        """)
 
         # 记忆位置
         # self.load_window_position_qt(self, "SectorDetail_Unified")
@@ -394,18 +398,21 @@ class SectorDetailDialog(QDialog, WindowMixin):
         # [🚀 标题栏交互增强] 创建可交互标题区域
         self.header_frame = QFrame()
         self.header_frame.setObjectName("header_frame")
+        self.header_frame.setStyleSheet("""
+            QFrame#header_frame { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A1A1E, stop:1 #060608); border-bottom: 2px solid #222; }
+        """)
         self.header_frame.mouseDoubleClickEvent = lambda e: self._on_header_double_click(e)
         header_layout = QHBoxLayout(self.header_frame)
-        header_layout.setContentsMargins(0, 0, 0, 5)
+        header_layout.setContentsMargins(12, 6, 12, 6)
         header_layout.setSpacing(10)
         
-        title_lbl = QLabel(f"🔥 {self.sector_name} - 领军个股明细")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC;")
-        header_layout.addWidget(title_lbl)
+        self.title_lbl = QLabel(f"🔥 {self.sector_name} - 个股明细")
+        self.title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #00FFCC; letter-spacing: 1px;")
+        header_layout.addWidget(self.title_lbl)
         
         header_layout.addStretch()
         
-        self.btn_dna = QPushButton("🧬 DNA审计")
+        self.btn_dna = QPushButton("🚀 DNA审计")
         self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
         header_layout.addWidget(self.btn_dna)
@@ -418,8 +425,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
-            QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
-            QHeaderView::section { background-color: #222; color: #BBB; padding: 4px; border: 1px solid #333; }
+            QTableWidget { background-color: #060608; alternate-background-color: #0C0C10; color: #EEE; gridline-color: #1A1A1A; outline: none; border: none; }
+            QHeaderView::section { background-color: #1A1A1E; color: #AAA; padding: 6px; border: none; border-right: 1px solid #222; border-bottom: 1px solid #222; font-weight: bold; }
+            QTableWidget::item:selected { background-color: #004488; }
         """ + GLOBAL_SCROLLBAR_STYLE)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -434,9 +442,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         # [统一管理] 停用实时列宽保存，由主面板统一落盘
         # self.table.horizontalHeader().sectionResized.connect(self._save_header_state)
-        
-        # 右键菜单支持
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        # 右键菜单支持 - [🚀 直出一层] 禁用基类默认菜单干扰
+        self.table._enable_default_menu = False
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         
         layout.addWidget(self.table)
@@ -520,6 +527,10 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 else:
                     self.status_lbl.setText(f"❌ '{self.sector_name}' 成员库仍处于冷启动状态...")
                     return
+            
+            # [🚀 新增] 更新标题栏强度得分
+            sec_score = self.detector.active_sectors.get(self.sector_name, {}).get('score', 0.0)
+            self.title_lbl.setText(f"🔥 {self.sector_name} - 个股明细 ({sec_score:.1f})")
 
         render_start_t = time.time()
         
@@ -532,6 +543,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self.detector._lock.release()
             
         if not data_list:
+            # [🚀 极速提示] 即使无数据也不白屏，显示占位
+            self.table.setRowCount(0)
+            self.status_lbl.setText(f"⚠️ '{self.sector_name}' 当前暂无活跃成分股行情")
             return
 
         # --- [🔒 锁外计算] 排序与统计全部移到临界区外执行，降低 GIL 竞争 ---
@@ -668,7 +682,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         except: pass
 
     def _on_context_menu(self, pos):
-        """明细表右键菜单"""
+        """明细表右键菜单 - 扁平化直出"""
         item = self.table.itemAt(pos)
         if not item: return
         row = item.row()
@@ -681,8 +695,15 @@ class SectorDetailDialog(QDialog, WindowMixin):
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="sector_dialog_context"))
         
+        # 穿透到主面板执行
+        act_sector = menu.addAction(f"🚀 关联最强板块详情")
+        if self.parent() and hasattr(self.parent(), '_show_strongest_sector'):
+            act_sector.triggered.connect(lambda: self.parent()._show_strongest_sector(code))
+
+        menu.addSeparator()
+        
         selected_rows = set([it.row() for it in self.table.selectedItems()])
-        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        title_dna = f"🚀 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🚀 执行 DNA 审计 ({name})"
         act_dna = menu.addAction(title_dna)
         act_dna.triggered.connect(self._run_dna_audit_top20)
 
@@ -801,7 +822,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         header_layout.addStretch()
         
-        self.btn_dna = QPushButton("🧬 DNA审计")
+        self.btn_dna = QPushButton("🚀 DNA审计")
         self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
         header_layout.addWidget(self.btn_dna)
@@ -832,6 +853,8 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         # self.table.horizontalHeader().sectionResized.connect(self._save_header_state)
         
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        # [🚀 直出一层] 禁用基类默认菜单干扰
+        self.table._enable_default_menu = False
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         
         layout.addWidget(self.table)
@@ -995,6 +1018,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         except: pass
 
     def _on_context_menu(self, pos):
+        """分类/明细表右键菜单 - 扁平化直出"""
         item = self.table.itemAt(pos)
         if not item: return
         row = item.row()
@@ -1007,8 +1031,15 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="category_dialog_context"))
         
+        # 穿透到主面板执行
+        act_sector = menu.addAction(f"🚀 关联最强板块详情")
+        if self.parent() and hasattr(self.parent(), '_show_strongest_sector'):
+            act_sector.triggered.connect(lambda: self.parent()._show_strongest_sector(code))
+
+        menu.addSeparator()
+        
         selected_rows = set([it.row() for it in self.table.selectedItems()])
-        title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
+        title_dna = f"🚀 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🚀 执行 DNA 审计 ({name})"
         act_dna = menu.addAction(title_dna)
         act_dna.triggered.connect(self._run_dna_audit_top20)
 
@@ -1145,15 +1176,22 @@ class RacingTimeline(QFrame):
         self.time_changed.emit(time_str)
 
     def set_time(self, time_str: str):
-        self.label.setText(f"🚩 竞技进度: {time_str}")
+        """[🚀 安全加固] 更新进度时间，增加对被销毁对象的保护"""
         try:
+            # 捕获 C++ 对象已删除的情况 (在回放模式下关闭窗口时常见)
+            self.label.setText(f"🚩 竞技进度: {time_str}")
+            
             parts = time_str.split(':')
             h, m = int(parts[0]), int(parts[1])
             total_m = (h - 9) * 60 + (m - 25)
             self.slider.blockSignals(True)
             self.slider.setValue(max(0, total_m))
             self.slider.blockSignals(False)
-        except: pass
+        except (RuntimeError, AttributeError):
+            # 忽略 "wrapped C/C++ object of type QLabel has been deleted"
+            pass
+        except Exception:
+            pass
 
     def update_market_stats(self, stats: dict):
         try:
@@ -1209,6 +1247,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._detail_dialogs = {} # [NEW] 追踪活跃的明细窗体实例
         self._current_anchor_ts = 0 # [NEW] 追踪当前正在使用的锚点时间戳
         self._ui_ready = False
+        self._sector_history = []  # [🚀 板块回溯]
+        self._is_updating_history = False
+        self._sector_score_anchors = {} # [🚀 新增] 面板级板块评分锚点，防止被 Detector 重刷丢失
+
 
         if sender:
             self.stock_sender = sender
@@ -1235,7 +1277,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._sort_order = Qt.SortOrder.DescendingOrder
         self._sort_col_sector = 1 
         self._sort_order_sector = Qt.SortOrder.DescendingOrder
-        
         self._reset_cycle_mins = 60 
         
         self._UI_CACHE = {
@@ -1361,10 +1402,41 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         center_layout = QHBoxLayout()
         center_layout.setSpacing(20)
         
+        # [🚀 板块回溯] 饼图区域增加历史下拉菜单
+        pie_container = QWidget()
+        pie_vbox = QVBoxLayout(pie_container)
+        pie_vbox.setContentsMargins(0, 0, 0, 0)
+        pie_vbox.setSpacing(6)
+        
+        history_lay = QHBoxLayout()
+        history_title = QLabel("🚀 板块回溯")
+        history_title.setStyleSheet("color: #00FFCC; font-size: 11px; font-weight: bold;")
+        history_lay.addWidget(history_title)
+        
+        self.combo_sector_history = QComboBox()
+        self.combo_sector_history.setStyleSheet("""
+            QComboBox { background-color: #2C2C2E; color: #FFF; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 11px; min-height: 24px; }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background-color: #2C2C2E; color: #FFF; selection-background-color: #005BB7; outline: none; }
+        """)
+        self.combo_sector_history.currentIndexChanged.connect(self._on_history_combo_changed)
+        history_lay.addWidget(self.combo_sector_history, stretch=1)
+        
+        self.btn_del_history = QPushButton("❌")
+        self.btn_del_history.setFixedSize(24, 24)
+        self.btn_del_history.setToolTip("删除选中回溯条目 (Delete History Item)")
+        self.btn_del_history.setStyleSheet("background-color: #2C2C2E; color: #FF4444; border: 1px solid #444; border-radius: 4px; font-weight: bold;")
+        self.btn_del_history.clicked.connect(self._on_delete_history_clicked)
+        history_lay.addWidget(self.btn_del_history)
+
+        pie_vbox.addLayout(history_lay)
+        
         self.pie_widget = RacingPieWidget()
         self.pie_widget.category_selected.connect(self._on_pie_filter)
         self.pie_widget.category_double_clicked.connect(self._on_category_double_clicked)
-        center_layout.addWidget(self.pie_widget, stretch=4)
+        pie_vbox.addWidget(self.pie_widget, stretch=1)
+        
+        center_layout.addWidget(pie_container, stretch=4)
         
         rank_frame = QFrame()
         rank_frame.setStyleSheet("background-color: #1C1C1E; border-radius: 12px;")
@@ -1436,8 +1508,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         bottom_lay.addLayout(sec_title_lay)
         
-        self.sector_table = EnhancedTableWidget(0, 7)
-        self.sector_table.setHorizontalHeaderLabels(["板块名称", "强度得分", "领涨龙头", "龙头涨幅", "起点涨幅", "龙头DFF", "联动详情"])
+        self.sector_table = EnhancedTableWidget(0, 8)
+        self.sector_table.setHorizontalHeaderLabels(["板块名称", "强度得分", "涨跌", "领涨龙头", "龙头涨幅", "起点涨幅", "龙头DFF", "联动详情"])
         s_header = self.sector_table.horizontalHeader()
         s_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # [🚀 实时持久化] 当列宽变动时，即时记录
@@ -1475,6 +1547,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.stock_table.code_double_clicked.connect(self._on_stock_double_clicked)
         
         self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        # [🚀 直出一层] 禁用基类默认菜单干扰
+        self.stock_table._enable_default_menu = False
         self.stock_table.customContextMenuRequested.connect(self._on_stock_context_menu)
         
         self.stock_table.currentCellChanged.connect(self._on_stock_key_nav)
@@ -1482,6 +1556,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.sector_table.cellDoubleClicked.connect(self._on_sector_double_clicked)
         self.sector_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         
+        # [🚀 直出一层] 禁用基类默认菜单干扰
+        self.sector_table._enable_default_menu = False
         self.sector_table.customContextMenuRequested.connect(self._on_sector_context_menu)
 
         self.sector_table.currentCellChanged.connect(
@@ -1510,7 +1586,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 return
             except: pass
             
-        dialog = CategoryDetailDialog(category, self.detector, self._execute_linkage, parent=self)
+        # [🚀 深度优化] parent 设为 None 避免样式干扰
+        dialog = CategoryDetailDialog(category, self.detector, self._execute_linkage, parent=None)
         dialog.finished.connect(lambda: self._detail_dialogs.pop(dlg_key, None))
         # [🚀 极速联动] 挂载主面板刷新信号
         self.data_updated.connect(dialog.refresh_data)
@@ -1544,7 +1621,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_context_viz"))
+
+        act_sector = menu.addAction(f"🚀 关联最强板块详情")
+        act_sector.triggered.connect(lambda: self._show_strongest_sector(code))
+
+        menu.addSeparator()
         
+        # DNA 审计支持
+        selected_rows = sorted(list(set([it.row() for it in self.stock_table.selectedItems()])))
+        title_dna = f"🚀 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🚀 执行 DNA 审计 ({name})"
+        act_dna = menu.addAction(title_dna)
+        act_dna.triggered.connect(self._run_dna_audit_batch)
+
         menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
@@ -1608,8 +1696,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         item = self.sector_table.item(row, 0) # 板块名称列
         if not item: return
         sec_name = item.text()
+        self._open_sector_detail(sec_name)
+
+    def _open_sector_detail(self, sec_name):
+        """打开/置顶指定的板块详情弹窗"""
+        if not sec_name: return
         
-        # [🚀 置顶去重] 如果已打开，则置顶
+        # [🚀 板块回溯] 将打开的板块记入历史栈，确保回溯功能有效
+        self._add_to_sector_history(sec_name)
+        
         dlg_key = f"sector:{sec_name}"
         if dlg_key in self._detail_dialogs:
             dlg = self._detail_dialogs[dlg_key]
@@ -1624,6 +1719,195 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.data_updated.connect(dialog.refresh_data)
         self._detail_dialogs[dlg_key] = dialog
         dialog.show()
+
+    def _on_history_combo_changed(self, index):
+        """[🚀 板块回溯] 下拉列表选中事件"""
+        if self._is_updating_history or index < 0: return
+        
+        # 提取板块名 (从 "[Score] Name Date" 中剥离)
+        text = self.combo_sector_history.itemText(index)
+        if "]" in text:
+            # 提取 ] 之后的部分，并尝试剥离末尾的日期 (如 0420)
+            content = text.split("]", 1)[1].strip()
+            # 如果末尾是 4 位数字日期，则截断
+            parts = content.rsplit(" ", 1)
+            if len(parts) > 1 and parts[1].isdigit() and len(parts[1]) == 4:
+                sec_name = parts[0].strip()
+            else:
+                sec_name = content
+        else:
+            sec_name = text.strip()
+            
+        if sec_name in self._sector_history:
+            self._open_sector_detail(sec_name)
+
+    def _add_to_sector_history(self, sec_name):
+        """[🚀 板块回溯] 维护历史栈，去重且限额"""
+        if not sec_name: return
+        if sec_name in self._sector_history:
+            self._sector_history.remove(sec_name)
+        
+        self._sector_history.insert(0, sec_name)
+        self._sector_history = self._sector_history[:15] # 最多保留 15 个
+        
+        self._refresh_history_combo()
+
+    def _on_delete_history_clicked(self):
+        """[🚀 板块回溯] 用户点击删除按钮，移除当前选中的历史记录项"""
+        idx = self.combo_sector_history.currentIndex()
+        if idx < 0: # 无选中项
+            return
+            
+        text = self.combo_sector_history.itemText(idx)
+        # --- [🚀 同步解析逻辑] 必须与跳转逻辑完全一致，支持剥离评分前缀和日期后缀 ---
+        try:
+            if "]" in text:
+                content = text.split("]", 1)[1].strip()
+                # 剥离 MMDD 格式的 4 位数字日期后缀
+                parts = content.rsplit(" ", 1)
+                if len(parts) > 1 and parts[1].isdigit() and len(parts[1]) == 4:
+                    sec_name = parts[0].strip()
+                else:
+                    sec_name = content
+            elif "(" in text:
+                sec_name = text.split("(", 1)[0].strip()
+            else:
+                sec_name = text.split("@")[0].strip() if "@" in text else text.strip()
+        except Exception:
+            sec_name = text.strip()
+
+        if sec_name in self._sector_history:
+            self._sector_history.remove(sec_name)
+            logger.info(f"🗑️ [History] 已从回溯历史中移除板块: {sec_name}")
+            self._refresh_history_combo()
+            self._save_ui_state() # 即时存盘，防止退出异常丢失操作成果
+
+    def _refresh_history_combo(self):
+        """[🚀 板块回溯] 完全重刷下拉框列表 (默认按评分大小排序显示，存储顺序不变)"""
+        if not hasattr(self, 'combo_sector_history'): return
+        self._is_updating_history = True
+        try:
+            # 记住当前选中的板块名
+            current_sec = ""
+            idx = self.combo_sector_history.currentIndex()
+            if idx > 0:
+                old_text = self.combo_sector_history.currentText()
+                if "]" in old_text:
+                    content = old_text.split("]", 1)[1].strip()
+                    parts = content.rsplit(" ", 1)
+                    current_sec = parts[0].strip() if (len(parts) > 1 and parts[1].isdigit() and len(parts[1]) == 4) else content
+                else:
+                    current_sec = old_text.strip()
+
+            self.combo_sector_history.clear()
+            # [USER REQUEST] 移除占位文本，默认显示最强制板块
+            
+            # --- [核心排序逻辑] 默认按评分大小排序显示，但底层 _sector_history 保持 MRU 顺序 ---
+            temp_list = []
+            for sec in self._sector_history:
+                score = self.detector.active_sectors.get(sec, {}).get('score', 0.0)
+                temp_list.append((score, sec))
+            
+            # 按评分降序排列
+            temp_list.sort(key=lambda x: x[0], reverse=True)
+            
+            today_str = datetime.datetime.now().strftime("%m%d")
+            for score, sec in temp_list:
+                # 格式: [评分] 板块名 0420
+                self.combo_sector_history.addItem(f"[{score:4.1f}] {sec} {today_str}")
+            
+            # 恢复之前的选中状态或默认选中第一名
+            if current_sec:
+                found = False
+                for i in range(self.combo_sector_history.count()):
+                    text = self.combo_sector_history.itemText(i)
+                    if "]" in text:
+                        content = text.split("]", 1)[1].strip()
+                        parts = content.rsplit(" ", 1)
+                        sn = parts[0].strip() if (len(parts) > 1 and parts[1].isdigit() and len(parts[1]) == 4) else content
+                        if sn == current_sec:
+                            self.combo_sector_history.setCurrentIndex(i)
+                            found = True
+                            break
+                if not found and self.combo_sector_history.count() > 0:
+                    self.combo_sector_history.setCurrentIndex(0)
+            elif self.combo_sector_history.count() > 0:
+                self.combo_sector_history.setCurrentIndex(0) # 默认最强
+
+        finally:
+            self._is_updating_history = False
+
+    def _show_strongest_sector(self, code):
+        """由个股代码查探并弹出其最强（在榜）的板块详情"""
+        ts = self.detector._tick_series.get(code)
+        if not ts or not ts.category: return
+        
+        import re
+        cats = [c.strip() for c in re.split(r'[;；,，/ \\-]', str(ts.category)) if c.strip()]
+        if not cats: return
+        
+        strongest_sector = None
+        max_score = -999.0
+        
+        with self.detector._lock:
+            active_sec = self.detector.active_sectors
+            for cat in cats:
+                if cat in active_sec:
+                    score = active_sec[cat].get('score', 0.0)
+                    if score > max_score:
+                        max_score = score
+                        strongest_sector = cat
+        
+        # 兜底：如果都没有上榜，取第一个
+        if not strongest_sector:
+            strongest_sector = cats[0]
+            
+        self._open_sector_detail(strongest_sector)
+
+    def _run_dna_audit_batch(self):
+        """[DNA-BATCH] 同步个股表选区送审"""
+        row_count = self.stock_table.rowCount()
+        if row_count == 0: return
+        
+        selected_items = self.stock_table.selectedItems()
+        selected_rows = sorted(list(set([item.row() for item in selected_items])))
+        
+        if len(selected_rows) > 1:
+            target_rows = selected_rows[:50]
+        elif len(selected_rows) == 1:
+            start_idx = selected_rows[0]
+            target_rows = range(start_idx, min(start_idx + 20, row_count))
+        else:
+            target_rows = range(min(20, row_count))
+            
+        code_to_name = {}
+        for row in target_rows:
+            if row >= row_count: break
+            c_item = self.stock_table.item(row, 0)
+            n_item = self.stock_table.item(row, 1)
+            if c_item:
+                c = c_item.text().strip()
+                n = n_item.text().strip() if n_item else ""
+                if n.startswith("🔔"): n = n.replace("🔔", "")
+                code_to_name[c] = n
+                    
+        if code_to_name:
+            # 委托给主程序的 dispatch 逻辑
+            if hasattr(self, 'main_app') and self.main_app:
+                if hasattr(self.main_app, 'tk_dispatch_queue') and hasattr(self.main_app, '_run_dna_audit_batch'):
+                    self.main_app.tk_dispatch_queue.put(lambda: self.main_app._run_dna_audit_batch(code_to_name))
+                else:
+                    logger.error("主程序不支持 DNA 审计分发逻辑")
+            else:
+                # 尝试从 Parent 追溯
+                p = self.parent()
+                while p:
+                    if hasattr(p, 'main_app'):
+                        if hasattr(p.main_app, 'tk_dispatch_queue'):
+                            p.main_app.tk_dispatch_queue.put(lambda: p.main_app._run_dna_audit_batch(code_to_name))
+                            return
+                    p = p.parent()
+                logger.error("未找到主监控程序句柄，无法分发 DNA 命令")
 
     def _on_show_alerts_clicked(self):
         """专用按钮打开报警个股追踪窗口"""
@@ -1681,8 +1965,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 for ts in self.detector._tick_series.values():
                     ts.pct_diff = 0.0
                     ts.price_diff = 0.0
-                for sec in self.detector.active_sectors.values():
+                for sec_name, sec in self.detector.active_sectors.items():
                     sec['leader_pct_diff'] = 0.0
+                    score_val = sec.get('score', 0.0)
+                    sec['score_anchor'] = score_val
+                    self._sector_score_anchors[sec_name] = score_val # 同步至面板级锚点库
             
             snap = self._create_anchor_snapshot(allow_system_time=True)
             if snap: 
@@ -1727,10 +2014,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             if not codes: return None # 无有效价格
 
+            # [🚀 板块得分同步持久化] 记录当前所有活跃板块的即时力度得分
+            sector_scores = {}
+            for sec_name, sec_data in self.detector.active_sectors.items():
+                sector_scores[sec_name] = round(float(sec_data.get('score', 0.0)), 1)
+
             return {
                 "ts": float(curr_time), 
                 "c": codes,   
-                "p": prices   
+                "p": prices,
+                "ss": sector_scores # [NEW] Sector Scores Snapshot
             }
 
     def _add_to_history(self, snapshot, force=False):
@@ -1873,9 +2166,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         else:
                             ts.pct_diff = 0.0
                 
-                # 2. 同步更新板块数据中的龙头 DFF，确保上下表一致
+                # 2. 同步更新板块数据中的龙头 DFF 与评分锚点
+                ss_map = snap.get("ss", {})
+                self._sector_score_anchors.update(ss_map) # [🚀 核心补强] 恢复面板级评分锚点缓存
+                
                 for sec_name, sec_data in self.detector.active_sectors.items():
-                    leader_code = sec_data.get('leader_code')
+                    # A. 恢复评分锚点 (优先从面板缓存读取)
+                    sec_data['score_anchor'] = self._sector_score_anchors.get(sec_name, sec_data.get('score', 0.0))
+                    
+                    # B. 同步龙头 DFF
+                    leader_code = sec_data.get('leader') # [FIX] 统一使用 leader 键名
                     if leader_code and leader_code in self.detector._tick_series:
                         l_ts = self.detector._tick_series[leader_code]
                         sec_data['leader_pct_diff'] = l_ts.pct_diff
@@ -1994,6 +2294,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "history": self._anchor_history[-20:],
                 "current_anchor_ts": self._current_anchor_ts,
                 "reset_cycle": self._reset_cycle_mins,
+                "sector_history": self._sector_history,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
                 "open_details_v2": open_windows
             }
@@ -2043,6 +2344,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._anchor_history = hist
                 self._refresh_history_buttons()
                 logger.info(f"✅ [RacingPanel] 已恢复 {len(hist)} 个历史起点。")
+
+            # [🚀 板块回溯] 恢复历史列表
+            if "sector_history" in conf:
+                self._sector_history = conf["sector_history"]
+                self._refresh_history_combo()
+                if self.combo_sector_history.count() > 0:
+                    self.combo_sector_history.setCurrentIndex(0) # 默认显示最新的
 
             # 4. 恢复主窗口几何尺寸与分栏器布局
             if "window_geometry" in conf:
@@ -2321,7 +2629,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         try:
             with self.detector._lock:
                 raw_ts_list = list(self.detector._tick_series.values())
-                active_sectors = list(self.detector.active_sectors.values())
+                # [🚀 核心对齐] 获取实时数据的副本并注入面板级锚点，防止被 Detector 异步重写导致涨跌数据归零
+                active_sectors = []
+                for sec_name, sec_dict in self.detector.active_sectors.items():
+                    sd = sec_dict.copy()
+                    sd['score_anchor'] = self._sector_score_anchors.get(sec_name, sd.get('score', 0.0))
+                    active_sectors.append(sd)
+
             
             # --- [🚀 兜底逻辑] 如果 Detector 处于冷启动(HDF5缺失)，UI 层反向聚合板块 ---
             # 修复：即便 active_sectors 不为空，如果数据极少（例如只有不到3个板块），也尝试从现有个股中补充
@@ -2338,7 +2652,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                             temp_sectors[cat] = {
                                 'sector': cat, 'score': 0.0, 'leader': '', 
                                 'leader_name': '', 'leader_pct': -100.0, 
-                                'leader_pct_diff': 0.0,  # [FIX] 补齐关键 DFF 字段
+                                'leader_pct_diff': 0.0,  
+                                'score_anchor': self._sector_score_anchors.get(cat, 0.0), # [🚀 修复] 聚合模式下的锚点对齐
                                 'count': 0,
                                 'followers': [] 
                             }
@@ -2452,7 +2767,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.sector_table.blockSignals(True)
                 self._update_table_optimized(self.stock_table, flattened_ts)
                 
-                sort_attr_map_sector = {0:'sector', 1:'score', 2:'leader_name', 3:'leader_pct', 4:'leader_start_pct', 5:'leader_pct_diff'}
+                sort_attr_map_sector = {0:'sector', 1:'score', 2:'score_diff', 3:'leader_name', 4:'leader_pct', 5:'leader_start_pct', 6:'leader_pct_diff'}
                 s_attr_sec = sort_attr_map_sector.get(self._sort_col_sector, 'score')
                 is_rev_sec = (self._sort_order_sector == Qt.SortOrder.DescendingOrder)
                 
@@ -2460,6 +2775,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 def get_sec_val(sec, attr):
                     if attr == 'leader_start_pct':
                         return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
+                    if attr == 'score_diff':
+                        return sec.get('score', 0) - sec.get('score_anchor', sec.get('score', 0))
                     return sec.get(attr, 0)
 
                 # 全量排序结果
@@ -2469,22 +2786,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     reverse=is_rev_sec
                 )
 
-                # [🚀 极致去重] 龙头代码+名称 双重去重逻辑
+                # [🚀 标注建议] 移除强力的龙头去重逻辑，防止强核心驱动下其他强势概念被隐藏
                 unique_leader_sectors = []
-                seen_leaders = set()
                 for sec in all_sorted_sectors:
-                    # 提取并标准化代码和名称
-                    l_code = str(sec.get('leader', '')).strip()
-                    l_name = str(sec.get('leader_name', '')).strip()
-                    
-                    # 生成唯一标识符：代码优先，名称补充
-                    l_id = l_code if (l_code and l_code != 'None') else l_name
-                    
-                    if l_id:
-                        if l_id in seen_leaders:
-                            continue
-                        seen_leaders.add(l_id)
-                    
                     unique_leader_sectors.append(sec)
                     if len(unique_leader_sectors) >= 20:
                         break
@@ -2516,6 +2820,27 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._last_rendered_time = curr_time
             # [🚀 极速联动] 主面板渲染结束，通知详情窗同步刷新
             self.data_updated.emit()
+            
+            # [🚀 板块回溯] 定时更新下拉列表中板块的实时得分 (非重绘，仅更新文本)
+            if hasattr(self, 'combo_sector_history') and not self._is_updating_history:
+                self._is_updating_history = True
+                try:
+                    today_str = datetime.datetime.now().strftime("%m%d")
+                    for i in range(self.combo_sector_history.count()): 
+                        old_text = self.combo_sector_history.itemText(i)
+                        if "]" in old_text:
+                            # 提取板块名 (剥离评分前缀和日期后缀)
+                            content = old_text.split("]", 1)[1].strip()
+                            parts = content.rsplit(" ", 1)
+                            sn = parts[0].strip() if (len(parts) > 1 and parts[1].isdigit() and len(parts[1]) == 4) else content
+                            
+                            # 获取最新评分
+                            sc = self.detector.active_sectors.get(sn, {}).get('score', 0.0)
+                            nw = f"[{sc:4.1f}] {sn} {today_str}"
+                            if old_text != nw:
+                                self.combo_sector_history.setItemText(i, nw)
+                finally:
+                    self._is_updating_history = False
         except Exception as e:
             import traceback
             logger.error(f"❌ [RacingPanel] Update Error: {e}\n{traceback.format_exc()}")
@@ -2600,45 +2925,53 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # 1. 强度得分
             score = round(sec.get('score', 0), 1)
-            if self._update_cell(table, i, 1, str(score), self._UI_CACHE["COLOR_CYAN"]):
+            if self._update_cell(table, i, 1, str(score), self._UI_CACHE["COLOR_GOLD"]):
                 if not is_first_init: self._table_highlights[("sector", s_name, 1)] = time.time()
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
+
+            # 2. 得分增量 (🚀 新增独立列：展示相对于锚点的强度增量)
+            score_anchor = sec.get('score_anchor', score)
+            score_diff = score - score_anchor
+            diff_txt = f"{score_diff:+.1f}"
+            c_diff = self._UI_CACHE["COLOR_RED"] if score_diff > 0.05 else (self._UI_CACHE["COLOR_GREEN"] if score_diff < -0.05 else Qt.GlobalColor.white)
+            if self._update_cell(table, i, 2, diff_txt, c_diff):
+                if not is_first_init: self._table_highlights[("sector", s_name, 2)] = time.time()
+            self._apply_flash_effect(table.item(i, 2), ("sector", s_name, 2))
                 
-            # 2. 领涨龙头与 DFF 校准
+            # 3. 领涨龙头
             l_total_pct = sec.get('leader_pct', 0.0)
             l_dff = sec.get('leader_pct_diff', 0.0)
-            # [🚀 核心数学公式修复] Start + Diff = Total (均基于 last_close 才有意义)
             l_start_pct = l_total_pct - l_dff
             leader_display = f"{sec.get('leader_name')} ({sec.get('leader')})"
-            self._update_cell(table, i, 2, leader_display, is_numeric=False)
+            self._update_cell(table, i, 3, leader_display, is_numeric=False)
                 
-            # 3. 龙头总涨幅
+            # 4. 龙头总涨幅
             l_pct_text = f"{l_total_pct:+.2f}%"
             c_pct = self._UI_CACHE["COLOR_RED"] if l_total_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_total_pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 3, l_pct_text, c_pct):
-                if not is_first_init: self._table_highlights[("sector", s_name, 3)] = time.time()
-            self._apply_flash_effect(table.item(i, 3), ("sector", s_name, 3))
-            
-            # 4. 起点涨幅
-            start_txt = f"{l_start_pct:+.2f}%"
-            c_start = self._UI_CACHE["COLOR_RED"] if l_start_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_start_pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 4, start_txt, c_start):
+            if self._update_cell(table, i, 4, l_pct_text, c_pct):
                 if not is_first_init: self._table_highlights[("sector", s_name, 4)] = time.time()
             self._apply_flash_effect(table.item(i, 4), ("sector", s_name, 4))
-
-            # 5. 龙头DFF
-            dff_txt = f"{l_dff:+.2f}%"
-            c_dff = self._UI_CACHE["COLOR_RED"] if l_dff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_dff < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 5, dff_txt, c_dff):
+            
+            # 5. 起点涨幅
+            start_txt = f"{l_start_pct:+.2f}%"
+            c_start = self._UI_CACHE["COLOR_RED"] if l_start_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_start_pct < -0.001 else Qt.GlobalColor.white)
+            if self._update_cell(table, i, 5, start_txt, c_start):
                 if not is_first_init: self._table_highlights[("sector", s_name, 5)] = time.time()
             self._apply_flash_effect(table.item(i, 5), ("sector", s_name, 5))
 
-            # 6. 联动详情
-            followers = sec.get('followers', [])
-            f_txt = ",".join([f"{f['name']}({f['pct']:+.1f}%)" for f in followers[:3]])
-            if self._update_cell(table, i, 6, f_txt, is_numeric=False):
+            # 6. 龙头DFF (纯净显示)
+            dff_txt = f"{l_dff:+.2f}%"
+            c_dff = self._UI_CACHE["COLOR_RED"] if l_dff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_dff < -0.001 else Qt.GlobalColor.white)
+            if self._update_cell(table, i, 6, dff_txt, c_dff):
                 if not is_first_init: self._table_highlights[("sector", s_name, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("sector", s_name, 6))
+
+            # 7. 联动详情
+            followers = sec.get('followers', [])
+            f_txt = ",".join([f"{f['name']}({f['pct']:+.1f}%)" for f in followers[:3]])
+            if self._update_cell(table, i, 7, f_txt, is_numeric=False):
+                if not is_first_init: self._table_highlights[("sector", s_name, 7)] = time.time()
+            self._apply_flash_effect(table.item(i, 7), ("sector", s_name, 7))
 
     def _refresh_fading_only(self):
         if not self._table_highlights: return

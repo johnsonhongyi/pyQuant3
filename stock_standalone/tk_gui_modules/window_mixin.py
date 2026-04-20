@@ -164,8 +164,17 @@ class WindowMixin:
                     logger.error(f"[save_window_position] 读取失败: {e}")
 
             data[window_name] = pos
-            with open(config_file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_file = config_file_path + ".tmp"
+            try:
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+
+                os.replace(tmp_file, config_file_path)
+                logger.debug(f"[save_window_position] 已原子保存 {window_name}: {pos}")
+            except Exception as e:
+                logger.error(f"[save_window_position] 原子保存失败: {e}")
+                if os.path.exists(tmp_file): os.remove(tmp_file)
+
 
             logger.debug(f"[save_window_position] 已保存 {window_name}: {pos}")
         except Exception as e:
@@ -302,8 +311,17 @@ class WindowMixin:
                     logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             data[window_name] = pos
-            with open(config_file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_file = config_file_path + ".tmp"
+            try:
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+
+                os.replace(tmp_file, config_file_path)
+                logger.debug(f"[save_window_position_qt] 已原子保存 {window_name}: {pos}")
+            except Exception as e:
+                logger.error(f"[save_window_position_qt] 原子保存失败: {e}")
+                if os.path.exists(tmp_file): os.remove(tmp_file)
+
 
             logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
         except Exception as e:
@@ -369,12 +387,21 @@ class WindowMixin:
                     logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             # [OPTIMIZE] 只有数据变化时才写盘
+            # [OPTIMIZE] 只有数据变化时才写盘
             if data_changed:
                 data[window_name] = pos
-                with open(config_file_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
+                tmp_file = config_file_path + ".tmp"
+                try:
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+
+                    os.replace(tmp_file, config_file_path)
+                    logger.debug(f"[save_window_position_qt] {config_file_path} 已原子保存 {window_name}: {pos}")
+                except Exception as e:
+                    logger.error(f"[save_window_position_qt] 原子写入失败: {e}")
+                    if os.path.exists(tmp_file): os.remove(tmp_file)
             else:
+
                 logger.debug(f"[save_window_position_qt] {config_file_path} 跳过保存 {window_name}: 数据未变化")
                 
         except Exception as e:
