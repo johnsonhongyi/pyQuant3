@@ -355,7 +355,9 @@ class AlertManager:
         with self._session_lock:
             if hasattr(self, 'session_alerted_codes'):
                 self.session_alerted_codes.clear()
-            logger.info("✅ AlertManager: 全局报警历史已清空")
+            if hasattr(self, 'cooldowns'):
+                self.cooldowns.clear() # [FIX] 同时也清空冷却记录，允许复位后立即重报
+            logger.info("✅ AlertManager: 全局报警历史及冷却记录已清空")
 
     def stop_current_speech(self, key=None):
         """非破坏式中断"""

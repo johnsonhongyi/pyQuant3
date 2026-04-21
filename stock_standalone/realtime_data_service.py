@@ -1183,6 +1183,7 @@ class IntradayEmotionTracker:
         self.scores.clear()
         self._sbc_alert_set.clear()
         self._sbc_signals_registry.clear()
+        self._last_sbc_status.clear() # [FIX] 必须清理状态位，否则复位后无法二次触发
         self._last_vol.clear()
         self._cumulative_amt.clear()
         self._intraday_high.clear()

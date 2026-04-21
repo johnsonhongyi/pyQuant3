@@ -587,9 +587,11 @@ class BiddingMomentumDetector:
                 
                 # [IMMEDIATE] 瞬间全量重置活跃数 (USER-RULE: 活跃数应随基准同步重置)
                 ts.signal_count = 0
-                ts._last_sig_min = 0
+                # [FIX] 将上一次信号时间重置为当前分钟，防止复位后由于得分仍然达标而立即触发 +1
+                curr_min = int(time.time() // 60)
+                ts._last_sig_min = curr_min
                 ts._bar_active_reward = 0
-                ts._last_active_price = 0.0
+                ts._last_active_price = ts.current_price # 以当前价格为新基准
                 
                 # 同步重置赛马稳定性时长
                 ts.racing_start_ts = 0.0
@@ -599,7 +601,6 @@ class BiddingMomentumDetector:
                 # 瞬间清干增量涨幅缓存，避免 UI 闪烁
                 ts.pct_diff = 0.0
                 ts.price_diff = 0.0
-                ts.signal_count = 0
                 ts.pattern_hint = ""
 
             # [REFINED] 同步清理实时基因报警记录 (IntradayEmotionTracker)
@@ -607,7 +608,7 @@ class BiddingMomentumDetector:
                 tracker = getattr(self.realtime_service, 'emotion_tracker', None)
                 if tracker:
                     tracker.clear()
-                    logger.info("⚡ [Detector] IntradayEmotionTracker (SBC) signals has been cleared.")
+                    logger.info("✅ [Detector] IntradayEmotionTracker (SBC) signals has been cleared.")
 
             logger.info(f"🔄 [Detector] All observation anchors and active metrics have been reset.")
 

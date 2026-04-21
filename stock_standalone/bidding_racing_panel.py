@@ -22,6 +22,23 @@ from PyQt6.QtGui import (
 )
 
 from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidgetItem
+
+class LabeledStockItem(QTableWidgetItem):
+    """支持信号优先级排序的表格项 - 确保 ⚡ 和 🔔 能够被排在最前面 (权重越大越靠前)"""
+    def __init__(self, text, sort_prio=0):
+        super().__init__(text)
+        self.sort_prio = sort_prio # 2:⚡, 1:🔔, 0:普通
+
+    def __lt__(self, other):
+        try:
+            if hasattr(other, 'sort_prio'):
+                if self.sort_prio != other.sort_prio:
+                    # Qt 排序: Ascending 时调用 __lt__，由于我们要 Descending 时 ⚡ 在前，
+                    # 那么 Ascending 时 ⚡ 应该在后，即 ⚡(2) > 普通(0)
+                    return self.sort_prio < other.sort_prio
+            return super().__lt__(other)
+        except: return super().__lt__(other)
+
 from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory, commonTips as cct
 from alert_manager import get_alert_manager
@@ -584,24 +601,31 @@ class SectorDetailDialog(QDialog, WindowMixin):
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
-        # 预计算合成评分
-        score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
-        
-        def get_sort_key(ts):
-            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
-            elif attr == 'pct_diff': val = ts.pct_diff
-            elif attr == 'score': val = score_cache.get(ts.code, 0)
-            else: val = getattr(ts, attr, 0)
-            return (val, ts.code)
-        
-        data_list.sort(key=get_sort_key, reverse=is_rev)
-        
-        # 获取 SBC 注册表
+        # 获取 SBC 注册表 (用于排序优先级判定)
         tracker = None
         if self.detector and self.detector.realtime_service:
             tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
         sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
+        # 预计算合成评分 (用于锁外高性能排序)
+        score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
 
+        def get_sort_key(ts):
+            # [🚀 优先级排序增强] ⚡(2) > 🔔(1) > 无(0)
+            has_alert = get_alert_manager().is_alerted(ts.code)
+            has_sbc = ts.code in sbc_registry
+            prio = 2 if has_sbc else (1 if has_alert else 0)
+            
+            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
+            elif attr == 'pct_diff': val = ts.pct_diff
+            elif attr == 'score': val = score_cache.get(ts.code, 0)
+            else: val = getattr(ts, attr, 0)
+            
+            if attr == 'name':
+                return (prio, val, ts.code)
+            return (val, ts.code)
+        
+        data_list.sort(key=get_sort_key, reverse=is_rev)
+        
         display_list = data_list[:100]
         flattened = []
         for ts in display_list:
@@ -1062,8 +1086,23 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
         
         def get_sort_key(ts):
+            # [🚀 优先级排序增强] ⚡(2) > 🔔(1) > 无(0)
+            # 获取 SBC 注册表
+            reg = {}
+            if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
+                 reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+            
+            has_alert = get_alert_manager().is_alerted(ts.code)
+            has_sbc = ts.code in reg
+            prio = 2 if has_sbc else (1 if has_alert else 0)
+            
             if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
-            else: val = getattr(ts, attr, 0 if attr != 'score' else score_cache.get(ts.code, 0))
+            elif attr == 'pct_diff': val = ts.pct_diff
+            elif attr == 'score': val = score_cache.get(ts.code, 0)
+            else: val = getattr(ts, attr, 0)
+            
+            if attr == 'name':
+                return (prio, val, ts.code)
             return (val, ts.code)
 
         data_list.sort(key=get_sort_key, reverse=is_rev)
@@ -2756,6 +2795,42 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _arrange_detail_windows(self):
         """[🚀 垂直联排优化] 极限收缩 + 磁吸叠层 + 阶梯分栏(优先对齐主窗)"""
+        # [🚀 针对主窗口] 点击整理时同步校准主表领军个股视图列宽
+        if getattr(self, '_global_show_reason', False):
+            if hasattr(self, 'stock_table'):
+                header = self.stock_table.horizontalHeader()
+                header.blockSignals(True)
+                try:
+                    # [🚀 极致紧凑版] 前置列尽可能压缩，为形态理由留出空间
+                    self.stock_table.setColumnWidth(0, 62)   # 代码
+                    self.stock_table.setColumnWidth(1, 72)   # 名称
+                    self.stock_table.setColumnWidth(2, 35)   # 结构分
+                    self.stock_table.setColumnWidth(3, 35)   # 活跃
+                    self.stock_table.setColumnWidth(4, 62)   # 涨幅
+                    self.stock_table.setColumnWidth(5, 62)   # 起点
+                    self.stock_table.setColumnWidth(6, 62)   # DFF
+                    if not self.stock_table.isColumnHidden(7):
+                        self.stock_table.setColumnWidth(7, 120) # 保持原样 180
+                finally:
+                    header.blockSignals(False)
+        else:
+            # [🚀 标准紧凑版] 无理由列时，适当放开其他列宽
+            if hasattr(self, 'stock_table'):
+                header = self.stock_table.horizontalHeader()
+                header.blockSignals(True)
+                try:
+                    self.stock_table.setColumnWidth(0, 62)   # 代码
+                    self.stock_table.setColumnWidth(1, 80)   # 名称
+                    self.stock_table.setColumnWidth(2, 62)   # 结构分
+                    self.stock_table.setColumnWidth(3, 62)   # 活跃
+                    self.stock_table.setColumnWidth(4, 70)   # 涨幅
+                    self.stock_table.setColumnWidth(5, 70)   # 起点
+                    self.stock_table.setColumnWidth(6, 62)   # DFF
+                    # 隐藏理由列或保持 0
+                    if not self.stock_table.isColumnHidden(7):
+                        self.stock_table.setColumnWidth(7, 0)
+                finally:
+                    header.blockSignals(False)
         dlgs = [dlg for dlg in self._detail_dialogs.values() if not dlg.isHidden()]
         if not dlgs: 
             logger.info("ℹ️ [Panel] 当前没有打开的详情窗口。")
@@ -3152,8 +3227,19 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 s_attr = sort_attr_map.get(self._sort_col, 'score')
                 is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
                 
+                # 执行前提取 SBC 注册表用于排序判定
+                tracker = None
+                if self.detector and self.detector.realtime_service:
+                    tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
+                sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
+
                 # 执行排行榜处理 (基于过滤后的结果，增加稳定性排序)
                 def get_stock_sort_key(ts):
+                    # [🚀 排序优先级增强] ⚡(2) > 🔔(1) > 普通(0)
+                    has_alert = get_alert_manager().is_alerted(ts.code)
+                    has_sbc = ts.code in sbc_registry
+                    prio = 2 if has_sbc else (1 if has_alert else 0)
+                    
                     if s_attr == 'start_pct':
                         val = ts.current_pct - ts.pct_diff
                     elif s_attr == 'pct_diff':
@@ -3162,6 +3248,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         val = score_cache.get(ts.code, 0)
                     else:
                         val = getattr(ts, s_attr, 0)
+                    
+                    if s_attr == 'name':
+                        # 确保图标个股在默认降序(Descending)时聚类在顶部
+                        return (prio, val, ts.code)
                     return (val, ts.code)
                 
                 sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:20]
@@ -3253,19 +3343,29 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
 
 
-    def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True, bg_color=None):
+    def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True, bg_color=None, sort_prio=None):
         it = table.item(row, col)
         if not it:
-            it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(text)
+            if sort_prio is not None:
+                it = LabeledStockItem(text, sort_prio) # 专门处理带图标排序
+            else:
+                it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(text)
+            
             if color: it.setForeground(color)
             if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             table.setItem(row, col, it)
             return True
+            
         changed = False
         if it.text() != text:
              it.setText(text)
              changed = True
+        
+        # [NEW] 同步更新排序优先级
+        if sort_prio is not None and hasattr(it, 'sort_prio') and it.sort_prio != sort_prio:
+            it.sort_prio = sort_prio
+            changed = True
         if color and it.foreground().color() != color:
              it.setForeground(color)
              changed = True
@@ -3287,12 +3387,21 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             bg_c = self._UI_CACHE["COLOR_ALERT_BG"] if is_alerted else None
             txt_c = self._UI_CACHE["COLOR_ALERT_TEXT"] if is_alerted else None
             
-            # [NEW] SBC 系统标记：⚡ 表示基因强度，🔔 表示通用报警
-            display_code = f"⚡{code}" if is_sbc_active else code
-            display_name = f"🔔{name}" if is_alerted else name
+            # [NEW] SBC 系统标记：⚡在前, 🔔在中, 代码列保持纯净 (权重越大越靠前)
+            # 排序优先级: ⚡(2) > 🔔(1) > 普通(0)
+            display_code = code
+            display_name = name
+            sort_p = 0
+            
+            if is_generic_alert:
+                display_name = f"🔔{display_name}"
+                sort_p = 1
+            if is_sbc_active:
+                display_name = f"⚡{display_name}"
+                sort_p = 2
 
             self._update_cell(table, i, 0, display_code, color=txt_c, is_numeric=False, bg_color=bg_c)
-            self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c)
+            self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c, sort_prio=sort_p)
             score_txt = str(round(score, 1))
             if self._update_cell(table, i, 2, score_txt, self._UI_CACHE["COLOR_GOLD"]):
                 if not is_first_init: self._table_highlights[("stock", code, 2)] = time.time()

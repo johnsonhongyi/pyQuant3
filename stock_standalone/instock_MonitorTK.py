@@ -9984,24 +9984,68 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 target_code = values[0]
                 name = values[1]
                 stock_code = str(target_code).zfill(6)
+                add_time = str(values[9])[:10] if len(values) > 9 else None
                 # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
                 self.sender.send(stock_code)
                 # Auto-launch Visualizer if enabled
                 if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
-                    self.open_visualizer(stock_code)
+                    self.open_visualizer(stock_code, timestamp=add_time)
 
             def on_voice_right_click(event):
                 item_id = tree.identify_row(event.y)
                 if not item_id:
                     return
+                
+                # 设置选中项，以便 visually 确认右键点的是哪行
+                tree.selection_set(item_id)
                 values = tree.item(item_id, "values")
-                # values: (time, code, name, content_preview)
-                target_code = values[0]
-                stock_code = str(target_code).zfill(6)
-                # pyperclip.copy(stock_code)
-                # toast_message(self, f"stock_code: {stock_code} 已复制")
-                self.tree_scroll_to_code(stock_code)
-                self.original_push_logic(stock_code)
+                
+                # Column order: code(0), name(1), ..., add_time(9), ...
+                stock_code = str(values[0]).zfill(6)
+                stock_name = values[1]
+                add_time = str(values[9])[:10] if len(values) > 9 else None
+                
+                menu = tk.Menu(win, tearoff=0)
+                
+                # 1. 核心联动 (携带时间)
+                menu.add_command(label=f"🔭 可视化联动 [{stock_code}]", 
+                                command=lambda: self.open_visualizer(stock_code, timestamp=add_time),
+                                font=("Arial", 9, "bold"))
+                
+                # 2. DNA 审计
+                def do_dna_audit():
+                    codes_dict = {stock_code: stock_name}
+                    # 获取该行之后的所有代码，模拟常用的“顺延审计”逻辑
+                    all_ids = tree.get_children()
+                    try:
+                        start_idx = all_ids.index(item_id)
+                        for next_item in all_ids[start_idx+1 : start_idx+11]: # 顺延 10 只
+                            v = tree.item(next_item, "values")
+                            if v and len(v) > 1:
+                                codes_dict[str(v[0]).zfill(6)] = v[1]
+                    except: pass
+                    
+                    if hasattr(self, '_run_dna_audit_batch'):
+                        self._run_dna_audit_batch(codes_dict)
+                    else:
+                        messagebox.showinfo("提示", "DNA 审计功能在当前模式下不可用")
+
+                menu.add_command(label="🧬 DNA 专项审计...", command=do_dna_audit, foreground="purple")
+                
+                menu.add_separator()
+                
+                # 3. 基础操作
+                menu.add_command(label="✏️ 修改阈值 (Edit)", command=lambda: edit_selected(item_id, values))
+                menu.add_command(label="🗑️ 删除规则 (Del)", command=lambda: delete_selected(), foreground="red")
+                
+                menu.add_separator()
+                
+                # 4. 其他
+                menu.add_command(label="🎯 滚动到主表", command=lambda: self.tree_scroll_to_code(stock_code))
+                menu.add_command(label="🚀 发送到关联软件", command=lambda: self.original_push_logic(stock_code))
+                menu.add_command(label="📋 复制代码", command=lambda: [self.clipboard_clear(), self.clipboard_append(stock_code)])
+
+                menu.post(event.x_root, event.y_root)
                 
             def on_voice_on_click(event):
                 item_id = tree.identify_row(event.y)
@@ -10013,12 +10057,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 name = values[1]
 
                 stock_code = str(code).zfill(6)
+                add_time = values[9] if len(values) > 9 else None
                 if stock_code:
                     # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
                     self.sender.send(stock_code)
                     # Auto-launch Visualizer if enabled
                     if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
-                        self.open_visualizer(stock_code)
+                        self.open_visualizer(stock_code, timestamp=add_time)
 
             def edit_selected(item=None, values=None):
                  if values is None:
