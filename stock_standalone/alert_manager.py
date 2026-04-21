@@ -350,6 +350,13 @@ class AlertManager:
         with self._session_lock:
             return str(code) in self.session_alerted_codes
 
+    def clear_alert_history(self):
+        """完全清空会话级别的新增报警记录"""
+        with self._session_lock:
+            if hasattr(self, 'session_alerted_codes'):
+                self.session_alerted_codes.clear()
+            logger.info("✅ AlertManager: 全局报警历史已清空")
+
     def stop_current_speech(self, key=None):
         """非破坏式中断"""
         if not self.process or not self.process.is_alive():
