@@ -321,6 +321,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
         self._boot_lock = True
         self._is_height_doubled = False # [NEW] 高度翻倍状态位
+        self._show_reason = False       # [NEW] 形态详情/理由显示标志 (默认关闭)
         
         self._init_ui()
         
@@ -342,7 +343,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
         try:
             return {
                 "geometry": self.saveGeometry().toHex().data().decode(),
-                "column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())]
+                "column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
+                "show_reason": self._show_reason
             }
         except:
             return None
@@ -351,6 +353,10 @@ class SectorDetailDialog(QDialog, WindowMixin):
         """应用外部恢复的状态（带启动保护锁 + 超时兜底）"""
         if not state:
             return
+        
+        self._show_reason = state.get("show_reason", False)
+        if hasattr(self, 'table'):
+            self.table.setColumnHidden(7, not self._show_reason)
 
         # 初始化首次时间戳
         if _retry_ts is None:
@@ -412,17 +418,35 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         header_layout.addStretch()
         
+        self.btn_toggle_reason = QPushButton("理由: 关")
+        self.btn_toggle_reason.setCheckable(True)
+        self.btn_toggle_reason.setChecked(self._show_reason)
+        self.btn_toggle_reason.setText("理由: 开" if self._show_reason else "理由: 关")
+        self.btn_toggle_reason.setStyleSheet("""
+            QPushButton { background-color: #333; color: #AAA; border: 1px solid #555; padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+            QPushButton:checked { background-color: #005BB7; color: white; border: 1px solid #00FFCC; }
+            QPushButton:hover { border: 1px solid white; }
+        """)
+        self.btn_toggle_reason.clicked.connect(self._toggle_reason_column)
+        header_layout.addWidget(self.btn_toggle_reason)
+
         self.btn_dna = QPushButton("🚀 DNA审计")
-        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
+        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
         header_layout.addWidget(self.btn_dna)
         
         layout.addWidget(self.header_frame)
         
-        self.table = EnhancedTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        self.table = EnhancedTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        # [NEW] 形态详情列控制
+        self.table.setColumnHidden(7, not self._show_reason)
+        if self._show_reason:
+            self.table.setColumnWidth(7, 180)
+
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #060608; alternate-background-color: #0C0C10; color: #EEE; gridline-color: #1A1A1A; outline: none; border: none; }
@@ -537,7 +561,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             
             # [🚀 新增] 更新标题栏强度得分
             sec_score = self.detector.active_sectors.get(self.sector_name, {}).get('score', 0.0)
-            self.title_lbl.setText(f"🔥 {self.sector_name} - 个股明细 ({sec_score:.1f})")
+            self.title_lbl.setText(f"{self.sector_name} - 明细 ({sec_score:.1f})")
 
         render_start_t = time.time()
         
@@ -581,18 +605,19 @@ class SectorDetailDialog(QDialog, WindowMixin):
         display_list = data_list[:100]
         flattened = []
         for ts in display_list:
-            # # 提取形态理由
-            # reason = ""
-            # if ts.code in sbc_registry: reason = sbc_registry[ts.code].get('desc', '')
-            # if not reason: reason = getattr(ts, 'pattern_hint', "")
+            # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
+            reason = ""
+            if self._show_reason:
+                if ts.code in sbc_registry: reason = sbc_registry[ts.code].get('desc', '')
+                if not reason: reason = getattr(ts, 'pattern_hint', "")
 
             flattened.append((
                 ts.code, ts.name, score_cache.get(ts.code, 0), 
                 getattr(ts, 'signal_count', 0),
                 ts.current_pct,
                 ts.current_pct - ts.pct_diff,
-                ts.pct_diff
-                # reason
+                ts.pct_diff,
+                reason
             ))
 
         total = len(data_list)
@@ -614,7 +639,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff = row
+            code, name, score, sig, pct, start_pct, dff, reason = row
             # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
@@ -641,11 +666,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
             if is_alerted: c_dff = txt_c
             self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
 
-            # # [NEW] 第 7 列：形态/报警理由
-            # reason = row[7] if len(row) > 7 else ""
-            # c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
-            # if is_alerted: c_reason = txt_c
-            # self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
+            # [自适应渲染] 只有在列可见时才更新单元格内容
+            if self._show_reason:
+                c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
+                if is_alerted: c_reason = txt_c
+                self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
 
     def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
         it = self.table.item(row, col)
@@ -708,7 +733,6 @@ class SectorDetailDialog(QDialog, WindowMixin):
         except: pass
 
     def _on_context_menu(self, pos):
-        """明细表右键菜单 - 扁平化直出"""
         item = self.table.itemAt(pos)
         if not item: return
         row = item.row()
@@ -720,6 +744,14 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="sector_dialog_context"))
+        
+        menu.addSeparator()
+        
+        # [NEW] 形态详情开关
+        act_toggle_reason = menu.addAction(f"{'👁️ 隐藏' if self._show_reason else '👁️ 显示'} 形态详情")
+        act_toggle_reason.triggered.connect(self._toggle_reason_column)
+
+        menu.addSeparator()
         
         # 穿透到主面板执行
         act_sector = menu.addAction(f"🚀 关联最强板块详情")
@@ -734,10 +766,75 @@ class SectorDetailDialog(QDialog, WindowMixin):
         act_dna.triggered.connect(self._run_dna_audit_top20)
 
         menu.addSeparator()
+        
+        # # [NEW] 重置活跃功能
+        # selected_rows = sorted(list(set([it.row() for it in self.table.selectedItems()])))
+        # if not selected_rows: selected_rows = [row]
+        
+        # title_reset = f"🔄 重置活跃 ({len(selected_rows)}只)" if len(selected_rows) > 1 else f"🔄 重置活跃 ({name})"
+        # act_reset = menu.addAction(title_reset)
+        # act_reset.triggered.connect(lambda: self._reset_stock_active(selected_rows))
+        
+        # [🚀 全局重置] 用户明确要求：重置活跃是全局重置，不是针对单个
+        act_reset = menu.addAction("🔄 重置全局活跃")
+        act_reset.triggered.connect(self._reset_stock_active)
+
+        menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
         
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _toggle_reason_column(self):
+        """切换理由列的可见性 - 实时同步至全局"""
+        new_val = not self._show_reason
+        if hasattr(self.parent(), '_set_global_show_reason'):
+            self.parent()._set_global_show_reason(new_val)
+        else:
+            self.apply_show_reason_manual(new_val)
+
+    def apply_show_reason_manual(self, val):
+        """供主面板调用的手动状态同步"""
+        self._show_reason = val
+        self.table.setColumnHidden(7, not val)
+        if val:
+            self.table.setColumnWidth(7, 180)
+            
+        # 同步更新 UI 按钮状态
+        if hasattr(self, 'btn_toggle_reason'):
+            self.btn_toggle_reason.blockSignals(True)
+            self.btn_toggle_reason.setChecked(val)
+            self.btn_toggle_reason.setText("理由: 开" if val else "理由: 关")
+            self.btn_toggle_reason.blockSignals(False)
+            
+        # 通知主面板保存状态
+        if hasattr(self.parent(), '_save_ui_state'):
+            self.parent()._save_ui_state()
+
+        # 即时通知主面板保存状态
+        if hasattr(self.parent(), '_save_ui_state'):
+            self.parent()._save_ui_state()
+        elif self.parent() and hasattr(self.parent().parent(), '_save_ui_state'):
+            self.parent().parent()._save_ui_state()
+
+    def _reset_stock_active(self, selected_rows=None):
+        """手动全量重置活跃计数 - 修改为全局重置以响应用户需求"""
+        if hasattr(self, 'detector') and self.detector:
+            # [🚀 深度重置] 调用 Detector 的全局重置逻辑
+            self.detector.reset_observation_anchors()
+            
+            # [🚀 深度重置] 同时也清空报警历史，防止列表无限堆积 (响应用户 "越来越多了" 的痛点)
+            # get_alert_manager().clear_alert_history()
+            
+            self.detector.data_version += 1
+            logger.info("🔄 [Detail] 用户通过详情窗触发了全局个股活跃计数与报警历史重置")
+            
+            self.refresh_data()
+            # 尝试通过父对象触发主界面刷新
+            if hasattr(self.parent(), 'update_visuals'):
+                self.parent().update_visuals()
+            elif self.parent() and hasattr(self.parent().parent(), 'update_visuals'):
+                self.parent().parent().update_visuals()
 
     def _on_header_clicked(self, logical_index):
         if self._sort_col == logical_index:
@@ -818,7 +915,8 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._sort_order = Qt.SortOrder.DescendingOrder
         
         self._boot_lock = True
-        self._is_height_doubled = False # [NEW] 高度翻倍状态位
+        self._is_height_doubled = False
+        self._show_reason = False
         
         self._init_ui()
         QTimer.singleShot(150, self._restore_header_state)
@@ -846,19 +944,34 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00FFCC;")
         header_layout.addWidget(title_lbl)
         
-        header_layout.addStretch()
-        
+        self.btn_toggle_reason = QPushButton("理由: 关")
+        self.btn_toggle_reason.setCheckable(True)
+        self.btn_toggle_reason.setChecked(self._show_reason)
+        self.btn_toggle_reason.setText("理由: 开" if self._show_reason else "理由: 关")
+        self.btn_toggle_reason.setStyleSheet("""
+            QPushButton { background-color: #222; color: #AAA; border: 1px solid #444; padding: 4px 10px; border-radius: 4px; font-size: 11px; }
+            QPushButton:checked { background-color: #005BB7; color: white; border: 1px solid #00FFCC; }
+            QPushButton:hover { border: 1px solid white; }
+        """)
+        self.btn_toggle_reason.clicked.connect(self._toggle_reason_column)
+        header_layout.addWidget(self.btn_toggle_reason)
+
         self.btn_dna = QPushButton("🚀 DNA审计")
-        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px;")
+        self.btn_dna.setStyleSheet("background-color: #333; color: white; border: 1px solid #555; padding: 4px 8px; border-radius: 4px;")
         self.btn_dna.clicked.connect(self._run_dna_audit_top20)
         header_layout.addWidget(self.btn_dna)
         
         layout.addWidget(self.header_frame)
         
-        self.table = EnhancedTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        self.table = EnhancedTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        # [NEW] 形态详情列默认隐藏
+        self.table.setColumnHidden(7, not self._show_reason)
+        if self._show_reason:
+            self.table.setColumnWidth(7, 180)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
@@ -955,25 +1068,24 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
         data_list.sort(key=get_sort_key, reverse=is_rev)
         
-        # # 获取 SBC 注册表引用
-        # tkr = None
-        # if self.detector and self.detector.realtime_service:
-        #     tkr = getattr(self.detector.realtime_service, 'emotion_tracker', None)
-        # s_registry = getattr(tkr, '_sbc_signals_registry', {}) if tkr else {}
-
         flattened = []
         for ts in data_list[:300]:
-            # # 提取形态理由
-            # rsn = ""
-            # if ts.code in s_registry: rsn = s_registry[ts.code].get('desc', '')
-            # if not rsn: rsn = getattr(ts, 'pattern_hint', "")
+            # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
+            reason = ""
+            if self._show_reason:
+                if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
+                    reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+                    if ts.code in reg: 
+                        reason = reg[ts.code].get('desc', '')
+                if not reason: 
+                    reason = getattr(ts, 'pattern_hint', "")
 
             flattened.append((ts.code, ts.name, score_cache.get(ts.code, 0), 
                              getattr(ts, 'signal_count', 0),
                              ts.current_pct,
                              ts.current_pct - ts.pct_diff,
-                             ts.pct_diff))
-                             #  rsn))
+                             ts.pct_diff,
+                             reason))
         avg_pct = sum(x.current_pct for x in data_list) / len(data_list)
         stats_text = (f"📊 统计: 共 {len(data_list)} 只 | "
                       f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span>")
@@ -986,7 +1098,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff = row
+            code, name, score, sig, pct, start_pct, dff, reason = row
             # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
@@ -1013,6 +1125,12 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             if is_alerted: c_dff = txt_c
             self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
 
+            # [自适应渲染] 只有在列可见时才更新单元格内容
+            if self._show_reason:
+                c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
+                if is_alerted: c_reason = txt_c
+                self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
+
     def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
         it = self.table.item(row, col)
         if not it:
@@ -1034,6 +1152,17 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
     def _release_boot_lock(self):
         self._boot_lock = False
+
+    def get_ui_state(self):
+        return {
+            "show_reason": self._show_reason
+        }
+
+    def apply_ui_state(self, state):
+        if not state: return
+        self._show_reason = state.get("show_reason", False)
+        if hasattr(self, 'table'):
+            self.table.setColumnHidden(7, not self._show_reason)
 
     def _save_header_state(self):
         if hasattr(self, '_boot_lock') and self._boot_lock:
@@ -1077,6 +1206,22 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="category_dialog_context"))
         
+        menu.addSeparator()
+        
+        # [NEW] 形态详情开关
+        act_toggle_reason = menu.addAction(f"{'👁️ 隐藏' if self._show_reason else '👁️ 显示'} 形态详情")
+        act_toggle_reason.triggered.connect(self._toggle_reason_column)
+
+        menu.addSeparator()
+        
+        menu.addSeparator()
+        
+        # [NEW] 形态详情开关
+        act_toggle_reason = menu.addAction(f"{'👁️ 隐藏' if self._show_reason else '👁️ 显示'} 形态详情")
+        act_toggle_reason.triggered.connect(self._toggle_reason_column)
+
+        menu.addSeparator()
+        
         # 穿透到主面板执行
         act_sector = menu.addAction(f"🚀 关联最强板块详情")
         if self.parent() and hasattr(self.parent(), '_show_strongest_sector'):
@@ -1090,10 +1235,65 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         act_dna.triggered.connect(self._run_dna_audit_top20)
 
         menu.addSeparator()
+
+        # [NEW] 重置活跃功能
+        selected_rows = sorted(list(set([it.row() for it in self.table.selectedItems()])))
+        if not selected_rows: selected_rows = [row]
+        
+        title_reset = f"🔄 重置活跃 ({len(selected_rows)}只)" if len(selected_rows) > 1 else f"🔄 重置活跃 ({name})"
+        act_reset = menu.addAction(title_reset)
+        act_reset.triggered.connect(lambda: self._reset_stock_active(selected_rows))
+
+        menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
         
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _toggle_reason_column(self):
+        """切换理由列的可见性 - 实时同步至全局"""
+        new_val = not self._show_reason
+        # 委托给主面板进行全局管理
+        if hasattr(self.parent(), '_set_global_show_reason'):
+            self.parent()._set_global_show_reason(new_val)
+        else:
+            self.apply_show_reason_manual(new_val)
+
+    def apply_show_reason_manual(self, val):
+        """供主面板调用的手动状态同步"""
+        self._show_reason = val
+        self.table.setColumnHidden(7, not val)
+        if val:
+            self.table.setColumnWidth(7, 180)
+
+        # 同步更新 UI 按钮状态
+        if hasattr(self, 'btn_toggle_reason'):
+            self.btn_toggle_reason.blockSignals(True)
+            self.btn_toggle_reason.setChecked(val)
+            self.btn_toggle_reason.setText("理由: 开" if val else "理由: 关")
+            self.btn_toggle_reason.blockSignals(False)
+
+        # 通知主面板保存状态
+        if hasattr(self.parent(), '_save_ui_state'):
+            self.parent()._save_ui_state()
+
+    def _reset_stock_active(self, selected_rows: list):
+        """手动重置选中个股的活跃计数"""
+        if not self.detector: return
+        codes = []
+        for r in selected_rows:
+            c_item = self.table.item(r, 0)
+            if c_item:
+                c = str(c_item.text()).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                if c and len(c) == 6:
+                    codes.append(c)
+        if codes:
+            self.detector.reset_stock_active(codes)
+            logger.info(f"🔄 [Detail] 用户重置了 {len(codes)} 只个股的活跃计数")
+            self.refresh_data()
 
     def _on_header_clicked(self, logical_index):
         if self._sort_col == logical_index:
@@ -1296,6 +1496,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._sector_history = []  # [🚀 板块回溯]
         self._is_updating_history = False
         self._sector_score_anchors = {} # [🚀 新增] 面板级板块评分锚点，防止被 Detector 重刷丢失
+        self._global_show_reason = False # [NEW] 全局形态详情控制位
 
 
         if sender:
@@ -1481,6 +1682,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.card_sbc_stats = QPushButton("🧬 实时基因报警: 0")
         self.card_sbc_stats.setFixedSize(160, 32)
         self.card_sbc_stats.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_sbc_stats.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.card_sbc_stats.setStyleSheet("""
             QPushButton { 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4B0082, stop:1 #800080); 
@@ -1491,6 +1693,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """)
         # 点击直接打开虚拟板块详情窗
         self.card_sbc_stats.clicked.connect(lambda: self._on_category_double_clicked("🔔 实时报警"))
+        # 右键重置功能
+        self.card_sbc_stats.customContextMenuRequested.connect(self._on_sbc_stats_context_menu)
         pie_vbox.addWidget(self.card_sbc_stats, alignment=Qt.AlignmentFlag.AlignCenter)
         
         self.pie_widget = RacingPieWidget()
@@ -1508,8 +1712,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         title_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFD700; padding: 10px;")
         rank_layout.addWidget(title_lbl)
         
-        self.stock_table = EnhancedTableWidget(0, 7)
-        self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF"])
+        self.stock_table = EnhancedTableWidget(0, 8)
+        self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态"])
+        self.stock_table.setColumnHidden(7, True) # 默认隐藏
         if self.stock_table.horizontalHeaderItem(6):
             self.stock_table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header = self.stock_table.horizontalHeader()
@@ -1649,7 +1854,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             except: pass
             
         # [🚀 深度优化] parent 设为 None 避免样式干扰
-        dialog = CategoryDetailDialog(category, self.detector, self._execute_linkage, parent=None)
+        dialog = CategoryDetailDialog(category, self.detector, self._execute_linkage, parent=self)
+        # [NEW] 实时同步全局形态详情开关
+        if hasattr(self, '_global_show_reason') and hasattr(dialog, 'apply_show_reason_manual'):
+            dialog._show_reason = self._global_show_reason # 先设置，防止 _init_ui 之后状态不统一
+            dialog.apply_show_reason_manual(self._global_show_reason)
+
         dialog.finished.connect(lambda: self._detail_dialogs.pop(dlg_key, None))
         # [🚀 极速联动] 挂载主面板刷新信号
         self.data_updated.connect(dialog.refresh_data)
@@ -1696,10 +1906,46 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         act_dna.triggered.connect(self._run_dna_audit_batch)
 
         menu.addSeparator()
+        
+        # # [NEW] 重置活跃功能
+        # selected_rows = sorted(list(set([it.row() for it in self.stock_table.selectedItems()])))
+        # if not selected_rows: selected_rows = [row]
+        
+        # title_reset = f"🔄 重置活跃 ({len(selected_rows)}只)" if len(selected_rows) > 1 else f"🔄 重置活跃 ({name})"
+        # act_reset = menu.addAction(title_reset)
+        # act_reset.triggered.connect(lambda: self._reset_stock_active(selected_rows))
+
+        # [🚀 全局重置] 用户明确要求：重置活跃是全局重置，不是针对单个
+        act_reset = menu.addAction("🔄 重置全局活跃")
+        act_reset.triggered.connect(self._reset_stock_active)
+        
+        menu.addSeparator()
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
         
         menu.exec(self.stock_table.viewport().mapToGlobal(pos))
+
+    def _reset_stock_active(self, selected_rows: list):
+        """[NEW] 手动重置选中个股的活跃计数"""
+        if not hasattr(self, 'detector') or not self.detector:
+            return
+            
+        codes = []
+        for r in selected_rows:
+            c_item = self.stock_table.item(r, 0)
+            if c_item:
+                c = str(c_item.text()).strip()
+                import re
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                if c and len(c) == 6:
+                    codes.append(c)
+        
+        if codes:
+            self.detector.reset_stock_active(codes)
+            logger.info(f"🔄 [RacingPanel] 用户手动重置了 {len(codes)} 只个股的活跃计数")
+            # 立即触发一次 UI 刷新（通过版本号间接或直接刷新）
+            self.update_visuals()
 
     def _on_sector_context_menu(self, pos):
         """板块表右键菜单"""
@@ -1776,6 +2022,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             except: pass
             
         dialog = SectorDetailDialog(sec_name, self.detector, self._execute_linkage, parent=self)
+        # [NEW] 实时同步全局形态详情开关
+        if hasattr(self, '_global_show_reason') and hasattr(dialog, 'apply_show_reason_manual'):
+            dialog.apply_show_reason_manual(self._global_show_reason)
+
         dialog.finished.connect(lambda: self._detail_dialogs.pop(dlg_key, None))
         # [🚀 极速联动] 挂载主面板刷新信号
         self.data_updated.connect(dialog.refresh_data)
@@ -2012,6 +2262,34 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._last_data_version = -1 
         self.update_visuals()
 
+    def _on_sbc_stats_context_menu(self, pos):
+        """基因报警卡片的右键菜单 - 提供重置功能"""
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #8B0000; }")
+        
+        act_reset = menu.addAction("🔄 重置基因报警数据")
+        act_reset.triggered.connect(self._reset_sbc_signals)
+        
+        menu.exec(self.card_sbc_stats.mapToGlobal(pos))
+
+    def _reset_sbc_signals(self):
+        """手动清理所有基因报警相关的实时统计与历史"""
+        if self.detector:
+            # 1. 清理 Tracker 内部注册表 (SBC 信号)
+            if self.detector.realtime_service and hasattr(self.detector.realtime_service, 'emotion_tracker'):
+                tracker = self.detector.realtime_service.emotion_tracker
+                if tracker:
+                    tracker.clear()
+            
+            # 2. 同步清理 AlertManager 全局历史 (防止侧边栏逻辑冲突)
+            get_alert_manager().clear_alert_history()
+            
+            # 3. 强制触发 UI 刷新 (包含所有已开启的明细窗口)
+            self.detector.data_version += 1
+            self.data_updated.emit()
+            self.update_visuals()
+            logger.info("⚡ [RacingPanel] 用户手动重置了所有基因报警数据 (SBC Registry & Alert History)")
+
     def _on_cycle_changed(self, val):
         self._reset_cycle_mins = val
         if hasattr(self, 'cycle_label'):
@@ -2022,20 +2300,23 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._on_cycle_changed(new_val)
 
     def _manual_reset_anchors(self):
-        """[IMMEDIATE] 瞬间重置 DFF 与起点涨幅 (上下同步) - 修复死锁"""
+        """[IMMEDIATE] 瞬间重置活跃数、DFF 与起点涨幅 (上下同步) - 修复死锁"""
         if self.detector:
+            # [🚀 深度重置] 调用 Detector 全量重置逻辑 (包含活跃数、赛马稳定性、价格锚点等)
             self.detector.reset_observation_anchors()
             
+            # [🚀 深度同步] 后置同步板块级锚点状态
             with self.detector._lock:
-                for ts in self.detector._tick_series.values():
-                    ts.pct_diff = 0.0
-                    ts.price_diff = 0.0
                 for sec_name, sec in self.detector.active_sectors.items():
                     sec['leader_pct_diff'] = 0.0
                     score_val = sec.get('score', 0.0)
                     sec['score_anchor'] = score_val
                     self._sector_score_anchors[sec_name] = score_val # 同步至面板级锚点库
             
+            # [🚀 深度重置] 同时也清空报警历史 (USER-FIX: 即时重置也重置活跃，确保全系统清爽)
+            # get_alert_manager().clear_alert_history()
+            # self.data_updated.emit()
+
             snap = self._create_anchor_snapshot(allow_system_time=True)
             if snap: 
                 self._add_to_history(snap, force=True)
@@ -2048,6 +2329,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._last_anchor_reset_data_ts = curr_time
             self._last_data_version = -1 
             self.update_visuals()
+            logger.info("🔄 [Panel] 用户触发了全局即时重置：活跃数、均线稳定性及报警历史已清零")
             
     def _check_auto_anchor(self):
         """[🚀 启动静默模式] 仅捕捉不写盘"""
@@ -2363,7 +2645,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "reset_cycle": self._reset_cycle_mins,
                 "sector_history": self._sector_history,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
-                "open_details_v2": open_windows
+                "open_details_v2": open_windows,
+                "global_show_reason": self._global_show_reason
             }
 
             # ==============================
@@ -2394,6 +2677,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             conf = _get_racing_config()
             if not conf: return
             
+            # 0. 恢复全局显示状态
+            self._global_show_reason = conf.get("global_show_reason", False)
+            self.stock_table.setColumnHidden(7, not self._global_show_reason)
+            if self._global_show_reason: self.stock_table.setColumnWidth(7, 120)
+
             # 1. 恢复列宽与排序状态 (Header States)
             if "header_stock" in conf:
                 self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_stock"].encode()))
@@ -2539,11 +2827,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         logger.info(f"📐 [Panel] 已完成 {len(dlgs)} 个详情窗口的阶梯式分栏(磁吸微调)联排。")
 
-    def _get_synthetic_score(self, ts):
-        # 原有逻辑...
-        pass
+    def _set_global_show_reason(self, val):
+        """全局形态详情开关同步 - 被子弹窗调用"""
+        self._global_show_reason = val
+        # 同步主界面个股列表
+        self.stock_table.setColumnHidden(7, not val)
+        if val: self.stock_table.setColumnWidth(7, 120)
         
-        logger.info(f"📐 [Panel] 已完成 {len(dlgs)} 个详情窗口的垂直堆叠联排。")
+        for dlg in self._detail_dialogs.values():
+            if hasattr(dlg, 'apply_show_reason_manual'):
+                dlg.apply_show_reason_manual(val)
+        # 强制保存一次 UI 状态
+        self._save_ui_state()
 
     def _get_synthetic_score(self, ts):
         """[🚀 性能加速版] 动态合成显示分数"""
@@ -2819,12 +3114,21 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             def flatten_ts(ts):
                 # [🚀 结构分展示优化] 统一调用合成评分公式 (命中缓存)
                 display_score = score_cache.get(ts.code, 0)
-                # [NEW] SBC 信号标记：如果个股有活跃的 SBC 信号，则标记为 True
+                
+                # [NEW] SBC 信号标记
                 is_sbc_active = False
                 if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
                     is_sbc_active = ts.code in getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
-                
-                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff, is_sbc_active)
+
+                # [全局自适应] 理由采集
+                reason = ""
+                if self._global_show_reason:
+                    if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
+                        reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
+                        if ts.code in reg: reason = reg[ts.code].get('desc', '')
+                    if not reason: reason = getattr(ts, 'pattern_hint', "")
+
+                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff, is_sbc_active, reason)
 
             self.stock_table.setUpdatesEnabled(False)
             self.sector_table.setUpdatesEnabled(False)
@@ -2975,7 +3279,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if table.rowCount() != len(flattened_data):
             table.setRowCount(len(flattened_data))
         for i, row_data in enumerate(flattened_data):
-            code, name, score, sig, pct, diff, dff, is_sbc_active = row_data
+            code, name, score, sig, pct, diff, dff, is_sbc_active, reason = row_data
             
             # [⚡ 报警核验] 针对命中报警或有 SBC 信号的个股应用高对比度
             is_generic_alert = get_alert_manager().is_alerted(code)
@@ -3005,9 +3309,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 6. DFF (强制使用切片涨幅 diff, 确保锚点变动时 UI 100% 同步)
             dff_txt = f"{diff:+.2f}%"
             c_dff = self._UI_CACHE["COLOR_RED"] if diff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if diff < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 6, dff_txt, c_dff):
+            if self._update_cell(table, i, 6, dff_txt, self._UI_CACHE["COLOR_RED"] if diff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if diff < -0.001 else Qt.GlobalColor.white)):
                 if not is_first_init: self._table_highlights[("stock", code, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("stock", code, 6))
+
+            # [全局自适应] 第 7 列：形态理由
+            if self._global_show_reason:
+                c_reason = self._UI_CACHE["COLOR_CYAN"] if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
+                if is_alerted: c_reason = self._UI_CACHE["COLOR_ALERT_TEXT"]
+                self._update_cell(table, i, 7, str(reason), c_reason, bg_color=bg_c)
             
             # 使用本次切片的 diff 来反推当时起点的涨幅
             l_start_pct = pct - diff

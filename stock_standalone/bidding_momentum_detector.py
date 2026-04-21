@@ -575,6 +575,7 @@ class BiddingMomentumDetector:
         2. 重置个股分锚点
         3. 重置个股价格瞄点 (用于切片涨跌计算)
         4. 重置全局基准时间
+        5. [NEW] 重置全量活跃数与赛马稳定性时长
         """
         now = time.time()
         with self._lock:
@@ -583,7 +584,32 @@ class BiddingMomentumDetector:
             for ts in self._tick_series.values():
                 ts.score_anchor = ts.score
                 ts.price_anchor = ts.current_price
-            logger.info(f"🔄 [Detector] All observation anchors have been reset.")
+                
+                # [IMMEDIATE] 瞬间全量重置活跃数 (USER-RULE: 活跃数应随基准同步重置)
+                ts.signal_count = 0
+                ts._last_sig_min = 0
+                ts._bar_active_reward = 0
+                ts._last_active_price = 0.0
+                
+                # 同步重置赛马稳定性时长
+                ts.racing_start_ts = 0.0
+                ts.last_stable_ts = 0.0
+                ts.racing_duration = 0.0
+                
+                # 瞬间清干增量涨幅缓存，避免 UI 闪烁
+                ts.pct_diff = 0.0
+                ts.price_diff = 0.0
+                ts.signal_count = 0
+                ts.pattern_hint = ""
+
+            # [REFINED] 同步清理实时基因报警记录 (IntradayEmotionTracker)
+            if hasattr(self, 'realtime_service') and self.realtime_service:
+                tracker = getattr(self.realtime_service, 'emotion_tracker', None)
+                if tracker:
+                    tracker.clear()
+                    logger.info("⚡ [Detector] IntradayEmotionTracker (SBC) signals has been cleared.")
+
+            logger.info(f"🔄 [Detector] All observation anchors and active metrics have been reset.")
 
 
     def set_strategy(self, key: str, **kwargs):
@@ -838,12 +864,27 @@ class BiddingMomentumDetector:
                 ts.score_anchor = 0.0
                 ts.price_anchor = ts.current_price if hasattr(ts, 'current_price') else 0.0
                 ts.first_breakout_ts = 0.0      # 彻底重置异动计时器
+                ts.signal_count = 0             # [FIX] 彻底重置活跃信号计数
+                ts._last_sig_min = 0            # 重置活跃分钟锁
+                ts._bar_active_reward = 0       # 重置活跃奖励锁
                 ts.pattern_hint = ""           # 清空形态描述
                 ts.klines.clear()              # 清空分时数据（保留 deque 结构，避免破坏 maxlen）
                 
         # 3. 时间锚点重置，作为后续计算“异动了多久”的基准
         self.baseline_time = current_dt.timestamp()
         self.data_version += 1 # 联动 UI 全量重传
+
+    def reset_stock_active(self, codes: List[str]):
+        """[NEW] 手动重置指定个股的活跃计数"""
+        if not codes: return
+        with self._lock:
+            for code in codes:
+                ts = self._tick_series.get(code)
+                if ts:
+                    ts.signal_count = 0
+                    ts._last_sig_min = 0
+                    ts._bar_active_reward = 0
+            self.data_version += 1
 
     def reconstruct_all_from_cache(self):
         """[NEW] 为历史模式提供的全量算法重映射，用于在模式切换时立即同步 UI"""
