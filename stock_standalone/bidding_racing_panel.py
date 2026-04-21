@@ -1595,6 +1595,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self.load_window_position_qt(self, "BiddingRacingRhythmPanel", default_width=1000, default_height=700)
         
+        # ✅ [生命周期管理] 显式设置关闭即销毁，确保 TK 同步引用为空
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.update_visuals)
         self.refresh_timer.start(200) # [⚡ 性能均衡] 5FPS 既能满足实时感，又能大幅降低 CPU 负载
@@ -2612,12 +2615,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
 
         self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
+        
+        # ✅ 通知外部引用失效（关键：确保 TK 应用层感知对象已销毁）
+        if hasattr(self, "main_app") and self.main_app:
+            try:
+                self.main_app._racing_panel_win = None
+            except: pass
+            
+        # ✅ 发射关闭信号
+        self.closed.emit()
+        
         # ✅ 关键：允许 Qt 删除对象
         self.deleteLater()
-
-        # ✅ 通知外部引用失效（关键！）
-        if hasattr(self, "main_app") and self.main_app:
-            self.main_app._racing_panel_win = None
         super().closeEvent(event)
 
     def _save_ui_state(self,force=False):

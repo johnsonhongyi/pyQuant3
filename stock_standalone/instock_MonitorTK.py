@@ -1001,7 +1001,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
         try:
-            if not hasattr(self, "_racing_panel_win") or self._racing_panel_win is None:
+            # [🚀 鲁棒性增强] 增加对 C++ 侧对象是否存活的实质性判定
+            is_alive = False
+            if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
+                try:
+                    self._racing_panel_win.isVisible()
+                    is_alive = True
+                except RuntimeError:
+                    self._racing_panel_win = None
+
+            if not is_alive:
                 # 确保 Qt 环境已初始化
                 from PyQt6 import QtWidgets
                 if not QtWidgets.QApplication.instance():
@@ -1015,6 +1024,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     main_app=self,
                     on_code_callback=self.on_code_click
                 )
+                
+                # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用
+                self._racing_panel_win.closed.connect(lambda: setattr(self, '_racing_panel_win', None))
                 
                 # 跨线程联动安全：双击个股跳转
                 self._racing_panel_win.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
