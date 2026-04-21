@@ -527,6 +527,10 @@ class SectorDetailDialog(QDialog, WindowMixin):
             return 0.0
 
     def refresh_data(self):
+        # [🚀 极速视口过滤] 如果窗口不可见，拒绝执行昂贵的重绘逻辑
+        if not self.isVisible(): 
+            return
+
         # [🚀 动态寻踪] 若当前探测器丢失，尝试从父面板动态“夺取”最新引用
         if not getattr(self, 'detector', None):
             if self.parent() and hasattr(self.parent(), 'detector'):
@@ -1055,6 +1059,10 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             return 0.0
 
     def refresh_data(self):
+        # [🚀 极速视口过滤] 只有在可见状态下才参与绘制，防止多窗口堆叠导致的 CPU 溢出
+        if not self.isVisible(): 
+            return
+
         if not hasattr(self, 'detector') or not self.detector: return
         
         if not self.detector._lock.acquire(blocking=False): return
@@ -2865,25 +2873,41 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         max_w_in_col = 0
         
         for i, dlg in enumerate(dlgs):
-            dlg.table.resizeColumnsToContents()
-            table_w = dlg.table.verticalHeader().width() + dlg.table.horizontalHeader().length()
-            # 容纳极窄滚动条与边框
-            target_w = table_w + 35
+            # [🚀 极速整理算法] 挂起更新并阻止信号，防止整理期间的 UI 假死
+            dlg.setUpdatesEnabled(False)
+            header = dlg.table.horizontalHeader()
+            header.blockSignals(True)
+            header.setStretchLastSection(False)
             
-            # [✨ 智能换列] 超过主窗口底边(或屏幕底边)则换列
-            if curr_y + target_h > limit_y_bottom + 10:
-                # 换列磁吸微调：从 -14px 放宽到 -11px，防止横向压盖
-                col_x += (max_w_in_col - 11 + padding)
-                curr_y = col_base_y
-                max_w_in_col = target_w 
+            # [🚀 零测绘开销] 放弃耗时的自适应测绘，直接应用主表同款高度紧凑布局
+            # 0:代码(62), 1:名称(72), 2:得分(35), 3:活跃(35), 4:涨幅(62), 5:起点(62), 6:DFF(62) -> 总计 390
+            fixed_cols_w = [62, 72, 35, 35, 62, 62, 62]
+            for col, w in enumerate(fixed_cols_w):
+                if col < dlg.table.columnCount():
+                    header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                    dlg.table.setColumnWidth(col, w)
+            
+            # [🚀 理由列固定策略]
+            reason_w = 0
+            if getattr(self, '_global_show_reason', False) and dlg.table.columnCount() > 7:
+                header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+                dlg.table.setColumnWidth(7, 120)
+                reason_w = 120
             else:
-                max_w_in_col = max(max_w_in_col, target_w)
+                if dlg.table.columnCount() > 7:
+                    dlg.table.setColumnWidth(7, 0)
             
+            # [🚀 结果计算] 窗口宽度 = 基础列宽(390) + 理由列(0/120) + 边距冗余(35)
+            target_w = 390 + reason_w + 35
+            
+            header.blockSignals(False)
             # 空间防护
             if col_x > screen_geo.right() - target_w:
                 col_x = max(screen_geo.left(), screen_geo.right() - target_w - 4)
                 
             dlg.resize(target_w, target_h)
+            dlg.setUpdatesEnabled(True)
+
             dlg_w = dlg.width()
             dlg_h = dlg.height()
             
