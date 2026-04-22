@@ -148,18 +148,30 @@ class IntradayDecisionEngine:
         top_info = detect_top_signals(day_df, row, cache_dict=cache_dict) # 传入 row 作为当前 tick
         debug["top_score"] = top_info['score']
         debug["top_signals"] = top_info['signals']
+
+        # 💥 [NEW] 模式识别预判 (Pattern Detection Preamble)
+        yesterday_pattern = str(snapshot.get("pattern", "")).lower()
+        is_stabilizing = "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern or "企稳" in yesterday_pattern
+        acc_info = self._check_acceleration_pattern(row, snapshot, debug)
+        
+        wv4_val = snapshot.get('win', 0)
+        win = int(wv4_val) if not pd.isna(wv4_val) else 0
+        rv4_val = snapshot.get('red', 0)
+        red = int(rv4_val) if not pd.isna(rv4_val) else 0
+        is_main_wave = win >= 3 or red >= 5
         
         # ==============================================================================
         # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
         # ==============================================================================
-        hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info)
+        hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info, 
+                                                 is_stabilizing=is_stabilizing, acc_info=acc_info, is_main_wave=is_main_wave)
         if hold_decision:
             # 如果主升浪逻辑接管，直接返回
             return {
                 "action": hold_decision["action"],
                 "position": round(hold_decision["position"], 2),
                 "reason": hold_decision["reason"],
-                "debug": debug
+                "debug": hold_decision.get("debug", debug)
             }
         
         # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
@@ -376,12 +388,17 @@ class IntradayDecisionEngine:
                 base_pos += ma60_result["bonus"]
                 ma_reason += f" | {ma60_result['reason']}"
 
-            acc_result = self._check_acceleration_pattern(row, snapshot, debug)
+            acc_result = acc_info
             if acc_result["is_acc"]:
                 if action == "持仓": 
                     action = "买入"
                 base_pos += acc_result["bonus"]
                 ma_reason += f" | {acc_result['reason']}"
+
+            # [NEW] 整理后突破识别 (Consolidation Breakthrough Recovery)
+            if is_stabilizing and (acc_result["is_acc"] or limit_info.get("limit_up", False)):
+                 base_pos += 0.25
+                 ma_reason += " | [强力] 整理后突破加速"
 
             debug["ma_decision"] = ma_reason
 
@@ -432,15 +449,16 @@ class IntradayDecisionEngine:
                 # 统计发现 win=1 时买入胜率为 0%，需连续确认
                 wd_val = snapshot.get('win', 0)
                 win_days = int(wd_val) if not pd.isna(wd_val) else 0
-                if win_days == 1:
+                # [Optimization] 如果是加速状态或主升浪结构，跳过单阳惩罚
+                if win_days == 1 and not acc_result["is_acc"]:
                     base_pos -= 0.15
                     debug["单阳惩罚"] = -0.15
                 
                 # 3. 量能与均价约束 (关键点)
                 # 【新增】量能模糊区间惩罚
-                # 统计发现 volume 在 0.8-1.2 之间胜率仅 18%
                 current_vol = float(row.get('volume', 0))
-                if 0.8 <= current_vol <= 1.2:
+                # [Optimization] 加速段量能往往处于爆发初期，跳过模糊区间惩罚
+                if 0.8 <= current_vol <= 1.2 and not acc_result["is_acc"]:
                     base_pos -= 0.10
                     debug["量能模糊"] = -0.10
                     
@@ -2783,17 +2801,17 @@ class IntradayDecisionEngine:
     
     # ==================== 主升浪持仓保护 ====================
 
-    def _main_wave_hold_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any], top_info: dict = None) -> dict[str, Any] | None:
+    def _main_wave_hold_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any], top_info: dict = None,
+                              is_stabilizing: bool = None, acc_info: dict = None, is_main_wave: bool = None) -> dict[str, Any] | None:
         """
         主升浪持仓保护逻辑 (002667 模型优化)
         """
-        wv4_val = snapshot.get('win', 0)
-        win = int(wv4_val) if not pd.isna(wv4_val) else 0
-        rv4_val = snapshot.get('red', 0)
-        red = int(rv4_val) if not pd.isna(rv4_val) else 0
-        
-        # 定义主升浪阶段：连阳3日以上 或 站稳5日线5日以上
-        is_main_wave = win >= 3 or red >= 5
+        if is_main_wave is None:
+            wv4_val = snapshot.get('win', 0)
+            win = int(wv4_val) if not pd.isna(wv4_val) else 0
+            rv4_val = snapshot.get('red', 0)
+            red = int(rv4_val) if not pd.isna(rv4_val) else 0
+            is_main_wave = win >= 3 or red >= 5
         
         if not is_main_wave:
             return None
@@ -2826,8 +2844,9 @@ class IntradayDecisionEngine:
         debug["top_score"] = top_info['score']
         
         # 💥 [NEW] D+1/D+2 稳定性检查 (缩量十字星企稳)
-        yesterday_pattern = str(snapshot.get("pattern", "")).lower()
-        is_stabilizing = "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern or "企稳" in yesterday_pattern
+        if is_stabilizing is None:
+            yesterday_pattern = str(snapshot.get("pattern", "")).lower()
+            is_stabilizing = "stabilization" in yesterday_pattern or "rising_structure" in yesterday_pattern or "企稳" in yesterday_pattern
         
         body_ratio = abs(price - open_p) / open_p if open_p > 0 else 1.0
         is_curr_doji = body_ratio < 0.015
@@ -2843,23 +2862,41 @@ class IntradayDecisionEngine:
                     "debug": debug
                 }
         
+        # 💥 [NEW] 加速段保护 (Acceleration Protection)
+        # 如果是刚从整理区突破或处于强势加速段，屏蔽一般的“指标见顶”卖出信号
+        if acc_info is None:
+            acc_info = self._check_acceleration_pattern(row, snapshot, debug)
+        
+        is_fresh_breakout = is_stabilizing and acc_info['is_acc']
+        
+        if acc_info['is_acc']:
+            debug["主升状态"] = f"加速中({acc_info['reason']})"
+            # 加速段大幅提升卖出门槛
+            top_sell_threshold = 0.75 if is_fresh_breakout else 0.65
+        else:
+            top_sell_threshold = 0.40
+
         # 💥 [NEW] 核心逻辑：高位放量滞涨/阴跌，主升浪也要“弃船”
         # 如果 top_score 已经很高，或者在高位放量 (量比>2.0) 且破均线
         is_vol_exhaustion = volume > 2.0 and price < nclose
         
-        if top_info['score'] > 0.40 or (is_extreme_bias and is_vol_exhaustion):
-            reason = f"主升高位分歧: {', '.join(top_info['signals'])}" if top_info['score'] > 0.4 else "高位放量破均线(主升避险)"
+        if top_info['score'] > top_sell_threshold or (is_extreme_bias and is_vol_exhaustion):
+            # 加速段即使触发，也保留更多底仓
+            reason = f"主升高位分歧: {', '.join(top_info['signals'])}" if top_info['score'] > top_sell_threshold else "高位放量破均线(主升避险)"
+            keep_pos = 0.6 if acc_info['is_acc'] else (0.4 if top_info['score'] > 0.6 else 0.7)
+            
             return {
                 "triggered": True,
                 "action": "卖出",
-                "position": 0.4 if top_info['score'] > 0.6 else 0.7, 
-                "reason": reason
+                "position": keep_pos, 
+                "reason": reason + (" (加速保护)" if acc_info['is_acc'] else "")
             }
             
         # 💥 [New] [User Request] 5-6日动能周期识别
         wc_val = snapshot.get("win", 0)
         win_count = int(wc_val) if not pd.isna(wc_val) else 0
-        if win_count >= 5:
+        # 如果是加速状态，屏蔽动能衰竭检查
+        if win_count >= 5 and not acc_info['is_acc']:
             # 动能衰竭期：只要跌破分时均线 或 产生冲高回落，立即保护
             if price < nclose or (high > 0 and (high - price) / high > 0.04):
                 return {

@@ -88,6 +88,62 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 }
 """
 
+
+# [🚀 DNA 统一分发] 模块级分发中枢：兼容 Tkinter 宿统与 Standalone Qt 进程
+def dispatch_dna_audit(code_to_name, parent_widget=None):
+    """
+    DNA 审计分发中枢：支持 Tkinter 宿主分发与独立 Qt 进程降级启动
+    """
+    if not code_to_name:
+        return
+    
+    # 1. 寻找主程序的 tk_dispatch_queue (Tkinter 环境)
+    main_app = None
+    p = parent_widget
+    while p:
+        if hasattr(p, 'main_app'):
+            main_app = getattr(p, 'main_app', None)
+            if main_app: break
+        p = p.parent()
+    
+    if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
+        # 委托给主程序的 Tkinter 线程执行，脱离 Qt 循环
+        main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+        return
+        
+    # 2. 降级方案：如果是独立 Qt 进程运行 (Standalone Mode)
+    logger.warning(f"📍 [Racing] 启动 DNA 降级审计 (Standalone) - 共 {len(code_to_name)} 只个股")
+    
+    def _standalone_worker():
+        try:
+            import tkinter as tk
+            # 延迟导入，防止启动阶段 IO 负担
+            from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+            
+            # 创建独立的 Tk root 并隐藏
+            root = tk.Tk()
+            root.withdraw()
+            
+            codes = list(code_to_name.keys())
+            # 独立审计不传 end_date，默认使用最新数据
+            summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+            
+            if summaries:
+                # 显示报告窗口。注意：由于是独立线程，需要在这里阻塞 loop
+                show_dna_audit_report_window(summaries, parent=root)
+                root.mainloop()
+            else:
+                logger.error("❌ [Racing] 降级审计失败：未返回任何基因摘要")
+                root.destroy()
+        except Exception as e:
+            logger.error(f"❌ [Racing] 降级审计崩溃: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # 启动守护线程执行审计，防止阻塞 PyQt6 UI
+    t = threading.Thread(target=_standalone_worker, daemon=True)
+    t.start()
+
 # [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
 def _get_racing_config_path():
     """获取标准化的绝对路径，确保集成与独立模式路径对齐"""
@@ -914,12 +970,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            main_app = getattr(self.parent(), 'main_app', None)
-            if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
-                # 回调委托给 tk_dispatch_queue，脱离 Qt 线程在 Tkinter 线程里执行
-                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
-            else:
-                logger.error("未连接到主监视器程序，无法启动 DNA 审计")
+            dispatch_dna_audit(code_to_name, parent_widget=self)
 
 class CategoryDetailDialog(QDialog, WindowMixin):
     """饼图分类成分股详情弹窗 - 结构与板块详情一致"""
@@ -1391,11 +1442,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            main_app = getattr(self.parent(), 'main_app', None)
-            if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
-                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
-            else:
-                logger.error("未连接到主监视器程序，无法启动 DNA 审计")
+            dispatch_dna_audit(code_to_name, parent_widget=self)
 
 
 class RacingTimeline(QFrame):
@@ -2251,28 +2298,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             c_item = self.stock_table.item(row, 0)
             n_item = self.stock_table.item(row, 1)
             if c_item:
-                c = c_item.text().strip()
-                n = n_item.text().strip() if n_item else ""
+                c = str(c_item.text()).strip()
+                c = re.sub(r'[^\d]', '', c)
+                if len(c) < 6 and c.isdigit(): c = c.zfill(6)
+                
+                n = str(n_item.text()).strip() if n_item else ""
                 if n.startswith("🔔"): n = n.replace("🔔", "")
-                code_to_name[c] = n
+
+                if c and c != "N/A" and len(c) == 6:
+                    code_to_name[c] = n
                     
         if code_to_name:
-            # 委托给主程序的 dispatch 逻辑
-            if hasattr(self, 'main_app') and self.main_app:
-                if hasattr(self.main_app, 'tk_dispatch_queue') and hasattr(self.main_app, '_run_dna_audit_batch'):
-                    self.main_app.tk_dispatch_queue.put(lambda: self.main_app._run_dna_audit_batch(code_to_name))
-                else:
-                    logger.error("主程序不支持 DNA 审计分发逻辑")
-            else:
-                # 尝试从 Parent 追溯
-                p = self.parent()
-                while p:
-                    if hasattr(p, 'main_app'):
-                        if hasattr(p.main_app, 'tk_dispatch_queue'):
-                            p.main_app.tk_dispatch_queue.put(lambda: p.main_app._run_dna_audit_batch(code_to_name))
-                            return
-                    p = p.parent()
-                logger.error("未找到主监控程序句柄，无法分发 DNA 命令")
+            dispatch_dna_audit(code_to_name, parent_widget=self)
 
     def _on_show_alerts_clicked(self):
         """专用按钮打开报警个股追踪窗口"""

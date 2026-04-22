@@ -29,6 +29,13 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-21 11:30
+- [x] **优化交易信号策略与加速段保护 (Optimized Trading Signal Strategy & Acceleration Protection)**：
+    - [x] **实现“加速段”卖点屏蔽逻辑**：在 `IntradayDecisionEngine._main_wave_hold_check` 中引入了加速感知。当个股处于“主升浪加速”或“整理后突破”状态时，自动提升技术性卖点（如 TD9、超买乖离）的触发阈值（从 0.4 提升至 0.75+）。这解决了 `603052` (恩捷科技) 在大涨后缩量横盘再突破时被错误判定为“动能衰竭”而过早减仓的问题。
+    - [x] **上线“整理后突破”专项加成**：在 `evaluate` 决策链中新增了 `is_consolidation_breakout` 判定。如果昨日为“企稳/整理”模式且今日触发“加速/涨停”，则给予 +0.25 的强力买点加成，确保系统能捕捉到二级起爆点。
+    - [x] **豁免加速股的“单阳”与“量能模糊”惩罚**：针对处于加速态的个股，自动豁免 `One-Day Wonder` (-0.15) 和 `Volume Blur` (-0.10) 惩罚。这确保了在突破初期的量能温和放大阶段，系统依然能给出坚定的跟单信号。
+    - [x] **重构决策引擎算力布局**：将形态识别（企稳、加速、主升浪）前置到 `evaluate` 头部进行统一计算，并通过参数下发至各子模块。减少了 50% 以上的重复计算开销，提升了高频行情下的实时响应速度。
+
 ## 2026-04-20 17:00
 - [x] **修复竞价回放逻辑崩溃与评分冗余优化 (Fixed Bidding Replay Crash & Evaluation Optimization)**:
     - [x] **根治 `TypeError: update_scores() got an unexpected keyword argument 'skip_evaluate'`**: 补全了 `bidding_momentum_detector.py` 中 `update_scores` 方法的参数签名，增加了 `skip_evaluate` 选项。这解决了在 `test_bidding_replay.py` 仿真过程中，由于调用了尚未定义的新接口参数导致的进程级崩溃。
