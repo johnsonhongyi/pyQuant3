@@ -235,6 +235,10 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
             logger.debug(f"[VoiceProcess] 🔊 播报: {speech_text}")
             
             # ⚡ [STABILITY] 在每一条播报前初始化，确保 Windows 引擎状态正确
+            # --- [NEW] 播报前最后一次中止检查 ---
+            if (abort_event and abort_event.is_set()) or not stop_flag.value:
+                continue
+
             engine = None
             try:
                 if pythoncom:
@@ -252,18 +256,24 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 def check_abort(name=None, location=None, length=None):
                     if (abort_event and abort_event.is_set()) or not stop_flag.value:
                         try:
+                            # ⚡ [NEW] 立即停止当前引擎所有输出
                             engine.stop()
                         except:
                             pass
 
                 engine.connect('started-utterance', check_abort)
                 engine.connect('started-word', check_abort)
-
-                engine.say(speech_text)
-                engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
+                
+                # --- [NEW] 启动前检查 ---
+                if not (abort_event and abort_event.is_set()):
+                    engine.say(speech_text)
+                    engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
                 
                 # [FIX] Update completion timestamp
                 last_speech_end_ts = time.time()
+                
+                # 播报完后清除 abort 标记，允许下一条 (如果是通过 abort() 清除的，speak() 会负责 clear)
+                # self.abort_event.clear() 
                 
                 time.sleep(0.1)
             except Exception as e:
@@ -351,12 +361,14 @@ class VoiceProcess:
         
         logger.debug("🛑 Voice broadcast aborted and queue cleared")
 
-    def pause(self):
+    def pause(self, clear_queue=False):
         """暂停播报"""
         self.pause_event.clear()
         # 同时触发 abort_event 中止当前正在说的
         self.abort_event.set()
-        logger.debug("⏸ Voice broadcast paused")
+        if clear_queue:
+            self.abort() # 内部包含 clear queue 逻辑
+        logger.debug(f"⏸ Voice broadcast paused (clear_queue={clear_queue})")
 
     def resume(self):
         """恢复播报"""
@@ -3383,9 +3395,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⚡ [NEW] 连接清理信号：清理日志时同步清理播报队列
         self.signal_log_panel.cleared.connect(self.voice_thread.abort)
         # ⚡ [NEW] 连接暂停信号：信号日志面板的暂停按钮 -> 控制全局语音
-        self.signal_log_panel.pause_toggled.connect(
-            lambda paused: self.voice_thread.pause() if paused else self.voice_thread.resume()
-        )
+        self.signal_log_panel.pause_toggled.connect(self._on_signal_log_pause_toggled)
         # ⚡ [NEW] 交互监控：任何手动选择操作都视为用户交互，激活防夺权锁定 (5秒)
         self.signal_log_panel.log_table.itemSelectionChanged.connect(self._on_signal_log_user_interaction)
 
@@ -3415,7 +3425,9 @@ class MainWindow(QMainWindow, WindowMixin):
         """统一处理并在固定窗口内播报累积的信号语音 (去重、合并)"""
         if not hasattr(self, 'voice_thread') or not self.voice_thread:
             return
-        if getattr(self, '_voice_paused', False):
+            
+        # ⚡ [NEW] 检查全局播报使能 (总阀门 + 局部暂停)
+        if not self._is_voice_globally_enabled():
             self.voice_batch_buffer.clear()
             return
             
@@ -3879,8 +3891,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if not hasattr(self, 'voice_thread') or not self.voice_thread:
                 return
             
-            is_muted = getattr(self, '_voice_paused', False)
-            if is_muted:
+            # ⚡ [NEW] 遵循总阀门分层逻辑
+            if not self._is_voice_globally_enabled():
                 return
 
             # 2. message 已经是 clean_msg，直接使用
@@ -3938,16 +3950,17 @@ class MainWindow(QMainWindow, WindowMixin):
 
                     # 联动 2: 实现自发联动标记 (从 _poll_command_queue 整合至此)
                     if code:
+                        import re as _re
+                        clean_target_code = _re.sub(r'[^\d]', '', str(code)).zfill(6)
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         self.active_time_linkage = {
-                            'code': str(code).zfill(6),
+                            'code': clean_target_code,
                             'timestamp': timestamp,
                             'label': "实时监控播报",
                             'price': None
                         }
                         # 🚀 [NEW] 程序内联联动优化：如果当前显示的正是该个股，立即刷新以显示联动白线
-                        if self.current_code == code:
-                            # logger.debug(f"[Internal] Sync linkage marker for {code}")
+                        if self.current_code == clean_target_code:
                             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
 
         except Exception as e:
@@ -4085,6 +4098,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.debug("[IPC] Command TOGGLE_LOG received")
                 if hasattr(self, "_toggle_signal_log"):
                     QtCore.QTimer.singleShot(0, self._toggle_signal_log)
+
 
             else:
                 logger.warning(f"Unknown IPC command content: {content}")
@@ -6038,6 +6052,21 @@ class MainWindow(QMainWindow, WindowMixin):
                     if hasattr(self, 'on_scan_triggered'):
                         self.on_scan_triggered()
 
+                elif cmd_type == 'VOICE_STATE':
+                    # ✅ Tk 主程序通知可视化器同步语音状态
+                    enabled = payload.get('enabled', True) if isinstance(payload, dict) else bool(payload)
+                    logger.debug(f"[IPC] Recv VOICE_STATE: enabled={enabled}")
+                    self._voice_paused = not enabled
+                    # 同步菜单文本
+                    if hasattr(self, 'voice_action'):
+                        txt = "🔇 热点播报: 关(Alt+O)" if not enabled else "🔊 热点播报: 开(Alt+O)"
+                        self.voice_action.setText(txt)
+                    if hasattr(self, 'hotlist_panel'):
+                        self.hotlist_panel._voice_paused = not enabled
+                        if hasattr(self.hotlist_panel, '_update_voice_button_style'):
+                            self.hotlist_panel._update_voice_button_style()
+                    self._sync_voice_thread_state()
+
             # --- 统一执行本轮最后的有效切换意图 ---
             
             # 🚀 [Batch UI Update] 处理完所有指令后，统一触发一次表格刷新
@@ -6077,7 +6106,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.warning("[Visualizer] Command pipe closed.")
             self.command_conn = None
         except Exception as e:
-            logger.error(f"[Visualizer] Failed to poll command pipe: {e}")
+            logger.exception(f"[Visualizer] Failed to poll command pipe: {e}")
 
     def _handle_update_df_data(self, payload):
         """内部助手：处理行情数据包更新"""
@@ -7277,66 +7306,91 @@ class MainWindow(QMainWindow, WindowMixin):
         pass
 
     def _toggle_hotlist_voice(self, checked=False):
-        """切换主语音状态 (Stop/Mute) - 直接通过核心变量切换并持久化"""
-        if not hasattr(self, 'voice_thread'):
-            return
-
-        # [REFACTORED] 核心状态翻转，不再基于 UI 文本猜测
+        """切换语音播报状态 (总阀门控制)"""
         new_is_paused = not getattr(self, '_voice_paused', False)
-        
-        if new_is_paused:
-            # 🔇 关闭：暂停播报并立即中止当前
-            self.voice_thread.pause()
-            text = "🔇 热点播报: 关(Alt+O)"
-            logger.info("🔇 语音播报已关闭")
-        else:
-            # 🔊 开启
-            text = "🔊 热点播报: 开(Alt+O)"
-            # 确保不处于暂停状态
-            self.voice_thread.resume()
-            logger.info("🔊 语音播报已开启")
-            
-        # 1. 立即更新 UI 文本
-        if hasattr(self, 'voice_action'):
-            self.voice_action.setText(text)
-
-        # 2. ⭐ 更新核心变量 (唯一真相源)
         self._voice_paused = new_is_paused
         
-        # 3. 同步到面板对象
+        # 1. 同步 UI 状态 (菜单 Action)
+        text = "🔇 热点播报: 关(Alt+O)" if new_is_paused else "🔊 热点播报: 开(Alt+O)"
+        if hasattr(self, 'voice_action'):
+            self.voice_action.setText(text)
+            
+        # 2. 同步 UI 状态 (HotlistPanel 内部状态)
         if hasattr(self, 'hotlist_panel'):
             self.hotlist_panel._voice_paused = new_is_paused
-            # 如果面板也开着，强制让它更新一下按钮样式
             if hasattr(self.hotlist_panel, '_update_voice_button_style'):
                 self.hotlist_panel._update_voice_button_style()
-                
-        # 4. 同步给语音线程
-        if hasattr(self, 'voice_thread') and self.voice_thread:
-            if new_is_paused:
-                self.voice_thread.pause()
-            else:
-                self.voice_thread.resume()
-
-        # 4.5 ⭐ [FIX] 同步 signal_log_panel 的暂停状态，确保停播时不再产生 log_added 语音
+            
+        # 3. ⚡ 执行物理中止与状态同步
+        self._sync_voice_thread_state()
+        
+        # 4. 同步 UI 状态 (SignalLogPanel 状态记录)
         if hasattr(self, 'signal_log_panel') and self.signal_log_panel:
             slp = self.signal_log_panel
-            if getattr(slp, '_paused', False) != new_is_paused:
-                slp._paused = new_is_paused
-                if hasattr(slp, 'pause_btn'):
-                    slp.pause_btn.setText("▶" if new_is_paused else "⏸")
-                if hasattr(slp, 'status_label'):
-                    slp.status_label.setText("已暂停" if new_is_paused else "运行中")
-        # 关闭时立即清空语音批量缓冲区，防止残留任务被播报
+            # 如果主开关关闭，同步更新日志面板的按钮显示 (虽然逻辑上由 _sync_voice_thread_state 统一管控)
+            if hasattr(slp, 'pause_btn'):
+                # 如果主开关关闭，日志面板应显示“待恢复”状态(逻辑上)，但通常保持原样
+                # 我们这里不做强制修改，以免用户混淆，但确保物理上无声
+                pass
+
+        # 5. 清理正在积压的批处理缓冲
         if new_is_paused and hasattr(self, 'voice_batch_buffer'):
             self.voice_batch_buffer.clear()
-
-        # 5. [OPTIMIZED] 采用延迟保存，防止主线程 IO 导致的 UI 卡死
+            
+        # 6. [IPC/Persistence]
         QTimer.singleShot(1000, self._save_visualizer_config)
 
-        # 6. [IPC] 反向同步给主程序监控进程 (确保互斥同步)
-        enabled = new_is_paused
-        self._send_voice_state_to_main_app(enabled=enabled)
+        # ⚡ 互斥逻辑：打开可视化器语音 → 通知 Tk 关闭其 AlertManager 语音
+        # 关闭时不通知 Tk（不强制打开 Tk 端语音）
+        if not new_is_paused:
+            # 可视化器语音刚被打开，通知 Tk 端关闭
+            self._send_voice_state_to_main_app(enabled=False)
 
+        logger.info(f"📢 Global Voice Broadcast: {'OFF' if new_is_paused else 'ON'}")
+
+    def _on_signal_log_pause_toggled(self, paused):
+        """信号日志面板暂停状态切换回调"""
+        self._sync_voice_thread_state()
+        logger.info(f"📋 Signal Log Voice Toggle: {'PAUSED' if paused else 'RESUMED'}")
+
+    def _is_voice_globally_enabled(self) -> bool:
+        """检查全系统语音是否应该处于开启状态 (分层逻辑)"""
+        # 1. 总阀门：热点播报开关 (MainWindow._voice_paused)
+        master_paused = getattr(self, '_voice_paused', False)
+        if master_paused:
+            return False
+            
+        # 2. 局部阀门：信号日志暂停开关 (SignalLogPanel._paused)
+        if hasattr(self, 'signal_log_panel') and self.signal_log_panel:
+            log_paused = getattr(self.signal_log_panel, '_paused', False)
+            if log_paused:
+                return False
+                
+        return True
+
+    def _sync_voice_thread_state(self):
+        # NOTE: This method only controls the visualizer process's own voice_thread.
+        # Tk main process AlertManager is in a SEPARATE process; its singleton is NOT shared.
+        # Cross-process communication must use IPC protocols:
+        #   Visualizer -> Tk: _send_voice_state_to_main_app() via Named Pipe
+        #   Tk -> Visualizer: viz_conn[0].send(('VOICE_STATE', {'enabled': ...})) via mp.Pipe
+        if not hasattr(self, 'voice_thread') or not self.voice_thread:
+            return
+
+        enabled = self._is_voice_globally_enabled()
+
+        if not enabled:
+            is_master_off = getattr(self, '_voice_paused', False)
+            if is_master_off:
+                # Master switch OFF: flush queue + stop current utterance immediately
+                self.voice_thread.abort()
+                self.voice_thread.pause()
+            else:
+                # Local pause (signal log pause button): stop current, keep queue
+                self.voice_thread.pause(clear_queue=False)
+        else:
+            # Resume playback
+            self.voice_thread.resume()
 
     def _toggle_verbose_log(self):
         """切换详细计算日志显示并触发延迟持久化 (避免主线程卡死)"""
@@ -13171,55 +13225,6 @@ class MainWindow(QMainWindow, WindowMixin):
             # 代码相同，仅刷新渲染层以更新标尺位置
             self.render_charts(actual_code, self.day_df, getattr(self, 'tick_df', None), force=True)
     
-    def _on_hotlist_voice_alert(self, code: str, msg: str):
-        """热点面板语音通知 - 同时更新信号日志面板"""
-        try:
-            # 1. 过滤逻辑：买卖、低开走高、强势
-            is_valid = any(kw in msg for kw in ['买入', '卖出', '低开走高', '强势'])
-            if not is_valid:
-                return
-
-            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
-            # if '低开走高' in msg and not any(kw in msg for kw in ['强势', '买入', '卖出']):
-            #     if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
-            #         row = self.df_all.loc[code]
-            #         o = row.get('open', 0)
-            #         l = row.get('low', 0)
-            #         if o > l > 0:
-            #             return
-
-            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
-            
-            # 2. 更新信号日志面板 (详尽信息模式)
-            if hasattr(self, 'signal_log_panel'):
-                from datetime import datetime
-                timestamp = datetime.now().strftime('%H:%M:%S')
-                name = self.code_name_map.get(code, code)
-                pattern = 'ALERT'
-                if '状态变更' in msg:
-                    pattern = 'STATUS'
-                
-                full_detail = f"[{timestamp}] {name}({code}) {msg}"
-                
-                if not self.signal_log_panel.isVisible():
-                    self.signal_log_panel.show()
-                    self.signal_log_panel.raise_()
-                self.signal_log_panel.append_log(code, name, pattern, full_detail, is_high_priority=False)
-            
-            # 3. 播放语音
-            # ⚡ [REMOVED] 已重构，由 signal_log_panel.log_added 信号统一触发同步播报
-            # if hasattr(self, 'voice_thread') and self.voice_thread:
-            #     if not is_muted:
-            #         self.voice_thread.speak(f"{msg}")
-            else:
-                logger.debug(f"Voice thread not available, skipping: {msg}")
-        except Exception as e:
-            logger.error(f"Hotlist voice alert error: {e}")
-
-
-    def _on_hotlist_double_click(self, code: str, name: str, add_price: float):
-        """热点列表双击: 打开详情弹窗"""
-        logger.info(f"打开热点详情: {code} {name} (加入价: {add_price:.2f})")
         
         # 先加载该股票数据（确保K线预览可用）
         if code and code != self.current_code:

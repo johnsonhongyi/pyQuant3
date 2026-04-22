@@ -29,6 +29,30 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-22 11:28
+- [x] **重构全局双语音系统互斥控制 (Mutual Exclusion Voice System)**：
+    - [x] **明确系统设计**：系统存在两套独立的语音播报，同一时间只能有一套处于工作状态：
+        - **Tk AlertManager**：专属于报警弹窗的语音播报，打开后报警窗口才能正常播报；
+        - **Qt Visualizer VoiceProcess**：专属于可视化器窗口内的信号语音播报。
+    - [x] **实现互斥开启逻辑 (Mutual Exclusion on Open)**：
+        - **打开可视化器语音** → 自动通知 Tk 端关闭 AlertManager 播报（通过 Named Pipe `SET_VOICE_STATE=False`）；
+        - **打开 Tk 语音** → 自动通知可视化器关闭 VoiceProcess（通过 `mp.Pipe` `VOICE_STATE={'enabled': False}`）；
+        - **关闭任意一方** → 不通知对方，不强制打开对方（静默关闭）。
+    - [x] **根治循环通知死锁**：可视化器处理 `VOICE_STATE` 指令时只调用 `_sync_voice_thread_state()`（控制本进程），不再反向通知 Tk，彻底避免 A 告知 B → B 再告知 A 的循环触发。
+
+## 2026-04-22 11:06
+
+- [x] **修复全系统语音报警中断机制 (Fixed Global Voice Alert Abort Mechanism)**：
+    - [x] **根治“无法即时关闭”与“总是要等很久”缺陷**：
+        - 补全了 `alert_manager.py` (Tkinter 主程序播报器) 中缺失的 COM 引擎中断回调机制。通过引入 `pyttsx3.connect('started-utterance')` 以及 `interrupt_event` 原子锁，实现了对长时语音播报的即时中止（Instant Abort），告别了以前必须等整句话读完才能静音的痛点。
+        - 修复了 `trade_visualizer_qt6.py` (Qt 视窗进程) 中 `VoiceProcess` 遗漏的 `self.abort_event` NameError 导致无法触发中断判断的隐患。
+    - [x] **打通热点播报总阀门联动与跨进程阻断 (Unified Master Kill-switch)**：
+        - 在可视化的 `_sync_voice_thread_state` 内置入了对本地 `AlertManager` 的彻底静音拦截，一旦关闭主开关，所有并发播放列队将瞬间清空并停止输出。
+        - 补全并修缮了 `trade_visualizer_qt6.py` 内用于监听来自主程序的 IPC 指令 (`TOGGLE_VOICE_STATE`) 处理器，实现双向闭环同步。
+    - [x] **修复主窗口 `on_voice_toggle` 同步漏洞**：
+        - 当主控台（Main App）的语音复选框被关停时，新增主动发送 `AlertManager().stop_current_speech()` 即刻刹停当前的语音输出。
+        - 当再度打开开关时，通过 `AlertManager().resume_voice()` 智能解锁和重置内部中断锁，保障后续新信号语音可以继续顺畅进场。
+
 ## 2026-04-22 10:30
 - [x] **优化竞赛与竞价面板右键菜单联动 (Optimized Context Menu Linkage in Racing & Bidding Panels)**：
     - [x] **集成语音预警与软件推送 (Integrated Voice Alert & Software Push)**：在 `sector_bidding_panel.py` 与 `bidding_racing_panel.py` 的个股、龙头及明细右键菜单中，补齐了 **“🔔 加入语音预警”** 与 **“🚀 发送到关联软件”** 功能。

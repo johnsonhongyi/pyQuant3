@@ -965,50 +965,18 @@ class HotlistPanel(QWidget, WindowMixin):
         return None
     
     def toggle_voice(self):
-        """切换语音播报：暂停/恢复 (仅 Hotlist 面板行为)"""
+        """切换语音播报：暂停/恢复 (与主窗口总阀门联动)"""
         main_window = self._find_main_window()
-        if not main_window or not hasattr(main_window, 'voice_thread'):
+        if not main_window:
             return
 
-        self._voice_paused = not self._voice_paused
-        # [FIX] 同步到主窗口标志位 (唯一真相源)
-        main_window._voice_paused = self._voice_paused
-        
-        if self._voice_paused:
-            main_window.voice_thread.pause()
-            logger.info("⏸ Voice paused via HotlistPanel")
+        # 🚀 [UNIFIED] 直接调用主窗口的统一切换逻辑，确保分层状态同步
+        if hasattr(main_window, '_toggle_hotlist_voice'):
+            main_window._toggle_hotlist_voice()
         else:
-            main_window.voice_thread.resume()
-            logger.info("▶ Voice resumed via HotlistPanel")
-            
-        # ⭐ [NEW] 同步更新主窗口菜单文本与 Action 状态
-        if hasattr(main_window, 'voice_action'):
-            text = "🔇 热点播报: 关(Alt+O)" if self._voice_paused else "🔊 热点播报: 开(Alt+O)"
-            main_window.voice_action.setText(text)
-
-        # ⭐ [FIX] 同步 signal_log_panel 的暂停状态，确保停播时不再触发 log_added 语音
-        if hasattr(main_window, 'signal_log_panel') and main_window.signal_log_panel:
-            slp = main_window.signal_log_panel
-            # 仅在状态不一致时才同步，避免死循环
-            if getattr(slp, '_paused', False) != self._voice_paused:
-                slp._paused = self._voice_paused
-                # 同步按钮图标 (⏸ = 运行中, ▶ = 已暂停)
-                if hasattr(slp, 'pause_btn'):
-                    slp.pause_btn.setText("▶" if self._voice_paused else "⏸")
-                if hasattr(slp, 'status_label'):
-                    slp.status_label.setText("已暂停" if self._voice_paused else "运行中")
-            # 如果是关闭状态，同步清空语音批量缓冲区，立即生效
-            if self._voice_paused and hasattr(main_window, 'voice_batch_buffer'):
-                main_window.voice_batch_buffer.clear()
-             
-        # ⭐ [NEW] 立即触发主窗口配置保存
-        if hasattr(main_window, '_save_visualizer_config'):
-            main_window._save_visualizer_config()
-
-        # ⭐ [NEW] 也同步给主进程 (IPC)
-        if hasattr(main_window, '_send_voice_state_to_main_app'):
-            enabled = self._voice_paused
-            main_window._send_voice_state_to_main_app(enabled=enabled)
+            # 兜底逻辑 (如果主窗口接口异常)
+            self._voice_paused = not self._voice_paused
+            self._update_voice_button_style()
             
         self._update_voice_button_style()
 
