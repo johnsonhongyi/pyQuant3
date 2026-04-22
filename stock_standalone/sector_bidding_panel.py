@@ -3901,6 +3901,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         act_dna.triggered.connect(lambda: self._run_dna_audit_selected(self.watchlist_table))
         
         menu.addSeparator()
+        # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+        mw = self.main_window
+        if mw and hasattr(mw, 'tk_dispatch_queue'):
+            menu.addAction("🔔 加入语音预警", lambda: mw.tk_dispatch_queue.put(
+                lambda c=code, n=name: mw.add_voice_monitor_dialog(c, n) if hasattr(mw, 'add_voice_monitor_dialog') else None
+            ))
+            menu.addAction("🚀 发送到关联软件", lambda: mw.tk_dispatch_queue.put(
+                lambda c=code: mw.original_push_logic(c) if hasattr(mw, 'original_push_logic') else None
+            ))
+            menu.addSeparator()
+
         menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
         
         menu.exec(self.watchlist_table.viewport().mapToGlobal(pos))
@@ -4268,6 +4279,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         act_dna.triggered.connect(lambda: self._run_dna_audit_selected(self.stock_table))
 
         menu.addSeparator()
+        # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+        mw = self.main_window
+        if mw and hasattr(mw, 'tk_dispatch_queue'):
+            menu.addAction("🔔 加入语音预警", lambda: mw.tk_dispatch_queue.put(
+                lambda c=code, n=name: mw.add_voice_monitor_dialog(c, n) if hasattr(mw, 'add_voice_monitor_dialog') else None
+            ))
+            menu.addAction("🚀 发送到关联软件", lambda: mw.tk_dispatch_queue.put(
+                lambda c=code: mw.original_push_logic(c) if hasattr(mw, 'original_push_logic') else None
+            ))
+            menu.addSeparator()
+
         menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
         menu.addAction("📋 复制名称", lambda: self._copy_to_clipboard(name))
         menu.exec(self.stock_table.mapToGlobal(pos))
