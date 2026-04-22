@@ -669,21 +669,31 @@ class SignalLogPanel(QWidget, WindowMixin):
         :param force_scroll: 是否强行滚动到该行 (用于防夺权保护策略)
         """
         self._is_programmatic_selection = True
+        import re as _re
         try:
             # 1. 快速查找所有匹配代码的项
-            # Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchCaseSensitive
+            # ⚡ [ENHANCED] 更加鲁棒的代码匹配：先尝试精确匹配，失败则尝试模糊匹配，并对 code 进行标准化
+            clean_code = _re.sub(r'[^\d]', '', code).zfill(6) if code else ""
+            
             items = self.log_table.findItems(code, Qt.MatchFlag.MatchExactly)
+            if not items and clean_code:
+                # 尝试用 6 位纯代码搜索
+                items = self.log_table.findItems(clean_code, Qt.MatchFlag.MatchExactly)
+            
+            if not items:
+                # 降级：包含匹配
+                items = self.log_table.findItems(code, Qt.MatchFlag.MatchContains)
             
             if not items:
                 return False
                 
             # 2. 筛选出位于 "代码" 列 (Col 3) 的项
+            # 🚀 [FIX] 统一代码列索引检查
             code_items = [it for it in items if it.column() == 3]
             if not code_items:
                 return False
             
             # 3. 寻找最佳匹配 (优先匹配 Row 最小的，即最新的)
-            # findItems 返回顺序不确定，先按 Row 排序
             code_items.sort(key=lambda it: it.row())
             
             target_item = None
@@ -692,22 +702,44 @@ class SignalLogPanel(QWidget, WindowMixin):
                 # 如果没有片段要求，直接取最新的 (Row 最小)
                 target_item = code_items[0]
             else:
-                # 遍历查找匹配消息的
-                import re as _re
+                # 预处理 snippet：去除时间戳和股票名等前缀，只保留核心信息以增加命中率
+                # 例如将 "[10:20:30] 恩捷股份(002812) 突破" 简化为 "突破"
+                # ⚡ [REFINED] 采用多级剥离，处理 [Time] Name(Code) Pattern: Msg 各种变体
+                def _get_core(text):
+                    # 1. 去除时间戳 [HH:MM:SS]
+                    text = _re.sub(r'^\[\d+:\d+:\d+\]\s*', '', text).strip()
+                    # 2. 如果包含 )，尝试取其后的内容 (跳过名称和代码)
+                    if ')' in text:
+                        text = text.split(')', 1)[-1].strip()
+                    # 3. 如果包含冒号，取其后的核心消息
+                    if ':' in text:
+                        text = text.split(':', 1)[-1].strip()
+                    if '：' in text:
+                        text = text.split('：', 1)[-1].strip()
+                    return text
+                
+                core_snippet = _get_core(message_snippet)
+                if not core_snippet: core_snippet = message_snippet
+                
                 for it in code_items:
                     row = it.row()
                     msg_item = self.log_table.item(row, 5)
                     if msg_item:
-                        # ⭐ [FIX] 去除 (N次) 计数前缀再比较，确保新旧行均能命中
                         raw_text = msg_item.text()
+                        # ⚡ [REFINED] 多维度匹配：优先匹配核心片段，次选全量匹配
+                        # 1. 去除计数前缀的纯文本
                         clean_text = _re.sub(r'^\(\d+次\)\s*', '', raw_text).strip()
-                        if (message_snippet in clean_text or
-                                clean_text[:len(message_snippet)] == message_snippet or
-                                message_snippet in raw_text):
+                        # 2. 提取表格行中的核心消息
+                        core_text = _get_core(clean_text)
+                        
+                        if (core_snippet in core_text or 
+                            core_snippet in clean_text or
+                            message_snippet in clean_text or
+                            message_snippet in raw_text):
                             target_item = it
                             break
                 
-                # 如果没找到匹配详细内容的，降级到最新的代码匹配
+                # 如果没找到匹配详细内容的，降级到该代码最新的行
                 if not target_item:
                     target_item = code_items[0]
             

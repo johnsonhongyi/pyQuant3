@@ -186,17 +186,32 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     worker_log(f"Skip Check Error: {e}")
 
             try:
+                # 确保进入播放阶段时先清空中断标记，以免影响后续播放
+                if interrupt_event.is_set():
+                    interrupt_event.clear()
+
                 if pyttsx3:
                     engine = pyttsx3.init()
                     engine.setProperty('rate', cct.voice_rate)
                     engine.setProperty('volume', cct.voice_volume)
                     
+                    def check_interrupt(name=None, location=None, length=None):
+                        if interrupt_event.is_set() or stop_event.is_set():
+                            try:
+                                engine.stop()
+                            except:
+                                pass
+
+                    engine.connect('started-utterance', check_interrupt)
+                    engine.connect('started-word', check_interrupt)
+
                     if feedback_queue and key:
                         try: feedback_queue.put(('START', key))
                         except: pass
 
-                    engine.say(safe_msg)
-                    engine.runAndWait()
+                    if not interrupt_event.is_set():
+                        engine.say(safe_msg)
+                        engine.runAndWait()
                     last_speech_end_ts = time.time() # [FIX] Update completion time
                     
                     # 播放结束
@@ -367,10 +382,12 @@ class AlertManager:
             self.cancel_queue.put(str(key))
         else:
             self.cancel_queue.put("__ALL__")
+            self.interrupt_event.set() # 立即触发引擎中断
 
     def resume_voice(self):
         """恢复语音播报"""
         self.voice_enabled = True
+        self.interrupt_event.clear() # 清除中断状态
         try:
             while not self.voice_queue.empty():
                 try: self.voice_queue.get_nowait()

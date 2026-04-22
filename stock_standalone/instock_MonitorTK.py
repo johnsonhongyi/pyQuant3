@@ -5345,12 +5345,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.live_strategy.set_voice_enabled(val)
         else:
             logger.warning(f'live_strategy is None, cannot set voice enabled')
-        if not val:
-            # 如果关闭语音，立即停止当前播放
+        # 1. 控制本进程 AlertManager
+        try:
+            am = AlertManager()
+            am.voice_enabled = val
+            if not val:
+                am.stop_current_speech()
+            else:
+                am.resume_voice()
+        except:
+            pass
+
+        # 2. 互斥逻辑：打开 Tk 语音 → 通知可视化器关闭其 VoiceProcess
+        #    关闭时不通知可视化器（不强制打开可视化器端语音）
+        if val:
             try:
-                AlertManager().stop_current_speech()
-            except:
-                pass
+                if (hasattr(self, 'viz_conn') and self.viz_conn
+                        and hasattr(self, 'qt_process') and self.qt_process
+                        and self.qt_process.is_alive()):
+                    self.viz_conn[0].send(('VOICE_STATE', {'enabled': False}))
+                    logger.info("[IPC] Tk voice ON -> sent VOICE_STATE=False to visualizer")
+            except Exception as e:
+                logger.debug(f"[IPC] Failed to send VOICE_STATE to visualizer: {e}")
 
     def reload_cfg_value(self):
         global marketInit,marketblk,scale_offset,resampleInit
