@@ -849,15 +849,26 @@ class SectorDetailDialog(QDialog, WindowMixin):
         act_dna = menu.addAction(title_dna)
         act_dna.triggered.connect(self._run_dna_audit_top20)
 
+        # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+        main_app = None
+        p = self.parent()
+        while p:
+            if hasattr(p, 'main_app') and p.main_app:
+                main_app = p.main_app
+                break
+            p = p.parent()
+        
+        if main_app and hasattr(main_app, 'tk_dispatch_queue'):
+            menu.addSeparator()
+            clean_name = name.replace("🔔", "").strip()
+            menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: main_app.tk_dispatch_queue.put(
+                lambda: main_app.add_voice_monitor_dialog(c, n) if hasattr(main_app, 'add_voice_monitor_dialog') else None
+            ))
+            menu.addAction("🚀 发送到关联软件", lambda c=code: main_app.tk_dispatch_queue.put(
+                lambda: main_app.original_push_logic(c) if hasattr(main_app, 'original_push_logic') else None
+            ))
+
         menu.addSeparator()
-        
-        # # [NEW] 重置活跃功能
-        # selected_rows = sorted(list(set([it.row() for it in self.table.selectedItems()])))
-        # if not selected_rows: selected_rows = [row]
-        
-        # title_reset = f"🔄 重置活跃 ({len(selected_rows)}只)" if len(selected_rows) > 1 else f"🔄 重置活跃 ({name})"
-        # act_reset = menu.addAction(title_reset)
-        # act_reset.triggered.connect(lambda: self._reset_stock_active(selected_rows))
         
         # [🚀 全局重置] 用户明确要求：重置活跃是全局重置，不是针对单个
         act_reset = menu.addAction("🔄 重置全局活跃")
@@ -1331,6 +1342,25 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         title_dna = f"🚀 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🚀 执行 DNA 审计 ({name})"
         act_dna = menu.addAction(title_dna)
         act_dna.triggered.connect(self._run_dna_audit_top20)
+
+        # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+        main_app = None
+        p = self.parent()
+        while p:
+            if hasattr(p, 'main_app') and p.main_app:
+                main_app = p.main_app
+                break
+            p = p.parent()
+            
+        if main_app and hasattr(main_app, 'tk_dispatch_queue'):
+            menu.addSeparator()
+            clean_name = name.replace("🔔", "").strip()
+            menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: main_app.tk_dispatch_queue.put(
+                lambda: main_app.add_voice_monitor_dialog(c, n) if hasattr(main_app, 'add_voice_monitor_dialog') else None
+            ))
+            menu.addAction("🚀 发送到关联软件", lambda c=code: main_app.tk_dispatch_queue.put(
+                lambda: main_app.original_push_logic(c) if hasattr(main_app, 'original_push_logic') else None
+            ))
 
         menu.addSeparator()
 
@@ -2017,6 +2047,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         act_reset.triggered.connect(self._reset_stock_active)
         
         menu.addSeparator()
+        # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+        ma = getattr(self, 'main_app', None)
+        if ma and hasattr(ma, 'tk_dispatch_queue'):
+            clean_name = name.replace("🔔", "").strip()
+            menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: ma.tk_dispatch_queue.put(
+                lambda: ma.add_voice_monitor_dialog(c, n) if hasattr(ma, 'add_voice_monitor_dialog') else None
+            ))
+            menu.addAction("🚀 发送到关联软件", lambda c=code: ma.tk_dispatch_queue.put(
+                lambda: ma.original_push_logic(c) if hasattr(ma, 'original_push_logic') else None
+            ))
+            menu.addSeparator()
+            
         act_copy = menu.addAction("📋 复制代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
         
@@ -2064,6 +2106,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             act_viz = menu.addAction(f"📊 联动可视化 (龙头: {name})")
             act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_sector_context_viz"))
+            
+            # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+            ma = getattr(self, 'main_app', None)
+            if ma and hasattr(ma, 'tk_dispatch_queue'):
+                menu.addSeparator()
+                clean_name = name.replace("🔔", "").strip()
+                menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: ma.tk_dispatch_queue.put(
+                    lambda: ma.add_voice_monitor_dialog(c, n) if hasattr(ma, 'add_voice_monitor_dialog') else None
+                ))
+                menu.addAction("🚀 发送到关联软件", lambda c=code: ma.tk_dispatch_queue.put(
+                    lambda: ma.original_push_logic(c) if hasattr(ma, 'original_push_logic') else None
+                ))
             
             menu.exec(self.sector_table.viewport().mapToGlobal(pos))
 

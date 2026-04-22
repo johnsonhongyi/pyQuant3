@@ -29,6 +29,12 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-22 10:30
+- [x] **优化竞赛与竞价面板右键菜单联动 (Optimized Context Menu Linkage in Racing & Bidding Panels)**：
+    - [x] **集成语音预警与软件推送 (Integrated Voice Alert & Software Push)**：在 `sector_bidding_panel.py` 与 `bidding_racing_panel.py` 的个股、龙头及明细右键菜单中，补齐了 **“🔔 加入语音预警”** 与 **“🚀 发送到关联软件”** 功能。
+    - [x] **实现跨框架安全分发 (Thread-Safe Dispatch)**：利用 `tk_dispatch_queue` 异步管道，将 PyQt6 UI 触发的业务逻辑平滑分发至 Tkinter 主进程执行。这彻底消除了在高频行情下直接调用重型联动接口导致的 GIL 锁死与 UI 粘滞，确保了监控系统的极致流畅。
+    - [x] **增强明细窗体交互闭环**：通过递归父级探测（Parent Traversal）机制，确保了在独立的 `SectorDetailDialog` 与 `CategoryDetailDialog` 弹窗中也能准确识并调用主程序的语音及推送接口。
+
 ## 2026-04-21 11:30
 - [x] **优化交易信号策略与加速段保护 (Optimized Trading Signal Strategy & Acceleration Protection)**：
     - [x] **实现“加速段”卖点屏蔽逻辑**：在 `IntradayDecisionEngine._main_wave_hold_check` 中引入了加速感知。当个股处于“主升浪加速”或“整理后突破”状态时，自动提升技术性卖点（如 TD9、超买乖离）的触发阈值（从 0.4 提升至 0.75+）。这解决了 `603052` (恩捷科技) 在大涨后缩量横盘再突破时被错误判定为“动能衰竭”而过早减仓的问题。
