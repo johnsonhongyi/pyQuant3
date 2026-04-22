@@ -816,6 +816,12 @@ class HotlistPanel(QWidget, WindowMixin):
         refresh_btn.setToolTip("刷新盈亏")
         refresh_btn.clicked.connect(self._refresh_pnl)
         header_layout.addWidget(refresh_btn)
+
+        # [NEW] 修复非交易日时间按钮 (📅)
+        self.fix_date_btn = QPushButton("📅")
+        self.fix_date_btn.setToolTip("修复非交易日时间 (修复当前Tab所有记录到上一个交易日)")
+        self.fix_date_btn.clicked.connect(self._trigger_fix_dates)
+        header_layout.addWidget(self.fix_date_btn)
         
         # [NEW] 联动自动显示切换按钮 (🔗)
         self.linkage_btn = QPushButton("🔗")
@@ -1180,7 +1186,7 @@ class HotlistPanel(QWidget, WindowMixin):
         
         layout.addWidget(self.watchlist_table)
 
-    def _update_item(self, table, row, col, value, sort_value=None, foreground=None):
+    def _update_item(self, table, row, col, value, sort_value=None, foreground=None, user_data=None):
         """[HIGH-PERFORMANCE] 复用 Item，避免频繁销毁创建对象导致 UI 卡死"""
         item = table.item(row, col)
         
@@ -1208,13 +1214,18 @@ class HotlistPanel(QWidget, WindowMixin):
             # 复用并更新
             # [FIX] 无论是否显式传递 sort_value，只要 value 是数值，就必须同步更新 item.sort_value
             # 这是修复“序号无法恢复排序”的关键：防止复用的 Item 带着旧行的排序权重
-            if sort_value is not None:
-                item.sort_value = sort_value # type: ignore
-            elif isinstance(value, (int, float)):
-                item.sort_value = value # type: ignore
+            if isinstance(item, NumericTableWidgetItem):
+                if sort_value is not None:
+                    item.sort_value = sort_value # type: ignore
+                elif isinstance(value, (int, float)):
+                    item.sort_value = value # type: ignore
             
             if item.text() != display_text:
                 item.setText(display_text)
+        
+        # ⚡ [NEW] 设置额外数据 (UserRole)
+        if user_data is not None:
+            item.setData(Qt.ItemDataRole.UserRole, user_data)
         
         # 统一设置对齐和颜色
         if isinstance(value, (int, float)):
@@ -1434,9 +1445,22 @@ class HotlistPanel(QWidget, WindowMixin):
                 name_item = self.watchlist_table.item(row, 3)
                 if code_item and name_item:
                     code = code_item.text()
-                    # 双击通常伴随强关联，直接记录并发送
+                    discover_date = code_item.data(Qt.ItemDataRole.UserRole) or ""
+                    # 强标记为最后选中
                     self._last_selected_codes["watchlist"] = code
-                    self.item_double_clicked.emit(f"{code}|realtime=false", name_item.text(), 0.0)
+                    
+                    # 获取发现价格
+                    price = 0.0
+                    if (it := self.watchlist_table.item(row, 5)): # 发现价列
+                        try: price = float(it.text())
+                        except: pass
+
+                    # [UPGRADE] 补充完整的联动协议
+                    link_msg = f"{code}|realtime=false|signal_type=watchlist|signal_price={price}"
+                    if discover_date:
+                        link_msg += f"|signal_date={discover_date}"
+                    
+                    self.item_double_clicked.emit(link_msg, name_item.text(), price)
             except: pass
 
     def _on_watchlist_cell_changed(self, row, col, pr, pc):
@@ -2276,9 +2300,9 @@ class HotlistPanel(QWidget, WindowMixin):
                 self._update_item(self.follow_table, row_idx, 7, entry_txt)
                 
                 # 8. 时间
-                time_dt = str(row.updated_at)
+                time_dt = str(getattr(row, 'detected_date', row.updated_at))
                 time_str = time_dt[:16] if len(time_dt) > 10 else time_dt
-                it_time = self._update_item(self.follow_table, row_idx, 8, time_str)
+                it_time = self._update_item(self.follow_table, row_idx, 8, time_str, user_data=time_dt)
                 it_time.setData(Qt.ItemDataRole.UserRole, time_dt)
 
                 # 9. 理由
@@ -2322,7 +2346,7 @@ class HotlistPanel(QWidget, WindowMixin):
             try:
                 code_item = self.follow_table.item(row, 2)
                 name_item = self.follow_table.item(row, 3)
-                time_item = self.follow_table.item(row, 9) # MM-DD HH:MM
+                time_item = self.follow_table.item(row, 8) # [FIX] 时间在第8列 (MM-DD HH:MM)
                 
                 if code_item and name_item:
                     code = str(code_item.text()).strip()
@@ -2338,7 +2362,7 @@ class HotlistPanel(QWidget, WindowMixin):
                     if time_item:
                         full_time = time_item.data(Qt.ItemDataRole.UserRole)
                         if full_time and len(str(full_time)) >= 10:
-                            signal_date = str(full_time)[:10]
+                            signal_date = str(full_time)
                         else:
                             # Fallback
                             time_txt = time_item.text()
@@ -2348,7 +2372,7 @@ class HotlistPanel(QWidget, WindowMixin):
                     if code:
                         # 获取入场价
                         entry_price = 0.0
-                        if (it := self.follow_table.item(row, 4)): # 入场价列
+                        if (it := self.follow_table.item(row, 7)): # [FIX] 入场价在第7列
                             try: entry_price = float(it.text())
                             except: pass
 
@@ -2368,7 +2392,7 @@ class HotlistPanel(QWidget, WindowMixin):
             try:
                 code_item = self.follow_table.item(row, 2)
                 name_item = self.follow_table.item(row, 3)
-                time_item = self.follow_table.item(row, 9)
+                time_item = self.follow_table.item(row, 8) # [FIX] 时间在第8列
                 
                 if code_item and name_item:
                     code = str(code_item.text()).strip()
@@ -2382,7 +2406,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 if time_item:
                     full_time = time_item.data(Qt.ItemDataRole.UserRole)
                     if full_time and len(str(full_time)) >= 10:
-                        signal_date = str(full_time)[:10]
+                        signal_date = str(full_time)
                     else:
                         time_txt = time_item.text()
                         if "-" in time_txt:
@@ -2609,7 +2633,7 @@ class HotlistPanel(QWidget, WindowMixin):
                     # [FIX] Hotlist link: No signal_date needed, specify type and add_price
                     link_msg = f"{item.code}|realtime=false|signal_type=hotlist|signal_price={item.add_price}"
                     if item.add_time and len(item.add_time) >= 10:
-                        link_msg += f"|signal_date={item.add_time[:10]}"
+                        link_msg += f"|signal_date={item.add_time}"
                     self.stock_selected.emit(link_msg, item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
@@ -2624,8 +2648,11 @@ class HotlistPanel(QWidget, WindowMixin):
         if item:
             # [DEBUNCE] 强关联同步去重缓存
             self._last_selected_codes["hotlist"] = item.code
-            # [FIX] Hotlist link: specify type
-            self.stock_selected.emit(f"{item.code}|realtime=false|signal_type=hotlist", item.name)
+            # [FIX] Hotlist link: specify type and time linkage
+            link_msg = f"{item.code}|realtime=false|signal_type=hotlist"
+            if item.add_time and len(item.add_time) >= 10:
+                link_msg += f"|signal_date={item.add_time}"
+            self.stock_selected.emit(link_msg, item.name)
             self.item_double_clicked.emit(item.code, item.name, item.add_price)
 
     def select_stock(self, code: str):
@@ -2903,3 +2930,99 @@ class HotlistPanel(QWidget, WindowMixin):
             cmd = {"cmd": "DNA_AUDIT", "codes": code_to_name}
             send_code_via_pipe(cmd, logger, pipe_name=PIPE_NAME_TK)
             logger.info(f"🧬 HotlistPanel: Sent DNA_AUDIT via Pipe for {len(code_to_name)} stocks")
+
+    def _fix_date_if_needed(self, date_str: str) -> str:
+        """检查日期是否为交易日，如果不是则修复为上一个交易日"""
+        if not date_str: return date_str
+        try:
+            # 兼容 YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD
+            date_part = date_str[:10]
+            time_part = date_str[10:] if len(date_str) > 10 else ""
+            
+            # 使用 cct 工具检查
+            if not cct.get_day_istrade_date(date_part):
+                # 不是交易日，寻找上一个交易日
+                fixed_date = cct.get_lastdays_trade_date(1, date_part)
+                if fixed_date:
+                    logger.warning(f"📅 [FixDate] {date_part} -> {fixed_date}")
+                    return f"{fixed_date}{time_part}"
+        except Exception as e:
+            logger.error(f"Fix date error for {date_str}: {e}")
+        return date_str
+
+    def _trigger_fix_dates(self):
+        """修复当前 Tab 的日期数据"""
+        tab_idx = self.tabs.currentIndex()
+        tab_name = self.tabs.tabText(tab_idx)
+        
+        # 确认弹窗
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(self, "确认修复", 
+                                   f"确定要检查并修复 [{tab_name}] 中所有非交易日的记录吗？\n(这会将其日期回退到最近的交易日)",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        changed_count = 0
+        mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+        conn = mgr.get_connection()
+        c = conn.cursor()
+        
+        try:
+            if tab_idx == 0: # Hotlist
+                for item in self.items:
+                    new_time = self._fix_date_if_needed(item.add_time)
+                    if new_time != item.add_time:
+                        c.execute("UPDATE follow_record SET follow_date = ? WHERE id = ?", (new_time, item.id))
+                        item.add_time = new_time
+                        changed_count += 1
+            
+            elif tab_idx == 1: # Follow Queue
+                # 针对活性信号 (TRACKING/ENTERED/READY/STALE) 统一修复
+                c.execute("SELECT id, detected_date, updated_at FROM follow_queue WHERE status NOT IN ('EXITED', 'CANCELLED')")
+                rows = c.fetchall()
+                for r_id, det_date, up_date in rows:
+                    new_det = self._fix_date_if_needed(det_date or "")
+                    new_up = self._fix_date_if_needed(up_date or "")
+                    
+                    if new_det != det_date or new_up != up_date:
+                        c.execute("UPDATE follow_queue SET detected_date = ?, updated_at = ? WHERE id = ?", 
+                                 (new_det, new_up, r_id))
+                        changed_count += 1
+            
+            elif tab_idx == 2: # Watchlist
+                c.execute("SELECT code, discover_date, updated_at FROM hot_stock_watchlist WHERE validation_status != 'DROPPED'")
+                rows = c.fetchall()
+                for code, disc_date, up_date in rows:
+                    new_disc = self._fix_date_if_needed(disc_date or "")
+                    new_up = self._fix_date_if_needed(up_date or "")
+                    
+                    if new_disc != disc_date or new_up != up_date:
+                        c.execute("UPDATE hot_stock_watchlist SET discover_date = ?, updated_at = ? WHERE code = ?", 
+                                 (new_disc, new_up, code))
+                        changed_count += 1
+            
+            conn.commit()
+            
+            if changed_count > 0:
+                self.status_label.setText(f"✅ 成功修复 {changed_count} 条记录日期")
+                # 立即刷新当前界面
+                if tab_idx == 0:
+                    self._refresh_table()
+                else:
+                    # Follow 和 Watchlist 依赖 Worker 定期刷新，或者我们可以重置指纹强制下次刷新
+                    self._last_follow_hash = ""
+                    self._last_watchlist_hash = ""
+                    # 提示用户可能需要几秒钟更新
+                    self.status_label.setText(f"✅ 已修复 {changed_count} 条记录，等待后台同步...")
+            else:
+                self.status_label.setText("ℹ️ 当前记录均为有效交易日，无需修复")
+                
+            QTimer.singleShot(3000, self._update_status_bar)
+            
+        except Exception as e:
+            logger.error(f"Trigger fix dates error: {e}")
+            self.status_label.setText(f"❌ 修复失败: {e}")
+        finally:
+            c.close()

@@ -1390,12 +1390,34 @@ class IntradayEmotionTracker:
                             p_high = float(anchors.get('prev_high', 0))
                             ma60 = float(row.get('ma60', anchors.get('ma60', 0))) # 动态 ma60 优先
                             last_l = float(anchors.get('last_low', 0))
-                            
+
                             hmax60 = float(anchors.get('hmax60', 0))
                             hmax   = float(anchors.get('hmax', 0))
                             max5   = float(anchors.get('max5', 0))
                             high4  = float(anchors.get('high4', 0))
                             last_c = float(anchors.get('last_close', 0))
+                            
+                            # [ALIGN] 提前解析时间，用于早盘杀跌等逻辑判断
+                            t_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1][:5]
+                            is_morning = "09:30" <= t_str <= "11:35"
+                            is_early = "09:30" <= t_str <= "10:15"
+                            
+                            opt_state = self._opt_states.setdefault(code_str, {
+                                "down_vwap": False, "up_last_close": False, "pullback": False, 
+                                "peak_after_rebound": 0.0, "morning_v_rebound": False
+                            })
+                            
+                            # [ALIGN] 提前解析日内核心指标，防止后续逻辑出现 UnboundLocalError
+                            vol_r = float(row.get(active_ratio_col, 1.0))
+                            cur_vol = float(row.get(active_vol_col, 0))
+                            p_fast = float(row.get('_p_fast', 0))
+                            v_avg = float(row.get('_v_avg', 0))
+                            i_high = self._intraday_high.get(code_str, 0.0)
+                            r_high = float(row.get('high', price))
+                            if i_high == 0: 
+                                i_high = r_high # 初次初始化
+                                self._intraday_high[code_str] = r_high
+                            
                             
                             # 688787 特征 1: 站稳均价线 (VWAP Support)
                             if price > avg_p * vwap_support_val: # 比例从配置读取
@@ -1443,21 +1465,40 @@ class IntradayEmotionTracker:
                             if ma60 > 0 and price < ma60 < row.get('open', price):
                                 status.append("跌破MA60")
                                 
+                            # --- 🚨 [NEW] 极其强割策略 (Strong Cut Strategy) ---
+                            cur_pct = float(row.get('percent', 0))
+                            high_p = float(row.get('high', price))
+                            open_p = float(row.get('open', price))
+                            
+                            # 1. 涨停开板放量下跌 (Limit-up Breakout with High Volume)
+                            # 估算涨停价 (大约 9.8% 以上视为触及涨停)
+                            if last_c > 0 and (high_p >= last_c * 1.098):
+                                if price < high_p * 0.98 and vol_r > 2.0:
+                                    status.append("🚨涨停开板放量")
+                                    
+                            # 2. 开盘最高下杀诱多 (Open-High Kill with Volume)
+                            # 如果开盘涨幅 > 3% 且 5分钟内(早盘) 快速放量下杀
+                            o_gap = (open_p - last_c) / last_c * 100.0 if last_c > 0 else 0
+                            if is_early and o_gap > 3.0:
+                                if price < open_p * 0.97 and vol_r > 3.0:
+                                    status.append("🚨开盘诱多杀跌")
+                                    
+                            # 3. 突然放量破均线 (Sudden High Volume Breakdown)
+                            # 如果日内涨幅曾 > 3%，且现在放量跌破均线 (VWAP)，视为诱多破位
+                            if i_high > last_c * 1.03 and price < avg_p and vol_r > 2.5:
+                                status.append("🚨放量破均线")
+
+                            # 4. 趋势失能 (Momentum Failure)
+                            # 如果从日内高点回吐超过 4%，且量能依然很大，说明主力在跑
+                            if i_high > 0 and price < i_high * 0.96 and vol_r > 1.8:
+                                status.append("🚨高位放量回吐")
+                                
                             # --- 🔥 [NEW] 趋势加速逻辑 ---
                             # 1. 价格突破日内高点 (新高)
                             # 2. 量比 > 1.8
                             # 3. 价格 > MA60 (大周期支撑)
                             # 4. 突然加速上涨带量 (最近 3-tick 价格升, 当前 vol > 均值 * 1.5)
-                            vol_r = float(row.get(active_ratio_col, 1.0))
-                            p_fast = float(row.get('_p_fast', 0))
-                            v_avg = float(row.get('_v_avg', 0))
-                            cur_vol = float(row.get(active_vol_col, 0))
-                            
-                            r_high = float(row.get('high', price))
-                            i_high = self._intraday_high.get(code_str, 0.0)
-                            
-                            # 初次记录
-                            if i_high == 0: self._intraday_high[code_str] = r_high
+                            # [REMOVED] vol_r, p_fast, i_high 等已在头部提前解析
                             
                             is_new_high = r_high > i_high > 0
                             is_accel = (p_fast > 0) and (cur_vol > v_avg * 1.5)
@@ -1470,15 +1511,7 @@ class IntradayEmotionTracker:
 
                             # --- 🚀 [NEW] SBC_OPT 复合形态追踪 ---
                             # 逻辑核心：模拟 sbc_core.run_sbc_analysis_core 里的状态机
-                            opt_state = self._opt_states.setdefault(code_str, {
-                                "down_vwap": False, "up_last_close": False, "pullback": False, 
-                                "peak_after_rebound": 0.0, "morning_v_rebound": False
-                            })
-                            # 解析时间 (HH:MM) 用于各阶段窗口判定
-                            t_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1][:5]
-                            is_morning = "09:30" <= t_str <= "11:35"
-                            is_early = "09:30" <= t_str <= "10:15"
-                            
+                            # [REMOVED] opt_state, t_str 等已在头部提前解析
                             sbc_opt_buy = False
                             sbc_opt_reason = ""
                             
@@ -1547,7 +1580,7 @@ class IntradayEmotionTracker:
                                         elif t_str >= "14:00" and vol_r < 1.5:
                                             is_sbc_buy = False # 尾盘适度放量即可
                             
-                            is_sbc_sell = "跌破均线" in status or "跌破MA60" in status
+                            is_sbc_sell = any(kw in status for kw in ("跌破均线", "跌破MA60", "🚨涨停开板放量", "🚨开盘诱多杀跌", "🚨放量破均线", "🚨高位放量回吐"))
                             is_sbc = is_sbc_buy or is_sbc_sell
                             prev_sbc = self._last_sbc_status.get(code_str, False)
                             

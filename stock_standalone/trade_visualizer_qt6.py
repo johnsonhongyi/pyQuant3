@@ -3617,62 +3617,14 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"[Pipe] Failed to send ADD_MONITOR: {e}")
     
-    def _on_hotlist_stock_selected(self, code: str, name: str):
-        """热点面板选中股票回调"""
-        self.show_stock(code)
 
-    def _on_hotlist_double_click(self, code: str, name: str, price: float):
-        """热点面板双击回调 - 切换到K线并聚焦"""
-        logger.info(f"[Hotlist] Double clicked: {code} {name}")
-        self.show_stock(code)
-        # 激活窗口
-        self.raise_()
-        self.activateWindow()
+
+
     
-    def _on_hotlist_voice_alert(self, code: str, message: str):
-        """热点面板语音提醒回调 - 同时更新信号日志面板"""
-        try:
-            # 1. 过滤：保留买卖信号、低开走高、强势股及一般信号提醒
-            # [STABILITY] 扩充关键字支持，减少“时有时无”的漏报情况
-            is_valid = any(kw in message for kw in ['买入', '卖出', '低开走高', '强势', '信号', '突破', '拐点'])
-            if not is_valid:
-                return
 
-            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
-            if '低开走高' in message and not any(kw in message for kw in ['强势', '买入', '卖出']):
-                if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
-                    row = self.df_all.loc[code]
-                    o = row.get('open', 0)
-                    l = row.get('low', 0)
-                    if o > l > 0: # 如果开盘价不是最低点，则跳过
-                        return
 
-            # ⭐ CHECK MUTE STATE (only for voice, log panel always updates)
-            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
-            
-            # 2. 更新信号日志面板 (详尽信息模式)
-            if hasattr(self, 'signal_log_panel'):
-                from datetime import datetime
-                timestamp = datetime.now().strftime('%H:%M:%S')
-                name = self.code_name_map.get(code, code)
-                pattern = 'ALERT'
-                if '状态变更' in message:
-                    pattern = 'STATUS'
-                    
-                full_detail = f"[{timestamp}] {name}({code}) {message}"
-                
-                if not self.signal_log_panel.isVisible():
-                    self.signal_log_panel.show()
-                    self.signal_log_panel.raise_()
-                self.signal_log_panel.append_log(code, name, pattern, full_detail, is_high_priority=False)
-            
-            # 3. 播放语音 (受静音状态控制)
-            # ⚡ [REMOVED] 改为由 signal_log_panel.log_added 信号统一触发，避免逻辑分散
-            # if not is_muted:
-            #     if hasattr(self, 'voice_thread'):
-            #         self.voice_thread.speak(message)
-        except:
-            pass
+
+
 
     
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
@@ -13139,6 +13091,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
 
+        # ⭐ [ROOT-FIX] 终极刹车：强制退出进程
+        # 彻底解决 pyttsx3/COM 句柄残留或 QThread 销毁异常导致的进程挂起及后台语音播报不停的问题
+        logger.info("👋 Visualizer Process Exiting via os._exit(0)")
+        import os
+        os._exit(0)
+
     # # ================== 热点自选面板回调 ==================
     # def _toggle_hotlist_panel(self):
     #     """Alt+H: 切换热点面板显示/隐藏"""
@@ -13218,21 +13176,100 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'active_time_linkage'):
                 self.active_time_linkage = {}
 
-        # 3. 执行加载或刷新
+        # 3. 执行加载或刷新 (通过传参告知 load_stock_by_code 不要误清理联动状态)
         if actual_code != self.current_code:
-            self.load_stock_by_code(actual_code, name)
+            self.load_stock_by_code(actual_code, name, signal_date=signal_date, signal_price=signal_price)
         else:
             # 代码相同，仅刷新渲染层以更新标尺位置
             self.render_charts(actual_code, self.day_df, getattr(self, 'tick_df', None), force=True)
     
+    def _on_hotlist_voice_alert(self, code: str, msg: str):
+        """热点面板语音通知 - 同时更新信号日志面板"""
+        try:
+            # 1. 过滤逻辑：买卖、低开走高、强势
+            is_valid = any(kw in msg for kw in ['买入', '卖出', '低开走高', '强势'])
+            if not is_valid:
+                return
+
+            # ⚡ [NEW] 细化过滤：低开走高模型 只要 早盘最低点即开盘点 的个股
+            # if '低开走高' in msg and not any(kw in msg for kw in ['强势', '买入', '卖出']):
+            #     if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+            #         row = self.df_all.loc[code]
+            #         o = row.get('open', 0)
+            #         l = row.get('low', 0)
+            #         if o > l > 0:
+            #             return
+
+            is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+            
+            # 2. 更新信号日志面板 (详尽信息模式)
+            if hasattr(self, 'signal_log_panel'):
+                from datetime import datetime
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                name = self.code_name_map.get(code, code)
+                pattern = 'ALERT'
+                if '状态变更' in msg:
+                    pattern = 'STATUS'
+                
+                full_detail = f"[{timestamp}] {name}({code}) {msg}"
+                
+                if not self.signal_log_panel.isVisible():
+                    self.signal_log_panel.show()
+                    self.signal_log_panel.raise_()
+                self.signal_log_panel.append_log(code, name, pattern, full_detail, is_high_priority=False)
+            
+            # 3. 播放语音
+            # ⚡ [REMOVED] 已重构，由 signal_log_panel.log_added 信号统一触发同步播报
+            # if hasattr(self, 'voice_thread') and self.voice_thread:
+            #     if not is_muted:
+            #         self.voice_thread.speak(f"{msg}")
+            else:
+                logger.debug(f"Voice thread not available, skipping: {msg}")
+        except Exception as e:
+            logger.error(f"Hotlist voice alert error: {e}")
+
+
+    def _on_hotlist_double_click(self, code: str, name: str, add_price: float):
+        """[UPGRADE] 热点列表双击: 切换股票并打开详情弹窗 (支持跟单时间联动)"""
+        if not code: return
         
-        # 先加载该股票数据（确保K线预览可用）
-        if code and code != self.current_code:
-            self.load_stock_by_code(code, name)
+        actual_code = code
+        signal_date = None
+        signal_price = add_price # 优先使用传入的 add_price
         
-        # [FIX] Extract clean code for popup if it contains metadata
-        clean_code = code.split('|')[0] if '|' in code else code
-        popup = HotSpotPopup(clean_code, name, add_price, self)
+        # 1. 解析复合指令 (针对 跟单/观察 等带时间戳的信号)
+        if "|" in code:
+            parts = code.split("|")
+            actual_code = parts[0]
+            for p in parts[1:]:
+                if p.startswith("signal_date="):
+                    signal_date = p.split("=")[1]
+                elif p.startswith("signal_price="):
+                    try: 
+                        parsed_price = float(p.split("=")[1])
+                        if parsed_price > 0: signal_price = parsed_price
+                    except: pass
+        
+        logger.info(f"打开热点详情: {actual_code} {name} (信号价: {signal_price:.2f}, 时间: {signal_date})")
+        
+        # 2. 执行联动切换 (如果是跟单信号，自动跳转到对应时间)
+        if signal_date:
+            self.active_time_linkage = {
+                'code': actual_code,
+                'timestamp': signal_date,
+                'label': "跟单联动",
+                'price': signal_price if signal_price > 0 else None,
+                'auto_scroll': True
+            }
+        
+        # 3. 先加载该股票数据（确保K线预览可用）
+        if actual_code != self.current_code:
+            self.load_stock_by_code(actual_code, name, signal_date=signal_date, signal_price=signal_price)
+        else:
+            self.render_charts(actual_code, self.day_df, getattr(self, 'tick_df', None), force=True)
+        
+        # 4. 打开详情弹窗
+        popup = HotSpotPopup(actual_code, name, signal_price, self)
         
         # 连接弹窗信号
         popup.group_changed.connect(lambda c, g: self._on_popup_group_changed(c, g))
@@ -13240,9 +13277,9 @@ class MainWindow(QMainWindow, WindowMixin):
         popup.item_removed.connect(lambda c: self._on_popup_remove(c))
         
         # 更新弹窗中的当前价格
-        if not self.df_all.empty and code in self.df_all.index:
-            row = self.df_all.loc[code]
-            current_price = float(row.get('close', row.get('price', add_price)))
+        if not self.df_all.empty and actual_code in self.df_all.index:
+            row = self.df_all.loc[actual_code]
+            current_price = float(row.get('close', row.get('price', signal_price)))
             popup.update_price(current_price)
         
         popup.exec()
