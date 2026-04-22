@@ -4504,9 +4504,16 @@ class StockLiveStrategy:
                 # 语义清理
                 clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
                 import re
-                raw_parts = re.split(r'[，。！| \s]+', clean_msg)
+                # [FIX] 彻底移除空括号 () or ( ) 以及多余符号
+                clean_msg = re.sub(r'\(\s*\)', '', clean_msg)
+                
+                raw_parts = re.split(r'[，。！| \s：:]+', clean_msg)
                 seen = set()
                 unique_parts = [p.strip() for p in raw_parts if p.strip() and p.strip() not in seen and not seen.add(p.strip())] # type: ignore
+                
+                # [FIX] 过滤掉只有 [日线] 这种标签但没有实质内容的片段
+                unique_parts = [p for p in unique_parts if p not in ('[日线]', '日线', '()')]
+                
                 concise_msg = "，".join(unique_parts[:3])
                 
                 leading_tag = ""
@@ -4514,8 +4521,11 @@ class StockLiveStrategy:
                 elif "热点" in message: leading_tag = "热点龙头，"
                 elif "主升" in message: leading_tag = "主升启动，"
                 elif "顶部风险" in message: leading_tag = "顶部预警，"
+                elif any(kw in message for kw in ("破位", "跌破", "杀跌", "回吐", "风险", "🚨")): leading_tag = "风险预警，"
 
-                speak_text = f"注意{action}，{leading_tag}{name} {code} ，{concise_msg}"
+                # [FIX] 在语音中加入当前价格，增强感知
+                price_str = f"{price:.2f}元" if price > 0 else ""
+                speak_text = f"注意{action}，{leading_tag}{name} {code} {price_str} ，{concise_msg}"
                 try:
                     # [ASYNC VOICE] Already non-blocking in AlertManager, but we use a short delay
                     # to let the UI popup appear first for visual confirmation
