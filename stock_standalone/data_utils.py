@@ -2616,13 +2616,18 @@ def fetch_and_process(
                     vol=ct.json_countVol,
                     vtype=ct.json_countType
                 )
+                
+                init_res_m = resample
 
                 if now_time <= 835:
-                    resamples = ['2d','3d', 'w', 'm','d']
+                    base_resamples = ['2d', '3d', 'w', 'm', 'd']
                 else:
-                    resamples = ['2d','3d','d']
+                    base_resamples = ['3d', 'w', 'd']
 
-                init_res_m = resample
+                # 保证 init_res_m 永远最后一个，且不重复
+                resamples = [x for x in base_resamples if x != init_res_m]
+                resamples.append(init_res_m)
+
                 for res_m in resamples:
                     time_init_m = time.time()
                     # if res_m != g_values.getkey("resample"):
