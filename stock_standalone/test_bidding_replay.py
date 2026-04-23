@@ -985,7 +985,21 @@ def main(args=None, df_all_target=None):
     """
     if args is None:
         import argparse
-        parser = argparse.ArgumentParser(description="Sector Bidding Slice Backtest/Replay Tool")
+        from datetime import datetime
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        parser = argparse.ArgumentParser(
+            description="Sector Bidding Slice Backtest/Replay Tool",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=f"""
+Usage Examples:
+  1. High-speed Replay (UI Mode):
+     python test_bidding_replay.py --ui --speed 100.0 --verbose --start 09:30:00 --log WARNING
+  2. Live Trading Monitor (UI Mode):
+     python test_bidding_replay.py --ui --live
+  3. Specific Date Debug (UI Mode):
+     python test_bidding_replay.py --ui --speed 20.0 --verbose --start 09:25:00 --log DEBUG --date {today_str}
+"""
+        )
         parser.add_argument("--speed", type=float, default=0.0, help="Playback speed multiplier (e.g. 1.0, 10.0). 0.0 means full speed.")
         parser.add_argument("--observation", type=str, action="append", help="Observation timestamps (HH:MM:SS) to pause and inspect. Can be specified multiple times.")
         parser.add_argument("--start", type=str, default="09:25:00", help="Simulation start time (HH:MM:SS)")

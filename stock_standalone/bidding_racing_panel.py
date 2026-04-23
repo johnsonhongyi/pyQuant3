@@ -412,7 +412,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         # [🚀 极限性能] 状态追踪
         self._last_rendered_version = -1
+        self._last_rendered_ts = 0.0
         self._dirty = False
+        self._init_refresh_count = 0  # [NEW] 初始强制刷新计数器
         
         self._init_ui()
         
@@ -607,7 +609,20 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
         # [🚀 极限性能] 版本脏检查：如果数据没变且没被强制置脏，直接跳过
         curr_ver = getattr(self.detector, 'data_version', 0)
-        if not getattr(self, '_dirty', False) and curr_ver == getattr(self, '_last_rendered_version', -1):
+        curr_ts = getattr(self.detector, 'last_data_ts', 0.0)
+        
+        # [FIX] 1. 窗口开启初期强制刷新 10 轮 (5秒)，确保冷启动数据灌入
+        is_init_phase = False
+        init_count = getattr(self, '_init_refresh_count', 0)
+        if init_count < 10:
+            self._init_refresh_count = init_count + 1
+            is_init_phase = True
+            
+        # [FIX] 2. 增强刷新判定：只要 版本号变化 OR 时间戳变化 OR 手动置脏 OR 处于初始化期，就允许刷新
+        is_data_changed = (curr_ver != getattr(self, '_last_rendered_version', -1)) or \
+                         (abs(curr_ts - getattr(self, '_last_rendered_ts', 0.0)) > 0.1)
+        
+        if not is_init_phase and not getattr(self, '_dirty', False) and not is_data_changed:
             return
 
         # [🚀 动态寻踪] 若当前探测器丢失，尝试从父面板动态“夺取”最新引用
@@ -692,15 +707,17 @@ class SectorDetailDialog(QDialog, WindowMixin):
         finally:
             self.detector._lock.release()
             
-        # [🚀 渲染闭环] 只有在成功获取数据并准备渲染时，才更新版本号
-        self._dirty = False
-        self._last_rendered_version = curr_ver
-            
         if not data_list:
             # [🚀 极速提示] 即使无数据也不白屏，显示占位
             self.table.setRowCount(0)
             self.status_lbl.setText(f"⚠️ '{self.sector_name}' 当前暂无活跃成分股行情")
+            # 注意：此处不更新 _last_rendered_version，让它在下一秒继续尝试“穿透”刷新
             return
+            
+        # [🚀 渲染闭环] 只有在成功获取数据并准备渲染时，才更新版本号与时间戳
+        self._dirty = False
+        self._last_rendered_version = curr_ver
+        self._last_rendered_ts = curr_ts
 
         # --- [🔒 锁外计算] 排序与统计全部移到临界区外执行，降低 GIL 竞争 ---
         col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
@@ -758,8 +775,19 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 if is_sbc: reason = sbc_registry[ts.code].get('desc', '')
                 if not reason: reason = getattr(ts, 'pattern_hint', "")
 
+            # [🚀 名称兜底] 优先从 ts 取，如果 ts 没名称，尝试从探测器的名称索引或主程序实时快照中提取
+            ts_name = getattr(ts, 'name', '')
+            if not ts_name or ts_name == ts.code or ts_name == '未知':
+                # 尝试从探测器索引找
+                ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
+                # 再次兜底：如果还没找到，尝试从主程序的全局快照提取
+                if (not ts_name or ts_name == ts.code or ts_name == '未知') and hasattr(self.detector, 'main_app'):
+                    df_all = getattr(self.detector.main_app, 'df_all', None)
+                    if df_all is not None and ts.code in df_all.index:
+                        ts_name = str(df_all.loc[ts.code, 'name'])
+
             flattened.append((
-                ts.code, getattr(ts, 'name', '未知') or '未知', score_cache.get(ts.code, 0), 
+                ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
                 getattr(ts, 'signal_count', 0) or 0,
                 getattr(ts, 'current_pct', 0) or 0,
                 (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
@@ -823,8 +851,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
         it = self.table.item(row, col)
         
         # [🚀 极限性能] 数值脏检查：只有当原始数值变动时，才允许进入昂贵的 f-string 格式化
-        # [FIX] 增加 it.text() 检查，防止由于初始化时的空 item 导致的“白屏”或“残留”
-        if it and it.text() and it.data(Qt.ItemDataRole.UserRole) == val:
+        # [FIX] 增加对有效文本内容的检查：如果当前 item 为空或者文本只有 code (冷启动态)，强制执行更新
+        if it and it.text() and it.text() != str(val) and it.data(Qt.ItemDataRole.UserRole) == val:
             # 数值没变，但颜色或背景可能随报警状态变动
             if color and it.foreground().color() != color:
                 it.setForeground(color)
@@ -1088,7 +1116,9 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         # [🚀 极限性能] 状态追踪
         self._last_rendered_version = -1
+        self._last_rendered_ts = 0.0
         self._dirty = False
+        self._init_refresh_count = 0 # [NEW] 初始强制刷新计数器
         
         self._init_ui()
         QTimer.singleShot(150, self._restore_header_state)
@@ -1209,7 +1239,19 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
         # [🚀 极限性能] 版本脏检查
         curr_ver = getattr(self.detector, 'data_version', 0)
-        if not getattr(self, '_dirty', False) and curr_ver == getattr(self, '_last_rendered_version', -1):
+        curr_ts = getattr(self.detector, 'last_data_ts', 0.0)
+        
+        # [FIX] 1. 初始强制刷新 10 轮
+        is_init_phase = False
+        init_count = getattr(self, '_init_refresh_count', 0)
+        if init_count < 10:
+            self._init_refresh_count = init_count + 1
+            is_init_phase = True
+            
+        is_data_changed = (curr_ver != getattr(self, '_last_rendered_version', -1)) or \
+                         (abs(curr_ts - getattr(self, '_last_rendered_ts', 0.0)) > 0.1)
+
+        if not is_init_phase and not getattr(self, '_dirty', False) and not is_data_changed:
             return
 
         if not hasattr(self, 'detector') or not self.detector: return
@@ -1250,16 +1292,17 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 else:
                     if get_racing_role(ts) == target_role:
                         data_list.append(ts)
-            
-            if not data_list:
-                if self.table.rowCount() > 0: self.table.setRowCount(0)
-                return
         finally:
             self.detector._lock.release()
             
+        if not data_list:
+            if self.table.rowCount() > 0: self.table.setRowCount(0)
+            return
+
         # [🚀 渲染闭环] 只有在成功获取数据并准备渲染时，才更新版本号
         self._dirty = False
         self._last_rendered_version = curr_ver
+        self._last_rendered_ts = curr_ts
 
         # [🚀 锁外计算] 预提取所有排序所需属性
         col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
@@ -1309,7 +1352,16 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 if not reason: 
                     reason = getattr(ts, 'pattern_hint', "")
 
-            flattened.append((ts.code, getattr(ts, 'name', '未知') or '未知', score_cache.get(ts.code, 0), 
+            # [🚀 名称兜底]
+            ts_name = getattr(ts, 'name', '')
+            if not ts_name or ts_name == ts.code or ts_name == '未知':
+                ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
+                if (not ts_name or ts_name == ts.code or ts_name == '未知') and hasattr(self.detector, 'main_app'):
+                    df_all = getattr(self.detector.main_app, 'df_all', None)
+                    if df_all is not None and ts.code in df_all.index:
+                        ts_name = str(df_all.loc[ts.code, 'name'])
+
+            flattened.append((ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
                              getattr(ts, 'signal_count', 0) or 0,
                              getattr(ts, 'current_pct', 0) or 0,
                              (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
@@ -1365,8 +1417,8 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         it = self.table.item(row, col)
         
         # [🚀 极限性能] 数值脏检查
-        # [FIX] 增加 it.text() 检查，防止由于初始化时的空 item 导致的“白屏”或“残留”
-        if it and it.text() and it.data(Qt.ItemDataRole.UserRole) == val:
+        # [FIX] 增加对有效文本内容的检查：如果当前 item 为空或者文本只有 code (冷启动态)，强制执行更新
+        if it and it.text() and it.text() != str(val) and it.data(Qt.ItemDataRole.UserRole) == val:
             if color and it.foreground().color() != color:
                 it.setForeground(color)
             if bg_color:
