@@ -29,6 +29,10 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-22 17:30
+- [x] **优化“显示详情”窗口交互 (Optimized Show Details Window Interaction)**：
+    - [x] **实现搜索框自动聚焦 (Auto-focus on Filter Entry)**：在 `stock_logic_utils.py` 的 `show_all_details` 方法中，补齐了 `search_entry.focus_set()` 调用。现在用户点击“显示详情”打开数据详情窗口后，光标会自动锁定在“过滤字段”输入框内，无需手动点击即可直接开始输入过滤关键字，显著提升了高频复盘时的数据检索效率。
+
 ## 2026-04-22 11:28
 - [x] **重构全局双语音系统互斥控制 (Mutual Exclusion Voice System)**：
     - [x] **明确系统设计**：系统存在两套独立的语音播报，同一时间只能有一套处于工作状态：
