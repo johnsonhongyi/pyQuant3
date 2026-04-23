@@ -1539,8 +1539,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def ask_exit(self):
         """弹出确认框，询问是否退出"""
-        if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
-            self.on_close()
+        global _exit_ctrl_c_count, _exit_ctrl_c_time
+        try:
+            if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
+                self.on_close()
+        except KeyboardInterrupt:
+            # [🚀 增强] 如果在确认框弹出时再次按 Ctrl+C，触发暴力退出逻辑
+            now = time.time()
+            if now - _exit_ctrl_c_time > 3:
+                _exit_ctrl_c_count = 0
+            _exit_ctrl_c_count += 1
+            _exit_ctrl_c_time = now
+            
+            if _exit_ctrl_c_count >= 3:
+                print("\n[Dialog] 检测到连续 3 次 Ctrl+C，正在强制暴力退出...")
+                os._exit(0)
+            else:
+                print(f"\n[Dialog] KeyboardInterrupt ({_exit_ctrl_c_count}/3), 请再次按 Ctrl+C 或输入 'quit' 退出")
+                # 再次尝试执行正常关闭流程
+                self.on_close()
 
     # ========== Win32 RegisterHotKey 全局快捷键 ==========
     # 使用系统级 RegisterHotKey API 替代 keyboard 库的低级钩子，
@@ -16140,6 +16157,11 @@ if __name__ == "__main__":
         sys.exit(0)
     
     app = StockMonitorApp()
+    
+    # [🚀 增强] 初始化全局退出计数器，用于 KeyboardInterrupt 暴力退出控制
+    _exit_ctrl_c_count = 0
+    _exit_ctrl_c_time = 0
+
     if cct.isMac():
         width, height = 100, 32
         cct.set_console(width, height)
