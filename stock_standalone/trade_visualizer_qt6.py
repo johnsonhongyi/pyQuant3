@@ -7132,10 +7132,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'hotlist_panel'):
              self.hotlist_panel._voice_paused = is_paused
         
-        # ⚠️ [FIX] 如果启动时状态为关闭，需立即同步给语音线程
         if is_paused and hasattr(self, 'voice_thread') and self.voice_thread:
             self.voice_thread.pause()
             logger.info("StartUp: Voice system initialized to PAUSED state.")
+        elif not is_paused:
+            # 🚀 [NEW] 如果启动时状态为开启，同步通知主程序静音，维持双端互斥
+            # 避免出现 Visualizer 播报时，主程序也在后台“偷跑”播报的情况
+            self._send_voice_state_to_main_app(enabled=False)
+            logger.info("StartUp: Voice system ACTIVE. Requesting Monitor silence.")
              
         text = "🔇 热点播报: 关(Alt+O)" if is_paused else "🔊 热点播报: 开(Alt+O)"
         self.voice_action = QAction(text, self)
@@ -7358,7 +7362,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.voice_thread.pause(clear_queue=False)
         else:
             # Resume playback
+            was_paused = getattr(self.voice_thread, 'pause_event', None) and not self.voice_thread.pause_event.is_set()
             self.voice_thread.resume()
+            
+            # ⭐ [NEW] 如果是从暂停恢复且当前没有任何播报，尝试播报当前选中的信号
+            if was_paused and hasattr(self, 'signal_log_panel') and self.signal_log_panel:
+                # 给予 200ms 缓冲，让 resume 指令先触达并稳定
+                QTimer.singleShot(200, self._speak_current_signal_log_selection)
 
     def _toggle_verbose_log(self):
         """切换详细计算日志显示并触发延迟持久化 (避免主线程卡死)"""
@@ -7372,6 +7382,40 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 使用定时器延迟保存，防止连续点击造成 IO 阻塞
         QTimer.singleShot(1000, self._save_visualizer_config)
+
+    def _speak_current_signal_log_selection(self):
+        """[NEW] 尝试播报信号日志中当前选中的行 (用于恢复播放时的自动补偿)"""
+        if not self._is_voice_globally_enabled():
+            return
+            
+        if not hasattr(self, 'signal_log_panel') or not self.signal_log_panel:
+            return
+            
+        # 检查队列是否为空，如果队列里已经有东西在排队了，就不必强插
+        if hasattr(self, 'voice_thread') and self.voice_thread:
+            if not self.voice_thread.queue.empty():
+                return
+                
+        table = self.signal_log_panel.log_table
+        # 优先取 currentRow，如果没有选中，取第 0 行 (最新的)
+        row = table.currentRow()
+        if row < 0 and table.rowCount() > 0:
+            row = 0
+            
+        if row >= 0:
+            try:
+                # 列索引需对应 append_log 中的定义: 2:pattern, 3:code, 4:name, 5:message
+                code = table.item(row, 3).text()
+                name = table.item(row, 4).text()
+                pattern = table.item(row, 2).text()
+                message = table.item(row, 5).text()
+                
+                voice_text = f"{name}，{pattern}，{message}"
+                # 使用 voice_thread.speak (会自动加入时间戳和去重逻辑)
+                self.voice_thread.speak(voice_text)
+                logger.info(f"▶ Resumed: Speaking current selection: {code} {name}")
+            except Exception as e:
+                logger.error(f"Error speaking selection: {e}")
 
     def _send_voice_state_to_main_app(self, enabled=True):
         """[ASYNC SAFE] 将语音状态同步给主监控，绝不阻塞 UI 主线程"""

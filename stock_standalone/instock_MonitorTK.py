@@ -4813,6 +4813,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # Load persisted states
         self.load_ui_states()
         
+        # ⚡ [NEW] 加载完状态后，强制同步一次语音引擎状态 (防止 UI 为 False 但后台引擎默认为 True)
+        self.on_voice_toggle()
+        
         # Apply strict linkage immediately
         self._schedule_after(100, self.update_linkage_status)
 
