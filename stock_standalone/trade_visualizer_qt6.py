@@ -244,6 +244,11 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 if pythoncom:
                     pythoncom.CoInitialize()
                 
+                # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次真独立实例化 COM 对象
+                # 避免回调事件堆积，并防止使用被 CoUninitialize 毁掉的僵尸对象导致崩溃
+                if hasattr(pyttsx3, '_activeEngines'):
+                    pyttsx3._activeEngines.clear()
+                    
                 engine = pyttsx3.init()
                 rate = engine.getProperty('rate')
                 logger.debug(f'rate:{rate}')
