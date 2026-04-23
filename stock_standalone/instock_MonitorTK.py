@@ -3397,7 +3397,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 3. 时间选择 (下拉)
         tk.Label(main_frame, text="🕒 启动时间点 (回放起点):", font=label_font).pack(anchor="w")
         time_var = tk.StringVar(value="09:25:00")
-        time_values = ["09:25:00", "09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", 
+        time_values = ["09:15:00", "09:25:00", "09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", 
                        "13:00:00", "13:30:00", "14:00:00", "14:30:00", "14:45:00"]
         time_combo = ttk.Combobox(main_frame, textvariable=time_var, values=time_values, state="readonly",
                                  font=label_font)
