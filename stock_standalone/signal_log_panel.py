@@ -332,6 +332,9 @@ class SignalLogPanel(QWidget, WindowMixin):
             h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # 名称
             h_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)          # 内容 (自适应拉伸)
             h_header.setStretchLastSection(True) # 确保最后一列占满剩余空间
+            
+        # [NEW] 开启点击表头排序功能
+        self.log_table.setSortingEnabled(True)
         
         # [FIX] 全局背景深色，修复空白区域白色问题
         # self.setStyleSheet(...) -> Moved to apply_theme
@@ -557,143 +560,154 @@ class SignalLogPanel(QWidget, WindowMixin):
         # (4) 移除开头的多余冒号和空格
         clean_msg = re.sub(r'^[:：\s]+', '', clean_msg).strip()
 
-        # 5. 表格去重更新逻辑 (合并相同代码)
-        # 查找最新的 100 行，看是否有相同代码的项
-        found_row = -1
-        for r in range(min(100, self.log_table.rowCount())):
-            code_item = self.log_table.item(r, 2)
-            if code_item and code_item.text() == code:
-                found_row = r
-                break
-                
-        # 更新计数 (按代码累积)
-        self._signal_counts[code] = self._signal_counts.get(code, 0) + 1
-        count = self._signal_counts[code]
-        
-        display_msg = clean_msg
+        # [FIX] 禁用排序以进行安全的定位和插入
+        sort_was_enabled = self.log_table.isSortingEnabled()
+        if sort_was_enabled:
+            self.log_table.setSortingEnabled(False)
             
-        if found_row >= 0:
-            # 获取原有的 pattern
-            old_pattern = self.log_table.item(found_row, 1).text()
-            new_pattern = pattern_cn
-            if pattern_cn not in old_pattern:
-                new_pattern = f"{pattern_cn}、{old_pattern}"
-                
-            # 获取原有的 message
-            old_msg = self.log_table.item(found_row, 4).text()
-            old_core_msg = re.sub(r'^\(\d+次\)\s*', '', old_msg)
+        try:
+            # 5. 表格去重更新逻辑 (合并相同代码)
+            # 查找所有行，看是否有相同代码的项（修复由于索引错误导致的去重失效）
+            found_row = -1
+            for r in range(self.log_table.rowCount()):
+                code_item = self.log_table.item(r, 3) # [FIX] 代码列是 3，之前错写成了 2
+                if code_item and code_item.text() == code:
+                    found_row = r
+                    break
+                    
+            # 更新计数 (按代码累积)
+            self._signal_counts[code] = self._signal_counts.get(code, 0) + 1
+            count = self._signal_counts[code]
             
-            if clean_msg not in old_core_msg:
-                combined_msg = f"{clean_msg} | {old_core_msg}"
-            else:
-                combined_msg = old_core_msg
+            display_msg = clean_msg
                 
+            if found_row >= 0:
+                # 获取原有的 pattern
+                old_pattern = self.log_table.item(found_row, 2).text() # [FIX] 性质列是 2，之前错写成 1
+                new_pattern = pattern_cn
+                if pattern_cn not in old_pattern:
+                    new_pattern = f"{pattern_cn}、{old_pattern}"
+                    
+                # 获取原有的 message
+                old_msg = self.log_table.item(found_row, 5).text() # [FIX] 内容列是 5，之前错写成 4
+                old_core_msg = re.sub(r'^\(\d+次\)\s*', '', old_msg)
+                
+                if clean_msg not in old_core_msg:
+                    combined_msg = f"{clean_msg} | {old_core_msg}"
+                else:
+                    combined_msg = old_core_msg
+                    
+                if count > 1:
+                    display_msg = f"({count}次) {combined_msg}"
+                else:
+                    display_msg = combined_msg
+                    
+                self._is_programmatic_selection = True
+                try:
+                    # 找到现有行，更新内容和时间
+                    self.log_table.item(found_row, 0).setText(now_str)
+                    self.log_table.item(found_row, 1).setText(grade if grade else self.log_table.item(found_row, 1).text())
+                    self.log_table.item(found_row, 2).setText(new_pattern)
+                    self.log_table.item(found_row, 5).setText(display_msg)
+                    
+                    # 更新评级颜色
+                    grade_item = self.log_table.item(found_row, 1)
+                    if grade == 'S': grade_item.setForeground(QColor("#FF1493"))
+                    elif grade == 'A': grade_item.setForeground(QColor("#FF8C00"))
+                    
+                    # 更新颜色为最新形态颜色
+                    for i in [0, 2, 3, 4, 5]:
+                        item = self.log_table.item(found_row, i)
+                        if item:
+                            item.setForeground(text_color)
+                finally:
+                    self._is_programmatic_selection = False
+            
+                # 发射日志已添加信号，用于同步语音播报 (即使更新也触发)
+                self.log_added.emit(code, name, pattern, clean_msg)
+                
+                # 若是高优先级或计数达到特定阈值，可选触发闪屏
+                if is_high_priority:
+                    self.flash_for_high_priority()
+                return
+
+            # 6. 没有找到现有行，插入新行
             if count > 1:
-                display_msg = f"({count}次) {combined_msg}"
-            else:
-                display_msg = combined_msg
+                display_msg = f"({count}次) {clean_msg}"
                 
+            row = 0 # 始终在最上方插入最新信号
+            
+            # 锁定程序性选择标志，防止 insertRow 触发选中状态变化引起的误联动
             self._is_programmatic_selection = True
             try:
-                # 找到现有行，更新内容和时间
-                self.log_table.item(found_row, 0).setText(now_str)
-                self.log_table.item(found_row, 1).setText(grade if grade else self.log_table.item(found_row, 1).text())
-                self.log_table.item(found_row, 2).setText(new_pattern)
-                self.log_table.item(found_row, 5).setText(display_msg)
-                
-                # 更新评级颜色
-                grade_item = self.log_table.item(found_row, 1)
-                if grade == 'S': grade_item.setForeground(QColor("#FF1493"))
-                elif grade == 'A': grade_item.setForeground(QColor("#FF8C00"))
-                
-                # 更新颜色为最新形态颜色
-                for i in [0, 2, 3, 4, 5]:
-                    item = self.log_table.item(found_row, i)
-                    if item:
-                        item.setForeground(text_color)
+                self.log_table.insertRow(row)
             finally:
                 self._is_programmatic_selection = False
             
-            # 发射日志已添加信号，用于同步语音播报 (即使更新也触发)
-            self.log_added.emit(code, name, pattern, clean_msg)
+            # 单元格填充
+            item_grade = QTableWidgetItem(grade)
+            if grade == 'S': 
+                item_grade.setForeground(QColor("#FF1493"))
+                font = item_grade.font()
+                font.setBold(True)
+                item_grade.setFont(font)
+            elif grade == 'A': 
+                item_grade.setForeground(QColor("#FF8C00"))
+                font = item_grade.font()
+                font.setBold(True)
+                item_grade.setFont(font)
+    
+            items = [
+                QTableWidgetItem(now_str),
+                item_grade,
+                QTableWidgetItem(pattern_cn),
+                QTableWidgetItem(code),
+                QTableWidgetItem(name),
+                QTableWidgetItem(clean_msg) # 使用清理后的消息
+            ]
             
-            # 若是高优先级或计数达到特定阈值，可选触发闪屏
+            self._is_programmatic_selection = True
+            try:
+                for i, item in enumerate(items):
+                    if i != 1: # grade 已经单独设色
+                        item.setForeground(text_color)
+                    if i == 3 or i == 4: # 代码和名称加粗
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                    self.log_table.setItem(row, i, item)
+            finally:
+                self._is_programmatic_selection = False
+            
+            # 限制行数
+            if self.log_table.rowCount() > self._max_lines:
+                self._is_programmatic_selection = True
+                try:
+                    self.log_table.removeRow(self.log_table.rowCount() - 1)
+                finally:
+                    self._is_programmatic_selection = False
+            
+            # 5. 更新状态与计数
+            self._log_buffer.append(f"{code} [{pattern_cn}] {message}")
+            if len(self._log_buffer) > self._max_lines:
+                self._log_buffer = self._log_buffer[-self._max_lines:]
+                
+            self.count_label.setText(str(len(self._log_buffer)))
+            self.status_label.setText(f"最新: {code}")
+            
+            # 高优先级信号触发闪屏
             if is_high_priority:
                 self.flash_for_high_priority()
-            return
-
-        # 6. 没有找到现有行，插入新行
-        if count > 1:
-            display_msg = f"({count}次) {clean_msg}"
             
-        row = 0 # 始终在最上方插入最新信号
-        
-        # 锁定程序性选择标志，防止 insertRow 触发选中状态变化引起的误联动
-        self._is_programmatic_selection = True
-        try:
-            self.log_table.insertRow(row)
-        finally:
-            self._is_programmatic_selection = False
-        
-        # 单元格填充
-        item_grade = QTableWidgetItem(grade)
-        if grade == 'S': 
-            item_grade.setForeground(QColor("#FF1493"))
-            font = item_grade.font()
-            font.setBold(True)
-            item_grade.setFont(font)
-        elif grade == 'A': 
-            item_grade.setForeground(QColor("#FF8C00"))
-            font = item_grade.font()
-            font.setBold(True)
-            item_grade.setFont(font)
-
-        items = [
-            QTableWidgetItem(now_str),
-            item_grade,
-            QTableWidgetItem(pattern_cn),
-            QTableWidgetItem(code),
-            QTableWidgetItem(name),
-            QTableWidgetItem(clean_msg) # 使用清理后的消息
-        ]
-        
-        self._is_programmatic_selection = True
-        try:
-            for i, item in enumerate(items):
-                if i != 1: # grade 已经单独设色
-                    item.setForeground(text_color)
-                if i == 3 or i == 4: # 代码和名称加粗
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.log_table.setItem(row, i, item)
-        finally:
-            self._is_programmatic_selection = False
-        
-        # 限制行数
-        if self.log_table.rowCount() > self._max_lines:
-            self._is_programmatic_selection = True
-            try:
-                self.log_table.removeRow(self.log_table.rowCount() - 1)
-            finally:
-                self._is_programmatic_selection = False
-        
-        # 5. 更新状态与计数
-        self._log_buffer.append(f"{code} [{pattern_cn}] {message}")
-        if len(self._log_buffer) > self._max_lines:
-            self._log_buffer = self._log_buffer[-self._max_lines:]
+            # 发射日志已添加信号，用于同步语音播报
+            # ⭐ [FIX] 统一发射 clean_msg（已清理的消息），与更新行保持一致。
+            # snippet 用于语音同步滚动定位，必须与表格内容对齐。
+            self.log_added.emit(code, name, pattern, clean_msg)
             
-        self.count_label.setText(str(len(self._log_buffer)))
-        self.status_label.setText(f"最新: {code}")
-        
-        # 高优先级信号触发闪屏
-        if is_high_priority:
-            self.flash_for_high_priority()
-        
-        # 发射日志已添加信号，用于同步语音播报
-        # ⭐ [FIX] 统一发射 clean_msg（已清理的消息），与更新行保持一致。
-        # snippet 用于语音同步滚动定位，必须与表格内容对齐。
-        self.log_added.emit(code, name, pattern, clean_msg)
+        finally:
+            # 恢复排序状态
+            if sort_was_enabled:
+                self.log_table.setSortingEnabled(True)
 
     def highlight_row_by_content(self, code: str, message_snippet: str, force_scroll: bool = True):
         """

@@ -5191,7 +5191,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._cold_start = True # 标记为全量重发
                     
                 self._last_send_df_hash = df_hash
-
+                mem = 0
                 # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
                 if hasattr(self, 'df_ui_prev') and not self._cold_start:
                     try:

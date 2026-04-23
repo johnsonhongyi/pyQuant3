@@ -71,6 +71,15 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     cancelled_set = set()
     last_speech_end_ts = 0.0 # [FIX] Timestamp of last speech completion
 
+    # [FIX] 线程级 COM 初始化
+    # 避免每次消息都 Initialize/Uninitialize 导致 COM Apartment 崩塌和 Access Violation
+    com_initialized = False
+    if pythoncom:
+        try:
+            pythoncom.CoInitialize()
+            com_initialized = True
+        except Exception as e:
+            worker_log(f"CoInitialize error: {e}")
 
     while not stop_event.is_set():
         try:
@@ -191,8 +200,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     interrupt_event.clear()
 
                 if pyttsx3:
-                    # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次真独立实例化 COM 对象
-                    # 避免回调事件堆积，并防止使用被 CoUninitialize 毁掉的僵尸对象导致崩溃
+                    # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次独立实例化
                     if hasattr(pyttsx3, '_activeEngines'):
                         pyttsx3._activeEngines.clear()
                     
@@ -200,15 +208,9 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     engine.setProperty('rate', cct.voice_rate)
                     engine.setProperty('volume', cct.voice_volume)
                     
-                    def check_interrupt(name=None, location=None, length=None):
-                        if interrupt_event.is_set() or stop_event.is_set():
-                            try:
-                                engine.stop()
-                            except:
-                                pass
-
-                    engine.connect('started-utterance', check_interrupt)
-                    engine.connect('started-word', check_interrupt)
+                    # [FIX] 不再使用引擎级别的 callback 来强行 interrupt。
+                    # SAPI5 强行 stop 容易触发底层死锁并导致全局 GIL 锁死（进而引发 Tk 假死）！
+                    # 我们让每条短消息正常读完，若收到中断，外层队列会自动跳过后续播报。
 
                     if feedback_queue and key:
                         try: feedback_queue.put(('START', key))
@@ -224,8 +226,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                         try: feedback_queue.put(('END', key))
                         except: pass
 
-                    try: engine.stop()
-                    except: pass
+                    # 安全回收
                     del engine
                     worker_log("Utterance finished.")
             except Exception as e:
@@ -234,13 +235,14 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                 if current_state:
                     try: current_state['key'] = ""
                     except: pass
-                if pythoncom:
-                    try: pythoncom.CoUninitialize()
-                    except: pass
 
         except Exception as e:
             worker_log(f"Fatal Worker Loop Error: {e}")
             time.sleep(1)
+
+    if com_initialized and pythoncom:
+        try: pythoncom.CoUninitialize()
+        except: pass
 
     worker_log("Voice worker process exited.")
 
