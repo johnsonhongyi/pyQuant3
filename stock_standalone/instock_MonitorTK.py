@@ -3138,7 +3138,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def load_main_pos():
             if hasattr(self, 'load_window_position'):
                 self.load_window_position(self, "main_window")
-                toast_message(self, "主窗口位置已恢复")
+                self.reload_cfg_value()
+                toast_message(self, "主窗口位置与配置已恢复")
 
         tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
@@ -5372,14 +5373,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.debug(f"[IPC] Failed to send VOICE_STATE to visualizer: {e}")
 
     def reload_cfg_value(self):
-        global marketInit,marketblk,scale_offset,resampleInit
-        global duration_sleep_time,write_all_day_date,detect_calc_support
-        conf_ini= cct.get_conf_path('global.ini')
+        global marketInit, marketblk, scale_offset, resampleInit
+        global duration_sleep_time, write_all_day_date, detect_calc_support
+        global alert_cooldown, pending_alert_cycles, st_key_sort
+        global saved_width, saved_height
+        
+        # 1. 记录加载前的关键配置值
+        check_keys = [
+            'marketInit', 'marketblk', 'scale_offset', 'resampleInit',
+            'duration_sleep_time', 'detect_calc_support', 'alert_cooldown',
+            'pending_alert_cycles', 'st_key_sort', 'write_all_day_date',
+            'saved_width', 'saved_height'
+        ]
+        old_state = {k: globals().get(k) for k in check_keys}
+
+        conf_ini = cct.get_conf_path('global.ini')
         if not conf_ini:
             logger.info("global.ini 加载失败，程序无法继续运行")
+            return
 
         CFG = cct.GlobalConfig(conf_ini)
 
+        # 2. 执行更新
         marketInit = CFG.marketInit
         marketblk = CFG.marketblk
         scale_offset = CFG.scale_offset
@@ -5390,13 +5405,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         alert_cooldown = CFG.alert_cooldown
         pending_alert_cycles = CFG.pending_alert_cycles
         st_key_sort = CFG.st_key_sort 
-        saved_width,saved_height = CFG.saved_width,CFG.saved_height 
-        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} \
-            scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} \
-            duration_sleep_time:{duration_sleep_time} \
-            detect_calc_support:{detect_calc_support} \
-            alert_cooldown:{alert_cooldown}\
-            pending_alert_cycles:{pending_alert_cycles} st_key_sort:{st_key_sort}")
+        saved_width, saved_height = CFG.saved_width, CFG.saved_height 
+
+        # 3. 差异化提示
+        changes = []
+        for k in check_keys:
+            new_v = globals().get(k)
+            old_v = old_state.get(k)
+            if old_v != new_v:
+                changes.append(f"• {k}: {old_v} ➜ {new_v}")
+        
+        if changes:
+            msg = "检测到配置项变更:\n" + "\n".join(changes)
+            toast_message(self, msg, duration=3500)
+            display_msg = msg.replace('\n', ' ')
+            logger.warning(f"[CFG-RELOAD] {display_msg}")
+
+            # 4. [NEW] 按需同步到 UI 控件与共享内存 (Conditional Shared State Sync)
+            try:
+                # 同步 resample 下拉框
+                if hasattr(self, 'resample_combo'):
+                    self.resample_combo.set(resampleInit)
+                
+                # 同步 st_key_sort 输入框
+                if hasattr(self, 'st_key_sort_value'):
+                    self.st_key_sort_value.set(st_key_sort)
+
+                # 同步到共享内存 (global_dict)，确保子进程感知
+                if hasattr(self, 'global_values'):
+                    self.global_values.setkey("resample", resampleInit)
+                
+                if hasattr(self, 'global_dict'):
+                    self.global_dict["resample"] = resampleInit
+                    self.global_dict["market"] = marketInit
+                    self.global_dict["sleep"] = int(duration_sleep_time)
+                    
+                logger.info(f"🔄 [SYNC] 已将变更配置同步至 UI 与共享内存 (resample={resampleInit})")
+            except Exception as e:
+                logger.error(f"❌ [SYNC] 同步 UI/共享内存失败: {e}")
+        else:
+            logger.info("配置重载完成，无关键参数变动。")
         
         # 同步频率变动到实时服务(如果已连接)
         if hasattr(self, 'realtime_service') and self.realtime_service:
@@ -5416,7 +5464,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # self.apply_search()
             # self.after(50, self.adjust_column_widths)
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
-            self.reload_cfg_value()
+            # self.reload_cfg_value()
             if self.live_strategy:
                 self.live_strategy.set_alert_cooldown(alert_cooldown)
 
@@ -15625,6 +15673,15 @@ def parse_args():
         help="执行测试数据流程"
     )
 
+    # 新增 K线重采样周期启动参数
+    parser.add_argument(
+        "-resample",
+        type=str,
+        choices=['2d', '3d', 'w', 'm', 'd'],
+        default=None,
+        help="K线重采样周期，可选：2d, 3d, w, m, d (默认从配置文件读取)"
+    )
+
     parser.add_argument(
         "-cmd",
         type=str,
@@ -15812,6 +15869,12 @@ if __name__ == "__main__":
 
 
     args = parse_args()  # 解析命令行参数
+
+    # ✅ 启动使用命令行参数覆盖默认初始化 (if provided)
+    if getattr(args, 'resample', None):
+        resampleInit = args.resample
+        logger.info(f"🚀 [INIT] 使用命令行参数覆盖 resample 周期: {resampleInit}")
+
     _exit_ctrl_c_count = 0
     _exit_ctrl_c_time = 0
     # ✅ 命令行触发数据库修复 - 必须在最开始检查,避免初始化其他组件

@@ -255,9 +255,58 @@ class StockSender:
                 self.ths_code = [co for co in codelist]
             print("Loaded:", len(self.ths_code))
     # ----------------- 工具函数 ----------------- #
+    # @staticmethod
+    # def get_pids(pname):
+    #     """
+    #     [FIXED] 安全地获取指定进程名的所有 PID
+    #     使用方案 3 (process_iter cache)：原子性更高，防止扫描期间进程消失导致 NoSuchProcess 崩溃
+    #     """
+    #     pids = []
+    #     try:
+    #         # 仅请求 pid 和 name 属性，psutil 内部会处理大部分 NoSuchProcess 异常
+    #         for p in psutil.process_iter(['pid', 'name']):
+    #             try:
+    #                 info = p.info
+    #                 if info and info['name'] and pname.lower() in info['name'].lower():
+    #                     pids.append(info['pid'])
+    #             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    #                 continue
+    #     except Exception as e:
+    #         print(f"⚠️ get_pids error for {pname}: {e}")
+    #     return pids
+
     @staticmethod
-    def get_pids(pname):
-        return [p.pid for p in psutil.process_iter() if pname.lower() in p.name().lower()]
+    def get_pids(pname, cache={}, ts=[0]):
+        """
+        高性能进程查找（长缓存优化版）
+        - 10秒缓存
+        - 降低 psutil 调用频率
+        - UI友好
+        """
+        if not pname:
+            return []
+        now = time.time()
+        # ⛔ 缓存命中（10秒）
+        if now - ts[0] < 10.0:
+            return cache.get(pname, [])
+        pname = pname.lower().strip()
+        pids = []
+        try:
+            for p in psutil.process_iter(['pid', 'name']):
+                name = p.info.get('name')
+                if not name:
+                    continue
+
+                if pname in name.lower():
+                    pids.append(p.info['pid'])
+
+        except Exception:
+            pass
+
+        cache[pname] = pids
+        ts[0] = now
+
+        return pids
 
     @staticmethod
     def get_handle_by_pid(pid):
@@ -296,13 +345,21 @@ class StockSender:
         user32.EnumWindows(enum_proc, 0)
 
     def ths_prc_hwnd(self):
-        for pid in psutil.pids():
-            try:
-                if psutil.Process(pid).name().lower() == "hexin.exe":
-                    self.ths_process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-                    return self.ths_process_hwnd
-            except psutil.NoSuchProcess:
-                continue
+        """
+        [UPGRADE] 优化 hexin.exe 进程查找逻辑，使用高性能 attrs 过滤
+        """
+        try:
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    info = p.info
+                    if info and info['name'] and info['name'].lower() == "hexin.exe":
+                        pid = info['pid']
+                        self.ths_process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+                        return self.ths_process_hwnd
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except Exception as e:
+            print(f"⚠️ ths_prc_hwnd scan error: {e}")
         return 0
 
     def find_ths_window(self):
