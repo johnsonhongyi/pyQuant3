@@ -29,6 +29,21 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-23 10:45
+- [x] **修复概念监控窗口位置持久化与退出保存 (Fixed Concept Monitor Window Persistence)**：
+    - [x] **实现位置自动恢复**：在 `instock_MonitorTK.py` 的 `show_concept_top10_window_simple` 中引入了 `load_window_position` 调用。现在每个概念监控窗口在创建时都会自动读取 `window_config.json` 中的历史坐标和大小，彻底解决了窗口每次启动都堆叠在默认位置的痛点。
+    - [x] **修复退出保存失效 Bug**：将窗口内部的关闭逻辑 `_on_close` 显式重命名并赋值给 `win.on_close`。这确保了在主程序退出（`on_close`）执行批量窗口清理时，能够正确触发各子窗口的 `save_window_position` 逻辑，实现了位置数据的跨会话闭环。
+    - [x] **增强窗口识别稳定性**：统一了 `window_name` 的生成规则（使用 `concept_top10_window-{unique_code}`），确保了持久化 key 的唯一性与可追溯性。
+
+## 2026-04-23 10:15
+
+- [x] **修复语音播报 SAPI5 引擎由于 COM 句柄复用导致的崩溃与 GIL 锁死 (Fixed SAPI5 Engine Access Violation)**：
+    - [x] **根治 `Windows fatal exception: access violation`**：在 `alert_manager.py` 与 `trade_visualizer_qt6.py` 的 `_voice_worker` 循环中，修复了此前因“隔离 COM 周期”错误引起的内存崩溃。由于 `pyttsx3.init()` 存在全局实例缓存，每次循环后执行的 `CoUninitialize()` 会将底层 COM 对象彻底销毁，导致下次播报时提取出“僵尸指针”而触发 Access Violation。通过在 `pyttsx3.init()` 前引入 `pyttsx3._activeEngines.clear()`，强行剥离残留缓存，确保了每次播报均为纯净的真·独立实例化引擎。
+    - [x] **修复回调堆积泄漏 (Fixed Callback Leak)**：上述缓存清理同步解决了由于在 `while` 循环内不断调用 `engine.connect` 引发的中断事件 (started-word) 呈几何级重复注册问题，避免了多线程交叉时数百次并发 `engine.stop()` 造成的中断卡死。
+- [x] **修复可视化器信号日志自动联动刷屏 (Fixed Signal Log Auto-Linkage Flood)**：
+    - [x] **根治后台批量注入导致的焦点抢夺**：在 `signal_log_panel.py` 中，针对 `append_log` 的 `insertRow` 和 `removeRow` 以及 `clear_logs` 操作全面引入了 `_is_programmatic_selection` 原子锁。彻底阻断了由于后台瞬间大批量日志推入导致 Qt 表格焦点漂移而产生的无数次虚假 `itemSelectionChanged` 信号。
+    - [x] **恢复并增强键盘导航防抖 (Debounced Keyboard Linkage)**：恢复了上下键选择自动联动的功能，并为其注入了 200ms 的 `QTimer` 防抖机制（Debounce）。这不仅确保了用户快速按键滚动时不会引发 UI 卡顿，更满足了数据洪峰瞬间静默、人工检阅时丝滑联动的双重业务需求。
+
 ## 2026-04-22 17:30
 - [x] **优化“显示详情”窗口交互 (Optimized Show Details Window Interaction)**：
     - [x] **实现搜索框自动聚焦 (Auto-focus on Filter Entry)**：在 `stock_logic_utils.py` 的 `show_all_details` 方法中，补齐了 `search_entry.focus_set()` 调用。现在用户点击“显示详情”打开数据详情窗口后，光标会自动锁定在“过滤字段”输入框内，无需手动点击即可直接开始输入过滤关键字，显著提升了高频复盘时的数据检索效率。

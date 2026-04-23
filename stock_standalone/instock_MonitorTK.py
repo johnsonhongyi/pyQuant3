@@ -12319,6 +12319,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         real_width = int(saved_width * self.scale_factor)
         real_height = int(saved_height * self.scale_factor)
         win.minsize(real_width, real_height)
+        
+        # 🚀 [NEW] 加载历史位置
+        window_name = f"concept_top10_window-{unique_code}"
+        self.load_window_position(win, window_name, default_width=saved_width, default_height=saved_height)
+
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
         if code and not stock_name:
@@ -12554,7 +12559,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- [REMOVED] Individual timers removed to prevent freezing.
         # Updates are now centralized in _apply_tree_data_sync -> update_all_top10_windows
 
-        def _on_close():
+        def on_close():
             try:
                 window_name = f"concept_top10_window-{unique_code}"
                 self.save_window_position(win, window_name)
@@ -12578,12 +12583,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info(f"清理 _pg_top10_window_simple 出错: {e}")
 
             win.destroy()
-            self._concept_top10_win = None
+            if hasattr(self, '_concept_top10_win') and self._concept_top10_win == win:
+                self._concept_top10_win = None
 
+        win.on_close = on_close
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        win.bind("<Escape>", lambda e: on_close())  # ESC关闭窗口
 
-
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-        win.bind("<Escape>", lambda e: _on_close())  # ESC关闭窗口
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
         if focus_force:

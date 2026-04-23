@@ -111,6 +111,11 @@ class SignalLogPanel(QWidget, WindowMixin):
         # [NEW] 防止反向联动导致死循环的标志位
         self._is_programmatic_selection: bool = False
         
+        # [NEW] 键盘上下键联动防抖
+        self._selection_debounce_timer = QTimer(self)
+        self._selection_debounce_timer.setSingleShot(True)
+        self._selection_debounce_timer.timeout.connect(self._do_selection_action)
+        
         # 设置为浮动工具窗口
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -341,7 +346,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.log_table.itemDoubleClicked.connect(self._on_item_double_clicked) # [NEW] 双击查看详情
         
         # [NEW] 键盘交互增强
-        # 1. 上下键自动联动
+        # 1. 恢复上下键自动联动，配合防抖机制
         self.log_table.itemSelectionChanged.connect(self._on_selection_changed)
         # 2. 回车/Esc 事件过滤器
         self.log_table.installEventFilter(self)
@@ -367,18 +372,25 @@ class SignalLogPanel(QWidget, WindowMixin):
             if v == pattern_cn:
                 pattern = k
                 break
-        
         self.log_clicked.emit(code, pattern, msg)
 
     def _on_selection_changed(self):
         """
         [NEW] 表格选择变更联动 (支持键盘上下键)
-        为了防止快速滚动时频繁触发，可以考虑加个防抖，这里暂时直接触发
+        加入防抖机制，防止在快速滚动或后台数据批量插入时频繁触发联动
         """
-        # [mFIX] 防止反向联动死循环
+        # [mFIX] 防止反向联动死循环，或者在批量插入数据时引起的自动焦点切换
         if getattr(self, '_is_programmatic_selection', False):
             return
 
+        # 重新启动定时器，200ms 内没有新的选中才会真正触发联动
+        self._selection_debounce_timer.start(200)
+
+    def _do_selection_action(self):
+        """防抖后实际执行的联动操作"""
+        if getattr(self, '_is_programmatic_selection', False):
+            return
+            
         items = self.log_table.selectedItems()
         if not items: return
         
@@ -386,6 +398,8 @@ class SignalLogPanel(QWidget, WindowMixin):
         row = items[0].row()
         # 复用点击逻辑
         self._on_cell_clicked(row, 0)
+
+
 
     def eventFilter(self, source, event):
         """[NEW] 事件过滤器：处理回车和ESC"""
@@ -609,7 +623,13 @@ class SignalLogPanel(QWidget, WindowMixin):
             display_msg = f"({count}次) {clean_msg}"
             
         row = 0 # 始终在最上方插入最新信号
-        self.log_table.insertRow(row)
+        
+        # 锁定程序性选择标志，防止 insertRow 触发选中状态变化引起的误联动
+        self._is_programmatic_selection = True
+        try:
+            self.log_table.insertRow(row)
+        finally:
+            self._is_programmatic_selection = False
         
         # 单元格填充
         item_grade = QTableWidgetItem(grade)
@@ -644,7 +664,11 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         # 限制行数
         if self.log_table.rowCount() > self._max_lines:
-            self.log_table.removeRow(self.log_table.rowCount() - 1)
+            self._is_programmatic_selection = True
+            try:
+                self.log_table.removeRow(self.log_table.rowCount() - 1)
+            finally:
+                self._is_programmatic_selection = False
         
         # 5. 更新状态与计数
         self._log_buffer.append(f"{code} [{pattern_cn}] {message}")
@@ -757,7 +781,13 @@ class SignalLogPanel(QWidget, WindowMixin):
     def clear_logs(self):
         """清空日志"""
         logger.info("🗑️ Clearing signal logs and cache...")
-        self.log_table.setRowCount(0)
+        
+        self._is_programmatic_selection = True
+        try:
+            self.log_table.setRowCount(0)
+        finally:
+            self._is_programmatic_selection = False
+            
         self._log_buffer.clear()
         self._last_signals.clear()
         self._last_signals_time.clear()  # [FIX] Clear time deduplication cache
