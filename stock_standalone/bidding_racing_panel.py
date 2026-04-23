@@ -1746,7 +1746,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         btn_layout.addWidget(self.reset_btn)
 
         self.btn_show_alerts = QPushButton("🔔 报警关注")
-        self.btn_show_alerts.setFixedSize(85, 26)
+        self.btn_show_alerts.setFixedSize(75, 26)
         self.btn_show_alerts.setStyleSheet("""
             QPushButton { 
                 background: #4B0082; color: #FFD700; border: 1px solid #FFD700; 
@@ -1760,7 +1760,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         btn_layout.addStretch()
 
         self.btn_arrange = QPushButton("📏 整理")
-        self.btn_arrange.setFixedSize(65, 26)
+        self.btn_arrange.setFixedSize(60, 26)
         self.btn_arrange.setStyleSheet("""
             QPushButton { background: #3A3A3C; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 4px; font-weight: bold; font-size: 10px; }
             QPushButton:hover { background: #00FFCC; color: black; }

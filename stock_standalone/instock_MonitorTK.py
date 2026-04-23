@@ -15743,42 +15743,73 @@ def write_to_hdf():
         tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=900)
 
 
+
+LOCK_FILE = cct.get_ramdisk_path("stock_app.lock")
+
+def ensure_single_instance_fileLock():
+    import msvcrt
+    import sys
+    import os
+    global lock_fp
+    lock_fp = open(LOCK_FILE, "w")
+
+    try:
+        msvcrt.locking(lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        print("Already running")
+        sys.exit(0)
+
+def ensure_single_instance():
+    import win32event, win32api, winerror
+
+    mutex = win32event.CreateMutex(None, False, "Global\\StockMonitorAppMutex")
+
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        return None
+
+    return mutex
+
 # ------------------ 主程序入口 ------------------ #
 if __name__ == "__main__":
-    # queue = mp.Queue()
-    # p = mp.Process(target=fetch_and_process, args=(queue,))
-    # p.daemon = True
-    # p.start()
-    # app = StockMonitorApp(queue)
-
-    # from multiprocessing import Manager
-    # manager = Manager()
-    # global_dict = manager.dict()  # 共享字典
-    # import ipdb;ipdb.set_trace()
-
-    # logger = init_logging("test.log")
-
-    # logger = init_logging(log_file='monitor_tk.log',redirect_print=True)
-
-    # logger.info("这是 print 输出")
-    # logger.info("这是 logger 输出")
-
-    # # 测试异常
-    # try:
-    #     1 / 0
-    # except Exception:
-    #     logging.exception("捕获异常")
-    
     # 测试未捕获异常
     # 直接触发
     # 1/0
     # 仅在 Windows 上设置启动方法，因为 Unix/Linux 默认是 'fork'，更稳定
+
+    import multiprocessing as mp
+    import os
+
     if sys.platform.startswith('win'):
         mp.freeze_support() # Windows 必需
-        mp.set_start_method('spawn', force=True)
+        # 1️⃣ 必须最先
+        # 2️⃣ set_start_method 只允许执行一次
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass
         # 'spawn' 是默认的，但显式设置有助于确保一致性。
         # 另一种方法是尝试使用 'forkserver' (如果可用)
         # mp.freeze_support()  # <-- 必须
+
+    if mp.current_process().name != "MainProcess" and mp.parent_process() is not None:
+        # 子进程，什么都不做
+        print(f'mp.current_process().name: {mp.current_process().name} != MainProcess')
+        print("PID:", os.getpid(), "Process:", mp.current_process().name)
+        sys.exit(0)
+    else:
+        # # 3️⃣ 单例锁（必须最早）
+        # mutex = ensure_single_instance()
+        # if mutex is None:
+        #     print(f"Already running:{mutex}")
+        #     sys.exit(0)
+
+        # # 3️⃣ 单例(文件锁）
+        # ensure_single_instance_fileLock()
+
+        print(f'mp.current_process().name: {mp.current_process().name} == MainProcess')
+        print("PID:", os.getpid(), "Process:", mp.current_process().name)
+
+
 
     args = parse_args()  # 解析命令行参数
     _exit_ctrl_c_count = 0
@@ -15905,24 +15936,10 @@ if __name__ == "__main__":
     # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
     log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
     # log_level = LoggerFactory.DEBUG
-
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
     logger.setLevel(log_level)
     logger.info("程序启动…")    
-
-    # test_single_thread()
-    # import ipdb;ipdb.set_trace()
-
-    # if log_level == logging.DEBUG:
-    # if logger.isEnabledFor(logging.DEBUG):
-    #     logger.debug("当前已开启 DEBUG 模式")
-    #     log = LoggerFactory.log
-    #     log.setLevel(LoggerFactory.DEBUG)
-    #     log.debug("log当前已开启 DEBUG 模式")
-
-    # log.setLevel(LoggerFactory.INFO)
-    # log.setLevel(Log.DEBUG)
 
     # ✅ 命令行触发 write_to_hdf
     if args.test:
@@ -16086,7 +16103,6 @@ if __name__ == "__main__":
         width, height = 100, 32
         cct.set_console(width, height)
 
-    app.mainloop()
     try:
         app.mainloop()
     except KeyboardInterrupt:
