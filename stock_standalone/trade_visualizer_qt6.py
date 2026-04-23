@@ -13424,7 +13424,7 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
                 try:
                     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     client_socket.connect((IPC_HOST, IPC_PORT))
-                    client_socket.send(code_to_send.encode("utf-8"))
+                    client_socket.send(f"CODE|{code_to_send}".encode("utf-8"))
                     client_socket.close()
                     break
                 except Exception:
@@ -13524,7 +13524,7 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
             try:
                 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client_socket.connect((IPC_HOST, IPC_PORT))
-                client_socket.send(code_to_send.encode('utf-8'))
+                client_socket.send(f"CODE|{code_to_send}".encode('utf-8'))
                 client_socket.close()
                 # print(f"Sent command: {code_to_send}")
             except Exception as e:
