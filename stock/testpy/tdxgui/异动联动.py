@@ -2138,16 +2138,16 @@ def search_by_code(event=None,onclick=False):
 
             df = _get_stock_changes()
             data = pd.DataFrame()  # 默认空
-            today_tdx_df = _get_tdx_data_df()
+            _today_tdx_df_tm = _get_tdx_data_df()
             if (
-                today_tdx_df is not None
-                and not today_tdx_df.empty
-                and 'category' in today_tdx_df.columns
+                _today_tdx_df_tm is not None
+                and not _today_tdx_df_tm.empty
+                and 'category' in _today_tdx_df_tm.columns
             ):
                 # ① 从 category 中筛代码（向量化，安全）
                 # code_list = today_tdx_df.query(f'category.str.contains("{code}")').index.tolist()
-                mask = today_tdx_df['category'].str.contains(code, na=False)
-                code_list = today_tdx_df.loc[mask].index.tolist()
+                mask = _today_tdx_df_tm['category'].str.contains(code, na=False)
+                code_list = _today_tdx_df_tm.loc[mask].index.tolist()
                 if code_list:
                     # ② 用代码精确过滤（最快、最准）
                     data = df.loc[df['代码'].isin(code_list)]

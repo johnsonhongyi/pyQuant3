@@ -4434,8 +4434,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         now = time.time()
         is_linkage = timestamp is not None
 
-        # [ROOT-FIX] 联动到状态中心 (处理 TDX / 剪切板)
-        self.sender.send(code)
+        # [UPGRADE] 只有手动点击才同步触发外部软件联动，后台自动信号增加 2s 防抖保护
+        self.sender.send(code, auto=is_linkage)
 
         # =========================
         # 1. 联动去重（严格）

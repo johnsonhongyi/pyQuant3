@@ -127,13 +127,14 @@ class StockSender:
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
     # ----------------- 核心分发与工作循环 ----------------- #
-    def send(self, stock_code):
+    def send(self, stock_code, auto=False):
         """
         投递一个发送意图 (State Overwrite)
+        :param auto: 是否为后台自动触发 (信号联动)
         """
         if not stock_code: return
 
-        # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (IPC)
+        # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (Proxy)
         if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
             try:
                 # 在物理执行路径上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
@@ -144,7 +145,7 @@ class StockSender:
                 }
                 from linkage_service import get_link_manager
                 # 投递到独立的后台进程进行节流与重叠执行
-                get_link_manager().push(stock_code, flags=flags)
+                get_link_manager().push(stock_code, flags=flags, auto=auto)
                 return
             except Exception:
                 pass
@@ -160,7 +161,7 @@ class StockSender:
         try:
             if self._task_queue.full():
                 self._task_queue.get_nowait()
-            self._task_queue.put_nowait((stock_code, flags))
+            self._task_queue.put_nowait((stock_code, flags, auto))
         except:
             pass
 
@@ -183,13 +184,18 @@ class StockSender:
 
                 if self._latest_task:
                     now = time.time()
-                    # 2. 物理节流（50ms）：防止高频触发导致 Windows 消息阻塞
-                    if now - self._last_exec_ts >= 0.05:
-                        code, flags = self._latest_task
-                        self._do_send(code, flags)
+                    code, flags, auto = self._latest_task
+                    
+                    # 2. 物理节流
+                    # ⭐ [UPGRADE] 针对后台自动信号 (auto=True) 实施更严格的防抖 (2s)
+                    # 这样既能保证同步，又能防止高频信号洪水导致软件卡死
+                    throttle = 2.0 if auto else 0.05
+                    
+                    if now - self._last_exec_ts >= throttle:
+                        self._do_send(code, flags, auto=auto)
                         self._latest_task = None
                         self._last_exec_ts = now
-
+                
                 time.sleep(0.01)  # 降低 CPU 占用
 
             except Exception as e:
@@ -197,7 +203,7 @@ class StockSender:
                 print(f"❌ StockSender Worker Error: {e}")
                 time.sleep(0.5)
 
-    def _do_send(self, stock_code, flags):
+    def _do_send(self, stock_code, flags, auto=False):
         """执行具体的物理发送动作并汇总状态"""
         tdx_enabled = flags.get('tdx', False)
         ths_enabled = flags.get('ths', False)

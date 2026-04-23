@@ -3933,6 +3933,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def process_ipc_command(self, cmd_str: str):
         """处理 IPC 命令分发"""
+        # ⭐ [NEW] 批量处理期间禁用向外发送 TDX 联动，防止信号洪水
+        self._is_processing_ipc = True
         start_t = time.perf_counter()
         try:
             if not cmd_str: return
@@ -4062,6 +4064,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 
         except Exception as e:
             logger.error(f"Error processing IPC command: {e}")
+        finally:
+            self._is_processing_ipc = False
 
     def _flush_ipc_code_load(self):
         """[NEW] 批量/降频后的代码加载执行 (支持常规切换与联动解析)"""
@@ -4091,14 +4095,18 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _flush_ipc_signals(self):
         """批量处理缓冲区中的 IPC 信号"""
-        if not self._ipc_signal_buffer:
-            return
+        self._is_processing_ipc = True
+        try:
+            if not self._ipc_signal_buffer:
+                return
+                
+            signals_to_process = self._ipc_signal_buffer.copy()
+            self._ipc_signal_buffer.clear()
             
-        signals_to_process = self._ipc_signal_buffer.copy()
-        self._ipc_signal_buffer.clear()
-        
-        # logger.debug(f"[IPC] Flushing {len(signals_to_process)} buffered signals")
-        self._update_signal_log_from_ipc(signals_to_process)
+            # logger.debug(f"[IPC] Flushing {len(signals_to_process)} buffered signals")
+            self._update_signal_log_from_ipc(signals_to_process)
+        finally:
+            self._is_processing_ipc = False
 
     def _update_signal_log_from_ipc(self, data_list: list):
         from signal_message_queue import SignalMessage
@@ -5979,6 +5987,7 @@ class MainWindow(QMainWindow, WindowMixin):
         max_commands_per_poll = 15
         commands_count = 0
         
+        self._is_processing_ipc = True
         try:
             while commands_count < max_commands_per_poll and self.command_conn.poll():
                 commands_count += 1
@@ -6064,6 +6073,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.command_conn = None
         except Exception as e:
             logger.exception(f"[Visualizer] Failed to poll command pipe: {e}")
+        finally:
+            self._is_processing_ipc = False
 
     def _handle_update_df_data(self, payload):
         """内部助手：处理行情数据包更新"""
@@ -8148,8 +8159,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._clicked_change = True
                 if code == self.current_code: 
                     # 如果 code 没变，说明 currentItemChanged 不会触发，手动同步一次 (强制同步)
-                    # TDX 或 THS 任一开启时都发送
-                    if self.tdx_enabled or self.ths_enabled:
+                    # ⭐ [FIX] 如果是由 IPC 驱动的点击 (极罕见) 或处于处理中，跳过外部工具联动
+                    if (self.tdx_enabled or self.ths_enabled) and not getattr(self, '_is_processing_ipc', False):
                         try:
                             self.sender.send(code)
                         except Exception:
@@ -8209,8 +8220,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.load_stock_by_code(code)
                     
                     # 1.1: 无论是键盘还是点击，只要切换了代码，且开启了同步，就发送给外部工具
-                    # TDX 或 THS 任一开启时都发送
-                    if self.tdx_enabled or self.ths_enabled:
+                    # ⭐ [FIX] 如果是由 IPC 驱动的切换 (如自动信号)，则跳过外部工具联动，由主程序统一控制
+                    if (self.tdx_enabled or self.ths_enabled) and not getattr(self, '_is_processing_ipc', False):
                         try:
                             self.sender.send(code)
                         except Exception as e:
