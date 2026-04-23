@@ -481,7 +481,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.viz_conn = None  # ⭐ [FIX] 使用 Pipe 代替 Queue，避免 GIL 崩溃
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
-        self._viz_ready = False
+        self._send_sync_lock = threading.Lock() # ⭐ [NEW] 实例级执行锁，确保全生命周期只有一个同步循环在跑
         self._df_sync_running = False  # ⭐ [FIX] 初始化同步运行状态位，防止 send_df AttributeError
         self._df_first_send_done = False # ⭐ [FIX] 初始化首发标志
         self._force_full_sync_pending = False # ⭐ [FIX] 初始化强制全量同步标志
@@ -1785,7 +1785,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.debug('[Pipe] Visualizer exited. Cleaning up qt_process state.')
                             self.qt_process = None
                             self.viz_command_queue = None
-                            self._viz_ready = False
                             if hasattr(self, 'viz_stop_flag'):
                                 self.viz_stop_flag.value = True  # Reset for next launch
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
@@ -4533,7 +4532,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # P2: 尝试独立 Socket
                 # 这解决了 "Listening 被占用" 但本程序认为进程已死的情况
                 if try_socket_send():
-                    self._viz_ready = True # 标记为就绪，以便 send_df 能尝试推送
                     return
 
                 # P3: 都不行，启动进程
@@ -5078,7 +5076,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._df_sync_thread.start()
                 logger.debug(f"[Visualizer] df_sync_thread start cost {(time.time() - thread_start)*1000:.1f}ms")
             
-            self._viz_ready = True
             logger.debug(f"✅ [Visualizer] Full startup sequence finished in {(time.time() - start_t)*1000:.1f}ms")
 
         except Exception as e:
@@ -5087,260 +5084,244 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def send_df(self, initial=True):
         """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
-        ipc_host, ipc_port = '127.0.0.1', 26668
-        last_send_time = 0
-        min_interval = 0.8  # ✅ [OPTIMIZE] 提高发送间隔到 800ms，减少 GIL 竞争
-        max_jitter = 0.2    # 随机抖动
-        logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
-        count = 0
-        self._cold_start = True # ⭐ [NEW] 冷启动标志
-        
-        while self._df_sync_running:
-            # 🚀 [FIX 1] 前置可视化过滤：没开可视化且没同步请求，直接长休眠
-            # vis_enabled = getattr(self, '_vis_enabled_cache', True)
-            # if not vis_enabled and not getattr(self, '_force_full_sync_pending', False):
-            #     for _ in range(10):  # 10 * 0.2 = 2秒
-            #         if getattr(self, '_vis_enabled_cache', True):
-            #             break
-            #         time.sleep(0.2)
-            #     else:
-            #         continue
+        # [THREAD-SAFETY] 确保同一时间只有一个同步实例在跑
+        if not self._send_sync_lock.acquire(blocking=False):
+            logger.debug("[send_df] Another sync loop is already running. Exiting redundant thread.")
+            return
+        try:
+            ipc_host, ipc_port = '127.0.0.1', 26668
+            last_send_time = 0
+            min_interval = 0.8  # ✅ [OPTIMIZE] 提高发送间隔到 800ms，减少 GIL 竞争
+            max_jitter = 0.2    # 随机抖动
+            logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
+            count = 0
+            self._cold_start = True # ⭐ [NEW] 冷启动标志
             
-            vis_enabled = getattr(self, '_vis_enabled_cache', True)
-            viz_ready   = getattr(self, '_viz_ready', False)
-            proc_alive  = hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()
-            # ⭐ 只有标记为就绪后的掉线判定 (仅针对托管进程)
-            if getattr(self, "_df_first_send_done", False) and not getattr(self, '_force_full_sync_pending', False):
-                # 只有明确持有进程句柄且进程已关闭时，才判定为掉线
-                managed_proc_dead = hasattr(self, 'qt_process') and self.qt_process and not self.qt_process.is_alive()
-                if managed_proc_dead and getattr(self, '_viz_ready', False):
-                    logger.warning("[VIZ] managed process died → set _viz_ready=False")
-                    self._viz_ready = False
-
-            # ⭐ 核心判断：是否需要跳过本轮同步（没开、或既没进程也没 Socket 就绪）
-            if (
-                (not vis_enabled or (not proc_alive and not viz_ready))
-                and not getattr(self, '_force_full_sync_pending', False)
-            ):
+            while self._df_sync_running:
+                vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                
+                # ⭐ 核心判断：是否需要跳过本轮同步（没开且无强制请求）
+                if not vis_enabled and not getattr(self, '_force_full_sync_pending', False):
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
-                        if getattr(self, '_vis_enabled_cache', False) and getattr(self, '_viz_ready', False):
+                        if getattr(self, '_vis_enabled_cache', True):
                             break
                         time.sleep(0.2)
                     else:
                         continue
 
-            # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
-            if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
-               and not getattr(self, '_force_full_sync_pending', False):
-                time.sleep(10)
-                continue
-
-            if not hasattr(self, 'df_all') or self.df_all.empty:
-                logger.debug("[send_df] df_all is empty or missing, waiting...")
-                if count < 3:
-                    count +=1
-                    time.sleep(2)
-                    continue
-            sent = False  # ⭐ 本轮是否成功发送
-            try:
-                now = time.time()
-                
-                # 动态调整发送频率：数据量越大，发送越稀疏，防止 GIL 挤占
-                if not hasattr(self, 'df_all'): 
-                    time.sleep(2)
-                    continue
-                
-                n_rows = len(self.df_all) if hasattr(self, 'df_all') else 0
-                dynamic_interval = min_interval
-                if n_rows > 3000: dynamic_interval = 2.5
-                if n_rows > 5000: dynamic_interval = 5.0
-                
-                # ⭐ 限流 + 抖动
-                if now - last_send_time < dynamic_interval:
-                    time.sleep(1.0) # 小碎步休眠防止 CPU 100%
-                    continue
-                
-                last_send_time = time.time()
-
-                # ⚡ [CORE] 线程安全地获取行情快照
-                with self._df_lock:  # [FIX] 硬编码锁引用，避免 getattr 每次创建新 Lock
-                    df_ui = self.df_all.copy()
-                
-                # [OPTIMIZE] 快速哈希校验
-                n_rows_now = len(df_ui)
-                df_hash = hash(n_rows_now)
-                if not df_ui.empty:
-                    p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in df_ui.columns), None)
-                    if p_col:
-                        # 采样计算哈希 (头中尾)
-                        sample_idx = [0, n_rows_now // 2, n_rows_now - 1] if n_rows_now > 2 else list(range(n_rows_now))
-                        df_hash = hash(tuple(df_ui[p_col].iloc[sample_idx].values)) ^ hash(n_rows_now)
-                
-                # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
-                if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not getattr(self, '_force_full_sync_pending', False):
-                    # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
+                # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
+                if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
+                and not getattr(self, '_force_full_sync_pending', False):
+                    time.sleep(10)
                     continue
 
-                # ⚡ [FIX] 处理强制全量同步请求
-                if getattr(self, '_force_full_sync_pending', False):
-                    logger.info("[send_df] Executing pending FULL SYNC request")
-                    if hasattr(self, 'df_ui_prev'):
-                        del self.df_ui_prev
-                    self.sync_version = 0
-                    self._force_full_sync_pending = False
-                    self._cold_start = True # 标记为全量重发
+                if not hasattr(self, 'df_all') or self.df_all.empty:
+                    logger.debug("[send_df] df_all is empty or missing, waiting...")
+                    if count < 3:
+                        count +=1
+                        time.sleep(2)
+                        continue
+                sent = False  # ⭐ 本轮是否成功发送
+                try:
+                    now = time.time()
                     
-                self._last_send_df_hash = df_hash
-                mem = 0
-                # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
-                if hasattr(self, 'df_ui_prev') and not self._cold_start:
-                    try:
-                        with timed_ctx("viz_df_compare", warn_ms=10000):
-                            # 仅在已有缓存且不是冷启动时才 compare
-                            df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
-                            
-                        if df_diff.empty:
-                            # logger.debug("[send_df] df_diff empty, skip sending this cycle")
-                            msg_type = 'DF_DIFF_EMPTY'
-                            sent = True
-                        else:
-                            msg_type = 'UPDATE_DF_DIFF'
-                            payload_to_send = df_diff
-                            mem = 0 
+                    # 动态调整发送频率：数据量越大，发送越稀疏，防止 GIL 挤占
+                    if not hasattr(self, 'df_all'): 
+                        time.sleep(2)
+                        continue
+                    
+                    n_rows = len(self.df_all) if hasattr(self, 'df_all') else 0
+                    dynamic_interval = min_interval
+                    if n_rows > 3000: dynamic_interval = 2.5
+                    if n_rows > 5000: dynamic_interval = 5.0
+                    
+                    # ⭐ 限流 + 抖动
+                    if now - last_send_time < dynamic_interval:
+                        time.sleep(1.0) # 小碎步休眠防止 CPU 100%
+                        continue
+                    
+                    last_send_time = time.time()
 
-                    except ValueError as e:
-                        logger.debug(f"[send_df] compare() ValueError: {e}, fallback to UPDATE_DF_ALL")
+                    # ⚡ [CORE] 线程安全地获取行情快照
+                    with self._df_lock:  # [FIX] 硬编码锁引用，避免 getattr 每次创建新 Lock
+                        df_ui = self.df_all.copy()
+                    
+                    # [OPTIMIZE] 快速哈希校验
+                    n_rows_now = len(df_ui)
+                    df_hash = hash(n_rows_now)
+                    if not df_ui.empty:
+                        p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in df_ui.columns), None)
+                        if p_col:
+                            # 采样计算哈希 (头中尾)
+                            sample_idx = [0, n_rows_now // 2, n_rows_now - 1] if n_rows_now > 2 else list(range(n_rows_now))
+                            df_hash = hash(tuple(df_ui[p_col].iloc[sample_idx].values)) ^ hash(n_rows_now)
+                    
+                    # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
+                    if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not getattr(self, '_force_full_sync_pending', False):
+                        # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
+                        continue
+
+                    # ⚡ [FIX] 处理强制全量同步请求
+                    if getattr(self, '_force_full_sync_pending', False):
+                        logger.info("[send_df] Executing pending FULL SYNC request")
+                        if hasattr(self, 'df_ui_prev'):
+                            del self.df_ui_prev
+                        self.sync_version = 0
+                        self._force_full_sync_pending = False
+                        self._cold_start = True # 标记为全量重发
+                        
+                    self._last_send_df_hash = df_hash
+                    mem = 0
+                    # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
+                    if hasattr(self, 'df_ui_prev') and not self._cold_start:
+                        try:
+                            with timed_ctx("viz_df_compare", warn_ms=10000):
+                                # 仅在已有缓存且不是冷启动时才 compare
+                                df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            payload_to_send = df_diff
+                            if df_diff.empty:
+                                # logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                                msg_type = 'DF_DIFF_EMPTY'
+                                sent = True
+                            else:
+                                msg_type = 'UPDATE_DF_DIFF'
+                                mem = 0 
+
+                        except ValueError as e:
+                            logger.debug(f"[send_df] compare() ValueError: {e}, fallback to UPDATE_DF_ALL")
+                            payload_to_send = df_ui
+                            mem = 0 
+                            msg_type = 'UPDATE_DF_ALL'
+                    else:
+                        # 冷启动或无缓存时，直接全量
                         payload_to_send = df_ui
                         mem = 0 
                         msg_type = 'UPDATE_DF_ALL'
-                else:
-                    # 冷启动或无缓存时，直接全量
-                    payload_to_send = df_ui
-                    mem = 0 
-                    msg_type = 'UPDATE_DF_ALL'
-                    self._cold_start = False # 重置冷启动标志
+                        self._cold_start = False # 重置冷启动标志
 
 
-                # 更新缓存
-                self.df_ui_prev = df_ui.copy()
+                    # 更新缓存
+                    self.df_ui_prev = df_ui.copy()
 
-                if 'code' not in df_ui.columns:
-                    df_ui = df_ui.reset_index()
+                    if 'code' not in df_ui.columns:
+                        df_ui = df_ui.reset_index()
 
-                logger.info(
-                    f'df_ui: {msg_type} rows={len(df_ui)} ver={self.sync_version} mem={mem/1024:.1f} KB'
-                )
+                    logger.info(
+                        f'df_ui: {msg_type} rows={len(df_ui)} ver={self.sync_version} mem={mem/1024:.1f} KB'
+                    )
 
-                # --- 🎁 封装版本化协议包 ---
-                if msg_type == 'UPDATE_DF_ALL':
-                    self.sync_version = 0
-                else:
-                    self.sync_version += 1
-                    
-                sync_package = {
-                    'type': msg_type,
-                    'data': payload_to_send,
-                    'ver': self.sync_version
-                }
-
-                # ======================================================
-                if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
-                    try:
-                        # ⭐ [STABILITY] Pipe 发送前检查，防止缓冲区满导致此线程永久阻塞
-                        # Pipe 并没有直接的 is_full 检查，我们通过非阻塞发送（如果支持）或简单的 conn.poll() 辅助判断
-                        # 此处仅做异常截获，确保 send 不会拖垮整个同步循环
-                        self.viz_conn[0].send(
-                            ('UPDATE_DF_DATA', sync_package)
-                        )
-                        logger.debug(f"[Pipe] {msg_type} sent (ver={self.sync_version})")
-                        sent = True
-                    except (EOFError, BrokenPipeError, ConnectionResetError):
-                         logger.warning("[Pipe] connection lost, fallback to Socket")
-                         self.viz_conn = None
-                    except Exception as e:
-                         logger.error(f"[Pipe] send failed: {e}")
-
-                # 诊断：如果有内部进程但没走 Pipe
-                if not sent and self.qt_process is not None and self.qt_process.is_alive():
-                     logger.warning(f"[send_df] Internal process alive but Pipe skipped/failed!")
-
-                # ======================================================
-                # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
-                # ======================================================
-                vis_enabled = getattr(self, '_vis_enabled_cache', True)
-                
-                # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
-                now_ipc = time.time()
-                ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
-                
-                if not sent and vis_enabled and now_ipc > ipc_cooldown:
-                    try:
-                        # 1️⃣ pickle 单独计时
-                        with timed_ctx("viz_IPC_pickle", warn_ms=10000):
-                            payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
-                                     protocol=pickle.HIGHEST_PROTOCOL)
-
-                        header = struct.pack("!I", len(payload))
-
-                        # 2️⃣ socket 单独计时
-                        with timed_ctx("viz_IPC_send", warn_ms=10000):
-                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                s.settimeout(0.4) # 缩短超时到 400ms
-                                s.connect((ipc_host, ipc_port))
-                                s.sendall(b"DATA" + header + payload)
-
-                        logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
-                        sent = True
-                        self._viz_ipc_fail_count = 0 # 成功清零
+                    # --- 🎁 封装版本化协议包 ---
+                    if msg_type == 'UPDATE_DF_ALL':
+                        self.sync_version = 0
+                    else:
+                        self.sync_version += 1
                         
-                        # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
-                        if self.qt_process is not None and self.qt_process.is_alive():
-                            logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
+                    sync_package = {
+                        'type': msg_type,
+                        'data': payload_to_send,
+                        'ver': self.sync_version
+                    }
 
-                    except (socket.timeout, ConnectionError, OSError) as e:
-                        # 只有当真正失败时才记录
-                        fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
-                        self._viz_ipc_fail_count = fail_count
-                        
-                        # 如果连续失败 3 次，开启 10-60 秒的冷却 (非工作时间更久)
-                        if fail_count >= 3:
-                            cooldown_dur = 60 if not cct.get_work_time() else 10
-                            self._viz_ipc_cooldown_until = now_ipc + cooldown_dur
-                            logger.info(f"⚠️ [IPC] Failed {fail_count} times, enter {cooldown_dur}s cooldown. (Error: {e})")
-                        
-                        self._viz_ready = False
-                        if not vis_enabled:
+                    # ======================================================
+                    if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
+                        try:
+                            # ⭐ [STABILITY] Pipe 发送前检查，防止缓冲区满导致此线程永久阻塞
+                            # Pipe 并没有直接的 is_full 检查，我们通过非阻塞发送（如果支持）或简单的 conn.poll() 辅助判断
+                            # 此处仅做异常截获，确保 send 不会拖垮整个同步循环
+                            self.viz_conn[0].send(
+                                ('UPDATE_DF_DATA', sync_package)
+                            )
+                            logger.debug(f"[Pipe] {msg_type} sent (ver={self.sync_version})")
                             sent = True
+                        except (EOFError, BrokenPipeError, ConnectionResetError):
+                            logger.warning("[Pipe] connection lost, fallback to Socket")
+                            self.viz_conn = None
+                        except Exception as e:
+                            logger.error(f"[Pipe] send failed: {e}")
 
-            except Exception:
-                logger.exception("[send_df] unexpected error")
-            finally:
-                if sent:
-                    cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
-            # ======================================================
-            # ⭐ 6️⃣ 状态更新（只在这里）
-            # ======================================================
-            prev = getattr(self, "_df_first_send_done", False)
-            self._df_first_send_done = sent
+                    # 诊断：如果有内部进程但没走 Pipe
+                    if not sent and self.qt_process is not None and self.qt_process.is_alive():
+                        logger.warning(f"[send_df] Internal process alive but Pipe skipped/failed!")
 
-            # 状态刚从 False → True：立即进入慢速周期
-            vis_enabled = getattr(self, '_vis_enabled_cache', True)
-            if sent and not prev and vis_enabled:
-                logger.info("[send_df] first successful send")
-            
-            # send_diff_df_status = hasattr(self, '_last_send_df_hash') and self._last_send_df_hash == df_hash and not getattr(self, '_force_full_sync_pending', False):
-            # # 数据指纹一致，且无强制请求，跳过本轮昂贵的比较和发送
-            # # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
-            # # logger.info(f"[send_df] Data fingerprint unchanged. Skip sync. getattr(self, '_force_full_sync_pending', False): {getattr(self, '_force_full_sync_pending', False)}")
-            # ======================================================
-            # ⭐ 7️⃣ 调度逻辑
-            # ======================================================
-            sleep_seconds = 300 if sent else 5
-            for _ in range(sleep_seconds):
-                if not self._df_sync_running or not self._df_first_send_done:
-                    break
-                time.sleep(1)
+                    # ======================================================
+                    # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
+                    # ======================================================
+                    vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                    
+                    # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
+                    now_ipc = time.time()
+                    ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
+                    
+                    if not sent and vis_enabled and now_ipc > ipc_cooldown:
+                        try:
+                            # 1️⃣ pickle 单独计时
+                            with timed_ctx("viz_IPC_pickle", warn_ms=10000):
+                                payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
+                                        protocol=pickle.HIGHEST_PROTOCOL)
+
+                            header = struct.pack("!I", len(payload))
+
+                            # 2️⃣ socket 单独计时
+                            with timed_ctx("viz_IPC_send", warn_ms=10000):
+                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                    s.settimeout(0.4) # 缩短超时到 400ms
+                                    s.connect((ipc_host, ipc_port))
+                                    s.sendall(b"DATA" + header + payload)
+
+                            logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
+                            sent = True
+                            self._viz_ipc_fail_count = 0 # 成功清零
+                            
+                            # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
+                            if self.qt_process is not None and self.qt_process.is_alive():
+                                logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
+
+                        except (socket.timeout, ConnectionError, OSError) as e:
+                            # 只有当真正失败时才记录
+                            fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
+                            self._viz_ipc_fail_count = fail_count
+                            
+                            # 如果连续失败 3 次，开启 10-60 秒的冷却 (非工作时间更久)
+                            if fail_count >= 3:
+                                cooldown_dur = 60 if not cct.get_work_time() else 10
+                                self._viz_ipc_cooldown_until = now_ipc + cooldown_dur
+                                logger.info(f"⚠️ [IPC] Failed {fail_count} times, enter {cooldown_dur}s cooldown. (Error: {e})")
+                            
+                            if not vis_enabled:
+                                sent = True
+
+                except Exception:
+                    logger.exception("[send_df] unexpected error")
+                finally:
+                    if sent:
+                        cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
+                # ======================================================
+                # ⭐ 6️⃣ 状态更新（只在这里）
+                # ======================================================
+                prev = getattr(self, "_df_first_send_done", False)
+                self._df_first_send_done = sent
+
+                # 状态刚从 False → True：立即进入慢速周期
+                vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                if sent and not prev and vis_enabled:
+                    logger.info("[send_df] first successful send")
+                
+                # send_diff_df_status = hasattr(self, '_last_send_df_hash') and self._last_send_df_hash == df_hash and not getattr(self, '_force_full_sync_pending', False):
+                # # 数据指纹一致，且无强制请求，跳过本轮昂贵的比较和发送
+                # # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
+                # # logger.info(f"[send_df] Data fingerprint unchanged. Skip sync. getattr(self, '_force_full_sync_pending', False): {getattr(self, '_force_full_sync_pending', False)}")
+                # ======================================================
+                # ⭐ 7️⃣ 调度逻辑
+                # ======================================================
+                sleep_seconds = 300 if sent else 5
+                for _ in range(sleep_seconds):
+                    if not self._df_sync_running or not self._df_first_send_done:
+                        break
+                    time.sleep(1)
+        finally:
+            self._send_sync_lock.release()
+            logger.info("[send_df] Thread EXITED safely.")
 
 
     def on_voice_toggle(self):

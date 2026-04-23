@@ -10,6 +10,8 @@ import time
 import os
 import traceback
 import sys
+import faulthandler
+faulthandler.enable()
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 # [ROOT-FIX] 设置标记，防止本进程内部调用 StockSender 时再次通过 Proxy 转发导致无限递归
@@ -116,7 +118,18 @@ class LinkageManagerProxy:
             daemon=True
         )
         self.process.start()
+        self._last_revive_ts = time.time()
         logger.info(f"Linkage process launched. PID: {self.process.pid}")
+
+    def _ensure_alive(self):
+        """确保后台进程存活，若死亡则拉起"""
+        if self.process is None or not self.process.is_alive():
+            now = time.time()
+            if now - getattr(self, '_last_revive_ts', 0) > 5: # 5秒冷却
+                logger.warning("🚨 [Linkage] Process detected DEAD. Attempting to revive...")
+                self._init()
+                return True
+        return self.process is not None and self.process.is_alive()
 
     def push(self, code, flags=None, auto=False):
         """投递一个联动意图 (State Overwrite)"""
@@ -133,6 +146,11 @@ class LinkageManagerProxy:
                  return
             self._last_auto_link_map[code] = now
 
+        # 确保进程存活
+        if not self._ensure_alive():
+            # logger.debug("Linkage process is dead and in cooling down, skip push.")
+            return
+
         # 状态覆盖：如果队列已满，尝试清理旧数据
         if self.queue.full():
             try:
@@ -148,11 +166,10 @@ class LinkageManagerProxy:
                 'ts': now,
                 'auto': auto
             })
-        except queue.Full:
+        except (queue.Full, Exception) as e:
             # 极端高频下如果还是满的，直接忽略，保证主流程不中断
+            # 捕获所有异常防止 feeder 线程引发的 crash 传导
             pass
-        except Exception as e:
-            logger.error(f"LinkageManagerProxy push error: {e}")
 
     def stop(self):
         try:
