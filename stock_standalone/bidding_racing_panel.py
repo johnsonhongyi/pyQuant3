@@ -1545,11 +1545,11 @@ class RacingTimeline(QFrame):
         self.label.setText(f"🚩 竞技进度: {time_str}")
         self.time_changed.emit(time_str)
 
-    def set_time(self, time_str: str):
+    def set_time(self, time_str: str, prefix="🚩 竞技进度"):
         """[🚀 安全加固] 更新进度时间，增加对被销毁对象的保护"""
         try:
             # 捕获 C++ 对象已删除的情况 (在回放模式下关闭窗口时常见)
-            self.label.setText(f"🚩 竞技进度: {time_str}")
+            self.label.setText(f"{prefix}: {time_str}")
             
             parts = time_str.split(':')
             h, m = int(parts[0]), int(parts[1])
@@ -1664,6 +1664,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             "COLOR_ALERT_TEXT": QColor("#FFFFFF")
         }
         
+        self._status_prefix = ""
         self._init_ui()
         QTimer.singleShot(500,self._restore_ui_state)
         
@@ -2531,8 +2532,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # 始终按时间排序
         self._anchor_history.sort(key=lambda x: x.get('ts', 0))
         
-        # 保持 8 个槽位
-        if len(self._anchor_history) > 8:
+        # 保持 25 个槽位 (最多保留 25 个)
+        if len(self._anchor_history) > 25:
             self._anchor_history.pop(0)
             
         self._refresh_history_buttons()
@@ -2547,9 +2548,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if item.widget():
                     item.widget().deleteLater()
             
-            count = len(self._anchor_history)
+            total_count = len(self._anchor_history)
+            # [🚀 界面优化] 界面只显示最新的 8 个
+            display_count = 8
+            start_idx = max(0, total_count - display_count)
+            
             # 重新生成按钮
-            for i, snap in enumerate(self._anchor_history):
+            for i in range(start_idx, total_count):
+                snap = self._anchor_history[i]
                 ts_val = snap.get("ts", 0)
                 dt = datetime.datetime.fromtimestamp(ts_val)
                 t_str = dt.strftime("%H:%M")
@@ -2787,7 +2793,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "header_stock": state_stock,
                 "header_sector": state_sector,
                 "splitter_main": self.main_splitter.saveState().toHex().data().decode(),
-                "history": self._anchor_history[-20:],
+                "history": self._anchor_history[-25:],
                 "current_anchor_ts": self._current_anchor_ts,
                 "reset_cycle": self._reset_cycle_mins,
                 "sector_history": self._sector_history,
@@ -3070,6 +3076,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     self.on_code_callback(str(code))
             except Exception: pass
 
+    def set_status_prefix(self, prefix: str):
+        """[🚀 状态锁] 允许外部(如 Replay 脚本)注入自定义状态前缀，防止 UI 渲染心跳时跳回默认值"""
+        self._status_prefix = prefix
+
     def update_market_stats(self, stats: dict):
         """接收外部传输的系统级全盘温度及涨跌并渲染到顶部时间组件上"""
         if hasattr(self, 'timeline'):
@@ -3159,7 +3169,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # [NEW] 同步赛马竞技进度时间轴
         if curr_time > 0 and hasattr(self, 'timeline'):
             t_str = datetime.datetime.fromtimestamp(curr_time).strftime("%H:%M:00")
-            self.timeline.set_time(t_str)
+            # [🚀 状态锁] 优先使用外部注入的 status_prefix，否则根据模式自动判定
+            if self._status_prefix:
+                prefix = self._status_prefix
+            else:
+                # [FIX] 兼容 100x 模拟回测模式的标识展示
+                is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
+                prefix = "🎥 录像回放" if is_simulation else "🚩 竞技进度"
+            self.timeline.set_time(t_str, prefix=prefix)
             
         # [🚀 标准化时间判定] 使用标准 cct 函数判定交易日与交易时间
         time_hhmm = 0
@@ -3176,6 +3193,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._last_anchor_reset_data_ts = curr_time
             
             interval_sec = self._reset_cycle_mins * 60
+            # [🚀 修复] 遵循用户要求，回放模式下也使用数据时间戳判定，确保 100x 回放逻辑一致
             if curr_time - self._last_anchor_reset_data_ts > interval_sec:
                 # [FIX] 使用系统标准函数：判断是否为交易时间且为交易日
                 is_trading_time = cct.get_work_time(time_hhmm) and cct.get_trade_date_status()

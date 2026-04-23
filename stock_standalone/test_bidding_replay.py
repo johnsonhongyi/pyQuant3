@@ -1127,11 +1127,17 @@ def main(args=None, df_all_target=None):
             def on_live_progress(t_str):
                 from PyQt6.sip import isdeleted
                 if isdeleted(panel): return
-                panel.timeline.set_time(t_str)
-                panel.timeline.label.setText(f"🔴 实盘监控: {t_str}")
+                # [🚀 状态锁] 优先设置前缀，然后调用 set_time 时传入该前缀
+                prefix = "🔴 实盘监控"
+                if hasattr(panel, 'set_status_prefix'):
+                    panel.set_status_prefix(prefix)
+                panel.timeline.set_time(t_str, prefix=prefix)
             
             def on_live_status(status_text):
-                panel.timeline.label.setText(status_text)
+                if hasattr(panel, 'set_status_prefix'):
+                    panel.set_status_prefix(status_text)
+                else:
+                    panel.timeline.label.setText(status_text)
             
             def on_panel_closed():
                 worker.stop()
@@ -1183,8 +1189,11 @@ def main(args=None, df_all_target=None):
             def on_progress(t_str):
                 from PyQt6.sip import isdeleted
                 if isdeleted(panel): return
-                panel.timeline.set_time(t_str)
-                panel.timeline.label.setText(f"🎥 录像回放中: {t_str} ({int(args.speed)}x)")
+                # [🚀 状态锁] 优先设置前缀，然后调用 set_time 时传入该前缀
+                prefix = f"🎥 录像回放中 ({int(args.speed)}x)"
+                if hasattr(panel, 'set_status_prefix'):
+                    panel.set_status_prefix(prefix)
+                panel.timeline.set_time(t_str, prefix=prefix)
 
             def on_panel_closed():
                 worker.stop()

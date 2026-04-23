@@ -199,14 +199,23 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                 if interrupt_event.is_set():
                     interrupt_event.clear()
 
-                if pyttsx3:
+                # [NEW] 从 current_state 或其他途径感知 voice_enabled
+                # 只有在明确需要播报时才初始化引擎
+                is_voice_on = True # 默认开启，由 send_alert 过滤输入
+                if current_state and not current_state.get('voice_active', True):
+                    is_voice_on = False
+                    worker_log("Voice disabled in state, skipping pyttsx3 init")
+
+                if pyttsx3 and is_voice_on:
                     # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次独立实例化
                     if hasattr(pyttsx3, '_activeEngines'):
-                        pyttsx3._activeEngines.clear()
+                        # [SAFETY] 仅在真的有活跃引擎时才清理，减少对 GIL 的冲击
+                        if pyttsx3._activeEngines:
+                            pyttsx3._activeEngines.clear()
                     
                     engine = pyttsx3.init()
-                    engine.setProperty('rate', cct.voice_rate)
-                    engine.setProperty('volume', cct.voice_volume)
+                    engine.setProperty('rate', getattr(cct, 'voice_rate', 200))
+                    engine.setProperty('volume', getattr(cct, 'voice_volume', 1.0))
                     
                     # [FIX] 不再使用引擎级别的 callback 来强行 interrupt。
                     # SAPI5 强行 stop 容易触发底层死锁并导致全局 GIL 锁死（进而引发 Tk 假死）！

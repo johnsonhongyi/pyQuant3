@@ -167,7 +167,7 @@ class TickSeries:
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
                  'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min',
-                 '_bar_active_reward', '_last_active_price')
+                 '_bar_active_reward', '_last_active_price', 'opening_bonus')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -224,6 +224,7 @@ class TickSeries:
         self._last_sig_min: int = 0
         self._bar_active_reward: int = 0 # [NEW] 活跃奖励锁
         self._last_active_price: float = 0.0 # [NEW] 最近一次活跃价格基准
+        self.opening_bonus: float = 0.0      # [NEW] 缓存早盘溢价分
 
     def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
         """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
@@ -473,6 +474,7 @@ class BiddingMomentumDetector:
         self.last_market_avg = 0.0
 
         # [NEW] 模式保护与参数
+        self.simulation_mode = simulation_mode
         self.in_history_mode = False
         self.use_dragon_race = False  # 龙头竞赛模式（停用后回归 0407 挖掘模式）
         self._last_data_date: str = "" # [NEW] 记录上次处理数据的日期 (YYYY-MM-DD)
@@ -665,7 +667,9 @@ class BiddingMomentumDetector:
         target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
         target_codes = list(set(target_codes)) # 去重
         
-        if self.realtime_service and target_codes:
+        # [FIX] 极限性能保护：在历史回测/复盘模式下，禁用冷启动历史 K 线拉取
+        # 此时数据流量极大 (97 tps)，拉取 5000 只股的 K 线会导致 GIL 彻底锁死并引发崩溃
+        if self.realtime_service and target_codes and not self.in_history_mode:
             for code in target_codes:
                 try:
                     # [REFINED] 仅在真的为空时才拉取，避免重复拉取浪费性能
@@ -713,7 +717,9 @@ class BiddingMomentumDetector:
         skip_evaluate: 是否跳过个股评估阶段 (如果之前已执行过 _evaluate_code)。
         """
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
-        self._check_day_switch(datetime.datetime.now())
+        # [REFINED] 使用数据时间戳进行判定，确保在回测/复盘模式下不会因为系统时间跨日而错误清空数据
+        eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
+        self._check_day_switch(eval_dt)
 
         if not skip_evaluate:
             with self._lock:
@@ -1920,8 +1926,23 @@ class BiddingMomentumDetector:
         if not klines or last_close <= 0:
             return
 
-        score = 0.0
         latest = klines[-1]
+        # [FIX] 优先从 K 线或 Tick 中获取时间戳，用于后续异动计时
+        data_ts = ts_obj.first_breakout_ts # 默认为已有的异动时间
+        if data_ts <= 0:
+            ts_val = latest.get('ticktime', latest.get('timestamp', latest.get('time')))
+            if ts_val:
+                try:
+                    if isinstance(ts_val, (str, pd.Timestamp)):
+                        data_ts = pd.to_datetime(ts_val).timestamp()
+                    else:
+                        data_ts = float(ts_val)
+                except:
+                    data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            else:
+                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+
+        score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
         cur_close = ts_obj.current_price
         cur_pct = ts_obj.current_pct
@@ -1968,6 +1989,25 @@ class BiddingMomentumDetector:
             ts_obj.pattern_hint += "[地量启动]"
             
         score += amount_bonus
+        
+        # [NEW] [PERF] 计算并缓存早盘溢价分 (Opening Bonus)
+        # 仅在异动时间有效时计算一次
+        fb_ts = ts_obj.first_breakout_ts
+        if fb_ts > 0:
+            # 权重衰减逻辑：竞价期（offset<=0）最高分，开盘后 45 分钟内线性降至 0
+            # 使用快速的日期计算，避免 pd.to_datetime
+            dt = datetime.datetime.fromtimestamp(fb_ts)
+            anchor_930 = dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+            offset = fb_ts - anchor_930
+            if offset < 2700: 
+                if offset <= 0: # 竞价期 (9:15-9:30)
+                    ts_obj.opening_bonus = 12.0
+                else: # 开盘爆发期
+                    ts_obj.opening_bonus = 12.0 * (1.0 - offset / 2700.0)
+            else:
+                ts_obj.opening_bonus = 0.0
+        else:
+            ts_obj.opening_bonus = 0.0
         
         # [Moved Up] 状态标志初始化
         is_counter = False
@@ -2209,27 +2249,7 @@ class BiddingMomentumDetector:
         else:
             # 衰减逻辑：如果没有持续强势表现，动量分缓慢回落
             ts_obj.momentum_score = max(0.0, ts_obj.momentum_score - 0.1)
-        # 尝试从数据中获取模拟时间
-        data_ts = 0.0
-        # 1. 优先从当前最新 row 提取时间
-        ts_val = latest.get('ticktime', latest.get('timestamp', latest.get('time')))
-        if ts_val:
-            try:
-                if isinstance(ts_val, (str, pd.Timestamp)):
-                    dt = pd.to_datetime(ts_val)
-                    data_ts = dt.timestamp()
-                    # 防止跨天解析偏差
-                    if data_ts > time.time() + 60:
-                        data_ts = (dt - pd.Timedelta(days=1)).timestamp()
-                else:
-                    data_ts = float(ts_val)
-            except:
-                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
-        # 2. 兜底从 K 线提取
-        elif klines:
-            data_ts = klines[-1].get('timestamp', self.last_data_ts if self.last_data_ts > 0 else time.time())
-        else:
-            data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+        # [REMOVED] Time extraction moved up to ensure data_ts is available for racing_status
             
         # [NEW] 赛马模式：时序稳定性加分 (Opening Racing Model)
         # 传入 low 和 nlow 进行物理结构校验 (确保开盘即最低)
@@ -2383,10 +2403,11 @@ class BiddingMomentumDetector:
                     data = {
                         'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
                         'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
-                        'high_day': ts.high_day, 'low_day': ts.low_day, 'last_high': ts.last_high, 
-                        'last_low': ts.last_low, 'first_breakout_ts': ts.first_breakout_ts, 
+                        'first_breakout_ts': ts.first_breakout_ts, 
                         'pattern_hint': getattr(ts, 'pattern_hint', ""),
-                        'klines': list(ts.klines) if ts.klines else (self.realtime_service.get_minute_klines(code, n=30) if self.realtime_service else []), 
+                        'opening_bonus': getattr(ts, 'opening_bonus', 0.0), # [NEW]
+                        # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
+                        'klines': (list(ts.klines) if ts.klines else []) if ts.score >= self.score_threshold else [],
                         'is_untradable': getattr(ts, 'is_untradable', False),
                         'is_counter_trend': getattr(ts, 'is_counter_trend', False),
                         'is_accumulating': getattr(ts, 'is_accumulating', False),
@@ -2865,11 +2886,16 @@ class BiddingMomentumDetector:
     # 时间窗口判断（只在竞价/尾盘生效）
     # =========================================================
 
-    @staticmethod
-    def is_active_session() -> bool:
-        """全天查看模式：主要交易时间内都就行（略去时间窗口限制）。
-        实盘如需限制仅在特定时段，可在 UI 层包装调用。"""
+    def is_active_session(self) -> bool:
+        """全天查看模式：主要交易时间内都就行（略去时间窗口限制）。"""
+        if getattr(self, 'in_history_mode', False) or getattr(self, 'simulation_mode', False):
+            # [FIX] 如果是模拟回测，则根据数据的时间戳判定，而不是系统墙上时间
+            if getattr(self, 'last_data_ts', 0) > 0:
+                dt = datetime.datetime.fromtimestamp(self.last_data_ts)
+                hm = dt.hour * 100 + dt.minute
+                return 915 <= hm <= 1500
+            return True
+            
         now = datetime.datetime.now()
         hm = now.hour * 100 + now.minute
-        # 盘中全期：09:15 - 15:00
         return 915 <= hm <= 1500
