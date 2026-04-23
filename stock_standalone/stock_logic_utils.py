@@ -383,6 +383,7 @@ def check_code(
             dst.insert(tk.END, "\n".join(filtered_lines))
             dst.config(state=tk.DISABLED)
         search_var.trace_add("write", on_search)
+        search_entry.focus_set()
     # 按钮栏
     # 按钮栏布局重构：增加历史选择与手动测试
     btn_frame = tk.Frame(win, bg=bg_color)

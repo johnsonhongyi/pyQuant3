@@ -2050,6 +2050,8 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
 
     for i in range(1, 7):
         df[f'macdlast{i}'] = df['macd'].shift(i - 1)
+        df[f'macddea{i}'] = df['macddea'].shift(i - 1)
+        df[f'macddif{i}'] = df['macddif'].shift(i - 1)
 
     # --- RSI ---
     df['rsi'] = talib.RSI(df['close'], timeperiod=rsi_period)
