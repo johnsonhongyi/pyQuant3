@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGraphicsDropShadowEffect, QPushButton,
-    QMenu, QApplication, QDialog, QSplitter, QComboBox
+    QMenu, QApplication, QDialog, QSplitter, QComboBox, QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
 from PyQt6.QtGui import (
@@ -162,30 +162,100 @@ def _get_racing_config_path():
 RACING_CONFIG_LOCK = threading.Lock() 
 
 def _get_racing_config():
-    """读取全局持久化配置"""
+    """读取全局持久化配置 - [🚀 增强版] 支持 Gzip/Zlib/Plain 自动识别"""
     path = _get_racing_config_path()
     if not os.path.exists(path):
         return {}
     try:
-        with gzip.open(path, "rb") as f:
-            return json.loads(f.read().decode('utf-8'))
+        with open(path, "rb") as f:
+            raw_data = f.read()
+        
+        if not raw_data: return {}
+        
+        # 1. 尝试自适应解压
+        try:
+            # Gzip Header: \x1f\x8b
+            if raw_data.startswith(b'\x1f\x8b'):
+                import gzip
+                data = gzip.decompress(raw_data).decode('utf-8')
+            # Zlib Header: \x78\x9c (用户反馈的格式)
+            elif raw_data.startswith(b'\x78\x9c'):
+                import zlib
+                data = zlib.decompress(raw_data).decode('utf-8')
+            else:
+                # 尝试作为纯文本
+                data = raw_data.decode('utf-8')
+            return json.loads(data)
+        except Exception as e:
+            logger.debug(f"Decode failed: {e}")
+            return {}
     except Exception:
         return {}
 
-def _save_racing_config(conf: dict):
+def _save_racing_config(conf: dict, force=False):
     """保存配置并合并历史记录 - [🔒 线程安全版]"""
+    # [🔒 安全加固] 确保持久化数据仅在交易日保存，防止非交易日空刷覆盖
+    # 如果是强制保存 (如用户手动触发合并/重置)，则绕过交易日检查
+    if not force and not cct.get_trade_date_status():
+        return
+        
     path = _get_racing_config_path()
     with RACING_CONFIG_LOCK:
         try:
+            # 1. 正常保存当前主配置
             old_conf = _get_racing_config()
             for k, v in conf.items():
                 old_conf[k] = v
+            
+            conf_data = json.dumps(old_conf).encode('utf-8')
             with gzip.open(path, "wb") as f:
-                f.write(json.dumps(old_conf).encode('utf-8'))
+                f.write(conf_data)
+                
+            # 2. [🚀 自动备份] 生成每日独立快照
+            today_str = datetime.datetime.now().strftime("%Y%m%d")
+            backup_path = path.replace(".json.gz", f"_{today_str}.json.gz")
+            if not os.path.exists(backup_path):
+                # 仅在当天第一个备份不存在时写入，节省 IO
+                with gzip.open(backup_path, "wb") as f:
+                    f.write(conf_data)
+                logger.info(f"📅 [RacingConfig] 已创建今日备份: {today_str}")
+                
+                # 3. [🔒 自动轮转] 清理 10 天前的旧数据
+                _rotate_racing_configs(path)
+
         except Exception as e:
             logger.error(f"❌ [RacingConfig] Save Failed: {e}")
-        except Exception as e:
-            logger.error(f"❌ [RacingConfig] Save Failed: {e}")
+
+def _rotate_racing_configs(main_path: str):
+    """[自动清理] 保留最近 10 天的备份文件"""
+    try:
+        base_dir = os.path.dirname(main_path)
+        base_name = os.path.basename(main_path).replace(".json.gz", "")
+        
+        # 扫描目录下的备份文件 (匹配 v3_YYYYMMDD.json.gz)
+        pattern = re.compile(rf"{re.escape(base_name)}_(\d{{8}})\.json\.gz")
+        
+        backups = []
+        for f in os.listdir(base_dir):
+            match = pattern.match(f)
+            if match:
+                date_str = match.group(1)
+                backups.append((date_str, os.path.join(base_dir, f)))
+        
+        if not backups: return
+        
+        # 按日期排序
+        backups.sort(key=lambda x: x[0], reverse=True)
+        
+        # 保留最近 10 个
+        if len(backups) > 10:
+            for date_str, f_path in backups[10:]:
+                try:
+                    os.remove(f_path)
+                    logger.info(f"🗑️ [Cleanup] 已删除 10 天前的过期配置: {os.path.basename(f_path)}")
+                except: pass
+    except Exception as e:
+        logger.debug(f"⚠️ [Cleanup] Rotation Error: {e}")
 
 def get_racing_role(ts):
     if not ts: return "静默"
@@ -2719,8 +2789,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # 始终按时间排序
         self._anchor_history.sort(key=lambda x: x.get('ts', 0))
         
-        # 保持 25 个槽位 (最多保留 25 个)
-        if len(self._anchor_history) > 25:
+        # 保持 50 个槽位 (最多保留 50 个)
+        if len(self._anchor_history) > 50:
             self._anchor_history.pop(0)
             
         self._refresh_history_buttons()
@@ -2794,6 +2864,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         act_del.triggered.connect(lambda: self._remove_anchor(idx))
         
         menu.addSeparator()
+        act_import = menu.addAction("📂 导入/合并历史起点")
+        act_import.triggered.connect(self._import_merge_anchors)
+
+        menu.addSeparator()
         act_clear = menu.addAction("💣 清空所有起点")
         act_clear.triggered.connect(self._clear_all_anchors)
         
@@ -2817,6 +2891,68 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._save_ui_state()
         logger.info("💣 [Panel] 已清空所有历史起点")
 
+    def _import_merge_anchors(self):
+        """[🚀 跨会话统筹] 导入并合并历史配置文件中的起点快照"""
+        try:
+            default_path = os.path.join(cct.get_base_path(), "snapshots")
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "选择历史配置文件", default_path, "Config Files (*.json.gz);;All Files (*)"
+            )
+            if not file_path:
+                return
+                
+            # 1. 读取选中的历史文件 (利用鲁棒读取逻辑)
+            try:
+                with open(file_path, "rb") as f:
+                    raw_data = f.read()
+                
+                if raw_data.startswith(b'\x1f\x8b'):
+                    import gzip
+                    data = gzip.decompress(raw_data).decode('utf-8')
+                elif raw_data.startswith(b'\x78\x9c'):
+                    import zlib
+                    data = zlib.decompress(raw_data).decode('utf-8')
+                else:
+                    data = raw_data.decode('utf-8')
+                    
+                hist_conf = json.loads(data)
+            except Exception as e:
+                logger.error(f"❌ [Import] Failed to read file: {e}")
+                QMessageBox.warning(self, "导入失败", f"无法解析该文件 (格式不兼容): {e}")
+                return
+                
+            hist_anchors = hist_conf.get("history", [])
+            if not hist_anchors:
+                QMessageBox.information(self, "提示", "选中的文件中未包含任何起点历史数据。")
+                return
+                
+            # 2. 合并逻辑 (基于 ts 唯一性)
+            current_ts_set = set(snap.get("ts", 0) for snap in self._anchor_history)
+            added_count = 0
+            for snap in hist_anchors:
+                ts = snap.get("ts", 0)
+                if ts and ts not in current_ts_set:
+                    self._anchor_history.append(snap)
+                    current_ts_set.add(ts)
+                    added_count += 1
+            
+            if added_count > 0:
+                # 3. 排序并限流
+                self._anchor_history.sort(key=lambda x: x.get('ts', 0))
+                if len(self._anchor_history) > 50:
+                    self._anchor_history = self._anchor_history[-50:]
+                
+                # 4. 刷新并即时持久化
+                self._refresh_history_buttons()
+                self._save_ui_state(force=True)
+                
+                QMessageBox.information(self, "合并成功", f"成功合并 {added_count} 条历史起点数据。")
+            else:
+                QMessageBox.information(self, "提示", "所有历史数据均已存在，无需合并。")
+                
+        except Exception as e:
+            logger.error(f"❌ [Import] Merge Error: {e}")
+            traceback.print_exc()
     def _apply_history_anchor(self, idx):
         """恢复历史锚点 - 兼容列式压缩协议"""
         if idx >= len(self._anchor_history): return False
@@ -3004,7 +3140,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # ==============================
             # 7️⃣ 原子写入
             # ==============================
-            _save_racing_config(conf)
+            _save_racing_config(conf, force=force)
 
             logger.info(f"💾 [RacingPanel] 原子存档完成 ({len(open_windows)} 窗口)")
 

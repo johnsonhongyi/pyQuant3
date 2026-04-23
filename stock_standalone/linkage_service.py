@@ -95,8 +95,12 @@ class LinkageService:
             logger.error(f"Execution error for {code}: {e}")
 
 def _start_linkage_worker(q):
-    service = LinkageService(q)
-    service.run()
+    try:
+        service = LinkageService(q)
+        service.run()
+    except KeyboardInterrupt:
+        # 子进程静默退出
+        pass
 
 class LinkageManagerProxy:
     """管理后台进程的生命周期与通讯接口"""
