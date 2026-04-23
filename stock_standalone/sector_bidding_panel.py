@@ -1193,23 +1193,28 @@ class DataProcessWorker(QObject):
                 except Empty:
                     pass
 
+                start_work_t = time.perf_counter()
+
                 # 1. 处理数据（关键优化：丢弃旧包，防堆积）
                 if df is not None:
-                    # 🔥 丢弃逻辑：如果有更新的数据在排队，只取最后一个
-                    count = 0
-                    while not self.df_queue.empty():
-                        try:
-                            df = self.df_queue.get_nowait()
-                            count += 1
-                        except Empty:
-                            break
-                    
-                    if count > 0 and self.detector.enable_log:
-                        logger.debug(f"⏩ [Worker] Skipped {count} stale data frames.")
+                    # 🔥 丢弃逻辑：如果有更新的数据在排队，且积压超过一定阈值，则加速丢弃
+                    q_size = self.df_queue.qsize()
+                    if q_size > 5: # 积压预警
+                        count = 0
+                        while not self.df_queue.empty():
+                            try:
+                                df = self.df_queue.get_nowait()
+                                count += 1
+                                if count > 20: break # 即使丢弃也一次不超过20个，防止死循环
+                            except Empty:
+                                break
+                        
+                        if self.detector.enable_log:
+                            logger.warning(f"⏩ [Worker] Queue backlogged ({q_size}). Skipped {count} stale frames.")
 
                     # 执行核心计算 (增量更新逻辑)
                     active_codes = df.index.tolist() if hasattr(df, 'index') else None
-                    self.detector.register_codes(df) # [RESTORED] 必须注册新 code 才能计算评分
+                    self.detector.register_codes(df) 
                     self.detector.update_scores(active_codes=active_codes)
 
                     v = getattr(self.detector, "data_version", 0) + 1
@@ -1226,26 +1231,28 @@ class DataProcessWorker(QObject):
                     force = False
 
                 if force:
-                    if self.detector.enable_log:
-                        logger.info("⚡ [Worker] Force recalculation")
-
                     self.detector.update_scores(force=True)
-
                     v = getattr(self.detector, "data_version", 0) + 1
                     setattr(self.detector, "data_version", v)
-
                     self.data_updated.emit(None)
                     has_done_work = True
+
+                # [PERF] 计算本次工作耗时，用于动态调整休眠
+                work_dur = time.perf_counter() - start_work_t
+                if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
+                    logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (GIL bottleneck risk)")
 
             except Exception as e:
                 logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
 
             # 3. 最后的保险：防止在数据极高频时榨干 CPU
-            # 如果是交易时段，正常休眠；否则大幅减速以节省电力和计算资源
-            if not self.detector.is_active_session() and not has_done_work:
-                time.sleep(0.5) # 非活跃时段且空闲时，大幅降噪
-            elif has_done_work:
-                time.sleep(0.001) 
+            # 如果刚刚做了重活，强制休眠一小会儿（10ms），确保 GIL 能切换给 UI 线程
+            if has_done_work:
+                time.sleep(0.01) 
+            elif not self.detector.is_active_session():
+                time.sleep(0.5)
+            else:
+                time.sleep(0.01)
 
         logger.info("🏁 [Worker] Loop exited safely.")
         self.stopped.emit()
