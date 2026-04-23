@@ -237,7 +237,8 @@ class VoiceAnnouncer:
     def pause(self) -> None:
         """暂停语音播报"""
         self.manager.voice_enabled = False
-        logger.debug("VoiceAnnouncer: 已暂停 (AlertManager Voice Disabled)")
+        self.manager.stop_current_speech()
+        logger.debug("VoiceAnnouncer: 已暂停 (AlertManager Voice Disabled & Stopped)")
     
     def resume(self) -> None:
         """恢复语音播报"""
@@ -705,6 +706,8 @@ class StockLiveStrategy:
         if hasattr(self, '_voice') and self._voice:
             if self.voice_enabled:
                 self._voice.resume()
+            else:
+                self._voice.pause()
         logger.info(f"Voice announcer enabled = {self.voice_enabled} (Synced to VoiceAnnouncer)")
 
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:

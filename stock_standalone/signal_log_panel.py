@@ -593,22 +593,26 @@ class SignalLogPanel(QWidget, WindowMixin):
             else:
                 display_msg = combined_msg
                 
-            # 找到现有行，更新内容和时间
-            self.log_table.item(found_row, 0).setText(now_str)
-            self.log_table.item(found_row, 1).setText(grade if grade else self.log_table.item(found_row, 1).text())
-            self.log_table.item(found_row, 2).setText(new_pattern)
-            self.log_table.item(found_row, 5).setText(display_msg)
-            
-            # 更新评级颜色
-            grade_item = self.log_table.item(found_row, 1)
-            if grade == 'S': grade_item.setForeground(QColor("#FF1493"))
-            elif grade == 'A': grade_item.setForeground(QColor("#FF8C00"))
-            
-            # 更新颜色为最新形态颜色
-            for i in [0, 2, 3, 4, 5]:
-                item = self.log_table.item(found_row, i)
-                if item:
-                    item.setForeground(text_color)
+            self._is_programmatic_selection = True
+            try:
+                # 找到现有行，更新内容和时间
+                self.log_table.item(found_row, 0).setText(now_str)
+                self.log_table.item(found_row, 1).setText(grade if grade else self.log_table.item(found_row, 1).text())
+                self.log_table.item(found_row, 2).setText(new_pattern)
+                self.log_table.item(found_row, 5).setText(display_msg)
+                
+                # 更新评级颜色
+                grade_item = self.log_table.item(found_row, 1)
+                if grade == 'S': grade_item.setForeground(QColor("#FF1493"))
+                elif grade == 'A': grade_item.setForeground(QColor("#FF8C00"))
+                
+                # 更新颜色为最新形态颜色
+                for i in [0, 2, 3, 4, 5]:
+                    item = self.log_table.item(found_row, i)
+                    if item:
+                        item.setForeground(text_color)
+            finally:
+                self._is_programmatic_selection = False
             
             # 发射日志已添加信号，用于同步语音播报 (即使更新也触发)
             self.log_added.emit(code, name, pattern, clean_msg)
@@ -653,14 +657,18 @@ class SignalLogPanel(QWidget, WindowMixin):
             QTableWidgetItem(clean_msg) # 使用清理后的消息
         ]
         
-        for i, item in enumerate(items):
-            if i != 1: # grade 已经单独设色
-                item.setForeground(text_color)
-            if i == 3 or i == 4: # 代码和名称加粗
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.log_table.setItem(row, i, item)
+        self._is_programmatic_selection = True
+        try:
+            for i, item in enumerate(items):
+                if i != 1: # grade 已经单独设色
+                    item.setForeground(text_color)
+                if i == 3 or i == 4: # 代码和名称加粗
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.log_table.setItem(row, i, item)
+        finally:
+            self._is_programmatic_selection = False
         
         # 限制行数
         if self.log_table.rowCount() > self._max_lines:
