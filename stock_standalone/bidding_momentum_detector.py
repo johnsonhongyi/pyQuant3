@@ -324,7 +324,8 @@ class TickSeries:
             return self._splitted_cats
         import re
         parts = re.split(r'[;；,，/\- ]', str(self.category))
-        self._splitted_cats = [p.strip() for p in parts if p.strip() and p.strip() != 'nan']
+        # [🚀 唯一性保护] 对单只个股的分类字符串执行去重，防止 "Sector1; Sector1" 导致映射冗余
+        self._splitted_cats = sorted(list({p.strip() for p in parts if p.strip() and p.strip() != 'nan'}))
         return self._splitted_cats
 
     def push_kline(self, kline: dict):
@@ -643,9 +644,13 @@ class BiddingMomentumDetector:
 
         new_codes = []
         for row in df.itertuples(index=False):
-            # [FIX] 显式使用 code 列，避免 itertuples Index 属性导致的 RangeIndex 数据错位
-            code = str(getattr(row, 'code', '')).strip().zfill(6)
-            if code == '000000' or not code: continue
+            # [🚀 格式规范化] 强制提取 6 位数字代码，剔除后缀(如 .SH/.SZ)，彻底根治重复入表问题
+            raw_code = str(getattr(row, 'code', '')).strip()
+            code = re.sub(r'[^\d]', '', raw_code)
+            if len(code) < 6 and code.isdigit(): code = code.zfill(6)
+            elif len(code) > 6: code = code[-6:]
+            
+            if code == '000000' or not code or len(code) != 6: continue
             
             row_data = row._asdict()
             name = str(row_data.get('name', code))
@@ -662,6 +667,20 @@ class BiddingMomentumDetector:
                     new_codes.append(code)
                 else:
                     self._tick_series[code].update_meta(row_data)
+
+        # [🚀 肃清冗余] 定期清理 _tick_series 中非标准 6 位格式的脏数据 (如带后缀的残余)
+        # 每 100 次注册执行一次，防止 CPU 抖动
+        if not hasattr(self, '_cleanup_counter'): self._cleanup_counter = 0
+        self._cleanup_counter += 1
+        if self._cleanup_counter % 100 == 0:
+            with self._lock:
+                dirty_keys = [k for k in self._tick_series.keys() if len(str(k)) != 6 or not str(k).isdigit()]
+                if dirty_keys:
+                    logger.info(f"🧹 [Detector] 清理了 {len(dirty_keys)} 个非标代码键: {dirty_keys[:5]}...")
+                    for k in dirty_keys:
+                        self._tick_series.pop(k, None)
+                        self._global_snap_cache.pop(k, None)
+                        if hasattr(self, '_code_index'): self._code_index.pop(k, None)
 
         # 对新 code 或 K线为空的 code：拉历史 K 线做冷启
         target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
@@ -2831,16 +2850,20 @@ class BiddingMomentumDetector:
             return
         new_map: Dict[str, Set[str]] = defaultdict(set)
         for row in df.itertuples(index=False):
-            code = str(getattr(row, 'code', '')).strip().zfill(6)
-            if not code or code == '000000':
+            # [🚀 格式规范化] 强制提取 6 位数字代码，剔除后缀(如 .SH/.SZ)，防止同一只股票以不同格式重复入表
+            raw_code = str(getattr(row, 'code', '')).strip()
+            code = re.sub(r'[^\d]', '', raw_code)
+            if len(code) < 6 and code.isdigit(): code = code.zfill(6)
+            elif len(code) > 6: code = code[-6:] # 仅取后 6 位，对齐全系统 A 股标准
+            
+            if not code or code == '000000' or len(code) != 6:
                 continue
             cat = str(getattr(row, 'category', ''))
             if not cat or cat == 'nan':
                 continue
-            for p in re.split(r'[;；,，/ \\-]', cat):
-                p = p.strip()
-                if p:
-                    new_map[p].add(code)
+            # [🚀 切分去重] 确保单行内重复的分类不产生多次 add 动作
+            for p in {c.strip() for c in re.split(r'[;；,，/ \\-]', cat) if c.strip()}:
+                new_map[p].add(code)
         
         # [ROOT-FIX] 稳健更新策略：判定是全量市场数据还是局部更新
         is_full_market = len(df) > 3000

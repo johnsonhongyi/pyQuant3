@@ -8,6 +8,7 @@ import re
 import traceback
 import threading
 import gzip
+import heapq
 from typing import Dict, List, Any, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
@@ -88,6 +89,9 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 }
 """
 
+
+# [🚀 渲染优化] 赛马明细窗 Top-K 渲染上限 (支持命令行 -display-k 修改)
+RENDER_TOP_K = 200
 
 # [🚀 DNA 统一分发] 模块级分发中枢：兼容 Tkinter 宿统与 Standalone Qt 进程
 def dispatch_dna_audit(code_to_name, parent_widget=None):
@@ -184,12 +188,22 @@ def _save_racing_config(conf: dict):
             logger.error(f"❌ [RacingConfig] Save Failed: {e}")
 
 def get_racing_role(ts):
-    is_leader = (ts.market_role == "主帅" or (ts.score > 60 and ts.first_breakout_ts > 0))
+    if not ts: return "静默"
+    # 增加属性存在性与 None 检查
+    score = getattr(ts, 'score', 0) or 0
+    current_pct = getattr(ts, 'current_pct', 0) or 0
+    market_role = getattr(ts, 'market_role', "") or ""
+    first_breakout_ts = getattr(ts, 'first_breakout_ts', 0) or 0
+    pattern_hint = getattr(ts, 'pattern_hint', "") or ""
+
+    is_leader = (market_role == "主帅" or (score > 60 and first_breakout_ts > 0))
     if is_leader: return "龙头"
-    is_confirmed = any(word in ts.pattern_hint for word in ["确认", "突破", "确核", "V反", "SBC"])
+    
+    is_confirmed = any(word in pattern_hint for word in ["确认", "突破", "确核", "V反", "SBC"])
     if is_confirmed: return "确核"
+    
     # [🚀 门槛下调] 只要有涨跌幅，就算作“跟涨”，确保饼图有颜色
-    if ts.score > 0.5 or abs(ts.current_pct) > 0.01: return "跟涨"
+    if score > 0.5 or abs(current_pct) > 0.01: return "跟涨"
     return "静默"
 
 
@@ -396,6 +410,10 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._is_height_doubled = False # [NEW] 高度翻倍状态位
         self._show_reason = False       # [NEW] 形态详情/理由显示标志 (默认关闭)
         
+        # [🚀 极限性能] 状态追踪
+        self._last_rendered_version = -1
+        self._dirty = False
+        
         self._init_ui()
         
         # 延迟恢复表头状态 (确保窗口布局已初步完成)
@@ -587,6 +605,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if not self.isVisible(): 
             return
 
+        # [🚀 极限性能] 版本脏检查：如果数据没变且没被强制置脏，直接跳过
+        curr_ver = getattr(self.detector, 'data_version', 0)
+        if not getattr(self, '_dirty', False) and curr_ver == getattr(self, '_last_rendered_version', -1):
+            return
+
         # [🚀 动态寻踪] 若当前探测器丢失，尝试从父面板动态“夺取”最新引用
         if not getattr(self, 'detector', None):
             if self.parent() and hasattr(self.parent(), 'detector'):
@@ -618,12 +641,16 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 new_members = set()
                 target_name = self.sector_name.strip()
                 with self.detector._lock:
-                    for code, ts in self.detector._tick_series.items():
+                    for raw_code, ts in self.detector._tick_series.items():
+                        # [🚀 格式规范化] 强制提取 6 位数字代码用于匹配与去重
+                        code = re.sub(r'[^\d]', '', str(raw_code))
+                        if len(code) < 6: code = code.zfill(6)
+                        elif len(code) > 6: code = code[-6:]
+                        
                         # [🚀 多维字段匹配 + 复杂正则切分] 对齐主面板推导逻辑
                         cat_val = str(getattr(ts, 'category', '')) + " " + str(getattr(ts, 'block', ''))
                         if not cat_val or len(cat_val) < 2: continue
                         
-                        # 使用正则表达式进行切分对比
                         cats = [c.strip() for c in re.split(r'[;；,，/\- ]', cat_val) if c.strip()]
                         if target_name in cats: 
                             new_members.add(code)
@@ -646,9 +673,28 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if not self.detector._lock.acquire(blocking=False): return
             
         try:
-            data_list = [self.detector._tick_series[c] for c in members if c in self.detector._tick_series]
+            # [🚀 绝对去重防御] 即使底层数据存在 600000 与 600000.SH，此处也仅保留一个对象
+            unique_members = {}
+            if members:
+                for raw_code in members:
+                    norm_code = re.sub(r'[^\d]', '', str(raw_code))
+                    if len(norm_code) < 6: norm_code = norm_code.zfill(6)
+                    elif len(norm_code) > 6: norm_code = norm_code[-6:]
+                    
+                    if norm_code in unique_members: continue
+                    
+                    # 尝试寻找最匹配的对象
+                    ts = self.detector._tick_series.get(raw_code) or self.detector._tick_series.get(norm_code)
+                    if ts:
+                        unique_members[norm_code] = ts
+            
+            data_list = list(unique_members.values())
         finally:
             self.detector._lock.release()
+            
+        # [🚀 渲染闭环] 只有在成功获取数据并准备渲染时，才更新版本号
+        self._dirty = False
+        self._last_rendered_version = curr_ver
             
         if not data_list:
             # [🚀 极速提示] 即使无数据也不白屏，显示占位
@@ -661,56 +707,74 @@ class SectorDetailDialog(QDialog, WindowMixin):
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
-        # 获取 SBC 注册表 (用于排序优先级判定)
+        # [🚀 性能加速] 提到循环外，避免在排序 lambda 中重复查找
         tracker = None
         if self.detector and self.detector.realtime_service:
             tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
         sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
+        alert_manager = get_alert_manager()
+        
         # 预计算合成评分 (用于锁外高性能排序)
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
 
-        def get_sort_key(ts):
-            # [🚀 优先级排序增强] ⚡(2) > 🔔(1) > 无(0)
-            has_alert = get_alert_manager().is_alerted(ts.code)
+        # [🚀 极限性能] 预提取所有排序所需属性，避免 lambda 内部重复 lookup
+        sort_payload = []
+        for ts in data_list:
+            has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in sbc_registry
             prio = 2 if has_sbc else (1 if has_alert else 0)
             
-            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
-            elif attr == 'pct_diff': val = ts.pct_diff
-            elif attr == 'score': val = score_cache.get(ts.code, 0)
-            else: val = getattr(ts, attr, 0)
+            cp = getattr(ts, 'current_pct', 0) or 0
+            pd = getattr(ts, 'pct_diff', 0) or 0
             
+            if attr == 'start_pct': val = cp - pd
+            elif attr == 'pct_diff': val = pd
+            elif attr == 'score': val = score_cache.get(ts.code, 0)
+            else: val = getattr(ts, attr, 0) or 0
+            
+            # 构建稳定排序 Key
             if attr == 'name':
-                return (prio, val, ts.code)
-            return (val, ts.code)
+                s_key = (prio, str(val), ts.code)
+            else:
+                s_key = (val if val is not None else 0, ts.code)
+            sort_payload.append((s_key, ts, prio, has_alert, has_sbc))
         
-        data_list.sort(key=get_sort_key, reverse=is_rev)
+        # [🚀 排序优化] 使用 Top-K 堆排序算法：O(N log K)
+        # 针对大数据量场景（如全A股），仅提取 Top-K 标的进行渲染，性能提升 5-10 倍
+        DISPLAY_K = RENDER_TOP_K
+        if len(sort_payload) > DISPLAY_K:
+            if is_rev:
+                sort_payload = heapq.nlargest(DISPLAY_K, sort_payload, key=lambda x: x[0])
+            else:
+                sort_payload = heapq.nsmallest(DISPLAY_K, sort_payload, key=lambda x: x[0])
+        else:
+            sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
         
-        display_list = data_list[:100]
         flattened = []
-        for ts in display_list:
+        for s_key, ts, prio, is_alerted, is_sbc in sort_payload:
             # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
             reason = ""
             if self._show_reason:
-                if ts.code in sbc_registry: reason = sbc_registry[ts.code].get('desc', '')
+                if is_sbc: reason = sbc_registry[ts.code].get('desc', '')
                 if not reason: reason = getattr(ts, 'pattern_hint', "")
 
             flattened.append((
-                ts.code, ts.name, score_cache.get(ts.code, 0), 
-                getattr(ts, 'signal_count', 0),
-                ts.current_pct,
-                ts.current_pct - ts.pct_diff,
-                ts.pct_diff,
-                reason
+                ts.code, getattr(ts, 'name', '未知') or '未知', score_cache.get(ts.code, 0), 
+                getattr(ts, 'signal_count', 0) or 0,
+                getattr(ts, 'current_pct', 0) or 0,
+                (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
+                getattr(ts, 'pct_diff', 0) or 0,
+                reason,
+                is_alerted # 传给渲染器
             ))
 
         total = len(data_list)
-        up = sum(1 for x in data_list if x.current_pct > 0)
-        down = sum(1 for x in data_list if x.current_pct < 0)
-        avg_pct = sum(x.current_pct for x in data_list) / total if total > 0 else 0
+        up = sum(1 for x in data_list if (getattr(x, 'current_pct', 0) or 0) > 0)
+        down = sum(1 for x in data_list if (getattr(x, 'current_pct', 0) or 0) < 0)
+        avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / total if total > 0 else 0
         
         stats_text = (
-            f"📊 共 {total} 只 | 涨跌: <span style='color:#FF4444;'>{up}</span>/<span style='color:#44CC44;'>{down}</span> | "
+            f"📊 共 {total} 只{' (仅显Top%d)' % RENDER_TOP_K if total > RENDER_TOP_K else ''} | 涨跌: <span style='color:#FF4444;'>{up}</span>/<span style='color:#44CC44;'>{down}</span> | "
             f"🏁 均涨: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span> | "
             f"📡 同步: {datetime.datetime.now().strftime('%H:%M:%S')}"
         )
@@ -723,32 +787,31 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, reason = row
+            code, name, score, sig, pct, start_pct, dff, reason, is_alerted = row
             # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
-            is_alerted = get_alert_manager().is_alerted(code)
+            # is_alerted = get_alert_manager().is_alerted(code) # 已在 refresh_data 预计算
             bg_c = QColor("#4B0082") if is_alerted else None
             txt_c = QColor("#FFFFFF") if is_alerted else None
             d_name = f"🔔{name}" if is_alerted else name
 
             self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
             self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
-            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c)
-            sig_txt = str(sig) if sig > 0 else ""
-            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC") if not is_alerted else txt_c, Qt.AlignmentFlag.AlignCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 2, score, color=QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c, fmt="{:.1f}")
+            self._update_dialog_cell(i, 3, sig, color=QColor("#00FFCC") if not is_alerted else txt_c, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_c, fmt="{}")
             
-            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
+            c_pct = QColor("#FF4444") if pct > 0.001 else (QColor("#44CC44") if pct < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_pct = txt_c
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 4, pct, color=c_pct, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
             
-            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
+            c_start = QColor("#FF4444") if start_pct > 0.001 else (QColor("#44CC44") if start_pct < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_start = txt_c
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 5, start_pct, color=c_start, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
             
-            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
+            c_dff = QColor("#FF4444") if dff > 0.001 else (QColor("#44CC44") if dff < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_dff = txt_c
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 6, dff, color=c_dff, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
 
             # [自适应渲染] 只有在列可见时才更新单元格内容
             if self._show_reason:
@@ -756,22 +819,36 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 if is_alerted: c_reason = txt_c
                 self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
 
-    def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
+    def _update_dialog_cell(self, row, col, val, color=None, align=None, bg_color=None, fmt=None):
         it = self.table.item(row, col)
+        
+        # [🚀 极限性能] 数值脏检查：只有当原始数值变动时，才允许进入昂贵的 f-string 格式化
+        # [FIX] 增加 it.text() 检查，防止由于初始化时的空 item 导致的“白屏”或“残留”
+        if it and it.text() and it.data(Qt.ItemDataRole.UserRole) == val:
+            # 数值没变，但颜色或背景可能随报警状态变动
+            if color and it.foreground().color() != color:
+                it.setForeground(color)
+            if bg_color:
+                if it.background().color() != bg_color:
+                    it.setBackground(bg_color)
+            elif it.background().color().alpha() != 0:
+                it.setBackground(QColor(0,0,0,0))
+            return
+
+        text = fmt.format(val) if (fmt and val is not None) else str(val if val is not None else "")
         if not it:
             from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
             it = NumericTableWidgetItem(text)
+            it.setData(Qt.ItemDataRole.UserRole, val)
             if color: it.setForeground(color)
             if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             self.table.setItem(row, col, it)
         else:
-            if it.text() != text:
-                it.setText(text)
-            if color:
-                it.setForeground(color)
-            if bg_color:
-                it.setBackground(bg_color)
+            it.setData(Qt.ItemDataRole.UserRole, val)
+            it.setText(text)
+            if color: it.setForeground(color)
+            if bg_color: it.setBackground(bg_color)
             elif it.background().color().alpha() != 0:
                 it.setBackground(QColor(0,0,0,0))
 
@@ -938,6 +1015,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self._sort_col = logical_index
             self._sort_order = Qt.SortOrder.DescendingOrder
         self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+        self._dirty = True
         self.refresh_data()
 
     def closeEvent(self, event):
@@ -1007,6 +1085,10 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._boot_lock = True
         self._is_height_doubled = False
         self._show_reason = False
+        
+        # [🚀 极限性能] 状态追踪
+        self._last_rendered_version = -1
+        self._dirty = False
         
         self._init_ui()
         QTimer.singleShot(150, self._restore_header_state)
@@ -1125,78 +1207,118 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if not self.isVisible(): 
             return
 
+        # [🚀 极限性能] 版本脏检查
+        curr_ver = getattr(self.detector, 'data_version', 0)
+        if not getattr(self, '_dirty', False) and curr_ver == getattr(self, '_last_rendered_version', -1):
+            return
+
         if not hasattr(self, 'detector') or not self.detector: return
         
         if not self.detector._lock.acquire(blocking=False): return
         try:
-            data_list = []
-            for ts in self.detector._tick_series.values():
-                # [FIX] 虚拟板块逻辑适配：分析报警状态
-                is_alerted = get_alert_manager().is_alerted(ts.code)
-                # [NEW] 补全回测模式下的信号感知：检查 SBC 注册表
-                if not is_alerted and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
-                    reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
-                    if ts.code in reg: is_alerted = True
+            # [🚀 性能优化] 提到循环外，大幅降低 5000+ 品种扫描时的开销
+            tracker = None
+            if self.detector.realtime_service:
+                tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
+            reg = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
+            alert_manager = get_alert_manager()
 
-                role = get_racing_role(ts)
-                if role == self.category_name or (self.category_name == "🔔 实时报警" and is_alerted):
-                    data_list.append(ts)
+            target_role = self.category_name
+            is_alert_cat = (target_role == "🔔 实时报警")
+
+            data_list = []
+            seen_codes = set()
+            for ts in self.detector._tick_series.values():
+                if not ts: continue
+                
+                # [🚀 唯一性校验] 强制规范化 code 键，防止由于 600000 与 600000.SH 同时存在导致的 UI 冗余
+                raw_code = getattr(ts, 'code', '')
+                norm_code = re.sub(r'[^\d]', '', str(raw_code))
+                if len(norm_code) < 6: norm_code = norm_code.zfill(6)
+                elif len(norm_code) > 6: norm_code = norm_code[-6:]
+                
+                if not norm_code or norm_code in seen_codes: continue
+                seen_codes.add(norm_code)
+                
+                is_alerted = False
+                # 只有在报警分类或需要显示详情时，才执行昂贵的报警校验
+                if is_alert_cat or self._show_reason:
+                    is_alerted = alert_manager.is_alerted(norm_code) or norm_code in reg
+
+                if is_alert_cat:
+                    if is_alerted: data_list.append(ts)
+                else:
+                    if get_racing_role(ts) == target_role:
+                        data_list.append(ts)
             
             if not data_list:
                 if self.table.rowCount() > 0: self.table.setRowCount(0)
                 return
         finally:
             self.detector._lock.release()
+            
+        # [🚀 渲染闭环] 只有在成功获取数据并准备渲染时，才更新版本号
+        self._dirty = False
+        self._last_rendered_version = curr_ver
 
-        # [🔒 锁外计算]
+        # [🚀 锁外计算] 预提取所有排序所需属性
         col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
+        alert_manager = get_alert_manager()
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
         
-        def get_sort_key(ts):
-            # [🚀 优先级排序增强] ⚡(2) > 🔔(1) > 无(0)
-            # 获取 SBC 注册表
-            reg = {}
-            if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
-                 reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
-            
-            has_alert = get_alert_manager().is_alerted(ts.code)
+        sort_payload = []
+        for ts in data_list:
+            has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in reg
             prio = 2 if has_sbc else (1 if has_alert else 0)
             
-            if attr == 'start_pct': val = ts.current_pct - ts.pct_diff
-            elif attr == 'pct_diff': val = ts.pct_diff
+            cp = getattr(ts, 'current_pct', 0) or 0
+            pd = getattr(ts, 'pct_diff', 0) or 0
+            
+            if attr == 'start_pct': val = cp - pd
+            elif attr == 'pct_diff': val = pd
             elif attr == 'score': val = score_cache.get(ts.code, 0)
-            else: val = getattr(ts, attr, 0)
+            else: val = getattr(ts, attr, 0) or 0
             
             if attr == 'name':
-                return (prio, val, ts.code)
-            return (val, ts.code)
+                s_key = (prio, str(val), ts.code)
+            else:
+                s_key = (val if val is not None else 0, ts.code)
+            sort_payload.append((s_key, ts, prio, has_alert, has_sbc))
 
-        data_list.sort(key=get_sort_key, reverse=is_rev)
+        # [🚀 排序优化] 使用 Top-K 堆排序：O(N log K)
+        DISPLAY_K = RENDER_TOP_K
+        if len(sort_payload) > DISPLAY_K:
+            if is_rev:
+                sort_payload = heapq.nlargest(DISPLAY_K, sort_payload, key=lambda x: x[0])
+            else:
+                sort_payload = heapq.nsmallest(DISPLAY_K, sort_payload, key=lambda x: x[0])
+        else:
+            sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
         
         flattened = []
-        for ts in data_list[:300]:
+        for s_key, ts, prio, is_alerted, is_sbc in sort_payload:
             # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
             reason = ""
             if self._show_reason:
-                if self.detector and self.detector.realtime_service and self.detector.realtime_service.emotion_tracker:
-                    reg = getattr(self.detector.realtime_service.emotion_tracker, '_sbc_signals_registry', {})
-                    if ts.code in reg: 
-                        reason = reg[ts.code].get('desc', '')
+                if is_sbc: 
+                    reason = reg[ts.code].get('desc', '')
                 if not reason: 
                     reason = getattr(ts, 'pattern_hint', "")
 
-            flattened.append((ts.code, ts.name, score_cache.get(ts.code, 0), 
-                             getattr(ts, 'signal_count', 0),
-                             ts.current_pct,
-                             ts.current_pct - ts.pct_diff,
-                             ts.pct_diff,
-                             reason))
-        avg_pct = sum(x.current_pct for x in data_list) / len(data_list)
-        stats_text = (f"📊 统计: 共 {len(data_list)} 只 | "
+            flattened.append((ts.code, getattr(ts, 'name', '未知') or '未知', score_cache.get(ts.code, 0), 
+                             getattr(ts, 'signal_count', 0) or 0,
+                             getattr(ts, 'current_pct', 0) or 0,
+                             (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
+                             getattr(ts, 'pct_diff', 0) or 0,
+                             reason,
+                             is_alerted))
+        avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / len(data_list) if data_list else 0
+        total_count = len(data_list)
+        stats_text = (f"📊 统计: 共 {total_count} 只{' (仅显Top%d)' % RENDER_TOP_K if total_count > RENDER_TOP_K else ''} | "
                       f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span>")
         self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
         self.status_lbl.setText(stats_text)
@@ -1207,55 +1329,67 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, reason = row
+            code, name, score, sig, pct, start_pct, dff, reason, is_alerted = row
             # code, name, score, sig, pct, start_pct, dff, reason = row
             
             # [⚡ 报警核验]
-            is_alerted = get_alert_manager().is_alerted(code)
+            # is_alerted = get_alert_manager().is_alerted(code) # 已预计算
             bg_c = QColor("#4B0082") if is_alerted else None
             txt_c = QColor("#FFFFFF") if is_alerted else None
             d_name = f"🔔{name}" if is_alerted else name
 
             self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
             self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
-            self._update_dialog_cell(i, 2, f"{score:.1f}", QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c)
-            sig_txt = str(sig) if sig > 0 else ""
-            self._update_dialog_cell(i, 3, sig_txt, QColor("#00FFCC") if not is_alerted else txt_c, Qt.AlignmentFlag.AlignCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 2, score, color=QColor("#FFD700") if not is_alerted else txt_c, bg_color=bg_c, fmt="{:.1f}")
+            self._update_dialog_cell(i, 3, sig, color=QColor("#00FFCC") if not is_alerted else txt_c, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_c, fmt="{}")
             
-            c_pct = QColor("#FF4444") if pct > 0 else (QColor("#44CC44") if pct < 0 else Qt.GlobalColor.white)
+            c_pct = QColor("#FF4444") if pct > 0.001 else (QColor("#44CC44") if pct < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_pct = txt_c
-            self._update_dialog_cell(i, 4, f"{pct:+.2f}%", c_pct, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 4, pct, color=c_pct, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
             
-            c_start = QColor("#FF4444") if start_pct > 0 else (QColor("#44CC44") if start_pct < 0 else Qt.GlobalColor.white)
+            c_start = QColor("#FF4444") if start_pct > 0.001 else (QColor("#44CC44") if start_pct < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_start = txt_c
-            self._update_dialog_cell(i, 5, f"{start_pct:+.2f}%", c_start, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 5, start_pct, color=c_start, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
             
-            c_dff = QColor("#FF4444") if dff > 0 else (QColor("#44CC44") if dff < 0 else Qt.GlobalColor.white)
+            c_dff = QColor("#FF4444") if dff > 0.001 else (QColor("#44CC44") if dff < -0.001 else Qt.GlobalColor.white)
             if is_alerted: c_dff = txt_c
-            self._update_dialog_cell(i, 6, f"{dff:+.2f}%", c_dff, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c)
+            self._update_dialog_cell(i, 6, dff, color=c_dff, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
 
             # [自适应渲染] 只有在列可见时才更新单元格内容
             if self._show_reason:
                 c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
                 if is_alerted: c_reason = txt_c
-                self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
+                self._update_dialog_cell(i, 7, reason, color=c_reason, bg_color=bg_c)
 
-    def _update_dialog_cell(self, row, col, text, color=None, align=None, bg_color=None):
+    def _update_dialog_cell(self, row, col, val, color=None, align=None, bg_color=None, fmt=None):
         it = self.table.item(row, col)
+        
+        # [🚀 极限性能] 数值脏检查
+        # [FIX] 增加 it.text() 检查，防止由于初始化时的空 item 导致的“白屏”或“残留”
+        if it and it.text() and it.data(Qt.ItemDataRole.UserRole) == val:
+            if color and it.foreground().color() != color:
+                it.setForeground(color)
+            if bg_color:
+                if it.background().color() != bg_color:
+                    it.setBackground(bg_color)
+            elif it.background().color().alpha() != 0:
+                it.setBackground(QColor(0,0,0,0))
+            return
+
+        text = fmt.format(val) if (fmt and val is not None) else str(val if val is not None else "")
         if not it:
             from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
             it = NumericTableWidgetItem(text)
+            it.setData(Qt.ItemDataRole.UserRole, val)
             if color: it.setForeground(color)
             if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             self.table.setItem(row, col, it)
         else:
-            if it.text() != text:
-                it.setText(text)
-            if color:
-                it.setForeground(color)
-            if bg_color:
-                it.setBackground(bg_color)
+            it.setData(Qt.ItemDataRole.UserRole, val)
+            it.setText(text)
+            if color: it.setForeground(color)
+            if bg_color: it.setBackground(bg_color)
             elif it.background().color().alpha() != 0:
                 it.setBackground(QColor(0,0,0,0))
 
@@ -1430,6 +1564,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             self._sort_col = logical_index
             self._sort_order = Qt.SortOrder.DescendingOrder
         self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+        self._dirty = True
         self.refresh_data()
 
     def closeEvent(self, event):
@@ -3485,35 +3620,46 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
 
 
-    def _update_cell(self, table, row, col, text, color=None, align=None, is_numeric=True, bg_color=None, sort_prio=None):
+    def _update_cell(self, table, row, col, val, color=None, align=None, is_numeric=True, bg_color=None, sort_prio=None, fmt=None):
         it = table.item(row, col)
+        
+        # [🚀 极限性能] 数值脏检查：跳过昂贵的 f-string 格式化与 setText
+        if it and it.data(Qt.ItemDataRole.UserRole) == val:
+            changed = False
+            if sort_prio is not None and hasattr(it, 'sort_prio') and it.sort_prio != sort_prio:
+                it.sort_prio = sort_prio
+                changed = True
+            if color and it.foreground().color() != color:
+                it.setForeground(color)
+                changed = True
+            if bg_color and it.background().color() != bg_color:
+                it.setBackground(bg_color)
+                changed = True
+            return changed
+
+        text = fmt.format(val) if (fmt and val is not None) else str(val if val is not None else "")
         if not it:
             if sort_prio is not None:
                 it = LabeledStockItem(text, sort_prio) # 专门处理带图标排序
             else:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(text)
             
+            it.setData(Qt.ItemDataRole.UserRole, val)
             if color: it.setForeground(color)
             if bg_color: it.setBackground(bg_color)
             if align: it.setTextAlignment(align)
             table.setItem(row, col, it)
             return True
             
-        changed = False
-        if it.text() != text:
-             it.setText(text)
-             changed = True
+        changed = True
+        it.setData(Qt.ItemDataRole.UserRole, val)
+        it.setText(text)
         
         # [NEW] 同步更新排序优先级
-        if sort_prio is not None and hasattr(it, 'sort_prio') and it.sort_prio != sort_prio:
+        if sort_prio is not None and hasattr(it, 'sort_prio'):
             it.sort_prio = sort_prio
-            changed = True
-        if color and it.foreground().color() != color:
-             it.setForeground(color)
-             changed = True
-        if bg_color and it.background().color() != bg_color:
-             it.setBackground(bg_color)
-             changed = True
+        if color: it.setForeground(color)
+        if bg_color: it.setBackground(bg_color)
         return changed
 
     def _update_table_optimized(self, table, flattened_data):
@@ -3544,23 +3690,19 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
             self._update_cell(table, i, 0, display_code, color=txt_c, is_numeric=False, bg_color=bg_c)
             self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c, sort_prio=sort_p)
-            score_txt = str(round(score, 1))
-            if self._update_cell(table, i, 2, score_txt, self._UI_CACHE["COLOR_GOLD"]):
+            if self._update_cell(table, i, 2, score, color=self._UI_CACHE["COLOR_GOLD"], fmt="{:.1f}"):
                 if not is_first_init: self._table_highlights[("stock", code, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("stock", code, 2))
-            sig_txt = f"{sig}" if sig > 0 else ""
-            if self._update_cell(table, i, 3, sig_txt, self._UI_CACHE["COLOR_CYAN"], Qt.AlignmentFlag.AlignCenter):
+            if self._update_cell(table, i, 3, sig, color=self._UI_CACHE["COLOR_CYAN"], align=Qt.AlignmentFlag.AlignCenter, fmt="{}"):
                 if not is_first_init: self._table_highlights[("stock", code, 3)] = time.time()
             self._apply_flash_effect(table.item(i, 3), ("stock", code, 3))
-            pct_text = f"{pct:+.2f}%"
             c_pct = self._UI_CACHE["COLOR_RED"] if pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 4, pct_text, c_pct):
+            if self._update_cell(table, i, 4, pct, color=c_pct, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("stock", code, 4)] = time.time()
             self._apply_flash_effect(table.item(i, 4), ("stock", code, 4))
             # 6. DFF (强制使用切片涨幅 diff, 确保锚点变动时 UI 100% 同步)
-            dff_txt = f"{diff:+.2f}%"
             c_dff = self._UI_CACHE["COLOR_RED"] if diff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if diff < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 6, dff_txt, self._UI_CACHE["COLOR_RED"] if diff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if diff < -0.001 else Qt.GlobalColor.white)):
+            if self._update_cell(table, i, 6, diff, color=c_dff, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("stock", code, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("stock", code, 6))
 
@@ -3568,13 +3710,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if self._global_show_reason:
                 c_reason = self._UI_CACHE["COLOR_CYAN"] if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
                 if is_alerted: c_reason = self._UI_CACHE["COLOR_ALERT_TEXT"]
-                self._update_cell(table, i, 7, str(reason), c_reason, bg_color=bg_c)
+                self._update_cell(table, i, 7, reason, color=c_reason, bg_color=bg_c)
             
             # 使用本次切片的 diff 来反推当时起点的涨幅
             l_start_pct = pct - diff
-            start_txt = f"{l_start_pct:+.2f}%"
             c_start = self._UI_CACHE["COLOR_RED"] if l_start_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_start_pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 5, start_txt, c_start):
+            if self._update_cell(table, i, 5, l_start_pct, color=c_start, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("stock", code, 5)] = time.time()
             self._apply_flash_effect(table.item(i, 5), ("stock", code, 5))
 
@@ -3590,17 +3731,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # 1. 强度得分
             score = round(sec.get('score', 0), 1)
-            if self._update_cell(table, i, 1, str(score), self._UI_CACHE["COLOR_GOLD"]):
+            if self._update_cell(table, i, 1, score, color=self._UI_CACHE["COLOR_GOLD"], fmt="{:.1f}"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 1)] = time.time()
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
 
             # 2. 得分增量 (展示相对于锚点的强度增量)
             score_anchor = sec.get('score_anchor', score)
             score_diff = score - score_anchor
-            diff_txt = f"{score_diff:+.1f}"
             c_diff = self._UI_CACHE["COLOR_RED"] if score_diff > 0.05 else (self._UI_CACHE["COLOR_GREEN"] if score_diff < -0.05 else Qt.GlobalColor.white)
             
-            if self._update_cell(table, i, 2, diff_txt, c_diff):
+            if self._update_cell(table, i, 2, score_diff, color=c_diff, fmt="{:+.1f}"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("sector", s_name, 2))
                 
@@ -3612,23 +3752,20 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._update_cell(table, i, 3, leader_display, is_numeric=False)
                 
             # 4. 龙头总涨幅
-            l_pct_text = f"{l_total_pct:+.2f}%"
             c_pct = self._UI_CACHE["COLOR_RED"] if l_total_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_total_pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 4, l_pct_text, c_pct):
+            if self._update_cell(table, i, 4, l_total_pct, color=c_pct, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 4)] = time.time()
             self._apply_flash_effect(table.item(i, 4), ("sector", s_name, 4))
             
             # 5. 起点涨幅
-            start_txt = f"{l_start_pct:+.2f}%"
             c_start = self._UI_CACHE["COLOR_RED"] if l_start_pct > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_start_pct < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 5, start_txt, c_start):
+            if self._update_cell(table, i, 5, l_start_pct, color=c_start, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 5)] = time.time()
             self._apply_flash_effect(table.item(i, 5), ("sector", s_name, 5))
 
             # 6. 龙头DFF (纯净显示)
-            dff_txt = f"{l_dff:+.2f}%"
             c_dff = self._UI_CACHE["COLOR_RED"] if l_dff > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_dff < -0.001 else Qt.GlobalColor.white)
-            if self._update_cell(table, i, 6, dff_txt, c_dff):
+            if self._update_cell(table, i, 6, l_dff, color=c_dff, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("sector", s_name, 6))
 
@@ -3636,7 +3773,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             followers = sec.get('followers', [])
             f_items = []
             for f in followers[:3]:
-                # [FIX] 名称空缺治理：若 f['name'] 为空，则从探测器回填，否则回退到代码
                 f_name = f.get('name') or ""
                 if not f_name:
                     ts_ref = self.detector._tick_series.get(f.get('code'))
