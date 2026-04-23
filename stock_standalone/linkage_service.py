@@ -56,10 +56,15 @@ class LinkageService:
 
                 # 2. 状态执行与节流逻辑
                 now = time.time()
-                if self.latest_cmd and (now - self.last_exec_ts >= self.throttle_interval):
-                    self._execute(self.latest_cmd)
-                    self.latest_cmd = None  # 执行完即视为状态已对齐
-                    self.last_exec_ts = now
+                if self.latest_cmd:
+                    # ⭐ [UPGRADE] 动态节流：后台自动信号使用 2s 防抖，手动点击使用 50ms 极速响应
+                    auto = self.latest_cmd.get('auto', False)
+                    throttle = 2.0 if auto else self.throttle_interval
+
+                    if (now - self.last_exec_ts >= throttle):
+                        self._execute(self.latest_cmd)
+                        self.latest_cmd = None  # 执行完即视为状态已对齐
+                        self.last_exec_ts = now
 
                 time.sleep(0.01) # 防止空转
 
@@ -81,7 +86,8 @@ class LinkageService:
             
             # 1. 核心物理联动派发
             if self.sender:
-                self.sender._do_send(code, flags)
+                auto = cmd_opt.get('auto', False)
+                self.sender._do_send(code, flags, auto=auto)
                 
         except Exception as e:
             logger.error(f"Execution error for {code}: {e}")
@@ -112,10 +118,20 @@ class LinkageManagerProxy:
         self.process.start()
         logger.info(f"Linkage process launched. PID: {self.process.pid}")
 
-    def push(self, code, flags=None):
+    def push(self, code, flags=None, auto=False):
         """投递一个联动意图 (State Overwrite)"""
         if not code: return
         flags = flags or {'tdx': True, 'ths': True, 'dfcf': True}
+
+        # [NEW] 联动节流逻辑：如果同一代码且是后台自动触发，极速过滤 (2s)
+        # 防止高频信号瞬间冲垮 IPC 队列
+        now = time.time()
+        if auto:
+            if not hasattr(self, '_last_auto_link_map'): self._last_auto_link_map = {}
+            last_t = self._last_auto_link_map.get(code, 0)
+            if now - last_t < 2.0:
+                 return
+            self._last_auto_link_map[code] = now
 
         # 状态覆盖：如果队列已满，尝试清理旧数据
         if self.queue.full():
@@ -129,7 +145,8 @@ class LinkageManagerProxy:
             self.queue.put_nowait({
                 'code': code,
                 'flags': flags,
-                'ts': time.time()
+                'ts': now,
+                'auto': auto
             })
         except queue.Full:
             # 极端高频下如果还是满的，直接忽略，保证主流程不中断
