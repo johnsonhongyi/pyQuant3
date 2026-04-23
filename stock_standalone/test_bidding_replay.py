@@ -187,7 +187,8 @@ class LiveWorker(QThread):
                 try:
                     df_hist = pd.read_hdf(h5_path, key='all')
                 except Exception as e2:
-                    logger.warning(f"ℹ️ [Recovery] No table '{today_key}' or 'all' found: {e2}")
+                    # [🚀 鲁棒提示] 如果数据确实不存在，给出清晰的业务提示
+                    logger.warning(f"ℹ️ [Recovery] 数据源未就绪: HDF5 文件中尚未包含 '{today_key}' 或 'all' 详情表。")
                     return
             except Exception as e:
                 logger.error(f"❌ [Recovery] Failed to read HDF5: {e}")

@@ -150,6 +150,7 @@ faulthandler.enable()
 # 全局退出计数 (3次 Ctrl+C 自动强制退出)
 _exit_ctrl_c_count = 0
 _exit_ctrl_c_time = 0
+_exit_dialog_active = False # [NEW] 对话框存活标记
 
 # ✅ 性能优化模块导入
 try:
@@ -1494,29 +1495,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info(f"已取消 {cancelled} 个 Tkinter after 调度任务")
 
     def signal_handler(self, sig, frame):
-        """[ROOT-FIX] 增强信号处理，确保安全关闭看门狗与后台服务"""
-        self._is_closing = True
-        if hasattr(self, 'link_manager'):
-            self.link_manager.stop()
-        """捕获 Ctrl+C 信号"""
-        global _exit_ctrl_c_count, _exit_ctrl_c_time
-        now = time.time()
-        # 3 秒内连续按 3 次 Ctrl+C，强制退出
-        if now - _exit_ctrl_c_time > 3:
-            _exit_ctrl_c_count = 0
-            
-        _exit_ctrl_c_count += 1
-        _exit_ctrl_c_time = now
+        """兼容 POSIX 系统的信号处理。Windows 下已由 native_ctrl_handler 接管，此方法仅作为降级备份"""
+        if not cct.isMac(): return
+        self.ask_exit()
 
-        if _exit_ctrl_c_count >= 3:
-            print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
-            logger.info("检测到连续 3 次 Ctrl+C，正在强制退出程序...")
-            os._exit(0)
-        else:
-            # 第一次或非连续，正常询问
-            self.ask_exit()
-            # 对话框关闭后（可能是取消），重置计数，防止影响后续
-            _exit_ctrl_c_count = 0
+    def _native_ctrl_handler(self, ctrl_type):
+        """[Windows 专用] 底层控制台处理器，运行在独立线程，不受 messagebox 阻塞影响"""
+        if ctrl_type in (0, 1): # CTRL_C_EVENT or CTRL_BREAK_EVENT
+            global _exit_ctrl_c_count, _exit_ctrl_c_time
+            now = time.time()
+            if now - _exit_ctrl_c_time > 3:
+                _exit_ctrl_c_count = 0
+            _exit_ctrl_c_count += 1
+            _exit_ctrl_c_time = now
+
+            if _exit_ctrl_c_count >= 3:
+                print("\n[Native] 检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                os._exit(0)
+            else:
+                if getattr(self, '_exit_dialog_active', False):
+                    print(f"\n[Native] 正在等待确认... 再按 {3 - _exit_ctrl_c_count} 次强制暴力退出")
+                else:
+                    print(f"\n[Native] KeyboardInterrupt ({_exit_ctrl_c_count}/3), 正在尝试弹出确认窗...")
+                    # [🚀 安全触发] 通过 after 将 GUI 请求投递回主线程执行
+                    try:
+                        self.after(0, self.ask_exit)
+                    except:
+                        pass
+                return True # 表示已处理
+        return False
         
     def send_command_to_visualizer(self, cmd_str):
         """
@@ -1539,25 +1546,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def ask_exit(self):
         """弹出确认框，询问是否退出"""
-        global _exit_ctrl_c_count, _exit_ctrl_c_time
+        # [🚀 防抖保护] 确保同时只有一个对话框实例存在，防止 Windows 焦点死锁
+        if getattr(self, '_exit_dialog_active', False):
+            return
+            
+        self._exit_dialog_active = True
         try:
             if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
                 self.on_close()
-        except KeyboardInterrupt:
-            # [🚀 增强] 如果在确认框弹出时再次按 Ctrl+C，触发暴力退出逻辑
-            now = time.time()
-            if now - _exit_ctrl_c_time > 3:
-                _exit_ctrl_c_count = 0
-            _exit_ctrl_c_count += 1
-            _exit_ctrl_c_time = now
-            
-            if _exit_ctrl_c_count >= 3:
-                print("\n[Dialog] 检测到连续 3 次 Ctrl+C，正在强制暴力退出...")
-                os._exit(0)
-            else:
-                print(f"\n[Dialog] KeyboardInterrupt ({_exit_ctrl_c_count}/3), 请再次按 Ctrl+C 或输入 'quit' 退出")
-                # 再次尝试执行正常关闭流程
-                self.on_close()
+        finally:
+            self._exit_dialog_active = False
 
     # ========== Win32 RegisterHotKey 全局快捷键 ==========
     # 使用系统级 RegisterHotKey API 替代 keyboard 库的低级钩子，
@@ -16168,6 +16166,11 @@ if __name__ == "__main__":
     else:
         width, height = 100, 32
         cct.set_console(width, height)
+
+    # ✅ 注册 Windows 原生控制台处理器，确保在弹窗阻塞时也能响应 Ctrl+C
+    if not cct.isMac():
+        import win32api
+        win32api.SetConsoleCtrlHandler(app._native_ctrl_handler, True)
 
     try:
         app.mainloop()
