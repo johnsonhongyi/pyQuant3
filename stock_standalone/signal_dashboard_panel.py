@@ -219,7 +219,12 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
             if not main_app: main_app = getattr(self.window(), 'parent_app', None)
             
             if main_app and hasattr(main_app, '_run_dna_audit_batch'):
-                main_app._run_dna_audit_batch(code_to_name)
+                if hasattr(main_app, 'tk_dispatch_queue'):
+                    # 🚀 [THREAD-SAFE] 通过 Tk 调度队列执行
+                    _cn = dict(code_to_name)
+                    main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
+                else:
+                    main_app._run_dna_audit_batch(code_to_name)
             else:
                 logger.error("No access to main monitor app for DNA audit.")
 
@@ -2147,11 +2152,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if main_app and hasattr(main_app, '_run_dna_audit_batch'):
                 if hasattr(main_app, 'tk_dispatch_queue'):
                     # 🚀 [THREAD-SAFE] 通过 Tk 调度队列跨进程/线程安全调用
-                    # ⭐ [FIX] 仅入队，不再同时直接调用，避免主线程同步阻塞
                     _cn = dict(code_to_name)  # 捕获闭包副本
                     main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
                 else:
-                    # 兜底：直接调用
+                    # 兜底：直接调用 (仅在缺失队列时)
                     main_app._run_dna_audit_batch(code_to_name)
             else:
                 logger.error("No access to main monitor app for DNA audit.")

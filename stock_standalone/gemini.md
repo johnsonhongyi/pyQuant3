@@ -29,6 +29,11 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-23 16:30
+- [x] **修复 BiddingMomentumDetector 持久化恢复崩溃 (Fixed Detector NameError)**：
+    - [x] **清理悬挂代码残留 (Removed Dangling Code)**：从 `_gc_old_sectors` 方法尾部移除了误入的 `self.sector_map = new_map` 赋值语句。由于 `new_map` 在该作用域内未定义，导致系统在启动恢复持久化会话（`load_persistent_data`）时触发 `NameError`。清理后恢复了系统的启动稳定性。
+    - [x] **加固启动自愈能力**：确保了种子加载与会话恢复链路的原子性，防止因局部逻辑错误导致整个行情引擎初始化失败。
+
 ## 2026-04-23 12:30
 - [x] **根治赛马详情窗数据重复 (Fixed Sector Data Duplication)**：
     - [x] **实施全链路唯一性防御 (Multi-layered De-duplication)**：针对用户反馈的同一只股票在板块内多次出现的 Bug，在 `SectorDetailDialog` 与 `CategoryDetailDialog` 的刷新入口强行注入了 `set()` 去重与 `seen_codes` 唯一性校验。这确保了即使底层字典存在格式差异（如带后缀的代码），UI 展现层也始终保持绝对唯一。

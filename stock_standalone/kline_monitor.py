@@ -228,8 +228,12 @@ class KLineMonitor(tk.Toplevel):
 
             if c_dict and hasattr(self.master, "_run_dna_audit_batch"):
                 # toast_message(self, msg)
-                # 🚀 调度主进程并发审计引擎
-                self.master._run_dna_audit_batch(c_dict)
+                # 🚀 [THREAD-SAFE] 调度主进程并发审计引擎
+                if hasattr(self.master, 'tk_dispatch_queue'):
+                    _cd = dict(c_dict)
+                    self.master.tk_dispatch_queue.put(lambda: self.master._run_dna_audit_batch(_cd))
+                else:
+                    self.master._run_dna_audit_batch(c_dict)
             else:
                 logger.warning("[KLineMonitor] DNA 审计调度失败: c_dict 为空或主程序接口缺失")
         except Exception as e:

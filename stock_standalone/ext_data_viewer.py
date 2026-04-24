@@ -294,7 +294,12 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
                     
         if code_to_name:
             if hasattr(self.master, '_run_dna_audit_batch'):
-                self.master._run_dna_audit_batch(code_to_name)
+                if hasattr(self.master, 'tk_dispatch_queue'):
+                    # 🚀 [THREAD-SAFE] 通过 Tk 调度队列执行
+                    _cn = dict(code_to_name)
+                    self.master.tk_dispatch_queue.put(lambda: self.master._run_dna_audit_batch(_cn))
+                else:
+                    self.master._run_dna_audit_batch(code_to_name)
             else:
                 logger.error("No access to main monitor app for DNA audit.")
 
