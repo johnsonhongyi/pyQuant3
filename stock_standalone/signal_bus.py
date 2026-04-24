@@ -152,7 +152,7 @@ class SignalBus:
         handlers = self._subscribers.get(event_type, [])
         # 🛡️ 降级日志等级，避免 ERROR 洪泛
         import os
-        logger.debug(f"📡 [BUS_TRACE] SignalBus({id(self)}, pid={os.getpid()}): Publishing {event_type} from {source}. Found {len(handlers)} handlers.")
+        # logger.debug(f"📡 [BUS_TRACE] SignalBus({id(self)}, pid={os.getpid()}): Publishing {event_type} from {source}. Found {len(handlers)} handlers.")
         
         for handler in handlers:
             try:

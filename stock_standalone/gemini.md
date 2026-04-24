@@ -29,6 +29,14 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-24 16:35
+- [x] **根治竞价持久化并发冲突与字典变动崩溃 (Fixed Bidding Persistence Concurrency & Dictionary Size Error)**：
+    - [x] **升级递归锁机制 (Upgraded to RLock)**：将 `BiddingMomentumDetector` 中的 `self._lock` 从 `threading.Lock` 升级为 `threading.RLock`。这允许系统在执行复杂的持久化逻辑时，能够安全地调用其他同样受锁保护的内部方法，彻底消除了递归调用引发的死锁隐患。
+    - [x] **实施全量遍历锁保护 (Full Iteration Locking)**：针对 `_tick_series`、`active_sectors` 和 `daily_watchlist` 等高频变动字典，在 `save_persistent_data`、`_aggregate_sectors` 和 `_do_rebuild_sector_map` 等关键遍历路径中全部补齐了 `with self._lock:` 保护块，根治了“dictionary changed size during iteration”这一顽固的运行时错误。
+    - [x] **引入持久化数据快照 (Persistence Data Snapshotting)**：重构了 `save_persistent_data` 的数据提取链路。现在所有字典 and 列表在锁内被提取后，会立即执行 `.copy()` 或列表推导式快照。这确保了耗时的 `json.dumps` 与压缩操作可以完全在锁外异步执行，且不会受到后台行情线程（Pump/Compute）修改数据结构的影响。
+    - [x] **修复盘后质量检查漏洞**：修复了 15:30 自动保存任务中，用于判断数据质量的个股过滤循环（Skip check）在锁外执行导致的 race condition。
+    - [x] **打通 15:30 任务稳定性闭环**：配合主程序 `instock_MonitorTK.py` 的资源回收优化，确保了系统在收盘瞬间的高负载环境下也能平滑完成会话保存。
+
 ## 2026-04-23 16:30
 - [x] **修复 BiddingMomentumDetector 持久化恢复崩溃 (Fixed Detector NameError)**：
     - [x] **清理悬挂代码残留 (Removed Dangling Code)**：从 `_gc_old_sectors` 方法尾部移除了误入的 `self.sector_map = new_map` 赋值语句。由于 `new_map` 在该作用域内未定义，导致系统在启动恢复持久化会话（`load_persistent_data`）时触发 `NameError`。清理后恢复了系统的启动稳定性。
