@@ -741,7 +741,7 @@ def show_dna_audit_report_window(summaries, parent=None, end_date=None):
         return
     
     # 使用新定义的类
-    DnaAuditReportWindow(summaries, parent=parent, end_date=end_date)
+    return DnaAuditReportWindow(summaries, parent=parent, end_date=end_date)
 
 def main():
     parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")

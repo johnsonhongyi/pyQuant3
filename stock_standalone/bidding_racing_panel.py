@@ -128,6 +128,20 @@ def _standalone_dna_audit_process_entry(code_to_name):
                 sys.exit(0)
 
         # =========================
+        # ✔ 信号处理（方案 2：子进程必须“可退出”）
+        # =========================
+        import signal
+        def handler(signum, frame):
+            logger.info(f"📍 DNA Audit Process received signal {signum}, exiting...")
+            safe_exit()
+        
+        # 监听系统强制终止信号
+        signal.signal(signal.SIGTERM, handler)
+        # Windows 兼容性补充 (可选)
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, handler)
+
+        # =========================
         # ✔ 窗口关闭事件
         # =========================
         root.protocol("WM_DELETE_WINDOW", safe_exit)
@@ -142,10 +156,11 @@ def _standalone_dna_audit_process_entry(code_to_name):
         # ✔ UI 展示 or 直接退出
         # =========================
         if summaries:
-            show_dna_audit_report_window(summaries, parent=root)
-
-            # ❗必须保留：Tk event loop
-            root.mainloop()
+            audit_win = show_dna_audit_report_window(summaries, parent=root)
+            # 🚀 [CRITICAL] 独立进程模式下，必须等待窗口销毁后才退出，否则进程会残留
+            if audit_win:
+                root.wait_window(audit_win)
+            safe_exit()
         else:
             safe_exit()
 
@@ -199,9 +214,11 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
         )
 
         process.start()
+        return process
 
     except Exception as e:
         logger.error(f"❌ [Racing] 无法启动 DNA 独立进程: {e}")
+        return None
     
 
 # [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
@@ -1213,7 +1230,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            dispatch_dna_audit(code_to_name, parent_widget=self)
+            # [🚀 方案 1] 保存 process 引用 (存入主面板)
+            if self.parent() and hasattr(self.parent(), 'audit_process'):
+                 self.parent().audit_process = dispatch_dna_audit(code_to_name, parent_widget=self)
+            else:
+                 dispatch_dna_audit(code_to_name, parent_widget=self)
 
 class CategoryDetailDialog(QDialog, WindowMixin):
     """饼图分类成分股详情弹窗 - 结构与板块详情一致"""
@@ -1635,14 +1656,6 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
         menu.addSeparator()
         
-        menu.addSeparator()
-        
-        # [NEW] 形态详情开关
-        act_toggle_reason = menu.addAction(f"{'👁️ 隐藏' if self._show_reason else '👁️ 显示'} 形态详情")
-        act_toggle_reason.triggered.connect(self._toggle_reason_column)
-
-        menu.addSeparator()
-        
         # 穿透到主面板执行
         act_sector = menu.addAction(f"🚀 关联最强板块详情")
         if self.parent() and hasattr(self.parent(), '_show_strongest_sector'):
@@ -1785,7 +1798,11 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            dispatch_dna_audit(code_to_name, parent_widget=self)
+            # [🚀 方案 1] 保存 process 引用 (存入主面板)
+            if self.parent() and hasattr(self.parent(), 'audit_process'):
+                 self.parent().audit_process = dispatch_dna_audit(code_to_name, parent_widget=self)
+            else:
+                 dispatch_dna_audit(code_to_name, parent_widget=self)
 
 
 class RacingTimeline(QFrame):
@@ -1934,6 +1951,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._is_updating_history = False
         self._sector_score_anchors = {} # [🚀 新增] 面板级板块评分锚点，防止被 Detector 重刷丢失
         self._global_show_reason = False # [NEW] 全局形态详情控制位
+        self.audit_process = None # [🚀 方案 1] 保存 DNA 独立审计进程引用
 
 
         if sender:
@@ -2677,7 +2695,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            dispatch_dna_audit(code_to_name, parent_widget=self)
+            self.audit_process = dispatch_dna_audit(code_to_name, parent_widget=self)
 
     def _on_show_alerts_clicked(self):
         """专用按钮打开报警个股追踪窗口"""
@@ -3098,12 +3116,29 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.main_app._racing_panel_win = None
             except: pass
             
+        # [🚀 方案 1] 停子进程 (强制收口) - 必须在 closed.emit() 之前，防止外部 os._exit 抢跑
+        try:
+            if hasattr(self, 'audit_process') and self.audit_process is not None:
+                if self.audit_process.is_alive():
+                    logger.info("🔪 Terminating orphaned DNA Audit Process...")
+                    self.audit_process.terminate()
+                    self.audit_process.join(timeout=1)
+        except Exception as e:
+            logger.error(f"❌ Process close error: {e}")
+
         # ✅ 发射关闭信号
         self.closed.emit()
         
         # ✅ 关键：允许 Qt 删除对象
         self.deleteLater()
         super().closeEvent(event)
+
+        # [🚀 方案 3] 强制主进程退出保护 (仅针对 test_bidding_replay 这种独立工具模式)
+        # 如果 parent 为 None，说明是作为独立窗口运行的
+        if self.parent() is None:
+            # 延迟一丁点确保资源回收后再退出
+            # os._exit(0) # 暂时不加，由 test_bidding_replay 内部控制
+            pass
 
     def _save_ui_state(self,force=False):
         """[🚀 物理存盘执行体] 防抖 + 去重 + 生命周期保护（增强版）"""
