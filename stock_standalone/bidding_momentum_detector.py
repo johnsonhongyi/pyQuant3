@@ -167,7 +167,7 @@ class TickSeries:
                  'total_vol', 'vol_ratio', 'lvol', 'last6vol', 'market_role',
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
                  'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min',
-                 '_bar_active_reward', '_last_active_price', 'opening_bonus')
+                 '_bar_active_reward', '_last_active_price', 'opening_bonus', 'total_amount')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -225,6 +225,7 @@ class TickSeries:
         self._bar_active_reward: int = 0 # [NEW] 活跃奖励锁
         self._last_active_price: float = 0.0 # [NEW] 最近一次活跃价格基准
         self.opening_bonus: float = 0.0      # [NEW] 缓存早盘溢价分
+        self.total_amount: float = 0.0
 
     def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
         """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
@@ -749,9 +750,11 @@ class BiddingMomentumDetector:
                     # [FULL-SWEEP] 全量模式
                     codes = list(self._tick_series.keys())
                     
-            # [PERF] 针对 5000+ 品种，_evaluate_code 已优化为纯数值计算
-            for code in codes:
-                self._evaluate_code(code)
+                # [OPTIMIZED] 针对 5000+ 品种，将循环放入锁内，减少 5000 次 lock/unlock 开销
+                # 同时使用 unlocked 版本的评估逻辑
+                for code in codes:
+                    self._evaluate_code_unlocked(code)
+
         
         self.data_version += 1 # 评分更新后递增版本号
         
@@ -952,84 +955,52 @@ class BiddingMomentumDetector:
         return os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
 
     def save_persistent_data(self, force=False):
-        """保存当前个股得分和板块强度到磁盘 (原子化强化版)"""
-        if self.in_history_mode:
-            logger.debug("[Detector] Skip save in history mode.")
-            return
-
-        # [REFINED] 强化交易日校验
-        is_trade_day = cct.get_trade_date_status()
-        # 🛡️ 二重校验：补齐可能的 GlobalValues 缓存刷新不及时问题
-        if not cct.get_day_istrade_date():
-            is_trade_day = False
-
-        if not force and not is_trade_day:
-            # logger.debug("[Detector] Skip save: Not a trade date.")
-            return
-
-        # [NEW] [TIME-CHECK] 16:00 以后停止自动存盘，防止盘后无效 IO 或过时的全量序列化占用资源
-        # 此时数据已基本定型，无需每分钟保存一次
-        now = datetime.datetime.now()
-        if not force:
-            if now.hour >= 16:
-                return
-            if is_trade_day:
-                if now.hour < 9 or (now.hour == 9 and now.minute < 40):
-                    # logger.debug(f"[Detector] Skip save: Morning noise protection (Before 09:40).")
-                    return
-
-        # [NEW] [QUALITY-PROTECTION] 盘后或非交易日的数据质量比对保护
-        main_path = self._get_persistence_path()
-        if os.path.exists(main_path):
-            try:
-                mtime = os.path.getmtime(main_path)
-                f_dt = datetime.datetime.fromtimestamp(mtime)
-                
-                # 情况 A：盘后且已有今日数据
-                # 情况 B：非交易日且已有近期(2天内)数据
-                # 如果当前 Session 信号极少，说明是误动或新开机，严禁覆盖
-                if now.hour >= 15 or not is_trade_day:
-                    current_sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
-                    # 磁盘文件较新且内存几乎无数据
-                    if current_sig_count < 5 and (now - f_dt).days <= 2:
-                        logger.info(f"🛡️ [Detector] Session empty ({current_sig_count} sigs). Protecting existing data from {f_dt.strftime('%m-%d %H:%M')}.")
-                        return
-            except Exception as e:
-                logger.debug(f"Persistence quality check error: {e}")
-
-        # [NEW] [CONTENT-CHECK] 如果完全没有板块数据，通常意味着是无效会话，不存盘
-        if not force and not self.active_sectors:
-            # logger.debug("[Detector] Skip save: No active sector data recorded.")
-            return
-
+        """将当前会话数据（得分、锚点、板块快照）序列化到磁盘，支持跨进程/重启恢复"""
         try:
-            # [Data Preparation ...]
-            # [OPTIMIZED] 深度清理数据，严禁重叠存储 K 线
+            main_path = self._get_persistence_path()
+            
+            # [TIME-CHECK] 16:00 以后停止自动存盘，防止盘后无效 IO
+            now = datetime.datetime.now()
+            is_trade_day = cct.get_day_istrade_date(now.strftime('%Y-%m-%d'))
+            
+            if not force:
+                if not is_trade_day: return
+                if now.hour >= 16: return
+                if now.hour < 9 or (now.hour == 9 and now.minute < 40): return
+
+            # [QUALITY-PROTECTION] 盘后或非交易日的数据质量比对保护
+            if os.path.exists(main_path):
+                try:
+                    mtime = os.path.getmtime(main_path)
+                    f_dt = datetime.datetime.fromtimestamp(mtime)
+                    if now.hour >= 15 or not is_trade_day:
+                        current_sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
+                        if current_sig_count < 5 and (now - f_dt).days <= 2:
+                            logger.info(f"🛡️ [Detector] Session empty ({current_sig_count} sigs). Protecting existing data.")
+                            return
+                except: pass
+
+            if not force and not self.active_sectors:
+                return
+
             def _clean_data(obj):
                 if isinstance(obj, dict):
-                    # 彻底剔除所有形式的 K 线数据，仅在 meta_data 中保留一份
                     return {k: _clean_data(v) for k, v in obj.items() if not k.endswith('klines')}
                 elif isinstance(obj, list):
                     return [_clean_data(item) for item in obj]
                 return obj
 
-            # [COLUMNAR-METADATA] 使用列式存储减少 Key 重复开销
             significant_stocks = {code: s for code, s in self._tick_series.items() if (s.score >= 0.1)}
-            
-            # [ENHANCED-COVERAGE] 扩充采集范围，包含重点表和所有反馈列表中的个股，确保复盘不空白
             relevant_codes = set(significant_stocks.keys()) | set(self.daily_watchlist.keys()) | set(self.stock_selector_seeds.keys())
             for sinfo in self.active_sectors.values():
                 relevant_codes.add(sinfo.get('leader'))
-                for f in sinfo.get('followers', []):
-                    relevant_codes.add(f.get('code'))
+                for f in sinfo.get('followers', []): relevant_codes.add(f.get('code'))
             
             codes_list = [c for c in relevant_codes if c]
             meta_cols = {
-                'code': codes_list,
-                'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
+                'code': codes_list, 'n': [], 'ph': [], 'c': [], 'lc': [], 'op': [], 'hd': [], 'ld': [], 
                 'lh': [], 'll': [], 'np': [], 'fb': [], 'rl': [], 'iu': [], 'ic': [], 
-                'p': [], 's': [], 'rs': [], 'sc': [], # [NEW] 增加 rs 赛马时间, sc 信号计数
-                'k': []
+                'p': [], 's': [], 'rs': [], 'sc': [], 'k': []
             }
             for code in codes_list:
                 ts = self._tick_series.get(code)
@@ -1050,14 +1021,13 @@ class BiddingMomentumDetector:
                     meta_cols['ic'].append(1 if ts.is_counter_trend else 0)
                     meta_cols['p'].append(round(ts.current_pct, 2))
                     meta_cols['s'].append(round(ts.score, 1))
-                    meta_cols['rs'].append(round(ts.racing_start_ts, 1)) # [NEW]
-                    meta_cols['sc'].append(ts.signal_count) # [NEW]
+                    meta_cols['rs'].append(round(ts.racing_start_ts, 1))
+                    meta_cols['sc'].append(ts.signal_count)
                     meta_cols['k'].append(compress_klines(ts.klines))
                 else:
                     for k in meta_cols: 
                         if k != 'code': meta_cols[k].append(None)
 
-            # [NEW] 存盘前自动更新今日的 Top 2 到追踪历史库
             self._update_daily_dragon_top2()
 
             data = {
@@ -1070,318 +1040,152 @@ class BiddingMomentumDetector:
                 'baseline_time': round(self.baseline_time, 2),
                 'sector_anchors': {name: round(s, 2) for name, s in self.sector_anchors.items()},
                 'stock_price_anchors': {code: round(ts.price_anchor, 4) for code, ts in self._tick_series.items() if ts.price_anchor > 0},
-                'watchlist': _clean_data(self.daily_watchlist),
-                'stock_selector_seeds': self.stock_selector_seeds,
                 'meta_cols': meta_cols,
-                'dragon_3day_history': self.dragon_3day_history
+                'watchlist': self.daily_watchlist,
+                'stock_selector_seeds': self.stock_selector_seeds,
+                'dragon_3day_history': getattr(self, 'dragon_3day_history', [])
             }
-            
-            sd_count = len(data.get('sector_data', {}))
-            ss_count = len(significant_stocks)
-            wl_count = len(data.get('watchlist', {}))
-            
-            # [FIX] 如果是强制保存 (force) 则跳过内容检查；否则至少需要板块或重点股数据才存盘
-            if not force:
-                if sd_count == 0 and ss_count == 0 and wl_count == 0:
-                    # logger.debug("ℹ️ [Detector] No active signals to save (skipped).")
-                    return
 
-            # ⭐ [C-Reinforcement] 原子化写入：先写临时文件，然后 os.replace
             import zlib
-            def atomic_save(target_path, data_dict):
-                def np_handler(obj):
-                    if isinstance(obj, (np.integer, np.int32, np.int64)):
-                        return int(obj)
-                    if isinstance(obj, (np.floating, np.float32, np.float64)):
-                        return float(obj)
-                    if isinstance(obj, np.ndarray):
-                        return obj.tolist()
-                    return str(obj) # Fallback
-
-                temp_path = target_path + f".{os.getpid()}.tmp"
-                try:
-                    # 性能与体积平衡：使用 separators 消除空格，并用 zlib 6级 压缩
-                    json_str = json.dumps(data_dict, ensure_ascii=False, default=np_handler, separators=(',', ':'))
-                    compressed = zlib.compress(json_str.encode('utf-8'), level=6)
-                    
-                    with open(temp_path, 'wb') as f:
-                        f.write(compressed)
-                    
-                    if os.path.exists(target_path):
-                        try: os.remove(target_path)
-                        except: pass
-                    
-                    os.replace(temp_path, target_path)
-                    return True
-                except Exception as e:
-                    if os.path.exists(temp_path):
-                        try: os.remove(temp_path)
-                        except: pass
-                    raise e
-
-            main_path = self._get_persistence_path()
-            if atomic_save(main_path, data):
-                today_str = datetime.datetime.now().strftime('%Y%m%d')
-                snapshot_path = self._get_persistence_path(snapshot_date=today_str)
-                if os.path.normpath(main_path) != os.path.normpath(snapshot_path):
-                    import shutil
-                    try:
-                        os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
-                        shutil.copy2(main_path, snapshot_path)
-                        logger.info(f"📸 [Detector] Snapshot copied to {snapshot_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to copy snapshot: {e}")
-                        atomic_save(snapshot_path, data)
-
-            logger.info(f"💾 [Detector] Session data saved to {main_path} ({ss_count} stocks, {sd_count} sectors)")
-            if snapshot_path != main_path:
-                logger.info(f"📸 [Detector] Snapshot saved to {snapshot_path}")
+            out_bytes = zlib.compress(json.dumps(data).encode('utf-8'))
+            temp_path = main_path + ".tmp"
+            with open(temp_path, 'wb') as f: f.write(out_bytes)
+            if os.path.exists(main_path): os.remove(main_path)
+            os.replace(temp_path, main_path)
+            logger.info(f"💾 [Detector] Session saved: {len(significant_stocks)} stocks, {len(data['sector_data'])} sectors")
         except Exception as e:
-            logger.error(f"❌ [Detector] Persistence save failed: {e}")
+            logger.error(f"Persistence save error: {e}")
 
     def load_persistent_data(self):
-        """启动时从磁盘恢复得分和强度"""
+        """从磁盘加载之前的会话数据 (多层级防御版)"""
+        path = self._get_persistence_path()
+        if not os.path.exists(path): return
+        
         try:
-            path = self._get_persistence_path()
-            if not os.path.exists(path):
-                return
-
-            # [REFINED] 跨日保护逻辑：如果是今日启动且已经有内容，严禁触发 is_cross_day 清空
-            mtime = os.path.getmtime(path)
-            file_dt = datetime.datetime.fromtimestamp(mtime)
-            file_date_str = file_dt.strftime('%Y-%m-%d')
+            import zlib
+            with open(path, 'rb') as f:
+                data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
+            
+            file_date_str = data.get('data_date', '')
             now_dt = datetime.datetime.now()
             today_str = now_dt.strftime('%Y-%m-%d')
             
             is_cross_day = (file_date_str != today_str)
-
-            is_expired = False
-            # [NEW] 虽然未过期，但我们仍需记录文件的日期，以便之后进行跨日重置判断
-            self._concept_data_date = file_dt.date()
             
-            try:
-                # 获取从文件日期到今天的交易日列表
-                trade_days = cct.a_trade_calendar.get_trade_days_interval(file_date_str, today_str)
+            with self._lock:
+                # 1. 恢复基础得分与板块结构
+                stock_scores = data.get('stock_scores', {})
+                for code, score in stock_scores.items():
+                    if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
+                    self._tick_series[code].score = score
                 
-                # 1. 如果中间隔了至少一个完整的交易日，彻底过期
-                if len(trade_days) > 2:
-                    is_expired = True
-                # 2. 如果是相邻交易日（如周五到周一，或昨日到今日）
-                elif len(trade_days) == 2:
-                    if cct.get_day_istrade_date(today_str):
-                        # 09:15 后（竞价已结束）且还在早盘，或者其他交易时段启动，认为过期数据需彻底隔离
-                        # [FIX] 增加保护：如果在早盘启动，认为是跨日数据需清理；如果是收盘后启动（做复盘），保留
-                        if now_dt.hour < 15:
-                            if now_dt.hour >= 10 or (now_dt.hour == 9 and now_dt.minute >= 15):
-                                is_expired = True
-                    # 如果今日不是交易日，保留上一交易日数据继续分析
-                # 3. 如果是同一个交易日重启 (len == 1)，绝不标记为跨日或过期
-                elif len(trade_days) == 1:
-                    is_cross_day = False
-                    is_expired = False
-            except Exception as e:
-                # 兜底逻辑
-                if time.time() - mtime > 15.5 * 3600:
-                    is_expired = True
-                logger.debug(f"[Detector] 交易日历判断异常: {e}")
+                momentum_scores = data.get('momentum_scores', {})
+                for code, m_score in momentum_scores.items():
+                    if code in self._tick_series: self._tick_series[code].momentum_score = m_score
 
-            if is_expired:
-                logger.info(f"📅 [Detector] 持久化数据已过期 ({file_date_str} -> {today_str})，跳过加载。")
-                return
-
-            # [COMPRESSION-ADAPTIVE] 支持 zlib 或 gzip
-            import zlib
-            with open(path, 'rb') as f:
-                raw_data = f.read()
-            
-            try:
-                # 优先尝试 zlib 解压
-                decompressed = zlib.decompress(raw_data).decode('utf-8')
-                data = json.loads(decompressed)
-            except Exception:
-                # 兼容旧版本 gzip 格式
-                try:
-                    import gzip
-                    decompressed = gzip.decompress(raw_data).decode('utf-8')
-                    data = json.loads(decompressed)
-                except Exception as e:
-                    logger.error(f"[Detector] Decompression failed: {e}")
-                    return
-
-            # 恢复个股分
-            stock_scores = data.get('stock_scores', {})
-            for code, score in stock_scores.items():
-                if code not in self._tick_series:
-                    self._tick_series[code] = TickSeries(code)
-                self._tick_series[code].score = score
-            
-            # 恢复动量分
-            momentum_scores = data.get('momentum_scores', {})
-            for code, m_score in momentum_scores.items():
-                if code in self._tick_series:
-                    self._tick_series[code].momentum_score = m_score
-
-            # 恢复板块数据
-            self.active_sectors = data.get('sector_data', {})
-            
-            # 恢复全量历史与锚点
-            stock_anchors = data.get('stock_score_anchors', {})
-            for code, anchor in stock_anchors.items():
-                if code in self._tick_series:
-                    self._tick_series[code].score_anchor = anchor
-                    
-            self.baseline_time = data.get('baseline_time', time.time())
+                self.active_sectors = data.get('sector_data', {})
+                stock_anchors = data.get('stock_score_anchors', {})
+                for code, anchor in stock_anchors.items():
+                    if code in self._tick_series: self._tick_series[code].score_anchor = anchor
+                        
+                self.baseline_time = data.get('baseline_time', time.time())
+                self.sector_anchors = data.get('sector_anchors', {})
                 
-            self.sector_anchors = data.get('sector_anchors', {})
-            
-            # 恢复价格锚点 (用于计算切片涨跌 pct_diff)
-            stock_price_anchors = data.get('stock_price_anchors', {})
-            for code, p_anchor in stock_price_anchors.items():
-                if code in self._tick_series:
-                    self._tick_series[code].price_anchor = p_anchor
-                
-            # [FIXED v2] 最终防层：逐条验证 watchlist 每个条目的 trigger_ts
-            # 无论 is_cross_day / mtime / 交易日历是否准确，只要触发时间早于今日零点，一律丢弃。
-            # 这可以防止启动后文件日期被“污染”为今日但内容仍是昨日的情况。
-            if is_cross_day:
-                logger.info(f"📅 [Detector] 跨日加载：清空昨日重点表与板块评分，仅保留元数据。")
-                self.daily_watchlist = {}          # 重点表清空
-                self.active_sectors = {}           # 板块汇总清空
-                self.sector_anchors = {}           # 板块锚点清空
-                # 个股状态全量复位
-                for ts in self._tick_series.values():
-                    ts.score = 0.0
-                    ts.momentum_score = 0.0
-                    ts.score_anchor = 0.0
-                    ts.first_breakout_ts = 0.0
-                    ts.klines.clear()
-            else:
-                # 同日重启：仍需防范性验证 trigger_ts
-                raw_watchlist = data.get('watchlist', {})
-                # 今日零点时间戳
-                today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
-                valid_watchlist = {}
-                stale_count = 0
-                for code, entry in raw_watchlist.items():
-                    ts_entry = entry.get('trigger_ts', 0)
-                    # 尝试从 time 字符串读取备份（兼容性处理）
-                    if ts_entry <= 0 and 'time' in entry:
-                        try:
-                            # 期望格式 HH:MM:SS，如果包含日期则优先
-                            t_str = entry['time']
-                            if '-' in t_str: 
-                                # 包含日期如 0408-15:00，这必然是昨日
-                                ts_entry = 0 
-                            else:
-                                # 仅时间，默认为今日（保守处理）
-                                ts_entry = today_midnight_ts + 1
-                        except: pass
+                stock_price_anchors = data.get('stock_price_anchors', {})
+                for code, p_anchor in stock_price_anchors.items():
+                    if code in self._tick_series: self._tick_series[code].price_anchor = p_anchor
                     
-                    if ts_entry >= today_midnight_ts:
-                        valid_watchlist[code] = entry
-                    else:
-                        stale_count += 1
-                
-                if stale_count > 0:
-                    logger.warning(f"🧹 [Detector] 从当日文件中剔除 {stale_count} 条昨日残留记录。")
-                self.daily_watchlist = valid_watchlist
-
-            # [NEW] 恢复种子股状态，确保实盘重启后种子奖分 (+15) 生效
-            self.stock_selector_seeds = data.get('stock_selector_seeds', {})
-
-            # [RECONSTRUCT-METADATA] 处理新的列式存储格式
-            meta_cols = data.get('meta_cols', {})
-            if meta_cols and 'code' in meta_cols:
-                codes = meta_cols['code']
-                for i, code in enumerate(codes):
-                    if not code: continue
-                    if code not in self._tick_series:
-                        self._tick_series[code] = TickSeries(code)
-                    ts = self._tick_series[code]
-                    
-                    # 映射函数简化代码
-                    def _get(key, default):
-                        val = meta_cols.get(key, [])
-                        return val[i] if i < len(val) and val[i] is not None else default
-
-                    ts.name = _get('n', ts.name)
-                    ts.pattern_hint = _get('ph', ts.pattern_hint)
-                    ts.category = _get('c', ts.category)
-                    ts.last_close = _get('lc', ts.last_close)
-                    ts.open_price = _get('op', ts.open_price)
-                    ts.high_day = _get('hd', ts.high_day)
-                    ts.low_day = _get('ld', ts.low_day)
-                    ts.last_high = _get('lh', ts.last_high)
-                    ts.last_low = _get('ll', ts.last_low)
-                    ts.now_price = _get('np', ts.now_price)
-                    ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
-                    ts.score = _get('s', ts.score) # [NEW] 情绪分恢复
-                    ts.ral = _get('rl', ts.ral)
-                    ts.is_untradable = bool(_get('iu', ts.is_untradable))
-                    ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
-                    ts.racing_start_ts = _get('rs', ts.racing_start_ts) # [NEW] 恢复赛马时间
-                    ts.signal_count = _get('sc', 0)
-                    if ts.signal_count > 0:
-                        ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
-                    ts.last_stable_ts = ts.racing_start_ts if ts.racing_start_ts > 0 else 0.0
-                    
-                    # [NEW] 同步更新全量缓存，确保 UI 在 Tick 到达前就能显示恢复出的分值与涨幅
-                    self._global_snap_cache[code] = {
-                        'code': code, 'name': ts.name, 'pct': _get('p', 0.0),
-                        'score': ts.score,
-                        'price': ts.now_price, 'last_close': ts.last_close,
-                        'category': ts.category, 'first_breakout_ts': ts.first_breakout_ts,
-                        'klines': decompress_klines(_get('k', [])),
-                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                        'pattern_hint': ts.pattern_hint, 'vol_ratio': getattr(ts, 'vol_ratio', 0.0),
-                        'signal_count': ts.signal_count
-                    }
-                    
-                    # 价格锚点与涨幅 (虽然 ts.current_pct 是属性，但 ts.now_price 恢复后会自愈，
-                    # 且 meta_cols 中有 'p' 列供 UI 层直接展示)
-                    
-                    # 恢复 K 线
-                    klines_data = _get('k', None)
-                    if klines_data:
+                # 2. 跨日清理或同日恢复 Watchlist
+                if is_cross_day:
+                    logger.info(f"📅 [Detector] Cross-day load: Clearing signals, keeping meta.")
+                    self.daily_watchlist = {}
+                    self.active_sectors = {}
+                    self.sector_anchors = {}
+                    for ts in self._tick_series.values():
+                        ts.score = 0.0
+                        ts.momentum_score = 0.0
+                        ts.score_anchor = 0.0
+                        ts.first_breakout_ts = 0.0
                         ts.klines.clear()
-                        for k in decompress_klines(klines_data):
-                            ts.push_kline(k)
-            else:
-                # 兼容旧的 meta_data (dict 格式)
-                meta_data = data.get('meta_data', {})
-                for code, m in meta_data.items():
-                    if code not in self._tick_series:
-                        self._tick_series[code] = TickSeries(code)
-                    ts = self._tick_series[code]
-                    ts.last_close = m.get('last_close', ts.last_close)
-                    ts.open_price = m.get('open_price', ts.open_price)
-                    ts.high_day = m.get('high_day', ts.high_day)
-                    ts.low_day = m.get('low_day', ts.low_day)
-                    ts.now_price = m.get('now_price', ts.now_price)
-                    ts.name = m.get('name', ts.name)
-                    ts.category = m.get('category', ts.category)
-                    ts.score = m.get('score', ts.score)
-                    ts.first_breakout_ts = m.get('first_breakout_ts', ts.first_breakout_ts)
-                    ts.pattern_hint = m.get('pattern_hint', ts.pattern_hint)
-                    ts.momentum_score = m.get('momentum_score', ts.momentum_score)
-                    
-                    ts.klines.clear()
-                    for k in decompress_klines(m.get('klines', [])): # [OPTIMIZED] 解压加载
-                        ts.push_kline(k)
-            
-            logger.info(f"♻️ [Detector] 会话数据已恢复: {len(self._tick_series)} 只个股, {len(self.active_sectors)} 个板块")
-            # [FIX] 跨日时将日期标记设为今日，防止 _check_day_switch 再次触发重置
-            # 同日重启时，优先使用 JSON 内嵌的 data_date，避免 os mtime 被带偏
-            if is_cross_day:
-                self._last_data_date = today_str
-                logger.info(f"📅 [Detector] 跨日加载完成，日期标记已更新为今日 ({today_str})")
-            else:
-                self._last_data_date = data.get('data_date', file_date_str)
-            self._concept_data_date = file_dt.date()
+                else:
+                    raw_watchlist = data.get('watchlist', {})
+                    today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
+                    valid_watchlist = {}
+                    for code, entry in raw_watchlist.items():
+                        ts_entry = entry.get('trigger_ts', 0)
+                        if ts_entry >= today_midnight_ts: valid_watchlist[code] = entry
+                    self.daily_watchlist = valid_watchlist
+
+                # 3. 恢复核心 Meta 数据 (支持列式存储与旧版字典存储)
+                self.stock_selector_seeds = data.get('stock_selector_seeds', {})
+                meta_cols = data.get('meta_cols', {})
+                if meta_cols and 'code' in meta_cols:
+                    codes = meta_cols['code']
+                    for i, code in enumerate(codes):
+                        if not code: continue
+                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
+                        ts = self._tick_series[code]
+                        def _get(key, default):
+                            val = meta_cols.get(key, [])
+                            return val[i] if i < len(val) and val[i] is not None else default
+                        
+                        ts.name = _get('n', ts.name)
+                        ts.pattern_hint = _get('ph', ts.pattern_hint)
+                        ts.category = _get('c', ts.category)
+                        ts.last_close = _get('lc', ts.last_close)
+                        ts.open_price = _get('op', ts.open_price)
+                        ts.high_day = _get('hd', ts.high_day)
+                        ts.low_day = _get('ld', ts.low_day)
+                        ts.last_high = _get('lh', ts.last_high)
+                        ts.last_low = _get('ll', ts.last_low)
+                        ts.now_price = _get('np', ts.now_price)
+                        ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
+                        ts.score = _get('s', ts.score)
+                        ts.ral = _get('rl', ts.ral)
+                        ts.is_untradable = bool(_get('iu', ts.is_untradable))
+                        ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                        ts.racing_start_ts = _get('rs', ts.racing_start_ts)
+                        ts.signal_count = _get('sc', 0)
+                        
+                        # 重建 Snap 缓存供渲染
+                        self._global_snap_cache[code] = {
+                            'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
+                            'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
+                            'first_breakout_ts': ts.first_breakout_ts, 'klines': decompress_klines(_get('k', [])),
+                            'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                            'pattern_hint': ts.pattern_hint, 'vol_ratio': getattr(ts, 'vol_ratio', 0.0),
+                            'signal_count': ts.signal_count
+                        }
+                        
+                        klines_data = _get('k', None)
+                        if klines_data:
+                            ts.klines.clear()
+                            for k in decompress_klines(klines_data): ts.push_kline(k)
+                else:
+                    meta_data = data.get('meta_data', {})
+                    for code, m in meta_data.items():
+                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
+                        ts = self._tick_series[code]
+                        ts.last_close = m.get('last_close', ts.last_close)
+                        ts.open_price = m.get('open_price', ts.open_price)
+                        ts.now_price = m.get('now_price', ts.now_price)
+                        ts.name = m.get('name', ts.name)
+                        ts.category = m.get('category', ts.category)
+                        ts.score = m.get('score', ts.score)
+                        ts.klines.clear()
+                        for k in decompress_klines(m.get('klines', [])): ts.push_kline(k)
+                
+                self._last_data_date = today_str if is_cross_day else file_date_str
+                try:
+                    self._concept_data_date = datetime.datetime.strptime(self._last_data_date, '%Y-%m-%d').date()
+                except:
+                    self._concept_data_date = now_dt.date()
+                
+                logger.info(f"♻️ [Detector] Session restored: {len(self._tick_series)} stocks, {len(self.active_sectors)} sectors")
         except Exception as e:
-            logger.error(f"❌ [Detector] 加载会话数据失败: {e}")
+            logger.error(f"❌ [Detector] Session load failed: {e}")
+        
         self._gc_old_sectors()
-        # [NEW] 启动或跨日载入后，初始化三日跟踪历史
         self._init_dragon_3day_tracker()
 
     def load_from_snapshot(self, filepath: str) -> bool:
@@ -1816,19 +1620,13 @@ class BiddingMomentumDetector:
             if s['code'] in self.stock_selector_seeds:
                 l_score += 15.0
             
-            # [LIQUIDITY BONUS] 大盘成交金额加成 (定海神针：金额越大越稳)
-            klines = s.get('klines', [])
-            total_amount = 0.0
-            if klines:
-                for k in klines:
-                    amt = float(k.get('amount', k.get('turnover', 0.0)))
-                    if amt == 0: amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
-                    total_amount += amt
-            
+            # [LIQUIDITY BONUS] 使用预计算的金额
+            total_amount = s.get('total_amount', 0.0)
             if total_amount > 1e8: 
                 l_score += min(5.0, total_amount / 2e8) # 每2亿加1分，封顶5分
             
             return l_score
+
         else:
             # [竞赛/追涨模式] 强调当日爆发力 + 极度强调开盘时效
             drawdown_pct = max(0, (s.get('high_day', 0.0) - s.get('price', 0.0)) / s.get('last_close', 1.0) * 100) if s.get('last_close', 0) > 0 else 0
@@ -1932,15 +1730,20 @@ class BiddingMomentumDetector:
     # =========================================================
 
     def _evaluate_code(self, code: str):
-        """对单只 code 计算异动评分，写入 ts_obj.score"""
+        """对单只 code 计算异动评分，写入 ts_obj.score (带锁包装器)"""
         with self._lock:
-            ts_obj = self._tick_series.get(code)
-            if ts_obj is None:
-                return
-            klines = list(ts_obj.klines)  # 本地拷贝，避免锁持有过长
-            last_close = ts_obj.last_close
-            ma20 = ts_obj.ma20
-            ma60 = ts_obj.ma60
+            self._evaluate_code_unlocked(code)
+
+    def _evaluate_code_unlocked(self, code: str):
+        """[PERF] 核心评估逻辑：不带锁版本，供内部批量调用。"""
+        ts_obj = self._tick_series.get(code)
+        if ts_obj is None:
+            return
+
+        klines = list(ts_obj.klines)  # 本地拷贝，避免锁持有过长
+        last_close = ts_obj.last_close
+        ma20 = ts_obj.ma20
+        ma60 = ts_obj.ma60
 
         if not klines or last_close <= 0:
             return
@@ -1979,11 +1782,9 @@ class BiddingMomentumDetector:
             cycle_score += 3.0  # 选股器加分，但不过分膨胀
             # 将选股理由同步到形态暗示的前端
             if seed_info.get('reason'):
-                with self._lock:
-                    if code in self._tick_series:
-                        # [FIX] 增加 延续 显式标记，让看板一眼看出是昨日主线
-                        reason_short = seed_info['reason'].split('|')[0]
-                        self._tick_series[code].pattern_hint = f"[延续|{reason_short}]"
+                # [FIX] 增加 延续 显式标记，让看板一眼看出是昨日主线
+                reason_short = seed_info['reason'].split('|')[0]
+                ts_obj.pattern_hint = f"[延续|{reason_short}]"
 
         if ma20 > 0 and cur_close > ma20:
             cycle_score += 1.0  # 基础牛熊分
@@ -2059,14 +1860,12 @@ class BiddingMomentumDetector:
             
             cycle_score += (hist_strength + pattern_bonus)
             
-            with self._lock:
-                if code in self._tick_series:
-                    # [FIX] 避免覆盖掉 [延续] 等历史种子标记
-                    existing = self._tick_series[code].pattern_hint or ""
-                    if "[延续" in existing:
-                        self._tick_series[code].pattern_hint = f"{existing.split(']')[0]}] | {detail}"
-                    else:
-                        self._tick_series[code].pattern_hint = detail
+            # [FIX] 避免覆盖掉 [延续] 等历史种子标记
+            existing = ts_obj.pattern_hint or ""
+            if "[延续" in existing:
+                ts_obj.pattern_hint = f"{existing.split(']')[0]}] | {detail}"
+            else:
+                ts_obj.pattern_hint = detail
             
             # [Added] 逆势带头逻辑
             if cur_pct > 3.0 and hasattr(self, 'last_market_avg') and self.last_market_avg < -0.5:
@@ -2175,12 +1974,7 @@ class BiddingMomentumDetector:
 
         # 5. 组装最终 pattern_hint
         # 结构: [历史/基础形态] | [今日实时信号]
-        detail_hint = ""
-        with self._lock:
-            ts_ref = self._tick_series.get(code)
-            if ts_ref:
-                # 获取 baseline 带来的历史形态 (V反、突破等)
-                detail_hint = ts_ref.pattern_hint.split('|')[0].strip() if ts_ref.pattern_hint else ""
+        detail_hint = ts_obj.pattern_hint.split('|')[0].strip() if ts_obj.pattern_hint else ""
         
         final_hint = detail_hint or base_pattern
         current_signals = " | ".join(filter(None, [intraday_signal, ma_break_signal]))
@@ -2188,9 +1982,7 @@ class BiddingMomentumDetector:
         if current_signals:
             final_hint = f"{final_hint} | {current_signals}" if final_hint else current_signals
         
-        with self._lock:
-            if code in self._tick_series:
-                self._tick_series[code].pattern_hint = final_hint
+        ts_obj.pattern_hint = final_hint
         
         # 1. 竞价/开盘高开强度
         high_open_pct = (day_open - last_close) / last_close * 100 if last_close > 0 else 0.0
@@ -2339,62 +2131,65 @@ class BiddingMomentumDetector:
         ts_obj.price_diff = cur_close - ts_obj.price_anchor if ts_obj.price_anchor > 0 else 0.0
 
 
-        with self._lock:
-            # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
-            # 这样能更准确捕捉涨停瞬间，哪怕涨停时由于某些原因评分还没跟上 (例如量还没放出来)
-            limit_up_price = last_close * (1.0 + get_limit_up_threshold(code) / 100.0)
-            is_at_limit = cur_close >= limit_up_price - 0.005 # 容差 1 分钱
-            
-            if (final_score >= 5.0 or is_at_limit) and ts_obj.first_breakout_ts == 0:
-                ts_obj.first_breakout_ts = data_ts
+        # [FIX] 只要达到涨停阈值，或者分数达到门槛，且是首次异动，就记录时间
+        # 这样能更准确捕捉涨停瞬间，哪怕涨停时由于某些原因评分还没跟上 (例如量还没放出来)
+        limit_up_price = last_close * (1.0 + get_limit_up_threshold(code) / 100.0)
+        is_at_limit = cur_close >= limit_up_price - 0.005 # 容差 1 分钱
+        
+        if (final_score >= 5.0 or is_at_limit) and ts_obj.first_breakout_ts == 0:
+            ts_obj.first_breakout_ts = data_ts
 
-            # [UPGRADE] 活跃数据统计能力：价格变动驱动活跃数 (USER-RULE: 活跃信号总数一定是价格有变动的数据)
-            current_min = int(data_ts // 60)
-            price_changed = abs(cur_close - ts_obj._last_active_price) > 0.005 # 容差，确保至少有 1 分钱变动
+        # [UPGRADE] 活跃数据统计能力：价格变动驱动活跃数 (USER-RULE: 活跃信号总数一定是价格有变动的数据)
+        current_min = int(data_ts // 60)
+        price_changed = abs(cur_close - ts_obj._last_active_price) > 0.005 # 容差，确保至少有 1 分钱变动
+        
+        # 1. 基础活性：得分达标、分钟切换 且 价格有实质变动
+        if final_score >= 5.0 and ts_obj._last_sig_min != current_min:
+            if price_changed:
+                ts_obj.signal_count += 1
+                ts_obj._last_sig_min = current_min
+                ts_obj._last_active_price = cur_close # 更新基准价格
             
-            # 1. 基础活性：得分达标、分钟切换 且 价格有实质变动
-            if final_score >= 5.0 and ts_obj._last_sig_min != current_min:
-                if price_changed:
+        # 2. 动能活性：价格持续上涨奖励 (脉冲级活性)
+        # 如果价格较上一次触发活跃时显著上涨，且强度达标，即便在同一分钟也额外奖励活跃数
+        if ts_obj._last_active_price > 0 and final_score >= 3.0:
+            # 强度越高，触发连续奖励的门槛越低 (如 0.3% - 0.5%)
+            surge_threshold = 0.005 if final_score < 10 else 0.003 
+            if cur_close > ts_obj._last_active_price * (1 + surge_threshold):
+                # 限制同一分钟内只能额外奖励一次，防止 Tick 过频导致数值失真
+                if ts_obj._bar_active_reward < 1:
                     ts_obj.signal_count += 1
-                    ts_obj._last_sig_min = current_min
-                    ts_obj._last_active_price = cur_close # 更新基准价格
-                
-            # 2. 动能活性：价格持续上涨奖励 (脉冲级活性)
-            # 如果价格较上一次触发活跃时显著上涨，且强度达标，即便在同一分钟也额外奖励活跃数
-            if ts_obj._last_active_price > 0 and final_score >= 3.0:
-                # 强度越高，触发连续奖励的门槛越低 (如 0.3% - 0.5%)
-                surge_threshold = 0.005 if final_score < 10 else 0.003 
-                if cur_close > ts_obj._last_active_price * (1 + surge_threshold):
-                    # 限制同一分钟内只能额外奖励一次，防止 Tick 过频导致数值失真
-                    if ts_obj._bar_active_reward < 1:
-                        ts_obj.signal_count += 1
-                        ts_obj._bar_active_reward += 1
-                        ts_obj._last_active_price = cur_close
-                        # logger.debug(f"🚀 [Bonus-Active] {ts_obj.code} Surge-Active (+1), Price: {cur_close}")
+                    ts_obj._bar_active_reward += 1
+                    ts_obj._last_active_price = cur_close
 
-            
-            # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0）且不处于涨停状态，重置异动时间
-            if final_score < 2.0 and not is_at_limit:
-                ts_obj.first_breakout_ts = 0
+        # [逻辑修正]：如果分数回落到极低水平（例如 < 2.0）且不处于涨停状态，重置异动时间
+        if final_score < 2.0 and not is_at_limit:
+            ts_obj.first_breakout_ts = 0
 
-            if code in self._tick_series:
-                ts_obj = self._tick_series[code]
-                ts_obj.score = final_score
-                ts_obj.score_diff = score_diff
-                # ts_obj.pct_diff 已在前面赋值
-                ts_obj.is_untradable = is_untradable
-                ts_obj.is_counter_trend = is_counter
-                ts_obj.is_gap_leader = is_gap_leader  # 连续跳空强势龙头标记
-                ts_obj.is_accumulating = is_accumulating # [NEW]
-                ts_obj.is_reversal = is_reversal         # [NEW]
-                ts_obj.is_upper_band = is_upper_band     # [NEW]
-                ts_obj.is_new_high = is_new_high         # [NEW]
+        ts_obj.score = final_score
+        ts_obj.score_diff = score_diff
+        ts_obj.is_untradable = is_untradable
+        ts_obj.is_counter_trend = is_counter
+        ts_obj.is_gap_leader = is_gap_leader  
+        ts_obj.is_accumulating = is_accumulating 
+        ts_obj.is_reversal = is_reversal         
+        ts_obj.is_upper_band = is_upper_band     
+        ts_obj.is_new_high = is_new_high         
+        
+        # [FIX] 无论如何确保 last_data_ts 能够推进
+        if data_ts > self.last_data_ts:
+            self.last_data_ts = data_ts
+        elif data_ts == 0:
+            self.last_data_ts = time.time()
             
-            # [FIX] 无论如何确保 last_data_ts 能够推进
-            if data_ts > self.last_data_ts:
-                self.last_data_ts = data_ts
-            elif data_ts == 0:
-                self.last_data_ts = time.time()
+        # [NEW] [PERF] 预计算 total_amount 缓存，消除后续板块聚合时的重复 O(K) 循环
+        total_amount = 0.0
+        for k in klines:
+            amt = float(k.get('amount', k.get('turnover', 0.0)))
+            if amt == 0: amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
+            total_amount += amt
+        ts_obj.total_amount = total_amount
+
 
     # =========================================================
     # 内部：板块聚合
@@ -2636,10 +2431,30 @@ class BiddingMomentumDetector:
             tags = []
             l_data = candidate_leader
             l_ts = self._tick_series.get(leader_code)
+
             if l_ts:
-                day_open = l_ts.open_price or (list(l_ts.klines)[0].get('open') if l_ts.klines else 0)
-                if l_ts.last_close > 0 and (day_open - l_ts.last_close) / l_ts.last_close > 0.03: tags.append("高开")
-                if l_data.get('price', 0) > day_open > 0: tags.append("高走")
+                # --- 安全获取 open ---
+                day_open = l_ts.open_price
+                if day_open is None:
+                    if l_ts.klines:
+                        first_k = next(iter(l_ts.klines), {})
+                        day_open = first_k.get('open')
+                
+                # --- 安全获取 last_close ---
+                last_close = l_ts.last_close
+
+                # --- 强制数值化（核心修复） ---
+                if not isinstance(day_open, (int, float)):
+                    day_open = 0.0
+                if not isinstance(last_close, (int, float)):
+                    last_close = 0.0
+
+                # --- 逻辑判断 ---
+                if last_close > 0 and (day_open - last_close) / last_close > 0.03:
+                    tags.append("高开")
+
+                if day_open > 0 and isinstance(l_data.get('price'), (int, float)) and l_data.get('price') > day_open:
+                    tags.append("高走")
                 
                 # 记录竞价情绪
                 now_t = int(time.strftime("%H%M"))
@@ -2843,11 +2658,24 @@ class BiddingMomentumDetector:
     # =========================================================
     # 内部：板块图
     # =========================================================
-
+    # [NEW] [PERF] 增加缓存机制：如果 DataFrame 内容没变，跳过重算
     def _rebuild_sector_map(self, df: pd.DataFrame):
-        """从 df_all 重建 sector → set(code) 索引"""
-        if 'category' not in df.columns:
+        """从 df_all 重建 sector → set(code) 索引 (带缓存保护)"""
+        if df is None or df.empty or 'category' not in df.columns:
             return
+            
+        # 使用内容指纹判定是否需要重算 (仅在全量时有效，增量始终执行以防漏网)
+        if len(df) > 3000:
+            # 这里的 logic 主要是防抖
+            current_tag = f"{len(df)}_{df.index[0]}_{df.index[-1]}"
+            if getattr(self, '_last_sector_rebuild_tag', '') == current_tag:
+                return
+            self._last_sector_rebuild_tag = current_tag
+            
+        self._do_rebuild_sector_map(df)
+
+    def _do_rebuild_sector_map(self, df: pd.DataFrame):
+        """真正的重建逻辑"""
         new_map: Dict[str, Set[str]] = defaultdict(set)
         for row in df.itertuples(index=False):
             # [🚀 格式规范化] 强制提取 6 位数字代码，剔除后缀(如 .SH/.SZ)，防止同一只股票以不同格式重复入表
@@ -2878,6 +2706,7 @@ class BiddingMomentumDetector:
                     self._sector_active_stocks_persistent.clear()
             
             self.sector_map = new_map
+
             logger.debug(f"📊 Sector map fully rebuilt from {len(df)} stocks (Sectors: {len(self.sector_map)})")
         else:
             # 局部更新逻辑：仅更新 df 中涉及代码的映射，不清理其他代码的映射

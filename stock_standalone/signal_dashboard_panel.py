@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
     QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
-    QProgressBar, QGridLayout, QComboBox
+    QProgressBar, QGridLayout, QComboBox, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray
 import threading
@@ -21,9 +21,9 @@ from PyQt6.QtGui import QColor, QFont, QBrush
 
 from tk_gui_modules.window_mixin import WindowMixin
 from signal_bus import get_signal_bus, SignalBus, BusEvent
-from JohnsonUtil import commonTips as cct
 import os
 import json
+from bidding_racing_panel import SectorDetailDialog
 from alert_manager import get_alert_manager
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 
@@ -428,6 +428,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 bus.unsubscribe(SignalBus.EVENT_ALERT, self._on_signal_received)
                 bus.unsubscribe(SignalBus.EVENT_RISK, self._on_signal_received)
                 bus.unsubscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
+                bus.unsubscribe(SignalBus.EVENT_STRATEGIC_TREND, self._on_signal_received)
         except Exception: pass
         
         if hasattr(self, '_table_update_buffer'):
@@ -735,13 +736,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
         self.tables: Dict[str, QTableWidget] = {}
 
-        # [MOD] 新增页签：决策队列与板块热力、龙头追踪
-        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"]
+        # [MOD] 新增页签：决策队列与板块热力、龙头追踪、战略趋势
+        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"]
         for tab_name in all_tabs:
             if tab_name == "🌟 决策队列":
                 table = self._create_decision_table()
             elif tab_name == "🐉 龙头追踪":
                 table = self._create_dragon_table()
+            elif tab_name == "🌐 战略趋势":
+                table = self._create_strategic_table()
             elif tab_name == "🔥 板块热力":
                 table = self._create_sector_table()
             else:
@@ -915,6 +918,32 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
 
+    def _create_strategic_table(self) -> QTableWidget:
+        """创建战略大格局趋势表"""
+        columns = ["趋势类型", "代码", "名称", "阶段", "所属板块", "战略分", "结构分", "共振分", "更新时间", "核心理由"]
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(True)
+        table.horizontalHeader().setSortIndicator(5, Qt.SortOrder.DescendingOrder) # 默认按战略分倒序
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        
+        table.cellClicked.connect(self._on_cell_clicked)
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # [NEW] 列宽持久化联动
+        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
+        return table
+
     def _on_sector_table_clicked(self, row, col):
         """板块表单击联动：同步龙头 K 线"""
         table = self.sender()
@@ -958,6 +987,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         bus.subscribe(SignalBus.EVENT_PATTERN, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_ALERT, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_RISK, self._on_signal_received)
+        bus.subscribe(SignalBus.EVENT_STRATEGIC_TREND, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
         history = bus.get_history(limit=200)
         for event in history: self._process_event(event, update_ui=False)
@@ -1004,7 +1034,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.error(f"❌ [DASHBOARD] Refresh dragon table failed: {e}", exc_info=True)
             self.status_label.setText(f"错误: 龙头同步失败")
 
-        # 3. 更新板块热力表
+        # 3. 更新战略趋势表 [NEW]
+        try:
+            trends = self._engine_ctrl.get_strategic_trends()
+            self._refresh_strategic_table(trends)
+        except Exception as e:
+            logger.error(f"❌ [DASHBOARD] Refresh strategic table failed: {e}")
+
+        # 4. 更新板块热力表
         try:
             sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
             self._refresh_sector_table(sectors)
@@ -1224,6 +1261,55 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         table.setSortingEnabled(True)
         # [NEW] 限制过长列宽触发 UI 溢出
+
+
+    def _refresh_strategic_table(self, trends: List[dict]):
+        """渲染战略大格局趋势列表"""
+        table = self.tables.get("🌐 战略趋势")
+        if not table: return
+        
+        # [PERF] Dirty-check: 如果数据没变则不渲染
+        trends_sig = str([(t['code'], t['score'], t['trend_type'], t['updated_at']) for t in trends])
+        if getattr(table, "_last_trends_sig", None) == trends_sig:
+            return
+        table._last_trends_sig = trends_sig
+
+        table.setSortingEnabled(False)
+        if table.rowCount() != len(trends):
+            table.setRowCount(len(trends))
+
+        def _update_cell(r_idx, c_idx, text, color=None, bg_color=None, bold=False, is_numeric=False):
+            it = table.item(r_idx, c_idx)
+            if not it:
+                it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
+                table.setItem(r_idx, c_idx, it)
+            if it.text() != str(text): it.setText(str(text))
+            if color:
+                if isinstance(color, str): color = QColor(color)
+                it.setForeground(QBrush(color))
+            if bg_color:
+                it.setBackground(bg_color)
+            if bold:
+                f = it.font(); f.setBold(True); it.setFont(f)
+            return it
+
+        for i, t in enumerate(trends):
+            # ["趋势类型", "代码", "名称", "阶段", "所属板块", "战略分", "结构分", "共振分", "更新时间", "核心理由"]
+            _update_cell(i, 0, t.get('trend_type', ''), color="#00ff88", bold=True)
+            
+            code = t.get('code', '')
+            c_color = "#00ff00" if code.startswith(('60', '00')) else "#00bfff"
+            _update_cell(i, 1, code, color=c_color)
+            _update_cell(i, 2, t.get('name', ''))
+            _update_cell(i, 3, t.get('stage_label', ''))
+            _update_cell(i, 4, t.get('sector', ''), color="#888")
+            _update_cell(i, 5, t.get('score', 0.0), is_numeric=True)
+            _update_cell(i, 6, t.get('upper_score', 0.0), is_numeric=True)
+            _update_cell(i, 7, t.get('resonance', 0.0), is_numeric=True)
+            _update_cell(i, 8, t.get('updated_at', ''))
+            _update_cell(i, 9, t.get('reason', ''))
+
+        table.setSortingEnabled(True)
         self._limit_table_column_widths(table)
 
     def _on_signal_received(self, event: BusEvent):
@@ -1382,6 +1468,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if code not in self._stock_stats: self._stock_stats[code] = {"count": 0, "name": payload.get('name', '')}
             self._stock_stats[code]["count"] += 1
         
+        if event.event_type == SignalBus.EVENT_STRATEGIC_TREND:
+            self._refresh_strategic_table(payload.get('trends', []))
+            return
+
         if update_ui: self._append_to_tables(event)
 
     def _append_to_tables(self, event: BusEvent):
@@ -1987,6 +2077,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         dna_action = menu.addAction(title)
         dna_action.triggered.connect(lambda: self._run_dna_audit_selected(table))
 
+        menu.addSeparator()
+
+        # 3. 大格局战略关注 (Macro Watchlist)
+        # ⭐ [FIX] 即使初始化时没连上，右键点击时也尝试重新连接一次
+        if self._engine_ctrl is None:
+            self._engine_ctrl = get_engine_controller()
+
+        if self._engine_ctrl:
+            try:
+                m_watchlist = self._engine_ctrl.get_macro_watchlist()
+                if code in m_watchlist:
+                    macro_action = menu.addAction(f"🛡️ 移除战略关注: {code}")
+                    macro_action.triggered.connect(lambda: self._engine_ctrl.remove_from_macro_watchlist(code))
+                else:
+                    macro_action = menu.addAction(f"🌐 战略趋势重点关注: {code}")
+                    macro_action.triggered.connect(lambda: self._engine_ctrl.add_to_macro_watchlist(code, name))
+            except Exception as e:
+                logger.error(f"❌ [Dashboard] Menu logic failed: {e}")
+
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def _run_dna_audit_selected(self, source_table=None):
@@ -2101,6 +2210,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # 如果弹窗时也要通知其他组件，可以在这里也 emit
             self.code_clicked.emit(code, name) 
             return 
+
+        if header in ["所属板块", "板块名称"]:
+            sec_name = current_text
+            controller = get_engine_controller()
+            if controller and hasattr(controller, 'sector_map'):
+                try:
+                    # SectorDetailDialog(sec_name, detector, linkage_func, parent)
+                    dialog = SectorDetailDialog(sec_name, controller.sector_map, self.code_clicked.emit, self)
+                    dialog.exec()
+                    return
+                except Exception as e:
+                    logger.error(f"Failed to open SectorDetailDialog: {e}")
 
         # --- 复制逻辑 ---
         if header == "代码":

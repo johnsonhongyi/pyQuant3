@@ -29,7 +29,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import IntEnum
 from typing import Dict, List, Optional, Tuple, Any
@@ -46,6 +46,8 @@ except ImportError:
 
 from logger_utils import LoggerFactory
 logger = LoggerFactory.getLogger(__name__)
+
+from sys_utils import get_conf_path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §0  常量与枚举
@@ -186,6 +188,58 @@ class DecisionSignal:
             'status': self.status,
             'hits': getattr(self, 'hits', 1)
         }
+
+@dataclass
+class StrategicTrend:
+    """战略大格局趋势（跨周期与大结构）"""
+    code: str
+    name: str
+    sector: str
+    stage: int                 # cycle_stage (1:筑底 2:主升)
+    trend_type: str           # 筑底启动 / 横盘慢牛 / 结构突破 / 蓄势共振
+    score: float               # 综合强度得分
+    upper_score: float         # 结构压力得分
+    resonance: float           # 多周期共振分
+    reason: str                # 核心逻辑
+    updated_at: datetime       = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        stage_labels = {1: "🌱筑底", 2: "📈主升", 3: "🔥脉冲", 4: "❄️回落"}
+        return {
+            'code': self.code,
+            'name': self.name,
+            'sector': self.sector,
+            'stage': self.stage,
+            'stage_label': stage_labels.get(self.stage, "❓未知"),
+            'trend_type': self.trend_type,
+            'score': round(self.score, 1),
+            'upper_score': round(self.upper_score, 1),
+            'resonance': round(self.resonance, 1),
+            'reason': self.reason,
+            'updated_at': self.updated_at.strftime('%H:%M:%S'),
+        }
+
+    def to_json_dict(self) -> dict:
+        """用于文件持久化的完整序列化 (手动构建以避免 asdict 开销)"""
+        return {
+            'code': self.code,
+            'name': self.name,
+            'sector': self.sector,
+            'stage': self.stage,
+            'trend_type': self.trend_type,
+            'score': self.score,
+            'upper_score': self.upper_score,
+            'resonance': self.resonance,
+            'reason': self.reason,
+            'updated_at': self.updated_at.isoformat(),
+        }
+
+    @classmethod
+    def from_json_dict(cls, d: dict) -> 'StrategicTrend':
+        """从文件恢复"""
+        if 'updated_at' in d and isinstance(d['updated_at'], str):
+            d['updated_at'] = datetime.fromisoformat(d['updated_at'])
+        return cls(**d)
 
 @dataclass
 class DragonRecord:
@@ -1837,6 +1891,235 @@ class ExitMonitor:
         with self._lock:
             self._position_highs.clear()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# §6.5 战略大格局跟踪器 (StrategicTrendTracker)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StrategicTrendTracker:
+    """
+    战略大格局跟踪器
+    ────────────────
+    目标：捕获 MA60 筑底启动、多周期共振、横盘突破等大周期高确定性标的。
+    """
+    def __init__(self, sector_map: SectorFocusMap):
+        self.sector_map = sector_map
+        self.filename = get_conf_path("macro_trends.json")
+        self._lock = threading.Lock()
+        self._trends: Dict[str, StrategicTrend] = {}
+        self._last_scan_time = 0
+        self._load()
+
+    def _load(self):
+        """跨会话恢复战略池"""
+        try:
+            if os.path.exists(self.filename):
+                with open(self.filename, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    with self._lock:
+                        for code, d in data.items():
+                            self._trends[code] = StrategicTrend.from_json_dict(d)
+                logger.info(f"📂 [StrategicTracker] 已恢复 {len(self._trends)} 只战略趋势标的")
+        except Exception as e:
+            logger.error(f"❌ [StrategicTracker] 恢复失败: {e}")
+
+    def _save(self):
+        """保存当前战略池"""
+        try:
+            with self._lock:
+                data = {c: t.to_json_dict() for c, t in self._trends.items()}
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"❌ [StrategicTracker] 保存失败: {e}")
+
+    def scan(self, df: pd.DataFrame, force: bool = False):
+        """执行大格局战略扫描"""
+        now = time.time()
+        # 节流扫描：默认 5 分钟扫描一次，除非 force=True
+        if not force and (now - self._last_scan_time < 300):
+            return
+        
+        if df is None or df.empty:
+            return
+
+        from data_utils import calc_cycle_stage_vect
+        from multi_period_manager import multi_period_mgr
+        
+        try:
+            # 1. 矢量化计算生命周期阶段
+            stages = calc_cycle_stage_vect(df)
+            
+            # 2. 获取多周期共振评分
+            with self.sector_map._lock:
+                snaps = dict(self.sector_map._detector_stock_snap)
+            
+            # [NEW] 获取持久化自选池
+            from sector_focus_engine import get_focus_controller
+            ctrl = get_focus_controller()
+            m_watchlist = ctrl.get_macro_watchlist() if ctrl else {}
+            
+            new_trends = {}
+            
+            # 3. 策略过滤循环
+            # 我们不仅遍历 stages，还要确保 watchlist 里的也被检查
+            target_codes = set(stages.index) | set(m_watchlist.keys())
+
+            for code in target_codes:
+                if code not in df.index: continue
+                
+                stage = stages.get(code, 2) # 默认 2
+                
+                snap = snaps.get(code, {})
+                score = float(snap.get('score', 0.0))
+                upper_score = float(snap.get('upper_score', 0.0))
+                dff = float(snap.get('dff', 0.0))
+                pct = float(snap.get('pct', 0.0))
+                name = str(snap.get('name', m_watchlist.get(code, code)))
+                
+                reason = ""
+                trend_type = ""
+                weight = 0.0
+                
+                # --- [策略 A] MA60 筑底反弹 (Stage 1) ---
+                if stage == 1:
+                    if score > 15 and pct > 0:
+                        trend_type = "🌱 筑底启动"
+                        reason = f"MA60附近筑底完成，分时转强(score={score:.1f})"
+                        weight = score * 1.5
+                    elif upper_score > 60:
+                        trend_type = "🧱 结构筑底"
+                        reason = f"站稳核心结构位(upper={upper_score:.1f})"
+                        weight = upper_score
+                
+                # --- [策略 B] 蓄势共振 (Stage 1/2) ---
+                if not trend_type and dff > 5.0 and score > 10:
+                    trend_type = "🔋 蓄势共振"
+                    reason = f"主力资金(dff={dff:.1f})持续流入，蓄势待发"
+                    weight = dff * 2.0 + score
+
+                # --- [策略 C] 横盘慢牛突破 (Stage 2) ---
+                if not trend_type and stage == 2:
+                    if upper_score > 85 and pct > 0.5:
+                        trend_type = "🚀 结构突破"
+                        reason = f"突破大周期关键压力位(upper={upper_score:.1f})"
+                        weight = upper_score * 1.2
+                    elif dff > 10.0:
+                        trend_type = "📈 趋势加速"
+                        reason = f"主升浪加速中，动能充足(dff={dff:.1f})"
+                        weight = dff * 3.0
+
+                # --- [策略 E] W周期/底部盘踞 (Strategic Launch) ---
+                if not trend_type:
+                    # 我们借用 multi_period_mgr 的逻辑，但这里是单周期 DF 扫描
+                    # 如果 stage 为 1 且满足底部盘踞
+                    if stage == 1:
+                        # 简化版底部盘踞判定 (MA60附近 + 窄幅震荡)
+                        ma60 = snap.get('ma60', 0)
+                        if ma60 > 0 and 0.95 < (pct / 100 + 1) * snap.get('last_close', 0) / ma60 < 1.08:
+                            trend_type = "📍 蓄势底座"
+                            reason = "MA60附近横盘蓄势，属于战略级筑底"
+                            weight = 40.0 + score
+
+                # --- [策略 F] 手动关注兜底 (Watchlist Fallback) ---
+                if not trend_type and code in m_watchlist:
+                    trend_type = "🎯 重点关注"
+                    reason = "用户手动加入的战略重点跟踪标的"
+                    weight = 30.0 + score
+
+                if trend_type:
+                    sec_name = self.sector_map.get_sector_of_code(code) or "未知"
+                    new_trends[code] = StrategicTrend(
+                        code=code, name=name, sector=sec_name,
+                        stage=int(stage), trend_type=trend_type,
+                        score=weight, upper_score=upper_score,
+                        resonance=score, reason=reason,
+                        updated_at=datetime.now()
+                    )
+
+            # 4. 更新结果并保持持久化
+            with self._lock:
+                # 合并新旧趋势：如果旧的已经存在，保留较强的那个
+                for code, trend in new_trends.items():
+                    if code in self._trends:
+                        # 如果类型相同，保留高分的；如果类型不同，更新为最新的
+                        if self._trends[code].trend_type == trend.trend_type:
+                            if trend.score > self._trends[code].score:
+                                self._trends[code] = trend
+                        else:
+                            self._trends[code] = trend
+                    else:
+                        self._trends[code] = trend
+                
+                # 清理逻辑：如果已经变成 Stage 3/4 (除非是手动跟踪的)，或者超过 3 天未更新
+                now_dt = datetime.now()
+                to_remove = []
+                for c, t in self._trends.items():
+                    # 如果不是手动跟踪，且 (不再活跃于本次扫描结果 AND 已经跨日)
+                    if c not in m_watchlist:
+                        if c not in new_trends and t.updated_at.date() != now_dt.date():
+                            to_remove.append(c)
+                
+                for c in to_remove:
+                    self._trends.pop(c, None)
+            
+            # 5. 持久化到磁盘
+            self._save()
+            
+            self._last_scan_time = now
+            if new_trends:
+                logger.info(f"🌐 [StrategicTracker] 扫描完成, 捕获战略标的 {len(new_trends)} 只")
+                
+        except Exception as e:
+            logger.error(f"❌ [StrategicTracker] 扫描异常: {e}")
+
+    def get_trends(self, min_score: float = 0.0) -> List[StrategicTrend]:
+        with self._lock:
+            # 返回按评分排序的趋势列表
+            sorted_trends = sorted(self._trends.values(), key=lambda x: x.score, reverse=True)
+            return [t for t in sorted_trends if t.score >= min_score]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §6.6 战略自选池 (MacroWatchlist) — 持久化
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MacroWatchlist:
+    """大格局战略自选池（跨会话持久化）"""
+    def __init__(self):
+        self.filename = get_conf_path("macro_watchlist.json")
+        self._lock = threading.Lock()
+        self.codes: Dict[str, str] = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if os.path.exists(self.filename):
+                with open(self.filename, 'r', encoding='utf-8') as f:
+                    self.codes = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load MacroWatchlist: {e}")
+
+    def _save(self):
+        try:
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                json.dump(self.codes, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save MacroWatchlist: {e}")
+
+    def add(self, code: str, name: str):
+        with self._lock:
+            self.codes[code] = name
+            self._save()
+
+    def remove(self, code: str):
+        with self._lock:
+            if code in self.codes:
+                del self.codes[code]
+                self._save()
+
+    def get_all(self) -> Dict[str, str]:
+        with self._lock:
+            return dict(self.codes)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §7  外观门面（SectorFocusController）— 整合所有引擎
@@ -1857,6 +2140,8 @@ class SectorFocusController:
         self.decision_queue    = DecisionQueue()
         self.exit_monitor      = ExitMonitor(self.sector_map)
         self.dragon_tracker    = DragonLeaderTracker()  # [Dragon] 龙头跨日持续跟踪器
+        self.strategic_tracker = StrategicTrendTracker(self.sector_map) # [NEW] 战略趋势跟踪器
+        self.macro_watchlist   = MacroWatchlist()      # [NEW] 战略自选持久化池
 
         self._lock = threading.Lock()
         self._bidding_scores: Dict[str, float] = {}
@@ -2081,6 +2366,12 @@ class SectorFocusController:
                         with self.sector_map._lock:
                             all_snaps = dict(self.sector_map._detector_stock_snap)
                         self.dragon_tracker.auto_next_day_validate_all(all_snaps)
+
+                    # [NEW] 执行战略扫描
+                    self.strategic_tracker.scan(df, force=force)
+                    # 📢 发布同步
+                    from signal_bus import publish_strategic_trend
+                    publish_strategic_trend("StrategicTracker", self.get_strategic_trends())
 
                 self._last_full_update = now
             except Exception as e:
@@ -2382,6 +2673,58 @@ class SectorFocusController:
     def get_dragon_count(self) -> dict:
         """获取龙头数量统计 {'candidate': N, 'dragon': N, 'warning': N, 'total': N}"""
         return self.dragon_tracker.get_count()
+
+    def get_strategic_trends(self) -> List[dict]:
+        """获取战略趋势列表（UI 消费接口）"""
+        return [t.to_dict() for t in self.strategic_tracker.get_trends()]
+
+    def add_to_macro_watchlist(self, code: str, name: str):
+        """将个股加入大格局自选池"""
+        self.macro_watchlist.add(code, name)
+        logger.info(f"🌐 [Controller] {code}({name}) 已加入战略大格局自选池")
+        
+        # [NEW] 立即手动注入一个基础趋势项，确保 UI 即时可见
+        snap = self.sector_map.get_stock_snap(code) or {}
+        with self.strategic_tracker._lock:
+            # 即使已经存在，也更新一下类型为重点关注（如果之前是自动捕获的则保留自动类型）
+            if code not in self.strategic_tracker._trends:
+                self.strategic_tracker._trends[code] = StrategicTrend(
+                    code=code, name=name, 
+                    sector=self.sector_map.get_sector_of_code(code) or "未知",
+                    stage=1, trend_type="🎯 重点关注",
+                    score=30.0 + float(snap.get('score', 0.0)),
+                    upper_score=float(snap.get('upper_score', 0.0)),
+                    resonance=float(snap.get('score', 0.0)),
+                    reason="用户手动加入的战略重点跟踪标的",
+                    updated_at=datetime.now()
+                )
+        
+        # 立即发布同步，让 UI 瞬间刷新
+        from signal_bus import publish_strategic_trend
+        publish_strategic_trend("StrategicTracker", self.get_strategic_trends())
+
+        # 尝试触发一次全量扫描（如果数据就绪）
+        if self._df_realtime is not None:
+            self.strategic_tracker.scan(self._df_realtime, force=True)
+
+    def remove_from_macro_watchlist(self, code: str):
+        """将个股从大格局自选池移除"""
+        self.macro_watchlist.remove(code)
+        logger.info(f"🌐 [Controller] {code} 已从战略大格局自选池移除")
+        
+        # [NEW] 如果当前趋势项只是“重点关注”类型，立即从内存列表中移除以更新 UI
+        with self.strategic_tracker._lock:
+            trend = self.strategic_tracker._trends.get(code)
+            if trend and trend.trend_type == "🎯 重点关注":
+                self.strategic_tracker._trends.pop(code, None)
+        
+        # 立即发布同步
+        from signal_bus import publish_strategic_trend
+        publish_strategic_trend("StrategicTracker", self.get_strategic_trends())
+
+    def get_macro_watchlist(self) -> Dict[str, str]:
+        """获取大格局自选池列表"""
+        return self.macro_watchlist.get_all()
 
     def run_daily_close_snapshot(self) -> dict:
         """
