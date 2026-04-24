@@ -29,6 +29,32 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-24 23:05
+- [x] **根治 DNA 审计 GIL 崩溃与独立进程隔离 (Fixed DNA Audit GIL Crash & Process Isolation)**：
+    - [x] **实现降级审计进程隔离 (Process-Isolated Audit)**：在 `bidding_racing_panel.py` 中，针对回测或独立进程模式下的“DNA审计”触发逻辑，将原有的 `threading.Thread` 降级方案重构为 `multiprocessing.Process`。
+    - [x] **参照主程序高性能模式**：遵循 `MonitorTK` 启动回测的 `mp.Process` 模式，确保 DNA 审计在完全独立的 Python 解释器实例中运行。这彻底解决了由于 Tkinter 与 PyQt6 库在同一进程子线程中竞争 GIL 及 GUI 资源导致的 `Fatal Python error: PyEval_RestoreThread` 崩溃。
+    - [x] **打通模块级分发闭环**：通过提取 `_standalone_dna_audit_process_entry` 顶级函数，确保了在 `spawn` 模式下子进程的正确加载与数据透传。
+- [x] **深度修复 DNA 审计报告窗 DPI 适配与渲染重叠 (Fixed UI Overlap & DPI Scaling)**：
+    - [x] **引入全局样式缩放 (Global Style Scaling)**：在 `backtest_feature_auditor.py` 的 `DnaAuditReportWindow` 中，新增了 `_setup_style` 方法。通过 `scale_factor` 动态调节 `Treeview` 的行高（rowheight）与字体大小，确保在高 DPI 显示器下不会出现文字挤压或行间距缺失。
+    - [x] **实施全组件字体同步 (Unified Font Scaling)**：重构了 `_setup_ui` 和 `_show_detail`。将 `scale_factor` 深度注入到 `ScrolledText` 详情窗及其富文本标签（title, header, row）中，解决了用户反馈的“字体重叠”与“排版混乱”痛点。
+    - [x] **加固列宽测量算法**：优化了 `_adjust_column_widths` 逻辑，强制测量引擎使用缩放后的字体实例进行像素预估，确保了表格列宽能自动适应内容长度，防止长字符被截断。
+
+## 2026-04-24 23:15
+- [x] **根治 SignalDashboardPanel 磁盘 IO 引发的 UI 假死 (Fixed UI Block & IO Bottleneck)**：
+    - [x] **引入 UI 状态保存防抖 (Debounced UI Persistence)**：在 `signal_dashboard_panel.py` 中引入了 `_save_ui_timer` (QTimer)。将所有涉及磁盘写入的布局保存（列宽调整、排序切换、窗口位移）统一延后 2000ms 执行。
+    - [x] **消除高频 IO 突发**：解决了由于仪表盘包含 12+ 个表格，在初始化或窗口缩放时产生的瞬间数百次同步 `json.dump` 操作。这彻底消除了 `watchdog` 报出的 5.14s 主线程阻塞，恢复了界面的丝滑响应。
+    - [x] **原子化合并写入**：重构了 `_save_ui_state_atomic`，确保窗口位置与表格布局在同一个 IO 周期内落盘，进一步降低了系统开销。
+
+## 2026-04-24 23:05
+- [x] **根治 DNA 审计 GIL 崩溃与独立进程隔离 (Fixed DNA Audit GIL Crash & Process Isolation)**：
+    - [x] **实现降级审计进程隔离 (Process-Isolated Audit)**：在 `bidding_racing_panel.py` 中，针对回测或独立进程模式下的“DNA审计”触发逻辑，将原有的 `threading.Thread` 降级方案重构为 `multiprocessing.Process`。
+    - [x] **参照主程序高性能模式**：遵循 `MonitorTK` 启动回测的 `mp.Process` 模式，确保 DNA 审计在完全独立的 Python 解释器实例中运行。这彻底解决了由于 Tkinter 与 PyQt6 库在同一进程子线程中竞争 GIL 及 GUI 资源导致的 `Fatal Python error: PyEval_RestoreThread` 崩溃。
+    - [x] **打通模块级分发闭环**：通过提取 `_standalone_dna_audit_process_entry` 顶级函数，确保了在 `spawn` 模式下子进程的正确加载与数据透传。
+- [x] **深度修复 DNA 审计报告窗 DPI 适配与渲染重叠 (Fixed UI Overlap & DPI Scaling)**：
+    - [x] **引入全局样式缩放 (Global Style Scaling)**：在 `backtest_feature_auditor.py` 的 `DnaAuditReportWindow` 中，新增了 `_setup_style` 方法。通过 `scale_factor` 动态调节 `Treeview` 的行高（rowheight）与字体大小，确保在高 DPI 显示器下不会出现文字挤压或行间距缺失。
+    - [x] **实施全组件字体同步 (Unified Font Scaling)**：重构了 `_setup_ui` 和 `_show_detail`。将 `scale_factor` 深度注入到 `ScrolledText` 详情窗及其富文本标签（title, header, row）中，解决了用户反馈的“字体重叠”与“排版混乱”痛点。
+    - [x] **加固列宽测量算法**：优化了 `_adjust_column_widths` 逻辑，强制测量引擎使用缩放后的字体实例进行像素预估，确保了表格列宽能自动适应内容长度，防止长字符被截断。
+
 ## 2026-04-24 16:50
 - [x] **上线持久化数据物理备份机制 (Implemented Session Persistence Backup)**：
     - [x] **引入自动旋转备份 (Rotation Backup)**：在 `BiddingMomentumDetector` 中新增 `_backup_session_file` 方法。在覆写 `bidding_session_data.json.gz` 或每日快照前，系统会自动检查现有文件。
