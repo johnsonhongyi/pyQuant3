@@ -1258,8 +1258,66 @@ class DataProcessWorker(QObject):
         self.stopped.emit()
 
 
+class DataLoaderThread(QThread):
+    """[🚀 极致稳定性] 专门用于异步加载重型数据快照，防止 UI 线程产生任何 I/O 阻塞"""
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, detector: BiddingMomentumDetector, file_path: str):
+        super().__init__()
+        self.detector = detector
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            # 此时 detector 内部已经优化为“原子替换”，大部分耗时操作均在锁外
+            success = self.detector.load_from_snapshot(self.file_path)
+            self.finished.emit(success, self.file_path)
+        except Exception as e:
+            logger.error(f"💥 [DataLoader] Async load failed: {e}")
+            self.finished.emit(False, str(e))
+
+
 class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
+
+    def _on_history_load_clicked(self):
+        """弹出【增强型日历】选择框加载历史快照 (异步非阻塞版)"""
+        dialog = SnapshotCalendarDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            file_path = dialog.selected_file
+            if not file_path: return
+            
+            # 1. 设置 UI 为加载中状态
+            self.status_lbl.setText("⏳ 正在后台加载历史数据，请稍候...")
+            self.btn_load_history.setEnabled(False)
+            
+            # 2. 启动异步加载线程
+            self._loader_thread = DataLoaderThread(self.detector, file_path)
+            self._loader_thread.finished.connect(self._on_history_load_finished)
+            self._loader_thread.start()
+
+    def _on_history_load_finished(self, success: bool, file_path: str):
+        """异步加载完成后的回调"""
+        self.btn_load_history.setEnabled(True)
+        if success:
+            self._is_history_mode = True
+            self.detector.in_history_mode = True
+            # 从文件名尝试提取日期 bidding_20260312.json.gz
+            date_match = re.search(r'(\d{8})', os.path.basename(file_path))
+            if date_match:
+                self._history_date = date_match.group(1)
+                self.title_lbl.setText(f"📅 板块赛道复盘 - [{self._history_date}]")
+                self.btn_load_history.setText(f"🔄 正在复盘: {self._history_date}")
+                self.btn_load_history.setStyleSheet("background-color: #5856D6; color: white; border: 1px solid #00FFCC;")
+            
+            # 3. 强制触发 UI 刷新并置脏，确保新数据立即可见
+            self.refresh_data(force=True)
+            self.status_lbl.setText(f"✅ 历史数据加载成功: {os.path.basename(file_path)}")
+            logger.info(f"✅ [HistoryMode] 已成功切入历史复盘状态: {file_path}")
+        else:
+            self.status_lbl.setText("❌ 历史数据加载失败，请检查文件格式")
+            QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏。")
+
 
     # ------------------------------------------------------------------ init
     def __init__(self, main_window: Any, allow_real_close: bool = False):
