@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import math
 import os
+import sys
 import json
 import time
 import datetime
@@ -93,64 +94,112 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 # [🚀 渲染优化] 赛马明细窗 Top-K 渲染上限 (支持命令行 -display-k 修改)
 RENDER_TOP_K = 200
 
-# [🚀 DNA 独立进程入口] 彻底隔离 GIL 与 GUI 库冲突
 def _standalone_dna_audit_process_entry(code_to_name):
     """
-    独立进程入口：在回测或独立进程模式下，拉起全新的 Tkinter 环境进行审计展示
+    独立进程入口：Tkinter + 回测审计安全隔离版本（稳定修复版）
     """
+    import tkinter as tk
+    import sys
+
     try:
-        import tkinter as tk
-        # 延迟导入，防止启动阶段 IO 负担
-        from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
-        
-        # 1. 创建独立的 Tk 宿主
+        from backtest_feature_auditor import (
+            audit_multiple_codes,
+            show_dna_audit_report_window
+        )
+
         root = tk.Tk()
         root.withdraw()
-        
+
+        # =========================
+        # ✔ 安全退出统一入口
+        # =========================
+        def safe_exit():
+            try:
+                # 先停止 Tk 事件循环
+                root.quit()
+            except:
+                pass
+            try:
+                root.destroy()
+            except:
+                pass
+            finally:
+                # 仅在最后退出进程（避免 os._exit 造成资源泄漏）
+                sys.exit(0)
+
+        # =========================
+        # ✔ 窗口关闭事件
+        # =========================
+        root.protocol("WM_DELETE_WINDOW", safe_exit)
+
+        # =========================
+        # ✔ 执行审计逻辑
+        # =========================
         codes = list(code_to_name.keys())
-        # 2. 执行审计
         summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
-        
+
+        # =========================
+        # ✔ UI 展示 or 直接退出
+        # =========================
         if summaries:
-            # 3. 显示报告窗口
             show_dna_audit_report_window(summaries, parent=root)
+
+            # ❗必须保留：Tk event loop
             root.mainloop()
         else:
-            root.destroy()
+            safe_exit()
+
     except Exception as e:
-        print(f"❌ [Racing] Standalone DNA Process Crash: {e}")
+        print(f"❌ Standalone DNA Process Crash: {e}")
+        sys.exit(1)
 
 # [🚀 DNA 统一分发] 模块级分发中枢：兼容 Tkinter 宿统与 Standalone Qt 进程
 def dispatch_dna_audit(code_to_name, parent_widget=None):
     """
-    DNA 审计分发中枢：支持 Tkinter 宿主分发与独立 Qt 进程降级启动
+    DNA 审计分发中枢（Tk / Qt / multiprocessing 安全版）
     """
     if not code_to_name:
         return
-    
-    # 1. 寻找主程序的 tk_dispatch_queue (Tkinter 环境)
+
+    # =========================
+    # 1. Tk 主程序模式（优先）
+    # =========================
     main_app = None
     p = parent_widget
     while p:
         if hasattr(p, 'main_app'):
             main_app = getattr(p, 'main_app', None)
-            if main_app: break
+            if main_app:
+                break
         p = p.parent()
-    
+
     if main_app and hasattr(main_app, 'tk_dispatch_queue') and hasattr(main_app, '_run_dna_audit_batch'):
-        # 委托给主程序的 Tkinter 线程执行，脱离 Qt 循环
-        main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(code_to_name))
+        main_app.tk_dispatch_queue.put(
+            lambda: main_app._run_dna_audit_batch(code_to_name)
+        )
         return
-        
-    # 2. 降级方案：如果是独立 Qt 进程运行 (Standalone Mode)
-    # 🚀 [FIX] 使用 multiprocessing 替代 threading，彻底解决 GIL 崩溃与 Tkinter/Qt 冲突
-    logger.warning(f"📍 [Racing] 启动 DNA 降级审计 (Process-Isolated) - 共 {len(code_to_name)} 只个股")
-    
+
+    # =========================
+    # 2. 独立进程模式（Qt fallback）
+    # =========================
+    logger.warning(
+        f"📍 [Racing] 启动 DNA 降级审计 (Process-Isolated) - 共 {len(code_to_name)} 只个股"
+    )
+
     import multiprocessing as mp
+
     try:
-        # 使用 spawn 模式确保干净的环境（Windows 默认）
-        p = mp.Process(target=_standalone_dna_audit_process_entry, args=(code_to_name,), daemon=True)
-        p.start()
+        # Windows / macOS / Linux 统一稳定模式
+        ctx = mp.get_context("spawn")
+
+        process = ctx.Process(
+            target=_standalone_dna_audit_process_entry,
+            args=(code_to_name,),
+            daemon=False  # ❗必须 False（否则 Tk 未执行完会被杀）
+        )
+
+        process.start()
+
     except Exception as e:
         logger.error(f"❌ [Racing] 无法启动 DNA 独立进程: {e}")
     
