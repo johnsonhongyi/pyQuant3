@@ -4683,20 +4683,27 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
 
     def _on_back_to_live_clicked(self):
-        """切回实时模式"""
-        self._is_history_mode = False
-        self.detector.in_history_mode = False
-        self.btn_live.setVisible(False)
-        self.btn_history.setStyleSheet("")
-        self.btn_refresh.setEnabled(True)
-        
-        # 恢复锚点并尝试冷启一次数据
-        self.detector.reset_observation_anchors()
-        self.manual_refresh()
-        
-        if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText("📡 已切回实时监控模式")
-            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+        """切回实时模式 (优化版：从内存恢复实盘，不重置锚点)"""
+        # 1. 尝试从内存恢复实盘状态
+        if self.detector.restore_live_session():
+            self._is_history_mode = False
+            self.btn_live.setVisible(False)
+            self.btn_history.setStyleSheet("")
+            self.btn_refresh.setEnabled(True)
+            
+            # 2. 强制触发一次 UI 刷新
+            self.refresh_data(force=True)
+            
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("📡 已恢复今日实盘监控数据")
+                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+        else:
+            # 兜底：如果恢复失败，则按旧逻辑重置
+            self._is_history_mode = False
+            self.detector.in_history_mode = False
+            self.btn_live.setVisible(False)
+            self.detector.reset_observation_anchors()
+            self.manual_refresh()
         
         # [NEW] 恢复默认窗口标题
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")

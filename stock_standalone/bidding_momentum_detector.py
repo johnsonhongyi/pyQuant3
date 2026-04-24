@@ -21,6 +21,7 @@ import json
 # from signal_bus import SignalBus
 import os
 import gzip
+import shutil
 import numpy as np
 from JohnsonUtil import commonTips as cct
 from linkage_service import get_link_manager
@@ -471,13 +472,14 @@ class BiddingMomentumDetector:
         # [Tier 2] 增量缓存
         self._global_snap_cache: Dict[str, Dict[str, Any]] = {}
         self._sector_active_stocks_persistent: Dict[str, Dict[str, Any]] = defaultdict(dict)
-        
         # [NEW] 市场整体数据缓存
         self.last_market_avg = 0.0
 
         # [NEW] 模式保护与参数
-        self.simulation_mode = simulation_mode
+        self.last_data_ts = 0
+        self.data_version = 0
         self.in_history_mode = False
+        self._live_stash = {} # [NEW] 用于存放实盘数据的暂存空间
         self.use_dragon_race = False  # 龙头竞赛模式（停用后回归 0407 挖掘模式）
         self._last_data_date: str = "" # [NEW] 记录上次处理数据的日期 (YYYY-MM-DD)
         
@@ -627,6 +629,9 @@ class BiddingMomentumDetector:
         从 df_all 中注册新的 code 订阅，补充元数据。
         需在主线程调用（如 update_tree / on_realtime_data_arrived）。
         """
+        if self.in_history_mode:
+            return # [GUARD] 历史复盘模式下，禁止修改当前活动的个股映射，防止污染视口
+
         if df_all is None or df_all.empty:
             return
 
@@ -740,6 +745,10 @@ class BiddingMomentumDetector:
         # [REFINED] 使用数据时间戳进行判定，确保在回测/复盘模式下不会因为系统时间跨日而错误清空数据
         eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
         self._check_day_switch(eval_dt)
+
+        # [GUARD] 历史模式下，除非显式强制刷新，否则禁止后台自动更新评分
+        if self.in_history_mode and not force:
+            return
 
         if not skip_evaluate:
             with self._lock:
@@ -955,6 +964,56 @@ class BiddingMomentumDetector:
         # Final fallback - current directory snapshots if ramdisk is broken
         return os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
 
+    def _backup_session_file(self, file_path: str):
+        """[NEW] 物理备份现有文件，防止覆写导致数据丢失"""
+        if not os.path.exists(file_path):
+            return
+        try:
+            base = cct.get_base_path()
+            bak_dir = os.path.join(base, "snapshots", "backup")
+            if not os.path.exists(bak_dir):
+                os.makedirs(bak_dir, exist_ok=True)
+
+            fname = os.path.basename(file_path).replace(".json.gz", "")
+            
+            # [FIX] 仅检查该特定文件名对应的备份
+            all_baks = sorted([
+                os.path.join(bak_dir, f) for f in os.listdir(bak_dir) 
+                if f.endswith(".bak.gz") and fname in f
+            ], key=os.path.getmtime)
+            
+            if all_baks:
+                last_bak_mtime = os.path.getmtime(all_baks[-1])
+                if time.time() - last_bak_mtime < 600:
+                    return # 10 分钟内已备份过该文件，跳过
+
+            mtime = os.path.getmtime(file_path)
+            f_dt = datetime.datetime.fromtimestamp(mtime)
+            
+            # 生成带时间戳的文件名: bak_YYYYMMDD_HHMMSS_filename.bak.gz
+            time_str = f_dt.strftime("%Y%m%d_%H%M%S")
+            bak_name = f"bak_{time_str}_{fname}.bak.gz"
+            bak_path = os.path.join(bak_dir, bak_name)
+            
+            if not os.path.exists(bak_path):
+                shutil.copy2(file_path, bak_path)
+                logger.info(f"💾 [Detector] Created safety backup: {bak_name}")
+                
+                # [CLEANUP] 重新获取该文件的备份列表，只保留最近 15 个
+                all_file_baks = sorted([
+                    os.path.join(bak_dir, f) for f in os.listdir(bak_dir) 
+                    if f.endswith(".bak.gz") and fname in f
+                ], key=os.path.getmtime)
+                
+                if len(all_file_baks) > 15:
+                    for old_bak in all_file_baks[:-15]:
+                        try:
+                            os.remove(old_bak)
+                        except:
+                            pass
+        except Exception as e:
+            logger.debug(f"Session backup failed: {e}")
+
     def save_persistent_data(self, force=False):
         """最终统一版：旧版控制流 + 新版数据结构（完全行为对齐）"""
         # === ① history mode（旧版优先级最高）
@@ -1096,8 +1155,11 @@ class BiddingMomentumDetector:
                 with open(tmp, 'wb') as f:
                     f.write(data_bytes)
                 os.replace(tmp, path)
-
+            
             # === 写主文件
+            if os.path.exists(main_path):
+                self._backup_session_file(main_path)
+                
             atomic_write(main_path, out_bytes)
 
             # === snapshot（完全恢复旧版语义）
@@ -1107,6 +1169,10 @@ class BiddingMomentumDetector:
             if os.path.normpath(main_path) != os.path.normpath(snapshot_path):
                 try:
                     os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+                    # [NEW] 备份旧的 snapshot，防止被当前（可能损坏的）数据覆盖
+                    # if os.path.exists(snapshot_path):
+                    #     self._backup_session_file(snapshot_path)
+                        
                     atomic_write(snapshot_path, out_bytes)
                     logger.info(f"📸 Snapshot saved to {snapshot_path}")
                 except Exception as e:
@@ -1255,6 +1321,10 @@ class BiddingMomentumDetector:
             if not os.path.exists(filepath):
                 logger.error(f"Snapshot file not found: {filepath}")
                 return False
+
+            # [AUTO-STASH] 如果当前是实盘模式，先暂存数据
+            if not self.in_history_mode:
+                self.stash_live_session()
 
             # 1. 后台读取与解压 (无锁)
             import zlib
@@ -1436,6 +1506,53 @@ class BiddingMomentumDetector:
         except Exception as e:
             logger.error(f"Failed to load snapshot: {e}")
             return False
+
+    # ---- [NEW] 实盘会话暂存与恢复逻辑 ----
+
+    def stash_live_session(self):
+        """[🚀 核心优化] 保存当前实盘会话数据到内存，防止复盘操作将其覆盖"""
+        with self._lock:
+            # 如果已经在历史模式，不要覆盖实盘暂存（防止二次覆盖丢失实盘）
+            if self.in_history_mode:
+                return
+            
+            # 我们直接持有当前的字典引用。
+            # 当 load_from_snapshot 运行时，它会创建新的字典和新的 TickSeries 对象，
+            # 因此旧的引用在 stash 中是安全的，不会被后续复盘操作修改。
+            self._live_stash = {
+                '_tick_series': self._tick_series,
+                '_global_snap_cache': self._global_snap_cache,
+                'active_sectors': self.active_sectors,
+                'daily_watchlist': self.daily_watchlist,
+                'sector_anchors': self.sector_anchors.copy() if hasattr(self, 'sector_anchors') else {},
+                'baseline_time': self.baseline_time,
+                'last_data_ts': self.last_data_ts,
+                '_last_data_date': getattr(self, '_last_data_date', ""),
+            }
+            logger.info("💾 [Detector] Live session data stashed (in-memory).")
+
+    def restore_live_session(self) -> bool:
+        """[🚀 核心优化] 从内存恢复实盘会话数据"""
+        if not self._live_stash:
+            logger.warning("No live stash found, attempting to reload from persistence file.")
+            # 如果内存没暂存（比如刚启动就进复盘），则尝试从磁盘持久化恢复
+            return self.load_persistent_data()
+        
+        with self._lock:
+            stash = self._live_stash
+            self._tick_series = stash['_tick_series']
+            self._global_snap_cache = stash['_global_snap_cache']
+            self.active_sectors = stash['active_sectors']
+            self.daily_watchlist = stash['daily_watchlist']
+            self.sector_anchors = stash['sector_anchors']
+            self.baseline_time = stash['baseline_time']
+            self.last_data_ts = stash['last_data_ts']
+            self._last_data_date = stash['_last_data_date']
+            
+            self.in_history_mode = False
+            self.data_version += 1
+            logger.info("🔄 [Detector] Live session data restored from memory stash.")
+            return True
 
     # ---- [SUPER] 龙头三日跟踪核心算法 ----
 

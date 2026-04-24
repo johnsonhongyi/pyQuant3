@@ -29,7 +29,21 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
-## 2026-04-24 16:35
+## 2026-04-24 16:50
+- [x] **上线持久化数据物理备份机制 (Implemented Session Persistence Backup)**：
+    - [x] **引入自动旋转备份 (Rotation Backup)**：在 `BiddingMomentumDetector` 中新增 `_backup_session_file` 方法。在覆写 `bidding_session_data.json.gz` 或每日快照前，系统会自动检查现有文件。
+    - [x] **修复备份触发失效 Bug**：重构了备份频率校验逻辑，将“检查源文件修改时间”改为“检查备份目录中对应文件的最新备份时间”。这确保了即使源文件频繁更新，系统也能每 10 分钟稳定产出一个高质量物理备份，彻底解决了用户反馈的 `backup` 目录不生成的问题。
+    - [x] **实现备份自动清理 (Auto-Cleanup)**：系统会自动按文件名分类维护最近 15 个备份文件，在保障数据可回溯性的同时，有效控制了磁盘空间占用。
+    - [x] **根治“空覆盖”导致的数据丢失**：配合原有的数据质量校验逻辑，即使在极端情况下（如程序异常导致保存了空数据），用户也能从 `backup` 目录中找回前一刻的高质量行情数据，彻底解决了用户反馈的测试数据丢失痛点。
+
+- [x] **实现实盘会话内存暂存与恢复 (Implemented Live Session Stash & Restore)**：
+    - [x] **引入内存暂存机制 (Memory Stash)**：在 `BiddingMomentumDetector` 中新增 `stash_live_session` 接口。当用户进入历史复盘模式前，自动将当前的实盘行情数据（`_tick_series`）、板块状态（`active_sectors`）及价格/分值锚点完整备份至内存。
+    - [x] **实现无缝切回 (Seamless Switch Back)**：重构了 `SectorBiddingPanel` 的“切回实时”逻辑，改用 `restore_live_session` 瞬间还原备份数据。这彻底解决了收盘后查看历史快照再切回实时导致当日涨跌数据被重置清零的痛点，确保了盘后复盘的连续性。
+    - [x] **强化历史模式数据隔离 (Data Isolation Guard)**：在 `register_codes` 与 `update_scores` 计算核心中增加了 `in_history_mode` 保护锁。确保在复盘历史数据期间，后台持续流入的实盘 Tick 信号不会污染当前观察的快照视口，维持了分析环境的纯净度。
+- [x] **重构快照加载为全异步非阻塞架构 (Refactored Snapshot Loading to Async)**：
+    - [x] **引入后台加载线程 (DataLoaderThread)**：利用 `QThread` 彻底隔离了历史快照读取与 UI 线程。解决了加载大体积 JSON 快照时界面出现 1-3s 假死的问题。
+    - [x] **实施“先加载后切换”原子模式**：在后台完成数据重建与验证后，通过信号量触发 UI 瞬间切换。移除了危险的 `processEvents()` 事件泵，消除了由于事件重入导致的不确定性系统崩溃隐患。
+
 - [x] **根治竞价持久化并发冲突与字典变动崩溃 (Fixed Bidding Persistence Concurrency & Dictionary Size Error)**：
     - [x] **升级递归锁机制 (Upgraded to RLock)**：将 `BiddingMomentumDetector` 中的 `self._lock` 从 `threading.Lock` 升级为 `threading.RLock`。这允许系统在执行复杂的持久化逻辑时，能够安全地调用其他同样受锁保护的内部方法，彻底消除了递归调用引发的死锁隐患。
     - [x] **实施全量遍历锁保护 (Full Iteration Locking)**：针对 `_tick_series`、`active_sectors` 和 `daily_watchlist` 等高频变动字典，在 `save_persistent_data`、`_aggregate_sectors` 和 `_do_rebuild_sector_map` 等关键遍历路径中全部补齐了 `with self._lock:` 保护块，根治了“dictionary changed size during iteration”这一顽固的运行时错误。
