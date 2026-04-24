@@ -93,6 +93,33 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 # [🚀 渲染优化] 赛马明细窗 Top-K 渲染上限 (支持命令行 -display-k 修改)
 RENDER_TOP_K = 200
 
+# [🚀 DNA 独立进程入口] 彻底隔离 GIL 与 GUI 库冲突
+def _standalone_dna_audit_process_entry(code_to_name):
+    """
+    独立进程入口：在回测或独立进程模式下，拉起全新的 Tkinter 环境进行审计展示
+    """
+    try:
+        import tkinter as tk
+        # 延迟导入，防止启动阶段 IO 负担
+        from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+        
+        # 1. 创建独立的 Tk 宿主
+        root = tk.Tk()
+        root.withdraw()
+        
+        codes = list(code_to_name.keys())
+        # 2. 执行审计
+        summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+        
+        if summaries:
+            # 3. 显示报告窗口
+            show_dna_audit_report_window(summaries, parent=root)
+            root.mainloop()
+        else:
+            root.destroy()
+    except Exception as e:
+        print(f"❌ [Racing] Standalone DNA Process Crash: {e}")
+
 # [🚀 DNA 统一分发] 模块级分发中枢：兼容 Tkinter 宿统与 Standalone Qt 进程
 def dispatch_dna_audit(code_to_name, parent_widget=None):
     """
@@ -116,37 +143,17 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
         return
         
     # 2. 降级方案：如果是独立 Qt 进程运行 (Standalone Mode)
-    logger.warning(f"📍 [Racing] 启动 DNA 降级审计 (Standalone) - 共 {len(code_to_name)} 只个股")
+    # 🚀 [FIX] 使用 multiprocessing 替代 threading，彻底解决 GIL 崩溃与 Tkinter/Qt 冲突
+    logger.warning(f"📍 [Racing] 启动 DNA 降级审计 (Process-Isolated) - 共 {len(code_to_name)} 只个股")
     
-    def _standalone_worker():
-        try:
-            import tkinter as tk
-            # 延迟导入，防止启动阶段 IO 负担
-            from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
-            
-            # 创建独立的 Tk root 并隐藏
-            root = tk.Tk()
-            root.withdraw()
-            
-            codes = list(code_to_name.keys())
-            # 独立审计不传 end_date，默认使用最新数据
-            summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
-            
-            if summaries:
-                # 显示报告窗口。注意：由于是独立线程，需要在这里阻塞 loop
-                show_dna_audit_report_window(summaries, parent=root)
-                root.mainloop()
-            else:
-                logger.error("❌ [Racing] 降级审计失败：未返回任何基因摘要")
-                root.destroy()
-        except Exception as e:
-            logger.error(f"❌ [Racing] 降级审计崩溃: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # 启动守护线程执行审计，防止阻塞 PyQt6 UI
-    t = threading.Thread(target=_standalone_worker, daemon=True)
-    t.start()
+    import multiprocessing as mp
+    try:
+        # 使用 spawn 模式确保干净的环境（Windows 默认）
+        p = mp.Process(target=_standalone_dna_audit_process_entry, args=(code_to_name,), daemon=True)
+        p.start()
+    except Exception as e:
+        logger.error(f"❌ [Racing] 无法启动 DNA 独立进程: {e}")
+    
 
 # [🚀 极致性能] 模块级配置持久化 (GZIP + JSON)
 def _get_racing_config_path():
