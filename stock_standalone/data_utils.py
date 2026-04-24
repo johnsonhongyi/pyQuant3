@@ -353,6 +353,20 @@ def build_hma_and_trendscore_noVol(
     return df
 
 def format_floats(df):
+    float_cols = df.select_dtypes(include='float').columns
+    if len(float_cols) == 0:
+        return df
+
+    # ⚠️ 不 copy 整表，只 copy float 列
+    df_float = df[float_cols].round(2)
+
+    df_out = df.copy(deep=False)  # 共享数据
+    for col in float_cols:
+        df_out[col] = df_float[col]
+
+    return df_out
+
+def format_floats_slow(df):
     # 找出 float 列
     float_cols = df.select_dtypes(include='float').columns
     # 仅对 float 列 apply 格式化，其他列保持不变
@@ -2355,9 +2369,9 @@ def get_all_fetch_df(market = 'all', resample= 'd',detect_val = False,status_cal
     df_all = clean_bad_columns(top_temp)
     df_all = sanitize(df_all)
 
-    # inside update_tree() to eliminate cross-process proxy overhead.
-    with timed_ctx("format_floats", warn_ms=800):
-        df_all = format_floats(df_all)
+    # # inside update_tree() to eliminate cross-process proxy overhead.
+    # with timed_ctx("format_floats", warn_ms=800):
+    #     df_all = format_floats(df_all)
     return df_all
     
 # def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 

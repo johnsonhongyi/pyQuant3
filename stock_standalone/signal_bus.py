@@ -71,6 +71,7 @@ class SignalBus:
     EVENT_HOTLIST = "hotlist"
     EVENT_PHASE = "phase"
     EVENT_HEARTBEAT = "heartbeat"
+    EVENT_STRATEGIC_TREND = "strategic_trend"
     
     # 事件优先级（数字越大优先级越高）
     PRIORITY = {
@@ -79,6 +80,7 @@ class SignalBus:
         EVENT_PHASE: 60,
         EVENT_PATTERN: 40,
         EVENT_HOTLIST: 30,
+        EVENT_STRATEGIC_TREND: 25,
         EVENT_ALERT: 20,
     }
     
@@ -277,3 +279,12 @@ def publish_phase_change(source: str, code: str, name: str,
         return get_signal_bus().publish(SignalBus.EVENT_PHASE, source, payload, signal)
         
     return get_signal_bus().publish(SignalBus.EVENT_PHASE, source, payload)
+
+
+def publish_strategic_trend(source: str, trends: List[Dict[str, Any]]) -> BusEvent:
+    """发布战略大格局趋势列表"""
+    return get_signal_bus().publish(
+        SignalBus.EVENT_STRATEGIC_TREND,
+        source,
+        {"trends": trends}
+    )
