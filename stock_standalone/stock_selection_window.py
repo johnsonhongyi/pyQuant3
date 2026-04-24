@@ -1246,7 +1246,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 last_td = str(cct.get_last_trade_date())
                 if self.current_date < last_td:
                     end_date = self.current_date
-                self.master._run_dna_audit_batch(code_to_name, end_date=end_date)
+                
+                if hasattr(self.master, 'tk_dispatch_queue'):
+                    # 🚀 [THREAD-SAFE] 通过 Tk 调度队列执行
+                    _cn = dict(code_to_name)
+                    self.master.tk_dispatch_queue.put(lambda: self.master._run_dna_audit_batch(_cn, end_date=end_date))
+                else:
+                    self.master._run_dna_audit_batch(code_to_name, end_date=end_date)
             else:
                 logger.error("No access to main monitor app for DNA audit.")
     
