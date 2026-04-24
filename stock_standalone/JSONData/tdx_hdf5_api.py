@@ -293,10 +293,10 @@ def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
         log.error(f"[TempCleanup] fatal error on base_dir={base_dir}: {e}")
 
 
-# 全局锁（进程内）
-_global_hdf_lock = threading.Lock()
-# [NEW] 专门保护 HDF5 文件写入过程的物理锁（防止同一进程内不同线程抢占 temp 文件）
-_hdf_write_lock = threading.Lock()
+# ⚡ [CORE-LOCK] 全局 HDF5 线程安全锁：保护所有 PyTables/HDF5 的底层 IO 与初始化
+# 由于 Windows 下的 HDF5 库通常非线程安全，必须确保同一时间只有一个线程在执行 open/read/write 操作。
+# [FIX] 使用 RLock (可重入锁) 防止 write_hdf_db 等内部嵌套调用 SafeHDFStore 时产生死锁。
+_HDF_GLOBAL_LOCK = threading.RLock()
 
 class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
@@ -385,9 +385,12 @@ class SafeHDFStore(pd.HDFStore):
         retry_count = 5
         for attempt in range(retry_count):
             try:
-                with timed_ctx(f"hdfstore_open_{attempt}"):
-                    # super().__init__(self.fname, mode=mode, **kwargs)
-                    super().__init__(self.fname, **kwargs)
+                # 🚀 [CORE] 必须在全局锁内执行 super().__init__，因为 PyTables/HDF5 在 Windows 下非线程安全
+                # 尤其是在初始化 blosc/IO 引擎时，多线程并发会触发 PyEval_RestoreThread 崩溃。
+                with _HDF_GLOBAL_LOCK:
+                    with timed_ctx(f"hdfstore_open_{attempt}"):
+                        # super().__init__(self.fname, mode=mode, **kwargs)
+                        super().__init__(self.fname, **kwargs)
                 opened = True
                 break
             except (tables.exceptions.HDF5ExtError, OSError, ValueError, PermissionError) as e:
@@ -414,22 +417,28 @@ class SafeHDFStore(pd.HDFStore):
                 super().__init__(self.fname, **kwargs)
 
         if self.mode != 'r':
-            with timed_ctx("acquire_writer_lock"):
+            with _HDF_GLOBAL_LOCK:
                 self._acquire_lock()
         else:
-            with timed_ctx("wait_for_writer_lock"):
+            with _HDF_GLOBAL_LOCK:
                 # 读模式只需要确认没有写者正在操作
                 # 多进程读在大并发下若还用互锁，会导致严重排队
                 self._wait_for_lock()
 
-    def __enter__(self):
-        return self
-
     def __exit__(self, exc_type, exc_val, exc_tb):
-        try:
-            self.close()
-        finally:
-            self._release_lock()
+        self.close()
+
+    def close(self):
+        """关闭 HDFStore 并释放锁"""
+        with _HDF_GLOBAL_LOCK:
+            try:
+                # 🛡️ 检测底层状态，避免重复关闭或已销毁对象的访问错误
+                if hasattr(self, '_handle') and self._handle is not None:
+                    super().close()
+            except Exception as e:
+                self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
+            finally:
+                self._release_lock()
 
     def ensure_hdf_file(self):
         """确保 HDF5 文件存在"""
@@ -1341,8 +1350,6 @@ def quarantine_hdf_file(fname, reason, rebuild_func=None):
             log.error(f"Rebuild failed for {fname}: {e}")
 
 
-# 全局锁（进程内）
-_global_hdf_lock = threading.Lock()
 
 def safe_load_table(
     store,
@@ -1366,7 +1373,7 @@ def safe_load_table(
     if store is None:
         return pd.DataFrame()
 
-    with _global_hdf_lock:
+    with _HDF_GLOBAL_LOCK:
         # ---------- 1. 快速路径（主路径） ----------
         try:
             df = store[table_name]
@@ -2113,7 +2120,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         truncated_triggered = False
         
         # 1. 容灾自愈与强力清场
-        with _hdf_write_lock:
+        with _HDF_GLOBAL_LOCK:
             # 如果主文件不存在，尝试从临时镜像中恢复
             if not os.path.exists(fname_path):
                 _recover_orphaned_h5(fname_path)
@@ -2124,7 +2131,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         try:
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
 
-            with _hdf_write_lock:
+            with _HDF_GLOBAL_LOCK:
                 # 2. [OPTIMIZE] 内存侧预裁切逻辑：判断是否需要进行体积管理
                 needs_prune = False
                 if sizelimit is not None and MultiIndex and os.path.exists(fname_path):
