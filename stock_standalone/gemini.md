@@ -39,6 +39,11 @@
     - [x] **实施全组件字体同步 (Unified Font Scaling)**：重构了 `_setup_ui` 和 `_show_detail`。将 `scale_factor` 深度注入到 `ScrolledText` 详情窗及其富文本标签（title, header, row）中，解决了用户反馈的“字体重叠”与“排版混乱”痛点。
     - [x] **加固列宽测量算法**：优化了 `_adjust_column_widths` 逻辑，强制测量引擎使用缩放后的字体实例进行像素预估，确保了表格列宽能自动适应内容长度，防止长字符被截断。
 
+- [x] **修复 DNA 专项审计报告名称显示缺失 (Fixed DNA Audit Name Missing)**：
+    - [x] **加固名称预热与缓存逻辑**：在 `backtest_feature_auditor.py` 中增强了 `preheat_names`，自动过滤 HDF5 中的 `nan` 或 `None` 值，确保名称始终回退为标准 6 位代码。
+    - [x] **实现缓存名称热同步 (Cache-Name Sync)**：在 `run_optimized_audit` 中增加了缓存命中时的名称二次校验。即使审计结果是从内存缓存中提取的，系统也会自动尝试用最新的 `NAME_CACHE` 更新 `summary.name`，解决了由于先审计后加载名称对照表导致的“名称显示为代码”或“空显示”的顽固 Bug。
+    - [x] **加固 AuditSummary 实体结构**：在构造函数中增加了对 `nan` 字符串的强制拦截与 `zfill(6)` 代码标准化，从源头上保障了报告数据的展现质量。
+
 ## 2026-04-24 23:15
 - [x] **根治 SignalDashboardPanel 磁盘 IO 引发的 UI 假死 (Fixed UI Block & IO Bottleneck)**：
     - [x] **引入 UI 状态保存防抖 (Debounced UI Persistence)**：在 `signal_dashboard_panel.py` 中引入了 `_save_ui_timer` (QTimer)。将所有涉及磁盘写入的布局保存（列宽调整、排序切换、窗口位移）统一延后 2000ms 执行。
