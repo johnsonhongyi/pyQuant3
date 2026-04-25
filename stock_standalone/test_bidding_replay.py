@@ -980,7 +980,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     end_time_real = time.time()
     logger.info(f"\n✅ Playback complete! Total real time elapsed: {end_time_real - start_time_real:.2f}s")
 
-def main(args=None, df_all_target=None):
+def main(args=None, df_all_target=None, quit_event=None):
     """
     [REFACTORED] 赛马回测入口，支持通过 mp.Process 直接透传 df_all 数据。
     """
@@ -1077,6 +1077,19 @@ Usage Examples:
     if args.ui and UI_AVAILABLE:
         # 在子进程中创建 QApplication 时，需要确保 sys.argv 有效
         app = QApplication(sys.argv if sys.argv else ['test_bidding_replay.py'])
+        
+        # [NEW] 注册外部退出事件信号 (Graceful Shutdown)
+        if quit_event is not None:
+            from PyQt6.QtCore import QTimer
+            shutdown_timer = QTimer()
+            def _check_quit():
+                if quit_event.is_set():
+                    logger.info("🛑 收到外部 quit_event，正在优雅关闭回测 UI 窗口...")
+                    app.closeAllWindows()
+                    app.quit()
+            shutdown_timer.timeout.connect(_check_quit)
+            shutdown_timer.start(500)
+            app._shutdown_timer = shutdown_timer # 保持引用防止被回收
         
         # --- [SILENT-MODE] 强力压制全局单例 Logger ---
         try:

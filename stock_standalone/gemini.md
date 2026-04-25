@@ -29,6 +29,11 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-25 18:50
+- [x] **根治 PyInstaller \_MEI\ 临时目录占用与赛马回测进程残留 (Fixed _MEI Directory Lock & Backtest Process Leak)**：
+    - [x] **加固赛马回测进程关闭**：在 \instock_MonitorTK.py\ 的 \on_close\ 方法中，针对 \acktest_process\ 的关闭逻辑，在 \	erminate()\ 和 \join()\ 的基础上，新增了 \kill()\ 兜底强制杀除，确保回测子进程被彻底清理。
+    - [x] **实施全量进程强杀清理**：升级了 \mp.active_children()\ 的遍历清理逻辑，在 \	erminate()\ 后若子进程仍存活，自动追加调用 \kill()\ 进行物理清除，并将等待时间从 0.3s 延长至 0.5s。彻底根治了当主程序 \sys.exit(0)\ 时，由于子进程未结束导致的 PyInstaller Bootloader 无法删除 \C:\Temp\_MEIxxx\ 目录并报出 \[PYI-25308:WARNING]\ 的顽固警告。
+
 ## 2026-04-25 10:35
 - [x] **深度清理与系统优化审计 (Deep System Cleanup & Audit)**：
     - [x] **清理历史临时脚本**：删除了早期迭代遗留的大量无用测试脚本 (如 	emp_historical_monitor.py, _inspect_dbs.py, _repair_signal_db.py等)，精简项目结构，防止错误调用。
