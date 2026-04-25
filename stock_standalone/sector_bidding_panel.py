@@ -1530,6 +1530,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     thread.wait(500)
             thread.deleteLater()   # 安全释放
             self._worker_thread = None
+            
+        # 4. 安全清理 SBC 测试线程
+        if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
+            try:
+                self._sbc_thread.quit()
+                if not self._sbc_thread.wait(2000):
+                    logger.warning("[SectorBiddingPanel] SBC thread did not stop in time, terminating...")
+                    self._sbc_thread.terminate()
+                    self._sbc_thread.wait(500)
+                self._sbc_thread.deleteLater()
+            except Exception as e:
+                logger.error(f"[SectorBiddingPanel] Failed to cleanup SBC thread: {e}")
         
         # [NEW] Persist scores and layout on close
         self._save_geometry()
@@ -4713,7 +4725,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.btn_live.setVisible(False)
             self.btn_history.setStyleSheet("")
             self.btn_refresh.setEnabled(True)
-            
+            self._history_date = ""
             # 2. 强制触发一次 UI 刷新
             self.refresh_data(force=True)
             
