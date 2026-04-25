@@ -913,6 +913,28 @@ class BiddingMomentumDetector:
         self.baseline_time = current_dt.timestamp()
         self.data_version += 1 # 联动 UI 全量重传
 
+    def stop(self):
+        """[NEW] 停止探测器：从实时服务注销，防止退出后回调触发崩溃"""
+        if hasattr(self, 'realtime_service') and self.realtime_service:
+            try:
+                self.realtime_service.unsubscribe_all(self._on_tick)
+                logger.info("🛑 BiddingMomentumDetector unsubscribed successfully.")
+            except Exception as e:
+                logger.error(f"Error unsubscribing BiddingMomentumDetector: {e}")
+
+    def clear_all_state(self):
+        """[NEW] 彻底清除内存状态，用于在回测与实盘切换时防止“脏数据”污染"""
+        logger.info("🧹 BiddingMomentumDetector clearing all internal states...")
+        with self._lock:
+            self._tick_series.clear()
+            self.daily_watchlist.clear()
+            self.active_sectors.clear()
+            self.sector_anchors.clear()
+            self._sector_active_stocks_persistent.clear()
+            if hasattr(self, '_global_snap_cache'):
+                self._global_snap_cache.clear()
+            self.data_version += 1
+
     def reset_stock_active(self, codes: List[str]):
         """[NEW] 手动重置指定个股的活跃计数"""
         if not codes: return

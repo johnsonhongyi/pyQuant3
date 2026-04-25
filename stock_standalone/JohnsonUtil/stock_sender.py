@@ -83,6 +83,17 @@ class StockSender:
         self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
         self._worker.start()
 
+    def close(self):
+        """[NEW] 停止工作线程并清理资源"""
+        self._running = False
+        # 投递一个空任务以唤醒可能处于空闲等待状态的逻辑（虽然当前是 time.sleep 轮询）
+        try:
+            if self._task_queue.full():
+                self._task_queue.get_nowait()
+            self._task_queue.put_nowait(None)
+        except:
+            pass
+
     def _get_flag(self, var):
         """
         兼容 tk.BooleanVar / bool

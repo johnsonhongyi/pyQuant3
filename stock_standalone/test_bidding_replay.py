@@ -1157,6 +1157,20 @@ Usage Examples:
             def on_panel_closed():
                 worker.stop()
                 worker.wait()
+                
+                # [NEW] 显式停止核心组件，释放线程与句柄
+                try:
+                    publisher.stop()
+                except: pass
+                try:
+                    if hasattr(detector, 'stop'):
+                        detector.stop()
+                except: pass
+                try:
+                    if hasattr(sender, 'close'):
+                        sender.close()
+                except: pass
+
                 # [EXIT-GUARD] 强制退出主进程前，先清理所有活跃的子进程 (包含 DNA 审计、数据 Publisher 等)
                 import os
                 import multiprocessing as mp
@@ -1168,8 +1182,8 @@ Usage Examples:
                             p.join(timeout=0.5)
                 except: pass
                 
-                logger.info("👋 Replay App exiting...")
-                os._exit(0)
+                logger.info("👋 Replay App exiting via app.quit()...")
+                QApplication.instance().quit()
             
             panel.closed.connect(on_panel_closed)
             worker.progress_update.connect(on_live_progress)
@@ -1226,6 +1240,20 @@ Usage Examples:
             def on_panel_closed():
                 worker.stop()
                 worker.wait()
+                
+                # [NEW] 显式停止核心组件，释放线程与句柄
+                try:
+                    publisher.stop()
+                except: pass
+                try:
+                    if hasattr(detector, 'stop'):
+                        detector.stop()
+                except: pass
+                try:
+                    if hasattr(sender, 'close'):
+                        sender.close()
+                except: pass
+
                 # [EXIT-GUARD] 强制退出主进程前，先清理所有活跃的子进程 (包含 DNA 审计、数据 Publisher 等)
                 import os
                 import multiprocessing as mp
@@ -1237,8 +1265,8 @@ Usage Examples:
                             p.join(timeout=0.5)
                 except: pass
 
-                logger.info("👋 Replay App exiting...")
-                os._exit(0)
+                logger.info("👋 Replay App exiting via app.quit()...")
+                QApplication.instance().quit()
             
             panel.closed.connect(on_panel_closed)
             worker.progress_update.connect(on_progress)

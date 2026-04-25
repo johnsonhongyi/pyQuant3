@@ -2828,6 +2828,17 @@ class DataPublisher:
     def subscribe(self, code: str, callback: Callable[..., object]):
         self.subscribers[code].append(callback)
 
+    def unsubscribe_all(self, callback: Callable[..., object]):
+        """[NEW] 从所有个股中注销指定的订阅回调"""
+        for code in list(self.subscribers.keys()):
+            if callback in self.subscribers[code]:
+                try:
+                    self.subscribers[code].remove(callback)
+                    if not self.subscribers[code]:
+                        del self.subscribers[code]
+                except ValueError:
+                    pass
+
     def get_minute_klines(self, code: str, n: int = 60) -> list[dict[str, Any]]:
         return self.kline_cache.get_klines(code, n)
 
