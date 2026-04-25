@@ -1998,8 +1998,14 @@ class BiddingMomentumDetector:
         # [FIX] 优先从 K 线或 Tick 中获取时间戳，用于后续异动计时
         data_ts = ts_obj.first_breakout_ts # 默认为已有的异动时间
         if data_ts <= 0:
-            # [PERF] 极致优化：直接使用主进程透传的 last_data_ts 避免昂贵的 pd.to_datetime
-            data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            ts_val = latest.get('ticktime') or latest.get('timestamp') or latest.get('time')
+            if ts_val:
+                try:
+                    data_ts = pd.to_datetime(ts_val).timestamp()
+                except:
+                    data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            else:
+                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
         score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
