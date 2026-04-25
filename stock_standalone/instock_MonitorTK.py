@@ -1001,14 +1001,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
-        # [🚀 统一防抖保护] 赛马与回测共享冷却时间，避免资源抢占与 GIL 崩溃 (3s 阈值)
+        # [🚀 统一防抖保护] 赛马与回测共享冷却时间，避免资源抢占与 GIL 崩溃 (10s 阈值)
         now = time.time()
         last_unified = getattr(self, '_last_racing_backtest_unified_t', 0)
-        if now - last_unified < 5.0:
+        if now - last_unified < 10.0:
             logger.warning("🏁 [Racing/Backtest] 操作太频繁（统一防抖中），请稍候...")
-            toast_message(self, "🏁 操作太频繁，请稍候...")
+            toast_message(self, f"🏁 操作太频繁，请等待 {int(10.0 - (now - last_unified))}s")
             return
         self._last_racing_backtest_unified_t = now
+
+        # [🚀 唯一性保护] 确保同时只有一个赛马相关进程 (实盘赛马与回测互斥)
+        if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
+            logger.warning("🏁 [Racing] 回测进程正在运行中，无法开启实盘赛马。")
+            toast_message(self, "🏁 回测进程运行中，请先关闭")
+            return
 
         try:
             # [🚀 鲁棒性增强] 增加对 C++ 侧对象是否存活的实质性判定
@@ -1087,9 +1093,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _on_racing_panel_closed(self):
         """赛马面板关闭回调：置空引用并刷新防抖计时器"""
         self._racing_panel_win = None
-        # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个
+        # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个，等待 OS 释放资源 (10s)
         self._last_racing_backtest_unified_t = time.time()
-        logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (3s)")
+        logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (10s)")
 
     def _put_deduped_task(self, key, task_fn):
         """
@@ -3559,14 +3565,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _run_backtest_replay_process(self, replay_date, start_time, verbose=True, log_level="ERROR"):
         """独立多进程启动 test_bidding_replay.py，兼容 EXE 打包环境 (高性能透传模式)"""
-        # [🚀 统一防抖保护] 赛马与回测共享冷却时间 (3s 阈值)
+        # [🚀 统一防抖保护] 赛马与回测共享冷却时间 (10s 阈值)
         now = time.time()
         last_unified = getattr(self, '_last_racing_backtest_unified_t', 0)
-        if now - last_unified < 5.0:
+        if now - last_unified < 10.0:
             logger.warning("🏁 [Racing/Backtest] 启动太频繁（统一防抖中），请稍候...")
-            toast_message(self, "🏁 启动太频繁，请稍候...")
+            toast_message(self, f"🏁 启动太频繁，请等待 {int(10.0 - (now - last_unified))}s")
             return
         self._last_racing_backtest_unified_t = now
+
+        # [🚀 唯一性保护] 确保实盘赛马与回测互斥
+        is_racing_alive = False
+        if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
+            try:
+                if self._racing_panel_win.isVisible():
+                    is_racing_alive = True
+            except RuntimeError:
+                self._racing_panel_win = None
+        
+        if is_racing_alive:
+            logger.warning("🏁 [Backtest] 实盘赛马面板正在运行，无法启动回测。")
+            toast_message(self, "🏁 实盘赛马运行中，请先注意资源占用易触发卡顿，请尽快关闭实盘赛马")
+            # return
 
         # [🚀 唯一性保护] 确保同时只有一个回测进程在运行
         if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
@@ -3616,7 +3636,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 def monitor_backtest_exit(proc):
                     proc.join()
                     self._last_racing_backtest_unified_t = time.time()
-                    logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (3s)")
+                    logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
                 
                 threading.Thread(target=monitor_backtest_exit, args=(self.backtest_process,), daemon=True).start()
 
@@ -4551,6 +4571,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_visualizer(self, code, timestamp=None):
         """🚀 [ROOT-FIX] 智能联动：优先现有进程，支持 Socket 兜底，彻底解决切换假死与端口冲突"""
+        # 🚀 [FIX] 增加 vis_var 状态检测，全局决定是否允许联动开启/透传
+        if hasattr(self, 'vis_var') and not self.vis_var.get():
+            return
+            
         logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
         
         # =========================
@@ -5134,7 +5158,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """🚀 [SIMPLIFIED] 跨工具联动接口：仅传日期"""
         if not code or not timestamp:
             return
-        
+        # 🚀 [FIX] 增加 vis_var 状态检测，全局决定是否允许联动开启/透传
+        if hasattr(self, 'vis_var') and not self.vis_var.get():
+            return
         # ⭐ [THROTTLE] 联动限流：避免 1s 内对同一只股票重复发送联动 (由于 T80 及策略震荡可能触发多次)
         now = time.time()
         throttle_key = f"link_{code}"
@@ -5146,10 +5172,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._viz_link_throttle = {}
         
         self._viz_link_throttle[throttle_key] = now
-
+        
         # 如果可视化尚未打开，则尝试开启
         if not (hasattr(self, 'qt_process') and self.qt_process and self.qt_process.is_alive()):
-            if hasattr(self, 'vis_var') and self.vis_var.get():
                 self.open_visualizer(code, timestamp=timestamp)
         else:
             # 已打开，直接通过 IPC 发送联动指令

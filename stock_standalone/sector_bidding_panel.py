@@ -979,6 +979,15 @@ class SnapshotCalendarDialog(QDialog):
         lay.addWidget(tip_lbl)
         
         self.calendar = QCalendarWidget()
+        # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+        if not cct.get_trade_date_status():
+            last_trade_date = cct.get_last_trade_date() 
+            if last_trade_date:
+                # 注意：cct.get_last_trade_date 返回格式通常为 %Y-%m-%d
+                qdate = QDate.fromString(last_trade_date, "yyyy-MM-dd")
+                if qdate.isValid():
+                    self.calendar.setSelectedDate(qdate)
+
         self.calendar.setGridVisible(False)
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
 
@@ -1240,7 +1249,7 @@ class DataProcessWorker(QObject):
                 # [PERF] 计算本次工作耗时，用于动态调整休眠
                 work_dur = time.perf_counter() - start_work_t
                 if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
-                    processed_count = len(df) if df is not None else 0
+                    processed_count = getattr(self.detector, 'last_processed_count', 0)
                     total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
                     logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (processed {processed_count}/{total_count} codes) (GIL bottleneck risk)")
 

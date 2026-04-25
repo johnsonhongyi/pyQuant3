@@ -2046,6 +2046,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._init_ui()
         QTimer.singleShot(500,self._restore_ui_state)
         
+        # [⚡ 性能优化] UI 状态保存防抖定时器 (10 分钟防抖)
+        # 仅在数据变更时触发计时，统一存盘。日常静默状态不会自动执行存盘。
+        self._save_ui_timer = QTimer(self)
+        self._save_ui_timer.setSingleShot(True)
+        self._save_ui_timer.timeout.connect(lambda: self._save_ui_state(force=True))
+        
         self.stock_table.setSortingEnabled(False)
         self.sector_table.setSortingEnabled(False)
         
@@ -2584,15 +2590,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._open_sector_detail(sec_name)
 
     def _add_to_sector_history(self, sec_name):
-        """[🚀 板块回溯] 维护历史栈，去重且限额"""
+        """[🚀 板块回溯] 维护历史栈，去重且限额 (扩展至 30 个)"""
         if not sec_name: return
         if sec_name in self._sector_history:
             self._sector_history.remove(sec_name)
         
         self._sector_history.insert(0, sec_name)
-        self._sector_history = self._sector_history[:15] # 最多保留 15 个
+        self._sector_history = self._sector_history[:30] # [USER REQUEST] 最多保留 30 个
         
         self._refresh_history_combo()
+        # [⚡ 性能优化] 10 分钟内所有修改统一防抖保存，避免磁盘 IO 压力
+        self._save_ui_timer.start(600000)
 
     def _on_delete_history_clicked(self):
         """[🚀 板块回溯] 用户点击删除按钮，移除当前选中的历史记录项"""
@@ -2622,7 +2630,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._sector_history.remove(sec_name)
             logger.info(f"🗑️ [History] 已从回溯历史中移除板块: {sec_name}")
             self._refresh_history_combo()
-            self._save_ui_state() # 即时存盘，防止退出异常丢失操作成果
+            self._save_ui_timer.start(600000) # 10 分钟防抖存盘
 
     def _refresh_history_combo(self):
         """[🚀 板块回溯] 完全重刷下拉框列表 (默认按评分大小排序显示，存储顺序不变)"""
@@ -2915,8 +2923,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._anchor_history.pop(0)
             
         self._refresh_history_buttons()
-        # [NEW] 立即持久化
-        self._save_ui_state()
+        # [⚡ 性能优化] 10 分钟防抖存盘
+        self._save_ui_timer.start(600000)
 
     def _refresh_history_buttons(self):
         try:
@@ -3002,14 +3010,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if abs(snap.get("ts", 0) - self._current_anchor_ts) < 1.0:
                  self._current_anchor_ts = 0
             self._refresh_history_buttons()
-            self._save_ui_state()
+            self._save_ui_timer.start(600000) # 10 分钟防抖存盘
             logger.info(f"🗑️ [Panel] 已删除历史起点 {idx+1}")
 
     def _clear_all_anchors(self):
         self._anchor_history = []
         self._current_anchor_ts = 0
         self._refresh_history_buttons()
-        self._save_ui_state()
+        self._save_ui_timer.start(600000) # 10 分钟防抖存盘
         logger.info("💣 [Panel] 已清空所有历史起点")
 
     def _import_merge_anchors(self):
@@ -3063,9 +3071,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if len(self._anchor_history) > 50:
                     self._anchor_history = self._anchor_history[-50:]
                 
-                # 4. 刷新并即时持久化
+                # 4. 刷新并 10 分钟防抖持久化
                 self._refresh_history_buttons()
-                self._save_ui_state(force=True)
+                self._save_ui_timer.start(600000)
                 
                 QMessageBox.information(self, "合并成功", f"成功合并 {added_count} 条历史起点数据。")
             else:
@@ -3503,8 +3511,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         for dlg in self._detail_dialogs.values():
             if hasattr(dlg, 'apply_show_reason_manual'):
                 dlg.apply_show_reason_manual(val)
-        # 强制保存一次 UI 状态
-        self._save_ui_state()
+        # 10 分钟防抖存盘
+        self._save_ui_timer.start(600000)
 
     def _get_synthetic_score(self, ts):
         """[🚀 性能加速版] 动态合成显示分数"""

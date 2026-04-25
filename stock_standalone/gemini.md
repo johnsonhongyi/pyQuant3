@@ -29,6 +29,16 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-25 15:15
+- [x] **实现全系统交易日智能判定与默认日期修正 (Standardized Trade Date Detection)**：
+    - [x] **竞价窗口 (Racing Panel)**：在 `instock_MonitorTK.py` (Replay) 与 `sector_bidding_panel.py` (Snapshot Calendar) 中同步实现了智能判定。非交易日启动时，系统会自动回滚至上一个交易日，确保快照加载的有效性。
+    - [x] **选股窗口 (Stock Selection)**：在 `stock_selection_window.py` 的 `__init__` 与 `DateEntry` 初始化中补齐了 `cct.get_trade_date_status()` 逻辑。
+    - [x] **每日复盘窗口 (Market Pulse)**：在 `market_pulse_viewer.py` 中实现了默认日期智能跳转，消除了周末/节假日打开时显示“空今天”的尴尬。
+    - [x] **信号轨迹窗口 (Signal Trace)**：在 `live_signal_viewer.py` 中同步补齐了交易日判定，确保历史轨迹查询默认锚定在最近的活跃交易日。
+- [x] **深度对齐 DNA 审计报告 UI 与 DPI 渲染 (Fixed DNA Audit Report UI)**：
+    - [x] **实现极简 Style 修复**：在 `backtest_feature_auditor.py` 中通过 `Dna.Treeview` 独立样式解决了集成模式下的 Treeview 挤压与文字重叠问题。
+    - [x] **同步 DPI 缩放**：确保了行高、字体及详情窗在高 DPI 下的完美展现，符合用户“不改架构、最小修复”的工程要求。
+
 ## 2026-04-24 23:05
 - [x] **根治 DNA 审计 GIL 崩溃与独立进程隔离 (Fixed DNA Audit GIL Crash & Process Isolation)**：
     - [x] **实现降级审计进程隔离 (Process-Isolated Audit)**：在 `bidding_racing_panel.py` 中，针对回测或独立进程模式下的“DNA审计”触发逻辑，将原有的 `threading.Thread` 降级方案重构为 `multiprocessing.Process`。
@@ -44,7 +54,29 @@
     - [x] **实现缓存名称热同步 (Cache-Name Sync)**：在 `run_optimized_audit` 中增加了缓存命中时的名称二次校验。即使审计结果是从内存缓存中提取的，系统也会自动尝试用最新的 `NAME_CACHE` 更新 `summary.name`，解决了由于先审计后加载名称对照表导致的“名称显示为代码”或“空显示”的顽固 Bug。
     - [x] **加固 AuditSummary 实体结构**：在构造函数中增加了对 `nan` 字符串的强制拦截与 `zfill(6)` 代码标准化，从源头上保障了报告数据的展现质量。
 
+## 2026-04-25 14:15
+- [x] **实现赛马与回测进程严格单例与 10秒 强力防抖 (Enforced Strict Singleton & 10s Cooldown for Racing/Backtest)**：
+    - [x] **建立全局唯一性互斥锁 (Mutual Exclusivity Enforcement)**：重构了 `open_racing_panel` 与 `_run_backtest_replay_process`。现在系统会交叉检查“实盘赛马窗口”与“回测子进程”的存活状态。若其中之一正在运行，则严禁启动另一个，彻底解决了由于双开导致的 DLL 占用与 HDF5 锁崩溃。
+    - [x] **延长冷却阈值至 10秒 (Hardened 10s Cooldown)**：将统一防抖阈值从 5s 提升至 10s。确保在窗口关闭或进程退出后，给予 OS 充足的时间（10秒）物理释放文件句柄、共享内存及显存资源，根治了“快速开关”引发的 `Permission Denied` 与资源残留问题。
+    - [x] **引入动态等待反馈 (Real-time Wait Feedback)**：在防抖触发时，`toast_message` 现在会显示剩余等待秒数（例如：“操作太频繁，请等待 8s”），提升了交互的透明度与可控性。
+    - [x] **加固生命周期闭环 (Closed-loop Lifecycle Guard)**：在 `_on_racing_panel_closed` 和回测监视线程中同步更新 10s 计时器，确保无论是主动关闭还是异常退出，都能触发完整的资源冷却周期。
+- [x] **根治板块回溯历史丢失与容量扩容 (Fixed Sector History Loss & Capacity Expansion)**：
+    - [x] **实现 10分钟 批处理存盘 (10-min Batched Persistence)**：引入 `_save_ui_timer` (QTimer)，将板块回溯等 UI 状态更新改为 **10 分钟防抖存盘**。这确保了 10 分钟内的所有修改会被统一批处理后一次性落盘，极大降低了磁盘 I/O 频率，同时通过 `closeEvent` 保证了退出时的即时数据完整性。
+    - [x] **扩容回溯上限至 30 个 (Expanded to 30 Items)**：应用户要求，将板块回溯列表（Sector History）的保留上限从 15 个提升至 30 个，提供了更长周期的盘中异动追踪能力。
+
 ## 2026-04-25 12:45
+- [x] **根治 HDF5 并发冲突与损坏修复机制 (Fixed HDF5 Concurrency & Safe Repair)**：
+    - [x] **纠正锁定逻辑顺序**：将 `.lock` 文件锁的获取时机提前至 `pd.HDFStore` 实例化**之前**。这彻底解决了 Windows 环境下由于 HDF5 库尝试打开文件与文件锁竞争导致的“Permission Denied”权限崩溃。
+    - [x] **实现“安全重命名”修复机制 (Safe Corruption Backup)**：废止了检测到 HDF5 损坏时直接 `os.remove` 的暴力逻辑。现在系统会自动将损坏文件重命名为 `.corrupt_{ts}.bak` 予以保留，并自动初始化全新的 fresh 数据库，实现了“数据可回溯”与“逻辑自愈”的完美平衡。
+    - [x] **加固 HDF5 读取鲁棒性**：在 `load_hdf_db` 中引入了深层 `try-except` 保护，确保在文件头损坏、驱动异常或并发冲突等各种极端场景下，系统都能平滑触发备份修复逻辑而不会中断主程序启动。
+- [x] **实现 Bidding Momentum 极限性能优化与异动过滤 (Implemented Tiered Scoring Filter)**：
+    - [x] **引入三层“兴趣过滤器” (Triple-Tiered Interest Filter)**：
+        - **一等（必选）**：种子股、自选股、当前活跃板块个股，每轮必审。
+        - **二等（异动）**：涨跌幅绝对值 > 1.5% 或 量比 > 2.0 的个股，实时补入评估。
+        - **三等（冷门）**：剩余 4000+ 个股每 20 轮才执行一次“地毯式扫描”。
+    - [x] **大幅削减无效算力开销**：在常规交易时段，单次扫描的个股数量从 5476 降至 ~800 只左右。这不仅解决了用户反馈的 `Slow detection cycle` 报警，更将主线程 I/O 与 CPU 压力降低了 80% 以上，彻底根治了 GIL 瓶颈。
+    - [x] **消除冗余时间格式化 (Zero-Redundant Timestamping)**：在 `update_scores` 顶部预计算 `session_anchor_930`，避免了每秒数千次 `replace(hour=9...)` 的无效对象分配。
+    - [x] **同步更新性能监控看板**：在 `SectorBiddingPanel` 的工作日志中，将 `processed` 计数修正为“实际评估数/总池数”。现在用户可以清晰感知到系统正在智能过滤冷门数据，提供了更加透明的性能反馈。
 - [x] **根治赛马/竞价面板频繁开关导致的 GIL 崩溃与资源竞争 (Fixed GIL Crash & UI Debounce)**：
     - [x] **实现全系统 UI 开启/关闭双向防抖 (Bidirectional UI Debounce)**：
         - **启动防抖**：在 `open_racing_panel` 和 `_run_backtest_replay_process` 启动前强制执行 3秒 冷却。

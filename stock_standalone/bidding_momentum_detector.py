@@ -452,6 +452,7 @@ class BiddingMomentumDetector:
         # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
         self.daily_watchlist: Dict[str, Dict[str, Any]] = {}
         self.enable_log = True # 是否允许向控制台/文件打印重点监控日志
+        self.last_processed_count = 0 # [NEW] 记录最近一轮实际处理的个股数量
         
         # ---- [NEW] 强度历史对比与变动追踪 ----
         self.comparison_interval: float = 60 * 60 # 默认 60 分钟对比窗口 (秒)
@@ -742,7 +743,6 @@ class BiddingMomentumDetector:
         skip_evaluate: 是否跳过个股评估阶段 (如果之前已执行过 _evaluate_code)。
         """
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
-        # [REFINED] 使用数据时间戳进行判定，确保在回测/复盘模式下不会因为系统时间跨日而错误清空数据
         eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
         self._check_day_switch(eval_dt)
 
@@ -754,17 +754,46 @@ class BiddingMomentumDetector:
             with self._lock:
                 if active_codes is not None and not force:
                     # [INCREMENTAL] 增量模式：仅对当前变动的代码进行评估
-                    codes = [c for c in active_codes if c in self._tick_series]
+                    all_codes = [c for c in active_codes if c in self._tick_series]
+                    
+                    # [NEW] ⚡ [PERF-CORE] 极其重要的过滤：不要每一轮都跑 5400+ 个代码
+                    # 1. 必选股：种子股、自选股、当前活跃板块个股
+                    # 2. 异动股：涨跌幅绝对值 > 1.5% 或 量比 > 2.0
+                    # 3. 冷门股：每 20 轮才全量扫描一次 (确保能发现新异动)
+                    
+                    essential = set(self.stock_selector_seeds.keys()) | set(self.daily_watchlist.keys())
+                    # 预合并活跃板块个股集
+                    for s_info in self.active_sectors.values():
+                        if 'codes' in s_info: essential.update(s_info['codes'])
+                    
+                    scan_all = (getattr(self, '_full_scan_counter', 0) % 20 == 0)
+                    self._full_scan_counter = getattr(self, '_full_scan_counter', 0) + 1
+                    
+                    target_codes = []
+                    for code in all_codes:
+                        if scan_all or (code in essential):
+                            target_codes.append(code)
+                            continue
+                        
+                        ts = self._tick_series[code]
+                        # 异动检查：涨跌幅 > 1.5% 或 量比 > 2.0
+                        if abs(ts.current_pct) > 1.5 or ts.vol_ratio > 2.0:
+                            target_codes.append(code)
+                    
+                    codes = target_codes
                 else:
                     # [FULL-SWEEP] 全量模式
                     codes = list(self._tick_series.keys())
-                    
-                # [OPTIMIZED] 针对 5000+ 品种，将循环放入锁内，减少 5000 次 lock/unlock 开销
-                # 同时使用 unlocked 版本的评估逻辑
+                
+                # [PERF] 预计算锚点时间戳，避免在 5000 次循环内重复调用 datetime.fromtimestamp
+                anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+                
+                # [OPTIMIZED] 针对大批量品种，将循环放入锁内，减少 lock/unlock 开销
                 for code in codes:
-                    self._evaluate_code_unlocked(code)
+                    self._evaluate_code_unlocked(code, anchor_930=anchor_930)
 
-        
+                self.last_processed_count = len(codes)
+
         self.data_version += 1 # 评分更新后递增版本号
         
         # 板块聚合逻辑
@@ -1932,7 +1961,7 @@ class BiddingMomentumDetector:
         with self._lock:
             self._evaluate_code_unlocked(code)
 
-    def _evaluate_code_unlocked(self, code: str):
+    def _evaluate_code_unlocked(self, code: str, anchor_930: float = None):
         """[PERF] 核心评估逻辑：不带锁版本，供内部批量调用。"""
         ts_obj = self._tick_series.get(code)
         if ts_obj is None:
@@ -2008,14 +2037,13 @@ class BiddingMomentumDetector:
             
         score += amount_bonus
         
-        # [NEW] [PERF] 计算并缓存早盘溢价分 (Opening Bonus)
-        # 仅在异动时间有效时计算一次
+        # [NEW] [PERF] 使用预计算的锚点时间戳，避免高频循环中的 replace/timestamp 开销
         fb_ts = ts_obj.first_breakout_ts
         if fb_ts > 0:
-            # 权重衰减逻辑：竞价期（offset<=0）最高分，开盘后 45 分钟内线性降至 0
-            # 使用快速的日期计算，避免 pd.to_datetime
-            dt = datetime.datetime.fromtimestamp(fb_ts)
-            anchor_930 = dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+            if anchor_930 is None:
+                dt = datetime.datetime.fromtimestamp(fb_ts)
+                anchor_930 = dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+            
             offset = fb_ts - anchor_930
             if offset < 2700: 
                 if offset <= 0: # 竞价期 (9:15-9:30)

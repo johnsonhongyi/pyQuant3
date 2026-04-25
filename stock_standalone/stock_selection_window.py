@@ -76,7 +76,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self._data_loaded: bool = False  # 标记数据是否已从策略加载
         self.hotspots_frame: Optional[tk.Frame] = None
         
-        self.current_date = datetime.now().strftime("%Y-%m-%d")
+        # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+        if cct.get_trade_date_status():
+            self.current_date = datetime.now().strftime('%Y-%m-%d')
+        else:
+            self.current_date = cct.get_last_trade_date()
         
         # ✅ 性能优化标记
         self._column_widths_cached = False
@@ -210,7 +214,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                                       foreground='white', borderwidth=2, 
                                       date_pattern='yyyy-mm-dd',
                                       state='readonly')
-            self.date_entry.set_date(datetime.now())
+            # 🚀 [FIX] 使用智能判定的交易日
+            try:
+                self.date_entry.set_date(datetime.strptime(self.current_date, "%Y-%m-%d"))
+            except:
+                self.date_entry.set_date(datetime.now())
             self.date_entry.pack(side="left", padx=2)
             self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
             

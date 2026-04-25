@@ -116,7 +116,11 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self.logger = logging.getLogger("MarketPulseViewer")
         
         # Data
-        self.current_date = datetime.now().strftime("%Y-%m-%d")
+        # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+        if cct.get_trade_date_status():
+            self.current_date = datetime.now().strftime('%Y-%m-%d')
+        else:
+            self.current_date = cct.get_last_trade_date()
         self.report_data = None
         self._refresh_count = 0
         self._fit_job = None
@@ -160,7 +164,11 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
                                       foreground='white', borderwidth=2, 
                                       date_pattern='yyyy-mm-dd',
                                       state='readonly') # Prevent typing, force calendar use
-            self.date_entry.set_date(datetime.now())
+            # 🚀 [FIX] 使用智能判定的交易日
+            try:
+                self.date_entry.set_date(datetime.strptime(self.current_date, "%Y-%m-%d"))
+            except:
+                self.date_entry.set_date(datetime.now())
             self.date_entry.pack(side="left", padx=5)
             self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
             # [FIX] Make the entire entry clickable to open the calendar

@@ -312,7 +312,7 @@ class SafeHDFStore(pd.HDFStore):
         self.fname_o = fname
         self.mode = mode
         self.probe_interval = kwargs.pop("probe_interval", 0.05)  
-        self.lock_timeout = kwargs.pop("lock_timeout", 10)  
+        self.lock_timeout = kwargs.pop("lock_timeout", 20)  
         self.max_wait = 30
         self.multiIndexsize = False
         self.log = log
@@ -327,14 +327,12 @@ class SafeHDFStore(pd.HDFStore):
 
         self.complevel = 9
         self.complib = 'zlib'
-        # self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --alignment=1024 --complevel=9 --complib=%s %s %s"
 
         self.h5_size_org = 0
         global RAMDISK_KEY
 
         # 文件路径处理
-        # if self.fname_o.lower().find(self.basedir.lower()) < 0 and (self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0):
         if not os.path.isabs(self.fname_o) and (self.fname_o == cct.tdx_hd5_name or 'tdx_all_df' in self.fname_o):
             self.multiIndexsize = True
             self.fname = cct.get_run_path_tdx(self.fname_o)
@@ -349,7 +347,7 @@ class SafeHDFStore(pd.HDFStore):
             self.log.info(f"ramdisk_hd5: {self.fname}")
 
         if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
-            # 优先使用 global.ini 的配置 (默认 150MB)，不再硬编码为 300MB
+            # 优先使用 global.ini 的配置 (默认 150MB)
             self.big_H5_Size_limit = SINA_MULTIINDEX_LIMIT * 1.5
         else:
             self.big_H5_Size_limit = ct.big_H5_Size_limit
@@ -374,22 +372,26 @@ class SafeHDFStore(pd.HDFStore):
         with timed_ctx("ensure_hdf_file"):
             self.ensure_hdf_file() 
 
-        # # 父类初始化
-        # with timed_ctx("hdfstore_init"):
-        #     super().__init__(self.fname, **kwargs)
-
         opened = False
         need_repair = False
+
+        # [🚀 CROSS-PROCESS LOCK] 必须在打开 HDF5 文件之前先获取/等待文件锁
+        # 否则 super().__init__ 在 Windows 下会因为共享冲突直接触发 PermissionError 或 HDF5ExtError
+        if self.mode != 'r':
+            with _HDF_GLOBAL_LOCK:
+                self._acquire_lock()
+        else:
+            with _HDF_GLOBAL_LOCK:
+                # 读模式只需要确认没有写者正在操作
+                self._wait_for_lock()
 
         # ========= 核心：只在这里判断是否损坏 =========
         retry_count = 5
         for attempt in range(retry_count):
             try:
                 # 🚀 [CORE] 必须在全局锁内执行 super().__init__，因为 PyTables/HDF5 在 Windows 下非线程安全
-                # 尤其是在初始化 blosc/IO 引擎时，多线程并发会触发 PyEval_RestoreThread 崩溃。
                 with _HDF_GLOBAL_LOCK:
                     with timed_ctx(f"hdfstore_open_{attempt}"):
-                        # super().__init__(self.fname, mode=mode, **kwargs)
                         super().__init__(self.fname, **kwargs)
                 opened = True
                 break
@@ -398,12 +400,22 @@ class SafeHDFStore(pd.HDFStore):
                 if attempt < retry_count - 1:
                     self.log.warning(f"[HDF] Retrying in 3s... Releasing lock first.")
                     try:
-                        self.close()
-                    except Exception:
-                        pass
-                    # 尝试释放可能残留的锁
-                    self._release_lock()
+                        # 🛡️ 检测底层状态，避免重复关闭
+                        if hasattr(self, '_handle') and self._handle is not None:
+                            super().close()
+                    except Exception: pass
+                    
+                    # 如果打开失败，可能需要临时释放锁给竞争者，避免死锁
+                    if self.mode != 'r':
+                        self._release_lock()
+                    
                     time.sleep(3)
+                    
+                    # 重新获取锁
+                    if self.mode != 'r':
+                        self._acquire_lock()
+                    else:
+                        self._wait_for_lock()
                 else:
                     self.log.error(f"[HDF] Final open failed after {retry_count} attempts")
                     need_repair = True
@@ -411,19 +423,9 @@ class SafeHDFStore(pd.HDFStore):
         # ========= 异常路径：才做清理 =========
         if not opened and need_repair:
             with timed_ctx("check_corrupt_keys"):
-                # self._repair_hdf_file()   # 见下方
-                self._check_and_clean_corrupt_keys()   # 见下方
+                self._check_and_clean_corrupt_keys()
             with timed_ctx("reopen_hdf"):
                 super().__init__(self.fname, **kwargs)
-
-        if self.mode != 'r':
-            with _HDF_GLOBAL_LOCK:
-                self._acquire_lock()
-        else:
-            with _HDF_GLOBAL_LOCK:
-                # 读模式只需要确认没有写者正在操作
-                # 多进程读在大并发下若还用互锁，会导致严重排队
-                self._wait_for_lock()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
@@ -465,9 +467,8 @@ class SafeHDFStore(pd.HDFStore):
                             self.log.error(f"Failed to read key {key}: {e}")
                             corrupt_keys.append(key)
         except Exception as e:
-            self.log.error(f"无法修复Error opening HDF5 file {self.fname}: {e}")
-            self._delete_file()
-            self.log.error(f"_delete_file:{self.fname}")
+            self.log.error(f"FATAL: Error opening HDF5 file {self.fname} for repair: {e}. Triggering safe backup.")
+            self._safe_rename_corrupt_file()
             self.ensure_hdf_file()
             return
 
@@ -512,29 +513,26 @@ class SafeHDFStore(pd.HDFStore):
                                 store.remove(key)
                             log.info(f"Removed corrupted key: {key}")
                         except Exception as e:
-                            log.error(f"Failed to remove key {key}: {e}")
-                            # 删除损坏的文件
-                            self._delete_file()
+                            log.error(f"Failed to remove key {key}: {e}. Triggering safe backup.")
+                            # 不再物理删除，改为安全重命名
+                            self._safe_rename_corrupt_file()
 
-    def _delete_file(self):
-        """删除损坏的文件"""
+    def _safe_rename_corrupt_file(self):
+        """安全重命名损坏的文件，而非物理删除"""
         try:
-            with timed_ctx("_delete_file"):
+            with timed_ctx("_safe_rename_corrupt_file"):
                 if os.path.isfile(self.fname):
-                    os.remove(self.fname)
-                    log.info(f"文件删除成功: {self.fname}")
+                    bak_name = self.fname + f".corrupt_{int(time.time())}.bak"
+                    try:
+                        os.rename(self.fname, bak_name)
+                        log.critical(f"✅ [HDF-SAFE-REPAIR] Corrupted file RENAMED to: {bak_name}")
+                    except Exception as re_e:
+                        log.error(f"❌ Rename failed (locked?): {re_e}. Falling back to deferred cleanup.")
+                        # 如果重命名失败（通常是 Windows 锁），不执行删除，让下次启动处理
                 else:
-                    log.error(f"文件 {self.fname} 不存在，无法删除")
+                    log.error(f"文件 {self.fname} 不存在，无法备份")
         except Exception as e:
-            log.error(f"删除文件失败: {e}")
-            # 尝试延迟重试
-            try:
-                time.sleep(2)
-                if os.path.isfile(self.fname):
-                    os.remove(self.fname)
-                    log.info(f"重试删除文件成功: {self.fname}")
-            except Exception as e2:
-                log.error(f"重试删除文件失败: {e2}")
+            log.error(f"安全备份失败: {e}")
 
     def _acquire_lock(self):
         my_pid = os.getpid()
@@ -2504,11 +2502,10 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     if code_l is not None:
         delete_corrupt_file = False
         if table is not None:
-            with SafeHDFStore(fname, mode='r') as store:
-                if store is not None:
-                    keys = store.keys()
-                    
-                    try:
+            try:
+                with SafeHDFStore(fname, mode='r') as store:
+                    if store is not None:
+                        keys = store.keys()
                         table_key = '/' + table
                         if table_key in keys:
                             obj = store.get(table)
@@ -2518,28 +2515,46 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                                 dd = pd.DataFrame()
                         else:
                             dd = pd.DataFrame()
-
-                    except Exception as e:
-                        log.error(f"load_hdf_db error {fname}/{table}: {e}")
+                    else:
                         dd = pd.DataFrame()
-                        # 判定是否为严重损坏
-                        if isinstance(e, AttributeError) or "UnImplemented" in str(e) or "HDF5ExtError" in str(type(e).__name__):
-                             delete_corrupt_file = True
-                else:
-                    dd = pd.DataFrame()
+
+            except Exception as e:
+                err_msg = str(e)
+                log.error(f"load_hdf_db error {fname}/{table}: {e}")
+                dd = pd.DataFrame()
+                
+                # [FIXED] ⚡ 针对读模式 (mode='r')，原则上应保护数据。
+                # 但如果是明确的底层损坏 (非 WinError 32 占用)，则允许触发重命名备份逻辑。
+                is_fatal = isinstance(e, AttributeError) or "UnImplemented" in err_msg or "HDF5ExtError" in str(type(e).__name__) or "file signature not found" in err_msg
+                
+                if is_fatal:
+                    if "PermissionError" in err_msg or "WinError 32" in err_msg:
+                        log.warning(f"⚠️ [HDF-LOCKED] File {fname} is locked by another process. Skipping cleanup.")
+                        delete_corrupt_file = False
+                    else:
+                        # 确认为损坏：允许触发清理（内部逻辑会执行重命名而非物理删除）
+                        log.warning(f"⚠️ [HDF-FATAL-CORRUPT] Real corruption detected in {fname}. Triggering safe backup.")
+                        delete_corrupt_file = True 
         
         # 退出 with 块后执行清理
         if delete_corrupt_file:
-            log.critical(f"Aggressive cleanup for corrupted file: {fname}")
+            log.critical(f"🚨 [HDF-ABORT] Aggressive cleanup triggered for: {fname}")
             try:
                 import tables
                 tables.file._open_files.close_all()
             except: pass
             
             try:
-                if os.path.exists(fname):
-                    os.remove(fname)
-                    log.warning(f"Deleted corrupted file: {fname}")
+                # 再次兜底检查：如果是核心数据库，禁止物理删除，仅重命名备份
+                _abs_fname = cct.get_ramdisk_path(fname)
+                if os.path.exists(_abs_fname):
+                    bak_name = _abs_fname + f".corrupt_{int(time.time())}.bak"
+                    os.rename(_abs_fname, bak_name)
+                    log.warning(f"Renamed corrupted file to: {bak_name}")
+                else:
+                    log.error(f"Failed to rename: file {_abs_fname} not found.")
+            except Exception as re_e:
+                log.error(f"Rename failed: {re_e}")
                 lock_f = fname + ".lock"
                 if os.path.exists(lock_f):
                     os.remove(lock_f)
@@ -2688,28 +2703,31 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                         dd = pd.DataFrame()
 
             # ---------- 这里是关键 ----------
-            except AttributeError as e:
-                log.critical("HDF STRUCTURE BROKEN: %s %s", fname, e)
-                # 1. 确保 PyTables 句柄释放
-                try:
-                    import tables
-                    tables.file._open_files.close_all()
-                except Exception:
-                    pass
-                # 2. 删除损坏文件
-                try:
-                    _ram_fname = cct.get_ramdisk_path(f'{fname}.h5')
-                    if os.path.exists(_ram_fname):
-                        os.remove(_ram_fname)
-                        log.critical("HDF REMOVED: %s", _ram_fname)
-                    else:
-                        log.critical("HDF %s not exists", _ram_fname)
-                except Exception as e2:
-                    log.error("Failed to remove %s: %s", fname, e2)
-                dd = pd.DataFrame()
-            except Exception as e:
-                # ⚠️ 普通异常不删文件
-                log.error("Exception:%s %s", fname, e)
+            except (AttributeError, tables.exceptions.HDF5ExtError, OSError) as e:
+                err_msg = str(e)
+                # 判定是否为致命损坏
+                is_fatal = "file signature not found" in err_msg or "unable to read superblock" in err_msg or isinstance(e, AttributeError)
+                
+                if is_fatal and not ("PermissionError" in err_msg or "WinError 32" in err_msg):
+                    log.critical("HDF FATAL CORRUPTION: %s %s", fname, e)
+                    # 🛡️ 执行安全重命名备份
+                    try:
+                        import tables
+                        tables.file._open_files.close_all()
+                    except Exception: pass
+                    
+                    try:
+                        _abs_fname = cct.get_ramdisk_path(fname)
+                        if os.path.exists(_abs_fname):
+                            bak_name = _abs_fname + f".broken_{int(time.time())}.bak"
+                            os.rename(_abs_fname, bak_name)
+                            log.critical("HDF RENAMED (BROKEN): %s -> %s", _abs_fname, bak_name)
+                        else:
+                            log.critical("HDF %s not exists (resolved from %s)", _abs_fname, fname)
+                    except Exception as e2:
+                        log.error("Failed to rename broken file %s: %s", fname, e2)
+                else:
+                    log.error("Exception (Non-Fatal or Locked): %s %s", fname, e)
                 dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:

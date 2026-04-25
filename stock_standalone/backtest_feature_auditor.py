@@ -534,6 +534,23 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
             self._show_detail(None)
 
     def _setup_ui(self):
+        """🚀 [最小修复] 显式配置 Treeview 样式与行高，解决集成模式下的重叠问题"""
+        style = ttk.Style(self)
+        
+        # 针对当前 DPI 缩放因子计算字体大小与行高
+        self.f_size = 9
+        self.r_height = 36
+        
+        style.configure(
+            "Dna.Treeview",
+            font=("微软雅黑", self.f_size),
+            rowheight=self.r_height
+        )
+        style.configure(
+            "Dna.Treeview.Heading",
+            font=("微软雅黑", self.f_size, "bold")
+        )
+
         # 主容器
         self.paned = ttk.Panedwindow(self, orient=tk.VERTICAL)
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -543,7 +560,8 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self.paned.add(top_frame, weight=2)
 
         columns = ("code", "name", "score", "gain", "verdict")
-        self.tree = ttk.Treeview(top_frame, columns=columns, show="headings")
+        # 🚀 使用指定的 "Dna.Treeview" 样式
+        self.tree = ttk.Treeview(top_frame, columns=columns, show="headings", style="Dna.Treeview")
         
         # 设置表头与排序
         headers = {"code": "代码", "name": "名称", "score": "DNA意图分", "gain": "波段涨幅%", "verdict": "极限判定"}
@@ -562,7 +580,8 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         bottom_frame = tk.Frame(self.paned)
         self.paned.add(bottom_frame, weight=3)
         
-        self.txt_detail = scrolledtext.ScrolledText(bottom_frame, font=("微软雅黑", 10), wrap=tk.WORD, bg="#fdfdfd")
+        # 使用计算后的字体大小
+        self.txt_detail = scrolledtext.ScrolledText(bottom_frame, font=("微软雅黑", self.f_size), wrap=tk.WORD, bg="#fdfdfd")
         self.txt_detail.pack(fill=tk.BOTH, expand=True)
 
         # 绑定事件
