@@ -46,6 +46,10 @@ from JohnsonUtil import LoggerFactory, commonTips as cct
 from alert_manager import get_alert_manager
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
+# [🚀 DNA Process Management] 全局审计进程句柄，用于窗口复用
+_DNA_AUDIT_PROCESS = None
+_DNA_AUDIT_QUEUE = None
+
 GLOBAL_SCROLLBAR_STYLE = """
 QScrollBar:vertical {
     border: none;
@@ -94,12 +98,14 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
 # [🚀 渲染优化] 赛马明细窗 Top-K 渲染上限 (支持命令行 -display-k 修改)
 RENDER_TOP_K = 200
 
-def _standalone_dna_audit_process_entry(code_to_name):
+def _standalone_dna_audit_process_entry(input_queue, initial_data=None):
     """
     独立进程入口：Tkinter + 回测审计安全隔离版本（稳定修复版）
+    支持通过 input_queue 接收新审计任务实现窗口复用
     """
     import tkinter as tk
     import sys
+    import queue
 
     try:
         from backtest_feature_auditor import (
@@ -110,34 +116,37 @@ def _standalone_dna_audit_process_entry(code_to_name):
         root = tk.Tk()
         root.withdraw()
 
-        # =========================
-        # ✔ 安全退出统一入口
-        # =========================
+        # 窗口句柄存储，用于复用
+        audit_win = None
+
+        is_exiting = False
         def safe_exit():
+            nonlocal is_exiting
+            if is_exiting: return
+            is_exiting = True
             try:
-                # 先停止 Tk 事件循环
                 root.quit()
-            except:
-                pass
+            except: pass
             try:
                 root.destroy()
-            except:
-                pass
+            except: pass
             finally:
-                # 仅在最后退出进程（避免 os._exit 造成资源泄漏）
-                sys.exit(0)
+                import os
+                os._exit(0)
 
         # =========================
-        # ✔ 信号处理（方案 2：子进程必须“可退出”）
+        # ✔ 信号处理
         # =========================
         import signal
         def handler(signum, frame):
-            logger.info(f"📍 DNA Audit Process received signal {signum}, exiting...")
-            safe_exit()
+            logger.info(f"📍 DNA Audit Process received signal {signum}, exiting safely...")
+            try:
+                root.after(0, safe_exit)
+            except:
+                import os
+                os._exit(0)
         
-        # 监听系统强制终止信号
         signal.signal(signal.SIGTERM, handler)
-        # Windows 兼容性补充 (可选)
         if hasattr(signal, 'SIGBREAK'):
             signal.signal(signal.SIGBREAK, handler)
 
@@ -146,23 +155,51 @@ def _standalone_dna_audit_process_entry(code_to_name):
         # =========================
         root.protocol("WM_DELETE_WINDOW", safe_exit)
 
-        # =========================
-        # ✔ 执行审计逻辑
-        # =========================
-        codes = list(code_to_name.keys())
-        summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+        def check_queue():
+            """[🚀 NEW] 轮询任务队列，实现窗口内容热更新"""
+            nonlocal audit_win
+            try:
+                # 尽可能处理完队列中所有堆积的任务
+                while not input_queue.empty():
+                    code_to_name = input_queue.get_nowait()
+                    if code_to_name == "QUIT":
+                        safe_exit()
+                        return
+                    
+                    if not isinstance(code_to_name, dict):
+                        continue
+                        
+                    # 执行审计逻辑
+                    codes = list(code_to_name.keys())
+                    summaries = audit_multiple_codes(codes, code_to_name=code_to_name)
+
+                    if summaries:
+                        # 检查窗口是否存在且未被销毁
+                        if audit_win and audit_win.winfo_exists():
+                            # 🚀 窗口复用：更新现有窗口内容
+                            logger.info(f"🔄 Reusing DNA Audit Window for {len(summaries)} stocks")
+                            audit_win.update_report(summaries)
+                        else:
+                            # 🚀 创建新窗口
+                            logger.info(f"🧬 Creating new DNA Audit Window for {len(summaries)} stocks")
+                            audit_win = show_dna_audit_report_window(summaries, parent=root)
+                    else:
+                        logger.warning("📍 DNA Audit produced no summaries.")
+            except Exception as e:
+                # 队列为空或其他异常不终止，仅记录
+                pass
+            
+            # 每 500ms 检查一次队列
+            root.after(500, check_queue)
 
         # =========================
-        # ✔ UI 展示 or 直接退出
+        # ✔ 启动逻辑
         # =========================
-        if summaries:
-            audit_win = show_dna_audit_report_window(summaries, parent=root)
-            # 🚀 [CRITICAL] 独立进程模式下，必须等待窗口销毁后才退出，否则进程会残留
-            if audit_win:
-                root.wait_window(audit_win)
-            safe_exit()
-        else:
-            safe_exit()
+        if initial_data:
+            input_queue.put(initial_data)
+            
+        root.after(100, check_queue)
+        root.mainloop()
 
     except Exception as e:
         print(f"❌ Standalone DNA Process Crash: {e}")
@@ -171,7 +208,7 @@ def _standalone_dna_audit_process_entry(code_to_name):
 # [🚀 DNA 统一分发] 模块级分发中枢：兼容 Tkinter 宿统与 Standalone Qt 进程
 def dispatch_dna_audit(code_to_name, parent_widget=None):
     """
-    DNA 审计分发中枢（Tk / Qt / multiprocessing 安全版）
+    DNA 审计分发中枢（支持窗口复用与进程单例）
     """
     if not code_to_name:
         return
@@ -197,24 +234,34 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
     # =========================
     # 2. 独立进程模式（Qt fallback）
     # =========================
+    global _DNA_AUDIT_PROCESS, _DNA_AUDIT_QUEUE
+    
+    import multiprocessing as mp
+    
+    # 检查现有进程是否存活
+    if _DNA_AUDIT_PROCESS and _DNA_AUDIT_PROCESS.is_alive():
+        logger.info("🚀 Reusing existing DNA Audit Process")
+        _DNA_AUDIT_QUEUE.put(code_to_name)
+        return _DNA_AUDIT_PROCESS
+
+    # 否则，启动新进程
     logger.warning(
         f"📍 [Racing] 启动 DNA 降级审计 (Process-Isolated) - 共 {len(code_to_name)} 只个股"
     )
 
-    import multiprocessing as mp
-
     try:
         # Windows / macOS / Linux 统一稳定模式
         ctx = mp.get_context("spawn")
-
-        process = ctx.Process(
+        _DNA_AUDIT_QUEUE = ctx.Queue()
+        
+        _DNA_AUDIT_PROCESS = ctx.Process(
             target=_standalone_dna_audit_process_entry,
-            args=(code_to_name,),
+            args=(_DNA_AUDIT_QUEUE, code_to_name),
             daemon=False  # ❗必须 False（否则 Tk 未执行完会被杀）
         )
 
-        process.start()
-        return process
+        _DNA_AUDIT_PROCESS.start()
+        return _DNA_AUDIT_PROCESS
 
     except Exception as e:
         logger.error(f"❌ [Racing] 无法启动 DNA 独立进程: {e}")

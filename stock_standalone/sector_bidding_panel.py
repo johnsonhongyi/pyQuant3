@@ -1240,7 +1240,9 @@ class DataProcessWorker(QObject):
                 # [PERF] 计算本次工作耗时，用于动态调整休眠
                 work_dur = time.perf_counter() - start_work_t
                 if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
-                    logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (GIL bottleneck risk)")
+                    processed_count = len(df) if df is not None else 0
+                    total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
+                    logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (processed {processed_count}/{total_count} codes) (GIL bottleneck risk)")
 
             except Exception as e:
                 logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)

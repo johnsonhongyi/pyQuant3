@@ -583,6 +583,38 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 自动调整列宽
         self._adjust_column_widths()
 
+    def update_report(self, new_summaries, end_date=None):
+        """[🚀 NEW] 动态更新报告内容，支持窗口复用"""
+        if not new_summaries: return
+        
+        self.summaries = new_summaries
+        if end_date: self.end_date = end_date
+        
+        # 1. 清空表格
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        # 2. 重新填充数据
+        self._fill_data()
+        
+        # 3. 更新标题
+        title_suffix = f" (截止: {self.end_date})" if self.end_date else ""
+        self.title(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(self.summaries)}只{title_suffix}")
+        
+        # 4. 激活并置顶
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(500, lambda: self.attributes("-topmost", False))
+        self.focus_force()
+        
+        # 5. 初始选中第一行并显示详情
+        if self.tree.get_children():
+            first = self.tree.get_children()[0]
+            self.tree.selection_set(first)
+            self.tree.focus(first)
+            self._show_detail(None)
+
     def _adjust_column_widths(self):
         import tkinter.font as tkfont
         # ttk.Treeview 不支持直接 cget('font')，使用基础 Font 对象进行像素测量
