@@ -1001,6 +1001,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
+        # [🚀 统一防抖保护] 赛马与回测共享冷却时间，避免资源抢占与 GIL 崩溃 (3s 阈值)
+        now = time.time()
+        last_unified = getattr(self, '_last_racing_backtest_unified_t', 0)
+        if now - last_unified < 5.0:
+            logger.warning("🏁 [Racing/Backtest] 操作太频繁（统一防抖中），请稍候...")
+            toast_message(self, "🏁 操作太频繁，请稍候...")
+            return
+        self._last_racing_backtest_unified_t = now
+
         try:
             # [🚀 鲁棒性增强] 增加对 C++ 侧对象是否存活的实质性判定
             is_alive = False
@@ -1026,8 +1035,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     on_code_callback=self.on_code_click
                 )
                 
-                # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用
-                self._racing_panel_win.closed.connect(lambda: setattr(self, '_racing_panel_win', None))
+                # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用并触发防抖
+                self._racing_panel_win.closed.connect(self._on_racing_panel_closed)
                 
                 # 跨线程联动安全：双击个股跳转
                 self._racing_panel_win.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
@@ -1037,16 +1046,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.racing_detector.ensure_data_ready_async()
                 
                 # [OPTIMIZED] ⚡ 判定数据新鲜度：如果后台 DataPublisher 已经唤醒了探测器 (data_version > 0)，
-                # 则无需重复执行昂贵的 register_codes 与全量 update_scores(force=True)。
-                # 这避免了在主线程中重复处理 5000+ 只股票导致的 100-500ms UI 假死。
+                # [🚀 PERFORMANCE OPTIMIZATION] 对冲冷启动数据灌入导致的 2-5s UI 假死
+                # 将昂贵的探测器初始化移至后台线程，主界面立即显示并进入“极速同步”状态。
                 if getattr(self.racing_detector, 'data_version', 0) == 0:
-                    # 如果当前内存中有全量行情快照，立即喂给探测器进行首轮聚合 (Cold Start Bootstrap)
                     curr_df = getattr(self, 'df_all', None)
                     if curr_df is not None and not curr_df.empty:
-                        logger.info("⚡ Racing Panel: Bootstrap initial data for detector (Cold Start)...")
-                        self.racing_detector.register_codes(curr_df)
-                        # 触发首波全量评分计算
-                        self.racing_detector.update_scores(force=True)
+                        logger.info("⚡ Racing Panel: Bootstrap initial data for detector in background...")
+                        
+                        def _bg_bootstrap():
+                            try:
+                                # 1. 注册代码并预计算评分
+                                self.racing_detector.register_codes(curr_df)
+                                self.racing_detector.update_scores(force=True)
+                                # 2. 通知 UI 线程计算完成，触发首次面板刷新
+                                self.after(0, lambda: self._racing_panel_win.update_visuals() if hasattr(self, '_racing_panel_win') and self._racing_panel_win else None)
+                                logger.info("✅ Racing Panel: Background bootstrap complete.")
+                            except Exception as e:
+                                logger.error(f"❌ Racing Panel: Background bootstrap failed: {e}")
+
+                        threading.Thread(target=_bg_bootstrap, daemon=True, name="RacingBootstrap").start()
+                        toast_message(self, "🏁 赛马面板数据后台预热中...")
                 else:
                     logger.debug(f"⚡ Racing Panel: Using pre-warmed detector (Version: {self.racing_detector.data_version})")
 
@@ -1064,6 +1083,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """Open the Indicator Help and Search window (Ctrl + /)"""
         stock_indicator_help.show_help(self)
 
+
+    def _on_racing_panel_closed(self):
+        """赛马面板关闭回调：置空引用并刷新防抖计时器"""
+        self._racing_panel_win = None
+        # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个
+        self._last_racing_backtest_unified_t = time.time()
+        logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (3s)")
 
     def _put_deduped_task(self, key, task_fn):
         """
@@ -2332,6 +2358,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.warning(f"关闭竞价窗口异常: {e}")
 
+            # 🛡️ [NEW] 显式关闭 DNA 审计窗口
+            if getattr(self, '_dna_audit_win', None) is not None:
+                try:
+                    if self._dna_audit_win.winfo_exists():
+                        self._dna_audit_win.destroy()
+                    self._dna_audit_win = None
+                except Exception:
+                    pass
+
             # ⭐ 注销全局快捷键
             self._shutdown_global_hotkeys()
             
@@ -2549,6 +2584,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.error(f"Error stopping backtest_process: {e}")
                 self.backtest_process = None
+            
+            # 🛡️ [NEW] 彻底清理 DNA 审计后台进程
+            try:
+                import bidding_racing_panel
+                dna_proc = getattr(bidding_racing_panel, '_DNA_AUDIT_PROCESS', None)
+                if dna_proc and dna_proc.is_alive():
+                    logger.info("正在停止 DNA 审计后台进程 (_DNA_AUDIT_PROCESS)...")
+                    dna_proc.terminate()
+                    dna_proc.join(timeout=0.3)
+                setattr(bidding_racing_panel, '_DNA_AUDIT_PROCESS', None)
+            except Exception as e:
+                logger.debug(f"Error cleaning up DNA audit process: {e}")
 
             # 2.5 停止联动系统 (Linkage Service)
             if hasattr(self, 'link_manager'):
@@ -3428,14 +3475,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 2. 日期选择
         tk.Label(main_frame, text="📅 选择日期 (YYYY-MM-DD):", font=label_font).pack(anchor="w")
+        
+        # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+        if cct.get_trade_date_status():
+            default_date_str = datetime.now().strftime('%Y-%m-%d')
+        else:
+            default_date_str = cct.get_last_trade_date()
+
         if use_calendar:
             date_entry = DateEntry(main_frame, width=20, background='#333',
                                   foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd',
                                   font=label_font)
+            try:
+                date_entry.set_date(datetime.strptime(default_date_str, '%Y-%m-%d'))
+            except:
+                pass
             date_entry.pack(fill="x", pady=(int(8*scale), int(15*scale)))
         else:
             date_entry = tk.Entry(main_frame, font=label_font)
-            date_entry.insert(0, datetime.now().strftime('%Y-%m-%d'))
+            date_entry.insert(0, default_date_str)
             date_entry.pack(fill="x", pady=(int(8*scale), int(15*scale)))
         
         # 3. 时间选择 (下拉)
@@ -3501,10 +3559,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _run_backtest_replay_process(self, replay_date, start_time, verbose=True, log_level="ERROR"):
         """独立多进程启动 test_bidding_replay.py，兼容 EXE 打包环境 (高性能透传模式)"""
+        # [🚀 统一防抖保护] 赛马与回测共享冷却时间 (3s 阈值)
+        now = time.time()
+        last_unified = getattr(self, '_last_racing_backtest_unified_t', 0)
+        if now - last_unified < 5.0:
+            logger.warning("🏁 [Racing/Backtest] 启动太频繁（统一防抖中），请稍候...")
+            toast_message(self, "🏁 启动太频繁，请稍候...")
+            return
+        self._last_racing_backtest_unified_t = now
+
+        # [🚀 唯一性保护] 确保同时只有一个回测进程在运行
+        if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
+            logger.warning("🏁 [Backtest] 回测进程已在运行中，请勿重复启动。")
+            toast_message(self, "🏁 回测进程已在运行中")
+            return
+
         from types import SimpleNamespace
         import test_bidding_replay as replay_module
-        import multiprocessing as mp
-        import time
         from tkinter import messagebox
         
         # 🚀 [OPTIMIZED] 记录启动时间
@@ -3531,26 +3602,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 获取当前主进程持有的行情全量快照，实现秒开
         current_df_all = getattr(self, 'df_all', None)
         
-        try:
-            # 🚀 使用 mp.Process 启动，避开 subprocess 的 IO 判定与重复抓取
-            self.backtest_process = mp.Process(
-                target=replay_module.main,
-                args=(args_namespace, current_df_all),
-                daemon=False
-            )
-            self.backtest_process.start()
-            
-            elapsed = (time.time() - launch_start) * 1000
-            msg = f"🏁 已下发回测指令 ({replay_date} {start_time}) | 唤起耗时: {elapsed:.1f}ms"
-            logger.info(msg)
-            
-            if hasattr(self, 'status_var2'):
-                self.status_var2.set(msg)
+        def _launch_task():
+            try:
+                # 🚀 使用 mp.Process 启动，避开 subprocess 的 IO 判定与重复抓取
+                self.backtest_process = mp.Process(
+                    target=replay_module.main,
+                    args=(args_namespace, current_df_all),
+                    daemon=False
+                )
+                self.backtest_process.start()
                 
-        except Exception as e:
-            logger.exception(f"Failed to launch backtest via mp.Process: {e}")
-            # 降级回退到子进程方式 (不推荐，但作为兜底)
-            messagebox.showerror("启动异常", f"回测进程 (mp) 启动失败:\n{str(e)}")
+                # [🚀 NEW] 启动存活监视，确保回测进程退出后也能触发统一防抖
+                def monitor_backtest_exit(proc):
+                    proc.join()
+                    self._last_racing_backtest_unified_t = time.time()
+                    logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (3s)")
+                
+                threading.Thread(target=monitor_backtest_exit, args=(self.backtest_process,), daemon=True).start()
+
+                elapsed = (time.time() - launch_start) * 1000
+                msg = f"🏁 已成功拉起回测进程 ({replay_date} {start_time}) | 唤起耗时: {elapsed:.1f}ms"
+                logger.info(msg)
+                
+                if hasattr(self, 'status_var2'):
+                    self.after(0, lambda: self.status_var2.set(msg))
+                    
+            except Exception as e:
+                logger.exception(f"Failed to launch backtest via mp.Process: {e}")
+                self.after(0, lambda: messagebox.showerror("启动异常", f"回测进程 (mp) 启动失败:\n{str(e)}"))
+
+        # 🚀 [ASYNC] 将昂贵的序列化与进程创建过程移出主线程，杜绝 UI 假死
+        threading.Thread(target=_launch_task, daemon=True, name="BacktestLauncher").start()
+        toast_message(self, "🏁 正在拉起回测引擎，请稍候...")
 
     def _run_live_strategy_process(self, full_df=None):
         """
@@ -4644,16 +4727,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         t.start()
 
     def _dump_ui_stack(self):
-        """[ENGINEERING] 仅在 Debug 模式下执行高成本的堆栈 Dump 操作"""
-        if not getattr(self, "_debug_mode", False):
+        """[ENGINEERING] 诊断主线程阻塞。在极端生产环境下，faulthandler 可能会干扰 GIL，需谨慎使用。"""
+        # 🛡️ 增加更严苛的触发条件：仅在明确开启深度调试模式时执行堆栈导出
+        if not getattr(self, "_debug_mode", False) or not os.environ.get("APP_DEBUG_FULL"):
             return
             
         try:
             import faulthandler
-            # 直接输出当前解释器所有线程的 traceback 到 stderr (控制台/日志捕获)
-            faulthandler.dump_traceback()
+            import io
+            # [🚀 NEW] 尝试捕获到缓冲区而非直接 stderr，降低对 C 层 IO 的直接冲击
+            output = io.StringIO()
+            faulthandler.dump_traceback(file=output)
+            logger.warning(f"🧵 [ThreadDump] Detected UI Block Stack:\n{output.getvalue()}")
         except Exception as e:
-            logger.error(f"[DumpStack] Failed to dump stack: {e}")
+            logger.error(f"[DumpStack] Failed to dump stack safety: {e}")
 
     def push_stock_info(self,stock_code, row):
         """
@@ -4865,6 +4952,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_sector_bidding_panel(self):
         """手动打开竞价/尾盘板块联动监控面板"""
+        # [🚀 防抖保护] 避免由于快速重复开关导致的 Qt 资源竞争与 GIL 崩溃 (2s 阈值)
+        now = time.time()
+        last_action = getattr(self, '_last_sector_bidding_action_t', 0)
+        if now - last_action < 2.0:
+            logger.warning("📡 [SectorBidding] 操作太频繁（防抖中），请稍候...")
+            toast_message(self, "📡 操作太频繁，请稍候...")
+            return
+        self._last_sector_bidding_action_t = now
+
         try:
             if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
                 from sector_bidding_panel import SectorBiddingPanel
@@ -6295,10 +6391,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                code_to_name=code_to_name,
                                                progress_callback=progress_cb)
                 # 切回主线程展示
-                self.after(0, lambda: [top.destroy(), show_dna_audit_report_window(summaries, parent=self, end_date=end_date)])
+                def _show_report():
+                    if top.winfo_exists():
+                        top.destroy()
+                    
+                    # 🚀 [NEW] 支持窗口复用
+                    if hasattr(self, '_dna_audit_win') and self._dna_audit_win and self._dna_audit_win.winfo_exists():
+                        logger.info(f"🔄 Reusing main DNA Audit Window for {len(summaries)} stocks")
+                        self._dna_audit_win.update_report(summaries, end_date=end_date)
+                    else:
+                        logger.info(f"🧬 Creating new main DNA Audit Window for {len(summaries)} stocks")
+                        self._dna_audit_win = show_dna_audit_report_window(summaries, parent=self, end_date=end_date)
+                
+                self.after(0, _show_report)
             except Exception as e:
                 logger.error(f"DNA Audit failed: {e}")
-                self.after(0, lambda: [top.destroy(), messagebox.showerror("DNA 审计出错", str(e), parent=self)])
+                self.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self)])
             finally:
                 self._dna_audit_running = False
                 

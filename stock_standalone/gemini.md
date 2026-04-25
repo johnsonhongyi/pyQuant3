@@ -44,6 +44,24 @@
     - [x] **实现缓存名称热同步 (Cache-Name Sync)**：在 `run_optimized_audit` 中增加了缓存命中时的名称二次校验。即使审计结果是从内存缓存中提取的，系统也会自动尝试用最新的 `NAME_CACHE` 更新 `summary.name`，解决了由于先审计后加载名称对照表导致的“名称显示为代码”或“空显示”的顽固 Bug。
     - [x] **加固 AuditSummary 实体结构**：在构造函数中增加了对 `nan` 字符串的强制拦截与 `zfill(6)` 代码标准化，从源头上保障了报告数据的展现质量。
 
+## 2026-04-25 12:45
+- [x] **根治赛马/竞价面板频繁开关导致的 GIL 崩溃与资源竞争 (Fixed GIL Crash & UI Debounce)**：
+    - [x] **实现全系统 UI 开启/关闭双向防抖 (Bidirectional UI Debounce)**：
+        - **启动防抖**：在 `open_racing_panel` 和 `_run_backtest_replay_process` 启动前强制执行 3秒 冷却。
+        - **关闭防抖**：通过 `closed` 信号和进程监视线程，在面板/进程**关闭瞬间**自动刷新防抖计时器。这确保了在旧资源（DLL、共享内存、临时目录）物理释放期间，用户无法立即开启新实例，彻底杜绝了“关闭即开”引发的 GIL 崩溃。
+    - [x] **实施赛马/回测统一防抖 (Unified Racing/Backtest Debounce)**：将赛马与回测的冷却计时器合并为 `_last_racing_backtest_unified_t`。
+    - [x] **加固回测进程单例保护 (Backtest Singleton Guard)**：在拉起回测引擎前增加 `is_alive()` 存活判定，杜绝了由于误触或后台延迟导致的多个回测进程同时争抢数据管道与 UI 句柄的隐患。
+    - [x] **优化 UI 启动反馈 (Optimized UI Feedback)**：同步引入了 `toast_message` 提示，当防抖机制触发时，界面会给予明确的“操作太频繁”反馈，提升了交互的可解释性。
+    - [x] **深度对冲 UI 假死 (Eliminated UI Freezes)**：
+        - [x] **异步化赛马面板初始化 (Async Racing Bootstrap)**：将主程序中 `RacingDetector` 的冷启动数据注入移至 `threading.Thread`。实现了面板打开与 5000+ 股票预计算的并行化，彻底消除了开启赛马时的 UI 假死。
+        - [x] **异步化回测进程拉起 (Async Backtest Launcher)**：将 `mp.Process.start()`（包含昂贵的 pickling 序列化）移至后台线程执行。解决了由于大体积 `df_all` 导致的主线程 I/O 阻塞，避免了触发 Watchdog 崩溃。
+    - [x] **安全化诊断监视器 (Hardened Watchdog)**：调整了 `_dump_ui_stack` 触发条件。默认禁用 `faulthandler` 以防止在多线程环境下干扰 GIL，仅在 `APP_DEBUG_FULL` 明确开启时允许执行。
+    - [x] **加固子进程退出保障 (Hardened Subprocess Exit)**：
+        - 为 DNA 审计子进程实现了 `SIGTERM` 信号捕获与 `safe_exit` 逻辑。
+        - 在 `on_close` 中补齐了对 `_DNA_AUDIT_PROCESS` 的全局物理清理，确保全系统无孤儿进程残留。
+    - [x] **修复由于局部 import 导致的 UnboundLocalError (Fixed Import Shadowing)**：删除了 `_run_backtest_replay_process` 中冗余的 `import time`。解决了由于局部作用域内重新定义模块名导致 `time.time()` 在赋值前被引用的脚本崩溃。
+    - [x] **增强 Bidding 性能监控统计 (Enhanced Performance Monitoring)**：在 `sector_bidding_panel.py` 的数据处理循环中，为 `Slow detection cycle` 报警补齐了处理数量统计。现在会明确显示“耗时/处理只数/总关注数”，便于分析 GIL 瓶颈是由数据量还是系统阻塞引起。
+
 ## 2026-04-24 23:15
 - [x] **根治 SignalDashboardPanel 磁盘 IO 引发的 UI 假死 (Fixed UI Block & IO Bottleneck)**：
     - [x] **引入 UI 状态保存防抖 (Debounced UI Persistence)**：在 `signal_dashboard_panel.py` 中引入了 `_save_ui_timer` (QTimer)。将所有涉及磁盘写入的布局保存（列宽调整、排序切换、窗口位移）统一延后 2000ms 执行。
