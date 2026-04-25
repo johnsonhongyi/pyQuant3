@@ -2256,80 +2256,81 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
-        # 🛡️ [NEW] 退出保险：15秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
+        # 🛡️ [NEW] 退出保险：25秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
         def failsafe_exit():
-            print("\n🚨 [Failsafe] Shutdown timeout reached (15s). Forcing physical exit...")
+            print("\n🚨 [Failsafe] Shutdown timeout reached (25s). Forcing physical exit...")
+            import os
             os._exit(0)
-            
+
         exit_timer = threading.Timer(25.0, failsafe_exit)
         exit_timer.daemon = True
         exit_timer.start()
 
         try:
-            # 设置退出标志，阻止后台线程调用 Tkinter 方法
-            self._is_closing = True
-            logger.info("🛑 [on_close] Application shutdown initiated...")
-            
-            # 🚀 [CORE FIX] 安全清理 Qt 资源，防止残留事件循环触发回调
+            # =========================================================
+            # ⭐ STEP 1: 停止动力源 / 设置全局退出标志
+            # =========================================================
             try:
-                from PyQt6 import QtWidgets
-                qt_app = QtWidgets.QApplication.instance()
-                if qt_app:
-                    logger.info("Cleaning up Qt application windows...")
-                    qt_app.closeAllWindows()
-            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
-                    # 靠 os._exit(0) 物理关闭
-            except Exception as e:
-                logger.debug(f"Qt cleanup error: {e}")
-
-            try:
-                self.stop_refresh() # 设置 refresh_flag = False
-                if hasattr(self, 'viz_lifecycle_flag'):
-                    self.viz_lifecycle_flag.value = False
-                    logger.info("Early set viz_lifecycle_flag to False")
+                self.stop_refresh()  # 设置 refresh_flag = False，切断主数据刷新循环
             except Exception:
                 pass
-            
-            # 🚀 [FIX] 显式关闭所有分层线程池，防止退出时线程残留 (如 pump_0 STILL ALIVE)
-            for pool_name in ['pump_executor', 'compute_executor', 'executor']:
+
+            self._is_closing = True
+
+            if hasattr(self, '_app_exiting'):
+                self._app_exiting.set()  # 通知所有监听线程立即停止
+
+            logger.info("🛑 [on_close] Phase 1: Shutdown initiated (Stop Refresh & Flags)")
+
+            # =========================================================
+            # ⭐ STEP 2: 停止 Worker / Thread / Executor / Publisher
+            # =========================================================
+
+            # ---------------------------------------------------------
+            # 2.1 停止后台扫描线程 / 主循环线程
+            # ---------------------------------------------------------
+            if hasattr(self, "proc") and self.proc is not None and self.proc.is_alive():
+                print("正在停止后台数据扫描线程 (proc)...")
+                self.proc.join(timeout=0.3)
+            self.proc = None
+
+            # ---------------------------------------------------------
+            # 2.2 停止线程池
+            # ⚠ 顺序极其重要：
+            #    executor(调度层) -> pump_executor(中转层) -> compute_executor(计算层)
+            # 防止主调度线程向已关闭计算池提交任务导致 RuntimeError
+            # ---------------------------------------------------------
+            for pool_name in ['executor', 'pump_executor', 'compute_executor']:
                 pool = getattr(self, pool_name, None)
                 if pool:
                     try:
                         logger.info(f"正在关闭线程池 {pool_name}...")
-                        pool.shutdown(wait=False)
+                        pool.shutdown(
+                            wait=False,
+                            cancel_futures=True  # 取消尚未执行任务，防止退出尾部继续跑
+                        )
                     except Exception as e:
-                        logger.debug(f"Error shutting down {pool_name}: {e}")
+                        logger.debug(f"{pool_name} shutdown error: {e}")
 
-            if getattr(self, 'live_strategy', None) is not None:
+            # ---------------------------------------------------------
+            # 2.3 停止策略引擎 / 发送器 / 探测器 / 报警系统
+            # ---------------------------------------------------------
+            strategy = getattr(self, "live_strategy", None)
+            if strategy is not None:
                 try:
+                    now_time = cct.get_now_time_int()
+
+                    # 收盘后保存 monitor 状态
+                    if now_time > 1500:
+                        strategy._save_monitors()
+                        logger.info("[on_close] strategy._save_monitors SAVE OK")
+
                     logger.info("正在停止 StockLiveStrategy...")
-                    self.live_strategy.stop()
+                    strategy.stop()
+
                 except Exception as e:
                     logger.error(f"Error stopping live_strategy: {e}")
 
-            if getattr(self, '_signal_dashboard_win', None) is not None:
-                try:
-                    logger.info("正在关闭信号看板...")
-                    # 🛡️ 增加类型判定，防止跨线程销毁冲突
-                    if hasattr(self._signal_dashboard_win, 'close'):
-                        self._signal_dashboard_win.close()
-                    self._signal_dashboard_win = None # 立即解引用
-                except Exception as e:
-                    logger.debug(f"Dashboard close error: {e}")
-                    
-            if getattr(self, '_racing_panel_win', None) is not None:
-                try:
-                    logger.info("正在关闭竞价赛马监控面板...")
-                    if hasattr(self._racing_panel_win, 'close'):
-                        self._racing_panel_win.close()
-                    self._racing_panel_win = None
-                except Exception as e:
-                    logger.debug(f"RacingPanel close error: {e}")
-            
-            if hasattr(self, '_app_exiting'):
-                self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
-            
-            # 🛡️ [NEW] 显式关闭语音引擎，防止后台播放导致进程无法退出
             try:
                 from alert_manager import get_alert_manager
                 print("正在停止语音报警引擎...")
@@ -2337,413 +2338,369 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
-            # 🛡️ [NEW] 显式关闭股票发送器后台线程
             if hasattr(self, 'sender') and self.sender:
                 try:
                     logger.info("正在停止股票发送器 (StockSender)...")
                     self.sender.close()
-                except Exception as e:
-                    logger.debug(f"StockSender close error: {e}")
+                except Exception:
+                    pass
 
-            # 🛡️ [NEW] 显式停止赛马探测器并注销数据监听
             if getattr(self, 'racing_detector', None) is not None:
                 try:
                     logger.info("正在停止赛马探测器 (RacingDetector)...")
                     self.racing_detector.stop()
-                except Exception as e:
-                    logger.error(f"Error stopping racing_detector: {e}")
-
-            # 关闭竞价窗口
-            if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
-                try:
-                    logger.info("正在关闭竞价窗口并保存数据...")
-                    # [NEW] 允许真正关闭，触发 panel 内部的资源回收与数据保存
-                    self.sector_bidding_panel._allow_real_close = True
-                    self.sector_bidding_panel.close()
-                    self.sector_bidding_panel = None # 立即解引用
-                except Exception as e:
-                    logger.warning(f"关闭竞价窗口异常: {e}")
-
-            # 🛡️ [NEW] 显式关闭 DNA 审计窗口
-            if getattr(self, '_dna_audit_win', None) is not None:
-                try:
-                    if self._dna_audit_win.winfo_exists():
-                        self._dna_audit_win.destroy()
-                    self._dna_audit_win = None
                 except Exception:
                     pass
 
-            # ⭐ 注销全局快捷键
-            self._shutdown_global_hotkeys()
-            
-            # 立即取消所有待处理的 after 任务
-            self._cancel_all_after_jobs()
-            self.close_all_alerts()
-            # 0.1 立即关闭所有报警弹窗（停止震动/闪烁循环）
-            if hasattr(self, 'active_alerts'):
-                for win in list(self.active_alerts):
-                    try:
-                        win.is_shaking = False
-                        win.is_flashing = False
-                        if win.winfo_exists():
-                            win.destroy()
-                    except Exception:
-                        pass
-                self.active_alerts.clear()
-            
-            # 保存 UI 状态
-            self.save_ui_states()
-
-            if hasattr(self, 'code_to_alert_win'):
-                self.code_to_alert_win.clear()
-            
-            logger.info("程序正在退出，执行保存与清理...")
-            self.vis_var.set(False)
-                
-            # 2. 存档交易日志 (TradingLogger)
+            # ---------------------------------------------------------
+            # 2.4 停止系统辅助工具
+            # ---------------------------------------------------------
             try:
-                t_logger = TradingLogger()
-                archive_file_tools(t_logger.db_path, "trading_signals", ARCHIVE_DIR, logger)
-            except Exception as e:
-                logger.warning(f"交易日志存档失败: {e}")
-            
-            # 2.1 存档信号策略数据库 (TradingHub)
-            try:
-                from trading_hub import get_trading_hub
-                hub = get_trading_hub()
-                archive_file_tools(hub.signal_db, "signal_strategy", ARCHIVE_DIR, logger)
-            except Exception as e:
-                logger.warning(f"信号策略存档失败: {e}")
-            
-            # 3. 存档手札
-            if hasattr(self, 'handbook'):
-                try:
-                    archive_file_tools(self.handbook.data_file, "stock_handbook", ARCHIVE_DIR, logger)
-                except Exception as e:
-                    logger.warning(f"手札存档失败: {e}")
-                    
-            try:
-                archive_file_tools(WINDOW_CONFIG_FILE, "window_config", ARCHIVE_DIR, logger)
-            except Exception as e:
-                logger.warning(f"vwindow_config失败: {e}")
+                self._shutdown_global_hotkeys()
+            except Exception:
+                pass
 
             try:
-                archive_file_tools(VOICE_ALERT_CONFIG_FILE, "voice_alert_config", ARCHIVE_DIR, logger)
-            except Exception as e:
-                logger.warning(f"voice_alert失败: {e}")
+                self._cancel_all_after_jobs()
+            except Exception:
+                pass
 
-            # 4. 如果 concept 窗口存在，也保存位置并隐藏
-            if hasattr(self, "_concept_win") and self._concept_win:
-                if self._concept_win.winfo_exists():
-                    self.save_window_position(self._concept_win, "detail_window")
-                    self._concept_win.destroy()
-            
-            # 5. 如果 KLineMonitor 存在且还没销毁，保存位置
-            if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
-                try:
-                    self.save_window_position(self.kline_monitor, "KLineMonitor")
-                    self.kline_monitor.on_kline_monitor_close()
-                    self.kline_monitor.destroy()
-                except Exception:
-                    pass
-
-            # 6. 保存并关闭所有 monitor_windows（概念前10窗口）
-            strategy = getattr(self, "live_strategy", None)
-            if strategy:
-                try:
-                    now_time = cct.get_now_time_int()
-                    if now_time > 1500:
-                        strategy._save_monitors()
-                        logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
-                    else:
-                        logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
-                except Exception as e:
-                    logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
-                
-                # 6.5 停止策略引擎后台任务 (包含语音线程和线程池)
-                try:
-                    strategy.stop()
-                except Exception as e:
-                    logger.warning(f"[on_close] self.live_strategy.stop 失败: {e}")
-
-
-            # 7. 关闭所有 concept top10 窗口 (Tkinter 版)
-            if hasattr(self, "_pg_top10_window_simple"):
-                try:
-                    self.save_all_monitor_windows()
-                    for key, win_info in list(self._pg_top10_window_simple.items()):
-                        win = win_info.get("win")
-                        if win and win.winfo_exists():
-                            try:
-                                if hasattr(win, "on_close") and callable(win.on_close):
-                                    win.on_close()
-                                else:
-                                    win.destroy()
-                            except Exception as e:
-                                logger.info(f"关闭窗口 {key} 出错: {e}")
-                    self._pg_top10_window_simple.clear()
-                except Exception as e:
-                    logger.warning(f"关闭 TK 监控窗口异常: {e}")
-
-            # 8. 关闭所有监视窗口 (PyQt 版)
-            if hasattr(self, "_pg_windows"):
-                try:
-                    for key, win_info in list(self._pg_windows.items()):
-                        win = win_info.get("win")
-                        if win is not None:
-                            try:
-                                # 🛡️ 优先检查 close 方法，不再尝试非标准的 on_close
-                                if hasattr(win, "close"):
-                                    win.close()
-                            except Exception as e:
-                                logger.info(f"关闭 Qt 窗口 {key} 出错: {e}")
-                    self._pg_windows.clear()
-                    
-                    # ⭐ [FIX] 彻底清理 PyQt 资源避免 QThreadStorage 报错
-                    qt_app = QtWidgets.QApplication.instance()
-                    if qt_app:
-                        logger.info("正在清理 PyQt 事件循环与资源...")
-                        # 1. 处理最后一批清理
-            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
-                        
-                        # 2. 遍历顶级窗口进行销毁
-                        for widget in qt_app.topLevelWidgets():
-                            try:
-                                if widget != self: # 避免操作到自己（虽然 self 是 Tk 对象）
-                                    widget.close()
-                                    widget.deleteLater()
-                            except: pass
-                        
-                        # 处理销毁后的事件
-            #  [PHASE 2 FIX] Removed hazardous event pump to enforce thread sovereignty
-                        
-                        # 3. 如果我们持有引用，解除它
-                        if hasattr(self, '_qt_app'):
-                            self._qt_app = None
-                            
-                except Exception as e:
-                    logger.warning(f"关闭 Qt 监控窗口异常: {e}")
-
-            # 9. 保存主窗口位置与搜索记录
-            self.save_window_position(self, "main_window")
-            if hasattr(self, 'query_manager'):
-                self.query_manager.save_search_history()
-            
             try:
-                archive_search_history_list(
-                    monitor_list_file=MONITOR_LIST_FILE, 
-                    search_history_file=SEARCH_HISTORY_FILE, 
-                    archive_dir=ARCHIVE_DIR, 
-                    logger=logger
-                )
-            except Exception as e:
-                logger.warning(f"搜索历史归档失败: {e}")
+                self.close_all_alerts()
+            except Exception:
+                pass
 
-            # 10. 停止后台进程与管理器 (关键顺序：优先停止数据生产和消费进程)
-            # Reordered following USER's instruction:
-            # 1. Stop backend scanning proc (Data Producer)
-            # 2. Stop Qt sub-process (Data Consumer)
-            # 3. Stop sync thread (Data Distributor)
-            # 4. Close queue / pipe (Resources)
-            
-            # 1. 停止后台数据扫描进程 (proc)
-                if hasattr(self, "proc") and self.proc is not None and self.proc.is_alive():
-                    print("正在停止后台数据扫描线程 (proc)...")
-                    # self.stop_refresh() # 已经在开头设置过
-                    self.proc.join(timeout=0.3) 
-                    if self.proc.is_alive():
-                        # 线程不支持 terminate，由于是 daemon=True，可以由系统回收，
-                        # 只要 refresh_flag 已设为 False，主循环就会自然退出。
-                        print("后台线程正在异步退出中...")
-                    else:
-                        print("后台线程已安全退出")
-                self.proc = None
-
-            # 2. 停止 Qt 子进程 (qt_process)
-            qtz_proc = getattr(self, 'qt_process', None)
-            if qtz_proc is not None:
-                try:
-                    if qtz_proc.is_alive():
-                        print("正在停止 Qt 可视化子进程 (qt_process)...")
-                        # self.viz_lifecycle_flag.value = False # 已经在开头设置过
-                        
-                        qtz_proc.join(timeout=0.5)
-                        if qtz_proc.is_alive():
-                            print("Qt 子进程未响，正在强制终止...")
-                            qtz_proc.terminate()
-                            qtz_proc.join(timeout=0.3)
-                            print("Qt 子进程已强制终止")
-                        else:
-                            print("Qt 子进程已安全退出")
-                except Exception as e:
-                    print(f"Error stopping qt_process: {e}")
-                self.qt_process = None
-
-            # 🛡️ [NEW] 停止赛马回测进程 (backtest_process)
-            if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
-                try:
-                    logger.info("正在停止赛马回测进程 (backtest_process)...")
-                    if hasattr(self, '_backtest_quit_event'):
-                        self._backtest_quit_event.set()
-                        # 给予 Qt UI 事件循环及内部资源自然退出的充裕窗口期
-                        self.backtest_process.join(timeout=8)
-                        
-                    if self.backtest_process.is_alive():
-                        logger.warning("Backtest process still alive after quit_event, forced termination.")
-                        self.backtest_process.terminate()
-                        self.backtest_process.join(timeout=1.0)
-                        if self.backtest_process.is_alive() and hasattr(self.backtest_process, 'kill'):
-                            self.backtest_process.kill()
-                            self.backtest_process.join(timeout=0.5)
-                except Exception as e:
-                    logger.error(f"Error stopping backtest_process: {e}")
-                self.backtest_process = None
-            
-            # 🛡️ [NEW] 彻底清理 DNA 审计后台进程
-            try:
-                import bidding_racing_panel
-                dna_proc = getattr(bidding_racing_panel, '_DNA_AUDIT_PROCESS', None)
-                if dna_proc and dna_proc.is_alive():
-                    logger.info("正在停止 DNA 审计后台进程 (_DNA_AUDIT_PROCESS)...")
-                    dna_proc.terminate()
-                    dna_proc.join(timeout=0.3)
-                setattr(bidding_racing_panel, '_DNA_AUDIT_PROCESS', None)
-            except Exception as e:
-                logger.debug(f"Error cleaning up DNA audit process: {e}")
-
-            # 2.5 停止联动系统 (Linkage Service)
-            if hasattr(self, 'link_manager'):
-                try:
-                    print("正在停止系统联动进程 (Linkage)...")
-                    self.link_manager.stop()
-                except Exception as e:
-                    logger.debug(f"Linkage stop error: {e}")
-
-            # 3. 停止 df_all 同步线程 (DFSyncThread)
+            # ---------------------------------------------------------
+            # 2.5 停止 df_all 同步线程
+            # ---------------------------------------------------------
             if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
                 print("正在停止 df_all 同步线程...")
                 self._df_sync_running = False
                 self._df_sync_thread.join(timeout=0.2)
                 self._df_sync_thread = None
 
-            # 4. 关闭队列与管道资源
-            logger.info("正在清理队列与通信资源...")
+            # =========================================================
+            # ⭐ STEP 2.6: 数据持久化（必须在 Manager 关闭前）
+            # =========================================================
+
+            try:
+                self.save_ui_states()
+            except Exception:
+                pass
+
+            try:
+                self.save_window_position(self, "main_window")
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self, "_concept_win") and self._concept_win and self._concept_win.winfo_exists():
+                    self.save_window_position(self._concept_win, "detail_window")
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                    self.save_window_position(self.kline_monitor, "KLineMonitor")
+                    self.kline_monitor.on_kline_monitor_close()
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self, "_pg_top10_window_simple"):
+                    self.save_all_monitor_windows()
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self, 'query_manager'):
+                    self.query_manager.save_search_history()
+            except Exception:
+                pass
+
+            logger.info("正在执行物理存档...")
+
+            try:
+
+                t_logger = TradingLogger()
+                archive_file_tools(
+                    t_logger.db_path,
+                    "trading_signals",
+                    ARCHIVE_DIR,
+                    logger
+                )
+
+                from trading_hub import get_trading_hub
+                hub = get_trading_hub()
+
+                archive_file_tools(
+                    hub.signal_db,
+                    "signal_strategy",
+                    ARCHIVE_DIR,
+                    logger
+                )
+
+                if hasattr(self, 'handbook'):
+                    archive_file_tools(
+                        self.handbook.data_file,
+                        "stock_handbook",
+                        ARCHIVE_DIR,
+                        logger
+                    )
+
+                archive_file_tools(
+                    WINDOW_CONFIG_FILE,
+                    "window_config",
+                    ARCHIVE_DIR,
+                    logger
+                )
+
+                archive_file_tools(
+                    VOICE_ALERT_CONFIG_FILE,
+                    "voice_alert_config",
+                    ARCHIVE_DIR,
+                    logger
+                )
+
+                archive_search_history_list(
+                    monitor_list_file=MONITOR_LIST_FILE,
+                    search_history_file=SEARCH_HISTORY_FILE,
+                    archive_dir=ARCHIVE_DIR,
+                    logger=logger
+                )
+
+            except Exception as e:
+                logger.warning(f"数据存档过程异常: {e}")
+
+            # =========================================================
+            # ⭐ STEP 3: 停止所有子进程
+            # =========================================================
+
+            # ---------------------------------------------------------
+            # 3.1 停止 Qt 可视化子进程
+            # ---------------------------------------------------------
+            if hasattr(self, 'viz_lifecycle_flag'):
+                self.viz_lifecycle_flag.value = False
+
+            qtz_proc = getattr(self, 'qt_process', None)
+            if qtz_proc and qtz_proc.is_alive():
+                print("正在停止 Qt 可视化子进程 (qt_process)...")
+                qtz_proc.join(timeout=0.5)
+
+                if qtz_proc.is_alive():
+                    qtz_proc.terminate()
+
+            self.qt_process = None
+
+            # ---------------------------------------------------------
+            # 3.2 停止赛马回测进程
+            # ---------------------------------------------------------
+            if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
+                logger.info("正在停止赛马回测进程 (backtest_process)...")
+
+                if hasattr(self, '_backtest_quit_event'):
+                    self._backtest_quit_event.set()
+                    self.backtest_process.join(timeout=8)
+
+                if self.backtest_process.is_alive():
+                    self.backtest_process.terminate()
+
+            self.backtest_process = None
+
+            # ---------------------------------------------------------
+            # 3.3 停止 DNA 审计 / 联动系统
+            # ---------------------------------------------------------
+            try:
+                import bidding_racing_panel
+
+                dna_proc = getattr(
+                    bidding_racing_panel,
+                    '_DNA_AUDIT_PROCESS',
+                    None
+                )
+
+                if dna_proc and dna_proc.is_alive():
+                    logger.info("正在停止 DNA 审计后台进程...")
+                    dna_proc.terminate()
+
+                if hasattr(self, 'link_manager'):
+                    print("正在停止系统联动进程 (Linkage)...")
+                    self.link_manager.stop()
+
+            except Exception:
+                pass
+
+            # =========================================================
+            # ⭐ STEP 4: 停止 Manager / Queue / Pipe
+            # =========================================================
+
+            # ---------------------------------------------------------
+            # 4.1 保存 K 线缓存（依赖 Manager）
+            # ---------------------------------------------------------
+            if hasattr(self, "realtime_service") and self.realtime_service:
+                try:
+                    logger.info("正在执行 MinuteKlineCache 退出保存...")
+                    self.realtime_service.stop()
+                    self.realtime_service.save_cache(force=True)
+                except Exception:
+                    pass
+
+            # ---------------------------------------------------------
+            # 4.2 清理 Pipe / Queue / SyncManager
+            # ---------------------------------------------------------
+            logger.info("正在清理资源管道与 SyncManager...")
+
             if hasattr(self, 'viz_conn') and self.viz_conn:
                 try:
                     self.viz_conn[0].close()
                     self.viz_conn[1].close()
                 except Exception:
                     pass
-                self.viz_conn = None
-            
-            if hasattr(self, 'queue') and self.queue:
-                # queue.Queue has no close()
-                self.queue = None
 
-            if hasattr(self, "manager"):
+            self.realtime_service = None
+            self.global_dict = None
+            self.manager_dict = None
+
+            if hasattr(self, "manager") and self.manager:
                 try:
-                    # 10.5 退出前强制保存 K 线记录 (这一步最耗时，保留在最后一步，且只做一次)
-                    if hasattr(self, "realtime_service") and self.realtime_service:
-                        logger.info("正在执行 MinuteKlineCache 退出保存并停止后台任务...")
-                        # 先停止后台线程，减少 I/O 冲突
-                        try:
-                            self.realtime_service.stop()
-                        except:
-                            pass
-                        
-                        self.realtime_service.save_cache(force=True)
+                    t = threading.Thread(
+                        target=self.manager.shutdown,
+                        daemon=True
+                    )
+                    t.start()
+                    t.join(timeout=1.0)
+                except Exception:
+                    pass
 
-                    # ⭐ [FIX] 彻底断开代理引用，防止 shutdown 时的 BrokenPipe 或资源挂起
-                    self.realtime_service = None
-                    self.global_dict = None
-                    self.manager_dict = None 
-                    
-                    # ⭐ [ROOT-FIX] 在 Windows 上，SyncManager 的 shutdown 极易引发 Access Violation。
-                    # 我们采取“先清理代理，后尝试关闭，最后物理强杀”的策略。
-                    if self.manager:
-                        try:
-                            # 给予 1 秒的优雅关闭时间，不阻塞主流程太久
-                            t = threading.Thread(target=self.manager.shutdown, daemon=True)
-                            t.start()
-                            t.join(timeout=1.0) 
-                        except: pass
-                    self.manager = None
-                    
-                except Exception as e:
-                    logger.debug(f"Manager cleanup error ignored: {e}")
+            self.manager = None
+            self.queue = None
 
-
-            self.wait_all_threads()
-            # 11. 停止日志与销毁 (放在最后)
+            # =========================================================
+            # ⭐ STEP 5: 关闭所有 Qt UI 资源
+            # =========================================================
             try:
-                from JohnsonUtil.LoggerFactory import stopLogger
-                print("正在停止日志服务...")
-                stopLogger() 
-            except Exception: 
+                from PyQt6 import QtWidgets
+
+                qt_app = QtWidgets.QApplication.instance()
+
+                if qt_app:
+                    logger.info("Phase 5: Cleaning up Qt application windows...")
+
+                    # 关闭核心业务窗口
+                    for win_attr in [
+                        '_signal_dashboard_win',
+                        '_racing_panel_win',
+                        'sector_bidding_panel'
+                    ]:
+                        win = getattr(self, win_attr, None)
+
+                        if win:
+                            try:
+                                if hasattr(win, '_allow_real_close'):
+                                    win._allow_real_close = True
+
+                                win.close()
+
+                            except Exception:
+                                pass
+
+                        setattr(self, win_attr, None)
+
+                    # 关闭 PyQt 监控窗口
+                    if hasattr(self, "_pg_windows"):
+                        for key, win_info in list(self._pg_windows.items()):
+                            win = win_info.get("win")
+
+                            if win:
+                                try:
+                                    win.close()
+                                except Exception:
+                                    pass
+
+                        self._pg_windows.clear()
+
+                    # 关闭所有顶级 QWidget
+                    for widget in qt_app.topLevelWidgets():
+                        try:
+                            widget.close()
+                            widget.deleteLater()
+                        except Exception:
+                            pass
+
+                    qt_app.closeAllWindows()
+
+            except Exception as e:
+                logger.debug(f"Qt UI cleanup error: {e}")
+
+            # =========================================================
+            # ⭐ STEP 6: 等待残余线程退出 / 销毁 Tk Root
+            # =========================================================
+            print("正在销毁主窗口...")
+
+            try:
+                self.wait_all_threads(timeout=2.0)
+            except Exception:
                 pass
 
-            print("正在销毁主窗口并强制退出...")
-            # 取消退出保险（如果还没触发的话）
-            exit_timer.cancel()
-            
-            # 首先尝试正常销毁
             try:
                 self.destroy()
-            except:
+            except Exception:
                 pass
-                
-            # ⭐ [CRITICAL] 物理强杀进程，跳过 Python 的 atexit 挂起和非 daemon 线程等待
-            # 只有走到这一步，才说明所有保存工作（如 K 线快照）已安全落地
-            print("正在最终清理 PyQt 与后台线程资源...")
             
-            # 🛡️ [NEW] 最终阶段：利用 psutil 暴力清理所有遗留子进程树，确保 _MEI 临时目录能被 PyInstaller 删除
+            # ⭐ 关键：成功进入“可控退出路径”，取消 failsafe
+            exit_timer.cancel()
+            # =========================================================
+            # ⭐ STEP 7: 最终清理子进程并物理切断
+            # =========================================================
+            print("正在最终清理遗留进程...")
+
             try:
-                import multiprocessing as mp
-                active_procs = mp.active_children()
-                if active_procs:
-                    for p in active_procs:
-                        try:
-                            p.terminate()
-                        except: pass
-                
-                # [ROOT-FIX] 暴力扫除：杀掉所有在 OS 层面挂接到当前进程的子孙进程 (包含 subprocess / 未注册的游离进程)
                 import psutil
                 import os
+                import time
+
                 current_process = psutil.Process(os.getpid())
                 children = current_process.children(recursive=True)
+
                 if children:
                     print(f"发现遗留子进程，正在强制释放: {[c.pid for c in children]}")
+
                     for child in children:
                         try:
                             child.kill()
-                        except: pass
-                    # 🚀 [FIX] 给 OS 充足的时间回收文件描述符和 DLL 句柄 (0.8s)
-                    # 解决 [PYI-WARNING] Failed to remove temporary directory 的核心关键
+                        except Exception:
+                            pass
+
                     psutil.wait_procs(children, timeout=0.8)
                     time.sleep(0.3)
-                
-                print("清理完成，正在物理切断进程...")
-            except Exception as e:
-                print(f"遗留进程清理异常: {e}")
-            
-            # 停止日志服务 (最后一步)
-            try:
-                from JohnsonUtil.LoggerFactory import stopLogger
-                print("程序运行结束，Bye.")
-                stopLogger() 
-            except Exception: 
-                pass
 
-            # [🚀 PHYSICAL EXIT] 使用 os._exit(0) 物理强行切断进程
-            # 彻底根治 Windows 上的 Access Violation 和 PyQt 析构崩溃
-            import os
-            os._exit(0)
+                try:
+                    from JohnsonUtil.LoggerFactory import stopLogger
+                    print("程序运行结束，Bye.")
+                    stopLogger()
+                except Exception:
+                    pass
+
+                print("清理完成，正在物理切断进程...")
+
+            finally:
+                # ⚠ 永远不要 cancel failsafe
+                # 因为如果 destroy()/stopLogger()/psutil 某步卡死
+                # 仍需依赖 failsafe 保底物理退出
+                import os
+                os._exit(0)
+
         except Exception as e:
-            logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
+            import traceback
+            print(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
+
             try:
                 self.destroy()
-            except:
+            except Exception:
                 pass
+
+            import os
+            os._exit(0)
 
 
     # 防抖 resize（避免重复刷新）

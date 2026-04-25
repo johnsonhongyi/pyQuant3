@@ -31,6 +31,17 @@
 
 ## 2026-04-25 18:50
 - [x] **根治 PyInstaller \_MEI\ 临时目录占用与赛马回测进程残留 (Fixed _MEI Directory Lock & Backtest Process Leak)**：
+    - [x] **重构 7-步标准退出序列 (Standardized 7-Step Shutdown Sequence)**：在 `instock_MonitorTK.py` 中实现了严格的序贯退出逻辑：
+        1. `stop_refresh` (停止行情动力源)。
+        2. 停止所有后台 Worker、Publisher、Detector 及分层线程池。
+        3. 优雅终止 `qt_process`、`backtest_process` (通过 `quit_event`) 及 `DNA_AUDIT_PROCESS` 子进程。
+        4. 物理存档业务数据后，安全关闭 `SyncManager` 及通讯管道。
+        5. 清理 PyQt6 顶级窗口资源 (`closeAllWindows`)。
+        6. 销毁 Tkinter 主窗口 (`destroy`)。
+        7. 最终执行递归进程树清理 (`psutil.kill`) 并物理退出 (`os._exit(0)`)。
+    - [x] **实现回测 UI 优雅退出 (Graceful Backtest Shutdown)**：通过 `mp.Event()` 为回测子进程注入 `quit_event`。回测主循环现在能够实时响应主程序的退出指令，自动关闭 Qt 窗口并释放资源，彻底解决了回测模式下关闭主程序导致的窗口残留与 DLL 占用。
+    - [x] **加固 SyncManager 退出稳定性**：引入了异步线程关闭机制与代理引用解耦，解决了 Windows 环境下 `SyncManager.shutdown()` 极易引发的 `Access Violation` 崩溃。
+    - [x] **实施全量进程强杀清理**：升级了 `psutil` 遍历清理逻辑，在物理退出前强制清除所有子孙进程，确保 PyInstaller Bootloader 能够 100% 成功删除 `_MEI` 临时目录。
     - [x] **加固赛马回测进程关闭**：在 \instock_MonitorTK.py\ 的 \on_close\ 方法中，针对 \acktest_process\ 的关闭逻辑，在 \	erminate()\ 和 \join()\ 的基础上，新增了 \kill()\ 兜底强制杀除，确保回测子进程被彻底清理。
     - [x] **实施全量进程强杀清理**：升级了 \mp.active_children()\ 的遍历清理逻辑，在 \	erminate()\ 后若子进程仍存活，自动追加调用 \kill()\ 进行物理清除，并将等待时间从 0.3s 延长至 0.5s。彻底根治了当主程序 \sys.exit(0)\ 时，由于子进程未结束导致的 PyInstaller Bootloader 无法删除 \C:\Temp\_MEIxxx\ 目录并报出 \[PYI-25308:WARNING]\ 的顽固警告。
 
