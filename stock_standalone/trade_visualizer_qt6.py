@@ -13151,11 +13151,25 @@ class MainWindow(QMainWindow, WindowMixin):
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
 
+        # [🚀 GRACEFUL] 停止赛马探测器
+        if hasattr(self, 'detector') and self.detector:
+            try:
+                logger.info("🛑 Stopping BiddingMomentumDetector in Visualizer...")
+                self.detector.stop()
+            except: pass
+            
+        # [🚀 GRACEFUL] 停止股票发送器
+        if hasattr(self, 'sender') and self.sender:
+            try:
+                logger.info("🛑 Closing StockSender in Visualizer...")
+                self.sender.close()
+            except: pass
+
         # ⭐ [ROOT-FIX] 终极刹车：强制退出进程
         # 彻底解决 pyttsx3/COM 句柄残留或 QThread 销毁异常导致的进程挂起及后台语音播报不停的问题
-        logger.info("👋 Visualizer Process Exiting via os._exit(0)")
-        import os
-        os._exit(0)
+        logger.info("👋 Visualizer Process Exiting via sys.exit(0)")
+        import sys
+        sys.exit(0)
 
     # # ================== 热点自选面板回调 ==================
     # def _toggle_hotlist_panel(self):

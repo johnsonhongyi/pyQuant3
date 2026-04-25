@@ -2305,6 +2305,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
+            # 🛡️ [NEW] 显式关闭股票发送器后台线程
+            if hasattr(self, 'sender') and self.sender:
+                try:
+                    logger.info("正在停止股票发送器 (StockSender)...")
+                    self.sender.close()
+                except Exception as e:
+                    logger.debug(f"StockSender close error: {e}")
+
+            # 🛡️ [NEW] 显式停止赛马探测器并注销数据监听
+            if getattr(self, 'racing_detector', None) is not None:
+                try:
+                    logger.info("正在停止赛马探测器 (RacingDetector)...")
+                    self.racing_detector.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping racing_detector: {e}")
+
             # 关闭竞价窗口
             if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
                 try:
@@ -2522,6 +2538,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     print(f"Error stopping qt_process: {e}")
                 self.qt_process = None
 
+            # 🛡️ [NEW] 停止赛马回测进程 (backtest_process)
+            if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
+                try:
+                    logger.info("正在停止赛马回测进程 (backtest_process)...")
+                    self.backtest_process.terminate()
+                    self.backtest_process.join(timeout=1.0)
+                    if self.backtest_process.is_alive():
+                        logger.warning("Backtest process still alive, forced termination.")
+                except Exception as e:
+                    logger.error(f"Error stopping backtest_process: {e}")
+                self.backtest_process = None
+
             # 2.5 停止联动系统 (Linkage Service)
             if hasattr(self, 'link_manager'):
                 try:
@@ -2635,8 +2663,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception: 
                 pass
 
-            os._exit(0)
-            
+            # [🚀 GRACEFUL EXIT] 使用 sys.exit(0) 替代硬杀 os._exit(0)
+            # 此时所有守护线程和子进程均已通过 terminate/stop/join 显式处理完毕
+            import sys
+            sys.exit(0)
         except Exception as e:
             logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
             try:
