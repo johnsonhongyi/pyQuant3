@@ -1998,17 +1998,8 @@ class BiddingMomentumDetector:
         # [FIX] 优先从 K 线或 Tick 中获取时间戳，用于后续异动计时
         data_ts = ts_obj.first_breakout_ts # 默认为已有的异动时间
         if data_ts <= 0:
-            ts_val = latest.get('ticktime', latest.get('timestamp', latest.get('time')))
-            if ts_val:
-                try:
-                    if isinstance(ts_val, (str, pd.Timestamp)):
-                        data_ts = pd.to_datetime(ts_val).timestamp()
-                    else:
-                        data_ts = float(ts_val)
-                except:
-                    data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
-            else:
-                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            # [PERF] 极致优化：直接使用主进程透传的 last_data_ts 避免昂贵的 pd.to_datetime
+            data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
 
         score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
@@ -2059,9 +2050,11 @@ class BiddingMomentumDetector:
         # [NEW] [PERF] 使用预计算的锚点时间戳，避免高频循环中的 replace/timestamp 开销
         fb_ts = ts_obj.first_breakout_ts
         if fb_ts > 0:
+            # [PERF] 如果外部没有传入预计算好的 anchor_930，则在此处计算一次
             if anchor_930 is None:
-                dt = datetime.datetime.fromtimestamp(fb_ts)
-                anchor_930 = dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+                # 快速计算 9:30 锚点 (避免 replace 对象分配)
+                dt_fb = datetime.datetime.fromtimestamp(fb_ts)
+                anchor_930 = datetime.datetime(dt_fb.year, dt_fb.month, dt_fb.day, 9, 30, 0).timestamp()
             
             offset = fb_ts - anchor_930
             if offset < 2700: 

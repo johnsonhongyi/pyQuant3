@@ -2261,7 +2261,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             print("\n🚨 [Failsafe] Shutdown timeout reached (15s). Forcing physical exit...")
             os._exit(0)
             
-        exit_timer = threading.Timer(15.0, failsafe_exit)
+        exit_timer = threading.Timer(25.0, failsafe_exit)
         exit_timer.daemon = True
         exit_timer.start()
 
@@ -2583,10 +2583,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, 'backtest_process') and self.backtest_process and self.backtest_process.is_alive():
                 try:
                     logger.info("正在停止赛马回测进程 (backtest_process)...")
-                    self.backtest_process.terminate()
-                    self.backtest_process.join(timeout=1.0)
+                    if hasattr(self, '_backtest_quit_event'):
+                        self._backtest_quit_event.set()
+                        # 给予 Qt UI 事件循环及内部资源自然退出的充裕窗口期
+                        self.backtest_process.join(timeout=8)
+                        
                     if self.backtest_process.is_alive():
-                        logger.warning("Backtest process still alive, forced termination.")
+                        logger.warning("Backtest process still alive after quit_event, forced termination.")
+                        self.backtest_process.terminate()
+                        self.backtest_process.join(timeout=1.0)
+                        if self.backtest_process.is_alive() and hasattr(self.backtest_process, 'kill'):
+                            self.backtest_process.kill()
+                            self.backtest_process.join(timeout=0.5)
                 except Exception as e:
                     logger.error(f"Error stopping backtest_process: {e}")
                 self.backtest_process = None
@@ -2648,26 +2656,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # ⭐ [FIX] 彻底断开代理引用，防止 shutdown 时的 BrokenPipe 或资源挂起
                     self.realtime_service = None
                     self.global_dict = None
-                    self.manager_dict = None # 额外清理
+                    self.manager_dict = None 
                     
-                    # ⭐ [FIX] 改为异步非阻塞关闭，不再 join 等待，防止 GIL 死锁导致主线程挂起
-                    print("正在触发 SyncManager 异步关闭...")
-                    logger.info("正在关闭 SyncManager (异步非阻塞模式)...")
-                    
-                    def async_shutdown(mgr):
+                    # ⭐ [ROOT-FIX] 在 Windows 上，SyncManager 的 shutdown 极易引发 Access Violation。
+                    # 我们采取“先清理代理，后尝试关闭，最后物理强杀”的策略。
+                    if self.manager:
                         try:
-                            mgr.shutdown()
-                            print("SyncManager 异步关闭完成。")
-                        except Exception as e:
-                            print(f"SyncManager 异步关闭异常: {e}")
-
-                    shutdown_thread = threading.Thread(target=async_shutdown, args=(self.manager,), daemon=True)
-                    shutdown_thread.start()
-                    # 不再调用 join(1.5)，直接进入下一步 destroy
+                            # 给予 1 秒的优雅关闭时间，不阻塞主流程太久
+                            t = threading.Thread(target=self.manager.shutdown, daemon=True)
+                            t.start()
+                            t.join(timeout=1.0) 
+                        except: pass
+                    self.manager = None
                     
                 except Exception as e:
-                    print(f"Manager shutdown sequence error: {e}")
-                    logger.debug(f"Manager shutdown error ignored: {e}")
+                    logger.debug(f"Manager cleanup error ignored: {e}")
 
 
             self.wait_all_threads()
@@ -2693,20 +2696,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 只有走到这一步，才说明所有保存工作（如 K 线快照）已安全落地
             print("正在最终清理 PyQt 与后台线程资源...")
             
-            # 🛡️ [NEW] 最终阶段：清理所有遗留的子进程，确保 _MEI 临时目录能被 PyInstaller Bootloader 删除
+            # 🛡️ [NEW] 最终阶段：利用 psutil 暴力清理所有遗留子进程树，确保 _MEI 临时目录能被 PyInstaller 删除
             try:
                 import multiprocessing as mp
                 active_procs = mp.active_children()
                 if active_procs:
-                    logger.info(f"清理遗留子进程: {[p.name for p in active_procs]}")
                     for p in active_procs:
                         try:
                             p.terminate()
                         except: pass
                 
-                # 稍微等待 handle 释放 (给 OS 亚毫秒级回收时间)
-                time.sleep(0.3)
-            except: pass
+                # [ROOT-FIX] 暴力扫除：杀掉所有在 OS 层面挂接到当前进程的子孙进程 (包含 subprocess / 未注册的游离进程)
+                import psutil
+                import os
+                current_process = psutil.Process(os.getpid())
+                children = current_process.children(recursive=True)
+                if children:
+                    print(f"发现遗留子进程，正在强制释放: {[c.pid for c in children]}")
+                    for child in children:
+                        try:
+                            child.kill()
+                        except: pass
+                    # 🚀 [FIX] 给 OS 充足的时间回收文件描述符和 DLL 句柄 (0.8s)
+                    # 解决 [PYI-WARNING] Failed to remove temporary directory 的核心关键
+                    psutil.wait_procs(children, timeout=0.8)
+                    time.sleep(0.3)
+                
+                print("清理完成，正在物理切断进程...")
+            except Exception as e:
+                print(f"遗留进程清理异常: {e}")
             
             # 停止日志服务 (最后一步)
             try:
@@ -2716,10 +2734,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception: 
                 pass
 
-            # [🚀 GRACEFUL EXIT] 使用 sys.exit(0) 替代硬杀 os._exit(0)
-            # 此时所有守护线程和子进程均已通过 terminate/stop/join 显式处理完毕
-            import sys
-            sys.exit(0)
+            # [🚀 PHYSICAL EXIT] 使用 os._exit(0) 物理强行切断进程
+            # 彻底根治 Windows 上的 Access Violation 和 PyQt 析构崩溃
+            import os
+            os._exit(0)
         except Exception as e:
             logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
             try:
@@ -3624,10 +3642,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         def _launch_task():
             try:
+                # [NEW] 注入退出同步事件
+                self._backtest_quit_event = mp.Event()
+                
                 # 🚀 使用 mp.Process 启动，避开 subprocess 的 IO 判定与重复抓取
                 self.backtest_process = mp.Process(
                     target=replay_module.main,
-                    args=(args_namespace, current_df_all),
+                    args=(args_namespace, current_df_all, self._backtest_quit_event),
                     daemon=False
                 )
                 self.backtest_process.start()
