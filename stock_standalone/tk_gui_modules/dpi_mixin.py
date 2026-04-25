@@ -320,6 +320,8 @@ class DPIMixin:
             try:
                 style = ttk.Style(self) # type: ignore
                 scaled_row_height = int(22 * scale_factor)
+                # f = tkfont.nametofont("TkDefaultFont")
+                # scaled_row_height = int(f.metrics("linespace") * 1.4)
                 style.configure('Treeview', rowheight=scaled_row_height)
             except Exception as e_rowinit:
                 logger.warning(f"[初始化缩放] 设置 Treeview 行高失败: {e_rowinit}")

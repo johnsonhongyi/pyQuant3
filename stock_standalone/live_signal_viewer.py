@@ -20,6 +20,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
 from trading_logger import TradingLogger
 from JohnsonUtil.stock_sender import StockSender
+from JohnsonUtil import commonTips as cct
 
 class DetailDialog(QDialog):
     """可滚动的详细信息对话框，解决长文本内容超出屏幕高度的问题"""
@@ -126,7 +127,16 @@ class LiveSignalViewer(QWidget, WindowMixin):
         self.date_input = QDateEdit()
         self.date_input.setCalendarPopup(True)
         self.date_input.setDisplayFormat("yyyy-MM-dd")
-        self.date_input.setDate(QDate.currentDate())
+        # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+        if cct.get_trade_date_status():
+            self.date_input.setDate(QDate.currentDate())
+        else:
+            last_trade_date = cct.get_last_trade_date()
+            if last_trade_date:
+                self.date_input.setDate(QDate.fromString(last_trade_date, "yyyy-MM-dd"))
+            else:
+                self.date_input.setDate(QDate.currentDate())
+        
         self.date_input.setFixedWidth(int(110 * self.scale_factor))
         self.date_input.dateChanged.connect(self.refresh_data)
         ctrl_layout.addWidget(self.date_input)
