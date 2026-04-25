@@ -340,15 +340,22 @@ class TickSeries:
             oldest = self.klines[0]
             v = float(oldest.get('volume', 0.0))
             c = float(oldest.get('close', 0.0))
+            # [FIX] 减去时也要使用当时记录的金额逻辑，防止累计偏差
+            a = float(oldest.get('amount', oldest.get('turnover', v * c)))
             self._total_vol -= v
-            self._total_amt -= v * c
+            self._total_amt -= a
 
         self.klines.append(kline)
         # 增量维护统计
         vol = float(kline.get('volume', 0.0))
         close = float(kline.get('close', 0.0))
+        # [PERF] 优先从 K 线获取预计算的金额，否则回退到 vol * close
+        amt = float(kline.get('amount', kline.get('turnover', vol * close)))
+        
         self._total_vol += vol
-        self._total_amt += vol * close
+        self._total_amt += amt
+        self.total_amount = self._total_amt # 同步更新到 slots 变量中
+        
         if close > self.high_day: self.high_day = close
         if close < self.low_day or self.low_day == 0: self.low_day = close
 
@@ -943,26 +950,28 @@ class BiddingMomentumDetector:
         self.data_version += 1 # 联动 UI 全量重传
 
     def stop(self):
-        """[NEW] 停止探测器：从实时服务注销，防止退出后回调触发崩溃"""
-        if hasattr(self, 'realtime_service') and self.realtime_service:
-            try:
-                self.realtime_service.unsubscribe_all(self._on_tick)
-                logger.info("🛑 BiddingMomentumDetector unsubscribed successfully.")
-            except Exception as e:
-                logger.error(f"Error unsubscribing BiddingMomentumDetector: {e}")
+        # """[NEW] 停止探测器：从实时服务注销，防止退出后回调触发崩溃"""
+        # if hasattr(self, 'realtime_service') and self.realtime_service:
+        #     try:
+        #         self.realtime_service.unsubscribe_all(self._on_tick)
+        #         logger.info("🛑 BiddingMomentumDetector unsubscribed successfully.")
+        #     except Exception as e:
+        #         logger.error(f"Error unsubscribing BiddingMomentumDetector: {e}")
+        pass
 
     def clear_all_state(self):
         """[NEW] 彻底清除内存状态，用于在回测与实盘切换时防止“脏数据”污染"""
-        logger.info("🧹 BiddingMomentumDetector clearing all internal states...")
-        with self._lock:
-            self._tick_series.clear()
-            self.daily_watchlist.clear()
-            self.active_sectors.clear()
-            self.sector_anchors.clear()
-            self._sector_active_stocks_persistent.clear()
-            if hasattr(self, '_global_snap_cache'):
-                self._global_snap_cache.clear()
-            self.data_version += 1
+        # logger.info("🧹 BiddingMomentumDetector clearing all internal states...")
+        # with self._lock:
+        #     self._tick_series.clear()
+        #     self.daily_watchlist.clear()
+        #     self.active_sectors.clear()
+        #     self.sector_anchors.clear()
+        #     self._sector_active_stocks_persistent.clear()
+        #     if hasattr(self, '_global_snap_cache'):
+        #         self._global_snap_cache.clear()
+        #     self.data_version += 1
+        pass
 
     def reset_stock_active(self, codes: List[str]):
         """[NEW] 手动重置指定个股的活跃计数"""
@@ -1245,9 +1254,14 @@ class BiddingMomentumDetector:
                 data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
             
             file_date_str = data.get('data_date', '')
-            now_dt = datetime.datetime.now()
-            today_str = now_dt.strftime('%Y-%m-%d')
-            
+            # now_dt = datetime.datetime.now()
+            # today_str = now_dt.strftime('%Y-%m-%d')
+            # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+            if cct.get_trade_date_status():
+                today_str = datetime.now().strftime('%Y-%m-%d')
+            else:
+                today_str = cct.get_last_trade_date()
+            now_dt = datetime.datetime.strptime(today_str,"%Y-%m-%d")
             is_cross_day = (file_date_str != today_str)
             
             with self._lock:
@@ -1632,7 +1646,12 @@ class BiddingMomentumDetector:
                 except: continue
             dates.sort(reverse=True)
             
-            today_str = datetime.datetime.now().strftime('%Y%m%d')
+            # today_str = datetime.datetime.now().strftime('%Y%m%d')
+            # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
+            if cct.get_trade_date_status():
+                today_str = datetime.now().strftime('%Y-%m-%d')
+            else:
+                today_str = cct.get_last_trade_date()
             # 排除今日，寻找前两个交易日
             past_dates = [d for d in dates if d < today_str][:9]
             
@@ -2408,13 +2427,7 @@ class BiddingMomentumDetector:
         elif data_ts == 0:
             self.last_data_ts = time.time()
             
-        # [NEW] [PERF] 预计算 total_amount 缓存，消除后续板块聚合时的重复 O(K) 循环
-        total_amount = 0.0
-        for k in klines:
-            amt = float(k.get('amount', k.get('turnover', 0.0)))
-            if amt == 0: amt = float(k.get('volume', 0.0)) * float(k.get('close', 0.0))
-            total_amount += amt
-        ts_obj.total_amount = total_amount
+        # [DONE] total_amount 已经在 ts_obj.push_kline 中通过增量维护完成
 
 
     # =========================================================

@@ -3,10 +3,9 @@
 Sector Bidding Panel v3 - 竞价及尾盘板块联动监控面板
 优化：紧凑布局、表格排序、TDX/可视化器联动、窗口位置持久化
 """
-import logging
 from datetime import datetime
 from typing import Any, List, Optional
-
+from JohnsonUtil import LoggerFactory
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QDoubleSpinBox, QSpinBox, QSplitter, QListWidget, QListWidgetItem,
@@ -48,7 +47,7 @@ except ImportError:
     from stock_standalone.query_engine_util import query_engine
 
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger("sector_bidding")
 
 SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
@@ -2198,6 +2197,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return f
 
     # ------------------------------------------------------------------ data
+    def refresh_data(self, force=False):
+        """[COMPAT] 强制刷新并恢复实时数据展示"""
+        if force:
+            self._last_data_version = -1 # 强制触发重绘
+            
+        # 如果处于历史模式且被强制触发，可能是切回实时的指令
+        if self._is_history_mode and force:
+            self.detector.in_history_mode = False
+            self._is_history_mode = False
+            self.btn_live.setVisible(False)
+            
+        self.manual_refresh()
+
     def manual_refresh(self):
         """手动触发评分计算和 UI 刷新 (增加防抖和状态反馈)"""
         if not hasattr(self, 'btn_refresh'): return
@@ -4836,8 +4848,8 @@ if __name__ == "__main__":
     import sys
     from PyQt6.QtWidgets import QApplication
 
-    # 配置基础日志
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # # 配置基础日志
+    # logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # 简单的 MockMainWindow 以满足初始化需求
     class MockMainWindow:
