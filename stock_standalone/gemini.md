@@ -29,6 +29,12 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-25 10:35
+- [x] **深度清理与系统优化审计 (Deep System Cleanup & Audit)**：
+    - [x] **清理历史临时脚本**：删除了早期迭代遗留的大量无用测试脚本 (如 	emp_historical_monitor.py, _inspect_dbs.py, _repair_signal_db.py等)，精简项目结构，防止错误调用。
+    - [x] **加固赛马板块后台线程退出安全性**：在 sector_bidding_panel.py 的 closeEvent 中补齐了针对 SBC 信号测试线程 (_sbc_thread) 的生命周期控制，实施平滑 quit() 与 	erminate() 兜底，解决了悬挂线程可能导致的资源泄漏与进程残留崩溃。
+    - [x] **排查全业务线测试与调试入口**：确认了所有 UI 测试按钮 (如 🧪 SBC 测试、买卖策略) 为正规业务辅助工具。确保所有的分析流程在并发环境和 UI 更新时受控且稳定。
+
 ## 2026-04-25 15:15
 - [x] **实现全系统交易日智能判定与默认日期修正 (Standardized Trade Date Detection)**：
     - [x] **竞价窗口 (Racing Panel)**：在 `instock_MonitorTK.py` (Replay) 与 `sector_bidding_panel.py` (Snapshot Calendar) 中同步实现了智能判定。非交易日启动时，系统会自动回滚至上一个交易日，确保快照加载的有效性。
