@@ -1068,7 +1068,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self.after(0, lambda: self._racing_panel_win.update_visuals() if hasattr(self, '_racing_panel_win') and self._racing_panel_win else None)
                                 logger.info("✅ Racing Panel: Background bootstrap complete.")
                             except Exception as e:
-                                logger.error(f"❌ Racing Panel: Background bootstrap failed: {e}")
+                                logger.exception(f"❌ Racing Panel: Background bootstrap failed: {e}")
 
                         threading.Thread(target=_bg_bootstrap, daemon=True, name="RacingBootstrap").start()
                         toast_message(self, "🏁 赛马面板数据后台预热中...")

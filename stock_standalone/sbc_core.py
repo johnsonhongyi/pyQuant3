@@ -714,7 +714,7 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
             logger.debug(f"Vectorized datetime parsing failed, fallback empty: {e}")
 
     # 4. 批量更新 EmotionTracker
-    with timed_ctx("5_tracker_batch_update", warn_ms=100):
+    with timed_ctx("5_tracker_batch_update", warn_ms=300):
         tracker = IntradayEmotionTracker()
         tracker.update_batch(tick_df, baseline_loader)
     
