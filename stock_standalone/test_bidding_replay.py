@@ -1140,6 +1140,7 @@ Usage Examples:
             # Step 3: 创建 Panel
             panel = BiddingRacingRhythmPanel(sender=sender)
             panel.detector = detector
+            panel.df_all = live_df_all
             panel.setWindowTitle("🏁 竞价赛马 🔴 实盘监控")
             
             # Step 4: 创建 LiveWorker
@@ -1231,6 +1232,7 @@ Usage Examples:
             
             # 初始化 Panel (必须在 detector 创建后，以便传入引用)
             panel = BiddingRacingRhythmPanel(sender=sender, detector=detector)
+            panel.df_all = real_df_all
             panel.setWindowTitle(f"🏁 竞价赛马回放 : {replay_date or 'ALL'}")
             
             replay_kwargs['detector'] = detector

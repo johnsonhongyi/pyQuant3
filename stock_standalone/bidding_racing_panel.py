@@ -10,12 +10,15 @@ import traceback
 import threading
 import gzip
 import heapq
+import pandas as pd
 from typing import Dict, List, Any, Optional
 
 # [🚀 预编译正则] 提升高频调用性能
 _RE_NON_DIGIT = re.compile(r'[^\d]')
 _RE_CAT_SPLIT = re.compile(r'[;；,，/\- ]')
 _RE_BRACKET_CODE = re.compile(r'\((\d{6})\)')
+_RE_QUERY_BRACKET = re.compile(r'^(.*?)\s*\((.*)\)$')
+_RE_CHINESE_COND = re.compile(r'[\u4e00-\u9fa5\-]')
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
@@ -24,7 +27,7 @@ from PyQt6.QtWidgets import (
     QMenu, QApplication, QDialog, QSplitter, QComboBox, QFileDialog, QMessageBox,
     QScrollArea, QCheckBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray, QEvent
 from PyQt6.QtGui import (
     QPainter, QColor, QFont, QPen, QBrush, QConicalGradient, 
     QLinearGradient, QRadialGradient, QPolygon, QPainterPath
@@ -51,11 +54,28 @@ class LabeledStockItem(QTableWidgetItem):
 from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory, commonTips as cct
 from alert_manager import get_alert_manager
+
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE, SEARCH_HISTORY_FILE
+try:
+    from history_manager import quick_save_specific_history
+    from query_engine_util import query_engine
+except ImportError:
+    from stock_standalone.history_manager import quick_save_specific_history
+    from stock_standalone.query_engine_util import query_engine
+
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
+
+SEARCH_HISTORY_GROUP = "bidding_racing"
 
 # [🚀 DNA Process Management] 全局审计进程句柄，用于窗口复用
 _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
+
+from PyQt6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
+from PyQt6.QtGui import QPainter, QPen, QColor
+from PyQt6.QtCore import QRect, pyqtSignal
+
+# [READ-ONLY] 宏观查询采用标准模式，不再使用自定义委托
 
 GLOBAL_SCROLLBAR_STYLE = """
 QScrollBar:vertical {
@@ -903,7 +923,12 @@ class SectorDetailDialog(QDialog, WindowMixin):
                     if ts:
                         unique_members[norm_code] = ts
             
-            data_list = list(unique_members.values())
+            # [NEW] 宏观过滤集成：板块明细也受主查询条件约束
+            if self.parent() and getattr(self.parent(), '_is_macro_active', False):
+                f_set = getattr(self.parent(), '_macro_filtered_codes_set', set())
+                data_list = [ts for code, ts in unique_members.items() if code in f_set]
+            else:
+                data_list = list(unique_members.values())
         finally:
             self.detector._lock.release()
             
@@ -1501,9 +1526,20 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                     is_alerted = alert_manager.is_alerted(norm_code) or norm_code in reg
 
                 if is_alert_cat:
-                    if is_alerted: data_list.append(ts)
+                    if is_alerted:
+                        # [NEW] 宏观过滤集成：报警分类也受主查询条件约束
+                        if self.parent() and getattr(self.parent(), '_is_macro_active', False):
+                            f_set = getattr(self.parent(), '_macro_filtered_codes_set', set())
+                            if norm_code not in f_set:
+                                continue
+                        data_list.append(ts)
                 else:
                     if get_racing_role(ts) == target_role:
+                        # [NEW] 宏观过滤集成：个股明细也受主查询条件约束
+                        if self.parent() and getattr(self.parent(), '_is_macro_active', False):
+                            f_set = getattr(self.parent(), '_macro_filtered_codes_set', set())
+                            if norm_code not in f_set:
+                                continue
                         data_list.append(ts)
         finally:
             self.detector._lock.release()
@@ -2020,6 +2056,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._global_show_reason = False # [NEW] 全局形态详情控制位
         self.audit_process = None # [🚀 方案 1] 保存 DNA 独立审计进程引用
 
+        # [NEW] 宏观查询状态位
+        self._is_macro_active = False
+        self._macro_query_str = ""
+        self._macro_filtered_codes = []
+        self._macro_filtered_codes_set = set() # [🚀 性能优化] 预存储标准化代码集合 (O(1))
+
 
         if sender:
             self.stock_sender = sender
@@ -2177,6 +2219,101 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         top_bar_layout.addWidget(cycle_group)
         
         main_layout.addWidget(top_bar)
+
+        # [NEW] 宏观查询栏 (Macro Query Bar)
+        query_bar = QHBoxLayout()
+        query_bar.setContentsMargins(15, 0, 15, 0)
+        query_bar.setSpacing(10)
+
+        # 1. 历史分组选择 (History Selector)
+        self.history_selector = QComboBox()
+        self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
+        self.history_selector.setCurrentIndex(4) 
+        self.history_selector.setMinimumWidth(85)
+        self.history_selector.setToolTip("选择查询历史分组 (当前默认: history5)")
+        self.history_selector.setStyleSheet("""
+            QComboBox { background-color: #1C1C1E; color: #aad4ff; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 11px; min-height: 24px; }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background-color: #2C2C2E; color: #FFF; selection-background-color: #005BB7; outline: none; }
+        """)
+        self.history_selector.currentIndexChanged.connect(self._on_history_group_changed)
+        query_bar.addWidget(self.history_selector)
+        
+        # 2. 刷新按钮
+        self.btn_reload_query = QPushButton("🔄")
+        self.btn_reload_query.setFixedSize(28, 28)
+        self.btn_reload_query.setToolTip("同步全局历史记录库 (不改变当前搜索内容)")
+        self.btn_reload_query.setStyleSheet("QPushButton { color: #aad4ff; background: #2a3a4a; border: 1px solid #444; border-radius: 3px; } QPushButton:hover { background: #34495e; }")
+        self.btn_reload_query.clicked.connect(self._load_current_history_to_combo_with_tip)
+        query_bar.addWidget(self.btn_reload_query)
+
+        # 3. 查询框
+        self.query_input = QComboBox()
+        self.query_input.setEditable(True)
+        self.query_input.setDuplicatesEnabled(False)
+        self.query_input.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
+        self.query_input.setPlaceholderText("宏观过滤: 涨幅>3 and score>10")
+        self.query_input.setToolTip("输入逻辑表达式进行个股/板块全链路过滤 (Enter 执行)")
+        self.query_input.setMinimumWidth(300)
+        self.query_input.view().setMinimumWidth(450) # [NEW] 扩展下拉列表宽度，防止长逻辑截断
+        self.query_input.lineEdit().returnPressed.connect(self._on_query_triggered)
+        self.query_input.activated.connect(self._on_query_triggered)
+
+        self.query_input.setStyleSheet("""
+            QComboBox { 
+                background-color: #1C1C1E; color: #EEE; border: 1px solid #444; 
+                border-radius: 4px; padding: 2px 8px; font-size: 11px; min-height: 24px; 
+            }
+            QComboBox::drop-down { 
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 25px;
+                border-left-width: 1px;
+                border-left-color: #444;
+                border-left-style: solid;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #00FFCC;
+                margin-top: 1px;
+            }
+            QComboBox QAbstractItemView { 
+                background-color: #2C2C2E; color: #FFF; selection-background-color: #005BB7; 
+                outline: none; border: 1px solid #555;
+            }
+            QLineEdit { background-color: transparent; color: #EEE; border: none; }
+            QComboBox:hover { border: 1px solid #00FFCC; }
+        """)
+        query_bar.addWidget(self.query_input)
+
+        # 4. 清空按钮
+        self.btn_query_clear = QPushButton("清空")
+        self.btn_query_clear.setFixedWidth(50)
+        self.btn_query_clear.setToolTip("清除所有过滤条件，恢复全量数据展示")
+        self.btn_query_clear.setStyleSheet("""
+            QPushButton { background-color: #333; color: #BBB; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 11px; }
+            QPushButton:hover { background-color: #444; color: white; border: 1px solid #777; }
+        """)
+        self.btn_query_clear.clicked.connect(self._on_query_clear_clicked)
+        query_bar.addWidget(self.btn_query_clear)
+
+        # 5. 执行按钮
+        self.btn_query_exec = QPushButton("🔍查询")
+        self.btn_query_exec.setFixedWidth(70)
+        self.btn_query_exec.setToolTip("立即执行当前宏观过滤逻辑")
+        self.btn_query_exec.setStyleSheet("""
+            QPushButton { background-color: #005BB7; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #0078D4; }
+        """)
+        self.btn_query_exec.clicked.connect(self._on_query_triggered)
+        query_bar.addWidget(self.btn_query_exec)
+        
+        query_bar.addStretch()
+        main_layout.addLayout(query_bar)
         
         center_layout = QHBoxLayout()
         center_layout.setSpacing(20)
@@ -2408,6 +2545,262 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # [🚀 最终关联] 确保所有组件初始化完成后才开启持久化监听
         # self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
         # self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        
+        self._ui_ready = True
+
+    # =========================================================================
+    # 🔍 宏观查询 (Macro Query) 核心逻辑
+    # =========================================================================
+
+    def _on_query_triggered(self):
+        """执行宏观查询 (Stage 1 Filtering)"""
+        # [🚀 修复] 优先判断文本是否为空。如果输入框已清空，则必须立即解除过滤，不论 userData 中是否存在旧值
+        curr_text = self.query_input.currentText().strip()
+        if not curr_text:
+            query = ""
+        else:
+            # 优先从 userData 获取原始查询语句，兼容 "备注 | 查询" 格式
+            query = self.query_input.currentData()
+            if query is None or not isinstance(query, str):
+                query = curr_text
+            
+        # [🚀 修复] 兼容多种复合标签格式： "备注 | 逻辑" (来自 history 加载) 或 "备注 (逻辑)"
+        if ' | ' in query:
+            parts = query.split(' | ', 1)
+            p1, p2 = parts[0].strip(), parts[1].strip()
+            # 校验右侧是否为逻辑表达式：含操作符或关键词
+            if any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or', 'close', 'pct', 'score']):
+                query = p2
+        elif '(' in query and query.endswith(')'):
+            m = _RE_QUERY_BRACKET.match(query)
+            if m:
+                p1, p2 = m.groups()
+                # 判定为 UI 标签格式：左侧含中文/符号，右侧含逻辑符
+                if _RE_CHINESE_COND.search(p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or', 'close', 'pct', 'score']):
+                    query = p2.strip()
+        
+        if not query:
+            self._is_macro_active = False
+            self._macro_query_str = ""
+            self._macro_filtered_codes = []
+            self._macro_filtered_codes_set = set() # [🚀 修复] 彻底清除过滤集合，恢复全量显示
+            logger.info("🔍 [RacingPanel] 宏过滤已解除")
+        else:
+            # [MOD] 宏搜索采用“只读模式”，不再自动写入历史库
+            self._run_macro_query_internal(query)
+
+        # 触发全局刷新
+        self._last_ui_update_ts = 0   # [FIX] 强制绕过 100ms 节流限制
+        self._last_data_version = -1  # [FIX] 强制重置数据版本缓存，确保查询后立即触发重绘
+        self.update_visuals()
+        
+        # [NEW] 立即强制刷新所有已打开的详情窗口，确保全数据过滤即时生效
+        for dlg in getattr(self, '_detail_dialogs', {}).values():
+            try:
+                if not dlg.isHidden() and hasattr(dlg, 'refresh_data'):
+                    setattr(dlg, '_dirty', True)
+                    dlg.refresh_data()
+            except: pass
+        
+        # 强制将光标移至最前
+        if self.query_input.lineEdit():
+            self.query_input.lineEdit().setCursorPosition(0)
+
+    def _on_query_clear_clicked(self):
+        """清空查询条件，恢复默认视图"""
+        self.query_input.setCurrentIndex(-1) # [🚀 修复] 彻底清除当前选中的历史项数据引用
+        self.query_input.setEditText("")
+        self._on_query_triggered()
+
+    def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
+        """核心查询逻辑：根据 query 计算匹配个股代码池"""
+        self._is_macro_active = True
+        self._macro_query_str = query
+        try:
+            # 1. 寻找数据源 (df_all)
+            df = None
+            if self.main_app and hasattr(self.main_app, 'df_all'):
+                df = self.main_app.df_all  # [LINK] 实盘模式：直接引用主程序数据源，确保 100% 实时一致性
+            elif self.detector and hasattr(self.detector, 'main_app'):
+                df = self.detector.main_app.df_all
+            elif hasattr(self, 'df_all'):
+                df = self.df_all # [SNAPSHOT] 回测模式：使用注入的快照
+            
+            # [🚀 核心增强] 动态行情同步逻辑
+            if df is not None and not df.empty and self.detector and self.detector._tick_series:
+                is_simulation = getattr(self.detector, 'simulation_mode', False)
+                with self.detector._lock:
+                    updates = {}
+                    for c in df.index:
+                        ts = self.detector._tick_series.get(c)
+                        if not ts: continue
+                        
+                        # 核心分值 (无论实盘还是回测，df_all 都没有这些列，必须同步)
+                        updates[c] = {
+                            'score': ts.score,
+                            'momentum': ts.momentum_score,
+                            'vol_ratio': ts.vol_ratio,
+                            'ratio': ts.vol_ratio,
+                            'pct_diff': ts.pct_diff
+                        }
+                        
+                        # 仿真/回测模式：df_all 是静态的，必须同步所有行情字段
+                        if is_simulation:
+                            updates[c].update({
+                                'pct': ts.current_pct,
+                                'percent': ts.current_pct,
+                                'close': ts.current_price,
+                                'now': ts.current_price,
+                                'lastp0d': ts.current_price, # [FIX] 对齐逻辑引擎别名
+                                'trade': ts.current_price,
+                                'price': ts.current_price,
+                                'open': ts.open_price
+                            })
+                        # 实盘模式：行情字段 (pct, open, close) 由主程序 Pump 维护，此处不予覆盖以保一致性
+                    
+                    if updates:
+                        # [🚀 性能优化] 仅在必要时转换为 DataFrame 批量更新
+                        up_df = pd.DataFrame.from_dict(updates, orient='index')
+                        for col in up_df.columns:
+                            df[col] = up_df[col]
+                        
+                        if not is_auto_refresh:
+                            mode_str = "Replay" if is_simulation else "Live"
+                            logger.debug(f"🧬 [RacingPanel] Macro sync ({mode_str}): Updated {len(updates)} stocks.")
+            
+            # [🚀 核心补齐] 录像回放 (Replay) 模式适配：如果 df_all 为空，则从当前 detector._tick_series 动态构建 df
+            if (df is None or df.empty) and self.detector and self.detector._tick_series:
+                data_rows = []
+                with self.detector._lock:
+                    for ts in self.detector._tick_series.values():
+                        data_rows.append({
+                            'code': ts.code, 'name': ts.name, 
+                            'close': ts.current_price, 'now': ts.current_price, 
+                            'pct': ts.current_pct, 'nclose': ts.last_close,
+                            'score': ts.score, 'momentum': ts.momentum_score,
+                            'dff': ts.dff, 'pct_diff': ts.pct_diff,
+                            'vol_ratio': ts.vol_ratio, 'volume': ts.total_vol,
+                            'category': ts.category
+                        })
+                if data_rows:
+                    df = pd.DataFrame(data_rows).set_index('code')
+
+            if df is None or df.empty:
+                self._macro_filtered_codes = []
+                self._macro_filtered_codes_set = set()
+                if not is_auto_refresh:
+                    logger.warning("🔭 [RacingPanel] 等待首轮完整行情到达后即可查询...")
+                return
+
+            # 2. 执行查询引擎逻辑
+            if query_engine:
+                res = query_engine.execute(df, query)
+            else:
+                try:
+                    res = df.query(query)
+                except Exception as e:
+                    # [🚀 鲁棒兜底] 如果逻辑查询失败 (如 NameError: name '反包' is not defined)，
+                    # 则尝试作为“关键字”进行模糊匹配 (代码/名称/板块)
+                    query_clean = query.strip()
+                    if query_clean:
+                        # 避免正则表达式特殊字符引发崩溃
+                        import re
+                        query_esc = re.escape(query_clean)
+                        # 构建模糊匹配逻辑：代码前缀、名称包含、板块包含
+                        mask = (df.index.astype(str).str.contains(query_esc, case=False, na=False)) | \
+                               (df['name'].astype(str).str.contains(query_esc, case=False, na=False))
+                        
+                        if 'category' in df.columns:
+                            mask |= df['category'].astype(str).str.contains(query_esc, case=False, na=False)
+                            
+                        res = df[mask]
+                        if not is_auto_refresh:
+                            logger.info(f"🔎 [RacingPanel] 逻辑查询失败，已切换至关键字模糊匹配: '{query_clean}'")
+                    else:
+                        raise e
+            
+            if isinstance(res, pd.DataFrame):
+                self._macro_filtered_codes = res.index.tolist()
+                # [🚀 性能优化] 转化为 set 供详情窗高频过滤使用 (O(1))
+                self._macro_filtered_codes_set = { _RE_NON_DIGIT.sub('', str(c)).zfill(6)[-6:] for c in self._macro_filtered_codes }
+            else:
+                self._macro_filtered_codes = []
+                self._macro_filtered_codes_set = set()
+            
+            if not is_auto_refresh:
+                logger.info(f"🎯 [RacingPanel] 宏查询匹配到 {len(self._macro_filtered_codes)} 只个股")
+                
+        except Exception as e:
+            logger.error(f"❌ [RacingPanel] Macro query failed: {e}")
+            self._macro_filtered_codes = []
+
+    def _on_history_group_changed(self):
+        """当历史分组切换时，加载新的查询列表并自动执行第一项"""
+        # [NEW] 切换分组时开启 auto_execute，实现“切换即刷新”
+        self._load_current_history_to_combo_with_tip(auto_execute=True)
+        self._trigger_save_ui()
+
+    def _load_current_history_to_combo_with_tip(self, auto_execute=False):
+        """加载历史查询记录 (只读模式)
+           auto_execute: 是否在加载后自动执行第一条记录 (用于切换分组场景)
+        """
+        if not hasattr(self, 'history_selector'): return
+        group = self.history_selector.currentText()
+        
+        curr_text = self.query_input.currentText()
+        self.query_input.blockSignals(True)
+        try:
+            self.query_input.clear()
+            if os.path.exists(SEARCH_HISTORY_FILE):
+                with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                group_data = data.get(group, [])
+                
+                # [FIX] 增加排序：确保时间戳最前的记录优先显示
+                if isinstance(group_data, list):
+                    # 按 ts 降序排序
+                    group_data = sorted(group_data, key=lambda x: x.get('ts', 0) if isinstance(x, dict) else 0, reverse=True)
+                    for item in group_data:
+                        if isinstance(item, dict):
+                            q = item.get("query", "")
+                            note = item.get("note", "")
+                            if q:
+                                # [NEW] 格式调整：备注优先且更醒目
+                                display_text = f"{note}  |  {q}" if note else q
+                                self.query_input.addItem(display_text, q)
+                        elif isinstance(item, str):
+                            self.query_input.addItem(item, item)
+                elif isinstance(group_data, dict):
+                    items = sorted(group_data.items(), key=lambda x: x[1].get('ts', 0), reverse=True)
+                    for q, info in items:
+                        note = info.get('note', '')
+                        display_text = f"{note} ({q})" if note else q
+                        self.query_input.addItem(display_text, q)
+                        
+            # [MOD] 逻辑差异化处理
+            if curr_text:
+                # 如果用户当前有输入，优先保留输入，不自动执行
+                self.query_input.setEditText(curr_text)
+            elif auto_execute and self.query_input.count() > 0:
+                # [NEW] 切换分组场景：自动加载第一条并触发查询
+                self.query_input.setCurrentIndex(0)
+                self.query_input.blockSignals(False) # 执行前提前解除阻塞
+                # [🚀 修复] 切换分组时强制重置宏过滤状态位，防止旧状态干扰
+                self._on_query_triggered()
+                return # 已处理完
+            else:
+                # 刷新场景：保持空状态
+                self.query_input.setCurrentIndex(-1)
+                if self.query_input.lineEdit():
+                    self.query_input.lineEdit().clear()
+                    
+        except Exception as e:
+            logger.error(f"Load history failed: {e}")
+        finally:
+            if self.query_input.signalsBlocked():
+                self.query_input.blockSignals(False)
+
+    # [READ-ONLY] 已移除右键菜单、删除项方法及事件过滤器
 
 
     def _on_pie_filter(self, category):
@@ -3368,7 +3761,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "sector_history": self._sector_history,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
                 "open_details_v2": open_windows,
-                "global_show_reason": self._global_show_reason
+                "global_show_reason": self._global_show_reason,
+                "last_query": self.query_input.currentText() if hasattr(self, 'query_input') else "",
+                "history_selector_index": self.history_selector.currentIndex() if hasattr(self, 'history_selector') else 4
             }
 
             # ==============================
@@ -3395,6 +3790,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _restore_ui_state(self):
         """[🚀 状态还原] 恢复全量布局与历史"""
+        # [NEW] 优先加载历史查询记录
+        self._load_current_history_to_combo_with_tip()
+
         try:
             conf = _get_racing_config()
             if not conf: return
@@ -3421,6 +3819,22 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             dedup_leader_enabled = conf.get("dedup_leader_enabled", True)
             if hasattr(self, 'check_dedup_leader'):
                 self.check_dedup_leader.setChecked(dedup_leader_enabled)
+
+            # [NEW] 恢复历史分组索引 (默认使用 history5)
+            history_idx = conf.get("history_selector_index", 4)
+            if hasattr(self, 'history_selector'):
+                self.history_selector.blockSignals(True)
+                self.history_selector.setCurrentIndex(history_idx)
+                self.history_selector.blockSignals(False)
+                # 切换索引后手动触发一次列表加载，确保历史下拉内容对齐
+                self._load_current_history_to_combo_with_tip()
+
+            # [NEW] 恢复最后一次查询条件
+            last_q = conf.get("last_query", "")
+            if last_q and hasattr(self, 'query_input'):
+                self.query_input.setEditText(last_q)
+                # 启动后延迟 1.5s 自动执行一次查询，等待数据泵首屏数据到达
+                QTimer.singleShot(1500, self._on_query_triggered)
             
             # 3. 恢复历史锚点并渲染按钮
             hist = conf.get("history", [])
@@ -3477,6 +3891,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             if open_list:
                 logger.info(f"🚀 [RacingPanel] 已通过原子协议恢复 {len(open_list)} 个详情窗口。")
+
+            # [NEW] 恢复最后一次宏查询 (1.5s 后执行以确保行情已到位)
+            if "last_query" in conf and conf["last_query"]:
+                self.query_input.setEditText(conf["last_query"])
+                QTimer.singleShot(1500, self._on_query_triggered)
                 # [🚀 深度补丁] 增加非空与属性校验，防止启动过快导致的 NoneType 崩溃
                 if self.detector and hasattr(self.detector, '_tick_series'):
                      if len(self.detector._tick_series) > 0:
@@ -3830,6 +4249,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         try:
             with self.detector._lock:
                 raw_ts_list = list(self.detector._tick_series.values())
+
+                # [READ-ONLY] 宏观查询不再在此处拦截 raw_ts_list，确保后续聚合逻辑使用全量数据
+
                 # [🚀 核心对齐] 获取实时数据的副本并注入面板级锚点，防止被 Detector 异步重写导致涨跌数据归零
                 active_sectors = []
                 for sec_name, sec_dict in self.detector.active_sectors.items():
@@ -3906,9 +4328,29 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     else:
                         sec['leader_pct_diff'] = 0.0
 
+            # [NEW] 🧬 UI 阶段过滤：仅在显示前对板块表进行裁切
+            if self._is_macro_active:
+                # 判定逻辑：如果该板块的龙头或其展示的跟随股中有任何一个命中过滤，则保留该板块
+                filtered_sectors = []
+                for sec in active_sectors:
+                    involved = [sec.get('leader')] + [f.get('code') for f in sec.get('followers', []) if isinstance(f, dict)]
+                    # 补充对 followers 是字符串列表的兼容
+                    if not any(isinstance(f, dict) for f in sec.get('followers', [])):
+                         involved += [self._name_index.get(f) for f in sec.get('followers', []) if isinstance(f, str)]
+                    
+                    if any(c in self._macro_filtered_codes_set for c in involved if c):
+                        filtered_sectors.append(sec)
+                active_sectors = filtered_sectors
+
             # --- 2. [WORK-ZONE] 锁外分析计算 ---
             # 宽放个股显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股
-            active_ts = [ts for ts in raw_ts_list if abs(ts.current_pct) > 0.001 or ts.score > 0.05 or ts.momentum_score > 0]
+            # [NEW] 🧬 UI 阶段过滤：先按原有流程跑完活跃筛选
+            if self._is_macro_active:
+                # 宏观过滤模式下，允许穿透展示所有匹配个股 (不受 0.001/0.05 等活跃阈值限制)
+                active_ts = [ts for ts in raw_ts_list if ts.code in self._macro_filtered_codes_set]
+            else:
+                # 原有流程：仅展示活跃个股 (宽放显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股)
+                active_ts = [ts for ts in raw_ts_list if abs(ts.current_pct) > 0.001 or ts.score > 0.05 or ts.momentum_score > 0]
             dist = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 0}
             
             filtered_ts = []
@@ -4015,6 +4457,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     key=lambda x: (get_sec_val(x, s_attr_sec), x.get('sector', '')), 
                     reverse=is_rev_sec
                 )
+
+                # [NEW] 宏观查询模式下，板块表仅展示其领涨股命中过滤条件的板块
+                if self._is_macro_active:
+                    all_sorted_sectors = [s for s in all_sorted_sectors if s.get('leader') in self._macro_filtered_codes]
 
                 # [🚀 标注建议] 根据开关执行龙头去重逻辑
                 unique_leader_sectors = []

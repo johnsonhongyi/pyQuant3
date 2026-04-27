@@ -99,7 +99,9 @@ class PandasQueryEngine:
             'max': self._greatest, 'min': self._least, 'abs': np.abs
         }
         col_map = {
-            'lastp0d': ['close', 'lastp0d'], 'lastp1d': ['lastp1d', 'lastp'], 'lastp2d': ['lastp2d'],
+            'lastp0d': ['close', 'trade', 'now', 'lastp0d'], 'lastp1d': ['lastp1d', 'lastp'], 'lastp2d': ['lastp2d'],
+            'close': ['close', 'trade', 'now', 'lastp0d'], 'now': ['now', 'trade', 'close', 'lastp0d'],
+            'percent': ['percent', 'pct', 'per1d'], 'pct': ['pct', 'percent', 'per1d'],
             'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
             'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
             'green': ['gren', 'green'], 'red': ['red']
