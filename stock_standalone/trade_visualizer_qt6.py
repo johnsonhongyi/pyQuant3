@@ -1506,13 +1506,13 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
 
     print("[IPC] realtime_worker_process exited cleanly")
 
-def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFrame:
     """
     统一 DataFrame 结构（最终稳定版）：
 
     输出保证：
     - 存在列：code, date
-    - date 类型：datetime64[ns]，粒度为 YYYY-MM-DD（normalize）
+    - date 类型：datetime64[ns]，根据参数决定是否 normalize 至 YYYY-MM-DD
     - 不混用 str / Timestamp
     - 可直接 set_index('date') + sort_index()
 
@@ -1568,9 +1568,12 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # ---------- 2. 时间统一转 datetime ----------
     ts = pd.to_datetime(ts, errors='coerce')
 
-    # ---------- 3. 统一成“日粒度 YYYY-MM-DD” ----------
+    # ---------- 3. 统一成“日粒度 YYYY-MM-DD” (仅在需要时) ----------
     if 'date' in df.columns:
-        df['date'] = ts.dt.normalize()
+        if normalize:
+            df['date'] = ts.dt.normalize()
+        else:
+            df['date'] = ts
 
         # ---------- 4. 清洗非法数据 ----------
         df = df.dropna(subset=['date'])
@@ -6606,14 +6609,17 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if day_df is not None and not day_df.empty:
             local_day_df = day_df.copy()
+            # [FIX] 按照用户要求：无论何种模式，索引格式都统一为 %Y-%m-%d (KISS)
             local_day_df.index = pd.to_datetime(local_day_df.index).strftime('%Y-%m-%d')
+
             # 统一列名: volume -> vol
             if 'volume' in local_day_df.columns and 'vol' not in local_day_df.columns:
                 local_day_df['vol'] = local_day_df['volume']
 
             # 盘中剥离今日（如有），由后续实时 Tick 重新构建，确保极值精度
+            # [FIX] 仅针对日线周期执行剥离。非日线周期（如周线、分时）保留最后一行以便“幽灵K”模式更新最后一根 Bar
             today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
-            if is_intraday or self._debug_realtime:
+            if (is_intraday or self._debug_realtime) and self.resample == 'd':
                 local_day_df = local_day_df[local_day_df.index < today_str]
 
         # 2. ⚡ 信号缓存刷新 (依赖 local_day_df 的索引)
@@ -6646,7 +6652,19 @@ class MainWindow(QMainWindow, WindowMixin):
                     local_day_df.index = [today_idx]
                 else:
                     today_bar_aligned = today_bar.reindex(columns=local_day_df.columns, fill_value=0)
-                    local_day_df.loc[today_idx] = today_bar_aligned.iloc[0]
+                    
+                    # [FIX] 幽灵K整合逻辑增强：支持周/月等非日线周期的“智能末尾更新”
+                    # 检查最后一行是否属于同一个周期（如同一周、同一月）
+                    last_idx = local_day_df.index[-1]
+                    if self._check_is_same_period(last_idx, today_idx):
+                        # 属于同一个周期，执行融合 (补到最后一周/月上)
+                        target_idx = last_idx
+                        new_row = today_bar_aligned.iloc[0]
+                        self._update_day_df_row_with_ghost_logic(local_day_df, target_idx, new_row)
+                    else:
+                        # 不同周期则追加 (如周一新起一根周线，或者日线下切换到新的一天)
+                        # 注意：索引依然遵循统一要求的 %Y-%m-%d
+                        local_day_df.loc[today_idx] = today_bar_aligned.iloc[0]
 
         # 5. ⚡ 统一状态赋值并执行唯一渲染
         if not local_day_df.empty:
@@ -6759,26 +6777,28 @@ class MainWindow(QMainWindow, WindowMixin):
                         today_bar[col] = stock_row[col]
 
         # 4. ⚡ “高水位”合并机制 (High-water mark merger)
-        if today_idx in self.day_df.index:
-            new_row = today_bar.iloc[0]
-            # --- 极值保护核心逻辑 ---
-            # High 采用最大值，Low 采用最小值，Close 采用最新值，防止数据包延迟导致 K 线“缩水”
-            if pd.notna(new_row.get('high')):
-                self.day_df.at[today_idx, 'high'] = max(self.day_df.at[today_idx, 'high'], new_row['high'])
-            if pd.notna(new_row.get('low')):
-                self.day_df.at[today_idx, 'low'] = min(self.day_df.at[today_idx, 'low'], new_row['low']) if self.day_df.at[today_idx, 'low'] > 0 else new_row['low']
-            
-            # Open 只在原先为空时更新
-            if pd.isna(self.day_df.at[today_idx, 'open']) or self.day_df.at[today_idx, 'open'] <= 0:
-                self.day_df.at[today_idx, 'open'] = new_row.get('open', 0)
-                
-            # Close 和 Volume 始终相信最新包
-            self.day_df.at[today_idx, 'close'] = new_row.get('close', self.day_df.at[today_idx, 'close'])
-            self.day_df.at[today_idx, 'vol'] = max(self.day_df.at[today_idx, 'vol'], new_row.get('vol', 0))
+        is_existing = False
+        target_idx = today_idx
+        
+        if not self.day_df.empty:
+            last_idx = self.day_df.index[-1]
+            if self._check_is_same_period(last_idx, today_idx):
+                is_existing = True
+                target_idx = last_idx
+            else:
+                is_existing = False
+                target_idx = today_idx
         else:
-            # 索引对齐追加
+            is_existing = False
+            target_idx = today_idx
+
+        if is_existing:
+            new_row = today_bar.iloc[0]
+            self._update_day_df_row_with_ghost_logic(self.day_df, target_idx, new_row)
+        else:
+            # 索引对齐追加 (遵循统一的 %Y-%m-%d 格式)
             today_bar_aligned = today_bar.reindex(columns=self.day_df.columns, fill_value=0)
-            self.day_df.loc[today_idx] = today_bar_aligned.iloc[0]
+            self.day_df.loc[target_idx] = today_bar_aligned.iloc[0]
 
         # 5. ⚡ 节流渲染
         now = time.time()
@@ -6833,33 +6853,36 @@ class MainWindow(QMainWindow, WindowMixin):
                         today_bar[col] = stock_row[col].iloc[0]
 
         # --- 4. 合并到主数据集 ---
-        # ⭐ [FIX] 前置去重：确保主数据集索引唯一，防止 .loc 赋值时因重复索引产生 slice/报错
+        # ⭐ [FIX] 前置去重：确保主数据集索引唯一
         if self.day_df.index.duplicated().any():
             self.day_df = self.day_df[~self.day_df.index.duplicated(keep='last')]
 
-        last_day = self.day_df.index[-1] if not self.day_df.empty else None
-
-        if last_day == today_idx:
-            # 覆盖当天最后一行
-            today_row = today_bar.iloc[0]
-            for col in self.day_df.columns:
-                if col in today_row.index and pd.notna(today_row[col]):
-                    # ⭐ [FIX] 如果是 open，且当前已有有效值，不轻易覆盖，防止被 segment 里的第一笔价格带歪
-                    if col == 'open' and pd.notna(self.day_df.loc[today_idx, col]) and self.day_df.loc[today_idx, col] > 0:
-                        continue
-                    self.day_df.loc[today_idx, col] = today_row[col]
-            logger.debug(f"[RT] Updated today's bar for {code}")
+        # [FIX] 考虑周线/月线等非日线周期的合并逻辑 (同周期判定)
+        is_existing = False
+        target_idx = today_idx
+        if not self.day_df.empty:
+            last_idx = self.day_df.index[-1]
+            if self._check_is_same_period(last_idx, today_idx):
+                is_existing = True
+                target_idx = last_idx
+            else:
+                is_existing = False
+                target_idx = today_idx
         else:
-            # 新增一行 (第二天或者刚从历史加载完成)
-            # 确保列顺序和类型对齐
+            is_existing = False
+            target_idx = today_idx
+
+        if is_existing:
+            # 覆盖/更新最后一行 (属于同一个周/月周期)
+            today_row = today_bar.iloc[0]
+            self._update_day_df_row_with_ghost_logic(self.day_df, target_idx, today_row)
+            logger.debug(f"[RT] Updated period bar for {code} (resample:{self.resample})")
+        else:
+            # 新增一行 (新的一天或新的一周)
             today_bar_aligned = today_bar.reindex(columns=self.day_df.columns)
+            today_bar_aligned.index = [target_idx]
             self.day_df = pd.concat([self.day_df, today_bar_aligned])
-            
-            # 再次去重加固（防止 concat 引入重复）
-            if self.day_df.index.duplicated().any():
-                self.day_df = self.day_df[~self.day_df.index.duplicated(keep='last')]
-                
-            logger.debug(f"[RT] Appended today's bar for {code}")
+            logger.debug(f"[RT] Appended new period bar for {code} (resample:{self.resample})")
 
         # --- 5. 渲染图表 (节流优化) ---
         now = time.time()
@@ -6878,6 +6901,54 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
 
+
+    def _check_is_same_period(self, date1, date2):
+        """[HELPER] 判断两个日期是否属于 self.resample 定义下的同一个周期"""
+        if not date1 or not date2: return False
+        try:
+            d1 = pd.to_datetime(date1)
+            d2 = pd.to_datetime(date2)
+            
+            if self.resample == 'd':
+                return d1.strftime('%Y-%m-%d') == d2.strftime('%Y-%m-%d')
+            elif self.resample == 'w':
+                # 判断是否属于同一个自然周 (pandas 默认周一为起点)
+                return d1.to_period('W') == d2.to_period('W')
+            elif self.resample == 'm':
+                # 判断是否属于同一个月
+                return d1.to_period('M') == d2.to_period('M')
+            else:
+                # 2d, 3d 等自定义周期，目前逻辑回退到按天比对
+                return d1.strftime('%Y-%m-%d') == d2.strftime('%Y-%m-%d')
+        except Exception as e:
+            logger.error(f"[PeriodCheck] Error comparing {date1} and {date2}: {e}")
+            return False
+
+    def _update_day_df_row_with_ghost_logic(self, df, idx, new_row):
+        """[HELPER] 统一的高水位合并逻辑 (Ghost K 线专用)"""
+        # --- 极值保护核心逻辑 ---
+        if pd.notna(new_row.get('high')):
+            df.at[idx, 'high'] = max(df.at[idx, 'high'], new_row['high'])
+        if pd.notna(new_row.get('low')):
+            # 如果原先是 0，则直接用 new_row
+            old_low = df.at[idx, 'low']
+            df.at[idx, 'low'] = min(old_low, new_row['low']) if old_low > 0 else new_row['low']
+        
+        # Open 只在原先为空或 0 时更新
+        if pd.isna(df.at[idx, 'open']) or df.at[idx, 'open'] <= 0:
+            df.at[idx, 'open'] = new_row.get('open', 0)
+            
+        # Close 和 Volume 始终相信最新包
+        df.at[idx, 'close'] = new_row.get('close', df.at[idx, 'close'])
+        
+        # 对于 Volume，由于 today_bar 是当日累计，这里根据 resample 决定是累加还是替换
+        if self.resample == 'd':
+            df.at[idx, 'vol'] = max(df.at[idx, 'vol'], new_row.get('vol', 0))
+        else:
+            # 非日线模式下，我们这里的 new_row 依然是当日累计
+            # 实际上对于周线月线，我们需要的是累加。
+            # 这里简单起见，依然取 max，因为 new_row 的 vol 会随时间增长
+            df.at[idx, 'vol'] = max(df.at[idx, 'vol'], new_row.get('vol', 0))
 
     def _init_theme_selector(self):
         self.toolbar.addSeparator()
@@ -9988,7 +10059,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         # ⚡ [CRITICAL] 提前数据标准化与排序，确保后续所有逻辑基于一致的坐标系
-        day_df = _normalize_dataframe(day_df)
+        day_df = _normalize_dataframe(day_df, normalize=(self.resample == 'd'))
         if 'date' in day_df.columns:
             day_df = day_df.set_index('date')
         day_df = day_df.sort_index()
