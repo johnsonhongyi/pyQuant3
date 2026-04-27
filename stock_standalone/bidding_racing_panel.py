@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGraphicsDropShadowEffect, QPushButton,
-    QMenu, QApplication, QDialog, QSplitter, QComboBox, QFileDialog, QMessageBox
+    QMenu, QApplication, QDialog, QSplitter, QComboBox, QFileDialog, QMessageBox,
+    QScrollArea, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF, QSize, QTimer, QByteArray
 from PyQt6.QtGui import (
@@ -2280,10 +2281,52 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         sec_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #00FFCC;")
         sec_title_lay.addWidget(sec_title)
         
-        self.history_layout = QHBoxLayout()
-        self.history_layout.setSpacing(10)
-        sec_title_lay.addLayout(self.history_layout)
-        sec_title_lay.addStretch(1)
+        # [🚀 新增] 自动重置开关
+        self.check_auto_reset = QCheckBox("重置")
+        self.check_auto_reset.setChecked(True)
+        self.check_auto_reset.setStyleSheet("""
+            QCheckBox { color: #BBB; font-size: 11px; font-weight: bold; spacing: 5px; }
+            QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #555; background: #2C2C2E; }
+            QCheckBox::indicator:checked { background: #00FFCC; border-color: #00FFCC; image: url(none); }
+            QCheckBox:hover { color: white; }
+        """)
+        self.check_auto_reset.stateChanged.connect(lambda: self._trigger_save_ui())
+        sec_title_lay.addWidget(self.check_auto_reset)
+        
+        sec_title_lay.addSpacing(10)
+
+        # [🚀 新增] 龙头去重开关
+        self.check_dedup_leader = QCheckBox("龙头")
+        self.check_dedup_leader.setChecked(True)
+        self.check_dedup_leader.setStyleSheet("""
+            QCheckBox { color: #BBB; font-size: 11px; font-weight: bold; spacing: 5px; }
+            QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #555; background: #2C2C2E; }
+            QCheckBox::indicator:checked { background: #00FFCC; border-color: #00FFCC; image: url(none); }
+            QCheckBox:hover { color: white; }
+        """)
+        self.check_dedup_leader.stateChanged.connect(lambda: self._trigger_save_ui())
+        sec_title_lay.addWidget(self.check_dedup_leader)
+        
+        sec_title_lay.addSpacing(10)
+        
+        # [🚀 历史起点滚动区域] 解决起点过多导致的显示问题
+        self.history_scroll = QScrollArea()
+        self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setFixedHeight(42)
+        self.history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.history_scroll.setStyleSheet("background: transparent;")
+        self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.history_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.history_scroll.horizontalScrollBar().setStyleSheet(GLOBAL_SCROLLBAR_STYLE)
+        
+        history_container = QWidget()
+        history_container.setStyleSheet("background: transparent;")
+        self.history_layout = QHBoxLayout(history_container)
+        self.history_layout.setContentsMargins(5, 2, 5, 2)
+        self.history_layout.setSpacing(8)
+        
+        self.history_scroll.setWidget(history_container)
+        sec_title_lay.addWidget(self.history_scroll, stretch=1)
         
         bottom_lay.addLayout(sec_title_lay)
         
@@ -2920,8 +2963,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # 始终按时间排序
         self._anchor_history.sort(key=lambda x: x.get('ts', 0))
         
-        # 保持 50 个槽位 (最多保留 50 个)
-        if len(self._anchor_history) > 50:
+        # 保持 100 个槽位 (最多保留 100 个)
+        if len(self._anchor_history) > 100:
             self._anchor_history.pop(0)
             
         self._refresh_history_buttons()
@@ -2937,8 +2980,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     item.widget().deleteLater()
             
             total_count = len(self._anchor_history)
-            # [🚀 界面优化] 界面只显示最新的 8 个
-            display_count = 8
+            # [🚀 界面优化] 界面显示最近的 50 个点，配合 ScrollArea 滚动
+            display_count = 50
             start_idx = max(0, total_count - display_count)
             
             # 重新生成按钮
@@ -2981,6 +3024,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 
             # [🚀 几何诊断] 确保布局及时刷新
             self.history_layout.update()
+            
+            # [🚀 自动滚动] 默认滚动到最右侧（最新起点）
+            if hasattr(self, 'history_scroll'):
+                QTimer.singleShot(100, lambda: self.history_scroll.horizontalScrollBar().setValue(
+                    self.history_scroll.horizontalScrollBar().maximum()
+                ))
         except Exception as e:
             logger.error(f"❌ [Panel] RefreshButtons Error: {e}")
 
@@ -3294,8 +3343,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "header_stock": state_stock,
                 "header_sector": state_sector,
                 "splitter_main": self.main_splitter.saveState().toHex().data().decode(),
-                "history": self._anchor_history[-25:],
+                "history": self._anchor_history[-100:],
                 "current_anchor_ts": self._current_anchor_ts,
+                "auto_reset_enabled": self.check_auto_reset.isChecked(),
+                "dedup_leader_enabled": self.check_dedup_leader.isChecked(), # [NEW] 保存龙头去重开关状态
                 "reset_cycle": self._reset_cycle_mins,
                 "sector_history": self._sector_history,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
@@ -3342,9 +3393,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if "header_sector" in conf:
                 self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_sector"].encode()))
             
-            # 2. 恢复重置周期
+            # 2. 恢复重置周期与开关
             self._reset_cycle_mins = conf.get("reset_cycle", 60)
             self.cycle_label.setText(f"📊 起点参考周期: {self._reset_cycle_mins}m")
+            
+            auto_reset_enabled = conf.get("auto_reset_enabled", True)
+            if hasattr(self, 'check_auto_reset'):
+                self.check_auto_reset.setChecked(auto_reset_enabled)
+                
+            dedup_leader_enabled = conf.get("dedup_leader_enabled", True)
+            if hasattr(self, 'check_dedup_leader'):
+                self.check_dedup_leader.setChecked(dedup_leader_enabled)
             
             # 3. 恢复历史锚点并渲染按钮
             hist = conf.get("history", [])
@@ -3592,30 +3651,46 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if not self.detector: return
         if self._is_rendering: return
         
+        curr_time = getattr(self.detector, 'last_data_ts', 0)
+        
         # --- [⚡ 核心生命周期：心跳驱动自启动逻辑] ---
         with self.detector._lock:
             has_data = len(self.detector._tick_series) > 0
             
         if has_data:
-            # A. 恢复今日已有历史
+            # A. 恢复今日已有历史 (日期敏感)
             if self._auto_restore_pending:
                 self._auto_restore_pending = False
-                last_idx = len(self._anchor_history) - 1
-                if self._apply_history_anchor(last_idx):
-                    logger.info(f"🚀 [Panel] 行情心跳到达，成功同步今日历史起点 ({last_idx+1})。")
-                else:
-                    logger.debug("⚠️ [Panel] 行情到达但尝试恢复历史失败。")
+                if self._anchor_history:
+                    last_snap = self._anchor_history[-1]
+                    # 判断最后一点是否是今日
+                    dt_last = datetime.datetime.fromtimestamp(last_snap.get('ts', 0)).date()
+                    dt_now = datetime.datetime.fromtimestamp(curr_time).date()
+                    
+                    if dt_last == dt_now:
+                        last_idx = len(self._anchor_history) - 1
+                        if self._apply_history_anchor(last_idx):
+                            logger.info(f"🚀 [Panel] 检测到今日历史，已自动同步至最近起点 ({last_idx+1})。")
+                    else:
+                        logger.debug(f"ℹ️ [Panel] 历史最后一点为 {dt_last}，非今日({dt_now})，跳过自动恢复。")
             
-            # B. 启动时自动捕捉首个新起点 (如果历史为空或日期更迭)
+            # B. 启动时自动捕捉首个新起点 (如果今日历史为空)
             elif self._auto_capture_today_first:
-                self._auto_capture_today_first = False # 仅执行一次
-                if not self._anchor_history:
+                self._auto_capture_today_first = False 
+                
+                # 检查今日是否有记录
+                has_today = False
+                if self._anchor_history:
+                    dt_last = datetime.datetime.fromtimestamp(self._anchor_history[-1].get('ts', 0)).date()
+                    dt_now = datetime.datetime.fromtimestamp(curr_time).date()
+                    if dt_last == dt_now: has_today = True
+                
+                if not has_today:
                     snap = self._create_anchor_snapshot()
-                    # 确保个股数足够
                     if snap and len(snap.get("c", [])) > 10:
                         self._add_to_history(snap)
-                        self._apply_history_anchor(0)
-                        logger.info("✨ [Panel] 启动观测到首波行情，已自动创建并激活今日首个起点。")
+                        self._apply_history_anchor(len(self._anchor_history)-1)
+                        logger.info("✨ [Panel] 启动观测到今日首波行情，已自动创建并激活今日首个起点。")
             
             # C. 处理之前的待处理强制恢复任务 (用户点击驱动)
             if self._pending_auto_restore_idx >= 0:
@@ -3667,7 +3742,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     """)
 
         curr_ver = getattr(self.detector, 'data_version', 0)
-        curr_time = getattr(self.detector, 'last_data_ts', 0)
         
         # [NEW] 同步赛马竞技进度时间轴
         if curr_time > 0 and hasattr(self, 'timeline'):
@@ -3690,8 +3764,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             except:
                 pass
             
-        # [NEW] 周期性自动重置基准锚点
-        if curr_time > 0 and time_hhmm > 0:
+        # [NEW] 周期性自动重置基准锚点 (仅在开关开启时执行)
+        if self.check_auto_reset.isChecked() and curr_time > 0 and time_hhmm > 0:
             if self._last_anchor_reset_data_ts == 0:
                 self._last_anchor_reset_data_ts = curr_time
             
@@ -3925,9 +3999,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     reverse=is_rev_sec
                 )
 
-                # [🚀 标注建议] 移除强力的龙头去重逻辑，防止强核心驱动下其他强势概念被隐藏
+                # [🚀 标注建议] 根据开关执行龙头去重逻辑
                 unique_leader_sectors = []
+                seen_leaders = set()
+                do_dedup = self.check_dedup_leader.isChecked()
+                
                 for sec in all_sorted_sectors:
+                    l_code = sec.get('leader', '')
+                    if do_dedup and l_code:
+                        if l_code in seen_leaders:
+                            continue
+                        seen_leaders.add(l_code)
+                    
                     unique_leader_sectors.append(sec)
                     if len(unique_leader_sectors) >= 20:
                         break
