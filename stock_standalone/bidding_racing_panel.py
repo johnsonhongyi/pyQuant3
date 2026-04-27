@@ -3145,6 +3145,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             return applied_count > 0
         return False
 
+    def showEvent(self, event):
+        """[⭐ 监控授权] 窗口显示时，授权 Detector 开启后台自动联动"""
+        super().showEvent(event)
+        if hasattr(self, 'detector') and self.detector:
+            self.detector.enable_background_linkage = True
+            logger.info("📡 Racing Panel: Background Linkage AUTHORIZED.")
+
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行原子联行保存"""
         # 1. 强制执行一次安全的原子持久化
@@ -3184,9 +3191,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # ✅ 发射关闭信号
         self.closed.emit()
         
+        # [⭐ 权限回收] 彻底关闭后台自动联动，防止灵异切换
+        if hasattr(self, 'detector') and self.detector:
+            self.detector.enable_background_linkage = False
+            logger.info("📡 Racing Panel: Background Linkage REVOKED.")
+            
+        super().closeEvent(event)
+        
         # ✅ 关键：允许 Qt 删除对象
         self.deleteLater()
-        super().closeEvent(event)
 
         # [🚀 方案 3] 强制主进程退出保护 (仅针对 test_bidding_replay 这种独立工具模式)
         # 如果 parent 为 None，说明是作为独立窗口运行的

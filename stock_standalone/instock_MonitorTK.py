@@ -4554,7 +4554,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
             
         logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
-        
+        if code != getattr(self, 'select_code', None):
+            self.select_code = code
         # =========================
         # 0. 基础过滤（UI线程安全）
         # =========================
