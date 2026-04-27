@@ -72,10 +72,64 @@ _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
 
 from PyQt6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
-from PyQt6.QtGui import QPainter, QPen, QColor
+from PyQt6.QtGui import QPainter, QPen, QColor, QPalette
 from PyQt6.QtCore import QRect, pyqtSignal
 
-# [READ-ONLY] 宏观查询采用标准模式，不再使用自定义委托
+
+class HitHighlightDelegate(QStyledItemDelegate):
+    """只将 [Hit: N] 部分渲染为蓝色，其余文字保持默认颜色"""
+    HIT_COLOR = QColor("#00BFFF")
+    HIT_MARKER = "[Hit:"
+
+    def paint(self, painter, option, index):
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        self.initStyleOption(option, index)
+
+        # 先用默认逻辑画背景（选中/悬停效果）
+        style = option.widget.style() if option.widget else QApplication.style()
+        opt_no_text = QStyleOptionViewItem(option)
+        opt_no_text.text = ""  # 不让默认渲染画文字
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt_no_text, painter, option.widget)
+
+        painter.save()
+        rect = option.rect.adjusted(6, 0, -4, 0)
+        fm = painter.fontMetrics()
+
+        # 确定正文颜色（选中时用 HighlightedText，否则用 Text）
+        if option.state & QStyle.StateFlag.State_Selected:
+            normal_color = option.palette.color(QPalette.ColorRole.HighlightedText)
+        else:
+            normal_color = option.palette.color(QPalette.ColorRole.Text)
+
+        hit_pos = text.find(self.HIT_MARKER)
+        if hit_pos >= 0:
+            # 三段分割: [正文] [Hit: ] [数字]
+            colon_pos = text.find(': ', hit_pos)
+            if colon_pos >= 0:
+                normal_part = text[:colon_pos + 2]   # 包含 '[Hit: '
+                blue_part   = text[colon_pos + 2:]   # 只有数字及 ']'
+            else:
+                normal_part = text[:hit_pos]
+                blue_part   = text[hit_pos:]
+
+            # 正文部分（白色）
+            painter.setPen(normal_color)
+            normal_w = fm.horizontalAdvance(normal_part)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, normal_part)
+
+            # 数字部分（蓝色）
+            painter.setPen(self.HIT_COLOR)
+            hit_rect = rect.adjusted(normal_w, 0, 0, 0)
+            painter.drawText(hit_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, blue_part)
+        else:
+            painter.setPen(normal_color)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        sh = super().sizeHint(option, index)
+        return sh
 
 GLOBAL_SCROLLBAR_STYLE = """
 QScrollBar:vertical {
@@ -2283,11 +2337,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             }
             QComboBox QAbstractItemView { 
                 background-color: #2C2C2E; color: #FFF; selection-background-color: #005BB7; 
+                selection-color: white;
                 outline: none; border: 1px solid #555;
             }
             QLineEdit { background-color: transparent; color: #EEE; border: none; }
             QComboBox:hover { border: 1px solid #00FFCC; }
         """)
+        self.query_input.view().setItemDelegate(HitHighlightDelegate(self.query_input))
         query_bar.addWidget(self.query_input)
 
         # 4. 清空按钮
@@ -2311,6 +2367,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """)
         self.btn_query_exec.clicked.connect(self._on_query_triggered)
         query_bar.addWidget(self.btn_query_exec)
+        
+        # 6. 测试按钮
+        self.btn_query_test = QPushButton("🧪测试")
+        self.btn_query_test.setFixedWidth(70)
+        self.btn_query_test.setToolTip("输入代码测试个股，或直接点击测试全量数据以查看命中数")
+        self.btn_query_test.setStyleSheet("""
+            QPushButton { background-color: #6C7A89; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #8C9CAB; }
+        """)
+        self.btn_query_test.clicked.connect(self._on_query_test_triggered)
+        query_bar.addWidget(self.btn_query_test)
         
         query_bar.addStretch()
         main_layout.addLayout(query_bar)
@@ -2734,6 +2801,123 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             logger.error(f"❌ [RacingPanel] Macro query failed: {e}")
             self._macro_filtered_codes = []
 
+    def _on_query_test_triggered(self):
+        """测试指定代码或全局数据，计算下拉菜单中各历史条件的命中数量"""
+        # 1. 寻找数据源 (df_all)
+        df = None
+        if self.main_app and hasattr(self.main_app, 'df_all'):
+            df = self.main_app.df_all
+        elif self.detector and hasattr(self.detector, 'main_app'):
+            df = self.detector.main_app.df_all
+        elif hasattr(self, 'df_all'):
+            df = self.df_all
+            
+        if df is None or df.empty:
+            return
+
+        df_code = df.copy() # 避免污染原数据
+        
+        # 2. 动态行情同步 (确保测试时的字段与赛马过滤字段完全一致)
+        if self.detector and self.detector._tick_series:
+            is_simulation = getattr(self.detector, 'simulation_mode', False)
+            with self.detector._lock:
+                updates = {}
+                for c in df_code.index:
+                    ts = self.detector._tick_series.get(c)
+                    if not ts: continue
+                    updates[c] = {
+                        'score': ts.score,
+                        'momentum': ts.momentum_score,
+                        'vol_ratio': ts.vol_ratio,
+                        'ratio': ts.vol_ratio,
+                        'pct_diff': ts.pct_diff
+                    }
+                    if is_simulation:
+                        updates[c].update({
+                            'pct': ts.current_pct,
+                            'percent': ts.current_pct,
+                            'close': ts.current_price,
+                            'now': ts.current_price,
+                            'lastp0d': ts.current_price,
+                            'trade': ts.current_price,
+                            'price': ts.current_price,
+                            'open': ts.open_price
+                        })
+                if updates:
+                    up_df = pd.DataFrame.from_dict(updates, orient='index')
+                    for col in up_df.columns:
+                        df_code[col] = up_df[col]
+
+        # 3. 确定测试目标
+        code = self.query_input.currentText().strip()
+        if ' | ' in code:
+            code = code.split(' | ')[1].strip()
+        elif '(' in code and code.endswith(')'):
+            m = _RE_QUERY_BRACKET.match(code)
+            if m: code = m.group(2).strip()
+
+        is_single_stock = False
+        if code.isdigit() and len(code) == 6:
+            if code in df_code.index:
+                df_code = df_code.loc[[code]]
+                is_single_stock = True
+            else:
+                try: from gui_utils import toast_message; toast_message(self, f"未找到代码 {code}")
+                except: pass
+                return
+
+        from query_engine_util import query_engine
+        from PyQt6.QtGui import QColor
+        
+        # 4. 遍历下拉框中的所有历史条件，进行测试
+        self.query_input.blockSignals(True)
+        try:
+            for i in range(self.query_input.count()):
+                query_item = self.query_input.itemText(i)
+                query_data = self.query_input.itemData(i)
+                
+                query = query_data if query_data else query_item
+                
+                # 剥离旧的 hit 标签
+                query_display = query_item
+                if ' [Hit:' in query_display:
+                    query_display = query_display.split(' [Hit:')[0]
+                
+                # 解析逻辑部分
+                real_query = query
+                if ' | ' in real_query:
+                    parts = real_query.split(' | ', 1)
+                    if any(op in parts[1].lower() for op in ['>', '<', '=', '&', '|', 'and', 'or', 'close', 'pct', 'score']):
+                        real_query = parts[1]
+                
+                hit_count = 0
+                if real_query:
+                    try:
+                        res = query_engine.execute(df_code, real_query)
+                        if res is not None and not res.empty:
+                            hit_count = len(res)
+                    except Exception:
+                        pass
+                
+                # 更新显示文本
+                hit_str = f"[{hit_count}]" if is_single_stock else str(hit_count)
+                new_text = f"{query_display} [Hit: {hit_str}]"
+                self.query_input.setItemText(i, new_text)
+                self.query_input.setItemData(i, query_data, Qt.ItemDataRole.UserRole)
+                
+            try:
+                from gui_utils import toast_message
+                if is_single_stock:
+                    toast_message(self, f"✅ 已测试代码 {code}，请下拉菜单查看各条件的命中情况")
+                else:
+                    toast_message(self, "✅ 策略命中测试完成，请下拉菜单查看各条件的命中数量")
+            except: pass
+            
+        finally:
+            self.query_input.blockSignals(False)
+            
+        logger.info(f"🧪 [RacingPanel] Test query completed. Single_stock={is_single_stock}")
+
     def _on_history_group_changed(self):
         """当历史分组切换时，加载新的查询列表并自动执行第一项"""
         # [NEW] 切换分组时开启 auto_execute，实现“切换即刷新”
@@ -2799,6 +2983,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         finally:
             if self.query_input.signalsBlocked():
                 self.query_input.blockSignals(False)
+            
+            # [🚀 新增] 刷新或加载完毕后，自动执行命中测试
+            if not auto_execute:
+                QTimer.singleShot(50, self._on_query_test_triggered)
 
     # [READ-ONLY] 已移除右键菜单、删除项方法及事件过滤器
 
