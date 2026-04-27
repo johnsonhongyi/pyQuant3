@@ -412,6 +412,7 @@ class BiddingMomentumDetector:
         self._is_ready = False if lazy_load else True
         self._loading_thread = None
         self.silent_mode = silent_mode # [NEW] 集成模式下抑制重复日志打印
+        self.enable_background_linkage = False # [NEW] 是否允许后台自动联动 (默认关闭，仅在赛马面板开启时授权)
 
         # ---- 策略参数：支持动态配置 ----
         self.strategies: Dict[str, Dict[str, Any]] = {
@@ -1793,8 +1794,9 @@ class BiddingMomentumDetector:
                 })
                 seen.add(code)
                 # [FIX] 仅在非复盘模式下投递联动，防止历史加载时队列溢出
-                if not self.in_history_mode:
-                    self.link_manager.push(code)
+                if not self.in_history_mode and self.enable_background_linkage:
+                    # [ROOT-FIX] 标记为 auto=True 启用节流与去重，解决后台自动刷新导致的“灵异联动”
+                    self.link_manager.push(code, auto=True)
         
         # [UPGRADE] 今日全局势能排序 Top 30
         potential_today.sort(key=lambda x: x['score'], reverse=True)

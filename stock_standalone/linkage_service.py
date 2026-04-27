@@ -115,6 +115,7 @@ class LinkageManagerProxy:
     def _init(self):
         _multiprocessingQueue = getattr(cct, "multiprocessingQueue", 300)
         self.queue = multiprocessing.Queue(maxsize=_multiprocessingQueue)
+        self._last_pushed_code = None # [NEW] 记录上一次成功投递的代码，用于极速去重
         self.process = multiprocessing.Process(
             target=_start_linkage_worker,
             args=(self.queue,),
@@ -140,8 +141,11 @@ class LinkageManagerProxy:
         if not code: return
         flags = flags or {'tdx': True, 'ths': True, 'dfcf': True}
 
-        # [NEW] 联动节流逻辑：如果同一代码且是后台自动触发，极速过滤 (2s)
-        # 防止高频信号瞬间冲垮 IPC 队列
+        # [ROOT-FIX] 极速去重逻辑：如果代码与上一次相同，且是后台自动触发(auto=True)，直接忽略
+        # 这能彻底解决 BiddingDetector 等后台任务在高频刷新时产生的“重复指令风暴”
+        if auto and code == self._last_pushed_code:
+            return
+            
         now = time.time()
         if auto:
             if not hasattr(self, '_last_auto_link_map'): self._last_auto_link_map = {}
@@ -170,6 +174,7 @@ class LinkageManagerProxy:
                 'ts': now,
                 'auto': auto
             })
+            self._last_pushed_code = code # 更新最后投递成功记录
         except (queue.Full, Exception) as e:
             # 极端高频下如果还是满的，直接忽略，保证主流程不中断
             # 捕获所有异常防止 feeder 线程引发的 crash 传导
