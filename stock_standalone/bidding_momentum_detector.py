@@ -478,6 +478,7 @@ class BiddingMomentumDetector:
 
         # ---- [NEW] 选股器联动与两阶段刷新 ----
         self.stock_selector_seeds: Dict[str, Dict[str, Any]] = {} # 昨曾强势/反转股代码
+        self._today_anchor_930: float = 0.0 # [NEW] 缓存今日 09:30 锚点，减少重复计算
         self._concept_data_date: Optional[datetime.date] = None
         self._concept_first_phase_done = False
         self._concept_second_phase_done = False
@@ -799,6 +800,7 @@ class BiddingMomentumDetector:
                 
                 # [PERF] 预计算锚点时间戳，避免在 5000 次循环内重复调用 datetime.fromtimestamp
                 anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+                self._today_anchor_930 = anchor_930
                 
                 # [OPTIMIZED] 针对大批量品种，将循环放入锁内，减少 lock/unlock 开销
                 for code in codes:
@@ -1545,6 +1547,8 @@ class BiddingMomentumDetector:
                 if snap_ts > 0:
                     self._last_data_date = datetime.datetime.fromtimestamp(snap_ts).strftime('%Y-%m-%d')
                     self.last_data_ts = snap_ts # [FIX] Sync timestamp for UI linkage
+                    # [FIX] 更新锚点缓存，防止后续板块重建时 _calculate_leader_score 崩溃
+                    self._today_anchor_930 = datetime.datetime.fromtimestamp(snap_ts).replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
                 
                 self.data_version += 1 # [FIX] Notify UI of data change after snapshot load
                 
@@ -1645,29 +1649,61 @@ class BiddingMomentumDetector:
                 except: continue
             dates.sort(reverse=True)
             
-            # today_str = datetime.datetime.now().strftime('%Y%m%d')
             # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
             if cct.get_trade_date_status():
-                today_str = _datetime.now().strftime('%Y-%m-%d')
+                # [FIX] 统一使用 YYYYMMDD 格式，对齐文件名
+                today_str = datetime.datetime.now().strftime('%Y%m%d')
             else:
-                today_str = cct.get_last_trade_date()
-            # 排除今日，寻找前两个交易日
-            past_dates = [d for d in dates if d < today_str][:9]
+                # [FIX] cct 返回通常带横杠，需统一剔除
+                today_str = cct.get_last_trade_date().replace('-', '')
             
+            # 排除今日及未来日期，寻找历史交易日快照
+            past_dates = [d for d in dates if d < today_str]
+            
+            # [UPGRADE] 1. 尝试从最近的一个快照中直接继承“完整多日历史”
+            # 这样可以瞬间恢复 10 日内的 base_price (最低价基准)，而无需逐一清洗
+            if past_dates:
+                latest_f = os.path.join(snapshot_dir, f"bidding_{past_dates[0]}.json.gz")
+                try:
+                    with open(latest_f, 'rb') as f: raw = f.read()
+                    try: data = json.loads(zlib.decompress(raw).decode('utf-8'))
+                    except: data = json.loads(gzip.decompress(raw).decode('utf-8'))
+                    
+                    history_in_snap = data.get('dragon_3day_history', [])
+                    if history_in_snap:
+                        # 仅保留有效的历史日期
+                        valid_history = [d for d in history_in_snap if d['date'] < today_str]
+                        if valid_history:
+                            self.dragon_3day_history = valid_history
+                            unique_days = {d['date'] for d in valid_history}
+                            if len(unique_days) >= 5:
+                                logger.info(f"🐉 [DragonTracker] 成功从最近快照继承 {len(unique_days)} 日完整历史")
+                                self._dragon_init_done = True
+                                return
+                except Exception as e:
+                    logger.warning(f"Failed to inherit history from {latest_f}: {e}")
+
+            # 2. 如果继承失败或数据不足，回退到逐个快照清洗逻辑 (Scavenge)
             new_history = []
-            for d_str in reversed(past_dates): # 从旧到新排列
+            for d_str in reversed(past_dates[:15]): # 从旧到新排列，最多追溯 15 个交易日
                 f_path = os.path.join(snapshot_dir, f"bidding_{d_str}.json.gz")
                 leaders = self._scavenge_top2_from_snapshot(f_path, d_str)
                 if leaders:
                     new_history.extend(leaders)
             
             if new_history:
-                self.dragon_3day_history = new_history
-                logger.info(f"🐉 [DragonTracker] 成功从历史快照补齐 {len(new_history)} 只前传龙头个股")
+                # 简单去重合并
+                existing = { (d['date'], d['code']): d for d in self.dragon_3day_history }
+                for d in new_history:
+                    existing[(d['date'], d['code'])] = d
+                self.dragon_3day_history = sorted(list(existing.values()), key=lambda x: x['date'], reverse=True)
+                logger.info(f"🐉 [DragonTracker] 补齐完成，当前追踪库共 {len(self.dragon_3day_history)} 条记录")
             
             self._dragon_init_done = True
         except Exception as e:
             logger.error(f"❌ DragonTracker init failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def _scavenge_top2_from_snapshot(self, f_path: str, date_str: str) -> list:
         """从指定快照中提取各板块的前 2 名强势股"""
@@ -1679,6 +1715,14 @@ class BiddingMomentumDetector:
             
             sector_data = data.get('sector_data', {})
             stock_scores = data.get('stock_scores', {})
+            
+            # [UPGRADE] 优先从快照自带的 history 中寻找该日期的记录 (保留了精准的 base_price 最低价)
+            stored_history = data.get('dragon_3day_history', [])
+            exact_day_records = [d for d in stored_history if d.get('date') == date_str]
+            if len(exact_day_records) >= 10:
+                # 如果记录数足够，说明该快照已经包含了当天的龙头统计，直接返回
+                return exact_day_records[:30]
+
             seen = set()
 
             # [NEW] 建立全量价格镜像，防止部分旧快照在 sector_data 中缺失价格字段
@@ -1741,7 +1785,16 @@ class BiddingMomentumDetector:
             return
         self._last_dragon_update_v = self.data_version
 
-        today_str = datetime.datetime.now().strftime('%Y%m%d')
+        # [FIX] 龙头多日追踪：区分实盘与回测/非交易日，确保日期列表严格对齐交易日
+        if self.in_history_mode:
+            # 历史回测模式：日期来源于数据流的时间戳
+            if self.last_data_ts <= 0: return
+            today_str = datetime.datetime.fromtimestamp(self.last_data_ts).strftime('%Y%m%d')
+        else:
+            # 实盘模式：如果是非交易日（如周末）且非强制刷新，则不产生今日记录，防止污染 3D/5D 日期窗口
+            if not force and not cct.get_trade_date_status():
+                return
+            today_str = datetime.datetime.now().strftime('%Y%m%d')
         
         # 剔除今日已有的项，准备重新抓取今日最新的 Top 2
         history_only = [d for d in self.dragon_3day_history if d['date'] != today_str]
@@ -1781,7 +1834,9 @@ class BiddingMomentumDetector:
                 if code in existing_today:
                     base_price = existing_today[code].get('base_price', c_price)
                 else:
-                    base_price = c_price
+                    # [UPGRADE] 2026-04-27: 取第一天的最低价作为起点基准 (如果有)
+                    # 解决用户反馈的“累计涨幅为0”以及“没有取第一天最低价”的问题
+                    base_price = ts.low_day if (ts and ts.low_day > 0) else c_price
                     
                 potential_today.append({
                     'date': today_str,
@@ -1855,8 +1910,15 @@ class BiddingMomentumDetector:
 
         if fb_ts > 0:
 
-            # anchor 优先外部
-            anchor_930 = today_anchor_930 if today_anchor_930 > 0 else self._today_anchor_930
+            # anchor 优先外部，fallback 到内部缓存，最后兜底计算
+            anchor_930 = today_anchor_930
+            if anchor_930 <= 0:
+                anchor_930 = getattr(self, '_today_anchor_930', 0.0)
+            
+            if anchor_930 <= 0:
+                # [FINAL-FALLBACK] 极端情况下实时计算
+                ref_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
+                anchor_930 = ref_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
 
             if anchor_930 > 0:
 

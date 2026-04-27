@@ -345,7 +345,7 @@ class KLineMonitor(tk.Toplevel):
 
             self.click_count += 1
             if self.click_count % 10 == 0:
-                logger.info(f"[Monitor] 点击了 {stock_code}")
+                logger.debug(f"[Monitor] 点击了 {stock_code}")
 
             if hasattr(self.master, "on_single_click"):
                 send_tdx_Key = (getattr(self.master, "select_code", None) != stock_code)

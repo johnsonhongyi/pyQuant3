@@ -38,6 +38,14 @@ import os
 import json
 import traceback
 
+# [OPTIMIZE] 预编译高频正则
+_RE_NON_DIGIT = re.compile(r'[^\d]')
+_RE_BIDDING_DATE = re.compile(r'bidding_(\d+)')
+_RE_DATE_8 = re.compile(r'(\d{8})')
+_RE_QUERY_BRACKET = re.compile(r'^(.*?)\s*\((.*)\)$')
+_RE_CHINESE_COND = re.compile(r'[\u4e00-\u9fa5\-]')
+_RE_MACRO_COND = re.compile(r'(涨幅|现价|量比)(>=|<=|>|<|==|=)([-+]?\d*\.?\d+)')
+
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE, SEARCH_HISTORY_FILE
 try:
     from history_manager import quick_save_specific_history
@@ -625,7 +633,7 @@ class HistoricalTrackerWorker(QThread):
             
             # STEP 1: 聚合历史快照中的异动个股
             for path in self.snapshot_paths:
-                match = re.search(r'bidding_(\d+)', os.path.basename(path))
+                match = _RE_BIDDING_DATE.search(os.path.basename(path))
                 date_str = match.group(1) if match else "Unknown"
                 self.progress.emit(f"📁 聚合 {date_str} 的竞价快照...")
                 
@@ -765,6 +773,8 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        # [NEW] 排序后自动滚动到顶部
+        self.table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
         self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
         
         self.table.cellClicked.connect(self._on_row_clicked)
@@ -846,7 +856,7 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         if self._is_populating or not current or not self.table.hasFocus(): return
         item = self.table.item(current.row(), 0)
         if item:
-            code = re.sub(r'[^\d]', '', item.text())
+            code = _RE_NON_DIGIT.sub('', item.text())
             # [SAFE] Use a timer that is property managed
             if not hasattr(self, '_link_timer'):
                 self._link_timer = QTimer(self)
@@ -1091,7 +1101,7 @@ class SnapshotCalendarDialog(QDialog):
             files = os.listdir(self.snapshots_dir)
             for f_name in files:
                 if f_name.startswith("bidding_") and f_name.endswith(".json.gz"):
-                    match = re.search(r'bidding_(\d{8})', f_name)
+                    match = _RE_BIDDING_DATE.search(f_name)
                     if match:
                         date_str = match.group(1) 
                         qdate = QDate.fromString(date_str, "yyyyMMdd")
@@ -1313,7 +1323,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._is_history_mode = True
             self.detector.in_history_mode = True
             # 从文件名尝试提取日期 bidding_20260312.json.gz
-            date_match = re.search(r'(\d{8})', os.path.basename(file_path))
+            date_match = _RE_DATE_8.search(os.path.basename(file_path))
             if date_match:
                 self._history_date = date_match.group(1)
                 self.title_lbl.setText(f"📅 板块赛道复盘 - [{self._history_date}]")
@@ -2662,18 +2672,31 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._populate_watchlist()
 
     def _on_dragon_3d_clicked(self):
-        """切换龙头追踪模式 (循环：普通 -> 三日 -> 五日)"""
+        """切换龙头追踪模式 (循环：普通 -> 三日 -> 五日 -> 七日 -> 十日)"""
         if self._watchlist_mode == "NORMAL":
             self._watchlist_mode = "DRAGON_3D"
             self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            self.btn_dragon_3d.setText("🐉 龙头五日")
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("💡 已切换至 [龙头三日跟踪] 视角 (基准: 3日内最早)")
         elif self._watchlist_mode == "DRAGON_3D":
             self._watchlist_mode = "DRAGON_5D"
             self.btn_dragon_3d.setStyleSheet("background-color: #cc0000; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
-            self.btn_dragon_3d.setText("🐉 龙头五日")
+            self.btn_dragon_3d.setText("🐉 龙头七日")
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("🔥 已切换至 [龙头五日跟踪] 视角 (基准: 5日内最早)")
+        elif self._watchlist_mode == "DRAGON_5D":
+            self._watchlist_mode = "DRAGON_7D"
+            self.btn_dragon_3d.setStyleSheet("background-color: #008080; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            self.btn_dragon_3d.setText("🐉 龙头十日")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🛸 已切换至 [龙头七日跟踪] 视角 (基准: 7日内最早)")
+        elif self._watchlist_mode == "DRAGON_7D":
+            self._watchlist_mode = "DRAGON_10D"
+            self.btn_dragon_3d.setStyleSheet("background-color: #990099; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            self.btn_dragon_3d.setText("📋 当日重点")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("🚀 已切换至 [龙头十日跟踪] 视角 (基准: 10日内最早)")
         else:
             self._watchlist_mode = "NORMAL"
             self.btn_dragon_3d.setStyleSheet("background-color: #1a2a3a; color: #ff9900; font-weight: bold; border-radius: 4px; border: 1px solid #ff9900;")
@@ -2838,11 +2861,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         # [NEW] 拆分 "备注 (逻辑)" 格式 (来自 UI 组合框显示)，优先提取核心逻辑以防 NameError
         if '(' in query and query.endswith(')'):
-            m = re.match(r'^(.*?)\s*\((.*)\)$', query)
+            m = _RE_QUERY_BRACKET.match(query)
             if m:
                 p1, p2 = m.groups()
                 # 判定为 UI 标签格式：左侧含中文/破折号，右侧含逻辑符且较长
-                if re.search(r'[\u4e00-\u9fa5\-]', p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
+                if _RE_CHINESE_COND.search(p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
                     logger.debug(f"🔍 [SectorPanel] Detached UI label '{p1}' from query.")
                     query = p2.strip()
         
@@ -3110,7 +3133,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         for cond in conditions:
             # Check for numeric comparators: >, <, >=, <=, =
-            match = re.search(r'(涨幅|现价|量比)(>=|<=|>|<|==|=)([-+]?\d*\.?\d+)', cond)
+            match = _RE_MACRO_COND.search(cond)
             if match:
                 field, op, val_str = match.groups()
                 try:
@@ -3592,7 +3615,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """填充底部当日重点表/龙头三日跟踪表"""
         mode = getattr(self, '_watchlist_mode', "NORMAL")
         
-        if mode in ["DRAGON_3D", "DRAGON_5D"]:
+        if mode in ["DRAGON_3D", "DRAGON_5D", "DRAGON_7D", "DRAGON_10D"]:
             # [OPTIMIZED] 龙头多日跟踪模式：引入数据层版本校验，避免重复执行聚合
             dv = getattr(self.detector, 'data_version', 0)
             if not getattr(self, '_dragon_cache_data', None) or getattr(self, '_dragon_cache_v', -1) != dv:
@@ -3606,7 +3629,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
             # 1. 确定时间窗口
             all_dates = sorted(list({d['date'] for d in all_history}), reverse=True)
-            window_days = 3 if mode == "DRAGON_3D" else 5
+            if mode == "DRAGON_3D": window_days = 3
+            elif mode == "DRAGON_5D": window_days = 5
+            elif mode == "DRAGON_7D": window_days = 7
+            else: window_days = 10
             valid_dates = set(all_dates[:window_days])
             
             # 2. 精准去重聚合：最新的评分信息 + 最早的基准价
@@ -3619,8 +3645,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 if code not in unique_leaders:
                     # 首次遇到 (最新的)：保留状态、分值、原因
                     record = d.copy()
-                    # [FIX] 兼容性处理：尝试获取多种可能的价格字段名
+                    # [FIX] 兼容性处理：优先取 base_price (最低价起点)，fallback 到 price (发现价)
                     record['_base_p_found'] = d.get('base_price') or d.get('price', 0.0)
+                    record['_base_score_found'] = d.get('score', 0)
                     record['_base_date_found'] = d.get('date', '')
                     unique_leaders[code] = record
                 else:
@@ -3629,6 +3656,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     if p_old > 0:
                         unique_leaders[code]['_base_p_found'] = p_old
                         unique_leaders[code]['_base_date_found'] = d.get('date', '')
+                        unique_leaders[code]['_base_score_found'] = d.get('score', 0)
 
             # 3. 计算实时涨幅与封装渲染对象
             watchlist = []
@@ -3658,7 +3686,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'name': d['name'],
                     'pct': round(pct_long, 2), # 存入在该周期内的累计涨幅
                     'sector': d.get('sector', ''),
-                    'reason': f"初始分:{d.get('score', 0)}",
+                    'reason': f"初始分:{d.get('_base_score_found', d.get('score', 0))}",
                     'score': d.get('score', 0), 
                     'time_str': d['_base_date_found'], # 显示最早发现日期 
                     'vol_ratio': round(curr_vol_ratio, 2),
@@ -3773,11 +3801,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if row_count_changed:
             self.watchlist_table.setRowCount(new_count)
 
-        # [NEW] 动态调整表头，适应三日/五日跟踪视角
+        # [NEW] 动态调整表头，适应三日/五日/七日/十日跟踪视角
         if mode == "DRAGON_3D":
              self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '3D累计%', '板块', '日期', '初始分', '现量比'])
         elif mode == "DRAGON_5D":
              self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '5D累计%', '板块', '日期', '初始分', '现量比'])
+        elif mode == "DRAGON_7D":
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '7D累计%', '板块', '日期', '初始分', '现量比'])
+        elif mode == "DRAGON_10D":
+             self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '10D累计%', '板块', '日期', '初始分', '现量比'])
         else:
              self.watchlist_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '核心板块', '触发时间', '分值', '状态/原因'])
         
@@ -3812,11 +3844,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.watchlist_table, i, 5, f"{v_score:.1f}", is_numeric=True)
 
             # 7. 状态/量比
-            if mode == "DRAGON_3D":
-                vr = w.get('vol_ratio', 0.0)
-                vr_c = self._color_red if vr >= 2.0 else (self._color_green if vr < 0.8 else None)
-                self._update_cell(self.watchlist_table, i, 6, f"{vr:.2f}", color=vr_c, is_numeric=True)
-            elif mode == "DRAGON_5D":
+            if mode in ["DRAGON_3D", "DRAGON_5D", "DRAGON_7D", "DRAGON_10D"]:
                 vr = w.get('vol_ratio', 0.0)
                 vr_c = self._color_red if vr >= 2.0 else (self._color_green if vr < 0.8 else None)
                 self._update_cell(self.watchlist_table, i, 6, f"{vr:.2f}", color=vr_c, is_numeric=True)
@@ -3870,6 +3898,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         title_prefix = "📋 当日重点表"
         if mode == "DRAGON_3D": title_prefix = "🐉 龙头三日跟踪"
         elif mode == "DRAGON_5D": title_prefix = "🔥 龙头五日跟踪"
+        elif mode == "DRAGON_7D": title_prefix = "🛸 龙头七日跟踪"
+        elif mode == "DRAGON_10D": title_prefix = "🚀 龙头十日跟踪"
         
         self.watchlist_title_lbl.setText(f"{title_prefix} (共 {len(watchlist)} 只){search_suffix}{hist_suffix}")
         
@@ -3884,14 +3914,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if row < 0: return
         item_code = self.watchlist_table.item(row, 0)
         item_sect = self.watchlist_table.item(row, 3) 
+        item_date = self.watchlist_table.item(row, 4)
         if not item_code: return
         
         code = item_code.text()
         sector_name = item_sect.text().strip() if item_sect else ""
         
+        # [NEW] 提取特定日期 (用于龙头多日追踪的可视化联动)
+        specific_date = item_date.text().strip() if item_date else ""
+        # 判定是否是日期格式 (如 20260420)
+        if len(specific_date) == 8 and specific_date.isdigit():
+             # 转换为 YYYY-MM-DD 格式以适配下游 link_to_visualizer
+             specific_date = f"{specific_date[:4]}-{specific_date[4:6]}-{specific_date[6:]}"
+        else:
+             specific_date = ""
+
         # 1. 执行外部代码联动 (TDX/可视化器) - 仅在点击时，键盘上下键不触发
         if link_software:
-            self._link_code(code, focus_widget=self.watchlist_table)
+            self._link_code(code, focus_widget=self.watchlist_table, specific_date=specific_date)
         
         # 2. 个股/板块定位：如果板块名存在，尝试联动左侧板块表并切换右侧个股视图
         if sector_name:
@@ -4072,7 +4112,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if c_item:
                 c = str(c_item.text()).strip()
                 import re
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
                 n = str(n_item.text()).strip() if n_item else ""
@@ -4267,7 +4307,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.stock_table.setFocus()
             self._link_code(code, focus_widget=self.stock_table)
 
-    def _link_code(self, code: str, focus_widget=None):
+    def _link_code(self, code: str, focus_widget=None, specific_date: str = ""):
         """将股票代码同步联动到主界面或外挂工具"""
         host = self.main_window
         if not host: return
@@ -4282,16 +4322,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             history_date = getattr(self, '_history_date', "")
             
             def _do_linkage_in_main_thread():
-                # 🚀 [FIXED] 统一联动逻辑：竞价面板核心在于时间对齐，因此无论是否历史模式都执行 link_to_visualizer
-                target_date = history_date
+                # 🚀 [FIXED] 统一联动逻辑：竞价面板核心在于时间对齐
+                # [OPTIMIZE] 优先使用表格中透传的特定日期 (龙头多日追踪)，否则使用全局复盘日期
+                target_date = specific_date if specific_date else history_date
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                if not target_date or history_date == today_str:
-                    if hasattr(host, 'open_visualizer'):
-                        host.open_visualizer(code)
+                
                 # 1. 优先调用 link_to_visualizer (代码切换 + 时间标记)
-                elif hasattr(host, 'link_to_visualizer'):
-                     host.link_to_visualizer(code, target_date)
-                     logger.info(f"[SectorPanel] Linked {code} at {target_date} (Unified Linkage Mode)")
+                if target_date and target_date != today_str:
+                    if hasattr(host, 'link_to_visualizer'):
+                         host.link_to_visualizer(code, target_date)
+                         logger.info(f"[SectorPanel] Linked {code} at {target_date} (Specific/History Linkage Mode)")
+                         return
+
+                # 2. 正常实盘模式或无历史日期时
+                if hasattr(host, 'open_visualizer'):
+                    host.open_visualizer(code)
                 
                 # 2. 只有在没有综合接口时，才回退到简单的代码切换信号
                 else:
@@ -4668,7 +4713,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._is_history_mode = True
                 self.detector.in_history_mode = True
                 # 从文件名尝试提取日期 bidding_20260312.json.gz
-                match = re.search(r'bidding_(\d+)', os.path.basename(file_path))
+                match = _RE_BIDDING_DATE.search(os.path.basename(file_path))
                 self._history_date = match.group(1) if match else "Unknown"
                 
                 # 更新 UI 状态

@@ -672,6 +672,8 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
 
         # 🚀 [FIX] 更新表头点击事件，确保 toggle 排序方向
         self.tree.heading(col, command=lambda _c=col: self._sort_column(_c, not reverse))
+        # [NEW] 排序后自动滚动到顶部
+        self.tree.yview_moveto(0)
 
     def _show_detail(self, event):
         sel = self.tree.selection()

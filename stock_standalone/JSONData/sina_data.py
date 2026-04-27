@@ -966,14 +966,22 @@ class Sina:
                 if not valid_ts.empty:
                     ts = valid_ts.iloc[0]
                     ts_str: str
-                    if isinstance(ts, (pd.Timestamp, datetime.datetime)):
-                        ts_str = ts.strftime('%H%M%S')
+                    if pd.isna(ts):
+                        ts_str = "0"
+                    elif isinstance(ts, (pd.Timestamp, datetime.datetime)):
+                        try:
+                            ts_str = ts.strftime('%H%M%S')
+                        except Exception:
+                            ts_str = "0"
                     elif isinstance(ts, str):
                         ts_str = ts.replace(":", "")[-6:]
                     else:
                         ts_str = str(ts)[-6:]
                     
-                    ticktime = int(ts_str)
+                    try:
+                        ticktime = int(ts_str)
+                    except ValueError:
+                        ticktime = 0
                     
                     # o_time 校验 (增强版：同时校验日期是否匹配今日)
                     o_time_df = h5[h5.timel != 0].timel
