@@ -2981,6 +2981,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.setHorizontalHeaderLabels(display_headers)
         self.stock_table.setSortingEnabled(True)
         headers = self.stock_table.horizontalHeader()
+        # [CRITICAL] 监听排序信号，确保物理行索引变动后立即重建映射，防止跳转错误
+        headers.sortIndicatorChanged.connect(self._rebuild_item_map_from_table)
+        
         # 设置表格列自适应
         # [RESTORE] 恢复内容自适应模式，并在数据填充后通过 _limit_table_column_widths 统一调优
         for col in range(len(self.headers)):
@@ -5148,7 +5151,14 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 尝试定位行
             if target_code and hasattr(self, '_table_item_map'):
-                found_row = self._table_item_map.get(target_code, -1)
+                temp_row = self._table_item_map.get(target_code, -1)
+                if temp_row >= 0:
+                    # [FIX] 验证索引有效性 (防止由于排序导致的映射过期)
+                    check_item = self.stock_table.item(temp_row, 0)
+                    if check_item:
+                        check_code = check_item.data(Qt.ItemDataRole.UserRole) or check_item.text()
+                        if str(check_code).zfill(6) == target_code:
+                            found_row = temp_row
             
             # 如果字典没查到，降级到线性搜索 (通常为零)
             if found_row == -1 and not target_code:
@@ -5169,7 +5179,14 @@ class MainWindow(QMainWindow, WindowMixin):
             target_code = code
             # [OPTIMIZE] 直接使用 1.4 版本的 _table_item_map 索引
             if hasattr(self, '_table_item_map'):
-                found_row = self._table_item_map.get(code, -1)
+                temp_row = self._table_item_map.get(code, -1)
+                if temp_row >= 0:
+                    # [FIX] 验证索引有效性 (防止由于排序导致的映射过期)
+                    check_item = self.stock_table.item(temp_row, 0)
+                    if check_item:
+                        check_code = check_item.data(Qt.ItemDataRole.UserRole) or check_item.text()
+                        if str(check_code).zfill(6) == code:
+                            found_row = temp_row
             
             # 兜底线性搜索
             if found_row == -1:
@@ -7648,6 +7665,8 @@ class MainWindow(QMainWindow, WindowMixin):
             
         finally:
             self.stock_table.setSortingEnabled(True)
+            # [CRITICAL] 排序可能导致物理行变动，必须在排序后重建映射
+            self._rebuild_item_map_from_table()
             self.stock_table.setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
             self._apply_cat_filter_logic()
@@ -7944,9 +7963,10 @@ class MainWindow(QMainWindow, WindowMixin):
                         _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
                 _h.setStretchLastSection(True)
                 
-                self._rebuild_item_map_from_table()
                 self.stock_table.setSortingEnabled(True)
                 self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
+                # [CRITICAL] 必须在设置排序指示器（触发排序）后再重建映射
+                self._rebuild_item_map_from_table()
                 
                 if target_code:
                     c_str = str(target_code)
@@ -8232,6 +8252,9 @@ class MainWindow(QMainWindow, WindowMixin):
         仅保留滚动位置恢复，防止视图跳动。
         不再自动调整列宽，完全保留用户的微调记忆。
         """
+        # [CRITICAL] 排序后物理行索引已变，必须立即重建映射，否则会导致跳转错误或实时更新错位
+        self._rebuild_item_map_from_table()
+        
         scroll_state = self._save_h_scroll_state(self.stock_table)
         
         # 恢复水平位置，防止排序导致的选择项偏移
