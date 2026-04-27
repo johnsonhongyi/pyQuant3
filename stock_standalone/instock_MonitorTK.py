@@ -3594,8 +3594,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             log=log_level
         )
         
-        # 获取当前主进程持有的行情全量快照，实现秒开
-        current_df_all = getattr(self, 'df_all', None)
+        # 获取当前主进程持有的行情全量快照，实现秒开 (必须在主线程闭环内获取副本)
+        current_df_all = None
+        if hasattr(self, 'df_all') and self.df_all is not None:
+            try:
+                current_df_all = self.df_all.copy()
+            except:
+                current_df_all = self.df_all
         
         def _launch_task():
             try:
@@ -3608,11 +3613,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     args=(args_namespace, current_df_all, self._backtest_quit_event),
                     daemon=False
                 )
+                
+                # 🛡️ [FINAL-GUARD] 再次确认主线程环境
+                if not threading.current_thread() is threading.main_thread():
+                    logger.warning("🏁 [Backtest] Re-dispatching launch to main thread...")
+                    self.after(0, _launch_task)
+                    return
+
                 self.backtest_process.start()
                 
                 # [🚀 NEW] 启动存活监视，确保回测进程退出后也能触发统一防抖
                 def monitor_backtest_exit(proc):
-                    proc.join()
+                    try:
+                        proc.join()
+                    except: pass
                     self._last_racing_backtest_unified_t = time.time()
                     logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
                 
@@ -3628,9 +3642,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.exception(f"Failed to launch backtest via mp.Process: {e}")
                 self.after(0, lambda: messagebox.showerror("启动异常", f"回测进程 (mp) 启动失败:\n{str(e)}"))
+            finally:
+                pass
 
-        # 🚀 [ASYNC] 将昂贵的序列化与进程创建过程移出主线程，杜绝 UI 假死
-        threading.Thread(target=_launch_task, daemon=True, name="BacktestLauncher").start()
+        # 🚀 [FIX] 彻底根治 Fatal Python error: PyEval_RestoreThread。
+        # 禁止在子线程中执行 mp.Process.start()。在 Windows spawn 模式下，子线程 pickling 极易引发 GIL 冲突。
+        # 将启动逻辑回退至主线程执行，并通过 after 延时给 UI 留出响应空间。
+        self.after(200, _launch_task) # 稍微增加延时，确保 UI 消息 (toast) 已显示
         toast_message(self, "🏁 正在拉起回测引擎，请稍候...")
 
     def _run_live_strategy_process(self, full_df=None):
@@ -4649,7 +4667,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.debug(f"✅ [IPC][SOCKET] Command sent via fallback port 26668: {msg[:40]}...")
                         return True
                 except (ConnectionRefusedError, socket.timeout, OSError) as e:
-                    # 仅在调试时输出，因为这是正常的 fallback 路径
                     logger.debug(f"[IPC][SOCKET] port 26668 connection failed: {e}")
                 except Exception as e:
                     logger.error(f"[IPC][SOCKET] unexpected: {e}")
@@ -4667,7 +4684,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # P3: 都不行，启动进程
                 logger.info(f"📡 No active visualizer detected via Pipe/Socket. Starting new process for {code}...")
-                self._start_visualizer_process(code, resample)
+                # 🚀 [FIX] 禁止在子线程中调用 mp.Process.start()。
+                # 通过 after(0) 将启动指令调度回主线程执行，彻底根治 Fatal Python error: PyEval_RestoreThread 崩溃。
+                self.after(0, lambda: self._start_visualizer_process(code, resample))
                 
             except Exception as e:
                 logger.error(f"[WORKER] open_visualizer fatal error: {e}")
@@ -4687,7 +4706,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.status_var2.set(f"🚀 可视化指令已发出: {code}")
         except: pass
 
-
     def _ui_heartbeat(self):
         """[CORRECTION 2] UI线程主心跳，每100ms跳动一次"""
         self._last_ui_heartbeat = time.time()
@@ -4697,17 +4715,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _start_watchdog(self):
         """[CORRECTION 2] 独立守护线程检测 UI 假死"""
         def watchdog_loop():
-            # [ROOT-FIX] 线程启动瞬间重置心跳，确保不把初始化耗时计算在内
             self._last_ui_heartbeat = time.time()
-            already_warned = False # 🛡️ [NEW] 防重复报警标志位
+            already_warned = False
             
             logger.info("📡 Diagnostic Watchdog active (Threshold: 2.0s).")
             while not getattr(self, "_is_closing", False):
                 time.sleep(0.5)
-                # 计算与最后心跳的时间差
                 delay = time.time() - getattr(self, "_last_ui_heartbeat", 0)
                 
-                if delay > 5:  # 判定为卡死阈值
+                if delay > 5:
                     if not already_warned:
                         q_size = -1
                         try:
@@ -5165,23 +5181,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._qt_starting = True
 
-        def task():
-            try:
-                time.sleep(0.2)  # 仍然保留轻微延迟
-                self._start_visualizer_process(code, resample)
-            finally:
-                self._qt_starting = False
-
-        if hasattr(self, 'executor') and self.executor:
-            self.executor.submit(task)
-        else:
-            t = threading.Thread(target=task, daemon=True)
-            t.start()
+        # 🚀 [FIX] 彻底根治 Fatal Python error: PyEval_RestoreThread。
+        # 禁止在子线程中执行 mp.Process.start()。
+        # 回退至主线程执行，并通过 after 延时给 UI 留出响应空间。
+        self.after(200, lambda: self._start_visualizer_process(code, resample))
 
     def _start_visualizer_process(self, code, resample=None):
-        """独立方法：在子线程中安全启动 Qt 可视化进程"""
+        """核心方法：启动 Qt 可视化进程 (支持跨线程调用，自动调度至主线程)"""
         start_t = time.time()
         try:
+            # 🛡️ [GUARD] 强制主线程校验，确保 mp.Process.start() 的稳定性
+            if not threading.current_thread() is threading.main_thread():
+                logger.warning("⚠️ [Visualizer] Detected call from non-main thread. Re-dispatching...")
+                self.after(0, lambda: self._start_visualizer_process(code, resample))
+                return
+
             if resample is None:
                 resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
             
@@ -5200,7 +5214,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             import_start = time.time()
             import trade_visualizer_qt6 as qtviz
             logger.debug(f"[Visualizer] Import trade_visualizer_qt6 cost {(time.time() - import_start)*1000:.1f}ms")
-
+            
             launch_start = time.time()
             self.qt_process = mp.Process(
                 target=qtviz.main, 
@@ -5226,6 +5240,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to start Qt visualizer: {e}")
             traceback.print_exc()
+        finally:
+            # ⚡ [FIX] 无论成功失败，必须重置启动锁，否则下一次启动将永久失效
+            self._qt_starting = False
 
     def send_df(self, initial=True):
         """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
