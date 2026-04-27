@@ -5148,6 +5148,20 @@ class MainWindow(QMainWindow, WindowMixin):
                     self._name_to_code_map = {v: k for k, v in self.code_name_map.items()}
                 
                 target_code = self._name_to_code_map.get(raw_input, "")
+                
+                if not target_code:
+                    # 🚀 [NEW] 支持模糊搜索 (例如 "天智航" -> "天智航U")
+                    # 优先匹配以 raw_input 开头的名称
+                    for c, n in self.code_name_map.items():
+                        if n.startswith(raw_input):
+                            target_code = c
+                            break
+                    # 兜底匹配包含 raw_input 的名称
+                    if not target_code:
+                        for c, n in self.code_name_map.items():
+                            if raw_input in n:
+                                target_code = c
+                                break
             
             # 尝试定位行
             if target_code and hasattr(self, '_table_item_map'):
@@ -5160,7 +5174,7 @@ class MainWindow(QMainWindow, WindowMixin):
                         if str(check_code).zfill(6) == target_code:
                             found_row = temp_row
             
-            # 如果字典没查到，降级到线性搜索 (通常为零)
+            # 如果字典没查到，降级到线性搜索
             if found_row == -1 and not target_code:
                 name_col = -1
                 if hasattr(self, 'headers'):
@@ -5170,9 +5184,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 if name_col >= 0:
                     for row in range(self.stock_table.rowCount()):
                         name_item = self.stock_table.item(row, name_col)
-                        if name_item and name_item.text().strip() == raw_input:
-                            found_row = row
-                            break
+                        if name_item:
+                            text = name_item.text().strip()
+                            if raw_input in text: # [NEW] 支持模糊匹配
+                                found_row = row
+                                break
         else:
             # --- 2. 代码搜索模式 ---
             code = raw_input.zfill(6)
@@ -5217,7 +5233,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"❌ 未找到匹配: {raw_input}")
 
     def _on_search_input_right_click(self, pos):
-        """搜索框右键菜单：自动粘贴并提取6位数字"""
+        """搜索框右键菜单：自动粘贴并智能提取代码或名称"""
         import re
         
         # 获取剪贴板内容
@@ -5228,22 +5244,27 @@ class MainWindow(QMainWindow, WindowMixin):
             self.show_status_message("📋 剪贴板为空", 2000)
             return
         
-        # 提取6位连续数字（优先匹配第一个6位数字串）
+        # 1. 优先提取 6 位连续数字（股票代码标准格式）
         matches = re.findall(r'\d{6}', text)
         if matches:
-            code = matches[0]
+            result = matches[0]
         else:
-            # 如果没有6位连续数字，尝试提取所有数字并取前6位
-            digits = re.sub(r'\D', '', text)[:6]
-            if len(digits) >= 1:
-                code = digits.zfill(6)
+            # 2. [NEW] 尝试提取中文名称（例如从“天智航(301106)”或单独的“天智航”中提取）
+            name_matches = re.findall(r'[\u4e00-\u9fa5]+', text)
+            if name_matches:
+                result = name_matches[0]
             else:
-                self.show_status_message("📋 未找到有效数字", 2000)
-                return
+                # 3. 尝试提取所有数字并取前6位（非标格式代码兜底）
+                digits = re.sub(r'\D', '', text)[:6]
+                if len(digits) >= 1:
+                    result = digits.zfill(6)
+                else:
+                    # 4. 最终兜底：原样截取前10位（可能是拼音缩写等）
+                    result = text[:10]
         
-        # 设置到输入框（textChanged 会触发2秒延迟定时器）
-        self.code_search_input.setText(code)
-        self.code_search_input.setFocus()  # 获取焦点，方便用户按Enter立即跳转
+        # 设置到输入框（textChanged 会触发 2 秒延迟自动执行）
+        self.code_search_input.setText(result)
+        self.code_search_input.setFocus()  # 获取焦点，方便用户立即按 Enter 或查看结果
 
     def _on_search_text_changed(self, text):
         """输入框文本变化时重启延迟定时器（2秒后自动执行）"""
@@ -8085,6 +8106,14 @@ class MainWindow(QMainWindow, WindowMixin):
         hotlist_action = menu.addAction("🔥 添加到热点自选")
         hotlist_action.triggered.connect(lambda: self._on_add_to_hotlist_from_menu(stock_code, stock_name, row))
         
+        # [NEW] 复制功能
+        menu.addSeparator()
+        copy_code_action = menu.addAction("📋 复制代码")
+        copy_code_action.triggered.connect(lambda: QApplication.clipboard().setText(stock_code))
+        
+        copy_name_action = menu.addAction("📝 复制名称")
+        copy_name_action.triggered.connect(lambda: QApplication.clipboard().setText(stock_name))
+
         menu.exec(self.stock_table.mapToGlobal(pos))
 
     def on_filter_tree_right_click(self, pos):
@@ -8122,6 +8151,14 @@ class MainWindow(QMainWindow, WindowMixin):
         # 发送到异动联动
         send_action = menu.addAction("📤 发送到异动联动")
         send_action.triggered.connect(lambda: self._on_send_to_signal_linkage(stock_code, row))
+
+        # [NEW] 复制功能
+        menu.addSeparator()
+        copy_code_action = menu.addAction("📋 复制代码")
+        copy_code_action.triggered.connect(lambda: QApplication.clipboard().setText(stock_code))
+        
+        copy_name_action = menu.addAction("📝 复制名称")
+        copy_name_action.triggered.connect(lambda: QApplication.clipboard().setText(stock_name))
 
         menu.exec(self.filter_tree.mapToGlobal(pos))
 
