@@ -12,6 +12,8 @@ SignalLogPanel - 实时信号日志面板 (强化版)
 """
 import logging
 import time
+import os
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -110,6 +112,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         # [NEW] 防止反向联动导致死循环的标志位
         self._is_programmatic_selection: bool = False
+        
+        # [NEW] 联动开关 (默认开启)
+        self._is_linkage_enabled: bool = True
+        self._load_settings()
         
         # [NEW] 键盘上下键联动防抖
         self._selection_debounce_timer = QTimer(self)
@@ -293,6 +299,13 @@ class SignalLogPanel(QWidget, WindowMixin):
         self.pause_btn.clicked.connect(self._toggle_pause)
         header_layout.addWidget(self.pause_btn)
         
+        # [NEW] 联动开关按钮
+        self.link_btn = QPushButton("🔗")
+        self.link_btn.setToolTip("联动可视化开关")
+        self.link_btn.clicked.connect(self._toggle_linkage)
+        header_layout.addWidget(self.link_btn)
+        self._update_link_btn_style()
+        
         clear_btn = QPushButton("🗑️")
         clear_btn.clicked.connect(self.clear_logs)
         header_layout.addWidget(clear_btn)
@@ -401,6 +414,57 @@ class SignalLogPanel(QWidget, WindowMixin):
         row = items[0].row()
         # 复用点击逻辑
         self._on_cell_clicked(row, 0)
+
+    def _toggle_linkage(self):
+        """切换联动可视化开关"""
+        self._is_linkage_enabled = not self._is_linkage_enabled
+        self._update_link_btn_style()
+        self._save_settings()
+        status = "开启" if self._is_linkage_enabled else "关闭"
+        self.status_label.setText(f"联动可视化: {status}")
+
+    def _update_link_btn_style(self):
+        """更新联动按钮样式"""
+        if self._is_linkage_enabled:
+            self.link_btn.setStyleSheet("color: #00FF88; font-weight: bold;") # 亮绿
+            self.link_btn.setText("🔗")
+        else:
+            self.link_btn.setStyleSheet("color: #888; font-weight: normal;") # 灰色
+            self.link_btn.setText("⛓️") # 断开的链条或灰色链条
+
+    def _load_settings(self):
+        """加载自定义设置 (联动开关等)"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                settings = data.get("signal_log_panel_settings", {})
+                self._is_linkage_enabled = settings.get("linkage_enabled", True)
+        except Exception as e:
+            logger.error(f"Failed to load signal_log_panel settings: {e}")
+            self._is_linkage_enabled = True
+
+    def _save_settings(self):
+        """保存自定义设置"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            data = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            
+            data["signal_log_panel_settings"] = {
+                "linkage_enabled": self._is_linkage_enabled
+            }
+            
+            with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to save signal_log_panel settings: {e}")
 
 
 
@@ -714,7 +778,8 @@ class SignalLogPanel(QWidget, WindowMixin):
         根据内容高亮并定位行 (用于语音联动)
         :param force_scroll: 是否强行滚动到该行 (用于防夺权保护策略)
         """
-        self._is_programmatic_selection = True
+        # [MOD] 把注释的改成开关判断打开就继续联动
+        # self._is_programmatic_selection = False
         import re as _re
         try:
             # 1. 快速查找所有匹配代码的项
@@ -791,13 +856,26 @@ class SignalLogPanel(QWidget, WindowMixin):
             
             if target_item:
                 row = target_item.row()
-                self.log_table.selectRow(row)
+                
+                # [MOD] 把注释的改成开关判断打开就继续联动
+                if self._is_linkage_enabled:
+                    # 联动开启：直接选中，触发 _on_selection_changed -> 联动外部窗口
+                    self.log_table.selectRow(row)
+                else:
+                    # 联动关闭：使用程序化选中标志，跳过外部联动信号
+                    self._is_programmatic_selection = True
+                    try:
+                        self.log_table.selectRow(row)
+                    finally:
+                        self._is_programmatic_selection = False
+
                 if force_scroll:
                     self.log_table.scrollToItem(target_item)
                 return True
 
         finally:
-            self._is_programmatic_selection = False
+            # self._is_programmatic_selection = False
+            pass
         return False
 
     def clear_logs(self):
