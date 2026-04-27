@@ -1125,6 +1125,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.tree.move(k, '', index)
 
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
+        # [NEW] 排序后自动滚动到顶部
+        self.tree.yview_moveto(0)
 
     def show_context_menu(self, event):
         """显示右键菜单 (通用)"""
@@ -1579,6 +1581,8 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
         self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
+        # [NEW] 排序后自动滚动到顶部
+        self.tree.yview_moveto(0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2071,6 +2075,8 @@ def _sort_sector_tree(self, col: str):
             items.sort()
         for idx, (_, k) in enumerate(items):
             self._sector_tree.move(k, '', idx)
+        # [NEW] 排序后自动滚动到顶部
+        self._sector_tree.yview_moveto(0)
     except Exception as e:
         logger.debug(f"_sort_sector_tree: {e}")
 
@@ -2340,6 +2346,8 @@ def _sort_signal_tree(self, col: str):
             items.sort(reverse=True)
         for idx, (_, k) in enumerate(items):
             self._signal_tree.move(k, '', idx)
+        # [NEW] 排序后自动滚动到顶部
+        self._signal_tree.yview_moveto(0)
     except Exception as e:
         logger.debug(f"_sort_signal_tree: {e}")
 

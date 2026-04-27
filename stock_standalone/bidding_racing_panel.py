@@ -11,6 +11,12 @@ import threading
 import gzip
 import heapq
 from typing import Dict, List, Any, Optional
+
+# [🚀 预编译正则] 提升高频调用性能
+_RE_NON_DIGIT = re.compile(r'[^\d]')
+_RE_CAT_SPLIT = re.compile(r'[;；,，/\- ]')
+_RE_BRACKET_CODE = re.compile(r'\((\d{6})\)')
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -722,6 +728,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         layout.addWidget(self.header_frame)
         
         self.table = EnhancedTableWidget(0, 8)
+        self.table.setSortingEnabled(False) # [🚀 性能优化] 禁用 Qt 内部排序，防止与 Python 手动排序冲突
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -849,22 +856,23 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 with self.detector._lock:
                     for raw_code, ts in self.detector._tick_series.items():
                         # [🚀 格式规范化] 强制提取 6 位数字代码用于匹配与去重
-                        code = re.sub(r'[^\d]', '', str(raw_code))
+                        code = _RE_NON_DIGIT.sub('', str(raw_code))
                         if len(code) < 6: code = code.zfill(6)
                         elif len(code) > 6: code = code[-6:]
                         
+                        if not code or code == '000000': continue
+
                         # [🚀 多维字段匹配 + 复杂正则切分] 对齐主面板推导逻辑
                         cat_val = str(getattr(ts, 'category', '')) + " " + str(getattr(ts, 'block', ''))
                         if not cat_val or len(cat_val) < 2: continue
                         
-                        cats = [c.strip() for c in re.split(r'[;；,，/\- ]', cat_val) if c.strip()]
+                        cats = [c.strip() for c in _RE_CAT_SPLIT.split(cat_val) if c.strip()]
                         if target_name in cats: 
                             new_members.add(code)
                 
                 if new_members:
                     self.detector.sector_map[self.sector_name] = new_members
                     members = new_members
-                    # logger.info(f"✅ [Detail] '{self.sector_name}' 自愈成功，注入 {len(members)} 个成员")
                 else:
                     self.status_lbl.setText(f"❌ '{self.sector_name}' 成员库仍处于冷启动状态...")
                     return
@@ -883,13 +891,14 @@ class SectorDetailDialog(QDialog, WindowMixin):
             unique_members = {}
             if members:
                 for raw_code in members:
-                    norm_code = re.sub(r'[^\d]', '', str(raw_code))
+                    # 彻底剔除非数字后缀
+                    norm_code = _RE_NON_DIGIT.sub('', str(raw_code))
                     if len(norm_code) < 6: norm_code = norm_code.zfill(6)
                     elif len(norm_code) > 6: norm_code = norm_code[-6:]
                     
-                    if norm_code in unique_members: continue
+                    if not norm_code or norm_code in unique_members: continue
                     
-                    # 尝试寻找最匹配的对象
+                    # 尝试寻找最匹配的对象 (优先原键，次选标准键)
                     ts = self.detector._tick_series.get(raw_code) or self.detector._tick_series.get(norm_code)
                     if ts:
                         unique_members[norm_code] = ts
@@ -959,7 +968,14 @@ class SectorDetailDialog(QDialog, WindowMixin):
             sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
         
         flattened = []
+        seen_codes_render = set()
         for s_key, ts, prio, is_alerted, is_sbc in sort_payload:
+            # [🚀 渲染去重] 即使 sort_payload 中由于某些极端情况存在重复 ts，渲染前也必须拦截
+            # 统一提取 6 位标准代码作为排他性 ID
+            r_code = _RE_NON_DIGIT.sub('', str(ts.code))[-6:].zfill(6)
+            if r_code in seen_codes_render: continue
+            seen_codes_render.add(r_code)
+
             # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
             reason = ""
             if self._show_reason:
@@ -1234,6 +1250,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             self._sort_col = logical_index
             self._sort_order = Qt.SortOrder.DescendingOrder
         self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+        self.table.scrollToTop()
         self._dirty = True
         self.refresh_data()
 
@@ -1268,7 +1285,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             if c_item:
                 c = str(c_item.text()).strip()
                 import re
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
                 n = str(n_item.text()).strip() if n_item else ""
@@ -1361,6 +1378,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         layout.addWidget(self.header_frame)
         
         self.table = EnhancedTableWidget(0, 8)
+        self.table.setSortingEnabled(False) # [🚀 性能优化] 禁用 Qt 内部排序
         self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1470,7 +1488,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 
                 # [🚀 唯一性校验] 强制规范化 code 键，防止由于 600000 与 600000.SH 同时存在导致的 UI 冗余
                 raw_code = getattr(ts, 'code', '')
-                norm_code = re.sub(r'[^\d]', '', str(raw_code))
+                norm_code = _RE_NON_DIGIT.sub('', str(raw_code))
                 if len(norm_code) < 6: norm_code = norm_code.zfill(6)
                 elif len(norm_code) > 6: norm_code = norm_code[-6:]
                 
@@ -1787,7 +1805,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             if c_item:
                 c = str(c_item.text()).strip()
                 import re
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 if c and len(c) == 6:
                     codes.append(c)
@@ -1803,6 +1821,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             self._sort_col = logical_index
             self._sort_order = Qt.SortOrder.DescendingOrder
         self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+        self.table.scrollToTop()
         self._dirty = True
         self.refresh_data()
 
@@ -1836,7 +1855,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             if c_item:
                 c = str(c_item.text()).strip()
                 import re
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
                 n = str(n_item.text()).strip() if n_item else ""
@@ -2503,7 +2522,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if c_item:
                 c = str(c_item.text()).strip()
                 import re
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 if c and len(c) == 6:
                     codes.append(c)
@@ -2522,9 +2541,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         leader_item = self.sector_table.item(row, 3)
         if not leader_item: return
         
-        import re
         text = leader_item.text()
-        match = re.search(r'\((\d{6})\)', text)
+        match = _RE_BRACKET_CODE.search(text)
         if match:
             code = match.group(1)
             name = text.split("(")[0].strip()
@@ -2570,9 +2588,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """单击联动板块龙头"""
         item = self.sector_table.item(row, 3)
         if item:
-            import re
             text = item.text()
-            match = re.search(r'\((\d{6})\)', text)
+            match = _RE_BRACKET_CODE.search(text)
             if match:
                 code = match.group(1)
                 name = text.split("(")[0].strip()
@@ -2739,7 +2756,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if not ts or not ts.category: return
         
         import re
-        cats = [c.strip() for c in re.split(r'[;；,，/ \\-]', str(ts.category)) if c.strip()]
+        cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(ts.category)) if c.strip()]
         if not cats: return
         
         strongest_sector = None
@@ -2783,7 +2800,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             n_item = self.stock_table.item(row, 1)
             if c_item:
                 c = str(c_item.text()).strip()
-                c = re.sub(r'[^\d]', '', c)
+                c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
                 n = str(n_item.text()).strip() if n_item else ""
@@ -3830,7 +3847,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     # 只要有板块信息且不是空数据
                     if not ts.category or (ts.current_pct == 0 and ts.score < 0.1): continue
                     # 容错处理：多种分隔符支持
-                    cats = [c.strip() for c in re.split(r'[;；,，/\- ]', str(ts.category)) if c.strip()]
+                    cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(ts.category)) if c.strip()]
                     for cat in cats:
                         if cat not in temp_sectors:
                             temp_sectors[cat] = {

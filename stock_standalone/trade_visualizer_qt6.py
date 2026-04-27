@@ -1864,6 +1864,8 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         
         # ⭐ 启用列排序功能
         table.setSortingEnabled(True)
+        # [NEW] 排序后自动滚动到顶部
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         return table
 
     def _on_table_clicked(self, row, col):
@@ -8296,14 +8298,15 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 恢复水平位置，防止排序导致的选择项偏移
         self._restore_h_scroll_state(self.stock_table, scroll_state)
-        
-        # 延时滚动到顶部
+        # [UX] 排序后自动滚动到顶部
         QTimer.singleShot(100, self.stock_table.scrollToTop)
 
     def on_filter_tree_header_clicked(self, _logicalIndex):
         """Filter Tree: 排序时保留手动列宽"""
         scroll_state = self._save_h_scroll_state(self.filter_tree)
         self._restore_h_scroll_state(self.filter_tree, scroll_state)
+        # [UX] 排序后自动滚动到顶部
+        self.filter_tree.scrollToTop()
 
     def _on_shortcut_autofit(self):
         """Alt+W 触发：紧凑型自适应"""

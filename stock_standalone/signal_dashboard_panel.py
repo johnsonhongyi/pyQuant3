@@ -93,6 +93,7 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         h_header = self.table.horizontalHeader()
         h_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         h_header.setFixedHeight(28) # 表头高度微调
+        h_header.sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
         
         self.table.setStyleSheet("""
             QTableWidget {
@@ -275,17 +276,30 @@ SIGNAL_TYPE_KEYWORDS = {
 }
 
 class NumericTableWidgetItem(QTableWidgetItem):
-    """支持数值排序的表格项"""
+    """支持数值排序的表格项 [FIXED] 支持 setText 实时同步数值"""
     def __init__(self, value):
+        super().__init__(str(value))
+        self.update_value(value)
+
+    def update_value(self, value):
+        """解析并更新用于排序的内部数值"""
         if isinstance(value, (int, float)):
-            super().__init__(str(value))
-            self._value = value
+            self._value = float(value)
         else:
-            super().__init__(str(value))
+            # 🚀 [UPGRADE] 智能数值提取：剥离百分比、正负号以支持整体排序
             try:
-                self._value = float(value)
+                clean_val = str(value).replace('%', '').replace('+', '').strip()
+                if not clean_val or clean_val == '-':
+                    self._value = -999999.0
+                else:
+                    self._value = float(clean_val)
             except (ValueError, TypeError):
                 self._value = value
+
+    def setText(self, text):
+        """同步更新内部数值，解决复用 Item 时的排序滞后问题"""
+        super().setText(text)
+        self.update_value(text)
 
     def __lt__(self, other):
         if isinstance(other, NumericTableWidgetItem):
@@ -828,6 +842,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [MOD] 设置默认按时间(第0列)倒序排列
         table.setSortingEnabled(True)
         table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         header = table.horizontalHeader()
@@ -854,6 +869,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
         table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder) # 默认按时间倒序
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
@@ -880,6 +896,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
@@ -907,6 +924,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
         table.horizontalHeader().setSortIndicator(5, Qt.SortOrder.DescendingOrder) # 默认按累跌倒序
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
@@ -933,6 +951,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.verticalHeader().setVisible(False)
         table.setSortingEnabled(True)
         table.horizontalHeader().setSortIndicator(5, Qt.SortOrder.DescendingOrder) # 默认按战略分倒序
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda: table.scrollToTop())
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
@@ -1069,10 +1088,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, is_numeric=False, bold=False):
             it = table.item(r_idx, c_idx)
-            if not it:
+            # [🚀 FIX] 确保 Item 类型匹配：如果是数值列但现有 Item 不是 NumericTableWidgetItem，则强制替换
+            needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
+            
+            if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
-            if it.text() != str(text): it.setText(str(text))
+            else:
+                if it.text() != str(text): it.setText(str(text))
             if color:
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
@@ -1143,10 +1166,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
         def _update_cell(r_idx, c_idx, text, color=None, is_numeric=False, bold=False, bg_color=None):
             it = table.item(r_idx, c_idx)
-            if not it:
+            # [🚀 FIX] 确保 Item 类型匹配
+            needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
+            
+            if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
-            if it.text() != str(text): it.setText(str(text))
+            else:
+                if it.text() != str(text): it.setText(str(text))
             if color:
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
@@ -1220,10 +1247,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, bg_color=None, bold=False, is_numeric=False):
             it = table.item(r_idx, c_idx)
-            if not it:
+            # [🚀 FIX] 确保 Item 类型匹配
+            needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
+            
+            if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
-            if it.text() != str(text): it.setText(str(text))
+            else:
+                if it.text() != str(text): it.setText(str(text))
             if color:
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
@@ -1285,10 +1316,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, bg_color=None, bold=False, is_numeric=False):
             it = table.item(r_idx, c_idx)
-            if not it:
+            # [🚀 FIX] 确保 Item 类型匹配
+            needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
+            
+            if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
-            if it.text() != str(text): it.setText(str(text))
+            else:
+                if it.text() != str(text): it.setText(str(text))
             if color:
                 if isinstance(color, str): color = QColor(color)
                 it.setForeground(QBrush(color))

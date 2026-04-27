@@ -351,23 +351,27 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         """Sort treeview content by column."""
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         
+        def try_parse_numeric(val):
+            if not val or val == '-': return -999999.0
+            # 🚀 [UPGRADE] 处理百分比、正负号
+            clean_s = str(val).replace('%', '').replace('+', '').strip()
+            try:
+                return float(clean_s)
+            except ValueError:
+                return str(val).lower()
+
         # Try to sort numerically if possible
-        try:
-            l.sort(key=lambda t: float(t[0]), reverse=reverse)
-        except ValueError:
-            l.sort(reverse=reverse)
+        l.sort(key=lambda t: try_parse_numeric(t[0]), reverse=reverse)
 
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
             # Re-index the '#' column if sorting by other columns? 
-            # Usually we want Index to stay static or move? 
-            # Let's keep Index static (row number) or dynamic? 
-            # If we explicitly sort, the row content moves.
-            # If we want the '#' column to update to 1,2,3... sorted order:
             self.tree.set(k, "index", index + 1)
 
         # Toggle sort direction
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
+        # [NEW] 排序后自动滚动到顶部
+        self.tree.yview_moveto(0)
 
     # --- Logic ---
     
@@ -627,7 +631,8 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         # Sort by Score desc
         stocks.sort(key=lambda x: x.get('score', 0), reverse=True)
-        stocks = stocks[:100] # 限制行数提升性能
+        # 🚀 [UPGRADE] 扩容展示上限，确保“整体排序”能涵盖绝大多数监控股
+        stocks = stocks[:300] 
         
         total_score = 0
         count = len(stocks)
