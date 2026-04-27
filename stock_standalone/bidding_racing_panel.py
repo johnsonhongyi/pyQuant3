@@ -1987,8 +1987,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._is_loading = False 
         self._table_highlights = {} 
         self._pending_auto_restore_idx = -1
-        self._auto_restore_pending = False
-        self._auto_capture_today_first = False
+        self._auto_restore_pending = True # [🚀 修复] 开启自动恢复，确保行情到达时同步今日历史
+        self._auto_capture_today_first = True # [🚀 修复] 开启自动捕捉，确保新的一天首波数据能产生起点
         self._first_boot_render = True # [NEW] 启动强制首次渲染标记
         self._startup_time = time.time()
         self._detail_dialogs = {} # [NEW] 追踪活跃的明细窗体实例
@@ -2599,8 +2599,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._sector_history = self._sector_history[:30] # [USER REQUEST] 最多保留 30 个
         
         self._refresh_history_combo()
-        # [⚡ 性能优化] 10 分钟内所有修改统一防抖保存，避免磁盘 IO 压力
-        self._save_ui_timer.start(600000)
+        # [⚡ 性能优化] 自动适配存盘延迟 (回测 1s / 实盘 10m)
+        self._trigger_save_ui()
 
     def _on_delete_history_clicked(self):
         """[🚀 板块回溯] 用户点击删除按钮，移除当前选中的历史记录项"""
@@ -2630,7 +2630,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._sector_history.remove(sec_name)
             logger.info(f"🗑️ [History] 已从回溯历史中移除板块: {sec_name}")
             self._refresh_history_combo()
-            self._save_ui_timer.start(600000) # 10 分钟防抖存盘
+            self._trigger_save_ui() # 自动适配存盘
 
     def _refresh_history_combo(self):
         """[🚀 板块回溯] 完全重刷下拉框列表 (默认按评分大小排序显示，存储顺序不变)"""
@@ -2855,6 +2855,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if curr_time == 0: curr_time = time.time()
             
             self._last_anchor_reset_data_ts = curr_time
+            # [🚀 修复] 手动重置后立即触发一次加速存盘，确保 marker 不丢失
+            self._trigger_save_ui() 
             self._last_data_version = -1 
             self.update_visuals()
             logger.info("🔄 [Panel] 用户触发了全局即时重置：活跃数、均线稳定性及报警历史已清零")
@@ -2923,8 +2925,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._anchor_history.pop(0)
             
         self._refresh_history_buttons()
-        # [⚡ 性能优化] 10 分钟防抖存盘
-        self._save_ui_timer.start(600000)
+        # [⚡ 性能优化] 自动适配存盘延迟 (回测 1s / 实盘 10m)
+        self._trigger_save_ui()
 
     def _refresh_history_buttons(self):
         try:
@@ -3010,14 +3012,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if abs(snap.get("ts", 0) - self._current_anchor_ts) < 1.0:
                  self._current_anchor_ts = 0
             self._refresh_history_buttons()
-            self._save_ui_timer.start(600000) # 10 分钟防抖存盘
+            self._trigger_save_ui() # 自动适配存盘
             logger.info(f"🗑️ [Panel] 已删除历史起点 {idx+1}")
 
     def _clear_all_anchors(self):
         self._anchor_history = []
         self._current_anchor_ts = 0
         self._refresh_history_buttons()
-        self._save_ui_timer.start(600000) # 10 分钟防抖存盘
+        self._trigger_save_ui() # 自动适配存盘
         logger.info("💣 [Panel] 已清空所有历史起点")
 
     def _import_merge_anchors(self):
@@ -3073,7 +3075,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 
                 # 4. 刷新并 10 分钟防抖持久化
                 self._refresh_history_buttons()
-                self._save_ui_timer.start(600000)
+                self._trigger_save_ui()
                 
                 QMessageBox.information(self, "合并成功", f"成功合并 {added_count} 条历史起点数据。")
             else:
@@ -3129,7 +3131,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         sec_data['leader_pct_diff'] = l_ts.pct_diff
             
             # 3. 重置自动刷新计时器与节流阀，确保 UI 瞬间 100% 重绘
-            self._last_anchor_reset_data_ts = getattr(self.detector, 'last_data_ts', time.time())
+            # [🚀 修复] 核心逻辑：设置重置时间戳为加载点的时间，而不是当前时间
+            # 这样 auto-reset 逻辑才能根据加载点后的时间流逝正确触发下一个 60m 节点
+            self._last_anchor_reset_data_ts = snap.get("ts", 0)
             self._last_ui_update_ts = 0      # 绕过 100ms 刷新限制
             self._last_data_version = -1     # 绕过数据版本缓存
             self._last_rendered_time = 0     # 绕过时间戳缓存
@@ -3141,6 +3145,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self._table_highlights[("stock", code, 6)] = now # DFF
             
             self.update_visuals()
+            self._trigger_save_ui() # 同步保存状态
             logger.info(f"♻️ [Panel] 已恢复至历史起点 {idx+1} ({datetime.datetime.fromtimestamp(snap['ts']).strftime('%H:%M:%S')})，生效个股: {applied_count}。")
             return applied_count > 0
         return False
@@ -3207,6 +3212,20 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 延迟一丁点确保资源回收后再退出
             # os._exit(0) # 暂时不加，由 test_bidding_replay 内部控制
             pass
+
+    def _trigger_save_ui(self, force=False):
+        """[🚀 性能均衡] 触发 UI 状态异步保存，支持回测模式下的加速保存"""
+        if force:
+            self._save_ui_state(force=True)
+            return
+
+        is_simulation = False
+        if hasattr(self, 'detector') and self.detector:
+            is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
+        
+        # 回测模式下使用 1 秒防抖，实盘模式使用 10 分钟防抖
+        delay = 1000 if is_simulation else 600000
+        self._save_ui_timer.start(delay)
 
     def _save_ui_state(self,force=False):
         """[🚀 物理存盘执行体] 防抖 + 去重 + 生命周期保护（增强版）"""
@@ -3332,6 +3351,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._current_anchor_ts = conf.get("current_anchor_ts", 0) # [NEW] 恢复当前选中状态
             if hist:
                 self._anchor_history = hist
+                # [🚀 修复] 恢复最后一次自动重置的时间戳，确保 auto-reset 逻辑的连续性
+                self._last_anchor_reset_data_ts = hist[-1].get("ts", 0)
                 self._refresh_history_buttons()
                 logger.info(f"✅ [RacingPanel] 已恢复 {len(hist)} 个历史起点。")
 
@@ -3524,8 +3545,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         for dlg in self._detail_dialogs.values():
             if hasattr(dlg, 'apply_show_reason_manual'):
                 dlg.apply_show_reason_manual(val)
-        # 10 分钟防抖存盘
-        self._save_ui_timer.start(600000)
+        # 自动适配存盘
+        self._trigger_save_ui()
 
     def _get_synthetic_score(self, ts):
         """[🚀 性能加速版] 动态合成显示分数"""
