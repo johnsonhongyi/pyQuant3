@@ -22,7 +22,7 @@ import threading
 import multiprocessing as mp
 from queue import Queue, Empty
 from multiprocessing.managers import BaseManager, SyncManager
-class StockManager(SyncManager): pass
+# class StockManager(SyncManager): pass # 🛡️ [REMOVED] SyncManager is a performance killer. Using local dict instead.
 import ctypes
 import pyperclip
 from datetime import datetime, timedelta
@@ -98,6 +98,8 @@ from history_manager import QueryHistoryManager
 import stock_indicator_help
 
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
+from market_state_bus import MarketStateBus, AtomicStateStore # 🚀 [PERF]
+
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
 # faulthandler is enabled later after logger is ready
 
@@ -167,6 +169,8 @@ def dump_all():
 # Ctrl+Alt+D（最可靠）
 # =========================
 keyboard.add_hotkey("ctrl+alt+d", dump_all)
+
+
 
 # =========================
 # SIGBREAK（仅在主线程 + 安全时）
@@ -425,8 +429,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #   pump_executor  (1线程) = 轻量编排: 解包/过滤/排序/调度 → Compute 返回后单点写 UI
         #   compute_executor (N线程) = CPU重计算: 信号检测/策略/情绪评分
         #   compute 线程永远不直接触碰 UI，结果必须回流 pump 后统一写入
-        cpu_count = int(os.cpu_count()/2) + 2 or 4
-        _compute_workers = min(cpu_count, cct.livestrategy_max_workers)
+        # ⭐ [PERF] 限制计算线程上限为 4，减少 GIL 争抢，确保 UI 响应优先级
+        _compute_workers = min(4, getattr(cct, 'livestrategy_max_workers', 4))
         self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
         self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")
         self.executor = self.compute_executor  # 🛡️ 向后兼容别名
@@ -532,15 +536,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
-        # 4. 初始化 Realtime Data Service (异步加载以加快启动)
+        # 4. 初始化全局状态存储 (代替昂贵的 SyncManager)
         try:
-            # 启动 Manager 仅用于同步设置 (global_dict)
-            logger.info("正在启动 StockManager (SyncManager) 用于状态共享...")
-            self.manager = StockManager()
-            self.manager.start()
-            
-            self.global_dict = self.manager.dict()
+            logger.info("🚀 [PERF] 启用本地状态存储 (Local Dict + Lock)...")
+            self._gdict_lock = threading.Lock()
+            self.global_dict = {}
             self.global_dict["resample"] = resampleInit
+            
+            # 🚀 [NEW] 初始化原子状态总线 (P0-3)
+            # 用于取代多 Queue 堆积，实现"拉取式" UI 刷新
+            from market_state_bus import MarketStateBus
+            self.market_bus = MarketStateBus.get_instance()
+            
+            # 🚀 [NEW] UI 专用原子快照存储 (P0-2)
+            self.ui_state_store = AtomicStateStore()
+            
+            # 🔥 同步初始化 DataPublisher (启动时直接加载)
             
             # 🔥 同步初始化 DataPublisher (启动时直接加载)
             self.realtime_service = DataPublisher(high_performance=True)
@@ -571,13 +582,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info("✅ [ROOT-FIX] UI Heartbeat & Watchdog (Delayed) initialized.")
 
         except Exception as e:
-            logger.error(f"❌ SyncManager 初始化失败: {e}\n{traceback.format_exc()}")
+            logger.error(f"❌ 状态存储初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
             self._realtime_service_ready = False
-            self.manager = mp.Manager()
-            self.global_dict = self.manager.dict()
-            self.global_dict["resample"] = resampleInit
-            self.global_dict['init_error'] = str(e)
+            self.global_dict = {"resample": resampleInit, 'init_error': str(e)}
+            self._gdict_lock = threading.Lock()
         # Restore global_values initialization
         self.global_values = cct.GlobalValues(self.global_dict)
         
@@ -638,6 +647,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=1
         )
         status_label_left.pack(fill="x", expand=True)
+
+
+
 
         # 右侧状态信息
         right_frame = tk.Frame(pw, bg="#f0f0f0")
@@ -1139,6 +1151,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个，等待 OS 释放资源 (10s)
         self._last_racing_backtest_unified_t = time.time()
         logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (10s)")
+
+
+
 
     def _put_deduped_task(self, key, task_fn):
         """
@@ -2605,18 +2620,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict = None
             self.manager_dict = None
 
-            if hasattr(self, "manager") and self.manager:
-                try:
-                    t = threading.Thread(
-                        target=self.manager.shutdown,
-                        daemon=True
-                    )
-                    t.start()
-                    t.join(timeout=1.0)
-                except Exception:
-                    pass
-
-            self.manager = None
+            self.manager = None # 🛡️ [PERF] No more SyncManager to shutdown
             self.queue = None
 
             # =========================================================
@@ -3887,6 +3891,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             daemon=True
         )
         self.proc.start()
+        
+        # 🚀 [NEW] 启动行情总线监听线程 (P0-3)
+        # 职责：将 Queue 中的数据包瞬间转移到 MarketStateBus，释放 Queue 积压
+        self._bus_worker_thread = threading.Thread(
+            target=self._market_bus_worker_loop,
+            name="MarketBusWorker",
+            daemon=True
+        )
+        self._bus_worker_thread.start()
+        # logger.info("✅ [PERF] MarketBusWorker thread started.")
+
 
     def stop_refresh(self):
         if hasattr(self, 'refresh_flag'):
@@ -3898,7 +3913,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def start_refresh(self):
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = True
-            logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
+
+    def _market_bus_worker_loop(self):
+        """
+        [PERF] 行情总线监听循环 (P0-3)
+        在后台线程中高速清空 Queue，将全量快照存入 MarketStateBus。
+        好处：UI 线程不再负责 get_nowait()，彻底消除 unpickle 引起的主线程卡顿。
+        """
+        logger.info("📡 MarketBusWorker loop started.")
+        while not getattr(self, "_is_closing", False):
+            try:
+                # 1. 尽可能清空积压，只保留最新的一帧（覆盖式模型）
+                latest_p = None
+                while not self.queue.empty():
+                    try:
+                        latest_p = self.queue.get_nowait()
+                    except Empty:
+                        break
+                
+                if latest_p:
+                    # 2. 发布到行情总线
+                    full_df = None
+                    df_filtered = None
+                    if isinstance(latest_p, dict):
+                        full_df = latest_p.get('full_snapshot')
+                        df_filtered = latest_p.get('filtered_ui_data')
+                    else:
+                        full_df = latest_p
+                    
+                    if full_df is not None:
+                        self.market_bus.publish(full_df, df_filtered)
+                        # logger.debug("📡 [Bus] Published latest snapshot.")
+                
+                time.sleep(0.05) # 20Hz 刷新率足够
+            except Exception as e:
+                logger.error(f"❌ MarketBusWorker Error: {e}")
+                time.sleep(1)
+
+            # logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
         self.status_var.set("刷新已启动")
 
     def format_next_time(self,delay_ms=None):
@@ -3956,23 +4008,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 🔄 优化：处理队列中的所有数据包，不跳过中间增量（解决“缺斤短两”数据不全问题）
                 # 我们逐个分发包到后台 worker 进行策略计算，但只在最后一轮同步 UI
-                # 🔄 优化：只取最新的数据包，清空积压以防止主线程被 unpickle 堆叠占满
-                all_packets = []
-                latest_p = None
-                while not self.queue.empty():
-                    try:
-                        latest_p = self.queue.get_nowait()
-                    except Empty:
-                        break
+                # 🔄 [PERF] 架构重构：改为从 MarketStateBus "拉取" 最新快照 (Snapshot Pull)
+                # 优点：不阻塞 Queue，不处理中间积压包，永远只处理当前最新帧
+                bus_data = self.market_bus.get_latest(since_version=getattr(self, '_last_ui_bus_version', 0))
                 
-                if latest_p:
-                    all_packets = [latest_p]
-                    proc_count = 1
-                
-                if all_packets:
-                    proc_count = len(all_packets)
-                    if proc_count > 1:
-                        logger.debug(f"📡 [UpdateTree] 批量处理 {proc_count} 个积压数据包，确保信号完整...")
+                if bus_data:
+                    version, full_df, df_filtered, snap_time = bus_data
+                    self._last_ui_bus_version = version
+                    latest_p = {
+                        'full_snapshot': full_df,
+                        'filtered_ui_data': df_filtered,
+                        'timestamp': snap_time
+                    }
+
                     
                     # ⭐ [RESTORED] 跨进程中转逻辑：在处理数据包之前快速消耗信号
                     try:
@@ -4002,13 +4050,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 避免新行情进入时，主表格自动跳回全量列表，导致用户搜索失效
                     combined_query = getattr(self, '_last_value', "")
                     
-                    # ⭐ [OPTIMIZE] 性能核心优化：跳帧 (Skip-frames) 策略
-                    # 如果 Queue 中积压了多个数据包，我们只取出最新的一个进行全量信号检测、策略计算和 UI 同步。
-                    # 因为每一个包都是全量快照 (Full Snapshot)，历史包的重复计算不仅浪费 CPU，还会导致 UI 响应产生严重堆叠延迟。
-                    if proc_count > 1:
-                        logger.warning(f"🚀 [UpdateTree] 性能预警：检测到 {proc_count} 个积压包，仅处理最新帧以恢复响应...")
-                    
-                    latest_pkg = all_packets[-1]
+                    # 🚀 [PERF] 提交最新的包到 pump_executor (1线程串行，保证快照顺序一致性)
+                    latest_pkg = latest_p
+
                     self._is_processing_tree_data = True
                     self._last_processing_start_time = time.time()
                     
@@ -4778,8 +4822,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.warning(f"🚨 [UI_BLOCK] 主线程假死检测! 延迟: {delay:.2f}s | Queue积压: {q_size if q_size >= 0 else 'N/A'}")
                         # 🧬 [NEW] 联动自动画像审计：同步输出最近周期的 Top 10 耗时任务
                         # self.show_ui_performance_audit(reset=False)
-                        self._dump_ui_stack()
+                        
+                        # 🚀 [PERF] 增加 30s 冷却，防止 dump 本身加剧卡顿
+                        last_dump = getattr(self, '_last_watchdog_dump_ts', 0)
+                        if time.time() - last_dump > 30:
+                            self._dump_ui_stack()
+                            self._last_watchdog_dump_ts = time.time()
+                            
                         already_warned = True
+
                 else:
                     if already_warned:
                         logger.debug(f"✅ [UI_RECOVER] 主线程已恢复响应. 曾阻塞: {delay:.2f}s")
@@ -5349,19 +5400,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     last_send_time = time.time()
 
-                    # ⚡ [CORE] 线程安全地获取行情快照
-                    with self._df_lock:  # [FIX] 硬编码锁引用，避免 getattr 每次创建新 Lock
-                        df_ui = self.df_all.copy()
+                    # 🔄 [PERF] 架构重构：send_df 改为从 MarketStateBus 拉取最新全量快照
+                    # 彻底消除 send_df 线程在 Queue 上的竞争与主线程锁 (_df_lock) 竞争
+                    bus_data = self.market_bus.get_latest(since_version=getattr(self, '_last_vis_bus_version', 0))
                     
-                    # [OPTIMIZE] 快速哈希校验
-                    n_rows_now = len(df_ui)
-                    df_hash = hash(n_rows_now)
-                    if not df_ui.empty:
-                        p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in df_ui.columns), None)
-                        if p_col:
-                            # 采样计算哈希 (头中尾)
-                            sample_idx = [0, n_rows_now // 2, n_rows_now - 1] if n_rows_now > 2 else list(range(n_rows_now))
-                            df_hash = hash(tuple(df_ui[p_col].iloc[sample_idx].values)) ^ hash(n_rows_now)
+                    if bus_data is None:
+                        # 检查是否有强制同步请求，如果没有则继续休眠
+                        if not getattr(self, '_force_full_sync_pending', False):
+                            time.sleep(0.5)
+                            continue
+                        # 如果有强制同步请求，拉取当前总线最新数据（无论版本）
+                        bus_data = (self.market_bus._version, self.market_bus._df_all, self.market_bus._df_filtered, self.market_bus._timestamp)
+
+                    version, df_bus_all, _, snap_time = bus_data
+                    self._last_vis_bus_version = version
+                    
+                    if df_bus_all is None or df_bus_all.empty:
+                        time.sleep(0.5)
+                        continue
+
+                    # ⚡ [CORE] 采用总线快照进行可视化分发
+                    df_ui = df_bus_all
+                    df_hash = hash(version) # 使用总线版本作为哈希
+
                     
                     # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
                     if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not getattr(self, '_force_full_sync_pending', False):

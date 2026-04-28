@@ -364,13 +364,27 @@ class RobustQueueListener(QueueListener):
 
 import queue
 
+class DropQueueHandler(QueueHandler):
+    """
+    丢弃式日志处理器 (P0-4)
+    当 Queue 满载时，直接丢弃新日志，防止阻塞业务线程。
+    """
+    def enqueue(self, record):
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            pass  # 💣 满载即丢弃
+
+
 def _ensure_listener_started(log_f, show_detail=True):
     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
 
     # ⭐ [STABILITY] 在 Windows 混合 GUI 环境下，multiprocessing.Queue 的 feeder 线程会引发 GIL 崩溃。
     # 我们改为每个进程使用各自独立的 queue.Queue（线程安全且无后台 feeder 线程）。
     if _GLOBAL_QUEUE is None:
-        _GLOBAL_QUEUE = queue.Queue(-1)
+        # ⭐ [PERF] 限制队列长度为 2000，配合 DropQueueHandler 实现丢弃策略，防止 IO 阻塞业务
+        _GLOBAL_QUEUE = queue.Queue(2000)
+
 
         # ================= Console handler（彩色） =================
         ch = logging.StreamHandler()
@@ -532,8 +546,9 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True,level=loggin
     # logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
 
     try:
-        logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
-        logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+        logger.handlers = [h for h in logger.handlers if not isinstance(h, (QueueHandler, DropQueueHandler))]
+        logger.addHandler(DropQueueHandler(_GLOBAL_QUEUE))
+
     except Exception as e:
         print(f"Failed to add QueueHandler: {e}")
 
