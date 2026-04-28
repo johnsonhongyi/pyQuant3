@@ -11,7 +11,7 @@ except ImportError:
     win32api = None
 
 from JohnsonUtil import LoggerFactory
-from gui_utils import askstring_at_parent_single,clamp_window_to_screens
+from gui_utils import askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin
 from stock_logic_utils import test_code_against_queries,toast_message
 
 logger = LoggerFactory.getLogger('QueryHistoryManager')
@@ -144,6 +144,17 @@ class QueryHistoryManager:
             self.editor_frame.destroy()  # 重建
 
         self.editor_frame = tk.Frame(self.root)
+
+        # [NEW] 全局搜索框
+        frame_global_search = tk.Frame(self.editor_frame)
+        frame_global_search.pack(fill="x", padx=5, pady=(5, 1))
+        
+        tk.Label(frame_global_search, text="🔍 全局搜索:").pack(side="left")
+        self.entry_global_search = tk.Entry(frame_global_search)
+        self.entry_global_search.pack(side="left", padx=5, fill="x", expand=True)
+        self.entry_global_search.bind("<Return>", lambda e: self.do_global_search())
+        tk.Button(frame_global_search, text="搜索所有历史", command=self.do_global_search).pack(side="left", padx=5)
+
         frame_input = tk.Frame(self.editor_frame)
         frame_input.pack(fill="x", padx=5, pady=1, expand=True)
 
@@ -250,6 +261,153 @@ class QueryHistoryManager:
         for index, (val, k) in enumerate(data_list):
             tv.move(k, '', index)
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
+
+    def do_global_search(self):
+        if not hasattr(self, "entry_global_search"):
+            return
+        keyword = self.entry_global_search.get().strip().lower()
+        if not keyword:
+            return
+            
+        # 💡 [关键改进] 从硬盘读取完整的历史记录进行全局搜索，绕过 UI 30 条的加载限制
+        full_data = {}
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    full_data = json.load(f)
+            except Exception as e:
+                logger.error(f"[do_global_search] Read full file error: {e}")
+
+        all_data = []
+        for grp_name in ["history1", "history2", "history3", "history4", "history5"]:
+            his_list = full_data.get(grp_name, [])
+            for i, item in enumerate(his_list):
+                if not isinstance(item, dict): continue
+                q = item.get("query", "")
+                n = item.get("note", "")
+                if keyword in q.lower() or keyword in n.lower():
+                    all_data.append({"id": i + 1, "group": grp_name, "query": q, "note": n})
+                    
+        if not all_data:
+            toast_message(self.root, f"未找到包含 '{keyword}' 的记录")
+            return
+            
+        top = tk.Toplevel(self.root)
+        top.title(f"🔍 全局搜索结果: '{keyword}' - 共 {len(all_data)} 条")
+        
+        # 设置窗口大小并居中显示
+        w, h = 1000, 500
+        x, y = get_centered_window_position_mainWin(self.root, w, h)
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        
+        # 使用 ttk 样式增强
+        main_frame = ttk.Frame(top, padding=5)
+        main_frame.pack(fill="both", expand=True)
+
+        # Treeview 结果列表
+        col_ratios = {"id": 0.05, "group": 0.08, "query": 0.67, "note": 0.20}
+        tree = ttk.Treeview(main_frame, columns=list(col_ratios.keys()), show="headings", selectmode="browse")
+        
+        # 应用系统统一的 Treeview 样式 (30px rowheight)
+        style = ttk.Style()
+        try:
+            from dpi_utils import get_windows_dpi_scale_factor
+            scale = get_windows_dpi_scale_factor()
+        except:
+            scale = 1.0
+        style.configure("Treeview", rowheight=int(28 * scale)) 
+        
+        tree.heading("id", text="#", command=lambda: self.treeview_sort_column(tree, "id"))
+        tree.heading("group", text="组", command=lambda: self.treeview_sort_column(tree, "group"))
+        tree.heading("query", text="查询公式 (Query)", command=lambda: self.treeview_sort_column(tree, "query"))
+        tree.heading("note", text="备注", command=lambda: self.treeview_sort_column(tree, "note"))
+        
+        # 初始宽度与对齐
+        tree.column("id", width=int(w * 0.05), minwidth=40, anchor="center", stretch=False)
+        tree.column("group", width=int(w * 0.08), minwidth=60, anchor="center", stretch=False)
+        tree.column("query", width=int(w * 0.67), minwidth=400, stretch=True)
+        tree.column("note", width=int(w * 0.20), minwidth=100, stretch=True)
+        
+        # 💡 响应式自适应
+        def adjust_search_cols(event):
+            tw = event.width - 25
+            if tw > 200:
+                tree.column("id", width=int(tw * 0.05))
+                tree.column("group", width=int(tw * 0.08))
+                tree.column("query", width=int(tw * 0.67))
+                tree.column("note", width=int(tw * 0.20))
+        
+        top.bind("<Configure>", adjust_search_cols)
+
+        # 滚动条
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+        
+        for d in all_data:
+            disp_q = " ".join(d["query"].strip().split())
+            if len(disp_q) > 250: disp_q = disp_q[:247] + "..."
+            tree.insert("", "end", values=(d["id"], d["group"], disp_q, d["note"]))
+            
+        def on_pin_to_top():
+            sel = tree.selection()
+            if not sel: return
+            idx = tree.index(sel[0])
+            original_item = all_data[idx]
+            q, n = original_item["query"], original_item["note"]
+            
+            existing_idx = -1
+            for i, r in enumerate(self.current_history):
+                if r.get("query") == q:
+                    existing_idx = i; break
+            if existing_idx >= 0: self.current_history.pop(existing_idx)
+            self.current_history.insert(0, {"query": q, "starred": 0, "note": n})
+            self._history_changed = True
+            self.refresh_tree()
+            self.save_search_history()
+            toast_message(top, f"已置顶保存到当前的 {self.current_key} 第一个")
+            
+        def on_copy_info():
+            sel = tree.selection()
+            if not sel: return
+            idx = tree.index(sel[0])
+            q = all_data[idx]["query"]
+            try:
+                top.clipboard_clear(); top.clipboard_append(str(q))
+                toast_message(top, "✅ Query公式已复制")
+            except: pass
+
+        def on_tree_double_click(event):
+            region = tree.identify_region(event.x, event.y)
+            if region != "cell": return
+            column = tree.identify_column(event.x) # #1=id, #2=组, #3=Query, #4=备注
+            sel = tree.selection()
+            if not sel: return
+            idx = tree.index(sel[0])
+            item_data = all_data[idx]
+            if column == "#4": # 备注列
+                content, label = item_data.get("note", ""), "备注信息"
+            else:
+                content, label = item_data.get("query", ""), "Query公式"
+            if content:
+                try:
+                    top.clipboard_clear(); top.clipboard_append(str(content))
+                    toast_message(top, f"✅ {label}已复制")
+                except: pass
+        tree.bind("<Double-1>", on_tree_double_click)
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill="x", pady=10)
+        
+        style = ttk.Style()
+        style.configure("Primary.TButton", font=("微软雅黑", 10, "bold"))
+        
+        btn_pin = ttk.Button(btn_frame, text="📌 置顶保存到当前组第一行", command=on_pin_to_top, style="Primary.TButton")
+        btn_pin.pack(side="left", padx=5)
+        
+        ttk.Button(btn_frame, text="📋 复制完整Query", command=on_copy_info).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="关闭窗口", command=top.destroy).pack(side="right", padx=5)
 
     def open_editor(self):
         # 每次打开时对数据重新读取一次存档,保持最新的数据
