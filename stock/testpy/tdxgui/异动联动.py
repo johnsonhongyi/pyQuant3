@@ -1748,20 +1748,21 @@ def save_dataframe(df=None):
     """獲取選取的日期，並將 DataFrame 儲存為以該日期命名的檔案。"""
     global date_write_is_processed
     global loaded_df,start_init
+    now_time = get_now_time_int()
+
     if not get_day_is_trade_day():
         date_str = get_last_weekday_before()
     else:
-        date_str = get_today()
+        date_str = get_today() 
     # filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
     filename =  os.path.join(BASE_DIR, "datacsv",f"dfcf_{date_str}.csv.bz2")
     # --- 核心檢查邏輯 ---
-    if get_now_time_int() > 1505 and  os.path.exists(filename):
+    if (now_time > 1505 and  os.path.exists(filename)) or now_time < 930:
         logger.info(f' workday:{date_str} {filename} exists,return')
         return
 
     init_start_time = time.time()
     while not start_init:
-        now_time = get_now_time_int()
         is_trade_day = get_day_is_trade_day()
         work_time = get_work_time()
 
@@ -2095,8 +2096,7 @@ def clear_code_entry():
     
     # 清空搜索框内容并执行搜索
     code_entry.delete(0, tk.END)
-    # safe_set_stock_code(code_entry)
-    search_by_code()  # 调用搜索函数
+    search_by_code()  # 恢复：清空后执行默认搜索（显示全量分类数据）
 
 # def scroll_to_code_in_treeview(monitor_tree,stock_code):
 #     """Helper function to scroll to a specific stock code in the treeview"""
@@ -2197,7 +2197,8 @@ def search_by_code(event=None,onclick=False):
             #     data = df[df["名称"].str.contains(code, case=False, na=False)]
 
             # 保存历史记录并更新下拉列表
-            save_keyword_to_config(code)
+            if code and code.strip():
+                save_keyword_to_config(code)
             all_keywords = load_keywords_from_config()
             if code_entry:
                 code_entry['values'] = all_keywords
@@ -2235,7 +2236,8 @@ def search_by_code(event=None,onclick=False):
         populate_treeview(data)
         
     else:
-        search_by_type()  # 如果没有 code，则按类型搜索
+        # [恢复] 如果没有 code，则执行分类/全量搜索
+        search_by_type()
         # 如果有找到 code，滚动到该条目
         # if onclick:
 
@@ -2494,6 +2496,13 @@ def update_linkage_status():
     
     if uniq_var.get() or not uniq_var.get():
         show_tasks()
+        # [🚀 修复] 联动 Uniq 状态：当去重状态改变时，自动重算命中数，保持全局一致
+        try:
+            # 检查函数是否存在（由于定义在 __main__ 中）
+            func = globals().get('calculate_history_hits_ui')
+            if func: func()
+        except Exception as e:
+            logger.debug(f"Auto-recalc hits on Uniq toggle failed: {e}")
     logger.info(f"TDX: {tdx_state}, THS: {ths_state}, VIS: {vis_state}, DC: {dfcf_state}, Uniq: {uniq_var.get()}, Sub: {sub_var.get()}, Win: {win_var.get()}")
 
 def save_linkage_config():
@@ -4250,7 +4259,7 @@ def load_archive(selected_file,readfile=False):
         return
     if readfile:
         initial_monitor_list = load_monitor_list(MONITOR_LIST_FILE=archive_file)
-        logger.info('readfile:{archive_file}')
+        logger.info(f'readfile:{archive_file}')
         return initial_monitor_list
     # 关闭所有已有监控窗口
     for code, info in list(monitor_windows.items()):
@@ -4738,6 +4747,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                         last_updated_time = None
                         return pd.DataFrame() # 提前返回
                         
+                    
                     temp_df = get_stock_changes(selected_type=symbol)
                     if temp_df is not None and not temp_df.empty:
                         dfs.append(temp_df)
@@ -5073,7 +5083,7 @@ def _get_tdx_data_df(stock_code=None):
 def _get_sina_data_realtime(stock_code=None):
     """获取全量实时快照数据（带智能缓存与交易时段分级刷新）"""
     global sina_data_last_updated_time, sina_data_df
-    global pytables_status
+    global pytables_status, today_tdx_df, realdatadf
     
     current_time = datetime.now()
     now_int = get_now_time_int()
@@ -5110,6 +5120,73 @@ def _get_sina_data_realtime(stock_code=None):
                 
                 sina_data_df = sina_data
                 sina_data_last_updated_time = current_time
+
+                # --- [🚀 增强] 同步更新 today_tdx_df 实时数据 ---
+                if today_tdx_df is not None and not today_tdx_df.empty:
+                    try:
+                        # 1. 准备实时 OHLC 数据 (从 sina_data_df 提取)
+                        # 列名映射：中英文兼容处理
+                        mapping = {'开盘': 'open', '最高': 'high', '最低': 'low', '现价': 'close', '成交量': 'volume'}
+                        update_cols = {c: mapping[c] for c in sina_data_df.columns if c in mapping}
+                        
+                        if update_cols:
+                            # 提取并重命名列
+                            rt_updates = sina_data_df[list(update_cols.keys())].rename(columns=update_cols)
+                            
+                            # 2. 优化成交量 (Volume) 来源：优先 realdatadf (若带量)
+                            if isinstance(realdatadf, pd.DataFrame) and not realdatadf.empty:
+                                # 寻找 realdatadf 中的成交量列 (优先使用 "量"，兼容 volume, vol)
+                                rd_vol_col = next((c for c in ['量', 'volume', 'vol'] if c in realdatadf.columns), None)
+                                if rd_vol_col:
+                                    # 提取 realdatadf 中的成交量，覆盖 sina_data 中的数据
+                                    rd_vols = realdatadf[[rd_vol_col]].copy().rename(columns={rd_vol_col: 'volume'})
+                                    # 确保索引对齐（字符串 zfill(6)）
+                                    rd_vols.index = rd_vols.index.map(lambda x: str(x).zfill(6))
+                                    rt_updates.update(rd_vols)
+                            
+                            # 3. 合并到 today_tdx_df
+                            # 确保 today_tdx_df 索引也是标准 6 位字符串
+                            if not today_tdx_df.empty:
+                                today_tdx_df.index = today_tdx_df.index.map(lambda x: str(x).zfill(6))
+                                
+                            is_multi_tdx = isinstance(today_tdx_df.columns, pd.MultiIndex)
+                            for col in rt_updates.columns:
+                                if is_multi_tdx:
+                                    # [🚀 修复] MultiIndex 下，更新所有匹配的 metric 列 (如 ('d', 'close'), ('5', 'close'))
+                                    found_match = False
+                                    # 遍历第一层级（周期），寻找匹配的第二层级（指标）
+                                    for p in today_tdx_df.columns.levels[0]:
+                                        if (p, col) in today_tdx_df.columns:
+                                            # 使用 update 机制确保对齐
+                                            # 构造一个带相同 MultiIndex 的临时 Series 进行更新
+                                            temp_s = rt_updates[col].copy()
+                                            temp_s.name = (p, col)
+                                            today_tdx_df.update(pd.DataFrame(temp_s))
+                                            found_match = True
+                                    if not found_match:
+                                        # 如果 MultiIndex 中没有，则作为平铺列添加 (通常会变成 (col, ''))
+                                        today_tdx_df[col] = rt_updates[col]
+                                else:
+                                    if col in today_tdx_df.columns:
+                                        today_tdx_df.update(rt_updates[[col]])
+                                    else:
+                                        today_tdx_df[col] = rt_updates[col]
+                            
+                            # 4. 计算实时量比 (vol_ratio)
+                            # 兼容 MultiIndex 结构下的量比计算
+                            if is_multi_tdx:
+                                # 尝试在 'd' 周期下计算
+                                if ('d', 'last6vol') in today_tdx_df.columns and ('d', 'volume') in today_tdx_df.columns:
+                                    l6v = today_tdx_df[('d', 'last6vol')].replace(0, np.nan)
+                                    today_tdx_df[('d', 'vol_ratio')] = (today_tdx_df[('d', 'volume')] / l6v).fillna(0)
+                            else:
+                                if 'last6vol' in today_tdx_df.columns and 'volume' in today_tdx_df.columns:
+                                    l6v = today_tdx_df['last6vol'].replace(0, np.nan)
+                                    today_tdx_df['vol_ratio'] = (today_tdx_df['volume'] / l6v).fillna(0)
+                        
+                        logger.info(f"📊 已同步更新 today_tdx_df 实时 OHLCV (n={len(today_tdx_df)}, multi={is_multi_tdx})")
+                    except Exception as ex:
+                        logger.error(f"⚠️ 更新 today_tdx_df 实时数据失败: {ex}")
         except Exception as e:
             import traceback
             logger.error(f"❌ 刷新 sina_data 缓存失败:\n{traceback.format_exc()}")
@@ -5136,6 +5213,11 @@ def _get_sina_data_realtime(stock_code=None):
     return sina_data_df.copy()
 
  
+# --- [🚀 性能优化] 全局数据集缓存 ---
+_global_enriched_cache = None
+_last_cache_realdatadf_id = None
+_last_cache_sina_ts = None
+
 def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_query=None):
     """获取股票异动数据（带安全检查）"""
     global realdatadf, loaded_df
@@ -5184,21 +5266,75 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
     if temp_df.empty:
         return temp_df
 
-    # === 6) Data Enrichment (Merge TDX & Sina) ===
-    # Use a copy to avoid mutating the original realdatadf
-    temp_df = temp_df.copy()
+    # === 6) Data Enrichment (Merge TDX & Sina) with Caching ===
+    global _global_enriched_cache, _last_cache_realdatadf_id, _last_cache_sina_ts
+    global realdatadf, sina_data_df, sina_data_last_updated_time
     
-    # TDX Data (Historical Daily OHLC)
-    tdx_df = _get_tdx_data_df()
-    if tdx_df is not None and not tdx_df.empty:
-        # Merge by '代码'
-        temp_df = temp_df.merge(tdx_df, left_on='代码', right_index=True, how='left')
+    # 判定是否需要更新缓存
+    current_realdatadf_id = id(realdatadf)
+    current_sina_ts = sina_data_last_updated_time
+    
+    need_refresh_cache = (
+        _global_enriched_cache is None or 
+        current_realdatadf_id != _last_cache_realdatadf_id or 
+        current_sina_ts != _last_cache_sina_ts
+    )
+    
+    if need_refresh_cache:
+        # logger.debug("🔄 [Cache Miss] Recalculating Enriched Dataset...")
+        # 1. 基础框架 (从 realdatadf 克隆)
+        enriched = realdatadf.copy()
         
-    # Sina Data (Real-time OHLC)
-    sina_df = _get_sina_data_realtime()
-    if sina_df is not None and not sina_df.empty:
-        # Sina columns: close, open, high, low, turnover, name, llastp
-        temp_df = temp_df.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+        # 2. TDX Data (Historical Daily OHLC)
+        tdx_df = _get_tdx_data_df()
+        if tdx_df is not None and not tdx_df.empty:
+            enriched = enriched.merge(tdx_df, left_on='代码', right_index=True, how='left')
+            
+        # 3. Sina Data (Real-time OHLC)
+        sina_df = _get_sina_data_realtime()
+        if sina_df is not None and not sina_df.empty:
+            mapping = {'现价': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'turnover'}
+            for cn, en in mapping.items():
+                if cn in sina_df.columns and en not in sina_df.columns:
+                    sina_df[en] = sina_df[cn]
+            enriched = enriched.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+        
+        # 4. 补齐核心列（用于 QueryEngine 兜底）
+        for c in ['open', 'high', 'low', 'close', 'volume']:
+            if c in enriched.columns:
+                s_col = f"{c}_sina"
+                if s_col in enriched.columns:
+                    enriched[c] = enriched[s_col].fillna(enriched[c] if c in enriched.columns else np.nan)
+
+        # 更新缓存索引
+        _global_enriched_cache = enriched
+        _last_cache_realdatadf_id = current_realdatadf_id
+        _last_cache_sina_ts = current_sina_ts
+    # else:
+    #     logger.debug("⚡ [Cache Hit] Using cached Enriched Dataset.")
+
+    # 从缓存中提取当前过滤后的结果
+    # 注意：temp_df 是经过 filter_stocks 过滤后的基础列表
+    # 我们需要将缓存中的行情列同步到当前结果集
+    if temp_df is not None:
+        # 获取当前结果集的索引（代码）
+        current_codes = temp_df['代码'].tolist()
+        # 从全量缓存中提取这些代码的完整列
+        temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
+        # 恢复由于 merge 可能改变的行顺序（对齐原始 temp_df）
+        # 这里简单处理：如果 temp_df 和 enriched 结构一致，直接使用 loc
+
+    # [🚀 DEBUG] 检查整合后的数据列，排查 Query NameError
+    if logger.isEnabledFor(logging.DEBUG) or True: # 临时强制开启或由全局级别控制
+        logger.debug(f"🧪 [Enrich Debug] temp_df columns: {temp_df.columns.tolist()}")
+        if not temp_df.empty:
+            # 只展示关键列的快照
+            cols_to_show = [c for c in ['代码', '名称', 'open', 'high', 'low', 'close', 'lastp1d'] if c in temp_df.columns]
+            if not cols_to_show: # 如果都没有，展示前10列
+                cols_to_show = temp_df.columns[:10].tolist()
+            logger.info(f"🧪 [Enrich Debug] Data Preview (Top 3):\n{temp_df[cols_to_show].head(3)}")
+        else:
+            logger.info("🧪 [Enrich Debug] temp_df is EMPTY")
 
     # === 7) History Strategy Filter ===
     # 注意：在子线程中调用 tk.Variable.get() 会触发 RuntimeError
@@ -5235,11 +5371,32 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
             except Exception:
                 final_query = ""
 
-        if final_query:
-            query_str = final_query
+        query_str = final_query
         if query_str:
-            # Format is usually "H1: query" or similar if set by manager
-            actual_query = query_str.split(":", 1)[1].strip() if ":" in query_str else query_str
+            # [🚀 修复] 宏观查询逻辑：支持 "备注 | [Hit: N] | 逻辑" 格式 (提取最后一段作为 query)
+            if ' | ' in query_str:
+                parts = query_str.split(' | ')
+                actual_query = parts[-1].strip()
+                # 校验是否为有效的逻辑表达式，如果不是（比如只有备注），则可能格式不符，保持原样
+                if not any(op in actual_query.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or', 'close', 'pct', 'score']):
+                    actual_query = query_str
+            else:
+                actual_query = query_str
+
+            # 2. 移除可能残留在 actual_query 中的 [Hit: N] 标签 (无论在何处)
+            if '[Hit:' in actual_query:
+                import re
+                actual_query = re.sub(r'\s*\[Hit:\s*\d+\]\s*', '', actual_query).strip()
+            
+            # 3. 处理 "【备注】  逻辑" 格式
+            if '】' in actual_query:
+                parts = actual_query.split('】', 1)
+                p2 = parts[1].strip()
+                if any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or', 'close', 'pct', 'score']):
+                    actual_query = p2
+            
+            query_str = actual_query
+            logger.info(f"🔍 Final Query String: {query_str}")
             
             # Apply filter using query_engine
             try:
@@ -10256,6 +10413,19 @@ if __name__ == "__main__":
         except Exception as e:
             messagebox.showwarning("Error", f"Failed to launch manager: {e}")
 
+    def _format_history_item_local(item):
+        """[NEW] 异动联动专用格式化：备注 | [Hit: N] | 逻辑"""
+        if not isinstance(item, dict): return str(item)
+        q = item.get("query", "").strip()
+        q = " ".join(q.split()) # 压缩空白
+        note = item.get("note", "").strip()
+        hit = item.get("hit", "")
+        parts = []
+        if note: parts.append(note)
+        if hit != "" and hit is not None: parts.append(f"[Hit: {hit}]")
+        parts.append(q)
+        return "  |  ".join(parts)
+
     def reload_history_from_disk():
         """刷新历史记录（从磁盘重新加载）"""
         global query_history_mgr, history_combo, root
@@ -10273,8 +10443,8 @@ if __name__ == "__main__":
                 elif cur_key == "history4": target = h4
                 elif cur_key == "history5": target = h5
                 
-                # 更新 UI
-                history_combo['values'] = [r.get("query") for r in target]
+                # 更新 UI：采用 "备注 | [Hit: N] | 逻辑" 格式
+                history_combo['values'] = [_format_history_item_local(r) for r in target]
                 from stock_logic_utils import toast_message
                 toast_message(root, "✅ 历史记录已同步")
                 logger.info(f"🔄 Reloaded {len(target)} queries from disk.")
@@ -10288,14 +10458,94 @@ if __name__ == "__main__":
     tk.Button(history_frame, text="🔄", command=reload_history_from_disk, 
               font=('Microsoft YaHei', 8), bg="#f0f4c3", padx=2, pady=0).pack(side=tk.LEFT, padx=1)
 
+    def calculate_history_hits_ui():
+        """[NEW] 计算当前历史记录的命中数并更新下拉列表"""
+        global query_history_mgr, history_combo, realdatadf, root, uniq_var
+        if not query_history_mgr or realdatadf.empty:
+            from stock_logic_utils import toast_message
+            toast_message(root, "⚠️ 数据未就绪或未加载历史")
+            return
+
+        # 获取当前历史组
+        cur_key = query_history_mgr.current_key
+        target = query_history_mgr.history1
+        if cur_key == "history2": target = query_history_mgr.history2
+        elif cur_key == "history3": target = query_history_mgr.history3
+        elif cur_key == "history4": target = query_history_mgr.history4
+        elif cur_key == "history5": target = query_history_mgr.history5
+        
+        if not target: return
+
+        from query_engine_util import query_engine
+        from stock_logic_utils import toast_message
+        
+        # [🚀 性能优化] 使用全局缓存的 Enriched Dataset
+        global _global_enriched_cache
+        if _global_enriched_cache is None:
+            # 兜底：如果缓存未建立，先调用一次 _get_stock_changes 建立它
+            _get_stock_changes(pd.DataFrame({'代码':[]}))
+        
+        test_df = _global_enriched_cache if _global_enriched_cache is not None else realdatadf
+        
+        # [🚀 修复] 如果打开了 Uniq 选项，测试命中数时也需要去重，以保持与显示数据一致
+        if test_df is not None and not test_df.empty and uniq_var.get():
+            test_df = test_df.drop_duplicates(subset=['代码'])
+        new_values = []
+        for item in target:
+            q = item.get("query", "")
+            note = item.get("note", "")
+            
+            hit_count = 0
+            try:
+                # 使用缓存后的数据执行，极大提升 🧪 点击响应速度
+                res = query_engine.execute(test_df, q)
+                if res is not None: hit_count = len(res)
+            except Exception as e:
+                logger.error(f"Hit calculation failed for {q}: {e}")
+                
+            # 保存命中数到内存
+            item["hit"] = hit_count
+            
+            # 采用统一的显示格式化逻辑
+            display = _format_history_item_local(item)
+            new_values.append(display)
+            
+        history_combo['values'] = new_values
+        
+        # [NEW] 自动刷新当前选中的显示（以反映最新的命中数）
+        current_val = history_filter_var.get()
+        if current_val:
+            # 在新列表中寻找对应的记录
+            for idx, item in enumerate(target):
+                # 通过逻辑内容匹配
+                if item.get("query") in current_val:
+                    new_display = _format_history_item_local(item)
+                    history_filter_var.set(new_display)
+                    break
+
+        toast_message(root, f"✅ 策略命中统计完成 (n={len(target)})")
+        
+        # 同步更新编辑器里的 Treeview（如果打开了）
+        if query_history_mgr:
+            query_history_mgr.refresh_tree()
+
+    tk.Button(history_frame, text="Hit", command=calculate_history_hits_ui, 
+              font=('Microsoft YaHei', 8), bg="#fff9c4", padx=2, pady=0).pack(side=tk.LEFT, padx=1)
+
     history_filter_enabled = tk.BooleanVar(value=False)
     tk.Checkbutton(history_frame, text="过滤", variable=history_filter_enabled, 
                    command=lambda: quick_refresh_ui(), bg="#f0f0f0", font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
 
     history_filter_var = tk.StringVar()
-    history_combo = ttk.Combobox(history_frame, textvariable=history_filter_var, state="readonly", width=45, font=('Microsoft YaHei', 9))
+    history_combo = ttk.Combobox(history_frame, textvariable=history_filter_var, state="readonly", width=60, font=('Microsoft YaHei', 9))
     history_combo.pack(side=tk.LEFT, padx=5)
-    history_combo.bind("<<ComboboxSelected>>", lambda e: quick_refresh_ui())
+
+
+    def on_history_selected(event=None):
+        """当历史选择变动时触发刷新"""
+        quick_refresh_ui()
+
+    history_combo.bind("<<ComboboxSelected>>", on_history_selected)
 
     def open_history_editor():
         if query_history_mgr:
@@ -10313,7 +10563,8 @@ if __name__ == "__main__":
     
     # [NEW] 默认使用 history1 并初始化下拉列表显示
     if query_history_mgr and query_history_mgr.history1:
-        history_combo['values'] = [r.get("query") for r in query_history_mgr.history1]
+        # 采用统一格式化
+        history_combo['values'] = [query_history_mgr._format_for_display(r) for r in query_history_mgr.history1]
         history_combo.current(0)
 
     # --- 全量恢复持久化状态 (包含 History 状态) --- 已移动至 root.after 延迟执行
@@ -10332,9 +10583,9 @@ if __name__ == "__main__":
     code_entry = ttk.Combobox(search_frame, width=12, font=('Microsoft YaHei', 9), values=all_keywords)
     code_entry.pack(side=tk.LEFT, padx=5)
     
-    # 默认选择第一个
-    if all_keywords:
-        code_entry.set(all_keywords[0])
+    # 默认选择第一个 (用户要求启动加载也是空的)
+    # if all_keywords:
+    #     code_entry.set(all_keywords[0])
 
     code_entry.bind("<KeyRelease>", on_code_entry_change)
     code_entry.bind("<<ComboboxSelected>>", lambda e: search_by_code())
@@ -10625,12 +10876,11 @@ if __name__ == "__main__":
     print(all_keywords)  # ['汽车', '航天', ...]
 
     # 读取最优先关键字
-    top_kw = load_top_keyword_from_config()
-    # print(top_kw)  # '汽车'
-    if top_kw:
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, top_kw)
-        root.after(10000, search_by_code)  # 调用搜索函数
+    # top_kw = load_top_keyword_from_config()
+    # if top_kw:
+    #     code_entry.delete(0, tk.END)
+    #     code_entry.insert(0, top_kw)
+    #     root.after(10000, search_by_code)  # 调用搜索函数
 
     root.after(10000, flush_alerts)
 
@@ -10660,6 +10910,8 @@ if __name__ == "__main__":
     # 延迟执行配置加载与重型刷新，彻底避开启动时的 IO/DLL 冲突
     root.after(500, load_linkage_config)
     root.after(1000, refresh_all_stock_data)
+    # [🚀 修复] 启动后自动根据当前的 Uniq 状态计算一次命中数，确保首屏一致性
+    root.after(2000, lambda: globals().get('calculate_history_hits_ui')() if globals().get('calculate_history_hits_ui') else None)
     bind_hotkeys(root)
 
     start_dpi_monitor(root)

@@ -129,6 +129,22 @@ class QueryHistoryManager:
             normalized.append({"query": q, "starred": starred, "note": note})
         return normalized
 
+    def _format_for_display(self, r):
+        """[NEW] 统一格式化显示文本：备注 | 查询 [Hit: N]"""
+        if not isinstance(r, dict):
+            return str(r)
+        q = r.get("query", "").strip()
+        # 自动整理空白
+        q = " ".join(q.split())
+        
+        note = r.get("note", "").strip()
+        hit = r.get("hit", "")
+        
+        display = f"{note}  |  {q}" if note else q
+        if hit != "" and hit is not None:
+            display = f"{display} [Hit: {hit}]"
+        return display
+
     def _selective_merge(self, current, old):
         """
         ⭐ [BUGFIX] 内存态为权威：直接返回内存列表，不从磁盘补回已删除的记录。
@@ -593,6 +609,17 @@ class QueryHistoryManager:
             self.current_key = "history5"
         logger.info(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
+        # [NEW] 切换分组时同步更新关联的 ComboBox
+        if self.current_key == "history1" and self.search_combo1:
+            self.search_combo1['values'] = [self._format_for_display(r) for r in self.history1]
+        elif self.current_key == "history2" and self.search_combo2:
+            self.search_combo2['values'] = [self._format_for_display(r) for r in self.history2]
+        elif self.current_key == "history3" and self.search_combo3:
+            self.search_combo3['values'] = [self._format_for_display(r) for r in self.history3]
+        elif self.current_key == "history4" and self.search_combo4:
+            self.search_combo4['values'] = [self._format_for_display(r) for r in self.history4]
+        elif self.current_key == "history5" and self.search_combo5:
+            self.search_combo5['values'] = [self._format_for_display(r) for r in self.history5]
 
     def edit_query(self, iid):
         values = self.tree.item(iid, "values")
@@ -802,7 +829,7 @@ class QueryHistoryManager:
             self.history1 = move_to_top(self.history1, query)
             if self.search_var1: self.search_var1.set(query)
             if self.search_combo1:
-                vals = [r["query"] for r in self.history1]
+                vals = [self._format_for_display(r) for r in self.history1]
                 self.search_combo1["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history1=self.history1, source="use", selected_query=query)
@@ -811,7 +838,7 @@ class QueryHistoryManager:
             self.history2 = move_to_top(self.history2, query)
             if self.search_var2: self.search_var2.set(query)
             if self.search_combo2:
-                vals = [r["query"] for r in self.history2]
+                vals = [self._format_for_display(r) for r in self.history2]
                 self.search_combo2["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history2=self.history2, source="use", selected_query=query)
@@ -820,7 +847,7 @@ class QueryHistoryManager:
             self.history3 = move_to_top(self.history3, query)
             if self.search_var3: self.search_var3.set(query)
             if self.search_combo3:
-                vals = [r["query"] for r in self.history3]
+                vals = [self._format_for_display(r) for r in self.history3]
                 self.search_combo3["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history3=self.history3, source="use", selected_query=query)
@@ -829,7 +856,7 @@ class QueryHistoryManager:
             self.history4 = move_to_top(self.history4, query)
             if self.search_var4: self.search_var4.set(query)
             if self.search_combo4:
-                vals = [r["query"] for r in self.history4]
+                vals = [self._format_for_display(r) for r in self.history4]
                 self.search_combo4["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history4=self.history4, source="use", selected_query=query)
@@ -838,7 +865,7 @@ class QueryHistoryManager:
             self.history5 = move_to_top(self.history5, query)
             if self.search_var5: self.search_var5.set(query)
             if self.search_combo5:
-                vals = [r["query"] for r in self.history5]
+                vals = [self._format_for_display(r) for r in self.history5]
                 self.search_combo5["values"] = vals
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history5=self.history5, source="use", selected_query=query)
@@ -873,13 +900,13 @@ class QueryHistoryManager:
         else: return
         if action == "delete":
             target[:] = [r for r in target if r.get("query") != query]
-            if combo: combo['values'] = [r.get("query") for r in target]
+            if combo: combo['values'] = [self._format_for_display(r) for r in target]
             if var and var.get() == query: var.set("")
         elif action == "add":
             # 先删除相同 query 的记录，然后插入到第 0 位（实现置顶）
             target[:] = [r for r in target if r.get("query") != query]
             target.insert(0, record.copy())
-            if combo: combo['values'] = [r.get("query") for r in target]
+            if combo: combo['values'] = [self._format_for_display(r) for r in target]
         if callable(self.sync_history_callback):
             if self.root and hasattr(self.root, "_suppress_sync") and getattr(self.root, "_suppress_sync"): return
             try:
@@ -1048,6 +1075,18 @@ class QueryHistoryManager:
                     self.current_history[i]["hit"] = r.get("hit", "")
 
             self.refresh_tree()
+
+            # [NEW] 同步更新关联的 ComboBox 下拉列表显示 (带 Hit 统计)
+            for history_key in ["history1", "history2", "history3", "history4", "history5"]:
+                if history_key == "history1": combo, target = self.search_combo1, self.history1
+                elif history_key == "history2": combo, target = self.search_combo2, self.history2
+                elif history_key == "history3": combo, target = self.search_combo3, self.history3
+                elif history_key == "history4": combo, target = self.search_combo4, self.history4
+                elif history_key == "history5": combo, target = self.search_combo5, self.history5
+                else: continue
+                
+                if combo:
+                    combo['values'] = [self._format_for_display(r) for r in target]
 
     def test_code(self, code_data):
         queries = getattr(self, "current_history", [])

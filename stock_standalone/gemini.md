@@ -29,6 +29,14 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-28 23:25
+- [x] **修复 Query History UI 联动与格式化显示 (Fixed Query History UI & Formatting)**：
+    - [x] **根治 `_get_stock_changes` 中的 `UnboundLocalError`**：确保了 `query_str` 在所有路径下均被正确初始化，解决了异动联动过滤时的逻辑崩溃。
+    - [x] **回归标准 `ttk.Combobox` 交互**：应用户要求，废弃了带滚动条的自定义 Rich 下拉框，恢复了原生的 `ttk.Combobox` 组件。通过将 `width` 设为 `60` 并配合 `detail_msg` 预览区，平衡了原生稳定性与长公式的可视性。
+    - [x] **实现策略详情自动换行预览 (Auto-wrapping Detail Preview)**：在 `异动联动.py` 中新增了基于 `tk.Message` 的 `detail_msg` 区域。当用户在下拉框中选择或点击策略时，下方会即时显示包含“备注 | 完整公式 [Hit: N]”的自动换行详情，解决了原生下拉框无法换行展示长公式的痛点。
+    - [x] **统一历史记录显示格式**：在 `history_manager.py` 中重构了 `_format_for_display`。统一采用 `Note | Query [Hit: N]` 格式，并自动执行空白字符清理（`" ".join(q.split())`），确保了下拉列表在单行显示时的整洁与专业感。
+    - [x] **加固 UI 刷新同步逻辑**：确保了在计算命中数（🧪 按钮）或切换历史分组后，下拉列表与详情预览区能够同步、实时地反映最新的数据状态。
+
 ## 2026-04-28 14:42
 - [x] **根治 SignalDashboardPanel 刷新引起的主线程卡死 (Fixed UI Block by SignalDashboardPanel Refresh)**：
     - [x] **实现数据刷新与心跳严格同步 (Heartbeat-driven Sync)**：废弃了原有的 `10s` 固定时长 `QTimer` (`_engine_sync_timer`)，将引擎数据的刷新直接挂载至 `MonitorTK` 投递过来的 `EVENT_HEARTBEAT` 信号上 (`_safe_process_heartbeat`)。这使得仪表盘的数据更新能够完全对齐后台主力的快照聚合节拍，消除了无数据时 UI 的空转开销。
