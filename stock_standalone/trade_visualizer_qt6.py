@@ -87,12 +87,8 @@ except ImportError:
 # KEYBOARD_AVAILABLE = False
 # keyboard = None
 # System-wide hotkey support
-try:
-    import keyboard
-    KEYBOARD_AVAILABLE = True
-except ImportError:
-    keyboard = None  # type: ignore
-    KEYBOARD_AVAILABLE = False
+# 延迟加载 keyboard，防止多进程启动时产生无关的 Win32 Hook 冲突
+KEYBOARD_AVAILABLE = True  # 假设可用，具体在注册时检查
     
 # Configuration
 IPC_PORT = 26668
@@ -894,8 +890,8 @@ class CommandListenerThread(QThread):
     def run(self):
         self.server_socket.settimeout(1.0)
         if not hasattr(self, 'executor') or not self.executor:
-            self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
-            logger.debug(f"ℹ️ Viz: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
+            self.executor = ThreadPoolExecutor(max_workers=2)
+            logger.debug(f"ℹ️ Viz: 独立创建私有线程池 (Workers: 2)")
         while self.running:
             try:
                 client_socket, addr = self.server_socket.accept()
@@ -4758,9 +4754,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _register_system_hotkeys(self):
         """注册系统级全局快捷键"""
-        if not KEYBOARD_AVAILABLE or not keyboard or self.system_hotkeys_registered:
+        if not KEYBOARD_AVAILABLE or self.system_hotkeys_registered:
             return
             
+        try:
+            import keyboard
+        except ImportError:
+            logger.warning("Keyboard library not found, global hotkeys disabled.")
+            return
+
         try:
             # 注册系统全局快捷键 (使用 QTimer 确保主线程执行)
             keyboard.add_hotkey('alt+t', lambda: QTimer.singleShot(0, self._show_signal_box))
@@ -4768,10 +4770,6 @@ class MainWindow(QMainWindow, WindowMixin):
             # keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
             keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
             keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
-            
-            # 兼容性补充 (Ctrl+Alt+H 等)
-            # keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
-            # keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             self.system_hotkeys_registered = True
             logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H)")
@@ -4781,13 +4779,17 @@ class MainWindow(QMainWindow, WindowMixin):
     
     def _unregister_system_hotkeys(self):
         """注销系统级全局快捷键"""
-        if not KEYBOARD_AVAILABLE or not keyboard or not self.system_hotkeys_registered:
+        if not self.system_hotkeys_registered:
             return
         
         try:
+            import keyboard
+        except ImportError:
+            return
+
+        try:
             keyboard.remove_hotkey('alt+t')
             keyboard.remove_hotkey('alt+f')
-            # keyboard.remove_hotkey('ctrl+/')
             keyboard.remove_hotkey('alt+h')
             keyboard.remove_hotkey('alt+l')
             self.system_hotkeys_registered = False
