@@ -2631,6 +2631,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if query is None or not isinstance(query, str):
                 query = curr_text
             
+            # [🚀 修复] 无论来自 data 还是 text，都必须剥离显示用的 [Hit: N] 标签，否则引擎报错 (NameError: Hit)
+            if query and ' [Hit:' in query:
+                query = query.split(' [Hit:')[0].strip()
+            
         # [🚀 修复] 兼容多种复合标签格式： "备注 | 逻辑" (来自 history 加载) 或 "备注 (逻辑)"
         if ' | ' in query:
             parts = query.split(' | ', 1)
@@ -2877,6 +2881,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 query_data = self.query_input.itemData(i)
                 
                 query = query_data if query_data else query_item
+                # [🚀 修复] 剥离可能残留在 data 或 text 中的 [Hit: N] 标签，防止引擎报错 (NameError: Hit)
+                if query and ' [Hit:' in query:
+                    query = query.split(' [Hit:')[0].strip()
                 
                 # 剥离旧的 hit 标签
                 query_display = query_item
