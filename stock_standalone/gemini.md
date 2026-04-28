@@ -36,6 +36,11 @@
     - [x] **实施渲染底层彻底冻结 (Render Pipeline Freeze)**：针对 `_refresh_dragon_table`、`_refresh_decision_table` 及 `_refresh_sector_table`，全面补齐了 `table.setUpdatesEnabled(False)` 与 `table.blockSignals(True)` 原子保护锁。这确保了包含 `setText` 与颜色渲染的高频循环仅在内存中执行，完成后再一次性提交布局引擎，彻底杜绝了渲染过程中的微卡顿。
     - [x] **实现画刷与颜色资源持久化缓存 (Brush/Color Pre-caching)**：优化了 `_update_cell`，对于表格中产生的高频颜色变化，全部引入了 `self._brushes` 字典进行懒加载缓存 (`c_name not in self._brushes: self._brushes[c_name] = QBrush(color)`)。这把原来每秒数百次的 `QColor` 和 `QBrush` 本地 C++ 对象分配降至为 0（全部复用），极大缓解了 Qt 底层的垃圾回收机制压力。
 
+## 2026-04-28 18:05
+- [x] **修复 resample 切换时空结果不刷新 UI 的问题 (Fixed Blank UI on Resample Switch)**：
+    - [x] **允许空结果集触发 UI 同步 (Enabled Empty Result UI Sync)**：移除了 `_process_tree_data_async`、`_handle_compute_result` 及 `_apply_tree_data_sync` 链路中对 `not df.empty` 的过度拦截。现在，当过滤条件或周期切换导致结果为空时，系统依然会向下传递空 DataFrame 并触发 `refresh_tree`。
+    - [x] **实现界面清空反馈 (Immediate UI Clearance Feedback)**：通过上述链路打通，系统在结果为空时能立即执行 `tree.delete(all)`，解决了用户反馈的“切换后界面仍显示旧数据”或“状态栏显示手动刷新但页面不动”的交互毛刺，确保了数据视图的绝对准确性。
+
 ## 2026-04-28 10:20
 - [x] **实现 Tk 主线程卡死一键诊断机制 (Implemented One-click UI Freeze Diagnosis)**：
     - [x] **引入 faulthandler 信号注册**：在 `instock_MonitorTK.py` 中实现了 `faulthandler.register(signal.SIGBREAK)`。

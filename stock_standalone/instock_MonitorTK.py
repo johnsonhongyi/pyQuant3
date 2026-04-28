@@ -547,9 +547,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
         # 4. 初始化全局状态存储 (代替昂贵的 SyncManager)
         try:
-            logger.info("🚀 [PERF] 启用本地状态存储 (Local Dict + Lock)...")
-            self._gdict_lock = threading.Lock()
-            self.global_dict = {}
+            logger.info("🚀 [PERF] 启用跨进程状态存储 (mp.Manager + mp.Queue)...")
+            from multiprocessing import Manager
+            self._sync_manager = Manager()
+            self.global_dict = self._sync_manager.dict()
             self.global_dict["resample"] = resampleInit
             
             # 🚀 [NEW] 初始化原子状态总线 (P0-3)
@@ -561,49 +562,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.ui_state_store = AtomicStateStore()
             
             # 🔥 同步初始化 DataPublisher (启动时直接加载)
-            
-            # 🔥 同步初始化 DataPublisher (启动时直接加载)
             self.realtime_service = DataPublisher(high_performance=True)
             self._realtime_service_ready = True
             
-            # 🚀 [NEW] 全局初始化赛道探测器 (One Calculation, Global Availability)
+            # 🚀 [NEW] 全局初始化赛道探测器
             try:
                 from bidding_momentum_detector import BiddingMomentumDetector
                 self.racing_detector = BiddingMomentumDetector(
                     realtime_service=self.realtime_service, 
-                    lazy_load=True, # [ROOT-FIX] 开启懒加载，避开启动 IO 峰值
-                    silent_mode=True # 集成模式下抑制独立日志，数据流由 DataPublisher 统一驱动
+                    lazy_load=True,
+                    silent_mode=True
                 )
                 self.realtime_service.racing_detector = self.racing_detector
-                # 🚀 [NEW] 启动时即刻触发后台异步加载探测器种子数据，无需等到打开面板
                 self.racing_detector.ensure_data_ready_async()
                 logger.info("✅ BiddingMomentumDetector 已全局就绪并在后台初始化")
             except Exception as rd_e:
                 self.racing_detector = None
                 logger.error(f"⚠️ BiddingMomentumDetector 初始化失败: {rd_e}")
 
-            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
+            logger.info(f"✅ RealtimeDataService (Global) 已就绪 (Main PID: {os.getpid()})")
             
-            # [ROOT-FIX] 核心稳定性：在重型初始化 (SyncManager) 完成后开启心跳与监控
             self._last_ui_heartbeat = time.time()
             self._ui_heartbeat()
             self.after(2000, self._start_watchdog) 
-            logger.info("✅ [ROOT-FIX] UI Heartbeat & Watchdog (Delayed) initialized.")
+            logger.info("✅ UI Heartbeat & Watchdog (Delayed) initialized.")
 
         except Exception as e:
             logger.error(f"❌ 状态存储初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
             self._realtime_service_ready = False
             self.global_dict = {"resample": resampleInit, 'init_error': str(e)}
-            self._gdict_lock = threading.Lock()
+        
         # Restore global_values initialization
         self.global_values = cct.GlobalValues(self.global_dict)
         
-        # [NEW] 额外监控列表，用于热点实时刷新
+        # [NEW] 额外监控列表
         if 'extra_monitor_codes' not in self.global_dict:
             self.global_dict['extra_monitor_codes'] = []
         resample = self.global_values.getkey("resample")
-        logger.info(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
 
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
@@ -712,8 +708,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._send_df_wake_event = threading.Event()  # 🛡️ [PERF] 用于非阻塞唤醒 send_df，代替 time.sleep 循环
 
         # 队列接收子进程数据 (Resolved mp.Queue GIL Crash)
-        self.queue = Queue()
-        self.signal_bridge_queue = Queue()  # ⭐ [NEW] 跨进程信号桥接队列
+        self.queue = mp.Queue(maxsize=cct.multiprocessingQueue or 10)
+        self.signal_bridge_queue = mp.Queue(maxsize=50)  # ⭐ [NEW] 跨进程信号桥接队列
         self.viz_conn = mp.Pipe()           # ⭐ [NEW] 跨进程指令 Pipe (parent_conn, child_conn)
 
         # UI 构建
@@ -2359,11 +2355,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # =========================================================
 
             # ---------------------------------------------------------
-            # 2.1 停止后台扫描线程 / 主循环线程
+            # 2.1 停止后台数据获取进程 (proc)
             # ---------------------------------------------------------
             if hasattr(self, "proc") and self.proc is not None and self.proc.is_alive():
-                print("正在停止后台数据扫描线程 (proc)...")
-                self.proc.join(timeout=0.3)
+                print("正在停止后台数据获取进程 (proc)...")
+                if hasattr(self, 'refresh_flag'):
+                    self.refresh_flag.value = False
+                if hasattr(self, 'global_values'):
+                    try: self.global_values.setkey('state', 'EXIT')
+                    except: pass
+                self.proc.join(timeout=3)
+                if self.proc.is_alive():
+                    self.proc.terminate()
+                    self.proc.join(timeout=1)
+                if self.proc.is_alive():
+                    self.proc.kill()
             self.proc = None
 
             # ---------------------------------------------------------
@@ -2633,7 +2639,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict = None
             self.manager_dict = None
 
-            self.manager = None # 🛡️ [PERF] No more SyncManager to shutdown
+            # ---------------------------------------------------------
+            # 4.3 关闭 SyncManager
+            # ---------------------------------------------------------
+            if hasattr(self, '_sync_manager') and self._sync_manager:
+                try:
+                    logger.info("正在关闭 SyncManager...")
+                    self._sync_manager.shutdown()
+                except Exception as e:
+                    logger.debug(f"SyncManager shutdown error: {e}")
+                self._sync_manager = None
+
             self.queue = None
 
             # =========================================================
@@ -3885,14 +3901,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.refresh_flag = mp.Value('b', True)
         self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
         self.detect_calc_support = mp.Value('b', detect_calc_support)  # 'i' 表示整数
-        # self.proc = mp.Process(target=fetch_and_process, args=(self.queue,))
-        # def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
-        #                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
-        #                       marketInit: str = "all", marketblk: str = "boll",
-        #                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
         
-        # self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, self.blkname , self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
-        self.proc = threading.Thread(
+        self.proc = mp.Process(
             target=fetch_and_process,
             args=(self.global_dict, self.queue, self.blkname, 
                   self.refresh_flag, self.log_level, self.detect_calc_support, 
@@ -3900,8 +3910,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             kwargs={
                 "status_callback": tip_var_status_flag  # 注意不用括号，传函数
             },
-            name="DataFetchThread",
-            daemon=True
+            name="DataFetchProcess",
+            daemon=False # 🚀 [FIX] 必须为 False，否则内部无法调用 to_mp_run_async (daemonic processes cannot have children)
         )
         self.proc.start()
         
@@ -4181,7 +4191,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             fut = self.compute_executor.submit(
                 self._run_compute_async,
                 full_df.copy(),
-                df.copy() if df is not None and not df.empty else None,
+                df.copy() if df is not None else None,
                 sync_ui, cur_res, version, force
             )
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
@@ -4279,6 +4289,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         [Pump Thread] 版本检查 + 单点写 UI。
         tk_dispatch_queue 的唯一合法写入点。
+        refresh_tree UI
         """
         self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
 
@@ -4297,7 +4308,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # 单点写 UI (通过 Latest-Wins 聚合器)
-        if df is not None and not df.empty:
+        if df is not None:
             def _do_sync():
                 # [VERSION] UI 层: 再次校验 (第二层防护)
                 if version < getattr(self, '_snapshot_version', 0):
@@ -4376,8 +4387,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.selector.resample = cur_res
 
                 # 2. [CORE-UI] 刷新主表格 (独立限流 + 忙碌守卫 + 存在校验)
-                # ⭐ [OPTIMIZE] 如果 ui_df 为空或 None (主要见于中间包)，直接跳过耗时 3s 的 Treeview 刷新
-                if ui_df is not None and not ui_df.empty:
+                # ⭐ [OPTIMIZE] 如果 ui_df 为 None (主要见于中间包)，直接跳过耗时 3s 的 Treeview 刷新
+                # 如果 ui_df 为空 DataFrame，则执行刷新以清空界面 (解决过滤为空不刷新问题)
+                if ui_df is not None:
                     if (now - getattr(self, '_last_tree_render_ts', 0) > 0.5) and not getattr(self, '_is_gui_rendering', False):
                         self._is_gui_rendering = True
                         try:
