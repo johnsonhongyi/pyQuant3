@@ -1,6 +1,9 @@
 import os
 import sys
+import traceback
 import requests
+import faulthandler
+import signal
 import pandas as pd
 import numpy as np
 from pandas import HDFStore
@@ -8,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from ctypes import wintypes
 import ctypes
 import shutil
@@ -22,6 +25,7 @@ import win32process
 import win32api
 import win32con
 import threading
+import multiprocessing
 import concurrent.futures
 import pyperclip
 import random
@@ -30,9 +34,78 @@ import importlib.util
 import win32pipe, win32file
 import a_trade_calendar
 import tkinter as tk
+from history_manager import QueryHistoryManager
+from stock_logic_utils import test_code_against_queries
 
 # from filelock import FileLock, Timeout
 # 全局变量
+try:
+    import tables
+except ImportError:
+    tables = None
+
+# 全局锁与线程池
+hdf_lock = threading.Lock()
+ui_update_lock = threading.Lock()
+# 限制后台任务并发数，防止踩内存
+worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
+def _get_win32_exe_path():
+    """
+    使用 Win32 API 获取当前进程的主模块路径。
+    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
+    """
+    # 假设是 32767 字符的路径长度是足够的
+    MAX_PATH_LENGTH = 32767 
+    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
+    
+    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
+    ctypes.windll.kernel32.GetModuleFileNameW(
+        None, buffer, MAX_PATH_LENGTH
+    )
+    return os.path.dirname(os.path.abspath(buffer.value))
+
+def get_base_path():
+    """
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
+    """
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = _get_win32_exe_path()
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 return real_path
+            if not is_interpreter:
+                 return real_path
+        except Exception:
+            pass 
+
+    # 3. 最终回退
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        return os.path.dirname(os.path.abspath(sys.executable))
+
+    # 4. 极端脚本回退
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+BASE_DIR = get_base_path()
 monitor_windows = {}  # 存储监控窗口实例
 
 WINDOW_GEOMETRIES = {}
@@ -64,13 +137,18 @@ update_interval_minutes = 10
 # --- [NEW] IPC 可视化联动全局状态 (VISUALIZER) ---
 _vis_last_link_key = None
 vis_var = None # 将在 __main__ 中初始化为 BooleanVar
+alert_link_var = None # 报警中心联动开关变量
 
 start_init = 0
 scheduled_task = None
 viewdf = pd.DataFrame()
+query_history_mgr = None
+history_filter_var = None
+history_filter_enabled = None
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 result_queue = queue.Queue()
 today_tdx_df = pd.DataFrame()
+history_manager_process = None
 
 # 停止信号
 stop_event = threading.Event()
@@ -172,7 +250,7 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,s
     logger.propagate = False
 
     # ⚠️ 调试时禁用 print 重定向
-    if redirect_print:
+    if redirect_print and multiprocessing.current_process().name == 'MainProcess':
         sys.stdout = LoggerWriter(logger.info)
         sys.stderr = LoggerWriter(logger.error)
 
@@ -187,7 +265,28 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,s
     logger.info("日志初始化完成")
     return logger
 
-logger = init_logging(log_file='monitor_dfcf.log',redirect_print=False)
+logger = init_logging(log_file=os.path.join(BASE_DIR, 'monitor_dfcf.log'), redirect_print=False)
+
+# --- 故障诊断：faulthandler 与 SIGBREAK 注册 ---
+faulthandler.enable()
+if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
+    try:
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGBREAK, lambda s, f: faulthandler.dump_traceback())
+            logger.info("✅ SIGBREAK (Ctrl+Break) registered for stack dump")
+        else:
+            logger.warning("⚠️ SIGBREAK skipped: not main thread")
+        
+        # 2. keyboard 热键诊断（主力）
+        if multiprocessing.current_process().name == "MainProcess":
+            try:
+                import keyboard
+                keyboard.add_hotkey("ctrl+alt+d", lambda: faulthandler.dump_traceback())
+                logger.info("✅ Keyboard hotkey 'ctrl+alt+d' registered for stack dump")
+            except ImportError:
+                logger.warning("⚠️ keyboard module not found, hotkey skipped")
+    except Exception as e:
+        logger.warning(f"⚠️ SIGBREAK/Hotkey register failed: {e}")
 
 def pipe_server(update_callback):
     """
@@ -231,114 +330,7 @@ def pipe_server(update_callback):
             # logger.info("DisconnectNamedPipe:")
             win32pipe.DisconnectNamedPipe(pipe)
 
-# def get_base_path():
-#     """
-#     获取程序基准路径：
-#     - PyInstaller 单文件/多文件 exe
-#     - Nuitka 单文件/多文件 exe
-#     - 普通 Python 脚本
-#     """
-#     # 1️⃣ PyInstaller 单文件 exe（存在 _MEIPASS）
-#     if hasattr(sys, "_MEIPASS"):
-#         # 返回 exe 解压目录（单文件模式），配置文件在 exe 同目录可能需要相对路径调整
-#         logger.info(f'_MEIPASS  os.path.dirname(os.path.abspath(sys.executable): {os.path.dirname(os.path.abspath(sys.executable))}')
-#         return os.path.dirname(os.path.abspath(sys.executable))
-
-#     # 2️⃣ Nuitka 打包 exe（单文件或多文件）
-#     elif getattr(sys, "frozen", False):
-#         # sys.argv[0] 指向运行时 exe
-#         exe_path = os.path.abspath(sys.argv[0])
-
-#         # 单文件模式解压在临时目录，需要返回原始 exe 所在目录
-#         # 可通过环境变量 TEMP 或者 exe 旁边的文件夹判断
-#         temp_dir = os.environ.get("TEMP", "")
-#         logger.info(f'temp_dir : {temp_dir}')
-#         logger.info(f'os.path.commonpath([exe_path, temp_dir]) : {os.path.commonpath([exe_path, temp_dir])}')
-#         logger.info(f'frozen os.path.dirname(os.path.realpath(sys.executable)): {os.path.dirname(os.path.realpath(sys.executable))}')
-#         logger.info(f'frozen os.path.dirname(exe_path) : {os.path.dirname(exe_path)}')
-#         if temp_dir and os.path.commonpath([exe_path, temp_dir]) == temp_dir:
-#             # 单文件 exe，返回当前脚本所在目录（用户原始目录）
-#             logger.info(f'frozen os.path.dirname(os.path.realpath(sys.executable)): {os.path.dirname(os.path.realpath(sys.executable))}')
-#             return os.path.dirname(os.path.realpath(sys.executable))
-#         else:
-#             # 多文件 exe，直接返回 exe 所在目录
-#             logger.info(f' os.path.dirname(exe_path) : { os.path.dirname(exe_path)}')
-#             return os.path.dirname(exe_path)
-
-#     # 3️⃣ 普通 Python 脚本
-#     else:
-#         logger.info(f'else os.path.dirname(os.path.abspath(__file__)) : {os.path.dirname(os.path.abspath(__file__))}')
-#         return os.path.dirname(os.path.abspath(__file__))
-
-
-# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
-def _get_win32_exe_path():
-    """
-    使用 Win32 API 获取当前进程的主模块路径。
-    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
-    """
-    # 假设是 32767 字符的路径长度是足够的
-    MAX_PATH_LENGTH = 32767 
-    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
-    
-    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
-    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
-    ctypes.windll.kernel32.GetModuleFileNameW(
-        None, buffer, MAX_PATH_LENGTH
-    )
-    return os.path.dirname(os.path.abspath(buffer.value))
-
-def get_base_path():
-    """
-    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
-    使用 Win32 API 优先获取真实的 EXE 目录。
-    """
-    
-    # 检查是否为 Python 解释器运行
-    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
-    
-    # 1. 普通 Python 脚本模式
-    if is_interpreter and not getattr(sys, "frozen", False):
-        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
-        try:
-            # 此时 __file__ 是可靠的
-            path = os.path.dirname(os.path.abspath(__file__))
-            logger.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
-            return path
-        except NameError:
-             pass # 忽略交互模式
-    
-    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
-    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
-    if sys.platform.startswith('win'):
-        try:
-            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
-            real_path = _get_win32_exe_path()
-            
-            # 核心：确保我们返回的是 EXE 的真实目录
-            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
-                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
-                 # 或者程序被从其他地方调用，我们信任 Win32 API。
-                 logger.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
-                 return real_path
-            
-            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
-            if not is_interpreter:
-                 logger.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
-                 return real_path
-
-        except Exception:
-            pass 
-
-    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
-    if getattr(sys, "frozen", False) or not is_interpreter:
-        path = os.path.dirname(os.path.abspath(sys.executable))
-        logger.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
-        return path
-
-    # 4. 极端脚本回退
-    logger.info(f"[DEBUG] Path Mode: Final Script Fallback.")
-    return os.path.dirname(os.path.abspath(sys.argv[0]))
+# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 
 # logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 
@@ -576,6 +568,8 @@ def check_hdf5():
     # 使用条件判断执行后续代码
     if tables_available and mkl_available:
         pytables_status = True
+        if tables:
+            tables.parameters.MAX_NUMEXPR_THREADS = 1  # 限制线程数防止 hdf5.dll 冲突
     else:
         logger.info("跳过 HDFStore 操作")
     logger.info(f"BLAS backend:{detect_blas_backend()} pytables_status:{pytables_status}")
@@ -583,18 +577,22 @@ def check_hdf5():
 
 def get_ths_code():
     global ths_code,code_file_name
-    if os.path.exists(code_file_name):
-        logger.info(f"{code_file_name} exists, loading...")
-        with open(code_file_name, "r", encoding="utf-8") as f:
-            codelist = json.load(f)['stock']
-            # ths_code = [co for co in codelist if co.startswith('60')]
-            ths_code = [co for co in codelist]
-        logger.info(f"Loaded:{len(ths_code)}")
-    else:
-        logger.info(f"{code_file_name} not found, creating...")
-        data = {"stock": ths_code}
-        with open(code_file_name, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+    try:
+        if os.path.exists(code_file_name):
+            logger.info(f"{code_file_name} exists, loading...")
+            with open(code_file_name, "r", encoding="utf-8") as f:
+                codelist = json.load(f)['stock']
+                # ths_code = [co for co in codelist if co.startswith('60')]
+                ths_code = [co for co in codelist]
+            logger.info(f"Loaded:{len(ths_code)}")
+        else:
+            logger.info(f"{code_file_name} not found, creating...")
+            data = {"stock": ths_code}
+            with open(code_file_name, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        import traceback
+        logger.error(f"Failed in get_ths_code:\n{traceback.format_exc()}")
 
 def load_code_file(filename):
     """读取 JSON 文件，没有则返回默认结构"""
@@ -826,8 +824,8 @@ def schedule_task(name, delay_ms, func, *args):
         try:
             func(*args)
         except Exception as e:
-            logger.info(f"❌ 任务 {name} 执行异常:", e)
-            import traceback; traceback.print_exc()
+            import traceback
+            logger.error(f"❌ 任务 {name} 执行异常:\n{traceback.format_exc()}")
         finally:
             after_tasks.pop(name, None)
 
@@ -876,7 +874,15 @@ def start_worker(worker_task,param=None):
 def actually_start_worker(worker_task,param=None):
     global worker_thread, stop_event
     stop_event.clear()
-    worker_thread = threading.Thread(target=worker_task, args=(param,), daemon=True)
+    
+    def thread_wrapper():
+        try:
+            worker_task(param)
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Worker 线程执行异常:\n{traceback.format_exc()}")
+            
+    worker_thread = threading.Thread(target=thread_wrapper, daemon=True)
     worker_thread.start()
     logger.info("Worker started!")
     check_worker_done()
@@ -1180,6 +1186,7 @@ thsweb_process_hwnd = 0
 ahk_process_hwnd = 0
 # 這個變數將用於存放載入的DataFrame
 loaded_df = None
+selected_date = None  # 全局历史日期参数，用于联动可视化
 date_write_is_processed = False
 
 
@@ -1256,7 +1263,7 @@ def get_trade_date_status(dt=None):
         fstr = "%Y" + sep + "%m" + sep + "%d"
         dt = TODAY.strftime(fstr)
     else:
-        if isinstance(dt, datetime.date):
+        if isinstance(dt, date):
             dt = dt.strftime('%Y-%m-%d')
     is_trade_date = a_trade_calendar.is_trade_date(dt)
 
@@ -1273,6 +1280,41 @@ def get_work_time(now_t = None):
         return False
     else:
         return True
+def highlight_available_dates(de):
+    """在日历上标记有数据的日期为红色"""
+    try:
+        data_dir = os.path.join(BASE_DIR, "datacsv")
+        if not os.path.exists(data_dir):
+            return
+        
+        # 扫描文件
+        files = os.listdir(data_dir)
+        available_dates = []
+        for f in files:
+            if f.startswith("dfcf_") and f.endswith(".csv.bz2"):
+                # 提取日期 YYYY-MM-DD
+                date_str = f[5:15]
+                try:
+                    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    available_dates.append(d)
+                except:
+                    continue
+        
+        # 获取 Calendar 实例
+        cal = de._calendar
+        
+        # 清除旧事件
+        cal.calevent_remove('all')
+        
+        # 创建标签：红色背景，白色文字
+        cal.tag_config('has_data', background='red', foreground='white')
+        
+        for d in available_dates:
+            cal.calevent_create(d, 'Data Available', 'has_data')
+            
+        logger.info(f"已在日历上标记 {len(available_dates)} 个有数据的日期")
+    except Exception as e:
+        logger.error(f"Highlighting calendar dates failed: {e}")
 
 
 
@@ -1436,42 +1478,65 @@ def link_to_visualizer(code, timestamp):
     """
     open_visualizer(code, timestamp)
 
-def send_to_tdx(stock_code,timestamp=None):
-    """发送股票代码到通达信"""
-    global send_stock_code
+def send_to_tdx(stock_code, timestamp=None):
+    """发送股票代码到通达信及可视化联动"""
+    global send_stock_code, selected_date
+    
+    # 防抖：避免重复发送同一代码
     if send_stock_code and send_stock_code == stock_code:
         return
-    else:
-        send_stock_code = stock_code
+    send_stock_code = stock_code
 
+    # 获取联动状态
     tdx_state = tdx_var.get()
     ths_state = ths_var.get()
     dfcf_state = dfcf_var.get()
     vis_state = vis_var.get()
 
-    if not tdx_state and not ths_state and not dfcf_state and not vis_state:
-        root.title(f"股票异动数据监控")
-    else:
+    # 🚀 [IPC UPGRADE] 自动补全历史日期联动 (针对可视化进程)
+    if vis_state:
+        try:
+            today_str = get_today()
+            is_today_trade = get_trade_date_status(today_str)
+            
+            # 判断是否为非实时监控模式 (加载了历史数据)
+            # 用户规则：当 selected_date 不为今天且是交易日，则带上日期
+            if selected_date and (selected_date != today_str or not is_today_trade):
+                ts_str = str(timestamp) if timestamp else ""
+                # 如果 timestamp 不包含日期信息 (无 '-')，则进行补全
+                if '-' not in ts_str:
+                    if not timestamp:
+                        # 如果 timestamp 完全为空，直接使用历史日期
+                        timestamp = selected_date
+                    else:
+                        # 如果 timestamp 是时间 HH:MM:SS，则拼接日期
+                        timestamp = f"{selected_date} {timestamp}"
+        except Exception as e:
+            logger.exception(f"Historical date linkage processing failed: {e}")
 
-        if len(stock_code.split()) == 2:
-            stock_code,stock_name = stock_code.split()
-        elif not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
-            # messagebox.showerror("错误", "请输入有效的6位股票代码:{stock_code}")
-            logger.info(f"请输入有效的6位股票代码:{stock_code}")
-            toast_message(root,f"请输入有效的6位股票代码:{stock_code}")
-            return
+    # 如果没有任何联动开启，仅更新标题
+    if not (tdx_state or ths_state or dfcf_state or vis_state):
+        root.title("股票异动数据监控")
+        return
 
-        # 生成股票代码
-        generated_code = generate_stock_code(stock_code)
+    # 代码格式预处理
+    if len(stock_code.split()) == 2:
+        stock_code, _ = stock_code.split()
+    elif not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+        logger.info(f"请输入有效的6位股票代码: {stock_code}")
+        toast_message(root, f"请输入有效的6位股票代码: {stock_code}")
+        return
 
-        # 更新状态
-        root.title(f"股票异动数据监控 + 通达信联动 - 正在发送...")
+    # 生成各平台适配的代码
+    generated_code = generate_stock_code(stock_code)
+    root.title(f"股票异动数据监控 + 通达信联动 - 正在发送: {stock_code}")
 
-        # 在新线程中执行发送操作，避免UI卡顿
-        threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
-        if vis_state:
-            # ⭐ [NEW] 触发可视化 IPC 联动
-            open_visualizer(stock_code,timestamp)
+    # 1. 在新线程中执行传统终端发送操作 (避免 UI 卡顿)
+    threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
+    
+    # 2. 触发可视化进程联动
+    if vis_state:
+        open_visualizer(stock_code, timestamp)
             
 def broadcast_stock_code(stock_code,message_type='stock'):
     if isinstance(stock_code, dict):
@@ -1908,7 +1973,7 @@ def get_stock_changes(selected_type=None, stock_code=None):
 
             temp_df = temp_df.sort_values(by="时间", ascending=False)
         else:
-            temp_df = loaded_df
+            temp_df = loaded_df.copy() if loaded_df is not None else pd.DataFrame()
         temp_df = filter_stocks(temp_df,selected_type)
         
         if stock_code:
@@ -1957,8 +2022,9 @@ def get_today(sep='-'):
     return today
 
 def populate_treeview(data=None):
-    """填充表格数据"""
-    global viewdf
+    """填充表格数据 (带 UI 线程安全锁)"""
+    with ui_update_lock:
+        global viewdf
 
     tree.delete(*tree.get_children())
     if data is None:
@@ -2007,7 +2073,7 @@ def clear_code_entry():
     """清空搜索框并执行搜索"""
     # 获取 code_entry 内容并记录（确保是6位数字）
     global last_searched_code,last_clear_time
-
+    
     now = time.time()
 
     # -----------------------------
@@ -2225,10 +2291,27 @@ def search_by_type():
     if last_searched_code:
         scroll_to_code_in_treeview(tree,last_searched_code)
 
-def refresh_data():
-    """刷新数据"""
+def quick_refresh_ui(event=None):
+    """极速刷新 UI：仅应用当前过滤条件，不重新加载底层数据流"""
+    # 仅保存状态，不触发全量 refresh_data()
+    save_linkage_config()
+    
+    current_code = code_entry.get().strip()
+    if current_code:
+        search_by_code()
+    else:
+        search_by_type()
+    
+    # 极速模式下的状态栏反馈：保留统计信息并加上 (极速) 前缀
+    current_status = status_var.get()
+    if "(极速)" not in current_status:
+        status_var.set(f"(极速) {current_status}")
 
-    global loaded_df,viewdf,realdatadf,start_init,scheduled_task
+def refresh_data():
+    """全量刷新数据：重置所有状态并重新启动行情引擎"""
+    save_linkage_config()
+
+    global loaded_df,viewdf,realdatadf,start_init,scheduled_task, selected_date
     global date_write_is_processed,worker_thread,last_updated_time
     # logger.info(loaded_df is not None , loaded_df is not None and not loaded_df.empty,start_init)
     if loaded_df is not None and not loaded_df.empty:
@@ -2243,6 +2326,7 @@ def refresh_data():
             time.sleep(0.1)
         show_tasks()
         loaded_df = None
+        selected_date = None  # 刷新实时数据时重置历史日期
         start_init = 0
         viewdf = pd.DataFrame()
         realdatadf = pd.DataFrame()
@@ -2351,9 +2435,9 @@ def delete_selected_records():
 
 def on_date_selected(event):
     """处理日期选择事件"""
-    selected_date = date_entry.get()
-    logger.info(f"选择了日期: {selected_date}")
-    global loaded_df,last_updated_time
+    selected_date_val = date_entry.get()
+    logger.info(f"选择了日期: {selected_date_val}")
+    global loaded_df,last_updated_time, selected_date
     
     try:
         # 1. 獲取日期並建立檔名
@@ -2373,6 +2457,10 @@ def on_date_selected(event):
             loaded_df.loc[:, "代码"] = loaded_df["代码"].astype(str).str.zfill(6)  # 改写简单赋值
             # 這裡可以根據需要更新 Treeview 或其他UI
             populate_treeview(loaded_df)
+            
+            # 加载成功后更新全局 selected_date 参数
+            selected_date = date_str
+            logger.info(f"成功更新全局 selected_date: {selected_date}")
             
             # messagebox.showinfo("成功", f"文件 '{filename}' 已成功載入。")
             
@@ -2413,13 +2501,16 @@ def save_linkage_config():
     try:
         config_path = os.path.join(BASE_DIR, "linkage_config.json")
         config = {
-            "tdx": tdx_var.get(),
-            "ths": ths_var.get(),
-            "dfcf": dfcf_var.get(),
-            "vis": vis_var.get(),
-            "uniq": uniq_var.get(),
-            "sub": sub_var.get(),
-            "win": win_var.get()
+            "tdx": tdx_var.get() if tdx_var else True,
+            "ths": ths_var.get() if ths_var else True,
+            "dfcf": dfcf_var.get() if dfcf_var else False,
+            "vis": vis_var.get() if vis_var else False,
+            "uniq": uniq_var.get() if uniq_var else False,
+            "sub": sub_var.get() if sub_var else False,
+            "win": win_var.get() if win_var else False,
+            "alert_link": alert_link_var.get() if alert_link_var else True,
+            "history_enabled": history_filter_enabled.get() if history_filter_enabled else False,
+            "history_query": history_filter_var.get() if history_filter_var else ""
         }
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -2433,13 +2524,22 @@ def load_linkage_config():
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                tdx_var.set(config.get("tdx", True))
-                ths_var.set(config.get("ths", True))
-                dfcf_var.set(config.get("dfcf", False))
-                vis_var.set(config.get("vis", False))
-                uniq_var.set(config.get("uniq", False))
-                sub_var.set(config.get("sub", False))
-                win_var.set(config.get("win", False))
+                if tdx_var: tdx_var.set(config.get("tdx", True))
+                if ths_var: ths_var.set(config.get("ths", True))
+                if dfcf_var: dfcf_var.set(config.get("dfcf", False))
+                if vis_var: vis_var.set(config.get("vis", False))
+                if uniq_var: uniq_var.set(config.get("uniq", False))
+                if sub_var: sub_var.set(config.get("sub", False))
+                if win_var: win_var.set(config.get("win", False))
+                if alert_link_var: alert_link_var.set(config.get("alert_link", True))
+                
+                # History 过滤状态恢复
+                if history_filter_enabled:
+                    history_filter_enabled.set(config.get("history_enabled", False))
+                if history_filter_var:
+                    h_query = config.get("history_query", "")
+                    if h_query:
+                        history_filter_var.set(h_query)
     except Exception as e:
         logger.error(f"Failed to load linkage config: {e}")
 
@@ -4684,7 +4784,7 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
 
         else:
             if not realdatadf.empty:
-                temp_df = realdatadf
+                temp_df = realdatadf.copy()
             else:
                 temp_df = get_stock_changes()
 
@@ -4971,40 +5071,72 @@ def _get_tdx_data_df(stock_code=None):
 
 
 def _get_sina_data_realtime(stock_code=None):
-    global sina_data_last_updated_time,sina_data_df
+    """获取全量实时快照数据（带智能缓存与交易时段分级刷新）"""
+    global sina_data_last_updated_time, sina_data_df
     global pytables_status
-    basedir = win10_ramdisk + os.sep
-    fname = os.path.join(basedir, "sina_data.h5")    
-    logger.debug(f'win10_ramdisk fname:{fname}')
-    table = "all"
+    
     current_time = datetime.now()
-    df = None
-    if pytables_status:
-        if sina_data_last_updated_time is None or current_time - sina_data_last_updated_time >= timedelta(minutes=3):
-            sina_data_last_updated_time = datetime.now()
-            logger.info(f'sina_data_last_updated_time:{sina_data_last_updated_time}  current_time: {current_time} sina_data_last_updated_time: {sina_data_last_updated_time}')
-            sina_data = read_hdf_table(fname,table)
-            if sina_data is not None and not sina_data.empty:
-                sina_data_df = sina_data.copy()
-                if stock_code is not None:
-                    df = sina_data.loc[stock_code]
-                else:
-                    df = sina_data
-        else:
-            if sina_data_df is not None and not sina_data_df.empty:
-                if stock_code is not None:
-                    if stock_code in sina_data_df.index:
-                        df = sina_data_df.loc[stock_code]
-                    else:
-                        logger.info(f'stock_code: {stock_code} not in sina_data')
-                        df = None
-                else:
-                    df = sina_data_df
+    now_int = get_now_time_int()
+    is_trade_day = get_day_is_trade_day()
+    # 交易时段定义：09:00 - 15:10
+    is_trade_session = is_trade_day and 900 <= now_int <= 1510
+    
+    # 刷新间隔：交易期 10 分钟，非交易期 30 分钟
+    refresh_interval = 10 if is_trade_session else 30
+    
+    should_reload = (
+        sina_data_df is None or 
+        sina_data_last_updated_time is None or 
+        current_time - sina_data_last_updated_time >= timedelta(minutes=refresh_interval)
+    )
 
-    return df
+    if pytables_status and should_reload:
+        basedir = win10_ramdisk + os.sep
+        fname = os.path.join(basedir, "sina_data.h5")
+        table = "all"
+        
+        try:
+            logger.info(f"🔄 刷新 sina_data 缓存 (时段: {'交易期' if is_trade_session else '非交易期'}, 间隔: {refresh_interval}m)")
+            sina_data = read_hdf_table(fname, table)
+            if sina_data is not None and not sina_data.empty:
+                # 确保代码列是索引且为字符串补齐格式
+                if '代码' in sina_data.columns:
+                    # 确保代码唯一，防止索引冲突导致 loc 返回 DataFrame
+                    sina_data = sina_data.drop_duplicates(subset=['代码'])
+                    sina_data = sina_data.set_index('代码')
+                elif not isinstance(sina_data.index, pd.Index) or not str(sina_data.index[0]).isdigit():
+                    # 如果索引不是代码，尝试重置
+                    pass
+                
+                sina_data_df = sina_data
+                sina_data_last_updated_time = current_time
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ 刷新 sina_data 缓存失败:\n{traceback.format_exc()}")
+            # 失败时不重置 time，以便下一轮重试，但维持旧 df
+
+    # --- 返回逻辑 ---
+    if sina_data_df is None:
+        return None
+        
+    if stock_code is not None:
+        stock_code = str(stock_code).zfill(6)
+        if stock_code in sina_data_df.index:
+            # 兼容性处理：如果索引不唯一，loc 会返回 DataFrame 而不是 Series
+            res = sina_data_df.loc[stock_code]
+            if hasattr(res, 'iloc') and not isinstance(res, pd.Series):
+                try:
+                    res = res.iloc[0]
+                except Exception:
+                    pass
+            # 返回 Series 拷贝，确保线程安全且属性（.close, .ticktime）可标量访问
+            return res.copy()
+        return None
+    
+    return sina_data_df.copy()
 
  
-def _get_stock_changes(selected_type=None, stock_code=None):
+def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_query=None):
     """获取股票异动数据（带安全检查）"""
     global realdatadf, loaded_df
     global last_updated_time
@@ -5042,13 +5174,79 @@ def _get_stock_changes(selected_type=None, stock_code=None):
     # === 5) 按代码过滤 ===
     if stock_code:
         stock_code = str(stock_code).zfill(6)
-
         temp_df = temp_df[
             temp_df['代码']
             .astype(str)
             .str.zfill(6)
             == stock_code
         ]
+
+    if temp_df.empty:
+        return temp_df
+
+    # === 6) Data Enrichment (Merge TDX & Sina) ===
+    # Use a copy to avoid mutating the original realdatadf
+    temp_df = temp_df.copy()
+    
+    # TDX Data (Historical Daily OHLC)
+    tdx_df = _get_tdx_data_df()
+    if tdx_df is not None and not tdx_df.empty:
+        # Merge by '代码'
+        temp_df = temp_df.merge(tdx_df, left_on='代码', right_index=True, how='left')
+        
+    # Sina Data (Real-time OHLC)
+    sina_df = _get_sina_data_realtime()
+    if sina_df is not None and not sina_df.empty:
+        # Sina columns: close, open, high, low, turnover, name, llastp
+        temp_df = temp_df.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+
+    # === 7) History Strategy Filter ===
+    # 注意：在子线程中调用 tk.Variable.get() 会触发 RuntimeError
+    # 优先使用传入的参数
+    global history_filter_enabled, history_filter_var
+    
+    # 判定最终使用的 enabled 状态
+    final_enabled = False
+    if h_enabled is not None:
+        final_enabled = h_enabled
+    elif history_filter_enabled:
+        try:
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                final_enabled = history_filter_enabled.get()
+            else:
+                final_enabled = False # 子线程非法调用，且没传参数
+        except Exception:
+            final_enabled = False 
+            
+    if final_enabled:
+        # 判定最终使用的 query 字符串
+        final_query = ""
+        if h_query is not None:
+            final_query = h_query
+        elif history_filter_var:
+            try:
+                # 最后的防线：如果还是没传，且在主线程，才调用 get()
+                import threading
+                if threading.current_thread() is threading.main_thread():
+                    final_query = history_filter_var.get()
+                else:
+                    final_query = ""
+            except Exception:
+                final_query = ""
+
+        if final_query:
+            query_str = final_query
+        if query_str:
+            # Format is usually "H1: query" or similar if set by manager
+            actual_query = query_str.split(":", 1)[1].strip() if ":" in query_str else query_str
+            
+            # Apply filter using query_engine
+            try:
+                from query_engine_util import query_engine
+                temp_df = query_engine.execute(temp_df, actual_query)
+            except Exception as e:
+                logger.error(f"History filter failed for [{actual_query}]: {e}")
 
     return temp_df
        
@@ -5079,15 +5277,26 @@ def fast_insert(tree, dataframe):
 def refresh_stock_data(window_info, tree, item_id,debug=False):
     """提交后台任务"""
     stock_code = window_info['stock_info'][0]
+    
+    # === [FIX] 在主线程中提前获取 Tk 变量，避免子线程 RuntimeError ===
+    global history_filter_enabled, history_filter_var
+    h_enabled = history_filter_enabled.get() if history_filter_enabled else False
+    h_query = history_filter_var.get() if history_filter_var else ""
+
     def task():
         try:
-            data = _get_stock_changes(None, stock_code)  # 你的数据获取函数
+            # 传递捕获的变量值
+            data = _get_stock_changes(None, stock_code, h_enabled=h_enabled, h_query=h_query)
             if debug:
                 logger.info(f"refresh_stock_data data : {data}")
             result_queue.put(("data", data, tree, window_info, item_id))
         except Exception as e:
+            import traceback
+            logger.error(f"refresh_stock_data task error:\n{traceback.format_exc()}")
             result_queue.put(("error", e, tree, window_info, item_id))
-    threading.Thread(target=task, daemon=True).start()
+            
+    # 使用线程池替代 raw thread，防止并发重入踩内存
+    worker_pool.submit(task)
 
 
 def handle_error(payload, tree, window_info, item_id):
@@ -5165,19 +5374,37 @@ def parse_datetime(dt_str):
         except ValueError:
             raise ValueError(f"无法解析时间: {dt_str}")
 
-def format_time(dt_str):
+def format_time(dt_val):
     """
-    解析日期时间或仅时间字符串，统一返回 H:M:S 格式
+    解析日期时间或仅时间字符串，统一返回 H:M:S 格式。
+    增加了对 Pandas Series 的兼容性保护。
     """
+    if dt_val is None or pd.isna(dt_val):
+        return "--:--:--"
+        
+    # 如果误传了 Series，取第一个值
+    if hasattr(dt_val, 'iloc') and not isinstance(dt_val, (str, bytes)):
+        try:
+            dt_val = dt_val.iloc[0]
+        except Exception:
+            pass
 
-    dt_str = str(dt_str)
+    dt_str = str(dt_val).strip()
     try:
         # 尝试完整日期时间
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        # 尝试仅时分秒
-        dt = datetime.strptime(dt_str, "%H:%M:%S")
-    return dt.strftime("%H:%M:%S")
+        if len(dt_str) > 8:
+            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            # 尝试仅时分秒
+            dt = datetime.strptime(dt_str, "%H:%M:%S")
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        # 兜底返回，防止崩溃
+        if len(dt_str) >= 8:
+            potential_time = dt_str[-8:]
+            if ":" in potential_time:
+                return potential_time
+        return dt_str
 
 
 def insert_placeholder(tree, text="loading"):
@@ -5501,9 +5728,9 @@ def on_monitor_double_click(event, stock_code,manual=False):
             break
 
     logger.info(f'stock_code: {stock_code} needs_update :{needs_update} 加载ing')
-    def fetch_and_insert(stock_code, monitor_tree):
+    def fetch_and_insert(stock_code, monitor_tree, h_enabled=None, h_query=None):
         # 获取股票涨跌数据
-        data = _get_stock_changes(stock_code=stock_code)
+        data = _get_stock_changes(stock_code=stock_code, h_enabled=h_enabled, h_query=h_query)
         # 删除占位符行
         def clean_placeholder():
             children = monitor_tree.get_children()
@@ -5615,8 +5842,13 @@ def on_monitor_double_click(event, stock_code,manual=False):
             alert_row = [time_str, "新浪", percent, price, amount]
             update_latest_row_double_click(alert_row)
 
+    # === [FIX] 在主线程中提前获取 Tk 变量，避免子线程 RuntimeError ===
+    global history_filter_enabled, history_filter_var
+    h_enabled = history_filter_enabled.get() if history_filter_enabled else False
+    h_query = history_filter_var.get() if history_filter_var else ""
+
     if needs_update:
-        threading.Thread(target=fetch_and_insert,args=(stock_code, monitor_tree), daemon=True).start()
+        threading.Thread(target=fetch_and_insert,args=(stock_code, monitor_tree, h_enabled, h_query), daemon=True).start()
     elif manual:
         threading.Thread(target=fetch_and_insert_only,args=(stock_code, monitor_tree), daemon=True).start()
 
@@ -7869,7 +8101,7 @@ def alert_treeview_sort_column(col, reverse=False):
     except Exception as e:
         print(f"[Alert] 排序失败: {e}")
 
-def open_alert_center():
+def open_alert_center(is_auto=True):
     global alert_window, alert_tree
     global alert_moniter_bring_front,sina_data_df
 
@@ -7881,13 +8113,16 @@ def open_alert_center():
 
     alert_moniter_bring_front = True
     stock_code, stock_name, stock_info = None, None, None
-    selected_item = tree.selection()
-    if selected_item:
-        vals = tree.item(selected_item, 'values')
-        if len(vals) >= 2:
-            stock_code = vals[1]
-            stock_name = vals[2]
-            stock_info = vals[1:]
+    
+    # [AL-LINK] 只有在手动打开且开启自动联动时，才在弹出时从主表同步当前选中的股票
+    if not is_auto and alert_link_var and alert_link_var.get():
+        selected_item = tree.selection()
+        if selected_item:
+            vals = tree.item(selected_item, 'values')
+            if len(vals) >= 2:
+                stock_code = vals[1]
+                stock_name = vals[2]
+                stock_info = vals[1:]
 
     # 改用局部变量 aw_win
     aw_win = tk.Toplevel(root)
@@ -7921,6 +8156,8 @@ def open_alert_center():
 
     # 股票选择 Combobox 初始化
     stock_var = tk.StringVar()
+    # 存储股票选择变量供外部联动使用
+    alert_window.alert_stock_var = stock_var
     vlist = list(monitor_windows.keys())
     # bug 
     # stock_list_for_combo = [f"{co} {monitor_windows[co]['stock_info'][1]}" for co in vlist]
@@ -7969,6 +8206,10 @@ def open_alert_center():
     # 按钮和规则管理
     tk.Button(top_frame, text="添加/编辑规则", command=lambda sv=stock_var: open_alert_editor(sv.get())).pack(side="left", padx=5)
     tk.Button(top_frame, text="规则管理", command=lambda w=aw_win: open_rules_overview(parent_win=w)).pack(side="left", padx=5)
+    
+    # [AL-LINK] 报警中心联动状态开关
+    tk.Checkbutton(top_frame, text="自动联动", variable=alert_link_var, 
+                   command=save_linkage_config, font=('Microsoft YaHei', 9)).pack(side="right", padx=10)
 
     # 报警列表
     frame = ttk.Frame(aw_win)
@@ -8002,6 +8243,11 @@ def open_alert_center():
 
     def on_tree_select(event):
         """处理报警中心表格行选择事件"""
+        # [AL-LINK] 如果设置了抑制标志（如窗口刚打开时），则跳过本次联动
+        if hasattr(alert_tree, '_suppress_linkage') and alert_tree._suppress_linkage:
+            alert_tree._suppress_linkage = False
+            return
+            
         tree = event.widget
         selected_item = tree.selection()
         if selected_item:
@@ -8104,6 +8350,11 @@ def open_alert_center():
     alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
     alert_tree.bind("<Button-1>", on_single_click_alert_center)
+
+    # [AL-LINK] 如果是手动打开窗口，设置抑制标志，防止第一次刷新自动选中导致联动；
+    # 如果是自动弹出（is_auto=True），则不设置抑制，以便在开启自动联动时能立即跳转。
+    if not is_auto:
+        alert_tree._suppress_linkage = True
 
     # Esc 只关闭当前 aw_win，不影响父窗口
     aw_win.bind("<Escape>", lambda e, w=aw_win: on_close_alert_monitor(w))
@@ -8789,90 +9040,6 @@ def check_alert(stock_code, price, change, volume, name=None):
 # -----------------------------
 # 刷新报警中心
 # -----------------------------
-# def refresh_alert_center():
-#     global alert_window, alert_tree, alerts_history
-#     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
-#         return
-
-#     alert_tree.delete(*alert_tree.get_children())
-#     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
-#     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
-
-#     # 保持最新在最后一行（alerts_history append -> 最新在末尾）
-#     rows = alerts_history[-200:]
-#     logger.info(f'rows: {row}')
-#     last_iid = None
-#     base_counter = len(alerts_history)  # 用作 iid 前缀的一部分，保证在多次刷新时不会重复
-
-#     for idx, alert in enumerate(rows):
-#         field = alert.get("field", "")
-#         value = alert.get("value", "")
-#         rule = alert.get("rule", {}) or {}
-#         delta = rule.get("delta", "")
-#         op = rule.get("op", "")
-#         rule_value = rule.get("value", "")
-
-#         triggered = False
-#         try:
-#             if op == ">=" and value >= rule_value:
-#                 triggered = True
-#             elif op == "<=" and value <= rule_value:
-#                 triggered = True
-#         except Exception:
-#             triggered = False
-
-#         status = "触发" if triggered else "未触发"
-#         vals = (
-#             alert.get('time', ''),
-#             alert.get('stock_code', ''),
-#             alert.get('name', ''),
-#             f"{field}{op}{rule_value} → {status}",
-#             f"现值 {value}",
-#             f"变化量 {delta}"
-#         )
-#         tag = "triggered" if triggered else "not_triggered"
-
-#         # 生成唯一 iid（可换成 stock_code+time 等更语义化的 id）
-#         iid = f"alert_{base_counter}_{idx}"
-#         logger.info(f'iid= {iid}, values={vals}, tags={tag}')
-#         alert_tree.insert("", "end", iid=iid, values=vals, tags=(tag,))
-#         last_iid = iid
-
-#     # 强制渲染完成
-#     try:
-#         alert_window.update_idletasks()
-#     except Exception:
-#         pass
-
-#     # 在下一个事件循环再选中最后一行（确保任何可能的排序/回调已执行）
-#     def _select_last():
-#         try:
-#             children = alert_tree.get_children()
-#             if not children:
-#                 return
-
-#             # 如果 last_iid 在 children 中，用它；否则退回到 children[-1]
-#             target = last_iid if (last_iid and last_iid in children) else children[-1]
-
-#             # 先清除旧选择，然后设置选中、焦点并滚动到可见
-#             try:
-#                 alert_tree.selection_remove(alert_tree.selection())
-#             except Exception:
-#                 pass
-#             alert_tree.selection_set(target)
-#             alert_tree.focus(target)
-#             alert_tree.see(target)
-
-#             # **（可选）调试输出，确认选中行与显示一致**
-#             # logger.info("SELECTED IID:", target, "VALUES:", alert_tree.item(target).get("values"))
-#         except Exception:
-#             pass
-
-#     try:
-#         alert_window.after(0, _select_last)
-#     except Exception:
-#         _select_last()
-
 def refresh_alert_center():
     global alert_window, alert_tree, alerts_history, alerts_rules, sina_data_df, monitor_windows
     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
@@ -8886,17 +9053,6 @@ def refresh_alert_center():
     # 取最近若干条记录（按时间倒序），按股票分组，保留每个股票的最近记录序列
     recent = alerts_history[-500:]
     
-    # # 取最近 500 条记录
-    # recent_raw = alerts_history[-500:]
-    # # 去重
-    # seen_keys = set()
-    # recent = []
-    # for alert in recent_raw:
-    #     unique_key = f"{alert['time']}-{alert['stock_code']}-{alert.get('status', '')}"
-    #     if unique_key not in seen_keys:
-    #         seen_keys.add(unique_key)
-    #         recent.append(alert)
-
     grouped = {}
     for alert in reversed(recent):
         code = alert.get("stock_code", "")
@@ -8907,7 +9063,6 @@ def refresh_alert_center():
     # ---- 按报警次数排序（次数多的排前） ----
     sorted_items = sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True)
 
-    # for code, alerts in grouped.items():
     for code, alerts in sorted_items:
         # 股票名称（优先用 sina_data_df）
         if sina_data_df is not None and not sina_data_df.empty:
@@ -8930,7 +9085,6 @@ def refresh_alert_center():
 
         # --- 构造“规则”列（阈值/操作，三合一） ---
         conds = []
-        get_rules(stock_code)
         for rule in rule_list:
             field = rule.get("field", "")
             if field in ("价格", "涨幅", "量"):
@@ -9007,9 +9161,15 @@ def refresh_alert_center():
 
     # 选中第一行以便展示
     if alert_tree.get_children():
-        first_item = alert_tree.get_children()[0]
-        alert_tree.selection_set(first_item)
-        alert_tree.focus(first_item)
+        # [AL-LINK] 只有开启了“自动联动”开关，才在数据刷新时自动执行选中（可能触发联动）
+        if alert_link_var and alert_link_var.get():
+            first_item = alert_tree.get_children()[0]
+            alert_tree.selection_set(first_item)
+            alert_tree.focus(first_item)
+        else:
+            # 开关关闭时，仅聚焦不选中（不触发联动）
+            first_item = alert_tree.get_children()[0]
+            alert_tree.focus(first_item)
 
     alert_window.update_idletasks()
 
@@ -9098,8 +9258,8 @@ def flush_alerts():
         delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
         if alerts_buffer:
-            # 打开窗口（不要在这里创建新的 tree）
-            open_alert_center()
+            # [AL-LINK] 自动刷新触发的弹出设为 is_auto=True，避免自动联动
+            open_alert_center(is_auto=True)
 
             # ---- 本批次去重 ----
             batch_seen = set()
@@ -9575,8 +9735,8 @@ def read_hdf_table(fname, key='all', columns=None, timeout=10):
             df = store[table_name]
             df = df[~df.index.duplicated(keep='first')]
             return df
-        except tables.exceptions.HDF5ExtError as e:
-            log.error(f"{table_name} read error: {e}, attempting chunked read...")
+        except (Exception if tables is None else tables.exceptions.HDF5ExtError) as e:
+            logger.error(f"{table_name} read error: {e}, attempting chunked read...")
             # 逐块读取
             dfs = []
             start = 0
@@ -9590,7 +9750,7 @@ def read_hdf_table(fname, key='all', columns=None, timeout=10):
                         break
                     dfs.append(df_chunk)
                     start += chunk_size
-                except tables.exceptions.HDF5ExtError:
+                except (Exception if tables is None else tables.exceptions.HDF5ExtError):
                     # 跳过损坏块
                     logger.error(f"Skipping corrupted chunk {start}-{start+chunk_size}")
                     start += chunk_size
@@ -9605,36 +9765,40 @@ def read_hdf_table(fname, key='all', columns=None, timeout=10):
     
     # 1. 等待写锁
     wait_hdf_lock(fname, lock_timeout=timeout, log=logger)
-    df = None
     # 2. I/O 层 try
     try:
-        with pd.HDFStore(fname, mode='r') as store:
-            keys = store.keys()
-            logger.debug(f"fname: {fname}, keys: {keys}")
-
-            hdf_key = '/' + key if not key.startswith('/') else key
-            if hdf_key not in keys:
-                logger.warning(f"Table not found: {hdf_key}")
-                return None
-
-            # 3. 表级 try（HDF5 易炸）
+        if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+            logger.warning(f"HDF5 file missing or empty: {fname}")
+            return None
+            
+        with hdf_lock:
+            df = None
             try:
-                df = safe_load_table(
-                    store,
-                    key,
-                    chunk_size=5000,
-                    MultiIndex=False,
-                    complib='blosc'
-                )
+                with pd.HDFStore(fname, mode='r') as store:
+                    keys = store.keys()
+                    hdf_key = '/' + key if not key.startswith('/') else key
+                    if hdf_key not in keys:
+                        logger.warning(f"Table not found: {hdf_key}")
+                        return None
+
+                    df = safe_load_table(
+                        store,
+                        key,
+                        chunk_size=5000,
+                        MultiIndex=False,
+                        complib='blosc'
+                    )
             except Exception as e:
-                logger.error(f"Failed to load table {hdf_key}: {e}")
+                import traceback
+                logger.error(f"Failed to load table {key} from {fname}:\n{traceback.format_exc()}")
                 return None
+
 
             if df is not None and not df.empty and columns:
                 df = df[columns]
             return df
 
-    except (IOError, OSError, tables.exceptions.HDF5ExtError) as e:
+    except (IOError, OSError, (Exception if tables is None else tables.exceptions.HDF5ExtError)) as e:
         logger.error(f"HDF5 open/read failed: {fname}, err={e}")
         return None
 
@@ -9832,6 +9996,43 @@ if __name__ == "__main__":
 
     logger.info("程序启动…")
 
+def safe_startup_self_check():
+    """启动自检：确保环境就绪，防止首次启动崩溃"""
+    try:
+        logger.info("执行启动自检...")
+        # 1. 检查关键目录
+        critical_dirs = [ARCHIVE_DIR, DARACSV_DIR, os.path.dirname(CONFIG_FILE)]
+        for d in critical_dirs:
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+                logger.info(f"创建缺失目录: {d}")
+
+        # 2. 检查 RAMDisk (G:) 连通性
+        basedir = win10_ramdisk + os.sep
+        if not os.path.exists(basedir):
+            logger.warning(f"⚠️ RAMDisk {win10_ramdisk} 未就绪，数据源可能受限")
+        
+        # 3. 检查并清理过期的 HDF5 锁文件
+        fname = os.path.join(basedir, "sina_data.h5")
+        lock_path = fname + ".lock"
+        if os.path.exists(lock_path):
+            try:
+                # 如果锁文件超过 5 分钟，强制清除
+                if time.time() - os.path.getmtime(lock_path) > 300:
+                    os.remove(lock_path)
+                    logger.info("清理过期的 HDF5 锁文件")
+            except Exception:
+                pass
+        
+        logger.info("✅ 启动自检完成")
+        return True
+    except Exception as e:
+        logger.error(f"❌ 启动自检失败: {e}")
+        return False
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    safe_startup_self_check()  # 执行自检
     check_hdf5()
     init_monitors()
     root = tk.Tk()
@@ -9884,6 +10085,9 @@ if __name__ == "__main__":
                            font=('Microsoft YaHei', 10))
     date_entry.pack(side=tk.LEFT, padx=2)
     date_entry.bind("<<DateEntrySelected>>", on_date_selected)
+    
+    # [NEW] 标记有数据的日期
+    highlight_available_dates(date_entry)
 
     # Right frame: Checkbuttons
     frame_right = tk.Frame(toolbar, bg="#f0f0f0")
@@ -9898,9 +10102,10 @@ if __name__ == "__main__":
     dfcf_var = tk.BooleanVar(value=False)
     sub_var = tk.BooleanVar(value=False)
     win_var = tk.BooleanVar(value=False)
+    alert_link_var = tk.BooleanVar(value=True)
     
-    # 尝试并恢复持久化状态
-    load_linkage_config()
+    # 尝试并恢复持久化状态 (Basics only for now)
+    # load_linkage_config()
 
     checkbuttons_info = [
         ("TDX", tdx_var),
@@ -9987,6 +10192,133 @@ if __name__ == "__main__":
     for c in range(cols):
         radio_container.grid_columnconfigure(c, weight=1)
             
+    # --- History Strategy Filter Section ---
+    history_frame = tk.Frame(root, bg="#f0f0f0", padx=5, pady=2)
+    history_frame.pack(fill=tk.X, padx=10)
+
+    # global history_filter_enabled, history_filter_var, query_history_mgr
+    def open_history_manager_standalone():
+        """以独立进程打开历史管理器，带窗口查重置顶功能"""
+        global history_manager_process
+        try:
+            from history_manager import run_manager_process
+            import multiprocessing
+            import win32gui
+            import win32con
+            
+            # --- 1. 优先尝试查找并置顶现有窗口 ---
+            found_hwnd = None
+            def check_window(hwnd, extra):
+                nonlocal found_hwnd
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if "Query History Manager" in title:
+                        found_hwnd = hwnd
+                        return False # Stop enumerating
+                return True
+                
+            try:
+                win32gui.EnumWindows(check_window, None)
+            except Exception as e:
+                logger.warning(f"Error enumerating windows: {e}")
+
+            if found_hwnd:
+                logger.info("History Manager window found, bringing to front.")
+                try:
+                    # 恢复最小化窗口
+                    if win32gui.IsIconic(found_hwnd):
+                        win32gui.ShowWindow(found_hwnd, win32con.SW_RESTORE)
+                    else:
+                        win32gui.ShowWindow(found_hwnd, win32con.SW_SHOW)
+                    # 尝试置顶
+                    win32gui.SetForegroundWindow(found_hwnd)
+                except Exception as e:
+                    logger.warning(f"Failed to bring window to front: {e}")
+                return
+
+            # --- 2. 窗口未找到，检查进程状态 ---
+            if history_manager_process and history_manager_process.is_alive():
+                logger.info("History Manager process is running (startup phase), please wait...")
+                return
+
+            # --- 3. 启动新进程 ---
+            logger.info("Launching History Manager...")
+            history_manager_process = multiprocessing.Process(
+                target=run_manager_process, 
+                kwargs={'df_all': realdatadf}
+            )
+            history_manager_process.daemon = False 
+            history_manager_process.start()
+            logger.info(f"History Manager launched (PID: {history_manager_process.pid})")
+            
+        except ImportError:
+             messagebox.showwarning("Error", "Failed to import history_manager module or win32gui.")
+        except Exception as e:
+            messagebox.showwarning("Error", f"Failed to launch manager: {e}")
+
+    def reload_history_from_disk():
+        """刷新历史记录（从磁盘重新加载）"""
+        global query_history_mgr, history_combo, root
+        if query_history_mgr:
+            try:
+                h1, h2, h3, h4, h5 = query_history_mgr.load_search_history()
+                query_history_mgr.history1, query_history_mgr.history2 = h1, h2
+                query_history_mgr.history3, query_history_mgr.history4, query_history_mgr.history5 = h3, h4, h5
+                
+                # 获取当前展示列表
+                cur_key = query_history_mgr.current_key
+                target = h1
+                if cur_key == "history2": target = h2
+                elif cur_key == "history3": target = h3
+                elif cur_key == "history4": target = h4
+                elif cur_key == "history5": target = h5
+                
+                # 更新 UI
+                history_combo['values'] = [r.get("query") for r in target]
+                from stock_logic_utils import toast_message
+                toast_message(root, "✅ 历史记录已同步")
+                logger.info(f"🔄 Reloaded {len(target)} queries from disk.")
+            except Exception as e:
+                logger.error(f"Reload history error: {e}")
+
+    # [FIX] 缩小 Manage 按钮并添加刷新按钮
+    tk.Button(history_frame, text="Manage", command=open_history_manager_standalone, 
+              font=('Microsoft YaHei', 8), bg="#e1f5fe", padx=2, pady=0).pack(side=tk.LEFT, padx=1)
+    
+    tk.Button(history_frame, text="🔄", command=reload_history_from_disk, 
+              font=('Microsoft YaHei', 8), bg="#f0f4c3", padx=2, pady=0).pack(side=tk.LEFT, padx=1)
+
+    history_filter_enabled = tk.BooleanVar(value=False)
+    tk.Checkbutton(history_frame, text="过滤", variable=history_filter_enabled, 
+                   command=lambda: quick_refresh_ui(), bg="#f0f0f0", font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+
+    history_filter_var = tk.StringVar()
+    history_combo = ttk.Combobox(history_frame, textvariable=history_filter_var, state="readonly", width=45, font=('Microsoft YaHei', 9))
+    history_combo.pack(side=tk.LEFT, padx=5)
+    history_combo.bind("<<ComboboxSelected>>", lambda e: quick_refresh_ui())
+
+    def open_history_editor():
+        if query_history_mgr:
+            query_history_mgr.open_editor()
+
+    tk.Button(history_frame, text="⚙️ 策略编辑", command=open_history_editor, 
+              font=('Microsoft YaHei', 9), padx=5).pack(side=tk.LEFT, padx=2)
+
+    # Initialize History Manager
+    query_history_mgr = QueryHistoryManager(
+        root=root,
+        search_combo1=history_combo,
+        history_file=os.path.join(get_base_path(), "query_history.json")
+    )
+    
+    # [NEW] 默认使用 history1 并初始化下拉列表显示
+    if query_history_mgr and query_history_mgr.history1:
+        history_combo['values'] = [r.get("query") for r in query_history_mgr.history1]
+        history_combo.current(0)
+
+    # --- 全量恢复持久化状态 (包含 History 状态) --- 已移动至 root.after 延迟执行
+    # load_linkage_config()
+
     # # 创建搜索框和按钮
     # # 创建搜索框和按钮
     search_frame = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
@@ -10325,7 +10657,9 @@ if __name__ == "__main__":
     # 在主程序初始化时调用一次
     reset_lift_flags()
 
-    refresh_all_stock_data()
+    # 延迟执行配置加载与重型刷新，彻底避开启动时的 IO/DLL 冲突
+    root.after(500, load_linkage_config)
+    root.after(1000, refresh_all_stock_data)
     bind_hotkeys(root)
 
     start_dpi_monitor(root)
