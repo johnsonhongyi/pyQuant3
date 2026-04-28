@@ -99,8 +99,8 @@ import stock_indicator_help
 
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
-import faulthandler
-faulthandler.enable()
+# faulthandler is enabled later after logger is ready
+
 # Integrated Query Engine
 try:
     from query_engine_util import query_engine
@@ -142,6 +142,49 @@ if sys.platform.startswith('win'):
 
 import faulthandler
 faulthandler.enable()
+# 🛡️ [DEBUG] 注册 Ctrl+Break 信号，用于在 UI 卡死时通过控制台打印所有线程堆栈
+# if sys.platform.startswith('win') and hasattr(signal, 'SIGBREAK'):
+#     try:
+#         # [🚀 加固] 显式指定 all_threads=True 确保能打印出 UI 主线程和工作线程的所有状态
+#         # faulthandler.register(signal.SIGBREAK, all_threads=True, chain=False)
+#         # 1. SIGBREAK（可用就用）
+#         # signal.signal(signal.SIGBREAK, lambda s, f: faulthandler.dump_traceback())
+#         # 2. keyboard 热键（主力）
+#         keyboard.add_hotkey(
+#                 "ctrl+alt+d",
+#                 lambda: faulthandler.dump_traceback()
+#             )
+#         logger.info("✅ faulthandler SIGBREAK (Ctrl+Break) 注册成功。提示：卡死时在控制台按 Ctrl+Break，输出将显示在标准错误流(stderr)中")
+#     except Exception as e:
+#         logger.warning(f"⚠️ faulthandler SIGBREAK 注册失败: {e}")
+
+
+def dump_all():
+    print("\n🔥 STACK TRACE DUMP\n")
+    faulthandler.dump_traceback(all_threads=True)
+
+# =========================
+# Ctrl+Alt+D（最可靠）
+# =========================
+keyboard.add_hotkey("ctrl+alt+d", dump_all)
+
+# =========================
+# SIGBREAK（仅在主线程 + 安全时）
+# =========================
+if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
+    try:
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGBREAK, lambda s, f: dump_all())
+            logger.info("✅ SIGBREAK registered")
+        else:
+            logger.warning("⚠️ SIGBREAK skipped: not main thread")
+        # 2. keyboard 热键（主力）
+        keyboard.add_hotkey(
+                "ctrl+alt+d",
+                lambda: faulthandler.dump_traceback()
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ SIGBREAK register failed: {e}")
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
 # from trading_analyzerQt6 import TradingGUI
@@ -1533,7 +1576,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _native_ctrl_handler(self, ctrl_type):
         """[Windows 专用] 底层控制台处理器，运行在独立线程，不受 messagebox 阻塞影响"""
-        if ctrl_type in (0, 1): # CTRL_C_EVENT or CTRL_BREAK_EVENT
+        # [🚀 修复] 仅处理 CTRL_C_EVENT (0)，让 CTRL_BREAK_EVENT (1) 由诊断信号接管，不再弹出确认窗
+        if ctrl_type == 0: 
             global _exit_ctrl_c_count, _exit_ctrl_c_time
             now = time.time()
             if now - _exit_ctrl_c_time > 3:
