@@ -72,18 +72,21 @@ _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
 
 from PyQt6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
-from PyQt6.QtGui import QPainter, QPen, QColor, QPalette
-from PyQt6.QtCore import QRect, pyqtSignal
-
+from PyQt6.QtGui import QPainter, QPen, QColor, QPalette, QTextDocument, QTextOption
+from PyQt6.QtCore import QRect, pyqtSignal, QSize, Qt
+import html
 
 class HitHighlightDelegate(QStyledItemDelegate):
-    """只将 [Hit: N] 部分渲染为蓝色，其余文字保持默认颜色"""
+    """只将 [Hit: N] 部分渲染为蓝色，其余文字保持默认颜色，并支持长文本自动换行"""
     HIT_COLOR = QColor("#00BFFF")
     HIT_MARKER = "[Hit:"
 
     def paint(self, painter, option, index):
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         self.initStyleOption(option, index)
+
+        # 强制清除背景，防止透明重叠导致的重影 (Ghosting)
+        painter.fillRect(option.rect, QColor("#2C2C2E"))
 
         # 先用默认逻辑画背景（选中/悬停效果）
         style = option.widget.style() if option.widget else QApplication.style()
@@ -92,44 +95,90 @@ class HitHighlightDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt_no_text, painter, option.widget)
 
         painter.save()
-        rect = option.rect.adjusted(6, 0, -4, 0)
-        fm = painter.fontMetrics()
+        # 严格裁剪绘制区域，防止文字溢出边界
+        painter.setClipRect(option.rect)
+        
+        rect = option.rect.adjusted(6, 4, -4, -4)
 
         # 确定正文颜色（选中时用 HighlightedText，否则用 Text）
         if option.state & QStyle.StateFlag.State_Selected:
-            normal_color = option.palette.color(QPalette.ColorRole.HighlightedText)
+            normal_color = option.palette.color(QPalette.ColorRole.HighlightedText).name()
         else:
-            normal_color = option.palette.color(QPalette.ColorRole.Text)
+            normal_color = option.palette.color(QPalette.ColorRole.Text).name()
 
         hit_pos = text.find(self.HIT_MARKER)
         if hit_pos >= 0:
             # 三段分割: [正文] [Hit: ] [数字]
             colon_pos = text.find(': ', hit_pos)
             if colon_pos >= 0:
-                normal_part = text[:colon_pos + 2]   # 包含 '[Hit: '
-                blue_part   = text[colon_pos + 2:]   # 只有数字及 ']'
+                normal_part = text[:colon_pos + 2]
+                blue_part   = text[colon_pos + 2:]
             else:
                 normal_part = text[:hit_pos]
                 blue_part   = text[hit_pos:]
 
-            # 正文部分（白色）
-            painter.setPen(normal_color)
-            normal_w = fm.horizontalAdvance(normal_part)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, normal_part)
-
-            # 数字部分（蓝色）
-            painter.setPen(self.HIT_COLOR)
-            hit_rect = rect.adjusted(normal_w, 0, 0, 0)
-            painter.drawText(hit_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, blue_part)
+            html_normal = html.escape(normal_part).replace('\n', '<br>')
+            html_blue = html.escape(blue_part).replace('\n', '<br>')
+            html_text = f"<span style='color:{normal_color}'>{html_normal}</span><span style='color:{self.HIT_COLOR.name()}'>{html_blue}</span>"
         else:
-            painter.setPen(normal_color)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+            html_text = f"<span style='color:{normal_color}'>{html.escape(text).replace(chr(10), '<br>')}</span>"
 
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        
+        # 强制任意位置换行，防止无空格的长文本无法折行而溢出
+        text_option = doc.defaultTextOption()
+        text_option.setWrapMode(QTextOption.WrapMode.WrapAnywhere)
+        doc.setDefaultTextOption(text_option)
+        
+        doc.setTextWidth(rect.width())
+        doc.setDocumentMargin(0)
+        doc.setHtml(html_text)
+
+        painter.translate(rect.topLeft())
+        doc.drawContents(painter)
         painter.restore()
 
     def sizeHint(self, option, index):
-        sh = super().sizeHint(option, index)
-        return sh
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        self.initStyleOption(option, index)
+        
+        hit_pos = text.find(self.HIT_MARKER)
+        if hit_pos >= 0:
+            colon_pos = text.find(': ', hit_pos)
+            if colon_pos >= 0:
+                normal_part = text[:colon_pos + 2]
+                blue_part   = text[colon_pos + 2:]
+            else:
+                normal_part = text[:hit_pos]
+                blue_part   = text[hit_pos:]
+            html_text = f"<span>{html.escape(normal_part)}</span><span>{html.escape(blue_part)}</span>"
+        else:
+            html_text = f"<span>{html.escape(text)}</span>"
+
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        
+        text_option = doc.defaultTextOption()
+        text_option.setWrapMode(QTextOption.WrapMode.WrapAnywhere)
+        doc.setDefaultTextOption(text_option)
+        
+        # 精确匹配 paint 中的宽度计算，防止高度预估不足导致上下重影
+        if option.widget:
+            available_w = option.widget.viewport().width()
+        elif self.parent() and hasattr(self.parent(), 'width'):
+            available_w = self.parent().width()
+        else:
+            available_w = option.rect.width()
+            
+        if available_w < 50:
+            available_w = 300
+            
+        doc.setTextWidth(max(10, available_w - 10))
+        doc.setDocumentMargin(0)
+        doc.setHtml(html_text)
+        
+        return QSize(int(doc.idealWidth()) + 10, int(doc.size().height()) + 8)
 
 GLOBAL_SCROLLBAR_STYLE = """
 QScrollBar:vertical {
@@ -2691,11 +2740,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 1. 寻找数据源 (df_all)
             df = None
             if self.main_app and hasattr(self.main_app, 'df_all'):
-                df = self.main_app.df_all  # [LINK] 实盘模式：直接引用主程序数据源，确保 100% 实时一致性
+                df = self.main_app.df_all.copy()  # [FIX] 使用 copy() 避免多次查询污染/修改原数据
             elif self.detector and hasattr(self.detector, 'main_app'):
-                df = self.detector.main_app.df_all
+                df = self.detector.main_app.df_all.copy()
             elif hasattr(self, 'df_all'):
-                df = self.df_all # [SNAPSHOT] 回测模式：使用注入的快照
+                df = self.df_all.copy() # [SNAPSHOT] 回测模式：使用注入的快照
             
             # [🚀 核心增强] 动态行情同步逻辑
             if df is not None and not df.empty and self.detector and self.detector._tick_series:
@@ -4544,8 +4593,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 # 宏观过滤模式下，允许穿透展示所有匹配个股 (不受 0.001/0.05 等活跃阈值限制)
                 active_ts = [ts for ts in raw_ts_list if ts.code in self._macro_filtered_codes_set]
             else:
-                # 原有流程：仅展示活跃个股 (宽放显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股)
-                active_ts = [ts for ts in raw_ts_list if abs(ts.current_pct) > 0.001 or ts.score > 0.05 or ts.momentum_score > 0]
+                # [FIX] 当执行清空或者查询为空时，还原完整数据集，显示全部数据
+                active_ts = raw_ts_list
             dist = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 0}
             
             filtered_ts = []
