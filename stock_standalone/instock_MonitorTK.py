@@ -20,6 +20,10 @@ import shutil
 import traceback
 import threading
 import multiprocessing as mp
+# 🛡️ [PERF] 全局阻断：彻底封杀子进程导入 keyboard 模块，杜绝底层 Hook 线程
+if mp.current_process().name != "MainProcess":
+    import sys
+    sys.modules["keyboard"] = None
 from queue import Queue, Empty
 from multiprocessing.managers import BaseManager, SyncManager
 # class StockManager(SyncManager): pass # 🛡️ [REMOVED] SyncManager is a performance killer. Using local dict instead.
@@ -116,7 +120,7 @@ from db_utils import *
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
-import keyboard  # ✅ 当前使用 keyboard 库实现全局热键 (Win32 API 作为备份)
+
 # import trade_visualizer_qt6 as qtviz  # ⚡ 移至局部作用域
 from sys_utils import assert_main_thread
 import struct, pickle
@@ -168,7 +172,10 @@ def dump_all():
 # =========================
 # Ctrl+Alt+D（最可靠）
 # =========================
-keyboard.add_hotkey("ctrl+alt+d", dump_all)
+import multiprocessing as mp
+if mp.current_process().name == "MainProcess":
+    import keyboard
+    keyboard.add_hotkey("ctrl+alt+d", dump_all)
 
 
 
@@ -183,10 +190,12 @@ if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
         else:
             logger.warning("⚠️ SIGBREAK skipped: not main thread")
         # 2. keyboard 热键（主力）
-        keyboard.add_hotkey(
-                "ctrl+alt+d",
-                lambda: faulthandler.dump_traceback()
-            )
+        if mp.current_process().name == "MainProcess":
+            import keyboard
+            keyboard.add_hotkey(
+                    "ctrl+alt+d",
+                    lambda: faulthandler.dump_traceback()
+                )
     except Exception as e:
         logger.warning(f"⚠️ SIGBREAK register failed: {e}")
 
@@ -700,6 +709,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
         self._df_lock = threading.Lock()  # 🛡️ [NEW] 保护 df_all 并发读写
+        self._send_df_wake_event = threading.Event()  # 🛡️ [PERF] 用于非阻塞唤醒 send_df，代替 time.sleep 循环
 
         # 队列接收子进程数据 (Resolved mp.Queue GIL Crash)
         self.queue = Queue()
@@ -1783,8 +1793,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # join 完成后，在调用方统一清理 keyboard 钩子（串行，无竞态）
         try:
+            import keyboard
             keyboard.unhook_all()
             logger.debug("[Hotkey] keyboard.unhook_all() 完成（调用方线程）")
+        except ImportError:
+            pass
         except Exception as e:
             logger.debug("[Hotkey] keyboard.unhook_all 失败 (可忽略): %s", e)
 
@@ -5579,13 +5592,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
                 # # logger.info(f"[send_df] Data fingerprint unchanged. Skip sync. getattr(self, '_force_full_sync_pending', False): {getattr(self, '_force_full_sync_pending', False)}")
                 # ======================================================
-                # ⭐ 7️⃣ 调度逻辑
+                # ⭐ 7️⃣ 调度逻辑 (PERF 优化：使用 Event 替代 300次/5分钟 的 GIL 竞争)
                 # ======================================================
                 sleep_seconds = 300 if sent else 5
-                for _ in range(sleep_seconds):
-                    if not self._df_sync_running or not self._df_first_send_done:
-                        break
-                    time.sleep(1)
+                
+                # 若外部主动置为 False，退出不等待
+                if not self._df_sync_running or not self._df_first_send_done:
+                    break
+                    
+                self._send_df_wake_event.wait(timeout=sleep_seconds)
+                self._send_df_wake_event.clear()
         finally:
             self._send_sync_lock.release()
             logger.info("[send_df] Thread EXITED safely.")

@@ -43,32 +43,47 @@ class LinkageService:
         
         while self._running:
             try:
-                # 1. 状态覆盖模型：尽可能清空队列，只保留最后一项“意图”
-                while True:
-                    try:
-                        msg = self.task_queue.get(timeout=0.02)
-                        if msg == "EXIT":
-                            self._running = False
-                            break
-                        self.latest_cmd = msg
-                    except queue.Empty:
+                # 1. 计算阻塞超时时间 (Dynamic Timeout)
+                now = time.time()
+                timeout = 1.0 # 默认长超时，防止空转
+                if self.latest_cmd:
+                    auto = self.latest_cmd.get('auto', False)
+                    throttle = 2.0 if auto else self.throttle_interval
+                    time_left = throttle - (now - self.last_exec_ts)
+                    timeout = max(0.001, min(time_left, 1.0))
+                
+                # 2. 阻塞等待新任务
+                try:
+                    msg = self.task_queue.get(timeout=timeout)
+                    if msg == "EXIT":
+                        self._running = False
                         break
+                    self.latest_cmd = msg
+                    
+                    # 快速吸收队列中积压的其他任务，只保留最新意图
+                    while True:
+                        try:
+                            msg = self.task_queue.get_nowait()
+                            if msg == "EXIT":
+                                self._running = False
+                                break
+                            self.latest_cmd = msg
+                        except queue.Empty:
+                            break
+                except queue.Empty:
+                    pass
 
                 if not self._running: break
 
-                # 2. 状态执行与节流逻辑
-                now = time.time()
+                # 3. 状态执行与节流逻辑
                 if self.latest_cmd:
-                    # ⭐ [UPGRADE] 动态节流：后台自动信号使用 2s 防抖，手动点击使用 50ms 极速响应
+                    now = time.time()
                     auto = self.latest_cmd.get('auto', False)
                     throttle = 2.0 if auto else self.throttle_interval
-
-                    if (now - self.last_exec_ts >= throttle):
+                    if now - self.last_exec_ts >= throttle:
                         self._execute(self.latest_cmd)
                         self.latest_cmd = None  # 执行完即视为状态已对齐
-                        self.last_exec_ts = now
-
-                time.sleep(0.01) # 防止空转
+                        self.last_exec_ts = time.time()
 
             except Exception as e:
                 logger.error(f"❌ LinkageService Inner Error: {e}\n{traceback.format_exc()}")

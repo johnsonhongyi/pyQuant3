@@ -58,6 +58,7 @@ class IPCSocketClient:
         # 核心队列：使用 deque(maxlen) 实现“丢弃旧消息”策略
         self.queue = collections.deque(maxlen=200)
         self.stop_event = threading.Event()
+        self.task_event = threading.Event()
         self.worker_thread = None
         
         self._initialized = True
@@ -80,11 +81,13 @@ class IPCSocketClient:
         """非阻塞入队指令 (O(1) 立即返回)"""
         self._start_worker_if_needed()
         self.queue.append(('CMD', cmd))
+        self.task_event.set()
 
     def enqueue_data(self, msg_type: str, data_obj: any):
         """非阻塞入队数据 (O(1) 立即返回)"""
         self._start_worker_if_needed()
         self.queue.append(('DATA', msg_type, data_obj))
+        self.task_event.set()
 
     def _connect(self):
         """内部重连逻辑"""
@@ -104,7 +107,8 @@ class IPCSocketClient:
         """后台单写线程循环"""
         while not self.stop_event.is_set():
             if not self.queue:
-                time.sleep(0.02) # 无任务时降低 CPU
+                self.task_event.wait(timeout=1.0) # ⚡ [PERF] 消除 busy loop (time.sleep)
+                self.task_event.clear()
                 continue
             
             # 1. 尝试连接可视化器

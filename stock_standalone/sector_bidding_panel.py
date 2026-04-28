@@ -1280,7 +1280,7 @@ class DataProcessWorker(QObject):
             elif not self.detector.is_active_session():
                 time.sleep(0.5)
             else:
-                time.sleep(0.01)
+                time.sleep(0.05)  # [PERF] 从 0.01 提升到 0.05，降低闲置时的 GIL 唤醒开销
 
         logger.info("🏁 [Worker] Loop exited safely.")
         self.stopped.emit()
