@@ -1231,12 +1231,21 @@ class DataProcessWorker(QObject):
                             logger.warning(f"⏩ [Worker] Queue backlogged ({q_size}). Skipped {count} stale frames.")
 
                     # 执行核心计算 (增量更新逻辑)
-                    active_codes = df.index.tolist() if hasattr(df, 'index') else None
-                    self.detector.register_codes(df) 
-                    self.detector.update_scores(active_codes=active_codes)
+                    # 执行核心计算 (⚡ 极致性能版：职责分离)
+                    # [🚀 PERFORMANCE] 如果 df 是 df_all (5000+), 则只注册价格，不进行耗时的逐一评估。
+                    # 评分评估已由 DataPublisher 的增量逻辑接管。此处仅触发板块聚合。
+                    is_full = len(df) > 3000
+                    self.detector.register_codes(df)
 
-                    v = getattr(self.detector, "data_version", 0) + 1
-                    setattr(self.detector, "data_version", v)
+                    if is_full:
+                        # 全量数据仅同步价格，跳过逐一评分计算，直接重算板块排行（即 skip_evaluate=True）
+                        # 这避免了在锁内循环 5000 次造成的 GIL 阻塞
+                        self.detector.update_scores(active_codes=None, skip_evaluate=True)
+                    else:
+                        active_codes = df.index.tolist() if hasattr(df, 'index') else None
+                        self.detector.update_scores(active_codes=active_codes)
+                    # [FIX] data_version 已由 update_scores 内部统一管理，无需 Worker 层再次递增
+                    # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
 
                     self.data_updated.emit(df)
                     has_done_work = True
@@ -1250,8 +1259,7 @@ class DataProcessWorker(QObject):
 
                 if force:
                     self.detector.update_scores(force=True)
-                    v = getattr(self.detector, "data_version", 0) + 1
-                    setattr(self.detector, "data_version", v)
+                    # [FIX] data_version 由 update_scores 内部统一管理
                     self.data_updated.emit(None)
                     has_done_work = True
 

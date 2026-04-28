@@ -29,6 +29,13 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-28 10:20
+- [x] **实现 Tk 主线程卡死一键诊断机制 (Implemented One-click UI Freeze Diagnosis)**：
+    - [x] **引入 faulthandler 信号注册**：在 `instock_MonitorTK.py` 中实现了 `faulthandler.register(signal.SIGBREAK)`。
+    - [x] **实现 Ctrl+Break 堆栈打印**：在 Windows 环境下，当 UI 界面出现假死或卡顿时，用户只需在控制台按下 **`Ctrl+Break`**，即可瞬间打印所有线程的完整调用栈（Thread Stack Dump）。
+    - [x] **精准定位卡顿根因**：该机制能够帮助开发者快速识别是由于 `lock.acquire` 竞争、`Qt event dispatch` 冲突还是 `sip wrapper` 阻塞导致的 UI 挂起，极大地提升了系统的可维护性与故障排除效率。
+    - [x] **清理冗余诊断代码**：合并并清理了启动初期重复的 `faulthandler` 启用逻辑，确保诊断引擎运行在最优状态。
+
 ## 2026-04-25 18:50
 - [x] **根治 PyInstaller \_MEI\ 临时目录占用与赛马回测进程残留 (Fixed _MEI Directory Lock & Backtest Process Leak)**：
     - [x] **重构 7-步标准退出序列 (Standardized 7-Step Shutdown Sequence)**：在 `instock_MonitorTK.py` 中实现了严格的序贯退出逻辑：

@@ -2727,9 +2727,24 @@ class DataPublisher:
                 # [NEW] ⚡ 赛马/赛道探测逻辑嵌入 (One Calculation, Global Availability)
                 if self.racing_detector is not None:
                     try:
+                        # [🚀 PERFORMANCE] 增加频率节流 (Throttling)，确保高频 Tick 冲击下计算不堆积
+                        # 只有在非复盘模式下才启用节流，复盘模式需要逐笔处理以维持精度
+                        now_t = time.time()
+                        last_racing_t = getattr(self, '_last_racing_t', 0)
+                        
                         self.racing_detector.register_codes(df)
-                        # 传入 enriched_df (含 detect_signals 后分值) 提高精度
-                        self.racing_detector.update_scores(active_codes=df['code'].tolist() if 'code' in df.columns else None)
+                        
+                        # 强制节流：1.0s 内仅执行一次核心评分与聚合
+                        if now_t - last_racing_t > 1.0 or self.simulation_mode:
+                            # 传入 enriched_df (含 detect_signals 后分值) 提高精度
+                            active_codes = df['code'].tolist() if 'code' in df.columns else None
+                            self.racing_detector.update_scores(active_codes=active_codes)
+                            self._last_racing_t = now_t
+                        else:
+                            # 节流期间仅通过 register_codes 更新价格，跳过耗时的评分评估与板块聚合
+                            # 这保证了内存中价格是新鲜的，但将昂贵的逻辑合并到下一个周期
+                            pass
+                            
                     except Exception as rd_err:
                         logger.error(f"[RacingDetector] Error in DataPublisher flow: {rd_err}")
                 
