@@ -389,18 +389,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._batch_timer.timeout.connect(self._process_batch_signals)
         self._batch_timer.start(3000)
 
-        # [NEW] 决策引擎同步定时器 (遵循系统 cct.duration_sleep_time)
-        self._engine_sync_timer = QTimer(self)
-        self._engine_sync_timer.timeout.connect(self._update_engine_views)
-        # 获取系统配置的更新节奏，赋予默认 5s 兜底
-        try:
-            # 优先从 cct.CFG 获取，否则尝试从 cct 直接获取（取决于 JohnsonUtil 加载方式）
-            interval_s = float(getattr(cct.CFG, 'duration_sleep_time', 30)) if hasattr(cct, 'CFG') else float(getattr(cct, 'duration_sleep_time', 30))
-            interval_ms = max(10000, int(interval_s * 1000)) # 强制不低于 2s 以保证 UI 流畅
-        except Exception:
-            interval_ms = 10000
-        self._engine_sync_timer.start(interval_ms)
-        logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，节拍: {interval_ms}ms")
+        # [FIX] 废弃原有的定时器机制，改为监听 MonitorTK 发出的心跳信号触发 _update_engine_views
+        # 这确保了 UI 刷新能够 100% 对齐数据聚合周期，避免无数据更新时的空转或脏检查开销
+        logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，变更为心跳驱动模式")
         
         # 恢复 UI 状态 (列宽等)
         self._restore_ui_state()
@@ -425,11 +416,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._batch_timer.stop()
         except Exception: pass
 
-        try:
-            if hasattr(self, '_engine_sync_timer') and self._engine_sync_timer: 
-                self._engine_sync_timer.stop()
-        except Exception: pass
-        
         try:
             if hasattr(self, '_search_timer') and self._search_timer: 
                 self._search_timer.stop()
@@ -1026,6 +1012,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._update_last_sync_time()
         if event.source == "market_stats" and isinstance(event.payload, dict):
             self.update_market_stats(event.payload)
+            # [🚀 性能优化] 心跳驱动引擎数据刷新，完全对齐后台数据合成节拍，消除主线程卡死
+            self._update_engine_views()
 
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"{datetime.now().strftime('%H:%M:%S')} (实时)")
@@ -1042,40 +1030,48 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.status_label.setText("未连接决策引擎")
             return
 
+        current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+
         # 1. 更新决策队列表
-        try:
-            decisions = self._engine_ctrl.get_decision_queue()
-            self._refresh_decision_table(decisions)
-        except Exception as e:
-            logger.error(f"❌ [DASHBOARD] Refresh decision table failed: {e}", exc_info=True)
-            self.status_label.setText(f"错误: 决策同步失败")
+        if current_tab_text == "🌟 决策队列":
+            try:
+                decisions = self._engine_ctrl.get_decision_queue()
+                self._refresh_decision_table(decisions)
+            except Exception as e:
+                logger.error(f"❌ [DASHBOARD] Refresh decision table failed: {e}", exc_info=True)
+                self.status_label.setText(f"错误: 决策同步失败")
 
         # 2. 更新龙头追踪表 [NEW]
-        try:
-            dragons = self._engine_ctrl.get_dragon_leaders()
-            self._refresh_dragon_table(dragons)
-        except Exception as e:
-            logger.error(f"❌ [DASHBOARD] Refresh dragon table failed: {e}", exc_info=True)
-            self.status_label.setText(f"错误: 龙头同步失败")
+        elif current_tab_text == "🐉 龙头追踪":
+            try:
+                dragons = self._engine_ctrl.get_dragon_leaders()
+                self._refresh_dragon_table(dragons)
+            except Exception as e:
+                logger.error(f"❌ [DASHBOARD] Refresh dragon table failed: {e}", exc_info=True)
+                self.status_label.setText(f"错误: 龙头同步失败")
 
         # 3. 更新战略趋势表 [NEW]
-        try:
-            trends = self._engine_ctrl.get_strategic_trends()
-            self._refresh_strategic_table(trends)
-        except Exception as e:
-            logger.error(f"❌ [DASHBOARD] Refresh strategic table failed: {e}")
+        elif current_tab_text == "🌐 战略趋势":
+            try:
+                trends = self._engine_ctrl.get_strategic_trends()
+                self._refresh_strategic_table(trends)
+            except Exception as e:
+                logger.error(f"❌ [DASHBOARD] Refresh strategic table failed: {e}")
 
         # 4. 更新板块热力表
-        try:
-            sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
-            self._refresh_sector_table(sectors)
-        except Exception as e:
-            logger.error(f"❌ [DASHBOARD] Refresh sector table failed: {e}", exc_info=True)
+        elif current_tab_text == "🔥 板块热力":
+            try:
+                sectors = self._engine_ctrl.get_hot_sectors(top_n=20)
+                self._refresh_sector_table(sectors)
+            except Exception as e:
+                logger.error(f"❌ [DASHBOARD] Refresh sector table failed: {e}", exc_info=True)
 
     def _refresh_decision_table(self, decisions: List[dict]):
         table = self.tables.get("🌟 决策队列")
         if not table: return
         
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
         table.setSortingEnabled(False)
         # 获取当前选中的代码，用于恢复 (代码列移到了 index 3)
         current_selection = None
@@ -1100,7 +1096,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
                 if it.foreground().color().name() != c_name:
-                    it.setForeground(self._brushes.get(c_name, QBrush(color)))
+                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
+                    it.setForeground(self._brushes[c_name])
             if bold:
                 f = it.font(); 
                 if not f.bold(): f.setBold(True); it.setFont(f)
@@ -1141,6 +1138,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     if it: it.setBackground(self._brushes.get("gold_bg"))
 
         table.setSortingEnabled(True)
+        table.blockSignals(False)
+        table.setUpdatesEnabled(True)
         self._limit_table_column_widths(table)
         
         # 恢复选中
@@ -1154,6 +1153,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🐉 龙头追踪")
         if not table: return
         
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
         table.setSortingEnabled(False)
         # 记录选中项代码 (代码在 index 1)
         current_selection = None
@@ -1178,7 +1179,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
                 if it.foreground().color().name() != c_name:
-                    it.setForeground(self._brushes.get(c_name, QBrush(color)))
+                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
+                    it.setForeground(self._brushes[c_name])
             if bg_color:
                  if it.background().color() != bg_color: it.setBackground(bg_color)
             elif it and it.background().color().alpha() != 0:
@@ -1227,6 +1229,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             _update_cell(i, 11, d.get('tags', ''))
 
         table.setSortingEnabled(True)
+        table.blockSignals(False)
+        table.setUpdatesEnabled(True)
         # [NEW] 限制过长列宽触发 UI 溢出
         self._limit_table_column_widths(table)
         
@@ -1241,6 +1245,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🔥 板块热力")
         if not table: return
         
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
         table.setSortingEnabled(False)
         if table.rowCount() != len(sectors):
             table.setRowCount(len(sectors))
@@ -1259,7 +1265,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if isinstance(color, str): color = QColor(color)
                 c_name = color.name()
                 if it.foreground().color().name() != c_name:
-                    it.setForeground(self._brushes.get(c_name, QBrush(color)))
+                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
+                    it.setForeground(self._brushes[c_name])
             if bg_color:
                 if it.background().color() != bg_color: it.setBackground(bg_color)
             elif it and it.background().color().alpha() != 0:
@@ -1296,7 +1303,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             _update_cell(i, 9, s.get('updated_at', ''))
 
         table.setSortingEnabled(True)
+        table.blockSignals(False)
+        table.setUpdatesEnabled(True)
         # [NEW] 限制过长列宽触发 UI 溢出
+        self._limit_table_column_widths(table)
 
 
     def _refresh_strategic_table(self, trends: List[dict]):
@@ -1310,6 +1320,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             return
         table._last_trends_sig = trends_sig
 
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
         table.setSortingEnabled(False)
         if table.rowCount() != len(trends):
             table.setRowCount(len(trends))
@@ -1350,6 +1362,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             _update_cell(i, 9, t.get('reason', ''))
 
         table.setSortingEnabled(True)
+        table.blockSignals(False)
+        table.setUpdatesEnabled(True)
         self._limit_table_column_widths(table)
 
     def _on_signal_received(self, event: BusEvent):
@@ -2348,6 +2362,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tabs.widget(index)
         if isinstance(table, QTableWidget):
             table.verticalScrollBar().setValue(0) # 回到顶部
+            
+        # [🚀 性能优化] 切换 Tab 时主动刷新当前页，实现可见性门控的即时响应
+        self._update_engine_views()
 
     def _on_search_context_menu(self, pos):
         QTimer.singleShot(30, lambda: self.search_input.setText(QApplication.clipboard().text().strip()))
