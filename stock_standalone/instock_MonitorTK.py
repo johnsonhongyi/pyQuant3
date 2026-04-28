@@ -16089,12 +16089,12 @@ def write_to_hdf():
 
 
 
-LOCK_FILE = cct.get_ramdisk_path("stock_app.lock")
 
 def ensure_single_instance_fileLock():
     import msvcrt
     import sys
     import os
+    LOCK_FILE = cct.get_ramdisk_path("stock_app.lock")
     global lock_fp
     lock_fp = open(LOCK_FILE, "w")
 
