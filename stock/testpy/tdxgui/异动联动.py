@@ -893,13 +893,15 @@ def actually_start_worker(worker_task,param=None):
     return worker_task
 
 def check_worker_done():
-    #检查任务结束更新视图
-    global worker_thread,realdatadf
+    # 检查任务结束更新视图
+    global worker_thread, realdatadf
     if worker_thread and worker_thread.is_alive():
-        root.after(2000, check_worker_done)  # 200ms 后再检查
+        # [🚀 优化] 降低轮询频率，从 2s 延长至 5s，减少无意义的线程状态检查
+        root.after(5000, check_worker_done)  
     else:
         logger.info("Worker finished!")
-        populate_treeview(realdatadf)  # 在主线程安全更新 UI
+        # [🚀 修复] 自动刷新后，应尊重当前的过滤条件
+        quick_refresh_ui(is_auto=True)
 
 # --------------------
 # 停止线程
@@ -2009,7 +2011,7 @@ def filter_stocks(df,selected_type):
     # 排除8开头的股票
     df = df[~df["代码"].astype(str).str.startswith('8')]
 
-    if selected_type is not None and not selected_type == '':
+    if selected_type is not None and isinstance(selected_type, str) and selected_type != '':
         df = df[df['板块'] == selected_type]
     if '时间' in df.columns and len(df) > 0:
         df = df.sort_values(by="时间", ascending=False)
@@ -2100,6 +2102,8 @@ def clear_code_entry():
     
     # 清空搜索框内容并执行搜索
     code_entry.delete(0, tk.END)
+    # [🚀 修复] 清空搜索框时，必须同步重置最后的搜索缓存，防止自动跳转回弹（自动添加 code 的根源）
+    last_searched_code = None
     search_by_code()  # 恢复：清空后执行默认搜索（显示全量分类数据）
 
 # def scroll_to_code_in_treeview(monitor_tree,stock_code):
@@ -2297,13 +2301,14 @@ def search_by_type():
     if last_searched_code:
         scroll_to_code_in_treeview(tree,last_searched_code)
 
-def quick_refresh_ui(event=None):
+def quick_refresh_ui(event=None, is_auto=False):
     """极速刷新 UI：仅应用当前过滤条件，不重新加载底层数据流"""
     # 仅保存状态，不触发全量 refresh_data()
     save_linkage_config()
     
     current_code = code_entry.get().strip()
-    if current_code:
+    # [🚀 修复] 自动刷新模式下，如果开启了宏过滤，则屏蔽代码搜索，优先展示全量宏信号
+    if current_code and not (is_auto and history_filter_enabled and history_filter_enabled.get()):
         search_by_code()
     else:
         search_by_type()
@@ -9713,6 +9718,8 @@ def refresh_all_stock_data():
 
     # 刷新报警中心显示
     flush_alerts()
+    # [🚀 修复] 刷新数据后，同步更新主 UI 视图，确保启动和定期刷新能自动应用过滤条件
+    quick_refresh_ui(is_auto=True)
     # 10 分钟后再次执行
 
     if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
@@ -10510,7 +10517,7 @@ if __name__ == "__main__":
         global _global_enriched_cache
         if _global_enriched_cache is None:
             # 兜底：如果缓存未建立，先调用一次 _get_stock_changes 建立它
-            _get_stock_changes(pd.DataFrame({'代码':[]}))
+            _get_stock_changes()
         
         test_df = _global_enriched_cache if _global_enriched_cache is not None else realdatadf
         
@@ -10787,11 +10794,9 @@ if __name__ == "__main__":
                 # 如果记录存在但窗口已关闭，则清理
                 open_editors.pop(code, None)
 
-        # --- ③ 打开新编辑窗口 ---
-        # code_entry.delete(0, tk.END)
-        # code_entry.insert(0, code)
-        safe_set_stock_code(code_entry)
-        search_by_code()
+        # --- ③ 自动同步代码（可选，若不需要自动切换主表过滤，可保持注释） ---
+        # safe_set_stock_code(code_entry, code)
+        # search_by_code()
 
         win = open_alert_editor(code, new=True, stock_info=stock_tuple, parent_win=root)
 

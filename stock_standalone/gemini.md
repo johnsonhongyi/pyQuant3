@@ -29,6 +29,13 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-29 14:55
+- [x] **修复异动联动面板自动刷新后的过滤残留与自动回填 Bug (Fixed Filter Persistence & Auto-backfill in Linkage Panel)**：
+    - [x] **根治自动刷新导致过滤失效 (Fixed Filter Loss on Auto-Refresh)**：在 `check_worker_done` 中，将后台更新后的 UI 刷新逻辑从全量灌入的 `populate_treeview` 替换为尊重当前过滤状态的 `quick_refresh_ui()`。这确保了当用户开启“宏过滤”（历史策略）或代码搜索时，定期的行情自动刷新不会强制重置视口到全量无过滤状态。
+    - [x] **斩断代码回填死循环 (Eradicated Code Backfill Loop)**：在 `clear_code_entry` 中强制重置 `last_searched_code = None`。这彻底根绝了“点击清空 -> 触发搜索 -> 自动滚动至旧代码位置 -> 触发 Treeview 选择事件 -> `on_tree_select` 将代码重新填入 Entry”的逻辑闭环，实现了搜索框的“彻底清空”。
+    - [x] **屏蔽外部 IPC 意外干扰 (Isolated IPC Filter Influence)**：在 `update_gui` (命名管道回调) 中注释掉了自动修改 `code_entry` 的逻辑。现在，从其它窗口（如可视化器或主表）联动过来的信号仅会触发对应的编辑器窗口弹出，而不会意外干扰用户正在进行的异动联动面板过滤搜索，解决了“自动添加 code”导致的显示异常。
+    - [x] **同步更新 UI 状态同步安全性**：确保了 `safe_set_stock_code` 在子线程调用下的鲁棒性，并通过 `root.after` 保证了所有 UI 更新均在主线程执行。
+
 ## 2026-04-29 11:48
 - [x] **深度拔除主线程假死与 GIL 级联阻塞 (Eradicated UI Freeze & GIL Block)**：
     - [x] **根治 O(N) 全表扫描与 Pandas `.loc` 装箱退化 (Fixed Pandas Overhead & Fallback)**：
