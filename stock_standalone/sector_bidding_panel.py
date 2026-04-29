@@ -1215,20 +1215,18 @@ class DataProcessWorker(QObject):
 
                 # 1. 处理数据（关键优化：丢弃旧包，防堆积）
                 if df is not None:
-                    # 🔥 丢弃逻辑：如果有更新的数据在排队，且积压超过一定阈值，则加速丢弃
-                    q_size = self.df_queue.qsize()
-                    if q_size > 5: # 积压预警
-                        count = 0
-                        while not self.df_queue.empty():
-                            try:
-                                df = self.df_queue.get_nowait()
-                                count += 1
-                                if count > 20: break # 即使丢弃也一次不超过20个，防止死循环
-                            except Empty:
-                                break
-                        
-                        if self.detector.enable_log:
-                            logger.warning(f"⏩ [Worker] Queue backlogged ({q_size}). Skipped {count} stale frames.")
+                    # 🔥 丢弃逻辑：如果有更新的数据在排队，直接取最新的，防堆积
+                    count = 0
+                    while True:
+                        try:
+                            newer_df = self.df_queue.get_nowait()
+                            df = newer_df
+                            count += 1
+                        except Empty:
+                            break
+                    
+                    if count > 0 and self.detector.enable_log:
+                        logger.warning(f"⏩ [Worker] Queue backlogged. Skipped {count} stale frames.")
 
                     # 执行核心计算 (增量更新逻辑)
                     # 执行核心计算 (⚡ 极致性能版：职责分离)
@@ -1240,14 +1238,23 @@ class DataProcessWorker(QObject):
                     if is_full:
                         # 全量数据仅同步价格，跳过逐一评分计算，直接重算板块排行（即 skip_evaluate=True）
                         # 这避免了在锁内循环 5000 次造成的 GIL 阻塞
+                        start_time = time.perf_counter()
                         self.detector.update_scores(active_codes=None, skip_evaluate=True)
+                        dur = time.perf_counter() - start_time
+                        if dur > 0.3:
+                            logger.warning(f"⚠️ [STALL] update_scores (full) slow: {dur:.3f}s")
                     else:
                         active_codes = df.index.tolist() if hasattr(df, 'index') else None
+                        start_time = time.perf_counter()
                         self.detector.update_scores(active_codes=active_codes)
+                        dur = time.perf_counter() - start_time
+                        if dur > 0.3:
+                            logger.warning(f"⚠️ [STALL] update_scores (incremental) slow: {dur:.3f}s")
                     # [FIX] data_version 已由 update_scores 内部统一管理，无需 Worker 层再次递增
                     # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
 
-                    self.data_updated.emit(df)
+                    self.latest_df = df
+                    self.data_updated.emit(None)
                     has_done_work = True
 
                 # 2. 强制刷新判定
@@ -1258,8 +1265,13 @@ class DataProcessWorker(QObject):
                     force = False
 
                 if force:
+                    start_time = time.perf_counter()
                     self.detector.update_scores(force=True)
+                    dur = time.perf_counter() - start_time
+                    if dur > 0.3:
+                        logger.warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
                     # [FIX] data_version 由 update_scores 内部统一管理
+                    self.latest_df = None
                     self.data_updated.emit(None)
                     has_done_work = True
 
@@ -2484,8 +2496,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             traceback.print_exc()
             logger.error(f"[SectorBiddingPanel] queue realtime_data failed: {e}")
 
-    def _on_worker_finished(self, df: pd.DataFrame = None):
+    def _on_worker_finished(self, _=None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+        df = getattr(self._worker, 'latest_df', None)
         # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
         if df is not None:
             self._last_source_df = df

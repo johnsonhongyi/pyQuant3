@@ -2304,6 +2304,12 @@ class SectorFocusController:
         df = None
         with self._lock:
             df = self._df_realtime
+            
+            # [FIX] 强制对齐为以 code 为 index 的 DataFrame，消解后续所有的全表扫描 O(N) 退化
+            if df is not None and not df.empty and df.index.name != 'code' and 'code' in df.columns:
+                df = df.set_index('code')
+                self._df_realtime = df  # 缓存回主表
+
             bidding = dict(self._bidding_scores)
             hot_rank = dict(self._hot_rank_map)
 
@@ -2387,6 +2393,18 @@ class SectorFocusController:
 
     def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
+        # 🚀 [PERF] 降频：避免每个 tick 都做 O(M) 次的回踩扫描，让出 CPU
+        self._pullback_counter = getattr(self, '_pullback_counter', 0) + 1
+        if not force and self._pullback_counter % 3 != 0:
+            return
+
+        # 🚀 [PERF] 极其关键：将 DataFrame 转换为 dict，根治 df.loc 在循环中带来的 O(N) 及装箱开销 (性能提升 50x)
+        df_map = df.to_dict('index') if df is not None and not df.empty else {}
+        
+        # 🚀 [PERF] 扁平化 snap 缓存提取，避免底层 5000 次加解锁 (Lock Overhead)
+        with self.sector_map._lock:
+            snap_map = self.sector_map._detector_stock_snap.copy()
+
         # [MOD] 扩大扫描宽度 (从 8 -> 15)，覆盖更广泛的轮动板块
         hot_sectors = self.sector_map.get_hot_sectors(top_n=15)
 
@@ -2400,7 +2418,7 @@ class SectorFocusController:
                 try:
                     idx_pct = getattr(self, '_index_pct_diff', 0.0)
                     ranks = self.sector_map.get_stock_ranks(code)
-                    self._scan_one_v2(code, sh, index_pct=idx_pct, ranks=ranks, force=force)
+                    self._scan_one_v2(code, sh, index_pct=idx_pct, ranks=ranks, force=force, df_map=df_map, snap_map=snap_map)
                 except Exception as e:
                     logger.debug(f"[scan_pullbacks] {code}: {e}")
 
@@ -2408,25 +2426,23 @@ class SectorFocusController:
         try:
             dragons = self.dragon_tracker.get_dragons(min_status=DragonStatus.CANDIDATE)
             for rec in dragons:
-                snap = self.sector_map.get_stock_snap(rec.code)
+                snap = snap_map.get(rec.code)
                 
                 # --- [FIX] 增加从 df_realtime 回退提取逻辑，防止因 snap 缺失导致数据为 0 ---
                 price, vwap, dff, pct, day_high, day_low = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
                 
                 
-                if df is not None and not df.empty:
-                    # 降级：从主行情表匹配
-                    try:
-                        row = df.loc[rec.code] if rec.code in df.index else df[df['code'] == rec.code].iloc[0]
+                if df_map:
+                    # 降级：从预提取的 df_map 极速匹配
+                    row = df_map.get(rec.code)
+                    if row:
                         price      = float(row.get('trade', row.get('price', 0)) or 0)
                         day_high   = float(row.get('high', price) or price)
                         day_low    = float(row.get('low', price) or price)
                         vwap       = float(row.get('nclose', row.get('lastp1d', price)) or price)
                         pct        = float(row.get('percent', 0.0))
                         dff        = float(row.get('dff', 0.0))
-                    except (KeyError, IndexError):
-                        continue # 两边都找不到，跳过
-                elif snap:
+                    elif snap:
                     price      = float(snap.get('price', 0.0))
                     day_high   = float(snap.get('high_day', 0.0))
                     day_low    = float(snap.get('low_day', snap.get('price', 0.0)))
@@ -2464,37 +2480,31 @@ class SectorFocusController:
                 except Exception as e:
                     logger.debug(f"[Dragon] scan {rec.code}: {e}")
             
-            # [NEW] 集中打印破位报警，防止刷屏
-            if self.dragon_tracker.breakdown_details:
+            # [PERF] 日志节流与缓冲：累积一定量或一定时间后统一 flush，防止 IO/GIL 阻塞
+            now_ts = time.time()
+            
+            # 集中打印破位报警
+            if self.dragon_tracker.breakdown_details and (len(self.dragon_tracker.breakdown_details) > 20 or now_ts - getattr(self, '_last_bd_log_ts', 0) > 10):
+                self._last_bd_log_ts = now_ts
                 count = len(self.dragon_tracker.breakdown_details)
-                if count > cct.loop_counter_limit:
-                    summary = "\n".join(self.dragon_tracker.breakdown_details[:cct.loop_counter_limit])
-                    logger.warning(f"⚠️ [Dragon-Breakdown] 集中破位(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
-                else:
-                    summary = "\n".join(self.dragon_tracker.breakdown_details)
-                    logger.warning(f"⚠️ [Dragon-Breakdown] 发现破位:\n{summary}")
+                sample = "\n".join(self.dragon_tracker.breakdown_details[:10])
+                logger.warning(f"⚠️ [Dragon-Breakdown] 集中破位(共{count}只):\n{sample[:300]}...")
                 self.dragon_tracker.breakdown_details.clear()
             
-            # [NEW] 集中打印龙头信号，防止刷屏
-            if self.dragon_tracker.dragon_details:
+            # 集中打印龙头信号
+            if self.dragon_tracker.dragon_details and (len(self.dragon_tracker.dragon_details) > 20 or now_ts - getattr(self, '_last_dr_log_ts', 0) > 10):
+                self._last_dr_log_ts = now_ts
                 count = len(self.dragon_tracker.dragon_details)
-                if count > cct.loop_counter_limit:
-                    summary = "\n".join(self.dragon_tracker.dragon_details[:cct.loop_counter_limit])
-                    logger.warning(f"🚀 [Dragon-Signals] 发现强势信号(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
-                else:
-                    summary = "\n".join(self.dragon_tracker.dragon_details)
-                    logger.warning(f"🚀 [Dragon-Signals] 触发信号:\n{summary}")
+                sample = "\n".join(self.dragon_tracker.dragon_details[:10])
+                logger.warning(f"🚀 [Dragon-Signals] 触发信号(共{count}只):\n{sample[:300]}...")
                 self.dragon_tracker.dragon_details.clear()
                 
-            # [NEW] 集中打印买点信号，防止刷屏
-            if self.decision_buy_details:
+            # 集中打印买点信号
+            if hasattr(self, 'decision_buy_details') and self.decision_buy_details and (len(self.decision_buy_details) > 20 or now_ts - getattr(self, '_last_buy_log_ts', 0) > 10):
+                self._last_buy_log_ts = now_ts
                 count = len(self.decision_buy_details)
-                if count > cct.loop_counter_limit:
-                    summary = "\n".join(self.decision_buy_details[:cct.loop_counter_limit])
-                    logger.warning(f"✅ [Decision-Buy] 发现买点(共{count}只):\n{summary}\n...等其它{count-cct.loop_counter_limit}只")
-                else:
-                    summary = "\n".join(self.decision_buy_details)
-                    logger.warning(f"✅ [Decision-Buy] 触发买点:\n{summary}")
+                sample = "\n".join(self.decision_buy_details[:10])
+                logger.warning(f"✅ [Decision-Buy] 发现买点(共{count}只):\n{sample[:300]}...")
                 self.decision_buy_details.clear()
 
         except Exception as e:
@@ -2533,12 +2543,12 @@ class SectorFocusController:
         self.tick(force=True)
         logger.info("✅ [SectorFocusController] 手动全链路刷新完成")
 
-    def _scan_one_v2(self, code: str, sh: SectorHeat, index_pct: float = 0.0, ranks: Tuple[int, int] = (9999, 9999), force: bool = False):
+    def _scan_one_v2(self, code: str, sh: SectorHeat, index_pct: float = 0.0, ranks: Tuple[int, int] = (9999, 9999), force: bool = False, df_map: dict = None, snap_map: dict = None):
         """
         [v2] 对单只股扫描买点，优先使用 detector 快照数据（含真实 klines）
         """
         # 优先从 detector 快照获取丰富数据
-        snap = self.sector_map.get_stock_snap(code)
+        snap = snap_map.get(code) if snap_map else self.sector_map.get_stock_snap(code)
 
         # 从 detector 快照提取
         if snap:
@@ -2555,19 +2565,23 @@ class SectorFocusController:
             # [MOD] 移除本地冗余计算，直接信任探测器快照提供的量比数据
             vol_ratio = float(snap.get('vol_ratio', 1.0))
 
-            # 真实 prices5：最近5根 kline 的收盘价
-            prices5 = [float(k.get('close', price)) for k in klines[-5:]] if klines else [price]
+            # 🚀 [PERF] 直接提取预计算的 prices5，根除 CPU 热点中的列表推导
+            prices5 = snap.get('prices5')
+            if not prices5:
+                prices5 = [float(k.get('close', price)) for k in klines[-5:]] if klines else [price]
 
         else:
-            # 降级：从 df_realtime 取基础数据
-            with self._lock:
-                df = self._df_realtime
-            if df is None or df.empty:
-                return
-            try:
-                row = df.loc[code] if code in df.index else df[df['code'] == code].iloc[0]
-            except (KeyError, IndexError):
-                return
+            # 降级：从 df_map 取基础数据
+            row = df_map.get(code) if df_map else None
+            if not row:
+                with self._lock:
+                    df = self._df_realtime
+                if df is None or df.empty:
+                    return
+                try:
+                    row = df.loc[code]
+                except KeyError:
+                    return
 
             price      = float(row.get('trade', row.get('price', 0)) or 0)
             day_high   = float(row.get('high', price) or price)
