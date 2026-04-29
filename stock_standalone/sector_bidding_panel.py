@@ -1170,6 +1170,7 @@ class DataProcessWorker(QObject):
         # 用队列替代 bool（彻底线程安全）
         self.force_queue = Queue()
         self._is_running = True
+        self._last_slow_log_ts = 0  # [NEW] 用于节流告警输出
 
     def add_data(self, df):
         """外部线程安全调用"""
@@ -1278,9 +1279,12 @@ class DataProcessWorker(QObject):
                 # [PERF] 计算本次工作耗时，用于动态调整休眠
                 work_dur = time.perf_counter() - start_work_t
                 if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
-                    processed_count = getattr(self.detector, 'last_processed_count', 0)
-                    total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
-                    logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (processed {processed_count}/{total_count} codes) (GIL bottleneck risk)")
+                    now_ts = time.time()
+                    if now_ts - self._last_slow_log_ts > 10: # 10秒节流
+                        self._last_slow_log_ts = now_ts
+                        processed_count = getattr(self.detector, 'last_processed_count', 0)
+                        total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
+                        logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (processed {processed_count}/{total_count} codes) (GIL bottleneck risk)")
 
             except Exception as e:
                 logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
@@ -1378,6 +1382,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.link_manager = get_link_manager()
         self.sender = None # 废弃旧 sender
 
+        self._force_full_view = False # [NEW] 强制全量显示标记
         # 排序状态：(col_index, ascending)
         self._sort_col = 4             # 默认按涨幅排序
         self._sort_asc = False
@@ -2894,13 +2899,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # 2. 执行查询引擎逻辑
         if not query:
-            self._is_macro_active = False
-            self._macro_query_str = ""
-            self._macro_filtered_codes = []
-            if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText("🔍 宏过滤已解除 (显示全量)")
-                self.status_lbl.setStyleSheet("color: #888888;")
+            self._reset_macro_filter()
         else:
+            self._force_show_all_in_stock_table = True
             self._run_macro_query_internal(query)
 
         # 触发全局刷新
@@ -3119,28 +3120,44 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.search_input.lineEdit().clear()
         self._active_search_query = ""
         self._is_leader_search_mode = False
-        self._force_show_all_in_stock_table = False 
         
-        # 2. 重置宏观查询 (Macro Query)
+        # 2. 重置宏观查询
         if hasattr(self, 'query_input'):
-            self.query_input.setCurrentText("")
-            self.query_input.lineEdit().clear()
+            self.query_input.setCurrentIndex(-1)
+            self.query_input.setEditText("")
+        
+        # 3. 调用原子重置函数
+        self._reset_macro_filter()
+            
+        # 4. 触发物理刷新
+        self.manual_refresh()
+
+    def _reset_macro_filter(self):
+        """彻底恢复全量数据视图（唯一可信入口）"""
+        # 1. 状态变量重置
         self._is_macro_active = False
         self._macro_query_str = ""
         self._macro_filtered_codes = []
+        self._force_show_all_in_stock_table = False 
+
+        # 2. UI 组件状态重置
+        if hasattr(self, 'pie_widget'):
+            self.pie_widget.selected_category = None
+            if hasattr(self.pie_widget, 'clear_cache'):
+                self.pie_widget.clear_cache()
             
-        # 3. 更新 UI 反馈
         if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText("🧹 已清空全部搜索与过滤条件 (显示全量)")
+            self.status_lbl.setText("🔍 宏过滤已解除 (显示全量)")
             self.status_lbl.setStyleSheet("color: #888888;")
             
         if hasattr(self, 'macro_info_lbl'):
             self.macro_info_lbl.setText("🔍 宏过滤: 已解除")
             self.macro_info_lbl.setStyleSheet("color: #888888;")
 
-        # 4. 执行全量表格刷新
-        self.manual_refresh()
-        self._save_ui_state()
+        # 3. 强制标记
+        self._force_full_view = True
+        
+        logger.info("🔍 [SectorPanel] 宏过滤已重置，全量视图强制恢复")
         
     def _evaluate_search_condition(self, query_str: str, row_data: dict) -> bool:
         """

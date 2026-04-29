@@ -2700,11 +2700,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     query = p2.strip()
         
         if not query:
-            self._is_macro_active = False
-            self._macro_query_str = ""
-            self._macro_filtered_codes = []
-            self._macro_filtered_codes_set = set() # [🚀 修复] 彻底清除过滤集合，恢复全量显示
-            logger.info("🔍 [RacingPanel] 宏过滤已解除")
+            self._reset_macro_filter()
         else:
             # [MOD] 宏搜索采用“只读模式”，不再自动写入历史库
             self._run_macro_query_internal(query)
@@ -2730,7 +2726,36 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """清空查询条件，恢复默认视图"""
         self.query_input.setCurrentIndex(-1) # [🚀 修复] 彻底清除当前选中的历史项数据引用
         self.query_input.setEditText("")
+        self._reset_macro_filter()
         self._on_query_triggered()
+
+    def _reset_macro_filter(self):
+        """彻底恢复全量数据视图（唯一可信入口）"""
+        # 1. 状态清空
+        self._is_macro_active = False
+        self._macro_query_str = ""
+        self._macro_filtered_codes = []
+        self._macro_filtered_codes_set = set()
+        
+        # 2. UI状态清空 (Pie Widget & Label)
+        if hasattr(self, 'pie_widget'):
+            self.pie_widget.selected_category = None
+            # 如果饼图有内部缓存也一并清除
+            if hasattr(self.pie_widget, 'clear_cache'):
+                self.pie_widget.clear_cache()
+            
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText("🔍 宏过滤已解除 (显示全量)")
+            self.status_lbl.setStyleSheet("color: #888888;")
+
+        # 3. 强制刷新版本，绕过节流限制
+        self._last_data_version = -1
+        self._last_ui_update_ts = 0
+        
+        # 4. 强制恢复基准标记
+        self._force_full_view = True
+        
+        logger.info("🔍 [RacingPanel] 宏过滤已重置，全量数据视图强制恢复")
 
     def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
         """核心查询逻辑：根据 query 计算匹配个股代码池"""
@@ -4589,12 +4614,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # --- 2. [WORK-ZONE] 锁外分析计算 ---
             # 宽放个股显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股
             # [NEW] 🧬 UI 阶段过滤：先按原有流程跑完活跃筛选
-            if self._is_macro_active:
+            if self._is_macro_active and not getattr(self, "_force_full_view", False):
                 # 宏观过滤模式下，允许穿透展示所有匹配个股 (不受 0.001/0.05 等活跃阈值限制)
                 active_ts = [ts for ts in raw_ts_list if ts.code in self._macro_filtered_codes_set]
             else:
                 # [FIX] 当执行清空或者查询为空时，还原完整数据集，显示全部数据
                 active_ts = raw_ts_list
+                self._force_full_view = False # 重置标记
             dist = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 0}
             
             filtered_ts = []
@@ -4676,7 +4702,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         return (prio, val, ts.code)
                     return (val, ts.code)
                 
-                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:20]
+                # [🚀 扩展展示] 宏观查询模式下，展示更多命中个股 (100只)，普通模式仅 Top 20
+                limit_stock = 100 if self._is_macro_active else 20
+                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:limit_stock]
                 flattened_ts = [flatten_ts(ts) for ts in sorted_raw]
                 
                 self.stock_table.blockSignals(True)
@@ -4719,7 +4747,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         seen_leaders.add(l_code)
                     
                     unique_leader_sectors.append(sec)
-                    if len(unique_leader_sectors) >= 20:
+                    # [🚀 扩展展示] 宏观查询模式下，板块也展示更多结果 (100只)
+                    limit_sec = 100 if self._is_macro_active else 20
+                    if len(unique_leader_sectors) >= limit_sec:
                         break
 
                 self._update_sector_table_optimized(self.sector_table, unique_leader_sectors)
