@@ -828,17 +828,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
              from market_pulse_viewer import MarketPulseViewer
              self._pulse_viewer_class = MarketPulseViewer
-             # [NEW] 存档按钮 (对调至此)
-             archive_btn = tk.Button(ctrl_frame, text="存档", 
-                                 font=self.default_font, pady=2,
-                                 command=self.open_archive_loader)
-             archive_btn.pack(side="left", padx=5)
-             
-             # [NEW] 策略按钮 (对调至此)
-             str_btn = tk.Button(ctrl_frame, text="策略", 
-                                 fg="blue", font=self.default_font_bold, pady=2,
-                                 command=lambda: self.open_strategy_manager())
-             str_btn.pack(side="left", padx=5)
         except ImportError as e:
              logger.error(f"Failed to import MarketPulseViewer: {e}")
              self._pulse_viewer_class = None
@@ -3402,7 +3391,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -3432,6 +3421,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.save_data_to_csv()
             elif action == "读取存档":
                 self.load_data_from_csv()
+            elif action == "存档管理":
+                self.open_archive_loader()
+            elif action == "策略管理":
+                self.open_strategy_manager()
             elif action == "覆写TDX":
                 self.write_to_blk(append=False)
             elif action == "手札总览":
@@ -15053,25 +15046,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info('readfile:{archive_file}')
             return initial_monitor_list
 
-    def open_archive_view_window(self, filename):
+    def open_archive_view_window(self, filename=None, data_list=None, title_suffix=None):
         """
-        从 filename 读取存档数据并显示
+        从 filename 读取存档数据并显示，或者直接显示 data_list
         数据格式：[code, name, tag, time]
         """
 
-        try:
-            data_list = self.load_archive(filename, readfile=True)
-
-        except Exception as e:
-            messagebox.showerror("读取失败", f"读取 {filename} 时发生错误:\n{e}")
-            return
+        if data_list is None:
+            if filename is None:
+                return
+            try:
+                data_list = self.load_archive(filename, readfile=True)
+            except Exception as e:
+                messagebox.showerror("读取失败", f"读取 {filename} 时发生错误:\n{e}")
+                return
 
         if not data_list:
-            messagebox.showwarning("无数据", f"{filename} 中没有可显示的数据。")
+            msg = f"{filename} 中没有可显示的数据。" if filename else "没有可显示的数据。"
+            messagebox.showwarning("无数据", msg)
             return
 
         win = tk.Toplevel(self)
-        win.title(f"存档预览 — {filename}")
+        title = f"存档预览 — {filename}" if filename else f"存档预览 — {title_suffix}"
+        win.title(title)
         win.geometry("600x480")
 
         window_id = "存档预览"
@@ -15085,6 +15082,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         }
 
         self.load_window_position(win, window_id, default_width=600, default_height=480)
+        win.lift()
+        win.focus_force()
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -15126,8 +15125,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vals = tree.item(sel[0], "values")
             if not vals: return
             code = str(vals[0]).zfill(6)
+            # 提取时间 (vals[3] 是 time 列) 并预处理为标准格式 (YYYY-MM-DD)
+            raw_time = vals[3] if len(vals) > 3 else None
+            date_val = str(raw_time)[:10] if raw_time else None
             # 🚀 [ASYNC] 延迟 10ms 执行，确保当前行选择动作先释放主循环
-            self._schedule_after(10, lambda: self.on_code_click(code))
+            self._schedule_after(10, lambda: self.on_code_click(code, date=date_val))
 
         def on_single_click(event):
             row_id = tree.identify_row(event.y)
@@ -15135,8 +15137,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vals = tree.item(row_id, "values")
             if not vals: return
             code = str(vals[0]).zfill(6)
+            # 提取时间并预处理
+            raw_time = vals[3] if len(vals) > 3 else None
+            date_val = str(raw_time)[:10] if raw_time else None
             # 🚀 [ASYNC] 延迟 10ms 执行
-            self._schedule_after(10, lambda: self.on_code_click(code))
+            self._schedule_after(10, lambda: self.on_code_click(code, date=date_val))
 
         def on_double_click(event):
             item = tree.focus()
@@ -15584,6 +15589,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         window_id = "历史监控数据"   # <<< 每个窗口一个唯一 ID
         # self.get_centered_window_position(win, window_id)
         self.load_window_position(win, window_id, default_width=400, default_height=300)
+        win.lift()
+        win.focus_force()
         files = list_archives(archive_dir=ARCHIVE_DIR,prefix='monitor_category_list')
         if not files:
             tk.Label(win, text="没有历史存档文件").pack(pady=20)
@@ -15591,11 +15598,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         selected_file = tk.StringVar(value=files[0])
         combo = ttk.Combobox(win, textvariable=selected_file, values=files, state="readonly")
-        combo.pack(pady=10)
+        combo.pack(pady=10, fill="x", padx=20)
 
         # 加载按钮
-        # ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
-        ttk.Button(win, text="显示", command=lambda: self.open_archive_view_window(selected_file.get())).pack(pady=5)
+        ttk.Button(win, text="显示选中", command=lambda: self.open_archive_view_window(selected_file.get())).pack(pady=5)
+        ttk.Button(win, text="整合最近100预览", command=lambda: self.open_consolidated_archive_view(files[:100])).pack(pady=5)
+
+        def delete_selected_archive():
+            """删除物理文件并刷新 UI"""
+            f = selected_file.get()
+            if not f: return
+            if messagebox.askyesno("物理删除确认", f"确定要从磁盘永久删除此存档文件吗？\n{f}"):
+                try:
+                    path = os.path.join(ARCHIVE_DIR, f)
+                    if os.path.exists(path):
+                        os.remove(path)
+                        logger.info(f"已从物理磁盘删除存档: {path}")
+                        # 刷新列表
+                        new_files = list_archives(archive_dir=ARCHIVE_DIR, prefix='monitor_category_list')
+                        combo["values"] = new_files
+                        if new_files:
+                            selected_file.set(new_files[0])
+                        else:
+                            selected_file.set("")
+                            messagebox.showinfo("完成", "所有存档已清空。")
+                    else:
+                        messagebox.showwarning("提示", "文件已不存在。")
+                except Exception as e:
+                    messagebox.showerror("错误", f"删除失败: {e}")
+
+        ttk.Button(win, text="❌ 删除选中存档", command=delete_selected_archive).pack(pady=5)
 
         def on_close(event=None):
             """
@@ -15610,6 +15642,53 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win.bind("<Escape>", on_close)
         win.protocol("WM_DELETE_WINDOW", lambda: on_close())
         win.after(60*1000, lambda: on_close())   # 自动关闭
+
+    def open_consolidated_archive_view(self, files_subset):
+        """整合最近存档并显示"""
+        consolidated = {}
+        for filename in files_subset:
+            try:
+                data = self.load_archive(filename, readfile=True)
+                if not data:
+                    continue
+                for row in data:
+                    if not isinstance(row, (list, tuple)) or len(row) < 1:
+                        continue
+                    code = str(row[0]).zfill(6)
+                    # 如果 code 不在字典中，或者当前记录的时间更晚，则更新
+                    # 注意：row 格式为 [code, name, tag, time]
+                    if code not in consolidated:
+                        consolidated[code] = row
+                    else:
+                        # 💡 [优化] 整合策略：优先保留有业务数据的记录 (monitor_category_list 结构 [code, name, tag, time])
+                        def check_has_data(r):
+                            try: return bool(r[2]) # 如果 tag 不为空，视为有数据
+                            except: return False
+                            
+                        curr_has_data = check_has_data(row)
+                        old_has_data = check_has_data(consolidated[code])
+                        
+                        if curr_has_data and not old_has_data:
+                            consolidated[code] = row
+                        elif not curr_has_data and old_has_data:
+                            pass
+                        else:
+                            # 简单的字符串比较时间
+                            if len(row) >= 4 and len(consolidated[code]) >= 4:
+                                if str(row[3]) > str(consolidated[code][3]):
+                                    consolidated[code] = row
+            except Exception as e:
+                logger.error(f"整合存档 {filename} 失败: {e}")
+        
+        if not consolidated:
+            messagebox.showwarning("无数据", "整合后没有可显示的数据。")
+            return
+            
+        final_list = list(consolidated.values())
+        # 按时间倒序排序
+        final_list.sort(key=lambda x: str(x[3]) if len(x) >= 4 else "", reverse=True)
+        
+        self.open_archive_view_window(data_list=final_list, title_suffix=f"整合最近{len(files_subset)}个存档")
 
     def write_to_blk(self,append=True):
         if self.current_df.empty:
