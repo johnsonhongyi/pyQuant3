@@ -11,7 +11,10 @@ except ImportError:
     win32api = None
 
 from JohnsonUtil import LoggerFactory
-from gui_utils import askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin
+from gui_utils import (
+    askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin,
+    load_window_position_simple, save_window_position_simple
+)
 from stock_logic_utils import test_code_against_queries,toast_message
 
 logger = LoggerFactory.getLogger('QueryHistoryManager')
@@ -295,10 +298,16 @@ class QueryHistoryManager:
         top = tk.Toplevel(self.root)
         top.title(f"🔍 全局搜索结果: '{keyword}' - 共 {len(all_data)} 条")
         
-        # 设置窗口大小并居中显示
-        w, h = 1000, 500
-        x, y = get_centered_window_position_mainWin(self.root, w, h)
-        top.geometry(f"{w}x{h}+{x}+{y}")
+        # 设置窗口大小并居中显示 (支持持久化)
+        window_id = "HistoryGlobalSearch"
+        w_def, h_def = 1000, 500
+        w, h, x_saved, y_saved = load_window_position_simple(window_id, w_def, h_def)
+        
+        if x_saved is not None and y_saved is not None:
+            top.geometry(f"{w}x{h}+{x_saved}+{y_saved}")
+        else:
+            x, y = get_centered_window_position_mainWin(self.root, w, h)
+            top.geometry(f"{w}x{h}+{x}+{y}")
         
         # 使用 ttk 样式增强
         main_frame = ttk.Frame(top, padding=5)
@@ -309,13 +318,17 @@ class QueryHistoryManager:
         tree = ttk.Treeview(main_frame, columns=list(col_ratios.keys()), show="headings", selectmode="browse")
         
         # 应用系统统一的 Treeview 样式 (30px rowheight)
-        style = ttk.Style()
+        style = ttk.Style(top)
         try:
             from dpi_utils import get_windows_dpi_scale_factor
             scale = get_windows_dpi_scale_factor()
         except:
             scale = 1.0
-        style.configure("Treeview", rowheight=int(28 * scale)) 
+            
+        # 💡 [修复] 使用唯一样式名，防止污染全局 Treeview 样式导致主窗口文字变化
+        search_style_name = f"Search{id(top)}.Treeview"
+        style.configure(search_style_name, rowheight=int(28 * scale))
+        tree.configure(style=search_style_name)
         
         tree.heading("id", text="#", command=lambda: self.treeview_sort_column(tree, "id"))
         tree.heading("group", text="组", command=lambda: self.treeview_sort_column(tree, "group"))
@@ -400,14 +413,23 @@ class QueryHistoryManager:
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill="x", pady=10)
         
-        style = ttk.Style()
-        style.configure("Primary.TButton", font=("微软雅黑", 10, "bold"))
+        # 💡 [修复] 使用唯一样式名
+        style = ttk.Style(top)
+        primary_btn_style = f"Primary{id(top)}.TButton"
+        style.configure(primary_btn_style, font=("微软雅黑", 10, "bold"))
         
-        btn_pin = ttk.Button(btn_frame, text="📌 置顶保存到当前组第一行", command=on_pin_to_top, style="Primary.TButton")
+        btn_pin = ttk.Button(btn_frame, text="📌 置顶保存到当前组第一行", command=on_pin_to_top, style=primary_btn_style)
         btn_pin.pack(side="left", padx=5)
         
         ttk.Button(btn_frame, text="📋 复制完整Query", command=on_copy_info).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="关闭窗口", command=top.destroy).pack(side="right", padx=5)
+        def on_close():
+            save_window_position_simple(top, window_id)
+            top.destroy()
+            
+        top.protocol("WM_DELETE_WINDOW", on_close)
+        top.bind("<Escape>", lambda e: on_close())
+        
+        ttk.Button(btn_frame, text="关闭窗口", command=on_close).pack(side="right", padx=5)
 
     def open_editor(self):
         # 每次打开时对数据重新读取一次存档,保持最新的数据

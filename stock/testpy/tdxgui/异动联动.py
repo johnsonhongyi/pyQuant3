@@ -4380,40 +4380,18 @@ def load_archive(selected_file,readfile=False):
 
 
 
-def open_archive_loader_old():
+
+
+
+def open_archive_loader(prefix="monitor_list_"):
     """打开存档选择窗口"""
     win = tk.Toplevel(root)
     win.title("加载历史监控数据")
     win.geometry("400x300")
     window_id = "历史监控数据"   # <<< 每个窗口一个唯一 ID
     update_position_window(win, window_id)
-
-    files = list_archives()
-    if not files:
-        tk.Label(win, text="没有历史存档文件").pack(pady=20)
-        return
-
-    # 下拉框选择
-    selected_file = tk.StringVar(value=files[0])
-    combo = ttk.Combobox(win, textvariable=selected_file, values=files, state="readonly")
-    combo.pack(pady=10)
-
-    # 加载按钮
-    ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
-    ttk.Button(win, text="显示", command=lambda: open_archive_view_window(selected_file.get())).pack(pady=5)
-    # 按 Esc 关闭窗口
-
-    win.bind("<Escape>", lambda event: win.destroy())
-    win.after(60*1000,  lambda  event:win.destroy())
-
-
-def open_archive_loader():
-    """打开存档选择窗口"""
-    win = tk.Toplevel(root)
-    win.title("加载历史监控数据")
-    win.geometry("400x300")
-    window_id = "历史监控数据"   # <<< 每个窗口一个唯一 ID
-    update_position_window(win, window_id)
+    win.lift()
+    win.focus_force()
 
     files = list_archives()
     if not files:
@@ -4422,11 +4400,38 @@ def open_archive_loader():
 
     selected_file = tk.StringVar(value=files[0])
     combo = ttk.Combobox(win, textvariable=selected_file, values=files, state="readonly")
-    combo.pack(pady=10)
+    combo.pack(pady=10, fill="x", padx=20)
 
     # 加载按钮
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
-    ttk.Button(win, text="显示", command=lambda: open_archive_view_window(selected_file.get())).pack(pady=5)
+    ttk.Button(win, text="显示选中", command=lambda: open_archive_view_window(selected_file.get())).pack(pady=5)
+    ttk.Button(win, text="整合最近100预览", command=lambda: open_consolidated_archive_view(files[:100])).pack(pady=5)
+
+    def delete_selected_archive():
+        """删除物理文件并刷新 UI"""
+        f = selected_file.get()
+        if not f: return
+        from tkinter import messagebox
+        if messagebox.askyesno("物理删除确认", f"确定要从磁盘永久删除此存档文件吗？\n{f}"):
+            try:
+                path = os.path.join(ARCHIVE_DIR, f)
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info(f"已从物理磁盘删除存档: {path}")
+                    # 刷新列表
+                    new_files = list_archives()
+                    combo["values"] = new_files
+                    if new_files:
+                        selected_file.set(new_files[0])
+                    else:
+                        selected_file.set("")
+                        messagebox.showinfo("完成", "所有存档已清空。")
+                else:
+                    messagebox.showwarning("提示", "文件已不存在。")
+            except Exception as e:
+                messagebox.showerror("错误", f"删除失败: {e}")
+
+    ttk.Button(win, text="❌ 删除选中存档", command=delete_selected_archive).pack(pady=5)
     def on_close(event=None):
         """
         统一关闭函数，ESC 和右上角 × 都能使用
@@ -4441,27 +4446,35 @@ def open_archive_loader():
     win.after(60*1000, lambda: win.destroy())   # 自动关闭
 
 
-def open_archive_view_window(filename):
+def open_archive_view_window(filename=None, data_list=None, title_suffix=None):
     """
-    从 filename 读取存档数据并显示。
-    仅显示：code, name, v3, v4, v5, time
+    从 filename 读取存档数据并显示，或者直接显示 data_list
+    仅显示：code, name, percent, price, volume, time
     """
 
-    try:
-        data_list = load_archive(filename,readfile=True)
-    except Exception as e:
-        messagebox.showerror("读取失败", f"读取 {filename} 时发生错误:\n{e}")
-        return
+    if data_list is None:
+        if filename is None:
+            return
+        try:
+            data_list = load_archive(filename, readfile=True)
+        except Exception as e:
+            messagebox.showerror("读取失败", f"读取 {filename} 时发生错误:\n{e}")
+            return
 
     if not data_list:
-        messagebox.showwarning("无数据", f"{filename} 中没有可显示的数据。")
+        msg = f"{filename} 中没有可显示的数据。" if filename else "没有可显示的数据。"
+        messagebox.showwarning("无数据", msg)
         return
 
     win = tk.Toplevel(root)
-    win.title(f"存档预览 — {filename}")
-    win.geometry("400x350")
+    title = f"存档预览 — {filename}" if filename else f"存档预览 — {title_suffix}"
+    win.title(title)
+    win.geometry("600x480")
     window_id = "存档预览"   # <<< 每个窗口一个唯一 ID
     update_position_window(win, window_id)
+    win.lift()
+    win.focus_force()
+
     # update_window_position(window_id)  #保存位置在close
 
     # 只保留需要的列
@@ -4581,6 +4594,49 @@ def open_archive_view_window(filename):
     # --- 🔥 默认按时间倒序排序（最新在上） ---
     win.after(10, lambda: sort_column_archive_view(tree, "time", True))  # True = 倒序
 
+def open_consolidated_archive_view(files_subset):
+    """整合最近存档并显示"""
+    consolidated = {}
+    for filename in files_subset:
+        try:
+            data = load_archive(filename, readfile=True)
+            if not data:
+                continue
+            for row in data:
+                if not isinstance(row, (list, tuple)) or len(row) < 1:
+                    continue
+                code = str(row[0]).zfill(6)
+                if code not in consolidated:
+                    consolidated[code] = row
+                else:
+                    # 💡 [优化] 整合策略：优先保留有业务数据（涨幅/价格/成交量）的记录
+                    def check_has_data(r):
+                        try:
+                            return any(float(r[i]) != 0 for i in range(4, 7) if i < len(r))
+                        except: return False
+                        
+                    curr_has_data = check_has_data(row)
+                    old_has_data = check_has_data(consolidated[code])
+                    
+                    if curr_has_data and not old_has_data:
+                        consolidated[code] = row
+                    elif not curr_has_data and old_has_data:
+                        pass
+                    else:
+                        if len(row) >= 8 and len(consolidated[code]) >= 8:
+                            if str(row[7]) > str(consolidated[code][7]):
+                                consolidated[code] = row
+        except Exception as e:
+            logger.error(f"整合存档 {filename} 失败: {e}")
+    
+    if not consolidated:
+        messagebox.showwarning("无数据", "整合后没有可显示的数据。")
+        return
+        
+    final_list = list(consolidated.values())
+    final_list.sort(key=lambda x: str(x[7]) if len(x) >= 8 else "", reverse=True)
+    open_archive_view_window(data_list=final_list, title_suffix=f"整合最近{len(files_subset)}个存档")
+
 def sort_column_archive_view(tree, col, reverse):
     """支持列排序，包括日期字符串排序。"""
     data = [(tree.set(k, col), k) for k in tree.get_children("")]
@@ -4696,10 +4752,14 @@ def save_monitor_list():
             # ❗ 关键：使用拷贝，不修改原始 m
             new_m = m.copy()
 
-            # 补齐 create_time 字段
+            # ❗ 修正：如果结构不全，一次性补齐到 8 位，而不是每次补一个
+            # 结构应为：[code, name, v1, v2, percent, price, volume, create_time]
             if len(new_m) < 8:
                 create_time = datetime.now().strftime("%Y-%m-%d %H")
-                new_m.append(create_time)
+                while len(new_m) < 7:
+                    new_m.append(0)  # 用 0 补齐中间的业务字段 (percent, price, vol 等)
+                if len(new_m) == 7:
+                    new_m.append(create_time)
 
             mo_list.append(new_m)
     else:
@@ -4745,6 +4805,19 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
     upgraded = []
     changed = False
     now_str = datetime.now().strftime("%Y-%m-%d %H")
+    
+    # 💡 [关键修复] 尝试从文件名中提取日期 (例如 monitor_list_2026-04-25.json)
+    # 如果是存档文件，应优先使用文件名的日期作为记录的回退时间，而不是当前系统时间
+    file_date_fallback = None
+    try:
+        fname = os.path.basename(MONITOR_LIST_FILE)
+        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", fname)
+        if date_match:
+            file_date_fallback = date_match.group(1) + " 00"
+    except:
+        pass
+    
+    fallback_time = file_date_fallback if file_date_fallback else now_str
 
     for idx, item in enumerate(loaded_raw):
         if not isinstance(item, (list, tuple)):
@@ -4755,7 +4828,7 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
         original_len = len(row)
 
         # ----------------------------
-        # ① 若长度 < 7，本身就是损坏数据，跳过（代码、名称等都不完整）
+        # ① 若长度 < 7，本身就是损坏数据，跳过
         # ----------------------------
         if original_len < 7:
             logger.info(f"⚠️ 跳过损坏记录 index={idx}: {row}")
@@ -4765,25 +4838,36 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
         # ② 处理 create_time 字段
         # ----------------------------
         if original_len == 7:
-            # 缺少 create_time → 补上
-            row.append(now_str)
+            row.append(fallback_time)
             changed = True
-            logger.info(f"升级记录 index={idx}: 添加 create_time={now_str}")
+            logger.info(f"升级记录 index={idx}: 使用回退时间={fallback_time}")
 
         elif original_len > 8:
-            # 多余字段，只保留前 8 个
             extra = row[8:]
             row = row[:8]
             changed = True
             logger.info(f"修剪记录 index={idx}: 移除多余字段 {extra}")
 
         else:
-            # 恰好 8 项，正常
             pass
+
+        # 💡 [加固] 修复历史遗留 Bug：清理被错误填充为时间的中间字段
+        for i in range(2, 7):
+            if i < len(row) and isinstance(row[i], str) and re.match(r"\d{4}-\d{2}-\d{2}", row[i]):
+                row[i] = 0
+                changed = True
+
+        # 💡 [加固] 修正时间逻辑：如果记录中的时间是今天，但文件名显示是过去，则强制修正
+        if file_date_fallback and len(row) >= 8:
+            record_date = str(row[7])[:10]
+            filename_date = file_date_fallback[:10]
+            if record_date > filename_date:
+                row[7] = file_date_fallback
+                changed = True
+                logger.info(f"修复记录 index={idx} 时间偏差: {record_date} -> {filename_date}")
 
         upgraded.append(row)
 
-    # ----------------------------
     # ③ 若有修改 → 写回文件
     # ----------------------------
     if changed:
