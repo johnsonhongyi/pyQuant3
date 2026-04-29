@@ -11,6 +11,7 @@ except ImportError:
     win32api = None
 
 import LoggerFactory
+import sys
 from gui_utils import askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin
 from stock_logic_utils import test_code_against_queries,toast_message
 
@@ -1234,11 +1235,12 @@ def run_manager_process(history_path=None, df_all=None):
     except Exception:
         scale_factor = 1.0
 
-    print(f"DPI: {dpi if 'dpi' in locals() else 'Unknown'} | Geometry Scale Factor: {scale_factor}")
+    if sys.stdout is not None:
+        print(f"DPI: {dpi if 'dpi' in locals() else 'Unknown'} | Geometry Scale Factor: {scale_factor}")
 
     # Calculate window size and position
     # Window geometry needs physical pixels when DPI Aware is ON
-    w, h = int(900 * scale_factor), int(650 * scale_factor) 
+    w, h = int(900 * scale_factor), int(800 * scale_factor) 
     ws = root.winfo_screenwidth()
     hs = root.winfo_screenheight()
     x = (ws/2) - (w/2)
