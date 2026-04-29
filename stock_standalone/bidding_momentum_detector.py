@@ -761,6 +761,12 @@ class BiddingMomentumDetector:
         force: 是否强制全量计算 (通常用于每 5 分钟的全局对齐)。
         skip_evaluate: 是否跳过个股评估阶段 (如果之前已执行过 _evaluate_code)。
         """
+        # [THROTTLE] 节流：防止短时间内被 Worker 疯狂调用，释放 CPU
+        now_ts = time.time()
+        if not force and now_ts - getattr(self, '_last_update_ts', 0) < 0.3:
+            return
+        self._last_update_ts = now_ts
+
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
         eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
         self._check_day_switch(eval_dt)
@@ -810,13 +816,18 @@ class BiddingMomentumDetector:
                 anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
                 self._today_anchor_930 = anchor_930
                 
-                # [OPTIMIZED] 针对大批量品种，将循环放入锁内，减少 lock/unlock 开销
-                for code in codes:
-                    self._evaluate_code_unlocked(code, anchor_930=anchor_930)
+            # 🚀 [GIL-FIX] 将大规模评估循环移出锁外，彻底根治 GIL 饥饿与 IPC 卡死
+            for i, code in enumerate(codes):
+                self._evaluate_code_unlocked(code, anchor_930=anchor_930)
+                # [YIELD] 强制让出 CPU，给 UI / Manager Proxy 喘息的机会
+                if i > 0 and i % 200 == 0:
+                    time.sleep(0)
 
+            with self._lock:
                 self.last_processed_count = len(codes)
 
-        self.data_version += 1 # 评分更新后递增版本号
+        with self._lock:
+            self.data_version += 1 # 评分更新后递增版本号
         
         # 板块聚合逻辑
         self._aggregate_sectors(active_codes=active_codes if not force else None)
@@ -2597,6 +2608,8 @@ class BiddingMomentumDetector:
                         'opening_bonus': ts.opening_bonus,
                         # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
                         'klines': list(ts.klines) if (ts.score >= self.score_threshold and ts.klines) else [],
+                        # 🚀 [PERF] 预计算 prices5，根除下游 O(N) 列表推导，注意 deque 需要先 list 化才能切片
+                        'prices5': [float(k.get('close', ts.current_price)) for k in list(ts.klines)[-5:]] if ts.klines else [ts.current_price],
                         'is_untradable': ts.is_untradable,
                         'is_counter_trend': ts.is_counter_trend,
                         'is_accumulating': ts.is_accumulating,
