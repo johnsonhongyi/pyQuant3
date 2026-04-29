@@ -160,6 +160,10 @@ class QueryHistoryManager:
         if hasattr(self, "editor_frame"):
             self.editor_frame.destroy()  # 重建
 
+        # [🚀 修复] 物理限制最小尺寸，防止窗口随内容动态缩放
+        if isinstance(self.root, tk.Toplevel):
+            self.root.minsize(800, 500)
+            
         self.editor_frame = tk.Frame(self.root)
 
         # [NEW] 全局搜索框
@@ -213,8 +217,11 @@ class QueryHistoryManager:
         # [NEW] 状态栏展示区: 展示匹配数及清理后的 Q 片段
         self.status_frame = tk.Frame(self.editor_frame)
         self.status_frame.pack(fill="x", side="bottom")
-        tk.Label(self.status_frame, textvariable=self.status_var, fg="blue", font=("微软雅黑", 9)).pack(side="left", padx=5)
-        tk.Label(self.status_frame, textvariable=self.status_var2, fg="darkgreen", font=("微软雅黑", 9)).pack(side="right", padx=5)
+        # [🚀 修复] 增加 wraplength 限制，防止超长 Query 撑开窗口宽度
+        self.lbl_status1 = tk.Label(self.status_frame, textvariable=self.status_var, fg="blue", font=("微软雅黑", 9), wraplength=700, justify="left", anchor="w")
+        self.lbl_status1.pack(side="left", padx=5, fill="x", expand=True)
+        self.lbl_status2 = tk.Label(self.status_frame, textvariable=self.status_var2, fg="darkgreen", font=("微软雅黑", 9), anchor="e")
+        self.lbl_status2.pack(side="right", padx=5)
 
         def adjust_column_widths():
             if not hasattr(self, "tree") or not self.tree.winfo_exists():
@@ -242,7 +249,11 @@ class QueryHistoryManager:
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         self.root.bind("<Control-z>", self.undo_delete)
-        self.root.bind("<Escape>", lambda event: self.open_editor())
+        # [🚀 修复] 区分嵌入式与独立窗口模式下的 Esc 键行为
+        if isinstance(self.root, tk.Toplevel):
+            self.root.bind("<Escape>", lambda event: self.root.destroy())
+        else:
+            self.root.bind("<Escape>", lambda event: self.open_editor())
         self.root.bind("<Alt-q>", lambda event: self.open_editor())
 
         for col in ("query", "star", "note", "hit"):
@@ -749,11 +760,8 @@ class QueryHistoryManager:
         else:
             screen_width = 1920
         screen_width_limit = screen_width * 0.8
-        char_width = 10
-        scale_factor = getattr(self.root, 'scale_factor', 1.0)
-        min_width = int(400 * scale_factor)
-        max_width = 2000 if 1000 * scale_factor < screen_width_limit else screen_width_limit
-        win_width = max(min_width, min(len(initialvalue) * char_width + 100, max_width))
+        # [🚀 修复] 窗口宽度不再跟随 query 长度自动变来变去，统一使用固定宽度
+        win_width = int(800 * scale_factor)
         win_height = 180
         x, y = self.get_centered_window_position_query(parent, win_width, win_height)
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
@@ -1121,9 +1129,10 @@ class QueryHistoryManager:
             from query_engine_util import query_engine
             # 对查询语句进行脱敏预处理 (剥离注释、赋值等)
             eff_query = query_engine._preprocess_query(query) if query_engine else query
-            disp_query = eff_query[:120].replace('\n', ' ').strip()
+            # [🚀 修复] 进一步缩短显示长度，防止撑开 UI
+            disp_query = eff_query[:80].replace('\n', ' ').strip()
         except Exception:
-            disp_query = query[:120].strip()
+            disp_query = query[:80].strip()
             
         self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
         self.status_var2.set("")

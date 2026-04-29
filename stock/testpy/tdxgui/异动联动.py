@@ -138,6 +138,7 @@ update_interval_minutes = 10
 _vis_last_link_key = None
 vis_var = None # 将在 __main__ 中初始化为 BooleanVar
 alert_link_var = None # 报警中心联动开关变量
+link_code_var = None  # 是否将联动代码填入主搜索框
 
 start_init = 0
 scheduled_task = None
@@ -1507,6 +1508,8 @@ def send_to_tdx(stock_code, timestamp=None):
             
             # 判断是否为非实时监控模式 (加载了历史数据)
             # 用户规则：当 selected_date 不为今天且是交易日，则带上日期
+            # print(f'timestamp1: {timestamp}')
+
             if selected_date and (selected_date != today_str or not is_today_trade):
                 ts_str = str(timestamp) if timestamp else ""
                 # 如果 timestamp 不包含日期信息 (无 '-')，则进行补全
@@ -1517,6 +1520,25 @@ def send_to_tdx(stock_code, timestamp=None):
                     else:
                         # 如果 timestamp 是时间 HH:MM:SS，则拼接日期
                         timestamp = f"{selected_date} {timestamp}"
+
+            # [🚀 修复] 非交易日对齐：如果日期不是交易日（如周末存档），自动回溯到上一个交易日
+            # print(f'timestamp: {timestamp}')
+            
+            if timestamp:
+                ts_parts = str(timestamp).split()
+                date_part = ts_parts[0]
+                if '-' in date_part and len(date_part) == 10:
+                    if not get_trade_date_status(date_part):
+                        # 获取最近的一个交易日
+                        last_td = a_trade_calendar.get_pre_trade_date(date_part)
+                        if last_td:
+                            if len(ts_parts) > 1:
+                                timestamp = f"{last_td} {' '.join(ts_parts[1:])}"
+                            else:
+                                timestamp = last_td
+                            logger.info(f"[Linkage] Non-trade date {date_part} adjusted to {last_td}")
+            # print(f'timestamp3: {timestamp}')
+                
         except Exception as e:
             logger.exception(f"Historical date linkage processing failed: {e}")
 
@@ -2370,7 +2392,8 @@ def on_tree_select(event):
             send_to_tdx(stock_code)
             # code_entry.delete(0, tk.END)
             # code_entry.insert(0, stock_code)
-            safe_set_stock_code(code_entry, stock_code)
+            if link_code_var and link_code_var.get():
+                safe_set_stock_code(code_entry, stock_code)
             # 2. 更新其他数据（示例）
             logger.info(f"选中股票代码: {stock_code}")
         time.sleep(0.1)
@@ -2473,6 +2496,10 @@ def on_date_selected(event):
             selected_date = date_str
             logger.info(f"成功更新全局 selected_date: {selected_date}")
             
+            # [🚀 修复] 加载历史数据时自动取消策略过滤，防止残留过滤导致首屏白屏
+            if 'history_filter_enabled' in globals() and history_filter_enabled:
+                history_filter_enabled.set(False)
+            
             # messagebox.showinfo("成功", f"文件 '{filename}' 已成功載入。")
             
         else:
@@ -2527,6 +2554,7 @@ def save_linkage_config():
             "sub": sub_var.get() if sub_var else False,
             "win": win_var.get() if win_var else False,
             "alert_link": alert_link_var.get() if alert_link_var else True,
+            "link_code": link_code_var.get() if link_code_var else False,
             "history_enabled": history_filter_enabled.get() if history_filter_enabled else False,
             "history_query": history_filter_var.get() if history_filter_var else ""
         }
@@ -2534,6 +2562,16 @@ def save_linkage_config():
             json.dump(config, f, indent=4)
     except Exception as e:
         logger.error(f"Failed to save linkage config: {e}")
+
+def on_link_code_changed():
+    """当联动代码开关改变时的处理"""
+    save_linkage_config()
+    # [🚀 优化] 如果关闭了联动，且当前搜索框内容为数字代码，则辅助清空一次，防止残留代码误导用户
+    if link_code_var and not link_code_var.get():
+        val = code_entry.get().strip()
+        if val and val.isdigit():
+            logger.info(f"联动代码已关闭，自动清空数字代码搜索框: {val}")
+            clear_code_entry()
 
 def load_linkage_config():
     """从本地 JSON 加载联动开关状态"""
@@ -2550,6 +2588,7 @@ def load_linkage_config():
                 if sub_var: sub_var.set(config.get("sub", False))
                 if win_var: win_var.set(config.get("win", False))
                 if alert_link_var: alert_link_var.set(config.get("alert_link", True))
+                if link_code_var: link_code_var.set(config.get("link_code", False))
                 
                 # History 过滤状态恢复
                 if history_filter_enabled:
@@ -4461,6 +4500,7 @@ def open_archive_view_window(filename):
         else:
             timestamp = None
         stock_code = str(stock_info[0]).zfill(6)
+
         send_to_tdx(stock_code,timestamp)
 
         logger.info(f"选中股票代码: {stock_code}")
@@ -4482,6 +4522,7 @@ def open_archive_view_window(filename):
         else:
             timestamp = None
         code = str(vals[0]).zfill(6)
+
         send_to_tdx(code,timestamp)
 
     # 绑定事件
@@ -5282,8 +5323,90 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
         return temp_df
 
     # === 6) Data Enrichment (Merge TDX & Sina) with Caching ===
-    global _global_enriched_cache, _last_cache_realdatadf_id, _last_cache_sina_ts
-    global realdatadf, sina_data_df, sina_data_last_updated_time
+    # [🚀 修复] 智能行情增强策略：
+    # 1. 衔接模式 (Enrich)：只要加载的是“最新交易日”的存档，就执行增强逻辑，以补齐 TDX/Sina 等完整指标列。
+    # 2. 纯历史模式 (Bypass)：如果是较早之前的存档（非最新交易日），则绕过增强，防止数据污染。
+    
+    do_enrich = True
+    if selected_date is not None:
+        do_enrich = False # 默认历史模式不增强
+        try:
+            # 获取系统认定的最新交易日（可能是今天，也可能是上一个周五）
+            today_str = get_today()
+            latest_td = a_trade_calendar.get_trade_days(end=today_str, count=1)[-1]
+            if selected_date == latest_td:
+                do_enrich = True
+        except Exception: 
+            # 兜底：如果日期计算失败，且确实等于今天，也允许增强
+            if selected_date == get_today():
+                do_enrich = True
+
+    if not do_enrich:
+        logger.info(f"📊 历史回溯模式: 使用存档数据 [{selected_date}]，绕过实时增强层。")
+        # 补齐字段映射，确保存档模式下 QueryEngine 能够工作
+        if not temp_df.empty:
+            mapping = {'价格': 'close', '现价': 'close', '涨幅': 'pct', '量': 'volume', '成交额': 'turnover'}
+            for cn, en in mapping.items():
+                if cn in temp_df.columns and en not in temp_df.columns:
+                    temp_df[en] = temp_df[cn]
+    else:
+        global _global_enriched_cache, _last_cache_realdatadf_id, _last_cache_sina_ts
+        global realdatadf, sina_data_df, sina_data_last_updated_time
+        
+        # 判定是否需要更新缓存
+        current_realdatadf_id = id(realdatadf)
+        current_sina_ts = sina_data_last_updated_time
+        
+        need_refresh_cache = (
+            _global_enriched_cache is None or 
+            current_realdatadf_id != _last_cache_realdatadf_id or 
+            current_sina_ts != _last_cache_sina_ts
+        )
+        
+        if need_refresh_cache:
+            # 1. 基础框架 (从 realdatadf 克隆)
+            enriched = realdatadf.copy()
+            
+            # [🚀 修复] 确保 '代码' 存在，否则 merge 会 KeyError: '代码'
+            if not enriched.empty and '代码' in enriched.columns:
+                # 2. TDX Data (Historical Daily OHLC)
+                tdx_df = _get_tdx_data_df()
+                if tdx_df is not None and not tdx_df.empty:
+                    enriched = enriched.merge(tdx_df, left_on='代码', right_index=True, how='left')
+                    
+                # 3. Sina Data (Real-time OHLC)
+                sina_df = _get_sina_data_realtime()
+                if sina_df is not None and not sina_df.empty:
+                    mapping = {'现价': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'turnover'}
+                    for cn, en in mapping.items():
+                        if cn in sina_df.columns and en not in sina_df.columns:
+                            sina_df[en] = sina_df[cn]
+                    enriched = enriched.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+            else:
+                if not enriched.empty:
+                    logger.warning(f"⚠️ _get_stock_changes: realdatadf 缺少 '代码' 列")
+                _global_enriched_cache = None 
+                _last_cache_realdatadf_id = None
+                return temp_df
+            
+            # 4. 补齐核心列
+            for c in ['open', 'high', 'low', 'close', 'volume']:
+                if c in enriched.columns:
+                    s_col = f"{c}_sina"
+                    if s_col in enriched.columns:
+                        enriched[c] = enriched[s_col].fillna(enriched[c] if c in enriched.columns else np.nan)
+
+            _global_enriched_cache = enriched
+            _last_cache_realdatadf_id = current_realdatadf_id
+            _last_cache_sina_ts = current_sina_ts
+
+        # 从缓存中提取并合并行情列
+        if temp_df is not None and _global_enriched_cache is not None and not _global_enriched_cache.empty:
+            current_codes = temp_df['代码'].tolist()
+            if '代码' in _global_enriched_cache.columns:
+                temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
+            else:
+                logger.warning("_get_stock_changes: 缓存中缺少 '代码' 列")
     
     # 判定是否需要更新缓存
     current_realdatadf_id = id(realdatadf)
@@ -5773,7 +5896,8 @@ def add_selected_stock():
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
             # code_entry.insert(0, stock_code)
-            safe_set_stock_code(code_entry, stock_code)
+            if link_code_var and link_code_var.get():
+                safe_set_stock_code(code_entry, stock_code)
 
             logger.info(f"选中监控股票代码: {stock_code}")
         else:
@@ -5834,7 +5958,8 @@ def add_selected_stock_popup_window():
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
             # code_entry.insert(0, stock_code)
-            safe_set_stock_code(code_entry, stock_code)
+            if link_code_var and link_code_var.get():
+                safe_set_stock_code(code_entry, stock_code)
 
             logger.info(f"选中监控股票代码: {stock_code}")
         else:
@@ -8404,7 +8529,11 @@ def open_alert_center(is_auto=True):
     
     # [AL-LINK] 报警中心联动状态开关
     tk.Checkbutton(top_frame, text="自动联动", variable=alert_link_var, 
-                   command=save_linkage_config, font=('Microsoft YaHei', 9)).pack(side="right", padx=10)
+                   command=save_linkage_config, font=('Microsoft YaHei', 9)).pack(side="right", padx=5)
+    
+    # [LINK-CODE] 是否将代码填入主搜索框
+    tk.Checkbutton(top_frame, text="联动代码", variable=link_code_var, 
+                   command=on_link_code_changed, font=('Microsoft YaHei', 9)).pack(side="right", padx=5)
 
     # 报警列表
     frame = ttk.Frame(aw_win)
@@ -8461,7 +8590,8 @@ def open_alert_center(is_auto=True):
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
             # code_entry.insert(0, stock_code)
-            safe_set_stock_code(code_entry, stock_code)
+            if link_code_var and link_code_var.get():
+                safe_set_stock_code(code_entry, stock_code)
             
             # 2. 更新其他数据（示例）
             logger.info(f"选中股票代码: {stock_code}")
@@ -8485,7 +8615,8 @@ def open_alert_center(is_auto=True):
         send_to_tdx(code, timestamp)
         # code_entry.delete(0, tk.END)
         # code_entry.insert(0, code)
-        safe_set_stock_code(code_entry, code)
+        if link_code_var and link_code_var.get():
+            safe_set_stock_code(code_entry, code)
         reset_timer()
 
     # 双击报警 → 聚焦监控窗口
@@ -8500,7 +8631,8 @@ def open_alert_center(is_auto=True):
         send_to_tdx(code)
         # code_entry.delete(0, tk.END)
         # code_entry.insert(0, code)
-        safe_set_stock_code(code_entry, code)
+        if link_code_var and link_code_var.get():
+            safe_set_stock_code(code_entry, code)
 
 
         if code in monitor_windows.keys():
@@ -10305,6 +10437,7 @@ if __name__ == "__main__":
     sub_var = tk.BooleanVar(value=False)
     win_var = tk.BooleanVar(value=False)
     alert_link_var = tk.BooleanVar(value=True)
+    link_code_var = tk.BooleanVar(value=False)
     
     # 尝试并恢复持久化状态 (Basics only for now)
     # load_linkage_config()
@@ -10430,7 +10563,13 @@ if __name__ == "__main__":
             except:
                 pass
 
-            # --- 3. 初始化管理器 ---
+            # [🚀 修复] 设置较大的默认尺寸并放置在鼠标附近，防止尺寸乱跳
+            w, h = 900, 500
+            mx = root.winfo_pointerx()
+            my = root.winfo_pointery()
+            # 偏移一点防止挡住鼠标点击点，y轴尽量居中
+            history_manager_window.geometry(f"{w}x{h}+{mx + 20}+{max(0, my - h // 2)}")
+            history_manager_window.minsize(900, 500) # 物理限制最小尺寸，防止乱变
             # 直接在当前进程创建实例，共享内存，无需序列化
             manager = QueryHistoryManager(
                 root=history_manager_window, 
@@ -10439,6 +10578,10 @@ if __name__ == "__main__":
             )
             
             logger.info("History Manager (Toplevel) opened successfully.")
+            
+            # [🚀 修复] 确保新创建的窗口立即获得焦点并置顶
+            history_manager_window.lift()
+            history_manager_window.focus_force()
             
         except ImportError as e:
             logger.error(f"Import error in open_history_manager: {e}")
@@ -10462,7 +10605,7 @@ if __name__ == "__main__":
 
     def reload_history_from_disk():
         """刷新历史记录（从磁盘重新加载）"""
-        global query_history_mgr, history_combo, root
+        global query_history_mgr, history_entry, root
         if query_history_mgr:
             try:
                 h1, h2, h3, h4, h5 = query_history_mgr.load_search_history()
@@ -10478,7 +10621,8 @@ if __name__ == "__main__":
                 elif cur_key == "history5": target = h5
                 
                 # 更新 UI：采用 "备注 | [Hit: N] | 逻辑" 格式
-                history_combo['values'] = [_format_history_item_local(r) for r in target]
+                if 'history_combo' in globals():
+                    history_combo['values'] = [_format_history_item_local(r) for r in target]
                 from stock_logic_utils import toast_message
                 toast_message(root, "✅ 历史记录已同步")
                 logger.info(f"🔄 Reloaded {len(target)} queries from disk.")
@@ -10494,7 +10638,7 @@ if __name__ == "__main__":
 
     def calculate_history_hits_ui():
         """[NEW] 计算当前历史记录的命中数并更新下拉列表"""
-        global query_history_mgr, history_combo, realdatadf, root, uniq_var
+        global query_history_mgr, history_entry, realdatadf, root, uniq_var
         if not query_history_mgr or realdatadf.empty:
             from stock_logic_utils import toast_message
             toast_message(root, "⚠️ 数据未就绪或未加载历史")
@@ -10513,13 +10657,36 @@ if __name__ == "__main__":
         from query_engine_util import query_engine
         from stock_logic_utils import toast_message
         
-        # [🚀 性能优化] 使用全局缓存的 Enriched Dataset
-        global _global_enriched_cache
-        if _global_enriched_cache is None:
-            # 兜底：如果缓存未建立，先调用一次 _get_stock_changes 建立它
-            _get_stock_changes()
+        # [🚀 性能优化] 智能判定命中统计的数据源
+        global _global_enriched_cache, selected_date, loaded_df
         
-        test_df = _global_enriched_cache if _global_enriched_cache is not None else realdatadf
+        # 采用与 _get_stock_changes 一致的 do_enrich 逻辑
+        do_enrich = True
+        if selected_date is not None:
+            do_enrich = False
+            try:
+                # 只要加载的是“最新交易日”的数据，无论现在是什么时间，都允许增强（衔接实时列）
+                today_str = get_today()
+                latest_td = a_trade_calendar.get_trade_days(end=today_str, count=1)[-1]
+                if selected_date == latest_td:
+                    do_enrich = True
+            except Exception:
+                # 兜底：如果日期计算失败，且确实等于今天，也允许增强
+                if selected_date == get_today():
+                    do_enrich = True
+
+        if not do_enrich and loaded_df is not None:
+            # 纯历史模式：使用存档并对齐字段
+            test_df = loaded_df.copy()
+            mapping = {'价格': 'close', '现价': 'close', '涨幅': 'pct', '量': 'volume', '成交额': 'turnover'}
+            for cn, en in mapping.items():
+                if cn in test_df.columns and en not in test_df.columns:
+                    test_df[en] = test_df[cn]
+        else:
+            # 实时/衔接模式：使用行情增强缓存
+            if _global_enriched_cache is None:
+                _get_stock_changes()
+            test_df = _global_enriched_cache if _global_enriched_cache is not None else realdatadf
         
         # [🚀 修复] 如果打开了 Uniq 选项，测试命中数时也需要去重，以保持与显示数据一致
         if test_df is not None and not test_df.empty and uniq_var.get():
@@ -10544,7 +10711,8 @@ if __name__ == "__main__":
             display = _format_history_item_local(item)
             new_values.append(display)
             
-        history_combo['values'] = new_values
+        if 'history_combo' in globals():
+            history_combo['values'] = new_values
         
         # [NEW] 自动刷新当前选中的显示（以反映最新的命中数）
         current_val = history_filter_var.get()
@@ -10555,6 +10723,9 @@ if __name__ == "__main__":
                 if item.get("query") in current_val:
                     new_display = _format_history_item_local(item)
                     history_filter_var.set(new_display)
+                    # [🚀 修复] 确保长公式显示在最前面（视口回滚到 index 0）
+                    history_combo.xview_moveto(0)
+                    history_combo.icursor(0)
                     break
 
         toast_message(root, f"✅ 策略命中统计完成 (n={len(target)})")
@@ -10571,15 +10742,33 @@ if __name__ == "__main__":
                    command=lambda: quick_refresh_ui(), bg="#f0f0f0", font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
 
     history_filter_var = tk.StringVar()
-    history_combo = ttk.Combobox(history_frame, textvariable=history_filter_var, state="readonly", width=60, font=('Microsoft YaHei', 9))
+    # [🚀 恢复方案] 使用 state="normal" 的 Combobox，既是输入框也能下拉
+    history_combo = ttk.Combobox(history_frame, textvariable=history_filter_var, state="normal", width=60, font=('Microsoft YaHei', 9))
     history_combo.pack(side=tk.LEFT, padx=5)
 
-
     def on_history_selected(event=None):
-        """当历史选择变动时触发刷新"""
+        """当选择历史或在框内按回车时触发"""
         quick_refresh_ui()
+        # [🚀 修复] 确保长公式显示在最前面（从左侧开始显示）
+        history_combo.xview_moveto(0)
+        history_combo.icursor(0)
 
     history_combo.bind("<<ComboboxSelected>>", on_history_selected)
+    history_combo.bind("<Return>", on_history_selected)
+
+    # 初始化下拉列表数据
+    def refresh_combo_list():
+        if not query_history_mgr: return
+        h = query_history_mgr.load_search_history()
+        cur_key = query_history_mgr.current_key
+        target = h[0]
+        if cur_key == "history2": target = h[1]
+        elif cur_key == "history3": target = h[2]
+        elif cur_key == "history4": target = h[3]
+        elif cur_key == "history5": target = h[4]
+        history_combo['values'] = [_format_history_item_local(r) for r in target]
+
+    # 在管理器初始化后刷新列表
 
     def open_history_editor():
         if query_history_mgr:
@@ -10594,12 +10783,9 @@ if __name__ == "__main__":
         search_combo1=history_combo,
         history_file=SEARCH_HISTORY_FILE
     )
+    refresh_combo_list() # 初始化列表
     
-    # [NEW] 默认使用 history1 并初始化下拉列表显示
-    if query_history_mgr and query_history_mgr.history1:
-        # 采用统一格式化
-        history_combo['values'] = [query_history_mgr._format_for_display(r) for r in query_history_mgr.history1]
-        history_combo.current(0)
+    # [NEW] 默认使用最近一次策略（由持久化 load_linkage_config 处理）
 
     # --- 全量恢复持久化状态 (包含 History 状态) --- 已移动至 root.after 延迟执行
     # load_linkage_config()
@@ -10794,9 +10980,10 @@ if __name__ == "__main__":
                 # 如果记录存在但窗口已关闭，则清理
                 open_editors.pop(code, None)
 
-        # --- ③ 自动同步代码（可选，若不需要自动切换主表过滤，可保持注释） ---
-        # safe_set_stock_code(code_entry, code)
-        # search_by_code()
+        # --- ③ 自动同步代码（根据开关决定是否自动切换主表过滤） ---
+        if link_code_var and link_code_var.get():
+            safe_set_stock_code(code_entry, code)
+            search_by_code()
 
         win = open_alert_editor(code, new=True, stock_info=stock_tuple, parent_win=root)
 
