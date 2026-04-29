@@ -34,7 +34,6 @@ import importlib.util
 import win32pipe, win32file
 import a_trade_calendar
 import tkinter as tk
-from history_manager import QueryHistoryManager
 from stock_logic_utils import test_code_against_queries
 
 # from filelock import FileLock, Timeout
@@ -49,6 +48,7 @@ hdf_lock = threading.Lock()
 ui_update_lock = threading.Lock()
 # 限制后台任务并发数，防止踩内存
 worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+from history_manager import QueryHistoryManager
 
 # --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
 def _get_win32_exe_path():
@@ -149,6 +149,7 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 result_queue = queue.Queue()
 today_tdx_df = pd.DataFrame()
 history_manager_process = None
+history_manager_window = None # [NEW] 用于多线程/Toplevel 模式下的窗口去重
 
 # 停止信号
 stop_event = threading.Event()
@@ -268,7 +269,8 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,s
 logger = init_logging(log_file=os.path.join(BASE_DIR, 'monitor_dfcf.log'), redirect_print=False)
 
 # --- 故障诊断：faulthandler 与 SIGBREAK 注册 ---
-faulthandler.enable()
+if sys.stderr is not None:
+    faulthandler.enable()
 if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
     try:
         if threading.current_thread() is threading.main_thread():
@@ -499,9 +501,11 @@ CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
 ALERTS_FILE =  os.path.join(BASE_DIR, "alerts.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
+SEARCH_HISTORY_FILE: str = os.path.join(BASE_DIR, "query_history.json")
 filterCONFIG_FILE = os.path.join(BASE_DIR,"filter_stock_codes.json")  # 可以放开机自动加载的 code_list
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
+
 def check_hdf5():
     # 检查 tables 是否可用
     global pytables_status
@@ -1930,7 +1934,7 @@ def get_stock_changes(selected_type=None, stock_code=None):
             data_json = response.json()
             
             if not data_json.get('data') or not data_json['data'].get('allstock'):
-                logger.info("提示", "未获取到数据")
+                logger.info("提示: 未获取到数据")
                 return pd.DataFrame()
             
             temp_df = pd.DataFrame(data_json["data"]["allstock"])
@@ -5184,7 +5188,13 @@ def _get_sina_data_realtime(stock_code=None):
                                     l6v = today_tdx_df['last6vol'].replace(0, np.nan)
                                     today_tdx_df['vol_ratio'] = (today_tdx_df['volume'] / l6v).fillna(0)
                         
-                        logger.info(f"📊 已同步更新 today_tdx_df 实时 OHLCV (n={len(today_tdx_df)}, multi={is_multi_tdx})")
+                        # [🚀 修复] 确保 is_multi_tdx 在 logger 调用前已定义
+                        try:
+                            _is_multi = is_multi_tdx
+                        except NameError:
+                            _is_multi = isinstance(today_tdx_df.columns, pd.MultiIndex) if today_tdx_df is not None else False
+
+                        logger.info(f"📊 已同步更新 today_tdx_df 实时 OHLCV (n={len(today_tdx_df)}, multi={_is_multi})")
                     except Exception as ex:
                         logger.error(f"⚠️ 更新 today_tdx_df 实时数据失败: {ex}")
         except Exception as e:
@@ -5285,19 +5295,30 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
         # 1. 基础框架 (从 realdatadf 克隆)
         enriched = realdatadf.copy()
         
-        # 2. TDX Data (Historical Daily OHLC)
-        tdx_df = _get_tdx_data_df()
-        if tdx_df is not None and not tdx_df.empty:
-            enriched = enriched.merge(tdx_df, left_on='代码', right_index=True, how='left')
-            
-        # 3. Sina Data (Real-time OHLC)
-        sina_df = _get_sina_data_realtime()
-        if sina_df is not None and not sina_df.empty:
-            mapping = {'现价': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'turnover'}
-            for cn, en in mapping.items():
-                if cn in sina_df.columns and en not in sina_df.columns:
-                    sina_df[en] = sina_df[cn]
-            enriched = enriched.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+        # [🚀 修复] 确保 '代码' 存在，否则 merge 会 KeyError: '代码'
+        if not enriched.empty and '代码' in enriched.columns:
+            # 2. TDX Data (Historical Daily OHLC)
+            tdx_df = _get_tdx_data_df()
+            if tdx_df is not None and not tdx_df.empty:
+                enriched = enriched.merge(tdx_df, left_on='代码', right_index=True, how='left')
+                
+            # 3. Sina Data (Real-time OHLC)
+            sina_df = _get_sina_data_realtime()
+            if sina_df is not None and not sina_df.empty:
+                mapping = {'现价': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'turnover'}
+                for cn, en in mapping.items():
+                    if cn in sina_df.columns and en not in sina_df.columns:
+                        sina_df[en] = sina_df[cn]
+                enriched = enriched.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
+        else:
+            if not enriched.empty:
+                logger.warning(f"⚠️ _get_stock_changes: realdatadf 缺少 '代码' 列 (cols: {enriched.columns.tolist()})")
+            else:
+                logger.debug("ℹ️ _get_stock_changes: realdatadf 为空，跳过行情增强缓存")
+            # 标记缓存失效，强制下一轮尝试
+            _global_enriched_cache = None 
+            _last_cache_realdatadf_id = None
+            return temp_df # 提前返回，避免后续 loc 崩溃
         
         # 4. 补齐核心列（用于 QueryEngine 兜底）
         for c in ['open', 'high', 'low', 'close', 'volume']:
@@ -5316,11 +5337,16 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
     # 从缓存中提取当前过滤后的结果
     # 注意：temp_df 是经过 filter_stocks 过滤后的基础列表
     # 我们需要将缓存中的行情列同步到当前结果集
-    if temp_df is not None:
+    if temp_df is not None and _global_enriched_cache is not None and not _global_enriched_cache.empty:
         # 获取当前结果集的索引（代码）
         current_codes = temp_df['代码'].tolist()
         # 从全量缓存中提取这些代码的完整列
-        temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
+        # [🚀 修复] 确保缓存中包含 '代码' 列，防止 KeyError
+        if '代码' in _global_enriched_cache.columns:
+            temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
+        else:
+            # 如果缓存中没有代码列（异常情况），回退到原始 temp_df
+            logger.warning("_get_stock_changes: 缓存中缺少 '代码' 列，无法按代码提取")
         # 恢复由于 merge 可能改变的行顺序（对齐原始 temp_df）
         # 这里简单处理：如果 temp_df 和 enriched 结构一致，直接使用 loc
 
@@ -5643,9 +5669,16 @@ def update_monitor_tree(data, tree, window_info, item_id):
     dd  = _get_sina_data_realtime(stock_code)
     price,percent,amount = 0,0,0
     if dd is not None:
-        price = dd.close
-        percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
-        amount = round(dd.turnover/100/10000/100,1)
+        price = getattr(dd, 'close', 0)
+        # [🚀 修复] 增加对 dd.llastp 的非零检查，防止 RuntimeWarning: invalid value encountered in double_scalars
+        llastp = getattr(dd, 'llastp', 0)
+        if llastp != 0 and pd.notna(llastp):
+            percent = round((price - llastp) / llastp * 100, 1)
+        else:
+            percent = 0
+            
+        turnover = getattr(dd, 'turnover', 0)
+        amount = round(turnover/100/10000/100, 1) if pd.notna(turnover) else 0
         # logger.info(f'line 2910 sina_data:{stock_code}, {price},{percent},{amount}')
 
 
@@ -10127,7 +10160,6 @@ def setup_logger(level_name: str):
 
 # logger = init_logging(log_file='monitor_dfcf.log',redirect_print=True)
 # # logger = init_logging(log_file='monitor_dfcf.log',redirect_print=False)
-if __name__ == "__main__":
     # args = parse_args()
     # setup_logger(args.log)
 
@@ -10143,15 +10175,7 @@ if __name__ == "__main__":
     # logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
 
 
-    args = parse_args()  # 解析命令行参数
-    level = getattr(logging, args.log.upper(), logging.INFO)
 
-    # 直接用自定义的 init_logging，传入日志等级
-    # logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
-    logger.setLevel(level)
-    
-
-    logger.info("程序启动…")
 
 def safe_startup_self_check():
     """启动自检：确保环境就绪，防止首次启动崩溃"""
@@ -10188,7 +10212,21 @@ def safe_startup_self_check():
         return False
 
 if __name__ == "__main__":
+    # [🚀 修复] 针对打包 EXE 环境，显式设置可执行路径并支持多进程
+    import sys, multiprocessing
+    if getattr(sys, 'frozen', False):
+        multiprocessing.set_executable(sys.executable)
     multiprocessing.freeze_support()
+    
+    args = parse_args()  # 解析命令行参数
+    level = getattr(logging, args.log.upper(), logging.INFO)
+
+    # 直接用自定义的 init_logging，传入日志等级
+    # logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
+    logger.setLevel(level)
+    
+
+    logger.info("程序启动…")
     safe_startup_self_check()  # 执行自检
     check_hdf5()
     init_monitors()
@@ -10355,63 +10393,52 @@ if __name__ == "__main__":
 
     # global history_filter_enabled, history_filter_var, query_history_mgr
     def open_history_manager_standalone():
-        """以独立进程打开历史管理器，带窗口查重置顶功能"""
-        global history_manager_process
+        """
+        以多线程（Toplevel 弹窗）方式打开历史管理器。
+        这种方式在同一个进程内运行，彻底规避了多进程在打包 EXE 时的各种启动和序列化问题。
+        """
+        global history_manager_window
         try:
-            from history_manager import run_manager_process
-            import multiprocessing
-            import win32gui
-            import win32con
+            from history_manager import QueryHistoryManager
             
-            # --- 1. 优先尝试查找并置顶现有窗口 ---
-            found_hwnd = None
-            def check_window(hwnd, extra):
-                nonlocal found_hwnd
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if "Query History Manager" in title:
-                        found_hwnd = hwnd
-                        return False # Stop enumerating
-                return True
-                
+            # --- 1. 优先尝试查找并置顶现有 Toplevel 窗口 ---
+            if history_manager_window and history_manager_window.winfo_exists():
+                logger.info("History Manager window already exists, bringing to front.")
+                history_manager_window.deiconify() # 取消最小化
+                history_manager_window.lift()      # 置顶
+                history_manager_window.focus_force() # 强制焦点
+                return
+
+            logger.info(f"Opening History Manager as Toplevel (Path: {SEARCH_HISTORY_FILE})...")
+            
+            # --- 2. 创建 Toplevel 窗口 ---
+            # 使用 Toplevel 而非单独的进程，性能更好且在 EXE 环境下最稳定
+            history_manager_window = tk.Toplevel(root)
+            history_manager_window.title("Query History Manager")
+            
+            # 设置图标
             try:
-                win32gui.EnumWindows(check_window, None)
-            except Exception as e:
-                logger.warning(f"Error enumerating windows: {e}")
+                if 'icon_path' in globals() and os.path.exists(globals()['icon_path']):
+                    history_manager_window.iconbitmap(globals()['icon_path'])
+            except:
+                pass
 
-            if found_hwnd:
-                logger.info("History Manager window found, bringing to front.")
-                try:
-                    # 恢复最小化窗口
-                    if win32gui.IsIconic(found_hwnd):
-                        win32gui.ShowWindow(found_hwnd, win32con.SW_RESTORE)
-                    else:
-                        win32gui.ShowWindow(found_hwnd, win32con.SW_SHOW)
-                    # 尝试置顶
-                    win32gui.SetForegroundWindow(found_hwnd)
-                except Exception as e:
-                    logger.warning(f"Failed to bring window to front: {e}")
-                return
-
-            # --- 2. 窗口未找到，检查进程状态 ---
-            if history_manager_process and history_manager_process.is_alive():
-                logger.info("History Manager process is running (startup phase), please wait...")
-                return
-
-            # --- 3. 启动新进程 ---
-            logger.info("Launching History Manager...")
-            history_manager_process = multiprocessing.Process(
-                target=run_manager_process, 
-                kwargs={'df_all': realdatadf}
+            # --- 3. 初始化管理器 ---
+            # 直接在当前进程创建实例，共享内存，无需序列化
+            manager = QueryHistoryManager(
+                root=history_manager_window, 
+                auto_run=True, 
+                history_file=SEARCH_HISTORY_FILE
             )
-            history_manager_process.daemon = False 
-            history_manager_process.start()
-            logger.info(f"History Manager launched (PID: {history_manager_process.pid})")
             
-        except ImportError:
-             messagebox.showwarning("Error", "Failed to import history_manager module or win32gui.")
+            logger.info("History Manager (Toplevel) opened successfully.")
+            
+        except ImportError as e:
+            logger.error(f"Import error in open_history_manager: {e}")
+            messagebox.showwarning("Error", f"Failed to import history_manager: {e}")
         except Exception as e:
-            messagebox.showwarning("Error", f"Failed to launch manager: {e}")
+            logger.error(f"Failed to open history manager toplevel: {e}")
+            messagebox.showwarning("Error", f"Failed to open manager: {e}")
 
     def _format_history_item_local(item):
         """[NEW] 异动联动专用格式化：备注 | [Hit: N] | 逻辑"""
@@ -10558,7 +10585,7 @@ if __name__ == "__main__":
     query_history_mgr = QueryHistoryManager(
         root=root,
         search_combo1=history_combo,
-        history_file=os.path.join(get_base_path(), "query_history.json")
+        history_file=SEARCH_HISTORY_FILE
     )
     
     # [NEW] 默认使用 history1 并初始化下拉列表显示

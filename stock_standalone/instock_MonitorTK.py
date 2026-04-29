@@ -147,7 +147,8 @@ if sys.platform.startswith('win'):
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 import faulthandler
-faulthandler.enable()
+if sys.stderr is not None:
+    faulthandler.enable()
 # 🛡️ [DEBUG] 注册 Ctrl+Break 信号，用于在 UI 卡死时通过控制台打印所有线程堆栈
 # if sys.platform.startswith('win') and hasattr(signal, 'SIGBREAK'):
 #     try:

@@ -13539,7 +13539,8 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     # ⭐ 启用底层故障捕捉，以便锁定 QThread Destroyed 等 C++ 报错
     try:
         import faulthandler
-        faulthandler.enable()
+        if sys.stderr is not None:
+            faulthandler.enable()
     except Exception:
         pass
 
@@ -13643,7 +13644,8 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
     # ⭐ 启用底层故障捕捉
     try:
         import faulthandler
-        faulthandler.enable()
+        if sys.stderr is not None:
+            faulthandler.enable()
         import signal
         # Handle Ctrl+C (SIGINT) for clean exit
         signal.signal(signal.SIGINT, signal.SIG_DFL) 
