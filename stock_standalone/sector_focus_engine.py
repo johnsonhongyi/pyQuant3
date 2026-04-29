@@ -2443,12 +2443,12 @@ class SectorFocusController:
                         pct        = float(row.get('percent', 0.0))
                         dff        = float(row.get('dff', 0.0))
                     elif snap:
-                    price      = float(snap.get('price', 0.0))
-                    day_high   = float(snap.get('high_day', 0.0))
-                    day_low    = float(snap.get('low_day', snap.get('price', 0.0)))
-                    vwap       = float(snap.get('vwap', snap.get('price', 0.0)))
-                    dff        = float(snap.get('dff', 0.0))
-                    pct        = float(snap.get('pct', 0.0))
+                        price      = float(snap.get('price', 0.0))
+                        day_high   = float(snap.get('high_day', 0.0))
+                        day_low    = float(snap.get('low_day', snap.get('price', 0.0)))
+                        vwap       = float(snap.get('vwap', snap.get('price', 0.0)))
+                        dff        = float(snap.get('dff', 0.0))
+                        pct        = float(snap.get('pct', 0.0))
                 else:
                     continue # 无数据源，跳过
                 # ----------------------------------------------------------------------
