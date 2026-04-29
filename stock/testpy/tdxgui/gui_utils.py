@@ -267,96 +267,12 @@ def get_centered_window_position_single(parent, win_width, win_height, margin=10
     return x, y
 
 def load_window_position_simple(window_name: str, default_width: int, default_height: int) -> tuple[int, int, Optional[int], Optional[int]]:
-    """从统一配置文件加载窗口位置（简化版，支持 DPI 缩放）"""
-    try:
-        from sys_utils import get_base_path
-        from dpi_utils import get_windows_dpi_scale_factor
-        scale = get_windows_dpi_scale_factor()
-        
-        base_dir = get_base_path()
-        config_file = os.path.join(base_dir, "window_config.json")
-        if scale > 1.5:
-            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
-        
-        if os.path.exists(config_file):
-            if os.path.getsize(config_file) == 0:
-                logger.warning(f"检测到 {os.path.basename(config_file)} 为 0 字节，可能正在被写入或已损坏。")
-                import time
-                for _ in range(3): # 尝试重试 3 次
-                    time.sleep(0.1)
-                    if os.path.getsize(config_file) > 0: break
-            
-            try:
-                with open(config_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as jse:
-                logger.error(f"JSON 解析失败 {config_file}: {jse}")
-                return default_width, default_height, None, None
-            if window_name in data:
-                pos = data[window_name]
-                width = int(pos.get("width", default_width) * scale)
-                height = int(pos.get("height", default_height) * scale)
-                x = int(pos.get("x", 0) * scale)
-                y = int(pos.get("y", 0) * scale)
-                return width, height, x, y
-    except Exception as e:
-        logger.error(f"[load_window_position_simple] 失败: {e}")
-            
+    """[已停用] 从统一配置文件加载窗口位置（绕过 sys_utils 报错）"""
     return default_width, default_height, None, None
 
 def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str):
-    """保存窗口位置到统一配置文件（简化版，支持 DPI 缩放）"""
-    try:
-        from sys_utils import get_base_path
-        from dpi_utils import get_windows_dpi_scale_factor
-        scale = get_windows_dpi_scale_factor()
-
-        base_dir = get_base_path()
-        config_file = os.path.join(base_dir, "window_config.json")
-        if scale > 1.5:
-            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
-        
-        win.update_idletasks()
-        geom = win.geometry().split('+')
-        if len(geom) < 3: return
-        size = geom[0].split('x')
-        if len(size) < 2: return
-        
-        width = int(int(size[0]) / scale)
-        height = int(int(size[1]) / scale)
-        x = int(int(geom[1]) / scale)
-        y = int(int(geom[2]) / scale)
-        
-        pos = {"x": x, "y": y, "width": width, "height": height}
-        
-        data = {}
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except:
-                pass
-        
-        data[window_name] = pos
-        
-        # 🚀 [原子化写入] 使用临时文件 + os.replace 确保写入完整，防止 Windows 下并发导致的 0 字节
-        import tempfile
-        fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(config_file), text=True)
-        try:
-            with os.fdopen(fd, 'w', encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            # 必须关闭后才能进行 replace
-            if os.path.exists(config_file):
-                try: os.chmod(config_file, 0o666) # 尝试修复权限
-                except: pass
-            os.replace(temp_path, config_file)
-        except Exception as e:
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except: pass
-            raise e
-    except Exception as e:
-        logger.error(f"[save_window_position_simple] 失败: {e}")
+    """[已停用] 保存窗口位置到统一配置文件（绕过 sys_utils 报错）"""
+    return
 
 # def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
 def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "", window_name: Optional[str] = None) -> Optional[str]:
