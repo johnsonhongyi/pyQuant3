@@ -62,6 +62,7 @@ class QueryHistoryManager:
         self.search_combo5 = search_combo5
         self.deleted_stack = []  # 保存被删除的 query 记录
         self._history_changed = False  # 追踪本次打开期间是否有过修改
+        self._after_ids = []  # [NEW] 记录待处理的 after 任务 ID
         
         # [NEW] 状态展示变量，与主程序保持一致
         self.status_var = tk.StringVar(value="准备就绪")
@@ -74,6 +75,14 @@ class QueryHistoryManager:
         self.current_history = self.history1
         self.current_key = "history1"
         self.MAX_HISTORY = 500
+        
+        # [NEW] 初始化 DPI 缩放因子
+        try:
+            dpi = self.root.winfo_fpixels('1i')
+            self.scale_factor = dpi / 96.0
+        except:
+            self.scale_factor = 1.0
+            
         self._build_ui()
         
         if auto_run:
@@ -233,7 +242,7 @@ class QueryHistoryManager:
             for col, ratio in col_ratios.items():
                 self.tree.column(col, width=int(total_width * ratio))
 
-        self.tree.after(50, adjust_column_widths)
+        self.tree.after_id = self.tree.after(50, adjust_column_widths)
 
         def on_resize(event):
             total_width = event.width
@@ -662,6 +671,37 @@ class QueryHistoryManager:
             self.refresh_tree()
             self.use_query(new_query)
 
+    def edit_note(self, iid):
+        """编辑指定行的备注"""
+        values = self.tree.item(iid, "values")
+        if not values:
+            return
+        query_text = values[0]
+        # 查找匹配的记录
+        idx = next((i for i, r in enumerate(self.current_history) if r.get("query") == query_text), None)
+        if idx is None:
+            # 如果 query 匹配不上，尝试通过 iid 回退
+            try: idx = int(iid) - 1
+            except: return
+            
+        if idx < 0 or idx >= len(self.current_history):
+            return
+            
+        record = self.current_history[idx]
+        new_note = askstring_at_parent_single(
+            self.root, 
+            "修改备注", 
+            "请输入新的备注信息：", 
+            initialvalue=record.get("note", ""), 
+            window_name="QueryHistoryManager_EditNote"
+        )
+        
+        if new_note is not None:
+            record["note"] = new_note.strip()
+            self._history_changed = True
+            self.refresh_tree()
+            logger.info(f"✅ 备注已更新: {record['query']} -> {record['note']}")
+
     def add_query(self):
         query = self.entry_query.get().strip()
         if not query:
@@ -760,8 +800,9 @@ class QueryHistoryManager:
         else:
             screen_width = 1920
         screen_width_limit = screen_width * 0.8
-        # [🚀 修复] 窗口宽度不再跟随 query 长度自动变来变去，统一使用固定宽度
-        win_width = int(800 * scale_factor)
+        # [🚀 修复] 修复 scale_factor 未定义的问题，优先使用实例属性
+        sf = getattr(self, "scale_factor", 1.0)
+        win_width = int(800 * sf)
         win_height = 180
         x, y = self.get_centered_window_position_query(parent, win_width, win_height)
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
@@ -802,19 +843,11 @@ class QueryHistoryManager:
             try: idx = int(row_id) - 1
             except: return
         record = self.current_history[idx]
-        if col == "#3":
-            new_note = self.askstring_at_parent(self.root, "修改备注", "请输入新的备注：", initialvalue=record.get("note", ""))
-            if new_note is not None:
-                record["note"] = new_note
-                if self.current_key == "history1": self.history1[idx]["note"] = new_note
-                elif self.current_key == "history2": self.history2[idx]["note"] = new_note
-                elif self.current_key == "history3": self.history3[idx]["note"] = new_note
-                elif self.current_key == "history4": self.history4[idx]["note"] = new_note
-                elif self.current_key == "history5": self.history5[idx]["note"] = new_note
-                self.current_history[idx]["note"] = new_note
-                self._history_changed = True  # 标记已修改
-                self.refresh_tree()
+        # 💡 [修复] 增强列判定：#3 为备注列。统一使用更稳定的 askstring_at_parent_single
+        if col == "#3" or self.tree.column(col, "id") == "note":
+            self.edit_note(row_id)
             return
+        # 双击其他列默认执行“使用”
         self.use_query(record["query"])
 
     def use_query(self, query=None):
@@ -889,6 +922,8 @@ class QueryHistoryManager:
         menu = tk.Menu(self.editor_frame, tearoff=0)
         menu.add_command(label="使用", command=lambda: self.use_query())
         menu.add_command(label="编辑Query", command=lambda: self.edit_query(item))
+        menu.add_command(label="编辑备注", command=lambda: self.edit_note(item))
+        menu.add_separator()
         menu.add_command(label="编辑框", command=lambda: self.up_to_entry(item))
         menu.add_command(label="删除", command=lambda: self.delete_item(item))
         menu.tk_popup(event.x_root, event.y_root)
@@ -1136,6 +1171,26 @@ class QueryHistoryManager:
             
         self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
         self.status_var2.set("")
+
+    def close(self):
+        """[NEW] 优雅关闭：清理定时器、销毁窗口并同步保存数据"""
+        try:
+            # 1. 保存历史（如果变动过）
+            if getattr(self, "_history_changed", False):
+                self.save_search_history()
+            
+            # 2. 取消所有 pending 的 after 任务
+            if hasattr(self, "tree") and self.tree.winfo_exists():
+                if hasattr(self.tree, "after_id"):
+                    self.tree.after_cancel(self.tree.after_id)
+            
+            # 3. 销毁 UI 容器
+            if hasattr(self, "editor_frame") and self.editor_frame.winfo_exists():
+                self.editor_frame.destroy()
+                
+            logger.info("✅ QueryHistoryManager 已安全关闭并同步。")
+        except Exception as e:
+            logger.debug(f"[QueryHistoryManager] Close error: {e}")
 
 
 def quick_save_specific_history(query, history_key="history5", note=""):

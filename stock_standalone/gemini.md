@@ -29,6 +29,18 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-29 18:05
+- [x] **修复历史记录管理器双击备注无法编辑与右键菜单缺失 (Fixed History Note Editing & Context Menu)**：
+    - [x] **根治双击列判定失效**：增强了 `on_double_click` 的列识别逻辑，支持通过索引 `#3` 和列名 `note` 双重锁定备注列。
+    - [x] **补齐右键编辑入口**：在右键菜单中新增了“编辑备注”命令，实现了与“编辑Query”对等的交互体验。
+    - [x] **统一使用 robust 编辑组件**：废弃了简易的 Entry 弹窗，统一采用 `askstring_at_parent_single`（来自 `gui_utils`），支持多行预览、撤销重做及右键剪贴板，解决了高 DPI 下的弹窗尺寸问题。
+    - [x] **修复 scale_factor 未定义引发的 NameError**：在 `QueryHistoryManager` 初始化时补齐了 DPI 缩放因子的获取，解决了窗口定位与尺寸计算崩溃。
+- [x] **根治主程序退出时的 Windows Access Violation 崩溃 (Fixed Access Violation on Exit)**：
+    - [x] **实现 HistoryManager 优雅回收 (Graceful Cleanup)**：为 `QueryHistoryManager` 新增了 `close()` 接口。在主程序退出协议 (`on_closing`) 中显式调用，物理取消后台 `tree.after` 计时器并销毁 UI 引用。
+    - [x] **加固退出保存防抖 (Hardened Save-on-Exit)**：在 `on_closing` 顶层强制取消 `save_timer` (threading.Timer)，防止退出过程中后台线程尝试访问已销毁的 Logger 或 Tk 对象导致的非法内存访问。
+    - [x] **修复变量作用域错误**：修正了 `on_closing` 循环中 `win_id` 的误用，确保所有子窗口的 Pending 任务都被正确清理。
+    - [x] **修复由于编辑失误导致的 his_limit 缺失 (Fixed missing his_limit)**：恢复了在上次重构中意外删除的 `self.his_limit` 等变量初始化。
+
 ## 2026-04-29 14:55
 - [x] **修复异动联动面板自动刷新后的过滤残留与自动回填 Bug (Fixed Filter Persistence & Auto-backfill in Linkage Panel)**：
     - [x] **根治自动刷新导致过滤失效 (Fixed Filter Loss on Auto-Refresh)**：在 `check_worker_done` 中，将后台更新后的 UI 刷新逻辑从全量灌入的 `populate_treeview` 替换为尊重当前过滤状态的 `quick_refresh_ui()`。这确保了当用户开启“宏过滤”（历史策略）或代码搜索时，定期的行情自动刷新不会强制重置视口到全量无过滤状态。

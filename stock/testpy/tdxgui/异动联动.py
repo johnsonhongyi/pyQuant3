@@ -1310,18 +1310,32 @@ def highlight_available_dates(de):
         # 获取 Calendar 实例
         cal = de._calendar
         
+        # [关键修复] 获取日历当前显示的月份和年份（而不是 DateEntry 选中的月份）
+        displayed_month, displayed_year = cal.get_displayed_month()
+        
         # 清除旧事件
         cal.calevent_remove('all')
         
         # 创建标签：红色背景，白色文字
         cal.tag_config('has_data', background='red', foreground='white')
         
+        # 核心逻辑：只高亮属于当前显示视图月份的日期，防止跨月干扰（解决点击4月填充位却选中5月的问题）
+        highlight_count = 0
         for d in available_dates:
-            cal.calevent_create(d, 'Data Available', 'has_data')
+            if d.month == displayed_month and d.year == displayed_year:
+                cal.calevent_create(d, 'Data Available', 'has_data')
+                highlight_count += 1
             
-        logger.info(f"已在日历上标记 {len(available_dates)} 个有数据的日期")
+        logger.info(f"已在日历视图（{displayed_year}-{displayed_month}）上标记 {highlight_count} 个有数据的日期")
     except Exception as e:
         logger.error(f"Highlighting calendar dates failed: {e}")
+
+def update_calendar_highlights(event=None):
+    """日历月份切换或状态更新时的回调"""
+    global date_entry, root
+    if date_entry:
+        # 使用 after 确保 tkcalendar 内部状态（如 get_displayed_month）已更新
+        root.after(10, lambda: highlight_available_dates(date_entry))
 
 
 
@@ -2050,6 +2064,22 @@ def get_today(sep='-'):
     today = TODAY.strftime(fstr)
     return today
 
+def _get_latest_trade_day():
+    """获取系统认定的最近一个交易日 (具备降级兜底逻辑)"""
+    try:
+        today_str = get_today()
+        # 1. 尝试 get_trade_days (部分环境支持)
+        if hasattr(a_trade_calendar, 'get_trade_days'):
+            return a_trade_calendar.get_trade_days(end=today_str, count=1)[-1]
+        
+        # 2. 降级：使用 is_trade_date 和 get_pre_trade_date
+        if a_trade_calendar.is_trade_date(today_str):
+            return today_str
+        return a_trade_calendar.get_pre_trade_date(today_str)
+    except Exception as e:
+        logger.warning(f"[_get_latest_trade_day] 判定失败: {e}")
+        return get_today()
+
 def populate_treeview(data=None):
     """填充表格数据 (带 UI 线程安全锁)"""
     with ui_update_lock:
@@ -2487,8 +2517,14 @@ def on_date_selected(event):
             last_updated_time = None
             # 檔案存在，載入到 DataFrame
             loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
-            # loaded_df['代码'] = loaded_df['代码'].apply(lambda x:str(x))
-            loaded_df.loc[:, "代码"] = loaded_df["代码"].astype(str).str.zfill(6)  # 改写简单赋值
+            # [修复警告] 显式转换类型以避免 FutureWarning
+            loaded_df['代码'] = loaded_df['代码'].astype(str).str.zfill(6)
+            
+            # [🚀 修复] 自动展开原始信息 (涨幅, 价格, 量)，确保存档模式下也能直接进行策略计算
+            if '涨幅' not in loaded_df.columns and '相关信息' in loaded_df.columns:
+                logger.info(f"📊 正在自动展开存档原始信息: {filename}")
+                loaded_df = process_full_dataframe(loaded_df)
+                
             # 這裡可以根據需要更新 Treeview 或其他UI
             populate_treeview(loaded_df)
             
@@ -5332,8 +5368,7 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
         do_enrich = False # 默认历史模式不增强
         try:
             # 获取系统认定的最新交易日（可能是今天，也可能是上一个周五）
-            today_str = get_today()
-            latest_td = a_trade_calendar.get_trade_days(end=today_str, count=1)[-1]
+            latest_td = _get_latest_trade_day()
             if selected_date == latest_td:
                 do_enrich = True
         except Exception: 
@@ -6257,6 +6292,12 @@ def on_monitor_window_focus(event):
     """
     当任意窗口获得焦点时，协调两个窗口到最前。
     """
+    # 增加 Grab 保护：如果正在操作日历或其他弹出菜单，禁止同步置顶逻辑
+    try:
+        if root.grab_current():
+            return
+    except:
+        pass
 
     sub_state = sub_var.get()
     if sub_state:
@@ -6266,6 +6307,18 @@ def on_window_focus(event):
     """
     当任意窗口获得焦点时，协调两个窗口到最前。
     """
+    # 1. 过滤：如果是子组件（如 DateEntry, Entry）触发的 FocusIn，不执行同步逻辑，防止抢占
+    if event.widget != root:
+        return
+
+    # 2. 检查是否有日历弹出或任何模态抓取（Grab），如果有则严禁置顶操作，否则会导致日历瞬间关闭
+    try:
+        if root.grab_current():
+            # logger.info("检测到 Grab 状态（日历或其他弹出），跳过同步")
+            return
+    except:
+        pass
+
     sub_state = sub_var.get()
     if sub_state:
         bring_both_to_front(root)
@@ -6280,6 +6333,13 @@ def on_window_focus(event):
 is_already_triggered = False
 
 def bring_both_to_front(main_window):
+    # 增加 Grab 保护
+    try:
+        if root.grab_current():
+            return
+    except:
+        pass
+
     if main_window and main_window.winfo_exists():
         logger.info(f'bring_both_to_front main')
         main_window.lift()
@@ -6383,6 +6443,12 @@ def bring_monitor_to_front(active_window):
 
         # 只有未提升过的才执行 lift
         if not win_info.get("is_lifted", False):
+            # 增加 Grab 保护
+            try:
+                if root.grab_current():
+                    return
+            except:
+                pass
             toplevel.lift()
             toplevel.attributes("-topmost", 1)
             toplevel.attributes("-topmost", 0)
@@ -6604,17 +6670,31 @@ def on_close_monitor(window_info):
 def on_closing(window, window_id):
     """在窗口关闭时调用。"""
     
+    # 0. [🚀 修复] 优雅关闭历史管理器，防止后台 timer 残留导致 access violation
+    if 'query_history_mgr' in globals() and query_history_mgr:
+        try:
+            query_history_mgr.close()
+        except Exception as e:
+            logger.info(f"关闭历史管理器失败:{e}")
+
     # save_alerts()
     # 1. 停止后台线程
     executor.shutdown(wait=False)  # 或 wait=True，根据线程安全性
     stop_worker()
+    
+    # [🚀 修复] 立即取消保存定时器，防止退出过程中触发后台写入
+    global save_timer
+    if save_timer:
+        save_timer.cancel()
+        save_timer = None
+
     time.sleep(1)
     # 2. 保存监控列表和窗口位置（建议放线程里异步保存）
     try:
         save_monitor_list()
         for win_id in list(WINDOWS_BY_ID.keys()):
-            win = WINDOWS_BY_ID.get(window_id)
-            if hasattr(win, "_after_id"):
+            win = WINDOWS_BY_ID.get(win_id) # 修复变量名错误: window_id -> win_id
+            if win and hasattr(win, "_after_id"):
                 win.after_cancel(win._after_id)
             update_window_position(win_id) # 确保保存最后的配置
         save_window_positions()
@@ -10371,8 +10451,8 @@ if __name__ == "__main__":
     init_monitors()
     root = tk.Tk()
     root.title("股票异动数据监控")
-    root.geometry("750x550")
-    root.minsize(300,400)    # 设置最小尺寸限制
+    root.geometry("500x600")
+    root.minsize(300, 400)    # 恢复原有的最小尺寸限制
 
     root.resizable(True, True)
 
@@ -10420,6 +10500,38 @@ if __name__ == "__main__":
     date_entry.pack(side=tk.LEFT, padx=2)
     date_entry.bind("<<DateEntrySelected>>", on_date_selected)
     
+    # [极致修复] 包装下拉逻辑，展开时物理移除全局焦点同步，防止闪退
+    def on_cal_drop_down(*args, **kwargs):
+        try:
+            # 1. 彻底解绑可能干扰的全局焦点事件
+            root.unbind("<FocusIn>")
+        except:
+            pass
+        
+        # 2. 执行原生的下拉展示
+        date_entry._original_drop_down(*args, **kwargs)
+        
+        # 3. 监听弹出层的销毁，销毁后延迟恢复绑定
+        if hasattr(date_entry, "_top_cal"):
+            def _on_cal_destroy(e):
+                # 只有顶级对象销毁才触发
+                if e.widget == date_entry._top_cal:
+                    root.after(200, lambda: root.bind("<FocusIn>", on_window_focus, add="+"))
+            
+            date_entry._top_cal.bind("<Destroy>", _on_cal_destroy)
+            
+            # [NEW] 修复跨月显示错位：绑定月份切换事件
+            date_entry._calendar.bind("<<CalendarMonthChanged>>", update_calendar_highlights)
+            
+            # [NEW] 首次展开时也触发一次准确的高亮
+            update_calendar_highlights()
+
+    # 替换原生方法
+    date_entry._original_drop_down = date_entry.drop_down
+    date_entry.drop_down = on_cal_drop_down
+
+    # 强制刷新布局，确保 DateEntry 坐标计算准确
+    root.update_idletasks()
     # [NEW] 标记有数据的日期
     highlight_available_dates(date_entry)
 
@@ -10638,7 +10750,19 @@ if __name__ == "__main__":
 
     def calculate_history_hits_ui():
         """[NEW] 计算当前历史记录的命中数并更新下拉列表"""
-        global query_history_mgr, history_entry, realdatadf, root, uniq_var
+        global query_history_mgr, history_entry, realdatadf, root, uniq_var, loaded_df, selected_date
+        global _global_enriched_cache
+        
+        # [🚀 修复] 数据衔接：如果实时流为空但加载了最新交易日存档，则恢复实时流引用，以支持增强逻辑
+        if realdatadf.empty and loaded_df is not None and not loaded_df.empty and selected_date:
+            try:
+                latest_td = _get_latest_trade_day()
+                if selected_date == latest_td:
+                    realdatadf = loaded_df
+                    logger.info(f"🔗 已将存档数据 [{selected_date}] 衔接至 realdatadf 以支持实时增强计算")
+            except Exception as e:
+                logger.error(f"Data bridging failed: {e}")
+
         if not query_history_mgr or realdatadf.empty:
             from stock_logic_utils import toast_message
             toast_message(root, "⚠️ 数据未就绪或未加载历史")
@@ -10658,19 +10782,18 @@ if __name__ == "__main__":
         from stock_logic_utils import toast_message
         
         # [🚀 性能优化] 智能判定命中统计的数据源
-        global _global_enriched_cache, selected_date, loaded_df
-        
         # 采用与 _get_stock_changes 一致的 do_enrich 逻辑
         do_enrich = True
         if selected_date is not None:
             do_enrich = False
             try:
                 # 只要加载的是“最新交易日”的数据，无论现在是什么时间，都允许增强（衔接实时列）
-                today_str = get_today()
-                latest_td = a_trade_calendar.get_trade_days(end=today_str, count=1)[-1]
+                latest_td = _get_latest_trade_day()
                 if selected_date == latest_td:
                     do_enrich = True
-            except Exception:
+                logger.info(f"[🧪 Hit] selected_date={selected_date}, latest_td={latest_td}, do_enrich={do_enrich}")
+            except Exception as e:
+                logger.warning(f"[🧪 Hit] 日期判定异常: {e}")
                 # 兜底：如果日期计算失败，且确实等于今天，也允许增强
                 if selected_date == get_today():
                     do_enrich = True
@@ -10678,15 +10801,42 @@ if __name__ == "__main__":
         if not do_enrich and loaded_df is not None:
             # 纯历史模式：使用存档并对齐字段
             test_df = loaded_df.copy()
-            mapping = {'价格': 'close', '现价': 'close', '涨幅': 'pct', '量': 'volume', '成交额': 'turnover'}
+            
+            # [🚀 修复] 如果存档未展开，手动触发展开
+            if '涨幅' not in test_df.columns and '相关信息' in test_df.columns:
+                test_df = process_full_dataframe(test_df)
+
+            # 扩展映射表，兼容更多可能的列名
+            mapping = {
+                '价格': 'close', '最新价': 'close', '现价': 'close', 
+                '涨幅': 'pct', 
+                '量': 'volume', '成交量': 'volume',
+                '成交额': 'turnover',
+                '最高': 'high', '最低': 'low', '开盘': 'open',
+                '板块': '异动类型'  # 兼容性映射：Query 可能使用 '异动类型'
+            }
             for cn, en in mapping.items():
                 if cn in test_df.columns and en not in test_df.columns:
                     test_df[en] = test_df[cn]
+            
+            # [🚀 修复] 兜底逻辑：如果 OHLC 字段依然缺失，则回退到 close，防止查询引擎报 name 'open' is not defined
+            if 'close' in test_df.columns:
+                for col in ['open', 'high', 'low']:
+                    if col not in test_df.columns:
+                        test_df[col] = test_df['close']
+            else:
+                logger.warning(f"[🧪 Hit] 警告: test_df 中缺少 'close' 核心列. Columns: {test_df.columns.tolist()}")
         else:
             # 实时/衔接模式：使用行情增强缓存
             if _global_enriched_cache is None:
                 _get_stock_changes()
             test_df = _global_enriched_cache if _global_enriched_cache is not None else realdatadf
+            
+            # [🚀 修复] 衔接模式下也要确保 '异动类型' 这个别名可用（QueryEngine 偏好英文或标准化字段）
+            if test_df is not None and '板块' in test_df.columns and '异动类型' not in test_df.columns:
+                test_df['异动类型'] = test_df['板块']
+                
+            logger.debug(f"[🧪 Hit] 增强模式. Columns: {test_df.columns.tolist() if test_df is not None else 'None'}")
         
         # [🚀 修复] 如果打开了 Uniq 选项，测试命中数时也需要去重，以保持与显示数据一致
         if test_df is not None and not test_df.empty and uniq_var.get():
@@ -10970,8 +11120,16 @@ if __name__ == "__main__":
             win = open_editors[code]
             if win and win.winfo_exists():
                 try:
-                    win.lift()
-                    win.focus_force()
+                    # 联动聚焦前检查 Grab 状态（日历交互保护）
+                    try:
+                        if root.grab_current():
+                            return
+                    except:
+                        pass
+                    
+                    if not (date_entry and hasattr(date_entry, "_top_cal") and date_entry._top_cal.winfo_exists()):
+                        win.lift()
+                        win.focus_force()
                     logger.info(f"[提示] 已存在编辑窗口，聚焦: {code}")
                 except Exception as e:
                     logger.info(f"[警告] 聚焦失败: {e}")
