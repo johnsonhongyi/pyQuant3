@@ -370,6 +370,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
         self.setWindowFlags(Qt.WindowType.Window)
         
+        # [PERF] 列宽持久化防抖 Timer：避免 sectionResized 每次触发磁盘 IO
+        self._save_ui_timer = QTimer(self)
+        self._save_ui_timer.setSingleShot(True)
+        self._save_ui_timer.setInterval(5000)  # 5s 防抖，合并连续列宽调整为单次写入
+        self._save_ui_timer.timeout.connect(self._save_ui_state)
+
         # --- 3. UI 渲染 (依赖上述数据结构) ---
         self._init_ui()
         self.load_window_position_qt(self, "signal_dashboard_panel", default_width=1100, default_height=750)
@@ -393,8 +399,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 这确保了 UI 刷新能够 100% 对齐数据聚合周期，避免无数据更新时的空转或脏检查开销
         logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，变更为心跳驱动模式")
         
-        # 恢复 UI 状态 (列宽等)
-        self._restore_ui_state()
+        # # 恢复 UI 状态 (列宽等)
+        # self._restore_ui_state()
 
         # [MOD] 状态栏 UI 布局优化：废除轮播模式，改为固定/滚动综合展示
         self._carousel_idx = 0
@@ -445,32 +451,85 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.stop()
         event.accept()
 
+    def _collect_ui_state(self) -> dict:
+        """收集当前 UI 布局状态（纯内存，无副作用）"""
+        if not hasattr(self, 'tables') or not self.tables:
+            return {}
+
+        data = {}
+
+        for name, table in self.tables.items():
+            try:
+                clean_name = (
+                    name.replace("🌟 ", "")
+                        .replace("🐉 ", "")
+                        .replace("🔥 ", "")
+                )
+
+                data[f'table_state_{clean_name}'] = (
+                    table.horizontalHeader()
+                        .saveState()
+                        .toHex()
+                        .data()
+                        .decode()
+                )
+
+            except Exception:
+                continue
+
+        return data
+
+
     def _save_ui_state(self):
-        """保存表格布局状态"""
-        # [🛡️ 安全保护] 如果初始化未完成（信号提前触发），静默退出
+        """高性能保存表格布局状态（Dirty Check + 防重复写盘）"""
         if not hasattr(self, 'tables') or not self.tables:
             return
 
         try:
-            data_to_save = {}
-            # 保存各个表格的列宽和排序状态 (Hex 格式保存)
-            for name, table in self.tables.items():
-                try:
-                    clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
-                    data_to_save[f'table_state_{clean_name}'] = table.horizontalHeader().saveState().toHex().data().decode()
-                except Exception: continue
-            
+            new_state = self._collect_ui_state()
+
+            if not new_state:
+                return
+
+            # -----------------------------
+            # Dirty Check：无变化直接跳过
+            # -----------------------------
+            if new_state == getattr(self, '_last_saved_ui_state', None):
+                return
+
+            self._last_saved_ui_state = dict(new_state)
+
             config_file = WINDOW_CONFIG_FILE
+
+            # -----------------------------
+            # 读取旧配置（仅一次）
+            # -----------------------------
             full_data = {}
+
             if os.path.exists(config_file):
                 try:
                     with open(config_file, "r", encoding="utf-8") as f:
                         full_data = json.load(f)
-                except Exception: pass
-            
-            full_data[SETTINGS_SECTION] = data_to_save
-            with open(config_file, "w", encoding="utf-8") as f:
+                except Exception:
+                    full_data = {}
+
+            # -----------------------------
+            # Merge 当前 Section
+            # -----------------------------
+            full_data[SETTINGS_SECTION] = new_state
+
+            # -----------------------------
+            # 原子写入（防止配置损坏）
+            # -----------------------------
+            tmp_file = config_file + ".tmp"
+
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(full_data, f, ensure_ascii=False, indent=2)
+
+            os.replace(tmp_file, config_file)
+
+            logger.debug("UI state saved.")
+
         except Exception as e:
             logger.error(f"Failed to save UI state: {e}")
 
@@ -490,6 +549,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 state_key = f'table_state_{clean_name}'
                 if state_key in ui_state:
                     table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
+            # [PERF] 最稳方案：延迟一个 event-loop 再采集快照
+            # 确保 restoreState() 引发的异步布局事件全部稳定后再建立基准，防止启动即触发 save_ui
+            QTimer.singleShot(0, lambda: setattr(self, '_last_saved_ui_state', self._collect_ui_state()))
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
 
@@ -578,7 +640,38 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "bear": QBrush(QColor("#44ff44")),
             "dragon": QBrush(QColor("#FFD700")),
             "warn": QBrush(QColor("#FF4500")),
-            "gold_bg": QBrush(QColor(100, 80, 0, 100))
+            "gold_bg": QBrush(QColor(100, 80, 0, 100)),
+            "transparent": QBrush(QColor(0, 0, 0, 0)),
+            "alert_bg": QBrush(QColor("#4B0082")),
+            "highlight_bg": QBrush(QColor(255, 127, 80, 50)),
+            "flash": QBrush(QColor(255, 255, 0, 60)),
+            "#ff0000": QBrush(QColor("#ff0000")),
+            "#ffaa00": QBrush(QColor("#ffaa00")),
+            "#00ff88": QBrush(QColor("#00ff88")),
+            "#ffff00": QBrush(QColor("#ffff00")),
+            "#00ffff": QBrush(QColor("#00ffff")),
+            "#888888": QBrush(QColor("#888888")),
+            "#FFD700": QBrush(QColor("#FFD700")),
+            "#ff4444": QBrush(QColor("#ff4444")),
+            "#44ff44": QBrush(QColor("#44ff44")),
+            "#ff4500": QColor("#ff4500"),
+        }
+        # [PERF] 预缓存所有高频颜色对象，消除每次心跳 ~240 次 QColor(str) C++ 解析开销
+        self._colors = {
+            "#ff4444": QColor("#ff4444"),
+            "#44ff44": QColor("#44ff44"),
+            "#FFD700": QColor("#FFD700"),
+            "#00ffff": QColor("#00ffff"),
+            "#ffff00": QColor("#ffff00"),
+            "#ffffff": QColor("#ffffff"),
+            "#ff4500": QColor("#ff4500"),
+            "#FF4500": QColor("#FF4500"),
+            "#00ff88": QColor("#00ff88"),
+            "#00ff00": QColor("#00ff00"),
+            "#00bfff": QColor("#00bfff"),
+            "#888888": QColor("#888888"),
+            "#ffaa00": QColor("#ffaa00"),
+            "#ff0000": QColor("#ff0000"),
         }
 
         temp_lay.addWidget(self.market_breadth_label)
@@ -832,15 +925,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # [PERF] Interactive 模式：不再随每次 setText 触发全列像素重测量（原 ResizeToContents 杀手）
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch) # 详情自动拉伸
+        # 首次数据就位后执行一次自适应
+        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [NEW] 列宽持久化联动
-        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # [PERF] 防抖持久化：sectionResized 不再直接写磁盘，合并为 2s 后单次写入
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -859,16 +955,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # [PERF] Interactive 模式
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [NEW] 列宽持久化联动
-        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # [PERF] 防抖持久化
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -886,16 +984,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # [PERF] Interactive 模式
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 跟风明细拉伸
+        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_sector_table_clicked)
         table.cellDoubleClicked.connect(self._on_sector_table_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [NEW] 列宽持久化联动
-        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # [PERF] 防抖持久化
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -914,15 +1014,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # [PERF] Interactive 模式
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 标签拉伸
+        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [NEW] 列宽持久化联动
-        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # [PERF] 防抖持久化
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -941,15 +1043,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # [PERF] Interactive 模式
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [NEW] 列宽持久化联动
-        table.horizontalHeader().sectionResized.connect(self._save_ui_state)
+        # [PERF] 防抖持久化
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -1008,12 +1112,44 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.sig_heartbeat.emit(event)
 
     def _safe_process_heartbeat(self, event: BusEvent):
-        """[GUI THREAD] 处理心跳和市场统计"""
-        self._update_last_sync_time()
-        if event.source == "market_stats" and isinstance(event.payload, dict):
-            self.update_market_stats(event.payload)
-            # [🚀 性能优化] 心跳驱动引擎数据刷新，完全对齐后台数据合成节拍，消除主线程卡死
-            self._update_engine_views()
+        """[GUI THREAD] heartbeat 调度入口（优化版）"""
+
+        try:
+            # ==================================================
+            # 1️⃣ 更新时间（轻量操作）
+            # ==================================================
+            self._update_last_sync_time()
+
+            # ==================================================
+            # 2️⃣ market stats 更新（轻量数据层）
+            # ==================================================
+            if event.source == "market_stats" and isinstance(event.payload, dict):
+                self.update_market_stats(event.payload)
+            
+            # ==================================================
+            # 3️⃣ 不再直接刷新 UI（关键优化）
+            # ==================================================
+            # self._ui_dirty_flag = True
+            # ⭐ 关键：消费 dirty flag
+            # if getattr(self, "_ui_dirty_flag", False):
+            #     self._ui_dirty_flag = False
+
+
+            # ==================================================
+            # 4️⃣ 只在必要时触发 UI 调度
+            # ==================================================
+            now = time.time()
+            last = getattr(self, "_last_ui_render_ts", 0)
+
+            # 200ms 节流（防止 heartbeat flood）
+            if now - last > 0.2:
+                self._last_ui_render_ts = now
+
+                # ⭐ 真正 UI 刷新入口
+                self._update_engine_views()
+
+        except Exception as e:
+            logger.exception(f"[heartbeat] failed: {e}")
 
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"{datetime.now().strftime('%H:%M:%S')} (实时)")
@@ -1070,6 +1206,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🌟 决策队列")
         if not table: return
         
+        # [PERF] 阶段2：整体签名脏检查
+        _sig = str([(d.get('code',''), d.get('status',''), d.get('current_price',0),
+                     d.get('suggest_price',0), d.get('priority',0)) for d in decisions])
+        if getattr(table, '_decision_sig', None) == _sig:
+            return
+        table._decision_sig = _sig
+
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         table.setSortingEnabled(False)
@@ -1084,20 +1227,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, is_numeric=False, bold=False):
             it = table.item(r_idx, c_idx)
-            # [🚀 FIX] 确保 Item 类型匹配：如果是数值列但现有 Item 不是 NumericTableWidgetItem，则强制替换
             needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
             
             if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
             else:
-                if it.text() != str(text): it.setText(str(text))
+                text_str = str(text)
+                if it.text() != text_str: it.setText(text_str)
             if color:
-                if isinstance(color, str): color = QColor(color)
-                c_name = color.name()
-                if it.foreground().color().name() != c_name:
-                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
-                    it.setForeground(self._brushes[c_name])
+                c_key = color if isinstance(color, str) else color.name()
+                if c_key not in self._brushes:
+                    self._brushes[c_key] = QBrush(self._colors.get(c_key, QColor(c_key)))
+                if it.foreground().color().name() != (self._colors.get(c_key, QColor(c_key)).name()):
+                    it.setForeground(self._brushes[c_key])
             if bold:
                 f = it.font(); 
                 if not f.bold(): f.setBold(True); it.setFont(f)
@@ -1106,18 +1249,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if f.bold(): f.setBold(False); it.setFont(f)
             return it
 
+        _cl = self._colors
         for i, d in enumerate(decisions):
             _update_cell(i, 0, d.get('created_at', ''))
             prio = d.get('priority', 0)
-            p_color = "#ff0000" if prio >= 75 else ("#ffaa00" if prio >= 60 else "#ffffff")
+            p_color = _cl["#ff0000"] if prio >= 75 else (_cl["#ffaa00"] if prio >= 60 else _cl["#ffffff"])
             _update_cell(i, 1, prio, color=p_color, is_numeric=True)
             
             st_text = d.get('status', '待处理')
-            st_color = "#00ff88" if '成交' in st_text else "#ffffff"
+            st_color = _cl["#00ff88"] if '成交' in st_text else _cl["#ffffff"]
             _update_cell(i, 2, st_text, color=st_color)
             
             code = d.get('code', '')
-            c_color = "#ffff00" if code.startswith('30') else "#00ffff"
+            c_color = _cl["#ffff00"] if code.startswith('30') else _cl["#00ffff"]
             _update_cell(i, 3, code, color=c_color, bold=True)
             
             _update_cell(i, 4, d.get('name', ''))
@@ -1127,7 +1271,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             _update_cell(i, 8, d.get('suggest_price', 0.0), is_numeric=True)
             
             pd_val = d.get('pct_diff', 0.0)
-            pd_color = "#ff4444" if pd_val > 0 else ("#44ff44" if pd_val < 0 else "#ffffff")
+            pd_color = _cl["#ff4444"] if pd_val > 0 else (_cl["#44ff44"] if pd_val < 0 else _cl["#ffffff"])
             _update_cell(i, 9, f"{pd_val:+.2f}%", color=pd_color, is_numeric=True)
             _update_cell(i, 10, d.get('dff', 0.0), is_numeric=True)
             _update_cell(i, 11, d.get('reason', ''))
@@ -1140,7 +1284,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setSortingEnabled(True)
         table.blockSignals(False)
         table.setUpdatesEnabled(True)
-        self._limit_table_column_widths(table)
+        # [PERF] Interactive 模式下不再需要每次限制列宽
         
         # 恢复选中
         if current_selection:
@@ -1153,6 +1297,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🐉 龙头追踪")
         if not table: return
         
+        # [PERF] 阶段2：整体数据签名脏检查，数据未变直接跳过全量渲染
+        _sig = str([(d.get('code',''), d.get('current_pct',0), d.get('cum_pct',0),
+                     d.get('consecutive_new_highs',0), d.get('status_label',''), d.get('tags','')) for d in dragons])
+        if getattr(table, '_dragon_sig', None) == _sig:
+            return
+        table._dragon_sig = _sig
+
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         table.setSortingEnabled(False)
@@ -1167,24 +1318,24 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
         def _update_cell(r_idx, c_idx, text, color=None, is_numeric=False, bold=False, bg_color=None):
             it = table.item(r_idx, c_idx)
-            # [🚀 FIX] 确保 Item 类型匹配
             needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
             
             if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
             else:
-                if it.text() != str(text): it.setText(str(text))
+                text_str = str(text)
+                if it.text() != text_str: it.setText(text_str)
             if color:
-                if isinstance(color, str): color = QColor(color)
-                c_name = color.name()
-                if it.foreground().color().name() != c_name:
-                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
-                    it.setForeground(self._brushes[c_name])
+                c_key = color if isinstance(color, str) else color.name()
+                if c_key not in self._brushes:
+                    self._brushes[c_key] = QBrush(self._colors.get(c_key, QColor(c_key)))
+                if it.foreground().color().name() != (self._colors.get(c_key, QColor(c_key)).name()):
+                    it.setForeground(self._brushes[c_key])
             if bg_color:
                  if it.background().color() != bg_color: it.setBackground(bg_color)
             elif it and it.background().color().alpha() != 0:
-                 it.setBackground(QColor(0,0,0,0))
+                 it.setBackground(self._brushes.get("transparent", QBrush(QColor(0,0,0,0))))
             if bold:
                 f = it.font()
                 if not f.bold(): f.setBold(True); it.setFont(f)
@@ -1193,33 +1344,35 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if f.bold(): f.setBold(False); it.setFont(f)
             return it
 
+        _cl = self._colors  # 本地引用，减少属性查找
         for i, d in enumerate(dragons):
             st_lbl = d.get('status_label', '')
-            st_color = QColor("#FFD700") if '龙' in st_lbl else (QColor("#00FF00") if '候' in st_lbl else QColor("#ffffff"))
+            # [PERF] 使用预缓存颜色，消除 QColor(str) 内联创建
+            st_color = _cl["#FFD700"] if '龙' in st_lbl else (_cl["#00ff00"] if '候' in st_lbl else _cl["#ffffff"])
             _update_cell(i, 0, st_lbl, color=st_color)
             
             code = d.get('code', '')
-            c_color = QColor("#ffff00" if code.startswith('30') else "#00ffff")
+            c_color = _cl["#ffff00"] if code.startswith('30') else _cl["#00ffff"]
             _update_cell(i, 1, code, color=c_color, bold=True)
             _update_cell(i, 2, d.get('name', ''), bold=('龙' in st_lbl))
             _update_cell(i, 3, d.get('sector', ''))
             
             c_pct = d.get('current_pct', 0.0)
-            cp_color = QColor("#ff4444") if c_pct > 0 else (QColor("#44ff44") if c_pct < 0 else QColor("#ffffff"))
+            cp_color = _cl["#ff4444"] if c_pct > 0 else (_cl["#44ff44"] if c_pct < 0 else _cl["#ffffff"])
             _update_cell(i, 4, f"{c_pct:+.2f}%", color=cp_color, is_numeric=True)
             
             cum_pct = d.get('cum_pct', 0.0)
-            cum_color = QColor("#FFD700") if cum_pct > 5 else (QColor("#ff4444") if cum_pct > 0 else QColor("#ffffff"))
+            cum_color = _cl["#FFD700"] if cum_pct > 5 else (_cl["#ff4444"] if cum_pct > 0 else _cl["#ffffff"])
             _update_cell(i, 5, f"{cum_pct:+.2f}%", color=cum_color, is_numeric=True)
             
             _update_cell(i, 6, d.get('tracked_days', 0), is_numeric=True)
             
             nh_days = d.get('consecutive_new_highs', 0)
-            nh_color = QColor("#ff4500") if nh_days >= 3 else QColor("#ffffff")
+            nh_color = _cl["#ff4500"] if nh_days >= 3 else _cl["#ffffff"]
             _update_cell(i, 7, nh_days, color=nh_color, is_numeric=True)
             
             dff = d.get('dff', 0.0)
-            dff_color = QColor("#00ff88") if dff > 0 else QColor("#ffffff")
+            dff_color = _cl["#00ff88"] if dff > 0 else _cl["#ffffff"]
             _update_cell(i, 8, dff, color=dff_color, is_numeric=True)
             _update_cell(i, 9, d.get('vwap', 0.0), is_numeric=True)
             
@@ -1231,8 +1384,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setSortingEnabled(True)
         table.blockSignals(False)
         table.setUpdatesEnabled(True)
-        # [NEW] 限制过长列宽触发 UI 溢出
-        self._limit_table_column_widths(table)
+        # [PERF] Interactive 模式下不再需要每次限制列宽
         
         # 恢复选中
         if current_selection:
@@ -1245,6 +1397,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🔥 板块热力")
         if not table: return
         
+        # [PERF] 阶段2：整体签名脏检查
+        _sig = str([(s.get('name',''), s.get('heat_score',0), s.get('sector_type',''),
+                     s.get('leader_code',''), s.get('leader_change_pct',0)) for s in sectors])
+        if getattr(table, '_sector_sig', None) == _sig:
+            return
+        table._sector_sig = _sig
+
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         table.setSortingEnabled(False)
@@ -1253,49 +1412,54 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, bg_color=None, bold=False, is_numeric=False):
             it = table.item(r_idx, c_idx)
-            # [🚀 FIX] 确保 Item 类型匹配
             needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
             
             if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
             else:
-                if it.text() != str(text): it.setText(str(text))
+                text_str = str(text)
+                if it.text() != text_str: it.setText(text_str)
             if color:
-                if isinstance(color, str): color = QColor(color)
-                c_name = color.name()
-                if it.foreground().color().name() != c_name:
-                    if c_name not in self._brushes: self._brushes[c_name] = QBrush(color)
-                    it.setForeground(self._brushes[c_name])
+                c_key = color if isinstance(color, str) else color.name()
+                if c_key not in self._brushes:
+                    self._brushes[c_key] = QBrush(self._colors.get(c_key, QColor(c_key)))
+                if it.foreground().color().name() != (self._colors.get(c_key, QColor(c_key)).name()):
+                    it.setForeground(self._brushes[c_key])
             if bg_color:
                 if it.background().color() != bg_color: it.setBackground(bg_color)
             elif it and it.background().color().alpha() != 0:
-                it.setBackground(QColor(0,0,0,0))
+                it.setBackground(self._brushes.get("transparent", QBrush(QColor(0,0,0,0))))
             if bold:
                 f = it.font(); 
                 if not f.bold(): f.setBold(True); it.setFont(f)
             return it
 
+        _cl = self._colors  # 本地引用
+        _resonance_bg = QColor(255, 69, 0, 40)  # 共振背景色，仅需一个实例
         for i, s in enumerate(sectors):
             _update_cell(i, 0, s.get('name', ''), bold=True)
             
             heat = s.get('heat_score', 0.0)
-            h_color = QColor("#ff0000") if heat >= 40 else QColor("#ffffff")
+            # [PERF] 使用预缓存颜色
+            h_color = _cl["#ff0000"] if heat >= 40 else _cl["#ffffff"]
             _update_cell(i, 1, heat, color=h_color, is_numeric=True)
             _update_cell(i, 2, s.get('bidding_score', 0.0), is_numeric=True)
             
             type_str = s.get('sector_type', '跟随')
             res_tag = s.get('resonance_tag', '')
             merged_type = f"{type_str} | {res_tag}" if res_tag else type_str
-            t_color = QColor("#FF4500") if res_tag else (QColor("#ff4444") if '强攻' in type_str else (QColor("#ffaa00") if '蓄势' in type_str else QColor("#ffffff")))
-            t_bg = QColor(255, 69, 0, 40) if res_tag else None
+            t_color = (_cl["#FF4500"] if res_tag else
+                       (_cl["#ff4444"] if '强攻' in type_str else
+                        (_cl["#ffaa00"] if '蓄势' in type_str else _cl["#ffffff"])))
+            t_bg = _resonance_bg if res_tag else None
             _update_cell(i, 3, merged_type, color=t_color, bg_color=t_bg, bold=bool(res_tag))
 
             _update_cell(i, 4, s.get('leader_code', ''))
             _update_cell(i, 5, s.get('leader_name', ''))
             
             l_pct = s.get('leader_change_pct', 0.0)
-            lp_color = QColor("#ff4444") if l_pct > 0 else QColor("#ffffff")
+            lp_color = _cl["#ff4444"] if l_pct > 0 else _cl["#ffffff"]
             _update_cell(i, 6, f"{l_pct:+.2f}%", color=lp_color, is_numeric=True)
 
             _update_cell(i, 7, s.get('follow_ratio', 0.0), is_numeric=True)
@@ -1305,8 +1469,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setSortingEnabled(True)
         table.blockSignals(False)
         table.setUpdatesEnabled(True)
-        # [NEW] 限制过长列宽触发 UI 溢出
-        self._limit_table_column_widths(table)
+        # [PERF] Interactive 模式下不再需要每次限制列宽
 
 
     def _refresh_strategic_table(self, trends: List[dict]):
@@ -1328,23 +1491,28 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _update_cell(r_idx, c_idx, text, color=None, bg_color=None, bold=False, is_numeric=False):
             it = table.item(r_idx, c_idx)
-            # [🚀 FIX] 确保 Item 类型匹配
             needs_recreate = not it or (is_numeric and not isinstance(it, NumericTableWidgetItem))
-            
             if needs_recreate:
                 it = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(str(text))
                 table.setItem(r_idx, c_idx, it)
             else:
-                if it.text() != str(text): it.setText(str(text))
+                text_str = str(text)
+                if it.text() != text_str: it.setText(text_str)
             if color:
-                if isinstance(color, str): color = QColor(color)
-                it.setForeground(QBrush(color))
+                # [PERF] 使用预缓存 brush，消除 QBrush(color) 动态创建
+                c_key = color if isinstance(color, str) else color.name()
+                if c_key not in self._brushes:
+                    self._brushes[c_key] = QBrush(self._colors.get(c_key, QColor(c_key)))
+                if it.foreground().color().name() != (self._colors.get(c_key, QColor(c_key)).name()):
+                    it.setForeground(self._brushes[c_key])
             if bg_color:
                 it.setBackground(bg_color)
             if bold:
-                f = it.font(); f.setBold(True); it.setFont(f)
+                f = it.font()
+                if not f.bold(): f.setBold(True); it.setFont(f)
             return it
 
+        _cl = self._colors
         for i, t in enumerate(trends):
             # ["趋势类型", "代码", "名称", "阶段", "所属板块", "战略分", "结构分", "共振分", "更新时间", "核心理由"]
             _update_cell(i, 0, t.get('trend_type', ''), color="#00ff88", bold=True)
@@ -1354,7 +1522,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             _update_cell(i, 1, code, color=c_color)
             _update_cell(i, 2, t.get('name', ''))
             _update_cell(i, 3, t.get('stage_label', ''))
-            _update_cell(i, 4, t.get('sector', ''), color="#888")
+            _update_cell(i, 4, t.get('sector', ''), color="#888888")
             _update_cell(i, 5, t.get('score', 0.0), is_numeric=True)
             _update_cell(i, 6, t.get('upper_score', 0.0), is_numeric=True)
             _update_cell(i, 7, t.get('resonance', 0.0), is_numeric=True)
@@ -1364,7 +1532,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setSortingEnabled(True)
         table.blockSignals(False)
         table.setUpdatesEnabled(True)
-        self._limit_table_column_widths(table)
+        # [PERF] Interactive 模式下不再需要每次限制列宽
 
     def _on_signal_received(self, event: BusEvent):
         self.sig_bus_event.emit(event)
@@ -1482,8 +1650,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
-                # [NEW] 限制列宽溢出
-                self._limit_table_column_widths(table)
+                # [PERF] Interactive 模式下不再需要每次限制列宽
                 table.viewport().update()
                 
             self._is_updating_ui = False
@@ -1595,11 +1762,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setRowHidden(r, not row_visible)
 
     def _get_item_color(self, pattern, detail):
-        if "[重点]" in detail or "[重点]" in pattern: return QColor("#FFD700") # 亮金色
-        if "SELL" in pattern or "风险" in detail: return QColor("#00FF00")
-        if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): return QColor("#FF4444")
-        if "跟单" in detail: return QColor("#FFD700")
-        return QColor("#ffffff")
+        _cl = self._colors
+        if "[重点]" in detail or "[重点]" in pattern: return _cl["#FFD700"] # 亮金色
+        if "SELL" in pattern or "风险" in detail: return _cl["#00ff00"]
+        if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): return _cl["#ff4444"]
+        if "跟单" in detail: return _cl["#FFD700"]
+        return _cl["#ffffff"]
 
     def _insert_row(self, table, time_str, code, name, pattern, detail, count, score, grade='', payload=None):
         insert_start = time.perf_counter()
@@ -1644,14 +1812,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             grade_item = QTableWidgetItem(grade)
             grade_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if grade in ['S', 'A']:
-                grade_item.setForeground(QBrush(QColor("#FF1493" if grade=='S' else "#FF8C00")))
+                color_key = "#ff0000" if grade=='S' else "#ffaa00"
+                grade_item.setForeground(self._brushes.get(color_key, QBrush(self._colors.get(color_key))))
                 f = grade_item.font(); f.setBold(True); grade_item.setFont(f)
 
             # 核心列 (存入缓存)
             is_alerted = get_alert_manager().is_alerted(code)
             display_name = f"🔔{name}" if is_alerted else name
-            alert_bg = QColor("#4B0082") if is_alerted else None
-            alert_fg = QColor("#FFFFFF") if is_alerted else None
+            alert_bg = self._brushes.get("alert_bg", QBrush(QColor("#4B0082")))
+            alert_fg = self._colors.get("#ffffff") if is_alerted else None
             
             code_item = QTableWidgetItem(code)
             table_cache[code] = code_item
@@ -1685,11 +1854,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # [NEW] 重点信号行高亮 (赛马模式深度加成)
             if "[重点]" in detail or "[重点]" in pattern:
                 # 使用深珊瑚红背景色突出重点，带透明度
-                highlight_bg = QColor(255, 127, 80, 50) 
+                highlight_bg = self._brushes.get("highlight_bg", QBrush(QColor(255, 127, 80, 50)))
                 for i in range(table.columnCount()):
                     it = table.item(0, i)
                     if it: 
-                        it.setBackground(QBrush(highlight_bg))
+                        it.setBackground(highlight_bg)
                         # 名称和代码加粗显示
                         if i in [2, 3]:
                             f = it.font(); f.setBold(True); it.setFont(f)
@@ -1712,13 +1881,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             items = [table.item(row, i) for i in range(table.columnCount())]
             if not items or not items[0]: return
+            flash_bg = self._brushes.get("flash", QBrush(QColor(255, 255, 0, 60)))
             for item in items:
-                if item: item.setBackground(QBrush(QColor(255, 255, 0, 60)))
+                if item: item.setBackground(flash_bg)
             
             def reset_bg():
+                transparent = self._brushes.get("transparent", QBrush(QColor(0, 0, 0, 0)))
                 for it in items:
                     try:
-                        if it: it.setBackground(QBrush(QColor(0, 0, 0, 0)))
+                        if it: it.setBackground(transparent)
                     except RuntimeError:
                         pass # Item was deleted from C++ side
             QTimer.singleShot(800, reset_bg)

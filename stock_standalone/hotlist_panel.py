@@ -180,7 +180,7 @@ class HotlistWorker(QThread):
                 # --- A. 处理市场数据推送 (高频/实时) ---
                 try:
                     # 尝试从队列获取数据，最多等待 0.1s
-                    df_market = self.market_data_queue.get(timeout=0.1)
+                    df_market = self.market_data_queue.get(timeout=1)
                     if df_market is not None and not df_market.empty:
                         self._process_patterns_async(df_market)
                 except Empty:

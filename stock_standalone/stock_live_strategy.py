@@ -124,7 +124,7 @@ def _ipc_sender_worker():
         batch = []
         try:
             # 1. 阻塞获取第一个任务，建立批处理窗口
-            data = ipc_queue.get(timeout=0.5)
+            data = ipc_queue.get(timeout=1)
             if data == "__STOP__": break
             batch.append(data)
             

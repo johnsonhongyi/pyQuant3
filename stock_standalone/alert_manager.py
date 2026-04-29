@@ -327,7 +327,7 @@ class AlertManager:
     def _feedback_loop(self):
         """监听 worker 状态反馈"""
         logger.info("Feedback loop started.")
-        while True:
+        while not self.stop_event.is_set():
             try:
                 msg = self.feedback_queue.get(timeout=1.0)
                 etype, key = msg

@@ -4079,6 +4079,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 解析可能的复合指令 (如 TIME_LINK|000001|2023-10-27)
             target_code = payload
             target_ts = None
+            target_res = None
             if '|' in payload:
                 parts = payload.split('|')
                 # 情况 A: TIME_LINK|code|ts|res=...
@@ -8928,9 +8929,12 @@ class MainWindow(QMainWindow, WindowMixin):
             target_width: 强制使用的图表宽度（像素），用于布局加载时的预计算
         """
         try:
+            # 净化 df 参数并判定来源
+            # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
+            is_from_button = isinstance(df, bool)
+            
             # 防止复位时引起的死循环重绘
             if not getattr(self, '_is_resetting_charts', False):
-                is_from_button = isinstance(df, bool)
                 # ⭐ [PERF/POLICY] 只有当真的是来自重置按钮 (Manual click) 时才执行破坏性清理
                 # 联动或切股触发的自动复位 (force=True but not from button) 仅清理视角
                 should_do_destructive_clear = is_from_button
@@ -9071,11 +9075,17 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"[_reset_kline_view] sizes:{sizes} Reset: bars={total_bars}, visible={visible_bars}, xRange=({x_min:.0f}, {x_max:.0f}), width={chart_pixel_width}px")
             
             # ========== 7. 触发补偿渲染 ==========
-            # 仅当手动点击重置按钮（df 为 bool）或 force 时触发重绘。
+            # 仅当手动点击重置按钮（is_from_button 为 True）或 force 时触发重绘。
             # 若是从 render_charts 内部调用的，由于那里不中断，不需要在此补偿，防止双重渲染。
-            if (isinstance(df, bool) or force) and hasattr(self, 'current_code'):
+            if (is_from_button or force) and hasattr(self, 'current_code'):
                  if not getattr(self, '_is_painting', False):
-                     self.render_charts(self.current_code, df if isinstance(df, pd.DataFrame) else getattr(self, 'day_df', pd.DataFrame()), getattr(self, 'tick_df', pd.DataFrame()))
+                     # 🚀 [FIX] 此处强制 pass force=True，绕过 render_charts 的 150ms 节流，确保 destructive reset 后立即重绘
+                     self.render_charts(
+                         self.current_code, 
+                         df if isinstance(df, pd.DataFrame) else getattr(self, 'day_df', pd.DataFrame()), 
+                         getattr(self, 'tick_df', pd.DataFrame()),
+                         force=True
+                     )
 
         except Exception as e:
             logger.warning(f"[_reset_kline_view] Failed: {e}")
@@ -13269,6 +13279,16 @@ class MainWindow(QMainWindow, WindowMixin):
                     except Exception as e:
                         logger.warning(f"Error stopping thread {id(t)}: {e}")
                 t.deleteLater()
+        
+        # 5️⃣.pre 停止 AlertManager 语音系统 (必须在 wait_all_threads 前执行)
+        # [FIX] AlertManager 的 _voice_worker 和 _feedback_loop 线程会阻塞在 queue.get() 上，
+        # 如果不先 set stop_event，这些线程会在 sys.exit() 时因解释器拆解 Queue 内部对象而触发 Access Violation
+        try:
+            am = get_alert_manager()
+            am.stop()
+        except Exception as _am_err:
+            print(f"AlertManager stop error (non-critical): {_am_err}")
+
         #0.5 5️⃣ 等线程全部结束（这一步必须提前）
         self.wait_all_threads()
         # 当 GUI 关闭时，触发 stop_event

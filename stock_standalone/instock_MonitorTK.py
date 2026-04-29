@@ -905,7 +905,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 2. 如果没获取到新任务，则阻塞等待 0.5s
                 if not got_any:
                     try:
-                        cmd_tuple = self._ipc_task_queue.get(timeout=0.5)
+                        cmd_tuple = self._ipc_task_queue.get(timeout=1)
                         if cmd_tuple:
                             cmd_type, payload = cmd_tuple
                             latest_tasks[cmd_type] = payload
@@ -5607,10 +5607,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ======================================================
                 # ⭐ 7️⃣ 调度逻辑 (PERF 优化：使用 Event 替代 300次/5分钟 的 GIL 竞争)
                 # ======================================================
-                sleep_seconds = 300 if sent else 5
+                sleep_seconds = 10 if sent else 5
                 
                 # 若外部主动置为 False，退出不等待
-                if not self._df_sync_running or not self._df_first_send_done:
+                # if not self._df_sync_running or not self._df_first_send_done:
+                if not self._df_sync_running:
                     break
                     
                 self._send_df_wake_event.wait(timeout=sleep_seconds)
@@ -5754,13 +5755,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self.live_strategy.scan_hot_concepts_status:
                     self.live_strategy.set_scan_hot_concepts(status=False)
                     logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
-        # [SAFEGUARD] 监测用户“手动”取消勾选行为：如果勾选断开且没有待恢复任务，才重置标志
-        if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False) \
-           and getattr(self, 'last_vis_var_status', None) is None:
-            logger.debug(f"[send_df] User manually unchecked vis: resetting first_send_done")
+        # # [SAFEGUARD] 监测用户“手动”取消勾选行为：如果勾选断开且没有待恢复任务，才重置标志
+        # if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False) \
+        #    and getattr(self, 'last_vis_var_status', None) is None:
+        #     logger.debug(f"[send_df] User manually unchecked vis: resetting first_send_done")
+        #     if hasattr(self, 'df_ui_prev'):
+        #         del self.df_ui_prev
+        # ==========================================================
+        # [SAFEGUARD] 监测用户手动切换可视化开关
+        # ==========================================================
+        curr_vis = getattr(self, '_vis_enabled_cache', True)
+        last_vis = getattr(self, 'last_vis_var_status', None)
+
+        # ---------- 用户手动关闭可视化 ----------
+        if (last_vis is True) and (curr_vis is False):
+            logger.debug("[send_df] User manually DISABLED visualization")
+
+            # 清空上一帧缓存，避免下次误走 diff
             if hasattr(self, 'df_ui_prev'):
                 del self.df_ui_prev
+
             self._df_first_send_done = False
+            self._last_send_df_hash = None
+            self.sync_version = 0
+            self._force_full_sync_pending = False
+            
+        # ---------- 用户手动重新开启可视化 ----------
+        elif (last_vis is False) and (curr_vis is True):
+            logger.info("[send_df] User manually ENABLED visualization -> schedule FULL SYNC")
+
+            self._force_full_sync_pending = True
+
+            # 立即唤醒 send_df 线程
+            if hasattr(self, '_send_df_wake_event'):
+                self._send_df_wake_event.set()
+
+        # 更新状态快照
+        self.last_vis_var_status = curr_vis
+            
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()
 
