@@ -29,6 +29,11 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-04-29 22:30
+- [x] **修复 SignalDashboardPanel 启动时的 AttributeError (Fixed AttributeError on Startup)**：
+    - [x] **根治 `_save_ui_timer` 初始化顺序问题**：将 `_save_ui_timer` 的初始化逻辑从 `__init__` 后部移动到 `_init_ui()` 调用之前。这解决了由于 `_restore_ui_state()` 触发 `sectionResized` 信号时，防抖计时器尚未定义导致的系统崩溃。
+    - [x] **增强 UI 启动鲁棒性**：确保所有依赖于表格布局变动的持久化组件在布局还原前已就绪。
+
 ## 2026-04-29 18:05
 - [x] **修复历史记录管理器双击备注无法编辑与右键菜单缺失 (Fixed History Note Editing & Context Menu)**：
     - [x] **根治双击列判定失效**：增强了 `on_double_click` 的列识别逻辑，支持通过索引 `#3` 和列名 `note` 双重锁定备注列。
