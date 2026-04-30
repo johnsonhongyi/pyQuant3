@@ -5009,6 +5009,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.voice_var = tk.BooleanVar(value=True) # 💥 默认开启语音
         self.realtime_var = tk.BooleanVar(value=True)
         self.vis_var = tk.BooleanVar(value=False)
+        self.alert_link_var = tk.BooleanVar(value=False) # 🚀 [NEW] 报警联动开关，默认关闭
         # [FIX] 绑定监听以同步影子变量，防止后台线程直接调用 .get() 导致 GIL 崩溃
         self.vis_var.trace_add('write', lambda *args: setattr(self, '_vis_enabled_cache', self.vis_var.get()))
         self.alert_popup_var = tk.BooleanVar(value=True) # 💥 默认开启报警弹窗
@@ -5048,6 +5049,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             text="Pop",
             variable=self.alert_popup_var,
             command=self.save_ui_states # 实时保存状态
+        ).pack(side=tk.LEFT, padx=1)
+
+        # 🚀 [NEW] 将 ALink 放置在最末尾
+        ttk.Checkbutton(
+            frame_right,
+            text="ALink",
+            variable=self.alert_link_var,
+            command=self.save_ui_states
         ).pack(side=tk.LEFT, padx=1)
 
         ttk.Button(
@@ -5153,6 +5162,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 'voice_var': ('voice_var', bool),
                 'realtime_var': ('realtime_var', bool),
                 'vis_var': ('vis_var', bool),
+                'alert_link_var': ('alert_link_var', bool), # 🚀 [NEW]
                 'force_d_cycle_var': ('force_d_cycle_var', bool),
                 'alert_popup_var': ('alert_popup_var', bool),
                 'search_var1': ('search_var1', str),
@@ -5200,7 +5210,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Variables to save
             save_list = [
                 'win_var', 'tdx_var', 'ths_var', 'dfcf_var', 
-                'tip_var', 'voice_var', 'realtime_var', 'vis_var',
+                'tip_var', 'voice_var', 'realtime_var', 'vis_var', 'alert_link_var', 
                 'force_d_cycle_var', 'alert_popup_var', 'search_var1', 'search_var2',
                 'st_key_sort_value'
             ]
@@ -9010,13 +9020,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              def wrapped_on_start(code):
                  # 1. 触发本地视觉反馈 (震动、闪烁、任务栏提示)
                  self.on_voice_speak_start(code)
-                 # 2. 触发外部可视化联动
-                 self._on_alert_speak_visual_link(code)
+                 # 2. [CONDITIONAL] 触发外部可视化联动
+                 # 🚀 [FIX] 默认不自动推送联动。只有当用户手动开启 ALink 勾选框时才执行外部切换。
+                 if hasattr(self, 'alert_link_var') and self.alert_link_var.get():
+                     self._on_alert_speak_visual_link(code)
              
              am.on_speak_start = wrapped_on_start
              am.on_speak_end = self.on_voice_speak_end # 恢复：播报结束后的状态恢复 (恢复标题等)
              am._linked_to_viz = True
-             logger.info("[Linkage] AlertManager callbacks aggregated (Visual Effects + IPC).")
+             logger.info("[Linkage] AlertManager callbacks aggregated (Visual Effects ONLY, IPC Linkage Disabled).")
         return am
 
     def _on_alert_speak_visual_link(self, code):

@@ -1229,28 +1229,18 @@ class DataProcessWorker(QObject):
                     if count > 0 and self.detector.enable_log:
                         logger.warning(f"⏩ [Worker] Queue backlogged. Skipped {count} stale frames.")
 
-                    # 执行核心计算 (增量更新逻辑)
                     # 执行核心计算 (⚡ 极致性能版：职责分离)
-                    # [🚀 PERFORMANCE] 如果 df 是 df_all (5000+), 则只注册价格，不进行耗时的逐一评估。
-                    # 评分评估已由 DataPublisher 的增量逻辑接管。此处仅触发板块聚合。
+                    # [🚀 PERFORMANCE] 评分评估由 update_scores 的内部过滤机制接管
+                    # 必选股与异动股实时评估，冷门股降频评估，从而根治全量 5000+ 带来的 GIL 阻塞
+                    active_codes = df.index.tolist() if hasattr(df, 'index') else None
                     is_full = len(df) > 3000
+                    start_time = time.perf_counter()
                     self.detector.register_codes(df)
-
-                    if is_full:
-                        # 全量数据仅同步价格，跳过逐一评分计算，直接重算板块排行（即 skip_evaluate=True）
-                        # 这避免了在锁内循环 5000 次造成的 GIL 阻塞
-                        start_time = time.perf_counter()
-                        self.detector.update_scores(active_codes=None, skip_evaluate=True)
-                        dur = time.perf_counter() - start_time
-                        if dur > 0.3:
-                            logger.warning(f"⚠️ [STALL] update_scores (full) slow: {dur:.3f}s")
-                    else:
-                        active_codes = df.index.tolist() if hasattr(df, 'index') else None
-                        start_time = time.perf_counter()
-                        self.detector.update_scores(active_codes=active_codes)
-                        dur = time.perf_counter() - start_time
-                        if dur > 0.3:
-                            logger.warning(f"⚠️ [STALL] update_scores (incremental) slow: {dur:.3f}s")
+                    self.detector.update_scores(active_codes=active_codes)
+                    
+                    dur = time.perf_counter() - start_time
+                    if dur > 0.3:
+                        logger.warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) slow: {dur:.3f}s")
                     # [FIX] data_version 已由 update_scores 内部统一管理，无需 Worker 层再次递增
                     # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
 
@@ -3286,6 +3276,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         if f['code'] == code:
                             r_data = f
                             break
+                    
+                    # [🚀 FIX] 如果在 followers 里没找到（可能被截断了），则回退到 rc 自带的基础数据
+                    if not r_data:
+                        r_data = rc
                 
                 # [NEW] 增加对宏观查询条件过滤的支持 (Stage 1 Filtering)
                 if self._is_macro_active and self._macro_filtered_codes:
