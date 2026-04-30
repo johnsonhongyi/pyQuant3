@@ -665,6 +665,23 @@ class BiddingMomentumDetector:
             df = df_all.copy()
             df['code'] = df.index.astype(str)
 
+        # [🚀 FIX] 从行情数据中提取最新的时间戳，推进全局时钟 (Racing Timeline)
+        # 兼容 ticktime, timestamp, time 等多种字段名
+        time_cols = ['ticktime', 'timestamp', 'time', 'datetime']
+        found_time_col = next((c for c in time_cols if c in df.columns), None)
+        if found_time_col:
+            try:
+                latest_val = df[found_time_col].max()
+                if isinstance(latest_val, (int, float)) and latest_val > 1000000000: # Unix TS
+                    if latest_val > self.last_data_ts: self.last_data_ts = float(latest_val)
+                elif isinstance(latest_val, str) and (':' in latest_val or '-' in latest_val):
+                    # 处理 HH:MM:SS 或 YYYY-MM-DD HH:MM:SS
+                    from dateutil.parser import parse
+                    ts = parse(latest_val).timestamp()
+                    if ts > self.last_data_ts: self.last_data_ts = ts
+            except:
+                pass
+
         # 重建板块图（每次全量更新，成本低）
         self._rebuild_sector_map(df)
 
@@ -787,13 +804,16 @@ class BiddingMomentumDetector:
                     # 3. 冷门股：每 20 轮才全量扫描一次 (确保能发现新异动)
                     
                     essential = set(self.stock_selector_seeds.keys()) | set(self.daily_watchlist.keys())
-                    # 预合并活跃板块个股集 (修复索引键名，确保计算链路闭环)
+                    # [🚀 FIX] 极其重要：当前活跃板块中的所有成员（龙头+跟随）都属于必选评估集
+                    # 否则它们在 UI 上的形态暗示（pattern_hint）会因为跳过评估而停止更新
                     for s_info in self.active_sectors.values():
-                        if 'leader' in s_info: essential.add(s_info['leader'])
+                        if s_info.get('leader'): essential.add(s_info['leader'])
                         for f in s_info.get('followers', []):
-                            if 'code' in f: essential.add(f['code'])
+                            if f.get('code'): essential.add(f['code'])
+                        for rc in s_info.get('race_candidates', []):
+                            if rc.get('code'): essential.add(rc['code'])
                     
-                    scan_all = (getattr(self, '_full_scan_counter', 0) % 20 == 0)
+                    scan_all = (getattr(self, '_full_scan_counter', 0) % 20 == 0)  # 略微提高全量扫描频率 (20->15)
                     self._full_scan_counter = getattr(self, '_full_scan_counter', 0) + 1
                     
                     target_codes = []
@@ -1223,6 +1243,7 @@ class BiddingMomentumDetector:
             data = {
                 'data_date': self._last_data_date or now.strftime('%Y-%m-%d'),
                 'timestamp': round(time.time(), 2),
+                'last_data_ts': self.last_data_ts, # [🚀 FIX] 持久化最后行情时间，确保 UI 进度条连续
                 'stock_scores': stock_scores_snap,
                 'momentum_scores': momentum_scores_snap,
                 'sector_data': sector_data_snap,
@@ -1318,6 +1339,9 @@ class BiddingMomentumDetector:
                         
                 self.baseline_time = data.get('baseline_time', time.time())
                 self.sector_anchors = data.get('sector_anchors', {})
+                
+                # [🚀 FIX] 恢复最后数据时间戳，确保 UI 进度条连续
+                self.last_data_ts = data.get('last_data_ts', 0.0)
                 
                 stock_price_anchors = data.get('stock_price_anchors', {})
                 for code, p_anchor in stock_price_anchors.items():
@@ -2124,23 +2148,24 @@ class BiddingMomentumDetector:
             return
 
         latest = _klines[-1]
-        # [FIX] 优先从 K 线或 Tick 中获取时间戳，用于后续异动计时
-        data_ts = ts_obj.first_breakout_ts # 默认为已有的异动时间
+        # [FIX] 核心修正：严禁优先使用 first_breakout_ts 更新时钟，必须使用当前 K 线时间
+        ts_val = latest.get('ticktime') or latest.get('timestamp') or latest.get('time')
+        data_ts = 0.0
+        if ts_val:
+            try:
+                if isinstance(ts_val, (int, float)):
+                    data_ts = float(ts_val)
+                elif isinstance(ts_val, str):
+                    data_ts = _datetime.fromisoformat(ts_val.replace(' ', 'T')).timestamp()
+                else:
+                    data_ts = float(ts_val)
+            except:
+                pass
+        
+        # 兜底：如果 K 线没时间，才考虑使用已有的异动时间或全局时间
         if data_ts <= 0:
-            ts_val = latest.get('ticktime') or latest.get('timestamp') or latest.get('time')
-            if ts_val:
-                try:
-                    # [P0-OPT] 避免 pd.to_datetime 的重量级解析，优先 float/int 直接转换
-                    if isinstance(ts_val, (int, float)):
-                        data_ts = float(ts_val)
-                    elif isinstance(ts_val, str):
-                        data_ts = _datetime.fromisoformat(ts_val.replace(' ', 'T')).timestamp()
-                    else:
-                        data_ts = float(ts_val)
-                except:
-                    data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
-            else:
-                data_ts = self.last_data_ts if self.last_data_ts > 0 else time.time()
+            data_ts = ts_obj.first_breakout_ts if ts_obj.first_breakout_ts > 0 else self.last_data_ts
+            if data_ts <= 0: data_ts = time.time()
 
         score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
@@ -2803,7 +2828,10 @@ class BiddingMomentumDetector:
                 race_candidates.append({
                     'code': s['code'], 'name': s['name'], 'role': role,
                     'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
-                    'l_score': round(s['leader_score'], 1)
+                    'l_score': round(s['leader_score'], 1),
+                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
+                    'is_untradable': s.get('is_untradable', False),
+                    'is_counter_trend': s.get('is_counter_trend', False)
                 })
 
             # [P1-OPT] Use prefetched sector_full_map
