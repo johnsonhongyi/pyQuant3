@@ -566,7 +566,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 if code in self._row_features:
                     f_tags, icon = self._row_features[code]
                     if f_tags: all_tags.extend(f_tags)
-                    if icon: display_name = f"{icon} {display_name}"
+                    if icon: display_name = f"{icon}{display_name}"
 
                 grade = getattr(row, 'grade', 'C')
                 if grade == "S": all_tags.append("grade_S")

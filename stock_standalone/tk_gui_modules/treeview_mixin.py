@@ -139,10 +139,16 @@ class TreeviewMixin:
         """点击表头排序"""
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         
-        # 尝试转为数字排序
+        # 尝试转为数字或优先级排序
         try:
-            l.sort(key=lambda t: float(t[0].replace('%', '').replace('+', '')), reverse=reverse)
-        except ValueError:
+            if col == 'name' and hasattr(self, 'feature_marker'):
+                # ⚡ [PERF] 针对名称列，优先根据图标强度(水印)权重排序
+                fm = getattr(self, 'feature_marker')
+                # 返回 (权重分数, 原始文本) 二元组进行复合排序
+                l.sort(key=lambda t: (fm.get_priority_score(t[0]), t[0]), reverse=reverse)
+            else:
+                l.sort(key=lambda t: float(t[0].replace('%', '').replace('+', '')), reverse=reverse)
+        except (ValueError, TypeError):
             l.sort(reverse=reverse)
 
         for index, (val, k) in enumerate(l):

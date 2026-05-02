@@ -11464,6 +11464,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if df is None:
             df = self.current_df.copy() if hasattr(self, 'current_df') else None
 
+        # ⚡ [NEW] 排序持久化保护：若用户已设置排序列，在渲染前自动对齐排序状态
+        if df is not None and not df.empty and self.sortby_col and self.sortby_col in df.columns:
+            try:
+                if self.sortby_col == 'name' and hasattr(self, 'feature_marker'):
+                    # 针对名称列，使用图标权重进行复合排序
+                    fm = self.feature_marker
+                    def _get_row_score(r):
+                        row_dict = r.to_dict()
+                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
+                        icon = fm.get_icon_for_row(row_dict)
+                        return (fm.get_priority_score(icon), row_dict.get('name', ''))
+                    
+                    # 使用辅助序列进行排序以保证性能
+                    scores = df.apply(_get_row_score, axis=1)
+                    df = df.loc[scores.sort_values(ascending=self.sortby_col_ascend).index]
+                else:
+                    # 通用列排序 (支持数值与字符串自适应)
+                    is_num = pd.api.types.is_numeric_dtype(df[self.sortby_col])
+                    if is_num:
+                        df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
+                    else:
+                        # 尝试强制数值排序（解决 Rank 等字段被识别为 Object 的问题）
+                        try:
+                            df = df.loc[pd.to_numeric(df[self.sortby_col], errors='coerce').fillna(0).sort_values(ascending=self.sortby_col_ascend).index]
+                        except:
+                            df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
+            except Exception as e:
+                logger.warning(f"[Sorting] 自动重排序失败: {e}")
+
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
             self.current_df = pd.DataFrame() if df is None else df
@@ -11619,22 +11648,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 for v in raw_values
             ]
             
-            # --- Fast Feature Marker (No Dict Rebuild) ---
-            iid = None
+            tags = ()
             if use_fm:
-                # 使用 Fast 模式：直接传 tuple 和 map
-                icon = self.feature_marker.get_icon_fast(row, feat_idx)
+                # [ULTIMATE PERF] 使用 get_marks_fast 一次性获取图标与标签
+                icon, tags = self.feature_marker.get_marks_fast(row, feat_idx)
                 if icon and name_in_show >= 0:
-                    formatted_values[name_in_show] = f"{icon} {formatted_values[name_in_show]}"
-                
-                iid = self.tree.insert("", "end", values=formatted_values)
-                
-                # 标签注入 (Fast 模式)
-                tags = self.feature_marker.get_tags_fast(row, feat_idx)
-                if tags:
-                    self.tree.item(iid, tags=tuple(tags))
-            else:
-                iid = self.tree.insert("", "end", values=formatted_values)
+                    formatted_values[name_in_show] = f"{icon}{formatted_values[name_in_show]}"
+            
+            iid = self.tree.insert("", "end", values=formatted_values, tags=tags)
 
             # 5. O(1) 记录选中项位置 (避免后续 O(N) 全表扫描)
             if self.select_code and raw_values[0] == self.select_code:
@@ -11708,37 +11729,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         elif pd.api.types.is_numeric_dtype(self.current_df[col]):
             df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
         elif col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-            # ✅ 名称排序支持图标优先级（与选股窗口逻辑一致）
-            # 生成带图标的辅助排序序列
-            def _name_icon_key(row):
-                row_data = {
-                    'percent': row.get('percent', 0),
-                    'volume': row.get('volume', 0),
-                    'category': row.get('category', ''),
-                    'price': row.get('price', row.get('trade', 0)),
-                    'high4': row.get('high4', 0),
-                    'max5': row.get('max5', 0),
-                    'max10': row.get('max10', 0),
-                    'hmax': row.get('hmax', 0),
-                    'hmax60': row.get('hmax60', 0),
-                    'low4': row.get('low4', 0),
-                    'low10': row.get('low10', 0),
-                    'low60': row.get('low60', 0),
-                    'lmin': row.get('lmin', 0),
-                    'min5': row.get('min5', 0),
-                    'cmean': row.get('cmean', 0),
-                    'hv': row.get('hv', 0),
-                    'lv': row.get('lv', 0),
-                    'llowvol': row.get('llowvol', 0),
-                    'lastdu4': row.get('lastdu4', 0)
-                }
-                icon = self.feature_marker.get_icon_for_row(row_data)
-                return f"{icon} {row['name']}" if icon else row['name']
+            # ✅ 名称排序支持图标优先级（使用分值权重进行排序）
+            fm = self.feature_marker
+            def _get_row_priority(r):
+                row_dict = r.to_dict()
+                row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
+                icon = fm.get_icon_for_row(row_dict)
+                # 返回 (分值, 名称) 二元组作为排序键
+                return (fm.get_priority_score(icon), row_dict.get('name', ''))
             
-            sort_aux = self.current_df.apply(_name_icon_key, axis=1)
-            df_sorted = self.current_df.sort_values(by=col, key=lambda _: sort_aux, ascending=not reverse)
+            # 生成排序键序列
+            sort_keys = self.current_df.apply(_get_row_priority, axis=1)
+            # 使用 loc (基于标签排序) 而非 iloc，防止索引越界
+            df_sorted = self.current_df.loc[sort_keys.sort_values(ascending=not reverse).index]
         else:
-            df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
+            # 通用列排序：检测是否为全数字字符串列
+            try:
+                # 尝试将列转为 numeric，如果成功则按数字排 (使用 loc 确保索引对齐)
+                df_sorted = self.current_df.loc[pd.to_numeric(self.current_df[col], errors='coerce').fillna(0).sort_values(ascending=not reverse).index]
+            except:
+                # 回退到字符串排序
+                df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
 
         self.refresh_tree(df_sorted, force=True)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))

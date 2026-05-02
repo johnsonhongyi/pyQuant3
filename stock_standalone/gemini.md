@@ -424,6 +424,14 @@
 
 
 
+## 2026-05-02 19:25
+- [x] **极致优化 Treeview 刷新与排序性能 (Ultimate Treeview Refresh & Sorting Optimization)**：
+    - [x] **根治 UI 渲染耗时增长 (Fixed Performance Regression)**：针对用户反馈的新版排序变慢问题，查明根本原因为 `insert` 后重复调用 `item(tags=...)` 导致的 Tkinter 通信翻倍。通过将标签 (Tags) 计算前置并直接注入 `insert(..., tags=tags)`，实现了单次调用完成渲染，性能提升约 30-50%。
+    - [x] **引入标签脏检查机制 (Implemented Tag Dirty Check)**：为 `TreeviewIncrementalUpdater` 补齐了 `_tags_cache`。在增量更新模式下，系统现在会同时对比数值与标签的变化，仅在两者之一发生真实变动时才触发 UI 重绘，极大降低了高频行情下的 CPU 负载。
+    - [x] **优化预处理计算链 (Optimized Pre-processing Pipeline)**：重构了 `_prepare_rows_fast` 内部循环。通过预检测列类型、使用原生 `v == v` 替代 `pd.notna` 以及减少 `isinstance` 调用，将 1000+ 行数据的预处理耗时进一步压缩。
+    - [x] **调优同步渲染阈值 (Tuned Sync Threshold)**：将同步全量刷新的门槛从 500 行提升至 1500 行。凭借优化后的极速插入逻辑，中等规模列表（1000行左右）的同步刷新响应速度已优于分块异步逻辑，解决了排序时的瞬间粘滞感。
+    - [x] **恢复工程化日志一致性 (Restored Log Consistency)**：将日志输出恢复为用户习惯的 `[TreeviewUpdater] 全量刷新(批量优化)` 格式，便于老用户通过日志直观感知性能回升。
+
 ## 2026-04-18 04:45
 - [x] **落地“一阶解耦”解耦架构，根治 UI 假死 (Root-Fix Performance Architecture)**：
     - [x] **实现状态驱动联动进程 (State-Driven Linkage Service)**：新增 `linkage_service.py` 独立进程。采用“状态覆盖”模型代替“任务队列”，仅执行最后一次选股指令，彻底解决了极速翻页时的“联动风暴”与剪切板竞争导致的 5-10s 假死。

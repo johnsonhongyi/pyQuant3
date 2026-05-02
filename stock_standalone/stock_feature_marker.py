@@ -47,11 +47,24 @@ class StockFeatureMarker:
         'limit_down': '🟢',
         'high_volume': '📊',
         'hot_concept': '🔥',
-        'new_high': '⬆️',
-        'new_low': '⬇️',
+        'new_high': '🔼',   # 兼容性更好的向上箭头
+        'new_low': '🔽',    # 兼容性更好的向下箭头
         'starred': '⭐',
         'alert': '⚠️',
         'bullish_trend': '🚀',   # [NEW] 强势波段标识
+    }
+    
+    # 强度优先级配置 (分值越高越靠前)
+    PRIORITY = {
+        '🚀': 1000,  # 强势波段
+        '🔼': 800,   # [HIGH] 突破/创新高 (用户特别关注)
+        '🔴': 500,   # 涨停
+        '⚠️': 300,   # 预警
+        '🔥': 100,   # 热门概念
+        '📊': 50,    # 异动放量
+        '⭐': 20,    # 收藏
+        '🔽': -10,   # 破位
+        '🟢': -500,  # 跌停
     }
     
     def __init__(self, tree, enable_colors=True):
@@ -74,14 +87,34 @@ class StockFeatureMarker:
                 background=colors.get('bg', ''),
                 foreground=colors.get('fg', '')
             )
-        # [NEW] 🚀 确保强势趋势样式在所有列表(主表/Top10)中均全局生效
-        self.tree.tag_configure("bullish_trend", background="#FFF0F5", font=("Arial", 10, "bold"))
+        # # [NEW] 🚀 确保强势趋势样式在所有列表(主表/Top10)中均全局生效
+        # self.tree.tag_configure("bullish_trend", background="#FFF0F5", font=("Arial", 10, "bold"))
         
         logger.info(f"✅ 已配置{len(self.COLORS)}种标记颜色")
     
     def set_enable_colors(self, enable: bool):
         """设置是否启用颜色显示"""
         self.enable_colors = enable
+        
+    def get_priority_score(self, text: str) -> int:
+        """
+        计算图标强度分数
+        
+        Args:
+            text: 包含图标的文本(如: "🚀🔴 飞马国际")
+            
+        Returns:
+            int: 强度总分
+        """
+        if not text: return 0
+        score = 0
+        # 遍历优先级字典，寻找文本中的图标
+        for icon, weight in self.PRIORITY.items():
+            if icon in text:
+                # 统计出现次数 (部分图标可能重复出现)
+                count = text.count(icon)
+                score += weight * count
+        return score
     
     def get_tags_for_row(self, row_data: dict) -> list:
         """
@@ -170,6 +203,13 @@ class StockFeatureMarker:
         if ma5 and ma20 and ma60:
             if ma5 > ma20 > ma60 and price > ma60:
                 tags.append('bullish_trend')
+        
+        # 4. 突破判断 (New High)
+        hmax = row_tuple[feat_idx['hmax']] if 'hmax' in feat_idx else 0
+        max5 = row_tuple[feat_idx['max5']] if 'max5' in feat_idx else 0
+        if price > 0:
+            if (hmax > 0 and price >= hmax) or (max5 > 0 and price >= max5):
+                tags.append('new_high')
                 
         return tags
     
@@ -243,6 +283,76 @@ class StockFeatureMarker:
             
         return ''.join(icons)
         
+
+    def get_marks_fast(self, row_tuple, feat_idx: dict) -> tuple:
+        """
+        [ULTIMATE PERF] 一次性获取图标与标签
+        合并了 get_icon_fast 和 get_tags_fast 的逻辑，消除重复的数据提取和条件判定。
+        Returns: (icon_str, tags_tuple)
+        """
+        tags = []
+        icons = []
+        
+        # 1. 提取核心指标
+        p_idx = feat_idx.get('price') or feat_idx.get('trade')
+        price = row_tuple[p_idx] if p_idx is not None else 0
+        percent = row_tuple[feat_idx['percent']] if 'percent' in feat_idx else 0
+        percent = 0 if percent == -100 else percent
+        volume = row_tuple[feat_idx['volume']] if 'volume' in feat_idx else 0
+        
+        # 2. 涨跌停判定 (共享逻辑)
+        if percent >= 6 and volume > 2:
+            icons.append(self.ICONS['limit_up'])
+            tags.append('limit_up')
+        elif percent >= 4.0:
+            tags.append('near_limit_up')
+        elif percent <= -9.9 and percent > -31:
+            icons.append(self.ICONS['limit_down'])
+            tags.append('limit_down')
+        elif percent <= -7.0:
+            tags.append('near_limit_down')
+            
+        # 3. 成交量判定 (共享逻辑)
+        if volume >= 5.0:
+            # [FIX] 修复 KeyError: 'ultra_high_volume'，图标统一使用 high_volume
+            icons.append(self.ICONS['high_volume'])
+            tags.append('ultra_high_volume')
+        elif volume >= 2.0:
+            icons.append(self.ICONS['high_volume'])
+            tags.append('high_volume')
+            
+        # 4. 趋势判定 (MA)
+        ma5 = row_tuple[feat_idx['ma5d']] if 'ma5d' in feat_idx else None
+        ma20 = row_tuple[feat_idx['ma20d']] if 'ma20d' in feat_idx else None
+        ma60 = row_tuple[feat_idx['ma60d']] if 'ma60d' in feat_idx else None
+        if ma5 and ma20 and ma60:
+            if ma5 > ma20 > ma60 and price > ma60:
+                icons.insert(0, self.ICONS['bullish_trend'])
+                tags.append('bullish_trend')
+                
+        # 5. 突破与新低判定
+        hmax = row_tuple[feat_idx['hmax']] if 'hmax' in feat_idx else 0
+        max5 = row_tuple[feat_idx['max5']] if 'max5' in feat_idx else 0
+        if price > 0:
+            if (hmax > 0 and price >= hmax) or (max5 > 0 and price >= max5):
+                icons.append(self.ICONS['new_high'])
+                tags.append('new_high')
+            
+            min5 = row_tuple[feat_idx['min5']] if 'min5' in feat_idx else 0
+            lmin = row_tuple[feat_idx['lmin']] if 'lmin' in feat_idx else 0
+            if (lmin > 0 and price <= lmin) or (min5 > 0 and price <= min5):
+                icons.append(self.ICONS['new_low'])
+                
+        # 6. 其它
+        lastdu4 = row_tuple[feat_idx['lastdu4']] if 'lastdu4' in feat_idx else 0
+        if lastdu4 >= 3:
+            icons.append(self.ICONS['starred'])
+            
+        category = row_tuple[feat_idx['category']] if 'category' in feat_idx else ''
+        if category and self._is_hot_concept(category):
+            icons.append(self.ICONS['hot_concept'])
+            
+        return "".join(icons), tuple(tags)
 
     def get_icon_fast(self, row_tuple, feat_idx: dict) -> str:
         """
