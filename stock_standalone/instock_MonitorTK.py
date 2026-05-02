@@ -11442,7 +11442,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def refresh_tree(self, df=None, force=False):
         """刷新 TreeView，保证列和数据严格对齐。 (高性能版：强制节流)"""
         start_time = time.time()
-
+        
         # ⚡ [OPTIMIZATION] 针对大列表 (5000+行) 强制节流，防止主线程被刷新操作占满导致卡死
         if not hasattr(self, '_last_tree_refresh_time'):
             self._last_tree_refresh_time = 0
@@ -11575,86 +11575,77 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.update_status()
     
     def _refresh_tree_traditional(self, df, cols_to_show):
-        """传统的全量刷新方式(作为增量更新的备用方案)"""
-        cols = self.tree["displaycolumns"]
-        self.tree["displaycolumns"] = ()
-
-        # 清空所有行
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
+        """[PERF] 传统的全量刷新方式 (作为增量更新的备用方案)"""
+        # ⚡ [PERF] True 95+ Ultimate Version: Zero-Copy + Fast-Marker + Atomic GUI
         
-        # 重新插入所有行
-        for idx, row in df.iterrows():
-            values = [row.get(col, "") for col in cols_to_show]
-            
-            # ✅ 如果启用了特征标记,在name列前添加图标
-            if self._use_feature_marking and hasattr(self, 'feature_marker'):
-                try:
-                    # 准备行数据用于特征检测
-                    row_data = {
-                        'percent': row.get('percent', 0),
-                        'volume': row.get('volume', 0),
-                        'category': row.get('category', ''),
-                        'price': row.get('trade', row.get('close', 0)),
-                        'high4': row.get('high4', 0),
-                        'max5': row.get('max5', 0),
-                        'max10': row.get('max10', 0),
-                        'hmax': row.get('hmax', 0),
-                        'hmax60': row.get('hmax60', 0),
-                        'low4': row.get('low4', 0),
-                        'low10': row.get('low10', 0),
-                        'low60': row.get('low60', 0),
-                        'lmin': row.get('lmin', 0),
-                        'min5': row.get('min5', 0),
-                        'cmean': row.get('cmean', 0),
-                        'hv': row.get('hv', 0),
-                        'lv': row.get('lv', 0),
-                        'llowvol': row.get('llowvol', 0),
-                        'lastdu4': row.get('lastdu4', 0),
-                        # [NEW] 补全趋势识别关键字段
-                        'ma5d': row.get('ma5d', 0),
-                        'ma20d': row.get('ma20d', 0),
-                        'ma60d': row.get('ma60d', 0)
-                    }
-                    
-                    # 获取图标
-                    icon = self.feature_marker.get_icon_for_row(row_data)
-                    if icon:
-                        # 在name列前添加图标(假设name在第2列,index 1)
-                        name_idx = cols_to_show.index('name') if 'name' in cols_to_show else -1
-                        if name_idx >= 0 and name_idx < len(values):
-                            values[name_idx] = f"{icon} {values[name_idx]}"
-                except Exception as e:
-                    logger.debug(f"添加图标失败: {e}")
-            
-            # 插入行
-            iid = self.tree.insert("", "end", values=values)
-            
-            # ✅ 应用颜色标记
-            if self._use_feature_marking and hasattr(self, 'feature_marker'):
-                try:
-                    row_data = {
-                        'percent': row.get('percent', 0),
-                        'volume': row.get('volume', 0),
-                        'category': row.get('category', '')
-                    }
-                    # 获取并应用标签(不添加图标,因为已经在values中添加了)
-                    tags = self.feature_marker.get_tags_for_row(row_data)
-                    if tags:
-                        self.tree.item(iid, tags=tuple(tags))
-                except Exception as e:
-                    logger.debug(f"应用颜色标记失败: {e}")
+        # 1. 资源隔离与列隐藏 (GUI 批处理 - 仅操作一次)
+        try:
+            saved_display = self.tree["displaycolumns"]
+            self.tree["displaycolumns"] = ()
+        except Exception:
+            saved_display = "#all"
 
-        self.tree["displaycolumns"] = cols
-        # 恢复选中状态
-        if self.select_code:
-            for iid in self.tree.get_children():
-                values = self.tree.item(iid, "values")
-                if values and values[0] == self.select_code:
-                    self.tree.selection_set(iid)
-                    self.tree.focus(iid)
-                    self.tree.see(iid)
-                    break
+        # 2. 原子级清空 (Single Tcl Call)
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+
+        # 3. 准备列映射 (Zero-Copy 视图)
+        f_cols_raw = ['percent', 'volume', 'category', 'trade', 'close', 'high4', 'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10', 'low60', 'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol', 'lastdu4', 'ma5d', 'ma20d', 'ma60d']
+        feature_cols = [c for c in f_cols_raw if c in df.columns]
+        
+        # 聚合显示列与特征列，确保 row_data 与 values 严格同源
+        all_cols = list(dict.fromkeys(cols_to_show + feature_cols))
+        
+        # 💡 [ZERO-COPY] 不做 full copy, 仅做 column view
+        df_view = df[all_cols]
+        
+        # 建立索引映射
+        col_map = {col: i for i, col in enumerate(all_cols)}
+        show_idx = [col_map[c] for c in cols_to_show]
+        feat_idx = {c: col_map[c] for c in feature_cols}
+        name_in_show = cols_to_show.index('name') if 'name' in cols_to_show else -1
+        
+        use_fm = self._use_feature_marking and hasattr(self, 'feature_marker')
+        target_iid = None
+        
+        # 4. 极速单流插入 (itertuples 是 Pandas 最快迭代器)
+        for row in df_view.itertuples(index=False):
+            # 获取显示值 (Lazy 处理 NaN)
+            raw_values = [row[i] for i in show_idx]
+            # 💡 Treeview 插入浮点数很慢，且无法处理 NaN。此处预格式化。
+            formatted_values = [
+                f"{v:.2f}" if isinstance(v, (float, np.floating)) and pd.notna(v) else (v if pd.notna(v) else "")
+                for v in raw_values
+            ]
+            
+            # --- Fast Feature Marker (No Dict Rebuild) ---
+            iid = None
+            if use_fm:
+                # 使用 Fast 模式：直接传 tuple 和 map
+                icon = self.feature_marker.get_icon_fast(row, feat_idx)
+                if icon and name_in_show >= 0:
+                    formatted_values[name_in_show] = f"{icon} {formatted_values[name_in_show]}"
+                
+                iid = self.tree.insert("", "end", values=formatted_values)
+                
+                # 标签注入 (Fast 模式)
+                tags = self.feature_marker.get_tags_fast(row, feat_idx)
+                if tags:
+                    self.tree.item(iid, tags=tuple(tags))
+            else:
+                iid = self.tree.insert("", "end", values=formatted_values)
+
+            # 5. O(1) 记录选中项位置 (避免后续 O(N) 全表扫描)
+            if self.select_code and raw_values[0] == self.select_code:
+                target_iid = iid
+
+        # 6. 恢复渲染与状态恢复
+        self.tree["displaycolumns"] = saved_display
+        if target_iid:
+            self.tree.selection_set(target_iid)
+            self.tree.focus(target_iid)
+            self.tree.see(target_iid)
 
 
     def adjust_column_widths(self):

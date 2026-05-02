@@ -131,6 +131,47 @@ class StockFeatureMarker:
                 tags.append('bullish_trend')
                 
         return tags
+
+    def get_tags_fast(self, row_tuple, feat_idx: dict) -> list:
+        """
+        [PERF-OPTIMIZED] 极速标签获取
+        直接使用元组和索引映射，消除每行 O(k) 的字典构造开销。
+        """
+        tags = []
+        
+        # 提取核心指标 (从索引映射)
+        percent = row_tuple[feat_idx['percent']] if 'percent' in feat_idx else 0
+        volume = row_tuple[feat_idx['volume']] if 'volume' in feat_idx else 0
+        
+        # 1. 涨跌停与强势判断
+        if percent >= 6 and volume > 2:
+            tags.append('limit_up')
+        elif percent >= 4.0:
+            tags.append('near_limit_up')
+        elif percent <= -9.9:
+            tags.append('limit_down')
+        elif percent <= -7.0:
+            tags.append('near_limit_down')
+        
+        # 2. 成交量判断
+        if volume >= 5.0:
+            tags.append('ultra_high_volume')
+        elif volume >= 2.0:
+            tags.append('high_volume')
+        
+        # 3. 趋势排列 (MA5 > MA20 > MA60)
+        p_idx = feat_idx.get('price') or feat_idx.get('trade')
+        price = row_tuple[p_idx] if p_idx is not None else 0
+        
+        ma5 = row_tuple[feat_idx['ma5d']] if 'ma5d' in feat_idx else None
+        ma20 = row_tuple[feat_idx['ma20d']] if 'ma20d' in feat_idx else None
+        ma60 = row_tuple[feat_idx['ma60d']] if 'ma60d' in feat_idx else None
+        
+        if ma5 and ma20 and ma60:
+            if ma5 > ma20 > ma60 and price > ma60:
+                tags.append('bullish_trend')
+                
+        return tags
     
     def _is_hot_concept(self, category: str) -> bool:
         """
@@ -198,6 +239,69 @@ class StockFeatureMarker:
         if ma5 and ma20 and ma60:
             if ma5 > ma20 > ma60 and price > ma60:
                 # 注入火箭图标，并确保排在较前位置（优先级高）
+                icons.insert(0, self.ICONS['bullish_trend'])
+            
+        return ''.join(icons)
+        
+
+    def get_icon_fast(self, row_tuple, feat_idx: dict) -> str:
+        """
+        [PERF-OPTIMIZED] 极速图标获取
+        直接操作元组，避免热点循环内的 Python 对象装箱。
+        """
+        icons = []
+        
+        # 提取核心数据点
+        percent = row_tuple[feat_idx['percent']] if 'percent' in feat_idx else 0
+        percent = 0 if percent == -100 else percent
+        volume = row_tuple[feat_idx['volume']] if 'volume' in feat_idx else 0
+        
+        p_idx = feat_idx.get('price') or feat_idx.get('trade')
+        price = row_tuple[p_idx] if p_idx is not None else 0
+        
+        max5 = row_tuple[feat_idx['max5']] if 'max5' in feat_idx else 0
+        hmax = row_tuple[feat_idx['hmax']] if 'hmax' in feat_idx else 0
+        min5 = row_tuple[feat_idx['min5']] if 'min5' in feat_idx else 0
+        lmin = row_tuple[feat_idx['lmin']] if 'lmin' in feat_idx else 0
+        lastdu4 = row_tuple[feat_idx['lastdu4']] if 'lastdu4' in feat_idx else 0
+        category = row_tuple[feat_idx['category']] if 'category' in feat_idx else ''
+
+        # 1. 强势/涨停图标 (🔴)
+        if percent >= 6 and volume > 2:
+            icons.append(self.ICONS['limit_up'])
+        
+        # 2. 弱势/跌停图标 (🟢)
+        if percent <= -9.9 and percent > -31:
+            icons.append(self.ICONS['limit_down'])
+        
+        # 3. 成交量异常 (📊)
+        if volume >= 2.0:
+            icons.append(self.ICONS['high_volume'])
+        
+        # 4. 概念热点 (🔥)
+        if category and self._is_hot_concept(category):
+            icons.append(self.ICONS['hot_concept'])
+        
+        # 5. 突破新高 (⬆️)
+        if price > 0:
+            if (hmax > 0 and price >= hmax) or (max5 > 0 and price >= max5):
+                icons.append(self.ICONS['new_high'])
+
+        # 6. 跌破新低 (⬇️)
+        if price > 0:
+            if (lmin > 0 and price <= lmin) or (min5 > 0 and price <= min5):
+                icons.append(self.ICONS['new_low'])
+
+        # 7. 连阳/星标 (⭐)
+        if lastdu4 >= 3:
+            icons.append(self.ICONS['starred'])
+
+        # 9. 均线趋势识别
+        ma5 = row_tuple[feat_idx['ma5d']] if 'ma5d' in feat_idx else None
+        ma20 = row_tuple[feat_idx['ma20d']] if 'ma20d' in feat_idx else None
+        ma60 = row_tuple[feat_idx['ma60d']] if 'ma60d' in feat_idx else None
+        if ma5 and ma20 and ma60:
+            if ma5 > ma20 > ma60 and price > ma60:
                 icons.insert(0, self.ICONS['bullish_trend'])
             
         return ''.join(icons)
