@@ -7274,9 +7274,13 @@ class MainWindow(QMainWindow, WindowMixin):
         # index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","588930":"科创ETF"}
         index_map = {"999999": " 上证", "399001": " 深证", "399006": " 创业","899050": " 北证50" ,"159915": " 创ETF","999688":"科创50"}
 
-        for code, name in index_map.items():
-            act = QAction(name, self)
-            act.setToolTip(f"一键直达 {name} ({code})")
+        for i, (code, name) in enumerate(index_map.items()):
+            shortcut_str = f"F{3 + i}"
+            display_name = f"{name}({shortcut_str})"
+            act = QAction(display_name, self)
+            act.setShortcut(QKeySequence(shortcut_str))
+            act.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+            act.setToolTip(f"一键直达 {name.strip()} ({code}) [{shortcut_str}]")
             # 使用 partial 或 lambda 绑定 code
             act.triggered.connect(partial(self.load_stock_by_code, code))
             menubar.addAction(act)

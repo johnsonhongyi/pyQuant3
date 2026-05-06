@@ -3951,8 +3951,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if hasattr(self, 'detector') and self.detector:
             is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
         
-        # 回测模式下使用 1 秒防抖，实盘模式使用 10 分钟防抖
-        delay = 1000 if is_simulation else 600000
+        # 回测模式下使用 10 分钟防抖，实盘模式使用 1 小时防抖
+        delay = 600000 if is_simulation else 3600000
         self._save_ui_timer.start(delay)
 
     def _save_ui_state(self,force=False):
