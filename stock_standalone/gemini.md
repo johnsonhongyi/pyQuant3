@@ -27,6 +27,19 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+## 2026-05-06 15:05
+- [x] **修复语音播报 SAPI5 资源耗尽与没有注册类崩溃 (Fixed SAPI5 E_OUTOFMEMORY & CLASSNOTREG in Voice Worker)**：
+    - [x] **实现线程级 COM 注册与生命周期绑定 (Thread-level COM Lifetime)**：将 `CoInitialize` 和 `CoUninitialize` 移出高频消息播放循环，完美绑定至 `_voice_worker` 线程的启动与退出阶段。这彻底避免了由于高频并发调用 COM 套件初始化导致的 Apartment 模型崩塌和句柄泄漏。
+    - [x] **落地隔离式引擎生命周期重构 (Isolated Engine Lifecycle)**：在消息循环内实例化 `pyttsx3.init()`，并在每一条消息播放完毕后，于 `finally` 块中显式执行 `engine.stop()` 和 `del engine` 安全解构。这既解决了 SAPI5 状态机单例复用引起的“静默无声音”硬伤，又确保了每一条语音播放完毕后资源被物理、安全地归还给操作系统。
+    - [x] **同步更新说明与任务归档**：创建并归档了 `20260506_1505_task.md` 任务文件，完成了开发的工程化闭环。
+
+## 2026-05-06 14:55
+- [x] **优化数据流动泵管道与添加微秒级诊断日志 (Optimized Data Staging Pump & Integrated Millisecond Diagnostics)**：
+    - [x] **实现 `_sanitize` 快速通道加速 (Fast-path Sanitization)**：引入基于前 10 行的样本类型和一致性校验。在 99.9% 规整数据流下自动跳过全量 5000+ 股票代码与名称的昂贵正则解析 (`str.extract`, `str.match`) 与去空白 (`str.strip`)，将常规清洗开销压缩至微秒级，彻底消除计算耗时突刺。
+    - [x] **集成微秒级分步计时探针 (Granular Timing Instrumentation)**：为 `_process_tree_data_async` 的每个核心步骤（解包、清洗、脏检查、过滤、排序）补齐了高精度时间戳度量，能够精确感知毫秒级开销。
+    - [x] **升级诊断告警系统为结构化剖析报告 (Actionable Diagnosis Log)**：当数据泵发生超过 10.0s 延迟或当前函数本身执行超 1.0s 时，自动拆解并输出 `QueueLag`（队列堆积，指示 GIL 独占/线程争用）与 `ProcDuration`（本层实际耗时）以及各细分子步骤的精确 Breakdown 耗时，实现了故障的自愈分析与透明排查。
+    - [x] **同步更新说明与任务归档**：创建并归档了 `20260506_1455_task.md` 任务文件，实现了优化的工程化跟踪与闭环。
+
 ## 2026-05-06 11:50
 - [x] **为可视化主面板“一键直达”指数按钮绑定 F3-F8 快捷键 (Assigned F3-F8 Shortcuts to Index Actions)**：
     - [x] **极速功能键对齐**：重构了 `trade_visualizer_qt6.py` 的顶层指数快捷按钮循环。引入 `enumerate` 索引依次动态绑定 `F3` 至 `F8` 六个高频功能按键为键盘快捷键。

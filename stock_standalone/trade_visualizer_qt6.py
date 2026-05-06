@@ -181,6 +181,15 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
     
     logger.debug("[VoiceProcess] Worker started")
     
+    com_initialized = False
+    if pythoncom:
+        try:
+            pythoncom.CoInitialize()
+            com_initialized = True
+        except Exception as e:
+            logger.error(f"[VoiceProcess] CoInitialize error: {e}")
+            
+    engine = None
     last_speech_end_ts = 0.0 # [FIX] Timestamp filtering
     
     while stop_flag.value:
@@ -236,23 +245,16 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
 
             engine = None
             try:
-                if pythoncom:
-                    pythoncom.CoInitialize()
-                
-                # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次真独立实例化 COM 对象
-                # 避免回调事件堆积，并防止使用被 CoUninitialize 毁掉的僵尸对象导致崩溃
+                # [FIX] 强行清除 pyttsx3 的缓存引擎，确保独立实例化 COM 对象
                 if hasattr(pyttsx3, '_activeEngines'):
                     pyttsx3._activeEngines.clear()
-                    
                 engine = pyttsx3.init()
                 rate = engine.getProperty('rate')
                 logger.debug(f'rate:{rate}')
                 if isinstance(rate, (int, float)):
-                    # engine.setProperty('rate', rate + 40)
                     engine.setProperty('rate', cct.voice_rate)
                     engine.setProperty('volume', cct.voice_volume)
-
-                    
+                
                 def check_abort(name=None, location=None, length=None):
                     if (abort_event and abort_event.is_set()) or not stop_flag.value:
                         try:
@@ -263,7 +265,7 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
 
                 engine.connect('started-utterance', check_abort)
                 engine.connect('started-word', check_abort)
-                
+
                 # --- [NEW] 启动前检查 ---
                 if not (abort_event and abort_event.is_set()):
                     engine.say(speech_text)
@@ -271,10 +273,6 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 
                 # [FIX] Update completion timestamp
                 last_speech_end_ts = time.time()
-                
-                # 播报完后清除 abort 标记，允许下一条 (如果是通过 abort() 清除的，speak() 会负责 clear)
-                # self.abort_event.clear() 
-                
                 time.sleep(0.1)
             except Exception as e:
                 logger.error(f"[VoiceProcess] Engine error: {e}")
@@ -282,20 +280,27 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 if engine:
                     try:
                         engine.stop()
-                        del engine
                     except:
                         pass
-                if pythoncom:
-                    try:
-                        pythoncom.CoUninitialize()
-                    except:
-                        pass
+                    del engine
+                    engine = None
                     
         except Exception as e:
             logger.debug(f"[VoiceProcess] Loop error: {e}")
             
+    if engine:
+        try:
+            engine.stop()
+            del engine
+        except:
+            pass
+    if com_initialized and pythoncom:
+        try:
+            pythoncom.CoUninitialize()
+        except:
+            pass
+            
     logger.info("✅ Voice worker process exited cleanly")
-    
     logger.debug("[VoiceProcess] Worker stopped")
 
 

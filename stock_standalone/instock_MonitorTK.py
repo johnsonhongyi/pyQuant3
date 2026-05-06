@@ -4115,6 +4115,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 df_raw    = data_packet
                 snap_time = t_pump_start
 
+            t_unpack = time.time()
+
             # 2. 代码与数据净化 (轻量)
             def _sanitize(d):
                 if d is None: return None
@@ -4123,24 +4125,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if 'code' not in d.columns:
                     d['code'] = d.index.astype(str)
                 if d['code'].dtype == 'object':
-                    ext = d['code'].str.extract(r'(\d{6})')[0]
-                    if ext.isna().any():
-                        ext = ext.fillna(d['code'].str.extract(r'(\d+)')[0])
-                    d['code'] = ext.fillna(d['code'])
+                    # 快速通道：如果前10个代码已是标准6位纯数字，直接跳过正则提取
+                    sample_codes = d['code'].iloc[:10] if len(d) >= 10 else d['code']
+                    needs_extract = not all(isinstance(x, str) and len(x) == 6 and x.isdigit() for x in sample_codes)
+                    if needs_extract:
+                        ext = d['code'].str.extract(r'(\d{6})')[0]
+                        if ext.isna().any():
+                            ext = ext.fillna(d['code'].str.extract(r'(\d+)')[0])
+                        d['code'] = ext.fillna(d['code'])
                 
                 # 过滤掉无效数据（空名称、无效代码等），确保 df_all 仅包含有效个股
                 if 'name' in d.columns:
-                    d['name'] = d['name'].astype(str).str.strip()
+                    sample_names = d['name'].iloc[:10] if len(d) >= 10 else d['name']
+                    needs_strip = not all(isinstance(x, str) and x.strip() == x for x in sample_names)
+                    if needs_strip:
+                        d['name'] = d['name'].astype(str).str.strip()
                     valid_name_mask = (~d['name'].isna()) & (d['name'] != '') & (~d['name'].isin(['nan', 'NaN', 'None', 'null', 'δ֪', '未知']))
                     d = d[valid_name_mask]
                 
                 if 'code' in d.columns:
-                    valid_code_mask = d['code'].astype(str).str.match(r'^\d{6}$') & (d['code'] != '000000')
-                    d = d[valid_code_mask]
+                    sample_codes = d['code'].iloc[:10] if len(d) >= 10 else d['code']
+                    needs_match_check = not all(isinstance(x, str) and len(x) == 6 and x.isdigit() and x != '000000' for x in sample_codes)
+                    if needs_match_check:
+                        valid_code_mask = d['code'].astype(str).str.match(r'^\d{6}$') & (d['code'] != '000000')
+                        d = d[valid_code_mask]
                     
                 return d
 
             full_df = _sanitize(full_df)
+            t_sanitize1 = time.time()
+
             if full_df is None or full_df.empty:
                 return
 
@@ -4155,6 +4169,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
             self._last_processed_df_hash = df_hash
 
+            t_hash = time.time()
+
             # 4. 过滤/查询 (轻量)
             if query:
                 from query_engine_util import query_engine
@@ -4165,6 +4181,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 df = _sanitize(df_raw) if df_raw is not None else full_df.copy()
 
+            t_filter = time.time()
+
             # 5. 排序 (轻量)
             cur_res = self.global_values.getkey("resample") or 'd'
             if df is not None and not df.empty:
@@ -4174,11 +4192,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
 
+            t_sort = time.time()
+
             # 6. Pump 延迟诊断
-            pump_lag = time.time() - snap_time
-            logger.info(f"[PumpLag] {pump_lag:.3f}s")
-            if pump_lag > 1.0:
-                logger.warning(f"[PumpLag] Slow pump: {pump_lag:.3f}s")
+            t_pump_end = time.time()
+            pump_lag = t_pump_end - snap_time
+            proc_duration = t_pump_end - t_pump_start
+
+            if pump_lag > 10.0 or proc_duration > 1.0:
+                logger.warning(
+                    f"[PumpLag] Slow pump: {pump_lag:.3f}s (QueueLag: {t_pump_start - snap_time:.3f}s, ProcDuration: {proc_duration:.3f}s) | "
+                    f"Breakdown: Unpack={t_unpack - t_pump_start:.3f}s, Sanitize1={t_sanitize1 - t_unpack:.3f}s, "
+                    f"Hash={t_hash - t_sanitize1:.3f}s, Filter={t_filter - t_hash:.3f}s, Sort={t_sort - t_filter:.3f}s"
+                )
 
             # 7. Compute 风暴限流 (防止 compute_executor 队列爆炸)
             max_fl = getattr(self, '_compute_max_inflight', 5)
