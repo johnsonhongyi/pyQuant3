@@ -27,7 +27,26 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+## 2026-05-06 10:16
+- [x] **优化赛马面板详情子窗口整理布局与三行高度展示 (Optimized Detail Windows Layout & 3-Row Compact Display)**：
+    - [x] **精缩默认展示行数**：在 `_arrange_detail_windows` 整理函数中，将默认子窗口高度限制 `min_h` 由 `210px` 压缩至 `180px`。完美实现了整理子窗口后，外观极致紧凑，且默认恰好完整清晰展示 3 行个股成分股数据的视觉诉求。
+    - [x] **实现多列右向自动换行磁吸联排**：引入了 `curr_y + target_h > limit_y_bottom + 10` 的临界值溢出换列算法。当垂直排列的一列子窗口累加超出主窗口或屏幕可用底界时，系统能够完美、流畅地自动将下一个子窗口向右平移一整列宽度（`col_x += target_w + 2`），并从顶部起点（`col_base_y`）自上而下继续对齐排列。彻底根治了旧版本中多窗口溢出底界后在同一底部位置“死锁堆叠重合”的交互硬伤。
+    - [x] **同步创建并归档任务清单**：创建了 [20260506_1016_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260506_1016_task.md) 任务清单文件，实现了本次开发的工程化跟踪。
 
+## 2026-05-06 10:10
+- [x] **修复赛马面板探测器僵尸股净化与数量严密对齐 (Fixed Racing Detector Stock Count & Purged Invalid Placeholders)**：
+    - [x] **改造个股元数据注册校验 (`register_codes`)**：在元数据注册和更新的热循环中，加入了针对 `name` 字段的精密合法性过滤。过滤掉所有空名称、`nan`/`NaN`/`None`/`null`/`δ֪`/`未知`，以及代码与名称相同的无效占位股。
+    - [x] **实现启动与定期全量净化 (Startup & Periodic Pure Purge)**：引入了 `_cleanup_counter == 1`（首次运行启动）和 `_cleanup_counter % 100 == 0`（定期运行）的全量脏键清洗机制。物理清除了在 `self._tick_series`、`self._global_snap_cache`、`self._code_index` 和逆向 `self._name_index` 缓存中的全部无效或无名称占位股票。
+    - [x] **升级板块地图重建过滤 (`_do_rebuild_sector_map`)**：在板块重构的数据行解析处同步加持了 `name` 字段校验，从根本上防止了退市股或无名称僵尸股的代码在重建时污染板块与个股的层级映射关系。
+    - [x] **净化会话与快照恢复数据流 (`load_persistent_data` / `load_from_snapshot`)**：针对 `load_persistent_data` 中基础得分、meta_cols 列式元数据以及 legacy meta_data 加载，以及 `load_from_snapshot` 阶段的 stock_scores 临时 TickSeries 构造，全链条植入了代码与名称合法性双重防线，防止历史幽灵股随持久化会话被意外拉起和复活。
+    - [x] **同步创建并归档任务清单**：创建了 [20260506_1010_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260506_1010_task.md) 任务清单文件，实现了本次开发的工程化跟踪。
+
+## 2026-05-06 09:55
+- [x] **修复竞价赛马面板个股总数不对齐及无效占位数据问题 (Fixed Stock Count Discrepancy & Sanitized Invalid Placeholders in df_all)**：
+    - [x] **源头级个股数据净化**：在 `instock_MonitorTK.py` 的异步行情接收与净化函数 `_sanitize` 内部，在对数据进行代码格式校对后，加入了对股票名称、代码有效性的精密拦截过滤逻辑。
+    - [x] **过滤异常占位字符**：过滤掉所有 `name` 为空、NaN、或者为 `nan`/`NaN`/`None`/`null`/`δ֪`/`未知` 的占位数据，并自动去除了名字两端的多余空白；过滤掉所有长度不为6位数字，或为 `000000` 虚无代码等无效代码的数据。
+    - [x] **全链条无缝数据对齐**：此举从数据最底层源头完成了数据净化，使下游面板（包括竞价赛马板块、领军个股列表、以及重点观察池）在同步 `self.df_all` 时，均能实现 100% 正规有效 A 股的严密对齐（完美对齐至5493只个股），彻底根治了 5583 vs 5493 数量不对称的问题。
+    - [x] **同步创建并归档任务清单**：创建了 [20260506_0955_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260506_0955_task.md) 任务清单文件，实现了本次开发的工程化跟踪。
 
 ## 2026-05-06 09:28
 - [x] **修复 DataHub 导入异常与冗余调用 (Fixed DataHub Service Import Error & Redundant Call)**：

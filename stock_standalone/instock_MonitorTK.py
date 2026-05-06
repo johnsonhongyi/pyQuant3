@@ -4115,7 +4115,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 df_raw    = data_packet
                 snap_time = t_pump_start
 
-            # 2. 代码净化 (轻量)
+            # 2. 代码与数据净化 (轻量)
             def _sanitize(d):
                 if d is None: return None
                 d = d.copy()
@@ -4127,6 +4127,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if ext.isna().any():
                         ext = ext.fillna(d['code'].str.extract(r'(\d+)')[0])
                     d['code'] = ext.fillna(d['code'])
+                
+                # 过滤掉无效数据（空名称、无效代码等），确保 df_all 仅包含有效个股
+                if 'name' in d.columns:
+                    d['name'] = d['name'].astype(str).str.strip()
+                    valid_name_mask = (~d['name'].isna()) & (d['name'] != '') & (~d['name'].isin(['nan', 'NaN', 'None', 'null', 'δ֪', '未知']))
+                    d = d[valid_name_mask]
+                
+                if 'code' in d.columns:
+                    valid_code_mask = d['code'].astype(str).str.match(r'^\d{6}$') & (d['code'] != '000000')
+                    d = d[valid_code_mask]
+                    
                 return d
 
             full_df = _sanitize(full_df)
