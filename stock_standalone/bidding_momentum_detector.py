@@ -696,7 +696,11 @@ class BiddingMomentumDetector:
             if code == '000000' or not code or len(code) != 6: continue
             
             row_data = row._asdict()
-            name = str(row_data.get('name', code))
+            name = str(row_data.get('name', '')).strip()
+            
+            # [🚀 SANITIZATION] 过滤空名称、占位符名称等无效个股
+            if not name or name in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                continue
 
             with self._lock:
                 # 维护极限性能索引
@@ -711,19 +715,27 @@ class BiddingMomentumDetector:
                 else:
                     self._tick_series[code].update_meta(row_data)
 
-        # [🚀 肃清冗余] 定期清理 _tick_series 中非标准 6 位格式的脏数据 (如带后缀的残余)
+        # [🚀 肃清冗余] 定期清理 _tick_series 中非标准 6 位格式的脏数据 (如带后缀的残余) 和无有效名称的占位股
         # 每 100 次注册执行一次，防止 CPU 抖动
         if not hasattr(self, '_cleanup_counter'): self._cleanup_counter = 0
         self._cleanup_counter += 1
-        if self._cleanup_counter % 100 == 0:
+        if self._cleanup_counter % 100 == 0 or self._cleanup_counter == 1:
             with self._lock:
-                dirty_keys = [k for k in self._tick_series.keys() if len(str(k)) != 6 or not str(k).isdigit()]
+                dirty_keys = [
+                    k for k, ts in self._tick_series.items()
+                    if len(str(k)) != 6 or not str(k).isdigit() or str(k) == '000000' or 
+                    not ts.name or str(ts.name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', str(k)]
+                ]
                 if dirty_keys:
-                    logger.info(f"🧹 [Detector] 清理了 {len(dirty_keys)} 个非标代码键: {dirty_keys[:5]}...")
+                    logger.info(f"🧹 [Detector] 清理了 {len(dirty_keys)} 个非标或无有效名称的脏代码键: {dirty_keys[:5]}...")
                     for k in dirty_keys:
                         self._tick_series.pop(k, None)
                         self._global_snap_cache.pop(k, None)
                         if hasattr(self, '_code_index'): self._code_index.pop(k, None)
+                        # 同时从逆向名称索引清理
+                        name_to_del = [n for n, c in list(self._name_index.items()) if c == k]
+                        for n in name_to_del:
+                            self._name_index.pop(n, None)
 
         # 对新 code 或 K线为空的 code：拉历史 K 线做冷启
         target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
@@ -1325,6 +1337,9 @@ class BiddingMomentumDetector:
                 # 1. 恢复基础得分与板块结构
                 stock_scores = data.get('stock_scores', {})
                 for code, score in stock_scores.items():
+                    # [🚀 SANITIZATION] 过滤无效代码
+                    if code == '000000' or len(code) != 6 or not code.isdigit():
+                        continue
                     if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
                     self._tick_series[code].score = score
                 
@@ -1374,14 +1389,21 @@ class BiddingMomentumDetector:
                 if meta_cols and 'code' in meta_cols:
                     codes = meta_cols['code']
                     for i, code in enumerate(codes):
-                        if not code: continue
-                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
-                        ts = self._tick_series[code]
+                        if not code or code == '000000' or len(code) != 6 or not code.isdigit():
+                            continue
+                        
                         def _get(key, default):
                             val = meta_cols.get(key, [])
                             return val[i] if i < len(val) and val[i] is not None else default
                         
-                        ts.name = _get('n', ts.name)
+                        t_name = _get('n', code)
+                        # [🚀 SANITIZATION] 过滤空名字、占位名字
+                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                            continue
+
+                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
+                        ts = self._tick_series[code]
+                        ts.name = t_name
                         ts.pattern_hint = _get('ph', ts.pattern_hint)
                         ts.category = _get('c', ts.category)
                         ts.last_close = _get('lc', ts.last_close)
@@ -1416,12 +1438,18 @@ class BiddingMomentumDetector:
                 else:
                     meta_data = data.get('meta_data', {})
                     for code, m in meta_data.items():
+                        if not code or code == '000000' or len(code) != 6 or not code.isdigit():
+                            continue
+                        t_name = m.get('name', '')
+                        # [🚀 SANITIZATION] 过滤空名字、占位名字
+                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                            continue
                         if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
                         ts = self._tick_series[code]
                         ts.last_close = m.get('last_close', ts.last_close)
                         ts.open_price = m.get('open_price', ts.open_price)
                         ts.now_price = m.get('now_price', ts.now_price)
-                        ts.name = m.get('name', ts.name)
+                        ts.name = t_name
                         ts.category = m.get('category', ts.category)
                         ts.score = m.get('score', ts.score)
                         ts.klines.clear()
@@ -1479,6 +1507,10 @@ class BiddingMomentumDetector:
             meta_idx_map = {c: idx for idx, c in enumerate(codes_list)} if codes_list else {}
             
             for code, score in stock_scores.items():
+                # [🚀 SANITIZATION] 过滤无效代码
+                if code == '000000' or len(code) != 6 or not code.isdigit():
+                    continue
+
                 ts = TickSeries(code)
                 ts.score = score
                 ts.momentum_score = momentum_scores.get(code, 0.0)
@@ -1491,6 +1523,11 @@ class BiddingMomentumDetector:
                             return v_list[i_idx] if i_idx < len(v_list) and v_list[i_idx] is not None else default
                         
                         ts.name = _get_val('n', code)
+                        
+                        # [🚀 SANITIZATION] 过滤空名字、占位名字
+                        if not ts.name or str(ts.name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                            continue
+
                         ts.category = _get_val('c', '')
                         ts.last_close = _get_val('lc', 0.0)
                         ts.high_day = _get_val('hd', 0.0)
@@ -3136,6 +3173,12 @@ class BiddingMomentumDetector:
             
             if not code or code == '000000' or len(code) != 6:
                 continue
+
+            # [🚀 SANITIZATION] 过滤空名称、占位符名称等无效个股
+            name = str(getattr(row, 'name', '')).strip()
+            if not name or name in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                continue
+
             cat = str(getattr(row, 'category', ''))
             if not cat or cat == 'nan':
                 continue

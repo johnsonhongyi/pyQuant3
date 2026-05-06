@@ -4221,8 +4221,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         screen_geo = self.screen().availableGeometry()
         
         # [✨ 规格决策]
-        # min_h 设为 210px，确保能稳稳看到4行数据
-        min_h = 210
+        # [🚀 3行精简] min_h 设为 180px，确保默认能刚好稳稳看到 3 行数据
+        min_h = 180
         title_bar_h = 32
         
         # 初始策略：优先高度对齐主窗口，如果窗口非常多(超过3列)，则释放到屏幕高度
@@ -4274,7 +4274,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             target_w = 390 + reason_w + 35
             
             header.blockSignals(False)
-            # 空间防护
+            
+            # [🚀 阶梯分栏/换列换行机制]
+            # 如果当前 Y 坐标加上当前窗口高度超过了底部限制，则往右换一列，并重置 Y 坐标
+            if curr_y + target_h > limit_y_bottom + 10:
+                col_x += target_w + 2 # 往右移一列宽度，另设 2px 间隙
+                curr_y = col_base_y
+            
+            # 空间防护，限制在屏幕右侧内
             if col_x > screen_geo.right() - target_w:
                 col_x = max(screen_geo.left(), screen_geo.right() - target_w - 4)
                 
@@ -4290,8 +4297,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             dlg.move(final_x, final_y)
             dlg.activateWindow()
             
-            # 下一个位置(垂直垂直叠层)
-            curr_y += target_h
+            # 下一个位置(垂直叠层)
+            curr_y += target_h + padding
             
         # [✨ 倒序 Z-Order 叠层] 压盖标题栏
         for dlg in reversed(dlgs):
