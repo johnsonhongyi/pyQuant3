@@ -540,8 +540,15 @@ class AlertManager:
         if log_allowed or is_high:
             self.global_last_alert = now
             prefix = "🔴" if priority == 0 else "📢" if priority == 1 else "ℹ️"
-            logger.warning(f"{prefix} [Alert] {message}")
+            # # [FIX] 完美跟随全局配置的 loglevel，忽略低于设定级别的警告输出
+            # config_level_name = str(getattr(cct, 'loglevel', 'INFO')).upper()
+            # config_level_num = getattr(LoggerFactory, config_level_name, LoggerFactory.INFO)
+            # if logger.level != config_level_num:
+            #     logger.setLevel(config_level_num)
             
+            # if logging.WARNING >= config_level_num:
+            #     logger.warning(f"{prefix} [Alert] {message}")
+            logger.warning(f"{prefix} [Alert] {message}")
         # 3. 语音队列分放
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
