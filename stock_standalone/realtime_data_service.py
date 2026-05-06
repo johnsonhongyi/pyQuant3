@@ -2423,11 +2423,12 @@ class DataPublisher:
                 except Exception as sig_err:
                     logger.error(f"[Backend] Signal detection failed: {sig_err}")
 
-                try:
-                    from data_hub_service import DataHubService
-                    DataHubService.get_instance().publish_df_all(enriched_df)
-                except Exception as dh_err:
-                    logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
+                # [REMOVED] DataHubService publishing block (service removed from system)
+                # try:
+                #     from data_hub_service import DataHubService
+                #     DataHubService.get_instance().publish_df_all(enriched_df)
+                # except Exception as dh_err:
+                #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
 
                 # [REFINED] 强化间隙检测 (仅在实盘模式运行)
                 if not self.simulation_mode:
