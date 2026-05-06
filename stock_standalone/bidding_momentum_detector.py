@@ -672,13 +672,15 @@ class BiddingMomentumDetector:
         if found_time_col:
             try:
                 latest_val = df[found_time_col].max()
-                if isinstance(latest_val, (int, float)) and latest_val > 1000000000: # Unix TS
-                    if latest_val > self.last_data_ts: self.last_data_ts = float(latest_val)
-                elif isinstance(latest_val, str) and (':' in latest_val or '-' in latest_val):
-                    # 处理 HH:MM:SS 或 YYYY-MM-DD HH:MM:SS
-                    from dateutil.parser import parse
-                    ts = parse(latest_val).timestamp()
-                    if ts > self.last_data_ts: self.last_data_ts = ts
+                # [FIX] 仿真/回测模式下，禁止利用全量 df_all 推进 clock 戳，防止 EOD 尾盘时间 (15:00/15:04) 锁死 time
+                if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
+                    if isinstance(latest_val, (int, float)) and latest_val > 1000000000: # Unix TS
+                        if latest_val > self.last_data_ts: self.last_data_ts = float(latest_val)
+                    elif isinstance(latest_val, str) and (':' in latest_val or '-' in latest_val):
+                        # 处理 HH:MM:SS 或 YYYY-MM-DD HH:MM:SS
+                        from dateutil.parser import parse
+                        ts = parse(latest_val).timestamp()
+                        if ts > self.last_data_ts: self.last_data_ts = ts
             except:
                 pass
 
@@ -2202,7 +2204,9 @@ class BiddingMomentumDetector:
         # 兜底：如果 K 线没时间，才考虑使用已有的异动时间或全局时间
         if data_ts <= 0:
             data_ts = ts_obj.first_breakout_ts if ts_obj.first_breakout_ts > 0 else self.last_data_ts
-            if data_ts <= 0: data_ts = time.time()
+            if data_ts <= 0:
+                if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
+                    data_ts = time.time()
 
         score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
@@ -2630,10 +2634,15 @@ class BiddingMomentumDetector:
         ts_obj.is_new_high = is_new_high         
         
         # [FIX] 无论如何确保 last_data_ts 能够推进
-        if data_ts > self.last_data_ts:
-            self.last_data_ts = data_ts
-        elif data_ts == 0:
-            self.last_data_ts = time.time()
+        if getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False):
+            # [FIX] 仿真/回测模式下，不进行 "大于" 校验，直接强制更新为当前数据的最新时间戳，彻底避免 EOD 数据引起的时钟死锁 or 高频重置
+            if data_ts > 0:
+                self.last_data_ts = data_ts
+        else:
+            if data_ts > self.last_data_ts:
+                self.last_data_ts = data_ts
+            elif data_ts == 0:
+                self.last_data_ts = time.time()
             
         # [DONE] total_amount 已经在 ts_obj.push_kline 中通过增量维护完成
 
