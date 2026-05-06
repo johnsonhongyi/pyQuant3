@@ -4457,7 +4457,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         # [NEW] 同步赛马竞技进度时间轴
         if curr_time > 0 and hasattr(self, 'timeline'):
-            t_str = datetime.datetime.fromtimestamp(curr_time).strftime("%H:%M:00")
+            t_str = datetime.datetime.fromtimestamp(curr_time).strftime("%H:%M:%S")
             # [🚀 状态锁] 优先使用外部注入的 status_prefix，否则根据模式自动判定
             if self._status_prefix:
                 prefix = self._status_prefix

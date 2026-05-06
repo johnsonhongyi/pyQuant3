@@ -807,6 +807,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             batch_df['timestamp'] = f"{sim_date} {t_str}" 
             
             # 向核心系统泵入 (这里它会自动处理分钟K线切割、情绪计算)
+            if ui_callback and not ui_callback(None): break
             t0 = time.time()
             publisher.update_batch(batch_df)
             t1 = time.time()
@@ -1169,8 +1170,16 @@ Usage Examples:
                     panel.timeline.label.setText(status_text)
             
             def on_panel_closed():
+                # [NEW] 提前断开信号，防止在停止/销毁期间向已关闭的 UI 发送通知而触发 C++ 内存 Access Violation
+                try:
+                    worker.progress_update.disconnect()
+                except: pass
+                try:
+                    worker.status_update.disconnect()
+                except: pass
+                
                 worker.stop()
-                worker.wait()
+                worker.wait(10)
                 
                 # [NEW] 显式停止核心组件，释放线程与句柄
                 try:
@@ -1196,8 +1205,8 @@ Usage Examples:
                             p.join(timeout=0.5)
                 except: pass
                 
-                logger.info("👋 Replay App exiting via app.quit()...")
-                QApplication.instance().quit()
+                logger.info("👋 Replay App exiting via os._exit(0)...")
+                os._exit(0)
             
             panel.closed.connect(on_panel_closed)
             worker.progress_update.connect(on_live_progress)
@@ -1206,6 +1215,8 @@ Usage Examples:
             
             panel.show()
             app.exec()
+            import os
+            os._exit(0)
         else:
             # ========================================
             # 回放模式 (Replay Mode)
@@ -1253,8 +1264,13 @@ Usage Examples:
                 panel.timeline.set_time(t_str, prefix=prefix)
 
             def on_panel_closed():
+                # [NEW] 提前断开信号，防止在停止/销毁期间向已关闭的 UI 发送通知而触发 C++ 内存 Access Violation
+                try:
+                    worker.progress_update.disconnect()
+                except: pass
+                
                 worker.stop()
-                worker.wait()
+                worker.wait(10)
                 
                 # [NEW] 显式停止核心组件，释放线程与句柄
                 try:
@@ -1280,8 +1296,8 @@ Usage Examples:
                             p.join(timeout=0.5)
                 except: pass
 
-                logger.info("👋 Replay App exiting via app.quit()...")
-                QApplication.instance().quit()
+                logger.info("👋 Replay App exiting via os._exit(0)...")
+                os._exit(0)
             
             panel.closed.connect(on_panel_closed)
             worker.progress_update.connect(on_progress)
@@ -1290,9 +1306,14 @@ Usage Examples:
             
             app.exec() # 等待 UI 退出
             
-            # [EXIT-GUARD] 确保退出时回收线程
+            # [EXIT-GUARD] 确保退出时回收线程并物理退出，防止 GC teardown 产生的 0xc0000096 崩溃
+            try:
+                worker.progress_update.disconnect()
+            except: pass
             worker.stop()
-            worker.wait(1000)
+            worker.wait(10)
+            import os
+            os._exit(0)
     else:
         # 无 UI 命令行模式
         run_replay(**replay_kwargs)
