@@ -29,6 +29,11 @@
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
 
+## 2026-05-06 09:28
+- [x] **修复 DataHub 导入异常与冗余调用 (Fixed DataHub Service Import Error & Redundant Call)**：
+    - [x] **精细注释 DataHub 调用**：在 `realtime_data_service.py` 的 `update_batch` 方法中，将尝试导入和发布到 `data_hub_service` 的 try-except 块（原 2426-2430 行）进行注释。这彻底解决了由于高频行情下不断调用已移除模块导致的 `No module named 'data_hub_service'` 异常，净化了后台日志并消除了无谓的 CPU 开销。
+    - [x] **同步创建并归档任务清单**：创建了 [20260506_0928_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260506_0928_task.md) 任务清单文件，实现了本次微调开发的工程化跟踪。
+
 ## 2026-04-29 22:30
 - [x] **修复 SignalDashboardPanel 启动时的 AttributeError (Fixed AttributeError on Startup)**：
     - [x] **根治 `_save_ui_timer` 初始化顺序问题**：将 `_save_ui_timer` 的初始化逻辑从 `__init__` 后部移动到 `_init_ui()` 调用之前。这解决了由于 `_restore_ui_state()` 触发 `sectionResized` 信号时，防抖计时器尚未定义导致的系统崩溃。
