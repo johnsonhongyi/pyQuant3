@@ -4218,35 +4218,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             return
         
         main_geo = self.frameGeometry()
-        screen_geo = self.screen().availableGeometry()
+        main_screen = self.screen()
+        main_screen_name = main_screen.name()
         
         # [✨ 规格决策]
         # [🚀 3行精简] min_h 设为 180px，确保默认能刚好稳稳看到 3 行数据
         min_h = 180
-        title_bar_h = 32
-        
-        # 初始策略：优先高度对齐主窗口，如果窗口非常多(超过3列)，则释放到屏幕高度
-        num_per_main_col = max(1, main_geo.height() // min_h)
-        if len(dlgs) > num_per_main_col * 3:
-            # 只有“超多”时才考虑上下铺满屏幕
-            limit_y_bottom = screen_geo.bottom()
-            col_base_y = screen_geo.top()
-            target_h = max(min_h, screen_geo.height() // (len(dlgs) // 3 + 1))
-        else:
-            # 优先在主窗口的高度范围内铺
-            limit_y_bottom = main_geo.bottom()
-            col_base_y = main_geo.top()
-            target_h = main_geo.height() // num_per_main_col
-
-        # [✨ 磁吸起点]
-        # -6px 抵消第一列与主窗口之间的隐形边框，留出1px缝隙防止压死
-        col_x = main_geo.right() - 6
-        curr_y = col_base_y
         padding = 1 # 极微小间距，保留磁吸感同时防止压盖
-        max_w_in_col = 0
         
-        for i, dlg in enumerate(dlgs):
-            # [🚀 极速整理算法] 挂起更新并阻止信号，防止整理期间的 UI 假死
+        # 1. 预处理所有子窗并计算其 target_w (挂起更新并阻止信号)
+        prepared_dlgs = []
+        for dlg in dlgs:
             dlg.setUpdatesEnabled(False)
             header = dlg.table.horizontalHeader()
             header.blockSignals(True)
@@ -4272,33 +4254,114 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # [🚀 结果计算] 窗口宽度 = 基础列宽(390) + 理由列(0/120) + 边距冗余(35)
             target_w = 390 + reason_w + 35
-            
             header.blockSignals(False)
+            prepared_dlgs.append((dlg, target_w))
             
-            # [🚀 阶梯分栏/换列换行机制]
-            # 如果当前 Y 坐标加上当前窗口高度超过了底部限制，则往右换一列，并重置 Y 坐标
-            if curr_y + target_h > limit_y_bottom + 10:
-                col_x += target_w + 2 # 往右移一列宽度，另设 2px 间隙
-                curr_y = col_base_y
-            
-            # 空间防护，限制在屏幕右侧内
-            if col_x > screen_geo.right() - target_w:
-                col_x = max(screen_geo.left(), screen_geo.right() - target_w - 4)
+        # 2. 按所属屏幕进行分组 (Group by Screen)
+        screen_to_prepared = {}
+        for dlg, target_w in prepared_dlgs:
+            dlg_center = dlg.geometry().center()
+            dlg_screen = QApplication.screenAt(dlg_center)
+            if not dlg_screen:
+                dlg_screen = dlg.screen() or main_screen
                 
-            dlg.resize(target_w, target_h)
-            dlg.setUpdatesEnabled(True)
-
-            dlg_w = dlg.width()
-            dlg_h = dlg.height()
+            scr_name = dlg_screen.name()
+            if scr_name not in screen_to_prepared:
+                screen_to_prepared[scr_name] = (dlg_screen, [])
+            screen_to_prepared[scr_name][1].append((dlg, target_w))
             
-            final_x = min(col_x, screen_geo.right() - dlg_w)
-            final_y = min(curr_y, screen_geo.bottom() - dlg_h)
+        # 3. 对各个屏幕分别进行独立的分列与渲染
+        for scr_name, (dlg_screen, s_dlgs) in screen_to_prepared.items():
+            screen_geo = dlg_screen.availableGeometry()
             
-            dlg.move(final_x, final_y)
-            dlg.activateWindow()
+            if scr_name == main_screen_name:
+                # 赛马主窗口所在的屏幕：优先高度对齐主窗口
+                num_per_main_col = max(1, main_geo.height() // min_h)
+                if len(s_dlgs) > num_per_main_col * 3:
+                    limit_y_bottom = screen_geo.bottom()
+                    col_base_y = screen_geo.top()
+                    target_h = max(min_h, screen_geo.height() // (len(s_dlgs) // 3 + 1))
+                else:
+                    limit_y_bottom = main_geo.bottom()
+                    col_base_y = main_geo.top()
+                    target_h = main_geo.height() // num_per_main_col
+                
+                # -6px 抵消第一列与主窗口之间的隐形边框
+                col_x = main_geo.right() - 6
+            else:
+                # 其它屏幕：在各自屏幕范围内自适应全高排列
+                limit_y_bottom = screen_geo.bottom()
+                col_base_y = screen_geo.top()
+                
+                num_per_col = max(1, screen_geo.height() // min_h)
+                if len(s_dlgs) > num_per_col * 3:
+                    target_h = max(min_h, screen_geo.height() // (len(s_dlgs) // 3 + 1))
+                else:
+                    target_h = screen_geo.height() // num_per_col
+                
+                col_x = screen_geo.left() + 6
+                
+            # 各屏幕独立的分列逻辑
+            columns = []
+            current_col = []
+            curr_y = col_base_y
             
-            # 下一个位置(垂直叠层)
-            curr_y += target_h + padding
+            for dlg, target_w in s_dlgs:
+                if curr_y + target_h > limit_y_bottom + 10 and current_col:
+                    columns.append(current_col)
+                    current_col = []
+                    curr_y = col_base_y
+                
+                current_col.append((dlg, target_w))
+                curr_y += target_h + padding
+                
+            if current_col:
+                columns.append(current_col)
+                
+            # 各屏幕独立的渲染逻辑 (采用蛇形交替对齐)
+            current_col_x = col_x
+            for col_idx, col_dlgs in enumerate(columns):
+                max_target_w = max(item[1] for item in col_dlgs) if col_dlgs else 390 + 35
+                
+                # 空间防护，限制在当前屏幕右侧内
+                if current_col_x > screen_geo.right() - max_target_w:
+                    current_col_x = max(screen_geo.left(), screen_geo.right() - max_target_w - 4)
+                    
+                if col_idx % 2 == 0:
+                    # 奇数列 (0, 2, 4...) -> 从上往下排
+                    curr_y = col_base_y
+                    for dlg, target_w in col_dlgs:
+                        dlg.resize(target_w, target_h)
+                        dlg.setUpdatesEnabled(True)
+                        
+                        dlg_w = dlg.width()
+                        dlg_h = dlg.height()
+                        
+                        final_x = min(current_col_x, screen_geo.right() - dlg_w)
+                        final_y = min(curr_y, screen_geo.bottom() - dlg_h)
+                        
+                        dlg.move(final_x, final_y)
+                        dlg.activateWindow()
+                        curr_y += target_h + padding
+                else:
+                    # 偶数列 (1, 3, 5...) -> 从下往上排 (交替磁吸对齐)
+                    curr_y = limit_y_bottom - target_h
+                    for dlg, target_w in col_dlgs:
+                        dlg.resize(target_w, target_h)
+                        dlg.setUpdatesEnabled(True)
+                        
+                        dlg_w = dlg.width()
+                        dlg_h = dlg.height()
+                        
+                        final_x = min(current_col_x, screen_geo.right() - dlg_w)
+                        final_y = max(screen_geo.top(), min(curr_y, screen_geo.bottom() - dlg_h))
+                        
+                        dlg.move(final_x, final_y)
+                        dlg.activateWindow()
+                        curr_y -= (target_h + padding)
+                        
+                # 往右移一列宽度
+                current_col_x += max_target_w + 2
             
         # [✨ 倒序 Z-Order 叠层] 压盖标题栏
         for dlg in reversed(dlgs):

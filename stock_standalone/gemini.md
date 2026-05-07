@@ -27,6 +27,18 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+## 2026-05-07 10:30
+- [x] **实现多屏幕详情窗口自适应独立磁吸排列 (Multi-screen Adaptive Auto-Grouping & Arrangement)**：
+    - [x] **按所属屏幕自动分组 (Per-screen Auto-Grouping)**：通过计算详情子窗口的中心物理坐标 `dlg.geometry().center()` 并调用高可靠的 `QApplication.screenAt(point)`，精准锁定子窗口所处的物理显示器。实现了将窗口按所属屏幕自适应划分为独立的分组，彻底废除了以前全量强重排到主屏幕的缺陷。
+    - [x] **各屏幕自适应参数自愈 (Per-screen Adaptive Parameters)**：主窗口所在显示屏延续“右侧对齐 + 垂直磁吸对齐主窗口”策略；其他独立副屏自适应采用副屏全高自伸缩规则，完美利用副屏全高，并且起点对齐各屏幕最左侧边界（`screen_geo.left() + 6`），实现极其专业、流畅的多屏联排分析看板。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1030_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/74b8adb2-d6ce-493c-b689-cf43f87099f7/20260507_1030_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 10:20
+- [x] **优化赛马面板子窗口叠层与蛇形排列交互 (Optimized Detail Windows Alternating Stack Layout)**：
+    - [x] **实现多列蛇形（交替）联排**：重构了 `_arrange_detail_windows` 中的窗口排列布局。现在，当第一列子窗口堆满后，往右移动到第二列时，会改为由下往上排（偶数列从下到上，奇数列从上到下）。这为全终端多维详情子窗提供了极具磁吸感的蛇形（Boustrophedon）交替排列，完美根治了溢出后在底部堆叠或顺序杂乱的痛点。
+    - [x] **安全化边界及自适应计算**：引入了分列预处理和分列渲染模式。通过在奇数/偶数列切换排布方向，自动校验窗口最大宽度和屏幕及主窗口的四周边缘防护（`max` 与 `min` 双向限位），在极高吞吐下实现瞬时整理，不引发主线程任何假死。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1020_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/74b8adb2-d6ce-493c-b689-cf43f87099f7/20260507_1020_task.md) 任务文件，实现了开发的工程化闭环。
+
 ## 2026-05-06 21:15
 - [x] **修复回放模式时间高频交替与闪烁抖动 (Fixed Replay Timeline Alternating & Jitter)**：
     - [x] **屏蔽 EOD 收盘时间初始化污染 (Prevented EOD Lock-in)**：在 `bidding_momentum_detector.py` 的 `register_codes` 函数中，加入仿真与历史模式门控。当检测到 `simulation_mode` 或 `in_history_mode` 为 `True` 时，绝对禁止利用全量数据表（包含 A 股 EOD 历史数据）推进全局时钟 `last_data_ts`，彻底移除了 `15:04:55` 收盘时间的提前污染和锁定。
