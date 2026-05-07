@@ -2565,13 +2565,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 pass
 
             # ---------------------------------------------------------
-            # 2.5 停止 df_all 同步线程
+            # 2.5 停止 df_all 同步线程与行情总线监听线程
             # ---------------------------------------------------------
             if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
                 print("正在停止 df_all 同步线程...")
                 self._df_sync_running = False
                 self._df_sync_thread.join(timeout=0.2)
                 self._df_sync_thread = None
+
+            if hasattr(self, '_bus_worker_thread') and self._bus_worker_thread and self._bus_worker_thread.is_alive():
+                print("正在停止行情总线监听线程 (BusWorkerThread)...")
+                self._bus_worker_thread.join(timeout=0.3)
+                self._bus_worker_thread = None
 
             # =========================================================
             # ⭐ STEP 2.6: 数据持久化（必须在 Manager 关闭前）
@@ -2754,6 +2759,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.realtime_service = None
             self.global_dict = None
             self.manager_dict = None
+
+            # 🛡️ [NEW] 强力切断对 SyncManager 的并发访问，实现安全隔离瞬间降级，根治 0xc000001d 退出崩溃
+            try:
+                cct.GlobalValues._manager_dead = True
+                cct.GlobalValues._global_dict = {}
+            except Exception:
+                pass
 
             # ---------------------------------------------------------
             # 4.3 关闭 SyncManager
