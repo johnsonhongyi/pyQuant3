@@ -1256,7 +1256,7 @@ class GlobalValues:
         """
         获取 key，优先从全局共享字典获取，失败则回退到本地字典
         """
-        # 如果 Manager 已失效，直接走本地字典
+        # 如果已进入 shutdown 或已失效，直接走本地字典
         if self._manager_dead:
             return self._local_fallback.get(key, default)
         try:
@@ -1264,8 +1264,8 @@ class GlobalValues:
             # 成功获取时，同步更新本地 fallback
             self._local_fallback[key] = value
             return value
-        except (BrokenPipeError, EOFError, OSError):
-            # 管道断开，标记 Manager 失效
+        except (BrokenPipeError, EOFError, OSError, AttributeError):
+            # 管道断开 or 代理被置空，标记 Manager 失效
             self.__class__._manager_dead = True
             log.debug(f"GlobalValues: Manager 已失效，切换到本地字典模式")
             return self._local_fallback.get(key, default)
@@ -1275,15 +1275,14 @@ class GlobalValues:
         设置 key，保证本地 fallback 始终更新。
         Manager 失效后直接使用本地字典，不再重试。
         """
-        # 如果 Manager 已失效，直接走本地字典
         if self._manager_dead:
             self._local_fallback[key] = value
             return
         
         try:
             self._global_dict[key] = value
-        except (BrokenPipeError, EOFError, OSError) as e:
-            # 管道断开，标记 Manager 失效，后续操作不再尝试共享字典
+        except (BrokenPipeError, EOFError, OSError, AttributeError) as e:
+            # 管道断开 or 代理被置空，标记 Manager 失效，后续操作不再尝试共享字典
             self.__class__._manager_dead = True
             log.debug(f"GlobalValues: Manager 已失效 ({e})，切换到本地字典模式")
         finally:
@@ -1304,7 +1303,7 @@ class GlobalValues:
             if exists:
                 self._local_fallback[key] = self._global_dict[key]
             return exists
-        except (BrokenPipeError, EOFError, OSError):
+        except (BrokenPipeError, EOFError, OSError, AttributeError):
             self.__class__._manager_dead = True
             return key in self._local_fallback
 
@@ -1320,7 +1319,7 @@ class GlobalValues:
             for k in keys:
                 self._local_fallback[k] = self._global_dict[k]
             return keys
-        except (BrokenPipeError, EOFError, OSError):
+        except (BrokenPipeError, EOFError, OSError, AttributeError):
             self.__class__._manager_dead = True
             return list(self._local_fallback.keys())
 

@@ -27,6 +27,12 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+## 2026-05-07 22:25
+- [x] **根治退出时 SyncManager 关闭引发的 Windows 致命异常与线程残留 (Fixed Application Exit Fatal Exception & Graceful Thread Shutdown)**：
+    - [x] **实现 GlobalValues 退出瞬间隔离与降级 (Instant Proxy Detach & Fallback)**：遵循 **KISS（极简）** 与 **YAGNI** 原则，不引入复杂的 `threading.Event()` 以免带来系统底层副作用。在 `instock_MonitorTK.py` 的 `on_close` 方法中执行 `self._sync_manager.shutdown()` 前，通过设置 `_manager_dead = True` 配合强行清空引用 `_global_dict = {}` 干净利落地断开代理 proxy。同时，在 `commonTips.py` 中增加了对 `AttributeError` 异常捕捉，使后台任何残留线程对代理的未决操作能够瞬间、无损地降级退回到本地安全字典，100% 根治了由于并发访问已关闭 socket/pipe 引起的 Windows `0xc000001d` 致命异常。
+    - [x] **优雅回收常驻监听线程 (Clean BusWorkerThread Recovery)**：在主程序关闭 STEP 2.5 序列中，补齐了对行情总线监听线程 `_bus_worker_thread` 的 `join(timeout=0.3)` 显式关闭，确保资源和线程环境被彻底、干净地回收，杜绝线程残留与进程假死。
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立的 [20260507_2225_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260507_2225_task.md) 任务跟踪清单，实现了软件工程的闭环。
+
 ## 2026-05-07 19:35
 - [x] **制定回测与实时基础数据集 100% 同构全功能过滤蓝图 (Established Cold-Hot Dataset Isolation Blueprint)**：
     - [x] **确立冷热物理隔离金律**：秉承“当天 Tick 变动是日内动态、`df_all` 是只读静态基础数据”的量化核心洞察，正式将数据分类规范化。冷启动载入的历史常量与静态技术指标列（`per1d`, `ma20d`, `SWL`, `high4`, `category`）作为**冷骨架（恒定只读、严禁盘中篡改覆盖）**；仅将日内变动的 Tick（`close`, `now`, `pct`, `percent`, `vol_ratio`, `score`）作为**热状态（动态对齐写入）**。
