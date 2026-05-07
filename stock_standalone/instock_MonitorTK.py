@@ -216,115 +216,6 @@ def dump_all():
     except Exception as e:
         print(f"⚠️ Failed to dump stack to file: {e}", flush=True)
 
-# =========================
-# 仅主进程 + 主线程
-# =========================
-IS_MAIN_PROCESS = (
-    mp.current_process().name == "MainProcess"
-)
-
-IS_MAIN_THREAD = (
-    threading.current_thread()
-    is threading.main_thread()
-)
-if IS_MAIN_PROCESS and IS_MAIN_THREAD:
-    
-    # -------------------------
-    # SIGBREAK
-    # -------------------------
-    if (
-        sys.platform.startswith("win")
-        and hasattr(signal, "SIGBREAK")
-    ):
-        try:
-            signal.signal(
-                signal.SIGBREAK,
-                lambda s, f: dump_all()
-            )
-            print("✅ SIGBREAK registered", flush=True)
-            logger.info(
-                "✅ SIGBREAK registered"
-            )
-
-            # -------------------------------------------------------------
-            # 强力加固：使用 Windows 底层 SetConsoleCtrlHandler 注册控制台 Ctrl 事件
-            # 解决当 Python 主线程由于 Tk/Qt 死锁而无法响应 Python 层 signal 处理器的痛点。
-            # 回调由操作系统分配在全新独立控制台线程内运行，确保 100% 瞬时绝对响应！
-            # -------------------------------------------------------------
-            try:
-                import ctypes
-                from ctypes import wintypes
-
-                CTRL_BREAK_EVENT = 1
-                PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
-
-                def win_console_ctrl_handler(ctrl_type):
-                    if ctrl_type == CTRL_BREAK_EVENT:
-                        # 瞬间由后台控制台线程驱动 dump_all，100% 防御主线程死锁
-                        dump_all()
-                        return True
-                    return False
-
-                # 强引用保持，防止 GC 回收 C 指针
-                global _win_ctrl_handler_ref
-                _win_ctrl_handler_ref = PHANDLER_ROUTINE(win_console_ctrl_handler)
-                
-                SetConsoleCtrlHandler = ctypes.windll.kernel32.SetConsoleCtrlHandler
-                SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wintypes.BOOL]
-                SetConsoleCtrlHandler.restype = wintypes.BOOL
-                
-                if SetConsoleCtrlHandler(_win_ctrl_handler_ref, True):
-                    print("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)", flush=True)
-                    logger.info("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)")
-                else:
-                    logger.warning("⚠️ Windows Console Ctrl Handler registration failed.")
-            except Exception as e_ctrl:
-                logger.warning(f"⚠️ Failed to register Win32 Console Ctrl Handler: {e_ctrl}")
-
-        except Exception as e:
-            logger.warning(
-                f"⚠️ SIGBREAK failed: {e}"
-            )
-
-    # -------------------------
-    # keyboard hotkey
-    # -------------------------
-    try:
-        import keyboard
-
-        keyboard.add_hotkey(
-            "ctrl+alt+d",
-            dump_all
-        )
-        print("✅ Hotkey registered: Ctrl+Alt+D", flush=True)
-        logger.info(
-            "✅ Hotkey registered: Ctrl+Alt+D"
-        )
-
-    except Exception as e:
-        logger.warning(
-            f"⚠️ Hotkey failed: {e}"
-        )
-
-# =========================
-# SIGBREAK（仅在主线程 + 安全时）
-# =========================
-# if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
-#     try:
-#         if threading.current_thread() is threading.main_thread():
-#             signal.signal(signal.SIGBREAK, lambda s, f: dump_all())
-#             logger.info("✅ SIGBREAK registered")
-#         else:
-#             logger.warning("⚠️ SIGBREAK skipped: not main thread")
-#         # 2. keyboard 热键（主力）
-#         if mp.current_process().name == "MainProcess":
-#             import keyboard
-#             keyboard.add_hotkey(
-#                     "ctrl+alt+d",
-#                     lambda: faulthandler.dump_traceback()
-#                 )
-#     except Exception as e:
-#         logger.warning(f"⚠️ SIGBREAK register failed: {e}")
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
 # from trading_analyzerQt6 import TradingGUI
@@ -16427,7 +16318,116 @@ def write_to_hdf():
         tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=900)
 
 
+def main_SIGBREAK():
+    # =========================
+    # 仅主进程 + 主线程
+    # =========================
+    IS_MAIN_PROCESS = (
+        mp.current_process().name == "MainProcess"
+    )
 
+    IS_MAIN_THREAD = (
+        threading.current_thread()
+        is threading.main_thread()
+    )
+    if IS_MAIN_PROCESS and IS_MAIN_THREAD:
+        
+        # -------------------------
+        # SIGBREAK
+        # -------------------------
+        if (
+            sys.platform.startswith("win")
+            and hasattr(signal, "SIGBREAK")
+        ):
+            try:
+                signal.signal(
+                    signal.SIGBREAK,
+                    lambda s, f: dump_all()
+                )
+                print("✅ SIGBREAK registered", flush=True)
+                logger.info(
+                    "✅ SIGBREAK registered"
+                )
+
+                # -------------------------------------------------------------
+                # 强力加固：使用 Windows 底层 SetConsoleCtrlHandler 注册控制台 Ctrl 事件
+                # 解决当 Python 主线程由于 Tk/Qt 死锁而无法响应 Python 层 signal 处理器的痛点。
+                # 回调由操作系统分配在全新独立控制台线程内运行，确保 100% 瞬时绝对响应！
+                # -------------------------------------------------------------
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+
+                    CTRL_BREAK_EVENT = 1
+                    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+                    def win_console_ctrl_handler(ctrl_type):
+                        if ctrl_type == CTRL_BREAK_EVENT:
+                            # 瞬间由后台控制台线程驱动 dump_all，100% 防御主线程死锁
+                            dump_all()
+                            return True
+                        return False
+
+                    # 强引用保持，防止 GC 回收 C 指针
+                    global _win_ctrl_handler_ref
+                    _win_ctrl_handler_ref = PHANDLER_ROUTINE(win_console_ctrl_handler)
+                    
+                    SetConsoleCtrlHandler = ctypes.windll.kernel32.SetConsoleCtrlHandler
+                    SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wintypes.BOOL]
+                    SetConsoleCtrlHandler.restype = wintypes.BOOL
+                    
+                    if SetConsoleCtrlHandler(_win_ctrl_handler_ref, True):
+                        print("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)", flush=True)
+                        logger.info("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)")
+                    else:
+                        logger.warning("⚠️ Windows Console Ctrl Handler registration failed.")
+                except Exception as e_ctrl:
+                    logger.warning(f"⚠️ Failed to register Win32 Console Ctrl Handler: {e_ctrl}")
+
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ SIGBREAK failed: {e}"
+                )
+
+        # -------------------------
+        # keyboard hotkey
+        # -------------------------
+        # try:
+        #     import keyboard
+
+        #     keyboard.add_hotkey(
+        #         "ctrl+alt+d",
+        #         dump_all
+        #     )
+        #     print("✅ Hotkey registered: Ctrl+Alt+D", flush=True)
+        #     logger.info(
+        #         "✅ Hotkey registered: Ctrl+Alt+D"
+        #     )
+
+        # except Exception as e:
+        #     logger.warning(
+        #         f"⚠️ Hotkey failed: {e}"
+        #     )
+
+    # =========================
+    # SIGBREAK（仅在主线程 + 安全时）
+    # =========================
+    # if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
+    #     try:
+    #         if threading.current_thread() is threading.main_thread():
+    #             signal.signal(signal.SIGBREAK, lambda s, f: dump_all())
+    #             logger.info("✅ SIGBREAK registered")
+    #         else:
+    #             logger.warning("⚠️ SIGBREAK skipped: not main thread")
+    #         # 2. keyboard 热键（主力）
+    #         if mp.current_process().name == "MainProcess":
+    #             import keyboard
+    #             keyboard.add_hotkey(
+    #                     "ctrl+alt+d",
+    #                     lambda: faulthandler.dump_traceback()
+    #                 )
+    #     except Exception as e:
+    #         logger.warning(f"⚠️ SIGBREAK register failed: {e}")
 
 def ensure_single_instance_fileLock():
     import msvcrt
@@ -16492,7 +16492,7 @@ if __name__ == "__main__":
 
         print(f'mp.current_process().name: {mp.current_process().name} == MainProcess')
         print("PID:", os.getpid(), "Process:", mp.current_process().name)
-
+        main_SIGBREAK()
 
 
     args = parse_args()  # 解析命令行参数
