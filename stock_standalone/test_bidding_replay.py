@@ -982,6 +982,22 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info(f"\n✅ Playback complete! Total real time elapsed: {end_time_real - start_time_real:.2f}s")
 
 def main(args=None, df_all_target=None, quit_event=None):
+    # ------------------ Signal Ignoring ------------------
+    try:
+        import signal
+        import sys
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        if sys.platform.startswith("win"):
+            import ctypes
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     """
     [REFACTORED] 赛马回测入口，支持通过 mp.Process 直接透传 df_all 数据。
     """

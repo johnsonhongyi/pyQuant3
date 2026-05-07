@@ -13562,6 +13562,21 @@ def run_visualizer(initial_code=None, df_all=None):
     sys.exit(app.exec())
 
 def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
+    # ------------------ Signal Ignoring ------------------
+    try:
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        if sys.platform.startswith("win"):
+            import ctypes
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     import pyqtgraph as pg
     pg.setConfigOptions(antialias=True)
     # ⭐ 启用底层故障捕捉，以便锁定 QThread Destroyed 等 C++ 报错

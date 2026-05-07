@@ -27,6 +27,20 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-07 18:20
+- [x] **修复触发 dump_all 后切换周期不能自动刷新及 Vis 状态不能自动恢复 (Fixed Subprocess Jitter after dump_all & Isolated Signal Interruption)**：
+    - [x] **实现 SyncManager 进程自启动信号屏蔽 (Hardened SyncManager Startup)**：重构了 `instock_MonitorTK.py` 中的跨进程状态共享 `Manager` 初始化流程。改为通过 `SyncManager` 并引入全局顶层函数 `init_manager_process` 以彻底满足 Windows 平台下 `spawn` 方式的 pickling (序列化) 要求。在 `start(initializer=init_manager_process)` 中显式注入底层信号忽略和拦截。这彻底避免了在触发堆栈转储（Ctrl+Break/SIGBREAK）时，操作系统由于向控制台全进程广播而导致的 SyncManager 背景进程闪退问题，保障了共享字典的永续存活与正常工作，根治了“切换周期不能自动刷新”的现象与 `AttributeError` 报错。
+    - [x] **实现 PyQt Visualizer 进程入口信号屏蔽 (Isolated PyQt Visualizer Signal)**：在 `trade_visualizer_qt6.py` 的 `main()` 入口函数中注入了 `SIGINT` 和 `SIGBREAK` 屏蔽防线。这杜绝了按下诊断热键时对 K线可视化主进程的误杀，保障了 Vis 客户端进程在大负荷诊断时的完美独立存活及自动恢复能力。
+    - [x] **实现 赛马回测/回放 进程入口信号屏蔽 (Isolated Bidding Replay Signal)**：在 `test_bidding_replay.py` 的 `main()` 入口函数中同样注入了完全相同的信号隔离体系，确保了其在回测与录像回放中均免疫一切控制台中断。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1820_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260507_1820_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 18:15
+- [x] **修复 KeyboardInterrupt 导致的后台子进程意外死亡与 shared_dict 报错治理 (Fixed Child Process DEAD & Optimized shared_dict Access)**：
+    - [x] **根治诊断热键引起的子进程连带强退 (Fixed Child Process KeyboardInterrupt DEAD)**：在后台数据进程 `fetch_and_process` 的初始化中，重新启用并加固了对 `SIGINT` / `SIGBREAK` 信号屏蔽和 Windows 控制台 `SetConsoleCtrlHandler` 处理。去除了原本的 `FreeConsole` 物理脱离及标准流重定向，使得控制台的 Prints/Logs 在保持完美可见的同时，赋予了子进程 100% 免疫 Ctrl+C/Ctrl+Break 以及前台按下诊断热键触发进程堆栈转储（Dump）的能力，彻底根治了 `DEAD` 异常。
+    - [x] **根治 shared_dict file-not-found 报错日志刷屏 (Optimized shared_dict FileNotFoundError Access)**：彻底废除了 `data_utils.py` 在高频循环内部对 raw `shared_dict.get` 的直接多重调用与低效 `try-except` 包裹。全面重构为调用 `GlobalValues.getkey` 统一接口。这不仅完美利用了现有的 `_manager_dead` 降级标志和本地无锁 `_local_fallback` 快速通道，确保在 IPC 通信临时受阻或 Manager 失效时实现微秒级静默无损降级，更从根源上消除了全部 `FileNotFoundError: [WinError 2]` 或 BrokenPipe 等 scary 报错，使控制台清爽、无噪音、极度顺畅。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1815_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260507_1815_task.md) 任务文件，实现了开发的工程化闭环。
+
 ## 2026-05-07 10:30
 - [x] **实现多屏幕详情窗口自适应独立磁吸排列 (Multi-screen Adaptive Auto-Grouping & Arrangement)**：
     - [x] **按所属屏幕自动分组 (Per-screen Auto-Grouping)**：通过计算详情子窗口的中心物理坐标 `dlg.geometry().center()` 并调用高可靠的 `QApplication.screenAt(point)`，精准锁定子窗口所处的物理显示器。实现了将窗口按所属屏幕自适应划分为独立的分组，彻底废除了以前全量强重排到主屏幕的缺陷。

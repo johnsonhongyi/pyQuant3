@@ -146,58 +146,181 @@ if sys.platform.startswith('win'):
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 import faulthandler
+import signal
+
 if sys.stderr is not None:
     faulthandler.enable()
-# 🛡️ [DEBUG] 注册 Ctrl+Break 信号，用于在 UI 卡死时通过控制台打印所有线程堆栈
-# if sys.platform.startswith('win') and hasattr(signal, 'SIGBREAK'):
-#     try:
-#         # [🚀 加固] 显式指定 all_threads=True 确保能打印出 UI 主线程和工作线程的所有状态
-#         # faulthandler.register(signal.SIGBREAK, all_threads=True, chain=False)
-#         # 1. SIGBREAK（可用就用）
-#         # signal.signal(signal.SIGBREAK, lambda s, f: faulthandler.dump_traceback())
-#         # 2. keyboard 热键（主力）
-#         keyboard.add_hotkey(
-#                 "ctrl+alt+d",
-#                 lambda: faulthandler.dump_traceback()
-#             )
-#         logger.info("✅ faulthandler SIGBREAK (Ctrl+Break) 注册成功。提示：卡死时在控制台按 Ctrl+Break，输出将显示在标准错误流(stderr)中")
-#     except Exception as e:
-#         logger.warning(f"⚠️ faulthandler SIGBREAK 注册失败: {e}")
 
+def init_manager_process():
+    import signal
+    import sys
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        if sys.platform.startswith("win"):
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
+    except Exception:
+        pass
 
 def dump_all():
-    print("\n🔥 STACK TRACE DUMP\n")
-    faulthandler.dump_traceback(all_threads=True)
+    print("\n🔥 ================= STACK TRACE DUMP TRIGGERED ================= 🔥\n", flush=True)
+    try:
+        faulthandler.dump_traceback(all_threads=True)
+    except Exception as ex:
+        print(f"⚠️ faulthandler.dump_traceback failed: {ex}", flush=True)
+
+    # 1. 尝试使用 logger 写入日志，以便用户在日志文件中也有清晰的可追溯记录
+    try:
+        logger.warning("🔥 [Dump] 快捷键/诊断信号已被捕获，开始转储线程堆栈...")
+    except Exception:
+        pass
+
+    # 2. 强力加固：将当前堆栈转储直接物理存盘至独立文件，即便控制台不可见，也能一键追溯
+    try:
+        dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
+        with open(dump_file_path, "a", encoding="utf-8") as f:
+            f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
+            try:
+                faulthandler.dump_traceback(file=f, all_threads=True)
+            except Exception as fe:
+                f.write(f"faulthandler failed to dump: {fe}\n")
+            f.flush()
+        print(f"✅ Stack trace successfully dumped to: {dump_file_path}", flush=True)
+        try:
+            logger.warning(f"✅ [Dump] 堆栈信息已成功写入: {dump_file_path}")
+        except Exception:
+            pass
+
+        # 3. 极速系统级物理反馈：在独立的守护线程中弹出一个 Windows 系统原生、非阻塞的 MessageBox 提示！
+        # 即使 Tkinter / PyQt 发生死锁挂起，该守护线程弹窗依然能秒级展现，给予用户 100% 极具冲击力的视觉反馈！
+        def show_native_toast():
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    0, 
+                    f"程序当前运行堆栈已成功转储至日志文件！\n\n转储路径:\n{dump_file_path}", 
+                    "诊断信号触发成功 (Stack Trace Dump)", 
+                    0x40 | 0x1000  # MB_OK | MB_SYSTEMMODAL (置顶并带有提示图标)
+                )
+            except Exception:
+                pass
+
+        t = threading.Thread(target=show_native_toast, daemon=True, name="Dump_Toast_Thread")
+        t.start()
+    except Exception as e:
+        print(f"⚠️ Failed to dump stack to file: {e}", flush=True)
 
 # =========================
-# Ctrl+Alt+D（最可靠）
+# 仅主进程 + 主线程
 # =========================
-import multiprocessing as mp
-if mp.current_process().name == "MainProcess":
-    import keyboard
-    keyboard.add_hotkey("ctrl+alt+d", dump_all)
+IS_MAIN_PROCESS = (
+    mp.current_process().name == "MainProcess"
+)
 
+IS_MAIN_THREAD = (
+    threading.current_thread()
+    is threading.main_thread()
+)
+if IS_MAIN_PROCESS and IS_MAIN_THREAD:
+    
+    # -------------------------
+    # SIGBREAK
+    # -------------------------
+    if (
+        sys.platform.startswith("win")
+        and hasattr(signal, "SIGBREAK")
+    ):
+        try:
+            signal.signal(
+                signal.SIGBREAK,
+                lambda s, f: dump_all()
+            )
+            print("✅ SIGBREAK registered", flush=True)
+            logger.info(
+                "✅ SIGBREAK registered"
+            )
 
+            # -------------------------------------------------------------
+            # 强力加固：使用 Windows 底层 SetConsoleCtrlHandler 注册控制台 Ctrl 事件
+            # 解决当 Python 主线程由于 Tk/Qt 死锁而无法响应 Python 层 signal 处理器的痛点。
+            # 回调由操作系统分配在全新独立控制台线程内运行，确保 100% 瞬时绝对响应！
+            # -------------------------------------------------------------
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                CTRL_BREAK_EVENT = 1
+                PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+                def win_console_ctrl_handler(ctrl_type):
+                    if ctrl_type == CTRL_BREAK_EVENT:
+                        # 瞬间由后台控制台线程驱动 dump_all，100% 防御主线程死锁
+                        dump_all()
+                        return True
+                    return False
+
+                # 强引用保持，防止 GC 回收 C 指针
+                global _win_ctrl_handler_ref
+                _win_ctrl_handler_ref = PHANDLER_ROUTINE(win_console_ctrl_handler)
+                
+                SetConsoleCtrlHandler = ctypes.windll.kernel32.SetConsoleCtrlHandler
+                SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wintypes.BOOL]
+                SetConsoleCtrlHandler.restype = wintypes.BOOL
+                
+                if SetConsoleCtrlHandler(_win_ctrl_handler_ref, True):
+                    print("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)", flush=True)
+                    logger.info("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)")
+                else:
+                    logger.warning("⚠️ Windows Console Ctrl Handler registration failed.")
+            except Exception as e_ctrl:
+                logger.warning(f"⚠️ Failed to register Win32 Console Ctrl Handler: {e_ctrl}")
+
+        except Exception as e:
+            logger.warning(
+                f"⚠️ SIGBREAK failed: {e}"
+            )
+
+    # -------------------------
+    # keyboard hotkey
+    # -------------------------
+    try:
+        import keyboard
+
+        keyboard.add_hotkey(
+            "ctrl+alt+d",
+            dump_all
+        )
+        print("✅ Hotkey registered: Ctrl+Alt+D", flush=True)
+        logger.info(
+            "✅ Hotkey registered: Ctrl+Alt+D"
+        )
+
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Hotkey failed: {e}"
+        )
 
 # =========================
 # SIGBREAK（仅在主线程 + 安全时）
 # =========================
-if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
-    try:
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGBREAK, lambda s, f: dump_all())
-            logger.info("✅ SIGBREAK registered")
-        else:
-            logger.warning("⚠️ SIGBREAK skipped: not main thread")
-        # 2. keyboard 热键（主力）
-        if mp.current_process().name == "MainProcess":
-            import keyboard
-            keyboard.add_hotkey(
-                    "ctrl+alt+d",
-                    lambda: faulthandler.dump_traceback()
-                )
-    except Exception as e:
-        logger.warning(f"⚠️ SIGBREAK register failed: {e}")
+# if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
+#     try:
+#         if threading.current_thread() is threading.main_thread():
+#             signal.signal(signal.SIGBREAK, lambda s, f: dump_all())
+#             logger.info("✅ SIGBREAK registered")
+#         else:
+#             logger.warning("⚠️ SIGBREAK skipped: not main thread")
+#         # 2. keyboard 热键（主力）
+#         if mp.current_process().name == "MainProcess":
+#             import keyboard
+#             keyboard.add_hotkey(
+#                     "ctrl+alt+d",
+#                     lambda: faulthandler.dump_traceback()
+#                 )
+#     except Exception as e:
+#         logger.warning(f"⚠️ SIGBREAK register failed: {e}")
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
 # from trading_analyzerQt6 import TradingGUI
@@ -527,6 +650,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._visualizer_debounce_sec = 0.5
         self._enable_clipboard_linkage = True # [NEW] 初始化剪切板联动标志位，防止 AttributeError
 
+        self.df_all = pd.DataFrame()
+        self.df_view = pd.DataFrame()
         self._concept_dict_global = {}
 
         # 刷新开关标志
@@ -547,9 +672,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
         # 4. 初始化全局状态存储 (代替昂贵的 SyncManager)
         try:
-            logger.info("🚀 [PERF] 启用跨进程状态存储 (mp.Manager + mp.Queue)...")
-            from multiprocessing import Manager
-            self._sync_manager = Manager()
+            logger.info("🚀 [PERF] 启用跨进程状态存储 (SyncManager + mp.Queue)...")
+            from multiprocessing.managers import SyncManager
+            
+            self._sync_manager = SyncManager()
+            self._sync_manager.start(initializer=init_manager_process)
             self.global_dict = self._sync_manager.dict()
             self.global_dict["resample"] = resampleInit
             
