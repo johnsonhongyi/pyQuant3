@@ -190,7 +190,6 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                         active_list = [c.strip() for c in active_str.split(',') if c.strip()]
                         if key not in active_list:
                             worker_log(f"Existence Warning (Window not active yet?): {key} (Active: {active_str})")
-                            # continue # [FIX] Don't skip, assume window is creating
                 except Exception as e:
                     worker_log(f"Skip Check Error: {e}")
 
@@ -206,7 +205,51 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     is_voice_on = False
                     worker_log("Voice disabled in state, skipping pyttsx3 init")
 
-                if pyttsx3 and is_voice_on:
+                sp_voice_success = False
+                if is_voice_on:
+                    try:
+                        import win32com.client
+                        if pythoncom:
+                            try: pythoncom.CoInitialize()
+                            except: pass
+                        
+                        # [CORE] 直接使用 SAPI.SpVoice 直连，避免 pyttsx3 的 Event 触发 GIL/thread state NULL 崩溃
+                        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                        
+                        # 转换 rate 和 volume
+                        # pyttsx3 的 rate 200 为正常。SpVoice 的 Rate 范围是 -10 到 10，默认为 0。
+                        # 进行映射：cct.voice_rate 默认为 200。映射公式: (rate - 200) // 20
+                        v_rate = getattr(cct, 'voice_rate', 200)
+                        sp_rate = max(-10, min(10, (v_rate - 200) // 20))
+                        speaker.Rate = sp_rate
+                        
+                        # pyttsx3 的 volume 1.0 为最大。SpVoice 的 Volume 范围是 0 到 100。
+                        v_vol = getattr(cct, 'voice_volume', 1.0)
+                        sp_vol = max(0, min(100, int(v_vol * 100)))
+                        speaker.Volume = sp_vol
+                        
+                        if feedback_queue and key:
+                            try: feedback_queue.put(('START', key))
+                            except: pass
+                            
+                        if not interrupt_event.is_set():
+                            # Speak flags: 0 = Synchronous
+                            speaker.Speak(safe_msg, 0)
+                            
+                        last_speech_end_ts = time.time()
+                        
+                        if feedback_queue and key:
+                            try: feedback_queue.put(('END', key))
+                            except: pass
+                            
+                        del speaker
+                        sp_voice_success = True
+                        worker_log("SpVoice Utterance finished successfully.")
+                    except Exception as ex:
+                        worker_log(f"Direct SpVoice speak failed: {ex}, falling back to pyttsx3")
+                        sp_voice_success = False
+
+                if not sp_voice_success and pyttsx3 and is_voice_on:
                     # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次独立实例化
                     if hasattr(pyttsx3, '_activeEngines'):
                         # [SAFETY] 仅在真的有活跃引擎时才清理，减少对 GIL 的冲击

@@ -264,8 +264,23 @@ def check_code(
     header = f"股票: {code} {name}\n" + "="*40 + "\n"
     summary_text = header + format_check_result(report)
     
-    # 创建自定义报告窗口
-    win = tk.Toplevel(parent)
+    # 智能检查环境并做安全隔离。如果是在非 Tk (如 PyQt) 环境调用 check_code，
+    # 我们创建一个隐藏的 tk.Tk() 主窗口，防止多出一个丑陋的空白小 Tk 窗口，
+    # 并且通过 mainloop() 使其能在非 Tk 环境下流畅渲染且不卡死。
+    is_standalone_tk = False
+    current_root = None
+    try:
+        current_root = tk._default_root
+    except Exception:
+        pass
+
+    if parent is None and current_root is None:
+        main_root = tk.Tk()
+        main_root.withdraw() # 隐藏最丑陋的空白主窗口！
+        win = tk.Toplevel(main_root)
+        is_standalone_tk = True
+    else:
+        win = tk.Toplevel(parent or current_root)
     win.title(f"股票检查报告 - {code} {name}")
     bg_color = "#E3F2FD"  # 淡蓝色背景
     win.configure(bg=bg_color)
@@ -299,6 +314,11 @@ def check_code(
             helper.scale_factor = scale_factor
             helper.save_window_position(win, report_win_name)
         win.destroy()
+        if is_standalone_tk:
+            try:
+                main_root.destroy()
+            except Exception:
+                pass
     win.protocol("WM_DELETE_WINDOW", on_close_report)
     
     # [FIX] ESC 关闭报告
@@ -462,6 +482,19 @@ def check_code(
     btn_test = tk.Button(manual_frame, text="执行测试", command=run_manual_test, 
                          bg="#4CAF50", fg="white", font=("微软雅黑", 8, "bold"))
     btn_test.pack(side="left", padx=5)
+
+    try:
+        win.update_idletasks()
+        win.update()
+    except Exception as e:
+        pass
+
+    if is_standalone_tk:
+        try:
+            main_root.mainloop()
+        except Exception:
+            pass
+
     return report
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
