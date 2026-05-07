@@ -2439,6 +2439,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_code_check.clicked.connect(self._on_code_check_triggered)
         query_bar.addWidget(self.btn_code_check)
         
+        # 6.6 回放暂停/继续按钮 (默认隐藏)
+        self.btn_pause = QPushButton("⏸ 暂停")
+        self.btn_pause.setFixedWidth(70)
+        self.btn_pause.setToolTip("暂停/继续录像回放")
+        self.btn_pause.setStyleSheet("""
+            QPushButton { background-color: #D35400; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #E67E22; }
+        """)
+        self.btn_pause.clicked.connect(self._on_pause_triggered)
+        self.btn_pause.setVisible(False)
+        query_bar.addWidget(self.btn_pause)
+        
         query_bar.addStretch()
         main_layout.addLayout(query_bar)
         
@@ -3167,6 +3179,26 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 except: pass
             except Exception as e:
                 logger.error(f"❌ [RacingPanel] check_code 报告调起失败: {e}\n{traceback.format_exc()}")
+
+    def _on_pause_triggered(self):
+        """处理录像回放暂停/继续"""
+        worker = getattr(self, 'replay_worker', None)
+        if not worker:
+            return
+        if getattr(worker, 'is_paused', False):
+            worker.is_paused = False
+            self.btn_pause.setText("⏸ 暂停")
+            self.btn_pause.setStyleSheet("""
+                QPushButton { background-color: #D35400; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+                QPushButton:hover { background-color: #E67E22; }
+            """)
+        else:
+            worker.is_paused = True
+            self.btn_pause.setText("▶ 继续")
+            self.btn_pause.setStyleSheet("""
+                QPushButton { background-color: #2980B9; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+                QPushButton:hover { background-color: #3498DB; }
+            """)
 
     def _on_history_group_changed(self):
         """当历史分组切换时，加载新的查询列表并自动执行第一项"""
@@ -4059,6 +4091,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行原子联行保存"""
+        # [⭐ 新增] 退出前安全暂停后台回测工作，释放算力
+        worker = getattr(self, 'replay_worker', None)
+        if worker and getattr(worker, 'is_running', False) and not getattr(worker, 'is_paused', True):
+            import time
+            logger.info("⏸ 窗口关闭前自动暂停回测/回放工作...")
+            worker.is_paused = True
+            time.sleep(0.05) # 短暂休眠让底层循环停下
+            
         # 1. 强制执行一次安全的原子持久化
         try:
             self._save_ui_state(force=True)

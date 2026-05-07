@@ -14,6 +14,7 @@ import json
 import pyperclip
 from stock_logic_utils import  toast_message
 try:
+    import JohnsonUtil.tkcalendar_patch
     from tkcalendar import DateEntry
     HAS_CALENDAR = True
 except ImportError:

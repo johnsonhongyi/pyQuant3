@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from stock_selector import StockSelector
 
 try:
+    import JohnsonUtil.tkcalendar_patch
     from tkcalendar import DateEntry
     HAS_CALENDAR = True
 except ImportError:
