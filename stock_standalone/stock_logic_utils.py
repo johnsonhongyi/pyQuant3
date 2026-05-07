@@ -650,10 +650,13 @@ class RealtimeSignalManager:
         self._lock = threading.Lock()
         # 使用 DataFrame 存储状态以实现向量化更新
         self.state_df = pd.DataFrame(columns=[
-            'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak'
+            'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak',
+            'vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4', 'vol_ptr'
         ])
-        # 针对最近成交量的特殊处理（由于是滚动窗口，暂时保留 dict 或使用 numpy 矩阵）
-        self.volume_history = {} # code -> list
+        self.vol_cols = ['vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4']
+        self._last_hash = None
+        self._cached_signal_strength = None
+        self._cached_signal = None
 
     def update_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
@@ -676,6 +679,16 @@ class RealtimeSignalManager:
         if df.index.name != 'code':
             df.set_index('code', inplace=True, drop=False)
 
+        try:
+            current_hash = hash(tuple(df[price_col].values)) ^ hash(tuple(df['volume'].values))
+            if self._last_hash == current_hash and self._cached_signal is not None and len(self._cached_signal) == len(df):
+                df['signal_strength'] = self._cached_signal_strength
+                df['signal'] = self._cached_signal
+                return df
+            self._last_hash = current_hash
+        except Exception:
+            pass
+
         codes = df.index
         
         with self._lock:
@@ -687,20 +700,20 @@ class RealtimeSignalManager:
                     'today_high': df.loc[missing_codes, 'high'],
                     'today_low': df.loc[missing_codes, 'low'],
                     'prev_signal': None,
-                    'down_streak': 0
+                    'down_streak': 0,
+                    'vol_h0': df.loc[missing_codes, 'volume'],
+                    'vol_h1': np.nan,
+                    'vol_h2': np.nan,
+                    'vol_h3': np.nan,
+                    'vol_h4': np.nan,
+                    'vol_ptr': 1
                 }, index=missing_codes)
                 self.state_df = pd.concat([self.state_df, new_states])
-                for c in missing_codes:
-                    self.volume_history[c] = [df.at[c, 'volume']]
     
             # 提取历史状态数据
-            state = self.state_df.loc[codes].copy()
-            # 提取成交量历史 (提前在持有锁时完成，防止后续向量化计算时被其他线程修改 dict)
-            avg_vol_list = []
-            for c in codes:
-                v_list = self.volume_history.get(c, [])
-                avg_vol_list.append(np.mean(v_list) if v_list else 0.0)
-            avg_vol_arr = np.array(avg_vol_list)
+            state = self.state_df.loc[codes]
+            # 提取成交量历史并计算均值
+            avg_vol_arr = np.nanmean(state[self.vol_cols].values.astype(float), axis=1)
         
         # [FIX] 重新提取当前价格数组，用于后续向量化计算
         now_arr = df[price_col].values
@@ -772,14 +785,19 @@ class RealtimeSignalManager:
         score += prev_signal_arr
 
         df['signal_strength'] = score
-        df['signal'] = ''
-        df.loc[score >= 9, 'signal'] = 'BUY_S'
-        df.loc[(score >= 6) & (score < 9), 'signal'] = 'BUY_N'
-        df.loc[(score < 6) & (macd < 0), 'signal'] = 'SELL_WEAK'
+        
+        signal_col = np.full(len(df), '', dtype=object)
+        signal_col[score >= 9] = 'BUY_S'
+        signal_col[(score >= 6) & (score < 9)] = 'BUY_N'
+        signal_col[(score < 6) & (macd < 0)] = 'SELL_WEAK'
 
         sell_cond = ((macddif < macddea) & (macd < 0)) | ((rsi < 45) & (kdj_j < kdj_k)) | \
                     ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break
-        df.loc[sell_cond, 'signal'] = 'SELL'
+        signal_col[sell_cond] = 'SELL'
+        
+        df['signal'] = signal_col
+        self._cached_signal_strength = score.copy()
+        self._cached_signal = signal_col.copy()
 
         # ⚡ 批量同步回 state_df
         with self._lock:
@@ -787,15 +805,16 @@ class RealtimeSignalManager:
             self.state_df.loc[codes, 'today_high'] = updated_today_high
             self.state_df.loc[codes, 'today_low'] = updated_today_low
             self.state_df.loc[codes, 'down_streak'] = updated_down_streak
-            self.state_df.loc[codes, 'prev_signal'] = df['signal'].values
+            self.state_df.loc[codes, 'prev_signal'] = signal_col
             
-            # 处理成交量历史
-            for i, c in enumerate(codes):
-                v_hist = self.volume_history.get(c, [])
-                v_hist.append(volume_arr[i])
-                if len(v_hist) > 5:
-                    v_hist.pop(0)
-                self.volume_history[c] = v_hist
+            # 处理成交量历史 (完全向量化)
+            ptrs = self.state_df.loc[codes, 'vol_ptr'].values.astype(int) % 5
+            for i in range(5):
+                mask = (ptrs == i)
+                if mask.any():
+                    self.state_df.loc[codes[mask], f'vol_h{i}'] = volume_arr[mask]
+            
+            self.state_df.loc[codes, 'vol_ptr'] += 1
 
         return df
 
