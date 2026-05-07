@@ -40,6 +40,10 @@ import win32con
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont, scrolledtext
 from tkinter import filedialog,Menu,simpledialog
+
+# 🚀 [FIX] 引入全局修补 tkcalendar 跨月标记及悬浮组件 Bug 的共用补丁
+import JohnsonUtil.tkcalendar_patch
+
 from concurrent.futures import ThreadPoolExecutor
 # import pyqtgraph as pg  # ⚡ 移至局部作用域以降低子进程内存
 try:
@@ -3681,6 +3685,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except:
                 pass
             date_entry.pack(fill="x", pady=(int(8*scale), int(15*scale)))
+
+            def _highlight_tick_dates():
+                try:
+                    now = time.time()
+                    cache_attr = "_tick_dates_cache"
+                    cache_time_attr = "_tick_dates_cache_time"
+                    
+                    if hasattr(self, cache_attr) and hasattr(self, cache_time_attr):
+                        if now - getattr(self, cache_time_attr) < 2 * 3600:
+                            unique_dates = getattr(self, cache_attr)
+                            logger.info("使用缓存的日历高亮数据 (有效期2小时)")
+                        else:
+                            unique_dates = None
+                    else:
+                        unique_dates = None
+
+                    if unique_dates is None:
+                        from JSONData.sina_data import Sina
+                        sina = Sina(readonly=True)
+                        unique_dates = sina.get_tick_dates()
+                        setattr(self, cache_attr, unique_dates)
+                        setattr(self, cache_time_attr, now)
+                        
+                    if unique_dates:
+                        cal = date_entry._calendar
+                        cal.calevent_remove('all', 'has_data')
+                        for d in unique_dates:
+                            cal.calevent_create(d, 'Tick Data Available', 'has_data')
+                        cal.tag_config('has_data', background='#ff4444', foreground='white')
+                        logger.info(f"成功在日历上高亮标记了 {len(unique_dates)} 个含数据的日期: {unique_dates}")
+                except Exception as ex:
+                    logger.error(f"标记日历含数据日期失败: {ex}")
+
+            dialog.after(100, _highlight_tick_dates)
         else:
             date_entry = tk.Entry(main_frame, font=label_font)
             date_entry.insert(0, default_date_str)

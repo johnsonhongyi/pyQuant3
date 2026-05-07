@@ -112,9 +112,13 @@ class ReplayWorker(QThread):
         super().__init__()
         self.kwargs = kwargs
         self.is_running = True
+        self.is_paused = False
 
     def run(self):
         def ui_callback(t_str):
+            import time
+            while self.is_paused and self.is_running:
+                time.sleep(0.1)
             if t_str is not None:
                 try:
                     self.progress_update.emit(str(t_str))
@@ -1194,8 +1198,16 @@ Usage Examples:
                     worker.status_update.disconnect()
                 except: pass
                 
+                # 先暂停，再退出，避免忙碌卡顿
+                try:
+                    worker.is_paused = True
+                except: pass
                 worker.stop()
-                worker.wait(10)
+                if not worker.wait(100):
+                    try:
+                        worker.terminate()
+                        worker.wait(100)
+                    except: pass
                 
                 # [NEW] 显式停止核心组件，释放线程与句柄
                 try:
@@ -1218,7 +1230,7 @@ Usage Examples:
                         if p.is_alive():
                             logger.info(f"🔪 Cleaning up background child process: {p.pid}")
                             p.terminate()
-                            p.join(timeout=0.5)
+                            p.join(timeout=0.05)
                 except: pass
                 
                 logger.info("👋 Replay App exiting via os._exit(0)...")
@@ -1269,6 +1281,9 @@ Usage Examples:
             
             # 开启后台回放线程
             worker = ReplayWorker(replay_kwargs)
+            panel.replay_worker = worker
+            if hasattr(panel, 'btn_pause'):
+                panel.btn_pause.setVisible(True)
             
             def on_progress(t_str):
                 from PyQt6.sip import isdeleted
@@ -1285,8 +1300,16 @@ Usage Examples:
                     worker.progress_update.disconnect()
                 except: pass
                 
+                # 先暂停，再退出，避免忙碌卡顿
+                try:
+                    worker.is_paused = True
+                except: pass
                 worker.stop()
-                worker.wait(10)
+                if not worker.wait(100):
+                    try:
+                        worker.terminate()
+                        worker.wait(100)
+                    except: pass
                 
                 # [NEW] 显式停止核心组件，释放线程与句柄
                 try:
@@ -1309,7 +1332,7 @@ Usage Examples:
                         if p.is_alive():
                             logger.info(f"🔪 Cleaning up background child process: {p.pid}")
                             p.terminate()
-                            p.join(timeout=0.5)
+                            p.join(timeout=0.05)
                 except: pass
 
                 logger.info("👋 Replay App exiting via os._exit(0)...")
@@ -1326,8 +1349,15 @@ Usage Examples:
             try:
                 worker.progress_update.disconnect()
             except: pass
+            try:
+                worker.is_paused = True
+            except: pass
             worker.stop()
-            worker.wait(10)
+            if not worker.wait(100):
+                try:
+                    worker.terminate()
+                    worker.wait(100)
+                except: pass
             import os
             os._exit(0)
     else:

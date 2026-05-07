@@ -2235,6 +2235,64 @@ class Sina:
 
         return df_code
 
+    def get_tick_dates(self, count=8) -> List[datetime.date]:
+        """
+        通过从 self.all 随机挑选当日有交易的个股，获取其实时轨迹数据中的有效日期列表。
+        """
+        import random
+        try:
+            df_all = self.all
+            if df_all is not None and not df_all.empty:
+                # 优先挑选当日有交易量(volume > 0)的个股
+                if 'volume' in df_all.columns:
+                    active_df = df_all[df_all['volume'] > 0]
+                else:
+                    active_df = df_all
+                if active_df.empty:
+                    active_df = df_all
+                
+                active_codes = active_df.index.tolist()
+                # 剔除指数代码，只保留6位股票代码
+                active_codes = [c for c in active_codes if len(str(c)) == 6 and str(c).isdigit()]
+                if active_codes:
+                    code_l = random.sample(active_codes, min(count, len(active_codes)))
+                else:
+                    code_l = ['603363', '000868', '603917', '600392', '300713', '000933', '002505', '603676']
+            else:
+                code_l = ['603363', '000868', '603917', '600392', '300713', '000933', '002505', '603676']
+        except Exception as e:
+            log.warning(f"Sina.get_tick_dates select codes from all failed: {e}")
+            code_l = ['603363', '000868', '603917', '600392', '300713', '000933', '002505', '603676']
+
+        try:
+            dd = self.get_real_time_tick(code_l)
+            dde = self.get_real_time_tick(code_l, enrich_data=True)
+            
+            unique_dates = set()
+            for df in [dd, dde]:
+                if df is not None and not df.empty:
+                    if isinstance(df.index, pd.MultiIndex):
+                        if 'ticktime' in df.index.names:
+                            times = df.index.get_level_values('ticktime')
+                        else:
+                            times = df.index.get_level_values(1)
+                    elif 'ticktime' in df.columns:
+                        times = df['ticktime']
+                    else:
+                        continue
+                    
+                    for t in times:
+                        if pd.notna(t):
+                            try:
+                                date_val = pd.to_datetime(t).date()
+                                unique_dates.add(date_val)
+                            except:
+                                pass
+            return sorted(list(unique_dates))
+        except Exception as e:
+            log.error(f"Sina.get_tick_dates failed: {e}")
+            return []
+
     def get_real_time_tick_slow(
         self,
         code: Union[str, List[str]],
@@ -2503,8 +2561,18 @@ if __name__ == "__main__":
     # log.setLevel(LoggerFactory.DEBUG)
     # sina = Sina()
     sina = Sina(readonly=True)
+
+    unique_dates = sina.get_tick_dates()
+    print(f'unique_dates: {unique_dates}')
+    import ipdb;ipdb.set_trace()
+
     dm = sina.all
 
+    code_l = ['603363','000868','603917','600392','300713','000933','002505','603676']
+    dd = sina.get_real_time_tick(code_l)
+    dde = sina.get_real_time_tick(code_l, enrich_data=True)
+    import ipdb;ipdb.set_trace()
+    
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb']:
         # for ma in ['sh']:
@@ -2569,7 +2637,8 @@ if __name__ == "__main__":
     code='603056'
     code='300058'
     # dd = sina.get_real_time_tick('300376')
-    dd = sina.get_real_time_tick(code)
+    code_l = ['603363','000868','603917','600392','300713','000933','002505','603676']
+    dd = sina.get_real_time_tick(code_l)
     dde = sina.get_real_time_tick(code, enrich_data=True)
     import ipdb;ipdb.set_trace()
 
