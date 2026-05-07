@@ -2515,6 +2515,27 @@ def fetch_and_process(
     logger = LoggerFactory.getLogger()
     if log_level is not None:
         logger.setLevel(log_level.value)
+
+    # -------------------------------------------------------------
+    # 强力加固：忽略子进程中的 KeyboardInterrupt (SIGINT/SIGBREAK) 信号
+    # 防止前台按下诊断热键或发生控制台中断事件时，此核心后台子进程被连带强退
+    # -------------------------------------------------------------
+    try:
+        import signal
+        import sys
+        
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+            
+        if sys.platform.startswith("win"):
+            import ctypes
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
+            except Exception:
+                pass
+    except Exception as e_sig:
+        logger.warning(f"⚠️ Failed to ignore Ctrl signals in child process: {e_sig}")
     
     logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level} duration_sleep_time:{duration_sleep_time}")
     print(f'single:{single}')
@@ -2806,20 +2827,10 @@ def fetch_and_process(
             df_all = sanitize(df_all)
             
             # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
-            # 使用 try-except 包装，防止 Manager 失效时崩溃
-            try:
-                # keep_all = shared_dict.get('keep_all_columns')
-                keep_all = shared_dict.get('keep_all_columns', True)
-            except (BrokenPipeError, EOFError, OSError, AttributeError) as e:
-                logger.error(f"shared_dict.get('keep_all_columns') 失败: {type(e).__name__}: {e}")
-                keep_all = True  # Manager 失效时使用默认值
-                
+            # 使用 GlobalValues 进行安全、零侵入、不刷错的属性提取
+            keep_all = g_values.getkey('keep_all_columns', True)
             if not keep_all:
-                try:
-                    required_cols = shared_dict.get('required_cols', [])
-                except (BrokenPipeError, EOFError, OSError, AttributeError) as e:
-                    logger.error(f"[data_utils:1537] shared_dict.get('required_cols') 失败: {type(e).__name__}: {e}")
-                    required_cols = []  # Manager 失效时使用默认空列表
+                required_cols = g_values.getkey('required_cols', [])
                     
                 if required_cols:
                     # 获取 df_all 中存在的列
@@ -2939,6 +2950,10 @@ def fetch_and_process(
                 if sleep_elapsed % heartbeat_interval == 0:
                     print("*", end=' ')
                     logger.debug(f"[心跳] resample={resample} 等待中... {sleep_elapsed}/{int(loop_sleep_time)}s flag={flag.value}")
+        except KeyboardInterrupt:
+            logger.info("⚡ [Subprocess] KeyboardInterrupt 信号已被子进程成功捕获，在没有卡死时优雅忽略，保持正常轮询工作...")
+            time.sleep(1)
+            continue
         except Exception as e:
             logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
             logger.error(f"完整堆栈:\n{traceback.format_exc()}")
