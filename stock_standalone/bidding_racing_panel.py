@@ -2428,6 +2428,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_query_test.clicked.connect(self._on_query_test_triggered)
         query_bar.addWidget(self.btn_query_test)
         
+        # 6.5 个股详检按钮
+        self.btn_code_check = QPushButton("🔍详检")
+        self.btn_code_check.setFixedWidth(70)
+        self.btn_code_check.setToolTip("对当前选中个股或输入个股调出 check_code 详检分析报告浮窗")
+        self.btn_code_check.setStyleSheet("""
+            QPushButton { background-color: #388E3C; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #4CAF50; }
+        """)
+        self.btn_code_check.clicked.connect(self._on_code_check_triggered)
+        query_bar.addWidget(self.btn_code_check)
+        
         query_bar.addStretch()
         main_layout.addLayout(query_bar)
         
@@ -2801,6 +2812,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                                 'price': ts.current_price,
                                 'open': ts.open_price
                             })
+                            # [🚀 核心修正] 仅在 DataFrame 列缺失时才进行安全兜底填充，绝对不覆盖已有历史多日涨幅，确保过滤不丢失数据
+                            for col_name in ['per1d', 'per2d', 'per3d']:
+                                if col_name not in df.columns:
+                                    updates[c][col_name] = ts.current_pct
                         # 实盘模式：行情字段 (pct, open, close) 由主程序 Pump 维护，此处不予覆盖以保一致性
                     
                     if updates:
@@ -2880,7 +2895,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._macro_filtered_codes = []
 
     def _on_query_test_triggered(self):
-        """测试指定代码或全局数据，计算下拉菜单中各历史条件的命中数量"""
+        """测试指定代码或全局数据，计算下拉菜单中各历史条件的命中数量 (🧪测试 按钮专用)"""
         # 1. 寻找数据源 (df_all)
         df = None
         if self.main_app and hasattr(self.main_app, 'df_all'):
@@ -2895,9 +2910,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
         df_code = df.copy() # 避免污染原数据
         
-        # 2. 动态行情同步 (确保测试时的字段与赛马过滤字段完全一致)
+        # 2. 动态行情与元数据深度同步
         if self.detector and self.detector._tick_series:
-            is_simulation = getattr(self.detector, 'simulation_mode', False)
             with self.detector._lock:
                 updates = {}
                 for c in df_code.index:
@@ -2908,25 +2922,51 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         'momentum': ts.momentum_score,
                         'vol_ratio': ts.vol_ratio,
                         'ratio': ts.vol_ratio,
-                        'pct_diff': ts.pct_diff
+                        'pct_diff': ts.pct_diff,
+                        'pct': ts.current_pct,
+                        'percent': ts.current_pct,
+                        'close': ts.current_price,
+                        'now': ts.current_price,
+                        'lastp0d': ts.current_price,
+                        'trade': ts.current_price,
+                        'price': ts.current_price,
+                        'open': ts.open_price,
+                        'lastp1d': ts.last_close,
+                        'pre_close': ts.last_close,
+                        'nclose': ts.last_close,
+                        'lasth1d': ts.last_high,
+                        'lasth': ts.last_high,
+                        'lastl1d': ts.last_low,
+                        'lastl': ts.last_low,
+                        'nlow': ts.last_low,
+                        'high': ts.high_day,
+                        'low': ts.low_day,
+                        'ma20d': ts.ma20,
+                        'ma60d': ts.ma60,
+                        'category': ts.category,
+                        'name': ts.name,
+                        'lastdu': ts.lastdu,
+                        'lastdu4': ts.lastdu4,
+                        'ral': ts.ral,
+                        'dff': ts.dff,
+                        'vol': ts.total_vol,
+                        'volume': ts.vol_ratio,
+                        'lvol': ts.lvol,
+                        'last6vol': ts.last6vol,
+                        'top0': ts.top0,
+                        'top15': ts.top15,
+                        'cycle_stage': ts.cycle_stage
                     }
-                    if is_simulation:
-                        updates[c].update({
-                            'pct': ts.current_pct,
-                            'percent': ts.current_pct,
-                            'close': ts.current_price,
-                            'now': ts.current_price,
-                            'lastp0d': ts.current_price,
-                            'trade': ts.current_price,
-                            'price': ts.current_price,
-                            'open': ts.open_price
-                        })
+                    # [🚀 核心兜底] 仅在 DataFrame 列缺失时才安全补齐，严禁覆盖历史值
+                    for col_name in ['per1d', 'per2d', 'per3d']:
+                        if col_name not in df_code.columns:
+                            updates[c][col_name] = ts.current_pct
                 if updates:
                     up_df = pd.DataFrame.from_dict(updates, orient='index')
                     for col in up_df.columns:
                         df_code[col] = up_df[col]
 
-        # 3. 确定测试目标
+        # 3. 确定测试目标个股
         code = self.query_input.currentText().strip()
         if ' | ' in code:
             code = code.split(' | ')[1].strip()
@@ -2934,20 +2974,24 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             m = _RE_QUERY_BRACKET.match(code)
             if m: code = m.group(2).strip()
 
+        if ' [Hit:' in code:
+            code = code.split(' [Hit:')[0].strip()
+
         is_single_stock = False
         if code.isdigit() and len(code) == 6:
             if code in df_code.index:
                 df_code = df_code.loc[[code]]
                 is_single_stock = True
             else:
-                try: from gui_utils import toast_message; toast_message(self, f"未找到代码 {code}")
+                try:
+                    from gui_utils import toast_message
+                    toast_message(self, f"未找到代码 {code}")
                 except: pass
                 return
 
         from query_engine_util import query_engine
-        from PyQt6.QtGui import QColor
         
-        # 4. 遍历下拉框中的所有历史条件，进行测试
+        # 4. 遍历下拉框中的所有历史条件，更新其在全量数据中的命中数量 (保留原有的测试反馈)
         self.query_input.blockSignals(True)
         try:
             for i in range(self.query_input.count()):
@@ -2955,16 +2999,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 query_data = self.query_input.itemData(i)
                 
                 query = query_data if query_data else query_item
-                # [🚀 修复] 剥离可能残留在 data 或 text 中的 [Hit: N] 标签，防止引擎报错 (NameError: Hit)
                 if query and ' [Hit:' in query:
                     query = query.split(' [Hit:')[0].strip()
                 
-                # 剥离旧的 hit 标签
                 query_display = query_item
                 if ' [Hit:' in query_display:
                     query_display = query_display.split(' [Hit:')[0]
                 
-                # 解析逻辑部分
                 real_query = query
                 if ' | ' in real_query:
                     parts = real_query.split(' | ', 1)
@@ -2991,13 +3032,141 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if is_single_stock:
                     toast_message(self, f"✅ 已测试代码 {code}，请下拉菜单查看各条件的命中情况")
                 else:
-                    toast_message(self, "✅ 策略命中测试完成，请下拉菜单查看各条件的命中数量")
+                    toast_message(self, "✅ 全量策略命中数计算完成，请下拉菜单查看")
             except: pass
             
         finally:
             self.query_input.blockSignals(False)
             
         logger.info(f"🧪 [RacingPanel] Test query completed. Single_stock={is_single_stock}")
+
+    def _on_code_check_triggered(self, target_code=None):
+        """对选定个股或随机个股调出 check_code 详检分析报告 (🔍详检 按钮专用)"""
+        # 1. 寻找数据源 (df_all)
+        df = None
+        if self.main_app and hasattr(self.main_app, 'df_all'):
+            df = self.main_app.df_all
+        elif self.detector and hasattr(self.detector, 'main_app'):
+            df = self.detector.main_app.df_all
+        elif hasattr(self, 'df_all'):
+            df = self.df_all
+            
+        if df is None or df.empty:
+            return
+
+        df_code = df.copy() # 避免污染原数据
+        
+        # 2. 动态行情与元数据深度同步 (彻底补齐所有字段，消除 "少col" 的隐患)
+        if self.detector and self.detector._tick_series:
+            with self.detector._lock:
+                updates = {}
+                for c in df_code.index:
+                    ts = self.detector._tick_series.get(c)
+                    if not ts: continue
+                    updates[c] = {
+                        'score': ts.score,
+                        'momentum': ts.momentum_score,
+                        'vol_ratio': ts.vol_ratio,
+                        'ratio': ts.vol_ratio,
+                        'pct_diff': ts.pct_diff,
+                        'pct': ts.current_pct,
+                        'percent': ts.current_pct,
+                        'close': ts.current_price,
+                        'now': ts.current_price,
+                        'lastp0d': ts.current_price,
+                        'trade': ts.current_price,
+                        'price': ts.current_price,
+                        'open': ts.open_price,
+                        'lastp1d': ts.last_close,
+                        'pre_close': ts.last_close,
+                        'nclose': ts.last_close,
+                        'lasth1d': ts.last_high,
+                        'lasth': ts.last_high,
+                        'lastl1d': ts.last_low,
+                        'lastl': ts.last_low,
+                        'nlow': ts.last_low,
+                        'high': ts.high_day,
+                        'low': ts.low_day,
+                        'ma20d': ts.ma20,
+                        'ma60d': ts.ma60,
+                        'category': ts.category,
+                        'name': ts.name,
+                        'lastdu': ts.lastdu,
+                        'lastdu4': ts.lastdu4,
+                        'ral': ts.ral,
+                        'dff': ts.dff,
+                        'vol': ts.total_vol,
+                        'volume': ts.vol_ratio,
+                        'lvol': ts.lvol,
+                        'last6vol': ts.last6vol,
+                        'top0': ts.top0,
+                        'top15': ts.top15,
+                        'cycle_stage': ts.cycle_stage
+                    }
+                    # [🚀 核心兜底] 仅在 DataFrame 列缺失时才安全补齐，严禁覆盖历史值
+                    for col_name in ['per1d', 'per2d', 'per3d']:
+                        if col_name not in df_code.columns:
+                            updates[c][col_name] = ts.current_pct
+                if updates:
+                    up_df = pd.DataFrame.from_dict(updates, orient='index')
+                    for col in up_df.columns:
+                        df_code[col] = up_df[col]
+
+        # 3. 确定查询表达式与目标个股
+        input_text = self.query_input.currentText().strip()
+        clean_text = input_text
+        if ' | ' in clean_text:
+            clean_text = clean_text.split(' | ')[1].strip()
+        elif '(' in clean_text and clean_text.endswith(')'):
+            m = _RE_QUERY_BRACKET.match(clean_text)
+            if m: clean_text = m.group(2).strip()
+
+        if ' [Hit:' in clean_text:
+            clean_text = clean_text.split(' [Hit:')[0].strip()
+
+        stock_code = ""
+        query_expr = ""
+
+        if target_code:
+            stock_code = target_code
+            query_expr = self._macro_query_str or ""
+        elif clean_text.isdigit() and len(clean_text) == 6:
+            # 输入的是个股代码
+            stock_code = clean_text
+            query_expr = self._macro_query_str or ""
+        else:
+            # 输入的是查询条件
+            query_expr = clean_text
+            selected_row = self.stock_table.currentRow()
+            if selected_row >= 0:
+                item = self.stock_table.item(selected_row, 0)
+                if item:
+                    stock_code = item.text()
+            if not stock_code and hasattr(self, '_select_code') and self._select_code:
+                stock_code = self._select_code
+
+            # 若没有代码，则随机选择一个
+            if not stock_code or stock_code not in df_code.index:
+                import random
+                valid_codes = [c for c in df_code.index if len(str(c)) == 6 and str(c).isdigit()]
+                if valid_codes:
+                    stock_code = random.choice(valid_codes)
+                    try:
+                        from gui_utils import toast_message
+                        toast_message(self, f"🎲 未选定个股，已随机选择 {stock_code} ({df_code.at[stock_code, 'name'] if 'name' in df_code.columns else ''}) 进行详检")
+                    except: pass
+
+        # 4. 调出详检报告
+        if stock_code and query_expr:
+            try:
+                from stock_logic_utils import check_code
+                check_code(df_code, stock_code, [{"expr": query_expr}], parent=None)
+                try:
+                    from gui_utils import toast_message
+                    toast_message(self, f"✅ 已成功调起 {stock_code} 的 🔍详检报告")
+                except: pass
+            except Exception as e:
+                logger.error(f"❌ [RacingPanel] check_code 报告调起失败: {e}\n{traceback.format_exc()}")
 
     def _on_history_group_changed(self):
         """当历史分组切换时，加载新的查询列表并自动执行第一项"""
@@ -3129,6 +3298,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_context_viz"))
+
+        act_check = menu.addAction(f"🔍 详检个股报告 ({name})")
+        act_check.triggered.connect(lambda: self._on_code_check_triggered(target_code=code))
 
         act_sector = menu.addAction(f"🚀 关联最强板块详情")
         act_sector.triggered.connect(lambda: self._show_strongest_sector(code))

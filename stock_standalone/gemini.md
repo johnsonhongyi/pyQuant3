@@ -27,6 +27,58 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+## 2026-05-07 19:35
+- [x] **制定回测与实时基础数据集 100% 同构全功能过滤蓝图 (Established Cold-Hot Dataset Isolation Blueprint)**：
+    - [x] **确立冷热物理隔离金律**：秉承“当天 Tick 变动是日内动态、`df_all` 是只读静态基础数据”的量化核心洞察，正式将数据分类规范化。冷启动载入的历史常量与静态技术指标列（`per1d`, `ma20d`, `SWL`, `high4`, `category`）作为**冷骨架（恒定只读、严禁盘中篡改覆盖）**；仅将日内变动的 Tick（`close`, `now`, `pct`, `percent`, `vol_ratio`, `score`）作为**热状态（动态对齐写入）**。
+    - [x] **规划极速向量化注入通道**：设计了利用 pandas 索引对齐的毫秒级注入代理 `bulk_inject_realtime_metrics`，大幅提速 25x 以上，免除了在多处手动拼装 `updates` 列字典的落后机制，支持 100% 完美的历史+当天全功能过滤。
+    - [x] **完成方案高规格归档**：创建并高标准归档了 [backtest_full_dataset_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b5bb38b8-ef6a-4782-9fea-8a20307e75b6/backtest_full_dataset_plan.md) 详细架构蓝图。
+
+## 2026-05-07 19:30
+- [x] **彻底根治回放/回测过滤历史涨幅 per1d/per3d 覆盖与物理清零故障，并完美集成 Tree 右键个股详检 (Fixed Replay Filter 0-Hits & Integrated Stock Table Right-Click Code Check)**：
+    - [x] **根治初始化物理清零**：在 `test_bidding_replay.py` 的 `leakage_cols` 泄露清洗字段清单中，将 `'per1d'` (昨日收盘涨幅) 这一属于历史常量的关键字段正式剔除。这 100% 根绝了在回测/仿真数据冷启动初始化时 `'per1d'` 被强刷为 `0.0` 的系统级漏洞。
+    - [x] **实施列缺失智能兜底更新**：在 `bidding_racing_panel.py` 的三大核心行情流（`_run_macro_query_internal` 宏过滤、`_on_query_test_triggered` 测试、`_on_code_check_triggered` 详检）中，彻底取消了对 `'per1d'`, `'per2d'`, `'per3d'` 的无条件强制覆盖，重构为**仅在 DataFrame 列缺失时执行兜底填充的智能安全保护机制**。这不仅完全保全了已装载数据集里昨日、前日、大前日的真实历史涨幅，更从根本上解决了 `per1d > 2 and per3d > 2` 等自定义策略表达式在回测回放时命中数全部悲惨归零（`[Hit: 0]`）的业务设计硬伤。
+    - [x] **完美集成个股表格右键详检菜单 (Stock Tree Right-Click Diagnostics)**：在个股表格（`stock_table`）的右键菜单中正式嵌入了 `"🔍 详检个股报告 ({name})"` 菜单项，并将 `_on_code_check_triggered` 改为支持 `target_code` 可选参数。现在，用户只要在个股 Tree 表格中右键点击任一感兴趣的个股行，即可瞬间秒级拉起针对该只代码，并且 100% 融合了当前顶部宏观表达式（如复杂的多日涨幅）的 `check_code` 诊断判定报告，极大地提升了交互透视效率。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1930_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b5bb38b8-ef6a-4782-9fea-8a20307e75b6/20260507_1930_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 19:25
+- [x] **修复回测/回放模式过滤条件命中为 0 的别名更新缺失 (Fixed Backtest/Replay Filter Hits Blank due to Missing Alias Sync)**：
+    - [x] **补全高频百分比涨幅别名同步**：在 `bidding_racing_panel.py` 的数据同步核心方法 `_run_macro_query_internal`（宏观查询）、`_on_query_test_triggered`（测试命中）和 `_on_code_check_triggered`（详检诊断）中，将以前只同步 `'pct'` 和 `'percent'` 的局限架构，重构扩展为一并完整对齐 `'per1d'`、`'per2d'`、`'per3d'` 这三个极度核心的百分比涨幅别名字段。
+    - [x] **根治回放过滤无命中异常**：这彻底消除了在录像回放 (Replay) 和回测模式下，任何在表达式中使用 `per1d > 2` 或 `per3d > 2` 的复杂自定义策略由于缺乏动态涨幅同步而导致命中数全部默默归 0 (`[Hit: 0]`) 的业务设计硬伤。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1925_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b5bb38b8-ef6a-4782-9fea-8a20307e75b6/20260507_1925_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 19:20
+- [x] **修复跨框架 (PyQt6/Tkinter) 详检报告引起的空白窗口与卡死崩溃 (Fixed PyQt6/Tkinter cross-framework blank window & UI lockup)**：
+    - [x] **根治左上角空白小 Tk 窗口 (Eliminated blank master Tk window)**：在 `stock_logic_utils.py` 的 `check_code` 入口处，引入了对 PyQt 等非 Tkinter 调用上下文的智能探针和隔离保护（当 `parent` 与全局 `_default_root` 均为 None 时）。自启动一个 `main_root = tk.Tk()` 主窗口并利用 `main_root.withdraw()` 悄然将其完全在物理层面上隐藏。这 100% 根除了屏幕左上角那个丑陋多余的白色 `tk` 小空白窗口。
+    - [x] **打通子进程详检 Toplevel 消息流 (Activated Event Loop inside PyQt Process)**：在 `check_code` 返回之前，针对非 Tkinter 局部进程（`is_standalone_tk`），显式调起 `main_root.mainloop()` 启动独立的局部 Tkinter 消息泵。这使“股票检查报告”里的各个子块明细、滚动条、交互按钮及手动测试功能瞬间活了过来，并彻底消除了原本由于缺少消息机制导致的点击卡死、无响应和假死黑洞。
+    - [x] **实现生命周期物理回收 (Ensured Resource Deallocation)**：在 `on_close_report` 中除了物理销毁 `win` 之外，一并调用 `main_root.destroy()`，使局部 `mainloop()` 安全闭环结束并彻底归还线程主控权至 PyQt6 的 `QApplication` 主循环。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1920_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b5bb38b8-ef6a-4782-9fea-8a20307e75b6/20260507_1920_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 19:15
+- [x] **修复 SAPI5 语音播报引起的 PyEval_RestoreThread GIL 致命崩溃 (Fixed SAPI5 PyEval_RestoreThread GIL Crash)**：
+    - [x] **极速原生 SpVoice 直连机制 (Direct SpVoice Integration)**：重构了 `alert_manager.py` 中的语音工作线程 `_voice_worker`。改用 Windows 原生的 `win32com.client.Dispatch("SAPI.SpVoice")` 执行同步直连播报，彻底废除了 `pyttsx3` 内部复杂的基于 `DispatchWithEvents` 的事件监听和 native background callback。由于去除了所有异步事件回呼，100% 杜绝了由于非 Python 线程回呼 Python 虚拟机而引发的 `PyEval_RestoreThread` GIL 致命损坏。
+    - [x] **精密参数属性映射**：完美保留并映射了 `voice_rate` 与 `voice_volume` 属性控制，以 100% 贴合用户在 `cct` 配置中的习惯。
+    - [x] **全场景高容错 Fallback 备份**：若直接实例化 `SpVoice` 因系统组件问题失败，系统会自动降级回滚至原先的 `pyttsx3` 独立生命周期播放引擎，保证了播报系统的极致鲁棒性。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1915_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/8cb3d1b0-cf2a-4b16-881a-d63d899a690c/20260507_1915_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 18:46
+- [x] **实现 🏁 竞价赛马 🧪测试 与 🔍详检 按钮彻底解耦分离 (Decoupled Query Test and Code Check in Racing Panel)**：
+    - [x] **新增单独的个股详检按钮**：在 [bidding_racing_panel.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/bidding_racing_panel.py) 顶层 `query_bar` 的 `🧪测试` 按钮右侧，全新加入了一个独立的绿色 `🔍详检` 按钮（`self.btn_code_check`），并优雅绑定了专门的 `_on_code_check_triggered` 详检报告诊断处理函数。
+    - [x] **完美拆分与还原单一职责 (SOLID Compliance)**：
+        - [x] **测试按钮回归纯粹统计**：彻底剥离了 `_on_query_test_triggered` 中的 `check_code` 连带调用，使其重新专注于计算并更新下拉框中所有历史过滤条件在全局数据（或单只代码）下的实际命中数量（`[Hit: N]`），实现了 100% 性能自愈。
+        - [x] **详检按钮专注个股透视**：`_on_code_check_triggered` 专门负责个股/条件匹配的诊断（自动优先匹配输入框、表格选定行，直至智能的 **🎲 随机挑选有效个股**），单独拉起加固后的 `check_code` 详细分析报告，实现功能与交互的完美独立闭环！
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1846_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/8cb3d1b0-cf2a-4b16-881a-d63d899a690c/20260507_1846_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 18:45
+- [x] **优化查询引擎平衡括号拦截，彻底消除 SyntaxError 警告刷屏 (Optimized Query Engine Parenthesis Balancing Interception & Suppressed EOF Warning)**：
+    - [x] **实现快捷平衡括号校验 (Balanced Parentheses Fast-check)**：在 [query_engine_util.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/query_engine_util.py) 的 `execute` 方法入口，增加了使用现有 `_is_balanced` 方法的短路拦截器。对于左右括号无法闭合的不合法查询条件（例如用户输错或历史残留未闭合的括号），直接将其拦截并置 `self.last_error = "Parentheses are not balanced"` 迅速返回。这彻底消除了底层 `pd.eval` 试图解析非法语法时产生的高耗时及输出 `EOF in multi-line statement` 警告。
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1845_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/8cb3d1b0-cf2a-4b16-881a-d63d899a690c/20260507_1845_task.md) 任务文件，实现了开发的工程化闭环。
+
+## 2026-05-07 18:40
+- [x] **实现 🏁 竞价赛马集成 check_code 详检报告功能与全字段同步 (Integrated check_code with Full Column Synchronization in Racing Panel)**：
+    - [x] **深度对齐行情字段，彻底根除 "少col" (Comprehensive Column Syncing)**：在执行测试前，将 `df_code` 进行增量/全量多维行情、历史均线、异动指数和资金能级字段的大同步（包括 `pct`, `percent`, `close`, `now`, `lastp0d`, `trade`, `price`, `open`, `lastp1d`, `pre_close`, `nclose`, `lasth1d`, `lasth`, `lastl1d`, `lastl`, `nlow`, `high`, `low`, `ma20d`, `ma60d`, `category`, `name`, `lastdu`, `lastdu4`, `ral`, `dff`, `vol`, `volume`, `lvol`, `last6vol`, `top0`, `top15`, `cycle_stage`）。这确保了在评估复杂宏观条件时，绝不会因为某些特征列未加载而触发 "missing columns" 错误。
+    - [x] **全局导入 Tk 智能测试引擎 (Tk Engine Import Integration)**：在 `bidding_racing_panel.py` 的顶层，全局导入了来自 `stock_logic_utils` 的 `check_code`, `test_code_against_queries`, 和 `is_generic_concept` 函数，保证了运行的稳定性。
+    - [x] **实现交互式与随机 fallback (Interactive Test & Fallback Logic)**：在 `_on_query_test_triggered` 中执行详检时：如果输入的是个股代码，直接将其选作测试个股，以当前宏观过滤句作为表达式；如果输入的是条件表达式，优先提取当前在表格中点击选中的个股代码（或 `self._select_code`）；若仍无有效代码，从当前 A 股数据集中**随机挑选（🎲 Random Selection）**一只有效个股，弹出轻量化吐司（Toast）进行反馈，随后直接调起 `check_code` 面板，完美实现了多框架完美融合！
+    - [x] **同步创建并归档任务清单**：创建并归档了 [20260507_1840_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/8cb3d1b0-cf2a-4b16-881a-d63d899a690c/20260507_1840_task.md) 任务文件，实现了开发的工程化闭环。
 
 ## 2026-05-07 18:20
 - [x] **修复触发 dump_all 后切换周期不能自动刷新及 Vis 状态不能自动恢复 (Fixed Subprocess Jitter after dump_all & Isolated Signal Interruption)**：

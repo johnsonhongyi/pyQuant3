@@ -531,7 +531,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     
     # [DATA INTEGRITY] Reset real-time columns to ensure we don't leak "future" 
     # final percentages into early simulation stages.
-    leakage_cols = ['percent', 'ratio', 'now', 'price', 'trade', 'high', 'low', 'volume', 'amount', 'per1d']
+    leakage_cols = ['percent', 'ratio', 'now', 'price', 'trade', 'high', 'low', 'volume', 'amount']
     for col in leakage_cols:
         if col in real_df_all.columns:
             real_df_all[col] = 0.0

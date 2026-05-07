@@ -190,6 +190,12 @@ class PandasQueryEngine:
         if df is None or df.empty or not query_str.strip(): return df
         cleaned_expr = self._preprocess_query(query_str)
         if not cleaned_expr: return df
+        
+        # 快捷拦截：平衡括号判定，防止 SyntaxError 警告刷屏 (例如：未闭合的括号)
+        if not self._is_balanced(cleaned_expr):
+            self.last_error = "Parentheses are not balanced"
+            return df
+
         context = self._prepare_context(df)
         
         is_explicit = any(l.strip().startswith(('result =', 'signal =', 'import ', 'from ')) for l in query_str.splitlines())
