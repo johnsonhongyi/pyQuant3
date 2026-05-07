@@ -34,6 +34,13 @@ class MarketStateBus:
         self._df_filtered = pd.DataFrame()     # 过滤后的 UI DataFrame (用于展示)
         self._version = 0
         self._timestamp = 0
+        self._observers = []
+
+    def register_observer(self, callback):
+        """注册观察者回调，当有新数据发布时触发"""
+        with self._lock:
+            if callback not in self._observers:
+                self._observers.append(callback)
         self._initialized = True
     
     def publish(self, df_all, df_filtered=None):
@@ -45,14 +52,25 @@ class MarketStateBus:
             return
             
         with self._data_lock:
-            self._df_all = df_all
-            self._df_filtered = df_filtered if df_filtered is not None else df_all
+            # 唯一一次 copy，后续所有消费者共享 (P0-2)
+            self._df_all = df_all.copy()
+            if df_filtered is not None:
+                self._df_filtered = df_filtered.copy()
+            else:
+                self._df_filtered = self._df_all
             self._version += 1
             self._timestamp = time.time()
             
+            # 通知所有观察者
+            for obs in self._observers:
+                try:
+                    obs(self._version)
+                except Exception as e:
+                    logger.warning(f"总线观察者回调失败: {e}")
+            
     def get_latest(self, since_version=0):
         """
-        消费者调用 - 返回 (version, df_all, df_filtered, timestamp)
+        消费者调用 - 返回只读快照 (version, df_all, df_filtered, timestamp)
         如果 since_version 等于当前版本，返回 None (避免重复处理)
         """
         with self._data_lock:

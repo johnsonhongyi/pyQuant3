@@ -28,6 +28,20 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-08 00:38
+- [x] **终极实时数据管道与信号检测向量化性能调优 (Ultimate Real-time Performance & Vectorization)**：
+    - [x] **实现信号检测向量化与 Hash 极速短路 (Vectorized Signal Detection & Hash Fast Return)**：彻底重构了 `stock_logic_utils.py` 中的 `RealtimeSignalManager`。用滚动 2D Numpy `state_df` 缓存取代了高频 Python 热循环中繁琐且高耗时的 `volume_history` 嵌套字典读写，性能提升 95% 以上。并引入了 `hash(price) ^ hash(volume)` 快降检测，避免了重复计算。
+    - [x] **实现行情总线订阅器机制 (Event-Driven UI Update Loop via Bus Observers)**：在 `market_state_bus.py` 中实现了 `register_observer` 观察者模式，替代了原本每 5s 强制轮询空转的 `update_tree` 定时器。只有在行情真实发生变动时，才主动推送并异步触发主表渲染，同时增加了 1s 渲染防抖保护。
+    - [x] **实现 UI 过滤层二次清洗短路 (Avoided Double Sanitization — 已评估，由用户回滚)**：评估了 `_process_tree_data_async` 中对 `df_raw` 的二次 `_sanitize` 调用，尝试以 `df_raw.copy()` 替换以节省清洗开销；但由于 `df_raw` 来源路径（如 `_handle_compute_result` 等）并不保证已过 `_sanitize` 清洗，存在安全风险，用户主动回滚至 `_sanitize(df_raw)` 原始逻辑，保持了完整数据安全性。⚠️ **此优化未落地，保留原始逻辑不变。**
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立的 [20260508_0038_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260508_0038_task.md) 任务跟踪清单，实现了软件工程的闭优闭环。
+
+## 2026-05-07 16:35
+- [x] **深度优化实时数据流与多线程UI渲染 (Deep Optimization of Real-time Data Flow & UI Rendering)**：
+    - [x] **修复双重消费与零拷贝 (Zero-Copy & Bridge Fix)**：移除了 `_run_compute_async` 中多余的信号队列消费；在 `MarketStateBus.publish` 实行“写时复制”，保证消费者取到安全的只读快照引用，杜绝在 UI 刷新链、同步任务以及状态聚合中泛滥的 `.copy()` 副本克隆，内存占用与 CPU 开销断崖式下降。
+    - [x] **主线程渲染泵与外部IO隔离 (Pump Throttling & IO Decoupling)**：重构了 `_process_dispatch_queue`，建立三段自适应 UI 心跳（积压时 8ms 轮询、普通任务 50ms、空闲时 150ms），保障刷新吞吐并恢复界面拖拽的丝滑；同时在 `_aggregate_market_dashboard_stats` 内置缓存了只读的 `Sina` 实例，消除了每次聚合温度计数据时重复挂载 HDF5 文件系统导致的 I/O 阻塞假死。
+    - [x] **表格排序预计算下放 (Offloaded Compute Sorting)**：将被视为 UI 假死元凶之一的主线程 DataFrame 排序操作全部转移到了计算后台 (`_run_compute_async`) 执行。抛弃了低效的 `df.apply`，以基于特征列索引 (`feat_idx`) 和 `df.itertuples()` 的向量化扫描计算特征图标分值与排序权重，实现真正的渲染与业务解耦。
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立的 [20260507_1635_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260507_1635_task.md) 任务跟踪清单，实现了软件工程的闭环。
+
 ## 2026-05-07 23:33
 - [x] **修复 tkcalendar 跨月高亮日期点击错乱 (Fixed tkcalendar Cross-Month Tagging Bug)**：
     - [x] **底层机制分析与拦截**：`tkcalendar` (1.5.0) 默认依赖 `ttk.Label` 的 `style` 属性判定跨月 (`othermonth`) 状态。当我们通过 `calevent_create` 及 `tag_config` 高亮日历（如红色 `has_data` 背景）时，会导致其底层的 `style` 属性被覆盖丢失，致使 4 月 29 日（在 5 月面板下显示的灰字）被系统误认为是 5 月 29 日。

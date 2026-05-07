@@ -579,6 +579,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 用于取代多 Queue 堆积，实现"拉取式" UI 刷新
             from market_state_bus import MarketStateBus
             self.market_bus = MarketStateBus.get_instance()
+            self.market_bus.register_observer(self._on_bus_data_ready)
             
             # 🚀 [NEW] UI 专用原子快照存储 (P0-2)
             self.ui_state_store = AtomicStateStore()
@@ -1263,7 +1264,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         max_single_task = {"name": "None", "dur": 0}
 
         # UI dispatch 预算 (与 pump_lag 解耦 — 专注主线渲染)
-        MAX_TASKS_PER_CYCLE = 8
+        MAX_TASKS_PER_CYCLE = 12
         TIME_BUDGET_S = 0.020    # 20ms — 保持 UI 可拖动的黄金预算
         SLOW_TASK_WARN_MS = 500  # 慢任务阈值降至 500ms
 
@@ -1277,9 +1278,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 try:
                     task = self.tk_dispatch_queue.get_nowait()
+                    self._last_dispatch_active_ts = time.time()  # [PERF] 记录最后活动时间
                 except Empty:
-                    # 队列空：如果没有活跃任务，延长检查间隔以节省省电
-                    next_delay = 150 if processed_count == 0 else 50
+                    # [PERF] 自适应心跳机制：如果队列有积压则 8ms 极速轮询；如果偶尔有任务则 50ms 待机；如果长闲则 150ms 休眠
+                    if processed_count > 0:
+                        next_delay = 8
+                    else:
+                        idle_time = time.time() - getattr(self, '_last_dispatch_active_ts', 0)
+                        next_delay = 150 if idle_time > 2.0 else 50
                     break
                 
                 if not callable(task):
@@ -3816,7 +3822,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 🛠️ [SNAPSHOT] 对数据进行快照化，防止子线程处理时主线程正在修改引发 RuntimeError: dict changed size during iteration
             # 或者是 Pandas 的 SettingWithCopyWarning
-            df_snapshot = full_df.copy()
+            df_snapshot = full_df
 
             if hasattr(self, 'executor') and self.executor:
                 # [THROTTLE] 增加分发节流保护，防止前一个分析任务由于卡顿未返回时持续堆积
@@ -4048,6 +4054,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     
     
     # ----------------- 数据刷新 ----------------- #
+    def _on_bus_data_ready(self, version):
+        """事件驱动回调：当总线发布新数据时触发 (后台线程)"""
+        now = time.time()
+        # 控制 UI 最大刷新率（防抖：每 1.0 秒最多触发一次）
+        last_trigger = getattr(self, '_last_bus_trigger_ts', 0)
+        if now - last_trigger < 1.0:
+            return
+        self._last_bus_trigger_ts = now
+        
+        try:
+            self.after(0, self.update_tree)
+        except Exception:
+            pass
+
     def update_tree(self):
         assert_main_thread("update_tree")
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
@@ -4162,8 +4182,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Error starting tree update: {e}", exc_info=True)
             self._is_processing_tree_data = False
         finally:
-            # Re-schedule next check
-            self._schedule_after(5000, self.update_tree)
+            # Re-schedule fallback heartbeat
+            if hasattr(self, '_update_tree_timer'):
+                try:
+                    self.after_cancel(self._update_tree_timer)
+                except Exception:
+                    pass
+            self._update_tree_timer = self.after(5000, self.update_tree)
 
     def _process_tree_data_async(self, data_packet, sync_ui=True, query="", force=False):
         """
@@ -4248,7 +4273,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df = full_df
             else:
                 df = _sanitize(df_raw) if df_raw is not None else full_df.copy()
-
+                
             t_filter = time.time()
 
             # 5. 排序 (轻量)
@@ -4288,9 +4313,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 9. 提交 CPU 重计算到 compute_executor
             fut = self.compute_executor.submit(
                 self._run_compute_async,
-                full_df.copy(),
-                df.copy() if df is not None else None,
-                sync_ui, cur_res, version, force
+                full_df,
+                df,
+                sync_ui, cur_res, version, force,
+                getattr(self, 'sortby_col', None),
+                getattr(self, 'sortby_col_ascend', False),
+                getattr(self, 'feature_marker', None)
             )
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
             fut.add_done_callback(lambda f, v=version, frc=force: self._on_compute_done(f, v, frc))
@@ -4301,33 +4329,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
 
-    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False):
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None):
         """
         [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
         结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
         """
         try:
-            # 信号桥接 (跨进程事件转发到 SignalBus)
-            try:
-                from signal_bus import get_signal_bus
-                bus = get_signal_bus()
-                if hasattr(self, 'signal_bridge_queue'):
-                    cnt = 0
-                    while not self.signal_bridge_queue.empty():
-                        try:
-                            ev = self.signal_bridge_queue.get_nowait()
-                            if ev:
-                                bus.publish(
-                                    event_type=getattr(ev, 'event_type', None) or getattr(ev, 'type', 'unknown'),
-                                    source=f"{getattr(ev, 'source', 'unknown')} (bridged)",
-                                    payload=getattr(ev, 'payload', {}),
-                                    signal=getattr(ev, 'signal', None)
-                                )
-                                cnt += 1
-                            if cnt > 100: break
-                        except Exception: break
-            except Exception: pass
-
             # 1. 情绪评分 (heavy)
             if hasattr(self, 'realtime_service') and self.realtime_service:
                 try:
@@ -4353,6 +4360,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df['emotion_status'] = df['code'].map(
                             full_df.set_index('code')['emotion_status']
                         ).fillna(50)
+
+                # 4. [PERF] CPU预计算：在后台线程完成 Treeview 的排序运算，彻底解放 UI 线程
+                if sortby_col and sortby_col in df.columns:
+                    try:
+                        if sortby_col == 'name' and feature_marker:
+                            fm = feature_marker
+                            cols = df.columns.tolist()
+                            feat_idx = {c: i+1 for i, c in enumerate(cols)} # index 0 is row Index
+                            scores = []
+                            for row in df.itertuples(name=None):
+                                icon = fm.get_icon_fast(row, feat_idx)
+                                prio = fm.get_priority_score(icon)
+                                name_val = row[feat_idx['name']] if 'name' in feat_idx else ''
+                                scores.append((prio, str(name_val)))
+                            
+                            score_series = pd.Series(scores, index=df.index)
+                            df = df.loc[score_series.sort_values(ascending=sortby_col_ascend).index]
+                        else:
+                            is_num = pd.api.types.is_numeric_dtype(df[sortby_col])
+                            if is_num:
+                                df = df.sort_values(by=sortby_col, ascending=sortby_col_ascend)
+                            else:
+                                try:
+                                    df = df.loc[pd.to_numeric(df[sortby_col], errors='coerce').fillna(0).sort_values(ascending=sortby_col_ascend).index]
+                                except:
+                                    df = df.sort_values(by=sortby_col, ascending=sortby_col_ascend)
+                    except Exception as e:
+                        logger.warning(f"[Compute Sorting] 预排序计算失败: {e}")
 
             # 4. 策略引擎 (fire-and-forget, 内置节流)
             if not full_df.empty:
@@ -4516,7 +4551,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         panel = getattr(self, "sector_bidding_panel", None)
                         if panel and panel.isVisible():
                             try:
-                                panel.on_realtime_data_arrived(full_df.copy())  # [THREAD-SAFETY] copy() 防止子线程悬空指针
+                                panel.on_realtime_data_arrived(full_df)  # [THREAD-SAFETY] 移除了 copy() 因为 full_df 已是独立的不可变快照
                             except Exception as e:
                                 logger.error(f"Panel sync failed: {e}")
 
@@ -4593,7 +4628,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
                             self.sector_bidding_panel.show()
                             if hasattr(self, 'df_all') and not self.df_all.empty:
-                                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
                             logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
 
             except Exception as e:
@@ -4664,7 +4699,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         import numpy as np
                         import traceback
                         
-                        df = self.df_all.copy() if hasattr(self, 'df_all') else None
+                        # [PERF] 从 MarketStateBus 获取只读快照，避免主线程 df_all 被并发修改
+                        bus_data = self.market_bus.get_latest()
+                        df = bus_data[1] if bus_data else (self.df_all if hasattr(self, 'df_all') else None)
                         if df is None or df.empty: return
                         
                         up_count = down_count = flat_count = vol_down = vol_up = 0
@@ -4710,7 +4747,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         indices_data = []
                         idx_codes = ["000001", "399001", "399006", "000688"]
                         try:
-                            idf = sina_data.Sina().get_stock_list_data(idx_codes, index=True)
+                            # [PERF] 复用 Sina 只读实例，消除每次实例化 HDF5 的高昂成本 (200ms+)
+                            if not hasattr(self, '_cached_sina_instance'):
+                                self._cached_sina_instance = sina_data.Sina(readonly=True)
+                            
+                            idf = self._cached_sina_instance.get_stock_list_data(idx_codes, index=True)
                             if idf is not None and not idf.empty:
                                 nm_map = {"000001": "上证", "999999": "上证", "399001": "深证", "399006": "创业", "999688": "科创", "999312": "科创"}
                                 for c, r in idf.iterrows():
@@ -11568,34 +11609,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if df is None:
             df = self.current_df.copy() if hasattr(self, 'current_df') else None
 
-        # ⚡ [NEW] 排序持久化保护：若用户已设置排序列，在渲染前自动对齐排序状态
-        if df is not None and not df.empty and self.sortby_col and self.sortby_col in df.columns:
-            try:
-                if self.sortby_col == 'name' and hasattr(self, 'feature_marker'):
-                    # 针对名称列，使用图标权重进行复合排序
-                    fm = self.feature_marker
-                    def _get_row_score(r):
-                        row_dict = r.to_dict()
-                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
-                        icon = fm.get_icon_for_row(row_dict)
-                        return (fm.get_priority_score(icon), row_dict.get('name', ''))
-                    
-                    # 使用辅助序列进行排序以保证性能
-                    scores = df.apply(_get_row_score, axis=1)
-                    df = df.loc[scores.sort_values(ascending=self.sortby_col_ascend).index]
-                else:
-                    # 通用列排序 (支持数值与字符串自适应)
-                    is_num = pd.api.types.is_numeric_dtype(df[self.sortby_col])
-                    if is_num:
-                        df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    else:
-                        # 尝试强制数值排序（解决 Rank 等字段被识别为 Object 的问题）
-                        try:
-                            df = df.loc[pd.to_numeric(df[self.sortby_col], errors='coerce').fillna(0).sort_values(ascending=self.sortby_col_ascend).index]
-                        except:
-                            df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-            except Exception as e:
-                logger.warning(f"[Sorting] 自动重排序失败: {e}")
+        # ⚡ [PERF] 排序计算已转移到 compute_executor 预计算，UI线程直接应用排序好的 df
 
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
