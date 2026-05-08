@@ -293,9 +293,14 @@ class TradingLogger:
             
         try:
             from JohnsonUtil import commonTips as cct
+            # 🚀 [优化] 允许当日或最近交易日盘后复盘数据(Fupan)持久化入库 (2026-05-08)
             if not cct.get_work_time():
-                # logger.debug("TradeLogger: 非交易时间，拒绝记录选股结果。")
-                return
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                first_record_date = records[0].get('date', '') if records else ''
+                is_valid_fupan = (first_record_date == today_str or first_record_date == cct.get_last_trade_date())
+                if not is_valid_fupan:
+                    # logger.debug("TradeLogger: 非交易时间且非当日/最近交易日复盘，拒绝记录。")
+                    return
         except Exception as check_e:
             pass
             

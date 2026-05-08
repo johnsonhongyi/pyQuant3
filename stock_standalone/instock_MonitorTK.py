@@ -2142,7 +2142,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.warning(f"❌ [15:30 Task] LiveStrategy saving failed: {e}")
 
-        today = cct.get_today('')
+        # --- [NEW] 自动保存每日选股数据：StockSelector (2026-05-08) ---
+        try:
+            # 💡 [关键改进] 无论用户有没有手动打开过 selector 窗口，都强制确保并初始化 selector 实例 (2026-05-08)
+            if not hasattr(self, 'selector') or self.selector is None:
+                from stock_selector import StockSelector
+                self.selector = StockSelector(df=getattr(self, 'df_all', None))
+                logger.info("📡 [15:30 Task] 自动初始化后台 StockSelector 实例成功。")
+            else:
+                # 确保实时数据源引用最新
+                if hasattr(self, 'df_all') and not self.df_all.empty:
+                    self.selector.df_all_realtime = self.df_all
+                    self.selector.resample = self.global_values.getkey("resample") or 'd'
+
+            if self.selector is not None:
+                logger.info("🕒 [15:30 Task] 正在自动触发每日收盘选股计算与持久化...")
+                def _auto_stock_select_task():
+                    try:
+                        # 强制执行今日收盘选股并自动落库
+                        self.selector.get_candidates_df(force=True)
+                        logger.info("✅ [15:30 Task] 每日收盘选股自动持久化保存圆满完成！")
+                    except Exception as e_select:
+                        logger.error(f"❌ [15:30 Task] 每日收盘选股自动持久化失败: {e_select}")
+                
+                # 在后台线程池异步运行，绝不卡死 UI 主线程
+                if hasattr(self, "compute_executor") and self.compute_executor is not None:
+                    self.compute_executor.submit(_auto_stock_select_task)
+                else:
+                    import threading
+                    threading.Thread(target=_auto_stock_select_task, daemon=True).start()
+        except Exception as e:
+            logger.error(f"❌ [15:30 Task] 自动触发或初始化选股任务失败: {e}")
+
+        today = cct.get_today()
         global write_all_day_date
         if write_all_day_date == today:
             logger.info(f'Write_market_all_day_mp 已经完成')
