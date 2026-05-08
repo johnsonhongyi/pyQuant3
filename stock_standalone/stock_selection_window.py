@@ -432,12 +432,24 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self._data_loaded = True
                 self._last_query_date = query_date
                 
-                # 初始化用户标注列
+                # 初始化用户标注列与历史回溯字段映射
                 if not self.df_full_candidates.empty:
                     if 'user_status' not in self.df_full_candidates.columns:
                         self.df_full_candidates['user_status'] = "待定"
                     if 'user_reason' not in self.df_full_candidates.columns:
                         self.df_full_candidates['user_reason'] = ""
+                        
+                    # 🚀 [新增] 优雅地针对历史数据列进行 rename，直接激活历史模式下的字段展现 (2026-05-08)
+                    rename_map = {}
+                    if 'yesterday_pct' in self.df_full_candidates.columns:
+                        rename_map['yesterday_pct'] = '昨日涨幅'
+                    if 'sum_perc' in self.df_full_candidates.columns:
+                        rename_map['sum_perc'] = '连阳涨幅'
+                    if 'rank' in self.df_full_candidates.columns:
+                        rename_map['rank'] = 'Rank'
+                    
+                    if rename_map:
+                        self.df_full_candidates.rename(columns=rename_map, inplace=True)
                 
                 # ✅ [OPTIMIZE] 重置列宽重测标记，确保新数据能重新计算宽度
                 self._column_widths_cached = False

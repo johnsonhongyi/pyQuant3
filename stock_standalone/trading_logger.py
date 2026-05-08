@@ -114,6 +114,18 @@ class TradingLogger:
                     ma10 REAL,
                     category TEXT,
                     resample TEXT DEFAULT 'd', -- 周期标识
+                    
+                    -- 🚀 [新增] 历史回溯与复盘补齐字段 (2026-05-08)
+                    rank INTEGER DEFAULT 0,
+                    zhuli_rank TEXT DEFAULT '-',
+                    yesterday_pct REAL DEFAULT 0.0,
+                    sum_perc REAL DEFAULT 0.0,
+                    win REAL DEFAULT 0.0,
+                    open REAL DEFAULT 0.0,
+                    stage INTEGER DEFAULT 2,
+                    user_status TEXT DEFAULT '待定',
+                    user_reason TEXT DEFAULT '',
+                    
                     PRIMARY KEY (date, code, resample)
                 )
             """)
@@ -180,7 +192,18 @@ class TradingLogger:
                 "tqi": "REAL",    # ✅ [新增] 2024-03-19 质量分支持
                 "ma5": "REAL",
                 "ma10": "REAL",
-                "category": "TEXT"
+                "category": "TEXT",
+                
+                # 🚀 [新增] 历史回溯与复盘补齐字段自动迁移
+                "rank": "INTEGER DEFAULT 0",
+                "zhuli_rank": "TEXT DEFAULT '-'",
+                "yesterday_pct": "REAL DEFAULT 0.0",
+                "sum_perc": "REAL DEFAULT 0.0",
+                "win": "REAL DEFAULT 0.0",
+                "open": "REAL DEFAULT 0.0",
+                "stage": "INTEGER DEFAULT 2",
+                "user_status": "TEXT DEFAULT '待定'",
+                "user_reason": "TEXT DEFAULT ''"
             }
             
             for col_name, col_type in check_cols.items():
@@ -278,8 +301,14 @@ class TradingLogger:
             
         try:
             self.db_manager.executemany("""
-                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, grade, tqi, ma5, ma10, category, resample)
-                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :grade, :tqi, :ma5, :ma10, :category, :resample)
+                INSERT OR REPLACE INTO selection_history (
+                    date, code, name, score, price, percent, ratio, volume, amount, reason, status, grade, tqi, ma5, ma10, category, resample,
+                    rank, zhuli_rank, yesterday_pct, sum_perc, win, open, stage, user_status, user_reason
+                )
+                VALUES (
+                    :date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :grade, :tqi, :ma5, :ma10, :category, :resample,
+                    :rank, :zhuli_rank, :yesterday_pct, :sum_perc, :win, :open, :stage, :user_status, :user_reason
+                )
             """, records)
         except Exception as e:
             logger.error(f"Error logging selections: {e}")

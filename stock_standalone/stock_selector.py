@@ -863,7 +863,15 @@ class StockSelector:
                     'open': float(data.get('open', 0)),
                     'category': "|".join(stock_cats[:3]),
                     'stage': stage, 
-                    'resample': resample
+                    'resample': resample,
+                    
+                    # 🚀 [新增] 历史回溯补齐字段映射 (2026-05-08)
+                    'rank': int(data.get('Rank', data.get('rank', 0))),
+                    'yesterday_pct': float(data.get('per1d', 0.0)),
+                    'sum_perc': float(data.get('sum_perc', 0.0)),
+                    'win': float(data.get('win', 0.0)),
+                    'user_status': '待定',
+                    'user_reason': ''
                 }
                 selected_records.append(record)
 
