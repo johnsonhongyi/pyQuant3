@@ -33,6 +33,20 @@
     - [x] **实现信号检测向量化与 Hash 极速短路 (Vectorized Signal Detection & Hash Fast Return)**：彻底重构了 `stock_logic_utils.py` 中的 `RealtimeSignalManager`。用滚动 2D Numpy `state_df` 缓存取代了高频 Python 热循环中繁琐且高耗时的 `volume_history` 嵌套字典读写，性能提升 95% 以上。并引入了 `hash(price) ^ hash(volume)` 快降检测，避免了重复计算。
     - [x] **实现行情总线订阅器机制 (Event-Driven UI Update Loop via Bus Observers)**：在 `market_state_bus.py` 中实现了 `register_observer` 观察者模式，替代了原本每 5s 强制轮询空转的 `update_tree` 定时器。只有在行情真实发生变动时，才主动推送并异步触发主表渲染，同时增加了 1s 渲染防抖保护。
     - [x] **实现 UI 过滤层二次清洗短路 (Avoided Double Sanitization — 已评估，由用户回滚)**：评估了 `_process_tree_data_async` 中对 `df_raw` 的二次 `_sanitize` 调用，尝试以 `df_raw.copy()` 替换以节省清洗开销；但由于 `df_raw` 来源路径（如 `_handle_compute_result` 等）并不保证已过 `_sanitize` 清洗，存在安全风险，用户主动回滚至 `_sanitize(df_raw)` 原始逻辑，保持了完整数据安全性。⚠️ **此优化未落地，保留原始逻辑不变。**
+    - [x] **优化跨进程信号中转与静默期积压修复 (Optimized Signal Bridging & Fixed Idle Throttling Bug)**：
+        - **问题定位**：原 `signal_bridge_queue` 跨进程信号消耗逻辑从后台 `_run_compute_async` 计算线程（每次无条件执行）迁移到了 Tk 主线程的 `update_tree` 中。但因为被错误包裹在 `if bus_data:` 条件块内，导致没有新行情数据发布的静默期内，子进程所发出的信号根本无法被及时消耗，引发极高延迟或队列满载丢失。
+        - **✅ 修复后的正确结构**：将信号桥接消耗逻辑提前到 `update_tree` 入口最前列无条件快速消费：
+          ```
+          update_tree()
+            │
+            ├─ ⚪️ [无条件] signal_bridge_queue 消耗 ← 已修复并提前至此，行情静止期信号也能秒级转发，杜绝延迟
+            │
+            ├─ bus_data = market_bus.get_latest(...)
+            │
+            └─ if bus_data:
+                  # 处理新一轮行情快照 -> 提交至 pump 后台
+          ```
+          业务逻辑 100% 完整保留，保障了实时监控与指令通知毫秒级互联。
     - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立的 [20260508_0038_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260508_0038_task.md) 任务跟踪清单，实现了软件工程的闭优闭环。
 
 ## 2026-05-07 16:35
