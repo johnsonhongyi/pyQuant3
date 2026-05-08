@@ -12258,16 +12258,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 diff_summary = "  ".join(diff_texts)
                 self.lbl_category_result.config(text=f"概念异动：{diff_summary}", fg="red")
 
-                def flash_label(count=0):
-                    if count >= 6:
-                        self.lbl_category_result.config(fg="red")
-                        return
-                    cur_color = self.lbl_category_result.cget("fg")
-                    new_color = "green" if cur_color == "red" else "red"
-                    self.lbl_category_result.config(fg=new_color)
-                    self.lbl_category_result.after(300, flash_label, count + 1)
+                # 💡 防止多重 overlapping 闪烁 loop
+                if not getattr(self, "_is_flashing_category", False):
+                    self._is_flashing_category = True
+                    def flash_label(count=0):
+                        if not hasattr(self, "lbl_category_result") or not self.lbl_category_result.winfo_exists():
+                            self._is_flashing_category = False
+                            return
+                        if count >= 6:
+                            self.lbl_category_result.config(fg="red")
+                            self._is_flashing_category = False
+                            return
+                        try:
+                            cur_color = self.lbl_category_result.cget("fg")
+                            new_color = "green" if cur_color == "red" else "red"
+                            self.lbl_category_result.config(fg=new_color)
+                            self.lbl_category_result.after(300, flash_label, count + 1)
+                        except Exception:
+                            self._is_flashing_category = False
 
-                flash_label()
+                    flash_label()
             else:
                 self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
 

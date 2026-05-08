@@ -789,7 +789,7 @@ class QueryHistoryManager:
             except: return
         record = self.current_history[idx]
         if col == "#3":
-            new_note = self.askstring_at_parent(self.root, "修改备注", "请输入新的备注：", initialvalue=record.get("note", ""))
+            new_note = askstring_at_parent_single(self.root, "修改备注", "请输入新的备注：", initialvalue=record.get("note", ""), window_name="QueryHistoryManager_EditNote")
             if new_note is not None:
                 record["note"] = new_note
                 if self.current_key == "history1": self.history1[idx]["note"] = new_note
