@@ -4110,8 +4110,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Periodic cache save check failed: {e}")
 
-                # 🔄 优化：处理队列中的所有数据包，不跳过中间增量（解决“缺斤短两”数据不全问题）
-                # 我们逐个分发包到后台 worker 进行策略计算，但只在最后一轮同步 UI
+                # ⚪️ [FIX] 无条件消耗 signal_bridge_queue（跨进程信号中转）
+                # 必须在 bus_data 条件外执行：即使行情无更新，子进程仍可能有信号待转发
+                try:
+                    from signal_bus import get_signal_bus
+                    _sb = get_signal_bus()
+                    if hasattr(self, 'signal_bridge_queue'):
+                        bridge_count = 0
+                        while not self.signal_bridge_queue.empty():
+                            try:
+                                event = self.signal_bridge_queue.get_nowait()
+                                if event:
+                                    _sb.publish(
+                                        event_type=getattr(event, 'event_type', None) or getattr(event, 'type', 'unknown'),
+                                        source=f"{getattr(event, 'source', 'unknown')} (bridged)",
+                                        payload=getattr(event, 'payload', {}),
+                                        signal=getattr(event, 'signal', None)
+                                    )
+                                    bridge_count += 1
+                                if bridge_count > 100: break
+                            except Exception: break
+                        if bridge_count > 0:
+                            logger.debug(f"📡 [UpdateTree] Bridged {bridge_count} external signals.")
+                except Exception as e:
+                    logger.warning(f"Signal bridging failed: {e}")
+
                 # 🔄 [PERF] 架构重构：改为从 MarketStateBus "拉取" 最新快照 (Snapshot Pull)
                 # 优点：不阻塞 Queue，不处理中间积压包，永远只处理当前最新帧
                 bus_data = self.market_bus.get_latest(since_version=getattr(self, '_last_ui_bus_version', 0))
@@ -4125,30 +4148,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'timestamp': snap_time
                     }
 
-                    
-                    # ⭐ [RESTORED] 跨进程中转逻辑：在处理数据包之前快速消耗信号
-                    try:
-                        from signal_bus import get_signal_bus
-                        bus = get_signal_bus()
-                        if hasattr(self, 'signal_bridge_queue'):
-                            bridge_count = 0
-                            while not self.signal_bridge_queue.empty():
-                                try:
-                                    event = self.signal_bridge_queue.get_nowait()
-                                    if event:
-                                        bus.publish(
-                                            event_type=getattr(event, 'event_type', None) or getattr(event, 'type', 'unknown'),
-                                            source=f"{getattr(event, 'source', 'unknown')} (bridged)",
-                                            payload=getattr(event, 'payload', {}),
-                                            signal=getattr(event, 'signal', None)
-                                        )
-                                        bridge_count += 1
-                                    if bridge_count > 100: break
-                                except: break
-                            if bridge_count > 0:
-                                logger.debug(f"📡 [UpdateTree] Bridged {bridge_count} external signals.")
-                    except Exception as e:
-                        logger.error(f"Signal bridging failed: {e}")
 
                     # ⭐ [FIX] 捕获当前 UI 的搜索条件，传递给后台进行实时过滤渲染
                     # 避免新行情进入时，主表格自动跳回全量列表，导致用户搜索失效
