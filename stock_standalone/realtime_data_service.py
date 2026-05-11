@@ -1244,8 +1244,13 @@ class IntradayEmotionTracker:
 
             # 2. [RESTORED] 情绪引擎核心逻辑
             baselines = df['code'].map(baseline_tracker.get_all_baselines()).fillna(50.0) if baseline_tracker else pd.Series(50.0, index=df.index)
-            percent = df.get('percent', 0.0)
-            vol_ratio = df.get(active_ratio_col, 1.0)
+            
+            # [FIX] 使用策略映射和备选列，并强制为 Series 以支持向量化 .clip()，防止 scalar 导致 AttributeError
+            active_pct_col = c_mapping.get('percent', 'percent')
+            if active_pct_col not in df.columns and 'pct' in df.columns: active_pct_col = 'pct' # Fallback
+            
+            percent = df[active_pct_col] if active_pct_col in df.columns else pd.Series(0.0, index=df.index)
+            vol_ratio = df[active_ratio_col] if active_ratio_col in df.columns else pd.Series(1.0, index=df.index)
             
             delta = (percent * 2.0).clip(-15, 15)
             
