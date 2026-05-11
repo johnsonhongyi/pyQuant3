@@ -28,6 +28,14 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-11 10:45
+- [x] **根治情绪引擎 AttributeError 并实现 percent 列映射容错 (Fixed Emotion Engine AttributeError & Percent Mapping)**：
+    - [x] **修复 'float' object has no attribute 'clip' 崩溃 (Fixed Float Clip Error)**：
+        - [x] **根治向量化运算类型缺陷**：查明在 `realtime_data_service.py` 中，由于直接使用 `df.get('percent', 0.0)`，当 `df` 中缺失 `'percent'` 列时会返回 Python 原生 float `0.0`。此时对 float 调用 `.clip()` 会抛出 `AttributeError` 导致后台计算进程中断。
+        - [x] **实现 Series 类型强制转化与保全**：在 `IntradayEmotionTracker.update_batch` 方法中重构了字段读取逻辑。现在无论该列是否存在，都会被强制封装/转换为对齐当前 DataFrame 的 `pd.Series`（缺失则填充为默认值 `0.0`/`1.0`）。这 100% 确保了后续所有涉及 `.clip()` 或掩码运算的向量化管道稳定顺畅。
+    - [x] **上线策略映射与 fallback 容错机制 (Percent Mapping Fallback)**：引入了 `c_mapping.get('percent')` 的动态获取，并增加了针对 `'pct'` 列名的智能 Fallback 备选判定。即使数据源中涨幅列名定义为 `'pct'` 而不是 `'percent'`，系统也能自适应抓取，极大提升了行情管道在异构数据集下的鲁棒性。
+    - [x] **同步加固成交量比 (vol_ratio) 安全提取**：对 `vol_ratio` 应用了同样的强制 Series 转化保护策略，从架构上防范了未来可能的同类型 AttributeError 风险，确保了盘中情绪分计算的万无一失。
+
 ## 2026-05-08 10:15
 - [x] **实现选股历史存档全数据 100% 完美持久化与回溯 (Implemented 100% Full Persistence & Perfect Historical Backtracking)**：
     - [x] **分析非持久化数据痛点**：查明在查看历史选股存档时，个股 `Rank`、`昨日% (per1d)`、`连阳 (sum_perc)`、`胜率 (win)` 等核心数据无法显示（为 `0`）的根本原因：这些关键指标在今日实时模式下是通过内存中的 `df_all_realtime` 动态 Join 拼装渲染的，由于 SQLite 的 `selection_history` 表缺少对应的物理列定义，在写入时便已被无情丢弃，导致历史复盘时满足不了 Join 条件且没有落盘数据而显示为 `0`。
