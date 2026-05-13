@@ -28,6 +28,27 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-13 19:10
+- [x] **根治可视化终端退出时偶发 Access Violation 崩溃的问题 (Root-fixed Visualizer Exit Access Violation)**：
+    - [x] **引入物理强制退出指令 (`os._exit`)**：针对在 `closeEvent` 结尾由于 `sys.exit(0)` 产生的 `SystemExit` 异常穿透 C++/PyQt 触发的析构冲突问题，采用与 `MonitorTK` 一致的工业级方案——将其平替为操作系统级的 `os._exit(0)`。这绕过了 Python 解释器内部不稳定的 GC 乱序销毁链，杜绝了因 COM/语音线程残留引发的内存访问冲突。
+    - [x] **优化清理流程与日志完整度**：重构了 `MainWindow.closeEvent` 尾部的物理退出逻辑。将 `detector.stop()` 和 `sender.close()` 的优雅回收操作以及物理退出提示音/日志，强制移动到 `stopLogger()` 之前执行，彻底解决了关闭日志被隐性吞噬的缺陷，同时保留了此前完美执行的数据落盘与计时器刹车链路。
+    - [x] **高规格同步与任务归档 (Task Archiving)**：创建并保存了独立的专项任务文件 [20260513_1910_fix_visualizer_exit_access_violation.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260513_1910_fix_visualizer_exit_access_violation.md) 以供回溯。
+
+## 2026-05-13 18:50
+- [x] **修复 `send_df` 自动推送全数据时 `resample` 状态未能对齐的 Bug (Fixed `send_df` Resample Sync Bug)**：
+    - [x] **升级推送数据包协议 (Enriched Push Protocol)**：重构了 `instock_MonitorTK.py` 中的 `send_df` 封装逻辑。现在在构建 `sync_package` 时，会自动提取当前 Tk 端全局活跃的周期键值并作为 `'resample'` 参数并入 Pipe 与 Socket 投递包中。
+    - [x] **打通接收端联动解析 (Wired Receiver Handling)**：查明可视化进程存在两条数据入口。针对这两条通道，分别在 `trade_visualizer_qt6.py` 的 `on_dataframe_received` (针对 Socket 通道) 以及 `_poll_command_queue` 的 `UPDATE_DF_DATA` 分支 (针对主 Pipe 通道) 入口处，增补了针对 `resample` 周期参数的反向提取与解析支路。
+    - [x] **实施物理数据先行的“因果时序调优” [极致一致性]**：基于数据刷新先行的核心诉求，全面重构了对齐时机。在 **Pipe 管道**中，将解析推迟到 `df_all` 物理吸纳入池之后；在 **Socket 管道**中，将触发逻辑精准切入到 `_safe_process` 和 `_safe_apply_diff` 的**计算回调尾部**。这彻底保证了只有在可视化终端核心数据渲染 100% 成功后，才放开 UI 的周期对齐闸门，杜绝了用“新周期”错配“旧数据”的瞬时帧跳变。
+    - [x] **实现周期脏位检测与秒级同步**：一旦数据落地完毕并检测到接收周期与本地可视化周期存在偏差，瞬间自发执行对齐，完成 ComboBox 状态与 K线拉取的原子刷新。
+    - [x] **高规格同步与任务归档 (Task Archiving)**：创建并保存了专项任务清单文件 [20260513_1850_fix_send_df_resample_sync.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260513_1850_fix_send_df_resample_sync.md) 以供回溯。
+
+## 2026-05-13 18:40
+- [x] **修复可视化界面初始化与联动时周期(Resample)显示状态不一致的问题 (Fixed Visualizer Toolbar Resample State Display Bug)**：
+    - [x] **重构 `main` 启动逻辑进行 UI 同步**：放弃了以前仅直接将解析出的字符串赋值给 `window.resample` 从而绕过 GUI 的做法。重构为直接调用标准的 UI 响应接口 `window.on_resample_changed(start_resample)`。这不仅打通了对 internal index 的更新，更保证了顶部 toolbar 中的 `QComboBox` 下拉框在窗体首次展示时便能够 100% 显示为正确的周期文字（如 "3d"）。
+    - [x] **引入启动防抖自动挂起机制 (Debounce Hardening)**：在调用 `on_resample_changed` 进行 UI 对齐后，针对由它触发的 50ms 重载延时进行了瞬间拦截——立即通过 `.stop()` 强力刹停了 `_resample_debounce_timer` 计时器并将 pending state 复位。这完美避开了系统自发启动的 singleShot 数据初始化加载，消除了冷启动时的二次冗余 I/O 消耗。
+    - [x] **补全 Pipe 通道下的 `TIME_LINK` 周期透传**：在 `_poll_command_queue` 处理从 MonitorTK 发送过来的 `TIME_LINK` 联动指令时，补齐了对 payload 中 `resample` 周期参数的精准提取。现在执行 `load_stock_by_code` 会将周期同代码、时间戳一道向下穿透发送，彻底解决并根治了多端状态数据绘制正常但工具栏显示却隐性脱节的缺陷。
+    - [x] **高规格同步与任务归档 (Task Archiving)**：创建并保存了专属任务清单，按 [20260513_1840_fix_visualizer_resample_ui_sync.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260513_1840_fix_visualizer_resample_ui_sync.md) 详细设计完成了全部闭环建设。
+
 ## 2026-05-13 17:46
 - [x] **修复可视化筛选面板 Name 列宽与持久化保存问题 (Fixed Filter Panel Name Column Width & Persistence Issues)**：
     - [x] **打通列宽变动防抖持久化机制 (Activated Column Resizing Debounced Storage)**：查明 `trade_visualizer_qt6.py` 中 `_on_column_resized_debounced` 试图调用的 `self._resize_timer` 在初始化中缺失的隐患。现已在 `__init__` 初始化流程极早阶段补全了 `self._resize_timer = QTimer(self)` 的单次防抖关联（2秒），彻底激活了列宽变动后的秒级延迟自动写盘机制。
