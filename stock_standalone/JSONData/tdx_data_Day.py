@@ -6292,45 +6292,102 @@ def get_tdx_exp_low_or_high_power(
 
     else:
 
-        # 🚀 最近低于 MA10 的最后最低点
+        # 🚀 自动选择均线周期
+        ma_col = 'ma10d' if str(resample).lower() == 'd' else 'ma5d'
 
-        if 'ma10d' not in dz.columns:
-            dz['ma10d'] = dz.close.rolling(10, min_periods=1).mean()
+        # 🚀 动态生成均线
+        if ma_col not in dz.columns:
 
-        # # 只保留低于 MA10 的K线
+            ma_n = 10 if ma_col == 'ma10d' else 5
+
+            dz[ma_col] = (
+                dz.close
+                .rolling(ma_n, min_periods=1)
+                .mean()
+            )
+
+        # 🚀 去除非法均线
+        valid_df = dz[dz[ma_col] > 0]
+
+        if valid_df.empty:
+            lowdate = dz.low.idxmin()
+
+        else:
+
+            # 🚀 回踩均线区域
+            support_df = valid_df[
+                valid_df.low < valid_df[ma_col]
+            ]
+
+            if not support_df.empty:
+
+                # 🚀 自动判断时间方向
+                # idx0 = valid_df.index[0]
+                # idx1 = valid_df.index[-1]
+
+                # descending = idx0 > idx1
+                descending = True
+
+                if descending:
+                    # 最新在前
+                    last_break_idx = support_df.index[0]
+                    pos = valid_df.index.get_loc(last_break_idx)
+                    search_df = valid_df.iloc[:pos + 1]
+
+                else:
+                    # 最新在后
+                    last_break_idx = support_df.index[-1]
+                    pos = valid_df.index.get_loc(last_break_idx)
+                    search_df = valid_df.iloc[pos:]
+
+                # 🚀 最近结构低点
+                low_pos = np.argmin(search_df.low.values)
+                lowdate = search_df.index[low_pos]
+
+            else:
+
+                low_pos = np.argmin(valid_df.low.values)
+                lowdate = valid_df.index[low_pos]
+
+        # # 🚀 最近低于 MA10 的最后最低点
+
+        # if 'ma10d' not in dz.columns:
+        #     dz['ma10d'] = dz.close.rolling(10, min_periods=1).mean()
+
+        # # # 只保留低于 MA10 的K线
+        # # support_df = dz[dz.low < dz.ma10d]
+
+        # # if not support_df.empty:
+
+        # #     # 🚀 从最近开始找最低点（避免太远历史低点）
+        # #     recent_df = support_df.iloc[::-1]
+
+        # #     min_idx = recent_df.low.idxmin()
+
+        # #     lowdate = min_idx
+
+        # # else:
+        # #     # fallback
+        # #     lowdate = dz.low.idxmin()
+
         # support_df = dz[dz.low < dz.ma10d]
 
         # if not support_df.empty:
 
-        #     # 🚀 从最近开始找最低点（避免太远历史低点）
-        #     recent_df = support_df.iloc[::-1]
+        #     # 🚀 最近一次跌破 MA10
+        #     last_break_idx = support_df.index[0]
 
-        #     min_idx = recent_df.low.idxmin()
+        #     # 最近回踩后的区域
+        #     pos = dz.index.get_loc(last_break_idx)
 
-        #     lowdate = min_idx
+        #     search_df = dz.iloc[:pos + 1]
+
+        #     # 🚀 找最近结构中的最低点
+        #     lowdate = search_df.low.idxmin()
 
         # else:
-        #     # fallback
+
         #     lowdate = dz.low.idxmin()
-
-        support_df = dz[dz.low < dz.ma10d]
-
-        if not support_df.empty:
-
-            # 🚀 最近一次跌破 MA10
-            last_break_idx = support_df.index[0]
-
-            # 最近回踩后的区域
-            pos = dz.index.get_loc(last_break_idx)
-
-            search_df = dz.iloc[:pos + 1]
-
-            # 🚀 找最近结构中的最低点
-            lowdate = search_df.low.idxmin()
-
-        else:
-
-            lowdate = dz.low.idxmin()
 
     dtemp = df.loc[lowdate]
 
