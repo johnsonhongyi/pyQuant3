@@ -2585,6 +2585,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self._table_refresh_timer.setSingleShot(True)
         self._table_refresh_timer.timeout.connect(self._flush_table_updates)
         self._pending_changed_codes = set()
+
+        # ⚡ [NEW] 列宽变动防抖定时器，用于异步持久化列宽配置
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._save_visualizer_config)
         self._last_table_update_time = 0
         self._table_update_interval = 1.5  # 1.5s 刷新一次界面，单位秒 (与 time.time() 对比)
 
@@ -12415,12 +12420,19 @@ class MainWindow(QMainWindow, WindowMixin):
             self.filter_tree.setRootIsDecorated(False)  # ⭐ 关闭首列树形缩进
             for i, h_text in enumerate(current_headers):
                 h = h_text.strip()
-                width = get_compact_width(h)
+                h_low = h.lower()
+                width = get_compact_width(h_low)
                 # logger.info(f'h: {h} width: {width}')
+                if h_low == 'name':
+                    width = 65  # 名称列特殊兜底,并可以手动调整name列宽度,自动持久化宽度
                 if width is not None:
                     self.filter_tree.setColumnWidth(i, width)
-                elif h == 'Name':
-                    header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+                    # 显式设为 Interactive 模式，支持手动拉伸
+                    header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+            
+            # ⭐ 应用已保存过的筛选面板列宽
+            if hasattr(self, 'saved_col_widths') and 'filter_tree' in self.saved_col_widths:
+                self._apply_saved_column_widths(self.filter_tree, self.saved_col_widths.get('filter_tree', {}))
 
 
             # for i, h_text in enumerate(current_headers):
@@ -12867,9 +12879,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 'layout_presets': getattr(self, 'layout_presets', {}),
                 'filter': filter_config,
                 'window': window_config,
-                # 未来扩展：直接添加新的顶级键即可
+                'column_widths': col_widths,  # ⭐ 关键持久化：保存主表和筛选表的列宽配置
             }
-                # 'column_widths': col_widths,
 
             # --- 保存 ---
             with open(config_file, 'w', encoding='utf-8') as f:

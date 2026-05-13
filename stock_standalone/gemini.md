@@ -28,6 +28,16 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-13 17:46
+- [x] **修复可视化筛选面板 Name 列宽与持久化保存问题 (Fixed Filter Panel Name Column Width & Persistence Issues)**：
+    - [x] **打通列宽变动防抖持久化机制 (Activated Column Resizing Debounced Storage)**：查明 `trade_visualizer_qt6.py` 中 `_on_column_resized_debounced` 试图调用的 `self._resize_timer` 在初始化中缺失的隐患。现已在 `__init__` 初始化流程极早阶段补全了 `self._resize_timer = QTimer(self)` 的单次防抖关联（2秒），彻底激活了列宽变动后的秒级延迟自动写盘机制。
+    - [x] **重构筛选树列宽自适应逻辑 (Restored Interactive Resizing for Name Column)**：
+        - 深度重构了 `on_filter_combo_changed` 的筛选面板表头初始化流程。全面接入 `h.lower() == 'name'` 智能抓取，彻底废除了原先将 `Name` 列强行锁定为 `ResizeToContents` 从而导致用户完全无法手动调整拖拽的限制。
+        - 实现了对 `Name` 列的统一像素兜底配置 `width = 65`，完美对齐主界面的“名称”栏视觉宽度，并显式设为 `QHeaderView.ResizeMode.Interactive` 开启手动拖拽微调支持。
+        - 补齐了应用已保存自定义列宽的后置渲染屏障：在面板表格刷新重算完毕后，自动调用 `_apply_saved_column_widths` 秒级同步恢复用户在上一次会话或操作中拉伸过的最佳列宽状态。
+    - [x] **根除配置持久化字典漏洞 (Eradicated Dict Serializing Leak)**：修正了 `_save_visualizer_config` 中构建最终配置的 Bug。先前将最重要的 `'column_widths': col_widths` 错误写在配置字典体外且处于被注释（`#`）的不稳定状态，现已在标准返回结构体中完美归位复活，消除了列宽配置在物理落盘时被暴力吞噬或丢弃的故障。
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立任务清单，按设计文档 [20260513_1746_fix_filter_panel_name_column_width.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/e5102be7-e95a-43ed-8138-bab83ed3ffe9/scratch/20260513_1746_fix_filter_panel_name_column_width.md) 步骤全量圆满实施完成。
+
 ## 2026-05-13 16:15
 - [x] **实现独立回测/实盘模式下的可视化 IPC 联动 (Implemented Standalone Visualizer IPC Linkage)**：
     - [x] **打通双轨发送管道 (Dual-Pipeline IPC Handler)**：在 `test_bidding_replay.py` 的 `main` 初始化层，定义了专属的 `standalone_on_code_click` 回调。优先利用 Socket 发送协议嗅探本地 `127.0.0.1:26668` 是否存在活跃的可视化进程（Socket Fallback），若无可用实例，则直接通过 `multiprocessing.Process` 跨进程物理拉起 `trade_visualizer_qt6` (New Spawning)，成功实现了脚本独立运行时的“冷启动”或“瞬时挂接”。
