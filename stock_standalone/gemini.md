@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-04-19 10:00  
+> 最后更新：2026-05-13 22:05  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,24 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-13 22:05
+- [x] **根治概念热榜排序丢失自定义列与数据空白问题 (Root-fixed Concept Top10 Sorting Data Loss)**：
+    - [x] **查明硬编码冗余缺陷 (Hardcoded Tuple Eradicated)**：查明 `instock_MonitorTK.py` 中的列头点击回调 `_sort_treeview_column_newTop10` 采用了完全手写的 8 元组硬编码 `tree.insert` 语句，导致用户添加的自定义动态列（如 `dff2`）在此处被粗暴截断或剔除，从而在排序后退化为数据空白。
+    - [x] **重写为完全动态的“委派渲染流” (Dynamic Rendering Delegation - DRY)**：完全删除了 `_sort_treeview_column_newTop10` 中冗余的 `tree.delete` 与 `tree.insert` 渲染循环。将其平替为轻量级的状态调度逻辑——更新窗口持久化排序状态槽 `win._top10_sort_state`、提取当前数据快照并绕开缓存机制，最后直接调用核心动态接口 `self._fill_concept_top10_content` 委派重新渲染。彻底达成单点逻辑控制。
+    - [x] **加固核心排序层鲁棒性 (Engine Sorting Hardening)**：在 `_fill_concept_top10_content` 中注入了更高级别的智能排演层。实现了 `rank` -> `Rank` 的智能字段映射，并对所有关键数值列（`percent`, `dff`, `dff2`, `volume` 等）进行容错性 `pd.to_numeric` 转换及 NaN 值极值覆盖。这消除了由 Pandas 引起的一切脏数据排序偏倚，极大提升了全方位排序质量。
+    - [x] **实现数据新鲜度自愈**：借助 `_fill_concept_top10_content` 原有的行级更新逻辑，即使在对历史快照排序时，系统也能在亚毫秒级内读取 `self.df_all` 中最实时的数据进行单元格填充，达成了历史一致性与实时新鲜度的两全。
+    - [x] **实现基于状态机的“零陷阱”正反排序切换 (Zero-trap State-driven Toggling)**：查明初始窗口构建时在 lambda 中硬编码传入了 `reverse=False`，加之在重构时错误更新 `tree.heading` 时陷入闭包值陷阱，导致再次点击时始终获取到相同的状态值而无法翻转。现已完全摒弃了 legacy 的 `reverse` 传入参数依赖，重写为**纯状态机驱动**——直接在运行时依据 `win._top10_sort_state` 中记忆的 `col` 与 `asc` 计算最新翻转值，完美消除了由于 lambda 变量捕获所致的死循环，达成了绝对灵敏的动态双向排序。
+    - [x] **根治排序视图冲突与跳动异常 (Root-fixed Sorting Scroll Jumping Collision)**：查明用户在点击排序后，渲染流程所挂载的 `after(50, scroll_and_highlight)` 延时任务会通过 `tree.see(target_iid)` 将视窗强行滚回选中股票的位置，从而破坏并覆盖了 `_sort_treeview_column_newTop10` 尾部的 `yview_moveto(0)` 归顶动作。通过在 `_fill_concept_top10_content` 中引入 **`win._skip_see_once`** 控制门闸，实现在排序时强行压制 `tree.see()` 的触发（仅保持选中高亮而放弃拉拽屏幕），完美终结了视图抢夺引发的无序跳动，在保留选中态的同时实现了精准归顶。
+    - [x] **高规格同步与任务归档 (Task Archiving)**：创建并保存了专项计划文档 [20260513_2158_fix_concept_top10_sort_dynamic_rendering_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/df3a41cc-7c34-472d-9652-f4dd967ebdf4/20260513_2158_fix_concept_top10_sort_dynamic_rendering_plan.md) 与实施记录 [20260513_2202_fix_concept_top10_sort_dynamic_rendering_walkthrough.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/df3a41cc-7c34-472d-9652-f4dd967ebdf4/20260513_2202_fix_concept_top10_sort_dynamic_rendering_walkthrough.md)。
+
+## 2026-05-13 20:58
+- [x] **实现概念热榜窗口动态化列配置支持 (Implemented Dynamic Column Config for Concept Top10 Windows)**：
+    - [x] **在 `commonTips.py` 注册配置项**：在 `GlobalConfig` 中加入了 `concept_top10_window_col` 配置注册及其 `get_with_writeback` 自动写入与回兜机制。使用户可以在 `global.ini` 中自定义增减或修改显示的列。
+    - [x] **解耦 `instock_MonitorTK.py` 中的硬编码元组**：在 `show_concept_top10_window` 和 `show_concept_top10_window_simple` 中，把原硬编码的 `columns = ("code", "name", ...)` 完全替换为读取自全局的动态配置项。
+    - [x] **加固表头映射安全性**：在两个窗口的列名渲染循环中，将硬编码的 `col_texts[col]` 重构为 `col_texts.get(col, col)` 安全 fallback。确保了自定义新增列能被优雅渲染而非抛出 `KeyError` 奔溃。
+    - [x] **重构数据行插入逻辑为动态适配**：全面升级了 `_fill_concept_top10_content` 中的 `tree.insert` 构建链路。废除了基于硬编码索引 8 元组，改由 `for col in tree["columns"]:` 动态迭代与自适应映射取值填充。配合浮点数的动态格式化处理，完美护卫了用户个性化定义列的完整性。
+    - [x] **高规格同步与任务归档 (Task Archiving)**：创建并保存了专项计划文档 [20260513_2055_add_concept_top10_columns_config_plan.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/df3a41cc-7c34-472d-9652-f4dd967ebdf4/20260513_2055_add_concept_top10_columns_config_plan.md) 与实施记录 [20260513_2058_add_concept_top10_columns_config_walkthrough.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/df3a41cc-7c34-472d-9652-f4dd967ebdf4/20260513_2058_add_concept_top10_columns_config_walkthrough.md)。
 
 ## 2026-05-13 19:10
 - [x] **根治可视化终端退出时偶发 Access Violation 崩溃的问题 (Root-fixed Visualizer Exit Access Violation)**：

@@ -444,26 +444,31 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
         if 'lastbuy' in top_all.columns:
             if 915 < now_time < 930:
                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
-                top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
 
             elif 926 < now_time < 1455:
                 # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
 
                 top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
-                top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
             else:
                 # top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
                 # top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
 
                 # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
                 top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
-                top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
         else:
             top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
-            top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+            # top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+            top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
     else:
         top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
-        top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+        # top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+        top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
     
     top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
     top_all['dff'].fillna(0, inplace=True)

@@ -279,6 +279,7 @@ pending_alert_cycles = CFG.pending_alert_cycles
 st_key_sort = CFG.st_key_sort
 
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
+concept_top10_window_col = getattr(CFG, 'concept_top10_window_col', ["code", "name", "rank", "percent", "dff", "volume","red","win"])
 
 # -------------------- 常量 -------------------- #
 MAX_ALERT_POPUP_QUEUE = 300 # [OPTIMIZED] 提升单批次弹窗队列容量，应对大规模并发
@@ -12906,7 +12907,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(side="top", fill="both", expand=True, padx=2, pady=1)
 
-        columns = ("code", "name", "rank", "percent", "dff", "volume","red","win")
+        columns = concept_top10_window_col
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=3)
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
@@ -12916,7 +12917,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
         limit_col = ['volume','red','win','dff']
         for col in columns:
-            tree.heading(col, text=col_texts[col], anchor="center",
+            tree.heading(col, text=col_texts.get(col, col), anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 50)
             tree.column(col, anchor="center", width=width)
@@ -13244,15 +13245,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win.is_refreshing = False
 
         try:
-            self.load_window_position(win, "concept_top10_window", default_width=520, default_height=420)
+                self.load_window_position(win, "concept_top10_window", default_width=460, default_height=320)
         except Exception:
-            win.geometry("520x420")
+            win.geometry("460x320")
 
         # --- Treeview 主体 ---
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "rank", "percent", "dff", "volume","red","win")
+        columns = concept_top10_window_col
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -13263,7 +13264,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
         limit_col = ['volume','red','win','dff']
         for col in columns:
-            tree.heading(col, text=col_texts[col], anchor="center",
+            tree.heading(col, text=col_texts.get(col, col), anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
             # width = 80 if col == "name" else (40 if col == "rank" else 60)
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 40)
@@ -13569,8 +13570,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
         sort_col, ascending = win._top10_sort_state["col"], win._top10_sort_state["asc"]
         
+        # 🛡️ 智能排序列映射与容错转换 (支持动态添加列后的正确数值排序)
+        df_sorted = df_concept.copy()
+        actual_col = sort_col
+        
+        if sort_col == "rank":
+            if "rank" not in df_sorted.columns and "Rank" in df_sorted.columns:
+                actual_col = "Rank"
+            
+            if actual_col in df_sorted.columns:
+                # 为 Rank 进行鲁棒的数值化以实现正确排序。缺失值根据升降序填充极端垫底值。
+                fill_val = 99999 if not ascending else -99999
+                df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(fill_val)
+        
+        # 对已知的数值列进行填充与数值化，确保即便含有 None 也能稳健排序
+        numeric_candidates = ["percent", "dff", "dff2", "volume", "win", "red"]
+        if actual_col in df_sorted.columns and actual_col in numeric_candidates:
+            df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(0)
+
         # 准备显示数据
-        df_display = df_concept.sort_values(sort_col, ascending=ascending).head(limit) if sort_col in df_concept.columns else df_concept.head(limit)
+        if actual_col in df_sorted.columns:
+            df_display = df_sorted.sort_values(actual_col, ascending=ascending).head(limit)
+        else:
+            df_display = df_sorted.head(limit)
         
         tree._full_df = df_concept.copy()
         tree._display_limit = limit
@@ -13599,20 +13621,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             rank_val = latest_row.get("Rank", row_dict.get("Rank", 0))
             rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
 
+            row_vals = []
+            for col in tree["columns"]:
+                if col == "code":
+                    row_vals.append(code_row)
+                elif col == "name":
+                    row_vals.append(latest_row.get("name", row_dict.get("name", "")))
+                elif col == "rank":
+                    row_vals.append(rank_str)
+                elif col == "percent":
+                    row_vals.append(f"{percent:.2f}")
+                elif col == "dff":
+                    row_vals.append(f"{latest_row.get('dff', row_dict.get('dff', 0)):.1f}")
+                elif col == "volume":
+                    row_vals.append(f"{latest_row.get('volume', row_dict.get('volume', 0)):.1f}")
+                elif col == "red":
+                    row_vals.append(latest_row.get("red", row_dict.get("red", 0)))
+                elif col == "win":
+                    row_vals.append(latest_row.get("win", row_dict.get("win", 0)))
+                else:
+                    # print(f'col: {col} : {latest_row.get(col, row_dict.get(col, ""))}')
+                    raw_val = latest_row.get(col, row_dict.get(col, ""))
+                    row_vals.append(f"{raw_val:.2f}" if isinstance(raw_val, float) else raw_val)
+
             tree.insert(
                 "",
                 "end",
                 iid=iid,
-                values=(
-                    code_row,
-                    latest_row.get("name", row_dict.get("name", "")),
-                    rank_str,
-                    f"{percent:.2f}",
-                    f"{latest_row.get('dff', row_dict.get('dff', 0)):.1f}",
-                    f"{latest_row.get('volume', row_dict.get('volume', 0)):.1f}",
-                    latest_row.get("red", row_dict.get("red", 0)),
-                    latest_row.get("win", row_dict.get("win", 0)),
-                ),
+                values=tuple(row_vals),
                 tags=tuple(row_tags)
             )
             code_to_iid[code_row] = iid
@@ -13636,7 +13672,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             def scroll_and_highlight():
                 try:
                     if tree.winfo_exists() and tree.exists(target_iid):
-                        tree.see(target_iid)
+                        # 🛡️ 避免排序时的滚动冲突：若外部标记跳过 once，则只高亮、不 see
+                        if not getattr(win, "_skip_see_once", False):
+                            tree.see(target_iid)
+                        else:
+                            win._skip_see_once = False # 消费并重置标记
+                        
                         self._highlight_tree_selection(tree, target_iid)
                 except Exception as e:
                     # 静默处理：项可能在 50ms 延迟期间被删除或刷新
@@ -13736,70 +13777,55 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
-
+        # 1. 校验基础数据
         if not hasattr(tree, "_full_df") or tree._full_df.empty:
             logger.info("[WARN] Treeview _full_df 为空")
             return
 
-        # 初始化排序状态
-        if not hasattr(tree, "_sort_state"):
-            tree._sort_state = {}
-
-        # 切换排序顺序
-        if reverse is None:
-            reverse = not tree._sort_state.get(col, False)
-        tree._sort_state[col] = not reverse
-
-        # map 'rank' to 'Rank' or ensure 'rank' exists for sorting
-        if col == "rank":
-            if "rank" not in tree._full_df.columns and "Rank" in tree._full_df.columns:
-                 tree._full_df["rank"] = tree._full_df["Rank"]
-            
-            if "rank" in tree._full_df.columns:
-                # 确保 rank 列为数值型，便于正确排序
-                tree._full_df["rank"] = pd.to_numeric(tree._full_df["rank"], errors='coerce').fillna(9999)
-        
-        # 再次检查列是否存在（防止其他列名不对的情况）
-        if col not in tree._full_df.columns:
-            logger.warning(f"Sort column '{col}' not found in DataFrame columns: {tree._full_df.columns.tolist()}")
+        # 2. 获取顶层窗口以读取与持久化排序状态
+        win = tree.winfo_toplevel()
+        if not hasattr(win, "_concept_name"):
+            logger.warning("[WARN] 树窗口缺失 _concept_name 属性")
             return
 
-        # 排序完整数据
-        df_sorted = tree._full_df.sort_values(col, ascending=not reverse)
+        # 初始化排序状态结构
+        if not hasattr(win, "_top10_sort_state"):
+            win._top10_sort_state = {"col": "percent", "asc": False}
 
-        # 调试信息
-        # logger.info(f"[DEBUG] Sorting column: {col}, ascending: {not reverse}, total rows: {len(df_sorted)}")
+        # 确定反向状态：忽略传入的 legacy 参数，直接依据窗口当前状态机动态翻转
+        current_col = win._top10_sort_state.get("col", "")
+        current_asc = win._top10_sort_state.get("asc", False)
 
-        # 填充前 limit 条
+        if current_col == col:
+            # 点击的是同一列 -> 翻转排序
+            ascending = not current_asc
+        else:
+            # 点击的是新列 -> 首次默认为降序排序 (False)，使用户能直接看到最高指标
+            ascending = False
+        
+        # 更新并固化最新的状态，使下一次点击或周期轮播能够自动继承
+        win._top10_sort_state = {"col": col, "asc": ascending}
+
+        # 4. 强制绕过缓存与版本比对机制，以便即时触发重绘
+        win._last_fill_hash = None
+        win._last_fill_version = -1
+        
+        # 🛡️ 阻止重绘后的 scroll.see() 将视窗强行拉走，确保滚顶效果生效
+        win._skip_see_once = True
+
+        # 5. 提取当前快照数据
+        df_snapshot = tree._full_df.copy()
+        
+        # 6. 记录选中项，以备重绘后自愈式还原
+        selected = tree.selection()
+        if selected:
+            win._selected_index = selected[0]
+
+        # 7. 移交至核心动态渲染流，彻底终结硬编码列名缺陷
         limit = getattr(tree, "_display_limit", 50)
-        df_display = df_sorted.head(limit)
-        # logger.info(f"[DEBUG] Displaying top {limit} rows after sort")
-
-        tree.delete(*tree.get_children())
-        for idx, (code_row, row) in enumerate(df_display.iterrows()):
-            iid = str(code_row)  # 使用原 DataFrame index 或股票 code 保证唯一
-            tags_for_row = get_row_tags(row)  # 或 get_row_tags_kline(row, idx)
-            percent = row.get("percent")
-            if pd.isna(percent) or percent == 0:
-                percent = row.get("per1d")
-
-            rank_val = row.get("Rank", 0)
-            rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
-
-            tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], rank_str, f"{percent:.2f}", f"{row.get('dff',0):.1f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
-
-        # 保留选中状态
-        if hasattr(tree, "_selected_index") and tree.get_children():
-            sel_iid = str(getattr(tree, "_selected_index", tree.get_children()[0]))
-            if sel_iid in tree.get_children():
-                tree.selection_set(sel_iid)
-                tree.focus(sel_iid)
-                tree.see(sel_iid)
-
-
-        # 更新heading command
-        tree.heading(col, command=lambda c=col: self._sort_treeview_column_newTop10(tree, c,not reverse))
+        self._fill_concept_top10_content(win, win._concept_name, df_concept=df_snapshot, limit=limit)
+        
+        # 8. 滚回顶部
         tree.yview_moveto(0)
 
 
