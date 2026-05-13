@@ -1220,52 +1220,83 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._sort_timer.start()
 
     def _sort_table_python(self, table: QTableWidget, col_idx: int, sort_order: Qt.SortOrder):
-        """[🚀 极致性能] 纯 Python O(N log N) 排序机制，彻底消除 QTableWidget 跨语言边界调用的阻塞卡顿"""
-        if table.rowCount() == 0: return
 
-        # 记录选择状态与隐藏状态，防止排序后错乱
-        selected_item_ids = {id(it) for it in table.selectedItems()}
+        row_count = table.rowCount()
+        if row_count == 0:
+            return
 
+        col_count = table.columnCount()
+
+        selected_rows = {table.row(item) for item in table.selectedItems()}
+
+        # 1. snapshot（只存数据，不存 item！）
         rows_data = []
-        for r in range(table.rowCount()):
+
+        for r in range(row_count):
             it = table.item(r, col_idx)
-            if not it:
+
+            if it is None:
                 sort_val = 0.0
             else:
                 sort_val = it.data(self._ROLE_NUMERIC)
                 if sort_val is None:
                     if isinstance(it, NumericTableWidgetItem):
-                        sort_val = getattr(it, '_value', it.text())
+                        sort_val = getattr(it, "_value", it.text())
                     else:
                         sort_val = it.text()
-            
-            is_hidden = table.isRowHidden(r)
-            # 使用 takeItem 会把 item 从 table 中拔出，但内存保留
-            items = [table.takeItem(r, c) for c in range(table.columnCount())]
-            rows_data.append((sort_val, is_hidden, items))
-            
+
+            # ❗ 必须转成纯数据（不能存 item）
+            row_values = []
+            for c in range(col_count):
+                cell = table.item(r, c)
+                row_values.append(cell.text() if cell else "")
+
+            hidden = table.isRowHidden(r)
+
+            rows_data.append((sort_val, hidden, row_values, r in selected_rows))
+
+        # 2. sort
         reverse = (sort_order == Qt.SortOrder.DescendingOrder)
+
+        def safe_key(v):
+            try:
+                return float(str(v).replace('%', '').replace(',', '').strip())
+            except:
+                return str(v)
+
         try:
             rows_data.sort(key=lambda x: x[0], reverse=reverse)
         except TypeError:
-            # 兼容不同类型混合的列（极其少见但可兜底）
-            def _safe_cast(v):
-                if isinstance(v, (int, float)): return v
-                try: return float(str(v).replace('%', '').replace(',', '').strip())
-                except ValueError: return str(v)
-            try:
-                rows_data.sort(key=lambda x: _safe_cast(x[0]), reverse=reverse)
-            except TypeError:
-                rows_data.sort(key=lambda x: str(x[0]), reverse=reverse)
-            
-        table.clearSelection()
-        for r, (val, is_hidden, items) in enumerate(rows_data):
-            table.setRowHidden(r, is_hidden)
-            for c, item in enumerate(items):
-                if item:
+            rows_data.sort(key=lambda x: safe_key(x[0]), reverse=reverse)
+
+        # 3. rebuild UI（安全版）
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+
+        try:
+            table.clearContents()
+
+            selected_row = None
+
+            for r, (val, hidden, row_values, selected) in enumerate(rows_data):
+
+                table.setRowHidden(r, hidden)
+
+                # ❗ 重新创建 item（关键修复点）
+                for c, text in enumerate(row_values):
+                    item = QTableWidgetItem(text)
                     table.setItem(r, c, item)
-                    if id(item) in selected_item_ids:
-                        item.setSelected(True)
+
+                if selected:
+                    selected_row = r
+
+            if selected_row is not None:
+                table.selectRow(selected_row)
+
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            table.viewport().update()
 
     def _trigger_sorted_refresh(self):
         """排序意图落地：引擎表走 Python 排序；信号表用 Qt sortByColumn"""
