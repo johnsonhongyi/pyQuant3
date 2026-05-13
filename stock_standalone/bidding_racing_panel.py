@@ -409,41 +409,83 @@ def _get_racing_config_path():
     except:
         return "snapshots/bidding_racing_ui_state_v3.json.gz"
 
-RACING_CONFIG_LOCK = threading.Lock() 
+RACING_CONFIG_LOCK = threading.RLock() # [🚀 修复] 提升为可重入锁，确保嵌套读写时不会发生死锁
 
 def _get_racing_config():
-    """读取全局持久化配置 - [🚀 增强版] 支持 Gzip/Zlib/Plain 自动识别"""
+    """读取全局持久化配置 - [🚀 增强版] 支持 Gzip/Zlib/Plain 自动识别，并具备备份自愈恢复机制"""
     path = _get_racing_config_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "rb") as f:
-            raw_data = f.read()
-        
-        if not raw_data: return {}
-        
-        # 1. 尝试自适应解压
+    
+    def try_read_file(filepath):
+        """尝试安全读取和解析文件"""
+        if not os.path.exists(filepath):
+            return None
         try:
-            # Gzip Header: \x1f\x8b
-            if raw_data.startswith(b'\x1f\x8b'):
-                import gzip
-                data = gzip.decompress(raw_data).decode('utf-8')
-            # Zlib Header: \x78\x9c (用户反馈的格式)
-            elif raw_data.startswith(b'\x78\x9c'):
-                import zlib
-                data = zlib.decompress(raw_data).decode('utf-8')
-            else:
-                # 尝试作为纯文本
-                data = raw_data.decode('utf-8')
-            return json.loads(data)
-        except Exception as e:
-            logger.debug(f"Decode failed: {e}")
-            return {}
-    except Exception:
+            with open(filepath, "rb") as f:
+                raw_data = f.read()
+            if not raw_data:
+                return None
+            
+            # 自适应解压
+            try:
+                if raw_data.startswith(b'\x1f\x8b'):
+                    import gzip
+                    data = gzip.decompress(raw_data).decode('utf-8')
+                elif raw_data.startswith(b'\x78\x9c'):
+                    import zlib
+                    data = zlib.decompress(raw_data).decode('utf-8')
+                else:
+                    data = raw_data.decode('utf-8')
+                return json.loads(data)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    with RACING_CONFIG_LOCK:
+        # 1. 优先尝试读取主配置文件
+        config = try_read_file(path)
+        if config is not None and isinstance(config, dict) and len(config) > 0:
+            return config
+            
+        # 2. [🔒 容灾自愈] 如果主配置损坏、无法读取或为空，尝试从历史每日备份中恢复
+        try:
+            base_dir = os.path.dirname(path)
+            if os.path.exists(base_dir):
+                base_name = os.path.basename(path).replace(".json.gz", "")
+                # 扫描备份格式 v3_YYYYMMDD.json.gz
+                pattern = re.compile(rf"{re.escape(base_name)}_(\d{{8}})\.json\.gz")
+                
+                backups = []
+                for f in os.listdir(base_dir):
+                    match = pattern.match(f)
+                    if match:
+                        date_str = match.group(1)
+                        backups.append((date_str, os.path.join(base_dir, f)))
+                
+                if backups:
+                    # 按照日期倒序排列，最鲜活的排在最前
+                    backups.sort(key=lambda x: x[0], reverse=True)
+                    for date_str, backup_file in backups:
+                        logger.warning(f"⚠️ [RacingConfig] 主配置读取失败，正在尝试从备份恢复: {backup_file}")
+                        restored_conf = try_read_file(backup_file)
+                        if restored_conf is not None and isinstance(restored_conf, dict) and len(restored_conf) > 0:
+                            logger.info(f"✅ [RacingConfig] 成功从备份 {date_str} 中自愈恢复配置数据！")
+                            # 尝试紧急物理修复损坏的主配置文件
+                            try:
+                                import gzip
+                                conf_data = json.dumps(restored_conf).encode('utf-8')
+                                with gzip.open(path, "wb") as f_main:
+                                    f_main.write(conf_data)
+                            except Exception:
+                                pass
+                            return restored_conf
+        except Exception as err:
+            logger.debug(f"Backup recovery process crashed: {err}")
+            
         return {}
 
 def _save_racing_config(conf: dict, force=False):
-    """保存配置并合并历史记录 - [🔒 线程安全版]"""
+    """保存配置并合并历史记录 - [🔒 原子写入防崩溃防空刷版]"""
     # [🔒 安全加固] 确保持久化数据仅在交易日保存，防止非交易日空刷覆盖
     # 如果是强制保存 (如用户手动触发合并/重置)，则绕过交易日检查
     if not force and not cct.get_trade_date_status():
@@ -452,23 +494,51 @@ def _save_racing_config(conf: dict, force=False):
     path = _get_racing_config_path()
     with RACING_CONFIG_LOCK:
         try:
-            # 1. 正常保存当前主配置
+            # 1. 读取已有主配置并合并本次更新项
             old_conf = _get_racing_config()
             for k, v in conf.items():
                 old_conf[k] = v
             
+            # [🔒 最终屏障] 如果合并后的全量配置依然是空的，绝对不允许写入，防止将配置文件毁坏式覆盖为空
+            if not old_conf:
+                logger.warning("⚠️ [RacingConfig] 合并后的配置为空，已强制拦截此次覆盖式落盘，保护历史资产。")
+                return
+                
             conf_data = json.dumps(old_conf).encode('utf-8')
-            with gzip.open(path, "wb") as f:
-                f.write(conf_data)
+            
+            # [🚀 原子物理存盘] 先写入临时的 .tmp 文件，最后使用 rename 物理覆盖，彻底杜绝写入时断电等物理损坏导致的数据毁灭
+            dir_name = os.path.dirname(path)
+            import tempfile
+            fd, temp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+            try:
+                with os.fdopen(fd, 'wb') as tmp:
+                    with gzip.GzipFile(fileobj=tmp, mode='wb') as f:
+                        f.write(conf_data)
+                # os.replace 保证了在任何操作系统下都是原子性的秒级覆盖
+                os.replace(temp_path, path)
+            except Exception as inner_e:
+                if os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except: pass
+                raise inner_e
                 
             # 2. [🚀 自动备份] 生成每日独立快照
             today_str = datetime.datetime.now().strftime("%Y%m%d")
             backup_path = path.replace(".json.gz", f"_{today_str}.json.gz")
             if not os.path.exists(backup_path):
                 # 仅在当天第一个备份不存在时写入，节省 IO
-                with gzip.open(backup_path, "wb") as f:
-                    f.write(conf_data)
-                logger.info(f"📅 [RacingConfig] 已创建今日备份: {today_str}")
+                # 备份写入也进行原子化防护
+                fd_b, temp_path_b = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+                try:
+                    with os.fdopen(fd_b, 'wb') as tmp_b:
+                        with gzip.GzipFile(fileobj=tmp_b, mode='wb') as f_b:
+                            f_b.write(conf_data)
+                    os.replace(temp_path_b, backup_path)
+                    logger.info(f"📅 [RacingConfig] 已创建今日备份: {today_str}")
+                except Exception:
+                    if os.path.exists(temp_path_b):
+                        try: os.remove(temp_path_b)
+                        except: pass
                 
                 # 3. [🔒 自动轮转] 清理 10 天前的旧数据
                 _rotate_racing_configs(path)
@@ -2682,10 +2752,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         )
         
         # [🚀 最终关联] 确保所有组件初始化完成后才开启持久化监听
-        # self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
-        # self.sector_table.horizontalHeader().sectionResized.connect(self._save_ui_state)
-        
-        self._ui_ready = True
+        # self._ui_ready = True # [🚀 修复] 严禁在此处设为 True，必须在 _restore_ui_state 完成后由 finally 块统一解除，防止空表覆盖配置
 
     # =========================================================================
     # 🔍 宏观查询 (Macro Query) 核心逻辑
@@ -4213,7 +4280,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             open_windows = []
             for key, dlg in list(self._detail_dialogs.items()):
                 try:
-                    if not dlg.isHidden() and hasattr(dlg, 'get_ui_state'):
+                    # [🚀 增强防丢] 严禁在此处依赖 isHidden() 判定。在退出生命周期中，Qt 极可能已经隐式地将所有子窗体隐藏，
+                    # 如果在此通过 isHidden 过滤，会导致在应用程序退出的最后一刻将活跃窗体列表误判为空，进而将持久化配置文件清空覆盖。
+                    # 只要 dlg 依然活跃存在于 _detail_dialogs 容器中（代表用户未主动点过 X 关闭），都理应抓取并还原其状态。
+                    if hasattr(dlg, 'get_ui_state'):
                         state = dlg.get_ui_state()
                         if state:
                             # 更安全的 key 解析
@@ -4614,9 +4684,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.stock_sender.send(str(code))
             except Exception: pass
         
-        if self.main_app and self.on_code_callback:
+        if self.on_code_callback:
             try:
-                if hasattr(self.main_app, 'tk_dispatch_queue'):
+                if self.main_app and hasattr(self.main_app, 'tk_dispatch_queue'):
                     if getattr(self.main_app, "_vis_enabled_cache", False):
                         if hasattr(self.main_app, 'open_visualizer'):
                             self.main_app.tk_dispatch_queue.put(lambda: self.main_app.open_visualizer(str(code)))

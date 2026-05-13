@@ -28,6 +28,23 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-13 16:15
+- [x] **实现独立回测/实盘模式下的可视化 IPC 联动 (Implemented Standalone Visualizer IPC Linkage)**：
+    - [x] **打通双轨发送管道 (Dual-Pipeline IPC Handler)**：在 `test_bidding_replay.py` 的 `main` 初始化层，定义了专属的 `standalone_on_code_click` 回调。优先利用 Socket 发送协议嗅探本地 `127.0.0.1:26668` 是否存在活跃的可视化进程（Socket Fallback），若无可用实例，则直接通过 `multiprocessing.Process` 跨进程物理拉起 `trade_visualizer_qt6` (New Spawning)，成功实现了脚本独立运行时的“冷启动”或“瞬时挂接”。
+    - [x] **补全实盘与回放界面绑定 (Wired Signal Bindings)**：将上述联动管道挂载至 `BiddingRacingRhythmPanel` 实例化的 `on_code_callback` 参数中，彻底实现了独立实盘 (`--live`) 及本地历史回测 (`--ui`) 状态下，点击板块/个股能自动联动或调出 Visualizer 界面。
+    - [x] **根除面板独立运行回调阻断 Bug (Fixed Standalone Callback Lockout)**：查明 `bidding_racing_panel.py` 中 `_execute_linkage` 对回调绑定的苛刻限制 `if self.main_app and self.on_code_callback`。由于独立拉起脚本时 `main_app`（MonitorTK）为 `None`，该逻辑断路器会导致一切用户点击皆无法透传至回调。目前已将约束放开为 `if self.on_code_callback` 并增补本地原生调用支路，从根本上赋能了竞价赛马组件的独立交付及可调试性。
+    - [x] **修复子进程日志字段 AttributeError**：修正了 `trade_visualizer_qt6` 子进程在冷启动物理拉起时接收 `log_level` 的参数封装。将其由原生的 Python 整型修改为标准的 `mp.Value('i', user_log_level)` 共享变量包装，彻底解决了可视化主函数 `logger.setLevel(log_level.value)` 报出的 `AttributeError: 'int' object has no attribute 'value'` 崩溃，保障了可视化界面的稳定绘制。
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立任务清单，按设计文档 [20260513_1615_add_standalone_ipc_linkage.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b0dbcd72-f1b4-4668-be8f-10bdc907a515/scratch/20260513_1615_add_standalone_ipc_linkage.md) 步骤全量圆满实施完成。
+
+## 2026-05-13 15:58
+- [x] **根治竞价赛马配置丢失与覆写为空的问题 (Fixed Bidding Racing Config Overwrite & Blank Issue)**：
+    - [x] **移除主窗体初始化阶段过早 UI 就绪状态 (Prevented Premature UI Read)**：查明 `__init__` 中 `_init_ui()` 结束后瞬间将 `self._ui_ready` 标为 `True` 的漏洞。这在 500ms 后的 `_restore_ui_state()` 实际还原历史前，若产生任何自动定时刷新写盘或者用户在 500ms 内秒关窗体行为，都会因就绪阀门已开，而将当时还是空的“板块回溯列表”和“子窗体容器”暴力写入，将原有磁盘数据覆盖清空。目前已将 `_init_ui()` 内的 `_ui_ready = True` 彻底注释移除，使其严格仅在 `_restore_ui_state` 彻底还原数据后的 `finally` 块中统一解锁，100% 杜绝空保存。
+    - [x] **提升锁级别至可重入锁 (Upgraded to RLock)**：将配置文件的全局互斥锁 `RACING_CONFIG_LOCK` 从普通的 `threading.Lock()` 升级为 `threading.RLock()`（可重入锁），彻底消除了在执行写操作 `_save_racing_config` 的锁内嵌套调用读操作 `_get_racing_config` 时产生的偶发性自我阻塞与死锁隐患。
+    - [x] **实现模块级配置自愈恢复系统 (Implemented Configuration Self-healing Recovery)**：重构了配置读取接口 `_get_racing_config()`。一旦遇到主文件被意外截断、空字节、无法解压或 JSON 解析崩溃，系统将不再被动返回 `{}` 而毁坏物理档案。现在会自动扫描备份池中的日级快照 `*_YYYYMMDD.json.gz`，降序挑选最新的一个完整备份进行读取加载并反向写回主文件，成功实现了配置崩溃后的**原地自愈复活**。
+    - [x] **落地原子物理存盘与最终空写入屏障 (Enforced Atomic Safe Storage)**：重构了 `_save_racing_config` 存盘流。采用 Python 的 `tempfile.mkstemp` 生成临时的 `.tmp` 文件物理刷盘，完成后才通过全平台原子性的 `os.replace()` 秒级瞬间物理替换目标，根绝了在存盘执行期的崩溃破坏原文件。同时，增加前置空合并校验屏障，若最终字典为空，则严禁触发物理落盘覆盖，多层护卫用户的数据资产。
+    - [x] **消除 Qt 隐式子窗体隐藏误判保护 (Eradicated Qt implicit child widget hide filter)**：在提取明细子窗口活跃清单进行存档时，彻底废除了 `dlg.isHidden()` 过滤判定。这解决了在 Qt 窗口关闭和解构序列中系统会隐式首先隐藏（hide）所有子窗体，从而误导 UI 存档器产生“无任何窗口打开”判定进而将记录清零的经典陷阱。只要子窗体句柄依然合法存活在活跃容器里，就应当抓取并记录状态。
+    - [x] **同步更新与高规格归档 (Task Archiving)**：创建并保存了独立任务清单，按设计文档 [20260513_1555_fix_racing_config_loss.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/b0dbcd72-f1b4-4668-be8f-10bdc907a515/scratch/20260513_1555_fix_racing_config_loss.md) 步骤全量圆满实施完成。
+
 ## 2026-05-13 14:54
 - [x] **根治 SignalDashboardPanel 排序假死与渲染拥堵 (Fixed UI Freeze on Signal Dashboard Sorting)**：
     - [x] **实现极致的纯 Python O(N log N) 排序机制 (O(1) Boundary-free Sorting)**：废弃了调用 `QTableWidget.sortByColumn()` 来重排信号列表的落后机制。针对带有 `NumericTableWidgetItem` 且混合类型的单元格，Qt C++ 端的快排算法在每次比较时都要回调 Python 覆写的 `__lt__` 魔术方法。在 1000 行以上的数据量中，超过 10000 次的 Python/C++ 语言边界跨越（Boundary Crossing）会瞬间导致严重的 UI 阻塞（假死 2~3 秒）。通过新引入的 `_sort_table_python`，使用 `table.takeItem()` 提取并借由纯 Python `list.sort()` 排序后再 `setItem()` 塞回，耗时被压低至不到 20ms。

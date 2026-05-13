@@ -1126,6 +1126,46 @@ Usage Examples:
         # [LINKAGE] 初始化联动发送器
         from JohnsonUtil.stock_sender import StockSender
         sender = StockSender(tdx_var=True, ths_var=False, dfcf_var=False)
+
+        # [IPC LINKAGE] 定义独立模式下的可视化联动回调 (支持 Socket 兜底与子进程物理拉起)
+        def standalone_on_code_click(code, timestamp=None):
+            if not code: return
+            import socket
+            import threading
+            import multiprocessing as mp
+            
+            resample_val = getattr(args, 'resample', 'd') or 'd'
+
+            def _bg_worker():
+                try:
+                    # 1. 优先尝试 Socket 连通现有可视化进程
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.settimeout(0.3)
+                            s.connect(('127.0.0.1', 26668))
+                            msg = f"CODE|{code}|resample={resample_val}"
+                            s.send(msg.encode("utf-8"))
+                            logger.info(f"✅ [IPC][SOCKET] Visualizer command sent for {code}")
+                            return
+                    except (ConnectionRefusedError, socket.timeout, OSError):
+                        pass # 端口未占用或超时，尝试拉起新进程
+
+                    # # 2. 若无存活进程，则物理拉起可视化子进程 (由外部环境独立运行)
+                    # logger.info(f"📡 No active visualizer on port 26668. Launching new process for {code}...")
+                    # import trade_visualizer_qt6 as qtviz
+                    # flag = mp.Value('b', True) # 生命周期维持标志
+                    # shared_log_level = mp.Value('i', user_log_level)
+                    # p = mp.Process(
+                    #     target=qtviz.main,
+                    #     args=(f"{code}|resample={resample_val}", flag, shared_log_level, False, None),
+                    #     daemon=False
+                    # )
+                    # p.start()
+                    # logger.info(f"🚀 [Visualizer] Launched new Visualizer process for {code}")
+                except Exception as ex:
+                    logger.error(f"❌ Error during standalone visualizer IPC: {ex}")
+
+            threading.Thread(target=_bg_worker, daemon=True, name="StandaloneVisIPC").start()
         
         from bidding_momentum_detector import BiddingMomentumDetector
         from realtime_data_service import DataPublisher
@@ -1159,7 +1199,7 @@ Usage Examples:
             )
             
             # Step 3: 创建 Panel
-            panel = BiddingRacingRhythmPanel(sender=sender)
+            panel = BiddingRacingRhythmPanel(sender=sender, on_code_callback=standalone_on_code_click)
             panel.detector = detector
             panel.df_all = live_df_all
             panel.setWindowTitle("🏁 竞价赛马 🔴 实盘监控")
@@ -1270,7 +1310,7 @@ Usage Examples:
             )
             
             # 初始化 Panel (必须在 detector 创建后，以便传入引用)
-            panel = BiddingRacingRhythmPanel(sender=sender, detector=detector)
+            panel = BiddingRacingRhythmPanel(sender=sender, detector=detector, on_code_callback=standalone_on_code_click)
             panel.df_all = real_df_all
             panel.setWindowTitle(f"🏁 竞价赛马回放 : {replay_date or 'ALL'}")
             
