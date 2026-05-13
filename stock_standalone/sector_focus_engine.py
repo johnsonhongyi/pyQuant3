@@ -2157,6 +2157,12 @@ class SectorFocusController:
         self._last_30m_slot = -1           # [Dragon] 记录上一个 30 分钟同步槽位 (9:30 offset=0)
         self._name_cache: Dict[str, str] = {}  # [NEW] 代码 -> 名称映射缓存
 
+        # [PERF] 渲染版本号计数器 (用于 UI 的脏检查)
+        self._dragon_render_version = 0
+        self._decision_render_version = 0
+        self._sector_render_version = 0
+        self._strategic_render_version = 0
+
     def _get_stock_name(self, code: str, default: Optional[str] = None) -> str:
         """获取股票名称，优先从缓存获取，或从实时数据动态补全"""
         name = self._name_cache.get(code)
@@ -2390,6 +2396,12 @@ class SectorFocusController:
         else:
             if force:
                 logger.warning("⚠️ [Controller] 引擎扫描跳过: _df_realtime 为空")
+
+        # [PERF] 递增渲染版本号，通知 UI 进行重绘判断
+        self._dragon_render_version += 1
+        self._decision_render_version += 1
+        self._sector_render_version += 1
+        self._strategic_render_version += 1
 
     def _scan_pullbacks(self, df: pd.DataFrame, force: bool = False):
         """扫描所有板块跟进股的回踩买点（v2：使用 kline 计算真实 prices5）"""
@@ -2679,10 +2691,20 @@ class SectorFocusController:
         self, min_status: DragonStatus = DragonStatus.CANDIDATE
     ) -> List[dict]:
         """获取龙头追踪列表（UI 消费接口）"""
-        # [NEW] 在返回前最后一次同步修复名称，防止冷启动或快照导致的代码显示
-        if self._name_cache:
-            self.dragon_tracker.sync_names(self._name_cache)
-        return [r.to_dict() for r in self.dragon_tracker.get_dragons(min_status)]
+        now = time.time()
+        cache = getattr(self, '_dragon_cache', None)
+        if cache and (now - cache[0]) < 0.5:
+            return cache[1]
+
+        # [NEW] 降频同步：仅在缓存失效且每 5 秒同步一次名称
+        if now - getattr(self, '_last_name_sync', 0) > 5.0:
+            self._last_name_sync = now
+            if self._name_cache:
+                self.dragon_tracker.sync_names(self._name_cache)
+
+        result = [r.to_dict() for r in self.dragon_tracker.get_dragons(min_status)]
+        self._dragon_cache = (now, result)
+        return result
 
     def get_dragon_count(self) -> dict:
         """获取龙头数量统计 {'candidate': N, 'dragon': N, 'warning': N, 'total': N}"""
