@@ -6247,6 +6247,125 @@ def get_tdx_exp_low_or_high_power(
         newdays=newdays, resample=resample,
         detect_calc_support=detect_calc_support
     )
+    
+    if df is None or len(df) <= 5:
+        return pd.Series([], dtype='float64')
+
+    df = df.sort_index(ascending=False)
+
+    # ✅ 极早裁剪
+    need_len = max(int(dl or 0), lvoldays) + 5
+    df = df.iloc[:need_len]
+
+    df = resample_dataframe_recut(df, resample=resample)
+
+    # ========= lastp 快速返回 =========
+    if lastp:
+        row = df.iloc[0]
+        out = row.copy()
+        out['date'] = df.index[0]
+        if 'ma5d' in row and row.ma5d:
+            out['ma5d'] = round(float(row.ma5d), 2)
+        if 'ma10d' in row and row.ma10d:
+            out['ma10d'] = round(float(row.ma10d), 2)
+        return out
+
+    # ========= dz 区间 =========
+    if dl:
+        dz = df.iloc[:int(dl)]
+    else:
+        dz = df
+
+    if dz.empty:
+        return pd.Series([], dtype='float64')
+
+    # ========= 极值点 =========
+    # if ptype == 'high':
+    #     lowdate = dz.close.idxmax()
+    # else:
+    #     lowdate = dz.close.idxmin()
+    # ========= 极值点 =========
+    if ptype == 'high':
+
+        # 最近最高点
+        lowdate = dz.high.idxmax()
+
+    else:
+
+        # 🚀 最近低于 MA10 的最后最低点
+
+        if 'ma10d' not in dz.columns:
+            dz['ma10d'] = dz.close.rolling(10, min_periods=1).mean()
+
+        # # 只保留低于 MA10 的K线
+        # support_df = dz[dz.low < dz.ma10d]
+
+        # if not support_df.empty:
+
+        #     # 🚀 从最近开始找最低点（避免太远历史低点）
+        #     recent_df = support_df.iloc[::-1]
+
+        #     min_idx = recent_df.low.idxmin()
+
+        #     lowdate = min_idx
+
+        # else:
+        #     # fallback
+        #     lowdate = dz.low.idxmin()
+
+        support_df = dz[dz.low < dz.ma10d]
+
+        if not support_df.empty:
+
+            # 🚀 最近一次跌破 MA10
+            last_break_idx = support_df.index[0]
+
+            # 最近回踩后的区域
+            pos = dz.index.get_loc(last_break_idx)
+
+            search_df = dz.iloc[:pos + 1]
+
+            # 🚀 找最近结构中的最低点
+            lowdate = search_df.low.idxmin()
+
+        else:
+
+            lowdate = dz.low.idxmin()
+
+    dtemp = df.loc[lowdate]
+
+    # ========= 成交量 =========
+    vols = dz.vol.values[:lvoldays]
+    if vols.size > 5:
+        vols = vols[(vols != vols.min()) & (vols != vols.max())]
+    lastvol = round(vols.mean(), 1) if vols.size else 0
+
+    # ========= 输出 =========
+    latest = df.iloc[0].copy()
+    latest['date'] = lowdate
+    latest['high'] = dtemp.high
+    latest['low'] = dtemp.low
+    latest['close'] = dtemp.close
+    latest['open'] = dtemp.open
+    latest['lowvol'] = dtemp.vol
+    latest['last6vol'] = lastvol
+    return latest
+
+
+def get_tdx_exp_low_or_high_power_src(
+    code, dt=None, ptype='close', dl=None, end=None,
+    power=False, lastp=False, newdays=None,
+    resample='d', lvoldays=ct.lastdays * 3,
+    detect_calc_support=False
+):
+    if dt is None and dl is None:
+        return get_tdx_Exp_day_to_df(code, dl=1)
+
+    df = get_tdx_Exp_day_to_df(
+        code, start=dt, dl=dl, end=end,
+        newdays=newdays, resample=resample,
+        detect_calc_support=detect_calc_support
+    )
 
     if df is None or len(df) <= 5:
         return pd.Series([], dtype='float64')
@@ -7885,6 +8004,12 @@ if __name__ == '__main__':
     resample = 'd'
 
     code = '002990'
+    df2=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    df3=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d')
+    df4=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
+    df5=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['m'],resample='m')
+    import ipdb;ipdb.set_trace()
+
     df=get_tdx_Exp_day_to_df(code,end='20260408',resample=resample)
     print(f'df:{df[-3:]}')
     import ipdb;ipdb.set_trace()
