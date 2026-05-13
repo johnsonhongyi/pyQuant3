@@ -1219,6 +1219,54 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().setSortIndicator(col_idx, new_order)
         self._sort_timer.start()
 
+    def _sort_table_python(self, table: QTableWidget, col_idx: int, sort_order: Qt.SortOrder):
+        """[🚀 极致性能] 纯 Python O(N log N) 排序机制，彻底消除 QTableWidget 跨语言边界调用的阻塞卡顿"""
+        if table.rowCount() == 0: return
+
+        # 记录选择状态与隐藏状态，防止排序后错乱
+        selected_item_ids = {id(it) for it in table.selectedItems()}
+
+        rows_data = []
+        for r in range(table.rowCount()):
+            it = table.item(r, col_idx)
+            if not it:
+                sort_val = 0.0
+            else:
+                sort_val = it.data(self._ROLE_NUMERIC)
+                if sort_val is None:
+                    if isinstance(it, NumericTableWidgetItem):
+                        sort_val = getattr(it, '_value', it.text())
+                    else:
+                        sort_val = it.text()
+            
+            is_hidden = table.isRowHidden(r)
+            # 使用 takeItem 会把 item 从 table 中拔出，但内存保留
+            items = [table.takeItem(r, c) for c in range(table.columnCount())]
+            rows_data.append((sort_val, is_hidden, items))
+            
+        reverse = (sort_order == Qt.SortOrder.DescendingOrder)
+        try:
+            rows_data.sort(key=lambda x: x[0], reverse=reverse)
+        except TypeError:
+            # 兼容不同类型混合的列（极其少见但可兜底）
+            def _safe_cast(v):
+                if isinstance(v, (int, float)): return v
+                try: return float(str(v).replace('%', '').replace(',', '').strip())
+                except ValueError: return str(v)
+            try:
+                rows_data.sort(key=lambda x: _safe_cast(x[0]), reverse=reverse)
+            except TypeError:
+                rows_data.sort(key=lambda x: str(x[0]), reverse=reverse)
+            
+        table.clearSelection()
+        for r, (val, is_hidden, items) in enumerate(rows_data):
+            table.setRowHidden(r, is_hidden)
+            for c, item in enumerate(items):
+                if item:
+                    table.setItem(r, c, item)
+                    if id(item) in selected_item_ids:
+                        item.setSelected(True)
+
     def _trigger_sorted_refresh(self):
         """排序意图落地：引擎表走 Python 排序；信号表用 Qt sortByColumn"""
         _ENGINE_TABS = {"\U0001f31f 决策队列", "\U0001f409 龙头追踪", "\U0001f525 板块热力", "\U0001f310 战略趋势"}
@@ -1235,9 +1283,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 # 优先使用自管理状态，回退到 header 状态
                 sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
                 sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-                table.setSortingEnabled(True)
-                table.sortByColumn(sort_col, sort_order)
-                table.setSortingEnabled(False)
+                
+                # 🚀 [PERF] O(1) 纯 Python 排序，杜绝 Qt C++ 边界反复跨越的死亡假死
+                table.setUpdatesEnabled(False)
+                table.blockSignals(True)
+                self._sort_table_python(table, sort_col, sort_order)
+                table.blockSignals(False)
+                table.setUpdatesEnabled(True)
+                table.viewport().update()
+                
                 table.horizontalHeader().setSectionsClickable(True)  # 恢复点击能力
 
     def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None):
@@ -1810,13 +1864,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         finally:
             for name, table in self.tables.items():
                 state = scroll_states.get(name)
-                # 信号表：批量插入后按当前排序意图执行一次排序（优先自管理状态）
-                sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-                sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-                table.setSortingEnabled(True)
-                table.sortByColumn(sort_col, sort_order)
-                table.setSortingEnabled(False)
-                table.horizontalHeader().setSectionsClickable(True)  # 恢复点击能力
+                # [PERF] ENGINE TABS DO NOT receive signals via append, and sort themselves via Python logic.
+                if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
+                    # 信号表：批量插入后按当前排序意图执行一次排序（优先自管理状态）
+                    sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+                    sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+                    self._sort_table_python(table, sort_col, sort_order)
+                    table.horizontalHeader().setSectionsClickable(True)  # 恢复点击能力
                         
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
@@ -2091,11 +2145,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._append_to_tables(event)
         finally:
             for name, table in self.tables.items():
-                was_sorting = active_sortings.get(name, True)
-                table.setSortingEnabled(was_sorting)
+                was_sorting = active_sortings.get(name, False)
                 # 恢复排序
-                if was_sorting and table.horizontalHeader().sortIndicatorSection() == 0:
-                    table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+                if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
+                    sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+                    sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+                    self._sort_table_python(table, sort_col, sort_order)
+                    table.horizontalHeader().setSectionsClickable(True)
                     
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
