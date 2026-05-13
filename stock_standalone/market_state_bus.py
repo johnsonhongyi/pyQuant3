@@ -51,6 +51,7 @@ class MarketStateBus:
         if df_all is None or df_all.empty:
             return
             
+        current_version = 0
         with self._data_lock:
             # 唯一一次 copy，后续所有消费者共享 (P0-2)
             self._df_all = df_all.copy()
@@ -60,14 +61,19 @@ class MarketStateBus:
                 self._df_filtered = self._df_all
             self._version += 1
             self._timestamp = time.time()
+            current_version = self._version
             
-            # 通知所有观察者
-            for obs in self._observers:
-                try:
-                    obs(self._version)
-                except Exception as e:
-                    logger.warning(f"总线观察者回调失败: {e}")
-            
+        # ⚠️ 【死锁修复】将观察者回调移出 data_lock 锁范围 (AB-BA Deadlock Fix)
+        # 观察者回调（如 _on_bus_data_ready）通常会调用 Tkinter 的 self.after 请求更新。
+        # 如果在 _data_lock 块内调用，当主线程(持有Tk锁)试图读取最新行情(请求_data_lock)时，
+        # 就会发生死锁：主线程等 _data_lock，后台线程等 Tk 锁。
+        # 移出后打破此死锁循环。
+        for obs in self._observers:
+            try:
+                obs(current_version)
+            except Exception as e:
+                logger.warning(f"总线观察者回调失败: {e}")
+                
     def get_latest(self, since_version=0):
         """
         消费者调用 - 返回只读快照 (version, df_all, df_filtered, timestamp)
