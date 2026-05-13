@@ -6059,16 +6059,35 @@ class MainWindow(QMainWindow, WindowMixin):
                 elif cmd_type == 'UPDATE_DF_DATA':
                     # 🚀 [OPTIMIZATION] 数据同步仅存入内存，不准在循环内触发耗时的 TableUpdate!
                     p_type = payload.get('type')
+                    
+                    # 1️⃣ 【核心数据物理入池】：优先接收并载入内存核心，确立高阶状态事实
+                    data_updated = False
                     if p_type == 'UPDATE_DF_ALL':
-                        self.df_all = payload.get('data')
-                        self.df_cache = self.df_all
-                        self._pending_table_refresh = True
+                        df_new = payload.get('data')
+                        if df_new is not None and not df_new.empty:
+                            self.df_all = df_new
+                            self.df_cache = self.df_all
+                            self._pending_table_refresh = True
+                            data_updated = True
                     elif p_type == 'UPDATE_DF_DIFF':
-                        self.apply_df_diff(payload.get('data'), skip_table_request=True)
-                        self._pending_table_refresh = True
+                        diff_data = payload.get('data')
+                        if diff_data is not None and not diff_data.empty:
+                            self.apply_df_diff(diff_data, skip_table_request=True)
+                            self._pending_table_refresh = True
+                            data_updated = True
                     elif 'code' in payload and 'data' in payload:
-                        # 分时数据：可以保留即时更新，因为通常只涉及一个个股
                         self._handle_update_df_data(payload)
+                        data_updated = True
+                        
+                    # 2️⃣ 【状态自适应联动】：唯有确认底层内存数据链已有效刷写后，才放开对齐 UI 周期显示的闸门
+                    if data_updated:
+                        target_resample = payload.get('resample')
+                        if target_resample and hasattr(self, 'on_resample_changed'):
+                            current_resample = str(getattr(self, 'resample', 'd') or 'd').lower().strip()
+                            target_res_clean = str(target_resample).lower().strip()
+                            if current_resample != target_res_clean:
+                                logger.info(f"[Pipe] Memory data successfully ingested, auto-syncing Visualizer resample to '{target_res_clean}'.")
+                                self.on_resample_changed(target_res_clean)
                 elif cmd_type == 'CMD_SCAN_CONSOLIDATION':
                     if hasattr(self, 'on_scan_triggered'):
                         self.on_scan_triggered()
@@ -6109,7 +6128,8 @@ class MainWindow(QMainWindow, WindowMixin):
                         'auto_scroll': True
                     }
                     if getattr(self, 'tk_linkage_auto_display', True):
-                        self.load_stock_by_code(code, skip_tdx=True, timestamp=timestamp)
+                        res = last_link_payload.get('resample')
+                        self.load_stock_by_code(code, skip_tdx=True, timestamp=timestamp, resample=res)
             
             elif last_switch_payload:
                 code = last_switch_payload.get('code')
@@ -8522,6 +8542,9 @@ class MainWindow(QMainWindow, WindowMixin):
             payload = df.get('data')
             ver = df.get('ver', 0)
             
+            # [NEW] 预先提取推送数据包中的 resample 周期，但并不在此处触发，需等待数据链物理渲染通过后执行
+            target_resample = df.get('resample')
+            
             # 版本校验逻辑
             # ⭐ [SYNC FIX] 如果 ver == 0，视为全量强制覆盖，无视之前的所有版本记录
             actual_type = df.get('type')
@@ -8558,6 +8581,14 @@ class MainWindow(QMainWindow, WindowMixin):
                     try:
                         self._process_df_all_update(payload)
                         logger.debug("[_safe_process] _process_df_all_update completed")
+                        
+                        # [NEW] 🌟【物理对齐屏障】：确认全量数据物理应用与渲染全部成功后，才安全联动对齐最新的显示周期
+                        if target_resample and hasattr(self, 'on_resample_changed'):
+                            current_resample = str(getattr(self, 'resample', 'd') or 'd').lower().strip()
+                            target_res_clean = str(target_resample).lower().strip()
+                            if current_resample != target_res_clean:
+                                logger.info(f"[IPC] Full sync completed successfully, auto-syncing Visualizer resample to '{target_res_clean}'.")
+                                self.on_resample_changed(target_res_clean)
                     except Exception as e:
                         import traceback
                         logger.error(f"[_safe_process] Error: {e}")
@@ -8591,6 +8622,14 @@ class MainWindow(QMainWindow, WindowMixin):
                     def _safe_apply_diff():
                         try:
                             self.apply_df_diff(payload)
+                            
+                            # [NEW] 🌟【物理对齐屏障】：确认差异数据补丁合并成功后，才安全联动对齐最新的显示周期
+                            if target_resample and hasattr(self, 'on_resample_changed'):
+                                current_resample = str(getattr(self, 'resample', 'd') or 'd').lower().strip()
+                                target_res_clean = str(target_resample).lower().strip()
+                                if current_resample != target_res_clean:
+                                    logger.info(f"[IPC] Diff sync completed successfully, auto-syncing Visualizer resample to '{target_res_clean}'.")
+                                    self.on_resample_changed(target_res_clean)
                         finally:
                             if is_large_diff:
                                 if hasattr(self, 'voice_thread') and self.voice_thread:
@@ -13313,6 +13352,23 @@ class MainWindow(QMainWindow, WindowMixin):
         # 当 GUI 关闭时，触发 stop_event
         stop_event.set()
 
+        # [🚀 GRACEFUL] 停止赛马探测器 (提前至 stopLogger 之前以完整打出日志)
+        if hasattr(self, 'detector') and self.detector:
+            try:
+                logger.info("🛑 Stopping BiddingMomentumDetector in Visualizer...")
+                self.detector.stop()
+            except: pass
+            
+        # [🚀 GRACEFUL] 停止股票发送器 (提前至 stopLogger 之前以完整打出日志)
+        if hasattr(self, 'sender') and self.sender:
+            try:
+                logger.info("🛑 Closing StockSender in Visualizer...")
+                self.sender.close()
+            except: pass
+
+        # ⭐ [ROOT-FIX] 物理退出日志前置打入，防止日志模块关闭后信息丢失
+        logger.info("👋 Visualizer Process Exiting via os._exit(0)")
+
         # 3.6️⃣ 停止日志，防止 BrokenPipeError (放在最后一步)
         try:
             from JohnsonUtil.LoggerFactory import stopLogger
@@ -13326,25 +13382,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
 
-        # [🚀 GRACEFUL] 停止赛马探测器
-        if hasattr(self, 'detector') and self.detector:
-            try:
-                logger.info("🛑 Stopping BiddingMomentumDetector in Visualizer...")
-                self.detector.stop()
-            except: pass
-            
-        # [🚀 GRACEFUL] 停止股票发送器
-        if hasattr(self, 'sender') and self.sender:
-            try:
-                logger.info("🛑 Closing StockSender in Visualizer...")
-                self.sender.close()
-            except: pass
-
-        # ⭐ [ROOT-FIX] 终极刹车：强制退出进程
-        # 彻底解决 pyttsx3/COM 句柄残留或 QThread 销毁异常导致的进程挂起及后台语音播报不停的问题
-        logger.info("👋 Visualizer Process Exiting via sys.exit(0)")
-        import sys
-        sys.exit(0)
+        # ⭐ [ROOT-FIX] 终极刹车：使用 os._exit(0) 强制物理退出进程
+        # 彻底解决 pyttsx3/COM 句柄残留或 QThread 销毁异常导致的进程退出异常
+        # 替换原来的 sys.exit(0) 以避免 SystemExit 异常穿透 PyQt/C++ 导致 access violation 崩溃
+        import os
+        os._exit(0)
 
     # # ================== 热点自选面板回调 ==================
     # def _toggle_hotlist_panel(self):
@@ -13664,7 +13706,11 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
             logger.info(f"[main] Parsed payload: code={start_code} resample={start_resample}")
         
         if start_resample:
-            window.resample = start_resample
+            window.on_resample_changed(start_resample)
+            # ⭐ [FIX] 立即停止因启动初始化时触发的 50ms 防抖计时器，防止与下方 singleShot 冲突导致二次冗余加载
+            if hasattr(window, '_resample_debounce_timer'):
+                window._resample_debounce_timer.stop()
+            window._pending_resample_key = None
 
         # ------------------ 5. 显示 GUI ------------------
         window.show()

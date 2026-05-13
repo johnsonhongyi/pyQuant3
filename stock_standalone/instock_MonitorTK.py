@@ -5493,15 +5493,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _start_visualizer_process(self, code, resample=None):
         """核心方法：启动 Qt 可视化进程 (支持跨线程调用，自动调度至主线程)"""
         start_t = time.time()
+
         try:
+            if resample is None:
+                resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
             # 🛡️ [GUARD] 强制主线程校验，确保 mp.Process.start() 的稳定性
             if not threading.current_thread() is threading.main_thread():
                 logger.warning("⚠️ [Visualizer] Detected call from non-main thread. Re-dispatching...")
                 self.after(0, lambda: self._start_visualizer_process(code, resample))
                 return
 
-            if resample is None:
-                resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
+            
             
             # 初始化指令 Pipe
             if not hasattr(self, 'viz_conn') or self.viz_conn is None:
@@ -5693,10 +5695,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     else:
                         self.sync_version += 1
                         
+                    # [NEW] 获取当前 TK 端生效的 resample 周期，并包含在推送协议中，用于对齐可视化界面状态
+                    cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
                     sync_package = {
                         'type': msg_type,
                         'data': payload_to_send,
-                        'ver': self.sync_version
+                        'ver': self.sync_version,
+                        'resample': cur_resample
                     }
 
                     # ======================================================
