@@ -2541,6 +2541,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 if hasattr(self, "_pg_top10_window_simple"):
                     self.save_all_monitor_windows()
+                    for k, v in self._pg_top10_window_simple.items():
+                        win = v.get("win")
+                        if win and win.winfo_exists():
+                            self.save_window_position(win, f"concept_top10_window-{k}")
             except Exception:
                 pass
 
