@@ -1449,7 +1449,6 @@ class IntradayEmotionTracker:
                         if "跌破均线" in status and vol_r > 1.5: status.append("🚨放量破均线")
                         if r_high >= last_c * 1.098 and price < r_high * 0.98 and vol_r > 2.0: status.append("🚨涨停开板放量")
                         if price < i_high * 0.96 and vol_r > 1.8: status.append("🚨高位放量回吐")
-
                         # [RESTORED] 阶梯式量比门槛 (语义对齐)
                         # 综合强势识别 (修复判定范围)
                         strong_tags = ("创多日高", "历史高", "波段高", "强势启动", "5D突破", "30D突破", "趋势加速", "诱空转多")
@@ -1457,66 +1456,97 @@ class IntradayEmotionTracker:
                         is_sbc_buy = (("均线上" in status and has_strong_tag) or sbc_opt_buy)
                         
                         if is_sbc_buy:
-                            cur_pct = float(row.get('percent', 0))
+                            cur_pct = float(row.get("percent", 0))
                             is_ultra_strong = (cur_pct >= 5.0 and vol_r >= 2.0)
                             if not is_ultra_strong:
-                                if t_str < "10:00" and vol_r < 5.0: is_sbc_buy = False # [RESTORED] 门槛 5.0
+                                if t_str < "10:00" and vol_r < 5.0: is_sbc_buy = False
                                 elif "10:00" <= t_str < "14:00" and vol_r < 2.0: is_sbc_buy = False
                                 elif t_str >= "14:00" and vol_r < 1.5: is_sbc_buy = False
+
+                        # --- [ENHANCED] 高级破位评级逻辑 ---
+                        is_heavy_break = ("跌破MA60" in status or "结构破位" in status) and vol_r > 2.5
+                        is_panic_sell = price < last_l * 0.97 # 跌穿前低 3% 以上
                         
                         is_sbc_sell = any(kw in status for kw in ("跌破均线", "跌破MA60", "结构破位", "🚨放量破均线", "🚨高位放量回吐"))
-                        if is_sbc_sell and t_str <= "09:33": is_sbc_sell = False
+                        if is_panic_sell: 
+                            is_sbc_sell = True
+                            if "断头铡刀" not in status: status.append("🚨断头铡刀")
+
+                        # 降低开盘保护至 1 分钟，且放量跳空不屏蔽
+                        if is_sbc_sell and t_str <= "09:31" and vol_r < 4.0: is_sbc_sell = False
                         
                         is_sbc = is_sbc_buy or is_sbc_sell
                         prev_sbc = self._last_sbc_status.get(code_str, False)
-                        prev_action = self._sbc_signals_registry.get(code_str, {}).get('action', '')
+                        prev_action = self._sbc_signals_registry.get(code_str, {}).get("action", "")
                         cur_action = "BUY" if is_sbc_buy else ("SELL" if is_sbc_sell else "")
                         is_reversal = prev_sbc and cur_action != "" and prev_action != "" and cur_action != prev_action
                         
                         if is_sbc:
-                            if not prev_sbc or is_reversal:
+                            # [NEW] 计算信号等级 (Grade)
+                            sig_grade = "普通"
+                            if is_sbc_sell:
+                                if is_heavy_break or is_panic_sell: sig_grade = "极高"
+                                elif vol_r > 2.0: sig_grade = "高"
+                            elif is_sbc_buy:
+                                if vol_r > 5.0 and is_new_high: sig_grade = "极高"
+                                elif vol_r > 3.0: sig_grade = "高"
+
+                            if not prev_sbc or is_reversal or sig_grade == "极高":
                                 reasons = [sbc_opt_reason] if sbc_opt_reason else []
+                                # [RESTORED] 精确提取核心标签，防止信号描述过于臃肿
                                 major_tags = ("创多日高", "历史高", "波段高", "强势启动", "5D突破", "30D突破", "趋势加速", "诱空转多")
-                                for tag in status:
-                                    if any(m in tag for m in major_tags) and tag not in reasons: reasons.append(tag)
-                                
+                                for tag in status: 
+                                    if any(m in tag for m in major_tags) and tag not in reasons: 
+                                        reasons.append(tag)
                                 sig_text = ""
                                 if is_sbc_buy:
-                                    icons = {"创多日高": "📈", "强势启动": "🚀", "趋势加速": "🔥", "诱空转多": "🎯", "历史高": "👑", "波段高": "💎"}
+                                    icons = {"创多日高": "📈", "强势启动": "🚀", "趋势加速": "🔥", "历史高": "👑"}
                                     reasons_with_icons = [f"{icons.get(next((m for m in icons if m in r), ''), '')}{r}" for r in reasons]
                                     sig_text = " + ".join(reasons_with_icons) if reasons_with_icons else "🚀强势结构"
                                 else:
                                     sig_text = "⚠️" + ("-".join(status) if status else "结构破位")
 
-                                sbc_signals.append(sig_text)
-                                alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{cur_action}"
-                                if alert_key not in self._sbc_alert_set:
+                                # [FIX] 动态去重 Key：允许同一股票在小时级别或等级提升时重复报警
+                                hour_str = datetime.now().strftime("%H")
+                                alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{hour_str}_{cur_action}_{sig_grade}"
+                                
+                                # 额外逻辑：如果价格比上次报警又跌了 2% 以上，强制再次报警
+                                last_alert_price = self._sbc_signals_registry.get(code_str, {}).get("price", 0)
+                                is_price_breakthrough = False
+                                if is_sbc_sell and last_alert_price > 0 and price < last_alert_price * 0.98:
+                                    is_price_breakthrough = True
+
+                                if alert_key not in self._sbc_alert_set or is_price_breakthrough:
                                     self._sbc_alert_set.add(alert_key)
-                                    r_time_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1]
-                                    if is_sbc_buy:
+                                    r_time_str = str(row.get("time", str(row.get("timestamp", "")))).split(" ")[-1]
+                                    
+                                    # [RESTORED] 评分奖励与控制台详细日志输出
+                                    if cur_action == "BUY":
                                         self._signal_start_price[code_str] = price
+                                        # 强势个股给予评分奖励，提升其在决策队列的权重
                                         scores_dict[code_str] += 15 if (is_day_strong or is_struct_strong) else 10
                                         logger.warning(f"{sig_text} [SBC] {code_str}{name_display} {r_time_str} 价:{price:.2f} %:{float(row.get('percent',0)):+.1f} 量比:{vol_r:.1f} 评分:{scores_dict[code_str]:.0f}")
                                     else:
+                                        # 记录破位详情，用于 Tick 结尾的聚合输出
                                         self.breakdown_details.append(f"{code_str:<7} {name_display:<8} | {sig_text}")
-                                        
+
                                     self._sbc_signals_registry[code_str] = {
-                                        'code': code_str, 'name': name_str, 'desc': sig_text, 'time': r_time_str,
-                                        'score': float(scores_dict[code_str]), 'price': price, 'pct': float(row.get('percent', 0)),
-                                        'vol_r': vol_r, 'action': cur_action, 'ts': time.time()
+                                        "code": code_str, "name": name_str, "desc": sig_text, "time": r_time_str,
+                                        "score": float(scores_dict[code_str]), "price": price, "pct": float(row.get("percent", 0)),
+                                        "vol_r": vol_r, "action": cur_action, "ts": time.time(), "grade": sig_grade
                                     }
                                     try:
                                         from signal_bus import SignalBus
                                         SignalBus().publish(event_type=SignalBus.EVENT_PATTERN, source="IntradayEmotionTracker",
                                                             payload={"code": code_str, "name": name_str, "price": price,
-                                                                     "action": cur_action, "pattern": sig_text, "score": scores_dict[code_str]})
+                                                                     "action": cur_action, "pattern": sig_text, 
+                                                                     "score": scores_dict[code_str], "grade": sig_grade})
                                     except: pass
-                            else:
-                                sbc_signals.append("-".join(status))
                         else:
                             if prev_sbc and code_str in self._sbc_signals_registry:
                                 if price > avg_p * 1.003: del self._sbc_signals_registry[code_str]
-                            sbc_signals.append("-".join(status))
+                        
+                        sbc_signals.append("-".join(status))
                         
                         # [RESTORED] 绩效持续评估 (FIX: 反馈后即时清理，防止全天持续漂移)
                         if code_str in self._signal_start_price:

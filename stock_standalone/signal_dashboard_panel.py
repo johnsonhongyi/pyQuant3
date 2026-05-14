@@ -251,7 +251,7 @@ CATEGORY_MAP = {
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
-    "结构破位": ["SBC-Breakdown", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
+    "结构破位": ["SBC-Breakdown", "断头铡刀", "严重破位", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
     "尾盘诱多": ["tail_end_trap", "尾盘诱多", "陷阱"],
     "其它信号": []
 }
@@ -381,7 +381,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         _ALL_COLOR_KEYS = [
             "#ff4444", "#44ff44", "#ffffff", "#FFD700", "#00ffff",
             "#ffff00", "#ff4500", "#FF4500", "#00ff88", "#00ff00",
-            "#00bfff", "#888888", "#ffaa00", "#ff0000", "#4B0082"
+            "#00bfff", "#888888", "#ffaa00", "#ff0000", "#4B0082", "#ff00ff"
         ]
         from PyQt6.QtGui import QBrush, QColor
         self._BRUSH_PRESET = {k: QBrush(QColor(k)) for k in _ALL_COLOR_KEYS}
@@ -690,7 +690,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "#FFD700": QBrush(QColor("#FFD700")),
             "#ff4444": QBrush(QColor("#ff4444")),
             "#44ff44": QBrush(QColor("#44ff44")),
-            "#ff4500": QColor("#ff4500"),
+            "#ff4500": QBrush(QColor("#ff4500")),
+            "#ff00ff": QBrush(QColor("#ff00ff")),
         }
         # [PERF] 预缓存所有高频颜色对象，消除每次心跳 ~240 次 QColor(str) C++ 解析开销
         self._colors = {
@@ -708,6 +709,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "#888888": QColor("#888888"),
             "#ffaa00": QColor("#ffaa00"),
             "#ff0000": QColor("#ff0000"),
+            "#ff00ff": QColor("#ff00ff"),
         }
 
         temp_lay.addWidget(self.market_breadth_label)
@@ -1986,7 +1988,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         self._all_events.append(event)
         self._categorize_and_count(event, increment=True)
-        if len(self._all_events) > 1000:
+        if len(self._all_events) > 5000:
             self._categorize_and_count(self._all_events.pop(0), increment=False)
         
         sector = payload.get('sector', '其它')
@@ -2033,10 +2035,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if append_dur > 150:
             logger.debug(f"⚠️ [DASHBOARD_PERF] _append_to_tables cost {append_dur:.1f}ms for {code} (matches={matched_cats})")
 
-    def _get_item_color(self, pattern, detail):
+    def _get_item_color(self, pattern, detail, grade=""):
         _cl = self._colors
+        # 优先处理极高级别信号的背景/前景色
+        if grade == "极高":
+            if "⚠️" in pattern or "SELL" in pattern or "破位" in detail: return _cl["#ff00ff"] # 品红色警告
+            return _cl["#FFD700"]
+            
         if "[重点]" in detail or "[重点]" in pattern: return _cl["#FFD700"] # 亮金色
-        if "SELL" in pattern or "风险" in detail: return _cl["#00ff00"]
+        if "SELL" in pattern or "风险" in detail or "破位" in detail: return _cl["#00ff00"] # 绿色风险
         if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): return _cl["#ff4444"]
         if "跟单" in detail: return _cl["#FFD700"]
         return _cl["#ffffff"]
@@ -2066,7 +2073,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.insertRow(new_row)
             
             # 🛡️ [CAPPING] 限制表格总长度
-            max_rows = 1000
+            max_rows = 5000
             if table.rowCount() > max_rows:
                 # 始终移除物理上的第一行
                 rem_row_idx = 0
@@ -2130,7 +2137,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if search_text and search_text not in search_blob:
                 table.setRowHidden(new_row, True)
             
-            color = self._get_item_color(pattern, detail)
+            color = self._get_item_color(pattern, detail, grade)
             if is_alerted: color = alert_fg
             
             for i in [0, 2, 3, 4, 5, 6, 7]:
