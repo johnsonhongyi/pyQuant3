@@ -25,9 +25,9 @@ except ImportError:
 
 # [NEW] Import real data fetching logic moved to local scopes to avoid circular import with MonitorTK
 
-from JohnsonUtil import LoggerFactory
+from logger_utils import LoggerFactory
 # [SILENT-MODE] 使用统一日志工厂，UI模式下默认级别仅 WARNING
-logger = LoggerFactory.getLogger()
+logger = LoggerFactory.getLogger("instock_TK")
 HDF5_FILE = r"g:\sina_MultiIndex_data.h5"
 KEY = "all_30"
 
@@ -418,6 +418,16 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     if stops is None:
         stops = []
         
+    # [NEW] 初始化预警中枢并开启模拟模式
+    try:
+        from signal_grading_hub import get_signal_grading_hub
+        hub = get_signal_grading_hub()
+        hub.set_simulation_mode(True, sim_time=start_time_str)
+        logger.info(f"🔮 [Replay] SignalGradingHub simulation mode enabled @ {start_time_str}")
+    except Exception as e:
+        logger.warning(f"Failed to init SignalGradingHub for replay: {e}")
+        hub = None
+
     is_ui_mode = (ui_callback is not None)
     if not is_ui_mode:
         logger.info(f"Loading data from {HDF5_FILE} (key={KEY})...")
@@ -821,6 +831,23 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             detector.update_scores(active_codes=active_codes, skip_evaluate=True)
             t2 = time.time()
             
+            # [NEW] 驱动预警中枢：根据回放数据更新市场预警
+            if hub and idx % 2 == 0: # 稍微降低频率，每 2 个 tick 更新一次
+                try:
+                    # 简单估算模拟温度：基于涨跌家数比或平均涨幅 (适配 DailyPulseEngine 逻辑)
+                    up_count = (batch_df['percent'] > 0).sum()
+                    total_count = len(batch_df)
+                    sim_temp = 50.0
+                    if total_count > 0:
+                        ready_pct = (up_count / total_count) * 100
+                        avg_pct = batch_df['percent'].mean()
+                        # 映射公式：(准备度 * 0.4 + 平均涨幅 * 5 + 40) 限制在 0-100
+                        sim_temp = np.clip(ready_pct * 0.4 + avg_pct * 5 + 40, 0, 100)
+                    
+                    hub.update_market(sim_temp, sim_time=t_str)
+                except Exception as e:
+                    logger.debug(f"Hub update failed during replay: {e}")
+
             total_ticks_processed += len(tick_slice)
             
             if idx % 1 == 0:
@@ -985,8 +1012,11 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     end_time_real = time.time()
     logger.info(f"\n✅ Playback complete! Total real time elapsed: {end_time_real - start_time_real:.2f}s")
 
-def main(args=None, df_all_target=None, quit_event=None):
-    # ------------------ Signal Ignoring ------------------
+def main(args=None, df_all_target=None, quit_event=None, bus_queue=None):
+    """
+    [REFACTORED] 赛马回测入口，支持通过 mp.Process 直接透传 df_all 数据。
+    """
+    # ------------------ Signal Ignoring (Windows/Linux) ------------------
     try:
         import signal
         import sys
@@ -1002,9 +1032,12 @@ def main(args=None, df_all_target=None, quit_event=None):
     except Exception:
         pass
 
-    """
-    [REFACTORED] 赛马回测入口，支持通过 mp.Process 直接透传 df_all 数据。
-    """
+    # [NEW] 注入跨进程总线队列 (如果存在)
+    if bus_queue:
+        from signal_bus import get_signal_bus
+        get_signal_bus().set_external_queue(bus_queue)
+        logger.info("📡 [Replay][IPC] Cross-process SignalBus bridge established.")
+
     if args is None:
         import argparse
         from datetime import datetime
@@ -1114,12 +1147,16 @@ Usage Examples:
         
         # --- [SILENT-MODE] 强力压制全局单例 Logger ---
         try:
-            global_logger = LoggerFactory.getLogger()
+            global_logger = LoggerFactory.getLogger("instock_TK")
             global_logger.setLevel(user_log_level)
-            import logging
-            logging.getLogger().setLevel(logging.WARNING)
+            # logger.setLevel(user_log_level)
+            # import logging
+            # logging.getLogger().setLevel(user_log_level)
+            # logging.getLogger("instock_TK").setLevel(user_log_level)
             if user_log_level >= LoggerFactory.WARNING:
                 print(f"🤫 静默模式：当前后台日志级别已设为 {str(args.log).upper()}")
+            else:
+                print(f"🔊 活跃模式：当前后台日志级别已设为 {str(args.log).upper()}")
         except Exception as e:
             logger.exception(f"Log conversion failed: {e}")
 
@@ -1363,6 +1400,12 @@ Usage Examples:
                     if hasattr(sender, 'close'):
                         sender.close()
                 except: pass
+                
+                # [NEW] 退出前重置中枢模式
+                try:
+                    from signal_grading_hub import get_signal_grading_hub
+                    get_signal_grading_hub().set_simulation_mode(False)
+                except: pass
 
                 # [EXIT-GUARD] 强制退出主进程前，先清理所有活跃的子进程 (包含 DNA 审计、数据 Publisher 等)
                 import os
@@ -1398,6 +1441,13 @@ Usage Examples:
                     worker.terminate()
                     worker.wait(100)
                 except: pass
+            
+            # 重置中枢
+            try:
+                from signal_grading_hub import get_signal_grading_hub
+                get_signal_grading_hub().set_simulation_mode(False)
+            except: pass
+
             import os
             os._exit(0)
     else:

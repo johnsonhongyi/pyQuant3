@@ -1537,20 +1537,30 @@ class IntradayEmotionTracker:
                                     }
                                     try:
                                         from signal_bus import SignalBus
-                                        SignalBus().publish(event_type=SignalBus.EVENT_PATTERN, source="IntradayEmotionTracker",
-                                                            payload={"code": code_str, "name": name_str, "price": price,
-                                                                     "action": cur_action, "pattern": sig_text, 
-                                                                     "score": scores_dict[code_str], "grade": sig_grade})
+                                        from signal_grading_hub import get_signal_grading_hub
                                         
-                                        # [NEW] 旁路接入：同步知会信号分级中枢
-                                        try:
-                                            from signal_grading_hub import get_signal_grading_hub
-                                            sector = baseline_tracker.get_sector_of_code(code_str) if baseline_tracker else ""
-                                            get_signal_grading_hub().on_stock_signal(code_str, name_str, sector, sig_text, sig_grade)
-                                        except Exception as e:
-                                            logger.debug(f"SignalGradingHub bridge error: {e}")
-                                            
-                                    except: pass
+                                        # 提取板块信息用于信号富集
+                                        sector = baseline_tracker.get_sector_of_code(code_str) if baseline_tracker else ""
+                                        
+                                        # [ENRICHED] 完善信号载荷，注入板块与时间戳，确保中枢与 UI 能正确识别
+                                        SignalBus().publish(
+                                            event_type=SignalBus.EVENT_PATTERN, 
+                                            source="IntradayEmotionTracker",
+                                            payload={
+                                                "code": code_str, 
+                                                "name": name_str, 
+                                                "price": price,
+                                                "action": cur_action, 
+                                                "pattern": sig_text, 
+                                                "score": scores_dict[code_str], 
+                                                "grade": sig_grade,
+                                                "sector": sector,
+                                                "ts": r_ts # [🛡️ FIX] 使用逻辑时间戳（tick时间），确保回测中枢窗口对齐
+                                            }
+                                        )
+                                        # 注意：中枢通过总线监听自动获取信号，不再需要此处的手动旁路调用
+                                    except Exception as e:
+                                        logger.debug(f"Signal publishing error: {e}")
                         else:
                             if prev_sbc and code_str in self._sbc_signals_registry:
                                 if price > avg_p * 1.003: del self._sbc_signals_registry[code_str]

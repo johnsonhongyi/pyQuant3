@@ -28,6 +28,12 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-14 19:00
+- [x] **修复由于后台线程阻塞引发的 Python 解释器致命崩溃 (Root-fixed PyEval_RestoreThread Fatal Crash)**：
+    - [x] **解除多进程等待死锁 (Eliminated Indefinite daemon Thread Block)**：查明在 instock_MonitorTK.py 中的 monitor_backtest_exit 回测监听线程中，直接调用无超时保护的 proc.join() 会导致 C 扩展底层（Windows _winapi.WaitForSingleObject）无限期挂起并释放 GIL。当用户主动关闭 Tkinter 主窗口触发 sys.exit() 开始销毁 Python 解释器时，若此时子进程恰好退出，底层 wait() 唤醒后试图重新获取已被销毁的 GIL（Thread State为NULL），从而引发 PyEval_RestoreThread 的致命崩溃（Access Violation）。
+    - [x] **实现退出信号敏锐感知 (Implemented Shutdown Signal Awareness)**：将 proc.join() 重构为带有 timeout=0.5 的安全轮询结构 proc.join(timeout=0.5)，并在轮询期间高频检查 getattr(self, '_is_closing', False)。一旦嗅探到主进程正在关闭，监听线程将瞬间自我退出，完美规避了与解释器 GC 回收机制的竞争，彻底根除退出时的闪退与报错。
+    - [x] **打通总线桥的安全退出链路 (Bridge Shutdown hardening)**：同步应用了上述退出感知逻辑至 monitor_bus_bridge 中，将其中的 q.get(timeout=1.0) 循环也纳入了主应用关闭嗅探防线。确保在退出应用时，跨进程通信队列不再成为阻碍解释器干净退出的僵尸句柄。
+
 ## 2026-05-13 22:05
 - [x] **根治概念热榜排序丢失自定义列与数据空白问题 (Root-fixed Concept Top10 Sorting Data Loss)**：
     - [x] **查明硬编码冗余缺陷 (Hardcoded Tuple Eradicated)**：查明 `instock_MonitorTK.py` 中的列头点击回调 `_sort_treeview_column_newTop10` 采用了完全手写的 8 元组硬编码 `tree.insert` 语句，导致用户添加的自定义动态列（如 `dff2`）在此处被粗暴截断或剔除，从而在排序后退化为数据空白。
