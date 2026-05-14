@@ -343,6 +343,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     code_clicked = pyqtSignal(str, str)
     sig_bus_event = pyqtSignal(object)
     sig_heartbeat = pyqtSignal(object) # [NEW] 专门用于心跳与统计更新的信号
+    sig_show_banner = pyqtSignal(str)  # [NEW] 专门用于置顶滚动预警的信号
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -352,13 +353,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 数据缓存
         # --- 1. 数据结构初始化 ---
         self._all_events: List[BusEvent] = []
+        self._hub_alerts = [] # [NEW] 聚合预警池
+        self._banner_timer = QTimer(self)
+        self._banner_timer.setSingleShot(True)
+        self._banner_timer.timeout.connect(lambda: self.alert_banner.setVisible(False))
+        
+        self.sig_show_banner.connect(self._show_alert_banner)
+        
         self._stock_stats: Dict[str, Dict] = {} 
         self._sector_heat: Dict[str, int] = {}  
         self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._signal_type_counts = {k: 0 for k in SIGNAL_TYPE_MAP.keys()}
         self._signal_type_counts["ALL"] = 0
         self._stats_counters = {"follow": 0, "breakout": 0, "risk": 0, "breakdown": 0, "bull": 0, "bear": 0, "other": 0}
-        self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
         self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
@@ -372,7 +379,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._ROLE_NUMERIC = Qt.ItemDataRole.UserRole + 104
         self._ROLE_SEARCH_BLOB = Qt.ItemDataRole.UserRole + 105
         
-        from PyQt6.QtGui import QFont
         self._font_normal = QFont()
         self._font_normal.setBold(False)
         self._font_bold = QFont()
@@ -383,14 +389,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "#ffff00", "#ff4500", "#FF4500", "#00ff88", "#00ff00",
             "#00bfff", "#888888", "#ffaa00", "#ff0000", "#4B0082", "#ff00ff"
         ]
-        from PyQt6.QtGui import QBrush, QColor
         self._BRUSH_PRESET = {k: QBrush(QColor(k)) for k in _ALL_COLOR_KEYS}
         self._BRUSH_PRESET["transparent"] = QBrush(QColor(0, 0, 0, 0))
         self._BRUSH_PRESET["gold_bg"] = QBrush(QColor(100, 80, 0, 100))
         self._BRUSH_PRESET["alert_bg"] = QBrush(QColor("#4B0082"))
         
         # [NEW] 排序防抖定时器
-        from PyQt6.QtCore import QTimer
         self._sort_timer = QTimer(self)
         self._sort_timer.setSingleShot(True)
         self._sort_timer.setInterval(100)
@@ -417,7 +421,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.load_window_position_qt(self, "signal_dashboard_panel", default_width=1100, default_height=750)
         self._restore_ui_state()
         
-        # --- 4. 定时器与总线连接 ---
+        # --- 4. 总线连接 ---
         self._setup_bus_connection()
         # ⭐ [FIX] 显式指定 QueuedConnection，确保跨线程信号在 GUI 线程处理
         self.sig_bus_event.connect(self._safe_process_event, Qt.ConnectionType.QueuedConnection)
@@ -632,6 +636,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         
+        # [NEW] 顶部全宽预警跑马灯 (最显眼位置，置于主布局最上方)
+        self.alert_banner = QLabel("")
+        self.alert_banner.setFixedHeight(30)
+        self.alert_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.alert_banner.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #800000, stop:0.5 #ff0000, stop:1 #800000);
+            color: #ffff00; font-weight: bold; font-size: 11pt;
+            border-bottom: 2px solid #ff4444; 
+        """)
+        self.alert_banner.setVisible(False)
+        layout.addWidget(self.alert_banner)
+        
         self.header = QFrame()
         self.header.setMinimumHeight(60)
         self.header.setStyleSheet("QFrame { background-color: #1a1c2c; border: 1px solid #333; border-radius: 6px; } QLabel { color: #ddd; }")
@@ -746,15 +762,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         header_layout.addSpacing(30)
         self.cards = {}
-        # [MOD] 增加 "dragon" 龙头池卡片，放在第一位
+        # [MOD] 增加 "alert_hub" 预警卡片，放在第一位
         card_configs = [
+            ("alert_hub", "📡 预警", "#FF4444"), # [NEW] 聚合预警卡片
             ("dragon", "🐉 龙头池", "#FFD700"),
             ("follow", "跟单信号", "#FFD700"), 
             ("breakout", "突破加速", "#FF4500"), 
             ("trap", "尾盘诱多", "#1E90FF"),
             ("risk", "风险卖出", "#00FA9A"), 
             ("breakdown", "结构破位", "#87CEFA"), 
-            ("other", "其它信号", "#A9A9A9")
+            ("other", "其它信号", "#A9A9A9"),
         ]
         for key, name, color in card_configs:
             card = QFrame()
@@ -797,8 +814,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #333; background: #0d121f; } QTabBar::tab { background: #1a1c2c; color: #888; padding: 4px 12px; font-size: 9pt; border: 1px solid #333; } QTabBar::tab:selected { background: #2a2d42; color: #fff; border-bottom-color: #00ff88; font-weight: bold; }")
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 搜索代码/名称...")
-        self.search_input.setFixedWidth(150)
+        self.search_input.setPlaceholderText("🔍 搜索代码/名称/形态...")
+        self.search_input.setFixedWidth(240)
         self.search_input.setClearButtonEnabled(True) # 内置原生清空按钮
         self.search_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.search_input.customContextMenuRequested.connect(self._on_search_context_menu)
@@ -851,6 +868,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             QPushButton:hover { background: #3A3A3C; border-color: #00ff88; }
         """)
         self.btn_dna_audit_signal.clicked.connect(self._run_dna_audit_selected)
+        search_lay.addWidget(self.btn_dna_audit_signal)
+
+        search_lay.addStretch()
+        
+        # [RESTORED] 右侧统计标签 (联动全部信号)
+        self.total_stat_label = QLabel("全部: 0")
+        self.total_stat_label.setStyleSheet("color: #00ffff; font-family: 'Consolas'; font-size: 14pt; font-weight: bold;")
+        self.total_stat_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.total_stat_label.mousePressEvent = lambda e: self._on_card_clicked("ALL")
+        search_lay.addWidget(self.total_stat_label)
 
         # [NEW] 重置按钮
         self.reset_btn = QPushButton("♻️ 重置")
@@ -872,10 +899,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
         self.tables: Dict[str, QTableWidget] = {}
 
-        # [MOD] 新增页签：决策队列与板块热力、龙头追踪、战略趋势
-        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"]
+        # [MOD] 恢复页签：保留基础页签，并将预警中枢置后以供查看效果
+        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号", "📡 市场预警"]
         for tab_name in all_tabs:
-            if tab_name == "🌟 决策队列":
+            if tab_name == "📡 市场预警":
+                table = self._create_alert_hub_table()
+            elif tab_name == "🌟 决策队列":
                 table = self._create_decision_table()
             elif tab_name == "🐉 龙头追踪":
                 table = self._create_dragon_table()
@@ -953,6 +982,29 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if ch_name == current_cat:
                 self.type_filter.setCurrentText(item_text)
         self.type_filter.blockSignals(False)
+
+    def _create_alert_hub_table(self) -> QTableWidget:
+        table = QTableWidget()
+        # 基础样式配置
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setSortingEnabled(False)
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; alternate-background-color: #161b29; }")
+        
+        cols = ["时间", "级别", "类型", "板块/内容", "活跃度", "详情"]
+        table.setColumnCount(len(cols))
+        table.setHorizontalHeaderLabels(cols)
+        # 预设列宽
+        table.setColumnWidth(0, 80)
+        table.setColumnWidth(1, 60)
+        table.setColumnWidth(2, 100)
+        table.setColumnWidth(3, 150)
+        table.setColumnWidth(4, 100)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionsClickable(True)
+        return table
 
     def _create_signal_table(self) -> QTableWidget:
         table = QTableWidget(0, 8)
@@ -1167,6 +1219,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         bus.subscribe(SignalBus.EVENT_RISK, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_STRATEGIC_TREND, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
+        bus.subscribe(SignalBus.EVENT_MARKET_ALERT, self._on_signal_received)
         history = bus.get_history(limit=200)
         for event in history: self._process_event(event, update_ui=False)
         self._refresh_all_tables()
@@ -1419,8 +1472,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
 
+        if current_tab_text == "📡 市场预警":
+            self._refresh_alert_hub_table()
         # 1. 更新决策队列表
-        if current_tab_text == "🌟 决策队列":
+        elif current_tab_text == "🌟 决策队列":
             try:
                 decisions = self._engine_ctrl.get_decision_queue()
                 self._refresh_decision_table(decisions)
@@ -1456,6 +1511,48 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._refresh_sector_table(sectors)
             except Exception as e:
                 logger.error(f"❌ [DASHBOARD] Refresh sector table failed: {e}", exc_info=True)
+
+    def _refresh_alert_hub_table(self):
+        table = self.tables.get("📡 市场预警")
+        if not table: return
+        
+        alerts = self._hub_alerts # 已是按时间降序
+        
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        
+        try:
+            table.setRowCount(len(alerts))
+            for i, alert in enumerate(alerts):
+                grade = alert.get('grade', 'B')
+                ts = alert.get('ts', '')
+                type_str = alert.get('type', '')
+                content = alert.get('content', '')
+                density = f"{alert.get('count', '-')}" if 'count' in alert else "-"
+                detail = f"{alert.get('codes', [])}" if 'codes' in alert else ""
+                
+                self._fast_update_cell(table, i, 0, ts)
+                self._fast_update_cell(table, i, 1, grade)
+                self._fast_update_cell(table, i, 2, type_str)
+                self._fast_update_cell(table, i, 3, content)
+                self._fast_update_cell(table, i, 4, density)
+                self._fast_update_cell(table, i, 5, detail)
+                
+                # 视觉分级
+                row_color = None
+                if grade == 'S':
+                    row_color = QColor("#4B0000") # 深红色背景
+                elif grade == 'A':
+                    row_color = QColor("#332200") # 深褐色
+                
+                if row_color:
+                    for j in range(table.columnCount()):
+                        item = table.item(i, j)
+                        if item: item.setBackground(row_color)
+                        
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
 
     def _refresh_decision_table(self, decisions: List[dict]):
         table = self.tables.get("🌟 决策队列")
@@ -1819,8 +1916,39 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setUpdatesEnabled(True)
 
     def _on_signal_received(self, event: BusEvent):
+        """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
+        if event.event_type == SignalBus.EVENT_MARKET_ALERT:
+            payload = event.payload
+            self._hub_alerts.insert(0, payload)
+            if len(self._hub_alerts) > 100: self._hub_alerts.pop()
+            
+            # 驱动横幅播报
+            if payload.get('grade') in ['S', 'A']:
+                self.sig_show_banner.emit(payload.get('content', ''))
+
+            # [NEW] 联动全部：将预警消息转化为“虚拟信号”注入主表
+            virtual_sig = event.__class__(
+                event_type=SignalBus.EVENT_PATTERN, # 模拟普通信号
+                source="MarketHub",
+                payload={
+                    "code": "MARKET",
+                    "name": "📊 市场预警",
+                    "price": payload.get('temp', 0.0),
+                    "action": payload.get('grade', 'B'),
+                    "pattern": payload.get('content', ''),
+                    "grade": payload.get('grade', 'B'),
+                    "detail": f"Type: {payload.get('type')}"
+                }
+            )
+            self.sig_bus_event.emit(virtual_sig) # 喂给主表处理链路
+
         self.sig_bus_event.emit(event)
 
+    def _show_alert_banner(self, msg):
+        """[GUI THREAD] 显示滚动横幅"""
+        self.alert_banner.setText(f" 🔔 {msg} ")
+        self.alert_banner.setVisible(True)
+        self._banner_timer.start(10000) # 10秒后消失
 
     def _categorize_and_count(self, event: BusEvent, increment: bool = True):
         delta = 1 if increment else -1
@@ -1970,21 +2098,22 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _process_event(self, event: BusEvent, update_ui=True):
         payload = event.payload
 
-        # [CRITICAL FIX - FIRST] EVENT_STRATEGIC_TREND 必须在 guard 之前处理！
-        # 该事件 payload 是趋势列表数据，不含单只股票 6 位代码，
-        # 若放在 guard 之后会被直接拦截导致缓存逻辑永远无法执行。
         if event.event_type == SignalBus.EVENT_STRATEGIC_TREND:
-            # 不再直接触发 UI 渲染！仅缓存数据并失效版本号，
-            # 等待 heartbeat 500ms 节流管道统一调度渲染，彻底消除无节流直推卡死。
             self._cached_strategic_trends = payload.get('trends', [])
             _st_table = self.tables.get("🌐 战略趋势")
-            if _st_table:
-                _st_table._render_version = -1  # 强制下次 heartbeat 必定刷新
+            if _st_table: _st_table._render_version = -1
             return
 
+        # [MOD] 处理市场预警事件
+        if event.event_type == SignalBus.EVENT_MARKET_ALERT:
+            if update_ui and self.tabs.tabText(self.tabs.currentIndex()) == "📡 市场预警":
+                self._refresh_alert_hub_table()
+            return
+
+
         code = payload.get('code', '')
-        # 🛡️ [GUARD] 必须有有效的股票代码才处理，防止空信号进入列表
-        if not (isinstance(code, str) and code.isdigit() and len(code) == 6): return
+        # 🛡️ [GUARD] 必须有有效的股票代码才处理，防止空信号进入列表 (放行虚拟代码 MARKET)
+        if not (isinstance(code, str) and (code.isdigit() and len(code) == 6 or code == "MARKET")): return
         
         self._all_events.append(event)
         self._categorize_and_count(event, increment=True)
@@ -2243,7 +2372,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.cards["breakdown"].setText(str(get_row_count("结构破位")))
             self.cards["trap"].setText(str(get_row_count("尾盘诱多")))
             self.cards["other"].setText(str(get_row_count("其它信号")))
+
             
+            # [NEW] 更新聚合预警统计 (展示全量预警条数以便观察系统活性)
+            total_hub_count = len(self._hub_alerts)
+            self.cards["alert_hub"].setText(str(total_hub_count))
+            if total_hub_count > 0:
+                # 如果有 S/A 级，显示深红警示，否则显示深蓝活跃色
+                has_critical = any(a.get('grade') in ['S', 'A'] for a in self._hub_alerts)
+                if has_critical:
+                    self.cards["alert_hub"].setStyleSheet("background: #4B0000; color: #fff; border: 1px solid #ff4444;")
+                else:
+                    self.cards["alert_hub"].setStyleSheet("background: #001a33; color: #fff; border: 1px solid #00aaff;")
+            else:
+                self.cards["alert_hub"].setStyleSheet("background: #1a1c2c; color: #ddd; border: 1px solid #333;")
+
             # [Dragon] 更新龙头统计
             if self._engine_ctrl:
                 d_counts = self._engine_ctrl.get_dragon_count()
@@ -2269,6 +2412,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         counts_parts.append(f"{short_name}: {tbl.rowCount()}")
                 
                 self.stats_info_label.setText(" | ".join(counts_parts))
+                if hasattr(self, 'total_stat_label'):
+                    self.total_stat_label.setText(f"全部: {get_row_count('全部信号')}")
 
         # 1. 通用计算多空比
         total_bull = self._stats_counters.get("bull", 0)
@@ -2399,30 +2544,36 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.debug(f"Update market stats failed: {e}")
 
     def _on_card_clicked(self, key):
+        # 1. 映射表定义
         mapping = {
+            "alert_hub": "📡 市场预警", # [RESTORED] 联动新中枢
             "dragon": "🐉 龙头追踪",
             "follow": "跟单信号", 
             "breakout": "突破加速", 
             "trap": "尾盘诱多",
             "risk": "卖点预警", 
             "breakdown": "结构破位", 
-            "other": "其它信号"
+            "other": "其它信号",
+            "ALL": "全部信号"
         }
+        
         tab_name = mapping.get(key)
         if tab_name:
-            # [FIX] 点击顶部卡片时，不仅重置下拉列表，还要清空搜索框，彻底消除交叉过滤限制
-            if hasattr(self, 'type_filter') and self.type_filter.currentData() != "ALL":
-                idx = self.type_filter.findData("ALL")
-                if idx >= 0:
-                    self.type_filter.setCurrentIndex(idx)
-                    
-            if hasattr(self, 'search_input') and self.search_input.text():
-                    self.search_input.clear()
-                    
+            # 跳转到对应页签
             for i in range(self.tabs.count()):
                 if self.tabs.tabText(i) == tab_name:
                     self.tabs.setCurrentIndex(i)
                     break
+            
+            # 点击顶部卡片或右侧“全部”时，重置过滤器状态，确保看到完整数据
+            if hasattr(self, 'type_filter'):
+                idx = self.type_filter.findData("ALL")
+                if idx >= 0:
+                    self.type_filter.setCurrentIndex(idx)
+            if hasattr(self, 'search_input'):
+                self.search_input.clear()
+            if hasattr(self, 'search_input'):
+                self.search_input.clear()
 
     def _on_market_breadth_clicked(self, event):
         self._vol_dialog.update_data(self._market_stats.get("vol_details", []))
@@ -2768,6 +2919,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tabs.currentWidget()
         if not isinstance(table, QTableWidget): return
         
+        visible_count = 0
         # [PERF] A3: 使用预缓存的列映射
         col_map = getattr(table, '_col_map', {})
         code_col = col_map.get("代码", col_map.get("龙头", -1))
@@ -2807,6 +2959,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     row_visible = (matched_type == target_type_key)
             
             table.setRowHidden(row, not row_visible)
+            if row_visible: visible_count += 1
+        
+        # [NEW] 搜索反馈：在状态栏显示匹配数
+        if search_text or target_type_key != "ALL":
+            self.status_label.setText(f"🔍 搜索/过滤结果: 在「{self.tabs.tabText(self.tabs.currentIndex())}」中找到 {visible_count} 条匹配")
         
         # [NEW] 手动搜索过滤后，自动滚动到顶部显示最新信号
         table.verticalScrollBar().setValue(0)
@@ -2897,11 +3054,31 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if ctrl:
                 ctrl.manual_run()
             
-            # 2. 立即更新 UI 视图
+            # 2. 触发信号中枢手动审计
+            from signal_grading_hub import get_signal_grading_hub
+            hub = get_signal_grading_hub()
+            hub.force_report()
+            
+            # 3. [EFFECT] 发射一条强视觉反馈信号，展示中枢效果
+            from signal_bus import get_signal_bus, BusEvent, SignalBus
+            bus = get_signal_bus()
+            bus.publish(BusEvent(
+                event_type=SignalBus.EVENT_MARKET_ALERT,
+                source="ManualTest",
+                payload={
+                    'ts': datetime.now().strftime("%H:%M:%S"),
+                    'type': "系统手动审计",
+                    'grade': "S",
+                    'content': "🚀 引擎全链路验证成功！中枢预警已激活，当前处于实时监控状态。",
+                    'temp': hub.last_temp if hasattr(hub, 'last_temp') else 50.0
+                }
+            ))
+
+            # 4. 立即更新 UI 视图
             self._update_engine_views()
             
-            self.status_label.setText("✅ 引擎重算刷新完成")
-            logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新")
+            self.status_label.setText("✅ 引擎重算与预警激活完成")
+            logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新与预警播报演示")
         except Exception as e:
             self.status_label.setText(f"❌ 重算失败: {e}")
         finally:

@@ -202,11 +202,15 @@ def dump_all():
         def show_native_toast():
             try:
                 import ctypes
-                ctypes.windll.user32.MessageBoxW(
+                # 使用 MessageBoxTimeoutW 实现自动关闭功能 (Windows 隐藏 API)
+                # 参数: 0, 内容, 标题, 类型, 语言ID, 超时时间(ms)
+                ctypes.windll.user32.MessageBoxTimeoutW(
                     0, 
                     f"程序当前运行堆栈已成功转储至日志文件！\n\n转储路径:\n{dump_file_path}", 
                     "诊断信号触发成功 (Stack Trace Dump)", 
-                    0x40 | 0x1000  # MB_OK | MB_SYSTEMMODAL (置顶并带有提示图标)
+                    0x40 | 0x1000,  # MB_OK | MB_SYSTEMMODAL
+                    0,              # Language ID
+                    3000            # 3000ms (3秒) 自动关闭
                 )
             except Exception:
                 pass
@@ -4839,6 +4843,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 
                             from signal_bus import get_signal_bus, SignalBus
                             get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "market_stats", final_stats)
+                            
+                            # [NEW] 同步更新信号分级中枢的市场温度
+                            try:
+                                from signal_grading_hub import get_signal_grading_hub
+                                temp = final_stats.get('temperature', 50.0)
+                                get_signal_grading_hub().update_market(temp)
+                            except: pass
                         except: pass
                         
                     except Exception as e:
