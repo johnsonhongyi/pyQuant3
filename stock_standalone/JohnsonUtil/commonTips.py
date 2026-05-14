@@ -849,6 +849,7 @@ class GlobalConfig:
         self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=1800, value_type="int")
         self.mem_threshold_mb = self.get_with_writeback("general", "mem_threshold_mb", fallback=1800, value_type="int")
         self.concept_top10_window_col = self.get_with_writeback("general", "concept_top10_window_col", fallback=["code", "name", "rank", "percent", "dff", "volume","red","win"], value_type="list")
+        self.periodic_report_interval = self.get_with_writeback("general", "periodic_report_interval", fallback=15, value_type="int") # [NEW] 定点播报周期(分钟)
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.sector_write_blk = self.get_with_writeback("general", "sector_write_blk", fallback='098.blk', value_type="str")
         self.multiprocessingQueue = self.get_with_writeback("general", "multiprocessingQueue", fallback=300, value_type="int")

@@ -72,12 +72,17 @@ class SignalBus:
     EVENT_PHASE = "phase"
     EVENT_HEARTBEAT = "heartbeat"
     EVENT_STRATEGIC_TREND = "strategic_trend"
+    EVENT_SECTOR_ALERT = "sector_alert"      # [NEW] 板块级聚合预警
+    EVENT_MARKET_ALERT = "market_alert"      # [NEW] 市场级宏观预警
+    EVENT_GRADED_SIGNAL = "graded_signal"    # [NEW] 分级后的综合信号
     
     # 事件优先级（数字越大优先级越高）
     PRIORITY = {
+        EVENT_MARKET_ALERT: 95,              # 极高：市场系统性预警
         EVENT_RISK: 100,
         EVENT_TRADE: 80,
         EVENT_PHASE: 60,
+        EVENT_SECTOR_ALERT: 50,              # 高：板块集体异动
         EVENT_PATTERN: 40,
         EVENT_HOTLIST: 30,
         EVENT_STRATEGIC_TREND: 25,

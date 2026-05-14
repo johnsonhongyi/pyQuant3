@@ -1541,6 +1541,15 @@ class IntradayEmotionTracker:
                                                             payload={"code": code_str, "name": name_str, "price": price,
                                                                      "action": cur_action, "pattern": sig_text, 
                                                                      "score": scores_dict[code_str], "grade": sig_grade})
+                                        
+                                        # [NEW] 旁路接入：同步知会信号分级中枢
+                                        try:
+                                            from signal_grading_hub import get_signal_grading_hub
+                                            sector = baseline_tracker.get_sector_of_code(code_str) if baseline_tracker else ""
+                                            get_signal_grading_hub().on_stock_signal(code_str, name_str, sector, sig_text, sig_grade)
+                                        except Exception as e:
+                                            logger.debug(f"SignalGradingHub bridge error: {e}")
+                                            
                                     except: pass
                         else:
                             if prev_sbc and code_str in self._sbc_signals_registry:
