@@ -4,7 +4,9 @@ SignalDashboardPanel - 策略信号分类仪表盘
 聚合实时信号，提供市场温度计、板块热力统计及分类过滤功能。
 支持个股信号聚合、样式持久化与时间排序。
 """
-import logging
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger(__name__)
 from datetime import datetime
 from typing import Dict, List, Any
 
@@ -30,6 +32,8 @@ from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 
 SETTINGS_SECTION = "signal_dashboard_persistence"
 
+# [NEW] 模块级锁，防止 Panel 和 Dialog 同时写入同一个配置文件导致状态丢失
+_CONFIG_FILE_LOCK = threading.RLock()
 # ✅ 盘中交易引擎（局部导入防止循环依赖）
 def get_engine_controller():
     try:
@@ -38,6 +42,284 @@ def get_engine_controller():
     except Exception as e:
         logger.error(f"❌ [Dashboard] Failed to import engine: {e}")
         return None
+
+class MarketAlertDetailDialog(QDialog, WindowMixin):
+    """市场预警个股异动详情弹窗"""
+    code_clicked = pyqtSignal(str, str) # 信号联动 (代码, 名称)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📡 预警个股异动明细")
+        self.setMinimumWidth(480)
+        self._is_updating = False
+        self.load_window_position_qt(self, "market_alert_detail_dialog", default_width=550, default_height=500)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        
+        # [NEW] 顶部统计信息与标题
+        top_layout = QHBoxLayout()
+        header = QLabel("📡 异动详情 | 单击联动")
+        header.setStyleSheet("color: #00FFCC; font-size: 13px; font-weight: bold;")
+        top_layout.addWidget(header)
+        
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("color: #ffffff; font-size: 12px; font-weight: bold;")
+        top_layout.addStretch()
+        top_layout.addWidget(self.stats_label)
+        layout.addLayout(top_layout)
+        
+        # [MOD] 扩展列: 代码, 名称, 涨幅, 量比, DFF, DFF2, 理由
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "涨幅%", "量比", "DFF", "DFF2", "详情/理由"])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; gridline-color: #2a2d42; }")
+        
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        
+        self._is_updating = True # 🛡️ [FIX] 启动初始保护，防止默认设置触发保存
+        # [MOD] 极致精简布局：设置核心列宽 (极致紧凑版)
+        self.table.setColumnWidth(0, 55)  # 代码
+        self.table.setColumnWidth(1, 65)  # 名称
+        self.table.setColumnWidth(2, 55)  # 涨幅
+        self.table.setColumnWidth(3, 45)  # 量比
+        self.table.setColumnWidth(4, 40)  # DFF
+        self.table.setColumnWidth(5, 40)  # DFF2
+        
+        h.setStretchLastSection(True)
+        # [NEW] 启用排序
+        h.setSectionsClickable(True)
+        self.table.setSortingEnabled(True)
+
+        # [NEW] 持久化支持
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._save_column_widths)
+        h.sectionResized.connect(self._on_section_resized)
+        
+        # 恢复状态
+        # [MOD] 增加延迟确保布局已生成，彻底根治 restoreState 失效问题
+        QTimer.singleShot(100, self._restore_column_widths)
+        
+        self.table.itemClicked.connect(self._on_item_clicked)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        layout.addWidget(self.table)
+        
+        # [NEW] 结束初始化保护延迟一点，确保 restoreState 完成后再放开 sectionResized 的保存
+        QTimer.singleShot(500, lambda: setattr(self, '_is_updating', False))
+        
+    def _on_item_clicked(self, item):
+        if item:
+            row = item.row()
+            self.code_clicked.emit(self.table.item(row, 0).text(), self.table.item(row, 1).text())
+
+    def _show_context_menu(self, pos):
+        """[GUI] 右键菜单：支持代码复制"""
+        item = self.table.itemAt(pos)
+        if not item: return
+        row = item.row()
+        code_item = self.table.item(row, 0)
+        if not code_item: return
+        code = code_item.text()
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #1a1c2c; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #2a2d42; }")
+        
+        copy_action = menu.addAction(f"📋 复制代码: {code}")
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
+        
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _on_section_resized(self, index, old_size, new_size):
+        """[GUI] 监听列宽变动，触发延迟保存"""
+        if not getattr(self, '_is_updating', False):
+            self._save_timer.start(2000)
+
+    def _save_column_widths(self):
+        """[DATA] 聚合保存列宽状态 (使用 Hex 协议)"""
+        try:
+            # 1. 采集状态
+            state = self.table.horizontalHeader().saveState().toHex().data().decode()
+            
+            config_file = WINDOW_CONFIG_FILE
+            
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except: pass
+                
+                # 写入状态
+                data["market_alert_detail_header_v2"] = state
+                
+                # 原子写盘
+                tmp = config_file + f".tmp_{id(self)}"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                os.replace(tmp, config_file)
+                
+            logger.debug(f"✅ [Dashboard] Market alert details columns saved.")
+        except Exception as e:
+            logger.error(f"❌ [Dashboard] Failed to save alert detail columns: {e}")
+
+    def _restore_column_widths(self):
+        """[DATA] 从磁盘恢复列宽状态"""
+        try:
+            config_file = WINDOW_CONFIG_FILE
+            if not os.path.exists(config_file): return
+            
+            with _CONFIG_FILE_LOCK:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            
+            # 优先尝试 v2 (Hex)
+            state_hex = data.get("market_alert_detail_header_v2")
+            if state_hex:
+                ok = self.table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
+                logger.debug(f"📊 [Dashboard] Market alert details columns restored: {ok}")
+                return
+
+            # 兼容旧版 (widths dict)
+            widths = data.get("market_alert_detail_cols", {})
+            if widths:
+                for col_idx_str, w in widths.items():
+                    try:
+                        idx = int(col_idx_str)
+                        if idx < self.table.columnCount():
+                            self.table.setColumnWidth(idx, w)
+                    except: pass
+        except Exception as e:
+            logger.debug(f"⚠️ [Dashboard] Failed to restore alert detail columns: {e}")
+
+    def keyPressEvent(self, event):
+        """[GUI] 按下 ESC 键自动关闭窗口"""
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def update_data(self, codes, df_snapshot=None, details=None):
+        """[GUI] 使用快照数据或预定义的 details 填充表格"""
+        self.table.setSortingEnabled(False) # [PERF] 更新时关闭排序
+        self.table.setRowCount(0)
+        if not codes: 
+            self.stats_label.setText("总计: 0 | 平均涨幅: 0.00%")
+            return
+        
+        # 将 details 转为 dict 方便查找
+        detail_map = {d['code']: d for d in (details or [])}
+        
+        self.table.setRowCount(len(codes))
+        
+        # 统计变量
+        total_pct = 0.0
+        valid_count = 0
+        sector_counts = {} # {sector: count}
+        
+        for i, code in enumerate(codes):
+            d_item = detail_map.get(code, {})
+            name = d_item.get('name', '-')
+            detail = str(d_item.get('sig_type', ''))
+            pct = 0.0
+            vol_ratio = 1.0
+            dff = 0.0
+            dff2 = 0.0
+            
+            # [MOD] 注入实时行情快照数据 (包含 DFF/DFF2)
+            if df_snapshot is not None and code in df_snapshot.index:
+                row = df_snapshot.loc[code]
+                if name == "-": name = str(row.get('name', '-'))
+                pct = row.get('percent', 0.0)
+                vol_ratio = row.get('volume_ratio', 1.0)
+                dff = row.get('dff', 0.0)
+                dff2 = row.get('dff2', 0.0)
+                
+                # [NEW] 板块分布统计
+                raw_cats = str(row.get('category', ''))
+                if raw_cats:
+                    cats = [c.strip() for c in raw_cats.replace("；", ";").replace("+", ";").split(";") if c.strip()]
+                    for ca in cats:
+                        if not self._is_generic_concept(ca):
+                            sector_counts[ca] = sector_counts.get(ca, 0) + 1
+                
+                total_pct += pct
+                valid_count += 1
+                
+                if not detail: detail = str(row.get('signal', ''))
+                
+            self._fast_set_item(i, 0, code)
+            self._fast_set_item(i, 1, name)
+            # 数值列使用 NumericTableWidgetItem 以支持排序
+            self._fast_set_item(i, 2, f"{pct:+.2f}%", color="#ff4444" if pct > 0 else "#44ff44", is_numeric=True)
+            self._fast_set_item(i, 3, f"{vol_ratio:.2f}", is_numeric=True)
+            self._fast_set_item(i, 4, f"{dff:+.2f}", is_numeric=True)
+            self._fast_set_item(i, 5, f"{dff2:+.2f}", is_numeric=True)
+            self._fast_set_item(i, 6, detail)
+
+        # [MOD] 使用极高饱和度颜色 (Neon Style) 提高清晰度
+        avg_pct = total_pct / valid_count if valid_count > 0 else 0.0
+        avg_color = "#00FF00" if avg_pct >= 0 else "#FF3333" 
+        
+        # 统计文本构建 (使用高对比度 HTML)
+        stats_html = (
+            f"<font color='#FFFFFF'>总计:</font> <font color='#FFFF00'>{len(codes)}</font> "
+            f"<font color='#666666'>|</font> "
+            f"<font color='#FFFFFF'>平均涨幅:</font> <font color='{avg_color}'>{avg_pct:+.2f}%</font>"
+        )
+        
+        # 提取并排序板块分布
+        sorted_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        if sorted_sectors:
+            # 领头板块使用青色高亮，计数用黄色
+            top_3 = [f"<font color='#00FFFF'>{s}</font>(<font color='#FFFF00'>{c}</font>)" for s, c in sorted_sectors[:3]]
+            stats_html += f" <font color='#666666'>|</font> <font color='#FFFFFF'>核心板块:</font> " + " ".join(top_3)
+            
+        self.stats_label.setText(stats_html)
+        
+        self.table.setSortingEnabled(True) # [PERF] 恢复排序
+
+    def _is_generic_concept(self, name):
+        """[UTIL] 过滤泛概念"""
+        generics = [
+            "其它", "融资融券", "深股通", "沪股通", "预盈预增", "昨日涨停", 
+            "昨日大涨", "昨日首板", "破净股", "转融券标的", "富时罗素概念股",
+            "标普道琼斯纳指", "MSCI中国", "央企改革", "地方国企改革", "低价股"
+        ]
+        return any(g in str(name) for g in generics)
+
+    def _fast_set_item(self, r, c, text, color=None, is_numeric=False):
+        if is_numeric:
+            it = NumericTableWidgetItem(text)
+        else:
+            it = QTableWidgetItem(text)
+            
+        if color: it.setForeground(QBrush(QColor(color)))
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(r, c, it)
+
+    def closeEvent(self, event):
+        """[GUI] 关闭时持久化所有状态"""
+        # 保存窗口位置与大小
+        self.save_window_position_qt_visual(self, "market_alert_detail_dialog")
+        # 强制保存当前列宽
+        self._save_column_widths()
+        event.accept()
+
+    def hideEvent(self, event):
+        """[GUI] 隐藏时也保存位置 (应对 Tool 模式)"""
+        self.save_window_position_qt_visual(self, "market_alert_detail_dialog")
+        super().hideEvent(event)
 
 class VolumeDetailsDialog(QDialog, WindowMixin):
     """持久化的放量详情弹窗"""
@@ -51,6 +333,7 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         
         # 加载窗口位置与大小
         self.load_window_position_qt(self, "volume_details_dialog", default_width=450, default_height=600)
+        self._is_updating = True # 开启初始化保护
         
         # [NEW] 设置窗口标志：置顶及工具窗口样式 (工具窗口在 Windows 下有更窄的标题栏)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -93,9 +376,24 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.table.horizontalHeader().setSortIndicatorShown(True)
         
         h_header = self.table.horizontalHeader()
-        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive) # 改为交互模式以支持持久化
         h_header.setFixedHeight(28) # 表头高度微调
         h_header.sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
+        
+        # [NEW] 持久化支持
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._save_column_widths)
+        h_header.sectionResized.connect(self._on_section_resized)
+        
+        # 默认列宽
+        self.table.setColumnWidth(0, 60)
+        self.table.setColumnWidth(1, 80)
+        self.table.setColumnWidth(2, 65)
+        self.table.setColumnWidth(3, 55)
+
+        # 恢复状态
+        QTimer.singleShot(0, self._restore_column_widths)
         
         self.table.setStyleSheet("""
             QTableWidget {
@@ -121,6 +419,54 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.table.itemDoubleClicked.connect(self._on_item_clicked)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self.table)
+        
+        # 结束初始化保护
+        QTimer.singleShot(200, lambda: setattr(self, '_is_updating', False))
+
+    def _on_section_resized(self, index, old_size, new_size):
+        """[GUI] 监听列宽变动，触发延迟保存"""
+        if not getattr(self, '_is_updating', False):
+            self._save_timer.start(2000)
+
+    def _save_column_widths(self):
+        """[DATA] 聚合保存列宽状态"""
+        try:
+            state = self.table.horizontalHeader().saveState().toHex().data().decode()
+            config_file = WINDOW_CONFIG_FILE
+            
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except: pass
+                
+                data["volume_details_header_v1"] = state
+                
+                tmp = config_file + f".tmp_vol_{id(self)}"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, config_file)
+            logger.debug(f"✅ [Dashboard] Volume details columns saved.")
+        except Exception as e:
+            logger.error(f"❌ [Dashboard] Failed to save volume detail columns: {e}")
+
+    def _restore_column_widths(self):
+        """[DATA] 从磁盘恢复列宽状态"""
+        try:
+            config_file = WINDOW_CONFIG_FILE
+            if not os.path.exists(config_file): return
+            
+            with _CONFIG_FILE_LOCK:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            
+            state_hex = data.get("volume_details_header_v1")
+            if state_hex:
+                self.table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
+        except Exception as e:
+            logger.debug(f"⚠️ [Dashboard] Failed to restore volume detail columns: {e}")
         
     def _on_item_clicked(self, item):
         if item:
@@ -236,6 +582,8 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         """关闭事件时保存位置"""
         self.save_window_position_qt_visual(self, "volume_details_dialog")
+        # 强制保存列宽
+        self._save_column_widths()
         event.accept()
 
     def hideEvent(self, event):
@@ -243,7 +591,6 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.save_window_position_qt_visual(self, "volume_details_dialog")
         super().hideEvent(event)
 
-logger = logging.getLogger(__name__)
 
 # 定义信号分类
 CATEGORY_MAP = {
@@ -354,6 +701,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # --- 1. 数据结构初始化 ---
         self._all_events: List[BusEvent] = []
         self._hub_alerts = [] # [NEW] 聚合预警池
+        self.parent_app = None # [NEW] 用于跨框架(Tk/Qt)引用数据 (如 self.parent_app.df_all)
+        self._alert_detail_dialog = None # [NEW] 详情对话框
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
         self._banner_timer.timeout.connect(lambda: self.alert_banner.setVisible(False))
@@ -375,9 +724,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._ROLE_TEXT    = Qt.ItemDataRole.UserRole + 100
         self._ROLE_COLOR   = Qt.ItemDataRole.UserRole + 101
         self._ROLE_BOLD    = Qt.ItemDataRole.UserRole + 102
-        self._ROLE_BG      = Qt.ItemDataRole.UserRole + 103
-        self._ROLE_NUMERIC = Qt.ItemDataRole.UserRole + 104
-        self._ROLE_SEARCH_BLOB = Qt.ItemDataRole.UserRole + 105
+        self._ROLE_DATA    = Qt.ItemDataRole.UserRole + 103
+        self._ROLE_BG      = Qt.ItemDataRole.UserRole + 104
+        self._ROLE_NUMERIC = Qt.ItemDataRole.UserRole + 105
+        self._ROLE_SEARCH_BLOB = Qt.ItemDataRole.UserRole + 106
         
         self._font_normal = QFont()
         self._font_normal.setBold(False)
@@ -419,6 +769,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # --- 3. UI 渲染 (依赖上述数据结构) ---
         self._init_ui()
         self.load_window_position_qt(self, "signal_dashboard_panel", default_width=1100, default_height=750)
+        
+        # [NEW] 恢复历史预警信息
+        self._load_alert_history()
+        
         self._restore_ui_state()
         
         # --- 4. 总线连接 ---
@@ -439,13 +793,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 这确保了 UI 刷新能够 100% 对齐数据聚合周期，避免无数据更新时的空转或脏检查开销
         logger.info(f"🚀 SignalDashboard 决策引擎同步已启动，变更为心跳驱动模式")
         
-        # # 恢复 UI 状态 (列宽等)
-        # self._restore_ui_state()
-
         # [MOD] 状态栏 UI 布局优化：废除轮播模式，改为固定/滚动综合展示
         self._carousel_idx = 0
         self._carousel_messages = []
-        # self._carousel_timer = QTimer(self) # 停止轮播定时器
         
         # 监听 Tab 切换，实现“tab当前点击查看的视图的统计信息”实时更新
         self.tabs.currentChanged.connect(self._update_stats_display)
@@ -465,11 +815,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             if hasattr(self, '_search_timer') and self._search_timer: 
                 self._search_timer.stop()
-        except Exception: pass
-
-        try:
-            if hasattr(self, '_carousel_timer') and self._carousel_timer: 
-                self._carousel_timer.stop()
         except Exception: pass
         
         try:
@@ -561,12 +906,22 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # -----------------------------
             # 原子写入（防止配置损坏）
             # -----------------------------
-            tmp_file = config_file + ".tmp"
+            with _CONFIG_FILE_LOCK:
+                # 重新读取一次以防在保存期间被其他组件更新了根级别的 key
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, "r", encoding="utf-8") as f:
+                            current_all = json.load(f)
+                            # 仅更新我们负责的 Section，保留其他 root keys (如 market_alert_detail_header_v2)
+                            current_all[SETTINGS_SECTION] = new_state
+                            full_data = current_all
+                    except: pass
 
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(full_data, f, ensure_ascii=False, indent=2)
+                tmp_file = config_file + ".tmp"
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(full_data, f, ensure_ascii=False, indent=2)
 
-            os.replace(tmp_file, config_file)
+                os.replace(tmp_file, config_file)
 
             logger.debug("UI state saved.")
 
@@ -578,8 +933,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             config_file = WINDOW_CONFIG_FILE
             if not os.path.exists(config_file): return
-            with open(config_file, "r", encoding="utf-8") as f:
-                full_data = json.load(f)
+            
+            with _CONFIG_FILE_LOCK:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    full_data = json.load(f)
             
             ui_state = full_data.get(SETTINGS_SECTION)
             if not ui_state: return
@@ -590,7 +947,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if state_key in ui_state:
                     table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
             # [PERF] 最稳方案：延迟一个 event-loop 再采集快照
-            # 确保 restoreState() 引发的异步布局事件全部稳定后再建立基准，防止启动即触发 save_ui
+            # 确保 restoreState() 引引发的异步布局事件全部稳定后再建立基准，防止启动即触发 save_ui
             QTimer.singleShot(0, lambda: setattr(self, '_last_saved_ui_state', self._collect_ui_state()))
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
@@ -917,7 +1274,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             self.tables[tab_name] = table
             # [INTERACTIVE-FIX] 为引擎表注入初始排序锚点，消除“冷启动点击无反应”的痛点
-            if tab_name in ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力"]:
+            if tab_name in ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "📡 市场预警"]:
                 table._sort_col = 0
                 table._sort_order = Qt.SortOrder.DescendingOrder
                 table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
@@ -1002,8 +1359,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setColumnWidth(2, 100)
         table.setColumnWidth(3, 150)
         table.setColumnWidth(4, 100)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.horizontalHeader().setSectionsClickable(True)
+        
+        h = table.horizontalHeader()
+        h.setSectionsClickable(True)
+        # [NEW] 绑定表头点击，实现手动排序联动
+        h.sectionClicked.connect(lambda idx: self._on_engine_header_clicked(table, idx))
+        
+        # [NEW] 绑定双击详情查看 (使用 cellDoubleClicked 传递 row, col)
+        table.cellDoubleClicked.connect(self._on_alert_double_clicked)
         return table
 
     def _create_signal_table(self) -> QTableWidget:
@@ -1374,7 +1737,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _trigger_sorted_refresh(self):
         """[ASYNC] 排序意图落地：决策引擎表直接物理排序；信号表延迟异步排序"""
-        _ENGINE_TABS = {"🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"}
+        _ENGINE_TABS = {"🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"}
         current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
         table = self.tables.get(current_tab_text)
         if not table: return
@@ -1408,7 +1771,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._sort_table_python(table, sort_col, sort_order)
             table.horizontalHeader().setSectionsClickable(True)
 
-    def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None):
+    def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None, data=None):
         it = table.item(r_idx, c_idx)
         if not it:
             # [PERF] 新建 item 快速路径：直接赋值，跳过全部脏检查分支
@@ -1418,6 +1781,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             it.setData(self._ROLE_TEXT, text_str)
             if numeric_val is not None:
                 it.setData(self._ROLE_NUMERIC, numeric_val)
+            if data is not None:
+                it.setData(self._ROLE_DATA, data)
             if color_key:
                 it.setForeground(self._BRUSH_PRESET.get(color_key, self._BRUSH_PRESET["#ffffff"]))
                 it.setData(self._ROLE_COLOR, color_key)
@@ -1435,6 +1800,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if it.data(self._ROLE_TEXT) != text_str:
             it.setText(text_str)
             it.setData(self._ROLE_TEXT, text_str)
+
+        # [FIX] data 脏检查
+        if data is not None:
+            if it.data(self._ROLE_DATA) != data:
+                it.setData(self._ROLE_DATA, data)
 
         # [FIX] numeric_val 增加脏检查，避免重复 setData 开销
         if numeric_val is not None:
@@ -1516,8 +1886,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("📡 市场预警")
         if not table: return
         
-        alerts = self._hub_alerts # 已是按时间降序
+        alerts = self._hub_alerts[:] # 复制副本防止干扰
         
+        # [NEW] 增加手动排序支持
+        sort_col = getattr(table, '_sort_col', 0)
+        sort_order = getattr(table, '_sort_order', Qt.SortOrder.DescendingOrder)
+        
+        def _get_sort_key(a):
+            if sort_col == 0: return a.get('ts', a.get('timestamp', ''))
+            if sort_col == 1: return a.get('grade', 'B')
+            if sort_col == 2: return a.get('type', '')
+            if sort_col == 3: return a.get('content', '')
+            if sort_col == 4: 
+                v = a.get('metadata', {}).get('count', a.get('count', 0))
+                try: return int(v) if str(v).isdigit() else 0
+                except: return 0
+            if sort_col == 5: return str(a.get('metadata', {}).get('codes', []))
+            return 0
+            
+        alerts.sort(key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+        
+        table.setSortingEnabled(False) # 🛡️ [FIX] 刷新期间强制关闭排序，确保 i 对齐 visual row
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         
@@ -1525,18 +1914,48 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setRowCount(len(alerts))
             for i, alert in enumerate(alerts):
                 grade = alert.get('grade', 'B')
-                ts = alert.get('ts', '')
+                ts = alert.get('ts', alert.get('timestamp', ''))
                 type_str = alert.get('type', '')
                 content = alert.get('content', '')
-                density = f"{alert.get('count', '-')}" if 'count' in alert else "-"
-                detail = f"{alert.get('codes', [])}" if 'codes' in alert else ""
                 
-                self._fast_update_cell(table, i, 0, ts)
-                self._fast_update_cell(table, i, 1, grade)
-                self._fast_update_cell(table, i, 2, type_str)
-                self._fast_update_cell(table, i, 3, content)
-                self._fast_update_cell(table, i, 4, density)
-                self._fast_update_cell(table, i, 5, detail)
+                metadata = alert.get('metadata', {})
+                count = metadata.get('count', alert.get('count', '-'))
+                codes = metadata.get('codes', alert.get('codes', []))
+                
+                # [MOD] 详情列展示优化：尝试将代码转为名称，并增强板块信息
+                detail = ""
+                if type_str == "MARKET_ALERT" and not codes:
+                    top_sectors = metadata.get('top_sectors', [])
+                    if top_sectors:
+                        detail = "影响板块: " + ", ".join(top_sectors)
+                        density = "Temp"
+                    else:
+                        density = str(count)
+                        detail = ""
+                else:
+                    density = str(count)
+                    # 尝试转换代码为 "名称(代码)" 格式
+                    df_all = self._get_snapshot_df()
+                    display_list = []
+                    for c in codes[:8]: # 限制展示数量，避免撑爆单元格
+                        if df_all is not None and c in df_all.index:
+                            display_list.append(f"{df_all.loc[c, 'name']}({c})")
+                        else:
+                            display_list.append(c)
+                    if len(codes) > 8: display_list.append("...")
+                    detail = ",".join(display_list)
+                    
+                    # 修正 "其它" 板块显示
+                    if "其它" in content and len(codes) > 0:
+                        # 如果是其它板块，但在详情里有明确个股，这里可以保持 detail 为个股列表
+                        pass
+                
+                self._fast_update_cell(table, i, 0, ts, data=alert) 
+                self._fast_update_cell(table, i, 1, grade, data=alert)
+                self._fast_update_cell(table, i, 2, type_str, data=alert)
+                self._fast_update_cell(table, i, 3, content, data=alert)
+                self._fast_update_cell(table, i, 4, density, data=alert)
+                self._fast_update_cell(table, i, 5, detail, data=alert)
                 
                 # 视觉分级
                 row_color = None
@@ -1553,6 +1972,54 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
+            table.setSortingEnabled(True) # 恢复排序
+
+    def _on_alert_double_clicked(self, row, column):
+        """[GUI] 双击预警行，查看个股异动明细"""
+        table = self.tables.get("📡 市场预警")
+        if not table: return
+        
+        # ⭐ [FIX] 从单元格 UserRole 中直接获取原始 alert 数据，解决排序/过滤导致的索引错位问题
+        it = table.item(row, column) # 优先取当前点击列
+        if not it: it = table.item(row, 0) # 兜底取首列
+        if not it: return
+        
+        alert = it.data(self._ROLE_DATA)
+        if not alert or not isinstance(alert, dict): 
+            # 尝试遍历当前行寻找有数据的 item (部分列可能由于复用没来得及写 data)
+            for c in range(table.columnCount()):
+                tmp_it = table.item(row, c)
+                if tmp_it:
+                    alert = tmp_it.data(self._ROLE_DATA)
+                    if isinstance(alert, dict): break
+            
+            if not isinstance(alert, dict):
+                # 最后的兜底：如果 Role 数据缺失，尝试使用 legacy 索引（可能错位但能跑）
+                if row < 0 or row >= len(self._hub_alerts): return
+                alert = self._hub_alerts[row]
+        metadata = alert.get('metadata', {})
+        codes = metadata.get('codes', [])
+        details = metadata.get('details', [])
+        
+        if not codes: 
+            # 如果没有 codes，尝试从 content 中提取
+            import re
+            codes = re.findall(r'\d{6}', alert.get('content', ''))
+            
+        if not codes: return
+        
+        if not self._alert_detail_dialog:
+            self._alert_detail_dialog = MarketAlertDetailDialog(self)
+            self._alert_detail_dialog.code_clicked.connect(self.code_clicked)
+            
+        # [MOD] 注入当前行情快照（从多渠道尝试获取）
+        df_all = self._get_snapshot_df()
+            
+        self._alert_detail_dialog.update_data(codes, df_snapshot=df_all, details=details)
+        self._alert_detail_dialog.show()
+        self._alert_detail_dialog.raise_()
+        self._alert_detail_dialog.activateWindow()
+        self._alert_detail_dialog.setFocus()
 
     def _refresh_decision_table(self, decisions: List[dict]):
         table = self.tables.get("🌟 决策队列")
@@ -1917,30 +2384,66 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_signal_received(self, event: BusEvent):
         """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
+        if not event or not event.payload: return # 🛡️ 防御空事件
+        
         if event.event_type == SignalBus.EVENT_MARKET_ALERT:
             payload = event.payload
+            content = payload.get('content') or payload.get('message', '')
+            metadata = payload.get('metadata', {})
+            codes = sorted(metadata.get('codes', []))
+            
+            # [NEW] 聚合去重逻辑：如果“内容”和“个股名单”完全一致，则剔除旧的，只保留最新的（置顶）
+            # 时间不参与比较，确保同一板块同一动作在列表中全局唯一
+            idx_to_remove = -1
+            for i, old in enumerate(self._hub_alerts):
+                if (old.get('content') or old.get('message', '')) == content:
+                    old_metadata = old.get('metadata', {})
+                    # 只有当个股清单也完全一致时才触发去重（忽略顺序）
+                    old_codes = sorted(old_metadata.get('codes', []) or [])
+                    if old_codes == codes:
+                        idx_to_remove = i
+                        break
+            
+            if idx_to_remove != -1:
+                self._hub_alerts.pop(idx_to_remove)
+
             self._hub_alerts.insert(0, payload)
             if len(self._hub_alerts) > 100: self._hub_alerts.pop()
             
             # 驱动横幅播报
-            if payload.get('grade') in ['S', 'A']:
-                self.sig_show_banner.emit(payload.get('content', ''))
+            content = payload.get('content') or payload.get('message', '')
+            grade = payload.get('grade', 'B')
+            
+            logger.info(f"🔔 [DASHBOARD] Received Market Alert: {content} (Grade={grade})")
+            
+            if grade in ['S', 'A'] and content:
+                self.sig_show_banner.emit(str(content))
+            
+            # [NEW] 记录历史
+            self._save_alert_history()
 
             # [NEW] 联动全部：将预警消息转化为“虚拟信号”注入主表
-            virtual_sig = event.__class__(
-                event_type=SignalBus.EVENT_PATTERN, # 模拟普通信号
+            # 使用标准的 dict 构建方式，避免 class 实例化问题
+            metadata = payload.get('metadata', {})
+            codes = metadata.get('codes', [])
+            codes_str = f" | {','.join(codes)}" if codes else ""
+            
+            virtual_payload = {
+                "code": "MARKET",
+                "name": "📊 市场预警",
+                "price": payload.get('temp', 0.0),
+                "action": grade,
+                "pattern": str(content),
+                "grade": grade,
+                "detail": f"Type: {payload.get('type', 'HUB')}{codes_str}"
+            }
+            # 物理重新发布到 UI 队列，确保出现在“全部信号”表中
+            self.sig_bus_event.emit(BusEvent(
+                event_type=SignalBus.EVENT_PATTERN,
+                timestamp=datetime.now(),
                 source="MarketHub",
-                payload={
-                    "code": "MARKET",
-                    "name": "📊 市场预警",
-                    "price": payload.get('temp', 0.0),
-                    "action": payload.get('grade', 'B'),
-                    "pattern": payload.get('content', ''),
-                    "grade": payload.get('grade', 'B'),
-                    "detail": f"Type: {payload.get('type')}"
-                }
-            )
-            self.sig_bus_event.emit(virtual_sig) # 喂给主表处理链路
+                payload=virtual_payload
+            ))
 
         self.sig_bus_event.emit(event)
 
@@ -1949,35 +2452,56 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.alert_banner.setText(f" 🔔 {msg} ")
         self.alert_banner.setVisible(True)
         self._banner_timer.start(10000) # 10秒后消失
+        
+        # [NEW] 语音预警
+        try:
+            get_alert_manager().speak(msg)
+        except Exception as e:
+            logger.debug(f"Speak failed: {e}")
 
     def _categorize_and_count(self, event: BusEvent, increment: bool = True):
         delta = 1 if increment else -1
         payload = event.payload
-        p = str(payload.get('pattern', payload.get('subtype', ''))).lower()
-        d = str(payload.get('detail', payload.get('message', ''))).lower()
+        if not payload: return
+        
+        # [🛡️ FIX] 增加防御性，确保 p 和 d 始终是有效字符串
+        p = str(payload.get('pattern', payload.get('subtype', '')) or '').lower()
+        d = str(payload.get('detail', payload.get('message', '')) or '').lower()
+        
         if not hasattr(event, '_cached_cats'):
             cats = set()
-            # [REVERTED] 恢复重叠多重标签: 一个复杂事件极可能是买点也符合破位结构，应被多重抓取展示
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["突破加速"]): cats.add("breakout")
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["卖点预警"]): cats.add("risk")
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["结构破位"]): cats.add("breakdown")
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["跟单信号"]): cats.add("follow")
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["买入机会"]): cats.add("bull")
-            if any(x.lower() in p or x.lower() in d for x in CATEGORY_MAP["尾盘诱多"]): cats.add("trap")
+            # [REVERTED] 恢复重叠多重标签
+            for cat_key, keywords in CATEGORY_MAP.items():
+                if not keywords: continue
+                if any(str(x).lower() in p or str(x).lower() in d for x in keywords):
+                    # 映射内部 key
+                    if cat_key == "突破加速": cats.add("breakout")
+                    elif cat_key == "卖点预警": cats.add("risk")
+                    elif cat_key == "结构破位": cats.add("breakdown")
+                    elif cat_key == "跟单信号": cats.add("follow")
+                    elif cat_key == "买入机会": cats.add("bull")
+                    elif cat_key == "尾盘诱多": cats.add("trap")
+            
             if not cats: cats.add("other")
             event._cached_cats = cats
+            
         for cat in event._cached_cats:
-            if cat in self._stats_counters: self._stats_counters[cat] += delta
-        if "breakout" in event._cached_cats: self._stats_counters["bull"] += delta
-        if "risk" in event._cached_cats or "breakdown" in event._cached_cats: self._stats_counters["bear"] += delta
+            if self._stats_counters and cat in self._stats_counters: 
+                self._stats_counters[cat] += delta
+        
+        if self._stats_counters:
+            if "breakout" in event._cached_cats: self._stats_counters["bull"] += delta
+            if "risk" in event._cached_cats or "breakdown" in event._cached_cats: self._stats_counters["bear"] += delta
 
         # [NEW] 统计信号类型用于下拉框
-        raw_type = str(payload.get('pattern', payload.get('subtype', 'ALERT')))
+        raw_type = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or 'ALERT').lower()
         matched_type = "ALERT"
-        for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
-            if any(kw.lower() in raw_type.lower() for kw in keywords):
-                matched_type = eng_key
-                break
+        if SIGNAL_TYPE_KEYWORDS:
+            for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+                if not keywords: continue
+                if any(str(kw).lower() in raw_type for kw in keywords):
+                    matched_type = eng_key
+                    break
         
         self._signal_type_counts[matched_type] = max(0, self._signal_type_counts.get(matched_type, 0) + delta)
         self._signal_type_counts["ALL"] = max(0, self._signal_type_counts["ALL"] + delta)
@@ -2816,85 +3340,56 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             else:
                 logger.error("No access to main monitor app for DNA audit.")
 
-    # def _on_cell_double_clicked(self, row, col):
-    #     table = self.sender()
-    #     it_code, it_name = table.item(row, 1), table.item(row, 2)
-    #     if not it_code or not it_name: return
-    #     code, name = it_code.text().strip(), it_name.text().strip()
-    #     clipboard = QApplication.clipboard()
-    #     header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
-    #     if header == "代码": clipboard.setText(code)
-    #     elif header == "名称": clipboard.setText(name)
-    #     elif header in ("形态", "信号"): clipboard.setText(table.item(row, col).text())
-    #     elif header == "详情":
-    #         detail = table.item(row, col).text()
-    #         # clipboard.setText(detail)
-    #         SignalDetailDialog(code, name, table.item(row, 3).text(), detail, self).exec()
-    #         return
-    #     else: clipboard.setText(code)
-    #     self.status_bar.setText(f"📋 已复制: {clipboard.text()}")
-    #     self.code_clicked.emit(code, name)
-
     def _on_cell_double_clicked(self, row, col):
         table = self.sender()
         
-        # 动态获取列
-        code_col, name_col = 2, 3
+        # 自动探测 代码 和 名称 列的位置
+        code_col, name_col = 1, 2 # 默认值
         for i in range(table.columnCount()):
             header = table.horizontalHeaderItem(i)
             if header:
-                text = header.text()
-                if text in ["代码", "龙头"]: code_col = i
-                elif text in ["名称", "龙头名称", "板块名称"]: name_col = i
+                txt = header.text()
+                if "代码" in txt: code_col = i
+                elif "名称" in txt: name_col = i
 
         it_code = table.item(row, code_col)
         it_name = table.item(row, name_col)
-        it_current = table.item(row, col)
+        if not it_code or not it_name: return
         
-        if not it_code or not it_name or not it_current: 
-            return
-            
-        code = it_code.text().strip()
-        name = it_name.text().strip()
-        current_text = it_current.text().strip()
-        
+        code, name = it_code.text().strip(), it_name.text().strip()
         clipboard = QApplication.clipboard()
         header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
-
+        
         if header == "详情":
-            # 仅弹窗，不执行复制逻辑
-            # 假设第4列是日期或时间，对应你代码中的 table.item(row, 4)
-            time_str = table.item(row, 4).text() if table.item(row, 4) else ""
-            dialog = SignalDetailDialog(code, name, time_str, current_text, self)
-            dialog.exec()
-            # 如果弹窗时也要通知其他组件，可以在这里也 emit
-            self.code_clicked.emit(code, name) 
-            return 
-
-        if header in ["所属板块", "板块名称"]:
-            sec_name = current_text
-            controller = get_engine_controller()
-            if controller and hasattr(controller, 'sector_map'):
-                try:
-                    # SectorDetailDialog(sec_name, detector, linkage_func, parent)
-                    dialog = SectorDetailDialog(sec_name, controller.sector_map, self.code_clicked.emit, self)
-                    dialog.exec()
-                    return
-                except Exception as e:
-                    logger.error(f"Failed to open SectorDetailDialog: {e}")
-
-        # --- 复制逻辑 ---
-        if header == "代码":
-            clipboard.setText(code)
-        elif header == "名称":
-            clipboard.setText(name)
-        elif header in ("形态", "信号", "形态/信号", "评级", "次数", "得分", "时间"):
-            clipboard.setText(current_text)
-        else:
-            clipboard.setText(code)
-
+            detail = table.item(row, col).text()
+            # 动态寻找时间列 (通常在 0 或 1)
+            time_str = table.item(row, 0).text() if table.columnCount() > 0 else ""
+            try:
+                from signal_dashboard_panel import SignalDetailDialog
+                dialog = SignalDetailDialog(code, name, time_str, detail, self)
+                dialog.exec()
+            except: pass
+            return
+            
+        if header == "代码": clipboard.setText(code)
+        elif header == "名称": clipboard.setText(name)
+        else: clipboard.setText(code)
+        
         self.status_label.setText(f"📋 已复制: {clipboard.text()}")
         self.code_clicked.emit(code, name)
+
+    def _get_snapshot_df(self):
+        """[DATA] 尝试从宿主窗口或父应用获取最新的行情快照"""
+        # 1. 尝试从父应用 (MonitorTK) 获取
+        if hasattr(self, 'parent_app') and self.parent_app and hasattr(self.parent_app, 'df_all'):
+            return self.parent_app.df_all
+            
+        # 2. 尝试从 Qt 窗口层级 (Visualizer MainWindow) 获取
+        main_win = self.window()
+        if hasattr(main_win, 'df_all'):
+            return main_win.df_all
+            
+        return None
 
     def _on_search_text_changed(self, text):
         if not hasattr(self, '_search_timer'):
@@ -3060,19 +3555,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             hub.force_report()
             
             # 3. [EFFECT] 发射一条强视觉反馈信号，展示中枢效果
-            from signal_bus import get_signal_bus, BusEvent, SignalBus
+            from signal_bus import get_signal_bus, SignalBus
             bus = get_signal_bus()
-            bus.publish(BusEvent(
-                event_type=SignalBus.EVENT_MARKET_ALERT,
+            
+            # [🛡️ FIX] 修正 publish 调用方式，直接传递 payload 而不是 BusEvent 对象
+            bus.publish(
+                SignalBus.EVENT_MARKET_ALERT,
                 source="ManualTest",
                 payload={
-                    'ts': datetime.now().strftime("%H:%M:%S"),
+                    'timestamp': datetime.now().strftime("%H:%M:%S"),
                     'type': "系统手动审计",
                     'grade': "S",
                     'content': "🚀 引擎全链路验证成功！中枢预警已激活，当前处于实时监控状态。",
-                    'temp': hub.last_temp if hasattr(hub, 'last_temp') else 50.0
+                    'temp': 50.0
                 }
-            ))
+            )
 
             # 4. 立即更新 UI 视图
             self._update_engine_views()
@@ -3080,7 +3577,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.status_label.setText("✅ 引擎重算与预警激活完成")
             logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新与预警播报演示")
         except Exception as e:
-            self.status_label.setText(f"❌ 重算失败: {e}")
+            err_msg = f"❌ 重算失败: {e}"
+            self.status_label.setText(err_msg)
+            logger.error(f"📡 [UI] Manual run FAILED: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             # 冷却 1.5s 后恢复可点击状态，防止疯狂连点
             QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
@@ -3105,6 +3606,59 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             return
         self._carousel_idx = (self._carousel_idx + 1) % len(self._carousel_messages)
         self.status_label.setText(self._carousel_messages[self._carousel_idx])
+
+    def _get_history_file_path(self):
+        """获取预警历史存储路径"""
+        config_dir = os.path.dirname(WINDOW_CONFIG_FILE)
+        return os.path.join(config_dir, "market_alerts_history.json")
+
+    def _load_alert_history(self):
+        """[DATA] 从磁盘加载历史预警"""
+        path = self._get_history_file_path()
+        if not os.path.exists(path): return
+        
+        try:
+            # 🚀 [ROBUST] 优先尝试 utf-8，失败则尝试 gbk (兼容 Windows 可能存在的历史遗留编码)
+            content = None
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                logger.warning(f"⚠️ [Dashboard] Alert history encoding issue, falling back to GBK...")
+                with open(path, 'r', encoding='gbk', errors='ignore') as f:
+                    content = f.read()
+            
+            if content:
+                history = json.loads(content)
+                if isinstance(history, list):
+                    # [FIX] 启动时物理去重：仅保留每个事件（内容+个股）的最顶层记录
+                    unique_alerts = []
+                    seen_keys = set()
+                    # 假定文件存储顺序是 [Newest -> Oldest]
+                    for alert in history:
+                        content = alert.get('content') or alert.get('message', '')
+                        metadata = alert.get('metadata', {})
+                        codes = sorted(metadata.get('codes', []) or [])
+                        key = f"{content}_{','.join(codes)}"
+                        if key not in seen_keys:
+                            unique_alerts.append(alert)
+                            seen_keys.add(key)
+                    
+                    self._hub_alerts = unique_alerts[:500] # 最多保留 500 条
+                    logger.info(f"✅ [Dashboard] Loaded {len(self._hub_alerts)} unique alert history records.")
+        except Exception as e:
+            logger.error(f"❌ [Dashboard] Failed to load alert history: {e}")
+
+    def _save_alert_history(self):
+        """[DATA] 将当前预警持久化到磁盘"""
+        path = self._get_history_file_path()
+        try:
+            # [FIX] 只保存最近 500 条 (Newest at front)
+            to_save = self._hub_alerts[:500]
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(to_save, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"❌ [Dashboard] Failed to save alert history: {e}")
 
 if __name__ == "__main__":
     import sys

@@ -3789,13 +3789,57 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         def _launch_task():
             try:
-                # [NEW] 注入退出同步事件
+                # [NEW] 注入退出同步事件与跨进程总线桥接队列
                 self._backtest_quit_event = mp.Event()
+                self._bus_bridge_queue = mp.Queue()
                 
+                # [NEW] 启动跨进程总线监听桥
+                def monitor_bus_bridge(q, quit_event):
+                    from signal_bus import get_signal_bus, BusEvent
+                    bus = get_signal_bus()
+                    logger.info("📡 [Backtest][IPC] SignalBus Bridge Listener started.")
+                    _debug_count = 0  # <--- Count first 10 signals
+                    while not quit_event.is_set():
+                        if getattr(self, '_is_closing', False):
+                            break
+                        try:
+                            # 阻塞式读取，超时设短一点以便响应退出
+                            data = q.get(timeout=1.0)
+                            if data:
+                                _debug_count += 1
+                                if _debug_count <= 10:
+                                    msg = f"🌟 [IPC DEBUG #{_debug_count}] {type(data)} -> {str(data)[:200]}"
+                                    print(msg)
+                                    logger.warning(msg) # Ensure visibility even in WARNING level
+                                
+                                # 物理转发：将子进程产生的信号在主进程总线重新发布
+                                if isinstance(data, BusEvent):
+                                    bus.publish(data.event_type, data.source, data.payload)
+                                elif isinstance(data, (list, tuple)) and len(data) >= 2:
+                                    bus.publish(data[0], "Bridge", data[1])
+                                elif isinstance(data, dict) and 'event_type' in data:
+                                    bus.publish(data['event_type'], data.get('source', 'Bridge'), data.get('payload', {}))
+                                else:
+                                    logger.warning(f"📡 [Backtest][IPC] Unrecognized format from bus queue: {type(data)} - {data}")
+                        except mp.queues.Empty:
+                            continue
+                        except Exception as e:
+                            logger.error(f"SignalBus Bridge Error: {e}")
+                            break
+                    logger.info("📡 [Backtest][IPC] SignalBus Bridge Listener stopped.")
+
+                bridge_thread = threading.Thread(
+                    target=monitor_bus_bridge, 
+                    args=(self._bus_bridge_queue, self._backtest_quit_event),
+                    daemon=True,
+                    name="BusBridgeListener"
+                )
+                bridge_thread.start()
+
                 # 🚀 使用 mp.Process 启动，避开 subprocess 的 IO 判定与重复抓取
                 self.backtest_process = mp.Process(
                     target=replay_module.main,
-                    args=(args_namespace, current_df_all, self._backtest_quit_event),
+                    args=(args_namespace, current_df_all, self._backtest_quit_event, self._bus_bridge_queue),
                     daemon=False
                 )
                 
@@ -3810,10 +3854,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # [🚀 NEW] 启动存活监视，确保回测进程退出后也能触发统一防抖
                 def monitor_backtest_exit(proc):
                     try:
-                        proc.join()
+                        while proc.is_alive():
+                            if getattr(self, '_is_closing', False):
+                                logger.info("🏁 [Backtest] 主程序关闭中，安全退出监控线程。")
+                                return
+                            proc.join(timeout=0.5)
+                        
+                        if not getattr(self, '_is_closing', False):
+                            self._last_racing_backtest_unified_t = time.time()
+                            logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
                     except: pass
-                    self._last_racing_backtest_unified_t = time.time()
-                    logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
                 
                 threading.Thread(target=monitor_backtest_exit, args=(self.backtest_process,), daemon=True).start()
 
@@ -4476,6 +4526,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             full_df, df, sync_ui, cur_res, force_res = result
             # 这里的 force_res 优先级更高
             final_force = force or force_res
+
+            # [NEW] 同步元数据到预警中枢 (实现智能板块识别)
+            if full_df is not None and not full_df.empty and 'category' in full_df.columns:
+                # 增加 600s 限流，板块信息基本不带变动，避免频繁执行 heavy 的 to_dict
+                now = time.time()
+                if now - getattr(self, '_last_hub_sync_time', 0) > 600:
+                    try:
+                        from signal_grading_hub import get_signal_grading_hub
+                        # 提取 code -> category 映射
+                        meta_dict = full_df.set_index('code')['category'].to_dict()
+                        get_signal_grading_hub().update_metadata(meta_dict)
+                        self._last_hub_sync_time = now
+                    except Exception as e:
+                        logger.error(f"Failed to sync metadata to Hub: {e}")
+
         except Exception as e:
             logger.error(f"[Pump] Unpack result failed v{version}: {e}")
             return
