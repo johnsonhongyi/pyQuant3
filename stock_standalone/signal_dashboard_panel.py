@@ -14,10 +14,11 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
     QProgressBar, QGridLayout, QComboBox, QMenu
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QModelIndex
 import threading
 import time
 from PyQt6.QtGui import QColor, QFont, QBrush
+from JohnsonUtil.commonTips import timed_ctx
 
 from tk_gui_modules.window_mixin import WindowMixin
 from signal_bus import get_signal_bus, SignalBus, BusEvent
@@ -369,6 +370,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._ROLE_BOLD    = Qt.ItemDataRole.UserRole + 102
         self._ROLE_BG      = Qt.ItemDataRole.UserRole + 103
         self._ROLE_NUMERIC = Qt.ItemDataRole.UserRole + 104
+        self._ROLE_SEARCH_BLOB = Qt.ItemDataRole.UserRole + 105
         
         from PyQt6.QtGui import QFont
         self._font_normal = QFont()
@@ -883,6 +885,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table = self._create_signal_table()
             
             self.tables[tab_name] = table
+            # [INTERACTIVE-FIX] 为引擎表注入初始排序锚点，消除“冷启动点击无反应”的痛点
+            if tab_name in ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力"]:
+                table._sort_col = 0
+                table._sort_order = Qt.SortOrder.DescendingOrder
+                table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
             self.tabs.addTab(table, tab_name)
         
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -975,6 +982,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # [NEW] A3: 列映射缓存
+        table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
     def _create_decision_table(self) -> QTableWidget:
@@ -1007,6 +1017,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # [NEW] A3: 列映射缓存
+        table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
     def _create_sector_table(self) -> QTableWidget:
@@ -1037,6 +1050,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # [NEW] A3: 列映射缓存
+        table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
     def _create_dragon_table(self) -> QTableWidget:
@@ -1068,6 +1084,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # [NEW] A3: 列映射缓存
+        table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
     def _create_strategic_table(self) -> QTableWidget:
@@ -1198,132 +1217,141 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     # --- [NEW] 决策引擎同步渲染逻辑 ---
     def _on_engine_header_clicked(self, table, col_idx):
-        """表头点击：自管理排序状态，不依赖 Qt setSortingEnabled(False) 后的内部状态"""
-        # 自管理状态——避免 Qt 在 setSortingEnabled(False) 后重置 sortIndicatorSection
-        cur_col = getattr(table, '_sort_col', -1)
-        cur_order = getattr(table, '_sort_order', Qt.SortOrder.DescendingOrder)
+        """表头点击：极致简化交互，确保点击后数据立即产生物理位移"""
+        cur_col = getattr(table, "_sort_col", -1)
+        cur_order = getattr(table, "_sort_order", Qt.SortOrder.DescendingOrder)
 
-        if cur_col == col_idx:
-            # 同列再点：切换正反序
-            new_order = (Qt.SortOrder.AscendingOrder
-                         if cur_order == Qt.SortOrder.DescendingOrder
+        # 核心逻辑：如果是当前列，则翻转；如果是新列，则强制切换为升序
+        # 理由：引擎默认都是降序排好的，点新列变升序能保证 100% 看到数据变化
+        if col_idx == cur_col:
+            new_order = (Qt.SortOrder.AscendingOrder 
+                         if cur_order == Qt.SortOrder.DescendingOrder 
                          else Qt.SortOrder.DescendingOrder)
         else:
-            # 新列：默认倒序
-            new_order = Qt.SortOrder.DescendingOrder
+            new_order = Qt.SortOrder.AscendingOrder
 
         table._sort_col = col_idx
         table._sort_order = new_order
 
-        # 更新视觉指示器
+        # 立即同步视觉指示器并触发排序任务
         table.horizontalHeader().setSortIndicator(col_idx, new_order)
         self._sort_timer.start()
 
-    def _sort_table_python(self, table: QTableWidget, col_idx: int, sort_order: Qt.SortOrder):
+    def _sort_table_python(self, table, col_idx, sort_order):
+        """[NUCLEAR-PERF] 核弹级排序优化：物理脱离布局引擎与模型通知"""
+        if getattr(table, "_is_sorting_locked", False): return
+        table._is_sorting_locked = True
+        
+        import gc
+        gc.disable()
+        from PyQt6.QtWidgets import QHeaderView
+        from PyQt6.QtCore import QModelIndex
+        
+        hh = table.horizontalHeader()
+        vh = table.verticalHeader()
+        model = table.model()
+        
+        # 1. 物理屏蔽布局引擎
+        orig_modes = [hh.sectionResizeMode(j) for j in range(table.columnCount())]
+        for j in range(table.columnCount()): hh.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
 
-        row_count = table.rowCount()
-        if row_count == 0:
-            return
-
-        col_count = table.columnCount()
-
-        selected_rows = {table.row(item) for item in table.selectedItems()}
-
-        # 1. snapshot（只存数据，不存 item！）
-        rows_data = []
-
-        for r in range(row_count):
-            it = table.item(r, col_idx)
-
-            if it is None:
-                sort_val = 0.0
-            else:
-                sort_val = it.data(self._ROLE_NUMERIC)
-                if sort_val is None:
-                    if isinstance(it, NumericTableWidgetItem):
-                        sort_val = getattr(it, "_value", it.text())
-                    else:
-                        sort_val = it.text()
-
-            # ❗ 必须转成纯数据（不能存 item）
-            row_values = []
-            for c in range(col_count):
-                cell = table.item(r, c)
-                row_values.append(cell.text() if cell else "")
-
-            hidden = table.isRowHidden(r)
-
-            rows_data.append((sort_val, hidden, row_values, r in selected_rows))
-
-        # 2. sort
-        reverse = (sort_order == Qt.SortOrder.DescendingOrder)
-
-        def safe_key(v):
-            try:
-                return float(str(v).replace('%', '').replace(',', '').strip())
-            except:
-                return str(v)
-
-        try:
-            rows_data.sort(key=lambda x: x[0], reverse=reverse)
-        except TypeError:
-            rows_data.sort(key=lambda x: safe_key(x[0]), reverse=reverse)
-
-        # 3. rebuild UI（安全版）
-        table.setUpdatesEnabled(False)
+        # 2. 彻底切断通知流
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
         table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        table.viewport().setUpdatesEnabled(False)
+        hh.setUpdatesEnabled(False)
+        vh.setUpdatesEnabled(False)
+
+        # 3. 开启模型重置闸门 (此期间所有 View 停止观察)
+        if model: model.beginResetModel()
 
         try:
-            table.clearContents()
+            with timed_ctx(f"_sort_table_python({table.rowCount()})", warn_ms=200):
+                row_count = table.rowCount()
+                col_count = table.columnCount()
+                if row_count <= 1: return
+                reverse = (sort_order == Qt.SortOrder.DescendingOrder)
 
-            selected_row = None
+                # Phase 1: Extraction
+                with timed_ctx("  [Phase 1] Extraction", warn_ms=100):
+                    rows_data = []
+                    sel_model = table.selectionModel()
+                    idx0 = QModelIndex()
+                    for r in range(row_count):
+                        it_sort = table.item(r, col_idx)
+                        sort_val = it_sort.data(self._ROLE_NUMERIC) if it_sort else None
+                        if sort_val is None and it_sort: sort_val = it_sort.text()
+                        is_selected = sel_model.isRowSelected(r, idx0) if sel_model else False
+                        row_items = [table.takeItem(r, c) for c in range(col_count)]
+                        rows_data.append({'sort_val': sort_val if sort_val is not None else "", 'items': row_items, 'hidden': table.isRowHidden(r), 'selected': is_selected})
 
-            for r, (val, hidden, row_values, selected) in enumerate(rows_data):
+                # Phase 2: Sort
+                with timed_ctx("  [Phase 2] Python Sort", warn_ms=50):
+                    def safe_key(v):
+                        if isinstance(v, (int, float)): return v
+                        try: return float(str(v).replace("%", "").replace(",", "").strip())
+                        except: return str(v)
+                    rows_data.sort(key=lambda x: safe_key(x["sort_val"]), reverse=reverse)
 
-                table.setRowHidden(r, hidden)
-
-                # ❗ 重新创建 item（关键修复点）
-                for c, text in enumerate(row_values):
-                    item = QTableWidgetItem(text)
-                    table.setItem(r, c, item)
-
-                if selected:
-                    selected_row = r
-
-            if selected_row is not None:
-                table.selectRow(selected_row)
-
+                # Phase 3: Write-back
+                with timed_ctx("  [Phase 3] Write-back", warn_ms=100):
+                    table.clearSelection()
+                    for r, row in enumerate(rows_data):
+                        table.setRowHidden(r, row["hidden"])
+                        for c, item in enumerate(row["items"]):
+                            if item: table.setItem(r, c, item)
+                        if row["selected"]: table.selectRow(r)
         finally:
+            # 4. 释放重置闸门并恢复
+            if model: model.endResetModel()
+            for j, m in enumerate(orig_modes): hh.setSectionResizeMode(j, m)
+            table.setSortingEnabled(was_sorting)
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
+            table.viewport().setUpdatesEnabled(True)
+            hh.setUpdatesEnabled(True)
+            vh.setUpdatesEnabled(True)
             table.viewport().update()
+            table._is_sorting_locked = False
+            gc.enable()
 
     def _trigger_sorted_refresh(self):
-        """排序意图落地：引擎表走 Python 排序；信号表用 Qt sortByColumn"""
-        _ENGINE_TABS = {"\U0001f31f 决策队列", "\U0001f409 龙头追踪", "\U0001f525 板块热力", "\U0001f310 战略趋势"}
+        """[ASYNC] 排序意图落地：决策引擎表直接物理排序；信号表延迟异步排序"""
+        _ENGINE_TABS = {"🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"}
         current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+        table = self.tables.get(current_tab_text)
+        if not table: return
+
         if current_tab_text in _ENGINE_TABS:
-            # [KEY FIX] 强制失效版本号缓存，否则数据未变时版本号相同会直接 return 跳过重排
-            table = self.tables.get(current_tab_text)
-            if table:
-                table._render_version = -1  # 强制下次 _refresh_*_table 重新排序渲染
-            self._update_engine_views()
+            # 🚀 [PERF-FIX] 核心改进：点击排序时，仅对当前表中的 Item 进行物理位置迁移
+            # 严禁将 table._render_version 设为 -1，严禁触发 _update_engine_views()
+            sort_col = getattr(table, "_sort_col", table.horizontalHeader().sortIndicatorSection())
+            sort_order = getattr(table, "_sort_order", table.horizontalHeader().sortIndicatorOrder())
+            self._sort_table_python(table, sort_col, sort_order)
         else:
+            # [DEBOUNCE] 如果当前已经有一个单次定时器在排队，不再重复添加，实现“只做最后一次”
+            if not getattr(self, "_deferred_sort_pending", False):
+                self._deferred_sort_pending = True
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(15, self._do_deferred_sort)
+
+    def _do_deferred_sort(self):
+        # \"\"\"执行实际的延迟排序操作\"\"\"
+        self._deferred_sort_pending = False # 释放挂起标志
+        with timed_ctx("_do_deferred_sort", warn_ms=200):
+            current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
             table = self.tables.get(current_tab_text)
-            if table:
-                # 优先使用自管理状态，回退到 header 状态
-                sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-                sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-                
-                # 🚀 [PERF] O(1) 纯 Python 排序，杜绝 Qt C++ 边界反复跨越的死亡假死
-                table.setUpdatesEnabled(False)
-                table.blockSignals(True)
-                self._sort_table_python(table, sort_col, sort_order)
-                table.blockSignals(False)
-                table.setUpdatesEnabled(True)
-                table.viewport().update()
-                
-                table.horizontalHeader().setSectionsClickable(True)  # 恢复点击能力
+            if not table: return
+            
+            # 提取已保存的排序状态
+            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+            
+            # 执行高效排序
+            self._sort_table_python(table, sort_col, sort_order)
+            table.horizontalHeader().setSectionsClickable(True)
 
     def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None):
         it = table.item(r_idx, c_idx)
@@ -1845,87 +1873,97 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _process_batch_signals(self):
         """批量处理 UI 更新，确保滚动条稳定"""
-        if not self._table_update_buffer:
-            return
+        with timed_ctx("_process_batch_signals", warn_ms=200):
+            if not self._table_update_buffer:
+                return
             
-        # [🚀 极致性能] 非阻塞锁获取，避免 UI 线程在重负载期间因等待锁而产生丢帧
-        if not self._data_lock.acquire(blocking=False):
-            # 如果背景线程正在大量写入缓冲区，UI 线程避让并推迟 500ms 重试
-            QTimer.singleShot(500, self._process_batch_signals)
-            return
+            # [🚀 极致性能] 非阻塞锁获取，避免 UI 线程在重负载期间因等待锁而产生丢帧
+            if not self._data_lock.acquire(blocking=False):
+                # 如果背景线程正在大量写入缓冲区，UI 线程避让并推迟 500ms 重试
+                QTimer.singleShot(500, self._process_batch_signals)
+                return
 
-        try:
-            events_raw = self._table_update_buffer[:]
-            self._table_update_buffer.clear()
-        finally:
-            self._data_lock.release()
-        
-        if not events_raw: return
-
-        # ⚡ [FIX] 移除此处的批次内按股票代码去重！
-        # 如果同一个股票在3秒内同时触发"跟单"与"破位"，较早的跨分类信号若被去重丢弃，会导致某分类卡片统计增加了但表格中永远不出现该行的严重Bug。
-        # 去重下放至 _insert_row 内部，针对每个子分类表格进行精准的独立覆盖更新。
-        events_to_process = events_raw
-
-        # 记录当前各表格的滚动状态
-        scroll_states = {}
-        for name, table in self.tables.items():
-            # ⚡ [PERF] 批量禁用更新、信号和排序全家桶，提升性能
-            table.setUpdatesEnabled(False)
-            table.blockSignals(True)
+            try:
+                events_raw = self._table_update_buffer[:]
+                self._table_update_buffer.clear()
+            finally:
+                self._data_lock.release()
             
-            scroll_states[name] = {
-                'value': table.verticalScrollBar().value(),
-                'at_top': table.verticalScrollBar().value() == 0,
-                'selected': [(r.topRow(), r.bottomRow()) for r in table.selectedRanges()],
-                'sorting': table.isSortingEnabled() # 记录排序状态
-            }
-            # [FIX] 在大批量插入期间，必须全局禁用排序，否则在 setItem 时仍然有 O(N*logN) 的触发或者布局更新
-            table.setSortingEnabled(False)
-        
-        # 批量插入
-        self._is_updating_ui = True
-        batch_start = time.perf_counter()
-        processed_count = 0
+            if not events_raw: return
             
-        try:
-            for event in events_to_process:
-                self._append_to_tables(event)
-                processed_count += 1
-        finally:
+            # ⚡ [FIX] 移除此处的批次内按股票代码去重！
+            # 如果同一个股票在3秒内同时触发"跟单"与"破位"，较早的跨分类信号若被去重丢弃，会导致某分类卡片统计增加了但表格中永远不出现该行的严重Bug。
+            # 去重下放至 _insert_row 内部，针对每个子分类表格进行精准的独立覆盖更新。
+            events_to_process = events_raw
+
+            # 记录当前各表格的滚动状态
+            scroll_states = {}
+            for name, table in self.tables.items():
+                # ⚡ [PERF] 批量禁用更新、信号和排序全家桶，提升性能
+                table.setUpdatesEnabled(False)
+                table.blockSignals(True)
+                
+                scroll_states[name] = {
+                    'value': table.verticalScrollBar().value(),
+                    'at_top': table.verticalScrollBar().value() == 0,
+                    'selected': [(r.topRow(), r.bottomRow()) for r in table.selectedRanges()],
+                    'sorting': table.isSortingEnabled() # 记录排序状态
+                }
+                # [FIX] 在大批量插入期间，必须全局禁用排序，否则在 setItem 时仍然有 O(N*logN) 的触发或者布局更新
+                table.setSortingEnabled(False)
+            
+            # 批量插入
+            self._is_updating_ui = True
+            batch_start = time.perf_counter()
+            processed_count = 0
+                
+            try:
+                for event in events_to_process:
+                    self._append_to_tables(event)
+                    processed_count += 1
+            finally:
+                current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+                for name, table in self.tables.items():
+                    state = scroll_states.get(name)
+                    # [PERF] ENGINE TABS 不接收信号插入，自有一套排序刷新逻辑
+                    if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
+                        # [STEP-2 FIX] 仅对当前可见的 Tab 执行实时排序，不可见 Tab 标记为“需要排序”
+                        if name == current_tab_text:
+                            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+                            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+                            self._sort_table_python(table, sort_col, sort_order)
+                            table._needs_sort = False # 已完成
+                        else:
+                            table._needs_sort = True # 标记脏位，切回来时再排
+                        
+                        table.horizontalHeader().setSectionsClickable(True)
+                            
+                    table.blockSignals(False)
+                    table.setUpdatesEnabled(True)
+                    # [PERF] Interactive 模式下不再需要每次限制列宽
+                    table.viewport().update()
+                    
+                self._is_updating_ui = False
+                batch_dur = (time.perf_counter() - batch_start) * 1000
+                if batch_dur > 50:
+                    logger.debug(f"📊 [DASHBOARD_PERF] Batch processed {processed_count} signals in {batch_dur:.1f}ms (TotalReceived={len(events_raw)})")
+                
+            # 恢复/修正滚动位置
             for name, table in self.tables.items():
                 state = scroll_states.get(name)
-                # [PERF] ENGINE TABS DO NOT receive signals via append, and sort themselves via Python logic.
-                if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
-                    # 信号表：批量插入后按当前排序意图执行一次排序（优先自管理状态）
-                    sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-                    sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-                    self._sort_table_python(table, sort_col, sort_order)
-                    table.horizontalHeader().setSectionsClickable(True)  # 恢复点击能力
-                        
-                table.blockSignals(False)
-                table.setUpdatesEnabled(True)
-                # [PERF] Interactive 模式下不再需要每次限制列宽
-                table.viewport().update()
+                if not state: continue
                 
-            self._is_updating_ui = False
-            batch_dur = (time.perf_counter() - batch_start) * 1000
-            if batch_dur > 50:
-                logger.debug(f"📊 [DASHBOARD_PERF] Batch processed {processed_count} signals in {batch_dur:.1f}ms (TotalReceived={len(events_raw)})")
-            
-        # 恢复/修正滚动位置
-        for name, table in self.tables.items():
-            state = scroll_states.get(name)
-            if not state: continue
-            
-            # [MOD] 逻辑：
-            # 1. 如果用户之前就在顶部(at_top=True)，则继续保持在顶部(0位置)，此时能看到最新冒出来的信号
-            # 2. 如果用户之前正在往下翻看旧数据(at_top=False)，则向下偏移新插入的行数，以保持视窗内原来的内容不动
-            if state['at_top']:
-                table.verticalScrollBar().setValue(0)
-            else:
-                new_val = state['value'] + len(events_to_process)
-                table.verticalScrollBar().setValue(new_val)
+                # [MOD] 逻辑：
+                # 1. 如果用户之前就在顶部(at_top=True)，则继续保持在顶部(0位置)，此时能看到最新冒出来的信号
+                # 2. 如果用户之前正在往下翻看旧数据(at_top=False)，则向下偏移新插入的行数，以保持视窗内原来的内容不动
+                if state['at_top']:
+                    table.verticalScrollBar().setValue(0)
+                else:
+                    new_val = state['value'] + len(events_to_process)
+                    table.verticalScrollBar().setValue(new_val)
+
+            # [NEW] 批量插入后立即触发统计重算，消除统计更新滞后的体感
+            self._update_stats_display()
 
     def _process_event(self, event: BusEvent, update_ui=True):
         payload = event.payload
@@ -1995,36 +2033,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if append_dur > 150:
             logger.debug(f"⚠️ [DASHBOARD_PERF] _append_to_tables cost {append_dur:.1f}ms for {code} (matches={matched_cats})")
 
-    def _on_search_text_changed(self, text):
-        search_text = text.lower()
-        # 获取当前选中的原始类型 key (从 UserData 子午线)
-        target_type_key = self.type_filter.currentData() or "ALL"
-        
-        table = self.tabs.currentWidget()
-        if not isinstance(table, QTableWidget): return
-        
-        for r in range(table.rowCount()):
-            row_visible = True
-            
-            # 1. 文本搜索 (代码/名称)
-            if search_text:
-                code_item = table.item(r, 2)
-                name_item = table.item(r, 3)
-                if code_item and name_item:
-                    row_visible = (search_text in code_item.text().lower() or 
-                                  search_text in name_item.text().lower())
-            
-            # 2. 类型过滤
-            if row_visible and target_type_key != "ALL":
-                pattern_item = table.item(r, 4)
-                if pattern_item:
-                    raw_pattern = str(pattern_item.data(Qt.ItemDataRole.UserRole) or pattern_item.text())
-                    # [FIX] 使用关键词映射判定归属，解决中英文过滤不统一问题
-                    keywords = SIGNAL_TYPE_KEYWORDS.get(target_type_key, [target_type_key])
-                    row_visible = any(kw.lower() in raw_pattern.lower() for kw in keywords)
-            
-            table.setRowHidden(r, not row_visible)
-
     def _get_item_color(self, pattern, detail):
         _cl = self._colors
         if "[重点]" in detail or "[重点]" in pattern: return _cl["#FFD700"] # 亮金色
@@ -2039,29 +2047,34 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if was_sorting:
             table.setSortingEnabled(False)
         try:
-            # 🔍 [PERF] O(1) 查找现有行索引，取代 O(N) 循环扫描
+            # 🔍 [PERF] O(1) 查找现有行索引
             table_cache = self._row_cache.setdefault(table, {})
             existing_row = -1
-            old_item = table_cache.get(code)
-            if old_item:
+            old_meta = table_cache.get(code)
+            if old_meta:
                 try:
+                    # 兼容旧版本直接存 Item 的情况
+                    old_item = old_meta['item'] if isinstance(old_meta, dict) else old_meta
                     existing_row = table.row(old_item)
                     if existing_row >= 0:
                         table.removeRow(existing_row)
                 except (RuntimeError, Exception): 
-                    pass # 可能 item 已失效
+                    pass 
             
-            table.insertRow(0)
+            # [A1] insertRow(0) → appendRow (O(1) 尾部追加)
+            new_row = table.rowCount()
+            table.insertRow(new_row)
             
-            # 🛡️ [CAPPING] 限制表格总长度，放宽至1000，与历史总事件数匹配，防止过早丢弃导致上下数据不一
+            # 🛡️ [CAPPING] 限制表格总长度
             max_rows = 1000
             if table.rowCount() > max_rows:
-                # 清除将被移除行在缓存中的索引 (最后一行)
-                rem_row = table.rowCount() - 1
-                rem_item = table.item(rem_row, 2)
+                # 始终移除物理上的第一行
+                rem_row_idx = 0
+                rem_item = table.item(rem_row_idx, 2)
                 if rem_item:
                     table_cache.pop(rem_item.text(), None)
-                table.removeRow(rem_row)
+                table.removeRow(rem_row_idx)
+                new_row = table.rowCount() - 1 
 
             # 形态/信号 (中文化展示)
             display_pattern = pattern
@@ -2087,49 +2100,57 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             alert_fg = self._colors.get("#ffffff") if is_alerted else None
             
             code_item = QTableWidgetItem(code)
-            table_cache[code] = code_item
+            
+            # [A2] search_blob 预计算并存入 item
+            sector = payload.get('sector', '') if payload else ''
+            search_blob = f"{code} {name} {display_pattern} {detail} {sector}".lower()
+            code_item.setData(self._ROLE_SEARCH_BLOB, search_blob)
+            
+            table_cache[code] = {
+                'item': code_item, 
+                'search_blob': search_blob,
+                'pattern_raw': pattern
+            }
 
             name_item = QTableWidgetItem(display_name)
             if payload:
                 name_item.setData(Qt.ItemDataRole.UserRole, payload.get('sector', ''))
 
-            table.setItem(0, 0, QTableWidgetItem(time_str))
-            table.setItem(0, 1, grade_item)
-            table.setItem(0, 2, code_item)
-            table.setItem(0, 3, name_item)
-            table.setItem(0, 4, p_item) 
-            table.setItem(0, 5, QTableWidgetItem(detail))
-            table.setItem(0, 6, NumericTableWidgetItem(str(count)))
-            table.setItem(0, 7, NumericTableWidgetItem(str(int(score))))
+            table.setItem(new_row, 0, QTableWidgetItem(time_str))
+            table.setItem(new_row, 1, grade_item)
+            table.setItem(new_row, 2, code_item)
+            table.setItem(new_row, 3, name_item)
+            table.setItem(new_row, 4, p_item) 
+            table.setItem(new_row, 5, QTableWidgetItem(detail))
+            table.setItem(new_row, 6, NumericTableWidgetItem(str(count)))
+            table.setItem(new_row, 7, NumericTableWidgetItem(str(int(score))))
             
+            # 搜索隐藏逻辑 (使用 blob 代替逐个 item 访问)
             search_text = self.search_input.text().strip().lower()
-            if search_text and not any(search_text in str(table.item(0, i).text()).lower() for i in [0, 2, 3, 4, 5] if table.item(0, i)):
-                table.setRowHidden(0, True)
+            if search_text and search_text not in search_blob:
+                table.setRowHidden(new_row, True)
             
             color = self._get_item_color(pattern, detail)
             if is_alerted: color = alert_fg
             
             for i in [0, 2, 3, 4, 5, 6, 7]:
-                it = table.item(0, i)
+                it = table.item(new_row, i)
                 if it: 
                     it.setForeground(color)
                     if is_alerted: it.setBackground(alert_bg)
             
-            # [NEW] 重点信号行高亮 (赛马模式深度加成)
+            # [NEW] 重点信号行高亮
             if "[重点]" in detail or "[重点]" in pattern:
-                # 使用深珊瑚红背景色突出重点，带透明度
                 highlight_bg = self._brushes.get("highlight_bg", QBrush(QColor(255, 127, 80, 50)))
                 for i in range(table.columnCount()):
-                    it = table.item(0, i)
+                    it = table.item(new_row, i)
                     if it: 
                         it.setBackground(highlight_bg)
-                        # 名称和代码加粗显示
                         if i in [2, 3]:
                             f = it.font(); f.setBold(True); it.setFont(f)
 
-            self._flash_row(table, 0)
-            
-            self._flash_row(table, 0)
+            # [A4] 修复重复调用，闪烁新插入行
+            self._flash_row(table, new_row)
             
             # [FIX] 不要在这里执行 sortByColumn，这会导致每一行插入都重排一次
             # 如果是批量插入，排序会在 _process_batch_signals 恢复时进行一次全局排序
@@ -2202,43 +2223,46 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         prof_temp = self._market_stats.get('temperature')
 
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
-        if total > 0:
-            with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
-                # [REVERTED] 顶部卡片展示底层总触发的累计次数 (包含同一只股票的历史重复触发)，不改变既有去重策略
-                self.cards["follow"].setText(str(self._stats_counters["follow"]))
-                self.cards["breakout"].setText(str(self._stats_counters["breakout"]))
-                self.cards["risk"].setText(str(self._stats_counters["risk"]))
-                self.cards["breakdown"].setText(str(self._stats_counters["breakdown"]))
-                self.cards["trap"].setText(str(self._stats_counters.get("trap", 0)))
-                self.cards["other"].setText(str(self._stats_counters.get("other", 0)))
+        # [FIX] 无论当前窗口是否有新信号，都必须更新统计（确保清空或低频时 UI 准确）
+        with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
+            # [UPGRADE] 顶部卡片现在直接读取表格行数，确保与状态栏和实际展示 100% 对齐，消除“窗口统计”与“持久化表格”的理解歧义
+            def get_row_count(tab_name):
+                tbl = self.tables.get(tab_name)
+                return tbl.rowCount() if tbl else 0
+
+            self.cards["follow"].setText(str(get_row_count("跟单信号")))
+            self.cards["breakout"].setText(str(get_row_count("突破加速")))
+            self.cards["risk"].setText(str(get_row_count("卖点预警")))
+            self.cards["breakdown"].setText(str(get_row_count("结构破位")))
+            self.cards["trap"].setText(str(get_row_count("尾盘诱多")))
+            self.cards["other"].setText(str(get_row_count("其它信号")))
+            
+            # [Dragon] 更新龙头统计
+            if self._engine_ctrl:
+                d_counts = self._engine_ctrl.get_dragon_count()
+                d_total = d_counts.get('dragon', 0)
+                c_total = d_counts.get('candidate', 0)
+                self.cards["dragon"].setText(str(d_total + c_total))
                 
-                # [Dragon] 更新龙头统计
-                if self._engine_ctrl:
-                    d_counts = self._engine_ctrl.get_dragon_count()
-                    d_total = d_counts.get('dragon', 0)
-                    c_total = d_counts.get('candidate', 0)
-                    self.cards["dragon"].setText(str(d_total + c_total))
-                    
-                    # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
-                    self._carousel_messages = [
-                        f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total}",
-                        f"🔥 市场信号: F:{self._stats_counters['follow']} | B:{self._stats_counters['breakout']} | T:{self._stats_counters.get('trap', 0)} | R:{self._stats_counters['risk']} | S:{self._stats_counters['breakdown']}",
-                        f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
-                    ]
-                    
-                    # [MOD] 动态获取各 Tab 行数用于状态栏展示
-                    counts_parts = []
-                    tab_to_count = ["🌟 决策队列", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "买入机会", "卖点预警", "结构破位"]
-                    for t_name in tab_to_count:
-                        tbl = self.tables.get(t_name)
-                        if tbl:
-                            # 简写映射
-                            short_name = t_name.replace("信号", "").replace("🌟 ", "").replace("🔥 ", "").replace("🐉 ", "")
-                            counts_parts.append(f"{short_name}: {tbl.rowCount()}")
-                    
-                    self.stats_info_label.setText(" | ".join(counts_parts))
-        
-        
+                # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
+                self._carousel_messages = [
+                    f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total}",
+                    f"🔥 市场信号: F:{get_row_count('跟单信号')} | B:{get_row_count('突破加速')} | T:{get_row_count('尾盘诱多')} | R:{get_row_count('卖点预警')} | S:{get_row_count('结构破位')}",
+                    f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
+                ]
+                
+                # [MOD] 动态获取各 Tab 行数用于状态栏展示
+                counts_parts = []
+                tab_to_count = ["🌟 决策队列", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "买入机会", "卖点预警", "结构破位"]
+                for t_name in tab_to_count:
+                    tbl = self.tables.get(t_name)
+                    if tbl:
+                        # 简写映射
+                        short_name = t_name.replace("信号", "").replace("🌟 ", "").replace("🔥 ", "").replace("🐉 ", "")
+                        counts_parts.append(f"{short_name}: {tbl.rowCount()}")
+                
+                self.stats_info_label.setText(" | ".join(counts_parts))
+
         # 1. 通用计算多空比
         total_bull = self._stats_counters.get("bull", 0)
         total_bear = self._stats_counters.get("bear", 0)
@@ -2439,18 +2463,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 2. 发送内部总线事件，以便总线相关组件也能同步
         self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": code, "name": name}))
 
-    def _on_search_context_menu(self, pos):
-        from PyQt6.QtWidgets import QMenu
-        menu = QMenu()
-        clear_act = menu.addAction("清除内容")
-        test_act = menu.addAction("🚀 发送并验证自检信号 (Fast-Track)")
-        
-        action = menu.exec(self.search_input.mapToGlobal(pos))
-        if action == clear_act:
-            self.search_input.clear()
-        elif action == test_act:
-            self._emit_test_signal()
-            
     def _emit_test_signal(self):
         """[SELF-TEST] 发送一个模拟的 Fast-Track 信号用于自检"""
         try:
@@ -2749,33 +2761,32 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tabs.currentWidget()
         if not isinstance(table, QTableWidget): return
         
-        # 动态查找当前表格关键属性所在列
-        code_col, name_col, pattern_col, sector_col = -1, -1, -1, -1
-        for i in range(table.columnCount()):
-            header = table.horizontalHeaderItem(i)
-            if header:
-                text = header.text()
-                if text in ["代码", "龙头"]: code_col = i
-                elif text in ["名称", "龙头名称", "板块名称"]: name_col = i
-                elif text in ["形态类别", "形态/信号"]: pattern_col = i
-                elif text in ["所属板块"]: sector_col = i
+        # [PERF] A3: 使用预缓存的列映射
+        col_map = getattr(table, '_col_map', {})
+        code_col = col_map.get("代码", col_map.get("龙头", -1))
+        name_col = col_map.get("名称", col_map.get("龙头名称", -1))
+        pattern_col = col_map.get("形态类别", col_map.get("形态/信号", -1))
+        sector_col = col_map.get("所属板块", -1)
 
         for row in range(table.rowCount()):
             row_visible = True
+            code_item = table.item(row, code_col) if code_col >= 0 else None
             
-            # 1. 文本搜索 (代码/名称/板块)
+            # 1. 文本搜索 (使用 A2 预计算的 blob)
             if search_text:
-                c_text = table.item(row, code_col).text().lower() if code_col >= 0 and table.item(row, code_col) else ""
-                n_text = table.item(row, name_col).text().lower() if name_col >= 0 and table.item(row, name_col) else ""
-                s_text = table.item(row, sector_col).text().lower() if sector_col >= 0 and table.item(row, sector_col) else ""
-                
-                # 特殊：提取 Name 单元格中存为 UserRole 的板块信息
-                if name_col >= 0 and table.item(row, name_col):
-                    sector_data = table.item(row, name_col).data(Qt.ItemDataRole.UserRole)
-                    if sector_data: s_text += str(sector_data).lower()
-
-                row_visible = (search_text in c_text or search_text in n_text or search_text in s_text)
-                                  
+                if code_item:
+                    blob = str(code_item.data(self._ROLE_SEARCH_BLOB) or "").lower()
+                    if not blob:
+                        # 兼容性兜底：如果没 blob，则回退到拼接几个关键列
+                        n_text = table.item(row, name_col).text().lower() if name_col >= 0 and table.item(row, name_col) else ""
+                        s_text = table.item(row, sector_col).text().lower() if sector_col >= 0 and table.item(row, sector_col) else ""
+                        blob = f"{code_item.text()} {n_text} {s_text}".lower()
+                    
+                    if search_text not in blob:
+                        row_visible = False
+                else:
+                    pass
+            
             # 2. 类型下拉过滤 (保证逻辑与下拉框计数完全一致)
             if row_visible and target_type_key != "ALL" and pattern_col >= 0:
                 pattern_item = table.item(row, pattern_col)
@@ -2787,24 +2798,45 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             matched_type = eng_key
                             break
                     row_visible = (matched_type == target_type_key)
-                    
+            
             table.setRowHidden(row, not row_visible)
         
         # [NEW] 手动搜索过滤后，自动滚动到顶部显示最新信号
         table.verticalScrollBar().setValue(0)
 
     def _on_tab_changed(self, index):
-        """[MANUAL] 手动切换 Tab 时，应用搜索并回到顶部"""
+        """[MANUAL] 手动切换 Tab 时，应用搜索并回到顶部，同时检查是否需要补做延迟排序"""
         self._apply_filter() # 先根据搜索框内容过滤
         table = self.tabs.widget(index)
         if isinstance(table, QTableWidget):
+            # [STEP-2 FIX] 如果该页签之前在后台累积了信号但未排序，现在补做
+            if getattr(table, '_needs_sort', False):
+                sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+                sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+                self._sort_table_python(table, sort_col, sort_order)
+                table._needs_sort = False
+                
             table.verticalScrollBar().setValue(0) # 回到顶部
             
         # [🚀 性能优化] 切换 Tab 时主动刷新当前页，实现可见性门控的即时响应
         self._update_engine_views()
 
     def _on_search_context_menu(self, pos):
-        QTimer.singleShot(30, lambda: self.search_input.setText(QApplication.clipboard().text().strip()))
+        """合并版：支持粘贴、清除、及测试信号"""
+        from PyQt6.QtWidgets import QMenu, QApplication
+        menu = QMenu()
+        paste_act = menu.addAction("📋 粘贴并搜索")
+        clear_act = menu.addAction("🧹 清除内容")
+        menu.addSeparator()
+        test_act = menu.addAction("🚀 发送并验证自检信号 (Fast-Track)")
+        
+        action = menu.exec(self.search_input.mapToGlobal(pos))
+        if action == paste_act:
+            self.search_input.setText(QApplication.clipboard().text().strip())
+        elif action == clear_act:
+            self.search_input.clear()
+        elif action == test_act:
+            self._emit_test_signal()
 
     def _clear_filters(self):
         """一键清空搜索框和下拉过滤状态"""
