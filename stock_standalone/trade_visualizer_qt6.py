@@ -6106,6 +6106,12 @@ class MainWindow(QMainWindow, WindowMixin):
                         if hasattr(self.hotlist_panel, '_update_voice_button_style'):
                             self.hotlist_panel._update_voice_button_style()
                     self._sync_voice_thread_state()
+                
+                elif cmd_type == 'ABORT_VOICE':
+                    # ✅ [NEW] 处理插播中断指令，中止可视化器当前的语音队列
+                    if hasattr(self, 'voice_thread') and self.voice_thread:
+                        logger.info("🛑 [IPC] Recv ABORT_VOICE, stopping current visualizer speech.")
+                        self.voice_thread.abort()
 
             # --- 统一执行本轮最后的有效切换意图 ---
             
