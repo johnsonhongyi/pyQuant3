@@ -1982,17 +1982,17 @@ class StrategicTrendTracker:
                 
                 # --- [策略 A] MA60 筑底反弹 (Stage 1) ---
                 if stage == 1:
-                    if score > 15 and pct > 0:
+                    if score > 25 and pct > 0:
                         trend_type = "🌱 筑底启动"
                         reason = f"MA60附近筑底完成，分时转强(score={score:.1f})"
                         weight = score * 1.5
-                    elif upper_score > 60:
+                    elif upper_score > 70:
                         trend_type = "🧱 结构筑底"
                         reason = f"站稳核心结构位(upper={upper_score:.1f})"
                         weight = upper_score
                 
                 # --- [策略 B] 蓄势共振 (Stage 1/2) ---
-                if not trend_type and dff > 5.0 and score > 10:
+                if not trend_type and dff > 10.0 and score > 20:
                     trend_type = "🔋 蓄势共振"
                     reason = f"主力资金(dff={dff:.1f})持续流入，蓄势待发"
                     weight = dff * 2.0 + score
@@ -2035,6 +2035,10 @@ class StrategicTrendTracker:
                         resonance=score, reason=reason,
                         updated_at=datetime.now()
                     )
+                
+                # [PERF] 释放 GIL，防止背景扫描卡死 GUI
+                if len(new_trends) % 50 == 0:
+                    time.sleep(0.002) # [PERF] 增加睡眠时间，让出 CPU 给 GUI 线程
 
             # 4. 更新结果并保持持久化
             with self._lock:
@@ -2072,11 +2076,12 @@ class StrategicTrendTracker:
         except Exception as e:
             logger.error(f"❌ [StrategicTracker] 扫描异常: {e}")
 
-    def get_trends(self, min_score: float = 0.0) -> List[StrategicTrend]:
+    def get_trends(self, min_score: float = 0.0, limit: int = 100) -> List[StrategicTrend]:
         with self._lock:
             # 返回按评分排序的趋势列表
             sorted_trends = sorted(self._trends.values(), key=lambda x: x.score, reverse=True)
-            return [t for t in sorted_trends if t.score >= min_score]
+            res = [t for t in sorted_trends if t.score >= min_score]
+            return res[:limit]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,6 +28,12 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-15 16:34
+- [x] **根治引擎执行引发的全局卡死与死锁问题 (Fixed Engine Execution Global Deadlock)**：
+    - [x] **解除 UI 线程同步阻塞 (Unblocked UI Thread Sync Execution)**：查明 `SignalDashboardPanel` 中 `_on_engine_manual_run` 按钮回调在直接调用 `ctrl.manual_run()` 时，由于历史龙头挖掘 (`mine_history_dragons`) 和全链路扫描耗时较长，导致主线程（Qt Event Loop）被长时间强行挂起，从而引发系统极度缓慢甚至全局假死。现已将其重构为基于 `threading.Thread(daemon=True)` 的后台异步执行模式。
+    - [x] **打通安全的跨线程渲染链路 (Secured Cross-thread UI Pipeline)**：在使用后台线程处理高负载引擎计算（包括 `manual_run`、`force_report` 以及 `SignalBus.publish` 广播）后，为了防止跨线程直接操作 UI 导致的崩溃，引入了 `QTimer.singleShot(0, callback)` 机制。这一机制将引擎运行成功或失败后的 UI 状态恢复与视图更新 (`_update_engine_views`) 完美且安全地派发回主线程执行，彻底保障了界面的响应流畅度。
+    - [x] **评估锁安全性 (Evaluated Lock Safety)**：仔细核查了面板中 `_CONFIG_FILE_LOCK` 及 `_sort_table_python` 的调用路径。确认配置写盘锁已使用了 `with` 上下文保护且未穿透影响其他耗时逻辑；而 `_sort_table_python` 中的 `gc.disable()` 和 `gc.enable()` 也具备严格的 `try...finally` 安全边界，排除了其他因锁竞争引发的死锁嫌疑。
+
 ## 2026-05-15 02:20
 - [x] **恢复信号面板实时同步与结构信号显示 (Restored Signal Dashboard Sync & Structural Signals)**：
     - [x] **根治个股名称缺失导致的信号丢弃 (Root-fixed Signal Drop due to Missing Names)**：查明 `SignalDashboardPanel` 存在严格的 `if not name: return` 校验。由于后台 `DataPublisher` 缺乏 UI 层的名称映射，导致所有结构信号（破位、跟单等）因名称为空而被 UI 暴力拦截。现已将 `_append_to_tables` 的守卫放开，允许空名称信号流入并自动以 `code` 兜底显示。

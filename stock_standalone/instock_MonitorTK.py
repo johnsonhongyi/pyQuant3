@@ -615,6 +615,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.after(2000, self._start_watchdog) 
             logger.info("✅ UI Heartbeat & Watchdog (Delayed) initialized.")
 
+            # 🚀 [NEW] 订阅信号总线报警事件，处理插播/中断指令
+            from signal_bus import get_signal_bus, SignalBus
+            get_signal_bus().subscribe(SignalBus.EVENT_ALERT, self._on_bus_alert_received)
+
         except Exception as e:
             logger.error(f"❌ 状态存储初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
@@ -951,6 +955,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"IPC Worker Error: {e}\n{traceback.format_exc()}")
                 time.sleep(1)
+
+    def _on_bus_alert_received(self, event):
+        """处理总线上的报警事件 (主要用于插播/中断语音)"""
+        try:
+            payload = event.payload
+            if payload.get("action") == "ABORT_VOICE":
+                logger.info("🛑 [BUS] Received ABORT_VOICE signal, forwarding to visualizer...")
+                # 通知可视化器中断语音
+                self._async_viz_send('ABORT_VOICE', None)
+        except Exception as e:
+            logger.error(f"Error handling bus alert: {e}")
 
     def _async_viz_send(self, cmd, payload):
         """发送指令到可视化器 (入队不阻塞)"""
