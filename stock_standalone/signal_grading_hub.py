@@ -267,8 +267,9 @@ class SignalGradingHub:
                 self.last_alerts[alert_key] = (now, res['count'])
             
         # [NEW] 判定是否为“结构破位”类信号
+        sig_type_str = str(sig_type or "")
         breakdown_keywords = ["SBC-Breakdown", "断头", "破位", "跌破", "failure", "exit"]
-        if any(k.lower() in sig_type_str.lower() if 'sig_type_str' in locals() else False for k in breakdown_keywords):
+        if any(k.lower() in sig_type_str.lower() for k in breakdown_keywords):
             # 记录到全局破位统计 (使用虚拟板块 'GLOBAL_BREAKDOWN')
             b_res = self.breakdown_aggregator.ingest(code, "GLOBAL_BREAKDOWN", sig_type, now=now)
             if b_res and b_res['count'] >= 3:

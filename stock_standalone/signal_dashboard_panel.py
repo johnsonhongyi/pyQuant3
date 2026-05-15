@@ -53,7 +53,7 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self.setMinimumWidth(480)
         self._is_updating = False
         self.load_window_position_qt(self, "market_alert_detail_dialog", default_width=550, default_height=500)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Tool)
         self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
         
         layout = QVBoxLayout(self)
@@ -108,6 +108,7 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         QTimer.singleShot(100, self._restore_column_widths)
         
         self.table.itemClicked.connect(self._on_item_clicked)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed) # [NEW] 增加键盘上下键联动支持
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.table)
@@ -116,9 +117,24 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         QTimer.singleShot(500, lambda: setattr(self, '_is_updating', False))
         
     def _on_item_clicked(self, item):
-        if item:
+        if item and not self._is_updating:
             row = item.row()
             self.code_clicked.emit(self.table.item(row, 0).text(), self.table.item(row, 1).text())
+
+    def _on_selection_changed(self):
+        """[GUI] 监听选择变动（支持键盘上下键联动）"""
+        if self._is_updating: return
+        items = self.table.selectedItems()
+        if not items: return
+        
+        # [PERF] 仅在键盘或鼠标切换行时触发联动
+        row = items[0].row()
+        code_it = self.table.item(row, 0)
+        name_it = self.table.item(row, 1)
+        if code_it and name_it:
+            code, name = code_it.text(), name_it.text()
+            if code and code != "N/A":
+                self.code_clicked.emit(code, name)
 
     def _show_context_menu(self, pos):
         """[GUI] 右键菜单：支持代码复制"""
@@ -210,84 +226,90 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
 
     def update_data(self, codes, df_snapshot=None, details=None):
         """[GUI] 使用快照数据或预定义的 details 填充表格"""
+        self._is_updating = True # 🔐 [LOCK] 开启更新锁，防止填表期间触发多余联动
         self.table.setSortingEnabled(False) # [PERF] 更新时关闭排序
         self.table.setRowCount(0)
-        if not codes: 
-            self.stats_label.setText("总计: 0 | 平均涨幅: 0.00%")
-            return
         
-        # 将 details 转为 dict 方便查找
-        detail_map = {d['code']: d for d in (details or [])}
-        
-        self.table.setRowCount(len(codes))
-        
-        # 统计变量
-        total_pct = 0.0
-        valid_count = 0
-        sector_counts = {} # {sector: count}
-        
-        for i, code in enumerate(codes):
-            d_item = detail_map.get(code, {})
-            name = d_item.get('name', '-')
-            detail = str(d_item.get('sig_type', ''))
-            pct = 0.0
-            vol_ratio = 1.0
-            dff = 0.0
-            dff2 = 0.0
+        try:
+            if not codes: 
+                self.stats_label.setText("总计: 0 | 平均涨幅: 0.00%")
+                return
             
-            # [MOD] 注入实时行情快照数据 (包含 DFF/DFF2)
-            if df_snapshot is not None and code in df_snapshot.index:
-                row = df_snapshot.loc[code]
-                if name == "-": name = str(row.get('name', '-'))
-                pct = row.get('percent', 0.0)
-                vol_ratio = row.get('volume_ratio', 1.0)
-                dff = row.get('dff', 0.0)
-                dff2 = row.get('dff2', 0.0)
+            # 将 details 转为 dict 方便查找
+            detail_map = {d['code']: d for d in (details or [])}
+            
+            self.table.setRowCount(len(codes))
+            
+            # 统计变量
+            total_pct = 0.0
+            valid_count = 0
+            sector_counts = {} # {sector: count}
+            
+            for i, code in enumerate(codes):
+                d_item = detail_map.get(code, {})
+                name = d_item.get('name', '-')
+                detail = str(d_item.get('sig_type', ''))
+                pct = 0.0
+                vol_ratio = 1.0
+                dff = 0.0
+                dff2 = 0.0
                 
-                # [NEW] 板块分布统计
-                raw_cats = str(row.get('category', ''))
-                if raw_cats:
-                    cats = [c.strip() for c in raw_cats.replace("；", ";").replace("+", ";").split(";") if c.strip()]
-                    for ca in cats:
-                        if not self._is_generic_concept(ca):
-                            sector_counts[ca] = sector_counts.get(ca, 0) + 1
-                
-                total_pct += pct
-                valid_count += 1
-                
-                if not detail: detail = str(row.get('signal', ''))
-                
-            self._fast_set_item(i, 0, code)
-            self._fast_set_item(i, 1, name)
-            # 数值列使用 NumericTableWidgetItem 以支持排序
-            self._fast_set_item(i, 2, f"{pct:+.2f}%", color="#ff4444" if pct > 0 else "#44ff44", is_numeric=True)
-            self._fast_set_item(i, 3, f"{vol_ratio:.2f}", is_numeric=True)
-            self._fast_set_item(i, 4, f"{dff:+.2f}", is_numeric=True)
-            self._fast_set_item(i, 5, f"{dff2:+.2f}", is_numeric=True)
-            self._fast_set_item(i, 6, detail)
+                # [MOD] 注入实时行情快照数据 (包含 DFF/DFF2)
+                if df_snapshot is not None and code in df_snapshot.index:
+                    row = df_snapshot.loc[code]
+                    if name == "-": name = str(row.get('name', '-'))
+                    pct = row.get('percent', 0.0)
+                    vol_ratio = row.get('volume_ratio', 1.0)
+                    dff = row.get('dff', 0.0)
+                    dff2 = row.get('dff2', 0.0)
+                    
+                    # [NEW] 板块分布统计
+                    raw_cats = str(row.get('category', ''))
+                    if raw_cats:
+                        cats = [c.strip() for c in raw_cats.replace("；", ";").replace("+", ";").split(";") if c.strip()]
+                        for ca in cats:
+                            if not self._is_generic_concept(ca):
+                                sector_counts[ca] = sector_counts.get(ca, 0) + 1
+                    
+                    total_pct += pct
+                    valid_count += 1
+                    
+                    if not detail: detail = str(row.get('signal', ''))
+                    
+                self._fast_set_item(i, 0, code)
+                self._fast_set_item(i, 1, name)
+                # 数值列使用 NumericTableWidgetItem 以支持排序
+                self._fast_set_item(i, 2, f"{pct:+.2f}%", color="#ff4444" if pct > 0 else "#44ff44", is_numeric=True)
+                self._fast_set_item(i, 3, f"{vol_ratio:.2f}", is_numeric=True)
+                self._fast_set_item(i, 4, f"{dff:+.2f}", is_numeric=True)
+                self._fast_set_item(i, 5, f"{dff2:+.2f}", is_numeric=True)
+                self._fast_set_item(i, 6, detail)
 
-        # [MOD] 使用极高饱和度颜色 (Neon Style) 提高清晰度
-        avg_pct = total_pct / valid_count if valid_count > 0 else 0.0
-        avg_color = "#00FF00" if avg_pct >= 0 else "#FF3333" 
-        
-        # 统计文本构建 (使用高对比度 HTML)
-        stats_html = (
-            f"<font color='#FFFFFF'>总计:</font> <font color='#FFFF00'>{len(codes)}</font> "
-            f"<font color='#666666'>|</font> "
-            f"<font color='#FFFFFF'>平均涨幅:</font> <font color='{avg_color}'>{avg_pct:+.2f}%</font>"
-        )
-        
-        # 提取并排序板块分布
-        sorted_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)
-        
-        if sorted_sectors:
-            # 领头板块使用青色高亮，计数用黄色
-            top_3 = [f"<font color='#00FFFF'>{s}</font>(<font color='#FFFF00'>{c}</font>)" for s, c in sorted_sectors[:3]]
-            stats_html += f" <font color='#666666'>|</font> <font color='#FFFFFF'>核心板块:</font> " + " ".join(top_3)
+            # [MOD] 使用极高饱和度颜色 (Neon Style) 提高清晰度
+            avg_pct = total_pct / valid_count if valid_count > 0 else 0.0
+            avg_color = "#00FF00" if avg_pct >= 0 else "#FF3333" 
             
-        self.stats_label.setText(stats_html)
-        
-        self.table.setSortingEnabled(True) # [PERF] 恢复排序
+            # 统计文本构建 (使用高对比度 HTML)
+            stats_html = (
+                f"<font color='#FFFFFF'>总计:</font> <font color='#FFFF00'>{len(codes)}</font> "
+                f"<font color='#666666'>|</font> "
+                f"<font color='#FFFFFF'>平均涨幅:</font> <font color='{avg_color}'>{avg_pct:+.2f}%</font>"
+            )
+            
+            # 提取并排序板块分布
+            sorted_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)
+            
+            if sorted_sectors:
+                # 领头板块使用青色高亮，计数用黄色
+                top_3 = [f"<font color='#00FFFF'>{s}</font>(<font color='#FFFF00'>{c}</font>)" for s, c in sorted_sectors[:3]]
+                stats_html += f" <font color='#666666'>|</font> <font color='#FFFFFF'>核心板块:</font> " + " ".join(top_3)
+                
+            self.stats_label.setText(stats_html)
+        except Exception as e:
+            logger.error(f"❌ [Dashboard] MarketAlertDetailDialog update failed: {e}")
+        finally:
+            self.table.setSortingEnabled(True) # [PERF] 恢复排序
+            self._is_updating = False # 🔓 [UNLOCK] 数据填充完毕，解锁联动
 
     def _is_generic_concept(self, name):
         """[UTIL] 过滤泛概念"""
@@ -598,7 +620,7 @@ CATEGORY_MAP = {
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
-    "结构破位": ["SBC-Breakdown", "断头铡刀", "严重破位", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
+    "结构破位": ["SBC-Breakdown", "Breakdown", "断头铡刀", "严重破位", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
     "尾盘诱多": ["tail_end_trap", "尾盘诱多", "陷阱"],
     "其它信号": []
 }
@@ -1583,7 +1605,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         bus.subscribe(SignalBus.EVENT_STRATEGIC_TREND, self._on_signal_received)
         bus.subscribe(SignalBus.EVENT_HEARTBEAT, self._on_heartbeat_received)
         bus.subscribe(SignalBus.EVENT_MARKET_ALERT, self._on_signal_received)
-        history = bus.get_history(limit=200)
+        history = bus.get_history(limit=500) # [UPGRADE] 增加初始化回溯深度至 500 条
         for event in history: self._process_event(event, update_ui=False)
         self._refresh_all_tables()
 
@@ -1772,18 +1794,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.horizontalHeader().setSectionsClickable(True)
 
     def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None, data=None):
+        """[PERF] 极速单元格更新逻辑：
+        1. 仅在内容真实变化时调用 Qt C++ 接口
+        2. 缓存 Font/Brush 对象，避免高频创建
+        3. 严格脏检查，减少渲染树扰动
+        """
         it = table.item(r_idx, c_idx)
         if not it:
-            # [PERF] 新建 item 快速路径：直接赋值，跳过全部脏检查分支
+            # [PERF] 新建 item 路径
             it = QTableWidgetItem()
-            text_str = str(text)
+            text_str = str(text) if text is not None else ""
             it.setText(text_str)
             it.setData(self._ROLE_TEXT, text_str)
             if numeric_val is not None:
                 it.setData(self._ROLE_NUMERIC, numeric_val)
             if data is not None:
                 it.setData(self._ROLE_DATA, data)
-            if color_key:
+            
+            # 只有在非默认值时才调用 expensive 的 Qt 方法
+            if color_key and color_key != "#ffffff":
                 it.setForeground(self._BRUSH_PRESET.get(color_key, self._BRUSH_PRESET["#ffffff"]))
                 it.setData(self._ROLE_COLOR, color_key)
             if bg_key:
@@ -1792,40 +1821,38 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if bold:
                 it.setFont(self._font_bold)
                 it.setData(self._ROLE_BOLD, True)
+            
             table.setItem(r_idx, c_idx, it)
             return
 
-        # ---- 已有 item：全路径脏检查，只在真正变化时才调用 Qt C++ ----
-        text_str = str(text)
+        # ---- 已有 item：全路径脏检查 ----
+        text_str = str(text) if text is not None else ""
         if it.data(self._ROLE_TEXT) != text_str:
             it.setText(text_str)
             it.setData(self._ROLE_TEXT, text_str)
 
-        # [FIX] data 脏检查
-        if data is not None:
-            if it.data(self._ROLE_DATA) != data:
-                it.setData(self._ROLE_DATA, data)
+        if data is not None and it.data(self._ROLE_DATA) != data:
+            it.setData(self._ROLE_DATA, data)
 
-        # [FIX] numeric_val 增加脏检查，避免重复 setData 开销
-        if numeric_val is not None:
-            if it.data(self._ROLE_NUMERIC) != numeric_val:
-                it.setData(self._ROLE_NUMERIC, numeric_val)
+        if numeric_val is not None and it.data(self._ROLE_NUMERIC) != numeric_val:
+            it.setData(self._ROLE_NUMERIC, numeric_val)
 
-        if color_key:
-            if it.data(self._ROLE_COLOR) != color_key:
-                it.setForeground(self._BRUSH_PRESET.get(color_key, self._BRUSH_PRESET["#ffffff"]))
-                it.setData(self._ROLE_COLOR, color_key)
+        # [PERF] 颜色/字体脏检查优化：不再对 None 或 默认值 重复设置
+        # Foreground
+        current_color = it.data(self._ROLE_COLOR)
+        target_color = color_key if color_key else "#ffffff"
+        if current_color != target_color:
+            it.setForeground(self._BRUSH_PRESET.get(target_color, self._BRUSH_PRESET["#ffffff"]))
+            it.setData(self._ROLE_COLOR, target_color)
 
-        # [FIX] bg_key=None 清空路径：只在当前真正有背景色时才调用 setBackground，消除大量无效调用
-        if bg_key:
-            if it.data(self._ROLE_BG) != bg_key:
-                it.setBackground(self._BRUSH_PRESET.get(bg_key, self._BRUSH_PRESET["transparent"]))
-                it.setData(self._ROLE_BG, bg_key)
-        else:
-            if it.data(self._ROLE_BG) is not None:  # 仅在真正有背景色时才清空
-                it.setBackground(self._BRUSH_PRESET["transparent"])
-                it.setData(self._ROLE_BG, None)
+        # Background
+        current_bg = it.data(self._ROLE_BG)
+        target_bg = bg_key # 可以为 None (transparent)
+        if current_bg != target_bg:
+            it.setBackground(self._BRUSH_PRESET.get(target_bg, self._BRUSH_PRESET["transparent"]))
+            it.setData(self._ROLE_BG, target_bg)
 
+        # Font Bold
         if it.data(self._ROLE_BOLD) != bold:
             it.setFont(self._font_bold if bold else self._font_normal)
             it.setData(self._ROLE_BOLD, bold)
@@ -2126,99 +2153,105 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _refresh_dragon_table(self, dragons: List[dict]):
         table = self.tables.get("🐉 龙头追踪")
         if not table: return
-        
-        if getattr(self, '_engine_ctrl', None):
-            if getattr(table, '_render_version', -1) == self._engine_ctrl._dragon_render_version:
-                return
-            table._render_version = self._engine_ctrl._dragon_render_version
 
-        current_selection = None
-        sel_items = table.selectedItems()
-        if sel_items: 
-            it = table.item(sel_items[0].row(), 1)
-            if it: current_selection = it.data(self._ROLE_TEXT)
+        # [PERF] 性能分析上下文
+        with timed_ctx("_refresh_dragon_table", warn_ms=300):
+            if getattr(self, '_engine_ctrl', None):
+                if getattr(table, '_render_version', -1) == self._engine_ctrl._dragon_render_version:
+                    return
+                table._render_version = self._engine_ctrl._dragon_render_version
 
-        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-        
-        def _get_sort_key(d):
-            if sort_col == 0: return d.get('status_label', '')
-            if sort_col == 1: return d.get('code', '')
-            if sort_col == 2: return d.get('name', '')
-            if sort_col == 3: return d.get('sector', '')
-            if sort_col == 4: return d.get('current_pct', 0.0)
-            if sort_col == 5: return d.get('cum_pct', 0.0)
-            if sort_col == 6: return d.get('tracked_days', 0)
-            if sort_col == 7: return d.get('consecutive_new_highs', 0)
-            if sort_col == 8: return d.get('dff', 0.0)
-            if sort_col == 9: return d.get('vwap', 0.0)
-            if sort_col == 10: return d.get('last_update', '')
-            if sort_col == 11: return d.get('tags', '')
-            return 0
+            current_selection = None
+            sel_items = table.selectedItems()
+            if sel_items: 
+                it = table.item(sel_items[0].row(), 1) # code col
+                if it: current_selection = it.data(self._ROLE_TEXT)
 
-        dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+            
+            def _get_sort_key(d):
+                if sort_col == 0: return d.get('status_label', '')
+                if sort_col == 1: return d.get('code', '')
+                if sort_col == 2: return d.get('name', '')
+                if sort_col == 3: return d.get('sector', '')
+                if sort_col == 4: return d.get('current_pct', 0.0)
+                if sort_col == 5: return d.get('cum_pct', 0.0)
+                if sort_col == 6: return d.get('tracked_days', 0)
+                if sort_col == 7: return d.get('consecutive_new_highs', 0)
+                if sort_col == 8: return d.get('dff', 0.0)
+                if sort_col == 9: return d.get('vwap', 0.0)
+                if sort_col == 10: return d.get('last_update', '')
+                if sort_col == 11: return d.get('tags', '')
+                return 0
 
-        table.setUpdatesEnabled(False)
-        table.setProperty("uniformItemSizes", True)
-        table.setProperty("layoutAboutToBeChanged", True)
-        table.blockSignals(True)
-        table.verticalHeader().setUpdatesEnabled(False)
-        table.horizontalHeader().setUpdatesEnabled(False)
-        vp = table.viewport()
-        vp.setUpdatesEnabled(False)
+            dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
 
-        try:
-            if table.rowCount() != len(dragons):
-                table.setRowCount(len(dragons))
-                
-            for i, d in enumerate(dragons):
-                st_lbl = d.get('status_label', '')
-                st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
-                self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
-                
-                code = d.get('code', '')
-                c_color = "#ffff00" if code.startswith('30') else "#00ffff"
-                self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
-                self._fast_update_cell(table, i, 2, d.get('name', ''), bold=('龙' in st_lbl))
-                self._fast_update_cell(table, i, 3, d.get('sector', ''))
-                
-                c_pct = d.get('current_pct', 0.0)
-                cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
-                self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
-                
-                cum_pct = d.get('cum_pct', 0.0)
-                cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
-                self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
-                
-                self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
-                
-                nh_days = d.get('consecutive_new_highs', 0)
-                nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
-                self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
-                
-                dff = d.get('dff', 0.0)
-                dff_color = "#00ff88" if dff > 0 else "#ffffff"
-                self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
-                self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
-                
-                up_time = d.get('last_update', '')
-                if len(up_time) > 19: up_time = up_time[11:19]
-                self._fast_update_cell(table, i, 10, up_time)
-                self._fast_update_cell(table, i, 11, d.get('tags', ''))
+            # [PERF] 极致锁定：停止一切布局重绘
+            table.setUpdatesEnabled(False)
+            table.blockSignals(True)
+            table.verticalHeader().setUpdatesEnabled(False)
+            table.horizontalHeader().setUpdatesEnabled(False)
+            vp = table.viewport()
+            vp.setUpdatesEnabled(False)
 
-            if current_selection:
-                for r in range(table.rowCount()):
-                    it = table.item(r, 1)
-                    if it and it.data(self._ROLE_TEXT) == current_selection:
-                        table.selectRow(r)
-                        break
-        finally:
-            vp.setUpdatesEnabled(True)
-            vp.update()
-            table.horizontalHeader().setUpdatesEnabled(True)
-            table.verticalHeader().setUpdatesEnabled(True)
-            table.blockSignals(False)
-            table.setUpdatesEnabled(True)
+            try:
+                if table.rowCount() != len(dragons):
+                    table.setRowCount(len(dragons))
+                    
+                # [PERF] 建立代码到行号的快速索引，用于 selection 恢复
+                code_to_row = {}
+                
+                for i, d in enumerate(dragons):
+                    st_lbl = d.get('status_label', '')
+                    st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
+                    self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
+                    
+                    code = d.get('code', '')
+                    code_to_row[code] = i 
+                    
+                    c_color = "#ffff00" if code.startswith('30') else "#00ffff"
+                    self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
+                    self._fast_update_cell(table, i, 2, d.get('name', ''), bold=('龙' in st_lbl))
+                    self._fast_update_cell(table, i, 3, d.get('sector', ''))
+                    
+                    c_pct = d.get('current_pct', 0.0)
+                    cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
+                    self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
+                    
+                    cum_pct = d.get('cum_pct', 0.0)
+                    cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
+                    self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
+                    
+                    self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
+                    
+                    nh_days = d.get('consecutive_new_highs', 0)
+                    nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
+                    self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
+                    
+                    dff = d.get('dff', 0.0)
+                    dff_color = "#00ff88" if dff > 0 else "#ffffff"
+                    self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
+                    self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
+                    
+                    up_time = d.get('last_update', '')
+                    if len(up_time) > 19: up_time = up_time[11:19]
+                    self._fast_update_cell(table, i, 10, up_time)
+                    self._fast_update_cell(table, i, 11, d.get('tags', ''))
+
+                # [PERF] O(1) 快速恢复选中态
+                if current_selection and current_selection in code_to_row:
+                    target_row = code_to_row[current_selection]
+                    table.selectRow(target_row)
+                        
+            finally:
+                # [PERF] 恢复布局并触发一次性刷新
+                vp.setUpdatesEnabled(True)
+                table.verticalHeader().setUpdatesEnabled(True)
+                table.horizontalHeader().setUpdatesEnabled(True)
+                table.blockSignals(False)
+                table.setUpdatesEnabled(True)
+                table.viewport().update()
 
     def _refresh_sector_table(self, sectors: List[dict]):
         table = self.tables.get("🔥 板块热力")
@@ -2309,78 +2342,86 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _refresh_strategic_table(self, trends: List[dict]):
         table = self.tables.get("🌐 战略趋势")
         if not table: return
-        
-        if getattr(self, '_engine_ctrl', None):
-            if getattr(table, '_render_version', -1) == self._engine_ctrl._strategic_render_version:
-                return
-            table._render_version = self._engine_ctrl._strategic_render_version
 
-        current_selection = None
-        sel_items = table.selectedItems()
-        if sel_items: 
-            it = table.item(sel_items[0].row(), 1)
-            if it: current_selection = it.data(self._ROLE_TEXT)
+        # [PERF] 性能分析上下文
+        with timed_ctx("_refresh_strategic_table", warn_ms=300):
+            if getattr(self, '_engine_ctrl', None):
+                if getattr(table, '_render_version', -1) == self._engine_ctrl._strategic_render_version:
+                    return
+                table._render_version = self._engine_ctrl._strategic_render_version
 
-        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-        
-        def _get_sort_key(t):
-            if sort_col == 0: return t.get('trend_type', '')
-            if sort_col == 1: return t.get('code', '')
-            if sort_col == 2: return t.get('name', '')
-            if sort_col == 3: return t.get('stage', '')
-            if sort_col == 4: return t.get('sector', '')
-            if sort_col == 5: return t.get('score', 0.0)
-            if sort_col == 6: return t.get('structural_score', 0.0)
-            if sort_col == 7: return t.get('resonance_score', 0.0)
-            if sort_col == 8: return t.get('updated_at', '')
-            if sort_col == 9: return t.get('reason', '')
-            return 0
+            current_selection = None
+            sel_items = table.selectedItems()
+            if sel_items: 
+                it = table.item(sel_items[0].row(), 1)
+                if it: current_selection = it.data(self._ROLE_TEXT)
 
-        trends = sorted(trends, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+            
+            def _get_sort_key(t):
+                if sort_col == 0: return t.get('trend_type', '')
+                if sort_col == 1: return t.get('code', '')
+                if sort_col == 2: return t.get('name', '')
+                if sort_col == 3: return t.get('stage', '')
+                if sort_col == 4: return t.get('sector', '')
+                if sort_col == 5: return t.get('score', 0.0)
+                if sort_col == 6: return t.get('structural_score', 0.0)
+                if sort_col == 7: return t.get('resonance_score', 0.0)
+                if sort_col == 8: return t.get('updated_at', '')
+                if sort_col == 9: return t.get('reason', '')
+                return 0
 
-        table.setUpdatesEnabled(False)
-        table.setProperty("uniformItemSizes", True)
-        table.setProperty("layoutAboutToBeChanged", True)
-        table.blockSignals(True)
-        table.verticalHeader().setUpdatesEnabled(False)
-        table.horizontalHeader().setUpdatesEnabled(False)
-        vp = table.viewport()
-        vp.setUpdatesEnabled(False)
+            trends = sorted(trends, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
 
-        try:
-            if table.rowCount() != len(trends):
-                table.setRowCount(len(trends))
+            # [PERF] 极致锁定：停止一切布局重绘
+            table.setUpdatesEnabled(False)
+            table.blockSignals(True)
+            table.verticalHeader().setUpdatesEnabled(False)
+            table.horizontalHeader().setUpdatesEnabled(False)
+            vp = table.viewport()
+            vp.setUpdatesEnabled(False)
 
-            for i, t in enumerate(trends):
-                self._fast_update_cell(table, i, 0, t.get('trend_type', ''))
-                self._fast_update_cell(table, i, 1, t.get('code', ''), color_key="#00ffff" if not t.get('code','').startswith('30') else "#ffff00", bold=True)
-                self._fast_update_cell(table, i, 2, t.get('name', ''))
-                self._fast_update_cell(table, i, 3, t.get('stage', ''))
-                self._fast_update_cell(table, i, 4, t.get('sector', ''))
-                
-                sc = t.get('score', 0.0)
-                sc_color = "#ff0000" if sc > 80 else ("#ffaa00" if sc > 60 else "#ffffff")
-                self._fast_update_cell(table, i, 5, sc, color_key=sc_color, numeric_val=sc)
-                self._fast_update_cell(table, i, 6, t.get('structural_score', 0.0), numeric_val=t.get('structural_score', 0.0))
-                self._fast_update_cell(table, i, 7, t.get('resonance_score', 0.0), numeric_val=t.get('resonance_score', 0.0))
-                
-                self._fast_update_cell(table, i, 8, t.get('updated_at', ''))
-                self._fast_update_cell(table, i, 9, t.get('reason', ''))
+            try:
+                if table.rowCount() != len(trends):
+                    table.setRowCount(len(trends))
 
-            if current_selection:
-                for r in range(table.rowCount()):
-                    it = table.item(r, 1)
-                    if it and it.data(self._ROLE_TEXT) == current_selection:
-                        table.selectRow(r)
-                        break
-        finally:
-            vp.setUpdatesEnabled(True)
-            vp.update()
-            table.horizontalHeader().setUpdatesEnabled(True)
-            table.verticalHeader().setUpdatesEnabled(True)
-            table.blockSignals(False)
-            table.setUpdatesEnabled(True)
+                # [PERF] 建立快速索引
+                code_to_row = {}
+                for i, t in enumerate(trends):
+                    self._fast_update_cell(table, i, 0, t.get('trend_type', ''))
+                    
+                    code = t.get('code', '')
+                    code_to_row[code] = i
+                    c_color = "#00ffff" if not code.startswith('30') else "#ffff00"
+                    self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
+                    
+                    self._fast_update_cell(table, i, 2, t.get('name', ''))
+                    self._fast_update_cell(table, i, 3, t.get('stage', ''))
+                    self._fast_update_cell(table, i, 4, t.get('sector', ''))
+                    
+                    sc = t.get('score', 0.0)
+                    sc_color = "#ff0000" if sc > 80 else ("#ffaa00" if sc > 60 else "#ffffff")
+                    self._fast_update_cell(table, i, 5, sc, color_key=sc_color, numeric_val=sc)
+                    self._fast_update_cell(table, i, 6, t.get('structural_score', 0.0), numeric_val=t.get('structural_score', 0.0))
+                    self._fast_update_cell(table, i, 7, t.get('resonance_score', 0.0), numeric_val=t.get('resonance_score', 0.0))
+                    
+                    self._fast_update_cell(table, i, 8, t.get('updated_at', ''))
+                    self._fast_update_cell(table, i, 9, t.get('reason', ''))
+
+                # [PERF] O(1) 快速恢复选中态
+                if current_selection and current_selection in code_to_row:
+                    target_row = code_to_row[current_selection]
+                    table.selectRow(target_row)
+                        
+            finally:
+                # [PERF] 恢复布局并触发一次性刷新
+                vp.setUpdatesEnabled(True)
+                table.verticalHeader().setUpdatesEnabled(True)
+                table.horizontalHeader().setUpdatesEnabled(True)
+                table.blockSignals(False)
+                table.setUpdatesEnabled(True)
+                table.viewport().update()
 
     def _on_signal_received(self, event: BusEvent):
         """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
@@ -2388,7 +2429,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             return # 🛡️ 防御空事件
         
         # [DEBUG] 打印信号流入快照 (仅在 Debug 或高频时查看)
-        # logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
+        logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
 
         if event.event_type == SignalBus.EVENT_MARKET_ALERT:
             payload = event.payload
@@ -2450,6 +2491,24 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             ))
 
         self.sig_bus_event.emit(event)
+
+    def _refresh_all_tables(self):
+        """[GUI THREAD] 全量刷新所有信号表格 (通常在启动加载历史后调用)"""
+        with self._data_lock:
+            # 1. 清空所有表格与索引缓存
+            for name, table in self.tables.items():
+                if name in CATEGORY_MAP or name == "全部信号":
+                    table.setRowCount(0)
+            self._row_cache.clear()
+            
+            # 2. 批量重新插入历史事件
+            # 注意：这里调用 _append_to_tables，它会内部处理分类逻辑
+            for event in self._all_events:
+                self._append_to_tables(event)
+        
+        # 3. 触发一次自动排序指示器同步
+        self._trigger_sorted_refresh()
+        logger.info(f"✅ [DASHBOARD] 全量刷新完成，重载 {len(self._all_events)} 条历史信号")
 
     def _show_alert_banner(self, msg):
         """[GUI THREAD] 显示滚动横幅"""

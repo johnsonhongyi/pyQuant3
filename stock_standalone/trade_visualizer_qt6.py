@@ -11488,9 +11488,13 @@ class MainWindow(QMainWindow, WindowMixin):
                     if sc in self.df_all.index:
                         crow = self.df_all.loc[sc]
                     else:
-                        mask = self.df_all['code'].to_numpy() == sc
-                        idx = np.flatnonzero(mask)
-                        crow = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
+                        # [FIX] 增加列存在性校验，防止 KeyError: 'code'
+                        if 'code' in self.df_all.columns:
+                            mask = self.df_all['code'].to_numpy() == sc
+                            idx = np.flatnonzero(mask)
+                            crow = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
+                        else:
+                            crow = None
                 
                 if crow is not None:
                     raw_cat = crow.get('category', '')
@@ -11749,9 +11753,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 if code in self.df_all.index:
                     stock_row = self.df_all.loc[code]
                 else:
-                    codes = self.df_all['code'].to_numpy()
-                    idx = np.flatnonzero(codes == code)
-                    stock_row = self.df_all.iloc[idx[-1]] if idx.size else None
+                    # [FIX] 增加列存在性校验
+                    if 'code' in self.df_all.columns:
+                        codes = self.df_all['code'].to_numpy()
+                        idx = np.flatnonzero(codes == code)
+                        stock_row = self.df_all.iloc[idx[-1]] if idx.size else None
+                    else:
+                        stock_row = None
 
                 if stock_row is not None:
 
@@ -11810,10 +11818,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 if code in self.df_all.index:
                     stock_row = self.df_all.loc[code]
                 else:
-                    # 否则用 numpy 避免全 DataFrame 扫描
-                    mask = self.df_all['code'].to_numpy() == code
-                    idx = np.flatnonzero(mask)
-                    stock_row = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
+                    # [FIX] 增加列存在性校验
+                    stock_row = None
+                    if 'code' in self.df_all.columns:
+                        mask = self.df_all['code'].to_numpy() == code
+                        idx = np.flatnonzero(mask)
+                        stock_row = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
 
                 if stock_row is not None:
                     _df_values = _df.values

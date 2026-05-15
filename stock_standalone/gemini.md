@@ -33,6 +33,10 @@
     - [x] **根治个股名称缺失导致的信号丢弃 (Root-fixed Signal Drop due to Missing Names)**：查明 `SignalDashboardPanel` 存在严格的 `if not name: return` 校验。由于后台 `DataPublisher` 缺乏 UI 层的名称映射，导致所有结构信号（破位、跟单等）因名称为空而被 UI 暴力拦截。现已将 `_append_to_tables` 的守卫放开，允许空名称信号流入并自动以 `code` 兜底显示。
     - [x] **实现跨进程/线程名称双向对齐 (Implemented Name Sync Bridge)**：在 `instock_MonitorTK.py` 的核心计算回流点 `_handle_compute_result` 中补齐了名称映射同步链路。现在系统每 10 分钟会自动将 UI 层的 `code -> name` 字典推送到 `realtime_service` 及底层的 `IntradayEmotionTracker`，确保了后台信号源能自带正确的股票名称。
     - [x] **修复回测/重放模式下的信号过度节流 (Fixed Simulation Throttling Bug)**：查明 `IntradayEmotionTracker` 在生成 `alert_key` 时错误地使用了物理时间 `datetime.now()`。这导致在执行历史回测或行情重放时，系统会基于当前“真实小时”进行过滤，从而产生严重的信号缺失。现已重构为基于逻辑时间戳 `r_ts` 生成 Key，实现了仿真环境下的精准报警与去重。
+    - [x] **极致优化 UI 刷新性能与响应速度 (Extreme UI Performance Optimization)**：
+        - [x] **重构 `_fast_update_cell` 实现“零冗余”渲染**：引入了严格的脏检查机制，只有在内容、颜色或字体发生真实变化时才调用昂贵的 Qt C++ 接口（如 `setText`, `setForeground`, `setFont`）。通过预缓存 `QFont` 和 `QBrush` 对象，消除了高频刷新下的瞬时内存分配压力。
+        - [x] **实现 `_refresh_dragon_table` O(1) 极速恢复**：废弃了遍历全表的 $O(N)$ 选中项查找逻辑，改为使用字典索引实现亚毫秒级的选中状态恢复。配合 `setUpdatesEnabled(False)` 物理锁定，彻底消除了切换 Tab 到“龙头追踪”时的 1-3s 假死感。
+        - [x] **注入 `timed_ctx` 诊断层**：在核心渲染路径注入了性能监控，确保后续任何导致 UI 阻塞的操作都能被及时捕获与预警。
     - [x] **增强总线监听鲁棒性**：在 `SignalDashboardPanel` 的 `_on_signal_received` 中注入了诊断日志占位，便于在复杂多进程环境下追踪信号流入时序，提升了系统的可维护性。
 
 ## 2026-05-14 19:00
