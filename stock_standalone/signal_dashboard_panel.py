@@ -2384,8 +2384,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_signal_received(self, event: BusEvent):
         """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
-        if not event or not event.payload: return # 🛡️ 防御空事件
+        if not event or not event.payload: 
+            return # 🛡️ 防御空事件
         
+        # [DEBUG] 打印信号流入快照 (仅在 Debug 或高频时查看)
+        # logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
+
         if event.event_type == SignalBus.EVENT_MARKET_ALERT:
             payload = event.payload
             content = payload.get('content') or payload.get('message', '')
@@ -2654,8 +2658,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _append_to_tables(self, event: BusEvent):
         payload = event.payload
-        code, name = payload.get('code', ''), payload.get('name', '')
-        if not code or not name: return # 🛡️ 进一步兜底校验
+        code = payload.get('code', '')
+        name = payload.get('name', '')
+        
+        # 🛡️ [FIX] 核心 code 必须有，name 缺失则兜底，不再暴力 return 阻断显示
+        if not code:
+            return 
+        if not name:
+            name = code
 
         append_start = time.perf_counter()
         pattern = payload.get('pattern', payload.get('subtype', 'ALERT'))
