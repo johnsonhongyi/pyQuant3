@@ -28,6 +28,13 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-15 02:20
+- [x] **恢复信号面板实时同步与结构信号显示 (Restored Signal Dashboard Sync & Structural Signals)**：
+    - [x] **根治个股名称缺失导致的信号丢弃 (Root-fixed Signal Drop due to Missing Names)**：查明 `SignalDashboardPanel` 存在严格的 `if not name: return` 校验。由于后台 `DataPublisher` 缺乏 UI 层的名称映射，导致所有结构信号（破位、跟单等）因名称为空而被 UI 暴力拦截。现已将 `_append_to_tables` 的守卫放开，允许空名称信号流入并自动以 `code` 兜底显示。
+    - [x] **实现跨进程/线程名称双向对齐 (Implemented Name Sync Bridge)**：在 `instock_MonitorTK.py` 的核心计算回流点 `_handle_compute_result` 中补齐了名称映射同步链路。现在系统每 10 分钟会自动将 UI 层的 `code -> name` 字典推送到 `realtime_service` 及底层的 `IntradayEmotionTracker`，确保了后台信号源能自带正确的股票名称。
+    - [x] **修复回测/重放模式下的信号过度节流 (Fixed Simulation Throttling Bug)**：查明 `IntradayEmotionTracker` 在生成 `alert_key` 时错误地使用了物理时间 `datetime.now()`。这导致在执行历史回测或行情重放时，系统会基于当前“真实小时”进行过滤，从而产生严重的信号缺失。现已重构为基于逻辑时间戳 `r_ts` 生成 Key，实现了仿真环境下的精准报警与去重。
+    - [x] **增强总线监听鲁棒性**：在 `SignalDashboardPanel` 的 `_on_signal_received` 中注入了诊断日志占位，便于在复杂多进程环境下追踪信号流入时序，提升了系统的可维护性。
+
 ## 2026-05-14 19:00
 - [x] **修复由于后台线程阻塞引发的 Python 解释器致命崩溃 (Root-fixed PyEval_RestoreThread Fatal Crash)**：
     - [x] **解除多进程等待死锁 (Eliminated Indefinite daemon Thread Block)**：查明在 instock_MonitorTK.py 中的 monitor_backtest_exit 回测监听线程中，直接调用无超时保护的 proc.join() 会导致 C 扩展底层（Windows _winapi.WaitForSingleObject）无限期挂起并释放 GIL。当用户主动关闭 Tkinter 主窗口触发 sys.exit() 开始销毁 Python 解释器时，若此时子进程恰好退出，底层 wait() 唤醒后试图重新获取已被销毁的 GIL（Thread State为NULL），从而引发 PyEval_RestoreThread 的致命崩溃（Access Violation）。

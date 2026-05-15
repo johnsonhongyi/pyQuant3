@@ -1506,9 +1506,11 @@ class IntradayEmotionTracker:
                                 else:
                                     sig_text = "⚠️" + ("-".join(status) if status else "结构破位")
 
-                                # [FIX] 动态去重 Key：允许同一股票在小时级别或等级提升时重复报警
-                                hour_str = datetime.now().strftime("%H")
-                                alert_key = f"{code_str}_{datetime.now().strftime('%Y%m%d')}_{hour_str}_{cur_action}_{sig_grade}"
+                                # [FIX] 动态去重 Key：采用逻辑时间 (Simulation-friendly) 而非物理时间
+                                # 这解决了回测/重录模式下由于 datetime.now() 导致的节流失效或过度节流问题
+                                dt_sim = datetime.fromtimestamp(r_ts)
+                                hour_str = dt_sim.strftime("%H")
+                                alert_key = f"{code_str}_{dt_sim.strftime('%Y%m%d')}_{hour_str}_{cur_action}_{sig_grade}"
                                 
                                 # 额外逻辑：如果价格比上次报警又跌了 2% 以上，强制再次报警
                                 last_alert_price = self._sbc_signals_registry.get(code_str, {}).get("price", 0)

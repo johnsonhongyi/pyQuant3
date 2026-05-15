@@ -4537,6 +4537,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 提取 code -> category 映射
                         meta_dict = full_df.set_index('code')['category'].to_dict()
                         get_signal_grading_hub().update_metadata(meta_dict)
+                        
+                        # [NEW] 同步名称映射到实时服务，确保信号有名称
+                        if self.realtime_service:
+                            name_dict = full_df.set_index('code')['name'].to_dict()
+                            self.realtime_service.register_names(name_dict)
+                            
                         self._last_hub_sync_time = now
                     except Exception as e:
                         logger.error(f"Failed to sync metadata to Hub: {e}")
