@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QTextEdit, QDateEdit
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPoint, QEvent, QDate
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtGui import QAction, QColor, QFont, QTextCharFormat
 
 from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
@@ -51,7 +51,11 @@ class DetailDialog(QDialog):
 class NumericTableWidgetItem(QTableWidgetItem):
     """自定义 TableWidgetItem，支持正确的数值排序"""
     def __init__(self, value):
-        if isinstance(value, (int, float)):
+        if isinstance(value, tuple) and len(value) == 2:
+            sort_val, display_val = value
+            super().__init__(str(display_val))
+            self.sort_value = sort_val
+        elif isinstance(value, (int, float)):
             # 格式化显示，但保留原始数值用于比较
             display_val = f"{value:.2f}" if isinstance(value, float) else str(value)
             super().__init__(display_val)
@@ -70,8 +74,8 @@ class LiveSignalViewer(QWidget, WindowMixin):
     """
     实时信号历史轨迹查询窗口，支持键盘联动与自动刷新。
     """
-    # 联动信号：(code, name, select_win)
-    stock_selected_signal = pyqtSignal(str, str, bool)
+    # 联动信号：(code, name, select_win, timestamp)
+    stock_selected_signal = pyqtSignal(str, str, bool, str)
     status_msg_signal = pyqtSignal(str)          # (message)
     window_closed_signal = pyqtSignal()          # 窗口关闭通知
 
@@ -86,6 +90,9 @@ class LiveSignalViewer(QWidget, WindowMixin):
         self.logger_tool = TradingLogger()
         self._refresh_timer = QTimer(self) # 显式创建计时器，方便清理
         
+        # 🚀 [FIX] 设置关闭时销毁窗口属性，自动清理释放内存，避免仅隐藏窗口
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
         self.sender = sender # 优先复用主界面的发送器
         if self.sender is None:
             try:
@@ -98,6 +105,9 @@ class LiveSignalViewer(QWidget, WindowMixin):
         self._history_stack = []
         self._history_index = -1
         self._is_navigating = False # 防止导航触发的刷新再次存入历史
+        
+        # 7. 日历高亮缓存
+        self._signal_dates_cache = None
         
         # 2. UI 构造
         self._init_ui()
@@ -165,6 +175,11 @@ class LiveSignalViewer(QWidget, WindowMixin):
         
         ctrl_layout.addStretch()
         
+        # 🚀 [NEW] 去重功能选项 (在全量轨迹前)
+        self.dedup_checkbox = QCheckBox("去重")
+        self.dedup_checkbox.stateChanged.connect(self._apply_view_filter)
+        ctrl_layout.addWidget(self.dedup_checkbox)
+        
         # 数据源选择 (如有必要后续扩展，目前默认 live_signal_history)
         self.source_combo = QComboBox()
         self.source_combo.addItems(["全量轨迹", "选股历史"])
@@ -183,8 +198,8 @@ class LiveSignalViewer(QWidget, WindowMixin):
         self.table.setSortingEnabled(True)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         
-        # 定义列: 恢复原始逻辑，确保价格和理由位置不变
-        self.headers = ["时间", "代码", "名称", "动作", "价格", "理由", "信号流", "周期", "状态", "ID"]
+        # 定义列: 插入“距今涨跌”列
+        self.headers = ["时间", "代码", "名称", "动作", "价格", "距今涨跌", "理由", "信号流", "周期", "状态", "ID"]
         self.table.setColumnCount(len(self.headers))
         self.table.setHorizontalHeaderLabels(self.headers)
         
@@ -192,14 +207,15 @@ class LiveSignalViewer(QWidget, WindowMixin):
         h = self.table.horizontalHeader()
         if h:
             h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive) 
-            h.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # 理由列: 内容自适应，解决显示不全问题
-            h.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)          # 信号流: 填充剩余空间
+            h.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # 理由列 (原来是 5)
+            h.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)          # 信号流 (原来是 6)
             # 初始基本宽度
             self.table.setColumnWidth(0, 150) # 时间
             self.table.setColumnWidth(1, 80)  # 代码
             self.table.setColumnWidth(2, 90)  # 名称
             self.table.setColumnWidth(3, 80)  # 动作
             self.table.setColumnWidth(4, 70)  # 价格
+            self.table.setColumnWidth(5, 80)  # 距今涨跌
 
         
         # 交互联动 (单击/键盘切换触发)
@@ -222,6 +238,11 @@ class LiveSignalViewer(QWidget, WindowMixin):
         # 计时器逻辑
         self._refresh_timer.timeout.connect(self.refresh_data)
         
+        # 🚀 [NEW] 日历选择标记当日有的数据
+        calendar = self.date_input.calendarWidget()
+        if calendar:
+            calendar.currentPageChanged.connect(self._highlight_calendar_dates)
+        
         layout.addWidget(self.table)
         
         # 状态栏
@@ -229,8 +250,51 @@ class LiveSignalViewer(QWidget, WindowMixin):
         self.status_label.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
         layout.addWidget(self.status_label)
 
+    def _get_dates_with_signals(self):
+        """从 SQLite 数据库获取所有有信号记录的日期列表"""
+        dates = set()
+        try:
+            conn = self.logger_tool.db_manager.get_connection()
+            query = "SELECT DISTINCT substr(timestamp, 1, 10) as date_str FROM live_signal_history"
+            with self.logger_tool.db_manager.execute_query(query, ()) as cur:
+                rows = cur.fetchall()
+                for row in rows:
+                    if row[0]:
+                        dates.add(row[0])
+        except Exception as e:
+            # 容错：仅打印，不影响主流程运行
+            print(f"[Calendar] Error querying signal dates: {e}")
+        return dates
+
+    def _highlight_calendar_dates(self):
+        """在下拉日历中标记所有拥有信号数据的日期"""
+        calendar = self.date_input.calendarWidget()
+        if not calendar:
+            return
+            
+        # 1. 确保缓存是最新的
+        if self._signal_dates_cache is None:
+            self._signal_dates_cache = self._get_dates_with_signals()
+            
+        # 2. 定义高亮样式
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor("#FF4444"))  # 鲜艳红高亮
+        f = fmt.font()
+        f.setBold(True)
+        f.setUnderline(True)
+        fmt.setFont(f)
+        
+        # 3. 在日历中遍历缓存的日期并设置格式
+        for date_str in self._signal_dates_cache:
+            qdate = QDate.fromString(date_str, "yyyy-MM-dd")
+            if qdate.isValid():
+                calendar.setDateTextFormat(qdate, fmt)
+
     def refresh_data(self, push_history=True):
         """异步/安全 刷新数据 (从数据库加载基础数据)"""
+        # 🚀 [NEW] 清空日历缓存以便重新加载最新标记
+        self._signal_dates_cache = None
+        
         # 使用 QDateEdit 获取格式化的日期字符串
         date_str = self.date_input.date().toString("yyyy-MM-dd")
         code_str = self.code_input.text().strip() or None
@@ -269,6 +333,9 @@ class LiveSignalViewer(QWidget, WindowMixin):
             
         # 3. 执行视图级过滤展示
         self._apply_view_filter()
+        
+        # 🚀 [NEW] 触发日历日期高亮
+        self._highlight_calendar_dates()
 
     def go_back(self):
         """后退 (鼠标4键)"""
@@ -377,6 +444,10 @@ class LiveSignalViewer(QWidget, WindowMixin):
             df = self.all_data_df[mask]
             self.status_msg_signal.emit(f"视图筛选: 内容内容[{type_str}] 命中 {len(df)} 条")
 
+        # 🚀 [NEW] 全量轨迹代码去重 (保留最新一条记录)
+        if hasattr(self, 'dedup_checkbox') and self.dedup_checkbox.isChecked() and not df.empty:
+            df = df.drop_duplicates(subset=['code'], keep='first')
+
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
@@ -415,13 +486,30 @@ class LiveSignalViewer(QWidget, WindowMixin):
             raw_reason = row.get('reason', '')
             display_reason = (raw_reason[:30] + "...") if len(raw_reason) > 30 else raw_reason
 
-            # 列映射: 恢复原始逻辑，确保价格和理由位置不变
+            # 🚀 [NEW] 计算距今涨跌幅 (Price change from trigger price to current price)
+            trigger_price = float(row.get('price', 0.0))
+            change_pct_str = "-"
+            change_pct_val = -9999.0  # 占位值，便于无数据排序在最后
+            
+            if trigger_price > 0:
+                current_price = 0.0
+                if self.main_app and hasattr(self.main_app, 'df_all') and not self.main_app.df_all.empty:
+                    if code_val in self.main_app.df_all.index:
+                        current_price = float(self.main_app.df_all.loc[code_val].get('trade', 0.0))
+                
+                if current_price > 0:
+                    change_pct = (current_price - trigger_price) / trigger_price * 100
+                    change_pct_str = f"{change_pct:+.2f}%"
+                    change_pct_val = change_pct
+
+            # 列映射: 恢复原始逻辑，并插入“距今涨跌”
             values = [
                 row.get('timestamp', ''),
                 code_val,
                 row.get('name', ''),
                 row.get('action', ''),
                 row.get('price', 0.0),
+                (change_pct_val, change_pct_str),  # 🚀 [NEW] 距今涨跌 (使用 (sort_value, display_text) 支持数值排序)
                 display_reason, # 此处使用截断后的理由
                 display_flow,   # 此处使用截断后的信号流
                 row.get('resample', 'd'),
@@ -448,16 +536,27 @@ class LiveSignalViewer(QWidget, WindowMixin):
                 item = NumericTableWidgetItem(val)
                 
                 # 提示与原始数据存储逻辑适配
-                if col_idx == 6: # 信号流列
+                if col_idx == 7: # 信号流列 (原 6)
                     item.setData(Qt.ItemDataRole.UserRole, flow_val) # [CRITICAL] 存储未截断的原始流文本
                     item.setToolTip(current_flow_details)
                     if any(x in flow_val for x in ['卖', 'DOWN', '离场', '出局']):
                         item.setForeground(QColor("#95a5a6"))
-                elif col_idx == 5: # 理由列
+                elif col_idx == 6: # 理由列 (原 5)
                     item.setData(Qt.ItemDataRole.UserRole, raw_reason) # [CRITICAL] 存储未截断的原始理由文本
                     # 理由列的 ToolTip 也要包含完整理由
                     reason_tip = f"📝 完整理由:\n{raw_reason}\n\n{tooltip_str}" if tooltip_str else f"📝 完整理由:\n{raw_reason}"
                     item.setToolTip(reason_tip)
+                elif col_idx == 5: # 🚀 [NEW] 距今涨跌幅列高亮与染色
+                    sort_val, display_str = val
+                    if sort_val > -9990.0:
+                        if sort_val > 0:
+                            item.setForeground(QColor("#e74c3c")) # 亮红色 (配合动作红)
+                            item.setFont(QFont("Arial", weight=QFont.Weight.Bold))
+                        elif sort_val < 0:
+                            item.setForeground(QColor("#27ae60")) # 亮绿色 (配合动作绿)
+                            item.setFont(QFont("Arial", weight=QFont.Weight.Bold))
+                    else:
+                        item.setForeground(QColor("#95a5a6")) # 灰色占位符 "-"
                 elif col_idx == 1: # 代码列
                     combined_tip = f"{current_flow_details}\n\n{tooltip_str}" if tooltip_str else current_flow_details
                     item.setToolTip(combined_tip)
@@ -500,8 +599,8 @@ class LiveSignalViewer(QWidget, WindowMixin):
             self.type_combo.setCurrentIndex(0) # 切换到“全部”
             self.refresh_data() # 触发新查询（会存入历史）
             self.status_msg_signal.emit(f"已钻取查询股票: {code}")
-        # 2. 理由 (5) 或 信号流 (6) 列: 弹出深度详情对话框 (放大镜功能)
-        elif col in [5, 6]:
+        # 2. 理由 (6) 或 信号流 (7) 列: 弹出深度详情对话框 (放大镜功能) (由于插入“距今涨跌”移至 6, 7)
+        elif col in [6, 7]:
             # [UPDATE] 由于理由列也实施了 30 字符截断，故恢复双击弹出详情功能
             # [CRITICAL] 针对理由/信号流列，应从 ToolTip 中提取完整背景信息
             # 这里的 item 是 QTableWidgetItem
@@ -521,7 +620,7 @@ class LiveSignalViewer(QWidget, WindowMixin):
             display_content = tip_content if tip_content else (raw_content if raw_content else cell_text)
             
             # 如果是信号流列，可以在头部稍微增强一下动作链的可读性
-            if col == 6 and raw_content:
+            if col == 7 and raw_content:
                 display_content = f"【今日信号流】\n{raw_content}\n\n" + display_content
             
             title = f"复盘详情: {name} ({code})"
@@ -546,21 +645,34 @@ class LiveSignalViewer(QWidget, WindowMixin):
         """统一触发联动逻辑"""
         code_item = self.table.item(row, 1)
         name_item = self.table.item(row, 2)
+        time_item = self.table.item(row, 0)
         if code_item and name_item:
             code = code_item.text().strip()
             name = name_item.text().strip()
-            self.stock_selected_signal.emit(code, name, select_win)
+            time_val = time_item.text().strip() if time_item else ""
+            # [UPGRADE] 时间仅取年月日 (YYYY-MM-DD)，避免包含时分秒导致联动或数据匹配异常
+            if time_val:
+                if " " in time_val:
+                    time_val = time_val.split(" ")[0]
+                elif "T" in time_val:
+                    time_val = time_val.split("T")[0]
+            self.stock_selected_signal.emit(code, name, select_win, time_val)
 
-    def _execute_linkage(self, code, name="", select_win=False):
+    def _execute_linkage(self, code, name="", select_win=False, timestamp=None):
         """核心：跨进程/框架联动逻辑 (整合自 KlineBackupViewer 模式)"""
-        if not code or self._select_code == str(code):
+        if not code:
             return
             
+        linkage_key = (str(code), str(timestamp) if timestamp else "")
+        if getattr(self, '_last_linkage_key', None) == linkage_key:
+            return
+        self._last_linkage_key = linkage_key
+        
         # 🛡️ 记录当前选中，确保状态同步
         self._select_code = str(code)
         
         # 🚀 联动主程序状态反馈
-        msg = f"🚀 已联动主程序: {code} {name} (Push:{select_win})"
+        msg = f"🚀 已联动主程序: {code} {name} (Time:{timestamp or 'None'}) (Push:{select_win})"
         self.status_label.setText(msg)
 
         # 2. 核心：通过主程序分发队列进行 UI 指令下发 (防 GIL 锁模式)
@@ -571,14 +683,17 @@ class LiveSignalViewer(QWidget, WindowMixin):
                     # A. 联动可视化：如果开启了 vis 标志，且主程序支持 open_visualizer，则同步开启
                     if getattr(self.main_app, "_vis_enabled_cache", False):
                         if hasattr(self.main_app, 'open_visualizer'):
-                            self.main_app.tk_dispatch_queue.put(lambda c=code: self.main_app.open_visualizer(str(c)))
+                            self.main_app.tk_dispatch_queue.put(lambda c=code, t=timestamp: self.main_app.open_visualizer(str(c), timestamp=t))
                     
                     # B. 联动主界面：执行主调回调 (如 on_code_click)
                     # 尝试多种调用签名以兼容不同的联动入口
-                    self.main_app.tk_dispatch_queue.put(lambda c=code: self.on_select_callback(str(c)))
+                    self.main_app.tk_dispatch_queue.put(lambda c=code, t=timestamp: self.on_select_callback(str(c), date=t))
                 else:
                     # C. 直接降级调用
-                    self.on_select_callback(str(code))
+                    try:
+                        self.on_select_callback(str(code), date=timestamp)
+                    except TypeError:
+                        self.on_select_callback(str(code))
             except Exception as e:
                 print(f"Linkage execute error (LiveSignalViewer): {e}")
         else:         # 1. 独立运行时的外部发送器联动
@@ -615,6 +730,14 @@ class LiveSignalViewer(QWidget, WindowMixin):
         row = item.row()
         code = self.table.item(row, 1).text()
         name = self.table.item(row, 2).text()
+        time_item = self.table.item(row, 0)
+        time_val = time_item.text().strip() if time_item else ""
+        # [UPGRADE] 时间仅取年月日 (YYYY-MM-DD)，避免包含时分秒导致联动或数据匹配异常
+        if time_val:
+            if " " in time_val:
+                time_val = time_val.split(" ")[0]
+            elif "T" in time_val:
+                time_val = time_val.split("T")[0]
         
         menu = QMenu(self)
         
@@ -623,7 +746,7 @@ class LiveSignalViewer(QWidget, WindowMixin):
         menu.addAction(copy_action)
         
         link_action = QAction("🎯 联动 K 线 (不跳转)", self)
-        link_action.triggered.connect(lambda: self.stock_selected_signal.emit(code, name, False))
+        link_action.triggered.connect(lambda: self.stock_selected_signal.emit(code, name, False, time_val))
         menu.addAction(link_action)
 
         # jump_action = QAction("🚀 定位股票 (触发推送)", self)
@@ -666,6 +789,14 @@ class LiveSignalViewer(QWidget, WindowMixin):
             
             # 3. 通知父对象进行解构/引用清理
             self.window_closed_signal.emit()
+            
+            # 4. 自动清理主程序及 panel_manager 中的引用缓存，防止 C++ 析构后残留引用引起二次调用异常
+            if self.main_app:
+                if getattr(self.main_app, '_live_signal_viewer', None) is self:
+                    self.main_app._live_signal_viewer = None
+                if hasattr(self.main_app, 'panel_manager') and self.main_app.panel_manager:
+                    if getattr(self.main_app.panel_manager, '_live_signal_viewer', None) is self:
+                        self.main_app.panel_manager._live_signal_viewer = None
             
         except Exception as e:
             print(f"LiveSignalViewer Cleanup Error: {e}")

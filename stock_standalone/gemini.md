@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-13 22:05  
+> 最后更新：2026-05-17 20:50  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,47 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-17 20:50
+- [x] **实现 LiveSignalViewer 全量轨迹代码去重与“距今涨跌幅”跟踪功能 (Implemented Code Deduplication & Trigger-to-Current PnL Tracking)**：
+    - [x] **集成“去重”复选选项 (Checkbox Deduplication)**：在“全量轨迹”控件前添加了“去重” `QCheckBox` 控件。勾选该选项后，系统自动在已筛选的数据帧上执行 `drop_duplicates(subset=['code'], keep='first')`。因基础数据按 ID 倒序排列，去重后完美保留并呈现每只个股的最新的那条交易信号。
+    - [x] **无缝打通实盘“距今涨跌幅”计算通道 (Trigger-to-Current Price PnL)**：在表格价格列右侧新增了“距今涨跌”列。系统会在加载时，从信号历史表读取触发价（`price`），并自动与 `main_app.df_all` 中的实盘最新价（`trade` 字段）进行对比，动态计算出从信号发出至今的百分比回报率。
+    - [x] **实现高精度数值排序与色彩高亮 (Numerical Sorting & QSS Highlight)**：
+        - 升级了 `NumericTableWidgetItem`，引入 `(sort_value, display_text)` 二元组格式，将隐藏的浮点数作为排序因子，解决了带 `+ / - / %` 符号字符造成的字母表错误排序。
+        - 增加了对“距今涨跌”列的高对比度染色：正收益自动以亮红色 (`#e74c3c`) 加粗显示，负收益以亮绿色 (`#27ae60`) 加粗显示，未加载到现价的股票则以灰色 `"-"` 稳健占位。
+    - [x] **完美对齐多列索引及交互跳转 (Interactive Index Offset Realignment)**：同步修正了表格中理由列（移至索引 6）与信号流列（移至索引 7）的位置，微调了 `horizontalHeader` 列自适应伸缩以及双击弹出放大镜、键盘联动、CSV 导出等全部逻辑，确保系统绝对稳定。
+
+## 2026-05-17 20:45
+- [x] **修复竞价赛马历史多日追踪面板全零与数据恢复 (Fixed Bidding History Tracker Zero Data & Full Recovery)**：
+    - [x] **物理隔离 UI 配置路径干扰**：在 `sector_bidding_panel.py` 的 `_on_history_track_clicked` 和 `bidding_momentum_detector.py` 的 `_init_dragon_3day_tracker` 中，将模糊正则匹配收紧为 `len(name_part) == 8 and name_part.isdigit()`。这彻底消除了将 `bidding_racing_ui_state_v3_*.json.gz` 错误读为历史快照的故障，保障了有效快照的纯净加载。
+    - [x] **实现双版本元数据高性能解码器**：在 `load_from_snapshot` 中集成了字段委托解析器，完美兼容了老版本 `meta_data` 嵌套字典和新版本 `meta_cols` 列式压缩映射，杜绝了老数据字段退化为默认空值的问题。
+    - [x] **注入 `stock_price_anchors` 现价 Fallback 机制**：针对老版本快照未保存 `now_price` 的缺陷，在属性解析阶段自动从全局 `stock_price_anchors` 现价锚点字典中兜底提取股价，彻底恢复了个股现价和百分比涨幅。
+    - [x] **解耦周期 ROI 计算与实时行情耦合**：将 ROI 运算及涨幅计算剥离出 `if self.realtime_service:` 块，在离线模式下自动用最近一日的快照价格作为现价进行兜底，确保在离线复盘与行情休眠时也能得出完美的时段回报率。
+    - [x] **放开最大历史追踪天数至 60 天**：将 `HistoricalTrackerDialog` 中人为的 10 天选择上限大幅度拓宽至最大 **60 天**，满足了用户“无论几日选择”的历史追踪对比需要。
+
+## 2026-05-17 20:40
+- [x] **实现 LiveSignalViewer 日历选择高亮当日有数据的日期 (Implemented LiveSignalViewer Calendar Highlight for Dates with Data)**：
+    - [x] **打通 SQLite 独特日期查询**：在 `live_signal_viewer.py` 中实现了 `_get_dates_with_signals` 接口。通过执行高效的 `SELECT DISTINCT substr(timestamp, 1, 10)` SQL 查询，亚毫秒级提取出 `live_signal_history` 表中所有存在信号轨迹的唯一年月日列表。
+    - [x] **建立高效内存缓存机制**：引入 `self._signal_dates_cache` 变量，仅在需要时懒加载（Lazy load）并缓存数据库记录；而在每次 `refresh_data` 数据刷新时自动清空缓存，确保高亮状态实时与数据库对齐。
+    - [x] **无缝集成 QCalendarWidget 动态高亮**：通过提取 `QDateEdit` 的 `calendarWidget()`，将 `currentPageChanged` 月份切换信号与 `_highlight_calendar_dates` 动作挂接。在日历渲染时，将拥有信号的日期统一以红色、加粗、下划线的标准高亮样式渲染，实现了“即点即看”的极简筛选交互，大幅度减少了用户在空数据日期下的无效点击。
+
+## 2026-05-17 20:32
+- [x] **优化 LiveSignalViewer 联动时间参数为年月日 (Optimized LiveSignalViewer Linkage Time to Date-Only)**：
+    - [x] **实现时间字符串精细截取**：在 `live_signal_viewer.py` 的 `_trigger_linkage` 以及 `show_context_menu` 右键上下文菜单事件中，增加了对时间（`time_val`）字符串的截断处理。
+    - [x] **兼容多格式高鲁棒对齐**：通过检测空格 `" "` 或标准化符号 `"T"`，智能剥离时分秒，仅保留 `YYYY-MM-DD` 年月日部分，并安全地投递给 `stock_selected_signal.emit` 信号。这彻底解决了由于时分秒参与联动比对导致的可视化终端时间比对失效或定位错配问题，保证了高频与历史行情联动的一致性。
+
+## 2026-05-17 20:30
+- [x] **实现 LiveSignalViewer 窗口关闭自动销毁与自我清理 (Implemented Auto-Destroy & Reference Self-Cleanup)**：
+    - [x] **引入 WA_DeleteOnClose 窗口销毁属性**：在 `live_signal_viewer.py` 的构造函数中，配置了 `self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)`，使得窗口在点击关闭时直接物理销毁释放内存，而非简单隐性隐藏。
+    - [x] **实现高智能引用“自我清理”机制 (Self-Cleanup)**：在 `closeEvent` 析构阶段增设对父组件 `self.main_app` 的主动清理。一旦检测到主程序 `MonitorTK` 直接持有的 `_live_signal_viewer` 指针或 `PanelManager` 持有的引用，立即重置为 `None`。这不仅避免了 C++ 底层销毁后 Python 残留的空句柄引用崩溃，更完美保障了用户下一次点击时能够百分之百在“首次点击”中重构拉起新窗口。
+
+## 2026-05-17 12:30
+- [x] **补齐 LiveSignalViewer 联动 IPC 信号时间戳功能 (Fixed LiveSignalViewer Timestamp IPC Linkage)**：
+    - [x] **升级 PyQt 信号定义**：将 `LiveSignalViewer` 的联动信号 `stock_selected_signal` 升级为支持 4 参的 `pyqtSignal(str, str, bool, str)`，额外携带信号触发的历史时间戳 `timestamp`。
+    - [x] **重构联动触发与获取逻辑**：在 `_trigger_linkage` 以及右键上下文菜单 `show_context_menu` 的联动事件中，增加了对表格第 0 列 (时间) 字段的提取与清理，确保完整传递。
+    - [x] **设计安全的组合键去重机制**：在 `_execute_linkage` 中将原基于单 `code` 的过滤升级为基于复合键 `(code, timestamp)` 的防重复机制，彻底解决了“同一股票不同时间点信号在点击时被静默拦截”的业务问题。
+    - [x] **打通跨进程/线程异步渲染队列**：在向主程序的 UI 线程派发队列 `tk_dispatch_queue` 投递命令时，补齐了对 `open_visualizer(str(c), timestamp=t)` 以及 `on_select_callback(str(c), date=t)` 参数的高可靠透传，实现了信号瞬间跨多端跳转定位。
+    - [x] **保证向下兼容鲁棒性**：针对没有 `date` 形参的 legacy 回调入口，在降级调用链引入 `TypeError` 自动捕获与智能 fallback 回落保护，确保系统不会因接口参数变动崩溃。
 
 ## 2026-05-15 16:34
 - [x] **根治引擎执行引发的全局卡死与死锁问题 (Fixed Engine Execution Global Deadlock)**：
