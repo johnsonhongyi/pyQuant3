@@ -28,6 +28,50 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-18 00:20
+- [x] **实现手动加自选同步 K 线图表交易时间功能 (Synced Manual Hotlist Addition with K-line Historical Chart Time)**：
+    - [x] **升级 `add_stock` 通用参数与时间戳分流机制**：在 `hotlist_panel.py` 中为 `add_stock` 方法引入了可选参数 `add_time: str = None`。在执行数据库 `INSERT` 时，若显式传递了 `add_time`，则使用该指定时间写入 `follow_date` 字段，否则自适应回退为当前的物理系统时间。
+    - [x] **智能捕捉 K 线图最末交易时间点**：在 `trade_visualizer_qt6.py` 的两处 `_add_to_hotlist`（右键按钮及快捷键 "H" 触发）核心逻辑中，增加对 `self.day_df` 最右端 K 线时间戳（`self.day_df.index[-1]`）的智能抓取。
+    - [x] **完美解决复盘时自选时间穿越的缺陷**：在历史复盘或回放模式下，向热点自选添加股票时，记录的不再是用户此刻点击时的物理系统时间（如深夜/凌晨），而是图表当前所呈现的历史最后交易日的截止时间（结合系统当前时分秒以保留多股加入时的先后时序）。这彻底保全了复盘数据在历史轨迹追踪时的先后关联一致性。
+
+## 2026-05-18 00:15
+- [x] **优化 LiveSignalViewer 提示窗口为 2 秒定时自毁模式 (Optimized QMessageBox to Auto-close in 2 Seconds)**：
+    - [x] **非阻塞定时自动关闭**：将 `LiveSignalViewer.run_dna_audit` 方法执行完毕后的 `QMessageBox` 同步阻塞提示框升级为搭载 `QTimer.singleShot(2000, msg_box.accept)` 的智能弹窗。这使用户在发出 DNA 审计请求后无需手动点击 "OK" 按钮进行关闭确认，系统会在 2 秒后自动干净回收弹出视窗，极大提升了流畅交易体验。
+
+## 2026-05-18 00:10
+- [x] **升级 LiveSignalViewer 批量 DNA 审计为 Smart Selection & Top-50 探测规则 (Upgraded LiveSignalViewer Batch DNA Audit to Smart Selection & Top-50 Rules)**：
+    - [x] **实现与 Tkinter 深度对齐的高级选股探测**：重构了 `LiveSignalViewer.run_dna_audit` 方法的个股抽取流程。
+    - [x] **三大智能检测模式落地**：
+        - **多选模式**：若用户选中多行，精准审计选中项，上限 50 只。
+        - **单选模式**：若用户选中单行，智能实现“向下瀑布探测”，从选中项向下延伸审计 50 只个股（含选中项本身）。
+        - **无选模式**：若未选中任何行，自发退守为默认审计当前显示列表的前 50 只个股。
+    - [x] **无卡顿安全分发与多级容错**：本规则无缝穿透在 PyQt6 内存中过滤和去重后的最终可视列表，继续通过 `tk_dispatch_queue` 管道将动态 `{code: name}` 发送至主程序执行，实现全平台业务逻辑大一统。
+
+## 2026-05-18 00:05
+- [x] **优化 K 线顶部指标看板交互比对与红绿心/箭头高亮 (Optimized Top Indicator Legend with Trend Arrows & Hearts)**：
+    - [x] **实现当前收盘价与指标价格的动态实时比例比对**：在 `MainWindow._update_ma_legend` 渲染层中，提取当前 K 线的收盘价格 `close_p`。
+    - [x] **自动追加红/绿趋势箭头与明黄色红心图标**：
+        - 偏离度大于指标 **101%** 时：在指标数值后自动追加红色高亮的向上三角形 `▲`。
+        - 偏离度小于指标 **99%** 时：在指标数值后自动追加绿色高亮的向下三角形 `▼`。
+        - 处于 **99% - 101%** 的均值贴近波动区间内：自动在指标数值后追加一朵明黄色的心形图标 `💛`（表示股价与均线/指标极度贴合，预示蓄势变盘）。
+    - [x] **全指标智能覆盖与防错保护**：本动态对比高亮规则全面覆盖了 **MA5 / MA10 / MA20 / MA60 / BOLL UP / BOLL DN** 以及翻转线 **REV**，并在数据缺失、新股冷启动或指标未就绪时执行零负荷的安全 fallback，极大丰富了实盘看盘的视觉反馈与直观分析力。
+
+## 2026-05-17 23:55
+- [x] **集成 LiveSignalViewer 跨进程 DNA 批量审计联动功能 (Integrated Cross-Process DNA Audit Linkage in LiveSignalViewer)**：
+    - [x] **在顶部去重选项前新增 DNA 审计按钮**：在 `LiveSignalViewer` 工具栏“去重”复选框左侧，集成了绿色的 `self.dna_btn` ("🧬 DNA审计")，点击即可对当前可见的个股进行一键快速审计。
+    - [x] **智能批量收集当前可见股票**：实现 `run_dna_audit` 方法，在触发时自动扫描当前表格中经过过滤或去重后所有可见的股票行，动态抽取 `{code: name}` 映射，并获取当前选择的 `date_input` 日期作为 `end_date`。
+    - [x] **采用跨框架事件分发队列彻底规避 GIL 锁与死锁**：放弃在 PyQt 子窗口直接调用后台审计，重构为向主程序的 `self.main_app.tk_dispatch_queue` 安全派发 `lambda c=codes_dict, ed=end_date: self.main_app._run_dna_audit_batch(c, end_date=ed)`。这实现了 PyQt 子窗口与 Tkinter 主线程的极速跨框架异步安全通信，彻底避免了由于跨框架多线程竞争导致的 GIL 锁死锁与主界面假死问题。
+
+## 2026-05-17 23:42
+- [x] **实现 K 线图顶部实时 MA 与布林等指标数值看板 (Implemented Top Indicator Legend synced with Crosshair & Themes)**：
+    - [x] **实现固定在 ViewBox 的 HTML 渲染节点**：在 K 线图的 ViewBox 左上角引入并挂载了独立的 `self.ma_legend_label` (`pg.TextItem`)。通过 `setParentItem(self.kline_plot.getViewBox())` 彻底解决了 K 线平移缩放导致看板位移的难题，并在背景添加半透明暗色背景提升了在极限行情背景下的阅读体验。
+    - [x] **全周期指标自动存储至数据管道**：在 `_render_charts_logic` 的各画线模块，同步将计算好的 `boll_upper`、`boll_lower` 以及翻转线 `reversal_line` 等动态指标数据实时推入 `day_df` 数据管道中，实现了 $O(1)$ 的无损存取。
+    - [x] **高保真色彩对齐与主题自适应**：在 `_update_ma_legend` 渲染层中，根据当前 `qt_theme` 动态解析各指标名称的 Hex 颜色，使看板文字的颜色与图表上绘制出的线条曲线（亮绿、亮黄、橙色、亮蓝、粉红、大红等）100% 精准对齐，完美对齐通达信看盘习惯。
+    - [x] **实现“十字星移动+还原”的双向联动**：
+        - 挂载至 `_update_crosshair_ui`：在十字星移动时，顶部数值瞬间跳转呈现当前光标所触 K 线的精确计算值。
+        - 挂载至 `_hide_crosshair`：在鼠标移出图表或十字星隐藏时，看板自动平滑还原为显示最新一根日 K 线（最新价）的对应指标数值，彻底根治看盘盲区。
+        - 智能挂载翻转线 `REV`：当九转序列中的翻转曲线激活且可见时，看板右侧自发延伸显示 `REV` 指标值。
+
 ## 2026-05-17 20:50
 - [x] **实现 LiveSignalViewer 全量轨迹代码去重与“距今涨跌幅”跟踪功能 (Implemented Code Deduplication & Trigger-to-Current PnL Tracking)**：
     - [x] **集成“去重”复选选项 (Checkbox Deduplication)**：在“全量轨迹”控件前添加了“去重” `QCheckBox` 控件。勾选该选项后，系统自动在已筛选的数据帧上执行 `drop_duplicates(subset=['code'], keep='first')`。因基础数据按 ID 倒序排列，去重后完美保留并呈现每只个股的最新的那条交易信号。

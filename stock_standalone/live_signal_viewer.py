@@ -175,6 +175,12 @@ class LiveSignalViewer(QWidget, WindowMixin):
         
         ctrl_layout.addStretch()
         
+        # 🧬 [NEW] DNA 审计功能按钮 (集成在去重前面，通过分发队列避免 GIL 锁)
+        self.dna_btn = QPushButton("🧬 DNA审计")
+        self.dna_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 2px 8px;")
+        self.dna_btn.clicked.connect(self.run_dna_audit)
+        ctrl_layout.addWidget(self.dna_btn)
+
         # 🚀 [NEW] 去重功能选项 (在全量轨迹前)
         self.dedup_checkbox = QCheckBox("去重")
         self.dedup_checkbox.stateChanged.connect(self._apply_view_filter)
@@ -776,6 +782,85 @@ class LiveSignalViewer(QWidget, WindowMixin):
                 self.status_msg_signal.emit(f"已导出至: {os.path.basename(file_path)}")
             except Exception as e:
                 QMessageBox.critical(self, "导出异常", str(e))
+
+    def run_dna_audit(self):
+        """
+        🧬 对当前表格中可见的个股进行 DNA 审计，通过主程序分发队列执行，避免 GIL 锁/线程死锁问题。
+        采用与主程序 Tkinter 逻辑完全一致的高级探测逻辑 (上限 50 只)：
+        1. 多选模式：仅审计选中的行 (上限 50 只)
+        2. 单选模式：从当前选中行开始向下审计 50 只 (包含选中行本身)
+        3. 无选模式：默认审计当前显示列表的前 50 只个股
+        """
+        if not self.main_app:
+            QMessageBox.warning(self, "提示", "未关联主程序，无法执行 DNA 审计。")
+            return
+
+        if not hasattr(self.main_app, 'tk_dispatch_queue') or not self.main_app.tk_dispatch_queue:
+            QMessageBox.warning(self, "提示", "主程序不支持分发队列，无法执行 DNA 审计。")
+            return
+
+        total_rows = self.table.rowCount()
+        if total_rows == 0:
+            QMessageBox.information(self, "提示", "当前显示列表为空，无有效个股可执行 DNA 审计。")
+            return
+
+        # 获取当前选中的所有行索引
+        selected_indexes = self.table.selectionModel().selectedRows()
+        selected_rows = sorted([idx.row() for idx in selected_indexes])
+        
+        limit_code = 50
+        target_rows = []
+
+        if len(selected_rows) > 1:
+            # 多选模式：仅审计选中的 (上限 50)
+            target_rows = selected_rows[:limit_code]
+            mode_desc = f"选中的 {len(target_rows)} 只"
+        elif len(selected_rows) == 1:
+            # 单选模式：从选中行开始向下 50 只 (包含本身)
+            start_idx = selected_rows[0]
+            end_idx = min(start_idx + limit_code, total_rows)
+            target_rows = list(range(start_idx, end_idx))
+            mode_desc = f"从选中行向下 {len(target_rows)} 只"
+        else:
+            # 无选模式：默认前 50 只
+            end_idx = min(limit_code, total_rows)
+            target_rows = list(range(0, end_idx))
+            mode_desc = f"列表前 {len(target_rows)} 只"
+
+        # 收集目标个股代码和名称
+        codes_dict = {}
+        for r in target_rows:
+            code_item = self.table.item(r, 1) # 代码列在索引 1
+            name_item = self.table.item(r, 2) # 名称列在索引 2
+            if code_item:
+                code_str = code_item.text().strip()
+                name_str = name_item.text().strip() if name_item else ""
+                if code_str:
+                    codes_dict[code_str] = name_str
+
+        if not codes_dict:
+            QMessageBox.information(self, "提示", "所选范围内无有效个股代码。")
+            return
+
+        end_date = self.date_input.date().toString("yyyy-MM-dd")
+        
+        # 通过主程序 tk_dispatch_queue 分发执行，彻底避免 PyQt 与 Tkinter GIL 锁冲突
+        try:
+            self.main_app.tk_dispatch_queue.put(
+                lambda c=codes_dict, ed=end_date: self.main_app._run_dna_audit_batch(c, end_date=ed)
+            )
+            # 创建一个提示框并开启 2 秒自动关闭定时器
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("DNA 审计启动")
+            msg_box.setText(f"已成功将 {mode_desc} 个股的 DNA 审计请求发送至主程序后台，请在主窗口查看审计进度。")
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            
+            # 2秒自动关闭
+            QTimer.singleShot(1000, msg_box.accept)
+            msg_box.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"发送 DNA 审计请求失败: {e}")
 
     def closeEvent(self, event):
         """持久化窗口位置信息并执行清理逻辑"""
