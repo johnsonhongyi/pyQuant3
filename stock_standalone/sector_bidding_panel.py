@@ -648,11 +648,15 @@ class HistoricalTrackerWorker(QThread):
                         sector_stats[sn]['codes'].add(code)
                         
                         if code not in all_candidate_dict:
+                            p_val = float(snap.get('price', 0.0))
                             all_candidate_dict[code] = {
                                 'code': code, 'name': snap.get('name', code), 'sector': sn,
                                 'hist_hits': 1, 'hist_scores': {date_str: snap.get('score', 0)},
-                                'hist_price': float(snap.get('price', 0.0)),
-                                'curr_price': 0.0, 'roi': 0.0, 'curr_score': 0.0, 'momentum': 0.0,
+                                'hist_price': p_val,
+                                'curr_price': p_val, # 默认将最近（最新）一日的快照价格作为现价兜底
+                                'roi': 0.0, 
+                                'curr_score': float(snap.get('score', 0.0)), # 默认将最近一日的 score 作为当前分兜底
+                                'momentum': float(snap.get('pct', 0.0)), # 默认将最近一日的涨幅作为动能兜底
                                 'pattern': '--', 'label': '', 'is_main': False, 'klines': [],
                                 'potential_score': 0.0, 'meta': snap
                             }
@@ -681,11 +685,13 @@ class HistoricalTrackerWorker(QThread):
                     
                     if item['hist_price'] <= 0 and klines:
                         item['hist_price'] = float(klines[0].get('close', 0))
-                    if item['hist_price'] > 0 and item['curr_price'] > 0:
-                        item['roi'] = (item['curr_price'] / item['hist_price'] - 1) * 100
                     if item['sector'] == 'N/A' or not item['sector']:
                         e_data = self.realtime_service.get_55188_data(code)
                         if e_data: item['sector'] = e_data.get('theme_name', e_data.get('concept', 'N/A'))
+                
+                # 计算 ROI (独立于 realtime_service 的有无，确保始终有正确的周期追踪回报)
+                if item['hist_price'] > 0 and item['curr_price'] > 0:
+                    item['roi'] = (item['curr_price'] / item['hist_price'] - 1) * 100
 
             # STEP 3: 板块效应与龙、一致性判定
             results = list(all_candidate_dict.values())
@@ -751,7 +757,7 @@ class HistoricalTrackerDialog(QDialog, WindowMixin):
         tool_lay = QHBoxLayout()
         tool_lay.addWidget(QLabel("📅 分析多日:"))
         self.spin_days = QSpinBox()
-        self.spin_days.setRange(1, min(10, len(self.all_snap_paths)))
+        self.spin_days.setRange(1, min(60, len(self.all_snap_paths)))
         self.spin_days.setValue(3)
         self.spin_days.setFixedWidth(50)
         tool_lay.addWidget(self.spin_days)
@@ -4776,8 +4782,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not os.path.exists(snapshots_dir):
             os.makedirs(snapshots_dir, exist_ok=True)
             
-        # 自动获取所有快照文件
-        all_snaps = [os.path.join(snapshots_dir, f) for f in os.listdir(snapshots_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
+        # 自动获取所有快照文件 (精确匹配 bidding_YYYYMMDD.json.gz 格式，避免混入 UI 配置等文件)
+        all_snaps = []
+        for f in os.listdir(snapshots_dir):
+            if f.startswith('bidding_') and f.endswith('.json.gz'):
+                name_part = f.replace('.json.gz', '').replace('bidding_', '')
+                if name_part.isdigit() and len(name_part) == 8:
+                    all_snaps.append(os.path.join(snapshots_dir, f))
         all_snaps.sort(reverse=True) # 最近的在前
         
         # 剔除过于小的文件（可能是损坏的）

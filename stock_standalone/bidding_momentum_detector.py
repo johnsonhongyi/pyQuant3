@@ -1503,6 +1503,7 @@ class BiddingMomentumDetector:
             stock_scores = data.get('stock_scores', {})
             momentum_scores = data.get('momentum_scores', {})
             meta_cols = data.get('meta_cols', {})
+            meta_data = data.get('meta_data', {})
             
             # [PHASE-1] 重构个股数据与 K 线 (无锁，不阻塞 UI 访问现有数据)
             codes_list = meta_cols.get('code', [])
@@ -1517,52 +1518,86 @@ class BiddingMomentumDetector:
                 ts.score = score
                 ts.momentum_score = momentum_scores.get(code, 0.0)
                 
+                # 统一的属性获取器，支持 meta_cols (新列式) 及 meta_data (老字典式)
+                _get_val = None
                 if meta_idx_map:
                     i_idx = meta_idx_map.get(code)
                     if i_idx is not None:
                         def _get_val(key, default):
                             v_list = meta_cols.get(key, [])
                             return v_list[i_idx] if i_idx < len(v_list) and v_list[i_idx] is not None else default
-                        
-                        ts.name = _get_val('n', code)
-                        
-                        # [🚀 SANITIZATION] 过滤空名字、占位名字
-                        if not ts.name or str(ts.name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
-                            continue
+                elif meta_data and code in meta_data:
+                    m_val = meta_data[code]
+                    if isinstance(m_val, dict):
+                        _key_map = {
+                            'n': 'name',
+                            'c': 'category',
+                            'lc': 'last_close',
+                            'op': 'open_price',
+                            'hd': 'high_day',
+                            'ld': 'low_day',
+                            'lh': 'last_high',
+                            'll': 'last_low',
+                            'np': 'now_price',
+                            'fb': 'first_breakout_ts',
+                            'rl': 'ral',
+                            'iu': 'is_untradable',
+                            'ic': 'is_counter_trend',
+                            'ph': 'pattern_hint',
+                            'sc': 'signal_count',
+                            'k': 'klines'
+                        }
+                        def _get_val(key, default):
+                            long_key = _key_map.get(key, key)
+                            val = m_val.get(long_key, m_val.get(key, default))
+                            # 针对 np 另外做 price / now / trade 的兼容回退
+                            if key == 'np' and val == default:
+                                val = m_val.get('price', m_val.get('now', m_val.get('trade', default)))
+                            return val
 
-                        ts.category = _get_val('c', '')
-                        ts.last_close = _get_val('lc', 0.0)
-                        ts.high_day = _get_val('hd', 0.0)
-                        ts.low_day = _get_val('ld', 0.0)
-                        ts.last_high = _get_val('lh', 0.0)
-                        ts.last_low = _get_val('ll', 0.0)
-                        ts.now_price = _get_val('np', 0.0)
-                        ts.first_breakout_ts = _get_val('fb', 0.0)
-                        ts.ral = _get_val('rl', 0)
-                        ts.is_untradable = bool(_get_val('iu', False))
-                        ts.is_counter_trend = bool(_get_val('ic', False))
-                        ts.pattern_hint = _get_val('ph', '')
-                        ts.signal_count = _get_val('sc', 0)
-                        if ts.signal_count > 0:
-                            ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
-                        
-                        ts.klines.clear()
-                        k_data = _get_val('k', [])
-                        for k in decompress_klines(k_data):
-                            ts.push_kline(k)
+                if _get_val is not None:
+                    ts.name = _get_val('n', code)
+                    
+                    # [🚀 SANITIZATION] 过滤空名字、占位名字
+                    if not ts.name or str(ts.name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+                        continue
+
+                    ts.category = _get_val('c', '')
+                    ts.last_close = _get_val('lc', 0.0)
+                    ts.high_day = _get_val('hd', 0.0)
+                    ts.low_day = _get_val('ld', 0.0)
+                    ts.last_high = _get_val('lh', 0.0)
+                    ts.last_low = _get_val('ll', 0.0)
+                    ts.now_price = _get_val('np', 0.0)
+                    if ts.now_price == 0.0:
+                        # 从 root 级别的 stock_price_anchors 中尝试找回股价，对齐老版本快照
+                        ts.now_price = float(data.get('stock_price_anchors', {}).get(code, 0.0))
+                    ts.first_breakout_ts = _get_val('fb', 0.0)
+                    ts.ral = _get_val('rl', 0)
+                    ts.is_untradable = bool(_get_val('iu', False))
+                    ts.is_counter_trend = bool(_get_val('ic', False))
+                    ts.pattern_hint = _get_val('ph', '')
+                    ts.signal_count = _get_val('sc', 0)
+                    if ts.signal_count > 0:
+                        ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
+                    
+                    ts.klines.clear()
+                    k_data = _get_val('k', [])
+                    for k in decompress_klines(k_data):
+                        ts.push_kline(k)
                 
-                new_tick_series[code] = ts
-                new_snap_cache[code] = {
-                    'code': code, 'score': score, 
-                    'pct': ts.current_pct, 'price': ts.current_price,
-                    'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
-                    'high_day': ts.high_day, 'low_day': ts.low_day,
-                    'last_high': ts.last_high, 'last_low': ts.last_low,
-                    'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
-                    'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                    'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts,
-                    'vol_ratio': ts.vol_ratio, 'signal_count': ts.signal_count
-                }
+                    new_tick_series[code] = ts
+                    new_snap_cache[code] = {
+                        'code': code, 'score': score, 
+                        'pct': ts.current_pct, 'price': ts.current_price,
+                        'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
+                        'high_day': ts.high_day, 'low_day': ts.low_day,
+                        'last_high': ts.last_high, 'last_low': ts.last_low,
+                        'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
+                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                        'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts,
+                        'vol_ratio': ts.vol_ratio, 'signal_count': ts.signal_count
+                    }
 
             # [PHASE-2] 原子替换 (短锁)
             with self._lock:
@@ -1738,11 +1773,15 @@ class BiddingMomentumDetector:
             files = [f for f in os.listdir(snapshot_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
             if len(files) < 1: return
             
-            # 提取日期并降序排列
+            # 提取日期并降序排列 (精确匹配 bidding_YYYYMMDD.json.gz 格式)
             dates = []
             for f in files:
-                try: d_str = f.split('_')[1].split('.')[0]; dates.append(d_str)
-                except: continue
+                try:
+                    name_part = f.replace('.json.gz', '').replace('bidding_', '')
+                    if name_part.isdigit() and len(name_part) == 8:
+                        dates.append(name_part)
+                except:
+                    continue
             dates.sort(reverse=True)
             
             # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
