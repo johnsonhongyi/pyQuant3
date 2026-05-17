@@ -3076,6 +3076,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.crosshair_label = pg.TextItem(anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0, 180))
         self.crosshair_label.setZValue(100)  # 最上层
 
+        # ⭐ [NEW] 创建 MA 等指标的顶部显示标签 (通达信样式，固定在 ViewBox 左上角)
+        self.ma_legend_label = pg.TextItem(anchor=(0, 0))
+        self.ma_legend_label.setParentItem(self.kline_plot.getViewBox())
+        self.ma_legend_label.setPos(10, 5) # 固定在 ViewBox 左上角 10px, 5px 位置
+        self.ma_legend_label.setZValue(99)  # 保证在最上层
+        self.ma_legend_label.setVisible(False)
+
         # 初始隐藏
         self.vline.setVisible(False)
         self.hline.setVisible(False)
@@ -3613,11 +3620,26 @@ class MainWindow(QMainWindow, WindowMixin):
         if not self.df_all.empty and self.current_code in self.df_all.index:
             row = self.df_all.loc[self.current_code]
             price = float(row.get('close', row.get('price', 0)))
+        elif not self.day_df.empty:
+            price = float(self.day_df['close'].iloc[-1]) if 'close' in self.day_df.columns else 0.0
+            
+        # [NEW] 从 K 线获取最新的最后交易时间，用于复盘添加自选时精准记录该交易时刻
+        add_time = None
+        if not self.day_df.empty:
+            try:
+                from datetime import datetime
+                last_dt = str(self.day_df.index[-1]).strip()
+                if len(last_dt) == 10:
+                    add_time = f"{last_dt} {datetime.now().strftime('%H:%M:%S')}"
+                elif len(last_dt) > 10:
+                    add_time = last_dt
+            except Exception as e:
+                logger.error(f"Error calculating K-line add_time: {e}")
         
-        if self.hotlist_panel.add_stock(self.current_code, name, price, "手动添加"):
+        if self.hotlist_panel.add_stock(self.current_code, name, price, "手动添加", add_time=add_time):
             if hasattr(self, 'voice_thread') and self.voice_thread:
                 self.voice_thread.speak(f"已添加 {name}")
-            logger.info(f"✅ 已添加到热点: {self.current_code} {name}")
+            logger.info(f"✅ 已添加到热点: {self.current_code} {name} at {add_time or '当前时间'}")
             
             # 立即在图表上绘制标记
             self._draw_hotspot_markers(self.current_code, getattr(self, 'x_axis', None), self.day_df)
@@ -6452,6 +6474,104 @@ class MainWindow(QMainWindow, WindowMixin):
         self.vline.setVisible(False)
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
+        self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
+
+    def _update_ma_legend(self, idx=None):
+        """
+        更新 K 线图顶部的 MA 和布林带等指标数值显示 (与通达信一致)
+        """
+        if not hasattr(self, 'ma_legend_label') or not self.ma_legend_label:
+            return
+
+        if self.day_df.empty:
+            self.ma_legend_label.setVisible(False)
+            return
+
+        # 如果没有指定 idx，或者 idx 超出范围，默认显示最新的数据 (最右侧一根 K 线)
+        if idx is None or idx < 0 or idx >= len(self.day_df):
+            idx = len(self.day_df) - 1
+
+        row = self.day_df.iloc[idx]
+        
+        # 提取各个均线与布林带数值
+        ma5_v = row.get('ma5', np.nan)
+        ma10_v = row.get('ma10', np.nan)
+        ma20_v = row.get('ma20', np.nan)
+        ma60_v = row.get('ma60', np.nan)
+        boll_up_v = row.get('boll_upper', np.nan)
+        boll_dn_v = row.get('boll_lower', np.nan)
+
+        # 根据当前主题获取指标名称的匹配颜色 (保证与画线颜色一致)
+        is_dark = getattr(self, 'qt_theme', 'dark') == 'dark'
+        if is_dark:
+            c_ma5 = "#00FF00"   # Bright Green
+            c_ma10 = "#FFA500"  # Orange
+            c_ma20 = "#FFFF00"  # Yellow
+            c_ma60 = "#00B4FF"  # Cyan-blue
+            c_up = "#DC143C"    # Crimson Red
+            c_dn = "#00C878"    # Bright Greenish-cyan
+        else:
+            c_ma5 = "#00C800"   # Darker Green
+            c_ma10 = "#FF8C00"  # Dark Orange
+            c_ma20 = "#FFA500"  # Orange
+            c_ma60 = "#0078FF"  # Royal Blue
+            c_up = "#C80000"    # Pure Red
+            c_dn = "#009600"    # Dark Green
+
+        # 提取当前收盘价格
+        close_p = row.get('close', np.nan)
+
+        def format_indicator_with_icon(val):
+            if pd.isna(val) or val <= 0:
+                return "-"
+            base_str = f"{val:.2f}"
+            if pd.isna(close_p) or close_p <= 0:
+                return base_str
+            
+            # 对比当前收盘价格与指标价格
+            ratio = close_p / val
+            if ratio > 1.01:
+                # 大于指标101% -> 红色上箭头
+                return f"{base_str}<span style='color:#FF3333; font-weight:bold; font-family:sans-serif;'>▲</span>"
+            elif ratio < 0.99:
+                # 小于指标99% -> 绿色下箭头
+                return f"{base_str}<span style='color:#00FF00; font-weight:bold; font-family:sans-serif;'>▼</span>"
+            else:
+                # 在99%-101%之间 -> 明黄色红心图标
+                return f"{base_str}<span style='color:#FFD700; font-family:sans-serif;'>💛</span>"
+
+        # 格式化指标值，并加入红绿心/箭头对比提示
+        ma5_str = format_indicator_with_icon(ma5_v)
+        ma10_str = format_indicator_with_icon(ma10_v)
+        ma20_str = format_indicator_with_icon(ma20_v)
+        ma60_str = format_indicator_with_icon(ma60_v)
+        up_str = format_indicator_with_icon(boll_up_v)
+        dn_str = format_indicator_with_icon(boll_dn_v)
+
+        # 整理成 HTML 文本 (半透明暗色背景板，提升图上文字可读性)
+        html_text = (
+            f"<div style='font-family:monospace; font-size:9pt; background-color:rgba(0,0,0,140); padding:3px 8px; border-radius:4px;'>"
+            f"<span style='color:#FFFFFF; font-weight:bold;'>均线: </span>"
+            f"<span style='color:{c_ma5}; font-weight:bold;'>MA5:{ma5_str}</span>&nbsp;&nbsp;"
+            f"<span style='color:{c_ma10}; font-weight:bold;'>MA10:{ma10_str}</span>&nbsp;&nbsp;"
+            f"<span style='color:{c_ma20}; font-weight:bold;'>MA20:{ma20_str}</span>&nbsp;&nbsp;"
+            f"<span style='color:{c_ma60}; font-weight:bold;'>MA60:{ma60_str}</span>"
+            f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> BOLL: </span>"
+            f"<span style='color:{c_up}; font-weight:bold;'>UP:{up_str}</span>&nbsp;&nbsp;"
+            f"<span style='color:{c_dn}; font-weight:bold;'>DN:{dn_str}</span>"
+        )
+        
+        # ⚡ [NEW] 如果翻转线 (Reversal Line) 当前处于显示状态，动态把数值也绘制在顶部
+        if hasattr(self, 'reversal_line_curve') and self.reversal_line_curve.isVisible():
+            rev_v = row.get('reversal_line', np.nan)
+            rev_str = format_indicator_with_icon(rev_v)
+            html_text += f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 翻转线: </span>" \
+                         f"<span style='color:#FFFF00; font-weight:bold;'>REV:{rev_str}</span>"
+
+        html_text += "</div>"
+
+        self.ma_legend_label.setHtml(html_text)
+        self.ma_legend_label.setVisible(True)
 
     def _update_crosshair_ui(self, idx, y_price=None):
         """
@@ -6491,7 +6611,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if prev_close > 0:
             calc_ratio = (close_p / prev_close - 1) * 100
-            # 如果存储的 ratio 为 0 而计算值非 0，优先用计算值（处理 history 数据缺 p_change 的情况）
+            # 如果存储 of ratio 为 0 而计算值非 0，优先用计算值（处理 history 数据缺 p_change 的情况）
             if abs(ratio) < 0.001 and abs(calc_ratio) > 0.001:
                 ratio = calc_ratio
             amplitude = (high_p - low_p) / prev_close * 100
@@ -6577,6 +6697,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.crosshair_label.setAnchor((anchor_x, anchor_y))
         self.crosshair_label.setPos(idx, y_price)
         self.crosshair_label.setVisible(True)
+
+        # ⚡ [NEW] 十字光标移动时，动态更新 K 线顶部 MA/布林等指标值
+        self._update_ma_legend(idx)
 
     def zoom_kline(self, in_=True):
         """通达信模式：上下键缩放"""
@@ -10479,6 +10602,10 @@ class MainWindow(QMainWindow, WindowMixin):
         std20 = day_df['close'].rolling(20).std().values
         upper_band = ma20 + 2*std20
         lower_band = ma20 - 2*std20
+        
+        # 保存布林带指标到 day_df 以便十字光标获取 (跟通达信一致)
+        day_df['boll_upper'] = upper_band
+        day_df['boll_lower'] = lower_band
 
         for attr, series, color in [('upper_curve', upper_band, bollinger_colors['upper']),
                                     ('lower_curve', lower_band, bollinger_colors['lower'])]:
@@ -10536,6 +10663,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     rev_data = df_custom['reversal_line'].values
                     self.reversal_line_curve.setData(x_axis, rev_data)
                     self.reversal_line_curve.show()
+                    # 保存翻转线指标到 day_df
+                    day_df['reversal_line'] = rev_data
                 
                 # 4. 绘制标签 (九转序列 1-9, 主力买卖文字)
                 # 使用专门的对象池 custom_indicator_pool
@@ -11451,6 +11580,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.decision_label.setText("实时决策中心: <span style='color:#666;'>未开启实时监控或等待信号...</span>")
             self.supervision_label.setText("🛡️ 流程监理: <span style='color:#666;'>就绪</span>")
             self.hb_label.setText("💤")
+            
+        # ----------------- 7. 更新顶部 MA / BOLL / REV 指标显示 -----------------
+        self._update_ma_legend()
         
     def _update_plot_title(self, code, day_df, tick_df):
         """仅更新 K 线图基础信息（代码、名称、排名、板块等） - 极限性能版"""
@@ -13432,14 +13564,27 @@ class MainWindow(QMainWindow, WindowMixin):
             price = row.get('close', row.get('price', 0))
         elif not self.day_df.empty:
             price = self.day_df['close'].iloc[-1] if 'close' in self.day_df.columns else 0
+            
+        # [NEW] 从 K 线获取最新的最后交易时间，用于复盘添加自选时精准记录该交易时刻
+        add_time = None
+        if not self.day_df.empty:
+            try:
+                from datetime import datetime
+                last_dt = str(self.day_df.index[-1]).strip()
+                if len(last_dt) == 10:
+                    add_time = f"{last_dt} {datetime.now().strftime('%H:%M:%S')}"
+                elif len(last_dt) > 10:
+                    add_time = last_dt
+            except Exception as e:
+                logger.error(f"Error calculating K-line add_time: {e}")
         
         if hasattr(self, 'hotlist_panel'):
             if self.hotlist_panel.contains(code):
                 logger.info(f"热点已存在: {code} {name}")
             else:
-                success = self.hotlist_panel.add_stock(code, name, float(price), "手动添加")
+                success = self.hotlist_panel.add_stock(code, name, float(price), "手动添加", add_time=add_time)
                 if success:
-                    logger.info(f"🔥 添加热点: {code} {name} @ {float(price):.2f}")
+                    logger.info(f"🔥 添加热点: {code} {name} @ {float(price):.2f} at {add_time or '当前时间'}")
                     # 如果面板隐藏，自动显示
                     if not self.hotlist_panel.isVisible():
                         self.hotlist_panel.show()

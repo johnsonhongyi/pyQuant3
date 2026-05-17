@@ -1721,7 +1721,7 @@ class HotlistPanel(QWidget, WindowMixin):
              self._pending_table_refresh_follow = True
              self._pending_pnl_refresh = True
 
-    def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察"):
+    def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察", add_time: str = None):
         """
         添加股票到热点列表
         
@@ -1731,6 +1731,7 @@ class HotlistPanel(QWidget, WindowMixin):
             price: 加入时价格
             signal_type: 信号类型
             group: 分组名称 (观察/强势/缺口等)
+            add_time: 自定义加入时间 (如果不传则使用当前系统时间)
         """
         # 检查是否已存在
         for item in self.items:
@@ -1738,7 +1739,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 logger.info(f"热点已存在: {code} {name}")
                 return False
         
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = add_time if add_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         try:
             mgr = SQLiteConnectionManager.get_instance(DB_FILE)
