@@ -49,6 +49,42 @@ logger = LoggerFactory.getLogger(__name__)
 
 from sys_utils import get_conf_path
 
+
+class TimeoutLock:
+    """[NEW] 具备超时报警与慢锁诊断功能的包装锁"""
+    def __init__(self, name="EngineLock", timeout=3.0):
+        self._inner = threading.Lock()
+        self._name = name
+        self._timeout = timeout
+
+    def __enter__(self):
+        start = time.perf_counter()
+        acquired = self._inner.acquire(timeout=self._timeout)
+        cost = time.perf_counter() - start
+        if cost > 0.5:
+            logger.warning(f"⚠️ [LOCK_WARN] {self._name} wait too long: {cost:.3f}s")
+        if not acquired:
+            logger.critical(f"🔥 [LOCK_FATAL] {self._name} TIMEOUT after {self._timeout}s!")
+            raise RuntimeError(f"Lock timeout for {self._name}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._inner.release()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if timeout < 0:
+            timeout = self._timeout
+        start = time.perf_counter()
+        acquired = self._inner.acquire(blocking=blocking, timeout=timeout)
+        cost = time.perf_counter() - start
+        if cost > 0.5:
+            logger.warning(f"⚠️ [LOCK_WARN] {self._name} acquire wait too long: {cost:.3f}s")
+        return acquired
+
+    def release(self):
+        self._inner.release()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §0  常量与枚举
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,7 +395,7 @@ class SectorFocusMap:
     W_VOL     = 0.20
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("SectorFocusMap", timeout=3.0)
         # {sector_name: SectorHeat}
         self._sector_map: Dict[str, SectorHeat] = {}
         # {code: sector_name} 快速反查
@@ -900,7 +936,7 @@ class StarFollowEngine:
         self._leader_baselines: Dict[str, float] = {}   # [B] 确认时涨幅基准
         self._leader_weakened: set = set()               # [B] 已弱化龙头集合
         self._race_peaks: Dict[str, float] = {}          # [NEW] 记录竞赛选手的盘中最高涨幅
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("StarFollowEngine", timeout=3.0)
 
     def confirm_leaders(
         self,
@@ -1044,7 +1080,7 @@ class DragonLeaderTracker:
 
     def __init__(self, persist_path: Optional[str] = None):
         self._records: Dict[str, DragonRecord] = {}
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("DragonTracker", timeout=3.0)
         self._persist_path = persist_path or _DRAGON_PERSIST_PATH
         self._today_str: str = datetime.now().strftime('%Y%m%d')
         self._next_day_done: bool = False
@@ -1250,16 +1286,14 @@ class DragonLeaderTracker:
                 # 淘汰：连续预警超阈值
                 if rec.warning_days >= self.WARNING_ELIM_DAYS:
                     rec.status = DragonStatus.ELIMINATED
-                    eliminated.append(code)
-                    logger.info(f"[DragonTracker] ❌ 淘汰: {code}({rec.name}) 连续{rec.warning_days}日预警")
+                    eliminated.append((code, rec.name, rec.warning_days))
                     continue
 
                 # 升级：连续新高达标
                 if (rec.status == DragonStatus.CANDIDATE
                         and rec.consecutive_new_highs >= self.DRAGON_UPGRADE_DAYS):
                     rec.status = DragonStatus.DRAGON
-                    upgraded.append(code)
-                    logger.info(f"[DragonTracker] 🐉 升级真龙头: {code}({rec.name}) 连续{rec.consecutive_new_highs}日新高")
+                    upgraded.append((code, rec.name, rec.consecutive_new_highs))
 
                 # 固化：今日 ➜ 昨日
                 rec.prev_day_high  = rec.today_high  if rec.today_high  > 0 else rec.prev_day_high
@@ -1274,13 +1308,22 @@ class DragonLeaderTracker:
                 rec.last_update = datetime.now().isoformat()
 
             # 删除已淘汰
-            for code in eliminated:
+            for code, _, _ in eliminated:
                 self._records.pop(code, None)
 
         self._next_day_done = False
         self._save_persist()
-        logger.info(f"[DragonTracker] 收盘快照完成: 升级={upgraded} 淘汰={eliminated} 存活={len(self._records)}")
-        return {'upgraded': upgraded, 'eliminated': eliminated}
+
+        # ⭐ 核心重构：锁外安全打印日志，彻底避免 logging 全局锁导致的死锁
+        for code, name, w_days in eliminated:
+            logger.info(f"[DragonTracker] ❌ 淘汰: {code}({name}) 连续{w_days}日预警")
+        for code, name, c_highs in upgraded:
+            logger.info(f"[DragonTracker] 🐉 升级真龙头: {code}({name}) 连续{c_highs}日新高")
+
+        eliminated_codes = [c for c, _, _ in eliminated]
+        upgraded_codes = [c for c, _, _ in upgraded]
+        logger.info(f"[DragonTracker] 收盘快照完成: 升级={upgraded_codes} 淘汰={eliminated_codes} 存活={len(self._records)}")
+        return {'upgraded': upgraded_codes, 'eliminated': eliminated_codes}
 
     # ── 次日批量初始化 ────────────────────────────────────────────────────────
 
@@ -1309,20 +1352,14 @@ class DragonLeaderTracker:
     def get_dragon_records(self, min_status=DragonStatus.CANDIDATE) -> List[dict]:
         """[NEW] 公开接口：获取当前符合条件的龙头个股数据列表"""
         with self._lock:
-            # ⭐ 核心修复：在 Record 对象层面进行 Enum 比较，防止 dict 转换后的类型冲突
-            recs = [r.to_dict() for r in self._records.values() 
-                    if r.status != DragonStatus.ELIMINATED and (min_status is None or r.status >= min_status)]
-            # 按连续新高排序 (降序)
-            recs.sort(key=lambda x: (int(x['status']), x['consecutive_new_highs'], x['cum_pct_from_entry']), reverse=True)
-            return recs
+            records = list(self._records.values())
 
-    def get_dragons(self, min_status=DragonStatus.CANDIDATE) -> List[DragonRecord]:
-        """内部/外部：直接返回 Record 对象列表"""
-        with self._lock:
-            res = [r for r in self._records.values() if r.status != DragonStatus.ELIMINATED]
-            if min_status is not None:
-                res = [r for r in res if r.status >= min_status]
-            return res
+        # ⭐ 核心修复：将 list-comprehension 与 to_dict() 及排序转换安全移动到锁外，极大缩短持锁临界区
+        recs = [r.to_dict() for r in records 
+                if r.status != DragonStatus.ELIMINATED and (min_status is None or r.status >= min_status)]
+        # 按连续新高排序 (降序)
+        recs.sort(key=lambda x: (DragonStatus[x['status']].value, x['consecutive_new_highs'], x['cum_pct']), reverse=True)
+        return recs
 
     # ── 生成龙头专属决策信号 ──────────────────────────────────────────────────
 
@@ -1548,7 +1585,7 @@ class IntradayPullbackDetector:
         self._star_engine = star_engine
         self._triggered: Dict[str, datetime] = {}
         self._cooldown_sec = 1800
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("PullbackDetector", timeout=3.0)
 
     def scan(
         self,
@@ -1776,7 +1813,7 @@ class DecisionQueue:
 
     def __init__(self):
         self._signals: Dict[str, DecisionSignal] = {}
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("DecisionQueue", timeout=3.0)
 
     def push(self, signal: DecisionSignal):
         with self._lock:
@@ -1842,7 +1879,7 @@ class ExitMonitor:
     def __init__(self, sector_map: SectorFocusMap):
         self._sector_map = sector_map
         self._position_highs: Dict[str, float] = {}
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("RiskEngine", timeout=3.0)
 
     def update_position_high(self, code: str, current_price: float):
         with self._lock:
@@ -1904,7 +1941,7 @@ class StrategicTrendTracker:
     def __init__(self, sector_map: SectorFocusMap):
         self.sector_map = sector_map
         self.filename = get_conf_path("macro_trends.json")
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("StrategicTracker", timeout=3.0)
         self._trends: Dict[str, StrategicTrend] = {}
         self._last_scan_time = 0
         self._load()
@@ -2092,7 +2129,7 @@ class MacroWatchlist:
     """大格局战略自选池（跨会话持久化）"""
     def __init__(self):
         self.filename = get_conf_path("macro_watchlist.json")
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("MacroWatchlist", timeout=3.0)
         self.codes: Dict[str, str] = {}
         self._load()
 
@@ -2106,21 +2143,27 @@ class MacroWatchlist:
 
     def _save(self):
         try:
+            # ⭐ 核心修复：锁内仅执行极速字典克隆，绝对不在锁内执行文件 I/O 阻塞
+            with self._lock:
+                codes_copy = dict(self.codes)
             with open(self.filename, 'w', encoding='utf-8') as f:
-                json.dump(self.codes, f, ensure_ascii=False, indent=2)
+                json.dump(codes_copy, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to save MacroWatchlist: {e}")
 
     def add(self, code: str, name: str):
         with self._lock:
             self.codes[code] = name
-            self._save()
+        self._save()
 
     def remove(self, code: str):
+        need_save = False
         with self._lock:
             if code in self.codes:
                 del self.codes[code]
-                self._save()
+                need_save = True
+        if need_save:
+            self._save()
 
     def get_all(self) -> Dict[str, str]:
         with self._lock:
@@ -2148,7 +2191,7 @@ class SectorFocusController:
         self.strategic_tracker = StrategicTrendTracker(self.sector_map) # [NEW] 战略趋势跟踪器
         self.macro_watchlist   = MacroWatchlist()      # [NEW] 战略自选持久化池
 
-        self._lock = threading.Lock()
+        self._lock = TimeoutLock("ControllerLock", timeout=3.0)
         self._bidding_scores: Dict[str, float] = {}
         self._hot_rank_map: Dict[str, int] = {}
         self._df_realtime: Optional[pd.DataFrame] = None
@@ -2167,6 +2210,33 @@ class SectorFocusController:
         self._decision_render_version = 0
         self._sector_render_version = 0
         self._strategic_render_version = 0
+
+        # [NEW] 零锁只读快照初始化，UI 线程将以零锁、零 GC 压力、O(1) 性能读取这些缓存，彻底消除 ABBA 锁嵌套与假死
+        self._dragon_snapshot: List[dict] = []
+        self._dragon_count_snapshot: dict = {'candidate': 0, 'dragon': 0, 'warning': 0, 'total': 0}
+        self._update_snapshots()
+
+    def _update_snapshots(self):
+        """[NEW] 在后台线程计算完成后，同步更新零锁只读快照缓存"""
+        try:
+            # 1. 极速提取龙头 records 并做 to_dict/sorted (在 records.values() 浅拷贝完成后锁外执行)
+            records_list = self.dragon_tracker.get_dragon_records(min_status=None)
+            self._dragon_snapshot = records_list
+            
+            # 2. 极速统计只读状态，规避 UI 访问 tracker 锁
+            c = {'candidate': 0, 'dragon': 0, 'warning': 0}
+            for r in records_list:
+                status = r.get('status')
+                if status == 'CANDIDATE':
+                    c['candidate'] += 1
+                elif status == 'DRAGON':
+                    c['dragon'] += 1
+                elif status == 'WARNING':
+                    c['warning'] += 1
+            c['total'] = sum(c.values())
+            self._dragon_count_snapshot = c
+        except Exception as e:
+            logger.error(f"[Controller] Failed to update snapshots: {e}")
 
     def _get_stock_name(self, code: str, default: Optional[str] = None) -> str:
         """获取股票名称，优先从缓存获取，或从实时数据动态补全"""
@@ -2401,6 +2471,9 @@ class SectorFocusController:
         else:
             if force:
                 logger.warning("⚠️ [Controller] 引擎扫描跳过: _df_realtime 为空")
+
+        # [NEW] 后台计算全部结束，同步更新零锁快照缓存，使得 UI 线程可以直接免锁读取，彻底断绝 ABBA 死锁
+        self._update_snapshots()
 
         # [PERF] 递增渲染版本号，通知 UI 进行重绘判断
         self._dragon_render_version += 1
@@ -2695,25 +2768,21 @@ class SectorFocusController:
     def get_dragon_leaders(
         self, min_status: DragonStatus = DragonStatus.CANDIDATE
     ) -> List[dict]:
-        """获取龙头追踪列表（UI 消费接口）"""
-        now = time.time()
-        cache = getattr(self, '_dragon_cache', None)
-        if cache and (now - cache[0]) < 0.5:
-            return cache[1]
+        """[UI 零锁只读快照接口] 获取龙头追踪列表，瞬时返回数据，完全消除锁竞争"""
+        snapshot = getattr(self, '_dragon_snapshot', [])
+        if min_status is None:
+            return snapshot
 
-        # [NEW] 降频同步：仅在缓存失效且每 5 秒同步一次名称
-        if now - getattr(self, '_last_name_sync', 0) > 5.0:
-            self._last_name_sync = now
-            if self._name_cache:
-                self.dragon_tracker.sync_names(self._name_cache)
-
-        result = [r.to_dict() for r in self.dragon_tracker.get_dragons(min_status)]
-        self._dragon_cache = (now, result)
-        return result
+        # 按照 status >= min_status 进行锁外过滤，完全零锁，高并发极其安全
+        try:
+            return [r for r in snapshot if DragonStatus[r['status']].value >= min_status.value]
+        except Exception as e:
+            logger.warning(f"[Controller] get_dragon_leaders filter fallback: {e}")
+            return snapshot
 
     def get_dragon_count(self) -> dict:
-        """获取龙头数量统计 {'candidate': N, 'dragon': N, 'warning': N, 'total': N}"""
-        return self.dragon_tracker.get_count()
+        """[UI 零锁只读快照接口] 获取龙头数量统计"""
+        return getattr(self, '_dragon_count_snapshot', {'candidate': 0, 'dragon': 0, 'warning': 0, 'total': 0})
 
     def get_strategic_trends(self) -> List[dict]:
         """获取战略趋势列表（UI 消费接口）"""
@@ -2774,6 +2843,7 @@ class SectorFocusController:
         返回 {'upgraded': [...], 'eliminated': [...]}
         """
         result = self.dragon_tracker.daily_close_snapshot()
+        self._update_snapshots()  # ⭐ 核心修复：收盘快照固化后同步更新零锁快照缓存，UI 即刻获得最新淘汰升级状态
         logger.info(f"[Controller] 龙头日收盘快照: {result}")
         return result
 
@@ -2783,7 +2853,7 @@ class SectorFocusController:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _controller_instance: Optional[SectorFocusController] = None
-_controller_lock = threading.Lock()
+_controller_lock = TimeoutLock("GlobalControllerLock", timeout=3.0)
 
 
 def get_focus_controller() -> SectorFocusController:
