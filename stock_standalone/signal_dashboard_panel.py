@@ -1396,6 +1396,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # [NEW] 绑定双击详情查看 (使用 cellDoubleClicked 传递 row, col)
         table.cellDoubleClicked.connect(self._on_alert_double_clicked)
+        # [NEW] 绑定单击与选择变化，实现单击任意列/键盘上下键切换时，自动联动第一个股票
+        table.cellClicked.connect(self._on_alert_cell_clicked)
+        table.itemSelectionChanged.connect(self._on_alert_selection_changed)
+        
+        # [NEW] 绑定回车键快捷键，按下回车键时双击打开详情页
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        shortcut = QShortcut(QKeySequence(Qt.Key.Key_Return), table)
+        shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        shortcut.activated.connect(self._on_alert_enter_pressed)
+        
+        shortcut_enter = QShortcut(QKeySequence(Qt.Key.Key_Enter), table)
+        shortcut_enter.setContext(Qt.ShortcutContext.WidgetShortcut)
+        shortcut_enter.activated.connect(self._on_alert_enter_pressed)
+        
         return table
 
     def _create_signal_table(self) -> QTableWidget:
@@ -2025,6 +2039,81 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
 
+    def _on_alert_cell_clicked(self, row, column):
+        """[GUI] 单击预警行单元格事件，实现单击任意列瞬间联动第一个股票，不弹出详情弹窗"""
+        table = self.tables.get("📡 市场预警")
+        if not table: return
+        
+        # 保护：如果是表格后台刷新/更新期间，直接忽略
+        if table.signalsBlocked(): return
+        
+        it = table.item(row, column)
+        if not it: it = table.item(row, 0)
+        if not it: return
+        
+        alert = it.data(self._ROLE_DATA)
+        if not alert or not isinstance(alert, dict):
+            # 尝试遍历当前行寻找有数据的 item
+            for c in range(table.columnCount()):
+                tmp_it = table.item(row, c)
+                if tmp_it:
+                    alert = tmp_it.data(self._ROLE_DATA)
+                    if isinstance(alert, dict): break
+            
+            if not isinstance(alert, dict):
+                if row < 0 or row >= len(self._hub_alerts): return
+                alert = self._hub_alerts[row]
+                
+        if not isinstance(alert, dict): return
+        
+        metadata = alert.get('metadata', {})
+        codes = metadata.get('codes', [])
+        details = metadata.get('details', [])
+        
+        if not codes:
+            import re
+            codes = re.findall(r'\d{6}', alert.get('content', ''))
+            
+        if not codes: return
+        
+        first_code = codes[0]
+        first_name = "-"
+        df_all = self._get_snapshot_df()
+        if df_all is not None and first_code in df_all.index:
+            first_name = str(df_all.loc[first_code, 'name'])
+        else:
+            for d in details:
+                if d.get('code') == first_code:
+                    first_name = d.get('name', '-')
+                    break
+                    
+        # 直接触发联动！
+        self.code_clicked.emit(first_code, first_name)
+
+    def _on_alert_selection_changed(self):
+        """[GUI] 监听市场预警表格的选择变化（支持键盘上下翻页时自动联动第一个代码）"""
+        table = self.tables.get("📡 市场预警")
+        if not table or table.signalsBlocked(): return
+        
+        items = table.selectedItems()
+        if not items: return
+        
+        # 获取当前选中的首个行
+        row = items[0].row()
+        if row >= 0:
+            self._on_alert_cell_clicked(row, 0)
+
+    def _on_alert_enter_pressed(self):
+        """[GUI] 按下回车键时，模拟双击打开详情页"""
+        table = self.tables.get("📡 市场预警")
+        if not table: return
+        
+        row = table.currentRow()
+        col = table.currentColumn()
+        if row >= 0:
+            if col < 0: col = 0
+            self._on_alert_double_clicked(row, col)
+
     def _on_alert_double_clicked(self, row, column):
         """[GUI] 双击预警行，查看个股异动明细"""
         table = self.tables.get("📡 市场预警")
@@ -2070,7 +2159,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._alert_detail_dialog.show()
         self._alert_detail_dialog.raise_()
         self._alert_detail_dialog.activateWindow()
-        self._alert_detail_dialog.setFocus()
+        
+        # 🎯 [NEW] 双击打开详情后自动选择第一行并切入焦点，可以直接键盘上下键查看联动
+        if self._alert_detail_dialog.table.rowCount() > 0:
+            self._alert_detail_dialog.table.clearSelection()
+            self._alert_detail_dialog.table.selectRow(0)
+        self._alert_detail_dialog.table.setFocus()
 
     def _refresh_decision_table(self, decisions: List[dict]):
         table = self.tables.get("🌟 决策队列")
