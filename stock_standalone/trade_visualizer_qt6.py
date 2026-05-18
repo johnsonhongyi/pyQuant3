@@ -5140,11 +5140,17 @@ class MainWindow(QMainWindow, WindowMixin):
         spacer.setFixedWidth(20)
         self.toolbar.addWidget(spacer)
 
-        self.cb_show_pdays = QCheckBox("突破天数(pdays)")
+        self.cb_show_pdays = QCheckBox("突破天数")
         self.cb_show_pdays.setToolTip("显示平台突破的主升天数标记")
         self.cb_show_pdays.setChecked(getattr(self, 'show_pdays', True))
         self.cb_show_pdays.stateChanged.connect(self._on_toggle_pdays)
         self.toolbar.addWidget(self.cb_show_pdays)
+
+        self.cb_show_breakout_lines = QCheckBox("支撑线")
+        self.cb_show_breakout_lines.setToolTip("显示突破收盘价的水平延长支撑压力线及最右侧价格标签")
+        self.cb_show_breakout_lines.setChecked(getattr(self, 'show_breakout_lines', True))
+        self.cb_show_breakout_lines.stateChanged.connect(self._on_toggle_breakout_lines)
+        self.toolbar.addWidget(self.cb_show_breakout_lines)
 
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_kline_view)
@@ -5152,8 +5158,27 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_toggle_pdays(self, state):
         self.show_pdays = self.cb_show_pdays.isChecked()
+        self._save_visualizer_config()
         if hasattr(self, 'current_code') and hasattr(self, 'day_df') and not self.day_df.empty:
-            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', None), force=True)
+            self._capture_view_state()
+            self._force_keep_view_state = True
+            try:
+                self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', None), force=True)
+            finally:
+                if hasattr(self, '_force_keep_view_state'):
+                    delattr(self, '_force_keep_view_state')
+
+    def _on_toggle_breakout_lines(self, state):
+        self.show_breakout_lines = self.cb_show_breakout_lines.isChecked()
+        self._save_visualizer_config()
+        if hasattr(self, 'current_code') and hasattr(self, 'day_df') and not self.day_df.empty:
+            self._capture_view_state()
+            self._force_keep_view_state = True
+            try:
+                self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', None), force=True)
+            finally:
+                if hasattr(self, '_force_keep_view_state'):
+                    delattr(self, '_force_keep_view_state')
 
     def on_real_time_toggled(self, state):
         self.realtime = bool(state)
@@ -9089,7 +9114,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             if total < 35:
                 # 🚀 [CRITICAL] 如果当前股票是极短数据，必须清理之前缓存的全部切片视口属性，防止干扰下一次切换后的新正常股！
-                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
+                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view', '_prev_absolute_x', '_prev_absolute_y']:
                     if hasattr(self, attr):
                         delattr(self, attr)
                 return
@@ -9115,6 +9140,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._prev_y_center_rel = (view_rect.center().y() - old_l) / old_rng
             else:
                 self._prev_y_zoom = None
+
+            # 4. 捕获绝对 X 轴和 Y 轴区间，供 force 局部刷新（如支撑线切换）时 100% 精准还原
+            self._prev_absolute_x = (view_rect.left(), view_rect.right())
+            self._prev_absolute_y = (view_rect.bottom(), view_rect.top())
 
             # logger.debug(f"[VIEW] Capture: is_full={self._prev_is_full_view}, left_d={self._prev_dist_left:.1f}")
         except Exception as e:
@@ -10102,6 +10131,17 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'pbreak_items_pool'):
             for item in self.pbreak_items_pool:
                 item.setVisible(False)
+        # 清理新增的突破价格水平线与标记
+        if hasattr(self, 'pbreak_price_lines_pool'):
+            for item in self.pbreak_price_lines_pool:
+                item.setVisible(False)
+        if hasattr(self, 'pbreak_price_labels_pool'):
+            for item in self.pbreak_price_labels_pool:
+                item.setVisible(False)
+        if hasattr(self, 'ptop_price_label'):
+            self.ptop_price_label.setVisible(False)
+        if hasattr(self, 'pbottom_price_label'):
+            self.pbottom_price_label.setVisible(False)
 
     def _draw_platform_breakout(self, x_axis, day_df):
         """在 K 线图上绘制基于收盘价的多维平台顶底曲线以及突破信号"""
@@ -10203,6 +10243,108 @@ class MainWindow(QMainWindow, WindowMixin):
                 text_item.setPos(x_axis[i], low_vals[i] - safe_offset)
                 text_item.show()
                 pool_idx += 1
+
+        # 🚀 [NEW] 绘制所有突破收盘价的支撑/压力水平线以及最右侧价格标记，加上 ptop/pbottom 的价格标记
+        self._draw_breakout_price_lines(x_axis, day_df, ptop_vals, pbottom_vals)
+
+    def _draw_breakout_price_lines(self, x_axis, day_df, ptop_vals, pbottom_vals):
+        """绘制所有突破收盘价的支撑/压力线，并在最右侧标注价格，同时在最右侧标注 ptop / pbottom 价格"""
+        try:
+            total = len(day_df)
+            if total == 0:
+                return
+
+            # 1. 初始化池子
+            if not hasattr(self, 'pbreak_price_lines_pool'):
+                self.pbreak_price_lines_pool = []
+                self.pbreak_price_labels_pool = []
+                for _ in range(50):
+                    line_item = pg.PlotCurveItem()
+                    self.kline_plot.addItem(line_item)
+                    line_item.setVisible(False)
+                    self.pbreak_price_lines_pool.append(line_item)
+                    
+                    label_item = pg.TextItem(anchor=(0, 0.5))
+                    self.kline_plot.addItem(label_item)
+                    label_item.setVisible(False)
+                    self.pbreak_price_labels_pool.append(label_item)
+                    
+            if not hasattr(self, 'ptop_price_label'):
+                self.ptop_price_label = pg.TextItem(anchor=(0, 0.5))
+                self.kline_plot.addItem(self.ptop_price_label)
+                self.ptop_price_label.setVisible(False)
+                
+            if not hasattr(self, 'pbottom_price_label'):
+                self.pbottom_price_label = pg.TextItem(anchor=(0, 0.5))
+                self.kline_plot.addItem(self.pbottom_price_label)
+                self.pbottom_price_label.setVisible(False)
+
+            # 2. 隐藏所有的池子项 (重置状态)
+            for item in self.pbreak_price_lines_pool:
+                item.setVisible(False)
+            for item in self.pbreak_price_labels_pool:
+                item.setVisible(False)
+            self.ptop_price_label.setVisible(False)
+            self.pbottom_price_label.setVisible(False)
+
+            # 如果用户在工具栏中关闭了支撑压力线显示，则直接退出（上面第2步已将其全部隐蔽）
+            if not getattr(self, 'show_breakout_lines', True):
+                return
+
+            # 3. 绘制 ptop/pbottom 的最新最右侧价格标记 (紧贴最后一根K线，以防被右轴裁剪)
+            if len(ptop_vals) > 0 and len(pbottom_vals) > 0:
+                ptop_curr = ptop_vals[-1]
+                pbottom_curr = pbottom_vals[-1]
+                
+                # 绘制 ptop 阻力标签 (紫红色，2px 描边与暗背景)
+                self.ptop_price_label.setHtml(f'<div style="color: #FF00FF; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #FF00FF; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">阻力: {ptop_curr:.2f}</div>')
+                self.ptop_price_label.setFont(self.custom_font_signal)
+                self.ptop_price_label.setPos(total - 1, ptop_curr)
+                self.ptop_price_label.setVisible(True)
+                
+                # 绘制 pbottom 支撑标签 (青色，2px 描边与暗背景)
+                self.pbottom_price_label.setHtml(f'<div style="color: #00FFFF; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #00FFFF; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">支撑: {pbottom_curr:.2f}</div>')
+                self.pbottom_price_label.setFont(self.custom_font_signal)
+                self.pbottom_price_label.setPos(total - 1, pbottom_curr)
+                self.pbottom_price_label.setVisible(True)
+
+            # 4. 扫描最近的 150 根 K 线寻找 pbreak == 1 且 pdays == 1 的突破日
+            pbreak_vals = day_df['pbreak'].values
+            pdays_vals = day_df['pdays'].values
+            close_vals = day_df['close'].values
+            
+            scan_start = max(0, total - 150)
+            line_idx = 0
+            
+            for i in range(scan_start, total):
+                if line_idx >= len(self.pbreak_price_lines_pool):
+                    break
+                    
+                pbreak = pbreak_vals[i]
+                pdays = pdays_vals[i]
+                
+                if pbreak == 1 and pdays == 1:
+                    price = close_vals[i]
+                    
+                    # 绘制水平延长线 (金色虚线，提高对比度和粗度到 1.5)
+                    line_item = self.pbreak_price_lines_pool[line_idx]
+                    line_pen = pg.mkPen(color=(255, 215, 0, 240), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+                    # 从突破日起点一直画到最后一根 K 线 index = total - 1
+                    line_item.setData([x_axis[i], total - 1], [price, price])
+                    line_item.setPen(line_pen)
+                    line_item.setVisible(True)
+                    
+                    # 绘制最右侧价格标记，位置与延长线终端 (total - 1) 贴合，避免遮挡或距离太远
+                    label_item = self.pbreak_price_labels_pool[line_idx]
+                    label_item.setHtml(f'<div style="color: #FFD700; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #FFD700; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">🎯 {price:.2f}</div>')
+                    label_item.setFont(self.custom_font_signal)
+                    label_item.setPos(total - 1, price)
+                    label_item.setVisible(True)
+                    
+                    line_idx += 1
+                    
+        except Exception as e:
+            logger.error(f"Error drawing breakout price lines: {e}")
 
     def _clear_price_gaps(self):
         """清理价格缺口 - 仅隐藏版本"""
@@ -10494,8 +10636,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 判定：是否应该应用记忆状态 (切换股票或周期时通常强制重置)
                 is_prev_short = getattr(self, '_prev_is_very_short', False) or getattr(self, '_prev_total_bars', 100) < 35 or prev_too_short
                 is_new_short = new_total < 35
-                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change and not is_new_stock and not is_prev_short and not is_new_short
-                if should_apply_memory:
+
+                # ⭐ 如果开启了 _force_keep_view_state 强力强制保持视角，我们直接跳过所有重置判定条件
+                if getattr(self, '_force_keep_view_state', False):
+                    should_apply_memory = True
+                else:
+                    should_apply_memory = has_captured_state and not was_full_view and not is_resample_change and not is_new_stock and not is_prev_short and not is_new_short
+
+                if should_apply_memory and not getattr(self, '_force_keep_view_state', False):
                     prev_width = self._prev_dist_left - self._prev_dist_right
                     if new_total < prev_width:
                         should_apply_memory = False
@@ -10513,36 +10661,41 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 👈 注意：此处不再 return，流程继续走完
                 else:
                     # 处于“记忆”状态：以右侧为基准还原视口
-                    is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
-                    
-                    if is_at_end:
-                         current_margin = 2 # 与 _reset_kline_view 保持一致
-                         target_right = new_total + current_margin
-                         prev_width = self._prev_dist_left - self._prev_dist_right
-                         target_left = target_right - prev_width
+                    # ⭐ [NEW] 如果是强行保持当前视口，我们优先采用 100% 绝对视口还原，防止任何坐标系抖动
+                    if getattr(self, '_force_keep_view_state', False) and hasattr(self, '_prev_absolute_x') and hasattr(self, '_prev_absolute_y'):
+                        vb.setRange(xRange=self._prev_absolute_x, padding=0)
+                        vb.setRange(yRange=self._prev_absolute_y, padding=0)
                     else:
-                         target_left = max(-1, new_total - self._prev_dist_left)
-                         target_right = new_total - self._prev_dist_right
-
-                    # 设置 X 轴范围
-                    vb.setRange(xRange=(target_left, target_right), padding=0)
-
-                    # 适配 Y 轴
-                    visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
-                    if not visible_new.empty:
-                        new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
-                        if is_new_stock:
-                            y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
-                            vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
+                        is_at_end = getattr(self, '_prev_dist_right', 0) <= 2
+                        
+                        if is_at_end:
+                             current_margin = 2 # 与 _reset_kline_view 保持一致
+                             target_right = new_total + current_margin
+                             prev_width = self._prev_dist_left - self._prev_dist_right
+                             target_left = target_right - prev_width
                         else:
-                            new_rng = new_h - new_l if new_h > new_l else 1.0
-                            p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
-                            target_h = new_rng * p_zoom
-                            target_y_center = new_l + (new_rng * p_center_rel)
-                            vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
+                             target_left = max(-1, new_total - self._prev_dist_left)
+                             target_right = new_total - self._prev_dist_right
+
+                        # 设置 X 轴范围
+                        vb.setRange(xRange=(target_left, target_right), padding=0)
+
+                        # 适配 Y 轴
+                        visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
+                        if not visible_new.empty:
+                            new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
+                            if is_new_stock:
+                                y_margin = (new_h - new_l) * 0.05 if new_h > new_l else 1.0
+                                vb.setRange(yRange=(new_l - y_margin, new_h + y_margin), padding=0)
+                            else:
+                                new_rng = new_h - new_l if new_h > new_l else 1.0
+                                p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
+                                target_h = new_rng * p_zoom
+                                target_y_center = new_l + (new_rng * p_center_rel)
+                                vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
 
                 # 统一清理临时的捕获状态
-                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
+                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view', '_prev_absolute_x', '_prev_absolute_y']:
                     if hasattr(self, attr): delattr(self, attr)
 
                 # 保持自适应开启
@@ -13080,6 +13233,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.cb_show_pdays.setChecked(enabled)
                     self.cb_show_pdays.blockSignals(False)
 
+            # 3.5.2 show_breakout_lines 开关
+            if 'show_breakout_lines' in window_config:
+                enabled = bool(window_config.get('show_breakout_lines', True))
+                self.show_breakout_lines = enabled
+                if hasattr(self, 'cb_show_breakout_lines'):
+                    self.cb_show_breakout_lines.blockSignals(True)
+                    self.cb_show_breakout_lines.setChecked(enabled)
+                    self.cb_show_breakout_lines.blockSignals(False)
+
             # 3.6 顶部 Filter 按钮状态同步
             if hasattr(self, 'filter_action'):
                 # 如果 collapsed=True, 则 visible=False -> checked=False
@@ -13183,6 +13345,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
             if hasattr(self, 'show_pdays'):
                 window_config['show_pdays'] = self.show_pdays
+
+            if hasattr(self, 'show_breakout_lines'):
+                window_config['show_breakout_lines'] = self.show_breakout_lines
             
             # 3.8 热点语音播报状态
             # 使用 MainWindow 自己的标志位作为第一优先级，它在整个生命周期最可靠

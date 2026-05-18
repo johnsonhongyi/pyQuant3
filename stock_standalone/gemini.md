@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-18 23:00  
+> 最后更新：2026-05-19 00:20  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,13 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-19 00:20
+- [x] **实现突破收盘价水平压力支撑线与最右侧价格标记 (Implemented Horizontal Breakout S/R Lines & Rightmost Price Tags)**:
+    - [x] **突破收盘价向右水平延长线**：在 `_draw_platform_breakout` 渲染闭环中完美融入 `_draw_breakout_price_lines`。扫描最近 150 根 K 线，针对每一个首发突破日（`pbreak == 1` 且 `pdays == 1`），以其收盘价为基准绘制出向右横贯延伸至最新 K 线边缘（`total - 1`）的高亮金色虚线支撑/压力位，线宽提升至 `1.5`，不透明度提升至 `240`，显著增强颜色对比度与识别度。
+    - [x] **右侧突破价格与支撑阻力高清徽章**：在最后一根 K 线（`total - 1`）位置统一贴合渲染出当前所有突破收盘价（金字 `🎯 23.45`）、阻力上限 `ptop`（洋红字 `阻力: 23.95`）和支撑下限 `pbottom`（青字 `支撑: 21.30`）的高清数值背景徽章。通过将位置从 `total + 1.1` 修正并向左对齐至最后一根 K 线处，完美解决了右边界遮挡裁剪与因距离过远导致的视觉剥离痛点。配合完备的 `_clear_platform_breakout` 清理管道，达成了完美的视觉穿透力与零内存泄漏。
+    - [x] **新增工具栏控制开关与全链路双向状态持久化 (Toolbar Checkbox & Configuration Persistence)**：在主工具栏的“突破天数”正后方，平滑植入 `QCheckBox("支撑压力线")` 复选框（`self.cb_show_breakout_lines`）。配套编写了 `_on_toggle_breakout_lines` 槽函数与绘图端短路校验；同时在 `_load_visualizer_config` 与 `_save_visualizer_config` 中打通了 `show_breakout_lines` 字段的双向读写，实现了 100% 跨会话的状态记忆与瞬时交互响应。
+    - [x] **修复手动拖动视图重置 Bug (Fixed Manual View Reset Bug on Toggle)**：针对勾选“支撑线”或“突破天数”等界面显示开关时导致手动定制拖拽/缩放视图被强行 Reset 的痛点，引入了 **`_force_keep_view_state`** 强力视角保持标志位与 **`_prev_absolute_x / _prev_absolute_y`** 绝对视口捕获还原算法。在状态改变重绘时，以 100% 绝对坐标系直接还原 X 轴和 Y 轴区间，彻底解除了“刷新界面视图自动回弹/复位”的问题，实现了完全无感的局部数据叠加刷新，最大化保护了交易员的复盘专注力。
 
 ## 2026-05-18 23:00
 - [x] **修复次新股切换后 K 线视口错位 Bug (Fixed K-Line Viewport Shift Bug on Short Stock Transition)**:
