@@ -28,6 +28,15 @@
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-18 02:25
+- [x] **实现单击预警详情列瞬间联动首个股票且不弹窗 (Deterministic First-Stock Linkage on Details Column Click without Popup)**：
+    - [x] **添加独立单击处理与键盘事件委派 (SRP - Single Responsibility Principle)**：在 `signal_dashboard_panel.py` 中新增了专用的单次点击处理方法 `_on_alert_cell_clicked(self, row, column)` 及键盘移动侦听方法 `_on_alert_selection_changed(self)`，完全保持与既有双击弹窗逻辑的物理隔离。
+    - [x] **打通“全列单击+键盘上下键”双维瞬间联动**：将 `cellClicked` 与 `itemSelectionChanged` 信号绑定。当用户在 `📡 市场预警` 表格中单击任意单元格/列，或通过键盘上下方向键切换行时，系统即刻提取出该行预警数据关联的第一只股票并派发 `self.code_clicked.emit`，瞬间联动图表跳转，绝不弹出任何明细详情窗口。
+    - [x] **双击打开详情后自动选择首行并聚焦 (Auto-focus & Auto-select Row 0 in Detail Dialog)**：在 `_on_alert_double_clicked` 弹窗展示后，注入了对详情表格的 `table.clearSelection()`, `table.selectRow(0)` 与 `table.setFocus()` 链式调用。使得双击后不仅能在首屏瞬间联动详情里的第一只股票，还能让用户在弹窗出现后无需进行任何鼠标点击，直接使用键盘的上下方向键控制详情内的表格，享受丝滑极速的级联联动看盘。
+    - [x] **支持键盘“回车/Enter键”瞬间唤起双击详情 (Enter/Return Key to Trigger Detail Dialog)**：通过绑定独立的 `QShortcut` (支持主键盘 `Key_Return` 与小键盘 `Key_Enter`)，使得用户在市场预警表格上进行键盘上下键浏览时，只要按下回车键，即可一键呼出双击明细详情窗口，实现完全免除鼠标交互的高级看盘。
+    - [x] **高保真维护既有双击逻辑不变**：不影响原有的双击（`cellDoubleClicked`）弹出 `MarketAlertDetailDialog` 对话框的核心机制，双击任何单元格明细弹窗依旧照常加载 and 显示，完美契合极速看盘的定制化需要。
+
+
 ## 2026-05-18 00:20
 - [x] **实现手动加自选同步 K 线图表交易时间功能 (Synced Manual Hotlist Addition with K-line Historical Chart Time)**：
     - [x] **升级 `add_stock` 通用参数与时间戳分流机制**：在 `hotlist_panel.py` 中为 `add_stock` 方法引入了可选参数 `add_time: str = None`。在执行数据库 `INSERT` 时，若显式传递了 `add_time`，则使用该指定时间写入 `follow_date` 字段，否则自适应回退为当前的物理系统时间。
