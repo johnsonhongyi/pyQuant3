@@ -9076,12 +9076,26 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
-        if not hasattr(self, 'day_df') or self.day_df.empty or len(self.day_df) < 30:
+        if not hasattr(self, 'day_df') or self.day_df.empty:
+            self._prev_kline_too_short = False
+            self._prev_total_bars = 0
+            self._prev_is_very_short = False
             return
         try:
+            total = len(self.day_df)
+            self._prev_total_bars = total
+            self._prev_is_very_short = (total < 35)
+            self._prev_kline_too_short = (total < 35)
+
+            if total < 35:
+                # 🚀 [CRITICAL] 如果当前股票是极短数据，必须清理之前缓存的全部切片视口属性，防止干扰下一次切换后的新正常股！
+                for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
+                    if hasattr(self, attr):
+                        delattr(self, attr)
+                return
+
             vb = self.kline_plot.getViewBox()
             view_rect = vb.viewRect()
-            total = len(self.day_df)
 
             # 1. 检测是否处于“全览”状态（即当前已经看完了绝大部分数据）
             # 如果左边缘接近 0 且右边缘接近末尾，则标记为 FullView
@@ -10463,12 +10477,24 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 只有在非递归渲染时才执行 Reset 逻辑
         if not is_resetting:
-            if is_new_stock or is_resample_change or has_captured_state:
+            # ⭐ [FIX] 如果前序个股长度太短，切换到正常个股时，强制执行重置视图 (防止视口错位)
+            prev_too_short = getattr(self, '_prev_kline_too_short', False)
+            if prev_too_short and len(day_df) >= 35:
+                self._prev_kline_too_short = False # 清除标记防止重复触发
+                logger.info(f"[VIEW] Prev stock was too short, forcing reset view for normal stock.")
+                self._is_painting = True
+                try:
+                    self._reset_kline_view(df=day_df, force=False)
+                finally:
+                    self._is_painting = False
+            elif is_new_stock or is_resample_change or has_captured_state:
                 vb = self.kline_plot.getViewBox()
                 new_total = len(day_df)
 
                 # 判定：是否应该应用记忆状态 (切换股票或周期时通常强制重置)
-                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change and not is_new_stock
+                is_prev_short = getattr(self, '_prev_is_very_short', False) or getattr(self, '_prev_total_bars', 100) < 35 or prev_too_short
+                is_new_short = new_total < 35
+                should_apply_memory = has_captured_state and not was_full_view and not is_resample_change and not is_new_stock and not is_prev_short and not is_new_short
                 if should_apply_memory:
                     prev_width = self._prev_dist_left - self._prev_dist_right
                     if new_total < prev_width:
