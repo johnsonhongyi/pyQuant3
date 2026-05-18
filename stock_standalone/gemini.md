@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-18 15:35  
+> 最后更新：2026-05-18 23:00  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,11 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-18 23:00
+- [x] **修复次新股切换后 K 线视口错位 Bug (Fixed K-Line Viewport Shift Bug on Short Stock Transition)**:
+    - [x] **重构状态捕获机制**：在 `_capture_view_state` 中彻底废弃提前截断，先精确记录旧股长度并设置专用标志 `self._prev_kline_too_short = (total < 35)`，如果是极短数据（`< 35` 根）则主动清空之前缓存的全部视口记忆属性，防止旧残余数据污染。
+    - [x] **拦截异常切换与强制对齐**：在 `_render_charts_logic` 中注入了针对 `prev_too_short` 的强力短路重置关卡。一旦判定是从极短次新股切换到正常个股，立刻清除 flag，并直接调用 `_reset_kline_view(df=day_df, force=False)` 进行完美的首屏 X 轴右侧自适应对齐，彻底治愈了“画幅错位，滞留左侧极旧区域”的顽疾，保障了切换流畅度。
 
 ## 2026-05-18 21:06
 - [x] **实现 K线平台突破与中枢高底的全量实时可视化 (Implemented Real-time Platform Breakout Visualization on K-Line Chart)**:
