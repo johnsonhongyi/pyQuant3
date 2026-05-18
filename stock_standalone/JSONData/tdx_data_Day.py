@@ -2419,8 +2419,9 @@ def get_tdx_Exp_day_to_df(
     from collections import deque
     from io import StringIO
 
+    warmup = 20 if not fastohlc else 0
     with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
-        lines = deque(f, maxlen=dl + 10)
+        lines = deque(f, maxlen=dl + warmup + 10)
 
     if not lines:
         return pd.DataFrame()
@@ -2462,7 +2463,7 @@ def get_tdx_Exp_day_to_df(
 
     if lastday:
         df = df.iloc[:-lastday]
-    df = df.iloc[-dl:]
+    df = df.iloc[-(dl + warmup):]
 
 
     if df.empty:
@@ -2565,6 +2566,43 @@ def get_tdx_Exp_day_to_df(
         df.loc[df.index[-1], 'MainU'] = chk['MainU'].iloc[0]
 
     # =========================
+    # 8.5. 平台突破形态极速集成计算 (Platform Breakout High-Efficiency Integration)
+    # =========================
+    if not fastohlc and len(df) >= 15:
+        try:
+            # 动态根据重采样参数调整 lookback
+            multiplier = 1
+            if resample == '2d':
+                multiplier = 2
+            elif resample == '3d':
+                multiplier = 3
+            elif resample == 'w':
+                multiplier = 5
+            elif resample == 'm':
+                multiplier = 20
+            
+            lookback = max(15, int(120 / multiplier))
+            if len(df) < lookback:
+                lookback = max(15, len(df) - 10)
+            
+            # 使用隔离拷贝运行以确保绝对向后兼容性
+            from stock_logic_utils import calc_platform_breakout
+            df_temp = df.copy()
+            if 'code' not in df_temp.columns:
+                df_temp['code'] = code
+            
+            df_calc = calc_platform_breakout(df_temp, lookback=lookback)
+            
+            # 仅提取算出的突破相关列赋值回主 DataFrame
+            df['ptop'] = df_calc['ptop'].values
+            df['pbottom'] = df_calc['pbottom'].values
+            df['pbreak'] = df_calc['pbreak'].values
+            df['pdays'] = df_calc['pdays'].values
+        except Exception as e:
+            # 健壮性防线，不中断预处理流程
+            pass
+
+    # =========================
     # 9. MultiIndex（可选）
     # =========================
     # if MultiIndex:
@@ -2577,6 +2615,7 @@ def get_tdx_Exp_day_to_df(
         df.index = df.pop('date')
     if 'index' in df.columns:
         df.index = df.pop('index')
+    df = df.iloc[-dl:]
     return df
 
 
@@ -6406,6 +6445,12 @@ def get_tdx_exp_low_or_high_power(
     latest['open'] = dtemp.open
     latest['lowvol'] = dtemp.vol
     latest['last6vol'] = lastvol
+    
+    # ✅ 完美对齐：仅对齐平台顶价格 ptop 和平台底价格 pbottom 到历史支撑日，pbreak 和 pdays 保持盘中最新状态
+    if 'ptop' in dtemp:
+        latest['ptop'] = dtemp.ptop
+    if 'pbottom' in dtemp:
+        latest['pbottom'] = dtemp.pbottom
     return latest
 
 
@@ -6478,6 +6523,12 @@ def get_tdx_exp_low_or_high_power_src(
     latest['open'] = dtemp.open
     latest['lowvol'] = dtemp.vol
     latest['last6vol'] = lastvol
+    
+    # ✅ 完美对齐：仅对齐平台顶价格 ptop 和平台底价格 pbottom 到历史支撑日，pbreak 和 pdays 保持盘中最新状态
+    if 'ptop' in dtemp:
+        latest['ptop'] = dtemp.ptop
+    if 'pbottom' in dtemp:
+        latest['pbottom'] = dtemp.pbottom
     return latest
 
 
@@ -8060,14 +8111,16 @@ if __name__ == '__main__':
     code = '300905'
     resample = 'd'
 
-    code = '002990'
+    code = '002361'
     df2=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df3=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d')
     df4=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
     df5=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['m'],resample='m')
     import ipdb;ipdb.set_trace()
 
-    df=get_tdx_Exp_day_to_df(code,end='20260408',resample=resample)
+    # df=get_tdx_Exp_day_to_df(code,end='20260408',resample=resample)
+    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+
     print(f'df:{df[-3:]}')
     import ipdb;ipdb.set_trace()
 

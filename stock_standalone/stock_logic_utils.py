@@ -920,6 +920,192 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
     return df
 
+def calc_platform_breakout(df: pd.DataFrame, lookback: int = 120) -> pd.DataFrame:
+    """
+    基于日K线数据计算平台突破（Platform Breakout）形态。
+    
+    核心设计与逻辑：
+    1. 【确定历史平台顶底】：在历史 lookback 天内寻找价格相近（在 ±3% 容忍度内）的两个局部极值点（收盘价）。
+       - 平台顶（ptop）：基于局部高点（Peak），寻找两两差距在 3% 以内的最高一对，将其均值作为阻力，以最高收盘价为兜底。
+       - 平台底（pbottom）：基于局部低点（Valley），寻找两两差距在 3% 以内的次低点，以最低收盘价为兜底。
+       - 无未来函数：阻力与支撑仅基于当前日期 $t$ 前的数据计算，完全消除未来泄露。
+    2. 【右侧有效突破】：当日内最高价突破平台顶（high > platform_top * 1.01），且前一日收盘在平台阻力下方时，触发突破信号。
+    3. 【持续趋势跟踪与破位】：一旦突破成立，持续累加 `pdays`。只要最低价守住平台支撑（low > platform_top * 0.97）且在 MA20 上方，持续有效。
+    """
+    if df is None or len(df) < lookback:
+        df = df.copy() if df is not None else pd.DataFrame()
+        df['ptop'] = np.nan
+        df['pbottom'] = np.nan
+        df['pbreak'] = 0
+        df['pdays'] = 0
+        return df
+
+    df = df.copy()
+    # 统一进行小写与标准字段映射，保证绝对健壮性
+    mapping = {'vol': 'volume', 'Vol': 'volume', 'amount': 'amount', 'Amount': 'amount'}
+    df = df.rename(columns=mapping)
+    df.columns = [c.lower() for c in df.columns]
+    
+    n = len(df)
+    
+    # 确保基础指标存在，优先直接引用 ma5d 和 ma20d，避免中转
+    if 'ma5d' in df.columns:
+        ma5_series = df['ma5d']
+    else:
+        ma5_series = df['close'].rolling(5).mean()
+
+    if 'ma20d' in df.columns:
+        ma20_series = df['ma20d']
+    else:
+        ma20_series = df['close'].rolling(20).mean()
+        
+    vol_ma5 = df['volume'].rolling(5).mean().fillna(df['volume'])
+    
+    # 提取底层 NumPy 数组，彻底摆脱 Pandas 对象的循环内开销
+    high_arr = df['high'].values
+    low_arr = df['low'].values
+    close_arr = df['close'].values
+    volume_arr = df['volume'].values
+    vol_ma5_arr = vol_ma5.values
+    ma20_arr = ma20_series.values
+    
+    platform_tops = [np.nan] * n
+    platform_bottoms = [np.nan] * n  # 💥 新增 platform_bottoms 容器
+    breakouts = [0] * n
+    trend_days = [0] * n
+    
+    active_breakout_top = None
+    active_trend_count = 0
+    
+    # 寻找局部高点（11天中心最大值，使用收盘价确定平台以过滤冲高试盘噪声）
+    is_local_max = (df['close'] == df['close'].rolling(11, center=True, min_periods=1).max())
+    is_local_max_arr = is_local_max.values
+    
+    # 1. 向量化预计算所有区间的全局最高收盘价以消除循环内 rolling.max() 开销
+    highest_high_series = df['close'].rolling(lookback - 3, min_periods=1).max().shift(4)
+    highest_high_arr = highest_high_series.values
+    
+    # 2. 向量化提取所有局部高点的索引，利用 np.searchsorted 在 O(log P) 时间内快速切片
+    peak_indices = np.where(is_local_max_arr)[0]
+    
+    # 寻找局部低点（11天中心最小值，使用收盘价确定平台底中枢）
+    is_local_min = (df['close'] == df['close'].rolling(11, center=True, min_periods=1).min())
+    is_local_min_arr = is_local_min.values
+    
+    # 1. 向量化预计算所有区间的全局最低收盘价以消除循环内 rolling.min() 开销
+    lowest_low_series = df['close'].rolling(lookback - 3, min_periods=1).min().shift(4)
+    lowest_low_arr = lowest_low_series.values
+    
+    # 2. 向量化提取所有局部低点的索引
+    valley_indices = np.where(is_local_min_arr)[0]
+    
+    # 3. 极速 NumPy 局部主循环
+    for idx in range(lookback, n):
+        # 确定历史平台阻力位的索引区间 [start_idx, end_idx)
+        start_idx = idx - lookback
+        if start_idx < 0:
+            start_idx = 0
+        end_idx = idx - 3
+        if end_idx <= start_idx:
+            end_idx = start_idx + 1
+            
+        # ==================== 平台顶计算 (Platform Top) ====================
+        left_idx = np.searchsorted(peak_indices, start_idx, side='left')
+        right_idx = np.searchsorted(peak_indices, end_idx, side='left')
+        
+        peak_prices = close_arr[peak_indices[left_idx:right_idx]]
+        highest_high = highest_high_arr[idx]
+        
+        if len(peak_prices) > 0 and not np.isnan(highest_high):
+            peak_prices = peak_prices[peak_prices >= highest_high * 0.7]
+            
+        platform_top = np.nan
+        if len(peak_prices) >= 2:
+            sorted_peaks = np.sort(peak_prices)[::-1]
+            found_pair = False
+            for i in range(len(sorted_peaks) - 1):
+                p1 = sorted_peaks[i]
+                p2 = sorted_peaks[i+1]
+                if p2 > 0 and (p1 - p2) / p2 <= 0.03:
+                    platform_top = (p1 + p2) / 2.0
+                    found_pair = True
+                    break
+            
+            if not found_pair:
+                platform_top = highest_high
+        else:
+            platform_top = highest_high
+            
+        platform_tops[idx] = platform_top
+        
+        # ==================== 平台底计算 (Platform Bottom / 次低点) ====================
+        left_val_idx = np.searchsorted(valley_indices, start_idx, side='left')
+        right_val_idx = np.searchsorted(valley_indices, end_idx, side='left')
+        
+        valley_prices = close_arr[valley_indices[left_val_idx:right_val_idx]]
+        lowest_low = lowest_low_arr[idx]
+        
+        if len(valley_prices) > 0 and not np.isnan(lowest_low):
+            valley_prices = valley_prices[valley_prices <= lowest_low * 1.3]
+            
+        platform_bottom = np.nan
+        if len(valley_prices) >= 2:
+            sorted_valleys = np.sort(valley_prices)
+            found_pair = False
+            for i in range(len(sorted_valleys) - 1):
+                p1 = sorted_valleys[i]
+                p2 = sorted_valleys[i+1]
+                if p1 > 0 and (p2 - p1) / p1 <= 0.03:
+                    platform_bottom = p2
+                    found_pair = True
+                    break
+            
+            if not found_pair:
+                platform_bottom = sorted_valleys[1]
+        else:
+            platform_bottom = lowest_low
+            
+        platform_bottoms[idx] = platform_bottom
+        
+        # ==================== 突破判定与主升跟踪 ====================
+        if np.isnan(platform_top):
+            continue
+            
+        close_curr = close_arr[idx]
+        close_prev = close_arr[idx - 1]
+        high_curr = high_arr[idx]
+        low_curr = low_arr[idx]
+        vol_curr = volume_arr[idx]
+        vol_ma5_curr = vol_ma5_arr[idx]
+        ma20_curr = ma20_arr[idx]
+        
+        is_break = (high_curr > platform_top * 1.01) and (close_prev <= platform_top * 1.01)
+        
+        if is_break:
+            breakouts[idx] = 1
+            if active_breakout_top is None:
+                active_trend_count = 1
+            else:
+                active_trend_count += 1
+            active_breakout_top = platform_top
+            trend_days[idx] = active_trend_count
+            logger.debug(f"🚀 [Platform Breakout] {df['code'].iloc[idx] if 'code' in df.columns else ''} "
+                        f"breakout (High: {high_curr:.2f}) above close platform {platform_top:.2f}")
+        elif active_breakout_top is not None:
+            if low_curr > active_breakout_top * 0.97 and low_curr > ma20_curr:
+                active_trend_count += 1
+                trend_days[idx] = active_trend_count
+                breakouts[idx] = 1
+            else:
+                active_breakout_top = None
+                active_trend_count = 0
+                
+    df['ptop'] = platform_tops
+    df['pbottom'] = platform_bottoms
+    df['pbreak'] = breakouts
+    df['pdays'] = trend_days
+    return df
+
 if __name__ == '__main__':
     from JSONData import tdx_data_Day as tdd
     code = '920088'
