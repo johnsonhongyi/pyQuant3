@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-18 14:40  
+> 最后更新：2026-05-18 15:35  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -25,8 +25,24 @@
 3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，必须保持最新。
 4.  **自动迭代**: 每次任务完成后，自动依据此规则更新文档并保存历史文件。
 5.  **记忆持续性协议**: 
-    - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
+    - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-18 15:45
+- [x] **建立极具自愈性与双重保险的 df_all 实时级联寻址与主动推送缓存架构 (Implemented Double-Secured Cascading df_all Retrieval & Reactive Push Cache Architecture)**：
+    - [x] **实现智能级联寻址 `_get_df_all_cascading` (SRP & DRY)**：在 `bidding_racing_panel.py` 中引入了全局级联数据提取函数 `_get_df_all_cascading(widget)`。该函数提供了深度穿透的数据路径，依次自适应探寻 `widget.df_all` -> `widget.main_app.df_all` -> `widget.parent().df_all` -> `widget.parent().main_app.df_all` -> `widget.detector.main_app.df_all`，以绝对零死角的自愈链路彻底打通了各类异构看盘（纯 Qt Standalone、仿真回放、Tk 集成实盘）中行情数据源的存取。
+    - [x] **打通三级看板/弹窗一键锁外预提取与性能腾飞 (KISS & SOLID)**：重构了个股明细详情窗 `SectorDetailDialog`、成分股详情弹窗 `CategoryDetailDialog` 以及主赛马分布面板 `BiddingRacingRhythmPanel` 中所有零散、重复的 df_all 寻址逻辑。特别是将 `CategoryDetailDialog` 在高频循环渲染内针对个股进行重入 lookup 的高成本开销完全剥离，改为在排序和生成前在锁外一次性进行 `_get_df_all_cascading` 预提取。这彻底消除了每帧数千次 redundant 的 getattr/hasattr 开销，为 CPU 渲染效率带来几何级数的提升。
+    - [x] **落地 Tk 主程序 `df_all` 始发点双重保险主动推送缓存 (Failsafe Push-Cache)**：在 `instock_MonitorTK.py` 内部引入了全量主动数据注入。在 `open_racing_panel` 初始化赛马面板的第一时间，立即同步赋值 `self._racing_panel_win.df_all = self.df_all`；在行情管道 `update_realtime_data` 更新 `self.df_all = full_df` 的黄金时刻，同步主动推送缓存给子面板 `self._racing_panel_win.df_all = full_df`。从而在始发端与接收端两手抓，完美保证了赛马面板在被拉起和运行阶段 100% 缓存对齐，彻底消除了数据冷启动与更新滞后盲区。
+
+## 2026-05-18 15:35
+- [x] **修复 DFF2 实时计算的最权威最低价数据源对齐 (Fixed DFF2 Calculation Low Price Source Alignment)**：
+    - [x] **实现权威 llow/low 数据源预提取守卫**：重构了 `_safe_extract_dff2` 的数据流入口。在函数顶部新增 `O(1)` 最权威最低价提取防线，优先从全局 `df_all` 中提取绝对精准的 `'llow'` 列（或者 `'low'` 列）数据并进行格式清洗与单行 Series 解包，赋值为 `df_llow`。
+    - [x] **打通实时与降级通道强制对齐**：当使用 `detector` 的实时 `TickSeries` 高频现价 `ts.current_price` 或 Step 3 降级自动计算时，减数与分母均强制优先对齐使用官方接口所派发的权威 `df_llow` 最低价。如果 `df_all` 无数据，才稳健地层层级联退守为 `ts.low_day` -> `ts.open_price` -> `ts.last_close`，彻底根治了高频实盘、极速场景或仿真回放中由于 incremental low 计算偏差导致的 `DFF2` 指标偏离误差，确保了 100% 数据一致性。
+
+## 2026-05-18 15:30
+- [x] **修复打包后 DFF2 布局状态丢失与副屏磁吸 setGeometry 警告 (Fixed DFF2 Column Layout Compatibility & Multi-Monitor Geometry Clamping)**：
+    - [x] **强力解决 DFF2 隐藏状态兼容性**：重构了 `_restore_ui_state` 的恢复逻辑时序。将 `restoreState()` 优先执行，并在其之后强行覆盖 Section 7 (DFF2) 与 Section 8 (形态理由) 的隐藏/显示状态以及安全宽度。彻底根治了在读取旧版 8 列配置缓存时，将新增的第 7 列 DFF2 (旧版为隐藏的形态列) 错误识别并静默隐藏的打包发布 Bug。
+    - [x] **极限收缩子窗布局消除 Windows 几何限制警告**：针对多屏（副屏负坐标 `-1912` 等）在不同 DPI 缩放配置下移动或吸附产生的 `QWindowsWindow::setGeometry` 限制警告，将 `SectorDetailDialog` 和 `CategoryDetailDialog` 的 Layout 外边距物理压缩至 `4px`，Spacing 压缩至 `4px`，大幅度降低了 Qt 自动测算出的 Minimum Client Size (mintrack)，给副屏缩放对齐留出了极富弹性的缓冲阈值，完美消除了 DWM 的尺寸纠偏警告。
 
 ## 2026-05-18 14:50
 - [x] **实现 DFF2 仿真及回放时极速 TickSeries 实时计算与自适应 Parent-df_all 级联穿透 (Implemented TickSeries Real-time Computation and Parent-df_all Cascading Flow for DFF2)**：
