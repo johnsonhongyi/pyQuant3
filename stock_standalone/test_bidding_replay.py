@@ -1154,9 +1154,9 @@ Usage Examples:
             # logging.getLogger().setLevel(user_log_level)
             # logging.getLogger("instock_TK").setLevel(user_log_level)
             if user_log_level >= LoggerFactory.WARNING:
-                print(f"🤫 静默模式：当前后台日志级别已设为 {str(args.log).upper()}")
+                print(f"[静默模式] 当前后台日志级别已设为 {str(args.log).upper()}")
             else:
-                print(f"🔊 活跃模式：当前后台日志级别已设为 {str(args.log).upper()}")
+                print(f"[活跃模式] 当前后台日志级别已设为 {str(args.log).upper()}")
         except Exception as e:
             logger.exception(f"Log conversion failed: {e}")
 
