@@ -71,6 +71,75 @@ SEARCH_HISTORY_GROUP = "bidding_racing"
 _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
 
+def _safe_extract_dff2(df_all, code, detector=None) -> float:
+    """从全局 df_all 安全提取 dff2 列，如果不存在或数据为空，优先使用 detector 中的 TickSeries 实时计算，其次使用 buy/trade 与 llow/low 自动计算"""
+    dff2 = 0.0
+
+    # 1. 优先尝试从 detector 实时 TickSeries 数据中计算 (回放及实盘最稳健、最准时的实时数据源)
+    if detector is not None:
+        try:
+            with detector._lock:
+                ts = detector._tick_series.get(code)
+                if ts is not None:
+                    # 现价优先使用 ts.current_price
+                    buy_f = ts.current_price
+                    # 最低价优先使用 ts.low_day (日内最低价)，其次 open_price，其次 last_close
+                    llow_f = ts.low_day
+                    if llow_f <= 0.001:
+                        llow_f = ts.open_price
+                    if llow_f <= 0.001:
+                        llow_f = ts.last_close
+                    
+                    if buy_f > 0.001 and llow_f > 0.001:
+                        dff2 = round((buy_f - llow_f) / llow_f * 100, 1)
+                        return dff2
+        except Exception:
+            pass
+
+    # 2. 如果 detector 提取不成功或未提供，再尝试从 df_all 提取 dff2 字段
+    if df_all is not None and code in df_all.index:
+        if 'dff2' in df_all.columns:
+            try:
+                val = df_all.loc[code, 'dff2']
+                if hasattr(val, 'iloc'):
+                    val = val.iloc[0]
+                if val is not None and str(val) != 'nan':
+                    dff2 = float(val)
+                    if dff2 != 0.0:
+                        return dff2
+            except Exception:
+                pass
+
+        # 3. 如果还是没有提取到有效的 dff2，使用 buy/trade 与 llow/low 自动计算
+        try:
+            buy_val = None
+            if 'buy' in df_all.columns:
+                buy_val = df_all.loc[code, 'buy']
+            elif 'trade' in df_all.columns:
+                buy_val = df_all.loc[code, 'trade']
+                
+            if hasattr(buy_val, 'iloc'):
+                buy_val = buy_val.iloc[0]
+                
+            llow_val = None
+            if 'llow' in df_all.columns:
+                llow_val = df_all.loc[code, 'llow']
+            elif 'low' in df_all.columns:
+                llow_val = df_all.loc[code, 'low']
+                
+            if hasattr(llow_val, 'iloc'):
+                llow_val = llow_val.iloc[0]
+
+            if buy_val is not None and llow_val is not None:
+                buy_f = float(buy_val)
+                llow_f = float(llow_val)
+                if llow_f > 0.001:
+                    dff2 = round((buy_f - llow_f) / llow_f * 100, 1)
+        except Exception:
+            pass
+            
+    return dff2
+
 from PyQt6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
 from PyQt6.QtGui import QPainter, QPen, QColor, QPalette, QTextDocument, QTextOption
 from PyQt6.QtCore import QRect, pyqtSignal, QSize, Qt
@@ -839,7 +908,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         self._show_reason = state.get("show_reason", False)
         if hasattr(self, 'table'):
-            self.table.setColumnHidden(7, not self._show_reason)
+            self.table.setColumnHidden(8, not self._show_reason)
 
         # 初始化首次时间戳
         if _retry_ts is None:
@@ -866,12 +935,12 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
             # --- 恢复列宽 ---
             widths = state.get("column_widths")
-            if widths and len(widths) == self.table.columnCount():
+            if widths:
                 header = self.table.horizontalHeader()
                 header.blockSignals(True)
                 try:
                     for i, w in enumerate(widths):
-                        if w > 10:
+                        if i < self.table.columnCount() and w > 10:
                             self.table.setColumnWidth(i, w)
                 finally:
                     header.blockSignals(False)
@@ -920,16 +989,18 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         layout.addWidget(self.header_frame)
         
-        self.table = EnhancedTableWidget(0, 8)
+        self.table = EnhancedTableWidget(0, 9)
         self.table.setSortingEnabled(False) # [🚀 性能优化] 禁用 Qt 内部排序，防止与 Python 手动排序冲突
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "DFF2", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if self.table.horizontalHeaderItem(7):
+            self.table.horizontalHeaderItem(7).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
         # [NEW] 形态详情列控制
-        self.table.setColumnHidden(7, not self._show_reason)
+        self.table.setColumnHidden(8, not self._show_reason)
         if self._show_reason:
-            self.table.setColumnWidth(7, 180)
+            self.table.setColumnWidth(8, 180)
 
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
@@ -1118,7 +1189,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._last_rendered_ts = curr_ts
 
         # --- [🔒 锁外计算] 排序与统计全部移到临界区外执行，降低 GIL 竞争 ---
-        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
@@ -1128,6 +1199,11 @@ class SectorDetailDialog(QDialog, WindowMixin):
             tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
         sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
         alert_manager = get_alert_manager()
+        
+        # 优先从 parent (主面板) 自身获取 df_all，其次从 detector 相关的 main_app 获取
+        df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
+        if df_all is None:
+            df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
         
         # 预计算合成评分 (用于锁外高性能排序)
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
@@ -1145,6 +1221,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
             if attr == 'start_pct': val = cp - pd
             elif attr == 'pct_diff': val = pd
             elif attr == 'score': val = score_cache.get(ts.code, 0)
+            elif attr == 'dff2': val = _safe_extract_dff2(df_all, ts.code, self.detector)
             else: val = getattr(ts, attr, 0) or 0
             
             # 构建稳定排序 Key
@@ -1186,10 +1263,12 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 # 尝试从探测器索引找
                 ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
                 # 再次兜底：如果还没找到，尝试从主程序的全局快照提取
-                if (not ts_name or ts_name == ts.code or ts_name == '未知') and hasattr(self.detector, 'main_app'):
-                    df_all = getattr(self.detector.main_app, 'df_all', None)
-                    if df_all is not None and ts.code in df_all.index:
+                if (not ts_name or ts_name == ts.code or ts_name == '未知') and df_all is not None:
+                    if ts.code in df_all.index:
                         ts_name = str(df_all.loc[ts.code, 'name'])
+
+            # [DFF2 提取] 从全局 df_all 安全提取 dff2 列 (自适应 Fallback 自动计算)
+            dff2 = _safe_extract_dff2(df_all, ts.code, self.detector)
 
             flattened.append((
                 ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
@@ -1197,6 +1276,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 getattr(ts, 'current_pct', 0) or 0,
                 (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
                 getattr(ts, 'pct_diff', 0) or 0,
+                dff2,
                 reason,
                 is_alerted # 传给渲染器
             ))
@@ -1220,8 +1300,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, reason, is_alerted = row
-            # code, name, score, sig, pct, start_pct, dff, reason = row
+            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted = row
             
             # [⚡ 报警核验]
             # is_alerted = get_alert_manager().is_alerted(code) # 已在 refresh_data 预计算
@@ -1246,11 +1325,16 @@ class SectorDetailDialog(QDialog, WindowMixin):
             if is_alerted: c_dff = txt_c
             self._update_dialog_cell(i, 6, dff, color=c_dff, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
 
+            # 7. DFF2
+            c_dff2 = QColor("#FF4444") if dff2 > 0.001 else (QColor("#44CC44") if dff2 < -0.001 else Qt.GlobalColor.white)
+            if is_alerted: c_dff2 = txt_c
+            self._update_dialog_cell(i, 7, dff2, color=c_dff2, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
+
             # [自适应渲染] 只有在列可见时才更新单元格内容
             if self._show_reason:
                 c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
                 if is_alerted: c_reason = txt_c
-                self._update_dialog_cell(i, 7, reason, c_reason, bg_color=bg_c)
+                self._update_dialog_cell(i, 8, reason, c_reason, bg_color=bg_c)
 
     def _update_dialog_cell(self, row, col, val, color=None, align=None, bg_color=None, fmt=None):
         it = self.table.item(row, col)
@@ -1401,9 +1485,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
     def apply_show_reason_manual(self, val):
         """供主面板调用的手动状态同步"""
         self._show_reason = val
-        self.table.setColumnHidden(7, not val)
+        self.table.setColumnHidden(8, not val)
         if val:
-            self.table.setColumnWidth(7, 180)
+            self.table.setColumnWidth(8, 180)
             
         # 同步更新 UI 按钮状态
         if hasattr(self, 'btn_toggle_reason'):
@@ -1575,16 +1659,18 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         layout.addWidget(self.header_frame)
         
-        self.table = EnhancedTableWidget(0, 8)
+        self.table = EnhancedTableWidget(0, 9)
         self.table.setSortingEnabled(False) # [🚀 性能优化] 禁用 Qt 内部排序
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态详情"])
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "DFF2", "形态详情"])
         if self.table.horizontalHeaderItem(6):
             self.table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if self.table.horizontalHeaderItem(7):
+            self.table.horizontalHeaderItem(7).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
         # [NEW] 形态详情列默认隐藏
-        self.table.setColumnHidden(7, not self._show_reason)
+        self.table.setColumnHidden(8, not self._show_reason)
         if self._show_reason:
-            self.table.setColumnWidth(7, 180)
+            self.table.setColumnWidth(8, 180)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #000; alternate-background-color: #111; color: #FFF; gridline-color: #222; outline: none; }
@@ -1727,7 +1813,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._last_rendered_ts = curr_ts
 
         # [🚀 锁外计算] 预提取所有排序所需属性
-        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
@@ -1746,6 +1832,12 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             if attr == 'start_pct': val = cp - pd
             elif attr == 'pct_diff': val = pd
             elif attr == 'score': val = score_cache.get(ts.code, 0)
+            elif attr == 'dff2':
+                # 优先获取自愈版 df_all，计算出真正的 DFF2 以便精确排序
+                df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
+                if df_all is None:
+                    df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+                val = _safe_extract_dff2(df_all, ts.code, self.detector)
             else: val = getattr(ts, attr, 0) or 0
             
             if attr == 'name':
@@ -1776,18 +1868,25 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
             # [🚀 名称兜底]
             ts_name = getattr(ts, 'name', '')
+            df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
+            if df_all is None:
+                df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+
             if not ts_name or ts_name == ts.code or ts_name == '未知':
                 ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
-                if (not ts_name or ts_name == ts.code or ts_name == '未知') and hasattr(self.detector, 'main_app'):
-                    df_all = getattr(self.detector.main_app, 'df_all', None)
-                    if df_all is not None and ts.code in df_all.index:
+                if (not ts_name or ts_name == ts.code or ts_name == '未知') and df_all is not None:
+                    if ts.code in df_all.index:
                         ts_name = str(df_all.loc[ts.code, 'name'])
+
+            # [DFF2 提取] 从全局 df_all 安全提取 dff2 列 (自适应 Fallback 自动计算)
+            dff2 = _safe_extract_dff2(df_all, ts.code, self.detector)
 
             flattened.append((ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
                              getattr(ts, 'signal_count', 0) or 0,
                              getattr(ts, 'current_pct', 0) or 0,
                              (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
                              getattr(ts, 'pct_diff', 0) or 0,
+                             dff2,
                              reason,
                              is_alerted))
         avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / len(data_list) if data_list else 0
@@ -1803,8 +1902,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, reason, is_alerted = row
-            # code, name, score, sig, pct, start_pct, dff, reason = row
+            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted = row
             
             # [⚡ 报警核验]
             # is_alerted = get_alert_manager().is_alerted(code) # 已预计算
@@ -1829,11 +1927,16 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             if is_alerted: c_dff = txt_c
             self._update_dialog_cell(i, 6, dff, color=c_dff, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
 
+            # 7. DFF2
+            c_dff2 = QColor("#FF4444") if dff2 > 0.001 else (QColor("#44CC44") if dff2 < -0.001 else Qt.GlobalColor.white)
+            if is_alerted: c_dff2 = txt_c
+            self._update_dialog_cell(i, 7, dff2, color=c_dff2, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_c, fmt="{:+.2f}%")
+
             # [自适应渲染] 只有在列可见时才更新单元格内容
             if self._show_reason:
                 c_reason = QColor("#00FFCC") if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
                 if is_alerted: c_reason = txt_c
-                self._update_dialog_cell(i, 7, reason, color=c_reason, bg_color=bg_c)
+                self._update_dialog_cell(i, 8, reason, color=c_reason, bg_color=bg_c)
 
     def _update_dialog_cell(self, row, col, val, color=None, align=None, bg_color=None, fmt=None):
         it = self.table.item(row, col)
@@ -1879,7 +1982,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if not state: return
         self._show_reason = state.get("show_reason", False)
         if hasattr(self, 'table'):
-            self.table.setColumnHidden(7, not self._show_reason)
+            self.table.setColumnHidden(8, not self._show_reason)
 
     def _save_header_state(self):
         if hasattr(self, '_boot_lock') and self._boot_lock:
@@ -1902,10 +2005,11 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 self.restoreGeometry(QByteArray.fromHex(conf[geom_key].encode()))
                 
             widths = conf.get(f"cat_detail_widths_{self.category_name}")
-            if widths and len(widths) == self.table.columnCount():
+            if widths:
                 self.table.horizontalHeader().blockSignals(True)
                 for i, w in enumerate(widths):
-                    if w > 10: self.table.setColumnWidth(i, w)
+                    if i < self.table.columnCount() and w > 10:
+                        self.table.setColumnWidth(i, w)
                 self.table.horizontalHeader().blockSignals(False)
         except: pass
 
@@ -1990,9 +2094,9 @@ class CategoryDetailDialog(QDialog, WindowMixin):
     def apply_show_reason_manual(self, val):
         """供主面板调用的手动状态同步"""
         self._show_reason = val
-        self.table.setColumnHidden(7, not val)
+        self.table.setColumnHidden(8, not val)
         if val:
-            self.table.setColumnWidth(7, 180)
+            self.table.setColumnWidth(8, 180)
 
         # 同步更新 UI 按钮状态
         if hasattr(self, 'btn_toggle_reason'):
@@ -2590,17 +2694,21 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         title_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #FFD700; padding: 10px;")
         rank_layout.addWidget(title_lbl)
         
-        self.stock_table = EnhancedTableWidget(0, 8)
-        self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "形态"])
-        self.stock_table.setColumnHidden(7, True) # 默认隐藏
+        self.stock_table = EnhancedTableWidget(0, 9)
+        self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "DFF2", "形态"])
+        self.stock_table.setColumnHidden(8, True) # 默认隐藏
         if self.stock_table.horizontalHeaderItem(6):
             self.stock_table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if self.stock_table.horizontalHeaderItem(7):
+            self.stock_table.horizontalHeaderItem(7).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header = self.stock_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setDefaultSectionSize(80) 
         header.setMinimumSectionSize(30)
         self.stock_table.setColumnWidth(0, 65)
         self.stock_table.setColumnWidth(1, 75)
+        self.stock_table.setColumnWidth(6, 62)
+        self.stock_table.setColumnWidth(7, 62)
         # self.stock_table.horizontalHeader().sectionResized.connect(self._save_ui_state) # 移动到 _init_ui 末尾，防止初始化时 AttributeError
         
         self.stock_table.setAlternatingRowColors(True)
@@ -4142,6 +4250,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             for code in anchors_map.keys():
                 self._table_highlights[("stock", code, 5)] = now # 起点
                 self._table_highlights[("stock", code, 6)] = now # DFF
+                self._table_highlights[("stock", code, 7)] = now # DFF2
             
             self.update_visuals()
             self._trigger_save_ui() # 同步保存状态
@@ -4350,8 +4459,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # 0. 恢复全局显示状态
             self._global_show_reason = conf.get("global_show_reason", False)
-            self.stock_table.setColumnHidden(7, not self._global_show_reason)
-            if self._global_show_reason: self.stock_table.setColumnWidth(7, 120)
+            self.stock_table.setColumnHidden(8, not self._global_show_reason)
+            if self._global_show_reason: self.stock_table.setColumnWidth(8, 120)
 
             # 1. 恢复列宽与排序状态 (Header States)
             if "header_stock" in conf:
@@ -4472,8 +4581,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     self.stock_table.setColumnWidth(4, 62)   # 涨幅
                     self.stock_table.setColumnWidth(5, 62)   # 起点
                     self.stock_table.setColumnWidth(6, 62)   # DFF
-                    if not self.stock_table.isColumnHidden(7):
-                        self.stock_table.setColumnWidth(7, 120) # 保持原样 180
+                    self.stock_table.setColumnWidth(7, 62)   # DFF2
+                    if not self.stock_table.isColumnHidden(8):
+                        self.stock_table.setColumnWidth(8, 120) # 保持原样 180
                 finally:
                     header.blockSignals(False)
         else:
@@ -4489,9 +4599,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     self.stock_table.setColumnWidth(4, 70)   # 涨幅
                     self.stock_table.setColumnWidth(5, 70)   # 起点
                     self.stock_table.setColumnWidth(6, 62)   # DFF
+                    self.stock_table.setColumnWidth(7, 62)   # DFF2
                     # 隐藏理由列或保持 0
-                    if not self.stock_table.isColumnHidden(7):
-                        self.stock_table.setColumnWidth(7, 0)
+                    if not self.stock_table.isColumnHidden(8):
+                        self.stock_table.setColumnWidth(8, 0)
                 finally:
                     header.blockSignals(False)
         dlgs = [dlg for dlg in self._detail_dialogs.values() if not dlg.isHidden()]
@@ -4517,8 +4628,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             header.setStretchLastSection(False)
             
             # [🚀 零测绘开销] 放弃耗时的自适应测绘，直接应用主表同款高度紧凑布局
-            # 0:代码(62), 1:名称(72), 2:得分(35), 3:活跃(35), 4:涨幅(62), 5:起点(62), 6:DFF(62) -> 总计 390
-            fixed_cols_w = [62, 72, 35, 35, 62, 62, 62]
+            # 0:代码(62), 1:名称(72), 2:得分(35), 3:活跃(35), 4:涨幅(62), 5:起点(62), 6:DFF(62), 7:DFF2(62) -> 总计 452
+            fixed_cols_w = [62, 72, 35, 35, 62, 62, 62, 62]
             for col, w in enumerate(fixed_cols_w):
                 if col < dlg.table.columnCount():
                     header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
@@ -4526,16 +4637,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # [🚀 理由列固定策略]
             reason_w = 0
-            if getattr(self, '_global_show_reason', False) and dlg.table.columnCount() > 7:
-                header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-                dlg.table.setColumnWidth(7, 120)
+            if getattr(self, '_global_show_reason', False) and dlg.table.columnCount() > 8:
+                header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
+                dlg.table.setColumnWidth(8, 120)
                 reason_w = 120
             else:
-                if dlg.table.columnCount() > 7:
-                    dlg.table.setColumnWidth(7, 0)
+                if dlg.table.columnCount() > 8:
+                    dlg.table.setColumnWidth(8, 0)
             
-            # [🚀 结果计算] 窗口宽度 = 基础列宽(390) + 理由列(0/120) + 边距冗余(35)
-            target_w = 390 + reason_w + 35
+            # [🚀 结果计算] 窗口宽度 = 基础列宽(452) + 理由列(0/120) + 边距冗余(35)
+            target_w = 452 + reason_w + 35
             header.blockSignals(False)
             prepared_dlgs.append((dlg, target_w))
             
@@ -4655,8 +4766,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """全局形态详情开关同步 - 被子弹窗调用"""
         self._global_show_reason = val
         # 同步主界面个股列表
-        self.stock_table.setColumnHidden(7, not val)
-        if val: self.stock_table.setColumnWidth(7, 120)
+        self.stock_table.setColumnHidden(8, not val)
+        if val: self.stock_table.setColumnWidth(8, 120)
         
         for dlg in self._detail_dialogs.values():
             if hasattr(dlg, 'apply_show_reason_manual'):
@@ -4986,6 +5097,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # [🚀 性能优化] 预计算所有过滤后个股的合成评分，避免在排序循环中重复计算
             score_cache = {ts.code: self._get_synthetic_score(ts) for ts in filtered_ts}
             
+            # 优先从主面板自身获取，其次从 detector 相关的 main_app 获取
+            df_all = getattr(self, 'df_all', None)
+            if df_all is None:
+                df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+
             def flatten_ts(ts):
                 # [🚀 结构分展示优化] 统一调用合成评分公式 (命中缓存)
                 display_score = score_cache.get(ts.code, 0)
@@ -5003,7 +5119,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         if ts.code in reg: reason = reg[ts.code].get('desc', '')
                     if not reason: reason = getattr(ts, 'pattern_hint', "")
 
-                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff, is_sbc_active, reason)
+                # [DFF2 提取] 从全局 df_all 安全提取 dff2 列 (自适应 Fallback 自动计算)
+                dff2 = _safe_extract_dff2(df_all, ts.code, self.detector)
+
+                return (ts.code, ts.name, round(display_score, 1), ts.signal_count, ts.current_pct, ts.pct_diff, ts.dff, dff2, is_sbc_active, reason)
 
             self.stock_table.setUpdatesEnabled(False)
             self.sector_table.setUpdatesEnabled(False)
@@ -5023,7 +5142,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 sec_scroll = self.sector_table.verticalScrollBar().value()
 
                 # --- [🚀 优化2] 手动排序逻辑 (对齐全局与本地) ---
-                sort_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff'}
+                sort_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
                 s_attr = sort_attr_map.get(self._sort_col, 'score')
                 is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
                 
@@ -5046,6 +5165,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         val = ts.pct_diff
                     elif s_attr == 'score':
                         val = score_cache.get(ts.code, 0)
+                    elif s_attr == 'dff2':
+                        val = _safe_extract_dff2(df_all, ts.code, self.detector)
                     else:
                         val = getattr(ts, s_attr, 0)
                     
@@ -5207,9 +5328,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if table.rowCount() != len(flattened_data):
             table.setRowCount(len(flattened_data))
         for i, row_data in enumerate(flattened_data):
-            code, name, score, sig, pct, diff, dff, is_sbc_active, reason = row_data
+            code, name, score, sig, pct, diff, dff, dff2, is_sbc_active, reason = row_data
             
-            # [⚡ 报警核验] 针对命中报警或有 SBC 信号的个股应用高对比度
+            # [⚡ 报警核验] 针对命中报警或有 SBC 信号 of 个股应用高对比度
             is_generic_alert = get_alert_manager().is_alerted(code)
             is_alerted = is_generic_alert or is_sbc_active
             bg_c = self._UI_CACHE["COLOR_ALERT_BG"] if is_alerted else None
@@ -5246,11 +5367,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not is_first_init: self._table_highlights[("stock", code, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("stock", code, 6))
 
-            # [全局自适应] 第 7 列：形态理由
+            # 7. DFF2 (实时从 df_all 读取)
+            c_dff2 = self._UI_CACHE["COLOR_RED"] if dff2 > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if dff2 < -0.001 else Qt.GlobalColor.white)
+            if is_alerted: c_dff2 = txt_c
+            if self._update_cell(table, i, 7, dff2, color=c_dff2, fmt="{:+.2f}%"):
+                if not is_first_init: self._table_highlights[("stock", code, 7)] = time.time()
+            self._apply_flash_effect(table.item(i, 7), ("stock", code, 7))
+
+            # [全局自适应] 第 8 列：形态理由
             if self._global_show_reason:
                 c_reason = self._UI_CACHE["COLOR_CYAN"] if ("🚀" in reason or "🔥" in reason) else QColor("#AAAAAA")
                 if is_alerted: c_reason = self._UI_CACHE["COLOR_ALERT_TEXT"]
-                self._update_cell(table, i, 7, reason, color=c_reason, bg_color=bg_c)
+                self._update_cell(table, i, 8, reason, color=c_reason, bg_color=bg_c)
             
             # 使用本次切片的 diff 来反推当时起点的涨幅
             l_start_pct = pct - diff

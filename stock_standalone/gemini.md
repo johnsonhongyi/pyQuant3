@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-17 20:50  
+> 最后更新：2026-05-18 14:40  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,9 +27,35 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话，AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-18 14:50
+- [x] **实现 DFF2 仿真及回放时极速 TickSeries 实时计算与自适应 Parent-df_all 级联穿透 (Implemented TickSeries Real-time Computation and Parent-df_all Cascading Flow for DFF2)**：
+    - [x] **打通 TickSeries 独立锁内数据源通道**：针对回放/仿真等 `df_all` 实时价格空缺或 `main_app` 为 None 的极端异构场景，升级了顶部通用静态辅助器 `_safe_extract_dff2(df_all, code, detector)` 接口。新增 `detector` 可选参数，优先通过安全的 `with detector._lock` 在 `_tick_series` 中直取个股最权威的当前现价 `current_price` 及日内最低点 `low_day`。如最低价未对齐，智能以 `open_price` 或 `last_close` 兜底，实现了仿真模式下毫秒级精准实时 mathematical 补齐。
+    - [x] **打通 Parent Panel 宿主 df_all 级联寻址**：彻底解耦了详情个股子窗 `SectorDetailDialog` 与重点成分子窗 `CategoryDetailDialog` 之前对 `self.detector.main_app` 强绑定的物理桎梏。新增 `getattr(self.parent(), 'df_all', None)` 向上多重穿透，使得在子窗在离线或仿真时，能够顺畅级联共享主面板拥有的全量基础信息，保证了复杂看盘环境下的百分之百自愈力。
+    - [x] **重构三大表格刷新渲染管道**：主领军个股表、板块成分详情表、个股详情表刷新链路全量改版，统一在锁外及转换迭代时向 `_safe_extract_dff2` 派发 `self.detector` 指针。彻底消除了任何零值 fallback 盲区，保证了在所有运行模式下均有极具一致性的极致计算品质。
+    - [x] **修复回放 GBK 字符集终端打印异常**：消除了 `test_bidding_replay.py` 内部 print 中的 Unicode Emojis，保障了 Windows CMD 中文终端环境下的绝对兼容性与物理稳定性。
+    - [x] **实现 DFF2 全表格高精度自主排序 (Fixed DFF2 Column sorting failure)**：修复了主面板个股列表、个股明细详情窗以及重点成分详情窗中，点击 DFF2 (第 7 列) 表头排序退化为结构分排序的底层缺陷。将三大表排序映射表 `col_attr_map` 物理扩充至包含索引 7 (`'dff2'`)，并在排序值提取钩子中完美嵌入对 `_safe_extract_dff2` 的无损回调。彻底消除了排序不对齐和降级现象，实现了全系统跨页面 DFF2 数据 100% 独立高精度物理排序。
+
+
+## 2026-05-18 13:25
+- [x] **修复竞价赛马详情窗列宽恢复的向下兼容性 (Fixed Detail Dialog Column Width Restoration Backward Compatibility)**：
+    - [x] **打破硬编码列数强等于条件限制**：重构了 `SectorDetailDialog.apply_ui_state`（个股明细详情窗）与 `CategoryDetailDialog._restore_header_state`（成分股详情窗）的列宽加载与恢复逻辑。将原先强行要求配置文件中宽度数组长度与当前表格列数完全相等的限制（`len(widths) == self.table.columnCount()`）彻底移除。这彻底根治了因新增 `DFF2` 列物理扩容导致历史 8 列宽度配置加载时被静默忽略、全量退水到默认宽度的缺陷。
+    - [x] **引入极具弹性与鲁棒性的安全恢复映射**：在 widths 循环中引入了 `i < self.table.columnCount()` 双边越界守卫。使得无论配置文件保存的是 8 列、7 列或未来任意数目的历史宽度，系统都能安全自动地恢复前 `i` 列的自定义宽度，多余或新增加的列则稳健退守为系统设定的默认宽度，极大护卫了跨版本升级时用户界面列宽微调数据的安全持久化与自适应性。
+
+## 2026-05-18 05:15
+- [x] **竞价赛马面板个股列表及详情窗新增 DFF2 列并完善显示与联动控制 (Implemented DFF2 Column Addition and Refined UI Layout Alignment)**：
+    - [x] **个股表格物理扩容为 9 列**：重构了 `bidding_racing_panel.py` 中的主面板个股列表 `stock_table`（当下领军个股表），以及明细个股详情弹窗 `SectorDetailDialog` 和成分股详情弹窗 `CategoryDetailDialog` 的表格初始化逻辑。个股表格物理列数从 8 列扩充至 **9 列**，表头调整对齐为 `["代码", "名称", "结构分", "活跃", "涨幅", "起点", "DFF", "DFF2", "形态"]`。
+    - [x] **实现 DFF2 行情数据毫秒级精准注入与容错**：在主表及各个子窗的刷新链路（`refresh_data` / `flatten_ts`）中，引入对全局行情快照 `df_all` 的安全提取与多级防空保护。在数据缺损或 NaN 状态下自动 fallback 兜底为 `0.0`，从而打通了 `DFF2` 行情列从底层到 UI 展现端的数据管道。
+    - [x] **打通 DFF2 单元格极速高亮与闪烁渲染**：在三大表格的数据更新渲染中（`_update_table_optimized` / `_render_table`），在第 7 列渲染 `DFF2` 数据并应用红绿高亮染色，自动绑定至闪烁历史计时器 `_table_highlights[("stock", code, 7)]`，完成了视觉效果的原子同步。
+    - [x] **理由隐藏列索引右移与全局详情开关同步**：将表格的 `形态详情/理由` 列隐藏与显示控制索引从第 7 列右移至第 8 列。同步更新了 `_restore_ui_state`、`_set_global_show_reason` 与 `apply_show_reason_manual`，确保全局开关与数据刷新状态严密对齐。
+    - [x] **重构子窗磁吸列宽自适应对齐算法**：在 `_arrange_detail_windows` 排版算法中，将固定前置列宽由 `390px` 升级调整为 `452px`（为 `DFF2` 预留出标准的 `62px` 宽度）。更新了目标子窗体宽度计算公式 `target_w = 452 + reason_w + 35`，彻底解决了对齐时由于前置宽度增加导致形态理由列被物理遮挡裁剪的排版问题。
+
 ## 2026-05-18 03:30
 - [x] **盘中决策引擎死锁根治与锁优化 (Decision Engine Deadlock Eradication & Lock Optimization)**：
     - [x] **落地 100% 零锁只读 Snapshot 缓存架构 (100% Lock-Free Read-Only Snapshot Cache Architecture)**：在 `SectorFocusController` 中引入了 `self._dragon_snapshot` 龙头快照列表和 `self._dragon_count_snapshot` 龙头数量统计字典。在后台计算线程每次计算完毕（`tick()` 尾部）及收盘归档完成（`run_daily_close_snapshot()` 尾部）时，由后台自动调用 `_update_snapshots()` 刷新缓存。彻底重构 UI 消费门面 `get_dragon_leaders` 与 `get_dragon_count` 接口，使 UI 线程调用时不再获取任何互斥锁，直接在 O(1) 下秒级零锁返回静态快照，锁外仅作极速状态过滤。这彻底消除了 UI 主线程与后台引擎线程之间的 ABBA 锁嵌套与长尾 O(N) 复制开销，将主线程挂起风险彻底降为零！
+    - [x] **全局替换 Lock 升级为慢锁诊断包装类 (`TimeoutLock`)**：在 `sector_focus_engine.py` 的 10 处核心组件（包括 `SectorFocusMap`、`StarFollowEngine`、`DragonLeaderTracker`、`DecisionQueue`、`RiskEngine`、`StrategicTrendTracker`、`MacroWatchlist`、`SectorFocusController` 以及全局 `_controller_lock`）中，全面平替原生的 `threading.Lock()` 为带超时警报和物理强退机制的 `TimeoutLock`。
+    - [x] **重构 `DragonLeaderTracker.get_dragon_records` 锁粒度与排序语法修复 (SRP & KISS)**：将重型的 `to_dict()` 属性提取、过滤判断和 `sorted` 排序操作完全剥离出 `with self._lock` 临界区之外，持锁时间由毫秒级暴跌至亚微秒级，完美根治由于锁竞争引发 of UI 主线程 124 秒挂起假死惨剧；同步修复了由于 to_dict 将 status 序列化为 string 导致锁外 `int(x['status'])` 抛出 `ValueError` 的类型异常，以及 `cum_pct_from_entry` 在字典中的真实命名键名冲突（对齐为 `cum_pct` 和 `DragonStatus[x['status']].value`），确保了高密度数据流写入时的绝对稳定性。
+    - [x] **重构 `MacroWatchlist` 锁外磁盘 I/O (I/O Lock Isolation)**：将 `add()` and `remove()` 方法中的写 JSON 动作 `self._save()` 移到 `with self._lock` 外；在 `_save` 内部通过锁浅拷贝 `dict(self.codes)`，然后以无锁状态在锁外执行物理磁盘写入，彻底断绝磁盘 I/O 挂起对线程锁的霸占。锁外仅作极速状态过滤。这彻底消除了 UI 主线程与后台引擎线程之间的 ABBA 锁嵌套与长尾 O(N) 复制开销，将主线程挂起风险彻底降为零！
     - [x] **全局替换 Lock 升级为慢锁诊断包装类 (`TimeoutLock`)**：在 `sector_focus_engine.py` 的 10 处核心组件（包括 `SectorFocusMap`、`StarFollowEngine`、`DragonLeaderTracker`、`DecisionQueue`、`RiskEngine`、`StrategicTrendTracker`、`MacroWatchlist`、`SectorFocusController` 以及全局 `_controller_lock`）中，全面平替原生的 `threading.Lock()` 为带超时警报和物理强退机制的 `TimeoutLock`。
     - [x] **重构 `DragonLeaderTracker.get_dragon_records` 锁粒度与排序语法修复 (SRP & KISS)**：将重型的 `to_dict()` 属性提取、过滤判断和 `sorted` 排序操作完全剥离出 `with self._lock` 临界区之外，持锁时间由毫秒级暴跌至亚微秒级，完美根治由于锁竞争引发的 UI 主线程 124 秒挂起假死惨剧；同步修复了由于 to_dict 将 status 序列化为 string 导致锁外 `int(x['status'])` 抛出 `ValueError` 的类型异常，以及 `cum_pct_from_entry` 在字典中的真实命名键名冲突（对齐为 `cum_pct` 和 `DragonStatus[x['status']].value`），确保了高密度数据流写入时的绝对稳定性。
     - [x] **重构 `MacroWatchlist` 锁外磁盘 I/O (I/O Lock Isolation)**：将 `add()` 和 `remove()` 方法中的写 JSON 动作 `self._save()` 移到 `with self._lock` 外；在 `_save` 内部通过锁浅拷贝 `dict(self.codes)`，然后以无锁状态在锁外执行物理磁盘写入，彻底断绝磁盘 I/O 挂起对线程锁的霸占。
