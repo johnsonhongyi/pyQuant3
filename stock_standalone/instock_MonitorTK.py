@@ -1133,6 +1133,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     main_app=self,
                     on_code_callback=self.on_code_click
                 )
+                self._racing_panel_win.df_all = self.df_all
                 
                 # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用并触发防抖
                 self._racing_panel_win.closed.connect(self._on_racing_panel_closed)
@@ -4620,6 +4621,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 with self._df_lock:
                     self.df_all = full_df
+                
+                # [NEW] ⚡ 同步更新赛马面板缓存的 df_all，确保数据 100% 同步
+                if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
+                    self._racing_panel_win.df_all = full_df
                 
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 

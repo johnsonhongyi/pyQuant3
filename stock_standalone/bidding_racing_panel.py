@@ -71,9 +71,70 @@ SEARCH_HISTORY_GROUP = "bidding_racing"
 _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
 
+def _get_df_all_cascading(widget) -> Optional[pd.DataFrame]:
+    """
+    智能级联寻址 df_all
+    1. 优先从 widget 自身获取 df_all
+    2. 其次从 widget.main_app 获取 df_all
+    3. 再次从 widget.parent() 获取 df_all 或 widget.parent().main_app 获取 df_all
+    4. 最后从 widget.detector.main_app 获取 df_all
+    """
+    if widget is None:
+        return None
+    # 1. 自身
+    df_all = getattr(widget, 'df_all', None)
+    if df_all is not None and not df_all.empty:
+        return df_all
+    # 2. 自身的 main_app
+    main_app = getattr(widget, 'main_app', None)
+    if main_app is not None:
+        df_all = getattr(main_app, 'df_all', None)
+        if df_all is not None and not df_all.empty:
+            return df_all
+    # 3. 自身的 parent()
+    parent_func = getattr(widget, 'parent', None)
+    if parent_func is not None and callable(parent_func):
+        p = parent_func()
+        if p is not None:
+            df_all = getattr(p, 'df_all', None)
+            if df_all is not None and not df_all.empty:
+                return df_all
+            p_main = getattr(p, 'main_app', None)
+            if p_main is not None:
+                df_all = getattr(p_main, 'df_all', None)
+                if df_all is not None and not df_all.empty:
+                    return df_all
+    # 4. 自身的 detector.main_app
+    detector = getattr(widget, 'detector', None)
+    if detector is not None:
+        d_main = getattr(detector, 'main_app', None)
+        if d_main is not None:
+            df_all = getattr(d_main, 'df_all', None)
+            if df_all is not None and not df_all.empty:
+                return df_all
+    return None
+
 def _safe_extract_dff2(df_all, code, detector=None) -> float:
     """从全局 df_all 安全提取 dff2 列，如果不存在或数据为空，优先使用 detector 中的 TickSeries 实时计算，其次使用 buy/trade 与 llow/low 自动计算"""
     dff2 = 0.0
+
+    # 0. 【核心加固】优先从 df_all 中提取最权威的日内最低价 llow / low 作为基准最低价
+    df_llow = None
+    if df_all is not None and code in df_all.index:
+        try:
+            if 'llow' in df_all.columns:
+                df_llow = df_all.loc[code, 'llow']
+            elif 'low' in df_all.columns:
+                df_llow = df_all.loc[code, 'low']
+            
+            if hasattr(df_llow, 'iloc'):
+                df_llow = df_llow.iloc[0]
+            if df_llow is not None:
+                df_llow = float(df_llow)
+                if df_llow <= 0.001:
+                    df_llow = None
+        except Exception:
+            df_llow = None
 
     # 1. 优先尝试从 detector 实时 TickSeries 数据中计算 (回放及实盘最稳健、最准时的实时数据源)
     if detector is not None:
@@ -83,8 +144,8 @@ def _safe_extract_dff2(df_all, code, detector=None) -> float:
                 if ts is not None:
                     # 现价优先使用 ts.current_price
                     buy_f = ts.current_price
-                    # 最低价优先使用 ts.low_day (日内最低价)，其次 open_price，其次 last_close
-                    llow_f = ts.low_day
+                    # 最低价：【核心修复】优先使用从 df_all 中获取的最权威 llow (df_llow)，其次使用 ts.low_day，其次 open_price，其次 last_close
+                    llow_f = df_llow if df_llow is not None else ts.low_day
                     if llow_f <= 0.001:
                         llow_f = ts.open_price
                     if llow_f <= 0.001:
@@ -121,20 +182,23 @@ def _safe_extract_dff2(df_all, code, detector=None) -> float:
             if hasattr(buy_val, 'iloc'):
                 buy_val = buy_val.iloc[0]
                 
-            llow_val = None
-            if 'llow' in df_all.columns:
-                llow_val = df_all.loc[code, 'llow']
-            elif 'low' in df_all.columns:
-                llow_val = df_all.loc[code, 'low']
-                
-            if hasattr(llow_val, 'iloc'):
-                llow_val = llow_val.iloc[0]
+            # 最低价：优先使用已提取的 df_llow
+            llow_f = df_llow
+            if llow_f is None:
+                llow_val = None
+                if 'llow' in df_all.columns:
+                    llow_val = df_all.loc[code, 'llow']
+                elif 'low' in df_all.columns:
+                    llow_val = df_all.loc[code, 'low']
+                    
+                if hasattr(llow_val, 'iloc'):
+                    llow_val = llow_val.iloc[0]
+                if llow_val is not None:
+                    llow_f = float(llow_val)
 
-            if buy_val is not None and llow_val is not None:
+            if buy_val is not None and llow_f is not None and llow_f > 0.001:
                 buy_f = float(buy_val)
-                llow_f = float(llow_val)
-                if llow_f > 0.001:
-                    dff2 = round((buy_f - llow_f) / llow_f * 100, 1)
+                dff2 = round((buy_f - llow_f) / llow_f * 100, 1)
         except Exception:
             pass
             
@@ -951,7 +1015,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
         
         # [🚀 标题栏交互增强] 创建可交互标题区域
         self.header_frame = QFrame()
@@ -961,7 +1026,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         """)
         self.header_frame.mouseDoubleClickEvent = lambda e: self._on_header_double_click(e)
         header_layout = QHBoxLayout(self.header_frame)
-        header_layout.setContentsMargins(12, 6, 12, 6)
+        header_layout.setContentsMargins(6, 4, 6, 4)
         header_layout.setSpacing(10)
         
         self.title_lbl = QLabel(f"🔥 {self.sector_name} - 个股明细")
@@ -1200,10 +1265,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
         sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
         alert_manager = get_alert_manager()
         
-        # 优先从 parent (主面板) 自身获取 df_all，其次从 detector 相关的 main_app 获取
-        df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
-        if df_all is None:
-            df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+        # 智能级联寻址最精准的 df_all 缓存
+        df_all = _get_df_all_cascading(self)
         
         # 预计算合成评分 (用于锁外高性能排序)
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
@@ -1626,14 +1689,15 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
         
         # [🚀 标题栏交互增强] 创建可交互标题区域
         self.header_frame = QFrame()
         self.header_frame.setObjectName("header_frame")
         self.header_frame.mouseDoubleClickEvent = lambda e: self._on_header_double_click(e)
         header_layout = QHBoxLayout(self.header_frame)
-        header_layout.setContentsMargins(0, 0, 0, 5)
+        header_layout.setContentsMargins(4, 2, 4, 2)
         header_layout.setSpacing(10)
         
         title_lbl = QLabel(f"🔥 {self.category_name} - 个股明细")
@@ -1817,6 +1881,9 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         attr = col_attr_map.get(self._sort_col, 'score')
         is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
         
+        # 智能级联寻址最精准的 df_all 缓存 (锁外一键预提取，彻底规避循环内部重复 lookup 与 getattr 损耗)
+        df_all = _get_df_all_cascading(self)
+        
         alert_manager = get_alert_manager()
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
         
@@ -1833,10 +1900,6 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             elif attr == 'pct_diff': val = pd
             elif attr == 'score': val = score_cache.get(ts.code, 0)
             elif attr == 'dff2':
-                # 优先获取自愈版 df_all，计算出真正的 DFF2 以便精确排序
-                df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
-                if df_all is None:
-                    df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
                 val = _safe_extract_dff2(df_all, ts.code, self.detector)
             else: val = getattr(ts, attr, 0) or 0
             
@@ -1868,9 +1931,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
             # [🚀 名称兜底]
             ts_name = getattr(ts, 'name', '')
-            df_all = getattr(self.parent(), 'df_all', None) if (hasattr(self, 'parent') and self.parent()) else None
-            if df_all is None:
-                df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+            # 已在锁外一键提取 df_all 缓存
 
             if not ts_name or ts_name == ts.code or ts_name == '未知':
                 ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
@@ -2961,13 +3022,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._macro_query_str = query
         try:
             # 1. 寻找数据源 (df_all)
-            df = None
-            if self.main_app and hasattr(self.main_app, 'df_all'):
-                df = self.main_app.df_all.copy()  # [FIX] 使用 copy() 避免多次查询污染/修改原数据
-            elif self.detector and hasattr(self.detector, 'main_app'):
-                df = self.detector.main_app.df_all.copy()
-            elif hasattr(self, 'df_all'):
-                df = self.df_all.copy() # [SNAPSHOT] 回测模式：使用注入的快照
+            df_src = _get_df_all_cascading(self)
+            df = df_src.copy() if df_src is not None else None
             
             # [🚀 核心增强] 动态行情同步逻辑
             if df is not None and not df.empty and self.detector and self.detector._tick_series:
@@ -3084,13 +3140,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def _on_query_test_triggered(self):
         """测试指定代码或全局数据，计算下拉菜单中各历史条件的命中数量 (🧪测试 按钮专用)"""
         # 1. 寻找数据源 (df_all)
-        df = None
-        if self.main_app and hasattr(self.main_app, 'df_all'):
-            df = self.main_app.df_all
-        elif self.detector and hasattr(self.detector, 'main_app'):
-            df = self.detector.main_app.df_all
-        elif hasattr(self, 'df_all'):
-            df = self.df_all
+        df = _get_df_all_cascading(self)
             
         if df is None or df.empty:
             return
@@ -3230,13 +3280,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def _on_code_check_triggered(self, target_code=None):
         """对选定个股或随机个股调出 check_code 详检分析报告 (🔍详检 按钮专用)"""
         # 1. 寻找数据源 (df_all)
-        df = None
-        if self.main_app and hasattr(self.main_app, 'df_all'):
-            df = self.main_app.df_all
-        elif self.detector and hasattr(self.detector, 'main_app'):
-            df = self.detector.main_app.df_all
-        elif hasattr(self, 'df_all'):
-            df = self.df_all
+        df = _get_df_all_cascading(self)
             
         if df is None or df.empty:
             return
@@ -4459,14 +4503,21 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
             # 0. 恢复全局显示状态
             self._global_show_reason = conf.get("global_show_reason", False)
-            self.stock_table.setColumnHidden(8, not self._global_show_reason)
-            if self._global_show_reason: self.stock_table.setColumnWidth(8, 120)
 
             # 1. 恢复列宽与排序状态 (Header States)
             if "header_stock" in conf:
                 self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_stock"].encode()))
             if "header_sector" in conf:
                 self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_sector"].encode()))
+            
+            # [🚀 修复] 解决旧 8 列配置加载导致第 7 列 DFF2 被错误隐藏或宽度异常的兼容性问题
+            self.stock_table.setColumnHidden(7, False) # DFF2 必须始终显示
+            if self.stock_table.columnWidth(7) < 10:
+                self.stock_table.setColumnWidth(7, 62)
+                
+            self.stock_table.setColumnHidden(8, not self._global_show_reason)
+            if self._global_show_reason and self.stock_table.columnWidth(8) < 10:
+                self.stock_table.setColumnWidth(8, 120)
             
             # 2. 恢复重置周期与开关
             self._reset_cycle_mins = conf.get("reset_cycle", 60)
@@ -4594,8 +4645,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 try:
                     self.stock_table.setColumnWidth(0, 62)   # 代码
                     self.stock_table.setColumnWidth(1, 80)   # 名称
-                    self.stock_table.setColumnWidth(2, 62)   # 结构分
-                    self.stock_table.setColumnWidth(3, 62)   # 活跃
+                    self.stock_table.setColumnWidth(2, 45)   # 结构分
+                    self.stock_table.setColumnWidth(3, 35)   # 活跃
                     self.stock_table.setColumnWidth(4, 70)   # 涨幅
                     self.stock_table.setColumnWidth(5, 70)   # 起点
                     self.stock_table.setColumnWidth(6, 62)   # DFF
@@ -5097,10 +5148,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # [🚀 性能优化] 预计算所有过滤后个股的合成评分，避免在排序循环中重复计算
             score_cache = {ts.code: self._get_synthetic_score(ts) for ts in filtered_ts}
             
-            # 优先从主面板自身获取，其次从 detector 相关的 main_app 获取
-            df_all = getattr(self, 'df_all', None)
-            if df_all is None:
-                df_all = getattr(self.detector.main_app, 'df_all', None) if (self.detector and hasattr(self.detector, 'main_app')) else None
+            # 智能级联寻址最精准的 df_all 缓存
+            df_all = _get_df_all_cascading(self)
 
             def flatten_ts(ts):
                 # [🚀 结构分展示优化] 统一调用合成评分公式 (命中缓存)
