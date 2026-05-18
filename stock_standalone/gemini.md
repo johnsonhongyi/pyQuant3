@@ -33,6 +33,12 @@
     - [x] **平台顶底阻力/支撑线渲染**：在 `trade_visualizer_qt6.py` 的核心渲染逻辑 `_render_charts_logic` 中，注入了提取自 `calc_platform_breakout` 的 `ptop` 与 `pbottom` 价格。运用高可视度的 `pg.InfiniteLine` 画出了两条横贯全局的水平虚线（顶为粉紫色，底为亮青色），直观呈现了庄家的箱体运作范围。
     - [x] **突破天数 `pdays` 与信号动态贴合绘制**：通过构建 `pbreak_items_pool` 渲染池，扫描 K 线中最近 120 天的历史，针对每一次 `pbreak == 1` 且 `pdays > 0` 的主升波段，以 K 线最低价（`low_vals[i] * 0.98`）为基点，在图形下方错位渲染出高度鲜艳的 `🎯突破`（金色）以及 `T+x`（亮青色）动态文字追踪标签，彻底解开了平台突破的视觉黑盒，让监控预警的逻辑变得一眼可见！
 
+## 2026-05-18 22:30
+- [x] **实现可视化终端 Pdays 突破天数界面级开关与全链路状态持久化 (Implemented Pdays Visibility Toggle & State Persistence in Visualizer)**:
+    - [x] **UI 工具栏动态开关植入 (Toolbar Toggle Injection)**：在 `trade_visualizer_qt6.py` 的工具栏 `Reset` 按钮前平滑插入了 `QCheckBox("突破天数(pdays)")`。通过动态绑定 `stateChanged` 信号到 `_on_toggle_pdays` 槽函数，实现了状态变动后极其迅速的 `force=True` 强制重绘，做到了真正的“即点即隐现”。
+    - [x] **全周期配置持久化自愈 (State Persistence & Self-healing)**：升级了配置加载 `_restore_ui_state` 与写盘 `_save_ui_state` 核心管道。系统能够自动读取并在下一次冷启动时记忆前次会话对 Pdays 标签的可见性设定（默认为 `True`），彻底杜绝了用户配置丢失的烦恼。
+    - [x] **打通主视图数据无损向下兼容与渲染防线 (Main View Data Fallback & Render Guard)**：重构了 `_draw_platform_breakout` 函数的冷启动判定逻辑，把原本只有 `ptop` / `pbottom` 存在时的短路校验全面升级为涵盖 `pdays` 与 `pbreak` 完整性的四重指标验证门闸 (`if 'ptop' not in day_df.columns or ... or 'pbreak' not in day_df.columns`)。配合渲染底层的 `getattr(self, 'show_pdays', True)` 防御性读取，确保了无论是由主视图传入的历史切片，还是 K线自行加载的数据流，均能完美适配与准确呈现 pdays 追踪。
+
 ## 2026-05-18 21:00
 - [x] **实现基于收盘价的双平台底（Platform Bottom/次低点）计算与中枢高底（Trading Hub）输出 (Implemented Multi-Dimensional Platform Bottom & Trading Hub Range)**:
     - [x] **实现平台底（Platform Bottom）次低点锁定**：升级 `calc_platform_breakout` 形态计算，不仅计算平台阻力上限 `ptop`，同时运用局部最低收盘价（Valley）进行 3% 容忍度的高精度匹配，提取次低收盘价作为平台支撑底 `pbottom`，形成扎实的历史波动中枢 `[pbottom - ptop]`；

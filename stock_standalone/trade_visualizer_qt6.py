@@ -5140,11 +5140,20 @@ class MainWindow(QMainWindow, WindowMixin):
         spacer.setFixedWidth(20)
         self.toolbar.addWidget(spacer)
 
+        self.cb_show_pdays = QCheckBox("突破天数(pdays)")
+        self.cb_show_pdays.setToolTip("显示平台突破的主升天数标记")
+        self.cb_show_pdays.setChecked(getattr(self, 'show_pdays', True))
+        self.cb_show_pdays.stateChanged.connect(self._on_toggle_pdays)
+        self.toolbar.addWidget(self.cb_show_pdays)
+
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_kline_view)
         self.toolbar.addWidget(reset_btn)
 
-
+    def _on_toggle_pdays(self, state):
+        self.show_pdays = self.cb_show_pdays.isChecked()
+        if hasattr(self, 'current_code') and hasattr(self, 'day_df') and not self.day_df.empty:
+            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', None), force=True)
 
     def on_real_time_toggled(self, state):
         self.realtime = bool(state)
@@ -10083,7 +10092,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def _draw_platform_breakout(self, x_axis, day_df):
         """在 K 线图上绘制基于收盘价的多维平台顶底曲线以及突破信号"""
         # 如果数据中没有 ptop 等字段，则调用基础函数进行实时计算以保证逻辑 100% 一致
-        if 'ptop' not in day_df.columns or 'pbottom' not in day_df.columns:
+        if 'ptop' not in day_df.columns or 'pbottom' not in day_df.columns or 'pdays' not in day_df.columns or 'pbreak' not in day_df.columns:
             try:
                 import stock_logic_utils
                 # 动态计算看盘视野的 lookback，防止传入长度刚好等于 120 导致 range 循环为空被跳过
@@ -10167,7 +10176,7 @@ class MainWindow(QMainWindow, WindowMixin):
             pbreak = pbreak_vals[i]
             pdays = pdays_vals[i]
             
-            if pbreak == 1 and not pd.isna(pdays) and pdays > 0:
+            if getattr(self, 'show_pdays', True) and pbreak == 1 and not pd.isna(pdays) and pdays > 0:
                 text_item = self.pbreak_items_pool[pool_idx]
                 if pdays == 1:
                     # 突破首日使用显眼样式，带底色框
@@ -13036,6 +13045,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.td_action.setChecked(enabled)
                     self.td_action.blockSignals(False)
 
+            # 3.5.1 pdays 开关
+            if 'show_pdays' in window_config:
+                enabled = bool(window_config.get('show_pdays', True))
+                self.show_pdays = enabled
+                if hasattr(self, 'cb_show_pdays'):
+                    self.cb_show_pdays.blockSignals(True)
+                    self.cb_show_pdays.setChecked(enabled)
+                    self.cb_show_pdays.blockSignals(False)
+
             # 3.6 顶部 Filter 按钮状态同步
             if hasattr(self, 'filter_action'):
                 # 如果 collapsed=True, 则 visible=False -> checked=False
@@ -13136,6 +13154,9 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if hasattr(self, 'show_td_sequential'):
                 window_config['show_td_sequential'] = self.show_td_sequential
+
+            if hasattr(self, 'show_pdays'):
+                window_config['show_pdays'] = self.show_pdays
             
             # 3.8 热点语音播报状态
             # 使用 MainWindow 自己的标志位作为第一优先级，它在整个生命周期最可靠
