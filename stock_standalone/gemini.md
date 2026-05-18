@@ -28,6 +28,11 @@
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-18 21:06
+- [x] **实现 K线平台突破与中枢高底的全量实时可视化 (Implemented Real-time Platform Breakout Visualization on K-Line Chart)**:
+    - [x] **平台顶底阻力/支撑线渲染**：在 `trade_visualizer_qt6.py` 的核心渲染逻辑 `_render_charts_logic` 中，注入了提取自 `calc_platform_breakout` 的 `ptop` 与 `pbottom` 价格。运用高可视度的 `pg.InfiniteLine` 画出了两条横贯全局的水平虚线（顶为粉紫色，底为亮青色），直观呈现了庄家的箱体运作范围。
+    - [x] **突破天数 `pdays` 与信号动态贴合绘制**：通过构建 `pbreak_items_pool` 渲染池，扫描 K 线中最近 120 天的历史，针对每一次 `pbreak == 1` 且 `pdays > 0` 的主升波段，以 K 线最低价（`low_vals[i] * 0.98`）为基点，在图形下方错位渲染出高度鲜艳的 `🎯突破`（金色）以及 `T+x`（亮青色）动态文字追踪标签，彻底解开了平台突破的视觉黑盒，让监控预警的逻辑变得一眼可见！
+
 ## 2026-05-18 21:00
 - [x] **实现基于收盘价的双平台底（Platform Bottom/次低点）计算与中枢高底（Trading Hub）输出 (Implemented Multi-Dimensional Platform Bottom & Trading Hub Range)**:
     - [x] **实现平台底（Platform Bottom）次低点锁定**：升级 `calc_platform_breakout` 形态计算，不仅计算平台阻力上限 `ptop`，同时运用局部最低收盘价（Valley）进行 3% 容忍度的高精度匹配，提取次低收盘价作为平台支撑底 `pbottom`，形成扎实的历史波动中枢 `[pbottom - ptop]`；

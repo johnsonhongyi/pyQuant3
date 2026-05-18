@@ -10068,6 +10068,119 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, attr): getattr(self, attr).hide()
 
 
+    def _clear_platform_breakout(self):
+        """清理平台突破相关的渲染项目"""
+        if hasattr(self, 'pbottom_curve'):
+            self.pbottom_curve.hide()
+        if hasattr(self, 'ptop_curve'):
+            self.ptop_curve.hide()
+        if hasattr(self, 'platform_fill'):
+            self.platform_fill.hide()
+        if hasattr(self, 'pbreak_items_pool'):
+            for item in self.pbreak_items_pool:
+                item.setVisible(False)
+
+    def _draw_platform_breakout(self, x_axis, day_df):
+        """在 K 线图上绘制基于收盘价的多维平台顶底曲线以及突破信号"""
+        # 如果数据中没有 ptop 等字段，则调用基础函数进行实时计算以保证逻辑 100% 一致
+        if 'ptop' not in day_df.columns or 'pbottom' not in day_df.columns:
+            try:
+                import stock_logic_utils
+                # 动态计算看盘视野的 lookback，防止传入长度刚好等于 120 导致 range 循环为空被跳过
+                dynamic_lookback = max(15, int(len(day_df) * 0.4))
+                calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
+                if 'ptop' in calc_df.columns:
+                    day_df['ptop'] = calc_df['ptop'].values
+                    day_df['pbottom'] = calc_df['pbottom'].values
+                    day_df['pbreak'] = calc_df['pbreak'].values
+                    day_df['pdays'] = calc_df['pdays'].values
+            except Exception as e:
+                logger.error(f"Error calculating platform breakout for visualization: {e}")
+                return
+                
+        if 'ptop' not in day_df.columns:
+            return
+            
+        self._clear_platform_breakout()
+        
+        # 提取数组用于历史曲线绘制 (前向填充以防断条)
+        ptop_vals = pd.Series(day_df['ptop']).ffill().bfill().values
+        pbottom_vals = pd.Series(day_df['pbottom']).ffill().bfill().values
+        
+        # 使用阶梯状或折线绘制历史平台顶底变化，像 MA 均线一样
+        ptop_pen = pg.mkPen(color=(255, 0, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+        pbottom_pen = pg.mkPen(color=(0, 255, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+        
+        if not hasattr(self, 'ptop_curve') or self.ptop_curve not in self.kline_plot.items:
+            self.ptop_curve = self.kline_plot.plot(x_axis, ptop_vals, pen=ptop_pen, connect='finite', name="Platform_Top")
+        else:
+            self.ptop_curve.setData(x_axis, ptop_vals)
+            self.ptop_curve.setPen(ptop_pen)
+            self.ptop_curve.show()
+            
+        if not hasattr(self, 'pbottom_curve') or self.pbottom_curve not in self.kline_plot.items:
+            self.pbottom_curve = self.kline_plot.plot(x_axis, pbottom_vals, pen=pbottom_pen, connect='finite', name="Platform_Bottom")
+        else:
+            self.pbottom_curve.setData(x_axis, pbottom_vals)
+            self.pbottom_curve.setPen(pbottom_pen)
+            self.pbottom_curve.show()
+            
+        # 🚀 [NEW] 绘制半透明的 "中枢通道" (Trading Hub Tunnel)
+        if not hasattr(self, 'platform_fill') or self.platform_fill not in self.kline_plot.items:
+            # 使用带科技感的蓝紫色半透明填充
+            tunnel_brush = pg.mkBrush(color=(138, 43, 226, 35)) 
+            self.platform_fill = pg.FillBetweenItem(self.pbottom_curve, self.ptop_curve, brush=tunnel_brush)
+            self.kline_plot.addItem(self.platform_fill)
+        else:
+            # 必须重新设置 curves 引用以刷新区域
+            self.platform_fill.setCurves(self.pbottom_curve, self.ptop_curve)
+            self.platform_fill.show()
+            
+        # 初始化文字渲染池
+        if not hasattr(self, 'pbreak_items_pool'):
+            self.pbreak_items_pool = []
+            for _ in range(80):
+                text_item = pg.TextItem(anchor=(0.5, 0)) # anchor 设为顶部对齐，这样放在底部才不会遮挡
+                self.kline_plot.addItem(text_item)
+                text_item.setVisible(False)
+                self.pbreak_items_pool.append(text_item)
+                
+        # 绘制 pbreak / pdays 突破日标记
+        pool_idx = 0
+        pool_len = len(self.pbreak_items_pool)
+        
+        pbreak_vals = day_df['pbreak'].values
+        pdays_vals = day_df['pdays'].values
+        low_vals = day_df['low'].values
+        
+        # 计算全局高度偏差用于安全定位，防止 0.98 将文字推到视口外部
+        safe_offset = (day_df['high'].max() - day_df['low'].min()) * 0.015
+        
+        # 仅扫描最近的 150 根 K 线
+        total = len(day_df)
+        scan_start = max(0, total - 150)
+        
+        for i in range(scan_start, total):
+            if pool_idx >= pool_len:
+                break
+                
+            pbreak = pbreak_vals[i]
+            pdays = pdays_vals[i]
+            
+            if pbreak == 1 and not pd.isna(pdays) and pdays > 0:
+                text_item = self.pbreak_items_pool[pool_idx]
+                if pdays == 1:
+                    # 突破首日使用显眼样式，带底色框
+                    text_item.setHtml(f'<div style="background-color:rgba(255,215,0,60); border: 1px solid #FFD700; color: #FFD700; padding: 2px;"><b>🎯突破</b></div>')
+                else:
+                    text_item.setHtml(f'<div style="color: #00FFFF;">T+{int(pdays)}</div>')
+                    
+                text_item.setFont(self.custom_font_signal)
+                # 安全放置在 K线最低点下方 1.5% 视口高度处，保证绝对可见且不粘连
+                text_item.setPos(x_axis[i], low_vals[i] - safe_offset)
+                text_item.show()
+                pool_idx += 1
+
     def _clear_price_gaps(self):
         """清理价格缺口 - 仅隐藏版本"""
         if hasattr(self, 'gap_items_pool'):
@@ -10753,6 +10866,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # [NEW] 绘制跳空缺口 (最近 5 个)
         self._draw_price_gaps(x_axis, day_df)
+
+        # ⚡ [NEW] 绘制平台突破的顶底和天数 (Platform Breakout)
+        self._draw_platform_breakout(x_axis, day_df)
 
         # --- ⚡ [NEW] 缠论分析展示 ---
         if getattr(self, 'show_chan', True):
