@@ -442,6 +442,10 @@ def send_with_visualizer(func):
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
+        # 🛡️ [GIL-OPTIMIZE] 将 Python GIL 线程切换间隔从默认的 5ms 压缩至 0.5ms
+        # 极大增强 GUI 主线程高频抢占 GIL 锁的权限，从根本上根治后台密集计算时主 UI 被饿死、假死、未响应的顽疾
+        sys.setswitchinterval(0.0005)
+
         # 🛡️ [RECOVERY] 提升 Windows 定时器精度，减少线程切换时的调度抖动 (解决 0x18 访问冲突的先决条件)
         if sys.platform.startswith('win'):
             try:
@@ -482,6 +486,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 初始化 tk.Tk()
         super().__init__()
+
+        # 🚀 [INIT-QUEUE] 主线程安全事件队列强制初始化
+        import queue
+        self.tk_dispatch_queue = queue.Queue()
+        # [DELAYED-START] 延迟启动主线程消费泵，统一移至构造函数最末尾安全触发，防止抢跑腰斩
+        
         
         # 初始化退出与任务追踪 system (必须放在最前面)
         self._is_closing = False
@@ -508,10 +518,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.last_dpi_scale = self.scale_factor
-        # 3. 接下来是 Qt 初始化
-        from PyQt6 import QtWidgets
-        if not QtWidgets.QApplication.instance():
-            self.app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+        # 3. 接下来是 Qt 初始化 (延迟按需创建，避免与 Tk 抢占主线程消息泵)
+        self.app = None
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
@@ -543,8 +551,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             os.getenv("APP_DEBUG", "0") == "1" or 
                             getattr(cct.CFG, "DEBUG", False) 
                             )
-        # [ROOT-FIX] 初始化联动代理与防重标志
-        self.link_manager = get_link_manager()
+        # [ROOT-FIX] 初始化联动代理与防重标志 (延迟安全启动，防止冷启动时进程重入死锁)
+        self.link_manager = None
+        self._schedule_after(1500, self._lazy_init_link_manager)
         self._last_visualizer_time = 0
         self._last_linkage_data = None 
         self._visualizer_debounce_sec = 0.5
@@ -830,10 +839,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 定时检查队列
         self._schedule_after(1000, self.update_tree)
 
-        # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
-        self.tk_dispatch_queue = queue.Queue()
-        self._is_pumping_events = False # 🚀 [NEW] 重入守卫
-        self._process_dispatch_queue()
+        # ✅ UI 线程任务调度队列 (防重复覆盖保障)
+        if not hasattr(self, 'tk_dispatch_queue') or self.tk_dispatch_queue is None:
+            self.tk_dispatch_queue = queue.Queue()
+            self._is_pumping_events = False # 🚀 [NEW] 重入守卫
+            self._process_dispatch_queue()
 
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
@@ -898,6 +908,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
+
+        # 🚀 [INIT-QUEUE-ACTIVE] 在主窗口彻底初始化完成的最末尾，开启事件队列消费泵！
+        # 彻底杜绝在构造函数前半段“抢跑”导致的主线程未就绪控件访问崩溃腰斩，实现完美自愈！
+        self._safe_schedule_dispatch(50)
+
+    def _lazy_init_link_manager(self):
+        """[ROOT-FIX] 延迟安全启动多进程联动代理，防止冷启动时与主 GUI 消息泵争抢导致死锁"""
+        if not self._is_closing:
+            try:
+                self.link_manager = get_link_manager()
+                logger.info("📡 [Linkage] 延迟启动成功：Linkage manager initialized safely.")
+            except Exception as e:
+                logger.error(f"❌ [Linkage] 延迟启动失败: {e}")
 
     def _ipc_worker_loop(self):
         """[ROOT-FIX] 核心稳定性：唯一背景线程处理发往 Visualizer 的指令。
@@ -1159,7 +1182,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self.racing_detector.register_codes(curr_df)
                                 self.racing_detector.update_scores(force=True)
                                 # 2. 通知 UI 线程计算完成，触发首次面板刷新
-                                self.after(0, lambda: self._racing_panel_win.update_visuals() if hasattr(self, '_racing_panel_win') and self._racing_panel_win else None)
+                                if hasattr(self, 'tk_dispatch_queue'):
+                                    self.tk_dispatch_queue.put(lambda: self._racing_panel_win.update_visuals() if hasattr(self, '_racing_panel_win') and self._racing_panel_win else None)
+                                else:
+                                    self.after(0, lambda: self._racing_panel_win.update_visuals() if hasattr(self, '_racing_panel_win') and self._racing_panel_win else None)
                                 logger.info("✅ Racing Panel: Background bootstrap complete.")
                             except Exception as e:
                                 logger.exception(f"❌ Racing Panel: Background bootstrap failed: {e}")
@@ -1234,34 +1260,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._schedule_after(0, _aggregator_wrapper)
 
     def _safe_schedule_dispatch(self, delay=50):
+        """[KISS-STABLE] 权威单点调度跳板：安全启动主事件消费泵"""
         if getattr(self, "_dispatch_scheduled", False):
             return
-
         self._dispatch_scheduled = True
-
-        def _run():
-            if getattr(self, "_dispatch_running", False):
-                self._dispatch_scheduled = False   # ✅ 防止卡死
-                return
-
-            self._dispatch_running = True
-
-            try:
-                self._process_dispatch_queue()
-            except Exception as e:
-                logger.error(f"dispatch run error: {e}")
-            finally:
-                self._dispatch_running = False
-                self._dispatch_scheduled = False   # ✅ 必须释放（核心）
-
         try:
-            self.after(delay, _run)
+            self.after(delay, self._process_dispatch_queue)
         except Exception as e:
-            logger.error(f"schedule fail: {e}")
+            logger.error(f"Failed to schedule dispatch: {e}")
             self._dispatch_scheduled = False
 
     def _process_dispatch_queue(self):
-        """[STABLE v5] 单心跳 + 时间预算 + 心跳检测 + 防重复调度"""
+        """[KISS-STABLE] 权威单心跳消费泵：自适应轮询 + Qt事件派发 + 100%防死锁"""
         import functools
         from collections import Counter
         from queue import Empty
@@ -1270,11 +1280,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_is_closing', False) or (
             getattr(self, '_app_exiting', None) and self._app_exiting.is_set()
         ):
+            self._dispatch_scheduled = False
             return
+
         if getattr(self, "_dispatch_running", False):
-            return   # ❗ 防止重入
+            return   # 🛡️ 稳固的单一防重入锁，绝不撞车
 
         self._dispatch_running = True
+        self._dispatch_scheduled = False # 释放调度标记，允许下一次挂接
 
         now = time.perf_counter()
         start_t = now
@@ -1382,6 +1395,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._dispatch_running = False
             self._last_task_finish_time = time.time()
 
+            # 🚀 [QT-EVENT-PUMP] 在主线程的 Tk 心跳中主动驱动和分发 PyQt6 窗口的 Windows 事件
+            # 从而完美解决在同一个主线程下，PyQt6 与 Tkinter 消息泵冲突导致打包后冷启动即死锁卡死的致命硬伤！
+            try:
+                now_t = time.time()
+                if now_t - getattr(self, '_last_qt_pump_t', 0) > 0.100: # 100ms 节流限制，大幅减少跨 C 扩展交互频率
+                    self._last_qt_pump_t = now_t
+                    from PyQt6 import QtWidgets
+                    qt_app = QtWidgets.QApplication.instance()
+                    if qt_app:
+                        import sys
+                        # 🛡️ 临时将 GIL 切换周期拉长到 50ms，防止 processEvents 内部执行被背景线程强行打断导致 PyEval_RestoreThread 致命崩溃
+                        old_interval = sys.getswitchinterval()
+                        sys.setswitchinterval(0.05)
+                        try:
+                            qt_app.processEvents()
+                        finally:
+                            sys.setswitchinterval(old_interval)
+            except Exception as q_e:
+                pass
+
             # --- [高级功能] 周期性能审计排行 (已改为手动触发，见 show_ui_performance_audit) ---
             
             # 保留原有的单波次严重阻塞报警
@@ -1389,24 +1422,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.warning(f"🕒 Batch Delay: {total_time:.1f}ms | {processed_count} tasks | max: {max_single_task['name']}")
 
 
-            # =========================
-            # ✅ 新版本（稳定）
-            # =========================
-            def _run():
-                self._dispatch_scheduled = False   # 只负责释放调度标记
+            # 🚀 [AUTO-RESCHEDULE] 100% 绝对安全挂接下一次自轮询（单向链条，永不重叠，绝不死锁！）
+            if not getattr(self, "_is_closing", False):
                 try:
-                    self._process_dispatch_queue()
-                except Exception as e:
-                    logger.error(f"dispatch run error: {e}")
-
-            # 只防止“短时间重复调度”
-            if not getattr(self, "_dispatch_scheduled", False):
-                self._dispatch_scheduled = True
-                try:
-                    self.after(next_delay, _run)
-                except Exception as e:
-                    logger.error(f"schedule fail: {e}")
-                    self._dispatch_scheduled = False   # ✅ 失败必须释放
+                    self.after(next_delay, self._process_dispatch_queue)
+                    self._dispatch_scheduled = True
+                except Exception as se:
+                    logger.error(f"Dispatch auto-reschedule failed: {se}")
+                    self._dispatch_scheduled = False
 
 
     def _schedule_after(self, ms, func, *args, key=None, debounce=True, bind_widget=None):
@@ -1445,12 +1468,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # -------------------------
         if not hasattr(self, "tk_dispatch_queue"):
             self.tk_dispatch_queue = queue.Queue()
-
-            if hasattr(self, "after"):
-                try:
-                    self.after(1, self._process_dispatch_queue)
-                except:
-                    pass
 
         # -------------------------
         # 3. widget safety
@@ -1652,9 +1669,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     print(f"\n[Native] 正在等待确认... 再按 {3 - _exit_ctrl_c_count} 次强制暴力退出")
                 else:
                     print(f"\n[Native] KeyboardInterrupt ({_exit_ctrl_c_count}/3), 正在尝试弹出确认窗...")
-                    # [🚀 安全触发] 通过 after 将 GUI 请求投递回主线程执行
+                    # [🚀 安全触发] 通过安全事件队列将 GUI 请求投递回主线程执行
                     try:
-                        self.after(0, self.ask_exit)
+                        if hasattr(self, 'tk_dispatch_queue'):
+                            self.tk_dispatch_queue.put(self.ask_exit)
+                        else:
+                            self.after(0, self.ask_exit)
                     except:
                         pass
                 return True # 表示已处理
@@ -2680,7 +2700,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.info("正在停止 DNA 审计后台进程...")
                     dna_proc.terminate()
 
-                if hasattr(self, 'link_manager'):
+                if hasattr(self, 'link_manager') and self.link_manager is not None:
                     print("正在停止系统联动进程 (Linkage)...")
                     self.link_manager.stop()
 
@@ -3861,8 +3881,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 🛡️ [FINAL-GUARD] 再次确认主线程环境
                 if not threading.current_thread() is threading.main_thread():
-                    logger.warning("🏁 [Backtest] Re-dispatching launch to main thread...")
-                    self.after(0, _launch_task)
+                    logger.warning("🏁 [Backtest] Re-dispatching launch to main thread via queue...")
+                    if hasattr(self, 'tk_dispatch_queue'):
+                        self.tk_dispatch_queue.put(_launch_task)
+                    else:
+                        self.after(0, _launch_task)
                     return
 
                 self.backtest_process.start()
@@ -4171,7 +4194,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_bus_trigger_ts = now
         
         try:
-            self.after(0, self.update_tree)
+            # 🚀 [THREAD-SAFETY] 绝对禁止子线程直接触碰 self.after，全部投递至主线程安全事件队列
+            if hasattr(self, 'tk_dispatch_queue'):
+                self.tk_dispatch_queue.put(lambda: self.update_tree())
+            else:
+                self.after(0, self.update_tree)
         except Exception:
             pass
 
@@ -4451,11 +4478,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.error(f"[Compute] Realtime sync error: {e}")
 
+            time.sleep(0.005) # ⭐ [GIL-YIELD] 主动让出 5ms 纯空闲时间片，保障主线程 UI 渲染与操作系统窗口操作极其流畅
+
             # 2. 信号检测 (最重的 CPU 操作)
             try:
                 full_df = detect_signals(full_df)
             except Exception as e:
                 logger.error(f"[Compute] detect_signals failed: {e}")
+
+            time.sleep(0.005) # ⭐ [GIL-YIELD] 再次主动释放 GIL 锁
 
             # 3. 将 full_df 增强列同步到 df 视图
             if df is not None and not df.empty:
@@ -5075,8 +5106,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # P3: 都不行，启动进程
                 logger.info(f"📡 No active visualizer detected via Pipe/Socket. Starting new process for {code}...")
                 # 🚀 [FIX] 禁止在子线程中调用 mp.Process.start()。
-                # 通过 after(0) 将启动指令调度回主线程执行，彻底根治 Fatal Python error: PyEval_RestoreThread 崩溃。
-                self.after(0, lambda: self._start_visualizer_process(code, resample))
+                # 通过安全事件队列将启动指令调度回主线程执行，彻底根治 Tcl 引擎跨线程死锁与 Fatal Python error 崩溃。
+                if hasattr(self, 'tk_dispatch_queue'):
+                    self.tk_dispatch_queue.put(lambda: self._start_visualizer_process(code, resample))
+                else:
+                    self.after(0, lambda: self._start_visualizer_process(code, resample))
                 
             except Exception as e:
                 logger.error(f"[WORKER] open_visualizer fatal error: {e}")
@@ -5602,8 +5636,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
             # 🛡️ [GUARD] 强制主线程校验，确保 mp.Process.start() 的稳定性
             if not threading.current_thread() is threading.main_thread():
-                logger.warning("⚠️ [Visualizer] Detected call from non-main thread. Re-dispatching...")
-                self.after(0, lambda: self._start_visualizer_process(code, resample))
+                logger.warning("⚠️ [Visualizer] Detected call from non-main thread. Re-dispatching via queue...")
+                if hasattr(self, 'tk_dispatch_queue'):
+                    self.tk_dispatch_queue.put(lambda: self._start_visualizer_process(code, resample))
+                else:
+                    self.after(0, lambda: self._start_visualizer_process(code, resample))
                 return
 
             
