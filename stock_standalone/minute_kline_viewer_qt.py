@@ -1078,7 +1078,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 # 获取所有 key
                 with pd.HDFStore(file_path, "r") as store:
                     keys = store.keys()  # 返回 ['/data1', '/data2', ...]
-                    keys = [k.strip("/") for k in keys]  # 去掉前导斜杠
+                    keys = list(map(lambda k: k.strip("/"), keys))  # 去掉前导斜杠
 
                 if not keys:
                     self.stats_label.setText(f"No datasets found in {file_path}")

@@ -195,9 +195,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-module=cleanup_non_trading_signals ^
     --include-module=test_bidding_replay ^
     --include-module=signal_bus
-    @REM --include-module=keyboard ^
-    @REM --include-module=tkcalendar ^
-    @REM --include-module=psutil
+    --include-module=keyboard ^
+    --include-module=tkcalendar ^
+    --include-module=psutil
 
 
 :: ===== Execute compilation =====

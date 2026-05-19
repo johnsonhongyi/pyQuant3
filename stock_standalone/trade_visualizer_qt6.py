@@ -11727,10 +11727,15 @@ class MainWindow(QMainWindow, WindowMixin):
                                 t_list.append(t.strftime("%H:%M"))
                     else:
                         # 单日模式：仅显示时间
-                        t_list = [t.strftime("%H:%M") if hasattr(t, 'strftime') else str(t)[:5] for t in ts_objs]
+                        t_list = []
+                        for t in ts_objs:
+                            if hasattr(t, 'strftime'):
+                                t_list.append(t.strftime("%H:%M"))
+                            else:
+                                t_list.append(str(t)[:5])
                 except Exception as te:
                     logger.debug(f"Failed to extract extra tick times: {te}")
-                    t_list = [str(i) for i in range(len(tick_df))]
+                    t_list = list(map(str, range(len(tick_df))))
 
                 self.tick_axis.updateTimes(t_list)
 
