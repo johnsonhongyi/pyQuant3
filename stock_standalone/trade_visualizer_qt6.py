@@ -6043,7 +6043,7 @@ class MainWindow(QMainWindow, WindowMixin):
             remaining.append(t)
         self.garbage_threads = remaining
 
-    def apply_df_diff(self, df_diff):
+    def apply_df_diff(self, df_diff, skip_table_request=False):
         """安全地应用增量更新到 df_all"""
         try:
             if df_diff is None or df_diff.empty or self.df_all is None or self.df_all.empty:
@@ -6071,7 +6071,12 @@ class MainWindow(QMainWindow, WindowMixin):
                     
             # ⚡ [OPTIMIZATION] 记录变更代码，交给节流器异步刷新
             changed_codes = set(df_diff.index.tolist())
-            self.update_df_all(self.df_all, changed_codes=changed_codes)
+            if skip_table_request:
+                if not hasattr(self, '_pending_changed_codes') or self._pending_changed_codes is None:
+                    self._pending_changed_codes = set()
+                self._pending_changed_codes.update(changed_codes)
+            else:
+                self.update_df_all(self.df_all, changed_codes=changed_codes)
 
             # ⚡ [NEW] 推送数据给 Hotlist 后台线程 (Worker)
             if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
@@ -9151,10 +9156,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _reset_kline_view(self, df=None, force=False, target_width=None):
         """
-        ⭐ [核心修复] 重置 K 线视图范围
-        
-        使用 main_splitter.sizes()[1] 获取图表区域的实际像素宽度（可靠值），
-        而不是 ViewBox.width()（有时不准）。
+        ⭐ [极限性能版] 重置 K 线视图范围 (仅重设显示视角，不重置或清理任何底层数据和曲线)
         
         Args:
             df: DataFrame，用于计算 Y 轴范围，默认使用 self.day_df
@@ -9162,95 +9164,30 @@ class MainWindow(QMainWindow, WindowMixin):
             target_width: 强制使用的图表宽度（像素），用于布局加载时的预计算
         """
         try:
-            # 净化 df 参数并判定来源
-            # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
             is_from_button = isinstance(df, bool)
             
-            # 防止复位时引起的死循环重绘
-            if not getattr(self, '_is_resetting_charts', False):
-                # ⭐ [PERF/POLICY] 只有当真的是来自重置按钮 (Manual click) 时才执行破坏性清理
-                # 联动或切股触发的自动复位 (force=True but not from button) 仅清理视角
-                should_do_destructive_clear = is_from_button
-                
-                if should_do_destructive_clear:
-                    # [MANUAL VIEW LOCK CLEAR] Clear the lock when a forced reset occurs.
-                    self._manual_view_lock = False
-                    # [FIX] 点击 reset 按键或要求 force 复位时，清理 K 线图基础数据解决图像重影问题
-                    logger.debug("Manual destructive reset triggered (Button Click), clearing all items...")
-                    self._is_resetting_charts = True
-                    try:
-                        # [FIX] 摒弃 .clear()，改用靶向移除。防止销毁依赖初始化的 tick_pct_axis 轴对象和网格
-                        def clean_plot(plot, keep_items):
-                            for item in list(plot.items):
-                                if item not in keep_items and not isinstance(item, (pg.AxisItem, pg.GridItem)):
-                                    try:
-                                        plot.removeItem(item)
-                                    except Exception: pass
-                                    
-                        keep_kline = [getattr(self, a) for a in ['vline', 'hline', 'crosshair_label', 'linkage_v_line', 'linkage_label'] if hasattr(self, a)]
-                        keep_tick = [getattr(self, a) for a in ['tick_vline', 'tick_hline', 'tick_crosshair_label', 'tick_axis', 'tick_pct_axis'] if hasattr(self, a)]
-                        
-                        clean_plot(self.kline_plot, keep_kline)
-                        self.signal_overlay.clear(target='kline') # 同步清理信号
-                        
-                        clean_plot(self.tick_plot, keep_tick)
-                        if hasattr(self, 'volume_plot'):
-                            keep_vol = [getattr(self, 'vol_date_axis')] if hasattr(self, 'vol_date_axis') else []
-                            clean_plot(self.volume_plot, keep_vol)
-                            
-                        # 彻底移除所有相关的缓存属性，强制重建
-                        clear_attrs = ['candle_item', 'vol_up_item', 'vol_down_item',
-                                    'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
-                                    'ema20_trend_curve', 'ema20_up_curve',
-                                    'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ppre_avg_line', 'ghost_candle',
-                                    'signal_overlay', 'custom_indicator_pool', 'reversal_line_curve', 'gap_items_pool',
-                                    'hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p', 'anno_arrow_p', 'anno_label_p']
-                        # 🚀 [NOTE] 'linkage_v_line' 和 'linkage_label' 不在 clear_attrs 中，且在 keep_kline 中已受保护
-                        for attr in clear_attrs:
-                            if hasattr(self, attr):
-                                delattr(self, attr)
-                                
-                        # 重新初始化信号覆盖层 (SignalOverlay自己携带了ScatterItem的增添逻辑)
-                        self.signal_overlay = SignalOverlay(self.kline_plot, self.tick_plot)
-                        self.signal_overlay.set_on_click_handler(self.on_signal_clicked)
-                        
-                        # 重建自定义指标对象池 (如九转, 买卖文字池等)
-                        if hasattr(self, '_init_custom_tdx_indicators_pool'):
-                            self._init_custom_tdx_indicators_pool()
-
-                        # 获取正确数据
-                        df_to_use = getattr(self, 'day_df', None) if df is None or isinstance(df, bool) else df
-                    except Exception as e:
-                        logger.error(f"Error during chart reset clear: {e}")
-                    finally:
-                        self._is_resetting_charts = False
+            # 如果是手动点击 Reset 按钮，解除视角锁定
+            if is_from_button:
+                self._manual_view_lock = False
+                logger.debug("Manual viewport reset triggered (Button Click), resetting display range only...")
 
             # 1. 净化 df 参数
-            # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
             if df is None or isinstance(df, bool):
                 df = getattr(self, 'day_df', None)
             
-            # 2. 最后的防线：确保 df 是 DataFrame
-            if df is None or not isinstance(df, pd.DataFrame):
-                # logger.warning(f"[_reset_kline_view] Valid DataFrame not found (got {type(df)}), aborting.")
-                return
-
-            # 3. 检查是否为空
-            if df.empty:
+            # 2. 确保 df 是 DataFrame 且不为空
+            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
                 return
             
             total_bars = len(df)
             vb = self.kline_plot.getViewBox()
             
             # ========== 1. 计算图表区域的实际像素宽度 ==========
-            # 优先顺序: target_width > widget.width() (最准) > splitter.sizes()[1] > ViewBox.width()
             chart_pixel_width = 800  # 默认值
-            
             sizes = []
             if target_width is not None and isinstance(target_width, (int, float)) and target_width > 0:
                 chart_pixel_width = int(target_width)
             elif hasattr(self, 'kline_widget') and self.kline_widget.width() > 100:
-                # ⭐ [OPTIMIZATION] Widget 宽度在渲染稳定后是最准确的
                 chart_pixel_width = self.kline_widget.width()
             elif hasattr(self, 'main_splitter'):
                 try:
@@ -9269,17 +9206,13 @@ class MainWindow(QMainWindow, WindowMixin):
                     pass
             
             # ========== 2. 计算可见 K 线数 ==========
-            # ⭐ [OPTIMIZATION] 增加单根 K 线宽度，减少可见根数，使显示不那么“拥挤”
-            # 原为 10，现改为 18
+            # 增加单根 K 线宽度，减少可见根数，使显示不那么“拥挤”
             BAR_PIXEL_WIDTH = 18
             visible_bars = max(35, int(chart_pixel_width / BAR_PIXEL_WIDTH))
-            
-            # 限制最小显示根数，防止显示过少但也不要强制太多导致拥挤
             visible_bars = min(visible_bars, 120) 
             
             # ========== 3. 计算 X 轴范围 ==========
-            # 始终让最新数据在右侧可见
-            # ⭐ [FIX] 预留极少量的 K 线位置，确保右侧紧凑 (由 5 减小到 1)
+            # 始终让最新数据在右侧可见，预留极少量的 K 线位置确保右侧紧凑
             RIGHT_MARGIN = 2 
             x_max = total_bars + RIGHT_MARGIN
             x_min = max(-1, total_bars - visible_bars)
@@ -9288,13 +9221,11 @@ class MainWindow(QMainWindow, WindowMixin):
             vb.setRange(xRange=(x_min, x_max), padding=0)
             
             # ========== 5. 自适应 Y 轴 ==========
-            # 根据可见区域的价格范围自动调整 Y 轴
             visible_start = int(max(0, x_min))
             visible_end = int(min(total_bars, x_max))
             
             if visible_start < visible_end and visible_start < len(df):
                 visible_df = df.iloc[visible_start:visible_end]
-                logger.debug(f'visible_df: {visible_df[-1:]}')
                 if visible_df is not None and not visible_df.empty and 'high' in visible_df.columns and 'low' in visible_df.columns:
                     y_high = visible_df['high'].max()
                     y_low = visible_df['low'].min()
@@ -9305,20 +9236,7 @@ class MainWindow(QMainWindow, WindowMixin):
             vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
             vb.setAutoVisible(y=True)
             
-            logger.debug(f"[_reset_kline_view] sizes:{sizes} Reset: bars={total_bars}, visible={visible_bars}, xRange=({x_min:.0f}, {x_max:.0f}), width={chart_pixel_width}px")
-            
-            # ========== 7. 触发补偿渲染 ==========
-            # 仅当手动点击重置按钮（is_from_button 为 True）或 force 时触发重绘。
-            # 若是从 render_charts 内部调用的，由于那里不中断，不需要在此补偿，防止双重渲染。
-            if (is_from_button or force) and hasattr(self, 'current_code'):
-                 if not getattr(self, '_is_painting', False):
-                     # 🚀 [FIX] 此处强制 pass force=True，绕过 render_charts 的 150ms 节流，确保 destructive reset 后立即重绘
-                     self.render_charts(
-                         self.current_code, 
-                         df if isinstance(df, pd.DataFrame) else getattr(self, 'day_df', pd.DataFrame()), 
-                         getattr(self, 'tick_df', pd.DataFrame()),
-                         force=True
-                     )
+            logger.debug(f"[_reset_kline_view] Viewport reset completed instantaneously: bars={total_bars}, visible={visible_bars}")
 
         except Exception as e:
             logger.warning(f"[_reset_kline_view] Failed: {e}")
