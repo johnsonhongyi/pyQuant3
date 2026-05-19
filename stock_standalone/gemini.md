@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-19 09:05  
+> 最后更新：2026-05-19 16:26  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -22,11 +22,46 @@
 1.  **任务历史不丢失**: 所有实施计划、任务清单、Walkthrough必须**包含日期时间命名** (e.g., `20260124_0341_task.md`) 并归档，**禁止覆盖**旧计划。
     - 每日任务完成后，同步更新到 `gemini.md` 的【变更日志】和【最近完成任务】中。
 2.  **每日闭环**: 每日结束时更新【变更日志】和【当前任务状态】，确保次日可无缝接续。
-3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，必须保持最新。
+3.  **文档即代码**: `gemini.md` 是项目的 Source of Truth，保持最新。
 4.  **自动迭代**: 每次任务完成后，自动依据此规则更新文档并保存历史文件。
 5.  **记忆持续性协议**: 
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-19 18:00
+- [x] **修复 Nuitka 独立编译打包后的动态依赖缺失与 PyQtGraph 信号断开崩溃 (Fixed Nuitka Dynamic Imports & PyQtGraph compiled_method Disconnect Bug)**：
+    - [x] **补齐本地动态与延时加载模块打包配置**：
+        - 在 `nuitka_build_console.bat` 的编译参数中显式加入了在 `instock_MonitorTK.py` 和各界面中通过 `cct.LazyClass` 或在函数局部动态 `import` 载入的 22 个本地核心模块（包括 `bidding_racing_panel`、`bidding_momentum_detector`、`test_bidding_replay`、`signal_bus`、`stock_live_strategy`、`realtime_data_service`、`market_pulse_engine`、`signal_dashboard_panel` 等），以及 `keyboard`、`tkcalendar`、`psutil` 这 3 个三方包，彻底防止了运行时菜单拉起或功能回放时报出 `ModuleNotFoundError`。
+        - 显式包含了本地界面包 `--include-package=tk_gui_modules`，保障了底层表格和窗口混合类等全部被编译打包。
+    - [x] **根治 PyTables 数据引擎 C 扩展压缩模块缺失与强制打包**：针对 PyTables 读取 HDF5 数据时动态调用压缩算法的机制，添加了 `--include-module=tables._comp_lzo` and `--include-module=tables._comp_bzip2` 的显式包含项。同时追加了整个 `--include-package=tables` 选项以全量防漏。
+    - [x] **修复 Nuitka 编译器内置 AST 树克隆崩溃 Bug (Fixed Nuitka AST-Cloning AssertionError)**：
+        - **定位并分析崩溃日志**：分析 `nuitka-crash-report.xml` 指出 Nuitka 在分析包含在 `try/finally` 或 `with` 块内的列表推导式 (list comprehension) 克隆时触发了内置 Bug (`AssertionError: listcomp_4__.0_clone`)。
+        - **升级 Nuitka 到稳定版本**：在 `tk_nuitka_env` Conda 虚拟环境中将 Nuitka 从 `4.1` 升级到修复版 `4.1.1`，彻底根治了该 AST 重复变量名命名的崩溃，编译得以顺利通过依赖解析进入构建核心。
+        - **支持 Conda 虚拟环境自动检测**：修改了 `nuitka_build_console.bat` 脚本中的 Python 路径解析逻辑，增加了对 `%CONDA_PREFIX%` 环境变量的智能探测与自动匹配。这确保了在 Conda 环境中执行批处理时，Nuitka 能够自动对齐到虚拟环境下的 `python.exe` 配合 `Nuitka 4.1.1` 进行编译，而不是错误退回到系统 Base 环境的旧版编译器中。
+    - [x] **解决 PyQtGraph 在 Nuitka 环境下 `compiled_method` 信号断开崩溃**：在 `trade_visualizer_qt6.py` 的全局 `import pyqtgraph as pg` 下方直接植入运行时猴子补丁（Monkeypatch），捕获并安全忽略 `AxisItem.unlinkFromView` 试图断开已编译 Python 方法槽信号时引发的 `TypeError: 'compiled_method' object is not connected`，打通了视窗清理销毁通道。
+    - [x] **重新使能 UPX 压缩优化打包体积**：从 `nuitka_build_console.bat` 移除了 `--disable-plugin=upx` 指令，使构建流程能够自动利用 PATH 中的 `upx.exe` 进行二进制 and DLL 的高性能体积压缩。
+    - [x] **隔离无用废弃脚本并实现 100% 物理级编译成功**：将 `temp_historical_monitor.py` 等 5 个已在设计规划中被废弃的带有语法与编码异常的备份文件隔离并移至 `scratch/obsolete/`。经对全域活跃 Python 代码执行自动化编译核查，全体活跃代码在字节码编译层面录得 100% 成功，彻底排除了编译隐患。
+
+## 2026-05-19 16:26
+- [x] **修正 Nuitka 构建配置冲突与打包工程优化 (Fixed Nuitka Config Conflicts & Packaging Optimization)**：
+    - [x] **根治双 GUI 运行时挂钩冲突**：恢复 `--enable-plugin=pyqt6` 与 `--enable-plugin=tk-inter` 的联动，避免 PyQt6 模块动态导入导致的多线程/GC崩溃，并确保主线程 Tkinter 与 PyQt6 外部子进程生命周期环境的一致性。
+    - [x] **修复 Standalone 检查逻辑**：修正了以 pyinstaller 方式检查 onefile 目标的逻辑错误，将批处理检测路径重构为 stable 物理指向的 `build/instock_MonitorTK.dist/instock_MonitorTK.exe`。
+    - [x] **根治 Windows 终端 UTF-8/GBK 编码解析冲突 (Mojibake Fix)**：将 `nuitka_build_console.bat` 中的所有中文注释和输出日志完全翻译为 ASCII 标准英文。这彻底消除了 Windows cmd.exe 在默认 GBK 代码页下解析 UTF-8（无 BOM）文件的中文字节导致将部分字节误判为控制符（如 `^`、`"`、`|`）而引发的语法解析崩溃（如 "A_CACHE_DIR is not recognized..." 等报错）。
+    - [x] **清除 Nuitka 无效参数 (Cleaned Invalid Arguments)**：
+        - 移除了无效的 `--cache-dir` 命令行参数，改由在批处理脚本中提前设置 `NUITKA_CACHE_DIR` 环境变量来物力指定缓存目录。
+        - 彻底废除了无效的 `--exclude-module` 命令行参数，并根据系统规范全部重构为 Nuitka 支持的 `--nofollow-import-to` 参数（如 `PyQt6.QtTest`、`PyQt6.QtXml`、`PyQt6.QtPdf` 等全量未用 GUI 二进制库），避免编译依赖冗余。
+        - 将非法的 `--upx-binary=""` 修改为 `--disable-plugin=upx`，显式弃用 UPX 插件，规避巨型 DLL 压缩带来的冷启动延时与杀毒软件误报风险，同时保留了 `--remove-output` 维持打包文件夹的清爽度。
+    - [x] **避免编译膨胀与精简包合并**：移除了 `--follow-imports` 强制扫描，使 Nuitka 默认按需追踪依赖，防止扫描整个 numpy/pandas/PyQt6 依赖树导致编译时间指数级增长；同时引入 `--no-pyi-file` 防止 stubs 污染；合并采用统一包级的 `--include-package=JSONData`、`--include-package=JohnsonUtil`、`--include-package=numpy`、`--include-package=pandas` 及 `--include-package=talib`，规范化大包导入，消除多余的 module 拆解选项。
+    - [x] **物理保留 Qt 依赖 DLL、剔除 WebEngine 瓶颈与关闭 UPX**：仅排除巨型未使用 DLL `--noinclude-dlls=Qt6WebEngineCore.dll`，在确保 Qt 功能正常的同时缩短编译时间；通过去除 UPX 支持与强行过滤，彻底消除了加解压时 DLL 装载冲突或冷启动卡顿的风险。
+    - [x] **引入编译缓存、免问答下载与增量隔离机制**：配置 `NUITKA_CACHE_DIR` 并启用 `.nuitka_cache\release`（将开发与发布物理分仓隔离）；增加 `--assume-yes-for-downloads` 自动允许外部工具静默下载，极大提升二次构建与日常增量编译的速度。
+    - [x] **限制无限制递归依赖**：加入 `--nofollow-import-to` 排除 matplotlib、scipy、tkinter.test、numpy.testing 和 pandas.tests，以及 PyQt6 的 QtWebEngineCore、QtWebEngineWidgets、QtQuick、QtQml、QtTest、QtXml、QtPdf 等依赖树的无意义分析与引入。
+    - [x] **批量打包数据目录**：将原本的单文件拷贝规则升级为 `--include-data-dir` 目录递归拷贝（如 `datacsv`、`JSONData` 和 `JohnsonUtil`），利用 Nuitka 自动忽略 `.py` 源码的机制安全提速。
+
+## 2026-05-19 16:25
+- [x] **生成 Nuitka Console 模式打包配置文件与工程化优化 (Generated Nuitka Console Mode Build Script & Embedded Project Options)**:
+    - [x] **实现 Nuitka 一键编译批处理脚本 (`nuitka_build_console.bat`)**：对齐 `instock_MonitorTK.spec` 配置，包含防干扰 MinGW 路径清洗、动态 `a_trade_calendar.csv` 解析、以及 14 个核心依赖模块的 `--include-module` 参数补全。
+    - [x] **整合 PyQt6 无效库与 DLL 物理过滤（Exclusions）**：通过 13 组 `--exclude-module` 和 `--noinclude-dlls` 剔除 `Qt6WebEngine`、`Qt6Qml` , `Qt6Quick`、`Qt6Multimedia` 等不必要的二进制文件，极大优化了打包体积和冷启动耗时。
+    - [x] **补齐静态数据文件与插件使能**：完整映射了 `visualizer_layout.json`、`intraday_pattern_config.json` 等 14 个资源数据包；同时显式启用了 `--enable-plugin=tk-inter` 和 `--enable-plugin=pyqt6` 确保 UI 窗口完美启动；强制使能 `--windows-console-mode=force` 保证调试控制台的输出完整性。
 
 ## 2026-05-19 09:05
 - [x] **实现 K线重置（Reset）按钮极限性能纯显示视角自适应重构 (Implemented Extreme Performance Display-Only Reset)**：

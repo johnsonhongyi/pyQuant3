@@ -20,6 +20,22 @@ import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import pyqtgraph as pg # ⚡ 已移至局部作用域 (修复：由于类定义需要，恢复至全局但保持 lazy)
+# Patch pyqtgraph compiled_method disconnect issue in Nuitka
+try:
+    import pyqtgraph.graphicsItems.AxisItem as axis_item
+    _original_unlinkFromView = axis_item.AxisItem.unlinkFromView
+    def _patched_unlinkFromView(self):
+        try:
+            _original_unlinkFromView(self)
+        except TypeError as e:
+            if "compiled_method" in str(e):
+                pass
+            else:
+                raise
+    axis_item.AxisItem.unlinkFromView = _patched_unlinkFromView
+except Exception as e:
+    print(f"Failed to patch pyqtgraph AxisItem.unlinkFromView: {e}")
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
