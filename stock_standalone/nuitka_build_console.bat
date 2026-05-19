@@ -155,6 +155,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-dir=JSONData=JSONData ^
     --include-data-dir=JohnsonUtil=JohnsonUtil ^
     --include-module=a_trade_calendar ^
+    --include-package=pyttsx3 ^
     --include-package=numpy ^
     --include-package=pandas ^
     --include-package=talib ^

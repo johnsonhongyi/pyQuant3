@@ -836,6 +836,10 @@ class DailyEmotionBaseline:
     def get_last_calc_date(self) -> Optional[str]:
         return self._last_calc_date
 
+    def get_sector_of_code(self, code: str) -> str:
+        """获取代码所属板块 (Mock / 扩展预留)"""
+        return ""
+
     def calculate_baseline(self, df: pd.DataFrame) -> None:
         """开盘时调用，基于日线数据计算基准"""
         from datetime import datetime
