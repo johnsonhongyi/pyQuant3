@@ -850,12 +850,22 @@ class BiddingMomentumDetector:
                 anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
                 self._today_anchor_930 = anchor_930
                 
-            # 🚀 [GIL-FIX] 将大规模评估循环移出锁外，彻底根治 GIL 饥饿与 IPC 卡死
-            for i, code in enumerate(codes):
-                self._evaluate_code_unlocked(code, anchor_930=anchor_930)
-                # [YIELD] 强制让出 CPU，给 UI / Manager Proxy 喘息的机会
-                if i > 0 and i % 200 == 0:
-                    time.sleep(0)
+            # 🚀 [GIL-FIX] 终极调度升级：采用工业级 Chunk-based 任务分片调度模型 (方案 B/C 融合)
+            # 我们将 codes 每 50 个拆分为一个 chunk，密集算完 50 个后强行调用 time.sleep 释放 GIL。
+            # 这可以在编译成 C 的 Nuitka 独立打包环境下，极好地给 UI 线程和 Tk 事件循环让度 GIL。
+            import datetime
+            now_hour = datetime.datetime.now().hour
+            sleep_time = 0.003 if (now_hour >= 15 or now_hour < 9) else 0.001
+            
+            chunk_size = 50
+            for i in range(0, len(codes), chunk_size):
+                chunk = codes[i : i + chunk_size]
+                for code in chunk:
+                    self._evaluate_code_unlocked(code, anchor_930=anchor_930)
+                
+                # [YIELD] 极其重要的物理线程上下文切换，强制释放并让度 GIL，确保 UI 线程心跳流畅！
+                # 在 Windows 下，sleep(0.001~0.003) 能带来确定且精准的线程调度切换
+                time.sleep(sleep_time)
 
             with self._lock:
                 self.last_processed_count = len(codes)

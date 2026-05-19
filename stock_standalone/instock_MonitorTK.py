@@ -2144,7 +2144,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             detector = getattr(self.sector_bidding_panel, 'detector', None)
                             if detector:
                                 # 同步极速聚合板块分
-                                detector.update_scores()
+                                detector.update_scores(skip_evaluate=True)
                                 detector.save_persistent_data(force=True)
                                 logger.info("✅ [15:30 Task] SectorBiddingPanel 归档圆满完成 (数据已熟透)。")
                     except Exception as e:

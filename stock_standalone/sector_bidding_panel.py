@@ -1475,8 +1475,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # 🚀 [Proactive] 启动引导初始化
         if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None and not self.main_window.df_all.empty:
-             self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
-             logger.info("📡 [SectorPanel] Cold start initialized with main window's df_all")
+             # 🚀 [GIL-FIX] 不要在构造函数返回前急着向后台线程喂数，防止高负载全量计算霸占 GIL 饿死正准备返回的主线程！
+             # 改为由 showEvent 里面的 singleShot 在 500ms 后安全触发首次喂数与评分，保障主线程瞬间初始化完成并返回。
+             logger.info("📡 [SectorPanel] Cold start scheduled with main window's df_all")
         else:
              if hasattr(self, 'status_lbl'):
                  self.status_lbl.setText("⏳ 等待主窗口数据或手动刷新...")
@@ -2346,8 +2347,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
         logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh.")
-        if hasattr(self, 'status_bar'):
-            self.status_bar.showMessage("✅ 竞价数据加载完成", 3000)
+        # 🚀 [UI-THREAD-SAFETY] 绝对禁止在子线程直接操作 UI 控件 showMessage，防止 Nuitka C 独立运行崩溃/死锁
         # 强制触发一次刷新
         self._force_update_requested = True
 

@@ -28,6 +28,15 @@
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-19 22:15
+- [x] **极速 Nuitka 增量打包瘦身与 sccache GCC 编译链彻底打通 (Streamlined Nuitka Packaging & sccache GCC Integration)**：
+    - [x] **打通 `sccache` 50G 高速本地编译缓存**：在 `nuitka_build_console.bat` 中成功融入 Scoop 部署的 `sccache` 配置，并将 `SCCACHE_DIR` 设置在 `D:\sccache` 开启 50G 高性能缓存；同时在批处理开头清洗 Anaconda 冲突路径，将 Mingw64 GCC/G++ 编译器列入首位，为未来的增量重新编译奠定了秒级通过的物理基础。
+    - [x] **物理剔除 `numba`、`llvmlite` 巨无霸科学库依赖链**：针对 pandas 等隐性可选导入 `numba` 导致 Nuitka 误判并将 LLVM 编译后端全套引入引发打包体积暴增和分析慢的痛点，在 `--nofollow-import-to` 中强力追加了对 `numba` 与 `llvmlite` 的物理拦截；同步加入了 `IPython`、`unittest`、`pydoc` 等开发测试依赖包阻断，极大精简了编译体积。
+    - [x] **升级 `JSONData` 与 `JohnsonUtil` 为 `--include-package-data`**：将原有粗暴的 `--include-data-dir` 静态目录无脑拷贝重构为 Nuitka 原生的 package 智能过滤机制。只拷走包内的 `.json` / `.csv` 等核心配置数据，**彻底过滤和强力排除包内所有 `.py` 明文源代码**。这既杜绝了分发时的源码泄露，又消除了零碎源码的二次打包开销。
+    - [x] **无损保留 20 余个本地 Lazy 动态反射加载的核心业务模块**：完全尊重并完整保留了包含 `stock_live_strategy`、`realtime_data_service`、`market_pulse_engine`、`signal_dashboard_panel` 以及 Tables 压缩核心等在内的全部本地包含项，百分之百防范了因反射动态加载导致运行时菜单点击 ModuleNotFoundError 闪退的隐患。
+    - [x] **补齐 `global.ini` 核心配置文件物理拷贝**：在资源打包列表中新增了 `--include-data-file=global.ini=global.ini` 参数，确保了 standalone 可执行文件双击冷启动时对系统温度与策略阈值配置的自愈性读取。
+    - [x] **修复命令行 `--cache-dir` 选项报错与 CMD 字符冲突**：删去了命令行里错误的 `--cache-dir` 参数，改为依靠环境变量 `NUITKA_CACHE_DIR` 优雅统领项目本目录下 `.nuitka_cache` 的读写；同时将 CMD 批处理中 `sccache & compiler` 里的特殊符号转义为标准的 `and`，彻底消除了 Windows 环境下的语法报错瑕疵。
+
 ## 2026-05-19 18:00
 - [x] **修复 Nuitka 独立编译打包后的动态依赖缺失与 PyQtGraph 信号断开崩溃 (Fixed Nuitka Dynamic Imports & PyQtGraph compiled_method Disconnect Bug)**：
     - [x] **补齐本地动态与延时加载模块打包配置**：
