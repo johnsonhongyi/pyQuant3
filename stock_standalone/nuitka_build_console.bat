@@ -42,15 +42,63 @@ if "%NEED_CLEAN%"=="1" (
     echo [SUCCESS] No conflicting paths detected.
 )
 
-:: 3. Add compiler path (Mingw64) & sccache wrapper
-echo Configuring sccache and compiler tool path...
+:: 3. Configure sccache & Detect LLVM Clang or Fallback to Mingw64 GCC
+echo Configuring sccache...
 set SCCACHE_DIR=D:\sccache
 set SCCACHE_CACHE_SIZE=50G
-set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;D:\mingw64\bin;%PATH%"
 
-set CC=sccache gcc
-set CXX=sccache g++
-echo [SUCCESS] sccache and compiler configuration is ready.
+set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;%PATH%"
+
+set "USE_CLANG=0"
+set "CLANG_PATH="
+
+:: Try to find LLVM Clang in typical locations
+if exist "C:\Users\Johnson\scoop\apps\llvm\current\bin\clang.exe" (
+    set "CLANG_PATH=C:\Users\Johnson\scoop\apps\llvm\current\bin"
+    set "USE_CLANG=1"
+) else if exist "C:\Program Files\LLVM\bin\clang.exe" (
+    set "CLANG_PATH=C:\Program Files\LLVM\bin"
+    set "USE_CLANG=1"
+) else (
+    where clang >nul 2>&1
+    if not errorlevel 1 (
+        set "USE_CLANG=1"
+    )
+)
+
+if "!USE_CLANG!"=="1" (
+    echo [SUCCESS] LLVM Clang compiler detected
+    set CC=sccache clang
+    set CXX=sccache clang++
+    set "NUITKA_CLANG_OPT=--clang"
+    echo [INFO] Compiler set to sccache clang with LLVM high speed compilation
+) else (
+    echo [INFO] LLVM Clang not found. Install llvm via scoop for faster speed.
+    echo [INFO] Fallback to Mingw64 GCC
+    set CC=sccache gcc
+    set CXX=sccache g++
+    set "NUITKA_CLANG_OPT="
+)
+
+rem 🛡️ Move PATH modifications outside of brackets to prevent Program Files (x86) parentheses from breaking CMD parser
+if "!USE_CLANG!"=="1" (
+    if not "!CLANG_PATH!"=="" (
+        set "PATH=!CLANG_PATH!;%PATH%"
+    )
+    rem Strip MinGW64 GCC from PATH to prevent Scons from mismatching the gcc compiler
+    set "PATH=%PATH:D:\mingw64\bin;=%"
+    set "PATH=%PATH:D:\mingw64;=%"
+) else (
+    set "PATH=D:\mingw64\bin;%PATH%"
+    
+    rem Check GCC fallback
+    where gcc >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] gcc not found, please check if D:\mingw64\bin exists
+        pause
+        exit /b
+    )
+)
 echo.
 
 :: 4. Set temporary directory and build cache
@@ -60,14 +108,6 @@ set TMP=C:\Temp
 set NUITKA_CACHE_DIR=%~dp0.nuitka_cache\release
 set CC_VERSION=13.2.0
 echo [SUCCESS] TEMP=%TEMP%, TMP=%TMP%, NUITKA_CACHE_DIR=%NUITKA_CACHE_DIR%
-
-:: 5. Check compiler
-where gcc >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] gcc not found, please check if D:\mingw64\bin exists.
-    pause
-    exit /b
-)
 
 where sh >nul 2>&1
 if not errorlevel 1 (
@@ -113,8 +153,10 @@ echo.
 :: ===== Create output directory =====
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
+
 :: ===== Build Nuitka command =====
 set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+    !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
     --enable-plugin=tk-inter ^
     --enable-plugin=pyqt6 ^
@@ -125,7 +167,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
-    --cache-dir="%~dp0.nuitka_cache" ^
     --lto=no ^
     --no-pyi-file ^
     --jobs=8 ^
