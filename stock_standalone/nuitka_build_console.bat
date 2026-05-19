@@ -42,10 +42,15 @@ if "%NEED_CLEAN%"=="1" (
     echo [SUCCESS] No conflicting paths detected.
 )
 
-:: 3. Add compiler path (Mingw64)
-echo Adding compiler tool path...
-set "PATH=D:\mingw64\bin;%PATH%"
-echo [SUCCESS] PATH configuration is ready.
+:: 3. Add compiler path (Mingw64) & sccache wrapper
+echo Configuring sccache and compiler tool path...
+set SCCACHE_DIR=D:\sccache
+set SCCACHE_CACHE_SIZE=50G
+set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;D:\mingw64\bin;%PATH%"
+
+set CC=sccache gcc
+set CXX=sccache g++
+echo [SUCCESS] sccache and compiler configuration is ready.
 echo.
 
 :: 4. Set temporary directory and build cache
@@ -123,7 +128,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --lto=no ^
     --no-pyi-file ^
     --jobs=8 ^
-    --remove-output ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^
     --nofollow-import-to=tkinter.test ^
@@ -142,26 +146,27 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --nofollow-import-to=PyQt6.QtSql ^
     --nofollow-import-to=PyQt6.QtTest ^
     --nofollow-import-to=PyQt6.QtXml ^
+    --nofollow-import-to=IPython ^
+    --nofollow-import-to=unittest ^
+    --nofollow-import-to=pydoc ^
+    --nofollow-import-to=numba ^
+    --nofollow-import-to=llvmlite ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
+    --include-data-file=global.ini=global.ini ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
     --include-data-dir=datacsv=datacsv ^
-    --include-data-dir=JSONData=JSONData ^
-    --include-data-dir=JohnsonUtil=JohnsonUtil ^
+    --include-package-data=JSONData ^
+    --include-package-data=JohnsonUtil ^
     --include-module=a_trade_calendar ^
     --include-package=pyttsx3 ^
-    --include-package=numpy ^
-    --include-package=pandas ^
-    --include-package=talib ^
     --include-package=tables ^
-    --include-package=JSONData ^
-    --include-package=JohnsonUtil ^
     --include-package=tk_gui_modules ^
     --include-module=configobj ^
     --include-module=tushare ^
@@ -195,7 +200,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-module=db_repair_tool ^
     --include-module=cleanup_non_trading_signals ^
     --include-module=test_bidding_replay ^
-    --include-module=signal_bus
+    --include-module=signal_bus ^
     --include-module=keyboard ^
     --include-module=tkcalendar ^
     --include-module=psutil
