@@ -1,0 +1,223 @@
+@echo off
+title Nuitka Smart Compiler Assistant - Console Mode
+chcp 65001 >nul
+setlocal enabledelayedexpansion
+
+echo ==========================================
+echo Nuitka Smart Compiler Assistant (Console Mode)
+echo ==========================================
+echo.
+
+:: 1. Backup original PATH
+set "OLD_PATH=%PATH%"
+
+echo Checking current gcc / sh paths...
+where gcc
+where sh
+echo.
+
+:: 2. Clean conflicting paths to prevent Nuitka compile failures
+set "NEED_CLEAN=0"
+
+for %%P in (
+    C:\Users\Johnson\anaconda3\Library\usr\bin
+    C:\Users\Johnson\anaconda3\Library\mingw-w64\bin
+    "C:\Program Files\Git\cmd"
+    C:\Users\Johnson\scoop\shims
+) do (
+    echo !PATH! | findstr /I "%%~P" >nul
+    if not errorlevel 1 (
+        echo [WARNING] Conflicting path detected: %%~P
+        set "NEED_CLEAN=1"
+    )
+)
+
+if "%NEED_CLEAN%"=="1" (
+    echo [INFO] Cleaning conflicting paths...
+    set "PATH=%PATH:C:\Users\Johnson\anaconda3\Library\usr\bin;=%"
+    set "PATH=%PATH:C:\Users\Johnson\anaconda3\Library\mingw-w64\bin;=%"
+    set "PATH=%PATH:C:\Program Files\Git\cmd;=%"
+    set "PATH=%PATH:C:\Users\Johnson\scoop\shims;=%"
+) else (
+    echo [SUCCESS] No conflicting paths detected.
+)
+
+:: 3. Add compiler path (Mingw64)
+echo Adding compiler tool path...
+set "PATH=D:\mingw64\bin;%PATH%"
+echo [SUCCESS] PATH configuration is ready.
+echo.
+
+:: 4. Set temporary directory and build cache
+echo [INFO] Setting temp directory to C:\Temp and configuring Nuitka cache...
+set TEMP=C:\Temp
+set TMP=C:\Temp
+set NUITKA_CACHE_DIR=%~dp0.nuitka_cache\release
+set CC_VERSION=13.2.0
+echo [SUCCESS] TEMP=%TEMP%, TMP=%TMP%, NUITKA_CACHE_DIR=%NUITKA_CACHE_DIR%
+
+:: 5. Check compiler
+where gcc >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] gcc not found, please check if D:\mingw64\bin exists.
+    pause
+    exit /b
+)
+
+where sh >nul 2>&1
+if not errorlevel 1 (
+    for /f "delims=" %%S in ('where sh') do (
+        echo [WARNING] sh.exe detected from: %%S
+        echo [WARNING] Temporarily removing scoop sh to avoid interfering with Nuitka.
+        set "PATH=%PATH:C:\Users\Johnson\scoop\shims;=%"
+    )
+)
+echo.
+
+:: ===== Configuration =====
+set MAIN_SCRIPT=instock_MonitorTK.py
+set OUTPUT_NAME=instock_MonitorTK_Nuita.exe
+set OUTPUT_DIR=build
+set ICON_FILE=MonitorTK.ico
+set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
+
+echo Checking Python environment...
+:: Check if virtual environment is active
+if defined VIRTUAL_ENV (
+    echo [SUCCESS] Virtual environment detected: %VIRTUAL_ENV%
+    set PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe
+@REM ) else if defined CONDA_PREFIX (
+@REM     echo [SUCCESS] Conda environment detected: %CONDA_PREFIX%
+@REM     set PYTHON_EXEC=%CONDA_PREFIX%\python.exe
+) else (
+    echo [WARNING] No virtual environment detected, using system Python
+    set PYTHON_EXEC=python
+)
+
+:: ===== Get dynamic CSV path =====
+for /f "usebackq delims=" %%i in (`%PYTHON_EXEC% -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))"`) do set CSV_PATH=%%i
+
+if not exist "%CSV_PATH%" (
+    echo [ERROR] CSV file not found: %CSV_PATH%
+    pause
+    exit /b
+)
+echo [SUCCESS] Dynamically retrieved CSV path: %CSV_PATH%
+echo.
+
+:: ===== Create output directory =====
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+
+:: ===== Build Nuitka command =====
+set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+    --assume-yes-for-downloads ^
+    --enable-plugin=tk-inter ^
+    --enable-plugin=pyqt6 ^
+    --windows-console-mode=force ^
+    --windows-icon-from-ico="%ICON_FILE%" ^
+    --windows-company-name="Johnson QuantLab" ^
+    --windows-product-name="instock_MonitorTK" ^
+    --windows-file-version="1.0.0" ^
+    --windows-product-version="1.0.0" ^
+    --output-dir="%OUTPUT_DIR%" ^
+    --lto=no ^
+    --no-pyi-file ^
+    --jobs=8 ^
+    --remove-output ^
+    --nofollow-import-to=scipy ^
+    --nofollow-import-to=matplotlib ^
+    --nofollow-import-to=tkinter.test ^
+    --nofollow-import-to=numpy.testing ^
+    --nofollow-import-to=pandas.tests ^
+    --nofollow-import-to=PyQt6.QtWebEngineCore ^
+    --nofollow-import-to=PyQt6.QtWebEngineWidgets ^
+    --nofollow-import-to=PyQt6.QtQuick ^
+    --nofollow-import-to=PyQt6.QtQml ^
+    --nofollow-import-to=PyQt6.QtPdf ^
+    --nofollow-import-to=PyQt6.QtVirtualKeyboard ^
+    --nofollow-import-to=PyQt6.QtMultimedia ^
+    --nofollow-import-to=PyQt6.QtBluetooth ^
+    --nofollow-import-to=PyQt6.QtNetwork ^
+    --nofollow-import-to=PyQt6.QtSvg ^
+    --nofollow-import-to=PyQt6.QtSql ^
+    --nofollow-import-to=PyQt6.QtTest ^
+    --nofollow-import-to=PyQt6.QtXml ^
+    --noinclude-dlls=Qt6WebEngineCore.dll ^
+    --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    --include-data-file=MonitorTK.ico=MonitorTK.ico ^
+    --include-data-file=window_config.json=window_config.json ^
+    --include-data-file=scale2_window_config.json=scale2_window_config.json ^
+    --include-data-file=monitor_category_list.json=monitor_category_list.json ^
+    --include-data-file=visualizer_layout.json=visualizer_layout.json ^
+    --include-data-file=display_cols.json=display_cols.json ^
+    --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
+    --include-data-dir=datacsv=datacsv ^
+    --include-data-dir=JSONData=JSONData ^
+    --include-data-dir=JohnsonUtil=JohnsonUtil ^
+    --include-module=a_trade_calendar ^
+    --include-package=numpy ^
+    --include-package=pandas ^
+    --include-package=talib ^
+    --include-package=tables ^
+    --include-package=JSONData ^
+    --include-package=JohnsonUtil ^
+    --include-package=tk_gui_modules ^
+    --include-module=configobj ^
+    --include-module=tushare ^
+    --include-module=pandas_ta ^
+    --include-module=talib.stream ^
+    --include-module=talib.abstract ^
+    --include-module=stock_live_strategy ^
+    --include-module=realtime_data_service ^
+    --include-module=market_pulse_engine ^
+    --include-module=signal_dashboard_panel ^
+    --include-module=tables._comp_lzo ^
+    --include-module=tables._comp_bzip2 ^
+    --include-module=bidding_racing_panel ^
+    --include-module=bidding_momentum_detector ^
+    --include-module=market_pulse_viewer ^
+    --include-module=sector_bidding_panel ^
+    --include-module=stock_selector ^
+    --include-module=trading_hub ^
+    --include-module=signal_grading_hub ^
+    --include-module=sector_focus_engine ^
+    --include-module=scraper_55188 ^
+    --include-module=backtest_feature_auditor ^
+    --include-module=intraday_decision_engine ^
+    --include-module=position_phase_engine ^
+    --include-module=daily_top_detector ^
+    --include-module=trading_analyzerQt6 ^
+    --include-module=minute_kline_viewer_qt ^
+    --include-module=live_signal_viewer ^
+    --include-module=stock_selection_window ^
+    --include-module=kline_monitor ^
+    --include-module=db_repair_tool ^
+    --include-module=cleanup_non_trading_signals ^
+    --include-module=test_bidding_replay ^
+    --include-module=signal_bus
+    @REM --include-module=keyboard ^
+    @REM --include-module=tkcalendar ^
+    @REM --include-module=psutil
+
+
+:: ===== Execute compilation =====
+echo [INFO] Executing Nuitka compilation...
+echo !CMD!
+echo.
+call !CMD!
+
+:: ===== Verification =====
+if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\instock_MonitorTK.exe" (
+    echo.
+    echo [SUCCESS] Compilation completed successfully!
+    echo [SUCCESS] Output directory: %OUTPUT_DIR%\instock_MonitorTK.dist
+) else (
+    echo [ERROR] Compilation failed. Please check the error logs.
+)
+
+:: 6. Restore original PATH
+set "PATH=%OLD_PATH%"
+echo Original PATH has been restored.
+echo.
+
+exit /b
