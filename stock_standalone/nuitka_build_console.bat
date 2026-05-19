@@ -125,6 +125,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
+    --cache-dir="%~dp0.nuitka_cache" ^
     --lto=no ^
     --no-pyi-file ^
     --jobs=8 ^
@@ -133,6 +134,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --nofollow-import-to=tkinter.test ^
     --nofollow-import-to=numpy.testing ^
     --nofollow-import-to=pandas.tests ^
+    --nofollow-import-to=tables.tests ^
+    --nofollow-import-to=tables.nodes.tests ^
+    --nofollow-import-to=numpy.tests ^
     --nofollow-import-to=PyQt6.QtWebEngineCore ^
     --nofollow-import-to=PyQt6.QtWebEngineWidgets ^
     --nofollow-import-to=PyQt6.QtQuick ^
