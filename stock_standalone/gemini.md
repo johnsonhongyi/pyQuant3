@@ -28,6 +28,14 @@
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-19 22:42
+- [x] **物理修复 `nuitka_build_console.bat` 遗漏 `--cache-dir` 参数 Bug (Fixed Missing cache-dir Build Option)**：
+    - [x] **强制命令行传递缓存目录**：在 Nuitka 编译指令中补齐并显式传入 `--cache-dir="%~dp0.nuitka_cache"`，彻底根治了由于仅配置环境变量而在 Windows/Conda 交叉环境下失效、导致项目本目录下 `.nuitka_cache` 被冷落空置的问题。这迫使 Nuitka 100% 认领并物理写入预编译缓存、下载工具依赖与 AST 依赖文件。
+
+## 2026-05-19 22:40
+- [x] **极速 Exclusions 物理拦截单元测试大军，极致瘦身编译文件数量 (Physical Test-Suite Exclusions & Compilation Slimming)**：
+    - [x] **物理拦截 `tables.tests` 与 `numpy.tests` 单元测试包**：在 `nuitka_build_console.bat` 中强力追加对 `tables.tests`、`tables.nodes.tests` 以及 `numpy.tests` 的 `--nofollow-import-to` 物理屏蔽。这直接避免了打包 `tables` 数据引擎包时，其自带的数百个完全无用且体积臃肿的单元测试用例（如 `test_earray` 等）被 Nuitka 强行翻译为 C++ 并送去 GCC 编译，大幅削减了最终的编译文件数，再次实现编译量大瘦身！
+
 ## 2026-05-19 22:15
 - [x] **极速 Nuitka 增量打包瘦身与 sccache GCC 编译链彻底打通 (Streamlined Nuitka Packaging & sccache GCC Integration)**：
     - [x] **打通 `sccache` 50G 高速本地编译缓存**：在 `nuitka_build_console.bat` 中成功融入 Scoop 部署的 `sccache` 配置，并将 `SCCACHE_DIR` 设置在 `D:\sccache` 开启 50G 高性能缓存；同时在批处理开头清洗 Anaconda 冲突路径，将 Mingw64 GCC/G++ 编译器列入首位，为未来的增量重新编译奠定了秒级通过的物理基础。
