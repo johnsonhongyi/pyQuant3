@@ -4,9 +4,20 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 echo ==========================================
-echo Nuitka Smart Compiler Assistant (Console Mode)
+echo 🧠 Nuitka Smart Compiler Assistant (Console Mode)
 echo ==========================================
 echo.
+
+:: =========================================
+:: 0. Activate Visual Studio Native Environment for full MSVC+Clang-CL
+:: =========================================
+set "VS_VARS=D:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+if exist "%VS_VARS%" (
+    echo [INFO] Activating Native Visual Studio Environment for Full Clang-CL mode...
+    call "%VS_VARS%" >nul
+    echo [SUCCESS] MSVC Native Linker and Environment loaded!
+    echo.
+)
 
 :: 1. Backup original PATH
 set "OLD_PATH=%PATH%"
@@ -42,26 +53,84 @@ if "%NEED_CLEAN%"=="1" (
     echo [SUCCESS] No conflicting paths detected.
 )
 
-:: 3. Configure sccache & Setup Mingw64 GCC Compiler
-echo Configuring sccache...
+:: =========================================
+:: 3. FORCE CLANG ONLY (NO GCC FALLBACK)
+:: =========================================
+
+echo Configuring STRICT LLVM Clang mode...
+
 set SCCACHE_DIR=D:\sccache
 set SCCACHE_CACHE_SIZE=50G
 
 set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;%PATH%"
 
-echo [INFO] Compiler set to sccache gcc
-set CC=sccache gcc
-set CXX=sccache g++
+set "CLANG_EXE="
+set "USE_CLANG=0"
 
-set "PATH=D:\mingw64\bin;%PATH%"
+:: ===== ONLY ACCEPT CLANG =====
+if exist "C:\Users\Johnson\scoop\apps\llvm\current\bin\clang.exe" (
+    set "CLANG_EXE=C:\Users\Johnson\scoop\apps\llvm\current\bin\clang.exe"
+    set "USE_CLANG=1"
+)
 
-rem Check GCC fallback
-where gcc >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] gcc not found, please check if D:\mingw64\bin exists
+if "!USE_CLANG!"=="0" (
+    if exist "C:\Program Files\LLVM\bin\clang.exe" (
+        set "CLANG_EXE=C:\Program Files\LLVM\bin\clang.exe"
+        set "USE_CLANG=1"
+    )
+)
+
+if "!USE_CLANG!"=="0" (
+    for /f "delims=" %%i in ('where clang 2^>nul') do (
+        set "CLANG_EXE=%%i"
+        set "USE_CLANG=1"
+        goto :clang_found
+    )
+)
+
+:clang_found
+
+if "!USE_CLANG!"=="1" (
+    echo [SUCCESS] FORCING CLANG ONLY: !CLANG_EXE!
+
+    for %%A in ("!CLANG_EXE!") do set "LLVM_BIN=%%~dpA"
+    
+    rem Put LLVM bin in front of PATH
+    set "PATH=!LLVM_BIN!;!PATH!"
+    
+    rem Strip MinGW64 GCC from PATH to prevent Scons from mismatching the gcc compiler
+    set "PATH=!PATH:D:\mingw64\bin;=!"
+    set "PATH=!PATH:D:\mingw64\bin=!"
+    set "PATH=!PATH:D:\mingw64;=!"
+    set "PATH=!PATH:D:\mingw64=!"
+
+    rem Let Nuitka Scons automatically detect and use the native MSVC clang-cl
+    rem DO NOT override CC/CXX here, as it breaks Scons Windows parsing.
+    set "CC="
+    set "CXX="
+
+    set "NUITKA_CLANG_OPT=--clang"
+
+    rem GCC泄露拦截断言 - 极速拦截
+    echo 🛡️ Asserting GCC-free environment...
+    where gcc >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo ❌ [FATAL ERROR] GCC still detected in active PATH:
+        where gcc
+        echo ❌ [FATAL ERROR] Strict Clang-Only build aborted to prevent silent GCC fallback!
+        echo.
+        pause
+        exit /b
+    )
+    echo 🛡️ GCC check passed. No GCC visible in PATH.
+
+) else (
+    echo [ERROR] CLANG NOT FOUND - BUILD STOPPED
     pause
     exit /b
 )
+
 echo.
 
 :: 4. Set temporary directory and build cache
@@ -119,6 +188,7 @@ if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
 :: ===== Build Nuitka command =====
 set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+    !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
     --enable-plugin=tk-inter ^
     --enable-plugin=pyqt6 ^
@@ -213,7 +283,24 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
 
 
 :: ===== Execute compilation =====
-echo [INFO] Executing Nuitka compilation...
+echo ==========================================
+echo 🔬 PRE-FLIGHT COMPILER DRY RUN (Takes ~2s)
+echo ==========================================
+echo pass > "%TEMP%\_nuitka_dry_run.py"
+python -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
+if errorlevel 1 (
+    echo.
+    echo ❌ [FATAL ERROR] Pre-flight failed! Could not compile properly.
+    pause
+    exit /b
+)
+echo.
+echo ✅ Pre-flight compiler check passed! (Check the logs above for 'clang' execution details)
+echo.
+
+echo ==========================================
+echo [INFO] Executing REAL Nuitka compilation...
+echo ==========================================
 echo !CMD!
 echo.
 call !CMD!
