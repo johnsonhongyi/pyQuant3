@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-19 16:26  
+> 最后更新：2026-05-20 01:10  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,14 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-20 01:10
+- [x] **将 Nuitka 编译链回滚与 Clang 独立配置文件深度重构 (Reverted Nuitka GCC Compiler & Hardened Clang-Only Config)**：
+    - [x] **`nuitka_build_console.bat` 彻底改回 GCC**：完全剥离 LLVM Clang 探查逻辑，固定编译器为 `sccache gcc` / `g++` 并清除 Nuitka 的 `--clang` 选项，保障极速稳定的 GCC 打包流程。
+    - [x] **`nuitka_build_console_onlyClang.bat` 与 `build_nuitka_clang.bat` 升级为 100% 独立 Clang 专用配置文件**：
+        - **物理剥离 GCC 干扰**：在 Clang 模式下强制从 `PATH` 变量中过滤、剔除 Mingw64 GCC 的物理路径（`D:\mingw64`）、Conda/Anaconda 环境内置 of MinGW 和 usr/bin 目录以及 Scoop shims 冲突路径，彻底切断 Nuitka 的自动 Fallback 机制，杜绝编译时跑出任何 GCC 的情况。
+        - **统一集成“GCC 泄露拦截断言”**：在两份 Clang 专用脚本中均 100% 对齐引入了自适应多路径 LLVM Clang 探测算法和 0.1 秒 GCC 环境拦截判定，彻底锁死 Clang 编译。
+        - **重构 CC/CXX 兼容变量**：废弃了带双引号或绝对路径的繁琐定义（这类写法会导致 Windows 下 Scons 探测编译器失败），改为无引号的极简兼容 `clang` / `clang++` (或搭配 sccache) 变量绑定，解决了 Scons 解析报错的顽疾，实现了纯 Clang 模式的一键完美编译。
 
 ## 2026-05-19 23:35
 - [x] **终极融合归一单向权威心跳泵与 GIL 强力物理护航金钟罩，彻底根除双重运行锁死、主视图空白与 PyEval_RestoreThread 崩溃 (Unified Pure Single-Path Event Pump & Fixed UI Deadlock & Resolved PyEval_RestoreThread Crash)**：
