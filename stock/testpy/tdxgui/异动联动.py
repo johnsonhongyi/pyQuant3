@@ -5103,6 +5103,7 @@ class GlobalConfig:
         self.win10_ramdisk  = self.get_with_writeback("general", "win10_ramdisk", fallback='G:', value_type="str")
         self.filterclose  = self.get_with_writeback("general", "filterclose", fallback='close', value_type="str")
         self.filterhigh4  = self.get_with_writeback("general", "filterhigh4", fallback='high4', value_type="str")
+        self.duration_date_day  = self.get_with_writeback("general", "duration_date_day", fallback='120', value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
@@ -5203,6 +5204,8 @@ clean_terminal = CFG.clean_terminal
 win10_ramdisk = CFG.win10_ramdisk
 filterclose = CFG.filterclose
 filterhigh4 = CFG.filterhigh4
+filterhigh4 = CFG.filterhigh4
+duration_date_day = CFG.duration_date_day
 
 # root_path = [
 #     CFG.get_path("root_path_windows"),
@@ -5216,12 +5219,12 @@ def _get_tdx_data_df(stock_code=None):
     basedir = win10_ramdisk + os.sep
     ptype = 'low'
     resample = 'd'
-    dl = 70
+    dl = 120
     filter = 'y'
 
     fname = os.path.join(basedir, "tdx_last_df.h5")
     table = f"{ptype}_{resample}_{dl}_{filter}_all"
-
+    logger.info(f"🔄fname:{fname} table:{table} ")
     # ① 读取 TDX 数据（只读一次）
     if pytables_status and (today_tdx_df is None or today_tdx_df.empty):
         today_tdx_df = read_hdf_table(fname, table)
