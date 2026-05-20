@@ -2715,97 +2715,97 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _process_batch_signals(self):
         """批量处理 UI 更新，确保滚动条稳定"""
-        with timed_ctx("_process_batch_signals", warn_ms=200):
-            if not self._table_update_buffer:
-                return
-            
-            # [🚀 极致性能] 非阻塞锁获取，避免 UI 线程在重负载期间因等待锁而产生丢帧
-            if not self._data_lock.acquire(blocking=False):
-                # 如果背景线程正在大量写入缓冲区，UI 线程避让并推迟 500ms 重试
-                QTimer.singleShot(500, self._process_batch_signals)
-                return
+        # with timed_ctx("_process_batch_signals", warn_ms=200):
+        if not self._table_update_buffer:
+            return
+        
+        # [🚀 极致性能] 非阻塞锁获取，避免 UI 线程在重负载期间因等待锁而产生丢帧
+        if not self._data_lock.acquire(blocking=False):
+            # 如果背景线程正在大量写入缓冲区，UI 线程避让并推迟 500ms 重试
+            QTimer.singleShot(500, self._process_batch_signals)
+            return
 
-            try:
-                events_raw = self._table_update_buffer[:]
-                self._table_update_buffer.clear()
-            finally:
-                self._data_lock.release()
-            
-            if not events_raw: return
-            
-            # ⚡ [FIX] 移除此处的批次内按股票代码去重！
-            # 如果同一个股票在3秒内同时触发"跟单"与"破位"，较早的跨分类信号若被去重丢弃，会导致某分类卡片统计增加了但表格中永远不出现该行的严重Bug。
-            # 去重下放至 _insert_row 内部，针对每个子分类表格进行精准的独立覆盖更新。
-            events_to_process = events_raw
+        try:
+            events_raw = self._table_update_buffer[:]
+            self._table_update_buffer.clear()
+        finally:
+            self._data_lock.release()
+        
+        if not events_raw: return
+        
+        # ⚡ [FIX] 移除此处的批次内按股票代码去重！
+        # 如果同一个股票在3秒内同时触发"跟单"与"破位"，较早的跨分类信号若被去重丢弃，会导致某分类卡片统计增加了但表格中永远不出现该行的严重Bug。
+        # 去重下放至 _insert_row 内部，针对每个子分类表格进行精准的独立覆盖更新。
+        events_to_process = events_raw
 
-            # 记录当前各表格的滚动状态
-            scroll_states = {}
-            for name, table in self.tables.items():
-                # ⚡ [PERF] 批量禁用更新、信号和排序全家桶，提升性能
-                table.setUpdatesEnabled(False)
-                table.blockSignals(True)
-                
-                scroll_states[name] = {
-                    'value': table.verticalScrollBar().value(),
-                    'at_top': table.verticalScrollBar().value() == 0,
-                    'selected': [(r.topRow(), r.bottomRow()) for r in table.selectedRanges()],
-                    'sorting': table.isSortingEnabled() # 记录排序状态
-                }
-                # [FIX] 在大批量插入期间，必须全局禁用排序，否则在 setItem 时仍然有 O(N*logN) 的触发或者布局更新
-                table.setSortingEnabled(False)
+        # 记录当前各表格的滚动状态
+        scroll_states = {}
+        for name, table in self.tables.items():
+            # ⚡ [PERF] 批量禁用更新、信号和排序全家桶，提升性能
+            table.setUpdatesEnabled(False)
+            table.blockSignals(True)
             
-            # 批量插入
-            self._is_updating_ui = True
-            batch_start = time.perf_counter()
-            processed_count = 0
-                
-            try:
-                for event in events_to_process:
-                    self._append_to_tables(event)
-                    processed_count += 1
-            finally:
-                current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
-                for name, table in self.tables.items():
-                    state = scroll_states.get(name)
-                    # [PERF] ENGINE TABS 不接收信号插入，自有一套排序刷新逻辑
-                    if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
-                        # [STEP-2 FIX] 仅对当前可见的 Tab 执行实时排序，不可见 Tab 标记为“需要排序”
-                        if name == current_tab_text:
-                            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-                            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-                            self._sort_table_python(table, sort_col, sort_order)
-                            table._needs_sort = False # 已完成
-                        else:
-                            table._needs_sort = True # 标记脏位，切回来时再排
-                        
-                        table.horizontalHeader().setSectionsClickable(True)
-                            
-                    table.blockSignals(False)
-                    table.setUpdatesEnabled(True)
-                    # [PERF] Interactive 模式下不再需要每次限制列宽
-                    table.viewport().update()
-                    
-                self._is_updating_ui = False
-                batch_dur = (time.perf_counter() - batch_start) * 1000
-                if batch_dur > 50:
-                    logger.debug(f"📊 [DASHBOARD_PERF] Batch processed {processed_count} signals in {batch_dur:.1f}ms (TotalReceived={len(events_raw)})")
-                
-            # 恢复/修正滚动位置
+            scroll_states[name] = {
+                'value': table.verticalScrollBar().value(),
+                'at_top': table.verticalScrollBar().value() == 0,
+                'selected': [(r.topRow(), r.bottomRow()) for r in table.selectedRanges()],
+                'sorting': table.isSortingEnabled() # 记录排序状态
+            }
+            # [FIX] 在大批量插入期间，必须全局禁用排序，否则在 setItem 时仍然有 O(N*logN) 的触发或者布局更新
+            table.setSortingEnabled(False)
+        
+        # 批量插入
+        self._is_updating_ui = True
+        batch_start = time.perf_counter()
+        processed_count = 0
+            
+        try:
+            for event in events_to_process:
+                self._append_to_tables(event)
+                processed_count += 1
+        finally:
+            current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
             for name, table in self.tables.items():
                 state = scroll_states.get(name)
-                if not state: continue
+                # [PERF] ENGINE TABS 不接收信号插入，自有一套排序刷新逻辑
+                if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
+                    # [STEP-2 FIX] 仅对当前可见的 Tab 执行实时排序，不可见 Tab 标记为“需要排序”
+                    if name == current_tab_text:
+                        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+                        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+                        self._sort_table_python(table, sort_col, sort_order)
+                        table._needs_sort = False # 已完成
+                    else:
+                        table._needs_sort = True # 标记脏位，切回来时再排
+                    
+                    table.horizontalHeader().setSectionsClickable(True)
+                        
+                table.blockSignals(False)
+                table.setUpdatesEnabled(True)
+                # [PERF] Interactive 模式下不再需要每次限制列宽
+                table.viewport().update()
                 
-                # [MOD] 逻辑：
-                # 1. 如果用户之前就在顶部(at_top=True)，则继续保持在顶部(0位置)，此时能看到最新冒出来的信号
-                # 2. 如果用户之前正在往下翻看旧数据(at_top=False)，则向下偏移新插入的行数，以保持视窗内原来的内容不动
-                if state['at_top']:
-                    table.verticalScrollBar().setValue(0)
-                else:
-                    new_val = state['value'] + len(events_to_process)
-                    table.verticalScrollBar().setValue(new_val)
+            self._is_updating_ui = False
+            batch_dur = (time.perf_counter() - batch_start) * 1000
+            if batch_dur > 50:
+                logger.debug(f"📊 [DASHBOARD_PERF] Batch processed {processed_count} signals in {batch_dur:.1f}ms (TotalReceived={len(events_raw)})")
+            
+        # 恢复/修正滚动位置
+        for name, table in self.tables.items():
+            state = scroll_states.get(name)
+            if not state: continue
+            
+            # [MOD] 逻辑：
+            # 1. 如果用户之前就在顶部(at_top=True)，则继续保持在顶部(0位置)，此时能看到最新冒出来的信号
+            # 2. 如果用户之前正在往下翻看旧数据(at_top=False)，则向下偏移新插入的行数，以保持视窗内原来的内容不动
+            if state['at_top']:
+                table.verticalScrollBar().setValue(0)
+            else:
+                new_val = state['value'] + len(events_to_process)
+                table.verticalScrollBar().setValue(new_val)
 
-            # [NEW] 批量插入后立即触发统计重算，消除统计更新滞后的体感
-            self._update_stats_display()
+        # [NEW] 批量插入后立即触发统计重算，消除统计更新滞后的体感
+        self._update_stats_display()
 
     def _process_event(self, event: BusEvent, update_ui=True):
         payload = event.payload

@@ -797,8 +797,10 @@ class BiddingMomentumDetector:
         if not force and now_ts - getattr(self, '_last_update_ts', 0) < 0.3:
             return
         self._last_update_ts = now_ts
-
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
+        # [NUITKA-FIX] 已移除冗余的 `import datetime` (line 800)
+        # Nuitka 编译器将函数内 import 视为局部变量绑定，导致 UnboundLocalError
+        # 模块级 import datetime (line 15) 已足够
         eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
         self._check_day_switch(eval_dt)
 
@@ -853,7 +855,6 @@ class BiddingMomentumDetector:
             # 🚀 [GIL-FIX] 终极调度升级：采用工业级 Chunk-based 任务分片调度模型 (方案 B/C 融合)
             # 我们将 codes 每 50 个拆分为一个 chunk，密集算完 50 个后强行调用 time.sleep 释放 GIL。
             # 这可以在编译成 C 的 Nuitka 独立打包环境下，极好地给 UI 线程和 Tk 事件循环让度 GIL。
-            import datetime
             now_hour = datetime.datetime.now().hour
             sleep_time = 0.003 if (now_hour >= 15 or now_hour < 9) else 0.001
             

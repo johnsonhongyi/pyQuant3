@@ -2961,7 +2961,7 @@ def fetch_and_process(
             continue
         except Exception as e:
             logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
-            logger.error(f"完整堆栈:\n{traceback.format_exc()}")
+            logger.exception(f"完整堆栈:\n{traceback.format_exc()}")
             time.sleep(duration_sleep_time)
 
     return df_all
