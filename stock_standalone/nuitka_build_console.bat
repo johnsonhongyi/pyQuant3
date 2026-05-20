@@ -168,6 +168,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
     --include-data-dir=datacsv=datacsv ^
+    --include-package=JSONData ^
+    --include-package=JohnsonUtil ^
     --include-package-data=JSONData ^
     --include-package-data=JohnsonUtil ^
     --include-module=a_trade_calendar ^
