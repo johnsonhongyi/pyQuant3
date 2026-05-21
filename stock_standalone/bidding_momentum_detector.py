@@ -675,7 +675,11 @@ class BiddingMomentumDetector:
         }
 
         # ---- 内部状态 ----
-        self._lock = threading.RLock()
+        try:
+            from tk_gil_monitor import TraceLock
+            self._lock = TraceLock("BiddingMomentumDetector._lock", timeout=5.0)
+        except ImportError:
+            self._lock = threading.RLock()
 
         # code → TickSeries
         self._tick_series: Dict[str, TickSeries] = {}
@@ -768,7 +772,11 @@ class BiddingMomentumDetector:
         self._score_anchor_930: float = 0.0      # 本轮 09:30 锚点时间戳（全局预计算）
         self._score_force: bool = False          # 本轮是否为强制全量扫描
         self._score_active_codes = None          # 本轮 active_codes 引用（用于 aggregate）
-        self._score_lock = threading.Lock()      # 防重入锁（轻量 Lock 即可）
+        try:
+            from tk_gil_monitor import TraceLock
+            self._score_lock = TraceLock("BiddingMomentumDetector._score_lock", timeout=5.0)
+        except ImportError:
+            self._score_lock = threading.Lock()
         self._chunk_timer: Optional[object] = None  # 当前活跃的帧调度 threading.Timer 引用
         # [PERF] 增量市场均价缓存（避免 _aggregate_sectors 每轮都 O(N) 遍历全量 snap）
         self._cached_market_avg_pct: float = 0.0   # EMA 平滑后的市场均涨幅
