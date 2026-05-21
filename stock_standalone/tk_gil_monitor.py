@@ -19,6 +19,49 @@ def get_monitor(): return _global_monitor
 
 
 # ─── 内部工具 ────────────────────────────────────────────
+_last_warns = {}
+_warn_lock = threading.Lock()
+
+def _should_suppress_warn(msg: str) -> bool:
+    try:
+        import re
+        # 1. 提取骨架指纹，将浮点数、整数、百分比等动态数值全部归一化为 [NUM]
+        skeleton = re.sub(r'\d+\.\d+|\d+', '[NUM]', msg)
+        skeleton = "".join(skeleton.split()) # 去除空白字符以做严格结构比对
+        
+        # 2. 根据警报严重程度和体量定制冷却阈值
+        cooldown = 5.0 # 默认普通警报 5 秒
+        if "THREAD DUMP" in msg:
+            cooldown = 30.0
+        elif "CALL CHAIN" in msg:
+            cooldown = 30.0
+        elif "DELTA_SAMPLER" in msg:
+            cooldown = 15.0
+        elif "TraceLock" in msg:
+            cooldown = 10.0
+        elif "BLOCKING THREADS" in msg:
+            cooldown = 30.0
+        elif "DELTA SAMPLER SUMMARY" in msg:
+            cooldown = 30.0
+        elif "QUEUE PRESSURE" in msg:
+            cooldown = 30.0
+            
+        now = time.monotonic()
+        with _warn_lock:
+            last_t = _last_warns.get(skeleton, 0.0)
+            if now - last_t < cooldown:
+                return True
+            _last_warns[skeleton] = now
+            
+            # 3. 限制指纹缓存大小，防内存膨胀
+            if len(_last_warns) > 1000:
+                for k, t in list(_last_warns.items()):
+                    if now - t > 600.0:
+                        del _last_warns[k]
+    except Exception:
+        pass
+    return False
+
 def _warn(msg):
     try:
         import sys
@@ -44,6 +87,8 @@ def _warn(msg):
                 except Exception:
                     pass
         if enabled:
+            if _should_suppress_warn(msg):
+                return
             print(msg, flush=True)
     except Exception:
         pass

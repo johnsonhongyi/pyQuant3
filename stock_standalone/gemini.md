@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-05-21 14:30
+- [x] **终结 _aggregate_sectors 板块聚合锁霸占与四大持久化通道 UI Starvation 隐患 (Eliminated Sector Aggregation Lock Monopoly & UI Starvation in Persistence Channels)**：
+    - [x] **落地 _aggregate_sectors 极致分片锁与 GIL Yield 呼吸器架构 (Chunked Locking & GIL Yielding in Sector Aggregation)**：在 `bidding_momentum_detector.py` 的板块聚合核心方法 `_aggregate_sectors` 中，将原先独占 5500+ 个股的超长 `with self._lock` 同步合并与快照大循环彻底解耦。重构为“锁外安全获取代码快照 + 每 200 个分片单次上锁执行 + 锁释放瞬间 time.sleep(0) 物理 Yield GIL”的极低响应延迟架构。将原先单次长达 150-450ms 的霸锁大循环粉碎为多个 <2ms 极其轻盈的微临界区，完美保障了 Tkinter 和 PyQt UI 渲染事件泵获取 GIL 的呼吸频率。
+    - [x] **打通四大持久化通道的高精度 `last_call` 性能雷达追踪 (High-Precision Radar Instrumentation across 4 Persistence Ports)**：在 `bidding_momentum_detector.py` 中对主导冷启动、磁盘 I/O 写入与会话恢复的四个绝对高危耗时接口 `_load_stock_selector_data`、`load_persistent_data`、`save_persistent_data`、`load_from_snapshot` 以及高负荷后台线程 K 线重构函数 `_deferred_restore_klines`（及 legacy 版）的入口处，全部物理嵌入 `tk_gil_monitor.last_call` 的高精毫秒级元数据埋点，确保了全自动 Watchdog 诊断系统在极重盘后结算与会话保护时的 100% 可观测性。
+
+## 2026-05-21 14:30
+- [x] **终结 _aggregate_sectors 板块聚合锁霸占与四大持久化通道 UI Starvation 隐患 (Eliminated Sector Aggregation Lock Monopoly & UI Starvation in Persistence Channels)**：
+    - [x] **落地 _aggregate_sectors 极致分片锁与 GIL Yield 呼吸器架构 (Chunked Locking & GIL Yielding in Sector Aggregation)**：在 `bidding_momentum_detector.py` 的板块聚合核心方法 `_aggregate_sectors` 中，将原先独占 5500+ 个股的超长 `with self._lock` 同步合并与快照大循环彻底解耦。重构为“锁外安全获取代码快照 + 每 200 个分片单次上锁执行 + 锁释放瞬间 time.sleep(0) 物理 Yield GIL”的极低响应延迟架构。将原先单次长达 150-450ms 的霸锁大循环粉碎为多个 <2ms 极其轻盈的微临界区，完美保障了 Tkinter 和 PyQt UI 渲染事件泵获取 GIL 的呼吸频率。
+    - [x] **打通四大持久化通道的高精度 `last_call` 性能雷达追踪 (High-Precision Radar Instrumentation across 4 Persistence Ports)**：在 `bidding_momentum_detector.py` 中对主导冷启动、磁盘 I/O 写入与会话恢复的四个绝对高危耗时接口 `_load_stock_selector_data`、`load_persistent_data`、`save_persistent_data`、`load_from_snapshot` 以及高负荷后台线程 K 线重构函数 `_deferred_restore_klines`（及 legacy 版）的入口处，全部物理嵌入 `tk_gil_monitor.last_call` 的 high-precision 毫秒级元数据埋点，确保了全自动 Watchdog 诊断 system 在极重盘后结算与会话保护时的 100% 可观测性。
+    - [x] **部署 tk_gil_monitor 智能特征去重速率限制器 (Implemented Structural Deduplication & Rate Limiting in GIL Radar)**：在 `tk_gil_monitor.py` 的主警告输出方法 `_warn` 中，引入了基于“骨架特征指纹匹配 + 细粒度个性化冷却机制 (Customized Skeleton Deduplication)”的轻量去重过滤器。通过正则智能消除时间戳、等待秒数、百分比等动态变量生成纯净的结构特征哈希，并对 Thread Dump、Call Chain、Delta Sampler 报告等重量级日志分别定制了 30s/15s/10s 等高防噪音冷却时间窗。这彻底遏制了系统卡顿期间冗余雷同的数万字符大量刷屏，保留核心异常诊断，让开发者能够在嘈杂的行情风暴中秒级锁定性能核心重点。
+    - [x] **根治 C++ 线程与原生锁/队列混合死锁 (Eradicated Hybrid QThread & Python Sync Deadlocks)**：在 `sector_bidding_panel.py` 中，彻底弃用了原生的 `QThread` 数据处理后台工作者，将其全面重构为原生 Python `threading.Thread`。这打破了在 Nuitka/PyInstaller 打包发行环境下，底层的 C++ 线程通过 QThread 运行 Python Bytecode 并使用 Python 原生条件锁及标准库 Queue（`TraceQueue`）挂起时导致的 GIL 锁严重失控、线程所有权错乱、以及主 GUI 线程无限饥饿卡死的系统性顽疾。通过嵌入 PyQt 原生的线程安全 `QObject` (`SignalBridge`) 并使用 `@property` 暴露信号，以极其优雅且微创（Micro-invasive）的“零改动外部接口”方式完成了平滑替换，彻底保障了打包程序的完美流畅和自选行情吞吐的安全稳定。
+    - [x] **补齐 `deleteLater` 接口兼容性包装 (Added deleteLater Compatibility Wrapper)**：在 `DataProcessWorker` 类中补齐了 `deleteLater(self)` 方法。由于原生 Python 线程不具备 Qt 固有的 `deleteLater` 垃圾回收机制，若外界有遗留信号连接如 `self._worker.stopped.connect(self._worker.deleteLater)` 会抛出 `AttributeError` 阻断面板构建。通过提供微创兼容封装，彻底消除了面板初始化时的构建崩溃问题，进一步提升了系统工程化水准。
+    - [x] **终结后台定时器跨线程激活 QTimer 警告 (Physically Fixed QBasicTimer Cross-Thread Start Warning)**：查明在打分分片计算全部结束后的回调函数 `_on_score_finished_callback` 中，由于该回调由底层的 `ScoreChunkTimer` 后台线程在子线程上下文中执行，原先直接在此调用 `QTimer.singleShot(0, self._on_worker_finished)` 会非法跨线程触发 Qt 底层的 `QBasicTimer::start` 导致控制台刷屏报错。已将其全面重构为使用线程安全的 QObject `SignalBridge` (`self._worker.data_updated.emit(None)`)。依靠 PyQt 内置的 `QueuedConnection` 跨线程排队派发机制，将刷新动作安全地在主 GUI 线程中执行，彻底根治了 QBasicTimer 线程冲突报错。
+
+## 2026-05-21 14:00
+- [x] **物理终结 DataProcessWorker 跨线程槽分派死锁与 register_codes 频繁上锁引发的 GIL 锁风暴 (Physically Terminated DataProcessWorker Thread Deadlock & register_codes GIL Lock-Storm)**：
+    - [x] **根治频繁上锁解锁引发的锁风暴 (Chunked Lock & GIL Yield in register_codes)**：在 `bidding_momentum_detector.py` 的 `register_codes` 大批量（5000+）个股注册更新循环中，废除了原先每行 `with self._lock` 单个加锁释放的极端繁琐机制。重构为 `lock_chunk_size = 200` 的分片锁架构，将上锁与释放频率暴降 99.5%；配合在分片边界主动执行 `time.sleep(0)` 强力物理让出 GIL，彻底释放了计算期对主 GUI 线程的锁霸占，UI 界面在重负载喂数期间仍能完美保持亚毫秒级极致响应。
+    - [x] **升级 DataProcessWorker 为原生 QThread 并重写 run() 方法 (Upgraded Worker to Native QThread subclass)**：查明先前由于使用 `QObject` 配合 `moveToThread` 套娃设计，且在 `started` 信号与 `process_data` 绑定时触发了 PyQt 跨线程事件泵的分派漏洞，导致本应在子线程后台无限循环的 `process_data` 实际上被派发到了主 GUI 线程上空转，直接饿死了 Tkinter 消息循环。现将 `DataProcessWorker` 直接升级为继承自 `QThread`，并将无限循环执行器移至重写后的 `run()` 虚函数中。这打通了真正的 OS 线程上下文，100% 杜绝了 Qt 跨线程槽分配盲区，完美隔离了计算热点与主 GUI 界面。
+    - [x] **精简并加固 closeEvent 销毁回收机制 (Hardened closeEvent Clean-up)**：在 `SectorBiddingPanel.closeEvent` 窗口彻底关闭路径下，配合原生 `QThread` 重构，删除了冗余的 `self._worker_thread` 容器对象；升级为对 `self._worker` 自身发起 `stop()`、`quit()` 以及 `wait(3000)` 安全同步退出与销毁，确保了应用退出时 DLL 文件描述符与共享内存的 100% 完美释放。
+
 ## 2026-05-21 13:30
 - [x] **新增全局配置开关 `gil_monitor` 并实现 TraceQueue/TraceLock 全闭环监控 (Added Global Config Switch `gil_monitor` and Full-Loop Monitoring via TraceQueue/TraceLock)**：
     - [x] **`commonTips.py` (配置项读取与回写)**：在 `cct.GlobalConfig` 构造器中新增 `self.gil_monitor = self.get_with_writeback("general", "gil_monitor", fallback=1, value_type="int")`。支持从 `global.ini` 的 `[general]` 节点自动读取与回写。

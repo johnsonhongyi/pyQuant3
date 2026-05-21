@@ -1176,25 +1176,34 @@ class SnapshotCalendarDialog(QDialog):
 from queue import Queue, Empty
 import time
 
-class DataProcessWorker(QObject):
-    """Worker object to process realtime data in a separate QThread."""
+import threading
+from PyQt6.QtCore import QObject, pyqtSignal
 
+class SignalBridge(QObject):
     data_updated = pyqtSignal(object)
     stopped = pyqtSignal()
 
+class DataProcessWorker(threading.Thread):
+    """Worker thread to process realtime data in a separate native Python Thread."""
+
     def __init__(self, detector):
-        super().__init__()
+        super().__init__(name="DataProcessWorker", daemon=True)
         self.detector = detector
+        # 信号桥梁
+        self.bridge = SignalBridge()
         # 线程安全队列
-        # try:
-        #     from tk_gil_monitor import TraceQueue
-        #     self.df_queue = TraceQueue(name="df_queue")
-        #     self.force_queue = TraceQueue(name="force_queue")
-        # except ImportError:
         self.df_queue = Queue()
         self.force_queue = Queue()
         self._is_running = True
         self._last_slow_log_ts = 0  # [NEW] 用于节流告警输出
+
+    @property
+    def data_updated(self):
+        return self.bridge.data_updated
+
+    @property
+    def stopped(self):
+        return self.bridge.stopped
 
     def add_data(self, df):
         """外部线程安全调用"""
@@ -1210,6 +1219,26 @@ class DataProcessWorker(QObject):
 
     def stop(self):
         self._is_running = False
+
+    def isRunning(self):
+        return self.is_alive()
+
+    def quit(self):
+        pass
+
+    def wait(self, timeout_ms=3000):
+        self.join(timeout=timeout_ms / 1000.0)
+        return not self.is_alive()
+
+    def terminate(self):
+        logger.warning("[DataProcessWorker] terminate() called on native thread (ignored, daemon thread will auto-exit)")
+
+    def deleteLater(self):
+        pass
+
+    def run(self):
+        # 线程的入口方法，百分之百在子线程中运行
+        self.process_data()
 
     def process_data(self):
         # ⭐ [GIL_MONITOR] 埋点：标记最后活跃函数
@@ -1494,8 +1523,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
 
         # Async Data Processing Worker - MUST be before UI init
-        self._worker_thread = QThread()  # no parent
-
         self._worker = DataProcessWorker(self.detector)
         # try:
         #     from tk_gil_monitor import get_monitor
@@ -1505,23 +1532,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         #         _m.register_queue("force_queue", self._worker.force_queue)
         # except Exception:
         #     pass
-        self._worker.moveToThread(self._worker_thread)
-
-        # 启动
-        self._worker_thread.started.connect(self._worker.process_data)
-
-        # 正确的停止信号
-        self._worker.stopped.connect(self._worker_thread.quit)
 
         # 线程结束后清理
-        self._worker_thread.finished.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker.stopped.connect(self._worker.deleteLater)
 
         # UI层回调
         # [FIX] 连接数据处理信号到刷新函数，而不是停止信号
         self._worker.data_updated.connect(self._on_worker_finished)
 
-        self._worker_thread.start()
+        # 直接启动 Worker 线程
+        self._worker.start()
 
 
         self._is_initializing = True
@@ -1612,24 +1632,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._refresh_timer.stop()
         if hasattr(self, '_score_timer'):
             self._score_timer.stop()
-        # 2. 告知 worker 停止循环
-        if hasattr(self, '_worker'):
+        # 2. 告知 worker 停止循环并等待退出（最多 3 秒）
+        if hasattr(self, '_worker') and self._worker is not None:
+            thread = self._worker
             try:
-                self._worker.stop()
+                thread.stop()
             except Exception:
                 pass
-        # 3. 等待线程退出（最多 3 秒）
-        if hasattr(self, '_worker_thread') and self._worker_thread is not None:
-            thread = self._worker_thread
             if thread.isRunning():
-                thread.quit()   # 请求事件循环退出
+                thread.quit()
                 if not thread.wait(3000):
-                    # 超时则强制终止
                     logger.warning("[SectorBiddingPanel] Worker thread did not stop in time, terminating...")
                     thread.terminate()
                     thread.wait(500)
-            thread.deleteLater()   # 安全释放
-            self._worker_thread = None
+            self._worker = None
             
         # 4. 安全清理 SBC 测试线程
         if hasattr(self, '_sbc_thread') and self._sbc_thread.isRunning():
@@ -2416,12 +2432,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_score_finished_callback(self):
         """[ROOT-FIX] 打分分片计算全部结束后的回调。
-        通过 QTimer.singleShot 将刷新动作无锁、线程安全地调度回主线程！"""
-        logger.warning("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh.")
-        # 强制将 refresh 标记设为 True，确保真正的打分结果能突破 5s 节流限制、100% 显示！
+        通过 QObject 信号桥梁将刷新动作安全、线程合规地调度回主线程，彻底消除 QTimer 警告！"""
+        logger.warning("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh via SignalBridge.")
         with self._update_lock:
             self._force_update_requested = True
-        QTimer.singleShot(0, self._on_worker_finished)
+        
+        if hasattr(self, '_worker') and self._worker is not None:
+            self._worker.data_updated.emit(None)
 
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
