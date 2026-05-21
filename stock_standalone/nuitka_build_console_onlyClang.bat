@@ -228,6 +228,18 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
+    --noinclude-dlls=Qt6WebEngineWidgets.dll ^
+    --noinclude-dlls=Qt6Pdf.dll ^
+    --noinclude-dlls=Qt6Quick.dll ^
+    --noinclude-dlls=Qt6Qml.dll ^
+    --noinclude-dlls=Qt6VirtualKeyboard.dll ^
+    --noinclude-dlls=Qt6Multimedia.dll ^
+    --noinclude-dlls=Qt6Bluetooth.dll ^
+    --noinclude-dlls=Qt6Network.dll ^
+    --noinclude-dlls=Qt6Svg.dll ^
+    --noinclude-dlls=Qt6Sql.dll ^
+    --noinclude-dlls=Qt6Test.dll ^
+    --noinclude-dlls=Qt6Xml.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
@@ -237,7 +249,12 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
-    --include-data-dir=datacsv=datacsv ^
+    --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
+    --include-data-file=datacsv\minute_kline_viewer_history.json=datacsv\minute_kline_viewer_history.json ^
+    --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
+    --include-data-file=JSONData\count.ini=JSONData\count.ini ^
+    --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
+    --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
     --include-package=JSONData ^
     --include-package=JohnsonUtil ^
     --include-package-data=JSONData ^
