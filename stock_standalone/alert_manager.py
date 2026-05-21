@@ -232,19 +232,9 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                             try: feedback_queue.put(('START', key))
                             except: pass
                             
-                        if not interrupt_event.is_set():
-                            # [UPGRADE] 使用异步播放 (Flags=1)，以便在长句播报中途响应中断
-                            # 1 = SVSFlagsAsync
-                            speaker.Speak(safe_msg, 1)
-                            
-                            # 循环等待直到播报完成或被外部中断
-                            while not speaker.WaitUntilDone(100):
-                                if interrupt_event.is_set() or stop_event.is_set():
-                                    # 立即中止当前播报: 1=Async, 2=PurgeBeforeSpeak
-                                    speaker.Speak("", 1 | 2) 
-                                    worker_log("SpVoice Interrupted during playback.")
-                                    break
-                                time.sleep(0.01)
+                        if not stop_event.is_set():
+                            # 使用同步播放 (Flags=0)，使其完整播放不会被打断
+                            speaker.Speak(safe_msg, 0)
                             
                         last_speech_end_ts = time.time()
                         
@@ -443,29 +433,17 @@ class AlertManager:
                 self.cooldowns.clear() # [FIX] 同时也清空冷却记录，允许复位后立即重报
             logger.info("✅ AlertManager: 全局报警历史及冷却记录已清空")
 
-    def speak(self, message: str, priority: int = 0, interrupt: bool = True):
+    def speak(self, message: str, priority: int = 0, interrupt: bool = False):
         """
-        [NEW] 便捷播报接口，支持插播与中断
+        [NEW] 便捷播报接口，支持插播与中断 (已关闭打断，自动完整播放)
         :param message: 播报文本
         :param priority: 优先级 (0=最高, 2=普通)
-        :param interrupt: 是否中断当前正在进行的播报 (插播)
+        :param interrupt: 忽略，不再支持打断
         """
         if not message:
             return
             
-        if interrupt:
-            # 1. 中断本地 AlertManager 的队列与播报
-            self.stop_current_speech()
-            
-            # 2. 广播全局中断信号 (通知可视化等其他进程也闭嘴)
-            from signal_bus import get_signal_bus, SignalBus
-            get_signal_bus().publish(
-                SignalBus.EVENT_ALERT, 
-                "AlertManager", 
-                {"action": "ABORT_VOICE", "reason": "HighPriorityAlert"}
-            )
-            
-        # 3. 发送新的报警 (高优先级)
+        # 发送新的报警 (高优先级)
         self.send_alert(message, priority=priority)
 
     def stop_current_speech(self, key=None):
