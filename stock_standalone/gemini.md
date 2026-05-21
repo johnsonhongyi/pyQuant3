@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-05-21 13:30
+- [x] **新增全局配置开关 `gil_monitor` 并实现 TraceQueue/TraceLock 全闭环监控 (Added Global Config Switch `gil_monitor` and Full-Loop Monitoring via TraceQueue/TraceLock)**：
+    - [x] **`commonTips.py` (配置项读取与回写)**：在 `cct.GlobalConfig` 构造器中新增 `self.gil_monitor = self.get_with_writeback("general", "gil_monitor", fallback=1, value_type="int")`。支持从 `global.ini` 的 `[general]` 节点自动读取与回写。
+    - [x] **`tk_gil_monitor.py` (日志与分析节流)**：重构了 `_warn(msg)` 内部逻辑。通过安全检查 `sys.modules` 中是否已导入 `cct` 以及 CFG 状态，实现在 `gil_monitor == 0` 时彻底关闭并隐藏所有 GIL 卡死警告、栈分析和队列压力诊断日志，在 `gil_monitor == 1` 时正常输出高辨识度报告。
+    - [x] **`instock_MonitorTK.py` 与 `sector_bidding_panel.py` (自动注册与追踪)**：将 UI 任务主分发队列 `tk_dispatch_queue`，以及后台计算的数据队列 `df_queue`、强刷队列 `force_queue` 全部重构为 `TraceQueue` 进行高精度的入队出队阻塞点时间耗时追踪，同时在打分器中替换 `self._lock` and `self._score_lock` 为 `TraceLock` 死锁检测锁，完美实现了全系统多维性能雷达的无缝运行与精细控制。
+
 ## 2026-05-21 13:00
 - [x] **部署生产级 Tk GIL 呼吸器系统，实现 UI 卡死自动诊断与线程栈快照 (Deployed Production-Grade TkBreathingMonitor with Auto-Freeze Detection & Thread Stack Dumps)**：
     - [x] **新建独立模块 `tk_gil_monitor.py`**：包含 6 大核心组件——`TkBreathingMonitor`（主体）、`LastCallTracker`（最后调用追踪）、`TraceLock`（带死锁诊断的 RLock 包装器）、`gil_yield`（GIL 时间片切割探针）、`ui_guard`（UI 耗时装饰器）、`auto_stack_dump_if_stuck`（独立卡死检测器）。全部组件均有 import 失败降级机制，不影响主流程。

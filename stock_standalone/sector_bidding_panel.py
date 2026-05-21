@@ -1186,8 +1186,12 @@ class DataProcessWorker(QObject):
         super().__init__()
         self.detector = detector
         # 线程安全队列
+        # try:
+        #     from tk_gil_monitor import TraceQueue
+        #     self.df_queue = TraceQueue(name="df_queue")
+        #     self.force_queue = TraceQueue(name="force_queue")
+        # except ImportError:
         self.df_queue = Queue()
-        # 用队列替代 bool（彻底线程安全）
         self.force_queue = Queue()
         self._is_running = True
         self._last_slow_log_ts = 0  # [NEW] 用于节流告警输出
@@ -1493,6 +1497,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._worker_thread = QThread()  # no parent
 
         self._worker = DataProcessWorker(self.detector)
+        # try:
+        #     from tk_gil_monitor import get_monitor
+        #     _m = get_monitor()
+        #     if _m:
+        #         _m.register_queue("df_queue", self._worker.df_queue)
+        #         _m.register_queue("force_queue", self._worker.force_queue)
+        # except Exception:
+        #     pass
         self._worker.moveToThread(self._worker_thread)
 
         # 启动

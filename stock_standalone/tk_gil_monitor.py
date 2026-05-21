@@ -1,635 +1,547 @@
 # -*- coding: utf-8 -*-
 """
-tk_gil_monitor.py  ——  Tk GIL 呼吸器系统 v2（生产级核武器）
-=============================================================
-
-v2 升级：
-  ① GIL Holder Tracker   — 追踪"谁最后持有 GIL 超过 N ms"
-  ② CPU Sampling Watchdog — 每 200ms 采样所有线程栈，检测"栈不变=卡死"
-  ③ Breathe 增强          — 50ms 心跳 + update_idletasks() 强制事件消费
-  ④ gil_yield 增强        — sleep(0) + sys._getframe() 强制调度器切换
-
-架构：
-    Tk mainloop (50ms breathe + idletasks)
-         ↑ 心跳
-    GIL Watchdog Thread (1s)   ← 报 FROZEN + dump
-    CPU Sampler Thread (200ms) ← 采样栈 → 检测"热点/卡死线程"
-    GIL Holder Tracker         ← gil_mark() 埋点 → 知道谁卡住了
-
-组件：
-  1. TkBreathingMonitor  — 主体
-  2. LastCallTracker     — 最后活跃函数
-  3. GilHolderTracker    — GIL 持有者追踪 ★NEW
-  4. CpuSampler          — CPU 热点采样器 ★NEW
-  5. TraceLock           — 死锁诊断 RLock
-  6. gil_yield(tag)      — 强化版 GIL 切片
-  7. gil_mark(tag)       — GIL 持有标记 ★NEW
-  8. ui_guard(name)      — UI 耗时装饰器
-  9. auto_stack_dump_if_stuck()
+tk_gil_monitor.py  ——  Tk GIL Radar v3
+=======================================
+v3 新增：
+  ① BlockingEdgeTracker + TraceQueue  — 追踪所有 blocking 点 enter/exit
+  ② DeltaStackSampler                 — CPU time delta 判定真正 CPU-bound
+  ③ GilContProxy                      — 1000-loop 探针推断 GIL 争用强度
+  ④ FreezeClassifier                  — A(CPU-bound) B(IO-wait) C(deadlock)
+  ⑤ CallChainBuffer                   — deque(50) 调用链追踪谁触发谁
 """
 
-import sys
-import time
-import threading
-import traceback
-import functools
-import collections
-from typing import Optional, Callable, Any
+import sys, time, threading, traceback, functools, os
+from collections import deque
+from typing import Optional, Callable
 
-# ─────────────────────────────────────────────────────────
-# 全局单例
-# ─────────────────────────────────────────────────────────
 _global_monitor: Optional["TkBreathingMonitor"] = None
+def get_monitor(): return _global_monitor
 
 
-def get_monitor() -> Optional["TkBreathingMonitor"]:
-    return _global_monitor
+# ─── 内部工具 ────────────────────────────────────────────
+def _warn(msg):
+    try:
+        import sys
+        enabled = True
+        if "JohnsonUtil.commonTips" in sys.modules:
+            cct = sys.modules["JohnsonUtil.commonTips"]
+            if hasattr(cct, "CFG") and hasattr(cct.CFG, "gil_monitor"):
+                enabled = bool(cct.CFG.gil_monitor)
+        elif "stock_standalone.JohnsonUtil.commonTips" in sys.modules:
+            cct = sys.modules["stock_standalone.JohnsonUtil.commonTips"]
+            if hasattr(cct, "CFG") and hasattr(cct.CFG, "gil_monitor"):
+                enabled = bool(cct.CFG.gil_monitor)
+        else:
+            try:
+                from JohnsonUtil.commonTips import CFG
+                if hasattr(CFG, "gil_monitor"):
+                    enabled = bool(CFG.gil_monitor)
+            except Exception:
+                try:
+                    from stock_standalone.JohnsonUtil.commonTips import CFG
+                    if hasattr(CFG, "gil_monitor"):
+                        enabled = bool(CFG.gil_monitor)
+                except Exception:
+                    pass
+        if enabled:
+            print(msg, flush=True)
+    except Exception:
+        pass
+
+def _tname(tid):
+    for t in threading.enumerate():
+        if t.ident == tid: return t.name
+    return "unknown"
+
+def _dump_threads(tag="", max_frames=12):
+    lines = [f"\n🔥 ===== THREAD DUMP [{tag}] ====="]
+    frames = sys._current_frames()
+    main_tid = threading.main_thread().ident
+    for tid, frame in sorted(frames.items(), key=lambda x:(x[0]!=main_tid, x[0])):
+        nm = _tname(tid)
+        marker = " ← ★" if nm == _gil_holder.get()["thread"] else ""
+        lines.append(f"\n--- [{nm}]{marker} ---")
+        lines.append("".join(traceback.format_stack(frame)[-max_frames:]).rstrip())
+    lines.append("===== END =====\n")
+    _warn("\n".join(lines))
 
 
-# ─────────────────────────────────────────────────────────
-# 1. LastCallTracker
-# ─────────────────────────────────────────────────────────
+# ─── 1. LastCallTracker ──────────────────────────────────
 class LastCallTracker:
-    """记录最后一次被调用的函数（线程安全，超低开销）。"""
     __slots__ = ("_data", "_lock")
-
     def __init__(self):
         self._data = {"time": 0.0, "func": None, "thread": None, "args_repr": ""}
         self._lock = threading.Lock()
 
-    def trace(self, func: Callable) -> Callable:
+    def trace(self, func):
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def w(*a, **kw):
             with self._lock:
-                self._data["time"] = time.time()
-                self._data["func"] = func.__qualname__
-                self._data["thread"] = threading.current_thread().name
-                try:
-                    self._data["args_repr"] = repr(args[1])[:40] if len(args) > 1 else ""
-                except Exception:
-                    pass
-            return func(*args, **kwargs)
-        return wrapper
+                self._data.update({"time": time.time(), "func": func.__qualname__,
+                                   "thread": threading.current_thread().name,
+                                   "args_repr": repr(a[1])[:40] if len(a)>1 else ""})
+            return func(*a, **kw)
+        return w
 
-    def get(self) -> dict:
-        with self._lock:
-            return dict(self._data)
+    def get(self):
+        with self._lock: return dict(self._data)
 
-    def dump(self) -> str:
+    def dump(self):
         d = self.get()
-        if not d["func"]:
-            return "[LastCall] (none)"
-        delta = time.time() - d["time"]
+        if not d["func"]: return "[LastCall] (none)"
         return (f"[LastCall] func={d['func']}  thread={d['thread']}  "
-                f"elapsed={delta:.3f}s  args={d['args_repr']}")
-
+                f"elapsed={time.time()-d['time']:.3f}s")
 
 last_call = LastCallTracker()
 
 
-# ─────────────────────────────────────────────────────────
-# 2. GilHolderTracker ★NEW
-#    在核心函数入口/出口调用 gil_mark(tag)
-#    Watchdog 检测"最后标记超过 N ms 未更新 = GIL 被占"
-# ─────────────────────────────────────────────────────────
+# ─── 2. GilHolderTracker ────────────────────────────────
 class GilHolderTracker:
+    def __init__(self): self._t = {"func":None,"thread":None,"ts":0.0}
+    def mark(self, fn): self._t.update({"func":fn,"thread":threading.current_thread().name,"ts":time.time()})
+    def get(self): return dict(self._t)
+    def dump(self, thr=1.0):
+        d=self.get()
+        if not d["func"]: return "[GilHolder] (none)"
+        e=time.time()-d["ts"]
+        return f"[GilHolder] {'🔥STUCK' if e>thr else 'OK'}  func={d['func']}  thread={d['thread']}  held={e:.3f}s"
+
+_gil_holder = GilHolderTracker()
+
+def gil_mark(fn): _gil_holder.mark(fn)
+
+
+# ─── 3. CallChainBuffer ★NEW ────────────────────────────
+class CallChainBuffer:
+    """记录最近 50 次函数调用链，用于还原"谁触发了谁"。"""
+    def __init__(self, maxlen=50):
+        self._buf = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def push(self, fn: str):
+        with self._lock:
+            self._buf.append((time.time(), threading.current_thread().name, fn))
+
+    def dump(self, last_n=20) -> str:
+        with self._lock:
+            items = list(self._buf)[-last_n:]
+        if not items: return "[CallChain] (empty)"
+        lines = ["📋 ===== CALL CHAIN (last {}) =====".format(len(items))]
+        t0 = items[0][0]
+        for ts, thr, fn in items:
+            lines.append(f"  +{ts-t0:6.3f}s [{thr}] {fn}")
+        return "\n".join(lines)
+
+call_chain = CallChainBuffer()
+
+
+# ─── 4. BlockingEdgeTracker + TraceQueue ★NEW ───────────
+_blocking_state = {}   # thread_name -> {"point": str, "enter_ts": float}
+
+def block_mark(name: str, action: str):
     """
-    追踪"谁最后持有 GIL 并停留了多久"。
-
-    用法::
-
-        from tk_gil_monitor import gil_mark
-
-        gil_mark("update_scores:start")
-        self.detector.update_scores(...)
-        gil_mark("update_scores:end")
-
-    Watchdog 会自动检测 last_ts 超过阈值 → 报 GIL_STUCK。
+    在 blocking 点前后调用：
+      block_mark("queue.get", "enter")
+      ...blocking call...
+      block_mark("queue.get", "exit")
     """
-    __slots__ = ("_trace",)
+    thr = threading.current_thread().name
+    now = time.time()
+    if action == "enter":
+        _blocking_state[thr] = {"point": name, "enter_ts": now}
+        call_chain.push(f"BLOCK_ENTER:{name}")
+    elif action == "exit":
+        st = _blocking_state.pop(thr, None)
+        if st:
+            waited = now - st["enter_ts"]
+            call_chain.push(f"BLOCK_EXIT:{name}  waited={waited:.3f}s")
+            if waited > 0.5:
+                _warn(f"⚠️ [BLOCK_SLOW] {name}  waited={waited:.3f}s  thread={thr}")
 
-    def __init__(self):
-        # 无锁设计：dict 赋值在 CPython 中是原子的
-        self._trace = {
-            "func": None,
-            "thread": None,
-            "ts": 0.0,
-        }
-
-    def mark(self, func_name: str):
-        """在关键函数入口/出口调用，标记当前 GIL 持有状态。"""
-        self._trace["func"] = func_name
-        self._trace["thread"] = threading.current_thread().name
-        self._trace["ts"] = time.time()
-
-    def get(self) -> dict:
-        return dict(self._trace)
-
-    def dump(self, threshold_s: float = 1.0) -> str:
-        d = self.get()
-        if not d["func"]:
-            return "[GilHolder] (none)"
-        elapsed = time.time() - d["ts"]
-        flag = "🔥 STUCK" if elapsed > threshold_s else "OK"
-        return (f"[GilHolder] {flag}  func={d['func']}  "
-                f"thread={d['thread']}  held={elapsed:.3f}s")
+def get_blocking_summary() -> str:
+    if not _blocking_state: return "[Blocking] (none)"
+    lines = ["🔒 ===== BLOCKING THREADS ====="]
+    for thr, st in _blocking_state.items():
+        waited = time.time() - st["enter_ts"]
+        lines.append(f"  [{thr}] BLOCKED on {st['point']}  waited={waited:.3f}s")
+    return "\n".join(lines)
 
 
-gil_holder = GilHolderTracker()
+import queue as _queue_mod
+
+class TraceQueue(_queue_mod.Queue):
+    """替换标准 Queue，自动记录 get/put 的 blocking 耗时。"""
+    def __init__(self, *a, name="unnamed", **kw):
+        super().__init__(*a, **kw)
+        self._tq_name = name
+
+    def get(self, *a, **kw):
+        block_mark(f"TraceQueue({self._tq_name}).get", "enter")
+        try:
+            return super().get(*a, **kw)
+        finally:
+            block_mark(f"TraceQueue({self._tq_name}).get", "exit")
+
+    def put(self, *a, **kw):
+        block_mark(f"TraceQueue({self._tq_name}).put", "enter")
+        try:
+            return super().put(*a, **kw)
+        finally:
+            block_mark(f"TraceQueue({self._tq_name}).put", "exit")
 
 
-def gil_mark(func_name: str):
-    """在关键函数入口/出口调用。外部一行接入：gil_mark('update_scores:start')"""
-    gil_holder.mark(func_name)
-
-
-# ─────────────────────────────────────────────────────────
-# 3. CpuSampler ★NEW
-#    每 200ms 采样所有线程栈 → 检测"栈 N 次不变 = CPU loop 卡死"
-# ─────────────────────────────────────────────────────────
-class CpuSampler:
+# ─── 5. DeltaStackSampler ★NEW ──────────────────────────
+class DeltaStackSampler:
     """
-    CPU 热点采样器。
-
-    每 sample_interval 秒采样一次所有线程的调用栈（最后3帧）。
-    若某线程的栈连续 stuck_count 次未变化，判定为 CPU-bound 卡死，
-    打印 🔥 [CPU_HOTSPOT] 报告。
-
-    这是定位"C/Python loop 独占 GIL"的核武器，传统 freeze dump 看不到。
+    每 200ms 采样线程栈 + process CPU time delta。
+    真正的 CPU-bound 判定：同一 stack + CPU time 增长 > 阈值
+    （纯"栈不变"会误判 IO-wait 线程）
     """
-
-    def __init__(
-        self,
-        sample_interval: float = 0.2,
-        stuck_count: int = 15,       # 15 × 0.2s = 3s 不变则报警
-        ignore_threads: tuple = (),  # 线程名前缀黑名单
-    ):
-        self.sample_interval = sample_interval
-        self.stuck_count = stuck_count
-        self.ignore_threads = ignore_threads or ("TkGilWatchdog", "CpuSampler", "AutoStackDump")
-
+    def __init__(self, interval=0.2, stuck_rounds=15,
+                 ignore=("TkGilWatchdog","DeltaStackSampler","AutoStackDump")):
+        self.interval = interval
+        self.stuck_rounds = stuck_rounds
+        self.ignore = ignore
         self._running = False
-        self._last_stacks: dict = {}      # tid -> (stack_tuple, repeat_count)
-        self._hotspot_report: list = []   # 最近热点记录
+        # tid -> {"key": tuple, "count": int, "cpu_t0": float}
+        self._state: dict = {}
+        try:
+            self._proc = __import__("psutil").Process(os.getpid())
+            self._has_psutil = True
+        except Exception:
+            self._has_psutil = False
 
     def start(self):
-        if self._running:
-            return
+        if self._running: return
         self._running = True
-        t = threading.Thread(target=self._loop, name="CpuSampler", daemon=True)
+        t = threading.Thread(target=self._loop, name="DeltaStackSampler", daemon=True)
         t.start()
 
-    def stop(self):
-        self._running = False
+    def stop(self): self._running = False
+
+    def _cpu_time(self):
+        try:
+            if self._has_psutil:
+                ct = self._proc.cpu_times()
+                return ct.user + ct.system
+        except Exception: pass
+        return time.process_time()
 
     def _loop(self):
         while self._running:
-            time.sleep(self.sample_interval)
-            try:
-                self._sample()
-            except Exception as exc:
-                try:
-                    print(f"[CpuSampler] error: {exc}", flush=True)
-                except Exception:
-                    pass
+            time.sleep(self.interval)
+            try: self._sample()
+            except Exception as e:
+                try: print(f"[DeltaStackSampler] {e}", flush=True)
+                except: pass
 
     def _sample(self):
         frames = sys._current_frames()
-        now = time.time()
-
+        cpu_now = self._cpu_time()
         for tid, frame in frames.items():
-            t_name = _thread_name(tid)
+            tname = _tname(tid)
+            if any(tname.startswith(ig) for ig in self.ignore): continue
 
-            # 跳过采样器自身和黑名单线程
-            if any(t_name.startswith(ig) for ig in self.ignore_threads):
-                continue
+            # 栈指纹：文件+函数+行号（最后4帧）
+            key = tuple(
+                (f.f_code.co_filename[-30:], f.f_code.co_name, f.f_lineno)
+                for f in self._iter_frames(frame)
+            )[-4:]
 
-            # 取最后 3 帧作为"栈指纹"
-            stack_key = tuple(
-                (f.f_code.co_filename, f.f_code.co_name, f.f_lineno)
-                for f in _iter_frames(frame)
-            )[-3:]
+            prev = self._state.get(tid, {"key": None, "count": 0, "cpu_t0": cpu_now})
 
-            prev_key, prev_count = self._last_stacks.get(tid, (None, 0))
+            if key == prev["key"]:
+                count = prev["count"] + 1
+                cpu_delta = cpu_now - prev["cpu_t0"]
+                self._state[tid] = {"key": key, "count": count, "cpu_t0": prev["cpu_t0"]}
 
-            if stack_key == prev_key:
-                count = prev_count + 1
-                self._last_stacks[tid] = (stack_key, count)
-
-                if count == self.stuck_count:
-                    # 刚刚达到阈值 → 报一次
-                    elapsed_s = count * self.sample_interval
-                    lines = [
-                        f"\n🔥 [CPU_HOTSPOT] Thread [{t_name}] STUCK for ~{elapsed_s:.1f}s",
-                        f"   Stack fingerprint (last 3 frames):",
-                    ]
-                    full_stack = "".join(traceback.format_stack(frame)[-8:]).rstrip()
-                    lines.append(full_stack)
-                    lines.append(f"   {last_call.dump()}")
-                    lines.append(f"   {gil_holder.dump()}")
-                    _warn("\n".join(lines))
-
+                if count == self.stuck_rounds:
+                    elapsed = count * self.interval
+                    # 区分 CPU-bound vs IO-wait
+                    is_cpu_bound = cpu_delta > elapsed * 0.3
+                    kind = "CPU-BOUND 🔥" if is_cpu_bound else "IO-WAIT ⏳"
+                    full = "".join(traceback.format_stack(frame)[-8:]).rstrip()
+                    _warn(
+                        f"\n🔥 [DELTA_SAMPLER] Thread [{tname}] {kind} ~{elapsed:.1f}s\n"
+                        f"   cpu_delta={cpu_delta:.3f}s  stack_rounds={count}\n"
+                        f"{full}\n"
+                        f"   {last_call.dump()}\n"
+                        f"   {_gil_holder.dump()}"
+                    )
             else:
-                self._last_stacks[tid] = (stack_key, 0)
+                self._state[tid] = {"key": key, "count": 0, "cpu_t0": cpu_now}
 
-    def get_hotspot_summary(self) -> str:
-        """返回当前所有线程的栈重复次数摘要（供 Watchdog dump 附加）。"""
-        lines = ["📊 ===== CPU SAMPLER SUMMARY ====="]
-        for tid, (stack, count) in list(self._last_stacks.items()):
-            if count > 0:
-                t_name = _thread_name(tid)
-                elapsed = count * self.sample_interval
-                top = f"{stack[-1][1]}@{stack[-1][2]}" if stack else "?"
-                lines.append(f"  [{t_name}] stuck={elapsed:.1f}s  top={top}")
+    @staticmethod
+    def _iter_frames(frame):
+        f = frame
+        while f:
+            yield f
+            f = f.f_back
+
+    def summary(self) -> str:
+        lines = ["📊 ===== DELTA SAMPLER SUMMARY ====="]
+        for tid, st in list(self._state.items()):
+            if st["count"] > 2:
+                tname = _tname(tid)
+                top = f"{st['key'][-1][1]}@{st['key'][-1][2]}" if st["key"] else "?"
+                elapsed = st["count"] * self.interval
+                lines.append(f"  [{tname}] stuck={elapsed:.1f}s  top={top}")
         lines.append("=====")
         return "\n".join(lines)
 
-
-# 全局实例
-cpu_sampler = CpuSampler()
+_delta_sampler = DeltaStackSampler()
 
 
-# ─────────────────────────────────────────────────────────
-# 4. TraceLock
-# ─────────────────────────────────────────────────────────
+# ─── 6. GilContProxy ★NEW ───────────────────────────────
+class GilContProxy:
+    """
+    GIL 争用强度探针。
+    在后台线程每 500ms 执行一次 1000-loop，
+    若耗时突增 → 推断 GIL 被长期占用。
+    """
+    def __init__(self, interval=0.5, baseline_ms=0.1, alert_ratio=5.0):
+        self.interval = interval
+        self.baseline_ms = baseline_ms   # 正常情况下 1000-loop 约 0.05ms
+        self.alert_ratio = alert_ratio   # 超过 baseline * ratio 报警
+        self._running = False
+        self._latency_ms: float = 0.0
+
+    def start(self):
+        if self._running: return
+        self._running = True
+        threading.Thread(target=self._loop, name="GilContProxy", daemon=True).start()
+
+    def stop(self): self._running = False
+
+    def _probe(self) -> float:
+        t0 = time.perf_counter()
+        for _ in range(1000): pass
+        return (time.perf_counter() - t0) * 1000.0
+
+    def _loop(self):
+        # 先测几次基线
+        samples = [self._probe() for _ in range(5)]
+        self.baseline_ms = max(0.01, sum(samples) / len(samples))
+        while self._running:
+            time.sleep(self.interval)
+            try:
+                ms = self._probe()
+                self._latency_ms = ms
+                if ms > self.baseline_ms * self.alert_ratio:
+                    _warn(f"🌡️ [GIL_CONT] probe={ms:.3f}ms  "
+                          f"baseline={self.baseline_ms:.3f}ms  "
+                          f"ratio={ms/self.baseline_ms:.1f}x  "
+                          f"→ GIL contention HIGH  {_gil_holder.dump()}")
+            except Exception: pass
+
+    @property
+    def contention_ratio(self) -> float:
+        if self.baseline_ms <= 0: return 1.0
+        return self._latency_ms / self.baseline_ms
+
+_gil_cont = GilContProxy()
+
+
+# ─── 7. FreezeClassifier ★NEW ───────────────────────────
+class FreezeClassifier:
+    """
+    UI Freeze 三分类：
+      A — CPU-bound (GIL starvation)
+      B — IO/queue wait
+      C — deadlock (lock cycle)
+    """
+    @staticmethod
+    def classify(ui_lag: float) -> tuple:
+        """
+        返回 (class_str, confidence, reason)
+        """
+        cont_ratio = _gil_cont.contention_ratio
+        blocking = _blocking_state
+
+        # C: deadlock — blocking 持续 > ui_lag 的 80%
+        if blocking:
+            max_wait = max(time.time()-v["enter_ts"] for v in blocking.values())
+            if max_wait > ui_lag * 0.8:
+                return ("C-DEADLOCK", 0.85,
+                        f"thread blocked {max_wait:.1f}s on {next(iter(blocking.values()))['point']}")
+
+        # A: CPU-bound — GIL contention 探针超高 + sampler 检测到 CPU stuck
+        if cont_ratio > 4.0:
+            return ("A-CPU_BOUND", min(0.95, cont_ratio/10),
+                    f"GIL probe ratio={cont_ratio:.1f}x")
+
+        # B: IO-wait — blocking 有记录但不是 deadlock
+        if blocking:
+            return ("B-IO_WAIT", 0.7,
+                    f"{len(blocking)} thread(s) in blocking call")
+
+        # Fallback
+        return ("A-CPU_BOUND", 0.5, "default (no blocking detected)")
+
+
+# ─── 8. TraceLock ────────────────────────────────────────
 class TraceLock:
-    """带超时死锁诊断的 threading.RLock 包装器。"""
+    def __init__(self, name, timeout=5.0, verbose=True):
+        self.name=name; self.timeout=timeout; self.verbose=verbose
+        self._lock=threading.RLock(); self._owner=None; self._ts=0.0
 
-    def __init__(self, name: str, timeout: float = 5.0, verbose: bool = True):
-        self.name = name
-        self.timeout = timeout
-        self.verbose = verbose
-        self._lock = threading.RLock()
-        self._owner_name: Optional[str] = None
-        self._acquire_ts: float = 0.0
+    def __enter__(self): self.acquire(); return self
+    def __exit__(self,*_): self.release()
 
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *_):
-        self.release()
-
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        t = timeout if timeout is not None else self.timeout
-        t0 = time.monotonic()
-        ok = self._lock.acquire(blocking=blocking, timeout=t if blocking else -1)
-        elapsed = time.monotonic() - t0
-
+    def acquire(self, blocking=True, timeout=None):
+        t=timeout if timeout is not None else self.timeout
+        t0=time.monotonic()
+        ok=self._lock.acquire(blocking=blocking, timeout=t if blocking else -1)
+        elapsed=time.monotonic()-t0
         if not ok:
-            _warn(
-                f"🚨 [TraceLock][DEADLOCK] '{self.name}' TIMEOUT after {elapsed:.2f}s  "
-                f"owner={self._owner_name}  caller={threading.current_thread().name}"
-            )
-            _dump_all_threads()
+            _warn(f"🚨 [TraceLock][DEADLOCK] '{self.name}' TIMEOUT {elapsed:.2f}s  owner={self._owner}")
+            _dump_threads("DEADLOCK")
             return False
-
-        if self.verbose and elapsed > 0.1:
-            _warn(f"⚠️ [TraceLock][SLOW] '{self.name}' acquired in {elapsed:.3f}s  "
-                  f"thread={threading.current_thread().name}")
-
-        self._owner_name = threading.current_thread().name
-        self._acquire_ts = time.monotonic()
+        if self.verbose and elapsed>0.1:
+            _warn(f"⚠️ [TraceLock][SLOW] '{self.name}' {elapsed:.3f}s")
+        self._owner=threading.current_thread().name; self._ts=time.monotonic()
         return True
 
     def release(self):
-        held = time.monotonic() - self._acquire_ts if self._acquire_ts else 0.0
-        if self.verbose and held > 0.5:
-            _warn(f"⚠️ [TraceLock][LONG_HOLD] '{self.name}' held {held:.3f}s  "
-                  f"thread={self._owner_name}")
-        self._owner_name = None
-        self._lock.release()
-
-    def locked(self) -> bool:
-        acquired = self._lock.acquire(blocking=False)
-        if acquired:
-            self._lock.release()
-            return False
-        return True
+        held=time.monotonic()-self._ts if self._ts else 0
+        if self.verbose and held>0.5:
+            _warn(f"⚠️ [TraceLock][LONG] '{self.name}' held {held:.3f}s")
+        self._owner=None; self._lock.release()
 
 
-# ─────────────────────────────────────────────────────────
-# 5. gil_yield 增强版 ★UPGRADED
-#    sleep(0) + sys._getframe() → 强制调度器切换
-# ─────────────────────────────────────────────────────────
-def gil_yield(tag: str = "", threshold_ms: float = 5.0):
-    """
-    强化版 GIL 时间片释放探针。
+# ─── 9. gil_yield 增强 ──────────────────────────────────
+def gil_yield(tag="", threshold_ms=5.0):
+    """sleep(0) + sys._getframe() 双重强制调度触发。"""
+    t0=time.perf_counter()
+    time.sleep(0); sys._getframe()
+    cost=(time.perf_counter()-t0)*1000
+    if cost>threshold_ms:
+        _warn(f"⚠️ [GIL_STALL] tag={tag!r}  wait={cost:.2f}ms")
 
-    对比旧版：
-      旧: time.sleep(0)
-      新: time.sleep(0) + sys._getframe()  ← 强制触发调度器
-
-    在大循环的 chunk 边界调用::
-
-        for i in range(0, len(codes), 200):
-            process_batch(codes[i:i+200])
-            gil_yield(f"chunk-{i}")
-    """
-    t0 = time.perf_counter()
-    time.sleep(0)
-    # sys._getframe() 强制触发 Python 字节码边界，让调度器有机会切换
-    sys._getframe()
-    cost_ms = (time.perf_counter() - t0) * 1000.0
-    if cost_ms > threshold_ms:
-        _warn(f"⚠️ [GIL_STALL] tag={tag!r}  wait={cost_ms:.2f}ms  "
-              f"thread={threading.current_thread().name}")
-
-
-# ─────────────────────────────────────────────────────────
-# 6. ui_guard
-# ─────────────────────────────────────────────────────────
-def ui_guard(name: str, threshold_ms: float = 50.0):
-    """UI 函数耗时装饰器，超阈值自动报警。"""
-    def decorator(fn: Callable) -> Callable:
+def ui_guard(name, threshold_ms=50.0):
+    def dec(fn):
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            t0 = time.perf_counter()
-            result = fn(*args, **kwargs)
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            if dt_ms > threshold_ms:
-                _warn(f"⚠️ [UI_SLOW] {name}  cost={dt_ms:.1f}ms  "
-                      f"thread={threading.current_thread().name}")
-                last_call._data.update({
-                    "time": time.time(),
-                    "func": name,
-                    "thread": threading.current_thread().name,
-                })
-            return result
-        return wrapper
-    return decorator
+        def w(*a,**kw):
+            t0=time.perf_counter(); r=fn(*a,**kw)
+            dt=(time.perf_counter()-t0)*1000
+            if dt>threshold_ms:
+                _warn(f"⚠️ [UI_SLOW] {name}  {dt:.1f}ms")
+            return r
+        return w
+    return dec
 
-
-# ─────────────────────────────────────────────────────────
-# 7. TkBreathingMonitor 增强版 ★UPGRADED
-# ─────────────────────────────────────────────────────────
-class TkBreathingMonitor:
-    """
-    Tk GIL 呼吸器系统 v2 主体。
-
-    v2 升级点：
-    - breathe() 心跳从 200ms → 50ms，加 update_idletasks()
-    - Watchdog dump 时附加 CpuSampler 热点摘要 + GilHolder 状态
-    - 集成 CpuSampler 自动启停
-    """
-
-    def __init__(
-        self,
-        root,
-        app=None,
-        warn_threshold: float = 1.0,
-        freeze_threshold: float = 3.0,
-        heartbeat_ms: int = 50,          # v2: 50ms（旧 200ms）
-        watchdog_interval: float = 1.0,
-        enabled: bool = True,
-        cpu_sampling: bool = True,       # v2: CPU 采样开关
-    ):
-        global _global_monitor
-        _global_monitor = self
-
-        self.root = root
-        self.app = app
-        self.warn_threshold = warn_threshold
-        self.freeze_threshold = freeze_threshold
-        self.heartbeat_ms = heartbeat_ms
-        self.watchdog_interval = watchdog_interval
-        self.enabled = enabled
-        self.cpu_sampling = cpu_sampling
-
-        self._ui_alive_ts: float = time.time()
-        self._watchdog_running: bool = False
-        self._tracked_queues: dict = {}
-        self._freeze_count: int = 0
-        self._last_dump_ts: float = 0.0
-        self._dump_cooldown: float = 5.0
-
-        self.last_call = last_call
-        self.gil_holder = gil_holder
-        self.cpu_sampler = cpu_sampler
-
-    # ── 心跳（Tk 主线程）★UPGRADED ────────────────────────
-    def breathe(self):
-        """
-        50ms 心跳 + update_idletasks()。
-
-        update_idletasks() 强制 Tk 处理积压的 idle 事件，
-        防止因 GIL 压力导致的 Tk 内部事件队列积压。
-        """
-        if not self.enabled:
-            return
-        self._ui_alive_ts = time.time()
-        try:
-            # ★ 关键升级：强制消费 Tk idle 事件
-            self.root.update_idletasks()
-        except Exception:
-            pass
-        try:
-            self.root.after(self.heartbeat_ms, self.breathe)
-        except Exception:
-            pass
-
-    # ── Watchdog ──────────────────────────────────────────
-    def start_watchdog(self):
-        """启动 Watchdog + CpuSampler。"""
-        if not self.enabled or self._watchdog_running:
-            return
-        self._watchdog_running = True
-
-        t = threading.Thread(target=self._watchdog_loop, name="TkGilWatchdog", daemon=True)
-        t.start()
-
-        if self.cpu_sampling:
-            cpu_sampler.start()
-
-    def _watchdog_loop(self):
-        while self._watchdog_running:
-            time.sleep(self.watchdog_interval)
-            if not self.enabled:
-                continue
-            try:
-                lag = time.time() - self._ui_alive_ts
-
-                if lag > self.freeze_threshold:
-                    self._freeze_count += 1
-                    now = time.time()
-                    if now - self._last_dump_ts >= self._dump_cooldown:
-                        self._last_dump_ts = now
-                        _warn(
-                            f"\n🚨 [GIL BREATHING ALERT] UI FROZEN!\n"
-                            f"   lag={lag:.2f}s  freeze_count={self._freeze_count}\n"
-                            f"   {last_call.dump()}\n"
-                            f"   {gil_holder.dump(threshold_s=self.freeze_threshold)}"
-                        )
-                        self._dump_all_threads()
-                        self._dump_queue_pressure()
-                        # ★ v2: 附加 CPU 采样摘要
-                        _warn(cpu_sampler.get_hotspot_summary())
-                    else:
-                        _warn(f"🚨 [FREEZE] lag={lag:.2f}s (cooldown)  "
-                              f"{last_call.dump()}")
-
-                elif lag > self.warn_threshold:
-                    _warn(f"⚠️ [GIL PRESSURE] lag={lag:.2f}s  {last_call.dump()}  "
-                          f"{gil_holder.dump()}")
-                    self._freeze_count = 0
-                else:
-                    self._freeze_count = 0
-
-                # ★ v2: 独立检测 GIL Holder 超时（不依赖 UI 心跳）
-                gh = gil_holder.get()
-                if gh["func"] and (time.time() - gh["ts"]) > self.freeze_threshold:
-                    elapsed = time.time() - gh["ts"]
-                    _warn(
-                        f"🔥 [GIL_STUCK_HOLDER] func={gh['func']}  "
-                        f"thread={gh['thread']}  held={elapsed:.2f}s"
-                    )
-
-            except Exception as exc:
-                try:
-                    print(f"[TkGilWatchdog] error: {exc}", flush=True)
-                except Exception:
-                    pass
-
-    # ── 线程栈快照 ────────────────────────────────────────
-    def _dump_all_threads(self):
-        try:
-            lines = ["\n🔥 ===== THREAD STACK SNAPSHOT ====="]
-            frames = sys._current_frames()
-            main_tid = threading.main_thread().ident
-            sorted_items = sorted(
-                frames.items(),
-                key=lambda kv: (0 if kv[0] == main_tid else 1, kv[0])
-            )
-            for tid, frame in sorted_items:
-                t_name = _thread_name(tid)
-                # ★ v2: 标注"可能 GIL 持有者"
-                gh = gil_holder.get()
-                marker = " ← ★GIL HOLDER★" if gh["thread"] == t_name else ""
-                lines.append(f"\n--- THREAD {tid} [{t_name}]{marker} ---")
-                lines.append("".join(traceback.format_stack(frame)[-15:]).rstrip())
-            lines.append("\n===== END SNAPSHOT =====\n")
-            _warn("\n".join(lines))
-        except Exception as exc:
-            _warn(f"[dump_all_threads] error: {exc}")
-
-    def _dump_queue_pressure(self):
-        if not self._tracked_queues:
-            return
-        try:
-            lines = ["📦 ===== QUEUE PRESSURE ====="]
-            for name, q in self._tracked_queues.items():
-                try:
-                    size = q.qsize() if hasattr(q, "qsize") else "?"
-                    lines.append(f"  {name}: qsize={size}")
-                except Exception:
-                    lines.append(f"  {name}: (error)")
-            lines.append("=====")
-            _warn("\n".join(lines))
-        except Exception as exc:
-            _warn(f"[queue_pressure] error: {exc}")
-
-    # ── 公共 API ──────────────────────────────────────────
-    def register_queue(self, name: str, q):
-        self._tracked_queues[name] = q
-
-    def get_lag(self) -> float:
-        return time.time() - self._ui_alive_ts
-
-    def is_frozen(self) -> bool:
-        return self.get_lag() > self.freeze_threshold
-
-    def stop(self):
-        self._watchdog_running = False
-        self.enabled = False
-        cpu_sampler.stop()
-
-
-# ─────────────────────────────────────────────────────────
-# 8. auto_stack_dump_if_stuck
-# ─────────────────────────────────────────────────────────
-def auto_stack_dump_if_stuck(seconds: float = 3.0) -> Callable:
-    """独立版卡死检测，返回 tick 函数，调用者定期调用证明存活。"""
-    state = {"last_tick": time.time()}
-
-    def _watchdog():
+def auto_stack_dump_if_stuck(seconds=3.0):
+    state={"ts":time.time()}
+    def _wd():
         while True:
-            time.sleep(1.0)
-            elapsed = time.time() - state["last_tick"]
-            if elapsed > seconds:
-                _warn(f"\n🚨 [auto_stack_dump] STUCK {elapsed:.1f}s\n{last_call.dump()}")
-                _dump_all_threads()
-
-    threading.Thread(target=_watchdog, name="AutoStackDump", daemon=True).start()
-
-    def tick():
-        state["last_tick"] = time.time()
-
+            time.sleep(1)
+            if time.time()-state["ts"]>seconds:
+                _warn(f"🚨 [auto_dump] stuck {time.time()-state['ts']:.1f}s")
+                _dump_threads("auto")
+    threading.Thread(target=_wd,name="AutoStackDump",daemon=True).start()
+    def tick(): state["ts"]=time.time()
     return tick
 
 
-# ─────────────────────────────────────────────────────────
-# 内部工具
-# ─────────────────────────────────────────────────────────
-def _warn(msg: str):
-    try:
-        print(msg, flush=True)
-    except Exception:
-        pass
+# ─── 10. TkBreathingMonitor v3 ──────────────────────────
+class TkBreathingMonitor:
+    """Tk GIL Radar v3 主体。"""
 
+    def __init__(self, root, app=None, warn_threshold=1.0,
+                 freeze_threshold=3.0, heartbeat_ms=50,
+                 watchdog_interval=1.0, enabled=True, cpu_sampling=True):
+        global _global_monitor; _global_monitor=self
+        self.root=root; self.app=app
+        self.warn_threshold=warn_threshold
+        self.freeze_threshold=freeze_threshold
+        self.heartbeat_ms=heartbeat_ms
+        self.watchdog_interval=watchdog_interval
+        self.enabled=enabled; self.cpu_sampling=cpu_sampling
+        self._ui_alive_ts=time.time()
+        self._watchdog_running=False
+        self._tracked_queues={}
+        self._freeze_count=0; self._last_dump_ts=0.0
+        self._dump_cooldown=5.0
+        self.last_call=last_call; self.call_chain=call_chain
 
-def _thread_name(tid: int) -> str:
-    for t in threading.enumerate():
-        if t.ident == tid:
-            return t.name
-    return "unknown"
+    def breathe(self):
+        """50ms 心跳 + update_idletasks()。"""
+        if not self.enabled: return
+        self._ui_alive_ts=time.time()
+        try: self.root.update_idletasks()
+        except Exception: pass
+        try: self.root.after(self.heartbeat_ms, self.breathe)
+        except Exception: pass
 
+    def start_watchdog(self):
+        if not self.enabled or self._watchdog_running: return
+        self._watchdog_running=True
+        threading.Thread(target=self._loop, name="TkGilWatchdog", daemon=True).start()
+        if self.cpu_sampling:
+            _delta_sampler.start()
+            _gil_cont.start()
 
-def _iter_frames(frame):
-    """从当前帧向上迭代所有帧。"""
-    f = frame
-    while f is not None:
-        yield f
-        f = f.f_back
+    def _loop(self):
+        while self._watchdog_running:
+            time.sleep(self.watchdog_interval)
+            if not self.enabled: continue
+            try:
+                lag=time.time()-self._ui_alive_ts
+                if lag>self.freeze_threshold:
+                    self._freeze_count+=1
+                    now=time.time()
+                    if now-self._last_dump_ts>=self._dump_cooldown:
+                        self._last_dump_ts=now
+                        cls,conf,reason=FreezeClassifier.classify(lag)
+                        _warn(
+                            f"\n🚨 [GIL RADAR v3] UI FROZEN!\n"
+                            f"   lag={lag:.2f}s  class={cls}  conf={conf:.0%}\n"
+                            f"   reason={reason}\n"
+                            f"   {last_call.dump()}\n"
+                            f"   {_gil_holder.dump(self.freeze_threshold)}\n"
+                            f"   GIL-probe-ratio={_gil_cont.contention_ratio:.1f}x"
+                        )
+                        _dump_threads("FROZEN")
+                        _warn(get_blocking_summary())
+                        _warn(_delta_sampler.summary())
+                        _warn(call_chain.dump())
+                        self._dump_queue_pressure()
+                    else:
+                        _warn(f"🚨 [FREEZE] lag={lag:.2f}s (cooldown)")
+                elif lag>self.warn_threshold:
+                    _warn(f"⚠️ [GIL PRESSURE] lag={lag:.2f}s  {last_call.dump()}")
+                    self._freeze_count=0
+                else:
+                    self._freeze_count=0
 
+                # GilHolder 独立超时检测
+                gh=_gil_holder.get()
+                if gh["func"] and (time.time()-gh["ts"])>self.freeze_threshold:
+                    _warn(f"🔥 [GIL_STUCK] func={gh['func']}  "
+                          f"thread={gh['thread']}  held={time.time()-gh['ts']:.2f}s")
+            except Exception as e:
+                try: print(f"[Watchdog] {e}", flush=True)
+                except: pass
 
-def _dump_all_threads():
-    try:
-        lines = ["\n🔥 ===== THREAD STACK (standalone) ====="]
-        frames = sys._current_frames()
-        for tid, frame in frames.items():
-            t_name = _thread_name(tid)
-            lines.append(f"\n--- THREAD {tid} [{t_name}] ---")
-            lines.append("".join(traceback.format_stack(frame)[-12:]).rstrip())
-        lines.append("\n===== END =====\n")
+    def _dump_queue_pressure(self):
+        if not self._tracked_queues: return
+        lines=["📦 QUEUE PRESSURE"]
+        for nm,q in self._tracked_queues.items():
+            try: lines.append(f"  {nm}: {q.qsize()}")
+            except: lines.append(f"  {nm}: err")
         _warn("\n".join(lines))
-    except Exception as exc:
-        _warn(f"[_dump_all_threads] error: {exc}")
+
+    def register_queue(self, name, q): self._tracked_queues[name]=q
+    def get_lag(self): return time.time()-self._ui_alive_ts
+    def is_frozen(self): return self.get_lag()>self.freeze_threshold
+
+    def stop(self):
+        self._watchdog_running=False; self.enabled=False
+        _delta_sampler.stop(); _gil_cont.stop()
 
 
-# ─────────────────────────────────────────────────────────
-# 快捷接入
-# ─────────────────────────────────────────────────────────
-def install(
-    root,
-    app=None,
-    freeze_threshold: float = 3.0,
-    enabled: bool = True,
-    cpu_sampling: bool = True,
-) -> "TkBreathingMonitor":
-    """
-    一行集成工厂。在 StockMonitorApp.__init__ 末尾::
-
-        from tk_gil_monitor import install
-        self._gil_monitor = install(root=self, app=self)
-    """
-    monitor = TkBreathingMonitor(
-        root=root,
-        app=app,
-        freeze_threshold=freeze_threshold,
-        enabled=enabled,
-        heartbeat_ms=50,          # 50ms 心跳
-        cpu_sampling=cpu_sampling,
-    )
-    monitor.breathe()
-    monitor.start_watchdog()
-    return monitor
+def install(root, app=None, freeze_threshold=3.0, enabled=True, cpu_sampling=True):
+    """一行集成：self._gil_monitor = install(root=self, app=self)"""
+    m=TkBreathingMonitor(root=root, app=app, freeze_threshold=freeze_threshold,
+                         enabled=enabled, heartbeat_ms=50, cpu_sampling=cpu_sampling)
+    m.breathe(); m.start_watchdog(); return m
