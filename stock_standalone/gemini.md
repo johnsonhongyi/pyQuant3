@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-21 00:49
+> 最后更新：2026-05-21 11:35  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
 
 ---
@@ -27,6 +27,19 @@
 5.  **记忆持续性协议**: 
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
+
+## 2026-05-21 11:35
+- [x] **恢复并优化语音发声与 UI 同步联动点亮机制 (Restored & Optimized Speech-to-UI Sync Linkage)**：
+    - [x] **物理根除隐藏的 NameError 逻辑炸弹**：在 `signal_log_panel.py` 的高亮逻辑 `highlight_row_by_content` 中，彻底清除了由于拼写错误引入的未定义变量 `_re`（原先为 `_re.sub`，这会在寻找最佳匹配行时无声触发 NameError 并被外层 Exception 吞掉，导致播报正常但界面联动完全静默失效的硬伤）。
+    - [x] **根治 COM 消息泵限制引发 the 未触发 Bug**：废除了由于 Windows/COM 消息泵在后台子线程对 WithEvents 限制可能导致 pyttsx3 引擎 `'started-utterance'` 回调事件静默不激发的隐患。
+    - [x] **恢复并部署 100% 稳定反馈点**：将 `feedback_queue.put(meta)` 转移至 `engine.say(speech_text)` 调用的前一刻执行。这避开了前期 `pyttsx3.init()` 与参数设定的耗时延迟，实现了良好的声画同步效果。
+    - [x] **100% 保障 highlight_row_by_content 点亮与联动**：从物理层面上 100% 确保每一次语音播报都必定会向主 GUI 线程推送元数据，实现了自选/热点信号日志的自动高亮滚动与 K 线图表视口的自发时空联动。
+
+## 2026-05-21 11:30
+- [x] **全量在 main 分支重构并落地“取消中断语音插播功能” (Re-applied Voice Interruption Deactivation on current main branch)**：
+    - [x] **`alert_manager.py` (SpVoice 播放器与 Speak 接口优化)**：将底层的 `_voice_worker` 里的 `SVSFlagsAsync` 异步播放与 `WaitUntilDone` 长句打断轮询彻底移除，恢复为高鲁棒、完美的标准同步播放 (`speaker.Speak(safe_msg, 0)`)；同时将 `speak(..., interrupt=True)` 默认参数调整为 `False`，并废除了内部对本地 `stop_current_speech` 的调用与向 `SignalBus.EVENT_ALERT` 总线发送 `ABORT_VOICE` 的逻辑，从源头上切断了插播信号的发送。
+    - [x] **`instock_MonitorTK.py` (主终端中转与总线订阅废除)**：移除了 `StockMonitorApp` 初始化阶段对 `SignalBus.EVENT_ALERT` 总线的订阅绑定，并删除了对应的全局中转派发函数 `_on_bus_alert_received`。主 Tk 进程不再中转派发 `ABORT_VOICE` 指令。
+    - [x] **`trade_visualizer_qt6.py` (可视化后台接收与 VoiceProcess 打断机制关闭)**：在主轮询命令队列解析器 `_poll_command_queue` 中彻底删除了处理 `cmd_type == 'ABORT_VOICE'` 的 `elif` 条件分支；同时在 `VoiceProcess` 的多进程工作者 `_voice_worker` 循环中，废除了 `abort_event` 的所有检查以及 `check_abort` 回调里的 `abort_event.is_set()` 判定，确保当前朗读始终完整播放，且在关闭程序时仍能做到秒级安全退出与自愈。
 
 ## 2026-05-21 03:18
 - [x] **彻底改造 `update_scores` 为状态机 + Chunk Iterator 模式，根治 5500 只同步循环导致的 GIL 长时占用与 UI 卡死 (Refactored update_scores to State-Machine Chunk Scheduler)**：

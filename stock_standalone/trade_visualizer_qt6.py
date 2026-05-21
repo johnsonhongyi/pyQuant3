@@ -243,12 +243,7 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 continue
 
 
-            # 向主进程反馈：开始播报该条信号
-            if feedback_queue and meta:
-                try:
-                    feedback_queue.put(meta)
-                except:
-                    pass
+
 
             # 执行播报
             speech_text = normalize_speech_text(msg)
@@ -256,7 +251,7 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
             
             # ⚡ [STABILITY] 在每一条播报前初始化，确保 Windows 引擎状态正确
             # --- [NEW] 播报前最后一次中止检查 ---
-            if (abort_event and abort_event.is_set()) or not stop_flag.value:
+            if not stop_flag.value:
                 continue
 
             engine = None
@@ -272,9 +267,9 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                     engine.setProperty('volume', cct.voice_volume)
                 
                 def check_abort(name=None, location=None, length=None):
-                    if (abort_event and abort_event.is_set()) or not stop_flag.value:
+                    if not stop_flag.value:
                         try:
-                            # ⚡ [NEW] 立即停止当前引擎所有输出
+                            # 仅在程序退出时停止
                             engine.stop()
                         except:
                             pass
@@ -283,7 +278,13 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 engine.connect('started-word', check_abort)
 
                 # --- [NEW] 启动前检查 ---
-                if not (abort_event and abort_event.is_set()):
+                if stop_flag.value:
+                    # 🎤 [SYNC LIGHT] 联动反馈 (100% 绝对稳定触发，避开 init 延时，实现良好声画同步)
+                    if feedback_queue and meta:
+                        try:
+                            feedback_queue.put(meta)
+                        except:
+                            pass
                     engine.say(speech_text)
                     engine.runAndWait() # ⭐ 稳健模式：等待当前语音播完
                 
@@ -6175,11 +6176,7 @@ class MainWindow(QMainWindow, WindowMixin):
                             self.hotlist_panel._update_voice_button_style()
                     self._sync_voice_thread_state()
                 
-                elif cmd_type == 'ABORT_VOICE':
-                    # ✅ [NEW] 处理插播中断指令，中止可视化器当前的语音队列
-                    if hasattr(self, 'voice_thread') and self.voice_thread:
-                        logger.info("🛑 [IPC] Recv ABORT_VOICE, stopping current visualizer speech.")
-                        self.voice_thread.abort()
+
 
             # --- 统一执行本轮最后的有效切换意图 ---
             

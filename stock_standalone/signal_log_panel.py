@@ -817,7 +817,7 @@ class SignalLogPanel(QWidget, WindowMixin):
                 # ⚡ [REFINED] 采用多级剥离，处理 [Time] Name(Code) Pattern: Msg 各种变体
                 def _get_core(text):
                     # 1. 去除时间戳 [HH:MM:SS]
-                    text = _re.sub(r'^\[\d+:\d+:\d+\]\s*', '', text).strip()
+                    text = re.sub(r'^\[\d+:\d+:\d+\]\s*', '', text).strip()
                     # 2. 如果包含 )，尝试取其后的内容 (跳过名称和代码)
                     if ')' in text:
                         text = text.split(')', 1)[-1].strip()
@@ -838,7 +838,7 @@ class SignalLogPanel(QWidget, WindowMixin):
                         raw_text = msg_item.text()
                         # ⚡ [REFINED] 多维度匹配：优先匹配核心片段，次选全量匹配
                         # 1. 去除计数前缀的纯文本
-                        clean_text = _re.sub(r'^\(\d+次\)\s*', '', raw_text).strip()
+                        clean_text = re.sub(r'^\(\d+次\)\s*', '', raw_text).strip()
                         # 2. 提取表格行中的核心消息
                         core_text = _get_core(clean_text)
                         
