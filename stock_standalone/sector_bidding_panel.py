@@ -61,10 +61,11 @@ SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
 # ⭐ [GIL_MONITOR] 引入最后调用追踪器（零侵入，import 失败时降级为 no-op）
 try:
-    from tk_gil_monitor import last_call as _last_call, gil_yield as _gil_yield
+    from tk_gil_monitor import last_call as _last_call, gil_mark as _gil_mark
+    def _gil_yield(tag=""):
+        import time, sys; time.sleep(0); sys._getframe()
     _GIL_MONITOR_AVAILABLE = True
 except Exception:
-    # 降级 no-op，不影响任何主流程
     class _NoopTracker:
         def get(self): return {}
         def dump(self): return ""
@@ -1259,10 +1260,15 @@ class DataProcessWorker(QObject):
                     is_full = len(df) > 3000
                     start_time = time.perf_counter()
                     logger.debug("⏱️ [Worker][DEBUG] Calling detector.register_codes...")
+                    _gil_mark("register_codes:start")
                     self.detector.register_codes(df)
+                    _gil_mark("register_codes:end")
                     logger.debug("⏱️ [Worker][DEBUG] Calling detector.update_scores...")
+                    _gil_mark("update_scores:start")
                     self.detector.update_scores(active_codes=active_codes)
+                    _gil_mark("update_scores:end")
                     time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
+                    import sys; sys._getframe()  # 强制调度器切换
                     
                     dur = time.perf_counter() - start_time
                     if dur > 0.3:
