@@ -896,6 +896,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #     #     self._schedule_after(30000, lambda: self.open_visualizer(target_code))
         #     self._schedule_after(45000, lambda: self.open_visualizer('000001'))
             
+        # ⭐ [GIL_MONITOR] 安装 Tk GIL 呼吸器（UI心跳 + Watchdog 卡死自动诊断）
+        # 一次接入，卡死时自动 dump 线程栈 + 队列压力，无需手动 F12
+        try:
+            from tk_gil_monitor import install as _install_gil_monitor
+            self._gil_monitor = _install_gil_monitor(
+                root=self,
+                app=self,
+                freeze_threshold=3.0,   # >3s 无心跳 = FROZEN，自动 dump
+                enabled=True,
+            )
+            logger.info("✅ [GilMonitor] Tk GIL 呼吸器已启动 (freeze_threshold=3s)")
+        except Exception as _e:
+            logger.warning(f"[GilMonitor] 安装失败（无影响主流程）: {_e}")
+            self._gil_monitor = None
+
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
 
@@ -2372,6 +2387,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
+        # ⭐ [GIL_MONITOR] 第一步：关闭呼吸器 Watchdog，避免销毁期误报 FROZEN
+        try:
+            if getattr(self, '_gil_monitor', None):
+                self._gil_monitor.stop()
+        except Exception:
+            pass
+
         # 🛡️ [NEW] 退出保险：25秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
         def failsafe_exit():
             print("\n🚨 [Failsafe] Shutdown timeout reached (25s). Forcing physical exit...")

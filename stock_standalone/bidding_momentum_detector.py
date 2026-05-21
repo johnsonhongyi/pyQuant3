@@ -1051,6 +1051,12 @@ class BiddingMomentumDetector:
         - 不做 sector rebuild (通过冷启动单次 rebuild 触发)
         - 只做内存 tick_series 更新 + enqueue
         """
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector.register_codes', 'thread': __import__('threading').current_thread().name, 'args_repr': f'rows={len(df_all) if df_all is not None else 0}'})
+        except Exception:
+            pass
 
         if self.in_history_mode or df_all is None or df_all.empty:
             return
@@ -1206,16 +1212,22 @@ class BiddingMomentumDetector:
     def update_scores(self, active_codes=None, force: bool = False, skip_evaluate: bool = False):
         """
         主入口（启动器）：启动 Chunk Scheduler 状态机，不再做任何同步计算。
-        
+
         改造说明（Chunk Scheduler 模式）：
         - BEFORE: 5521 只代码在同一函数内同步循环，阻塞 3s+ → UI freeze
         - AFTER:  本函数只做节流/跨日检测/codes 收集，随即启动状态机
                   状态机每 10ms 推进 80 只，共 ~69 帧平滑分散到 0.6-1.5s
-        
+
         active_codes: 如果提供，则执行增量更新 (O(Delta) 复杂度)。
         force: 是否强制全量计算（全量扫描所有 _tick_series）。
         skip_evaluate: 跳过评估阶段（兼容旧接口，直接触发 aggregate）。
         """
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector.update_scores', 'thread': __import__('threading').current_thread().name, 'args_repr': f'force={force}'})
+        except Exception:
+            pass
         # [THROTTLE] 节流：防止短时间内被 Worker 疯狂调用，释放 CPU
         now_ts = time.time()
         if not force and now_ts - getattr(self, '_last_update_ts', 0) < 0.3:
@@ -1319,6 +1331,12 @@ class BiddingMomentumDetector:
         每次执行 _score_chunk_size 只个股的评估，然后调度下一帧。
         全程无锁执行，帧间 GIL 完全释放给 UI 线程。
         """
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc, gil_yield as _gy
+            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector._score_step', 'thread': __import__('threading').current_thread().name, 'args_repr': f'idx={self._score_index}'})
+        except Exception:
+            pass
         if not self._score_active:
             return
 

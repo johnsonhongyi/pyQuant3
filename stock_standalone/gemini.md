@@ -1,8 +1,20 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-21 11:35  
+> 最后更新：2026-05-21 13:00  
 > **核心目标**：数据统筹 → 信号跟踪 → 入场监控 → 盈利闭环
+
+---
+
+## 2026-05-21 13:00
+- [x] **部署生产级 Tk GIL 呼吸器系统，实现 UI 卡死自动诊断与线程栈快照 (Deployed Production-Grade TkBreathingMonitor with Auto-Freeze Detection & Thread Stack Dumps)**：
+    - [x] **新建独立模块 `tk_gil_monitor.py`**：包含 6 大核心组件——`TkBreathingMonitor`（主体）、`LastCallTracker`（最后调用追踪）、`TraceLock`（带死锁诊断的 RLock 包装器）、`gil_yield`（GIL 时间片切割探针）、`ui_guard`（UI 耗时装饰器）、`auto_stack_dump_if_stuck`（独立卡死检测器）。全部组件均有 import 失败降级机制，不影响主流程。
+    - [x] **`instock_MonitorTK.py` 接入**：在 `__init__` 末尾通过 `install()` 工厂函数一行安装 UI 心跳（200ms）+ Watchdog 后台守护线程；在 `on_close` 开头第一步调用 `monitor.stop()` 安全关闭，避免销毁期误报 FROZEN 告警。
+    - [x] **`sector_bidding_panel.py` 埋点**：在模块级 import 区引入 `_last_call` / `_gil_yield`（import 失败降级为 no-op）；在 `DataProcessWorker.process_data`、`_on_worker_finished`、`_refresh_sector_list` 三个关键函数入口加 `_last_call._data.update(...)` 埋点，Watchdog 报警时自动识别"UI 渲染中"。
+    - [x] **`bidding_momentum_detector.py` 埋点**：在 `register_codes`、`update_scores`、`_score_step` 三个核心计算函数入口加埋点（通过 `from tk_gil_monitor import last_call` 局部导入，避免循环依赖）。
+    - [x] **全自动卡死诊断流程**：当 UI 线程 > 3s 无心跳时，自动打印 `[GIL BREATHING ALERT]` + 最后调用函数 + 所有线程的完整栈快照（最后 15 帧）+ Queue 压力报告。无需手动按 F12，生产/Nuitka 打包环境均有效。
+
+
 
 ---
 
