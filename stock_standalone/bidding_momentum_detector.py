@@ -820,6 +820,18 @@ class BiddingMomentumDetector:
 
     def _load_stock_selector_data(self):
         """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector._load_stock_selector_data',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': ''
+            })
+        except Exception:
+            pass
+
         try:
             from trading_logger import TradingLogger
             t_logger = TradingLogger()
@@ -1100,26 +1112,30 @@ class BiddingMomentumDetector:
         # ===============================
         new_codes = []
 
-        for row in df.itertuples(index=False):
+        # 🚀 [PERF] 采用分片锁 + GIL-yielding 机制，彻底根治 5000+ 循环高频上锁解锁导致的锁风暴与 GIL 争抢
+        lock_chunk_size = 200
+        row_count = 0
 
-            raw_code = str(getattr(row, 'code', '')).strip()
-            code = _RE_NON_DIGIT.sub('', raw_code)
+        self._lock.acquire()
+        try:
+            for row in df.itertuples(index=False):
+                raw_code = str(getattr(row, 'code', '')).strip()
+                code = _RE_NON_DIGIT.sub('', raw_code)
 
-            if len(code) < 6 and code.isdigit():
-                code = code.zfill(6)
-            elif len(code) > 6:
-                code = code[-6:]
+                if len(code) < 6 and code.isdigit():
+                    code = code.zfill(6)
+                elif len(code) > 6:
+                    code = code[-6:]
 
-            if len(code) != 6 or code == "000000":
-                continue
+                if len(code) != 6 or code == "000000":
+                    continue
 
-            row_data = row._asdict()
-            name = str(row_data.get('name', '')).strip()
+                row_data = row._asdict()
+                name = str(row_data.get('name', '')).strip()
 
-            if not name or name in ('nan', 'None', 'null', '', 'δ֪', '未知', code):
-                continue
+                if not name or name in ('nan', 'None', 'null', '', 'δ֪', '未知', code):
+                    continue
 
-            with self._lock:
                 self._code_index[code] = name
                 self._name_index[name] = code
 
@@ -1130,6 +1146,15 @@ class BiddingMomentumDetector:
                     new_codes.append(code)
 
                 ts.update_meta(row_data)
+
+                # ── 分片锁管理 ──
+                row_count += 1
+                if row_count % lock_chunk_size == 0:
+                    self._lock.release()
+                    time.sleep(0)  # [YIELD] 物理让出 GIL
+                    self._lock.acquire()
+        finally:
+            self._lock.release()
 
         # ===============================
         # 4. 异步任务投递（关键）
@@ -1698,6 +1723,18 @@ class BiddingMomentumDetector:
 
     def save_persistent_data(self, force=False):
         """最终统一版：旧版控制流 + 新版数据结构（完全行为对齐）"""
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector.save_persistent_data',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': f'force={force}'
+            })
+        except Exception:
+            pass
+
         # === ① history mode（旧版优先级最高）
         if getattr(self, "in_history_mode", False):
             logger.debug("[Detector] Skip save in history mode.")
@@ -1879,6 +1916,18 @@ class BiddingMomentumDetector:
 
     def load_persistent_data(self):
         """从磁盘加载之前的会话数据 (3阶段无阻塞版)"""
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector.load_persistent_data',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': ''
+            })
+        except Exception:
+            pass
+
         path = self._get_persistence_path()
         if not os.path.exists(path): return
         
@@ -2083,6 +2132,18 @@ class BiddingMomentumDetector:
         self._init_dragon_3day_tracker()
 
     def _deferred_restore_klines(self, kline_payload_new: dict):
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector._deferred_restore_klines',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': f'len={len(kline_payload_new) if kline_payload_new else 0}'
+            })
+        except Exception:
+            pass
+
         import time
         time.sleep(0.5)
         count = 0
@@ -2104,6 +2165,18 @@ class BiddingMomentumDetector:
         logger.info("[Detector] Deferred K-line restore (New) completed.")
 
     def _deferred_restore_klines_legacy(self, kline_payload_legacy: dict):
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector._deferred_restore_klines_legacy',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': f'len={len(kline_payload_legacy) if kline_payload_legacy else 0}'
+            })
+        except Exception:
+            pass
+
         import time
         time.sleep(0.5)
         count = 0
@@ -2126,6 +2199,18 @@ class BiddingMomentumDetector:
 
     def load_from_snapshot(self, filepath: str) -> bool:
         """从指定的快照文件恢复数据，用于历史复盘 (原子替换版本)"""
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector.load_from_snapshot',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': f'file={filepath}'
+            })
+        except Exception:
+            pass
+
         try:
             if not os.path.exists(filepath):
                 logger.error(f"Snapshot file not found: {filepath}")
@@ -3358,70 +3443,91 @@ class BiddingMomentumDetector:
         active_codes: 如果提供，则只更新受这些个股影响的板块（增量模式）。
         _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
+        # ⭐ [GIL_MONITOR] 埋点
+        try:
+            from tk_gil_monitor import last_call as _glc
+            _glc._data.update({
+                'time': __import__('time').time(),
+                'func': 'BiddingMomentumDetector._aggregate_sectors',
+                'thread': __import__('threading').current_thread().name,
+                'args_repr': f'active={len(active_codes) if active_codes is not None else "ALL"}'
+            })
+        except Exception:
+            pass
+
         target_sectors = None
         
+        # 1. 锁外安全复制 codes 映射，以便于后续的分片锁处理
         with self._lock:
             if active_codes is not None:
-                codes_to_process = active_codes
+                codes_to_process = list(active_codes)
                 target_sectors = set()
             else:
                 codes_to_process = list(self._tick_series.keys())
+                target_sectors = None
 
-            # 1. 更新 snap 缓存
-            # [PERF] 同步增量维护 market_avg_pct：在此循环内顺带累计 pct，
-            # 避免后续再做一次 O(N) 全量遍历。
-            _pct_sum_delta = 0.0
-            _pct_count_delta = 0
-            for code in codes_to_process:
-                ts = self._tick_series.get(code)
-                if ts:
-                    # [P0-OPT] __slots__ 保证字段存在，直接访问替换 getattr 防御
-                    data = {
-                        'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
-                        'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
-                        'first_breakout_ts': ts.first_breakout_ts,
-                        'pattern_hint': ts.pattern_hint,
-                        'opening_bonus': ts.opening_bonus,
-                        # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
-                        'klines': list(ts.klines) if (ts.score >= self.score_threshold and ts.klines) else [],
-                        # 🚀 [PERF] 预计算 prices5，根除下游 O(N) 列表推导，注意 deque 需要先 list 化才能切片
-                        'prices5': [float(k.get('close', ts.current_price)) for k in list(ts.klines)[-5:]] if ts.klines else [ts.current_price],
-                        'is_untradable': ts.is_untradable,
-                        'is_counter_trend': ts.is_counter_trend,
-                        'is_accumulating': ts.is_accumulating,
-                        'is_reversal': ts.is_reversal,
-                        'signal_count': ts.signal_count,
-                        'ral': ts.ral,
-                        'top0': ts.top0,
-                        'top15': ts.top15,
-                        'score_diff': ts.score_diff,
-                        'pct_diff': ts.pct_diff,
-                        'price_diff': ts.price_diff,
-                        'vol_ratio': ts.vol_ratio,
-                        'dff': ts.dff,
-                        'high_day': ts.high_day,
-                        'low_day': ts.low_day,
-                        'last_high': ts.last_high,
-                        'last_low': ts.last_low,
-                        'total_amount': ts.total_amount,
-                    }
-                    self._global_snap_cache[code] = data
-                    _pct_sum_delta += ts.current_pct
-                    _pct_count_delta += 1
+        # 2. 更新 snap 缓存 & 增量分组 (分片加锁，每 200 个 Yield GIL 一次)
+        _pct_sum_delta = 0.0
+        _pct_count_delta = 0
+        chunk_size = 200
+        
+        for idx in range(0, len(codes_to_process), chunk_size):
+            chunk = codes_to_process[idx:idx+chunk_size]
+            with self._lock:
+                for code in chunk:
+                    ts = self._tick_series.get(code)
+                    if ts:
+                        # [P0-OPT] __slots__ 保证字段存在，直接访问替换 getattr 防御
+                        data = {
+                            'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
+                            'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
+                            'first_breakout_ts': ts.first_breakout_ts,
+                            'pattern_hint': ts.pattern_hint,
+                            'opening_bonus': ts.opening_bonus,
+                            # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
+                            'klines': list(ts.klines) if (ts.score >= self.score_threshold and ts.klines) else [],
+                            # 🚀 [PERF] 预计算 prices5，根除下游 O(N) 列表推导，注意 deque 需要先 list 化才能切片
+                            'prices5': [float(k.get('close', ts.current_price)) for k in list(ts.klines)[-5:]] if ts.klines else [ts.current_price],
+                            'is_untradable': ts.is_untradable,
+                            'is_counter_trend': ts.is_counter_trend,
+                            'is_accumulating': ts.is_accumulating,
+                            'is_reversal': ts.is_reversal,
+                            'signal_count': ts.signal_count,
+                            'ral': ts.ral,
+                            'top0': ts.top0,
+                            'top15': ts.top15,
+                            'score_diff': ts.score_diff,
+                            'pct_diff': ts.pct_diff,
+                            'price_diff': ts.price_diff,
+                            'vol_ratio': ts.vol_ratio,
+                            'dff': ts.dff,
+                            'high_day': ts.high_day,
+                            'low_day': ts.low_day,
+                            'last_high': ts.last_high,
+                            'last_low': ts.last_low,
+                            'total_amount': ts.total_amount,
+                        }
+                        self._global_snap_cache[code] = data
+                        _pct_sum_delta += ts.current_pct
+                        _pct_count_delta += 1
 
-                    # 2. 同步更新增量分组 (持久化)
-                    cats = ts.get_splitted_cats()
-                    if target_sectors is not None:
-                        target_sectors.update(cats)
-                    if ts.score >= self.score_threshold:
-                        for cat in cats:
-                            if cat not in SECTOR_BLACKLIST and len(cat) <= 8:
-                                self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
-                    else:
-                        for cat in cats:
-                            if code in self._sector_active_stocks_persistent.get(cat, {}):
-                                del self._sector_active_stocks_persistent[cat][code]
+                        # 2. 同步更新增量分组 (持久化)
+                        cats = ts.get_splitted_cats()
+                        if target_sectors is not None:
+                            target_sectors.update(cats)
+                        if ts.score >= self.score_threshold:
+                            for cat in cats:
+                                if cat not in SECTOR_BLACKLIST and len(cat) <= 8:
+                                    self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
+                        else:
+                            for cat in cats:
+                                if code in self._sector_active_stocks_persistent.get(cat, {}):
+                                    del self._sector_active_stocks_persistent[cat][code]
+            # 强力 Yield 让出 GIL
+            time.sleep(0)
 
+        # 3. 统计诊断与缓存更新 (短锁)
+        with self._lock:
             # [PERF] 更新增量均价缓存（避免后续再 O(N) 遍历全量 snap）
             if _pct_count_delta > 0:
                 # 用 EMA 平滑：旧值 * 0.8 + 新增量均值 * 0.2（降低噪声）
