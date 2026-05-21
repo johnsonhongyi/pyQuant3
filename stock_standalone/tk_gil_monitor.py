@@ -143,7 +143,11 @@ last_call = LastCallTracker()
 # ─── 2. GilHolderTracker ────────────────────────────────
 class GilHolderTracker:
     def __init__(self): self._t = {"func":None,"thread":None,"ts":0.0}
-    def mark(self, fn): self._t.update({"func":fn,"thread":threading.current_thread().name,"ts":time.time()})
+    def mark(self, fn):
+        if not fn or fn.endswith(":end"):
+            self._t.update({"func": None, "thread": None, "ts": 0.0})
+        else:
+            self._t.update({"func": fn, "thread": threading.current_thread().name, "ts": time.time()})
     def get(self): return dict(self._t)
     def dump(self, thr=1.0):
         d=self.get()
@@ -521,10 +525,18 @@ class TkBreathingMonitor:
     def start_watchdog(self):
         if not self.enabled or self._watchdog_running: return
         self._watchdog_running=True
-        threading.Thread(target=self._loop, name="TkGilWatchdog", daemon=True).start()
-        if self.cpu_sampling:
-            _delta_sampler.start()
-            _gil_cont.start()
+        
+        def _delayed_start():
+            # 🛡️ [SHIELD-FIX] 延迟 3 秒启动后台监测，避开冷启动期间大量 C/C++ 模块载入的内存敏感期
+            time.sleep(3.0)
+            if not self._watchdog_running: return
+            
+            threading.Thread(target=self._loop, name="TkGilWatchdog", daemon=True).start()
+            if self.cpu_sampling:
+                _delta_sampler.start()
+                _gil_cont.start()
+                
+        threading.Thread(target=_delayed_start, name="TkGilWatchdogDelayed", daemon=True).start()
 
     def _loop(self):
         while self._watchdog_running:

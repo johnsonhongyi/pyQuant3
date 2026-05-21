@@ -106,10 +106,6 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self._save_timer.timeout.connect(self._save_column_widths)
         h.sectionResized.connect(self._on_section_resized)
         
-        # 恢复状态
-        # [MOD] 增加延迟确保布局已生成，彻底根治 restoreState 失效问题
-        QTimer.singleShot(100, self._restore_column_widths)
-        
         self.table.itemClicked.connect(self._on_item_clicked)
         self.table.itemSelectionChanged.connect(self._on_selection_changed) # [NEW] 增加键盘上下键联动支持
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -346,6 +342,14 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self.save_window_position_qt_visual(self, "market_alert_detail_dialog")
         super().hideEvent(event)
 
+    def showEvent(self, event):
+        """[GUI] 展现时安全恢复列宽与大小，防范 C++ 构造期 access violation"""
+        super().showEvent(event)
+        if not getattr(self, '_columns_restored', False):
+            self._restore_column_widths()
+            self._columns_restored = True
+
+
 class VolumeDetailsDialog(QDialog, WindowMixin):
     """持久化的放量详情弹窗"""
     code_clicked = pyqtSignal(str, str) # 信号联动 (代码, 名称)
@@ -415,11 +419,7 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.table.setColumnWidth(0, 60)
         self.table.setColumnWidth(1, 80)
         self.table.setColumnWidth(2, 65)
-        self.table.setColumnWidth(3, 55)
-
-        # 恢复状态
-        QTimer.singleShot(0, self._restore_column_widths)
-        
+        self.table.setColumnWidth(3, 55)        
         self.table.setStyleSheet("""
             QTableWidget {
                 background-color: #0d121f;
@@ -615,6 +615,14 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         """隐藏事件时保存位置 (用于该 Dialog 频繁 hide/show 的场景)"""
         self.save_window_position_qt_visual(self, "volume_details_dialog")
         super().hideEvent(event)
+
+    def showEvent(self, event):
+        """[GUI] 展现时安全恢复列宽与大小，防范 C++ 构造期 access violation"""
+        super().showEvent(event)
+        if not getattr(self, '_columns_restored', False):
+            self._restore_column_widths()
+            self._columns_restored = True
+
 
 
 # 定义信号分类
