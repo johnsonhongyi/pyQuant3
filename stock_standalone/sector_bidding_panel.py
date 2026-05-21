@@ -2441,12 +2441,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._worker.data_updated.emit(None)
 
     def _on_detector_ready(self):
-        """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
-        logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh.")
-        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready START: triggering delayed refresh")
-        # 🚀 [UI-THREAD-SAFETY] 绝对禁止在子线程直接操作 UI 控件 showMessage，防止 Nuitka C 独立运行崩溃/死锁
-        # 延迟触发刷新，释放主线程
-        QTimer.singleShot(100, self._refresh_sector_list)
+        """[ROOT-FIX] 异步加载回调：数据就绪后通过 SignalBridge 触发首次刷新，绝对防范跨线程 Timer 崩溃"""
+        logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh via SignalBridge.")
+        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready START: sending data_updated signal")
+        with self._update_lock:
+            self._force_update_requested = True
+        
+        if hasattr(self, '_worker') and self._worker is not None:
+            self._worker.data_updated.emit(None)
         logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready END")
 
     def _on_sbc_test_finished(self, data: dict):
