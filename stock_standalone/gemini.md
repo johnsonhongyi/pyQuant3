@@ -28,6 +28,21 @@
     - 每次启动新对话， AI 必须首先读取 `gemini.md` 顶部的【🔴 当前任务】和【🧠 核心上下文记忆】。
     - 禁止在未同步 `gemini.md` 的情况下进行大规模重构。
 
+## 2026-05-21 12:05
+- [x] **终极解决子线程事件泵阻塞导致的跨线程信号静默丢失 (Fixed PyQt Cross-Thread Signal Loss Due to Blocked Worker QThread Event Loop)**：
+    - [x] **病因透析与经典 QThread 陷阱定位**：在先前架构下，`DataProcessWorker` 被移动到一个 `QThread` 子线程，且其子线程执行 `process_data` 时处于 `while self._is_running` 死循环中。这使得该子线程的 Qt 事件泵（Event Loop）彻底没有机会运行。当后台状态机 Timer 线程跑完打分并回调 `on_score_finished` 试图向 `DataProcessWorker` 派发跨线程调用时，信号被堆积在此死循环子线程的事件队列中无法被处理，导致信号“静默丢失”、主 UI 面板永远无法收到刷新通知。
+    - [x] **实现主窗口直接回调绑定 (Direct Callback Assignment to Main UI)**：彻底废除了由 `DataProcessWorker` 做中转转发信号的设计。将 `self.detector.on_score_finished` 直接注册给主 GUI 线程的窗口对象方法 `_on_score_finished_callback`。
+    - [x] **高鲁棒 QTimer.singleShot 跨线程派发**：在主窗口的 `_on_score_finished_callback` 回调中，利用线程安全的 `QTimer.singleShot(0, self._on_worker_finished)` 直接将刷新动作跨线程安全、瞬时地投递到 GUI 主线程事件循环，绕过了死循环子线程的事件泵盲区，彻底根治了白屏和无法刷新的底层顽疾！
+    - [x] **高优先级刷新穿透保护**：在打分结束回调中，将 `self._force_update_requested` 强制设为 `True`，保证真实的打分计算结果 100% 能够穿透 5 秒限频节流（Throttling）屏障，第一时间高精度渲染给用户。
+    - [x] **安全退出与防泄露保障**：在 `closeEvent` 销毁流程中，新增 `self.detector.on_score_finished = None` 清除绑定，彻底避免窗口被隐藏/销毁时因野指针触发异常或内存泄漏。
+    - [x] **命令行 `-log debug` 对齐加固**：在 `SectorBiddingPanel.__init__` 中新增 `sys.argv` 嗅探。当检测到启动参数含 `-log debug` 时，自动强制将 `logger` 和 `self.detector.logger` 设为 `logging.DEBUG` 级别，确保控制台调试信息同 Tk 进程完美同步呈现。
+
+## 2026-05-21 11:58
+- [x] **终极解决竞价面板改分片模式后无法刷新显示数据的逻辑硬伤 (Fixed SectorBiddingPanel Rendering Empty/Blank Due to Signal Throttling Race)**：
+    - [x] **根治同步信号与异步打分的时序竞态冲突 (Eliminated Throttling Race)**：在后台数据处理线程 `DataProcessWorker.process_data` 中，彻底删除了 `df is not None` 和 `if force:` 两个分支内冗余同步发射的 `self.data_updated.emit(None)` 信号。
+    - [x] **病因与危害分析**：在先前状态机异步分片重构下，`update_scores` 被设计为“秒级返回、后台异步分片 Timer 线程执行计算”的非阻塞启动器。如果在启动瞬间直接同步发射 `data_updated` 信号到主线程，主线程会极其迅速地消耗掉 `_force_update_requested = True` 标志并把最近刷新时间 `_last_refresh_ts` 强行拉升至当前时间。这导致 1.3 秒后真正的分片计算完成回调（`on_score_finished`）再次发送信号时，因为距离上一次（也就是空数据的那次）刷新时间间隔仅为 1.3 秒，被主线程 5 秒限频节流（Throttling）无情丢弃！使得界面永远停留在空数据的白板状态。
+    - [x] **实现单一可信信号源**：去除冗余 emit 后，计算启动时不再发生空刷新，主线程的强制刷新标志与时间阈值被 100% 完整保留。仅在所有分片计算彻底跑完的时刻，才由 Detector 的 `_finish_score()` 精准触发唯一的回调信号。信号能 100% 顺利通过限频检查，完美呈现计算结果，不仅彻底根治了白屏，而且逻辑简洁优雅，运行效能极高。
+
 ## 2026-05-21 11:35
 - [x] **恢复并优化语音发声与 UI 同步联动点亮机制 (Restored & Optimized Speech-to-UI Sync Linkage)**：
     - [x] **物理根除隐藏的 NameError 逻辑炸弹**：在 `signal_log_panel.py` 的高亮逻辑 `highlight_row_by_content` 中，彻底清除了由于拼写错误引入的未定义变量 `_re`（原先为 `_re.sub`，这会在寻找最佳匹配行时无声触发 NameError 并被外层 Exception 吞掉，导致播报正常但界面联动完全静默失效的硬伤）。

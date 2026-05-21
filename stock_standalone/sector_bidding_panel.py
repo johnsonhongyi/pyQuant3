@@ -1254,9 +1254,9 @@ class DataProcessWorker(QObject):
                     # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
 
                     self.latest_df = df
-                    logger.debug("⏱️ [Worker][DEBUG] Emitting data_updated...")
-                    self.data_updated.emit(None)
-                    logger.debug("⏱️ [Worker][DEBUG] Emitted data_updated.")
+                    # [🚀 PERF] 异步分片模式下，此处立即 emit 会导致空刷新抢占 _last_refresh_ts，
+                    # 从而使真正的打分完毕回调因 5s 节流被丢弃。一切刷新统一由 on_score_finished 回调触发。
+                    logger.debug("⏱️ [Worker][DEBUG] Async scoring started. Skipping sync emit.")
                     has_done_work = True
 
                 # 2. 强制刷新判定
@@ -1277,9 +1277,7 @@ class DataProcessWorker(QObject):
                         logger.warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
                     # [FIX] data_version 由 update_scores 内部统一管理
                     self.latest_df = None
-                    logger.debug("⏱️ [Worker][DEBUG] Emitting data_updated (force)...")
-                    self.data_updated.emit(None)
-                    logger.debug("⏱️ [Worker][DEBUG] Emitted data_updated (force).")
+                    logger.debug("⏱️ [Worker][DEBUG] Async force scoring started. Skipping sync emit.")
                     has_done_work = True
 
                 # [PERF] 计算本次工作耗时，用于动态调整休眠
@@ -1380,9 +1378,32 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         super().__init__(None)         # 独立窗口
         self.main_window = main_window
+        
+        # [NEW] 动态对齐命令行日志级别，确保在启用 -log debug 时能显示详细调试输出
+        import sys
+        self._log_level_debug = False
+        if "-log" in sys.argv:
+            try:
+                idx = sys.argv.index("-log")
+                if idx + 1 < len(sys.argv) and sys.argv[idx + 1].lower() == "debug":
+                    import logging
+                    logger.warning("⚙️ [SectorPanel] CMD line '-log debug' detected. Forcing logger to DEBUG level.")
+                    logger.setLevel(logging.DEBUG)
+                    self._log_level_debug = True
+            except Exception as e:
+                logger.warning(f"Failed to set log level dynamically: {e}")
         rs = getattr(main_window, 'realtime_service', None)
         # [ROOT-FIX] 开启懒加载模式，确保 UI 瞬间启动，不被 IO 阻塞
         self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
+        if getattr(self, '_log_level_debug', False):
+            try:
+                import logging
+                if hasattr(self.detector, 'logger'):
+                    self.detector.logger.setLevel(logging.DEBUG)
+            except:
+                pass
+        # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程的事件泵盲区！
+        self.detector.on_score_finished = self._on_score_finished_callback
         self.detector.ensure_data_ready_async(on_ready_callback=self._on_detector_ready)
 
         # [ROOT-FIX] 使用 LinkageManagerProxy 替代原始 StockSender 以防 IO 阻塞
@@ -1590,7 +1611,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [NEW] Persist scores and layout on close
         self._save_geometry()
         self._save_ui_state()
-        if hasattr(self, 'detector'):
+        if hasattr(self, 'detector') and self.detector:
+            # 清理回调绑定，防止野指针与内存泄露
+            self.detector.on_score_finished = None
             # 这里是真正关闭，我们保存数据
             self.detector.save_persistent_data()
             
@@ -2355,6 +2378,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._sbc_thread.start()
         
         logger.info(f"⏳ SBC 信号测试已启动后台线程: {code} (Live Mode: {use_live})")
+
+    def _on_score_finished_callback(self):
+        """[ROOT-FIX] 打分分片计算全部结束后的回调。
+        通过 QTimer.singleShot 将刷新动作无锁、线程安全地调度回主线程！"""
+        logger.warning("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh.")
+        # 强制将 refresh 标记设为 True，确保真正的打分结果能突破 5s 节流限制、100% 显示！
+        with self._update_lock:
+            self._force_update_requested = True
+        QTimer.singleShot(0, self._on_worker_finished)
 
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
