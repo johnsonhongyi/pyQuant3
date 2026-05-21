@@ -734,6 +734,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # --- 1. 数据结构初始化 ---
         self._all_events: List[BusEvent] = []
         self._hub_alerts = [] # [NEW] 聚合预警池
+        self._history_write_lock = threading.Lock() # 🛡️ [LOCK] 预警历史专属文件写盘锁，防 Windows 并发重入
+        self._last_saved_hash = None # [NEW] 记录上一次成功写盘的内容哈希，用于物理拦截无变动的无效写盘
+        self._alert_save_timer = QTimer(self) # [NEW] 预警历史专属防抖节流定时器
+        self._alert_save_timer.setSingleShot(True)
+        self._alert_save_timer.timeout.connect(self._save_alert_history)
         self.parent_app = None # [NEW] 用于跨框架(Tk/Qt)引用数据 (如 self.parent_app.df_all)
         self._alert_detail_dialog = None # [NEW] 详情对话框
         self._banner_timer = QTimer(self)
@@ -2616,8 +2621,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if grade in ['S', 'A'] and content:
                 self.sig_show_banner.emit(str(content))
             
-            # [NEW] 记录历史
-            self._save_alert_history()
+            # [NEW] 记录历史 (使用 QTimer 1.5s 防抖节流定时器进行合并写入，防范高频 IO 冲突与无效写盘)
+            self._alert_save_timer.start(1500)
 
             # [NEW] 联动全部：将预警消息转化为“虚拟信号”注入主表
             # 使用标准的 dict 构建方式，避免 class 实例化问题
@@ -4021,36 +4026,59 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             seen_keys.add(key)
                     
                     self._hub_alerts = unique_alerts[:500] # 最多保留 500 条
+                    
+                    # 💡 [HASH-INIT] 初始化读取内容后的历史指纹哈希，防止刚启动时的冗余写入
+                    loaded_fingerprint = tuple((x.get("time", ""), x.get("code", ""), x.get("message", "")) for x in self._hub_alerts)
+                    self._last_saved_hash = hash(loaded_fingerprint)
+                    
                     logger.info(f"✅ [Dashboard] Loaded {len(self._hub_alerts)} unique alert history records.")
         except Exception as e:
             logger.error(f"❌ [Dashboard] Failed to load alert history: {e}")
 
     def _save_alert_history(self):
-        """[DATA] 将当前预警持久化到磁盘 (原子替换写盘，保障文件不损坏)"""
+        """[DATA] 将当前预警持久化到磁盘 (原子替换写盘，保障文件不损坏，引入专属锁与 Windows 重试退避防 WinError 32)"""
         path = self._get_history_file_path()
         tmp_path = path + ".tmp"
-        try:
-            # [FIX] 只保存最近 500 条 (Newest at front)
-            to_save = self._hub_alerts[:500]
-            # 先写入临时文件，确保中途被切断时原文件完好无损
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(to_save, f, ensure_ascii=False, indent=2)
-            
-            # Windows 原子替换文件路径
-            if os.path.exists(tmp_path):
-                if os.path.exists(path):
+        
+        # 🛡️ [LOCK] 临界区上锁保护，彻底排除本进程多线程下的写冲突
+        with self._history_write_lock:
+            try:
+                # [FIX] 只保存最近 500 条 (Newest at front)
+                to_save = self._hub_alerts[:500]
+                
+                # 💡 [HASH-DEDUP] 计算当前数据的指纹哈希，防范无变动的重复写盘
+                # 提取关键字段生成不可变特征元组以防 value dict 无法直接 hash
+                current_fingerprint = tuple((x.get("time", ""), x.get("code", ""), x.get("message", "")) for x in to_save)
+                current_hash = hash(current_fingerprint)
+                
+                if current_hash == self._last_saved_hash:
+                    # 内容指纹完全一致，短路返回，零 IO 损耗！
+                    return
+                
+                # 先写入临时文件，确保中途被切断时原文件完好无损
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(to_save, f, ensure_ascii=False, indent=2)
+                
+                # Windows 原子替换文件路径 (加入重试退避，抗御杀毒软件扫描及瞬间 IO 冲突)
+                if os.path.exists(tmp_path):
+                    for attempt in range(5):
+                        try:
+                            if os.path.exists(path):
+                                os.remove(path)
+                            os.rename(tmp_path, path)
+                            self._last_saved_hash = current_hash # 成功写入，更新哈希标记
+                            break
+                        except Exception as rename_err:
+                            if attempt == 4:
+                                raise rename_err
+                            time.sleep(0.05) # 50ms 优雅回退
+            except Exception as e:
+                logger.error(f"❌ [Dashboard] Failed to save alert history: {e}")
+                if os.path.exists(tmp_path):
                     try:
-                        os.remove(path)
-                    except Exception as rm_old_err:
-                        logger.warning(f"⚠️ [Dashboard] Failed to remove old alert history during atomic swap: {rm_old_err}")
-                os.rename(tmp_path, path)
-        except Exception as e:
-            logger.error(f"❌ [Dashboard] Failed to save alert history: {e}")
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except:
-                    pass
+                        os.remove(tmp_path)
+                    except:
+                        pass
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
