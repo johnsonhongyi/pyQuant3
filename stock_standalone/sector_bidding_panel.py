@@ -59,6 +59,20 @@ logger = LoggerFactory.getLogger()
 
 SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
+# ⭐ [GIL_MONITOR] 引入最后调用追踪器（零侵入，import 失败时降级为 no-op）
+try:
+    from tk_gil_monitor import last_call as _last_call, gil_yield as _gil_yield
+    _GIL_MONITOR_AVAILABLE = True
+except Exception:
+    # 降级 no-op，不影响任何主流程
+    class _NoopTracker:
+        def get(self): return {}
+        def dump(self): return ""
+        class _data: pass
+    _last_call = _NoopTracker()
+    def _gil_yield(tag=""): pass
+    _GIL_MONITOR_AVAILABLE = False
+
 
 def _ascii_kline(klines: List[dict], width: int = 24, last_close: float = 0) -> str:
     """最近 N 根分钟 K 线 → 文字条形迷你图"""
@@ -1193,6 +1207,9 @@ class DataProcessWorker(QObject):
         self._is_running = False
 
     def process_data(self):
+        # ⭐ [GIL_MONITOR] 埋点：标记最后活跃函数
+        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'DataProcessWorker.process_data', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
+        except Exception: pass
         """子线程主循环（生产稳定版）"""
         # [NEW] 1. 延迟初始化：将耗时的种子加载与持久化恢复移至后台线程执行，解决启动阻塞（491ms问题）
         try:
@@ -2545,6 +2562,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_worker_finished(self, _=None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+        # ⭐ [GIL_MONITOR] 埋点
+        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._on_worker_finished', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
+        except Exception: pass
         df = getattr(self._worker, 'latest_df', None)
         # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
         if df is not None:
@@ -2594,6 +2614,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.status_lbl.setStyleSheet("color: #ff6666;")
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
+        # ⭐ [GIL_MONITOR] 埋点：记录进入时刻，Watchdog 可识别"UI 渲染中"
+        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._refresh_sector_list', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
+        except Exception: pass
         logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list START.")
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
