@@ -2,6 +2,7 @@ import time
 from datetime import datetime
 import threading
 import gc
+import sys
 import pandas as pd
 import numpy as np
 import sqlite3
@@ -91,10 +92,8 @@ class MinuteKlineCache:
 
     def to_dataframe(self) -> pd.DataFrame:
         """
-        [OPTIMIZED] 极限性能版：直接从内存对象提取 NumPy 数组，避免 dict 中转和百万次 Python 循环。
+        [OPTIMIZED] 极限性能版：直接从内存对象提取 NumPy 数组，避免 dict 中转 and 百万次 Python 循环。
         """
-        import numpy as np
-        
         with self._lock:
             # 1. 快速统计总量
             total_nodes = sum(len(dq) for dq in self._shared_cache.values())
@@ -2704,7 +2703,6 @@ class DataPublisher:
 
     def stress_test(self, num_stocks=4000, n_klines=240):
         """内存压力测试"""
-        import sys
         print(f"Starting Stress Test: {num_stocks} stocks, {n_klines} klines each...")
         dummy_data = {
             'time': 1700000000, 'open': 10.0, 'high': 11.0, 'low': 9.0, 'close': 10.5, 'volume': 1000

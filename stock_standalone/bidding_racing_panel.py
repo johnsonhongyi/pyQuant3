@@ -10,6 +10,7 @@ import traceback
 import threading
 import gzip
 import heapq
+import hashlib
 import pandas as pd
 from typing import Dict, List, Any, Optional
 
@@ -367,7 +368,6 @@ def _standalone_dna_audit_process_entry(input_queue, initial_data=None):
     支持通过 input_queue 接收新审计任务实现窗口复用
     """
     import tkinter as tk
-    import sys
     import queue
 
     try:
@@ -394,7 +394,6 @@ def _standalone_dna_audit_process_entry(input_queue, initial_data=None):
                 root.destroy()
             except: pass
             finally:
-                import os
                 os._exit(0)
 
         # =========================
@@ -406,7 +405,6 @@ def _standalone_dna_audit_process_entry(input_queue, initial_data=None):
             try:
                 root.after(0, safe_exit)
             except:
-                import os
                 os._exit(0)
         
         signal.signal(signal.SIGTERM, handler)
@@ -1629,7 +1627,6 @@ class SectorDetailDialog(QDialog, WindowMixin):
             n_item = self.table.item(row, 1)
             if c_item:
                 c = str(c_item.text()).strip()
-                import re
                 c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
@@ -2178,7 +2175,6 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             c_item = self.table.item(r, 0)
             if c_item:
                 c = str(c_item.text()).strip()
-                import re
                 c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 if c and len(c) == 6:
@@ -2228,7 +2224,6 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             n_item = self.table.item(row, 1)
             if c_item:
                 c = str(c_item.text()).strip()
-                import re
                 c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
@@ -3107,7 +3102,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     query_clean = query.strip()
                     if query_clean:
                         # 避免正则表达式特殊字符引发崩溃
-                        import re
                         query_esc = re.escape(query_clean)
                         # 构建模糊匹配逻辑：代码前缀、名称包含、板块包含
                         mask = (df.index.astype(str).str.contains(query_esc, case=False, na=False)) | \
@@ -3606,7 +3600,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             c_item = self.stock_table.item(r, 0)
             if c_item:
                 c = str(c_item.text()).strip()
-                import re
                 c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 if c and len(c) == 6:
@@ -3840,7 +3833,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         ts = self.detector._tick_series.get(code)
         if not ts or not ts.category: return
         
-        import re
         cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(ts.category)) if c.strip()]
         if not cats: return
         
@@ -4314,7 +4306,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # [⭐ 新增] 退出前安全暂停后台回测工作，释放算力
         worker = getattr(self, 'replay_worker', None)
         if worker and getattr(worker, 'is_running', False) and not getattr(worker, 'is_paused', True):
-            import time
             logger.info("⏸ 窗口关闭前自动暂停回测/回放工作...")
             worker.is_paused = True
             time.sleep(0.05) # 短暂休眠让底层循环停下
@@ -4410,7 +4401,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # ==============================
         # 2️⃣ 时间防抖（硬限流，防止高频触发）
         # ==============================
-        import time
         now = time.time()
         last_ts = getattr(self, "_last_save_ts", 0)
 
@@ -4473,7 +4463,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # ==============================
             # 6️⃣ hash 去重（关键优化）
             # ==============================
-            import json, hashlib
             conf_str = json.dumps(conf, sort_keys=True)
             new_hash = hashlib.md5(conf_str.encode()).hexdigest()
 
@@ -5534,7 +5523,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._table_highlights.pop(key, None)
 
 if __name__ == "__main__":
-    import sys
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     window = BiddingRacingRhythmPanel()

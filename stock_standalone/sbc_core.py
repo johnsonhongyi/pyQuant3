@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import time
 import os
+import re
 import logging
 from datetime import datetime, date as _date
 from typing import List, Dict, Any, Optional, Union
@@ -580,7 +581,6 @@ def parse_t(t):
             parts = s.split(':')
             if len(parts) >= 2:
                 # 简单寻找数字
-                import re
                 m = re.search(r'(\d{1,2}:\d{2})', s)
                 if m: return m.group(1)
         return s[:5]

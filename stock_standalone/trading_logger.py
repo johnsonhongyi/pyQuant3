@@ -2,9 +2,10 @@ import os
 import sqlite3
 import json
 import logging
+import time
 from datetime import datetime
-from typing import Any, Optional
 import pandas as pd
+from typing import Any, Optional
 # 处理 override 装饰器 (Python 3.12+ 才有)
 try:
     from typing import override # type: ignore
@@ -335,19 +336,16 @@ class TradingLogger:
         query += " ORDER BY date DESC, score DESC"
         
         try:
-            if pd:
-                # pandas read_sql_query uses connection object
-                df = pd.read_sql_query(query, conn, params=params)
-                return df
-            else:
-                with self.db_manager.execute_query(query, tuple(params)) as cur:
-                    rows = cur.fetchall()
-                    cols = [d[0] for d in cur.description]
-                    results = [dict(zip(cols, row)) for row in rows]
-                return results
+            cur = conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            if not rows:
+                return pd.DataFrame()
+            cols = [d[0] for d in cur.description]
+            return pd.DataFrame(rows, columns=cols)
         except Exception as e:
             logger.error(f"Error getting selections: {e}")
-            return pd.DataFrame() if pd else []
+            return pd.DataFrame()
 
     def log_signal_batch(self, records: list[dict]) -> None:
         """批量记录每日决策信号 (高性能事务)"""
@@ -462,7 +460,6 @@ class TradingLogger:
                 logger.debug(f"LiveSignal: 交易日/时段检查失败 (fallback to allow): {check_e}")
             
             # --- [Deduplication] ---
-            import time
             now_ts = time.time()
             cache_key = (code, action)
             
@@ -525,10 +522,14 @@ class TradingLogger:
             query += " ORDER BY id DESC LIMIT ?"
             params.append(limit)
             
-            # Use connection from manager
             conn = self.db_manager.get_connection()
-            df = pd.read_sql_query(query, conn, params=params)
-            return df
+            cur = conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            if not rows:
+                return pd.DataFrame()
+            cols = [d[0] for d in cur.description]
+            return pd.DataFrame(rows, columns=cols)
         except Exception as e:
             logger.error(f"Error get_live_signal_history_df: {e}")
             return pd.DataFrame()
@@ -734,7 +735,6 @@ class TradingLogger:
         return results
 
     def get_signal_history_df_bug(self, start_date=None, end_date=None, resample=None, code=None, limit=None):
-        import pandas as pd
         conn = self.db_manager.get_connection()
         
         cols = ["date", "code", "resample", "price", "signal"]
@@ -759,7 +759,14 @@ class TradingLogger:
             query += f" LIMIT {limit}"
         
         try:
-            df = pd.read_sql_query(query, conn, params=params)
+            cur = conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            if not rows:
+                df = pd.DataFrame()
+            else:
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(rows, columns=cols)
         except Exception as e:
             logger.error(f"get_signal_history_df error: {e}")
             df = pd.DataFrame()
@@ -768,13 +775,6 @@ class TradingLogger:
 
     def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None):
         """获取信号历史并作为 DataFrame 返回"""
-        try:
-            import pandas as pd
-        except ImportError:
-            return None
-            
-            return None
-            
         conn = self.db_manager.get_connection()
         query = "SELECT * FROM signal_history WHERE 1=1"
         params = []
@@ -794,7 +794,14 @@ class TradingLogger:
         query += " ORDER BY date DESC"
         
         try:
-            df = pd.read_sql_query(query, conn, params=params)
+            cur = conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            if not rows:
+                df = pd.DataFrame()
+            else:
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(rows, columns=cols)
         except Exception as e:
             logger.error(f"get_signal_history_df error: {e}")
             df = pd.DataFrame()

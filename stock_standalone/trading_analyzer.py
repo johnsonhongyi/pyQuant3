@@ -1,6 +1,8 @@
 from __future__ import annotations
 import pandas as pd
 import json
+import datetime
+import re
 from typing import Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -252,7 +254,6 @@ class TradingAnalyzer:
                 return s
             # Fallback to reason: "[Strategy] ..."
             reason = str(row.get('buy_reason', ''))
-            import re
             match = re.search(r'\[(.*?)\]', reason)
             if match:
                 # 进一步清洗：提取方括号内的第一个词，避免类似 "[回踩MA5:达标]" 这种带描述的
@@ -334,7 +335,6 @@ class StrategySignalAnalyzer:
         获取今日信号计数详情
         返回 DataFrame columns: [code, pattern, count, last_trigger, date]
         """
-        import datetime
         try:
             from intraday_pattern_detector import IntradayPatternDetector
             pattern_map = IntradayPatternDetector.PATTERN_NAMES

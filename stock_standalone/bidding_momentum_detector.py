@@ -9,9 +9,12 @@ Bidding Momentum Detector v2 - 竞价及尾盘板块联动异动检测器
 3. 龙头触发后，展开所属板块，找出龙二龙三 (一点带面)
 4. 策略参数可动态配置（每日新高、振幅、涨幅、MA反弹）
 """
-import logging
+
+from JohnsonUtil import LoggerFactory
 import time
 import threading
+from queue import Queue
+
 import datetime
 import re
 import json
@@ -140,7 +143,7 @@ def decompress_klines(compressed):
 if TYPE_CHECKING:
     from realtime_data_service import DataPublisher
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger()
 
 def get_limit_up_threshold(code: str) -> float:
     """获取各市场接近涨停的阈值 (主板10%, 科创/创业20%, 北证30%)"""
@@ -403,6 +406,241 @@ class TickSeries:
         return self.klines[-1].get('close', 0.0)
 
 
+def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
+    """
+    运行在独立子进程中，承接所有重 CPU 和 IO 任务 (SQLite, JSON parse, decompress, TickSeries build)
+    彻底释放主进程 GIL。
+    """
+    import os, json, zlib, gzip, time, datetime
+    from trading_logger import TradingLogger
+    
+    result = {
+        'stock_selector_seeds': {},
+        'tick_series': {},
+        'global_snap_cache': {},
+        'active_sectors': {},
+        'sector_anchors': {},
+        'baseline_time': time.time(),
+        'last_data_ts': 0.0,
+        'daily_watchlist': {},
+        'dragon_3day_history': [],
+        'data_date': '',
+        'kline_payload_new': {},
+        'kline_payload_legacy': {}
+    }
+    
+    try:
+        t_logger = TradingLogger()
+        df_seeds = t_logger.get_selections_df() 
+        if not df_seeds.empty and 'code' in df_seeds.columns:
+            high_df = df_seeds[df_seeds['score'] >= 80]
+            result['stock_selector_seeds'] = {
+                str(r.code).zfill(6): {'code': str(r.code).zfill(6), 'reason': getattr(r, 'reason', '')}
+                for r in high_df.itertuples(index=False)
+            }
+    except Exception:
+        pass
+
+    if not simulation_mode:
+        path = os.path.join(cwd_path, 'snapshots', 'detector_state_persist.json.gz')
+        if os.path.exists(path):
+            try:
+                with open(path, 'rb') as f:
+                    raw_data = f.read()
+                json_str = zlib.decompress(raw_data).decode('utf-8')
+                del raw_data
+                data = json.loads(json_str)
+                del json_str
+                
+                file_date_str = data.get('data_date', '')
+                result['data_date'] = file_date_str
+                
+                if cct.get_trade_date_status():
+                    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+                else:
+                    today_str = cct.get_last_trade_date().replace('-', '')
+                now_dt = datetime.datetime.strptime(today_str, '%Y-%m-%d')
+                is_cross_day = (file_date_str != today_str)
+
+                result['active_sectors'] = data.get('sector_data', {})
+                result['sector_anchors'] = data.get('sector_anchors', {})
+                result['baseline_time'] = data.get('baseline_time', time.time())
+                result['last_data_ts'] = data.get('last_data_ts', 0.0)
+                
+                if not is_cross_day:
+                    raw_watchlist = data.get('watchlist', {})
+                    today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
+                    for code, entry in raw_watchlist.items():
+                        if entry.get('trigger_ts', 0) >= today_midnight_ts: 
+                            result['daily_watchlist'][code] = entry
+                
+                stock_scores = data.get('stock_scores', {})
+                momentum_scores = data.get('momentum_scores', {})
+                stock_anchors = data.get('stock_score_anchors', {})
+                stock_price_anchors = data.get('stock_price_anchors', {})
+                meta_cols = data.get('meta_cols', {})
+                
+                new_tick_series = {}
+                new_snap_cache = {}
+                kline_payload_new = {}
+                kline_payload_legacy = {}
+
+                if meta_cols and 'code' in meta_cols:
+                    codes = meta_cols['code']
+                    for i, code in enumerate(codes):
+                        if not code or code == '000000' or len(code) != 6 or not code.isdigit(): continue
+                        
+                        def _get(key, default, _mc=meta_cols, _i=i):
+                            val = _mc.get(key, [])
+                            return val[_i] if _i < len(val) and val[_i] is not None else default
+                        
+                        t_name = _get('n', code)
+                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]: continue
+                        
+                        ts = TickSeries(code)
+                        ts.name = t_name
+                        ts.score = stock_scores.get(code, _get('s', ts.score))
+                        ts.momentum_score = momentum_scores.get(code, 0.0)
+                        ts.score_anchor = stock_anchors.get(code, 0.0)
+                        ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                        
+                        if is_cross_day:
+                            ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                        else:
+                            ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
+
+                        ts.pattern_hint = _get('ph', ts.pattern_hint)
+                        ts.category = _get('c', ts.category)
+                        ts.last_close = _get('lc', ts.last_close)
+                        ts.open_price = _get('op', ts.open_price)
+                        ts.high_day = _get('hd', ts.high_day)
+                        ts.low_day = _get('ld', ts.low_day)
+                        ts.last_high = _get('lh', ts.last_high)
+                        ts.last_low = _get('ll', ts.last_low)
+                        ts.now_price = _get('np', ts.now_price)
+                        ts.ral = _get('rl', ts.ral)
+                        ts.is_untradable = bool(_get('iu', ts.is_untradable))
+                        ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                        ts.racing_start_ts = _get('rs', ts.racing_start_ts)
+                        ts.signal_count = _get('sc', 0)
+                        
+                        new_tick_series[code] = ts
+                        new_snap_cache[code] = {
+                            'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
+                            'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
+                            'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
+                            'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                            'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
+                            'signal_count': ts.signal_count
+                        }
+                        if not is_cross_day:
+                            k_data = _get('k', None)
+                            if k_data: kline_payload_new[code] = k_data
+                else:
+                    meta_data = data.get('meta_data', {})
+                    for code, m in meta_data.items():
+                        if not code or code == '000000' or len(code) != 6 or not code.isdigit(): continue
+                        t_name = m.get('name', '')
+                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]: continue
+                        
+                        ts = TickSeries(code)
+                        ts.name = t_name
+                        ts.score = stock_scores.get(code, m.get('score', ts.score))
+                        ts.momentum_score = momentum_scores.get(code, 0.0)
+                        ts.score_anchor = stock_anchors.get(code, 0.0)
+                        ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                        
+                        if is_cross_day:
+                            ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                        else:
+                            ts.last_close = m.get('last_close', ts.last_close)
+                            ts.open_price = m.get('open_price', ts.open_price)
+                            ts.now_price = m.get('now_price', ts.now_price)
+                            ts.category = m.get('category', ts.category)
+                            k_data = m.get('klines', [])
+                            if k_data: kline_payload_legacy[code] = k_data
+                            
+                        new_tick_series[code] = ts
+                        new_snap_cache[code] = {
+                            'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
+                            'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
+                            'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
+                            'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                            'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
+                            'signal_count': getattr(ts, 'signal_count', 0)
+                        }
+
+                result['tick_series'] = new_tick_series
+                result['global_snap_cache'] = new_snap_cache
+                result['kline_payload_new'] = kline_payload_new
+                result['kline_payload_legacy'] = kline_payload_legacy
+            except Exception:
+                pass
+
+    try:
+        snapshot_dir = os.path.join(cwd_path, 'snapshots')
+        if os.path.exists(snapshot_dir):
+            files = [f for f in os.listdir(snapshot_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
+            dates = []
+            for f in files:
+                try:
+                    name_part = f.replace('.json.gz', '').replace('bidding_', '')
+                    if name_part.isdigit() and len(name_part) == 8:
+                        dates.append(name_part)
+                except: continue
+            dates.sort(reverse=True)
+            
+            if cct.get_trade_date_status():
+                today_str = datetime.datetime.now().strftime('%Y%m%d')
+            else:
+                today_str = cct.get_last_trade_date().replace('-', '')
+            
+            past_dates = [d for d in dates if d < today_str]
+            history = []
+            if past_dates:
+                latest_f = os.path.join(snapshot_dir, f"bidding_{past_dates[0]}.json.gz")
+                try:
+                    with open(latest_f, 'rb') as f: raw = f.read()
+                    try: data = json.loads(zlib.decompress(raw).decode('utf-8'))
+                    except: data = json.loads(gzip.decompress(raw).decode('utf-8'))
+                    history_in_snap = data.get('dragon_3day_history', [])
+                    if history_in_snap:
+                        valid_history = [d for d in history_in_snap if d['date'] < today_str]
+                        unique_days = {d['date'] for d in valid_history}
+                        if len(unique_days) >= 3:
+                            history = valid_history
+                except: pass
+
+            if not history:
+                for d_str in reversed(past_dates[:5]):
+                    f_path = os.path.join(snapshot_dir, f"bidding_{d_str}.json.gz")
+                    try:
+                        with open(f_path, 'rb') as f: raw = f.read()
+                        try: data = json.loads(zlib.decompress(raw).decode('utf-8'))
+                        except: data = json.loads(gzip.decompress(raw).decode('utf-8'))
+                        board = data.get('board_intensity', {})
+                        top_sectors = sorted(board.items(), key=lambda x: x[1].get('score', 0), reverse=True)[:5]
+                        for s_name, s_info in top_sectors:
+                            for idx, fol in enumerate(s_info.get('followers', [])[:2]):
+                                history.append({
+                                    'date': d_str,
+                                    'code': fol['code'],
+                                    'name': fol['name'],
+                                    'sector': s_name,
+                                    'base_price': fol['now'],
+                                    'base_vol_l6': fol.get('l6_vol', 0),
+                                    'base_score': fol['score'],
+                                    'rank': idx + 1
+                                })
+                    except: pass
+            
+            result['dragon_3day_history'] = history
+    except Exception:
+        pass
+
+    return result
+
+
 class BiddingMomentumDetector:
     """
     订阅式竞价/尾盘异动检测器。
@@ -514,6 +752,30 @@ class BiddingMomentumDetector:
         # [NEW] [ROOT-FIX] 初始化联动代理
         self.link_manager = get_link_manager()
 
+        # ===== [CHUNK-SCHEDULER] 状态机状态变量 =====
+        # 将 update_scores 的 5000+ 同步循环拆分为 10ms/帧的状态机迭代
+        # 彻底消除 GIL 长时占用导致的 UI 假死
+        self._score_active: bool = False          # 是否正在执行 chunk 迭代
+        self._score_codes: list = []              # 本轮待评估的代码列表
+        self._score_index: int = 0               # 当前已处理到的索引
+        self._score_chunk_size: int = 80         # 每帧处理的代码数量（80只 ≈ <10ms）
+        self._score_anchor_930: float = 0.0      # 本轮 09:30 锚点时间戳（全局预计算）
+        self._score_force: bool = False          # 本轮是否为强制全量扫描
+        self._score_active_codes = None          # 本轮 active_codes 引用（用于 aggregate）
+        self._score_lock = threading.Lock()      # 防重入锁（轻量 Lock 即可）
+        self._chunk_timer: Optional[object] = None  # 当前活跃的帧调度 threading.Timer 引用
+        # [PERF] 增量市场均价缓存（避免 _aggregate_sectors 每轮都 O(N) 遍历全量 snap）
+        self._cached_market_avg_pct: float = 0.0   # EMA 平滑后的市场均涨幅
+        self._cached_market_avg_count: int = 0      # 已纳入统计的总 code 次数
+        # [STREAMING] dirty-set：记录本轮已评估的 codes，供 aggregate 做增量 sector 定位
+        self._sector_dirty_codes: set = set()       # 脏码集合（仅在 _score_step 写入，aggregate 消费后清空）
+        
+
+
+        self._subscribe_queue = Queue()
+        self._sector_update_queue = Queue()
+        self._register_worker_started = False
+
         if not lazy_load:
             self._load_stock_selector_data()
         else:
@@ -565,30 +827,160 @@ class BiddingMomentumDetector:
         except Exception as e:
             logger.warning(f"[Detector] 种子加载或持久化恢复失败: {e}")
 
+    def _apply_detector_state(self, state_dict):
+        """仅做纯数据合并（禁止任何UI/信号行为）"""
+        try:
+            self.stock_selector_seeds = state_dict.get('stock_selector_seeds', {})
+
+            with self._lock:
+                tick_series = state_dict.get('tick_series')
+                if tick_series:
+                    self._tick_series = tick_series
+
+                snap_cache = state_dict.get('global_snap_cache')
+                if snap_cache:
+                    self._global_snap_cache = snap_cache
+
+                # 日期逻辑（纯计算）
+                if cct.get_trade_date_status():
+                    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+                else:
+                    today_str = cct.get_last_trade_date()
+
+                is_cross_day = (
+                    state_dict.get('data_date') and state_dict['data_date'] != today_str
+                )
+
+                self.active_sectors = state_dict.get('active_sectors', {}) if not is_cross_day else {}
+                self.sector_anchors = state_dict.get('sector_anchors', {}) if not is_cross_day else {}
+                self.baseline_time = state_dict.get('baseline_time', time.time())
+                self.last_data_ts = state_dict.get('last_data_ts', 0.0)
+                self.daily_watchlist = state_dict.get('daily_watchlist', {})
+
+                if state_dict.get('data_date'):
+                    self._last_data_date = state_dict['data_date']
+                    try:
+                        self._concept_data_date = datetime.datetime.strptime(
+                            self._last_data_date, '%Y-%m-%d'
+                        ).date()
+                    except:
+                        pass
+
+                self.data_version += 1
+
+            # UI无关数据
+            self.dragon_3day_history = state_dict.get('dragon_3day_history', [])
+            self._dragon_init_done = True
+
+            # 延迟K线恢复（线程安全OK）
+            k_new = state_dict.get('kline_payload_new', {})
+            k_old = state_dict.get('kline_payload_legacy', {})
+
+            if k_new:
+                threading.Thread(
+                    target=self._deferred_restore_klines,
+                    args=(k_new,),
+                    daemon=True
+                ).start()
+
+            if k_old:
+                threading.Thread(
+                    target=self._deferred_restore_klines_legacy,
+                    args=(k_old,),
+                    daemon=True
+                ).start()
+
+        except Exception as e:
+            logger.error(f"❌ Apply state failed: {e}")
+
+    def _apply_and_finalize(self, state_dict, on_ready_callback=None):
+        """UI线程唯一入口（必须保证在主线程执行）"""
+        try:
+            self._apply_detector_state(state_dict)
+            self._is_ready = True
+
+            logger.info("✅ Detector ready")
+
+            if on_ready_callback:
+                on_ready_callback()
+
+        except Exception as e:
+            logger.error(f"❌ finalize failed: {e}")
+
     def ensure_data_ready_async(self, on_ready_callback: Callable = None):
-        """[ROOT-FIX] 真正的异步懒加载入口：启动后台线程读取 IO"""
+        """稳定版 ProcessPool loader（无UI死锁版本）"""
+
         if self._is_ready:
-            if on_ready_callback: on_ready_callback()
+            if on_ready_callback:
+                on_ready_callback()
             return
+
+        def _dispatch_ui(fn):
+            """统一UI调度入口"""
+            try:
+                if hasattr(self, 'after'):
+                    self.after(0, fn)
+                    return
+            except:
+                pass
+
+            try:
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, fn)
+                return
+            except:
+                pass
+
+            # 最后兜底（不建议，但不会死）
+            fn()
 
         def _worker():
             try:
-                start_t = time.time()
-                logger.info("📡 [Detector] Background data loading started...")
-                self._load_stock_selector_data()
-                self._is_ready = True
-                dur = time.time() - start_t
-                logger.info(f"✅ [Detector] Background loading completed in {dur:.2f}s.")
-                if on_ready_callback:
-                    on_ready_callback()
+                import os
+                import concurrent.futures
+
+                logger.info("📡 Detector ProcessPool starting...")
+
+                executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+
+                future = executor.submit(
+                    _build_detector_state_process,
+                    self.simulation_mode,
+                    os.getcwd()
+                )
+
+                def _done(fut):
+                    try:
+                        state_dict = fut.result()
+
+                        def _apply():
+                            self._apply_and_finalize(state_dict, on_ready_callback)
+
+                        _dispatch_ui(_apply)
+
+                    except Exception as e:
+                        logger.error(f"ProcessPool failed: {e}")
+
+                    finally:
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except:
+                            pass
+
+                future.add_done_callback(_done)
+
             except Exception as e:
-                logger.error(f"❌ [Detector] Background loading failed: {e}")
+                logger.error(f"_worker failed: {e}")
 
         if self._loading_thread is None or not self._loading_thread.is_alive():
-            self._loading_thread = threading.Thread(target=_worker, name="DetectorAsyncLoad", daemon=True)
+            self._loading_thread = threading.Thread(
+                target=_worker,
+                name="DetectorAsyncLoad",
+                daemon=True
+            )
             self._loading_thread.start()
         else:
-            logger.warning("📡 [Detector] Background loading already in progress.")
+            logger.warning("Detector loading already running")
 
     # =========================================================
     # 公共接口
@@ -646,121 +1038,136 @@ class BiddingMomentumDetector:
 
     def register_codes(self, df_all: pd.DataFrame):
         """
-        从 df_all 中注册新的 code 订阅，补充元数据。
-        需在主线程调用（如 update_tree / on_realtime_data_arrived）。
+        🚀 ULTRA FAST VERSION (UI NON-BLOCKING)
+        - 不做任何 IO
+        - 不做 subscribe
+        - 不做 sector rebuild
+        - 只做内存 tick_series 更新 + enqueue
         """
-        if self.in_history_mode:
-            return # [GUARD] 历史复盘模式下，禁止修改当前活动的个股映射，防止污染视口
 
-        if df_all is None or df_all.empty:
+        if self.in_history_mode or df_all is None or df_all.empty:
             return
 
-        # [THREAD-SAFETY] 防御性 copy：防止调用方在其他线程中修改或释放底层 C 数组
-        df_all = df_all.copy()
+        # ⚡ 轻量 copy（避免 pandas 跨线程风险）
+        df = df_all.copy()
 
-        # 确保 code 列存在
-        if 'code' in df_all.columns:
-            df = df_all.set_index('code', drop=False)
-        else:
-            df = df_all.copy()
+        # ===============================
+        # 1. 统一 code index
+        # ===============================
+        if 'code' not in df.columns:
             df['code'] = df.index.astype(str)
 
-        # [🚀 FIX] 从行情数据中提取最新的时间戳，推进全局时钟 (Racing Timeline)
-        # 兼容 ticktime, timestamp, time 等多种字段名
-        time_cols = ['ticktime', 'timestamp', 'time', 'datetime']
-        found_time_col = next((c for c in time_cols if c in df.columns), None)
-        if found_time_col:
-            try:
-                latest_val = df[found_time_col].max()
-                # [FIX] 仿真/回测模式下，禁止利用全量 df_all 推进 clock 戳，防止 EOD 尾盘时间 (15:00/15:04) 锁死 time
-                if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
-                    if isinstance(latest_val, (int, float)) and latest_val > 1000000000: # Unix TS
-                        if latest_val > self.last_data_ts: self.last_data_ts = float(latest_val)
-                    elif isinstance(latest_val, str) and (':' in latest_val or '-' in latest_val):
-                        # 处理 HH:MM:SS 或 YYYY-MM-DD HH:MM:SS
-                        from dateutil.parser import parse
-                        ts = parse(latest_val).timestamp()
-                        if ts > self.last_data_ts: self.last_data_ts = ts
-            except:
-                pass
+        # ===============================
+        # 2. 时间戳推进（极轻量）
+        # ===============================
+        try:
+            time_cols = ['ticktime', 'timestamp', 'time', 'datetime']
+            col = next((c for c in time_cols if c in df.columns), None)
+            if col:
+                v = df[col].max()
+                if isinstance(v, (int, float)) and v > self.last_data_ts:
+                    self.last_data_ts = float(v)
+        except:
+            pass
 
-        # 重建板块图（每次全量更新，成本低）
-        self._rebuild_sector_map(df)
-
+        # ===============================
+        # 3. 只做 tick_series 更新（核心轻操作）
+        # ===============================
         new_codes = []
+
         for row in df.itertuples(index=False):
-            # [🚀 格式规范化] 强制提取 6 位数字代码，剔除后缀(如 .SH/.SZ)，彻底根治重复入表问题
+
             raw_code = str(getattr(row, 'code', '')).strip()
             code = _RE_NON_DIGIT.sub('', raw_code)
-            if len(code) < 6 and code.isdigit(): code = code.zfill(6)
-            elif len(code) > 6: code = code[-6:]
-            
-            if code == '000000' or not code or len(code) != 6: continue
-            
+
+            if len(code) < 6 and code.isdigit():
+                code = code.zfill(6)
+            elif len(code) > 6:
+                code = code[-6:]
+
+            if len(code) != 6 or code == "000000":
+                continue
+
             row_data = row._asdict()
             name = str(row_data.get('name', '')).strip()
-            
-            # [🚀 SANITIZATION] 过滤空名称、占位符名称等无效个股
-            if not name or name in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
+
+            if not name or name in ('nan', 'None', 'null', '', 'δ֪', '未知', code):
                 continue
 
             with self._lock:
-                # 维护极限性能索引
                 self._code_index[code] = name
                 self._name_index[name] = code
-                
-                if code not in self._tick_series:
-                    ts_obj = TickSeries(code)
-                    ts_obj.update_meta(row_data)
-                    self._tick_series[code] = ts_obj
+
+                ts = self._tick_series.get(code)
+                if ts is None:
+                    ts = TickSeries(code)
+                    self._tick_series[code] = ts
                     new_codes.append(code)
-                else:
-                    self._tick_series[code].update_meta(row_data)
 
-        # [🚀 肃清冗余] 定期清理 _tick_series 中非标准 6 位格式的脏数据 (如带后缀的残余) 和无有效名称的占位股
-        # 每 100 次注册执行一次，防止 CPU 抖动
-        if not hasattr(self, '_cleanup_counter'): self._cleanup_counter = 0
-        self._cleanup_counter += 1
-        if self._cleanup_counter % 100 == 0 or self._cleanup_counter == 1:
-            with self._lock:
-                dirty_keys = [
-                    k for k, ts in self._tick_series.items()
-                    if len(str(k)) != 6 or not str(k).isdigit() or str(k) == '000000' or 
-                    not ts.name or str(ts.name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', str(k)]
-                ]
-                if dirty_keys:
-                    logger.info(f"🧹 [Detector] 清理了 {len(dirty_keys)} 个非标或无有效名称的脏代码键: {dirty_keys[:5]}...")
-                    for k in dirty_keys:
-                        self._tick_series.pop(k, None)
-                        self._global_snap_cache.pop(k, None)
-                        if hasattr(self, '_code_index'): self._code_index.pop(k, None)
-                        # 同时从逆向名称索引清理
-                        name_to_del = [n for n, c in list(self._name_index.items()) if c == k]
-                        for n in name_to_del:
-                            self._name_index.pop(n, None)
+                ts.update_meta(row_data)
 
-        # 对新 code 或 K线为空的 code：拉历史 K 线做冷启
-        target_codes = new_codes + [c for c in df['code'].astype(str).str.strip().str.zfill(6) if c in self._tick_series and not self._tick_series[c].klines]
-        target_codes = list(set(target_codes)) # 去重
-        
-        # [FIX] 极限性能保护：在历史回测/复盘模式下，禁用冷启动历史 K 线拉取
-        # 此时数据流量极大 (97 tps)，拉取 5000 只股的 K 线会导致 GIL 彻底锁死并引发崩溃
-        if self.realtime_service and target_codes and not self.in_history_mode:
-            for code in target_codes:
+        # ===============================
+        # 4. 异步任务投递（关键）
+        # ===============================
+
+        if new_codes:
+            for c in new_codes:
+                self._subscribe_queue.put(c)
+
+        # sector update 不阻塞主线程
+        self._sector_update_queue.put(True)
+
+        # ===============================
+        # 5. 启动后台 worker（只启动一次）
+        # ===============================
+        if not self._register_worker_started:
+            self._start_register_workers()
+            self._register_worker_started = True
+
+    def _start_register_workers(self):
+
+        # =========================
+        # ① subscribe worker（完全异步）
+        # =========================
+        def subscribe_worker():
+            while True:
+                code = self._subscribe_queue.get()
                 try:
-                    # [REFINED] 仅在真的为空时才拉取，避免重复拉取浪费性能
-                    ts = self._tick_series.get(code)
-                    if ts and not ts.klines:
-                        hist = self.realtime_service.get_minute_klines(code, n=30)
-                        if hist:
-                            with self._lock:
-                                ts.load_history(hist)
-                                
-                    if code not in self._subscribed:
+                    if self.realtime_service and code not in self._subscribed:
                         self.realtime_service.subscribe(code, self._on_tick)
                         self._subscribed.add(code)
                 except Exception as e:
-                    logger.warning(f"[Detector] 历史K线加载/订阅失败 {code}: {e}")
+                    logger.warning(f"[SubscribeWorker] {code} failed: {e}")
+
+        # =========================
+        # ② sector worker（低频更新）
+        # =========================
+        def sector_worker():
+            import time
+            while True:
+                self._sector_update_queue.get()
+
+                try:
+                    # ❗ 控频：最多 1次/300ms
+                    time.sleep(0.3)
+
+                    with self._lock:
+                        df_snapshot = None
+                        if hasattr(self, '_tick_series'):
+                            # 只做轻量触发，不 rebuild
+                            self.data_version += 1
+
+                    # 延迟真正 sector rebuild
+                    self._aggregate_sectors(active_codes=None)
+
+                except Exception as e:
+                    logger.warning(f"[SectorWorker] failed: {e}")
+
+        # =========================
+        # 启动线程
+        # =========================
+        threading.Thread(target=subscribe_worker, daemon=True).start()
+        threading.Thread(target=sector_worker, daemon=True).start()
 
     def get_active_sectors(self) -> List[Dict[str, Any]]:
         """
@@ -787,20 +1194,24 @@ class BiddingMomentumDetector:
 
     def update_scores(self, active_codes=None, force: bool = False, skip_evaluate: bool = False):
         """
-        主入口：计算个股分值并聚合板块。
-        active_codes: 如果提供，则执行增量更新 (O(Delta) 复杂度)，极度节省性能。
-        force: 是否强制全量计算 (通常用于每 5 分钟的全局对齐)。
-        skip_evaluate: 是否跳过个股评估阶段 (如果之前已执行过 _evaluate_code)。
+        主入口（启动器）：启动 Chunk Scheduler 状态机，不再做任何同步计算。
+        
+        改造说明（Chunk Scheduler 模式）：
+        - BEFORE: 5521 只代码在同一函数内同步循环，阻塞 3s+ → UI freeze
+        - AFTER:  本函数只做节流/跨日检测/codes 收集，随即启动状态机
+                  状态机每 10ms 推进 80 只，共 ~69 帧平滑分散到 0.6-1.5s
+        
+        active_codes: 如果提供，则执行增量更新 (O(Delta) 复杂度)。
+        force: 是否强制全量计算（全量扫描所有 _tick_series）。
+        skip_evaluate: 跳过评估阶段（兼容旧接口，直接触发 aggregate）。
         """
         # [THROTTLE] 节流：防止短时间内被 Worker 疯狂调用，释放 CPU
         now_ts = time.time()
         if not force and now_ts - getattr(self, '_last_update_ts', 0) < 0.3:
             return
         self._last_update_ts = now_ts
+
         # [FIX] 跨日重置必须在所有评估逻辑之前执行
-        # [NUITKA-FIX] 已移除冗余的 `import datetime` (line 800)
-        # Nuitka 编译器将函数内 import 视为局部变量绑定，导致 UnboundLocalError
-        # 模块级 import datetime (line 15) 已足够
         eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
         self._check_day_switch(eval_dt)
 
@@ -808,74 +1219,170 @@ class BiddingMomentumDetector:
         if self.in_history_mode and not force:
             return
 
-        if not skip_evaluate:
+        if skip_evaluate:
+            # 兼容旧接口：直接更新版本号并聚合
+            with self._lock:
+                self.data_version += 1
+            self._aggregate_sectors(active_codes=active_codes if not force else None)
+            return
+
+        # 👉 启动 Chunk Scheduler 状态机（异步分帧执行，不阻塞当前线程）
+        self.start_update_scores(active_codes=active_codes, force=force, eval_dt=eval_dt)
+
+    def start_update_scores(self, active_codes=None, force: bool = False, eval_dt=None):
+        """
+        [Chunk Scheduler] Step 1：收集待评估代码列表，初始化状态机，启动首帧调度。
+        防重入：若上一轮尚未完成，直接返回（不允许并行双路调度）。
+        """
+        with self._score_lock:
+            if self._score_active:
+                # 上一轮尚未完成，防止重入导致 codes 被覆盖
+                return
+
+            # ---- 在锁保护区内收集 codes（快速操作，≈ 0.5ms）----
             with self._lock:
                 if active_codes is not None and not force:
-                    # [INCREMENTAL] 增量模式：仅对当前变动的代码进行评估
+                    # [INCREMENTAL] 增量模式：过滤出有效且存在于 _tick_series 的 codes
                     all_codes = [c for c in active_codes if c in self._tick_series]
-                    
-                    # [NEW] ⚡ [PERF-CORE] 极其重要的过滤：不要每一轮都跑 5400+ 个代码
-                    # 1. 必选股：种子股、自选股、当前活跃板块个股
-                    # 2. 异动股：涨跌幅绝对值 > 1.5% 或 量比 > 2.0
-                    # 3. 冷门股：每 20 轮才全量扫描一次 (确保能发现新异动)
-                    
+
                     essential = set(self.stock_selector_seeds.keys()) | set(self.daily_watchlist.keys())
-                    # [🚀 FIX] 极其重要：当前活跃板块中的所有成员（龙头+跟随）都属于必选评估集
-                    # 否则它们在 UI 上的形态暗示（pattern_hint）会因为跳过评估而停止更新
                     for s_info in self.active_sectors.values():
                         if s_info.get('leader'): essential.add(s_info['leader'])
                         for f in s_info.get('followers', []):
                             if f.get('code'): essential.add(f['code'])
                         for rc in s_info.get('race_candidates', []):
                             if rc.get('code'): essential.add(rc['code'])
-                    
-                    scan_all = (getattr(self, '_full_scan_counter', 0) % 20 == 0)  # 略微提高全量扫描频率 (20->15)
+
+                    scan_all = (getattr(self, '_full_scan_counter', 0) % 60 == 0)  # 全量扫描降频至每 60 轮一次
                     self._full_scan_counter = getattr(self, '_full_scan_counter', 0) + 1
-                    
-                    target_codes = []
+
+                    codes = []
                     for code in all_codes:
                         if scan_all or (code in essential):
-                            target_codes.append(code)
+                            codes.append(code)
                             continue
-                        
                         ts = self._tick_series[code]
-                        # 异动检查：涨跌幅 > 1.5% 或 量比 > 2.0
                         if abs(ts.current_pct) > 1.5 or ts.vol_ratio > 2.0:
-                            target_codes.append(code)
-                    
-                    codes = target_codes
+                            codes.append(code)
                 else:
-                    # [FULL-SWEEP] 全量模式
+                    # [FULL-SWEEP] 强制全量扫描所有 tick_series
                     codes = list(self._tick_series.keys())
-                
-                # [PERF] 预计算锚点时间戳，避免在 5000 次循环内重复调用 datetime.fromtimestamp
+
+                # 预计算 09:30 锚点（全局共享，避免 5000 次重复 datetime 运算）
+                if eval_dt is None:
+                    eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
                 anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
                 self._today_anchor_930 = anchor_930
-                
-            # 🚀 [GIL-FIX] 终极调度升级：采用工业级 Chunk-based 任务分片调度模型 (方案 B/C 融合)
-            # 我们将 codes 每 50 个拆分为一个 chunk，密集算完 50 个后强行调用 time.sleep 释放 GIL。
-            # 这可以在编译成 C 的 Nuitka 独立打包环境下，极好地给 UI 线程和 Tk 事件循环让度 GIL。
-            now_hour = datetime.datetime.now().hour
-            sleep_time = 0.003 if (now_hour >= 15 or now_hour < 9) else 0.001
-            
-            chunk_size = 50
-            for i in range(0, len(codes), chunk_size):
-                chunk = codes[i : i + chunk_size]
-                for code in chunk:
-                    self._evaluate_code_unlocked(code, anchor_930=anchor_930)
-                
-                # [YIELD] 极其重要的物理线程上下文切换，强制释放并让度 GIL，确保 UI 线程心跳流畅！
-                # 在 Windows 下，sleep(0.001~0.003) 能带来确定且精准的线程调度切换
-                time.sleep(sleep_time)
 
-            with self._lock:
-                self.last_processed_count = len(codes)
+            # ---- 初始化状态机 ----
+            self._score_codes = codes
+            self._score_index = 0
+            self._score_anchor_930 = anchor_930
+            self._score_force = force
+            self._score_active_codes = active_codes  # 保留引用，供 _finish_score 传给 aggregate
+            self._score_active = True               # 🔥 状态机激活
+
+        # 启动首帧（在锁外调度，避免死锁）
+        self._schedule_score_step()
+
+    def _schedule_score_step(self):
+        """
+        [Chunk Scheduler] 调度下一帧（10ms 后）。
+        使用 threading.Timer 实现与 Tk/Qt 无关的通用调度，
+        适配 DataProcessWorker（QThread）后台线程环境。
+        """
+        # 取消上一个 timer（防止重复触发）
+        old = self._chunk_timer
+        if old is not None:
+            try: old.cancel()
+            except Exception: pass
+        t = threading.Timer(0.010, self._score_step)  # 10ms 一帧
+        t.daemon = True
+        t.name = "ScoreChunkTimer"
+        self._chunk_timer = t
+        t.start()
+
+    def _score_step(self):
+        """
+        [Chunk Scheduler] Step 2（核心帧执行器）：
+        每次执行 _score_chunk_size 只个股的评估，然后调度下一帧。
+        全程无锁执行，帧间 GIL 完全释放给 UI 线程。
+        """
+        if not self._score_active:
+            return
+
+        t0 = time.perf_counter()
+
+        start_idx = self._score_index
+        end_idx = min(start_idx + self._score_chunk_size, len(self._score_codes))
+        chunk = self._score_codes[start_idx:end_idx]
+
+        if not chunk:
+            self._finish_score()
+            return
+
+        t1 = time.perf_counter()
+
+        try:
+            for code in chunk:
+                self._evaluate_code_unlocked(code, anchor_930=self._score_anchor_930)
+        except Exception as e:
+            logger.warning(f"[ScoreChunk] error: {e}")
+
+        t2 = time.perf_counter()
+
+        self._score_index = end_idx
+        # [STREAMING] 标记本帧已评估的 codes 为舄（dirty），供 aggregate 增量定位受影响的 sector
+        self._sector_dirty_codes.update(chunk)
+
+        self._schedule_score_step()
+
+        t3 = time.perf_counter()
+
+        logger.debug(
+            f"[PROFILE] slice={t1-t0:.4f}s "
+            f"eval={t2-t1:.4f}s "
+            f"schedule={t3-t2:.4f}s "
+            f"chunk={len(chunk)}"
+        )
+        if (t2 - t1) > 0.030:
+            logger.warning(
+                f"[ScoreChunk][SLOW] chunk eval {len(chunk)} codes = {(t2-t1)*1000:.1f}ms "
+                f"idx={start_idx}-{end_idx}  thread={threading.current_thread().name}"
+            )
+
+    def _finish_score(self):
+        """
+        [Chunk Scheduler] Step 3（收尾）：
+        所有 chunk 评估完毕后，收集 dirty_codes 并调用 aggregate。
+        data_version 在此统一递增（_aggregate_sectors 不再递增）。
+        """
+        with self._score_lock:
+            self._score_active = False
+            processed_count = len(self._score_codes)
+            force_ref = self._score_force
+            # 收集本轮已评估的全部脏码，清空已用的脏集合
+            dirty_codes = self._sector_dirty_codes.copy()
+            self._sector_dirty_codes.clear()
 
         with self._lock:
-            self.data_version += 1 # 评分更新后递增版本号
-        
-        # 板块聚合逻辑
-        self._aggregate_sectors(active_codes=active_codes if not force else None)
+            self.last_processed_count = processed_count
+            self.data_version += 1  # ⚡ 统一在此递增
+
+        # ⚠️ aggregate 不再递增 data_version（传入 _from_scheduler=True）
+        _t_agg = time.perf_counter()
+        self._aggregate_sectors(
+            active_codes=dirty_codes if (dirty_codes and not force_ref) else None,
+            _from_scheduler=True
+        )
+        _agg_ms = (time.perf_counter() - _t_agg) * 1000
+        if _agg_ms > 100:
+            logger.warning(
+                f"[ScoreChunk][SLOW] aggregate {processed_count} codes = {_agg_ms:.1f}ms "
+                f"(dirty={len(dirty_codes)}, force={force_ref})"
+            )
+
+        logger.debug(f"[ScoreChunk] ✅ 完成评估 {processed_count} 只，dirty={len(dirty_codes)}, v={self.data_version}")
 
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
@@ -1327,146 +1834,185 @@ class BiddingMomentumDetector:
             logger.error(f"❌ Persistence save error: {e}")
 
     def load_persistent_data(self):
-        """从磁盘加载之前的会话数据 (多层级防御版)"""
+        """从磁盘加载之前的会话数据 (3阶段无阻塞版)"""
         path = self._get_persistence_path()
         if not os.path.exists(path): return
         
         try:
+            # Phase-0: 磁盘 IO + 解压 + JSON 解析，全程锁外
             with open(path, 'rb') as f:
-                data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
+                raw_data = f.read()
+            time.sleep(0)
+            json_str = zlib.decompress(raw_data).decode('utf-8')
+            del raw_data
+            time.sleep(0)
+            data = json.loads(json_str)
+            del json_str
+            time.sleep(0)
             
             file_date_str = data.get('data_date', '')
-            # now_dt = datetime.datetime.now()
-            # today_str = now_dt.strftime('%Y-%m-%d')
-            # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
             if cct.get_trade_date_status():
                 today_str = _datetime.now().strftime('%Y-%m-%d')
             else:
                 today_str = cct.get_last_trade_date()
             now_dt = datetime.datetime.strptime(today_str,"%Y-%m-%d")
             is_cross_day = (file_date_str != today_str)
+
+            # Phase-1: 锁外预构建临时容器
+            new_tick_series = {}
+            new_snap_cache = {}
+            new_active_sectors = data.get('sector_data', {})
+            new_sector_anchors = data.get('sector_anchors', {})
+            new_baseline_time = data.get('baseline_time', time.time())
+            new_last_data_ts = data.get('last_data_ts', 0.0)
+            new_stock_selector_seeds = data.get('stock_selector_seeds', {})
             
-            with self._lock:
-                # 1. 恢复基础得分与板块结构
-                stock_scores = data.get('stock_scores', {})
-                for code, score in stock_scores.items():
-                    # [🚀 SANITIZATION] 过滤无效代码
-                    if code == '000000' or len(code) != 6 or not code.isdigit():
-                        continue
-                    if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
-                    self._tick_series[code].score = score
-                
-                momentum_scores = data.get('momentum_scores', {})
-                for code, m_score in momentum_scores.items():
-                    if code in self._tick_series: self._tick_series[code].momentum_score = m_score
+            # Watchlist
+            new_daily_watchlist = {}
+            if not is_cross_day:
+                raw_watchlist = data.get('watchlist', {})
+                today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
+                for code, entry in raw_watchlist.items():
+                    if entry.get('trigger_ts', 0) >= today_midnight_ts: 
+                        new_daily_watchlist[code] = entry
+            
+            stock_scores = data.get('stock_scores', {})
+            momentum_scores = data.get('momentum_scores', {})
+            stock_anchors = data.get('stock_score_anchors', {})
+            stock_price_anchors = data.get('stock_price_anchors', {})
+            
+            meta_cols = data.get('meta_cols', {})
+            kline_payload_new = {}
+            kline_payload_legacy = {}
 
-                self.active_sectors = data.get('sector_data', {})
-                stock_anchors = data.get('stock_score_anchors', {})
-                for code, anchor in stock_anchors.items():
-                    if code in self._tick_series: self._tick_series[code].score_anchor = anchor
-                        
-                self.baseline_time = data.get('baseline_time', time.time())
-                self.sector_anchors = data.get('sector_anchors', {})
-                
-                # [🚀 FIX] 恢复最后数据时间戳，确保 UI 进度条连续
-                self.last_data_ts = data.get('last_data_ts', 0.0)
-                
-                stock_price_anchors = data.get('stock_price_anchors', {})
-                for code, p_anchor in stock_price_anchors.items():
-                    if code in self._tick_series: self._tick_series[code].price_anchor = p_anchor
+            if meta_cols and 'code' in meta_cols:
+                codes = meta_cols['code']
+                for i, code in enumerate(codes):
+                    if i % 200 == 0: time.sleep(0) # GIL yield
+                    if not code or code == '000000' or len(code) != 6 or not code.isdigit(): continue
                     
-                # 2. 跨日清理或同日恢复 Watchlist
-                if is_cross_day:
-                    logger.info(f"📅 [Detector] Cross-day load: Clearing signals, keeping meta.")
-                    self.daily_watchlist = {}
-                    self.active_sectors = {}
-                    self.sector_anchors = {}
-                    for ts in self._tick_series.values():
-                        ts.score = 0.0
-                        ts.momentum_score = 0.0
-                        ts.score_anchor = 0.0
-                        ts.first_breakout_ts = 0.0
-                        ts.klines.clear()
-                else:
-                    raw_watchlist = data.get('watchlist', {})
-                    today_midnight_ts = datetime.datetime.combine(now_dt.date(), datetime.time.min).timestamp()
-                    valid_watchlist = {}
-                    for code, entry in raw_watchlist.items():
-                        ts_entry = entry.get('trigger_ts', 0)
-                        if ts_entry >= today_midnight_ts: valid_watchlist[code] = entry
-                    self.daily_watchlist = valid_watchlist
-
-                # 3. 恢复核心 Meta 数据 (支持列式存储与旧版字典存储)
-                self.stock_selector_seeds = data.get('stock_selector_seeds', {})
-                meta_cols = data.get('meta_cols', {})
-                if meta_cols and 'code' in meta_cols:
-                    codes = meta_cols['code']
-                    for i, code in enumerate(codes):
-                        if not code or code == '000000' or len(code) != 6 or not code.isdigit():
-                            continue
-                        
-                        def _get(key, default):
-                            val = meta_cols.get(key, [])
-                            return val[i] if i < len(val) and val[i] is not None else default
-                        
-                        t_name = _get('n', code)
-                        # [🚀 SANITIZATION] 过滤空名字、占位名字
-                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
-                            continue
-
-                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
-                        ts = self._tick_series[code]
-                        ts.name = t_name
-                        ts.pattern_hint = _get('ph', ts.pattern_hint)
-                        ts.category = _get('c', ts.category)
-                        ts.last_close = _get('lc', ts.last_close)
-                        ts.open_price = _get('op', ts.open_price)
-                        ts.high_day = _get('hd', ts.high_day)
-                        ts.low_day = _get('ld', ts.low_day)
-                        ts.last_high = _get('lh', ts.last_high)
-                        ts.last_low = _get('ll', ts.last_low)
-                        ts.now_price = _get('np', ts.now_price)
+                    def _get(key, default, _mc=meta_cols, _i=i):
+                        val = _mc.get(key, [])
+                        return val[_i] if _i < len(val) and val[_i] is not None else default
+                    
+                    t_name = _get('n', code)
+                    if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]: continue
+                    
+                    ts = TickSeries(code)
+                    ts.name = t_name
+                    ts.score = stock_scores.get(code, _get('s', ts.score))
+                    ts.momentum_score = momentum_scores.get(code, 0.0)
+                    ts.score_anchor = stock_anchors.get(code, 0.0)
+                    ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                    
+                    if is_cross_day:
+                        ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                    else:
                         ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
-                        ts.score = _get('s', ts.score)
-                        ts.ral = _get('rl', ts.ral)
-                        ts.is_untradable = bool(_get('iu', ts.is_untradable))
-                        ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
-                        ts.racing_start_ts = _get('rs', ts.racing_start_ts)
-                        ts.signal_count = _get('sc', 0)
-                        
-                        # 重建 Snap 缓存供渲染
-                        self._global_snap_cache[code] = {
-                            'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
-                            'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
-                            'first_breakout_ts': ts.first_breakout_ts, 'klines': decompress_klines(_get('k', [])),
-                            'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
-                            'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
-                            'signal_count': ts.signal_count
-                        }
-                        
-                        klines_data = _get('k', None)
-                        if klines_data:
-                            ts.klines.clear()
-                            for k in decompress_klines(klines_data): ts.push_kline(k)
-                else:
-                    meta_data = data.get('meta_data', {})
-                    for code, m in meta_data.items():
-                        if not code or code == '000000' or len(code) != 6 or not code.isdigit():
-                            continue
-                        t_name = m.get('name', '')
-                        # [🚀 SANITIZATION] 过滤空名字、占位名字
-                        if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]:
-                            continue
-                        if code not in self._tick_series: self._tick_series[code] = TickSeries(code)
-                        ts = self._tick_series[code]
+
+                    ts.pattern_hint = _get('ph', ts.pattern_hint)
+                    ts.category = _get('c', ts.category)
+                    ts.last_close = _get('lc', ts.last_close)
+                    ts.open_price = _get('op', ts.open_price)
+                    ts.high_day = _get('hd', ts.high_day)
+                    ts.low_day = _get('ld', ts.low_day)
+                    ts.last_high = _get('lh', ts.last_high)
+                    ts.last_low = _get('ll', ts.last_low)
+                    ts.now_price = _get('np', ts.now_price)
+                    ts.ral = _get('rl', ts.ral)
+                    ts.is_untradable = bool(_get('iu', ts.is_untradable))
+                    ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
+                    ts.racing_start_ts = _get('rs', ts.racing_start_ts)
+                    ts.signal_count = _get('sc', 0)
+                    
+                    new_tick_series[code] = ts
+                    new_snap_cache[code] = {
+                        'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
+                        'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
+                        'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
+                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                        'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
+                        'signal_count': ts.signal_count
+                    }
+                    if not is_cross_day:
+                        kline_data = _get('k', None)
+                        if kline_data: kline_payload_new[code] = kline_data
+
+            else:
+                meta_data = data.get('meta_data', {})
+                i = 0
+                for code, m in meta_data.items():
+                    i += 1
+                    if i % 200 == 0: time.sleep(0)
+                    if not code or code == '000000' or len(code) != 6 or not code.isdigit(): continue
+                    t_name = m.get('name', '')
+                    if not t_name or str(t_name).strip() in ['', 'nan', 'NaN', 'None', 'null', 'δ֪', '未知', code]: continue
+                    
+                    ts = TickSeries(code)
+                    ts.name = t_name
+                    ts.score = stock_scores.get(code, m.get('score', ts.score))
+                    ts.momentum_score = momentum_scores.get(code, 0.0)
+                    ts.score_anchor = stock_anchors.get(code, 0.0)
+                    ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                    
+                    if is_cross_day:
+                        ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                    else:
                         ts.last_close = m.get('last_close', ts.last_close)
                         ts.open_price = m.get('open_price', ts.open_price)
                         ts.now_price = m.get('now_price', ts.now_price)
-                        ts.name = t_name
                         ts.category = m.get('category', ts.category)
-                        ts.score = m.get('score', ts.score)
-                        ts.klines.clear()
-                        for k in decompress_klines(m.get('klines', [])): ts.push_kline(k)
+                        kline_data = m.get('klines', [])
+                        if kline_data: kline_payload_legacy[code] = kline_data
+                    
+                    new_tick_series[code] = ts
+                    new_snap_cache[code] = {
+                        'code': code, 'name': ts.name, 'pct': round(ts.current_pct, 2), 'score': ts.score,
+                        'price': ts.now_price, 'last_close': ts.last_close, 'category': ts.category,
+                        'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
+                        'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
+                        'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
+                        'signal_count': ts.signal_count
+                    }
+
+            # Phase-2: 极短原子锁
+            with self._lock:
+                for code, ts in new_tick_series.items():
+                    if code not in self._tick_series:
+                        self._tick_series[code] = ts
+                    else:
+                        # Copy pre-computed fields back to existing instance
+                        existing_ts = self._tick_series[code]
+                        existing_ts.score = ts.score
+                        existing_ts.momentum_score = ts.momentum_score
+                        existing_ts.score_anchor = ts.score_anchor
+                        existing_ts.price_anchor = ts.price_anchor
+                        existing_ts.first_breakout_ts = ts.first_breakout_ts
+                        existing_ts.name = ts.name
+                        existing_ts.category = ts.category
+                        existing_ts.pattern_hint = ts.pattern_hint
+                        existing_ts.last_close = ts.last_close
+                        existing_ts.open_price = ts.open_price
+                        existing_ts.high_day = ts.high_day
+                        existing_ts.low_day = ts.low_day
+                        existing_ts.last_high = ts.last_high
+                        existing_ts.last_low = ts.last_low
+                        existing_ts.now_price = ts.now_price
+                        existing_ts.ral = ts.ral
+                        existing_ts.is_untradable = ts.is_untradable
+                        existing_ts.is_counter_trend = ts.is_counter_trend
+                        existing_ts.racing_start_ts = ts.racing_start_ts
+                        existing_ts.signal_count = ts.signal_count
+                        
+                for code, snap in new_snap_cache.items():
+                    self._global_snap_cache[code] = snap
+                
+                self.active_sectors = new_active_sectors if not is_cross_day else {}
+                self.sector_anchors = new_sector_anchors if not is_cross_day else {}
+                self.baseline_time = new_baseline_time
+                self.last_data_ts = new_last_data_ts
+                self.stock_selector_seeds = new_stock_selector_seeds
+                self.daily_watchlist = new_daily_watchlist
                 
                 self._last_data_date = today_str if is_cross_day else file_date_str
                 try:
@@ -1474,12 +2020,65 @@ class BiddingMomentumDetector:
                 except:
                     self._concept_data_date = now_dt.date()
                 
-                logger.info(f"♻️ [Detector] Session restored: {len(self._tick_series)} stocks, {len(self.active_sectors)} sectors")
+                self.data_version += 1 # Trigger UI refresh immediately
+            
+            logger.info(f"♻️ [Detector] Session restored (Phase 1&2): {len(new_tick_series)} stocks")
+            
+            # Phase-3: K线延迟恢复
+            if kline_payload_new:
+                threading.Thread(target=self._deferred_restore_klines, args=(kline_payload_new,), daemon=True).start()
+            if kline_payload_legacy:
+                threading.Thread(target=self._deferred_restore_klines_legacy, args=(kline_payload_legacy,), daemon=True).start()
+
         except Exception as e:
             logger.error(f"❌ [Detector] Session load failed: {e}")
+            import traceback
+            traceback.print_exc()
         
         self._gc_old_sectors()
         self._init_dragon_3day_tracker()
+
+    def _deferred_restore_klines(self, kline_payload_new: dict):
+        import time
+        time.sleep(0.5)
+        count = 0
+        for code, kline_data in kline_payload_new.items():
+            count += 1
+            if count % 50 == 0: time.sleep(0)
+            if not kline_data: continue
+            with self._lock:
+                ts = self._tick_series.get(code)
+            if not ts: continue
+            try:
+                klines = decompress_klines(kline_data)
+                ts.klines.clear()
+                for k in klines: ts.push_kline(k)
+                with self._lock:
+                    if code in self._global_snap_cache:
+                        self._global_snap_cache[code]['klines'] = klines
+            except Exception: pass
+        logger.info("[Detector] Deferred K-line restore (New) completed.")
+
+    def _deferred_restore_klines_legacy(self, kline_payload_legacy: dict):
+        import time
+        time.sleep(0.5)
+        count = 0
+        for code, kline_data in kline_payload_legacy.items():
+            count += 1
+            if count % 50 == 0: time.sleep(0)
+            if not kline_data: continue
+            with self._lock:
+                ts = self._tick_series.get(code)
+            if not ts: continue
+            try:
+                klines = decompress_klines(kline_data)
+                ts.klines.clear()
+                for k in klines: ts.push_kline(k)
+                with self._lock:
+                    if code in self._global_snap_cache:
+                        self._global_snap_cache[code]['klines'] = klines
+            except Exception: pass
+        logger.info("[Detector] Deferred K-line restore (Legacy) completed.")
 
     def load_from_snapshot(self, filepath: str) -> bool:
         """从指定的快照文件恢复数据，用于历史复盘 (原子替换版本)"""
@@ -1767,7 +2366,14 @@ class BiddingMomentumDetector:
     # ---- [SUPER] 龙头三日跟踪核心算法 ----
 
     def _init_dragon_3day_tracker(self):
-        """[SUPER] 启动时初始化三日跟踪逻辑：补齐前两日快照。支持在已有今日数据的情况下回溯补全。"""
+        """异步启动三日跟踪逻辑，避免阻塞启动流程"""
+        threading.Thread(target=self._init_dragon_3day_tracker_deferred, daemon=True).start()
+
+    def _init_dragon_3day_tracker_deferred(self):
+        """[SUPER] 启动时初始化三日跟踪逻辑：后台执行并 Yield GIL"""
+        import time
+        time.sleep(2.0) # 延迟2秒启动，让出启动高峰期
+        
         # [FIX] 如果已经完成初始化，或者历史记录中已经包含了 3 个不同日期的数据，跳过
         existing_dates = {d['date'] for d in self.dragon_3day_history}
         if self._dragon_init_done and len(existing_dates) >= 2:
@@ -1797,23 +2403,22 @@ class BiddingMomentumDetector:
             
             # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
             if cct.get_trade_date_status():
-                # [FIX] 统一使用 YYYYMMDD 格式，对齐文件名
                 today_str = datetime.datetime.now().strftime('%Y%m%d')
             else:
-                # [FIX] cct 返回通常带横杠，需统一剔除
                 today_str = cct.get_last_trade_date().replace('-', '')
             
             # 排除今日及未来日期，寻找历史交易日快照
             past_dates = [d for d in dates if d < today_str]
             
             # [UPGRADE] 1. 尝试从最近的一个快照中直接继承“完整多日历史”
-            # 这样可以瞬间恢复 10 日内的 base_price (最低价基准)，而无需逐一清洗
             if past_dates:
                 latest_f = os.path.join(snapshot_dir, f"bidding_{past_dates[0]}.json.gz")
                 try:
                     with open(latest_f, 'rb') as f: raw = f.read()
+                    time.sleep(0)
                     try: data = json.loads(zlib.decompress(raw).decode('utf-8'))
                     except: data = json.loads(gzip.decompress(raw).decode('utf-8'))
+                    time.sleep(0)
                     
                     history_in_snap = data.get('dragon_3day_history', [])
                     if history_in_snap:
@@ -1822,7 +2427,7 @@ class BiddingMomentumDetector:
                         if valid_history:
                             self.dragon_3day_history = valid_history
                             unique_days = {d['date'] for d in valid_history}
-                            if len(unique_days) >= 5:
+                            if len(unique_days) >= 3:
                                 logger.info(f"🐉 [DragonTracker] 成功从最近快照继承 {len(unique_days)} 日完整历史")
                                 self._dragon_init_done = True
                                 return
@@ -1831,11 +2436,12 @@ class BiddingMomentumDetector:
 
             # 2. 如果继承失败或数据不足，回退到逐个快照清洗逻辑 (Scavenge)
             new_history = []
-            for d_str in reversed(past_dates[:15]): # 从旧到新排列，最多追溯 15 个交易日
+            for d_str in reversed(past_dates[:5]): # 从旧到新排列，最多追溯 5 个交易日
                 f_path = os.path.join(snapshot_dir, f"bidding_{d_str}.json.gz")
                 leaders = self._scavenge_top2_from_snapshot(f_path, d_str)
                 if leaders:
                     new_history.extend(leaders)
+                time.sleep(0.005) # 【关键优化】每加载完一天历史数据，强制 yield 避免连续阻塞
             
             if new_history:
                 # 简单去重合并
@@ -1843,7 +2449,7 @@ class BiddingMomentumDetector:
                 for d in new_history:
                     existing[(d['date'], d['code'])] = d
                 self.dragon_3day_history = sorted(list(existing.values()), key=lambda x: x['date'], reverse=True)
-                logger.info(f"🐉 [DragonTracker] 补齐完成，当前追踪库共 {len(self.dragon_3day_history)} 条记录")
+                logger.info(f"🐉 [DragonTracker] 后台补齐完成，当前追踪库共 {len(self.dragon_3day_history)} 条记录")
             
             self._dragon_init_done = True
         except Exception as e:
@@ -2702,10 +3308,11 @@ class BiddingMomentumDetector:
     # =========================================================
 
 
-    def _aggregate_sectors(self, active_codes=None):
+    def _aggregate_sectors(self, active_codes=None, _from_scheduler: bool = False):
         """
         将高分个股聚合到板块，找龙头和跟随股。
-        active_codes: 如果提供，则只更新受这些个股影响的板块。
+        active_codes: 如果提供，则只更新受这些个股影响的板块（增量模式）。
+        _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
         target_sectors = None
         
@@ -2717,6 +3324,10 @@ class BiddingMomentumDetector:
                 codes_to_process = list(self._tick_series.keys())
 
             # 1. 更新 snap 缓存
+            # [PERF] 同步增量维护 market_avg_pct：在此循环内顺带累计 pct，
+            # 避免后续再做一次 O(N) 全量遍历。
+            _pct_sum_delta = 0.0
+            _pct_count_delta = 0
             for code in codes_to_process:
                 ts = self._tick_series.get(code)
                 if ts:
@@ -2751,7 +3362,9 @@ class BiddingMomentumDetector:
                         'total_amount': ts.total_amount,
                     }
                     self._global_snap_cache[code] = data
-                    
+                    _pct_sum_delta += ts.current_pct
+                    _pct_count_delta += 1
+
                     # 2. 同步更新增量分组 (持久化)
                     cats = ts.get_splitted_cats()
                     if target_sectors is not None:
@@ -2764,23 +3377,45 @@ class BiddingMomentumDetector:
                         for cat in cats:
                             if code in self._sector_active_stocks_persistent.get(cat, {}):
                                 del self._sector_active_stocks_persistent[cat][code]
+
+            # [PERF] 更新增量均价缓存（避免后续再 O(N) 遍历全量 snap）
+            if _pct_count_delta > 0:
+                # 用 EMA 平滑：旧值 * 0.8 + 新增量均值 * 0.2（降低噪声）
+                _old_avg = getattr(self, '_cached_market_avg_pct', 0.0)
+                _new_sample = _pct_sum_delta / _pct_count_delta
+                self._cached_market_avg_pct = _old_avg * 0.8 + _new_sample * 0.2
+                self._cached_market_avg_count = max(1, getattr(self, '_cached_market_avg_count', 0) + _pct_count_delta)
             
         # [P1-OPT] 预算 today_anchor_930 （全函数只算一次 datetime 对象）
         _now = datetime.datetime.now()
         today_anchor_930 = _now.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
 
-        # [P1-OPT] 市场均价增量维护：在 snap 构建循环中已计算，替代 O(N) 全量求和
+        # [PERF-FIX] 市场均价：废弃全量 dict(snap) 拷贝（5500只×dict = O(N) 炸弹）。
+        # 改为：若是增量模式只取本轮 active_codes 的 pct 平均，全量模式才遍历缓存。
         market_avg_pct = 0.0
         with self._lock:
-            # [FIX] 改为浅拷贝，避免锁外遍历时被其他线程并发写入导致竞态
-            snap = dict(self._global_snap_cache)
-            if snap:
-                _pct_total = 0.0
-                _pct_count = len(snap)
-                for _x in snap.values():
-                    _pct_total += _x['pct']
-                market_avg_pct = _pct_total / _pct_count if _pct_count > 0 else 0.0
-                self.last_market_avg = market_avg_pct
+            # ① 局部 snap：仅包含本次 aggregate 需要更新的 codes（active_codes），
+            #    供后续 watchlist / sector 计算使用，避免全量 5500 只拷贝。
+            if active_codes is not None:
+                # 增量模式：只拷贝本轮处理的 codes + 已持久化的龙头相关 codes
+                relevant = set(active_codes)
+                for _s in self.active_sectors.values():
+                    if _s.get('leader'): relevant.add(_s['leader'])
+                    for _rc in _s.get('race_candidates', []): relevant.add(_rc.get('code', ''))
+                snap = {c: v for c, v in self._global_snap_cache.items() if c in relevant}
+            else:
+                # 全量模式：必须全量拷贝（供 sector 完整计算）
+                snap = dict(self._global_snap_cache)
+
+            # 市场均价：直接从缓存的 pct 字段增量读取，不再为此做额外全量遍历
+            _cached_avg = getattr(self, '_cached_market_avg_pct', 0.0)
+            _cached_count = getattr(self, '_cached_market_avg_count', 0)
+            if _cached_count > 0:
+                market_avg_pct = _cached_avg
+            elif snap:
+                _pt = sum(_x['pct'] for _x in snap.values())
+                market_avg_pct = _pt / len(snap)
+            self.last_market_avg = market_avg_pct
 
         now_dt = datetime.datetime.now()
         today = now_dt.date()
@@ -3168,10 +3803,13 @@ class BiddingMomentumDetector:
 
         with self._lock:
             self.active_sectors = new_active
-            self.data_version += 1
+            # [FIX] 当由 _finish_score 调用时 data_version 已经在外部递增，此处不再重复递增。
+            # 当外部直接调用（skip_evaluate 或其他路径）时才递增。
+            if not _from_scheduler:
+                self.data_version += 1
             
         # [DEBUG] 打印高评分但被过滤的板块（辅助诊断为何板块缺失）
-        if logger.isEnabledFor(logging.DEBUG) and skipped_reasons:
+        if logger.isEnabledFor(LoggerFactory.DEBUG) and skipped_reasons:
             interesting = {s: r for s, r in skipped_reasons.items() if "low_board_score" in r and float(r.split('(')[1].split(' ')[0]) > 3.0}
             if interesting:
                 logger.debug(f"ℹ️ [Detector] Potential High-score Sectors filtered: {interesting}")

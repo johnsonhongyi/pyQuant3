@@ -3545,8 +3545,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if not code: return
         
         # ⚡ [NEW] 更新用户交互时间，防止语音播报立即强行滚回
-        import time as _time
-        self._last_ui_interaction_time = _time.time()
+        self._last_ui_interaction_time = time.time()
         
         # 保存信号上下文
         self.active_signal_context = {
@@ -3723,7 +3722,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
             # ⚡ [FIX] 信号去重：同一股票同一信号类型 5 秒内不重复推送
-            import time
             dedup_key = f"{code}_{pattern}"
             if not hasattr(self, '_signal_dedup_cache'):
                 self._signal_dedup_cache = {}
@@ -3907,7 +3905,6 @@ class MainWindow(QMainWindow, WindowMixin):
             speak_msg = message.strip() if message else ''
             
             # 仅去除可能残留的 (N次) 前缀和开头冒号/空白
-            import re
             speak_msg = re.sub(r'^\(\d+次\)\s*', '', speak_msg).strip()
             speak_msg = re.sub(r'^[：:\s]+', '', speak_msg).strip()
 
@@ -3950,16 +3947,14 @@ class MainWindow(QMainWindow, WindowMixin):
                     snippet = meta.get('snippet')
                     if code and hasattr(self, 'signal_log_panel'):
                         # ⭐ [UI LINKAGE LOCK] 用户交互锁定：如果用户刚才点击或滚动过，暂不强行同步
-                        import time as _time
-                        man_diff = _time.time() - getattr(self, '_last_ui_interaction_time', 0)
+                        man_diff = time.time() - getattr(self, '_last_ui_interaction_time', 0)
                         
                         # 联动 1: 日志面板自动定位与高亮 (仅在用户超过 3.0 秒未交互时自动滚动)
                         self.signal_log_panel.highlight_row_by_content(code, snippet, force_scroll=(man_diff > 3.0))
 
                     # 联动 2: 实现自发联动标记 (从 _poll_command_queue 整合至此)
                     if code:
-                        import re as _re
-                        clean_target_code = _re.sub(r'[^\d]', '', str(code)).zfill(6)
+                        clean_target_code = re.sub(r'[^\d]', '', str(code)).zfill(6)
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         self.active_time_linkage = {
                             'code': clean_target_code,
@@ -3978,8 +3973,7 @@ class MainWindow(QMainWindow, WindowMixin):
         """处理信号日志面板的用户交互回调"""
         # 仅处理非程序性选择 (即真实用户操作)
         if hasattr(self, 'signal_log_panel') and not getattr(self.signal_log_panel, '_is_programmatic_selection', False):
-            import time as _time
-            self._last_ui_interaction_time = _time.time()
+            self._last_ui_interaction_time = time.time()
             # logger.debug("👤 User interaction detected in signal log, locking auto-scroll for 5s")
 
     def process_ipc_command(self, cmd_str: str):
@@ -5320,7 +5314,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_search_input_right_click(self, pos):
         """搜索框右键菜单：自动粘贴并智能提取代码或名称"""
-        import re
         
         # 获取剪贴板内容
         clipboard = QApplication.clipboard()
@@ -5364,7 +5357,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_cat_filter_right_click(self, pos):
         """板块过滤框右键：自动粘贴剪贴板内容并智能格式化为 category.str.contains("xxx") 查询"""
-        import re as _re
         clipboard = QApplication.clipboard()
         text = clipboard.text().strip()
         if not text:
@@ -5376,7 +5368,7 @@ class MainWindow(QMainWindow, WindowMixin):
             fmt = f'index.str.contains("^{text}")'
         else:
             # 提取第一个中文词（允许混合英文/数字）
-            matches = _re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
+            matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
             if matches:
                 # fmt = matches[0]
                 fmt = f'category.str.contains("{matches[0]}")'
@@ -5578,7 +5570,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._spoken_cache = set()
                 self._last_spoken_clean_time = 0
             
-            import time
             now = time.time()
             if now - self._last_spoken_clean_time > 300: # 每5分钟清理一次缓存
                 self._spoken_cache.clear()
@@ -6989,7 +6980,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def on_realtime_update(self, code, tick_df, today_bar, skip_render=False):
         """实时更新（高水位保护合并策略）"""
-        import time 
         now_ts = time.time()
         
         # 0. ⚡ 缓存新鲜度校验
@@ -8078,7 +8068,6 @@ class MainWindow(QMainWindow, WindowMixin):
         3. [快门刷新] 开启 UpdatesEnabled(True) -> update() -> False 循环。
         4. [脏检测] 仅在数据真实变化时触发 UI 设置（setData）。
         """
-        import time
         n_rows = len(df)
         
         if not hasattr(self, '_chunk_seq'): self._chunk_seq = 0
@@ -8642,7 +8631,6 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         # 简单的频率控制 (每5秒最多一次播报)
-        import time
         now = time.time()
         if not hasattr(self, '_last_alert_time'):
             self._last_alert_time = 0
@@ -8738,7 +8726,6 @@ class MainWindow(QMainWindow, WindowMixin):
                            (m_type == 'UPDATE_DF_DATA' and actual_type == 'UPDATE_DF_ALL'))
             
             if is_full_sync:
-                import time
                 now = time.time()
                 # ⚡ [CRITICAL] 防重复：如果正在处理或距离上次同步不到2秒，忽略
                 if self._is_processing_full_sync:
@@ -8829,7 +8816,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if msg_type == "UPDATE_DF_ALL":
             # 同样应用防重复逻辑
-            import time
             now = time.time()
             if self._is_processing_full_sync or (now - self._last_full_sync_time < 2.0):
                 logger.warning(f"[IPC] Ignoring duplicate UPDATE_DF_ALL")
@@ -9051,7 +9037,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.df_all is None or self.df_all.empty:
             return
             
-        import time
         now = time.time()
         
         # 确保最小间隔
@@ -9091,7 +9076,6 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             self._pending_changed_codes.add("ALL")
             
-        import time
         now = time.time()
         
         # ⚡ [OPTIMIZATION] 针对 5000+ 行的大数据列表，强行拉长刷新间隔
@@ -12516,7 +12500,6 @@ class MainWindow(QMainWindow, WindowMixin):
         - 支持列、颜色标记、图标
         - 左对齐、紧凑列宽、水平滚动
         """
-        import time
         prep_start = time.time()
         self.filter_tree.clear()
 
@@ -13800,7 +13783,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ [ROOT-FIX] 终极刹车：使用 os._exit(0) 强制物理退出进程
         # 彻底解决 pyttsx3/COM 句柄残留或 QThread 销毁异常导致的进程退出异常
         # 替换原来的 sys.exit(0) 以避免 SystemExit 异常穿透 PyQt/C++ 导致 access violation 崩溃
-        import os
         os._exit(0)
 
     # # ================== 热点自选面板回调 ==================

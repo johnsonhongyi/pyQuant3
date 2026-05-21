@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 import pandas as pd
+import re
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
 from JohnsonUtil import LoggerFactory
@@ -287,7 +288,6 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
                 # The first two columns should be code and name in all three tables
                 c = str(vals[0]).strip().zfill(6)
                 n = str(vals[1]).strip()
-                import re
                 c = re.sub(r'[^\d]', '', c)
                 if c and c != "N/A":
                     code_to_name[c] = n

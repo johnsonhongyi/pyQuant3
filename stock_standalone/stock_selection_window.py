@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import os
 import json
+import re
 from datetime import datetime
 import threading
 import queue
@@ -1157,7 +1158,6 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         vals = tree.item(item_id, "values")
         if vals:
             c = str(vals[0]).strip()
-            import re
             c = re.sub(r'[^\d]', '', c).zfill(6)
             if c:
                 code = c
@@ -1251,7 +1251,6 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             vals = tree.item(it, "values")
             if vals and len(vals) > idx_code:
                 c = str(vals[idx_code]).strip()
-                import re
                 c = re.sub(r'[^\d]', '', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
