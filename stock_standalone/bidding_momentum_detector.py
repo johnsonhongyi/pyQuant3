@@ -458,8 +458,14 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                 if cct.get_trade_date_status():
                     today_str = datetime.datetime.now().strftime('%Y-%m-%d')
                 else:
-                    today_str = cct.get_last_trade_date().replace('-', '')
-                now_dt = datetime.datetime.strptime(today_str, '%Y-%m-%d')
+                    today_str = cct.get_last_trade_date()
+                    if today_str and '-' not in today_str and len(today_str) == 8:
+                        today_str = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}"
+                
+                if '-' in today_str:
+                    now_dt = datetime.datetime.strptime(today_str, '%Y-%m-%d')
+                else:
+                    now_dt = datetime.datetime.strptime(today_str, '%Y%m%d')
                 is_cross_day = (file_date_str != today_str)
 
                 result['active_sectors'] = data.get('sector_data', {})
@@ -770,7 +776,8 @@ class BiddingMomentumDetector:
         # [STREAMING] dirty-set：记录本轮已评估的 codes，供 aggregate 做增量 sector 定位
         self._sector_dirty_codes: set = set()       # 脏码集合（仅在 _score_step 写入，aggregate 消费后清空）
         
-
+        # [NEW] 异步分片打分完成后，通知外部 UI 刷新界面的高级回调
+        self.on_score_finished = None
 
         self._subscribe_queue = Queue()
         self._sector_update_queue = Queue()
@@ -1041,12 +1048,16 @@ class BiddingMomentumDetector:
         🚀 ULTRA FAST VERSION (UI NON-BLOCKING)
         - 不做任何 IO
         - 不做 subscribe
-        - 不做 sector rebuild
+        - 不做 sector rebuild (通过冷启动单次 rebuild 触发)
         - 只做内存 tick_series 更新 + enqueue
         """
 
         if self.in_history_mode or df_all is None or df_all.empty:
             return
+
+        # [NEW] 在冷启动或当 sector_map 为空时，自动仅 rebuild 一次，以保障板块聚合可用性
+        if not self.in_history_mode and (not self.sector_map or len(self.sector_map) == 0):
+            self._rebuild_sector_map(df_all)
 
         # ⚡ 轻量 copy（避免 pandas 跨线程风险）
         df = df_all.copy()
@@ -1383,6 +1394,13 @@ class BiddingMomentumDetector:
             )
 
         logger.debug(f"[ScoreChunk] ✅ 完成评估 {processed_count} 只，dirty={len(dirty_codes)}, v={self.data_version}")
+
+        # 👉 [NEW] 打分全部完成后，触发回调通知外部 UI 统一更新
+        if hasattr(self, 'on_score_finished') and self.on_score_finished:
+            try:
+                self.on_score_finished()
+            except Exception as e:
+                logger.warning(f"[ScoreChunk] Failed to trigger on_score_finished: {e}")
 
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
@@ -3386,6 +3404,20 @@ class BiddingMomentumDetector:
                 self._cached_market_avg_pct = _old_avg * 0.8 + _new_sample * 0.2
                 self._cached_market_avg_count = max(1, getattr(self, '_cached_market_avg_count', 0) + _pct_count_delta)
             
+            # 🔬 [Detector-Diag] 开启临时详细诊断以抓取白屏硬伤
+            _scores = [ts.score for ts in self._tick_series.values()]
+            _max_score = max(_scores) if _scores else 0.0
+            _above_threshold = sum(1 for s in _scores if s >= self.score_threshold)
+            _above_05 = sum(1 for s in _scores if s >= 0.5)
+            logger.warning(
+                f"🔬 [Detector-Diag] TickSeries: {len(self._tick_series)} | "
+                f"Max Score: {_max_score:.2f} | "
+                f"Score>={self.score_threshold}: {_above_threshold} | "
+                f"Score>=0.5: {_above_05} | "
+                f"Persistent Sectors: {len(self._sector_active_stocks_persistent)} | "
+                f"Sample Keys: {list(self._sector_active_stocks_persistent.keys())[:10]}"
+            )
+            
         # [P1-OPT] 预算 today_anchor_930 （全函数只算一次 datetime 对象）
         _now = datetime.datetime.now()
         today_anchor_930 = _now.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
@@ -3813,6 +3845,14 @@ class BiddingMomentumDetector:
             interesting = {s: r for s, r in skipped_reasons.items() if "low_board_score" in r and float(r.split('(')[1].split(' ')[0]) > 3.0}
             if interesting:
                 logger.debug(f"ℹ️ [Detector] Potential High-score Sectors filtered: {interesting}")
+
+        # 🔬 [Detector-Diag] 最终生成的活跃板块列表诊断
+        logger.warning(
+            f"🔬 [Detector-Diag-End] Final Active Sectors: {len(self.active_sectors)} | "
+            f"Active Sector Names: {list(self.active_sectors.keys())[:10]} | "
+            f"Skipped Sectors count: {len(skipped_reasons)} | "
+            f"Skipped Sample: {list(skipped_reasons.items())[:5]}"
+        )
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
