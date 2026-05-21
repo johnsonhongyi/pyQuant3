@@ -14,6 +14,7 @@ import logging
 import time
 import os
 import json
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -606,7 +607,6 @@ class SignalLogPanel(QWidget, WindowMixin):
         now_str = datetime.now().strftime("%H:%M:%S")
 
         # 4. 内容去重处理 (移除重复的时间、名称、代码)
-        import re
         clean_msg = message
         # (1) 移除时间戳前缀 [HH:MM:SS]
         clean_msg = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', clean_msg)
@@ -780,11 +780,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         """
         # [MOD] 把注释的改成开关判断打开就继续联动
         # self._is_programmatic_selection = False
-        import re as _re
         try:
             # 1. 快速查找所有匹配代码的项
             # ⚡ [ENHANCED] 更加鲁棒的代码匹配：先尝试精确匹配，失败则尝试模糊匹配，并对 code 进行标准化
-            clean_code = _re.sub(r'[^\d]', '', code).zfill(6) if code else ""
+            clean_code = re.sub(r'[^\d]', '', code).zfill(6) if code else ""
             
             items = self.log_table.findItems(code, Qt.MatchFlag.MatchExactly)
             if not items and clean_code:

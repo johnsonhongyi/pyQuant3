@@ -531,8 +531,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         
         # [NEW] 更新状态栏时间
         if hasattr(self, 'lbl_status'):
-            import datetime
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            now_str = datetime.now().strftime("%H:%M:%S")
             interval = getattr(self, 'refresh_interval', 0)
             if interval > 0:
                 self.lbl_status.setText(f"🔄 {interval}s | {now_str}")

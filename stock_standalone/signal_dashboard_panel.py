@@ -7,6 +7,9 @@ SignalDashboardPanel - 策略信号分类仪表盘
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger(__name__)
+import sys
+import re
+import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Any
 
@@ -765,6 +768,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._BRUSH_PRESET["transparent"] = QBrush(QColor(0, 0, 0, 0))
         self._BRUSH_PRESET["gold_bg"] = QBrush(QColor(100, 80, 0, 100))
         self._BRUSH_PRESET["alert_bg"] = QBrush(QColor("#4B0082"))
+        self._BRUSH_PRESET["highlight_bg"] = QBrush(QColor(255, 127, 80, 50))
         
         # [NEW] 排序防抖定时器
         self._sort_timer = QTimer(self)
@@ -2071,7 +2075,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         details = metadata.get('details', [])
         
         if not codes:
-            import re
             codes = re.findall(r'\d{6}', alert.get('content', ''))
             
         if not codes: return
@@ -2143,7 +2146,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         if not codes: 
             # 如果没有 codes，尝试从 content 中提取
-            import re
             codes = re.findall(r'\d{6}', alert.get('content', ''))
             
         if not codes: return
@@ -2854,7 +2856,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         append_start = time.perf_counter()
         pattern = payload.get('pattern', payload.get('subtype', 'ALERT'))
         detail = payload.get('detail', payload.get('message', ''))
-        import pandas as pd
         score = payload.get('score', 0.0)
         if pd.isna(score) or score is None:
             score = 0.0
@@ -2882,18 +2883,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if append_dur > 150:
             logger.debug(f"⚠️ [DASHBOARD_PERF] _append_to_tables cost {append_dur:.1f}ms for {code} (matches={matched_cats})")
 
-    def _get_item_color(self, pattern, detail, grade=""):
-        _cl = self._colors
-        # 优先处理极高级别信号的背景/前景色
+    def _get_pattern_color(self, pattern, detail, grade=""):
         if grade == "极高":
-            if "⚠️" in pattern or "SELL" in pattern or "破位" in detail: return _cl["#ff00ff"] # 品红色警告
-            return _cl["#FFD700"]
+            if "⚠️" in pattern or "SELL" in pattern or "破位" in detail: 
+                return "#ff00ff"
+            return "#FFD700"
             
-        if "[重点]" in detail or "[重点]" in pattern: return _cl["#FFD700"] # 亮金色
-        if "SELL" in pattern or "风险" in detail or "破位" in detail: return _cl["#00ff00"] # 绿色风险
-        if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): return _cl["#ff4444"]
-        if "跟单" in detail: return _cl["#FFD700"]
-        return _cl["#ffffff"]
+        if "[重点]" in detail or "[重点]" in pattern: 
+            return "#FFD700"
+        if "SELL" in pattern or "风险" in detail or "破位" in detail: 
+            return "#00ff00"
+        if "BUY" in pattern or "突破" in detail or any(kw in detail for kw in ["上涨", "反转", "抢筹"]): 
+            return "#ff4444"
+        if "跟单" in detail: 
+            return "#FFD700"
+        return "#ffffff"
+
+    def _get_item_color(self, pattern, detail, grade=""):
+        color_str = self._get_pattern_color(pattern, detail, grade)
+        return self._colors.get(color_str, self._colors["#ffffff"])
 
     def _insert_row(self, table, time_str, code, name, pattern, detail, count, score, grade='', payload=None):
         insert_start = time.perf_counter()
@@ -3046,6 +3054,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.blockSignals(True)
             table.setSortingEnabled(False)
             table.setRowCount(0) # 物理清空
+            self._row_cache[table] = {} # 物理清理旧缓存
             
         try:
             # 2. 批量归类（内存操作，亚毫秒级）
@@ -3115,42 +3124,82 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         pattern = p.get('pattern', '')
         detail = p.get('detail', p.get('message', ''))
         grade = p.get('grade', '')
-        price = p.get('price', 0.0)
         score = p.get('score', 0.0)
-        
-        # 1. 基础文本列
-        self._fast_update_cell(table, row_idx, 0, time_str)
-        self._fast_update_cell(table, row_idx, 1, code, bold=True)
-        
-        # 2. 名称列（带报警图标）
+        if pd.isna(score) or score is None:
+            score = 0.0
+
+        # 获取次数统计和报警状态
+        count = self._stock_stats.get(code, {}).get("count", 1)
         is_alerted = get_alert_manager().is_alerted(code)
         display_name = f"🔔{name}" if is_alerted else name
-        self._fast_update_cell(table, row_idx, 2, display_name)
-        
-        # 3. 形态与详情
+
+        # 转换中文化形态/信号展示
         display_pattern = pattern
         for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
             if any(kw.lower() in pattern.lower() for kw in keywords):
                 display_pattern = SIGNAL_TYPE_MAP.get(eng_key, pattern)
                 break
-        self._fast_update_cell(table, row_idx, 3, display_pattern)
+
+        # 判断高亮和前景色
+        is_highlight = "[重点]" in detail or "[重点]" in pattern
+        default_color_key = self._get_pattern_color(pattern, detail, grade)
         
-        # 详情列带变色
-        row_color = self._get_pattern_color(pattern, detail)
-        self._fast_update_cell(table, row_idx, 4, detail, color_key=row_color)
-        
-        # 4. 价格与评分
-        self._fast_update_cell(table, row_idx, 5, f"{price:.2f}")
-        self._fast_update_cell(table, row_idx, 6, f"{score:.1f}")
-        
-        # 5. 等级列
-        self._fast_update_cell(table, row_idx, 7, grade)
+        # 确定常规列的前景色和背景色
+        if is_alerted:
+            cur_color_key = "#ffffff"
+            cur_bg_key = "alert_bg"
+        else:
+            cur_color_key = default_color_key
+            cur_bg_key = "highlight_bg" if is_highlight else None
+
+        # 0. 时间
+        self._fast_update_cell(table, row_idx, 0, time_str, color_key=cur_color_key, bg_key=cur_bg_key)
+
+        # 1. 评级
+        grade_bg = "alert_bg" if is_alerted else ("highlight_bg" if is_highlight else None)
         if grade in ['S', 'A']:
-            color = "#ff0000" if grade == 'S' else "#ffaa00"
-            it = table.item(row_idx, 7)
-            if it:
-                it.setForeground(self._brushes.get(color, QBrush(QColor(color))))
-                f = it.font(); f.setBold(True); it.setFont(f)
+            grade_color = "#ff0000" if grade == 'S' else "#ffaa00"
+            self._fast_update_cell(table, row_idx, 1, grade, color_key=grade_color, bold=True, bg_key=grade_bg)
+        else:
+            self._fast_update_cell(table, row_idx, 1, grade, bg_key=grade_bg)
+
+        # 2. 代码 (预计算 search_blob)
+        sector = p.get('sector', '')
+        search_blob = f"{code} {name} {display_pattern} {detail} {sector}".lower()
+        
+        self._fast_update_cell(table, row_idx, 2, code, bold=True, color_key=cur_color_key, bg_key=cur_bg_key)
+        it2 = table.item(row_idx, 2)
+        if it2:
+            it2.setData(self._ROLE_SEARCH_BLOB, search_blob)
+            
+            # 更新缓存
+            table_cache = self._row_cache.setdefault(table, {})
+            table_cache[code] = {
+                'item': it2,
+                'search_blob': search_blob,
+                'pattern_raw': pattern
+            }
+
+        # 3. 名称
+        self._fast_update_cell(table, row_idx, 3, display_name, bold=is_highlight, color_key=cur_color_key, bg_key=cur_bg_key)
+        it3 = table.item(row_idx, 3)
+        if it3:
+            it3.setData(Qt.ItemDataRole.UserRole, sector)
+
+        # 4. 形态与信号
+        self._fast_update_cell(table, row_idx, 4, display_pattern, color_key=cur_color_key, bg_key=cur_bg_key)
+        it4 = table.item(row_idx, 4)
+        if it4:
+            it4.setData(Qt.ItemDataRole.UserRole, pattern)
+
+        # 5. 详情
+        self._fast_update_cell(table, row_idx, 5, detail, color_key=cur_color_key, bg_key=cur_bg_key)
+
+        # 6. 次数
+        self._fast_update_cell(table, row_idx, 6, str(count), color_key=cur_color_key, bg_key=cur_bg_key, numeric_val=count)
+
+        # 7. 得分
+        self._fast_update_cell(table, row_idx, 7, str(int(score)), color_key=cur_color_key, bg_key=cur_bg_key, numeric_val=int(score))
 
     def _update_stats_display(self):
         total = len(self._all_events)
@@ -3921,11 +3970,34 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     content = f.read()
             except UnicodeDecodeError:
                 logger.warning(f"⚠️ [Dashboard] Alert history encoding issue, falling back to GBK...")
-                with open(path, 'r', encoding='gbk', errors='ignore') as f:
-                    content = f.read()
+                try:
+                    with open(path, 'r', encoding='gbk', errors='ignore') as f:
+                        content = f.read()
+                except Exception as gbk_err:
+                    logger.error(f"❌ [Dashboard] Failed to read alert history with GBK fallback: {gbk_err}")
             
             if content:
-                history = json.loads(content)
+                try:
+                    history = json.loads(content)
+                except json.JSONDecodeError as jde:
+                    logger.error(f"❌ [Dashboard] Alert history JSON corrupted: {jde}. Backing up and resetting...")
+                    bak_path = path + ".bak"
+                    try:
+                        import shutil
+                        if os.path.exists(bak_path):
+                            os.remove(bak_path)
+                        shutil.copy2(path, bak_path)
+                        logger.info(f"💾 [Dashboard] Corrupted alert history backed up to {bak_path}")
+                    except Exception as backup_err:
+                        logger.error(f"⚠️ [Dashboard] Failed to backup corrupted alert history: {backup_err}")
+                    
+                    try:
+                        os.remove(path)
+                        logger.info(f"🧹 [Dashboard] Removed corrupted alert history file to force self-healing.")
+                    except Exception as rm_err:
+                        logger.error(f"⚠️ [Dashboard] Failed to remove corrupted alert history: {rm_err}")
+                    history = []
+                
                 if isinstance(history, list):
                     # [FIX] 启动时物理去重：仅保留每个事件（内容+个股）的最顶层记录
                     unique_alerts = []
@@ -3946,18 +4018,33 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.error(f"❌ [Dashboard] Failed to load alert history: {e}")
 
     def _save_alert_history(self):
-        """[DATA] 将当前预警持久化到磁盘"""
+        """[DATA] 将当前预警持久化到磁盘 (原子替换写盘，保障文件不损坏)"""
         path = self._get_history_file_path()
+        tmp_path = path + ".tmp"
         try:
             # [FIX] 只保存最近 500 条 (Newest at front)
             to_save = self._hub_alerts[:500]
-            with open(path, 'w', encoding='utf-8') as f:
+            # 先写入临时文件，确保中途被切断时原文件完好无损
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(to_save, f, ensure_ascii=False, indent=2)
+            
+            # Windows 原子替换文件路径
+            if os.path.exists(tmp_path):
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception as rm_old_err:
+                        logger.warning(f"⚠️ [Dashboard] Failed to remove old alert history during atomic swap: {rm_old_err}")
+                os.rename(tmp_path, path)
         except Exception as e:
             logger.error(f"❌ [Dashboard] Failed to save alert history: {e}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
 
 if __name__ == "__main__":
-    import sys
     app = QApplication(sys.argv)
     window = SignalDashboardPanel()
     window.show()

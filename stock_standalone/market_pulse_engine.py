@@ -385,7 +385,6 @@ class DailyPulseEngine:
     @staticmethod
     def calculate_professional_temperature(ready_pct, sector_heat, breadth, indices):
         """Standalone reusable temperature calculation (Logic Only)."""
-        import numpy as np
         # 3.1 Index Impact (Average of major indices)
         avg_index_pct = np.mean([idx['percent'] for idx in indices]) if indices else 0.0
         

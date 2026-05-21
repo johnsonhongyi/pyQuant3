@@ -10,6 +10,7 @@ import queue
 from queue import Queue, Empty, Full
 import time
 import logging
+from datetime import datetime
 from typing import Optional, Any, Dict, List
 import re
 import os
@@ -40,7 +41,6 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     语音播报后台线程 (Resolved mp.Queue GIL Crash)
     支持通过 cancel_q 跳过队列，并通过 current_state 标记当前状态
     """
-    from datetime import datetime
     import pyttsx3
     import pythoncom
     import time

@@ -442,10 +442,6 @@ def send_with_visualizer(func):
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
-        # 🛡️ [GIL-OPTIMIZE] 将 Python GIL 线程切换间隔从默认的 5ms 压缩至 0.5ms
-        # 极大增强 GUI 主线程高频抢占 GIL 锁的权限，从根本上根治后台密集计算时主 UI 被饿死、假死、未响应的顽疾
-        sys.setswitchinterval(0.0005)
-
         # 🛡️ [RECOVERY] 提升 Windows 定时器精度，减少线程切换时的调度抖动 (解决 0x18 访问冲突的先决条件)
         if sys.platform.startswith('win'):
             try:
@@ -486,12 +482,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 初始化 tk.Tk()
         super().__init__()
-
-        # 🚀 [INIT-QUEUE] 主线程安全事件队列强制初始化
-        import queue
-        self.tk_dispatch_queue = queue.Queue()
-        # [DELAYED-START] 延迟启动主线程消费泵，统一移至构造函数最末尾安全触发，防止抢跑腰斩
-        
         
         # 初始化退出与任务追踪 system (必须放在最前面)
         self._is_closing = False
@@ -518,8 +508,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.last_dpi_scale = self.scale_factor
-        # 3. 接下来是 Qt 初始化 (延迟按需创建，避免与 Tk 抢占主线程消息泵)
-        self.app = None
+        # 3. 接下来是 Qt 初始化
+        from PyQt6 import QtWidgets
+        if not QtWidgets.QApplication.instance():
+            self.app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
@@ -551,9 +543,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             os.getenv("APP_DEBUG", "0") == "1" or 
                             getattr(cct.CFG, "DEBUG", False) 
                             )
-        # [ROOT-FIX] 初始化联动代理与防重标志 (延迟安全启动，防止冷启动时进程重入死锁)
-        self.link_manager = None
-        self._schedule_after(1500, self._lazy_init_link_manager)
+        # [ROOT-FIX] 初始化联动代理与防重标志
+        self.link_manager = get_link_manager()
         self._last_visualizer_time = 0
         self._last_linkage_data = None 
         self._visualizer_debounce_sec = 0.5
@@ -830,8 +821,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_alert_time = 0
         self._alert_count_per_sec = 0
         
-        # ⭐ [NEW] 启动后自动打开信号仪表盘 (同步更新前)
-        self._schedule_after(500, self.open_live_signal_viewer)
+        # ⭐ [NUITKA-FIX] 延迟打开信号仪表盘至 8s 后，确保 Tk 主窗口 + 数据子进程 + 消费泵完全就绪
+        # 原先 500ms 在 Nuitka 编译环境下会导致 QApplication + SignalDashboardPanel 的同步初始化
+        # 阻塞主线程 5+ 秒，引发 UI 全面假死（C 扩展内部持有 GIL 不释放）
+        self._schedule_after(8000, self.open_live_signal_viewer)
 
         # 启动后台进程
         self._start_process()
@@ -839,11 +832,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 定时检查队列
         self._schedule_after(1000, self.update_tree)
 
-        # ✅ UI 线程任务调度队列 (防重复覆盖保障)
-        if not hasattr(self, 'tk_dispatch_queue') or self.tk_dispatch_queue is None:
-            self.tk_dispatch_queue = queue.Queue()
-            self._is_pumping_events = False # 🚀 [NEW] 重入守卫
-            self._process_dispatch_queue()
+        # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
+        self.tk_dispatch_queue = queue.Queue()
+        self._is_pumping_events = False # 🚀 [NEW] 重入守卫
+        self._process_dispatch_queue()
 
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
@@ -908,19 +900,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
-
-        # 🚀 [INIT-QUEUE-ACTIVE] 在主窗口彻底初始化完成的最末尾，开启事件队列消费泵！
-        # 彻底杜绝在构造函数前半段“抢跑”导致的主线程未就绪控件访问崩溃腰斩，实现完美自愈！
-        self._safe_schedule_dispatch(50)
-
-    def _lazy_init_link_manager(self):
-        """[ROOT-FIX] 延迟安全启动多进程联动代理，防止冷启动时与主 GUI 消息泵争抢导致死锁"""
-        if not self._is_closing:
-            try:
-                self.link_manager = get_link_manager()
-                logger.info("📡 [Linkage] 延迟启动成功：Linkage manager initialized safely.")
-            except Exception as e:
-                logger.error(f"❌ [Linkage] 延迟启动失败: {e}")
 
     def _ipc_worker_loop(self):
         """[ROOT-FIX] 核心稳定性：唯一背景线程处理发往 Visualizer 的指令。
@@ -1044,7 +1023,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 vals = self.tree.item(it, 'values')
                 if not vals: continue
                 c = str(vals[idx_code]).strip()
-                import re
                 c = re.sub(r'[^\d]', '', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
@@ -1275,7 +1253,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         import functools
         from collections import Counter
         from queue import Empty
-        import time
 
         if getattr(self, '_is_closing', False) or (
             getattr(self, '_app_exiting', None) and self._app_exiting.is_set()
@@ -1395,26 +1372,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._dispatch_running = False
             self._last_task_finish_time = time.time()
 
-            # 🚀 [QT-EVENT-PUMP] 在主线程的 Tk 心跳中主动驱动和分发 PyQt6 窗口的 Windows 事件
-            # 从而完美解决在同一个主线程下，PyQt6 与 Tkinter 消息泵冲突导致打包后冷启动即死锁卡死的致命硬伤！
-            try:
-                now_t = time.time()
-                if now_t - getattr(self, '_last_qt_pump_t', 0) > 0.100: # 100ms 节流限制，大幅减少跨 C 扩展交互频率
-                    self._last_qt_pump_t = now_t
-                    from PyQt6 import QtWidgets
-                    qt_app = QtWidgets.QApplication.instance()
-                    if qt_app:
-                        import sys
-                        # 🛡️ 临时将 GIL 切换周期拉长到 50ms，防止 processEvents 内部执行被背景线程强行打断导致 PyEval_RestoreThread 致命崩溃
-                        old_interval = sys.getswitchinterval()
-                        sys.setswitchinterval(0.05)
-                        try:
-                            qt_app.processEvents()
-                        finally:
-                            sys.setswitchinterval(old_interval)
-            except Exception as q_e:
-                pass
-
             # --- [高级功能] 周期性能审计排行 (已改为手动触发，见 show_ui_performance_audit) ---
             
             # 保留原有的单波次严重阻塞报警
@@ -1444,9 +1401,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         - task_key 全局唯一一致
         """
 
-        import time
-        import threading
-        import queue
+
 
         # -------------------------
         # 1. 生命周期保护
@@ -1468,6 +1423,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # -------------------------
         if not hasattr(self, "tk_dispatch_queue"):
             self.tk_dispatch_queue = queue.Queue()
+
+            if hasattr(self, "after"):
+                try:
+                    self.after(1, self._process_dispatch_queue)
+                except:
+                    pass
 
         # -------------------------
         # 3. widget safety
@@ -1885,7 +1846,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         import win32pipe, win32file, pywintypes, winerror
-        import json, threading, time
         from data_utils import PIPE_NAME_TK
 
         def listener():
@@ -2068,9 +2028,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     # scheduler
     def schedule_15_30_job(self):
-        from datetime import datetime, time
+        import datetime as dt
         now = datetime.now()
-        today_1530 = datetime.combine(now.date(), time(15,30))
+        today_1530 = datetime.combine(now.date(), dt.time(15, 30))
 
         if not hasattr(self, "_last_run_date"):
             logger.info("schedule_15_30_job，开始_last_run_date...")
@@ -2078,163 +2038,172 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if now >= today_1530 and self._last_run_date != now.date():
             self._last_run_date = now.date()
-            logger.info(f'start run Write_market_all_day_mp')
+            logger.warning(f'[15:30 Task] Triggering run_15_30_task in background thread. now={now.strftime("%H:%M:%S")}')
             threading.Thread(
                 target=self.run_15_30_task,
+                name="EOD_15_30_Task",
                 daemon=True
             ).start()
+        else:
+            logger.debug(f'[15:30 Job] Check: now={now.strftime("%H:%M:%S")}, 1530_passed={now >= today_1530}, last_run={self._last_run_date}')
 
         self._schedule_after(60*1000, self.schedule_15_30_job)
 
     def run_15_30_task(self):
-        """盘后自动任务：包含离线行情存档与所有子面板的持久化"""
+        """盘后自动任务：包含离线行情存档与所有子面板的持久化。
+        
+        [ARCH] 此方法完全在后台守护线程 (EOD_15_30_Task) 中运行。
+        严禁通过 tk_dispatch_queue 派发后再同步 wait，避免造成 Tk 主线程锁死。
+        SectorBiddingPanel.on_realtime_data_arrived() 是线程安全的入队接口，
+        可在任意后台线程直接调用。
+        """
+        logger.warning("[15:30 Task] ▶▶▶ run_15_30_task STARTED in thread: %s", threading.current_thread().name)
+
         if getattr(self, "_task_running", False):
+            logger.info("[15:30 Task] Already running, skip.")
             return
 
-        # ✅ 每日自动保存 SectorBiddingPanel 历史数据 (高精度密度版)
-        # 1. 预先准备数据快照 (提升作用域，确保全局可用)
+        # ── 早退守卫：今日所有任务已完成则直接跳过 ────────────────────────────
+        today = cct.get_today()
+        global write_all_day_date
+        if write_all_day_date == today:
+            logger.warning(f"[15:30 Task] skip: all EOD tasks already done for {today}")
+            return
+
+        # ── STEP 1: 准备 SectorBiddingPanel 并喂数 ──────────────────────────────
+        logger.warning("[15:30 Task] STEP 1 ▶ Preparing SectorBiddingPanel data feed...")
         try:
-            import queue
-            wait_q = queue.Queue()
             df_feed = None
-            
             if hasattr(self, 'df_all') and not self.df_all.empty:
                 df_feed = self.df_all.copy()
                 if 'code' not in df_feed.columns and df_feed.index.name == 'code':
                     df_feed = df_feed.reset_index()
-            
-            if df_feed is None:
-                logger.warning("🕒 [15:30 Task] df_all empty at 15:30, aborting save.")
+
+            if df_feed is None or df_feed.empty:
+                logger.warning("[15:30 Task] df_all empty at 15:30, skip SectorBiddingPanel save.")
             else:
-                def _init_panel_task():
-                    """在 UI 线程仅执行轻量化实例化与异步喂数"""
+                # [ARCH] run_15_30_task 完全在后台线程执行，严禁任何 tk_dispatch_queue + wait 调用。
+                # SectorBiddingPanel 是 PyQt6 窗口，可在任意线程直接操作。
+                panel = getattr(self, 'sector_bidding_panel', None)
+                if panel is None:
+                    # [KEY FIX] SectorBiddingPanel 是 PyQt6 窗口，与 Tk 主线程无关。
+                    # 直接在当前后台线程实例化，完全不需要经过 tk_dispatch_queue。
+                    logger.warning("[15:30 Task] sector_bidding_panel not found, creating directly in background thread...")
                     try:
                         from sector_bidding_panel import SectorBiddingPanel
-                        if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
-                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                            logger.info("📡 [15:30 Task] Standard SectorBiddingPanel instance created on UI thread.")
-                        
-                        # ⭐ 异步喂数：任务进入面板自带的 _worker 线程并行处理，绝不阻塞 UI
-                        self.sector_bidding_panel.on_realtime_data_arrived(df_feed.copy(), force_update=False)  # [THREAD-SAFETY] copy() 防止子线程悬空指针
+                        self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                        panel = self.sector_bidding_panel
+                        logger.warning("[15:30 Task] SectorBiddingPanel instance created in background thread OK.")
                     except Exception as ex:
-                        logger.error(f"Panel dispatch-init error: {ex}")
-                    finally:
-                        wait_q.put(True)
+                        logger.error(f"[15:30 Task] SectorBiddingPanel creation error: {ex}")
+                        panel = None
 
-                if hasattr(self, "tk_dispatch_queue"):
-                    self.tk_dispatch_queue.put(_init_panel_task)
-                    try:
-                        # a. 等待 UI 实例化任务本身下发完成
-                        wait_q.get(timeout=10) 
-                        
-                        # b. ⭐ [SYNC-DENSITY-CHECK] 核心策略：直到全量指标提取完成且队列清空
-                        detector = getattr(self.sector_bidding_panel, 'detector', None)
-                        worker_obj = getattr(self.sector_bidding_panel, '_worker', None)
-                        if detector and worker_obj:
-                            logger.info("📊 [15:30 Task] Monitoring indicator density (waiting for scores)...")
-                            sync_start = time.time()
-                            target_count = len(df_feed)
-                            
-                            # 持续检测计算深度：只要得分池还没填满（<90%）或者队列还有数，就继续等
-                            # 即使是新面板启动，也会因为这个循环而等待 K 线抓取和评分计算完成
-                            while (time.time() - sync_start < 60.0):
-                                q_count = worker_obj.df_queue.qsize() if hasattr(worker_obj.df_queue, 'qsize') else 0
-                                score_count = len(detector._tick_series)
-                                
-                                # 成功判定：计算队列为空且已抓取超过 90% 的股票指标
-                                if q_count == 0 and score_count >= (target_count * 0.9):
-                                    break
-                                time.sleep(1.5)
-                            
-                            # 额外缓冲 3s，确保分值聚合到板块
-                            time.sleep(3.0)
-                            logger.info(f"⏳ [15:30 Task] EOD calculation sync complete. scores:{len(detector._tick_series)} in {time.time()-sync_start:.1f}s.")
-                        else:
-                            time.sleep(5.0) 
-                    except queue.Empty:
-                        logger.warning("🕒 [15:30 Task] SectorBiddingPanel dispatch timeout")
-                else:
-                    from sector_bidding_panel import SectorBiddingPanel
-                    self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                if panel is not None:
+                    # [THREAD-SAFE] on_realtime_data_arrived 是线程安全入队接口，直接在后台线程调用
+                    logger.warning("[15:30 Task] STEP 1b ▶ Feeding df to panel (thread-safe queue)...")
+                    panel.on_realtime_data_arrived(df_feed.copy(), force_update=False)
 
-                # --- 此时得分已由工作线程处理完毕，执行高采样率存档 ---
-                if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel:
+                    # 等待面板内部 _worker 处理完毕（score 填充 >= 90%）
+                    detector = getattr(panel, 'detector', None)
+                    worker_obj = getattr(panel, '_worker', None)
+                    if detector and worker_obj:
+                        logger.warning("[15:30 Task] STEP 1c ▶ Waiting for score calculation (max 60s)...")
+                        sync_start = time.time()
+                        target_count = len(df_feed)
+                        while (time.time() - sync_start < 60.0):
+                            q_count = worker_obj.df_queue.qsize() if hasattr(worker_obj.df_queue, 'qsize') else 0
+                            score_count = len(detector._tick_series)
+                            logger.debug(f"[15:30 Task] q={q_count}, scored={score_count}/{target_count}, elapsed={time.time()-sync_start:.1f}s")
+                            if q_count == 0 and score_count >= (target_count * 0.9):
+                                break
+                            time.sleep(1.5)
+                        time.sleep(3.0)  # 额外缓冲，确保板块聚合完成
+                        logger.warning(f"[15:30 Task] STEP 1c ✅ Score sync done. scored={len(detector._tick_series)} in {time.time()-sync_start:.1f}s")
+                    else:
+                        logger.warning("[15:30 Task] STEP 1c ▶ No detector/worker, sleep 5s as fallback.")
+                        time.sleep(5.0)
+
+                    # 执行高采样率归档
+                    logger.warning("[15:30 Task] STEP 1d ▶ Saving SectorBiddingPanel persistent data...")
                     try:
-                        if cct.get_trade_date_status():
-                            detector = getattr(self.sector_bidding_panel, 'detector', None)
-                            if detector:
-                                # 同步极速聚合板块分
-                                detector.update_scores(skip_evaluate=True)
-                                detector.save_persistent_data(force=True)
-                                logger.info("✅ [15:30 Task] SectorBiddingPanel 归档圆满完成 (数据已熟透)。")
+                        if cct.get_trade_date_status() and detector:
+                            detector.update_scores(skip_evaluate=True)
+                            detector.save_persistent_data(force=True)
+                            logger.warning("[15:30 Task] STEP 1d ✅ SectorBiddingPanel 归档完成。")
                     except Exception as e:
-                        logger.error(f"❌ [15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
+                        logger.error(f"[15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
+                else:
+                    logger.warning("[15:30 Task] STEP 1 ⚠ No valid panel instance, skipping SectorBiddingPanel save.")
 
         except Exception as global_e:
-            logger.error(f"❌ [15:30 Task] Global Exception in run_15_30_task: {global_e}")
+            logger.error(f"[15:30 Task] STEP 1 ❌ Exception: {global_e}\n{traceback.format_exc()}")
 
-        # --- 其他模块自动保存：LiveStrategy ---
+        # ── STEP 2: 保存 LiveStrategy ─────────────────────────────────────────
+        logger.warning("[15:30 Task] STEP 2 ▶ Saving LiveStrategy monitors...")
         if hasattr(self, "live_strategy") and self.live_strategy is not None:
             try:
                 now_time = cct.get_now_time_int()
                 if now_time >= 1500:
                     self.live_strategy._save_monitors()
-                    logger.info(f"✅ [15:30 Task] LiveStrategy monitors saved OK at {now_time}")
+                    logger.warning(f"[15:30 Task] STEP 2 ✅ LiveStrategy monitors saved OK at {now_time}")
+                else:
+                    logger.info(f"[15:30 Task] STEP 2 skip: now_time={now_time} < 1500")
             except Exception as e:
-                logger.warning(f"❌ [15:30 Task] LiveStrategy saving failed: {e}")
+                logger.warning(f"[15:30 Task] STEP 2 ❌ LiveStrategy saving failed: {e}")
+        else:
+            logger.info("[15:30 Task] STEP 2 skip: live_strategy not initialized")
 
-        # --- [NEW] 自动保存每日选股数据：StockSelector (2026-05-08) ---
+        # ── STEP 3: 自动收盘选股 (StockSelector) ─────────────────────────────
+        logger.warning("[15:30 Task] STEP 3 ▶ Auto stock selection (StockSelector)...")
         try:
-            # 💡 [关键改进] 无论用户有没有手动打开过 selector 窗口，都强制确保并初始化 selector 实例 (2026-05-08)
             if not hasattr(self, 'selector') or self.selector is None:
                 from stock_selector import StockSelector
                 self.selector = StockSelector(df=getattr(self, 'df_all', None))
-                logger.info("📡 [15:30 Task] 自动初始化后台 StockSelector 实例成功。")
+                logger.info("[15:30 Task] STEP 3: Auto-init StockSelector instance.")
             else:
-                # 确保实时数据源引用最新
                 if hasattr(self, 'df_all') and not self.df_all.empty:
                     self.selector.df_all_realtime = self.df_all
                     self.selector.resample = self.global_values.getkey("resample") or 'd'
 
             if self.selector is not None:
-                logger.info("🕒 [15:30 Task] 正在自动触发每日收盘选股计算与持久化...")
                 def _auto_stock_select_task():
+                    logger.warning("[15:30 Task] STEP 3 ▶ get_candidates_df started in thread.")
                     try:
-                        # 强制执行今日收盘选股并自动落库
                         self.selector.get_candidates_df(force=True)
-                        logger.info("✅ [15:30 Task] 每日收盘选股自动持久化保存圆满完成！")
+                        logger.warning("[15:30 Task] STEP 3 ✅ 每日收盘选股自动持久化完成！")
                     except Exception as e_select:
-                        logger.error(f"❌ [15:30 Task] 每日收盘选股自动持久化失败: {e_select}")
-                
-                # 在后台线程池异步运行，绝不卡死 UI 主线程
+                        logger.error(f"[15:30 Task] STEP 3 ❌ 每日收盘选股失败: {e_select}")
+
                 if hasattr(self, "compute_executor") and self.compute_executor is not None:
                     self.compute_executor.submit(_auto_stock_select_task)
                 else:
-                    import threading
-                    threading.Thread(target=_auto_stock_select_task, daemon=True).start()
+                    threading.Thread(target=_auto_stock_select_task, name="EOD_StockSelect", daemon=True).start()
         except Exception as e:
-            logger.error(f"❌ [15:30 Task] 自动触发或初始化选股任务失败: {e}")
+            logger.error(f"[15:30 Task] STEP 3 ❌ StockSelector task failed: {e}")
 
-        today = cct.get_today()
-        global write_all_day_date
-        if write_all_day_date == today:
-            logger.info(f'Write_market_all_day_mp 已经完成')
-            return
+        # ── STEP 4: Write_market_all_day_mp (最重量级任务) ───────────────────
+        logger.warning("[15:30 Task] STEP 4 ▶ Checking Write_market_all_day_mp...")
+        # 注：today / write_all_day_date 已在函数顶部声明，此处直接复用
+
         self._task_running = True
         try:
-            if  cct.get_trade_date_status():
-                logger.info(f'start Write_market_all_day_mp OK')
+            if cct.get_trade_date_status():
+                logger.warning(f"[15:30 Task] STEP 4 ▶ Entering Write_market_all_day_mp for {today}")
+                t_start = time.time()
                 tdd.Write_market_all_day_mp('all')
-                logger.info(f'run Write_market_all_day_mp OK')
+                elapsed = time.time() - t_start
+                logger.warning(f"[15:30 Task] STEP 4 ✅ Write_market_all_day_mp finished. Elapsed: {elapsed:.3f}s")
                 CFG = cct.GlobalConfig(conf_ini)
-                # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
                 CFG.set_and_save("general", "write_all_day_date", today)
                 write_all_day_date = today
             else:
-                logger.info(f"today: {today} is trade_date :{cct.get_trade_date_status()} not to Write_market_all_day_mp")
-
+                logger.info(f"[15:30 Task] STEP 4 skip: today={today} is not trade date.")
+        except Exception as e_write:
+            logger.error(f"[15:30 Task] STEP 4 ❌ Write_market_all_day_mp error: {e_write}\n{traceback.format_exc()}")
         finally:
             self._task_running = False
+
+        logger.warning("[15:30 Task] ◀◀◀ run_15_30_task COMPLETED.")
 
     
     def _cleanup_signals_with_feedback(self, days: int):
@@ -2417,7 +2386,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 🛡️ [NEW] 退出保险：25秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
         def failsafe_exit():
             print("\n🚨 [Failsafe] Shutdown timeout reached (25s). Forcing physical exit...")
-            import os
             os._exit(0)
 
         exit_timer = threading.Timer(25.0, failsafe_exit)
@@ -2839,8 +2807,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             try:
                 import psutil
-                import os
-                import time
 
                 current_process = psutil.Process(os.getpid())
                 children = current_process.children(recursive=True)
@@ -2870,7 +2836,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⚠ 永远不要 cancel failsafe
                 # 因为如果 destroy()/stopLogger()/psutil 某步卡死
                 # 仍需依赖 failsafe 保底物理退出
-                import os
                 os._exit(0)
 
         except Exception as e:
@@ -2882,7 +2847,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
-            import os
             os._exit(0)
 
 
@@ -3957,20 +3921,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, 'executor') and self.executor:
                 # [THROTTLE] 增加分发节流保护，防止前一个分析任务由于卡顿未返回时持续堆积
                 if getattr(self, '_is_strategy_running', False):
+                    logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: skipped because _is_strategy_running is True")
                     return
                 self._is_strategy_running = True
                 
                 def _wrap_process():
                     try:
+                        logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: [Async-Pool] Calling strategy_engine.process_data...")
                         strategy_engine.process_data(df_snapshot, concept_top5=cur_concept, resample=cur_res)
+                        logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: [Async-Pool] Calling strategy_engine.process_data DONE.")
                     finally:
                         self._is_strategy_running = False
 
                 # 投递到线程池，立即返回，释放 UI 指令
+                logger.debug("⏳ [DEBUG_LOCK] [Main] Submitting _wrap_process to executor pool...")
                 self.executor.submit(_wrap_process)
+                logger.debug("⏳ [DEBUG_LOCK] [Main] Submitting _wrap_process to executor pool DONE.")
             else:
                 # 兜底方案 (不推荐)
+                logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: [Sync-Fallback] Calling strategy_engine.process_data...")
                 strategy_engine.process_data(df_snapshot, concept_top5=cur_concept, resample=cur_res)
+                logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: [Sync-Fallback] Calling strategy_engine.process_data DONE.")
             
         except Exception as strategy_err:
             logger.exception(f"Async Strategy submission failed: {strategy_err}")
@@ -4858,8 +4829,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     try:
                         from market_pulse_engine import DailyPulseEngine
                         from JSONData import sina_data
-                        import numpy as np
-                        import traceback
                         
                         # [PERF] 从 MarketStateBus 获取只读快照，避免主线程 df_all 被并发修改
                         bus_data = self.market_bus.get_latest()
@@ -5131,10 +5100,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except: pass
 
     def _ui_heartbeat(self):
-        """[CORRECTION 2] UI线程主心跳，每100ms跳动一次"""
+        """[CORRECTION 2] UI线程主心跳，每100ms跳动一次 (高可用防重入防多重挂载加固版)"""
         self._last_ui_heartbeat = time.time()
-        if not getattr(self, "_is_closing", False):
-            self.after(100, self._ui_heartbeat)
+        
+        # 🛡️ 权威防多重挂接锁，确保整个主线程中有且仅有一个心跳循环在跳动，绝不重叠！
+        if getattr(self, '_heartbeat_scheduled', False):
+            return
+            
+        self._heartbeat_scheduled = True
+        def _beat():
+            self._last_ui_heartbeat = time.time()
+            self._heartbeat_scheduled = False
+            if not getattr(self, "_is_closing", False):
+                self._ui_heartbeat()
+                
+        self.after(100, _beat)
 
     def _start_watchdog(self):
         """[CORRECTION 2] 独立守护线程检测 UI 假死"""
@@ -5410,7 +5390,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(100, self.update_linkage_status)
 
     def open_sector_bidding_panel(self):
-        """手动打开竞价/尾盘板块联动监控面板"""
+        """手动打开竞价/尾盘板块联动监控面板 (异步构建版，防 Tk 主线程冻结)"""
         # [🚀 防抖保护] 避免由于快速重复开关导致的 Qt 资源竞争与 GIL 崩溃 (2s 阈值)
         now = time.time()
         last_action = getattr(self, '_last_sector_bidding_action_t', 0)
@@ -5420,22 +5400,82 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         self._last_sector_bidding_action_t = now
 
-        try:
-            if not hasattr(self, 'sector_bidding_panel') or self.sector_bidding_panel is None:
+        # [🔍 已存在面板] 直接显示，不构建
+        if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel is not None:
+            try:
+                logger.warning("⏱️ [SectorBidding][REOPEN] 面板已存在，直接 show/raise")
+                if self.sector_bidding_panel.isVisible():
+                    self.sector_bidding_panel.raise_()
+                else:
+                    self.sector_bidding_panel.show()
+                # 推一次行情数据（仅做 queue.put，不 copy 大 DataFrame）
+                if hasattr(self, 'df_all') and not self.df_all.empty:
+                    t0 = time.time()
+                    self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                    logger.warning(f"⏱️ [SectorBidding][REOPEN] on_realtime_data_arrived cost {(time.time()-t0)*1000:.1f}ms")
+            except Exception as e:
+                logger.error(f"打开已有竞价面板失败: {e}")
+                import traceback; traceback.print_exc()
+            return
+
+        # [🔍 首次构建] 使用后台线程构建，防止 ProcessPoolExecutor Windows spawn 冻结 Tk 主线程
+        logger.warning("⏱️ [SectorBidding][BUILD] 首次构建面板，移至后台线程执行 (防 GIL 冻结)...")
+        t_start = time.time()
+
+        def _build_panel_worker():
+            """后台线程：执行耗时的面板构建 (ProcessPool 启动 + 数据加载)"""
+            import traceback as _tb
+            try:
+                t0 = time.time()
+                logger.warning("⏱️ [SectorBidding][BUILD-Worker] Step 1: import sector_bidding_panel ...")
                 from sector_bidding_panel import SectorBiddingPanel
-                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                logger.info("📡 手动打开 竞价/尾盘联动监控面板(Tick订阅版)")
-            if self.sector_bidding_panel.isVisible():
-                self.sector_bidding_panel.raise_()
-            else:
-                self.sector_bidding_panel.show()
-            # 立即推一次数据以初始化订阅
-            if hasattr(self, 'df_all') and not self.df_all.empty:
-                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)  # [THREAD-SAFETY] copy() 防止子线程悬空指针
-        except Exception as e:
-            logger.error(f"打开竞价监控面板失败: {e}")
-            import traceback
-            traceback.print_exc()
+                logger.warning(f"⏱️ [SectorBidding][BUILD-Worker] Step 1 Done: import cost {(time.time()-t0)*1000:.1f}ms")
+
+                # ⚠️ SectorBiddingPanel.__init__ 含 ProcessPoolExecutor 与 QWidget 构建，
+                # QWidget 必须在 Qt 主线程（即当前 Tk 主线程的 Qt 事件层）构建
+                # 因此通过 after(0) 调度回主线程安全构建
+                def _create_in_main():
+                    try:
+                        t1 = time.time()
+                        logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 2: SectorBiddingPanel() 构建开始 ...")
+                        panel = SectorBiddingPanel(main_window=self)
+                        logger.warning(f"⏱️ [SectorBidding][BUILD-Main] Step 2 Done: 面板构建耗时 {(time.time()-t1)*1000:.1f}ms")
+
+                        self.sector_bidding_panel = panel
+
+                        t2 = time.time()
+                        logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 3: panel.show() ...")
+                        panel.show()
+                        logger.warning(f"⏱️ [SectorBidding][BUILD-Main] Step 3 Done: show() cost {(time.time()-t2)*1000:.1f}ms")
+
+                        logger.info("📡 手动打开 竞价/尾盘联动监控面板(Tick订阅版)")
+
+                        # 推入首次行情（延迟至下一帧，让面板先完成 show）
+                        def _push_initial_data():
+                            if hasattr(self, 'df_all') and not self.df_all.empty:
+                                t3 = time.time()
+                                logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 4: df_all.copy() + on_realtime_data_arrived ...")
+                                panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                                logger.warning(f"⏱️ [SectorBidding][BUILD-Main] Step 4 Done: 数据推送耗时 {(time.time()-t3)*1000:.1f}ms")
+                            logger.warning(f"⏱️ [SectorBidding][BUILD-Main] 🎉 全程总耗时: {(time.time()-t_start)*1000:.1f}ms")
+
+                        self.after(200, _push_initial_data)
+
+                    except Exception as e:
+                        logger.exception(f"[SectorBidding][BUILD-Main] 面板构建异常: {e}")
+                        _tb.print_exc()
+
+                # 回调至 Tk 主线程
+                self.after(0, _create_in_main)
+
+            except Exception as e:
+                logger.error(f"[SectorBidding][BUILD-Worker] 后台线程异常: {e}")
+                _tb.print_exc()
+
+        # 启动后台线程（仅负责 import + 触发回调，实际 Qt widget 创建仍在主线程）
+        t = threading.Thread(target=_build_panel_worker, name="SectorBiddingBuild", daemon=True)
+        t.start()
+        logger.warning(f"⏱️ [SectorBidding] 后台构建线程已启动，主线程立即返回 (total {(time.time()-t_start)*1000:.1f}ms)")
 
     def open_strategy_scan(self):
         """一键打开策略扫描"""
@@ -9039,7 +9079,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             geom = win.geometry()
             # [FIXED] 更加鲁棒的几何信息解析，支持正负坐标
-            import re
             m = re.match(r"(\d+x\d+)([+-]-?\d+)([+-]-?\d+)", geom)
             if m:
                 win._shake_orig_wh = m.group(1)
@@ -10091,8 +10130,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """[COMPAT] 打开 Qt6 版本的交易分析工具 (兼容 PyInstaller 打包)"""
         from PyQt6 import QtWidgets
         from trading_analyzerQt6 import TradingGUI
-        import sys
-        import threading
 
         try:
             # 防止重复创建
@@ -10106,6 +10143,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             app = QtWidgets.QApplication.instance()
             if app is None:
                 self._qt_app = QtWidgets.QApplication([])  # ❗避免 sys.argv 干扰 Tk
+                self._qt_ready = True  # 🛡️ [NUITKA-FIX] 标记 Qt 就绪
 
             # --- 创建 Qt 窗口（在 Tk 线程中） ---
             # on_tree_scroll_to_code=self.tree_scroll_to_code,
@@ -16660,8 +16698,6 @@ def main_SIGBREAK():
 
 def ensure_single_instance_fileLock():
     import msvcrt
-    import sys
-    import os
     LOCK_FILE = cct.get_ramdisk_path("stock_app.lock")
     global lock_fp
     lock_fp = open(LOCK_FILE, "w")
@@ -16689,8 +16725,6 @@ if __name__ == "__main__":
     # 1/0
     # 仅在 Windows 上设置启动方法，因为 Unix/Linux 默认是 'fork'，更稳定
 
-    import multiprocessing as mp
-    import os
 
     if sys.platform.startswith('win'):
         mp.freeze_support() # Windows 必需
@@ -16705,347 +16739,338 @@ if __name__ == "__main__":
         # mp.freeze_support()  # <-- 必须
 
     if mp.current_process().name != "MainProcess" and mp.parent_process() is not None:
-        # 子进程，什么都不做
+        # 子进程，什么都不做，直接结束主模块加载，让 multiprocessing 接管
         print(f'mp.current_process().name: {mp.current_process().name} != MainProcess')
         print("PID:", os.getpid(), "Process:", mp.current_process().name)
         sys.exit(0)
     else:
-        # # 3️⃣ 单例锁（必须最早）
-        # mutex = ensure_single_instance()
-        # if mutex is None:
-        #     print(f"Already running:{mutex}")
-        #     sys.exit(0)
-
-        # # 3️⃣ 单例(文件锁）
-        # ensure_single_instance_fileLock()
-
+        # 主进程，执行主程序启动
         print(f'mp.current_process().name: {mp.current_process().name} == MainProcess')
         print("PID:", os.getpid(), "Process:", mp.current_process().name)
         main_SIGBREAK()
 
+        args = parse_args()  # 解析命令行参数
 
-    args = parse_args()  # 解析命令行参数
+        # ✅ 启动使用命令行参数覆盖默认初始化 (if provided)
+        if getattr(args, 'resample', None):
+            resampleInit = args.resample
+            logger.info(f"🚀 [INIT] 使用命令行参数覆盖 resample 周期: {resampleInit}")
 
-    # ✅ 启动使用命令行参数覆盖默认初始化 (if provided)
-    if getattr(args, 'resample', None):
-        resampleInit = args.resample
-        logger.info(f"🚀 [INIT] 使用命令行参数覆盖 resample 周期: {resampleInit}")
-
-    _exit_ctrl_c_count = 0
-    _exit_ctrl_c_time = 0
-    # ✅ 命令行触发数据库修复 - 必须在最开始检查,避免初始化其他组件
-    if args.repair_db is not None:
-        from db_repair_tool import DatabaseRepairTool
+        _exit_ctrl_c_count = 0
+        _exit_ctrl_c_time = 0
+        # ✅ 命令行触发数据库修复 - 必须在最开始检查,避免初始化其他组件
+        if args.repair_db is not None:
+            from db_repair_tool import DatabaseRepairTool
         
-        # 如果是相对路径,转换为绝对路径
-        target_db = args.repair_db
-        if not os.path.isabs(target_db):
-            target_db = os.path.join(BASE_DIR, target_db)
-        
-        print(f"开始修复数据库: {target_db}")
-        tool = DatabaseRepairTool(target_db)
-        success = tool.run()
-        
-        if success:
-            print("数据库修复完成!")
-            sys.exit(0)
-        else:
-            print("数据库修复失败!")
-            sys.exit(1)
-    
-    # ✅ 命令行触发清理非交易时段信号
-    if args.cleanup_signals is not None:
-        from cleanup_non_trading_signals import (
-            clean_live_signal_history,
-            clean_signal_message,
-            backup_database
-        )
-        
-        # 确定要处理的数据库列表
-        db_files = []
-        
-        if args.cleanup_signals.lower() == 'all':
-            db_files = ['trading_signals.db', 'signal_strategy.db']
-            print("清理所有数据库中的非交易时段信号...")
-        elif args.cleanup_signals in ['signal_strategy.db', 'trading_signals.db']:
-            db_files = [args.cleanup_signals]
-            print(f"清理 {args.cleanup_signals} 中的非交易时段信号...")
-        else:
             # 如果是相对路径,转换为绝对路径
-            target_db = args.cleanup_signals
+            target_db = args.repair_db
             if not os.path.isabs(target_db):
                 target_db = os.path.join(BASE_DIR, target_db)
-            db_files = [target_db]
-            print(f"清理 {target_db} 中的非交易时段信号...")
         
-        # 处理每个数据库
-        total_deleted = 0
+            print(f"开始修复数据库: {target_db}")
+            tool = DatabaseRepairTool(target_db)
+            success = tool.run()
         
-        for db_file in db_files:
-            # 确定数据库绝对路径
-            if not os.path.isabs(db_file):
-                db_path = os.path.join(BASE_DIR, db_file)
+            if success:
+                print("数据库修复完成!")
+                sys.exit(0)
             else:
-                db_path = db_file
+                print("数据库修复失败!")
+                sys.exit(1)
+    
+        # ✅ 命令行触发清理非交易时段信号
+        if args.cleanup_signals is not None:
+            from cleanup_non_trading_signals import (
+                clean_live_signal_history,
+                clean_signal_message,
+                backup_database
+            )
+        
+            # 确定要处理的数据库列表
+            db_files = []
+        
+            if args.cleanup_signals.lower() == 'all':
+                db_files = ['trading_signals.db', 'signal_strategy.db']
+                print("清理所有数据库中的非交易时段信号...")
+            elif args.cleanup_signals in ['signal_strategy.db', 'trading_signals.db']:
+                db_files = [args.cleanup_signals]
+                print(f"清理 {args.cleanup_signals} 中的非交易时段信号...")
+            else:
+                # 如果是相对路径,转换为绝对路径
+                target_db = args.cleanup_signals
+                if not os.path.isabs(target_db):
+                    target_db = os.path.join(BASE_DIR, target_db)
+                db_files = [target_db]
+                print(f"清理 {target_db} 中的非交易时段信号...")
+        
+            # 处理每个数据库
+            total_deleted = 0
+        
+            for db_file in db_files:
+                # 确定数据库绝对路径
+                if not os.path.isabs(db_file):
+                    db_path = os.path.join(BASE_DIR, db_file)
+                else:
+                    db_path = db_file
             
-            if not os.path.exists(db_path):
-                print(f"⚠️ 数据库文件不存在,跳过: {db_file}")
-                continue
-            
-            print(f"\n{'='*60}")
-            print(f"开始处理数据库: {db_file}")
-            print(f"{'='*60}")
-            
-            # 备份数据库
-            try:
-                backup_path = backup_database(str(db_path))
-                print(f"✅ 数据库已备份至: {backup_path}")
-            except Exception as e:
-                print(f"❌ 备份失败: {e}")
-                print("是否继续清理? (y/n)")
-                response = input().strip().lower()
-                if response != 'y':
+                if not os.path.exists(db_path):
+                    print(f"⚠️ 数据库文件不存在,跳过: {db_file}")
                     continue
             
-            # 清理 live_signal_history 表 (在 trading_signals.db 中)
-            if 'trading_signals' in db_file:
-                try:
-                    total, deleted = clean_live_signal_history(str(db_path), dry_run=False)
-                    total_deleted += deleted
-                    print(f"✅ live_signal_history: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
-                except Exception as e:
-                    print(f"❌ 清理 live_signal_history 失败: {e}")
+                print(f"\n{'='*60}")
+                print(f"开始处理数据库: {db_file}")
+                print(f"{'='*60}")
             
-            # 清理 signal_message 表 (在 signal_strategy.db 中)
-            if 'signal_strategy' in db_file:
+                # 备份数据库
                 try:
-                    total, deleted = clean_signal_message(str(db_path), dry_run=False)
-                    total_deleted += deleted
-                    print(f"✅ signal_message: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
+                    backup_path = backup_database(str(db_path))
+                    print(f"✅ 数据库已备份至: {backup_path}")
                 except Exception as e:
-                    print(f"❌ 清理 signal_message 失败: {e}")
+                    print(f"❌ 备份失败: {e}")
+                    print("是否继续清理? (y/n)")
+                    response = input().strip().lower()
+                    if response != 'y':
+                        continue
+            
+                # 清理 live_signal_history 表 (在 trading_signals.db 中)
+                if 'trading_signals' in db_file:
+                    try:
+                        total, deleted = clean_live_signal_history(str(db_path), dry_run=False)
+                        total_deleted += deleted
+                        print(f"✅ live_signal_history: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
+                    except Exception as e:
+                        print(f"❌ 清理 live_signal_history 失败: {e}")
+            
+                # 清理 signal_message 表 (在 signal_strategy.db 中)
+                if 'signal_strategy' in db_file:
+                    try:
+                        total, deleted = clean_signal_message(str(db_path), dry_run=False)
+                        total_deleted += deleted
+                        print(f"✅ signal_message: 总记录 {total}, 删除 {deleted} 条非交易时段记录")
+                    except Exception as e:
+                        print(f"❌ 清理 signal_message 失败: {e}")
         
-        # 总结
-        print(f"\n{'='*60}")
-        print(f"✅ [清理完成] 共删除 {total_deleted} 条非交易时段记录")
-        print(f"{'='*60}")
-        sys.exit(0)
+            # 总结
+            print(f"\n{'='*60}")
+            print(f"✅ [清理完成] 共删除 {total_deleted} 条非交易时段记录")
+            print(f"{'='*60}")
+            sys.exit(0)
         
-    # ✅ 命令行触发数据库去重清理 (一股一仓排重)
-    if getattr(args, 'dedup', False):
-        from trading_hub import get_trading_hub
-        print("\n正在启动数据库排重清理 (Deduplication Cleanup)...")
-        hub = get_trading_hub()
-        res = hub.cleanup_duplicates()
-        if res['found_dupes'] > 0:
-            print(f"✅ 处理完成: 发现 {res['found_dupes']} 只重复代码，清理了 {res['cancelled_count']} 条冗余记录。")
-        else:
-            print("✅ 检查完成: 数据库中不存在活跃的重复记录。")
-        sys.exit(0)
+        # ✅ 命令行触发数据库去重清理 (一股一仓排重)
+        if getattr(args, 'dedup', False):
+            from trading_hub import get_trading_hub
+            print("\n正在启动数据库排重清理 (Deduplication Cleanup)...")
+            hub = get_trading_hub()
+            res = hub.cleanup_duplicates()
+            if res['found_dupes'] > 0:
+                print(f"✅ 处理完成: 发现 {res['found_dupes']} 只重复代码，清理了 {res['cancelled_count']} 条冗余记录。")
+            else:
+                print("✅ 检查完成: 数据库中不存在活跃的重复记录。")
+            sys.exit(0)
 
-    # 🚀 [AUTO] 启动时自动执行轻量级排重 (确保系统健壮性)
-    try:
-        from trading_hub import get_trading_hub
-        hub = get_trading_hub()
-        hub.cleanup_duplicates()
-    except Exception as e:
-        logger.error(f"Auto deduplication failed on startup: {e}")
+        # 🚀 [AUTO] 启动时自动执行轻量级排重 (确保系统健壮性)
+        try:
+            from trading_hub import get_trading_hub
+            hub = get_trading_hub()
+            hub.cleanup_duplicates()
+        except Exception as e:
+            logger.error(f"Auto deduplication failed on startup: {e}")
 
     
-    # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
-    log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
-    # log_level = LoggerFactory.DEBUG
-    # 直接用自定义的 init_logging，传入日志等级
-    # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
-    logger.setLevel(log_level)
-    logger.info("程序启动…")    
+        # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
+        log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
+        # log_level = LoggerFactory.DEBUG
+        # 直接用自定义的 init_logging，传入日志等级
+        # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
+        logger.setLevel(log_level)
+        logger.info("程序启动…")    
 
-    # ✅ 命令行触发 write_to_hdf
-    if args.test:
-        test_get_tdx()
-        sys.exit(0)
+        # ✅ 命令行触发 write_to_hdf
+        if args.test:
+            test_get_tdx()
+            sys.exit(0)
 
-    # 执行传入命令
-    if args.cmd:
-        if len(args.cmd) > 5:
-            try:
-                from data_utils import *
-                result = eval(args.cmd)
-                print("执行结果:", result)
-            except Exception as e:
-                logger.error(f"执行命令出错: {args.cmd}\n{traceback.format_exc()}")
+        # 执行传入命令
+        if args.cmd:
+            if len(args.cmd) > 5:
+                try:
+                    from data_utils import *
+                    result = eval(args.cmd)
+                    print("执行结果:", result)
+                except Exception as e:
+                    logger.error(f"执行命令出错: {args.cmd}\n{traceback.format_exc()}")
 
-        # # 可选：补全关键字或函数名
-        # completer = WordCompleter(['get_tdx_Exp_day_to_df', 'quit', 'exit'], ignore_case=True)
+            # # 可选：补全关键字或函数名
+            # completer = WordCompleter(['get_tdx_Exp_day_to_df', 'quit', 'exit'], ignore_case=True)
 
-        # # 创建 PromptSession 并指定历史文件
-        # session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
+            # # 创建 PromptSession 并指定历史文件
+            # session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
 
-        # -------------------------------
-        # 动态收集补全列表
-        # -------------------------------
-        def get_completions():
-            completions = list(COMMON_COMMANDS)  # 先把常用命令放到最前面
-            # completions = []
-            for name, obj in globals().items():
-                completions.append(name)
-                if hasattr(obj, '__dict__'):
-                    # 支持 obj. 子属性补全
-                    completions.extend([f"{name}.{attr}" for attr in dir(obj) if not attr.startswith('_')])
-            return completions
+            # -------------------------------
+            # 动态收集补全列表
+            # -------------------------------
+            def get_completions():
+                completions = list(COMMON_COMMANDS)  # 先把常用命令放到最前面
+                # completions = []
+                for name, obj in globals().items():
+                    completions.append(name)
+                    if hasattr(obj, '__dict__'):
+                        # 支持 obj. 子属性补全
+                        completions.extend([f"{name}.{attr}" for attr in dir(obj) if not attr.startswith('_')])
+                return completions
 
-        # 创建 WordCompleter
-        completer = WordCompleter(get_completions(), ignore_case=True, sentence=True)
+            # 创建 WordCompleter
+            completer = WordCompleter(get_completions(), ignore_case=True, sentence=True)
 
-        # 创建 PromptSession 并指定历史文件
-        session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
+            # 创建 PromptSession 并指定历史文件
+            session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
 
-        result_stack = []  # 保存历史结果
+            result_stack = []  # 保存历史结果
 
-        HELP_TEXT = """
-        调试模式命令:
-          :help         显示帮助信息
-          :result       查看最新结果
-          :history      查看历史结果内容（DataFrame显示前5行）
-          :clear        清空历史结果
-        退出:
-          quit / q / exit / e
-        说明:
-          最新执行结果总是存放在 `result` 变量中
-          所有历史结果都存放在 `result_stack` 列表，可通过索引访问
-        """
+            HELP_TEXT = """
+            调试模式命令:
+              :help         显示帮助信息
+              :result       查看最新结果
+              :history      查看历史结果内容（DataFrame显示前5行）
+              :clear        清空历史结果
+            退出:
+              quit / q / exit / e
+            说明:
+              最新执行结果总是存放在 `result` 变量中
+              所有历史结果都存放在 `result_stack` 列表，可通过索引访问
+            """
 
-        def summarize(obj, head_rows=5):
-            """根据对象类型返回可读摘要"""
-            if isinstance(obj, pd.DataFrame):
-                return f"<DataFrame shape={obj.shape}>\n{obj.head(head_rows)}"
-            elif isinstance(obj, (list, tuple, set)):
-                preview = list(obj)[:head_rows]
-                return f"<{type(obj).__name__} len={len(obj)}>\n{preview}"
-            elif isinstance(obj, dict):
-                preview = dict(list(obj.items())[:head_rows])
-                return f"<dict len={len(obj)}>\n{preview}"
-            else:
-                return repr(obj)
+            def summarize(obj, head_rows=5):
+                """根据对象类型返回可读摘要"""
+                if isinstance(obj, pd.DataFrame):
+                    return f"<DataFrame shape={obj.shape}>\n{obj.head(head_rows)}"
+                elif isinstance(obj, (list, tuple, set)):
+                    preview = list(obj)[:head_rows]
+                    return f"<{type(obj).__name__} len={len(obj)}>\n{preview}"
+                elif isinstance(obj, dict):
+                    preview = dict(list(obj.items())[:head_rows])
+                    return f"<dict len={len(obj)}>\n{preview}"
+                else:
+                    return repr(obj)
 
-        print("调试模式启动 (输入 ':help' 获取帮助)")
-        top_all = test_single_thread(single=True)
-        queries = [
-            {
-                "name": "main_rule",
-                "expr": "(vol > 1e8 or volume > 2) and (open <= nlow or (open > lasth1d and low >= lastp1d)) "
-                        "and close > lastp1d and a1_v > 10 and percent > 3 and close > nclose and win > 2"
-            }
-        ]
-        while True:
-            try:
-                cmd = session.prompt(">>> ").strip()
-                if not cmd:
-                    continue
+            print("调试模式启动 (输入 ':help' 获取帮助)")
+            top_all = test_single_thread(single=True)
+            queries = [
+                {
+                    "name": "main_rule",
+                    "expr": "(vol > 1e8 or volume > 2) and (open <= nlow or (open > lasth1d and low >= lastp1d)) "
+                            "and close > lastp1d and a1_v > 10 and percent > 3 and close > nclose and win > 2"
+                }
+            ]
+            while True:
+                try:
+                    cmd = session.prompt(">>> ").strip()
+                    if not cmd:
+                        continue
 
-                # 退出命令
-                if cmd.lower() in ['quit', 'q', 'exit', 'e']:
-                    print("退出调试模式")
+                    # 退出命令
+                    if cmd.lower() in ['quit', 'q', 'exit', 'e']:
+                        print("退出调试模式")
+                        break
+
+                    # 特殊命令
+                    if cmd.startswith(":"):
+                        if cmd == ":help":
+                            print(HELP_TEXT)
+                        elif cmd == ":result":
+                            if result_stack:
+                                print(summarize(result_stack[-1]))
+                            else:
+                                print("没有历史结果")
+                        elif cmd == ":history":
+                            if result_stack:
+                                for i, r in enumerate(result_stack):
+                                    print(f"[{i}] {summarize(r)}\n{'-'*50}")
+                            else:
+                                print("没有历史结果")
+                        elif cmd == ":clear":
+                            result_stack.clear()
+                            print("历史结果已清空")
+                        else:
+                            print("未知命令:", cmd)
+                        continue
+
+                    # 尝试 eval
+                    try:
+                        temp = eval(cmd, globals(), locals())
+                        result_stack.append(temp)   # 保存历史
+                        result = result_stack[-1]   # 最新结果
+                        globals()['result'] = result  # 注入全局，方便后续操作
+                        print(summarize(temp))
+                    except Exception:
+                        try:
+                            exec(cmd, globals(), locals())
+                            print("执行完成 (exec)")
+                        except Exception:
+                            print("执行异常:\n", traceback.format_exc())
+
+                except KeyboardInterrupt:
+                    now = time.time()
+                    if now - _exit_ctrl_c_time > 3:
+                        _exit_ctrl_c_count = 0
+                    
+                    _exit_ctrl_c_count += 1
+                    _exit_ctrl_c_time = now
+
+                    if _exit_ctrl_c_count >= 3:
+                        print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                        os._exit(0)
+                    else:
+                        print(f"\nKeyboardInterrupt ({_exit_ctrl_c_count}/3), 输入 'quit' 退出")
+                except EOFError:
+                    print("\nEOF, 退出调试模式")
                     break
 
-                # 特殊命令
-                if cmd.startswith(":"):
-                    if cmd == ":help":
-                        print(HELP_TEXT)
-                    elif cmd == ":result":
-                        if result_stack:
-                            print(summarize(result_stack[-1]))
-                        else:
-                            print("没有历史结果")
-                    elif cmd == ":history":
-                        if result_stack:
-                            for i, r in enumerate(result_stack):
-                                print(f"[{i}] {summarize(r)}\n{'-'*50}")
-                        else:
-                            print("没有历史结果")
-                    elif cmd == ":clear":
-                        result_stack.clear()
-                        print("历史结果已清空")
-                    else:
-                        print("未知命令:", cmd)
-                    continue
-
-                # 尝试 eval
-                try:
-                    temp = eval(cmd, globals(), locals())
-                    result_stack.append(temp)   # 保存历史
-                    result = result_stack[-1]   # 最新结果
-                    globals()['result'] = result  # 注入全局，方便后续操作
-                    print(summarize(temp))
-                except Exception:
-                    try:
-                        exec(cmd, globals(), locals())
-                        print("执行完成 (exec)")
-                    except Exception:
-                        print("执行异常:\n", traceback.format_exc())
-
-            except KeyboardInterrupt:
-                now = time.time()
-                if now - _exit_ctrl_c_time > 3:
-                    _exit_ctrl_c_count = 0
-                    
-                _exit_ctrl_c_count += 1
-                _exit_ctrl_c_time = now
-
-                if _exit_ctrl_c_count >= 3:
-                    print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
-                    os._exit(0)
-                else:
-                    print(f"\nKeyboardInterrupt ({_exit_ctrl_c_count}/3), 输入 'quit' 退出")
-            except EOFError:
-                print("\nEOF, 退出调试模式")
-                break
-
-        sys.exit(0)        
-    # ✅ 命令行触发 write_to_hdf
-    if args.write_to_hdf:
-        write_to_hdf()
-        sys.exit(0)
-    if args.write_today_tdx:
-        write_today_tdx()
-        sys.exit(0)
-    if args.test_single:
-        logger.info(f'b fetch_and_process')
-        test_single_thread()
-        sys.exit(0)
+            sys.exit(0)        
+        # ✅ 命令行触发 write_to_hdf
+        if args.write_to_hdf:
+            write_to_hdf()
+            sys.exit(0)
+        if args.write_today_tdx:
+            write_today_tdx()
+            sys.exit(0)
+        if args.test_single:
+            logger.info(f'b fetch_and_process')
+            test_single_thread()
+            sys.exit(0)
     
-    app = StockMonitorApp()
+        app = StockMonitorApp()
     
-    # [🚀 增强] 初始化全局退出计数器，用于 KeyboardInterrupt 暴力退出控制
-    _exit_ctrl_c_count = 0
-    _exit_ctrl_c_time = 0
+        # [🚀 增强] 初始化全局退出计数器，用于 KeyboardInterrupt 暴力退出控制
+        _exit_ctrl_c_count = 0
+        _exit_ctrl_c_time = 0
 
-    if cct.isMac():
-        width, height = 100, 32
-        cct.set_console(width, height)
-    else:
-        width, height = 100, 32
-        cct.set_console(width, height)
-
-    # ✅ 注册 Windows 原生控制台处理器，确保在弹窗阻塞时也能响应 Ctrl+C
-    if not cct.isMac():
-        import win32api
-        win32api.SetConsoleCtrlHandler(app._native_ctrl_handler, True)
-
-    try:
-        app.mainloop()
-    except KeyboardInterrupt:
-        # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
-        now = time.time()
-        if now - _exit_ctrl_c_time > 3:
-            _exit_ctrl_c_count = 0
-            
-        _exit_ctrl_c_count += 1
-        _exit_ctrl_c_time = now
-
-        if _exit_ctrl_c_count >= 3:
-            print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
-            os._exit(0)
+        if cct.isMac():
+            width, height = 100, 32
+            cct.set_console(width, height)
         else:
-            app.ask_exit()
-            _exit_ctrl_c_count = 0
+            width, height = 100, 32
+            cct.set_console(width, height)
+
+        # ✅ 注册 Windows 原生控制台处理器，确保在弹窗阻塞时也能响应 Ctrl+C
+        if not cct.isMac():
+            import win32api
+            win32api.SetConsoleCtrlHandler(app._native_ctrl_handler, True)
+
+        try:
+            app.mainloop()
+        except KeyboardInterrupt:
+            # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
+            now = time.time()
+            if now - _exit_ctrl_c_time > 3:
+                _exit_ctrl_c_count = 0
+            
+            _exit_ctrl_c_count += 1
+            _exit_ctrl_c_time = now
+
+            if _exit_ctrl_c_count >= 3:
+                print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                os._exit(0)
+            else:
+                app.ask_exit()
+                _exit_ctrl_c_count = 0

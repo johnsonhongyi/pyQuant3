@@ -55,7 +55,7 @@ except ImportError:
     from stock_standalone.query_engine_util import query_engine
 
 
-logger = LoggerFactory.getLogger("sector_bidding")
+logger = LoggerFactory.getLogger()
 
 SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
@@ -304,7 +304,6 @@ class TimeAxisItem(pg.AxisItem):
             if 0 <= idx < len(self.ts_list):
                 ts = self.ts_list[idx]
                 try:
-                    from datetime import datetime
                     dt = datetime.fromtimestamp(ts)
                     # 如果跨度超过一天，显示日期；否则仅显示时间
                     if len(self.ts_list) > 240 or (self.ts_list[-1] - self.ts_list[0] > 86400):
@@ -1215,6 +1214,7 @@ class DataProcessWorker(QObject):
                 # 这一步会自动让出 GIL，对系统非常友好
                 try:
                     df = self.df_queue.get(timeout=0.05)
+                    logger.debug("⏱️ [Worker][DEBUG] Got data from df_queue.")
                 except Empty:
                     pass
 
@@ -1241,17 +1241,22 @@ class DataProcessWorker(QObject):
                     active_codes = df.index.tolist() if hasattr(df, 'index') else None
                     is_full = len(df) > 3000
                     start_time = time.perf_counter()
+                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.register_codes...")
                     self.detector.register_codes(df)
+                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.update_scores...")
                     self.detector.update_scores(active_codes=active_codes)
+                    time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
                     
                     dur = time.perf_counter() - start_time
                     if dur > 0.3:
-                        logger.warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) slow: {dur:.3f}s")
+                        logger.warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) counts: {len(active_codes)} slow: {dur:.3f}s")
                     # [FIX] data_version 已由 update_scores 内部统一管理，无需 Worker 层再次递增
                     # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
 
                     self.latest_df = df
+                    logger.debug("⏱️ [Worker][DEBUG] Emitting data_updated...")
                     self.data_updated.emit(None)
+                    logger.debug("⏱️ [Worker][DEBUG] Emitted data_updated.")
                     has_done_work = True
 
                 # 2. 强制刷新判定
@@ -1263,20 +1268,25 @@ class DataProcessWorker(QObject):
 
                 if force:
                     start_time = time.perf_counter()
+                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.update_scores(force=True)...")
                     self.detector.update_scores(force=True)
+                    time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
+                    
                     dur = time.perf_counter() - start_time
                     if dur > 0.3:
                         logger.warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
                     # [FIX] data_version 由 update_scores 内部统一管理
                     self.latest_df = None
+                    logger.debug("⏱️ [Worker][DEBUG] Emitting data_updated (force)...")
                     self.data_updated.emit(None)
+                    logger.debug("⏱️ [Worker][DEBUG] Emitted data_updated (force).")
                     has_done_work = True
 
                 # [PERF] 计算本次工作耗时，用于动态调整休眠
                 work_dur = time.perf_counter() - start_work_t
                 if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
                     now_ts = time.time()
-                    if now_ts - self._last_slow_log_ts > 10: # 10秒节流
+                    if now_ts - self._last_slow_log_ts > 30: # 30秒节流
                         self._last_slow_log_ts = now_ts
                         processed_count = getattr(self.detector, 'last_processed_count', 0)
                         total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
@@ -1286,9 +1296,11 @@ class DataProcessWorker(QObject):
                 logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
 
             # 3. 最后的保险：防止在数据极高频时榨干 CPU
-            # 如果刚刚做了重活，强制休眠一小会儿（10ms），确保 GIL 能切换给 UI 线程
+            # [DYNAMIC YIELD] 动态睡眠，根据单次负载动态增加睡眠时间，给 Tk 足够调度窗口
+            # 负载越大，休眠越长 (下限 10ms，上限提升至 200ms)
             if has_done_work:
-                time.sleep(0.01) 
+                dynamic_sleep = min(0.2, max(0.01, work_dur * 0.1 if 'work_dur' in locals() else 0.01))
+                time.sleep(dynamic_sleep) 
             elif not self.detector.is_active_session():
                 time.sleep(0.5)
             else:
@@ -2347,9 +2359,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后触发首次刷新"""
         logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh.")
+        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready START: triggering delayed refresh")
         # 🚀 [UI-THREAD-SAFETY] 绝对禁止在子线程直接操作 UI 控件 showMessage，防止 Nuitka C 独立运行崩溃/死锁
-        # 强制触发一次刷新
-        self._force_update_requested = True
+        # 延迟触发刷新，释放主线程
+        QTimer.singleShot(100, self._refresh_sector_list)
+        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready END")
 
     def _on_sbc_test_finished(self, data: dict):
         """SBC 测试完成回调"""
@@ -2509,6 +2523,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
             
         try:
+            logger.debug("⏱️ [SectorPanel][DEBUG] _on_worker_finished START.")
             now = time.time()
             
             # [REFINED] 统一使用数据更新周期 (cct.duration_sleep_time) 控制 UI 渲染节奏
@@ -2523,8 +2538,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
                 should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
             
+            logger.debug(f"⏱️ [SectorPanel][DEBUG] _on_worker_finished: should_refresh={should_refresh}")
             if should_refresh:
-                self._refresh_sector_list()
+                logger.debug("⏱️ [SectorPanel][DEBUG] Calling _refresh_sector_list (delayed)...")
+                QTimer.singleShot(0, self._refresh_sector_list)
+                logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list scheduled.")
                 self._last_refresh_ts = now
                 with self._update_lock:
                     self._force_update_requested = False
@@ -2544,8 +2562,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.status_lbl.setStyleSheet("color: #ff6666;")
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
+        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list START.")
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
+            logger.debug("⏱️ [SectorPanel][DEBUG] _worker is None, return.")
             return
 
         # 2. 状态判断：不再直接访问 Queue（关键修复）
@@ -2602,7 +2622,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif col == 2: sectors.sort(key=lambda x: x.get('score_diff', 0), reverse=not asc)
         elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
 
+        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: rendering table...")
         # 6. 表格渲染 (Dirty Check Update)
+        self._ui_refreshing = True
         self.sector_table.setUpdatesEnabled(False)
         self.sector_table.blockSignals(True)
         
@@ -2660,10 +2682,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if sn == selected_sector:
                 self.sector_table.selectRow(i)
 
-        # 7. 恢复 UI
+        # 7. 恢复 UI 状态标记 (解除更新锁定，解除信号屏蔽)
         self.sector_table.setUpdatesEnabled(True)
         self.sector_table.blockSignals(False)
+        self._ui_refreshing = False
 
+        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: table rendered. Updating selection...")
         # 8. 默认选中
         if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
@@ -2672,7 +2696,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.sector_table.selectRow(0)
             self.sector_table.scrollToTop()
 
-        # 9. 联动刷新
+        # 9. 联动刷新 (手动触发时，由于 _ui_refreshing=False，可以正常执行)
         if self.sector_table.selectedItems():
             self._on_sector_table_selection_changed()
 
@@ -2691,7 +2715,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 )
 
         # 11. 重点表刷新
+        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: Calling _populate_watchlist...")
         self._populate_watchlist()
+        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list END.")
 
     def _on_dragon_3d_clicked(self):
         """切换龙头追踪模式 (循环：普通 -> 三日 -> 五日 -> 七日 -> 十日)"""
@@ -2732,6 +2758,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ------------------------------------------------------------------ sector select
     def _on_sector_table_selection_changed(self):
         """板块表选中项变更 → 刷新个股列表"""
+        if getattr(self, '_ui_refreshing', False):
+            return
+            
         curr_row = self.sector_table.currentRow()
         if curr_row < 0:
             self.stock_table.setRowCount(0)
@@ -3651,6 +3680,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
         """填充底部当日重点表/龙头三日跟踪表"""
+        logger.debug("⏱️ [SectorPanel][DEBUG] _populate_watchlist START.")
         mode = getattr(self, '_watchlist_mode', "NORMAL")
         
         if mode in ["DRAGON_3D", "DRAGON_5D", "DRAGON_7D", "DRAGON_10D"]:
@@ -4149,7 +4179,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             n_item = table_widget.item(row, name_col) if name_col != -1 else None
             if c_item:
                 c = str(c_item.text()).strip()
-                import re
                 c = _RE_NON_DIGIT.sub('', c)
                 if len(c) < 6 and c.isdigit(): c = c.zfill(6)
                 
@@ -4839,7 +4868,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         [NEW] 手动重置今日数据：清除所有历史缓存/看板，强制从零开始采集。
         用于解决重启后昨日数据污染问题，无需重启程序。
         """
-        import datetime as _dt
         reply = QMessageBox.warning(
             self,
             "⚠️ 确认重置",
@@ -4853,7 +4881,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             return
 
         try:
-            now_dt = _dt.datetime.now()
+            now_dt = datetime.now()
             # 1. 调用 detector 的统一重置方法
             self.detector._reset_daily_state(now_dt)
             # 2. 同步更新 _last_data_date 为今日，防止 _check_day_switch 再触发

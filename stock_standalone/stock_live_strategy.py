@@ -328,7 +328,6 @@ class StrategySupervisor:
         try:
             config_path = os.path.join(cct.get_base_path(), "config", "supervisor_constraints.json")
             if os.path.exists(config_path):
-                import json
                 with open(config_path, 'r', encoding='utf-8') as f:
                     dynamic_data: dict[str, Any] = json.load(f)
                     self.constraints.update(dynamic_data)
@@ -529,6 +528,9 @@ class StockLiveStrategy:
             self._using_shared_executor = False
             logger.debug(f"ℹ️ StockLiveStrategy: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
         
+        # ⭐ [NEW] 专门用于慢速 I/O、磁盘数据读取、告警播报和外部请求的独立线程池，彻底杜绝父子任务饥饿死锁
+        self._io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="LiveStrategy_IO")
+        
         self._is_checking_resamples: set[str] = set() # [NEW] 并行运行状态锁，按 resample 隔离防止并发冲突
         self._last_process_time = 0.0 # 🛡️ Ensure init 
         
@@ -538,7 +540,7 @@ class StockLiveStrategy:
         self.supervisor = None
 
         # ⭐ [FIX] 将耗时的监控加载逻辑异步化，防止阻塞主界面启动 (Stuck Issue)
-        self.executor.submit(self.load_monitors)
+        self._io_executor.submit(self.load_monitors)
         self.df: Optional[pd.DataFrame] = None
 
         # 初始化决策引擎（带止损止盈配置）
@@ -662,6 +664,16 @@ class StockLiveStrategy:
                     self.executor.shutdown(wait=False)
                 except: pass
 
+        # ⭐ [NEW] 优雅关闭慢速 I/O 线程池，防止退出时线程悬空
+        if hasattr(self, "_io_executor") and self._io_executor:
+            try:
+                self._io_executor.shutdown(wait=False, cancel_futures=True)
+                logger.info("StockLiveStrategy: IO executor shutdown.")
+            except (TypeError, Exception):
+                try:
+                    self._io_executor.shutdown(wait=False)
+                except: pass
+
         # 3. ⭐ [NEW] 停止 IPC 发送线程
         try:
             global _ipc_sender_stop, _ipc_sender_thread
@@ -758,7 +770,6 @@ class StockLiveStrategy:
 
     def load_monitors(self):
         """[OPTIMIZED] 从 JSON 和数据库后台加载监控列表 (Background Thread)"""
-        import json
         try:
             # 1. 首先在后台初始化记录器与监理器 (涉及数据库 I/O)
             if self.trading_logger is None:
@@ -1083,7 +1094,6 @@ class StockLiveStrategy:
     def _save_monitors(self):
         """保存配置（不包含派生字段，同时增加即时行情信息）"""
         try:
-            import json
             data = {}
 
             for key, stock in list(self._monitored_stocks.items()):
@@ -1240,7 +1250,10 @@ class StockLiveStrategy:
         # [NEW] 周期归一化，防止 'd' vs 'D' 导致匹配失败
         resample = str(resample).lower().strip()
         
+        logger.debug(f"⏳ [DEBUG_LOCK] [Strategy] process_data entered. resample={resample}, df_all size={len(df_all) if hasattr(df_all, '__len__') else 0}")
+        
         if not self.enabled or df_all is None or df_all.empty:
+            logger.debug(f"⏳ [DEBUG_LOCK] [Strategy] process_data skipped: enabled={self.enabled}, df_all_empty={df_all is None or df_all.empty}")
             return
             
         # 🚀 [ULTRA-PERF] 定期更新持仓内存缓存 (Async refresh to avoid UI/Worker hang)
@@ -1253,7 +1266,7 @@ class StockLiveStrategy:
                         self._open_trades_cache = self.trading_logger.get_trades()
                     except: pass
                 # 投递到线程池异步执行
-                if hasattr(self, 'executor'): self.executor.submit(sync_trades_worker)
+                if hasattr(self, '_io_executor'): self._io_executor.submit(sync_trades_worker)
 
         # ----------------- Throttling -----------------
         now = time.time()
@@ -1329,13 +1342,14 @@ class StockLiveStrategy:
                 can_submit = True
                 
         if can_submit:
-             # [OPTIMIZE] 核心性能优化：仅过滤受监控股票的子集进行策略检查
+             # [OPTIMIZE] 核心性能优化：仅过滤受监控股票 of 子集进行策略检查
              with self._lock:
                  target_codes = list(self._monitored_stocks.keys())
                  
              if target_codes:
                  # 🛡️ [PERF OPTIMIZE] 延迟到 _check_strategies 内部进行 index 转换和 intersection
                  # 这里只提交任务，最大限度减少主线程/刷新线程的停顿
+                 logger.debug(f"⏳ [DEBUG_LOCK] [Strategy] Submitting _check_strategies for {len(target_codes)} codes...")
                  self.executor.submit(self._check_strategies, df_internal, target_codes, resample=resample)
              else:
                  with self._lock:
@@ -1360,18 +1374,22 @@ class StockLiveStrategy:
                      self._perform_daily_settlement()
              
              # 非交易时间停止策略计算
+             logger.debug("⏳ [DEBUG_LOCK] [Strategy] process_data finished (non-trading time).")
              return
 
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
 
         if self.auto_loop_enabled:
+             logger.debug("⏳ [DEBUG_LOCK] [Strategy] Submitting _process_auto_loop...")
              self.executor.submit(self._process_auto_loop, df_all, concept_top5)
 
         # --- [新增] 板块风险监控 (Sector Risk Monitoring) ---
         if concept_top5 and cct.get_now_time_int() > 916:
             try:
+                logger.debug("⏳ [DEBUG_LOCK] [Strategy] Calling sector_monitor.update...")
                 sector_status = self.sector_monitor.update(df_all, concept_top5)
                 self._last_sector_status = sector_status
+                logger.debug("⏳ [DEBUG_LOCK] [Strategy] Calling sector_monitor.update DONE.")
             except Exception as e:
                 logger.error(f"Sector Monitor Check Failed: {e}")
 
@@ -1414,7 +1432,7 @@ class StockLiveStrategy:
                      self._df_lock.release()
 
         # [REMOVED] DataHubService publish logic
-        pass
+        logger.debug("⏳ [DEBUG_LOCK] [Strategy] process_data finished.")
 
     def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any], resample: str = 'd'):
         """
@@ -2124,7 +2142,6 @@ class StockLiveStrategy:
                                     
                         if allow_trade:
                             # 防止同一股票反复触发同一类型的自动交易，使用专用缓存机制冷却
-                            import time
                             sig_key = f"{code}_T0_{t1_action}"
                             last_ts = self._t0_cooldowns.get(sig_key, 0.0)
                             now_ts = time.time()
@@ -4277,7 +4294,7 @@ class StockLiveStrategy:
                     continue
                 
                 self._pending_hist_fetches.add(cache_key)
-                self.executor.submit(self._async_fetch_history, c, resample)
+                self._io_executor.submit(self._async_fetch_history, c, resample)
                 
             self.last_daily_history_refresh = now
             # logger.debug(f"Daily history cache task submitted for {len(codes)} stocks.")
@@ -4416,9 +4433,9 @@ class StockLiveStrategy:
         
         try:
             # 优先使用内部线程池
-            if hasattr(self, 'executor') and self.executor:
+            if hasattr(self, '_io_executor') and self._io_executor:
                 if not getattr(self, '_is_stopping', False):
-                    self.executor.submit(self._async_alert_worker, alert_ctx)
+                    self._io_executor.submit(self._async_alert_worker, alert_ctx)
                 else:
                     logger.debug(f"Skip alert submission during shutdown for {code}")
             else:
@@ -4506,7 +4523,6 @@ class StockLiveStrategy:
                 
                 # 语义清理
                 clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
-                import re
                 # [FIX] 彻底移除空括号 () or ( ) 以及多余符号
                 clean_msg = re.sub(r'\(\s*\)', '', clean_msg)
                 
@@ -4574,7 +4590,7 @@ class StockLiveStrategy:
             self._voice.say("手动热点选股强制启动")
             logger.info("Manual Hotspot Selection Triggered (Independent Batch)")
             if hasattr(self, 'df'):
-                self.executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5, is_manual=True)
+                self._io_executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5, is_manual=True)
                 self._voice.say(f"手动执行热点筛选{MAX_DAILY_ADDITIONS}只")
                 # 确保 concept_top5 不为 None
                 if concept_top5 is not None:
@@ -4672,7 +4688,7 @@ class StockLiveStrategy:
                     return
                 
                 self._is_importing_hotspot = True
-                self.executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5)
+                self._io_executor.submit(self._import_hotspot_candidates_async, concept_top5=concept_top5)
                 # the async method will update the state to WAITING_ENTRY on success
 
             # 2. State: WAITING_ENTRY - 等待建仓
@@ -5046,7 +5062,6 @@ def test_check_strategies_params():
     测试 _check_strategies 参数类型一致性。
     验证 now, last_alert, sent_data['ts'] 等时间戳类型。
     """
-    import time
     # import datetime # handled at top
     
     print("===== 测试参数类型一致性 =====")

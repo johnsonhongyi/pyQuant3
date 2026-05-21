@@ -351,7 +351,7 @@ class SignalGradingHub:
         # [🔮 DEBUG] 模拟模式下输出更明显的日志
         prefix = "🔮 [SIM] " if self._simulation_mode else "📢 "
         msg = f"{prefix}Publishing Alert: {content} ({grade})"
-        print(msg) # 强制控制台输出
+        logger.debug(msg) # 强制控制台输出
         logger.warning(msg) # 提升至 WARNING 确保可见
         
         get_signal_bus().publish(
@@ -373,7 +373,7 @@ class SignalGradingHub:
     def force_report(self):
         """手动触发状态快照报告"""
         msg = "📡 [HUB] Manual report triggered."
-        print(msg)
+        logger.debug(msg)
         logger.warning(msg)
         self._publish_alert("MANUAL_CHECK", "A", "📊 预警中枢运行中：全系统链路巡检正常")
 
