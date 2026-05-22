@@ -1699,6 +1699,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H - 切换Hotlist
         6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
         7: (win32con.MOD_ALT, 0x4D, "Alt+M"),  # M - 竞价赛马监控
+        8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T - 策略选股与人工复核
     }
 
 
@@ -1722,6 +1723,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
             6: lambda: self._schedule_after(0, self._run_live_strategy_process),
             7: lambda: self._schedule_after(0, self.open_racing_panel),
+            8: lambda: self._schedule_after(0, self.open_stock_selection_window),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -3580,6 +3582,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
+
+        # 绑定选股窗口打开/复用快捷键 Alt+t (支持大小写)
+        self.bind_all("<Alt-t>", lambda e: self.open_stock_selection_window())
+        # self.bind_all("<Alt-T>", lambda e: self.open_stock_selection_window())
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -11155,6 +11161,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"StockSelector 初始化/更新失败: {e}")
             self.selector = None
 
+        # 1.5 优先自动拉起详细概念异动窗口
+        try:
+            self.show_concept_detail_window()
+        except Exception as ex:
+            logger.error(f"优先自动打开概念窗口失败: {ex}")
+
         # 2. 窗口复用逻辑
         if self._stock_selection_win and self._stock_selection_win.winfo_exists():
             try:
@@ -11164,6 +11176,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # ✅ 强制刷新数据 (force=True 重新跑筛选)
                 self._stock_selection_win.load_data(force=True)
+                
+                # ✅ 自动切到“实时决策”选项卡
+                if hasattr(self._stock_selection_win, 'show_decision_tab'):
+                    try:
+                        self._stock_selection_win.show_decision_tab()
+                    except Exception:
+                        pass
                 
                 self._stock_selection_win.deiconify()
                 self._stock_selection_win.lift()
@@ -11175,7 +11194,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 3. 新建窗口
         try:
             self._stock_selection_win = StockSelectionWindow(self, getattr(self, 'live_strategy', None), self.selector)
-            
+            # ✅ 自动切到“实时决策”选项卡
+            if hasattr(self._stock_selection_win, 'show_decision_tab'):
+                try:
+                    self._stock_selection_win.show_decision_tab()
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"打开选股窗口失败: {e}")
             messagebox.showerror("错误", f"打开选股窗口失败: {e}")

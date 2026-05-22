@@ -1,7 +1,79 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 16:25  
+> 最后更新：2026-05-22 20:45  
+
+## 2026-05-22 20:45
+- [x] **100%原汁原味重置还原策略选股表格昨天之前最原始原生白底配色与穿透显示 (Reverted Selection Grid to Pre-Yesterday Original Styling & Enabled Default Treeview Tag-Coloring)**：
+    - [x] **精确追溯 git 历史风格**：通过对 git show 进行深层历史版本检索与代码分析，确认了在今天（5月22日）一系列修改之前，策略选股 Tab 表格 `self.tree` 原本的创建根本不带任何 `style` 参数，为最纯粹的原生默认表格样式。
+    - [x] **精准解锁默认样式穿透并还原昨天之前经典高反差色彩**：
+        - 针对在 Windows 默认主题下，如果不应用 `fixed_map` 穿透解锁，原生 `"Treeview"` 的 `tag_configure` 行底色会被底层系统直接强行忽略进而退化为没有任何颜色的“黑白灰”（普通的白底行）的原生缺陷，将 `self.tree` 的创建完全还原回归为最原始的不带 style 参数的状态：
+          `self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")`
+        - 专门对系统默认的 `"Treeview"` 样式注入 `fixed_map` 穿透解锁映射，完美瓦解了 Windows 默认主题对自定义背景色的过滤限制。
+        - 将选中、忽略、待复核行（`selected`/`ignored`/`pending`）的标签配色完全重置还原为历史原汁原味的配色：浅绿背景（`#dcedc8`）、浅红背景（`#ffcdd2`）与纯白背景（`#ffffff`），且完全删除了前景文字 foreground 覆盖，使其 100% 回归为历史上最鲁棒、最清爽、最亮丽的高反差色彩效果，彻底终结了黑白灰显示的不良体验。
+    - [x] **工具栏“🔍 追踪”按钮物理位置前置微调**：将工具栏中的“🔍 追踪”按钮物理前移，精确放置在了“板块”标签之前，大幅拉升了界面交互的人机工程学体验。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2045_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/aa87f3a2-56c9-4de2-b5a8-a3ac82e9a224/20260522_2045_task.md)。
+
+## 2026-05-22 20:30
+- [x] **实现策略选股原生白底复原与板块/决策暗黑同色穿透及 Sash 窗格位置持久化自愈 (Implemented Selection Grid Color Reversion, Segmented Dark Styling & Sash Geometry Auto Persistence)**：
+    - [x] **策略选股原生白底色彩复原 (Reverted Selection Grid to White Background)**：完全剥离并清除了对 Tab 1 "策略选股" 默认表格的原生样式侵入，令其百分之百回归至 Windows 系统自带大白底色的清爽视觉风格。同步将选中、忽略、待复核行（`selected`/`ignored`/`pending`）的标签背景色及前景色完美复原为高反差的亮色调（亮绿、亮红、纯白底色），彻底解决了行背景与表格底色割裂的问题。
+    - [x] **局部高反差沉浸式暗色穿透 (Segmented Dark.Treeview Custom Styling & fixed_map Hack)**：全新定制了 `Dark.Treeview` 局部专属表格样式（背景设为极客深蓝/黑色 `#0c101b`、文本设为纯白）。引入只针对该样式的 `fixed_map` 穿透解锁逻辑，免去全局主题污染引起的界面形变，完美实现“板块聚焦”（`_sector_tree`/`_member_tree`）与“实时决策”（`_signal_tree`/`_pos_tree`/`_log_tree`）5 大表格在填充数据时的沉浸式暗黑高反差底色（与数据保持高度一致），且数据底色与空白区 100% 同色融合。
+    - [x] **手动分割窗格大小跨会话高保真持久化与自愈恢复 (Implemented Sash Geometry Persistence & Auto Restore for Split Panes)**：
+        - [x] **成员变量规范升级**：将“板块聚焦”与“实时决策”Tab 中的垂直分割窗格 `paned` 从临时局部变量规范升级重构为主类成员变量 `self._sector_paned` 与 `self._decision_paned`，彻底打通了外部与生命周期句柄的直接访问。
+        - [x] **原子化关闭写盘**：在窗口生命周期关闭主入口 `_on_close` 的最前端安全挂载了 `self._save_sash_positions()`。以自适应 DPI 比例从 `sash_coord(0)` 中解析垂直高度坐标，原子化融合写入 `window_config.json` 的 `sash_positions` 子树，提供了绿色环保的极速持久化。
+        - [x] **秒级自愈加载**：在选股窗口构造函数 `__init__` 的结尾，挂载了延迟 250ms 的 `self._restore_sash_positions` 触发器。在 UI 完成初次充分绘制渲染、真实几何范围对齐建立后，高精自动恢复板块聚焦与决策队列两个 Tab 的分割线位置，极大拉升了跨设备使用的一致性体验。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2030_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/aa87f3a2-56c9-4de2-b5a8-a3ac82e9a224/20260522_2030_task.md)。
+
+## 2026-05-22 20:23
+- [x] **实现实时决策下半区“当前持仓”与“今日流水”双表全向高保真联动刷新 (Implemented Automated Linkage & Synchronized Sync for Portfolios & Log Tabs)**：
+    - [x] **实现 O(1) 亚毫秒级个股代码提取**：由于“当前持仓”表格 (`self._pos_tree`) 的 iid 设定为代码本身，而“今日流水”表格 (`self._log_tree`) 的第 3 列记录了个股代码，我们在两个事件回调中实现了极其轻量、高精度的 O(1) 级代码解包，规避了行遍历开销。
+    - [x] **接入多进程双向联动同步管道**：在事件发生时，自动通过 `self.sender.send(code)` 瞬间向主控制台投递切股重绘指令。同时级联监测 `vis_var` 联动状态变量，若激活则自发通过 `open_visualizer(code)` 将联动可视化终端的视角瞬间定位至该股票，实现了真正的全终端立体化同步分析。
+    - [x] **配置极速单选选中触发交互 (<<TreeviewSelect>>)**：在 `_init_decision_tab` 表格初始化块中，为两个 Treeview 控件的 `<<TreeviewSelect>>` 单选选中事件动态挂载了这两个联动接口。用户只需点击任一行，主图与可视化面板瞬间同步刷新，彻底清除了人工手动输入搜索的繁琐。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2023_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_2023_task.md)。
+
+## 2026-05-22 20:20
+- [x] **实现策略选股及决策队列全量表格深度暗黑化同色适配与立体白框剔除 (Implemented Premium Dark Theme Alignment with Same Background & Zero Border for All Tables)**：
+    - [x] **拒绝全局主题污染与防变形安全兜底 (Prevented Global Style Contamination & Fail-Safe Guard)**：为了彻底根除由于 `theme_use("clam")` 全局风格设置对主程序及其他对话框中所有默认 `ttk` 控件（按钮、下拉框、状态栏等）可能产生的排版污染与错位，我们物理剥离并剔除了所有的全局主题切换配置。这百分之百确保了整个系统原生排版高保真，绝不引发任何界面变形。
+    - [x] **实现有数据背景与多余区域完美同色融汇**：全新定义 `Custom.Treeview` 统一样式，配置 `background="#0c101b"`, `fieldbackground="#0c101b"`, `foreground="#ffffff"` 并作为平滑降级的兜底应用到全终端所有 7 个核心数据表。这确保了在不同平台或兼容主题下，数据背景色与数据下方多余的空白填充区域实现完美同色，彻底杜绝了以往大片惨白的“白底”视觉噪点。
+    - [x] **实现表头扁平暗化定制**：定制了 `Custom.Treeview.Heading` 样式，表头底色设为稍微明亮的暗极客蓝 `#111726`，前景色为纯白且设置 `relief="flat"`，在极窄滚动条映衬下更显极致档次。
+    - [x] **清理硬编码白底行标签配置**：将 Tab 1 中写死为大白底色的普通待复核行 `tag_configure("pending", background="#ffffff")` 统一步步改写并暗黑化为同色 `#0c101b`；将概念悬浮窗口高命中行背景由亮绿 `#e8f5e9` 修正为暗绿底色 `#13261a`，确保高亮不刺眼。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2020_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_2020_task.md)。
+
+## 2026-05-22 20:10
+- [x] **实现 Alt+T 全局一键选股与核心实时决策选项卡自动聚焦 (Implemented Alt+T Global Shortcut with Auto Redirection to Decision Tab)**：
+    - [x] **实现全局与系统级原生双通道热键**：在 Win32 系统级热键字典 `_HOTKEY_MAP` 中正式注册了物理全局快捷键 `Alt+T`（键码 `0x54`），实现了高精度的系统原生按键拦截和跨线程安全主循环调度。同时保留了 `bind_all("<Alt-t>")` 这一本地兜底通道，无论用户当前聚焦于任何外接显示器或软件子窗，均能 100% 物理唤醒拉起。
+    - [x] **精炼界面按键引导**：将控制条主按钮标签由 `"选股"` 正式更名为 `"选股 (Alt+T)"`，实现了对极客化键盘导航的显式视觉指引。
+    - [x] **实现首屏与复用选项卡自动切回**：在 `StockSelectionWindow` 类中monkey-patch注入了基于文本特征扫描的 `show_decision_tab` 统合控制接口。在**全新创设**选股界面或在**复用已有**实例并执行 `load_data` 时，自发扫描 Notebook 子容器，将视口精准、安全地拉回至第一核心的 `"🎯 实时决策"` 选项卡上，彻底攻克了此前需要人工再次点击的繁琐痛点。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2010_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_2010_task.md)。
+
+## 2026-05-22 20:05
+- [x] **实现 Kernel 看板窗口大小与绝对位置跨会话持久化及自动加载 (Implemented Kernel Toast Window Geometry Persistence & Auto Restore)**：
+    - [x] **复用 WindowMixin 系统架构**：深层级联并复用了主程序继承 of `WindowMixin.load_window_position` 及 `save_window_position` 核心方法，完美实现了窗口位置跨会话的 DPI 自适应与越界校正防崩盘保护。
+    - [x] **实现手动与级联多向单点位置持久化**：废弃了拖拽拉伸时的实时写盘记录。引入 `_on_toast_close` 自定义关闭处理方法，将保存逻辑收拢在关闭的一瞬间触发。完美绑定并适配了：系统右上角“红叉”关闭协议 (`WM_DELETE_WINDOW`)、界面上自定义“✕ 关闭”按钮事件、以及主选股窗口关闭时的自动级联物理 `destroy()` 动作。这彻底避免了多次冗余的文件 IO 开销，达成了极其高精和绿色高效的架构水准。
+    - [x] **实现置顶按需控制与当前运行期状态保持**：废除看板的强制置顶属性，在右上角关闭按钮左侧精巧新增了“📌 置顶”复选框（Checkbutton），支持一键手动切换置顶（`attributes("-topmost")`）。采用暗黑系夜间模式配色（与顶部信息栏背景完全融为一体，绝无Windows默认勾选框的刺眼白底色），并能在选股确认窗口生命周期内自动记忆用户的勾选状态。
+    - [x] **建立高可靠性双向 Fallback 通道**：新看板首次冷启动配置缺失时，无缝回退至原有的居右偏置几何计算定位，兼顾了精细化布局与首屏高可用体验。
+    - [x] **实现生命周期安全析构**：在选股主窗口 `_on_close` 关闭动作中，深度挂载了看板生命周期，关闭时自动物理销毁交易看板，同时彻底注销慢闪烁呼吸定时器，杜绝了任何潜在的微定时器或资源句柄泄露。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2005_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_2005_task.md)。
+
+## 2026-05-22 19:55
+- [x] **实现策略选股与概念风口异动看板“一键级联与次序拉起” (Implemented Single-Click Cascade with Sequential Order for Stock Selection & Concept Dashboard)**：
+    - [x] **先打开概念、后打开选股的次序保障**：在 `instock_MonitorTK.py` 的选股窗口入口 `open_stock_selection_window` 中，将 `self.show_concept_detail_window()` 优先移至方法最前端执行。确保概念异动窗口首先物理就绪，紧接着复用或新建策略选股窗口覆盖在最上方获取焦点，视觉层级完美顺畅。
+    - [x] **全方位无缝双向高保真联动**：策略选股窗口与概念看板深度挂载了针对 K 线主图及可视化面板的双向同步联动机制，并存时，点击任一窗口的个股，全系统瞬间同步刷新，实现了极致一体化的分析闭环。
+    - [x] **强力故障隔离保障 (Fault-Tolerance Guarantee)**：针对这套自动级联机制实施了严格的独立 `try-except` 异常隔离保护，彻底杜绝了因非交易时段数据缺失或特定概念状态未就绪等外部异常干扰选股窗口本身的主流程开启，保障了无人看护下的系统 100% 健壮运行。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1955_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1955_task.md)。
+
+## 2026-05-22 19:40
+- [x] **实现 Kernel 自动交易高亮行慢闪烁呼吸灯与联动悬浮 Tree 视图 (Implemented Highlighting Slow Blink & Interactive Toast Tree View)**：
+    - [x] **高亮行永不消失与慢闪烁呼吸灯 (Persistent Highlight & Slow Blink)**：通过在 `StockSelectionWindow` 上维护 `_kernel_marked_exec` 等三大状态集合，彻底拦截了 15 秒周期刷新对高亮的覆盖抹除。设计了 `_schedule_kernel_blink` 呼吸定时器，以 $O(1)$ 的零重绘开销通过切换 `tag_configure` 样式在 1500 毫秒周期内交替进行颜色呼吸变换，达成令人惊艳的极客级“慢闪烁”呼吸灯效果。
+    - [x] **全新升级 Treeview 联动悬浮看板 (Floating Interactive Exec Table Dashboard)**：重构了 `_kernel_show_toast`，彻底废弃了气泡 Label 自动销毁逻辑。现在看板常驻于屏幕右侧，内建 `ttk.Treeview` 结构化表格展现代码、名称、指令、结果、详情五列，用绿、黄、红区分执行、拦截和异常状态。
+    - [x] **首创浮动看板多路高保真联动与单点复用 (Interactive Linkage & Dashboard Reuse)**：在浮动 Treeview 行上绑定单选与双击事件，点击任一个股瞬间向主 K 线图发送联动代码，并在开启时一键拉起 K 线可视化视口联动。多次执行自动交易时自发重用既有看板，清空旧数据并载入最新 `records`，极富工程前瞻性。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1940_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1940_task.md)。
+
+## 2026-05-22 19:35
+- [x] **修复实时决策状态条执行日志详情撑高状态栏导致窗口排布变形 Bug (Fixed UI Status Strip Height Stretch & Window Layout Distort Bug)**：
+    - [x] **状态栏单行摘要化 (StatusBar Simplification & Monospace Summary)**：彻底清除了在执行 `_kernel_auto_execute_once` 时向状态栏控件 `_kernel_status_lbl` 注入含有 `\n` 换行符的 `detail` 大文本的错误。现在状态栏仅显示单行的精炼汇总 `msg`（如 `"执行=1 拦截=0 错误=0"`），这从物理上杜绝了由于大文本换行导致底层 Tk `risk_bar` 高度暴增、进而强行挤压变形下方“实时买点决策队列”表格及流水/持仓组件的 Bug，保证了 UI 窗口的高级 Rich Aesthetics 观感。
+    - [x] **保留气泡详情交互 (Preserved Topmost Float-Toast Details)**：保留了在 `_kernel_show_toast` 中继续展现 `detail` 完整内容的极客逻辑，确保买卖指令和拦截错误在屏幕右侧以不遮挡的透明悬浮气泡（2.6秒自动销毁）中优雅高保真展现，保障了系统交易的可解释性与绝佳人机交互体验。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1935_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1935_task.md)。
 
 ## 2026-05-22 16:25
 - [x] **修复放量详情及预警明细弹窗视图不同步拉伸/缩放 Bug (Fixed Window Scaling and Geometry Desync Bug)**：
