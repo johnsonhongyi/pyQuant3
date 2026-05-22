@@ -10060,30 +10060,33 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _draw_platform_breakout(self, x_axis, day_df):
         """在 K 线图上绘制基于收盘价的多维平台顶底曲线以及突破信号"""
-        # 如果数据中没有 ptop 等字段，则调用基础函数进行实时计算以保证逻辑 100% 一致
-        if 'ptop' not in day_df.columns or 'pbottom' not in day_df.columns or 'pdays' not in day_df.columns or 'pbreak' not in day_df.columns:
-            try:
-                import stock_logic_utils
-                # 动态计算看盘视野的 lookback，防止传入长度刚好等于 120 导致 range 循环为空被跳过
-                dynamic_lookback = max(15, int(len(day_df) * 0.4))
-                calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
-                if 'ptop' in calc_df.columns:
-                    day_df['ptop'] = calc_df['ptop'].values
-                    day_df['pbottom'] = calc_df['pbottom'].values
-                    day_df['pbreak'] = calc_df['pbreak'].values
-                    day_df['pdays'] = calc_df['pdays'].values
-            except Exception as e:
-                logger.error(f"Error calculating platform breakout for visualization: {e}")
-                return
+        # 🛡️ [BUGFIX] 实盘中由于追加了实时K线行，原本的 ptop/pbottom 等列被默认填充为 0 或 NaN。
+        # 故不论列是否存在，均强制对其进行实时重算，保证最新的一根实时K线得到 100% 准确的平台顶底与突破计算
+        try:
+            import stock_logic_utils
+            # 动态计算看盘视野的 lookback，防止传入长度刚好等于 120 导致 range 循环为空被跳过
+            dynamic_lookback = max(15, int(len(day_df) * 0.4))
+            calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
+            if 'ptop' in calc_df.columns:
+                day_df['ptop'] = calc_df['ptop'].values
+                day_df['pbottom'] = calc_df['pbottom'].values
+                day_df['pbreak'] = calc_df['pbreak'].values
+                day_df['pdays'] = calc_df['pdays'].values
+        except Exception as e:
+            logger.error(f"Error calculating platform breakout for visualization: {e}")
+            return
                 
         if 'ptop' not in day_df.columns:
             return
             
         self._clear_platform_breakout()
         
-        # 提取数组用于历史曲线绘制 (前向填充以防断条)
-        ptop_vals = pd.Series(day_df['ptop']).ffill().bfill().values
-        pbottom_vals = pd.Series(day_df['pbottom']).ffill().bfill().values
+        # 🛡️ [BUGFIX] 提取并替换 0.0 与 NaN 值，前向填充以防断条，彻底杜绝垂落到 0.0 轴和显示 "支撑: 0.0" 的 BUG
+        ptop_series = pd.Series(day_df['ptop']).replace(0.0, np.nan).ffill().bfill()
+        pbottom_series = pd.Series(day_df['pbottom']).replace(0.0, np.nan).ffill().bfill()
+        
+        ptop_vals = ptop_series.values
+        pbottom_vals = pbottom_series.values
         
         # 使用阶梯状或折线绘制历史平台顶底变化，像 MA 均线一样
         ptop_pen = pg.mkPen(color=(255, 0, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
