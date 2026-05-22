@@ -1739,7 +1739,8 @@ def _init_decision_tab(self, parent: tk.Frame):
                                   bg="#0a0f1a", fg="#00cc88", font=("Arial", 9, "bold"))
     paned.add(signal_frame, height=300)
 
-    sig_cols = ("time", "priority", "code", "name", "sector", "signal_type", "suggest_price",
+    sig_cols = ("time", "priority", "kernel_action", "kernel_size", "kernel_conf", "kernel_risk",
+                "code", "name", "sector", "signal_type", "suggest_price",
                 "current_price", "change_pct", "sector_heat", "hits", "reason", "status")
     self._signal_tree = ttk.Treeview(signal_frame, columns=sig_cols, show="headings", height=7)
 
@@ -1750,6 +1751,12 @@ def _init_decision_tab(self, parent: tk.Frame):
         "change_pct": "涨幅%", "sector_heat": "热度",
         "hits": "次数", "reason": "触发原因", "status": "状态",
     }
+    sig_headers.update({
+        "kernel_action": "Kernel",
+        "kernel_size": "仓位",
+        "kernel_conf": "置信",
+        "kernel_risk": "风控",
+    })
     for col, text in sig_headers.items():
         self._signal_tree.heading(col, text=text, command=lambda c=col: self._sort_signal_tree(c))
         self._signal_tree.column(col, anchor="center", width=60)
@@ -1759,6 +1766,10 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._signal_tree.column("time", width=70, stretch=False)
     self._signal_tree.column("hits", width=40, stretch=False)
     self._signal_tree.column("priority", width=50, stretch=False)
+    self._signal_tree.column("kernel_action", width=70, stretch=False)
+    self._signal_tree.column("kernel_size", width=55, stretch=False)
+    self._signal_tree.column("kernel_conf", width=55, stretch=False)
+    self._signal_tree.column("kernel_risk", width=85, stretch=False)
 
     self._signal_tree.tag_configure("high", background="#1a2a00", foreground="#88ff44")   # 高优先级
     self._signal_tree.tag_configure("medium", background="#001a2a", foreground="#44aaff") # 中
@@ -1800,7 +1811,7 @@ def _init_decision_tab(self, parent: tk.Frame):
                 hide_sig_tooltip()
                 try:
                     vals = self._signal_tree.item(item, 'values')
-                    txt = vals[11] if len(vals) > 11 else ""
+                    txt = vals[15] if len(vals) > 15 else ""
                     if txt:
                         # 文字多行显示
                         txt = str(txt).replace('|', '\n').replace('；', '\n').replace(';', '\n')
@@ -2114,6 +2125,10 @@ def _refresh_decision_tab(self):
                 values = (
                     s.get('created_at', ''),
                     priority,
+                    s.get('kernel_action', ''),
+                    f"{float(s.get('kernel_size_pct', 0) or 0):.0%}",
+                    f"{float(s.get('kernel_confidence', 0) or 0):.2f}",
+                    "OK" if s.get('kernel_allowed') else (s.get('kernel_reject_code') or "BLOCK"),
                     code, s['name'], s['sector'],
                     s['signal_type'],
                     s.get('suggest_price', 0),
@@ -2324,7 +2339,7 @@ def _on_signal_double_click(self, event):
     if col_name == 'reason':
         try:
             values = self._signal_tree.item(code, 'values')
-            reason_text = values[11]
+            reason_text = values[15]
             messagebox.showinfo("触发原因详情", reason_text, parent=self)
         except Exception:
             pass

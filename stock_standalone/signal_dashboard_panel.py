@@ -1618,7 +1618,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _create_decision_table(self) -> QTableWidget:
         """创建决策队列表"""
-        columns = ["时间", "优先级", "状态", "代码", "名称", "形态类别", "所属板块", "现价", "建议价", "周期涨变", "DFF动量", "捕捉理由"]
+        columns = ["时间", "优先级", "Kernel", "仓位", "置信", "风控", "状态", "代码", "名称", "形态类别", "所属板块", "现价", "建议价", "周期涨变", "DFF动量", "捕捉理由"]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -2346,7 +2346,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         current_selection = None
         sel_items = table.selectedItems()
         if sel_items: 
-            it = table.item(sel_items[0].row(), 3)
+            it = table.item(sel_items[0].row(), 7)
             if it: current_selection = it.data(self._ROLE_TEXT)
 
         sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
@@ -2355,16 +2355,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         def _get_sort_key(d):
             if sort_col == 0: return d.get('created_at', '')
             if sort_col == 1: return d.get('priority', 0)
-            if sort_col == 2: return d.get('status', '')
-            if sort_col == 3: return d.get('code', '')
-            if sort_col == 4: return d.get('name', '')
-            if sort_col == 5: return d.get('signal_type', '')
-            if sort_col == 6: return d.get('sector', '')
-            if sort_col == 7: return d.get('current_price', 0.0)
-            if sort_col == 8: return d.get('suggest_price', 0.0)
-            if sort_col == 9: return d.get('pct_diff', 0.0)
-            if sort_col == 10: return d.get('dff', 0.0)
-            if sort_col == 11: return d.get('reason', '')
+            if sort_col == 2: return d.get('kernel_action', '')
+            if sort_col == 3: return d.get('kernel_size_pct', 0.0)
+            if sort_col == 4: return d.get('kernel_confidence', 0.0)
+            if sort_col == 5: return d.get('kernel_reject_code', '')
+            if sort_col == 6: return d.get('status', '')
+            if sort_col == 7: return d.get('code', '')
+            if sort_col == 8: return d.get('name', '')
+            if sort_col == 9: return d.get('signal_type', '')
+            if sort_col == 10: return d.get('sector', '')
+            if sort_col == 11: return d.get('current_price', 0.0)
+            if sort_col == 12: return d.get('suggest_price', 0.0)
+            if sort_col == 13: return d.get('pct_diff', 0.0)
+            if sort_col == 14: return d.get('dff', 0.0)
+            if sort_col == 15: return d.get('reason', '')
             return 0
 
         decisions = sorted(decisions, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
@@ -2390,26 +2394,32 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 prio = d.get('priority', 0)
                 p_color = "#ff0000" if prio >= 75 else ("#ffaa00" if prio >= 60 else "#ffffff")
                 self._fast_update_cell(table, i, 1, prio, color_key=p_color, numeric_val=prio)
+                kernel_action = d.get('kernel_action', '')
+                k_color = "#00ff88" if d.get('kernel_allowed') else "#ff8844"
+                self._fast_update_cell(table, i, 2, kernel_action, color_key=k_color, bold=True)
+                self._fast_update_cell(table, i, 3, f"{float(d.get('kernel_size_pct', 0) or 0):.0%}", numeric_val=d.get('kernel_size_pct', 0.0))
+                self._fast_update_cell(table, i, 4, f"{float(d.get('kernel_confidence', 0) or 0):.2f}", numeric_val=d.get('kernel_confidence', 0.0))
+                self._fast_update_cell(table, i, 5, "OK" if d.get('kernel_allowed') else (d.get('kernel_reject_code') or "BLOCK"), color_key=k_color)
                 
                 st_text = d.get('status', '待处理')
                 st_color = "#00ff88" if '成交' in st_text else "#ffffff"
-                self._fast_update_cell(table, i, 2, st_text, color_key=st_color)
+                self._fast_update_cell(table, i, 6, st_text, color_key=st_color)
                 
                 code = d.get('code', '')
                 c_color = "#ffff00" if code.startswith('30') else "#00ffff"
-                self._fast_update_cell(table, i, 3, code, color_key=c_color, bold=True)
+                self._fast_update_cell(table, i, 7, code, color_key=c_color, bold=True)
                 
-                self._fast_update_cell(table, i, 4, d.get('name', ''))
-                self._fast_update_cell(table, i, 5, d.get('signal_type', ''))
-                self._fast_update_cell(table, i, 6, d.get('sector', ''))
-                self._fast_update_cell(table, i, 7, d.get('current_price', 0.0), numeric_val=d.get('current_price', 0.0))
-                self._fast_update_cell(table, i, 8, d.get('suggest_price', 0.0), numeric_val=d.get('suggest_price', 0.0))
+                self._fast_update_cell(table, i, 8, d.get('name', ''))
+                self._fast_update_cell(table, i, 9, d.get('signal_type', ''))
+                self._fast_update_cell(table, i, 10, d.get('sector', ''))
+                self._fast_update_cell(table, i, 11, d.get('current_price', 0.0), numeric_val=d.get('current_price', 0.0))
+                self._fast_update_cell(table, i, 12, d.get('suggest_price', 0.0), numeric_val=d.get('suggest_price', 0.0))
                 
                 pd_val = d.get('pct_diff', 0.0)
                 pd_color = "#ff4444" if pd_val > 0 else ("#44ff44" if pd_val < 0 else "#ffffff")
-                self._fast_update_cell(table, i, 9, f"{pd_val:+.2f}%", color_key=pd_color, numeric_val=pd_val)
-                self._fast_update_cell(table, i, 10, d.get('dff', 0.0), numeric_val=d.get('dff', 0.0))
-                self._fast_update_cell(table, i, 11, d.get('reason', ''))
+                self._fast_update_cell(table, i, 13, f"{pd_val:+.2f}%", color_key=pd_color, numeric_val=pd_val)
+                self._fast_update_cell(table, i, 14, d.get('dff', 0.0), numeric_val=d.get('dff', 0.0))
+                self._fast_update_cell(table, i, 15, d.get('reason', ''))
 
                 if '🐉' in d.get('reason', ''):
                     for col in range(table.columnCount()):
