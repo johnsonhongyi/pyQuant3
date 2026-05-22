@@ -3,6 +3,14 @@ title Nuitka Smart Compiler Assistant - Console Mode
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
+:: =========================================
+:: START TIME RECORDING
+:: =========================================
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "START_TIME=%%i"
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "START_TIME_STR=%%i"
+echo [INFO] Build started at: %START_TIME_STR%
+echo.
+
 echo ==========================================
 echo 🧠 Nuitka Smart Compiler Assistant (Console Mode)
 echo ==========================================
@@ -298,7 +306,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-module=signal_bus ^
     --include-module=keyboard ^
     --include-module=tkcalendar ^
-    --include-module=psutil
+    --include-module=psutil ^
+    --include-module=tk_gil_monitor
 
 
 :: ===== Execute compilation =====
@@ -332,6 +341,29 @@ if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\instock_MonitorTK.exe" (
 ) else (
     echo [ERROR] Compilation failed. Please check the error logs.
 )
+
+:: ===== Calculate and Record Elapsed Time =====
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "END_TIME=%%i"
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "END_TIME_STR=%%i"
+
+for /f "usebackq delims=" %%i in (`python -c "import time; elapsed = %END_TIME% - %START_TIME%; m, s = divmod(elapsed, 60); h, m = divmod(m, 60); print('{:02d}:{:02d}:{:02d} ({:.2f}s)'.format(int(h), int(m), int(s), elapsed))"`) do set "ELAPSED_TIME=%%i"
+
+echo ==========================================
+echo 🕒 Build Time Summary:
+echo Start Time:    %START_TIME_STR%
+echo End Time:      %END_TIME_STR%
+echo Elapsed Time:  %ELAPSED_TIME%
+echo ==========================================
+
+:: Persist to time.txt
+(
+echo ==========================================
+echo Build Date:    %START_TIME_STR%
+echo Start Time:    %START_TIME_STR%
+echo End Time:      %END_TIME_STR%
+echo Elapsed Time:  %ELAPSED_TIME%
+echo ==========================================
+) >> "%~dp0time.txt"
 
 :: 6. Restore original PATH
 set "PATH=%OLD_PATH%"

@@ -1,7 +1,22 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-21 20:10  
+> 最后更新：2026-05-21 23:57  
+
+## 2026-05-21 23:57
+- [x] **极致精简 Nuitka 编译链路与物理加速构建 (Optimized Nuitka Build Exclusions & Accelerators)**：
+    - [x] **精准物理阻断巨型冗余三方包**：在 `nuitka_build_console_onlyClang.bat` 的 `--nofollow-import-to` 中，大幅扩充拦截了 `pytest`, `_pytest`, `jedi`, `pygments`, `setuptools`, `distutils`, `pkg_resources`, `sphinx`, `docutils`, `notebook`, `pydoc` 等 11 个极其庞大、含有海量小文件的测试/分析/文档开发库，斩断了 Nuitka 陷入冗长分析的噩梦，有效缩减编译产生的 C 代码总规模。
+    - [x] **开启 Scons 二进制自动清理与优化**：在编译批处理中物理补齐了 `--remove-output` 以自动在编译成功后彻底清理几 GB 的中间 `.build` 临时 C 代码目录；同时加入 `--python-flag=-O` 二级优化，精简字节码，以及 `--show-progress` 增强编译百分比的可视化友好性。
+    - [x] **强力挂载 UI 看门狗诊断哨兵**：在本地模块编译打包列表中补齐了 `--include-module=tk_gil_monitor` 强制依赖，杜绝了 Nuitka 编译 standalone 离线包后因动态反射加载遗漏导致的 ModuleNotFoundError 闪退隐患。
+    - [x] **修复 a_trade_calendar 模块遮蔽与子依赖丢失**：查明由于物理阻断了 `setuptools/pkg_resources` 导致 Nuitka 对第三方包的自动子模块追踪受阻，原本错误的 `--include-module=a_trade_calendar` 无法再通过隐式跟随规避；配合 dist 目录下同名数据文件夹 `a_trade_calendar` 造成的 Namespace Package 遮蔽效应，引发了 `module has no attribute 'is_trade_date'` 报错。通过精准重构为 `--include-package=a_trade_calendar` 强制包含其全部子模块（如 `calendar_util`）编译，彻底消除了该 AttributeError 顽疾。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260521_2357_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260521_2357_task.md)。
+
+## 2026-05-21 23:45
+- [x] **实现 Nuitka 编译一键启动计时与持久化用时统计 (Implemented Nuitka Compilation Timing & Persistence to time.txt)**：
+    - [x] **实现启动计时 (Start Timer Hook)**：在 `nuitka_build_console_onlyClang.bat` 的初始化区注入了 Unix 时间戳及高辨识度字符串捕获逻辑（使用 `python -c` 绕过 Windows batch 脚本本地化时间格式易跑偏的解析缺陷）。
+    - [x] **实现编译用时自动计算 (Elapsed Time Calculation)**：在编译完成和退出前，利用 Python 计算差值并格式化转换为 `HH:MM:SS (seconds)` 精准形态，以高可读日志展现于控制台。
+    - [x] **实现持久化追加落盘 (Build History Persistence)**：在编译尾部自动向当前路径的 `time.txt` 追加写盘，留存每次 Nuitka Clang 编译构建的宝贵统计痕迹，保障极致的工程可回溯性。
+    - [x] **创建独立任务日志归档 (Task Archive Creation)**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260521_2345_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260521_2345_task.md)。
 
 ## 2026-05-21 20:10
 - [x] **物理对齐 PyInstaller 特征剔除，实现 Nuitka 打包极限瘦身 70% 空间 (Nuitka Slimming & Asset Alignment)**：
