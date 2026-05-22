@@ -401,7 +401,7 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(26) # 行高微调 (适应 13px 文字)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         
         h_header = self.table.horizontalHeader()
@@ -517,48 +517,47 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self._is_updating = True
         self.table.setSortingEnabled(False) # 写入数据时关闭排序避免错位
         self.table.setRowCount(0)
-        if not details_list: 
-            self.table.setSortingEnabled(False)
-            self.table.horizontalHeader().setSortIndicatorShown(True)
-            self._is_updating = False
-            return
         
-        self.table.setRowCount(len(details_list))
-        for i, item in enumerate(details_list):
-            code = item.get("code", "")
-            name = item.get("name", "")
-            change = item.get("change", 0.0)
-            ratio = item.get("ratio", 0.0)
+        try:
+            if not details_list: 
+                return
             
-            # 代码 (亮色)
-            c_item = QTableWidgetItem(code)
-            c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
-            c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 0, c_item)
-            
-            # 名称
-            n_item = QTableWidgetItem(name)
-            n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 1, n_item)
-            
-            # 涨幅 (注意：NumericTableWidgetItem 会处理排序，展示带格式文字)
-            ch_item = NumericTableWidgetItem(change)
-            ch_item.setText(f"{change:+.2f}%")
-            ch_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if change > 0: ch_item.setForeground(QBrush(QColor("#ff4444")))
-            elif change < 0: ch_item.setForeground(QBrush(QColor("#44ff44")))
-            self.table.setItem(i, 2, ch_item)
-            
-            # 量比 (亮黄)
-            r_item = NumericTableWidgetItem(ratio)
-            r_item.setText(f"{ratio:.2f}")
-            r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            r_item.setForeground(QBrush(QColor("#ffff00")))
-            self.table.setItem(i, 3, r_item)
-            
-        self.table.setSortingEnabled(False)
-        self.table.horizontalHeader().setSortIndicatorShown(True) # 恢复自适应排序
-        self._is_updating = False
+            self.table.setRowCount(len(details_list))
+            for i, item in enumerate(details_list):
+                code = item.get("code", "")
+                name = item.get("name", "")
+                change = item.get("change", 0.0)
+                ratio = item.get("ratio", 0.0)
+                
+                # 代码 (亮色)
+                c_item = QTableWidgetItem(code)
+                c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
+                c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(i, 0, c_item)
+                
+                # 名称
+                n_item = QTableWidgetItem(name)
+                n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(i, 1, n_item)
+                
+                # 涨幅 (注意：NumericTableWidgetItem 会处理排序，展示带格式文字)
+                ch_item = NumericTableWidgetItem(change)
+                ch_item.setText(f"{change:+.2f}%")
+                ch_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if change > 0: ch_item.setForeground(QBrush(QColor("#ff4444")))
+                elif change < 0: ch_item.setForeground(QBrush(QColor("#44ff44")))
+                self.table.setItem(i, 2, ch_item)
+                
+                # 量比 (亮黄)
+                r_item = NumericTableWidgetItem(ratio)
+                r_item.setText(f"{ratio:.2f}")
+                r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                r_item.setForeground(QBrush(QColor("#ffff00")))
+                self.table.setItem(i, 3, r_item)
+        finally:
+            self.table.setSortingEnabled(True)
+            self.table.horizontalHeader().setSortIndicatorShown(True) # 恢复自适应排序
+            self._is_updating = False
 
     def _run_dna_audit_selected(self):
         """🚀 [DNA-BATCH] 极限审计：针对异动放量列表"""

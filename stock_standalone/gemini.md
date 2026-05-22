@@ -1,7 +1,20 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 13:14  
+> 最后更新：2026-05-22 14:57  
+
+## 2026-05-22 14:57
+- [x] **修复策略信号仪表盘今日异动放量个股 (VolumeDetailsDialog) 表格点击排序功能失效的 Bug (Fixed VolumeDetailsDialog Sorting Bug)**：
+    - [x] **根除排序功能静默关闭隐患 (Fixed sorting disabled logically)**：查明在 `VolumeDetailsDialog.update_data` 方法的结尾处，原本打算在填充完个股数据后“恢复自适应排序”，却因为手误将 `setSortingEnabled(True)` 写成了 `setSortingEnabled(False)`；并且在 `__init__` 中初始化阶段也将该表格的排序强行关闭，导致点击表头完全没有响应。
+    - [x] **落地高可靠 try-finally 闭环装载机制 (Hardened data loading with try-finally)**：在 `VolumeDetailsDialog.update_data` 写入数据时，引入了严密的 `try-finally` 结构。进入时暂时关闭排序以获取极限的数据写入性能、防止错位，在 `finally` 块中强制恢复 `setSortingEnabled(True)` 并解除 `_is_updating` 锁定，即使在个股列表装载中发生偶发性异常也能 100% 优雅地恢复排序功能，提升了终端在无人值守护航下的系统容错能力。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1457_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1457_task.md)。
+
+## 2026-05-22 13:46
+- [x] **扩展 KLineMonitor 实时监控面板以显示 DFF 与 DFF2 列 (Added DFF and DFF2 columns to KLineMonitor)**：
+    - [x] **表格结构配置扩容与首屏布局防裁切 (Expanded Table Structure & Visual Bounds)**：在 `ttk.Treeview` 中新增了 `"dff"` 和 `"dff2"` 的定义与中英表头设置，同时针对备用几何比例，将窗口默认的 fallback 宽度从 `760px` 优雅扩宽至 `860px`（以与 `load_window_position` 默认配置对齐），杜绝在无位置记忆时的界面截断。
+    - [x] **实现高速数据路由与容错 (High-efficiency O(1) Columns Detection & Fallbacks)**：在数据处理核心方法 `process_table_data` 循环最前端预先对 DataFrame 列结构进行一次性提取缓存（`has_dff`/`has_dff2`），实现了 $O(1)$ 的无阻断取值与 Fallback 填充（默认填充值为 `0`），在规避行循环内高频反射开销的同时，从物理层面上彻底清除了 `KeyError` 隐患。
+    - [x] **高精格式化与数值筛选对齐 (Precise Formatting & Query Alignment)**：在树形列表装载时，对 `dff` 与 `dff2` 字段实施高精格式化校验（处理 `None` 或 `NaN` 等空值）并保留两位小数（`f"{val:.2f}"`）渲染；同时将其加入 `apply_filters` 的 `pd.to_numeric` 数值类型转换列表中，保障了 pandas 在执行 `.query()` 高级筛选与表头列点击排序时的完全一致与精确。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1346_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1346_task.md)。
 
 ## 2026-05-22 13:14
 - [x] **落地多级实时行情自愈补齐机制，彻底攻克增量冷启动跟随股“无分时图及0.00元价格”问题 (Implemented Multi-level Real-time Data Healing for Lagging Followers)**：
