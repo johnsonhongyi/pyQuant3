@@ -790,6 +790,10 @@ class BiddingMomentumDetector:
         self._subscribe_queue = Queue()
         self._sector_update_queue = Queue()
         self._register_worker_started = False
+        
+        # [NEW] 异步板块聚合任务队列与退出信号 (异步分层解耦)
+        self._async_sector_agg_queue = Queue()
+        self._stop_event = threading.Event()
 
         if not lazy_load:
             self._load_stock_selector_data()
@@ -1175,44 +1179,120 @@ class BiddingMomentumDetector:
         # ① subscribe worker（完全异步）
         # =========================
         def subscribe_worker():
-            while True:
-                code = self._subscribe_queue.get()
+            import queue
+            while not self._stop_event.is_set():
                 try:
-                    if self.realtime_service and code not in self._subscribed:
-                        self.realtime_service.subscribe(code, self._on_tick)
-                        self._subscribed.add(code)
-                except Exception as e:
-                    logger.warning(f"[SubscribeWorker] {code} failed: {e}")
+                    code = self._subscribe_queue.get(timeout=1.0)
+                    if code is None:
+                        break
+                    try:
+                        if self.realtime_service and code not in self._subscribed:
+                            self.realtime_service.subscribe(code, self._on_tick)
+                            self._subscribed.add(code)
+                    except Exception as e:
+                        logger.warning(f"[SubscribeWorker] {code} failed: {e}")
+                except queue.Empty:
+                    continue
 
         # =========================
         # ② sector worker（低频更新）
         # =========================
         def sector_worker():
             import time
-            while True:
-                self._sector_update_queue.get()
-
+            import queue
+            while not self._stop_event.is_set():
                 try:
-                    # ❗ 控频：最多 1次/300ms
-                    time.sleep(0.3)
+                    trigger = self._sector_update_queue.get(timeout=1.0)
+                    if trigger is None:
+                        break
 
-                    with self._lock:
-                        df_snapshot = None
-                        if hasattr(self, '_tick_series'):
-                            # 只做轻量触发，不 rebuild
-                            self.data_version += 1
+                    try:
+                        # ❗ 控频：最多 1次/300ms
+                        time.sleep(0.3)
 
-                    # 延迟真正 sector rebuild
-                    self._aggregate_sectors(active_codes=None)
+                        with self._lock:
+                            if hasattr(self, '_tick_series'):
+                                # 只做轻量触发，不 rebuild
+                                self.data_version += 1
 
+                        # 延迟真正 sector rebuild
+                        self._aggregate_sectors(active_codes=None)
+
+                    except Exception as e:
+                        logger.warning(f"[SectorWorker] failed: {e}")
+                except queue.Empty:
+                    continue
+
+        # =========================
+        # ③ 异步板块聚合 worker (分层异步，完成后更新，防抖折叠)
+        # =========================
+        def async_sector_agg_worker():
+            import queue
+            while not self._stop_event.is_set():
+                try:
+                    # 阻塞式获取首个任务
+                    task = self._async_sector_agg_queue.get(timeout=1.0)
+                    if task is None:
+                        break
+                    
+                    active_codes_set = set()
+                    is_none_found = False
+                    _from_scheduler = False
+                    
+                    # 🚀 防抖折叠逻辑：把队列里积压的板块聚合任务全部合并，仅执行一次最新状态聚合
+                    # 这能从根本上消除多进程/高频行情推送下密集板块计算对 GIL 的争夺与卡顿
+                    tasks_to_process = [task]
+                    while not self._async_sector_agg_queue.empty():
+                        try:
+                            t = self._async_sector_agg_queue.get_nowait()
+                            if t is None:
+                                is_none_found = True
+                            else:
+                                tasks_to_process.append(t)
+                        except queue.Empty:
+                            break
+                    
+                    # 合并任务参数
+                    for t in tasks_to_process:
+                        if t is None:
+                            is_none_found = True
+                            continue
+                        curr_codes, curr_from = t
+                        _from_scheduler = _from_scheduler or curr_from
+                        if curr_codes is None:
+                            is_none_found = True
+                        elif not is_none_found:
+                            active_codes_set.update(curr_codes)
+                    
+                    final_active_codes = None if is_none_found else list(active_codes_set)
+                    
+                    # 执行真正的板块聚合 (在独立的后台守护线程中安全运行)
+                    _t_agg = time.perf_counter()
+                    self._aggregate_sectors(active_codes=final_active_codes, _from_scheduler=_from_scheduler)
+                    _agg_ms = (time.perf_counter() - _t_agg) * 1000
+                    
+                    # [DEBUG] 打印分析日志
+                    if _agg_ms > 800:
+                        logger.info(f"⚡ [AsyncSectorAgg] Aggregated sectors in {_agg_ms:.1f}ms (active={len(final_active_codes) if final_active_codes else 'ALL'})")
+                    
+                    # 板块计算全部完成后，异步通知外部 UI 统一刷新（完成后更新模式）
+                    if hasattr(self, 'on_score_finished') and self.on_score_finished:
+                        try:
+                            self.on_score_finished()
+                        except Exception as e:
+                            logger.warning(f"[AsyncSectorAgg] Failed to trigger on_score_finished: {e}")
+                            
+                except queue.Empty:
+                    continue
                 except Exception as e:
-                    logger.warning(f"[SectorWorker] failed: {e}")
+                    logger.error(f"[AsyncSectorAgg] Error in worker loop: {e}", exc_info=True)
 
         # =========================
         # 启动线程
         # =========================
-        threading.Thread(target=subscribe_worker, daemon=True).start()
-        threading.Thread(target=sector_worker, daemon=True).start()
+        threading.Thread(target=subscribe_worker, name="subscribe_worker", daemon=True).start()
+        threading.Thread(target=sector_worker, name="sector_worker", daemon=True).start()
+        threading.Thread(target=async_sector_agg_worker, name="async_sector_agg_worker", daemon=True).start()
 
     def get_active_sectors(self) -> List[Dict[str, Any]]:
         """
@@ -1271,10 +1351,12 @@ class BiddingMomentumDetector:
             return
 
         if skip_evaluate:
-            # 兼容旧接口：直接更新版本号并聚合
+            # 兼容旧接口：直接更新版本号并投递异步板块聚合，彻底防止同步计算导致的卡顿
             with self._lock:
                 self.data_version += 1
-            self._aggregate_sectors(active_codes=active_codes if not force else None)
+            self._async_sector_agg_queue.put(
+                (active_codes if not force else None, False)
+            )
             return
 
         # 👉 启动 Chunk Scheduler 状态机（异步分帧执行，不阻塞当前线程）
@@ -1414,7 +1496,7 @@ class BiddingMomentumDetector:
     def _finish_score(self):
         """
         [Chunk Scheduler] Step 3（收尾）：
-        所有 chunk 评估完毕后，收集 dirty_codes 并调用 aggregate。
+        所有 chunk 评估完毕后，收集 dirty_codes 并投递到异步聚合队列。
         data_version 在此统一递增（_aggregate_sectors 不再递增）。
         """
         with self._score_lock:
@@ -1429,27 +1511,13 @@ class BiddingMomentumDetector:
             self.last_processed_count = processed_count
             self.data_version += 1  # ⚡ 统一在此递增
 
-        # ⚠️ aggregate 不再递增 data_version（传入 _from_scheduler=True）
-        _t_agg = time.perf_counter()
-        self._aggregate_sectors(
-            active_codes=dirty_codes if (dirty_codes and not force_ref) else None,
-            _from_scheduler=True
+        # 👉 [NEW] 将板块聚合任务投递至高可靠异步聚合队列中，0.00ms 物理零阻塞！
+        # 队列工作线程会自动合并防抖折叠并实现“完成后更新模式”
+        self._async_sector_agg_queue.put(
+            (dirty_codes if (dirty_codes and not force_ref) else None, True)
         )
-        _agg_ms = (time.perf_counter() - _t_agg) * 1000
-        if _agg_ms > 5000:
-            logger.warning(
-                f"[ScoreChunk][SLOW] aggregate {processed_count} codes = {_agg_ms:.1f}ms "
-                f"(dirty={len(dirty_codes)}, force={force_ref})"
-            )
 
-        logger.debug(f"[ScoreChunk] ✅ 完成评估 {processed_count} 只，dirty={len(dirty_codes)}, v={self.data_version}")
-
-        # 👉 [NEW] 打分全部完成后，触发回调通知外部 UI 统一更新
-        if hasattr(self, 'on_score_finished') and self.on_score_finished:
-            try:
-                self.on_score_finished()
-            except Exception as e:
-                logger.warning(f"[ScoreChunk] Failed to trigger on_score_finished: {e}")
+        logger.debug(f"[ScoreChunk] ✅ 评估分片完毕 {processed_count} 只，已派发异步板块聚合，dirty={len(dirty_codes)}, v={self.data_version}")
 
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
@@ -1608,6 +1676,17 @@ class BiddingMomentumDetector:
             except Exception as e:
                 logger.warning(f"Error cancelling BiddingMomentumDetector timer: {e}")
             self._chunk_timer = None
+            
+        # [NEW] 优雅关闭后台异步 worker 线程，彻底根除线程残留与退出假死
+        if hasattr(self, '_stop_event'):
+            self._stop_event.set()
+        try:
+            self._async_sector_agg_queue.put(None)
+            self._subscribe_queue.put(None)
+            self._sector_update_queue.put(None)
+            logger.info("🛑 BiddingMomentumDetector background workers triggered for exit.")
+        except Exception as e:
+            logger.warning(f"Error sending exit signals to background queues: {e}")
             
         self.on_score_finished = None
 
@@ -3669,6 +3748,9 @@ class BiddingMomentumDetector:
             sector_full_map = {k: v.copy() for k, v in self.sector_map.items()}
             # snap and market_avg_pct were already handled above
 
+        # 联动概念本轮跟风计算局部缓存，避免在同一个 _aggregate_sectors 周期内重复遍历计算相同概念
+        concept_cache = {}
+
         for sector in sectors_to_update:
             stocks_dict = sector_stocks_map.get(sector, {})
             if not stocks_dict:
@@ -3689,20 +3771,6 @@ class BiddingMomentumDetector:
             candidate_leader = stocks[0]
             leader_code = candidate_leader['code']
             leader_pct = candidate_leader['pct']
-
-            # [NEW] 龙头竞赛选手识别 (Race Candidates) - 对应 UI 中的“角色”精细化展示
-            # 将板块内除了绝对龙头之外的强势股打上状态标签
-            race_candidates = []
-            for s in stocks:
-                role = self._determine_role(s, leader_code, s['leader_score'])
-                race_candidates.append({
-                    'code': s['code'], 'name': s['name'], 'role': role,
-                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
-                    'l_score': round(s['leader_score'], 1),
-                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
-                    'is_untradable': s.get('is_untradable', False),
-                    'is_counter_trend': s.get('is_counter_trend', False)
-                })
 
             # [P1-OPT] Use prefetched sector_full_map
             all_member_codes = sector_full_map.get(sector, set())
@@ -3747,6 +3815,40 @@ class BiddingMomentumDetector:
             # 最终板分公式：(板块均值加权 + 联动比例加权 + 个股强势溢价) * 热度系数
             board_score = (avg_pct * 0.8 + follow_ratio * 4.0 + (candidate_leader['score'] * 0.05) + tk_correlation_score) * hotness_multiplier
 
+            # ----------------------------------------------------
+            # ⚡ 第一阶段初筛与过滤门槛校验 (Early-Exit)
+            # ----------------------------------------------------
+            # 基础门槛：下调门槛，增强对竞价初期及异动概念的捕捉灵敏度
+            # 原条件: follow_ratio < 0.15 and avg_pct < 1.5
+            if follow_ratio < 0.10 and avg_pct < 1.0:
+                 skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f})"
+                 new_active.pop(sector, None)
+                 continue
+            
+            # 最终入榜门槛校验
+            if board_score < self.sector_score_threshold:
+                 skipped_reasons[sector] = f"low_board_score({board_score:.1f} < {self.sector_score_threshold})"
+                 new_active.pop(sector, None)
+                 continue
+
+            # ----------------------------------------------------
+            # ⚡ 第二阶段：只有通过过滤的板块，才执行高成本的数据包装与联动概念计算！
+            # ----------------------------------------------------
+
+            # [NEW] 龙头竞赛选手识别 (Race Candidates) - 对应 UI 中的“角色”精细化展示
+            # 将板块内除了绝对龙头之外的强势股打上状态标签
+            race_candidates = []
+            for s in stocks:
+                role = self._determine_role(s, leader_code, s['leader_score'])
+                race_candidates.append({
+                    'code': s['code'], 'name': s['name'], 'role': role,
+                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
+                    'l_score': round(s['leader_score'], 1),
+                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
+                    'is_untradable': s.get('is_untradable', False),
+                    'is_counter_trend': s.get('is_counter_trend', False)
+                })
+
             # 提取龙头元数据供后续使用
             tags = []
             l_data = candidate_leader
@@ -3786,19 +3888,6 @@ class BiddingMomentumDetector:
                 # [NEW] 主流延续性标签：如果龙头是昨日选股器选出的强势股，且板块强势
                 if leader_code in self.stock_selector_seeds and board_score > 5.5:
                     tags.append("🔥 延续")
-
-            # 基础门槛：下调门槛，增强对竞价初期及异动概念的捕捉灵敏度
-            # 原条件: follow_ratio < 0.15 and avg_pct < 1.5
-            if follow_ratio < 0.10 and avg_pct < 1.0:
-                 skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f})"
-                 new_active.pop(sector, None)
-                 continue
-            
-            # 最终入榜门槛校验
-            if board_score < self.sector_score_threshold:
-                 skipped_reasons[sector] = f"low_board_score({board_score:.1f} < {self.sector_score_threshold})"
-                 new_active.pop(sector, None)
-                 continue
             
             # [NEW] 标记板块类型
             sector_type = "📈 跟随"
@@ -3810,26 +3899,55 @@ class BiddingMomentumDetector:
             
             tags.insert(0, sector_type)
             
-            # 联动板块分析 (精简版)
+            # 联动板块分析 (精简版) - [OPTIMIZED] 仅对强势、有活力的龙头板块计算联动以节省 CPU
             linked_concepts = []
-            leader_concepts = [c.strip() for c in _RE_CAT_SPLIT.split(l_data['category']) if c.strip() and len(c.strip()) <= 8]
-            if leader_concepts:
-                for concept in leader_concepts:
-                    if concept == sector: continue
-                    members = self.sector_map.get(concept)
-                    if not members or len(members) < 3: continue
-                    # [P0-OPT] snap 已经是锁外快照，且 members 来自 sector_full_map 快照
-                    members_in_snap = [mc for mc in members if mc in snap]
-                    if not members_in_snap: continue
-                    f_count = sum(1 for mc in members_in_snap if (1 if snap[mc]['pct']>0 else -1) == leader_sign)
-                    total_c_pct = sum(snap[mc]['pct'] for mc in members_in_snap if (1 if snap[mc]['pct']>0 else -1) == leader_sign)
-                    c_follow = f_count / len(members_in_snap)
-                    c_avg_pct = total_c_pct / len(members_in_snap)
-                    if c_follow > 0.4: linked_concepts.append({
-                        'concept': concept, 
-                        'follow_ratio': round(c_follow, 2),
-                        'avg_pct': round(c_avg_pct, 2)
-                    })
+            if board_score >= 5.0 or abs(leader_pct) >= 1.0:
+                leader_concepts = [c.strip() for c in _RE_CAT_SPLIT.split(l_data['category']) if c.strip() and len(c.strip()) <= 8]
+                if leader_concepts:
+                    for concept in leader_concepts:
+                        if concept == sector: continue
+                        
+                        # 🚀 [PERF] Single-pass Concept Cache 极速优化，彻底消灭 O(N^2) 重复计算
+                        if concept in concept_cache:
+                            cached_val = concept_cache[concept]
+                            if cached_val is not None:
+                                linked_concepts.append(cached_val)
+                            continue
+
+                        members = self.sector_map.get(concept)
+                        if not members or len(members) < 3:
+                            concept_cache[concept] = None
+                            continue
+                        
+                        # [P0-OPT] snap 已经是锁外快照，且 members 来自 sector_full_map 快照
+                        members_in_snap = [mc for mc in members if mc in snap]
+                        if not members_in_snap:
+                            concept_cache[concept] = None
+                            continue
+                        
+                        # 计算成员均值与跟风率
+                        f_count = 0
+                        total_c_pct = 0.0
+                        for mc in members_in_snap:
+                            mc_pct = snap[mc]['pct']
+                            mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
+                            if mc_sign == leader_sign and mc_sign != 0:
+                                f_count += 1
+                                total_c_pct += mc_pct
+                                
+                        c_follow = f_count / len(members_in_snap)
+                        c_avg_pct = total_c_pct / len(members_in_snap)
+                        
+                        if c_follow > 0.4:
+                            concept_val = {
+                                'concept': concept, 
+                                'follow_ratio': round(c_follow, 2),
+                                'avg_pct': round(c_avg_pct, 2)
+                            }
+                            concept_cache[concept] = concept_val
+                            linked_concepts.append(concept_val)
+                        else:
+                            concept_cache[concept] = None
 
             # [REM] 移除此处冗余的基准重置逻辑，已由外层校验覆盖。
                  

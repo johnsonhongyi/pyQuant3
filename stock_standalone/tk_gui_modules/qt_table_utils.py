@@ -265,7 +265,10 @@ class TrendDelegate(QStyledItemDelegate):
         
         display_prices = list(prices)
         if not display_prices:
-            now_p = pdata.get('now_price', last_close)
+            now_p = pdata.get('now_price', 0)
+            if now_p <= 0:
+                now_p = last_close
+            
             if now_p > 0:
                 display_prices = [now_p, now_p]
             else:
