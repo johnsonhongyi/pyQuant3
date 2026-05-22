@@ -1,7 +1,27 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 11:05  
+> 最后更新：2026-05-22 12:30  
+
+## 2026-05-22 12:30
+- [x] **精准化补齐 Nuitka 懒加载模块依赖 (Injected Precise LazyModule Dependencies for JSONData and JohnsonUtil)**：
+    - [x] **物理规避无用大包引入**：摒弃了直接导入整个 `JSONData` 与 `JohnsonUtil` 大包（`--include-package`）的粗放打包方案，以防打包冗余不必要的文件，确保 Standalone 发布包体积轻量、纯净。
+    - [x] **单独处理与精准注入**：在 Clang-Only 编译脚本及普通编译脚本中，仅针对真正通过 `LazyModule` 延迟加载的子模块进行手动精准包含：
+        - 手动注入 `--include-module=JSONData.tdx_hdf5_api` 解决 `tdx_hdf5_api` 的动态依赖缺失。
+        - 手动注入 `--include-module=JSONData.wencaiData` 解决 `wcd = LazyModule('JSONData.wencaiData')` 的动态依赖缺失。
+        - 手动注入 `--include-module=JSONData.sina_data` 解决 `sina_data = LazyModule('JSONData.sina_data')` 的动态依赖缺失。
+        - 同步注入 `--include-module=JohnsonUtil.johnson_cons` 解决 `johnson_cons` 运行时延迟加载引发的 ModuleNotFoundError。
+    - [x] **创建独立任务日志归档**：根据用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1230_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1230_task.md)。
+
+## 2026-05-22 11:36
+- [x] **同步 Nuitka 编译计时能力与极致精简参数对齐 (Synchronized Nuitka Timing Hooks & Parameter Alignment)**：
+    - [x] **落地高精度编译用时雷达 (Synchronized Compilation Timing)**：将 `nuitka_build_console_onlyClang.bat` 领先的 Unix 时间戳自动计算与持久化追加落盘（写入 `time.txt`）能力完美移植入普通版 `nuitka_build_console.bat`，实现了双批处理构建记录的高水准留存与工程可回溯性。
+    - [x] **极致精简与参数对齐 (Optimized Parameter Alignment)**：
+        - [x] 在普通编译脚本 `nuitka_build_console.bat` 中精准配置物理排除了 `datacsv` 全量大目录的盲目拷贝，改为仅打包高频读写的 `search_history.json` 和 `minute_kline_viewer_history.json`。
+        - [x] 物理对齐截杀了 PyQt6 重型垃圾 DLL 依赖，包括 `Qt6WebEngineWidgets`、`Qt6WebEngineCore`、`Qt6Pdf`、`Qt6Quick`、`Qt6Qml`、`Qt6VirtualKeyboard`、`Qt6Multimedia`、`Qt6Bluetooth`、`Qt6Svg`、`Qt6Sql`、`Qt6Test`、`Qt6Xml` 等十余款 C++ 库，使普通包大小暴跌数层。
+        - [x] 重新对齐并补全了 `JSONData` 与 `JohnsonUtil` 包的打包配置，以及 `--include-module=tk_gil_monitor` 哨兵。
+        - [x] **同步打通 PyQt6 Plugin 全量编译支持**：在 Clang-Only 脚本中同步对齐注入了 `--enable-plugin=pyqt6`，完美保障了混编架构下 PyQt6 各看板视窗（例如 `trading_analyzerQt6`、`minute_kline_viewer_qt`）在 standalone 脱离开发环境后的 100% 正常拉起。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1136_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1136_task.md)。
 
 ## 2026-05-22 11:05
 - [x] **深度净化 HDF5 读写及 Sina 行情接口的高频冗余日志 (Cleaned High-Frequency Diagnostic Verbosity to DEBUG)**：
