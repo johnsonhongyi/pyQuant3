@@ -138,6 +138,16 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        # 🚀 [NEW] 级联销毁所有打开的交易确认弹窗，防止残留
+        try:
+            if hasattr(self, "_active_confirm_wins"):
+                for code, win in list(self._active_confirm_wins.items()):
+                    if win and win.winfo_exists():
+                        win.destroy()
+                self._active_confirm_wins.clear()
+        except Exception:
+            pass
+
         # 🚀 [NEW] 保存板块聚焦和实时决策的 sash 窗格分割高度位置
         try:
             self._save_sash_positions()
@@ -1842,6 +1852,32 @@ def _init_decision_tab(self, parent: tk.Frame):
     )
     self._kernel_status_lbl.pack(side="left", padx=12)
 
+    # 🚀 [NEW] 极客暗黑风格交易内核模式选择菜单按钮
+    if not hasattr(self, "_kernel_mode_var"):
+        self._kernel_mode_var = tk.StringVar(value="PAPER 模拟")
+    
+    mode_btn = tk.Menubutton(
+        risk_bar, text="⚙ PAPER 模拟 ▾",
+        bg="#1a0010", fg="#ffcc66", activebackground="#2c1a00", activeforeground="#ffcc66",
+        font=("Arial", 9, "bold"), relief="flat", bd=0, highlightthickness=0
+    )
+    mode_btn.pack(side="left", padx=15)
+    
+    mode_menu = tk.Menu(
+        mode_btn, tearoff=0, bg="#0c101b", fg="#ffffff", 
+        activebackground="#2c3e50", activeforeground="#55ffff",
+        bd=1, font=("Arial", 9)
+    )
+    mode_btn.config(menu=mode_menu)
+    
+    def select_mode(m):
+        self._kernel_mode_var.set(m)
+        mode_btn.config(text=f"⚙ {m} ▾")
+        self._kernel_set_status(f"mode switched to {m}", "info")
+        
+    for m in ["OBSERVE 观察", "PAPER 模拟", "CONFIRM 确认", "LIVE_AUTO 自动"]:
+        mode_menu.add_command(label=m, command=lambda val=m: select_mode(val))
+
     btn_frame = tk.Frame(risk_bar, bg="#1a0010")
     btn_frame.pack(side="right", padx=5)
     tk.Button(btn_frame, text="🗑 清除已完结", bg="#2c1a00", fg="#cc8800",
@@ -2723,6 +2759,8 @@ def _kernel_auto_execute_once(self):
         self._kernel_today_buys = set()
         self._kernel_today_sells = set()
         self._kernel_today_mocks = set()
+        self._kernel_today_confirmed = set()
+        self._kernel_today_ignored = set()
         # 尝试从今日已记录的日志中恢复已模拟执行的 code，保障跨会话一致性
         if os.path.exists("logs/trading_kernel_trace.jsonl"):
             try:
@@ -2754,6 +2792,17 @@ def _kernel_auto_execute_once(self):
     blocked_codes = []
     error_codes = []
     records = []
+    
+    # 解析当前选择的交互模式
+    mode_text = self._kernel_mode_var.get() if hasattr(self, "_kernel_mode_var") else "PAPER 模拟"
+    mode = "PAPER"
+    if "OBSERVE" in mode_text:
+        mode = "OBSERVE"
+    elif "CONFIRM" in mode_text:
+        mode = "CONFIRM"
+    elif "LIVE_AUTO" in mode_text:
+        mode = "LIVE_AUTO"
+
     try:
         signals = self._focus_ctrl.get_decision_queue()
         positions = {p['code']: p for p in self._trade_gw.get_positions()}
@@ -2767,6 +2816,8 @@ def _kernel_auto_execute_once(self):
             allowed = bool(sig.get('kernel_allowed'))
             if action in ("HOLD", "", "BLOCK", "ERROR"):
                 continue
+                
+            # 1. 风控未通过拦截
             if not allowed:
                 reject_code = sig.get('kernel_reject_code', 'BLOCK')
                 blocked.append(f"{code}:{reject_code}")
@@ -2778,7 +2829,7 @@ def _kernel_auto_execute_once(self):
                     "status": "拦截",
                     "detail": reject_code
                 })
-                # 拦截记录写盘（由底层 JsonlJournal 进行交易期/模拟期按需防重）
+                # 拦截记录写盘
                 enrich_decision_item(sig, write_journal=True)
                 continue
 
@@ -2796,139 +2847,176 @@ def _kernel_auto_execute_once(self):
                 enrich_decision_item(sig, write_journal=True)
                 continue
 
+            # 2. 风控已放行，根据不同模式分流执行：
+
+            # A. OBSERVE (观察模式)
+            if mode == "OBSERVE":
+                executed.append(f"OBS_{action} {code}")
+                executed_codes.append(code)
+                self._focus_ctrl.decision_queue.update_status(code, "已观察")
+                records.append({
+                    "code": code,
+                    "name": sig.get('name', ''),
+                    "action": action,
+                    "status": "观察中",
+                    "detail": f"OBSERVE 放行信号 [建议价 {price:.2f}]"
+                })
+                enrich_decision_item(sig, write_journal=True)
+                continue
+
+            # B. CONFIRM (弹窗确认模式)
+            elif mode == "CONFIRM":
+                if not hasattr(self, "_kernel_today_confirmed"):
+                    self._kernel_today_confirmed = set()
+                if not hasattr(self, "_kernel_today_ignored"):
+                    self._kernel_today_ignored = set()
+
+                if code in self._kernel_today_confirmed:
+                    continue
+                if code in self._kernel_today_ignored:
+                    continue
+
+                # 去重与状态匹配
+                if action in ("BUY", "ADD") and code in positions:
+                    blocked.append(f"{code}:ALREADY_POS")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "拦截", "detail": "已有持仓"
+                    })
+                    continue
+                if action in ("SELL", "REDUCE") and code not in positions:
+                    blocked.append(f"{code}:NO_POS")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "拦截", "detail": "无此持仓"
+                    })
+                    continue
+
+                # 弹出精美人机核实确认弹窗，实现真正的所见即所得
+                self._show_kernel_confirm_dialog(sig, action, price)
+                executed.append(f"PEND_{action} {code}")
+                executed_codes.append(code)
+                records.append({
+                    "code": code,
+                    "name": sig.get('name', ''),
+                    "action": action,
+                    "status": "等待确认",
+                    "detail": "已弹出核实确认弹窗..."
+                })
+                continue
+
+            # C. PAPER (模拟成交模式) / LIVE_AUTO (自动交易)
+            is_live = (mode == "LIVE_AUTO" and is_active_trading)
+
             if action in ("BUY", "ADD"):
-                if is_active_trading:
-                    # 1. 交易期：当日买入去重拦截
+                if code in positions:
+                    blocked.append(f"{code}:ALREADY_POS")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "拦截", "detail": "已有持仓"
+                    })
+                    continue
+
+                if is_live:
                     if code in self._kernel_today_buys:
                         blocked.append(f"{code}:TODAY_BOUGHT")
                         blocked_codes.append(code)
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拦截",
-                            "detail": "今日已买入过"
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "今日已买入过"
                         })
                         continue
 
-                    # 2. 已有持仓拦截
-                    if code in positions:
-                        blocked.append(f"{code}:ALREADY_POSITION")
-                        blocked_codes.append(code)
-                        records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拦截",
-                            "detail": "已有持仓"
-                        })
-                        continue
-
-                    # 3. 提交真实网关买入
                     ok, msg = self._trade_gw.submit_buy(
                         code=code,
                         name=sig.get('name', ''),
                         sector=sig.get('sector', ''),
                         price=price,
-                        strategy_tag=f"Kernel:{sig.get('signal_type', '')}",
-                        reason=(
-                            f"Kernel {action} size={float(sig.get('kernel_size_pct', 0) or 0):.0%} "
-                            f"conf={float(sig.get('kernel_confidence', 0) or 0):.2f} "
-                            f"trace={sig.get('kernel_trace_id', '')}"
-                        ),
+                        strategy_tag=f"Live:{sig.get('signal_type', '')}",
+                        reason=sig.get('reason', ''),
                     )
                     if ok:
                         self._kernel_today_buys.add(code)
-                        executed.append(f"{action} {code}")
+                        executed.append(f"LIVE_{action} {code}")
                         executed_codes.append(code)
                         self._focus_ctrl.decision_queue.update_status(code, "已提交")
                         positions[code] = {"code": code}
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "已执行(买)",
-                            "detail": msg
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "自动已执行(买)", "detail": msg
                         })
-                        # 网关成交后显式触发带最新订单 ID 的日志写盘
                         sig["kernel_order_id"] = msg
                         enrich_decision_item(sig, write_journal=True)
                     else:
                         blocked.append(f"{code}:{msg}")
                         blocked_codes.append(code)
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拒绝",
-                            "detail": msg
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拒绝", "detail": msg
                         })
                         enrich_decision_item(sig, write_journal=True)
                 else:
-                    # 4. 模拟信号模拟执行（其余时段）
                     if code in self._kernel_today_mocks:
                         continue
                     self._kernel_today_mocks.add(code)
+                    
+                    # 提交到模拟网关以同步更新持仓和流水，真正做到“模拟成交，写持仓和盈亏”
+                    ok, msg = self._trade_gw.submit_buy(
+                        code=code,
+                        name=sig.get('name', ''),
+                        sector=sig.get('sector', ''),
+                        price=price,
+                        strategy_tag=f"Mock:{sig.get('signal_type', '')}",
+                        reason=sig.get('reason', ''),
+                    )
+                    
                     executed.append(f"MOCK_{action} {code}")
                     executed_codes.append(code)
                     self._focus_ctrl.decision_queue.update_status(code, "已提交")
                     records.append({
-                        "code": code,
-                        "name": sig.get('name', ''),
-                        "action": action,
-                        "status": "模拟已提交",
-                        "detail": "非交易活跃期模拟买入"
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
                     })
-                    # 模拟提交触发写盘 (JsonlJournal 自动去重控制只记录一次)
                     enrich_decision_item(sig, write_journal=True)
 
             elif action in ("SELL", "REDUCE"):
-                if is_active_trading:
-                    # 1. 交易期：当日卖出去重拦截
+                if code not in positions:
+                    blocked.append(f"{code}:NO_POS")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "拦截", "detail": "当前无此持仓"
+                    })
+                    continue
+
+                if is_live:
                     if code in self._kernel_today_sells:
                         blocked.append(f"{code}:TODAY_SOLD")
                         blocked_codes.append(code)
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拦截",
-                            "detail": "今日已卖出过"
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "今日已卖出过"
                         })
                         continue
 
-                    # 2. 无此持仓拦截
-                    if code not in positions:
-                        blocked.append(f"{code}:NO_POSITION")
-                        blocked_codes.append(code)
-                        records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拦截",
-                            "detail": "当前无此持仓"
-                        })
-                        continue
-
-                    # 3. 提交真实网关卖出
                     sell_price = float(price_map.get(code, price) or price)
                     ok, msg = self._trade_gw.submit_sell(
                         code=code,
                         price=sell_price,
-                        reason=f"Kernel {action} conf={float(sig.get('kernel_confidence', 0) or 0):.2f} trace={sig.get('kernel_trace_id', '')}",
+                        reason=f"LiveSell conf={float(sig.get('kernel_confidence', 0) or 0):.2f}",
                     )
                     if ok:
                         self._kernel_today_sells.add(code)
-                        executed.append(f"{action} {code}")
+                        executed.append(f"LIVE_{action} {code}")
                         executed_codes.append(code)
                         self._focus_ctrl.decision_queue.update_status(code, "已成交")
                         positions.pop(code, None)
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "已执行(卖)",
-                            "detail": msg
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "自动已执行(卖)", "detail": msg
                         })
                         sig["kernel_order_id"] = msg
                         enrich_decision_item(sig, write_journal=True)
@@ -2936,27 +3024,28 @@ def _kernel_auto_execute_once(self):
                         blocked.append(f"{code}:{msg}")
                         blocked_codes.append(code)
                         records.append({
-                            "code": code,
-                            "name": sig.get('name', ''),
-                            "action": action,
-                            "status": "拒绝",
-                            "detail": msg
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拒绝", "detail": msg
                         })
                         enrich_decision_item(sig, write_journal=True)
                 else:
-                    # 4. 模拟信号模拟执行（其余时段）
                     if code in self._kernel_today_mocks:
                         continue
                     self._kernel_today_mocks.add(code)
+
+                    sell_price = float(price_map.get(code, price) or price)
+                    ok, msg = self._trade_gw.submit_sell(
+                        code=code,
+                        price=sell_price,
+                        reason="MockSell",
+                    )
+                    
                     executed.append(f"MOCK_{action} {code}")
                     executed_codes.append(code)
                     self._focus_ctrl.decision_queue.update_status(code, "已成交")
                     records.append({
-                        "code": code,
-                        "name": sig.get('name', ''),
-                        "action": action,
-                        "status": "模拟已成交",
-                        "detail": "非交易活跃期模拟卖出"
+                        "code": code, "name": sig.get('name', ''), "action": action,
+                        "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
                     })
                     enrich_decision_item(sig, write_journal=True)
 
@@ -3169,5 +3258,222 @@ def _on_log_selected(self, event=None):
 
 StockSelectionWindow._on_pos_selected       = _on_pos_selected
 StockSelectionWindow._on_log_selected       = _on_log_selected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIRM 确认模式下的人机核实极客美学弹窗
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _show_kernel_confirm_dialog(self, sig, action, price):
+    """
+    弹出极具极客美感的一键交易确认对话框 (非阻塞)
+    """
+    code = str(sig.get('code', '')).zfill(6)
+    name = sig.get('name', '')
+    sector = sig.get('sector', '')
+    signal_type = sig.get('signal_type', '')
+    reason = sig.get('reason', '').replace('|', '\n').replace('；', '\n')
+    size = f"{float(sig.get('kernel_size_pct', 0) or 0):.0%}"
+    conf = f"{float(sig.get('kernel_confidence', 0) or 0):.2f}"
+    
+    # 检查是否已有该股票的弹窗，防止重复弹出
+    if not hasattr(self, "_active_confirm_wins"):
+        self._active_confirm_wins = {}
+    if code in self._active_confirm_wins:
+        try:
+            self._active_confirm_wins[code].focus_force()
+            return
+        except Exception:
+            pass
+            
+    # 播放系统铃声提示
+    try:
+        self.bell()
+    except Exception:
+        pass
+        
+    win = tk.Toplevel(self)
+    self._active_confirm_wins[code] = win
+    win.title(f"⚠️ 交易决策核实 - {name}({code})")
+    win.geometry("450x380")
+    win.configure(bg="#0c101b")
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    
+    # 居中显示
+    win.update_idletasks()
+    x = self.winfo_rootx() + (self.winfo_width() - 450) // 2
+    y = self.winfo_rooty() + (self.winfo_height() - 380) // 2
+    win.geometry(f"450x380+{x}+{y}")
+    
+    # 头部警告条
+    bg_head = "#1b3a24" if action in ("BUY", "ADD") else "#3a1b1b"
+    fg_head = "#66ffcc" if action in ("BUY", "ADD") else "#ff7777"
+    act_name = "买入入场" if action in ("BUY", "ADD") else "卖出离场"
+    
+    head_frame = tk.Frame(win, bg=bg_head, pady=8)
+    head_frame.pack(fill="x")
+    
+    tk.Label(
+        head_frame, text=f"🎯 DETECTOR TRIGGER: 建议 {act_name}", 
+        bg=bg_head, fg=fg_head, font=("Arial", 11, "bold")
+    ).pack()
+    
+    # 个股关键指标
+    body_frame = tk.Frame(win, bg="#0c101b", padx=20, pady=15)
+    body_frame.pack(fill="both", expand=True)
+    
+    # 大字标的与代码
+    info_frame = tk.Frame(body_frame, bg="#0c101b")
+    info_frame.pack(fill="x", pady=(0, 10))
+    
+    tk.Label(
+        info_frame, text=f"{name}", bg="#0c101b", fg="#ffffff", 
+        font=("Microsoft YaHei", 18, "bold")
+    ).pack(side="left")
+    
+    tk.Label(
+        info_frame, text=f"({code})", bg="#0c101b", fg="#88aaff", 
+        font=("Consolas", 14, "bold")
+    ).pack(side="left", padx=8, pady=(4, 0))
+    
+    tk.Label(
+        info_frame, text=f"[{sector}]", bg="#0c101b", fg="#888888", 
+        font=("Microsoft YaHei", 10)
+    ).pack(side="right", pady=(8, 0))
+    
+    # 决策因子网格
+    grid_frame = tk.Frame(body_frame, bg="#111726", bd=1, relief="solid", padx=10, pady=8)
+    grid_frame.pack(fill="x", pady=5)
+    
+    factors = [
+        ("建议价格", f"¥ {price:.2f}", "#ffffff"),
+        ("信号形态", signal_type, "#ffcc66"),
+        ("置信指数", conf, "#66ffcc"),
+        ("建议仓位", size, "#ff7777"),
+    ]
+    for i, (k, v, color) in enumerate(factors):
+        r, c = i // 2, i % 2
+        f_sub = tk.Frame(grid_frame, bg="#111726")
+        f_sub.grid(row=r, column=c, sticky="ew", padx=15, pady=4)
+        tk.Label(f_sub, text=k, bg="#111726", fg="#888888", font=("Microsoft YaHei", 9)).pack(side="left")
+        tk.Label(f_sub, text=v, bg="#111726", fg=color, font=("Consolas", 10, "bold")).pack(side="right")
+        
+    grid_frame.grid_columnconfigure(0, weight=1)
+    grid_frame.grid_columnconfigure(1, weight=1)
+    
+    # 原因详情滚动展示
+    reason_frame = tk.LabelFrame(
+        body_frame, text="  🔎 触发归因原因分析  ", 
+        bg="#0c101b", fg="#888888", font=("Microsoft YaHei", 9)
+    )
+    reason_frame.pack(fill="both", expand=True, pady=(5, 10))
+    
+    reason_text = tk.Text(
+        reason_frame, bg="#0c101b", fg="#ff4444" if action in ("BUY", "ADD") else "#ff7777",
+        font=("Consolas", 9), bd=0, highlightthickness=0, wrap="word", height=4
+    )
+    reason_text.pack(side="left", fill="both", expand=True, padx=5, pady=2)
+    reason_text.insert("1.0", reason)
+    reason_text.config(state="disabled")
+    
+    sb = ttk.Scrollbar(reason_frame, orient="vertical", command=reason_text.yview)
+    reason_text.configure(yscroll=sb.set)
+    sb.pack(side="right", fill="y")
+    
+    # 控制按钮区
+    ctrl_frame = tk.Frame(body_frame, bg="#0c101b")
+    ctrl_frame.pack(fill="x")
+    
+    def on_confirm():
+        self._kernel_today_confirmed.add(code)
+        ok, msg = False, ""
+        if action in ("BUY", "ADD"):
+            ok, msg = self._trade_gw.submit_buy(
+                code=code,
+                name=name,
+                sector=sector,
+                price=price,
+                strategy_tag=f"Confirm:{signal_type}",
+                reason=sig.get('reason', ''),
+            )
+        else:
+            ok, msg = self._trade_gw.submit_sell(
+                code=code,
+                price=price,
+                reason=f"Confirm:{signal_type}",
+            )
+            
+        if ok:
+            if self._focus_ctrl:
+                self._focus_ctrl.decision_queue.update_status(code, "已提交" if action in ("BUY", "ADD") else "已成交")
+            self._kernel_mark_signal_rows(executed=[code])
+            self._kernel_show_toast(
+                f"Confirm 成功: {name}({code})", "ok", 
+                records=[{"code": code, "name": name, "action": action, "status": "已执行", "detail": msg}]
+            )
+        else:
+            self._kernel_mark_signal_rows(errors=[code])
+            self._kernel_show_toast(
+                f"Confirm 拒绝: {name}({code})", "error", 
+                records=[{"code": code, "name": name, "action": action, "status": "拒绝", "detail": msg}]
+            )
+            
+        self._refresh_decision_tab()
+        self._active_confirm_wins.pop(code, None)
+        win.destroy()
+        
+    def on_ignore():
+        self._kernel_today_ignored.add(code)
+        if self._focus_ctrl:
+            self._focus_ctrl.decision_queue.update_status(code, "已忽略")
+        self._kernel_mark_signal_rows(blocked=[code])
+        self._refresh_decision_tab()
+        self._kernel_show_toast(
+            f"Confirm 忽略: {name}({code})", "warn", 
+            records=[{"code": code, "name": name, "action": action, "status": "忽略", "detail": "人工一键拦截"}]
+        )
+        self._active_confirm_wins.pop(code, None)
+        win.destroy()
+        
+    def on_close():
+        self._active_confirm_wins.pop(code, None)
+        win.destroy()
+        
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    
+    # 扁平化极客按钮
+    btn_yes = tk.Button(
+        ctrl_frame, text="✔ 确认执行 (Enter)", bg="#005a36", fg="#66ffcc",
+        activebackground="#007e4b", activeforeground="#ffffff",
+        font=("Microsoft YaHei", 10, "bold"), relief="flat", padx=15, pady=4,
+        command=on_confirm
+    )
+    btn_yes.pack(side="left", expand=True, fill="x", padx=(0, 10))
+    
+    btn_no = tk.Button(
+        ctrl_frame, text="✖ 放弃拦截 (Esc)", bg="#3a1a1a", fg="#ff7777",
+        activebackground="#5a2222", activeforeground="#ffffff",
+        font=("Microsoft YaHei", 10, "bold"), relief="flat", padx=15, pady=4,
+        command=on_ignore
+    )
+    btn_no.pack(side="right", expand=True, fill="x", padx=(10, 0))
+    
+    # 快捷键绑定
+    win.bind("<Return>", lambda e: on_confirm())
+    win.bind("<Escape>", lambda e: on_ignore())
+    
+    # 联动 K 线与可视化
+    if hasattr(self, 'sender') and self.sender:
+        try:
+            self.sender.send(code)
+        except Exception:
+            pass
+    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+        if hasattr(self.master, 'open_visualizer'):
+            self.master.open_visualizer(code)
+
+
+StockSelectionWindow._show_kernel_confirm_dialog = _show_kernel_confirm_dialog
 
 

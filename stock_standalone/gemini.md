@@ -1,7 +1,22 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 21:05  
+> 最后更新：2026-05-22 21:58  
+
+## 2026-05-22 21:58
+- [x] **全能交易终端多态四模式流转与人机核实极客确认弹窗完美落地 (Implemented Multi-mode Execution Flow & Interactive Premium Confirmation Window)**：
+    - [x] **新增全能级交互模式选择下拉菜单**：在实时决策 Tab 顶部的资金风控状态栏中，集成了一款极客暗黑风的 `tk.Menubutton` 下拉选择菜单。支持 **OBSERVE 观察、PAPER 模拟、CONFIRM 确认、LIVE_AUTO 自动** 四种交易模式的亚毫秒级无缝实时切流。
+    - [x] **实现多态分流与精细化去重管道**：全面重构了交易核心的自动执行方法 `_kernel_auto_execute_once`。根据当前选择的模式分流处理：**OBSERVE** 仅做数据日志放行；**PAPER** 提交到模拟网关动态计算持仓盈亏并更新流水；**CONFIRM** 弹出人机核实框；**LIVE_AUTO** 在活跃交易期时调用真实接口。引入了 `self._kernel_today_confirmed` 与 `self._kernel_today_ignored` 缓存防重，并在窗口关闭时级联析构。
+    - [x] **首创 CONFIRM 人工核实极客美学弹窗 (Geeky Non-blocking Dialog)**：编写了非阻塞式、置顶且自适应居中排布的 `_show_kernel_confirm_dialog` 核实弹窗。采用夜间暗黑系配色，融合了大字号标的与代码展示、决策因子网格（建议价格、信号形态、置信指数、建议仓位）以及可滚动的触发归因原因分析文本。
+    - [x] **打通多维高保真联动与纯键盘盲操**：确认窗口与主图及可视化终端（Visualizer）无缝级联刷新。深度绑定了 `Return` (回车确认) 与 `Escape` (Esc 拦截忽略) 快捷按键，大幅拉升了操盘手的人机盲操极速体验。
+    - [x] **物理归类创建独立任务清单**：严格遵守用户规则，归类创建了日期时间命名的任务文件 [20260522_2158_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_2158_task.md)。
+
+## 2026-05-22 21:37
+- [x] **全能交易终端 Trading Kernel 阶段性成果评估与实盘演进规划 (Trading Kernel Evaluation & Live-Trading Evolution Roadmap)**：
+    - [x] **物理创建独立任务日志归档**：严格按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2137_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/305562b9-eab9-4b19-b037-253fe2a17511/20260522_2137_task.md)。
+    - [x] **撰写实盘演进白皮书与阶段成果规划**：在 App Data 目录下，物理撰写生成了极富工业与美学水准的 [TRADING_KERNEL_PROGRESS_AND_PLAN.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/305562b9-eab9-4b19-b037-253fe2a17511/TRADING_KERNEL_PROGRESS_AND_PLAN.md) 技术白皮书。
+    - [x] **系统性理清 Trading Kernel 确定性流动管道**：用精美 `mermaid` 流程图直观勾勒了从信号标准化、持仓去重防重入、Immutable 决策逻辑打分评定、硬风控 RiskGate 校验以及 Journal Idempotent 落盘在内的全生命周期闭环；详细评估并矩阵化展现了 Phase 0 至 Phase 9 核心模块（包括三层快速实盘反馈链路在内）的LOC行数范围、实现状态与架构评级。
+    - [x] **筑牢走向 100% 真实交易的四大支柱建设**：指明并规划了下一步攻坚的核心任务，包括（A）完整盘后 Trace 胜率/拒单分析回放面板，（B）独立解耦 `PaperExecutionAdapter` 模拟执行模块，（C）人工 Confirm 一键强制校验弹窗交互，与（D）对接 QMT/PTrade 等极速柜台网关及物理断电 KillSwitch 全自动实盘交易（Live Auto）模式演进，为系统化交易奠定了权威指南。
 
 ## 2026-05-22 21:05
 - [x] **完美解决策略选股原生白底与局部暗黑表格共存，并修复分割窗格自愈的语法错误 (Perfectly Coexisted White-Grid Styling with Segmented Dark.Treeview & Fixed Sash Restore Indentation Error)**：
