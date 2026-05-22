@@ -1310,6 +1310,9 @@ class BiddingMomentumDetector:
                             if rc.get('code'): essential.add(rc['code'])
 
                     scan_all = (getattr(self, '_full_scan_counter', 0) % 60 == 0)  # 全量扫描降频至每 60 轮一次
+                    # [自愈式工程设计] 如果当前没有任何活跃板块（冷启动或刚开盘白屏），或者没有算出任何板块，强制进行全量扫描以快速打破逻辑死锁
+                    if not self.active_sectors or len(self.active_sectors) == 0:
+                        scan_all = True
                     self._full_scan_counter = getattr(self, '_full_scan_counter', 0) + 1
 
                     codes = []
@@ -1597,14 +1600,21 @@ class BiddingMomentumDetector:
         self.data_version += 1 # 联动 UI 全量重传
 
     def stop(self):
-        # """[NEW] 停止探测器：从实时服务注销，防止退出后回调触发崩溃"""
-        # if hasattr(self, 'realtime_service') and self.realtime_service:
-        #     try:
-        #         self.realtime_service.unsubscribe_all(self._on_tick)
-        #         logger.info("🛑 BiddingMomentumDetector unsubscribed successfully.")
-        #     except Exception as e:
-        #         logger.error(f"Error unsubscribing BiddingMomentumDetector: {e}")
-        pass
+        """[NEW] 停止打分状态机，彻底取消正在等待的后台 Timer，切断退出期异步回调。"""
+        logger.info("🛑 BiddingMomentumDetector.stop() called. Terminating score timer loop...")
+        with self._score_lock:
+            self._score_active = False
+        
+        t = self._chunk_timer
+        if t is not None:
+            try:
+                t.cancel()
+                logger.info("🛑 BiddingMomentumDetector chunk timer cancelled successfully.")
+            except Exception as e:
+                logger.warning(f"Error cancelling BiddingMomentumDetector timer: {e}")
+            self._chunk_timer = None
+            
+        self.on_score_finished = None
 
     def clear_all_state(self):
         """[NEW] 彻底清除内存状态，用于在回测与实盘切换时防止“脏数据”污染"""
@@ -3515,7 +3525,7 @@ class BiddingMomentumDetector:
                         cats = ts.get_splitted_cats()
                         if target_sectors is not None:
                             target_sectors.update(cats)
-                        if ts.score >= self.score_threshold:
+                        if ts.score >= 0.5:
                             for cat in cats:
                                 if cat not in SECTOR_BLACKLIST and len(cat) <= 8:
                                     self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
@@ -3541,14 +3551,14 @@ class BiddingMomentumDetector:
             _max_score = max(_scores) if _scores else 0.0
             _above_threshold = sum(1 for s in _scores if s >= self.score_threshold)
             _above_05 = sum(1 for s in _scores if s >= 0.5)
-            logger.warning(
-                f"🔬 [Detector-Diag] TickSeries: {len(self._tick_series)} | "
-                f"Max Score: {_max_score:.2f} | "
-                f"Score>={self.score_threshold}: {_above_threshold} | "
-                f"Score>=0.5: {_above_05} | "
-                f"Persistent Sectors: {len(self._sector_active_stocks_persistent)} | "
-                f"Sample Keys: {list(self._sector_active_stocks_persistent.keys())[:10]}"
-            )
+            # logger.debug(
+            #     f"🔬 [Detector-Diag] TickSeries: {len(self._tick_series)} | "
+            #     f"Max Score: {_max_score:.2f} | "
+            #     f"Score>={self.score_threshold}: {_above_threshold} | "
+            #     f"Score>=0.5: {_above_05} | "
+            #     f"Persistent Sectors: {len(self._sector_active_stocks_persistent)} | "
+            #     f"Sample Keys: {list(self._sector_active_stocks_persistent.keys())[:10]}"
+            # )
             
         # [P1-OPT] 预算 today_anchor_930 （全函数只算一次 datetime 对象）
         _now = datetime.datetime.now()
@@ -3700,8 +3710,8 @@ class BiddingMomentumDetector:
                 if sector in new_active: del new_active[sector]
                 continue
             
-            # [FIX] 动态过滤：即使在持久化缓存中，也要确保个股分满足当前 UI 设定的门槛
-            stocks = [s for s in stocks_dict.values() if s.get('score', 0) >= self.score_threshold]
+            # [FIX] 动态过滤：只要大于等于 0.5 基础活性门槛即计入板块统计，以敏锐捕捉板块群体动能与龙头
+            stocks = [s for s in stocks_dict.values() if s.get('score', 0) >= 0.5]
             
             if not stocks:
                 if sector in new_active: del new_active[sector]
@@ -3979,7 +3989,7 @@ class BiddingMomentumDetector:
                 logger.debug(f"ℹ️ [Detector] Potential High-score Sectors filtered: {interesting}")
 
         # 🔬 [Detector-Diag] 最终生成的活跃板块列表诊断
-        logger.warning(
+        logger.debug(
             f"🔬 [Detector-Diag-End] Final Active Sectors: {len(self.active_sectors)} | "
             f"Active Sector Names: {list(self.active_sectors.keys())[:10]} | "
             f"Skipped Sectors count: {len(skipped_reasons)} | "

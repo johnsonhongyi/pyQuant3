@@ -2090,16 +2090,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # SectorBiddingPanel 是 PyQt6 窗口，可在任意线程直接操作。
                 panel = getattr(self, 'sector_bidding_panel', None)
                 if panel is None:
-                    # [KEY FIX] SectorBiddingPanel 是 PyQt6 窗口，与 Tk 主线程无关。
-                    # 直接在当前后台线程实例化，完全不需要经过 tk_dispatch_queue。
-                    logger.warning("[15:30 Task] sector_bidding_panel not found, creating directly in background thread...")
+                    logger.warning("[15:30 Task] sector_bidding_panel not found, creating via main UI thread...")
                     try:
-                        from sector_bidding_panel import SectorBiddingPanel
-                        self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                        panel_ready_event = threading.Event()
+                        def create_panel_safe():
+                            try:
+                                from sector_bidding_panel import SectorBiddingPanel
+                                self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                                logger.warning("[15:30 Task] SectorBiddingPanel instance created in main UI thread OK.")
+                            except Exception as ex:
+                                logger.error(f"[15:30 Task] SectorBiddingPanel creation error in main thread: {ex}")
+                            finally:
+                                panel_ready_event.set()
+
+                        self.tk_dispatch_queue.put(create_panel_safe)
+                        panel_ready_event.wait(timeout=10.0) # 在后台线程稍作安全等待主线程创建完毕
                         panel = self.sector_bidding_panel
-                        logger.warning("[15:30 Task] SectorBiddingPanel instance created in background thread OK.")
                     except Exception as ex:
-                        logger.error(f"[15:30 Task] SectorBiddingPanel creation error: {ex}")
+                        logger.error(f"[15:30 Task] SectorBiddingPanel delegated creation error: {ex}")
                         panel = None
 
                 if panel is not None:

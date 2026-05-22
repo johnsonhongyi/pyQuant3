@@ -1665,6 +1665,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self, 'detector') and self.detector:
             # 清理回调绑定，防止野指针与内存泄露
             self.detector.on_score_finished = None
+            try:
+                self.detector.stop() # 🛑 强力取消打分器后台 Timer 与打分循环，根治退出假死与冲突
+            except Exception as ex:
+                logger.warning(f"[SectorBiddingPanel] Failed to stop detector: {ex}")
             # 这里是真正关闭，我们保存数据
             self.detector.save_persistent_data()
             
