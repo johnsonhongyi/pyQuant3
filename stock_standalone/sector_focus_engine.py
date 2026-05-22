@@ -2719,7 +2719,13 @@ class SectorFocusController:
 
     def get_decision_queue(self) -> List[dict]:
         # [MOD] 默认返回全部活跃信号，防止因状态过滤导致界面看起来没数据
-        return [s.to_dict() for s in self.decision_queue.get_sorted(status_filter="ALL")]
+        rows = [s.to_dict() for s in self.decision_queue.get_sorted(status_filter="ALL")]
+        try:
+            from trading_kernel.kernel_service import enrich_decision_item
+            return [enrich_decision_item(row) for row in rows]
+        except Exception as e:
+            logger.debug(f"[TradingKernel] decision queue enrich skipped: {e}")
+            return rows
 
     def check_exit(
         self,
