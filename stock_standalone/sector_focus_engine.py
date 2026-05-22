@@ -2722,7 +2722,7 @@ class SectorFocusController:
         rows = [s.to_dict() for s in self.decision_queue.get_sorted(status_filter="ALL")]
         try:
             from trading_kernel.kernel_service import enrich_decision_item
-            return [enrich_decision_item(row) for row in rows]
+            return [enrich_decision_item(row, write_journal=False) for row in rows]
         except Exception as e:
             logger.debug(f"[TradingKernel] decision queue enrich skipped: {e}")
             return rows
