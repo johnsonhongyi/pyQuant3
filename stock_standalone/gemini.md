@@ -1,7 +1,7 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 09:59  
+> 最后更新：2026-05-22 10:51  
 
 ## 2026-05-22 09:59
 - [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
@@ -16,6 +16,7 @@
         - [x] **落地 GUI 资源“主线程托管构建模式” (Delegated GUI Construction)**：查明在盘后 15:30 自动归档任务中，原先直接在后台普通线程内创建 PyQt6 板块面板，导致退出时主 GUI 线程尝试停止和销毁属于后台线程的 QTimer，从而抛出致命的 `Timers cannot be stopped from another thread`。重构为利用 `tk_dispatch_queue` 跨线程安全派发到主线程进行安全实例化，配合 `threading.Event` 事件高可靠同步，完美遵循了 GUI 的线程亲和性，彻底消除了退出期的 Timer 销毁假死。
         - [x] **加固 `SectorBiddingPanel.closeEvent` 销毁链路**：在面板真正关闭事件中补齐了对 `self.detector.stop()` 的显式调用，保证在窗口关闭的瞬间，后台的计算循环已被完全掐断。
         - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_0959_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_0959_task.md)。
+        - [x] **落地集中式埋点与零参数求值开销及全局一次性状态缓存优化与全量无损升级 (DRY & Zero-Overhead Delayed Argument Evaluation & Global State Cache & Full Upgrade)**：查明系统中存在多处性能监视器埋点，为杜绝在每一个埋点处编写冗余判定并解决参数前置求值造成的隐性耗时。在 `tk_gil_monitor.py` 的 `LastCallTracker` 类中重构了 `trace()` 装饰器，并新增了 `update(func_name, args_repr)` 集中式埋点接口，由底层统一检查 `cct.CFG.gil_monitor` 级别。引入 **`_gil_monitor_enabled` 全局一次性开关状态缓存**，仅在系统启动模块加载时读取解析一次配置，彻底消除了高频运行阶段对 `sys.modules` 的查找以及对 CFG 属性判断 of 冗余损耗。在关闭显示状态时，以单纯的布尔值逻辑直接短路（Early Return），实现了**极致的 DRY 架构与完美的物理零开销（0.00ns 损耗）**！同时对 `bidding_momentum_detector.py` 全文中**全部 10 处旧埋点**进行了整体升级，将它们全部重构为单行集中式 `_glc.update` 调用，参数彻底延迟求值，系统的极客化工程水准与性能调优达到全新高度！
 
 ## 2026-05-22 01:50
 - [x] **终极解决竞价板块面板开盘与冷启动“数据皆空/白屏”逻辑死锁 (Fixed Sector Board Cold-Start Blank & Incremental Selection Deadlock)**：

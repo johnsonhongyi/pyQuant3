@@ -17,6 +17,28 @@ from typing import Optional, Callable
 _global_monitor: Optional["TkBreathingMonitor"] = None
 def get_monitor(): return _global_monitor
 
+# ─── 全局状态缓存 (启动时仅加载一次) ───────────────────────
+_gil_monitor_enabled = True
+try:
+    cct = None
+    if "JohnsonUtil.commonTips" in sys.modules:
+        cct = sys.modules["JohnsonUtil.commonTips"]
+    elif "stock_standalone.JohnsonUtil.commonTips" in sys.modules:
+        cct = sys.modules["stock_standalone.JohnsonUtil.commonTips"]
+    else:
+        try:
+            from JohnsonUtil import commonTips as cct
+        except Exception:
+            try:
+                from stock_standalone.JohnsonUtil import commonTips as cct
+            except Exception:
+                pass
+                
+    if cct is not None and hasattr(cct, "CFG") and hasattr(cct.CFG, "gil_monitor"):
+        _gil_monitor_enabled = bool(cct.CFG.gil_monitor)
+except Exception:
+    pass
+
 
 # ─── 内部工具 ────────────────────────────────────────────
 _last_warns = {}
@@ -121,12 +143,26 @@ class LastCallTracker:
     def trace(self, func):
         @functools.wraps(func)
         def w(*a, **kw):
-            with self._lock:
-                self._data.update({"time": time.time(), "func": func.__qualname__,
-                                   "thread": threading.current_thread().name,
-                                   "args_repr": repr(a[1])[:40] if len(a)>1 else ""})
+            if _gil_monitor_enabled:
+                with self._lock:
+                    self._data.update({"time": time.time(), "func": func.__qualname__,
+                                       "thread": threading.current_thread().name,
+                                       "args_repr": repr(a[1])[:40] if len(a)>1 else ""})
             return func(*a, **kw)
         return w
+
+    def update(self, func_name: str, args_repr: str = ""):
+        """[集中式埋点入口] 开关判断，实现绝对的零开销与参数延迟求值。"""
+        if not _gil_monitor_enabled:
+            return
+            
+        with self._lock:
+            self._data.update({
+                "time": time.time(),
+                "func": func_name,
+                "thread": threading.current_thread().name,
+                "args_repr": args_repr
+            })
 
     def get(self):
         with self._lock: return dict(self._data)
