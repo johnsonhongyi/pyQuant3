@@ -833,6 +833,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
         self.tk_dispatch_queue = queue.Queue()
         self._is_pumping_events = False # 🚀 [NEW] 重入守卫
+        
+        # 初始化全局窗口轮询切换 MRU 列表，并注册主窗口 HWND
+        self._window_mru_list = []
+        if self.winfo_exists():
+            self._register_hwnd_to_mru(self.winfo_id())
+            
         self._process_dispatch_queue()
 
 
@@ -854,6 +860,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
         self.bind("<Control-slash>", lambda e: self.open_indicator_help())
+        
+
 
         # [NEW] 每日复盘入口按钮
         try:
@@ -1094,6 +1102,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._aggregate_market_dashboard_stats(has_update=True)
             self._signal_dashboard_win.raise_()
             self._signal_dashboard_win.activateWindow()
+            if hasattr(self, '_register_hwnd_to_mru'):
+                self._register_hwnd_to_mru(int(self._signal_dashboard_win.winId()))
 
             toast_message(self, "实时信号仪表盘已启动")
             
@@ -1147,6 +1157,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用并触发防抖
                 self._racing_panel_win.closed.connect(self._on_racing_panel_closed)
                 
+
+                
                 # 跨线程联动安全：双击个股跳转
                 self._racing_panel_win.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
 
@@ -1184,6 +1196,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._racing_panel_win.show()
             self._racing_panel_win.raise_()
             self._racing_panel_win.activateWindow()
+            if hasattr(self, '_register_hwnd_to_mru'):
+                self._register_hwnd_to_mru(int(self._racing_panel_win.winId()))
             self._racing_first_sync_done = False # [NEW] ⚡ 强制触发立即同步大盘温度数据
             # ⭐ [NEW] 立即触发一次全盘数据聚合与同步，确保赛马节奏面板首屏大盘温度和指数秒级显示
             self._aggregate_market_dashboard_stats(has_update=True)
@@ -1700,7 +1714,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
         7: (win32con.MOD_ALT, 0x4D, "Alt+M"),  # M - 竞价赛马监控
         8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T - 策略选股与人工复核
+        9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R - 切换下一个窗口
+        10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R - 切换上一个窗口
     }
+    def _diagnose_hotkey_conflict(self, desc):
+        """当热键注册失败时，自动通过系统进程快照扫描潜在的冲突来源进程"""
+        import subprocess
+        potential_conflicts = {
+            "RadeonSoftware.exe": "AMD显卡录屏/热键工具 (Radeon Software)",
+            "NVIDIA Share.exe": "NVIDIA GeForce Experience 录屏/覆盖控制中心",
+            "GeForceExperience.exe": "NVIDIA 显卡录屏热键工具",
+            "WeChat.exe": "微信 (WeChat)",
+            "QQ.exe": "腾讯 QQ",
+            "neteasecloudmusic.exe": "网易云音乐 (NetEase Cloud Music) 全局快捷键",
+            "cloudmusic.exe": "网易云音乐全局快捷键",
+            "Lark.exe": "飞书 (Lark) 截图/快捷键",
+            "Feishu.exe": "飞书 (Feishu) 截图/快捷键",
+            "DingTalk.exe": "钉钉 (DingTalk)",
+            "AltTab.exe": "第三方Alt+Tab增强软件",
+            "XFS.exe": "向日葵远控软件 (Alt+R 默认是屏幕录像功能)"
+        }
+        found_processes = []
+        try:
+            # 使用 tasklist 快速拉取进程快照，设置超时防卡死
+            output = subprocess.check_output("tasklist /NH /FI \"STATUS eq running\"", shell=True, timeout=2.0).decode('gbk', errors='ignore')
+            for proc, name in potential_conflicts.items():
+                if proc.lower() in output.lower():
+                    found_processes.append(f"【{name} ({proc})】")
+        except Exception:
+            pass
+        
+        diag_msg = f"🚨 [Hotkey冲突诊断] 注册 {desc} 失败！"
+        if found_processes:
+            diag_msg += f"\n👉 检测到系统中可能存在冲突的活动进程: " + "、".join(found_processes)
+            diag_msg += f"\n💡 建议：请尝试在该软件的设置中将包含 {desc.split('+')[-1]} 的录屏或热键功能关闭或修改，随后重新运行交易系统！"
+        else:
+            diag_msg += f"\n👉 未扫到常见显卡或社交流氓热键。请手动排查是否有其他软件占用了 {desc}。"
+        return diag_msg
 
 
     def setup_global_hotkey(self, show_toast=False, mode="GLOBAL"):
@@ -1724,6 +1774,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             6: lambda: self._schedule_after(0, self._run_live_strategy_process),
             7: lambda: self._schedule_after(0, self.open_racing_panel),
             8: lambda: self._schedule_after(0, self.open_stock_selection_window),
+            9: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(1)),
+            10: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(-1)),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -1737,13 +1789,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 user32 = ctypes.windll.user32
                 
                 registered_ids = []
-                for offset, (mod, vk, desc) in self._HOTKEY_MAP.items():
+                for offset, (mod, vk, desc) in list(self._HOTKEY_MAP.items()):
                     hk_id = self._HOTKEY_ID_BASE + offset
                     if user32.RegisterHotKey(None, hk_id, mod, vk):
                         registered_ids.append(hk_id)
                         logger.info(f"✅ [Hotkey] Win32 全局热键已激活: {desc}")
                     else:
                         logger.warning(f"⚠️ [Hotkey] Win32 注册 {desc} 失败，可能已被占用")
+                        if offset in [9, 10]:
+                            # 🚀 [自愈降级与智能诊断机制]
+                            # 9 -> Alt+R 降级为 Alt+Q; 10 -> Alt+Shift+R 降级为 Alt+Shift+Q
+                            fallback_char = "Q"
+                            fallback_vk = 0x51  # Q 键码
+                            
+                            # 执行进程冲突诊断
+                            diag_msg = self._diagnose_hotkey_conflict(desc)
+                            logger.error(diag_msg)
+                            
+                            if offset == 9:
+                                new_desc = f"Alt+{fallback_char} (已自愈降级)"
+                                self._HOTKEY_MAP[9] = (mod, fallback_vk, new_desc)
+                                if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
+                                    registered_ids.append(hk_id)
+                                    logger.info(f"🚀 [Hotkey] Win32 全局热键已自愈降级注册备用键: {new_desc}")
+                                    self._schedule_after(1000, lambda: self.status_var.set(f"⚠️ Alt+R被占用，已降级为 Alt+Q 轮转窗口！"))
+                                else:
+                                    logger.error(f"❌ [Hotkey] 备用热键 {new_desc} 依然注册失败！")
+                            elif offset == 10:
+                                new_desc = f"Alt+Shift+{fallback_char} (已自愈降级)"
+                                self._HOTKEY_MAP[10] = (mod, fallback_vk, new_desc)
+                                if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
+                                    registered_ids.append(hk_id)
+                                    logger.info(f"🚀 [Hotkey] Win32 全局热键已自愈降级注册备用键: {new_desc}")
+                                else:
+                                    logger.error(f"❌ [Hotkey] 备用热键 {new_desc} 依然注册失败！")
 
                 try:
                     msg = wintypes.MSG()
@@ -2432,6 +2511,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # 通知所有监听线程立即停止
+
+            # 🚀 [NEW] 优雅注销并回收 Windows 底层内置全局热键监听线程
+            try:
+                self._shutdown_global_hotkeys()
+            except Exception as ex:
+                logger.warning(f"Failed to shutdown global hotkeys: {ex}")
 
             logger.info("🛑 [on_close] Phase 1: Shutdown initiated (Stop Refresh & Flags)")
 
@@ -4790,6 +4875,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         from sector_bidding_panel import SectorBiddingPanel
                         if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
                             self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
+                            
+
+                            
                             self.sector_bidding_panel.show()
                             if hasattr(self, 'df_all') and not self.df_all.empty:
                                 self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
@@ -5130,6 +5218,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             name="OpenVisWorker"
         ).start()
 
+        # 异步探测并注册可视化窗口的 HWND 至 MRU 列表中
+        def _register_vis_hwnd_async():
+            import time
+            for _ in range(30): # 轮询探测 3 秒
+                vis_hwnd = self._find_visualizer_hwnd()
+                if vis_hwnd:
+                    if hasattr(self, '_register_hwnd_to_mru'):
+                        self._register_hwnd_to_mru(vis_hwnd)
+                    break
+                time.sleep(0.1)
+        threading.Thread(target=_register_vis_hwnd_async, daemon=True, name="RegisterVisHwnd").start()
+
         # UI 状态提示
         try:
             if hasattr(self, 'status_var2'):
@@ -5445,6 +5545,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.sector_bidding_panel.raise_()
                 else:
                     self.sector_bidding_panel.show()
+                if hasattr(self, '_register_hwnd_to_mru'):
+                    self._register_hwnd_to_mru(int(self.sector_bidding_panel.winId()))
                 # 推一次行情数据（仅做 queue.put，不 copy 大 DataFrame）
                 if hasattr(self, 'df_all') and not self.df_all.empty:
                     t0 = time.time()
@@ -5480,9 +5582,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         self.sector_bidding_panel = panel
 
+
                         t2 = time.time()
                         logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 3: panel.show() ...")
                         panel.show()
+                        if hasattr(self, '_register_hwnd_to_mru'):
+                            self._register_hwnd_to_mru(int(panel.winId()))
                         logger.warning(f"⏱️ [SectorBidding][BUILD-Main] Step 3 Done: show() cost {(time.time()-t2)*1000:.1f}ms")
 
                         logger.info("📡 手动打开 竞价/尾盘联动监控面板(Tick订阅版)")
@@ -11118,6 +11223,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._live_signal_viewer.show()
                     self._live_signal_viewer.raise_()
                     self._live_signal_viewer.activateWindow()
+                    if hasattr(self, '_register_hwnd_to_mru'):
+                        self._register_hwnd_to_mru(int(self._live_signal_viewer.winId()))
                     self._live_signal_viewer.refresh_data() # 自动刷新
                     return
                 except Exception:
@@ -11133,9 +11240,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     main_app=self,                         # 借鉴架构对齐
                 )
                 
+                
                 self._live_signal_viewer.show()
                 self._live_signal_viewer.raise_()
                 self._live_signal_viewer.activateWindow()
+                if hasattr(self, '_register_hwnd_to_mru'):
+                    self._register_hwnd_to_mru(int(self._live_signal_viewer.winId()))
                 
                 logger.info("LiveSignalViewer initialized with stable linkage.")
                 toast_message(self, "实时信号查询已启动")
@@ -11143,6 +11253,682 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to open LiveSignalViewer: {e}\n{traceback.format_exc()}")
             messagebox.showerror("错误", f"启动信号查询窗口失败: {e}")
+            
+    # 🚀 [NEW] 跨框架多窗口轮询快捷键系统 (Unified Window Rotator System)
+    def _find_visualizer_hwnd(self):
+        """利用 EnumWindows 跨进程枚举可视化窗口 HWND"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        found_hwnd = [0]
+        
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        
+        def enum_callback(hwnd, lParam):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+                # 模糊匹配可视化看板标题
+                if any(kw in title for kw in ["分时可视化", "TradeVisualizer", "K线可视化", "量价异动详情", "PyQuant Stock Visualizer", "Stock Visualizer", "Visualizer"]):
+                    found_hwnd[0] = hwnd
+                    return False  # 停止枚举
+            return True
+            
+        user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+        return found_hwnd[0]
+
+    def _register_hwnd_to_mru(self, hwnd):
+        """将有效的 HWND 注册到 MRU 窗口切换列表中，如果已存在则移动到最前"""
+        if not hwnd:
+            return
+        if not hasattr(self, '_window_mru_list'):
+            self._window_mru_list = []
+        try:
+            hwnd = int(hwnd)
+        except (ValueError, TypeError):
+            return
+        
+        if hwnd in self._window_mru_list:
+            self._window_mru_list.remove(hwnd)
+        self._window_mru_list.insert(0, hwnd)
+        logger.debug(f"[Rotator] Registered HWND {hwnd} to MRU list. Current list: {self._window_mru_list}")
+
+    def _get_all_open_trade_windows(self):
+        """动态搜集并结合 MRU 列表排序的所有打开且可见的交易窗口 HWND 列表"""
+        if not hasattr(self, '_window_mru_list'):
+            self._window_mru_list = []
+            
+        current_visible_hwnds = []
+        name_map = {}
+        
+        # 1. 主控制台 (Tk)
+        if self.winfo_exists():
+            try:
+                h = self.winfo_id()
+                current_visible_hwnds.append(h)
+                name_map[h] = f"MainConsole({h})"
+            except Exception as e:
+                pass
+                
+        # 2. 策略选股窗口 (Tk)
+        if hasattr(self, '_stock_selection_win') and self._stock_selection_win is not None:
+            try:
+                if self._stock_selection_win.winfo_exists():
+                    h = self._stock_selection_win.winfo_id()
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"StockSelection({h})"
+            except Exception:
+                pass
+                
+        # 3. 赛马面板 (PyQt6)
+        if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
+            try:
+                if self._racing_panel_win.isVisible():
+                    h = int(self._racing_panel_win.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"RacingPanel({h})"
+            except Exception:
+                pass
+                
+        # 4. 板块竞价面板 (PyQt6)
+        if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel is not None:
+            try:
+                if self.sector_bidding_panel.isVisible():
+                    h = int(self.sector_bidding_panel.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"SectorBiddingPanel({h})"
+            except Exception:
+                pass
+                
+        # 5. 信号看板 (PyQt6)
+        if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
+            try:
+                if self._live_signal_viewer.isVisible():
+                    h = int(self._live_signal_viewer.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"LiveSignalViewer({h})"
+            except Exception:
+                pass
+
+        # 6. 信号仪表盘 (PyQt6 - SignalDashboardPanel)
+        if hasattr(self, '_signal_dashboard_win') and self._signal_dashboard_win is not None:
+            try:
+                if self._signal_dashboard_win.isVisible():
+                    h = int(self._signal_dashboard_win.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"SignalDashboard({h})"
+            except Exception:
+                pass
+                
+        # 7. K线可视化窗口 (PyQt6 独立进程)
+        try:
+            vis_hwnd = self._find_visualizer_hwnd()
+            if vis_hwnd:
+                import ctypes
+                # 确保窗口句柄在 Windows 中真实存在且可见，从而允许跨进程 Socket 或残留连接切换
+                if ctypes.windll.user32.IsWindow(vis_hwnd) and ctypes.windll.user32.IsWindowVisible(vis_hwnd):
+                    current_visible_hwnds.append(vis_hwnd)
+                    name_map[vis_hwnd] = f"Visualizer({vis_hwnd})"
+        except Exception:
+            pass
+
+        # 8. K线监控窗口 (Tk - kline_monitor)
+        if hasattr(self, 'kline_monitor') and self.kline_monitor is not None:
+            try:
+                if self.kline_monitor.winfo_exists():
+                    h = self.kline_monitor.winfo_id()
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"KLineMonitor({h})"
+            except Exception:
+                pass
+
+        # 9. 概念异动详情窗口 (Tk - _concept_win)
+        if hasattr(self, '_concept_win') and self._concept_win is not None:
+            try:
+                if self._concept_win.winfo_exists():
+                    h = self._concept_win.winfo_id()
+                    current_visible_hwnds.append(h)
+                    name_map[h] = f"ConceptDetail({h})"
+            except Exception:
+                pass
+
+        # 10. 概念放量监控子窗口 (Tk - self.monitor_windows 中的所有有效 toplevel 窗口)
+        if hasattr(self, 'monitor_windows') and self.monitor_windows:
+            for win_id, win_info in self.monitor_windows.items():
+                try:
+                    w = win_info.get("toplevel")
+                    if w and w.winfo_exists():
+                        h = w.winfo_id()
+                        if h not in current_visible_hwnds:
+                            current_visible_hwnds.append(h)
+                            name_map[h] = f"MonitorWindow_{win_id}({h})"
+                except Exception:
+                    pass
+            
+        # 🌟 动态记录操盘手手动点击/查看的窗口顺序
+        # 读取 Windows 物理前台焦点窗口。如果它是我们的可见交易窗口之一，
+        # 则说明操盘手此前正在查看它。我们必须在 MRU 中把它放到最前面，使其真正符合切换查看顺序。
+        import ctypes
+        current_fore = ctypes.windll.user32.GetForegroundWindow()
+        if current_fore in current_visible_hwnds:
+            if current_fore in self._window_mru_list:
+                self._window_mru_list.remove(current_fore)
+            self._window_mru_list.insert(0, current_fore)
+            
+        # 2. 根据 MRU 历史列表对当前可见窗口进行排序
+        # 已经在 MRU 中的，按 MRU 顺序排在前面；不在 MRU 中的可见窗口，追加到最后
+        sorted_hwnds = []
+        for mru_hwnd in self._window_mru_list:
+            if mru_hwnd in current_visible_hwnds:
+                sorted_hwnds.append(mru_hwnd)
+                
+        # 将不在 MRU 中的可见窗口也加入，并同步登记进 MRU 列表
+        for v_hwnd in current_visible_hwnds:
+            if v_hwnd not in sorted_hwnds:
+                sorted_hwnds.append(v_hwnd)
+                self._window_mru_list.append(v_hwnd)
+                
+        # 输出当前的活跃窗口列表日志
+        details = [name_map.get(h, f"Unknown({h})") for h in sorted_hwnds]
+        logger.debug(f"[Rotator] Detected active windows registry (MRU Sorted): {', '.join(details)}")
+        self._rotator_window_names = name_map
+        return sorted_hwnds
+
+    def _force_focus_hwnd(self, hwnd):
+        """100% 强力穿透并聚焦置顶窗口 (AttachThreadInput 底层穿透技术 + GUI原生双保险)"""
+        if not hwnd:
+            return
+        
+        # 🛡️ 双保险：针对 Tk 窗口，在原生句柄穿透前先触发 Tk 原生的置顶唤醒逻辑
+        if self.winfo_exists() and hwnd == self.winfo_id():
+            try:
+                self.deiconify()
+                self.lift()
+                self.focus_force()
+            except Exception:
+                pass
+        elif hasattr(self, '_stock_selection_win') and self._stock_selection_win and self._stock_selection_win.winfo_exists():
+            if hwnd == self._stock_selection_win.winfo_id():
+                try:
+                    self._stock_selection_win.deiconify()
+                    self._stock_selection_win.lift()
+                    self._stock_selection_win.focus_force()
+                except Exception:
+                    pass
+
+        import ctypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        
+        fore_hwnd = user32.GetForegroundWindow()
+        fore_thread = user32.GetWindowThreadProcessId(fore_hwnd, None) if fore_hwnd else 0
+        current_thread = kernel32.GetCurrentThreadId()
+        
+        attached = False
+        if fore_thread and fore_thread != current_thread:
+            attached = bool(user32.AttachThreadInput(current_thread, fore_thread, True))
+            
+        try:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            else:
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+                
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+            user32.SetFocus(hwnd)
+        except Exception as e:
+            logger.error(f"[Rotator] SetFocus error for {hwnd}: {e}")
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread, fore_thread, False)
+
+    def rotate_trade_windows(self, direction=1):
+        """
+        跨框架/进程多窗口自动轮询切换 (1: 下一个窗口, -1: 上一个窗口)
+        对应按键：Alt+R / Alt+Shift+R (大写R)
+        """
+        try:
+            import ctypes
+            hwnds = self._get_all_open_trade_windows()
+            if not hwnds:
+                return
+                
+            current_fore = ctypes.windll.user32.GetForegroundWindow()
+            
+            # 如果当前焦点在我们的某个交易窗口，切向下一个/上一个
+            if current_fore in hwnds:
+                curr_idx = hwnds.index(current_fore)
+                next_idx = (curr_idx + direction) % len(hwnds)
+            else:
+                # 否则，默认激活主控制台
+                next_idx = 0
+                
+            target_hwnd = hwnds[next_idx]
+            
+            # 从缓存的全局名字映射中拉取当前 HWND 真实名称
+            target_name = getattr(self, '_rotator_window_names', {}).get(target_hwnd, "K线/分时可视化窗口 (Visualizer)")
+            
+            self._force_focus_hwnd(target_hwnd)
+            logger.info(f"[Rotator] Focus rotated (Direction: {direction}). Target HWND: {target_hwnd} [{target_name}], {next_idx + 1}/{len(hwnds)}")
+        except Exception as e:
+            logger.error(f"[Rotator] Rotate windows error: {e}")
+
+
+
+    def show_qt_rotator_dialog(self, direction=1):
+        """安全调度高保真极客 Alt+Tab 效果 Qt 切换面板，支持键盘上下、连续按键与松手自动切换"""
+        try:
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QFrame, QWidget, QGridLayout, QPushButton
+            from PyQt6.QtCore import Qt, QTimer
+            from PyQt6.QtGui import QFont, QColor
+        except ImportError:
+            # Fallback：如果 Qt 环境不支持，直接用 fallback 的无面板切换
+            self.rotate_trade_windows(direction)
+            return
+
+        # 1. 检查主程序中是否已存活 Dialog 实例
+        if hasattr(self, '_rotator_dialog_instance') and self._rotator_dialog_instance is not None:
+            try:
+                # 检查底层窗口句柄是否依然存活，isVisible()
+                # 如果对象已被销毁，isVisible() 可能会抛出 RuntimeError
+                if self._rotator_dialog_instance.isVisible():
+                    self._rotator_dialog_instance.rotate_highlight(direction)
+                    return
+                else:
+                    self._rotator_dialog_instance.close()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            self._rotator_dialog_instance = None
+
+        # 🚀 [WindowRotatorDialog] 实现高保真松手自适应切换面板
+        class WindowRotatorDialog(QDialog):
+            _instance = None  # 全局单例，确保任何时候只有一个切换框
+
+            @classmethod
+            def show_rotator(cls, main_app, direction):
+                import ctypes
+                
+                # 设置活跃状态标志
+                main_app._rotator_active = True
+                
+                # 1. 搜集所有可见交易窗口 (已由 _get_all_open_trade_windows 自动按 MRU 排序)
+                hwnds = main_app._get_all_open_trade_windows()
+                if not hwnds:
+                    main_app._rotator_active = False
+                    return
+                    
+                # 建立 HWND 到人类可读名称的映射
+                cached_names = getattr(main_app, '_rotator_window_names', {})
+                name_map = {}
+                for hwnd in hwnds:
+                    raw_name = cached_names.get(hwnd, "")
+                    if "MainConsole" in raw_name:
+                        name_map[hwnd] = "💻 主控制台 (MainConsole)"
+                    elif "StockSelection" in raw_name:
+                        name_map[hwnd] = "📊 策略选股与人工复核 (StockSelection)"
+                    elif "RacingPanel" in raw_name:
+                        name_map[hwnd] = "🏁 竞价赛马看板 (RacingPanel)"
+                    elif "SectorBiddingPanel" in raw_name:
+                        name_map[hwnd] = "⚡ 板块竞价/尾盘联动 (SectorBidding)"
+                    elif "LiveSignalViewer" in raw_name:
+                        name_map[hwnd] = "📡 实时行情信号监控 (LiveSignalViewer)"
+                    elif "SignalDashboard" in raw_name:
+                        name_map[hwnd] = "🛡️ 策略信号仪表盘 (SignalDashboard)"
+                    elif "KLineMonitor" in raw_name:
+                        name_map[hwnd] = "📈 传统K线监控 (KLineMonitor)"
+                    elif "ConceptDetail" in raw_name:
+                        name_map[hwnd] = "💡 概念异动详情 (ConceptDetail)"
+                    elif "MonitorWindow_" in raw_name:
+                        # 提炼出独特代码如 "板块名称_代码"
+                        mon_id = raw_name.split("MonitorWindow_")[-1].split("(")[0]
+                        name_map[hwnd] = f"🔍 概念前10监控 ({mon_id})"
+                    else:
+                        name_map[hwnd] = raw_name or "📺 K线/分时可视化窗口 (Visualizer)"
+                    
+                # 构建 Dialog 并持久保存在 main_app 上
+                dialog = WindowRotatorDialog(main_app, hwnds, name_map, direction)
+                main_app._rotator_dialog_instance = dialog
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+
+            def __init__(self, main_app, hwnds, name_map, initial_dir):
+                super().__init__(None)
+                self.main_app = main_app
+                self.hwnds = hwnds
+                self.name_map = name_map
+                
+                # 分类核心窗口和瓷贴窗口
+                self.core_hwnds = []
+                self.tile_hwnds = []
+                for h in self.hwnds:
+                    raw_name = self.name_map.get(h, "")
+                    if "概念前10监控" in raw_name or "MonitorWindow_" in raw_name:
+                        self.tile_hwnds.append(h)
+                    else:
+                        self.core_hwnds.append(h)
+                
+                import time
+                self.last_action_time = time.time()
+                
+                self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+                self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose) # 确保 close 瞬间彻底销毁
+                self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                
+                # 高对比度极客暗黑风 QSS 样式设计（完全不透明，色彩反差巨大）
+                self.setStyleSheet("""
+                    QDialog {
+                        background-color: transparent; /* 由 paintEvent 负责绘制实体背景 */
+                    }
+                    QListWidget {
+                        background-color: transparent;
+                        border: none;
+                        outline: none;
+                    }
+                    QListWidget::item {
+                        background-color: #1c1d30;
+                        color: #ffffff;
+                        border-radius: 6px;
+                        padding: 10px;
+                        margin-bottom: 6px;
+                        font-size: 13px;
+                        font-weight: bold;
+                    }
+                    QListWidget::item:selected {
+                        background-color: #1e3a8a;
+                        color: #39ff14;
+                        border: 1.5px solid #00f0ff;
+                    }
+                """)
+                
+                layout = QVBoxLayout(self)
+                layout.setContentsMargins(15, 15, 15, 15)
+                
+                # 顶部美观大方的提示 Title
+                title = QLabel("🔄 交易视窗全局轮询切换器", self)
+                title.setStyleSheet("color: #00f0ff; font-size: 14px; font-weight: bold; margin-bottom: 8px;")
+                title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(title)
+                
+                # 列表容器
+                self.list_widget = QListWidget(self)
+                self.list_widget.wheelEvent = self.wheelEvent
+                self.list_widget.itemClicked.connect(self.on_item_clicked)
+                layout.addWidget(self.list_widget)
+                
+                # 灌入核心窗口
+                for h in self.core_hwnds:
+                    name = self.name_map.get(h, "📈 K线/分时可视化监控终端 (Visualizer)")
+                    item = QListWidgetItem(name)
+                    item.setData(Qt.ItemDataRole.UserRole, h)
+                    self.list_widget.addItem(item)
+                    
+                # 灌入瓷贴小方块
+                self.tiles_frame = None
+                self.tile_buttons = {}  # hwnd -> QPushButton
+                
+                if self.tile_hwnds:
+                    self.tiles_frame = QFrame(self)
+                    self.tiles_frame.setStyleSheet("""
+                        QFrame {
+                            background-color: #171828;
+                            border: 1px solid #2d2e42;
+                            border-radius: 8px;
+                        }
+                    """)
+                    tiles_layout = QVBoxLayout(self.tiles_frame)
+                    tiles_layout.setContentsMargins(8, 8, 8, 8)
+                    
+                    t_title = QLabel("🔍 概念前10放量监控 (瓷贴)", self.tiles_frame)
+                    t_title.setStyleSheet("color: #8b92b6; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+                    tiles_layout.addWidget(t_title)
+                    
+                    grid_widget = QWidget(self.tiles_frame)
+                    grid_widget.setStyleSheet("border: none; background: transparent;")
+                    grid_layout = QGridLayout(grid_widget)
+                    grid_layout.setContentsMargins(0, 4, 0, 0)
+                    grid_layout.setSpacing(6)
+                    
+                    for idx, h in enumerate(self.tile_hwnds):
+                        raw_name = self.name_map.get(h, "")
+                        clean_name = raw_name.replace("🔍 概念前10监控 (", "").replace(")", "")
+                        if "_" in clean_name:
+                            clean_name = clean_name.split("_")[0]
+                        if len(clean_name) > 6:
+                            clean_name = clean_name[:5] + ".."
+                            
+                        btn = QPushButton(clean_name, grid_widget)
+                        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                        btn.setStyleSheet(self._get_tile_style(selected=False))
+                        btn.clicked.connect(lambda checked, hwnd=h: self.select_hwnd_and_close(hwnd))
+                        
+                        self.tile_buttons[h] = btn
+                        row = idx // 3
+                        col = idx % 3
+                        grid_layout.addWidget(btn, row, col)
+                        
+                    tiles_layout.addWidget(grid_widget)
+                    layout.addWidget(self.tiles_frame)
+                    
+                # 确定初始高亮索引：当前激活窗口顺次往后切
+                import ctypes
+                current_fore = ctypes.windll.user32.GetForegroundWindow()
+                if current_fore in self.hwnds:
+                    curr_idx = self.hwnds.index(current_fore)
+                    self.curr_idx = (curr_idx + initial_dir) % len(self.hwnds)
+                else:
+                    self.curr_idx = 0
+                    
+                self.apply_highlight_to_ui()
+                
+                # 底部操作指南
+                hk_desc = "Alt+R"
+                for offset, (mod, vk, desc) in self.main_app._HOTKEY_MAP.items():
+                    if offset == 9:
+                        hk_desc = desc.split(" ")[0]
+                        break
+                help_lbl = QLabel(f"💡 连按 [{hk_desc}] 轮选 | 释放 [Alt] 键自动松手切换", self)
+                help_lbl.setStyleSheet("color: #8b92b6; font-size: 11px; font-weight: bold; margin-top: 6px;")
+                help_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(help_lbl)
+                
+                # 屏幕居中尺寸适配
+                list_height = len(self.core_hwnds) * 45
+                tile_rows = (len(self.tile_hwnds) + 2) // 3
+                tiles_height = 40 + tile_rows * 36 if self.tile_hwnds else 0
+                self.resize(380, min(120 + list_height + tiles_height, 600))
+                self.center_on_screen()
+                
+                # 启动高频 GetAsyncKeyState ALT 键释放检测器与超时保护 (30ms 极速响应)
+                self.detect_timer = QTimer(self)
+                self.detect_timer.timeout.connect(self.check_alt_release)
+                self.detect_timer.start(30)
+                
+            def paintEvent(self, event):
+                """重写绘图事件，提供完全不透明的窗口背景以防透明度干扰，保证高对比度"""
+                from PyQt6.QtGui import QPainter, QBrush, QColor, QPen
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                # 完全不透明暗黑蓝背景
+                painter.setBrush(QBrush(QColor("#111224")))
+                # 实体高反差亮青边框
+                painter.setPen(QPen(QColor("#00f0ff"), 2))
+                painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
+
+            def center_on_screen(self):
+                screen = self.screen()
+                if screen:
+                    geom = screen.geometry()
+                    x = (geom.width() - self.width()) // 2
+                    y = (geom.height() - self.height()) // 2
+                    self.move(x, y)
+
+            def _get_tile_style(self, selected=False):
+                if selected:
+                    return """
+                        QPushButton {
+                            background-color: #1e3a8a;
+                            color: #39ff14;
+                            border: 1.5px solid #00f0ff;
+                            border-radius: 4px;
+                            padding: 5px;
+                            font-size: 11px;
+                            font-weight: bold;
+                        }
+                    """
+                else:
+                    return """
+                        QPushButton {
+                            background-color: #1c1d30;
+                            color: #ffffff;
+                            border: 1px solid #33344a;
+                            border-radius: 4px;
+                            padding: 5px;
+                            font-size: 11px;
+                            font-weight: bold;
+                        }
+                    """
+
+            def select_hwnd_and_close(self, hwnd):
+                if hwnd in self.hwnds:
+                    self.curr_idx = self.hwnds.index(hwnd)
+                if hasattr(self, 'detect_timer') and self.detect_timer.isActive():
+                    self.detect_timer.stop()
+                self.trigger_switch_and_close()
+
+            def apply_highlight_to_ui(self):
+                if not self.hwnds or self.curr_idx < 0 or self.curr_idx >= len(self.hwnds):
+                    return
+                target_hwnd = self.hwnds[self.curr_idx]
+                
+                # 1. 核心窗口高亮，取消瓷贴高亮
+                if target_hwnd in self.core_hwnds:
+                    self.list_widget.blockSignals(True)
+                    core_idx = self.core_hwnds.index(target_hwnd)
+                    self.list_widget.setCurrentRow(core_idx)
+                    self.list_widget.blockSignals(False)
+                    
+                    for btn in self.tile_buttons.values():
+                        btn.setStyleSheet(self._get_tile_style(selected=False))
+                else:
+                    # 2. 瓷贴高亮，核心列表取消高亮
+                    self.list_widget.blockSignals(True)
+                    self.list_widget.clearSelection()
+                    self.list_widget.setCurrentRow(-1)
+                    self.list_widget.blockSignals(False)
+                    
+                    for h, btn in self.tile_buttons.items():
+                        btn.setStyleSheet(self._get_tile_style(selected=(h == target_hwnd)))
+                    
+            def rotate_highlight(self, direction):
+                """外部连点快捷键时顺次切高亮"""
+                if not self.hwnds:
+                    return
+                import time
+                self.last_action_time = time.time()
+                self.curr_idx = (self.curr_idx + direction) % len(self.hwnds)
+                self.apply_highlight_to_ui()
+                
+            def on_item_clicked(self, item):
+                """鼠标点击列表项时立即切换目标并关闭（鼠标点击 = 明确确认选中）"""
+                import time
+                self.last_action_time = time.time()
+                hwnd = item.data(Qt.ItemDataRole.UserRole)
+                if hwnd and hwnd in self.hwnds:
+                    self.curr_idx = self.hwnds.index(hwnd)
+                if hasattr(self, 'detect_timer') and self.detect_timer.isActive():
+                    self.detect_timer.stop()
+                self.trigger_switch_and_close()
+
+            def check_alt_release(self):
+                """极速感应 ALT 释放松手判定与无操作超时自愈保护"""
+                import time
+                import ctypes
+                
+                # 1. 2.5 秒无按键无操作强制超时保护
+                if time.time() - self.last_action_time > 2.5:
+                    self.detect_timer.stop()
+                    logger.info("[Rotator] Inactivity timeout (2.5s) reached. Closing and switching automatically.")
+                    self.trigger_switch_and_close()
+                    return
+                    
+                # 2. 物理读取 Alt 键电平状态
+                state = ctypes.windll.user32.GetAsyncKeyState(0x12) # VK_MENU
+                if not (state & 0x8000):
+                    self.detect_timer.stop()
+                    self.trigger_switch_and_close()
+                    
+                # 3. 鼠标左键已释放时（用户点击松手），也视为确认切换
+                # 场景：用户按住 Alt 后用鼠标点击列表项，松开鼠标时 on_item_clicked 已触发，
+                #        detect_timer 已被 on_item_clicked 主动 stop，此检查只做保险兜底。
+
+                    
+            def trigger_switch_and_close(self):
+                """最终锁定并瞬间强力聚焦"""
+                if self.curr_idx >= 0 and self.curr_idx < len(self.hwnds):
+                    target_hwnd = self.hwnds[self.curr_idx]
+                    target_name = self.name_map.get(target_hwnd, "未知窗口")
+                    
+                    # 更新 MRU 列表顺序，将目标移至最前
+                    if hasattr(self.main_app, '_window_mru_list'):
+                        if target_hwnd in self.main_app._window_mru_list:
+                            self.main_app._window_mru_list.remove(target_hwnd)
+                        self.main_app._window_mru_list.insert(0, target_hwnd)
+                        
+                    # 强力聚焦
+                    self.main_app.tk_dispatch_queue.put(lambda: self.main_app._force_focus_hwnd(target_hwnd))
+                    logger.debug(f"[Rotator] Focus switched to HWND {target_hwnd} [{target_name}] via select.")
+                self.close()
+                
+            def keyPressEvent(self, event):
+                """支持键盘上下键与回车 Esc 纯盲操"""
+                import time
+                self.last_action_time = time.time()
+                if event.key() == Qt.Key.Key_Down:
+                    self.rotate_highlight(1)
+                elif event.key() == Qt.Key.Key_Up:
+                    self.rotate_highlight(-1)
+                elif event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
+                    self.detect_timer.stop()
+                    self.trigger_switch_and_close()
+                elif event.key() == Qt.Key.Key_Escape:
+                    self.detect_timer.stop()
+                    self.close()
+                else:
+                    super().keyPressEvent(event)
+
+            def wheelEvent(self, event):
+                """支持鼠标滚轮在窗口任意位置滚动以顺次轮转列表高亮项，并防止超时自动关闭"""
+                import time
+                self.last_action_time = time.time()
+                
+                # 获取滚轮滚动的垂直增量
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    # 向上滚动，高亮项向上移
+                    self.rotate_highlight(-1)
+                elif delta < 0:
+                    # 向下滚动，高亮项向下移
+                    self.rotate_highlight(1)
+                
+                event.accept()
+
+            def closeEvent(self, event):
+                """关闭事件兜底清理"""
+                if hasattr(self, 'detect_timer') and self.detect_timer.isActive():
+                    self.detect_timer.stop()
+                self.main_app._rotator_active = False
+                self.main_app._rotator_dialog_instance = None
+                WindowRotatorDialog._instance = None
+                super().closeEvent(event)
+
+        # 触发单例 Dialog 呈现
+        WindowRotatorDialog.show_rotator(self, direction)
 
     def open_stock_selection_window(self):
         from stock_selection_window import StockSelectionWindow
@@ -11187,6 +11973,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._stock_selection_win.deiconify()
                 self._stock_selection_win.lift()
                 self._stock_selection_win.focus_force()
+                if hasattr(self, '_register_hwnd_to_mru'):
+                    self._register_hwnd_to_mru(self._stock_selection_win.winfo_id())
                 return
             except Exception as e:
                 logger.warning(f"复用选股窗口异常: {e}")
@@ -11194,6 +11982,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 3. 新建窗口
         try:
             self._stock_selection_win = StockSelectionWindow(self, getattr(self, 'live_strategy', None), self.selector)
+            if hasattr(self, '_register_hwnd_to_mru') and self._stock_selection_win and self._stock_selection_win.winfo_exists():
+                self._register_hwnd_to_mru(self._stock_selection_win.winfo_id())
             # ✅ 自动切到“实时决策”选项卡
             if hasattr(self._stock_selection_win, 'show_decision_tab'):
                 try:
@@ -12562,6 +13352,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win = self._concept_win
                     win.deiconify()
                     win.lift()
+                    if hasattr(self, '_register_hwnd_to_mru'):
+                        self._register_hwnd_to_mru(win.winfo_id())
                     # 仅清理旧内容区，不销毁窗口结构
                     for widget in win._content_frame.winfo_children():
                         widget.destroy()
@@ -12648,6 +13440,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._concept_win = None
 
         win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+        if hasattr(self, '_register_hwnd_to_mru') and win.winfo_exists():
+            self._register_hwnd_to_mru(win.winfo_id())
         # --- 初始内容 ---
         self.update_concept_detail_content()
         def _keep_focus(event):
@@ -13203,6 +13997,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 'monitor_tree': tree,
                 'stock_info': code  # 新增这一行
             }
+        if hasattr(self, '_register_hwnd_to_mru') and win.winfo_exists():
+            self._register_hwnd_to_mru(win.winfo_id())
         # -------------------
         # 鼠标点击统一处理
         # -------------------
@@ -13538,6 +14334,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 'monitor_tree': tree,
                 'stock_info': code  # 新增这一行
             }
+        if hasattr(self, '_register_hwnd_to_mru') and win.winfo_exists():
+            self._register_hwnd_to_mru(win.winfo_id())
 
         # -------------------
         # 鼠标点击统一处理
@@ -15432,6 +16230,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # logger.info("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
             self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=duration_sleep_time,history3=lambda: self.search_history3,logger=logger)
+            if hasattr(self, '_register_hwnd_to_mru') and self.kline_monitor and self.kline_monitor.winfo_exists():
+                self._register_hwnd_to_mru(self.kline_monitor.winfo_id())
             # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)
         else:
             logger.info("监控已在运行中。")
@@ -15445,6 +16245,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 已经创建过，直接显示
                 self.kline_monitor.deiconify()
                 self.kline_monitor.lift()
+                if hasattr(self, '_register_hwnd_to_mru'):
+                    self._register_hwnd_to_mru(self.kline_monitor.winfo_id())
                 # self.kline_monitor.focus_force()
                 self._schedule_after(500, self.kline_monitor.focus_force)
         logger.info("启动K线监控OK...")

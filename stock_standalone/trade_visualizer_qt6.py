@@ -2499,6 +2499,200 @@ class RealtimeWorker(QObject):
             print(f"[RealtimeWorker] {e}")
 
 
+class KLineDetailWindow(QtWidgets.QFrame):
+    """
+    K 线十字光标/鼠标 hover 的独立悬浮详情窗口，支持手动拖拽、复用和位置持久化。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent=None)  # parent设为None，使它成为独立顶层窗口，但设置Tool标志，使它依赖主窗口
+        self.main_window = parent
+        self.is_custom_positioned = False
+        self.is_hovered = False
+        
+        # 窗口属性：工具窗口（不占任务栏）、无边框、置顶
+        self.setWindowFlags(
+            Qt.WindowType.Tool | 
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("DetailContainer")
+        
+        # 内部布局
+        self.main_layout = QtWidgets.QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        
+        # 顶部拖拽把手栏 (平时隐藏，hover时显示)
+        self.handle_bar = QtWidgets.QFrame(self)
+        self.handle_bar.setFixedHeight(16)
+        self.handle_bar.setObjectName("HandleBar")
+        self.handle_layout = QtWidgets.QHBoxLayout(self.handle_bar)
+        self.handle_layout.setContentsMargins(6, 0, 6, 0)
+        
+        self.handle_label = QtWidgets.QLabel("⠿ 拖动以调整位置", self.handle_bar)
+        self.handle_label.setStyleSheet("color: #00f0ff; font-family: monospace; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+        self.handle_layout.addWidget(self.handle_label)
+        self.handle_bar.setVisible(False)
+        
+        self.main_layout.addWidget(self.handle_bar)
+        
+        # 内容区域
+        self.content_frame = QtWidgets.QFrame(self)
+        self.content_frame.setObjectName("ContentFrame")
+        self.content_layout = QtWidgets.QVBoxLayout(self.content_frame)
+        self.content_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 富文本标签展示详情
+        self.label = QtWidgets.QLabel(self.content_frame)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setObjectName("ContentLabel")
+        self.label.setStyleSheet("font-family: monospace; font-size: 12px; line-height: 1.3;")
+        self.label.setWordWrap(True)  # 开启自动换行，结合 HTML style 控制特定部分不换行
+        self.label.setMaximumWidth(280)  # 限制最大宽度，防止理由文字过长时无限横向延伸，强制折行
+        self.content_layout.addWidget(self.label)
+        
+        self.main_layout.addWidget(self.content_frame)
+        
+        # 应用样式表
+        self._update_stylesheets()
+        
+        self.drag_position = None
+        self.is_dragging = False
+        
+        # 开启鼠标悬停跟踪
+        self.setMouseTracking(True)
+        self.content_frame.setMouseTracking(True)
+        self.label.setMouseTracking(True)
+        
+        # 3秒静止悬停定时器
+        self.hover_timer = QtCore.QTimer(self)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.timeout.connect(self._on_hover_timeout)
+        
+        # 限制 KLineDetailWindow 自身最大宽度为 300，配合 label.setMaximumWidth(280)，实现彻底自动折行
+        self.setMaximumWidth(300)
+
+    def _update_stylesheets(self):
+        if self.is_hovered:
+            # 鼠标悬停状态：高反差显示边框和把手背景
+            self.setStyleSheet("""
+                QFrame#DetailContainer {
+                    background: transparent;
+                    border: none;
+                }
+                QFrame#HandleBar {
+                    background-color: rgba(0, 240, 255, 30);
+                    border-bottom: 1px solid rgba(0, 240, 255, 80);
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                }
+                QLabel#ContentLabel {
+                    color: #FFFFFF;
+                    border: none;
+                    background-color: transparent;
+                }
+            """)
+        else:
+            # 平时状态：完全没有边框，背景透明，由 paintEvent 自行绘制半透明黑
+            self.setStyleSheet("""
+                QFrame#DetailContainer {
+                    background: transparent;
+                    border: none;
+                }
+                QFrame#HandleBar {
+                    background: transparent;
+                    border: none;
+                }
+                QLabel#ContentLabel {
+                    color: #FFFFFF;
+                    border: none;
+                    background-color: transparent;
+                }
+            """)
+
+    def paintEvent(self, event):
+        """重写绘图事件以正确绘制半透明背景和边框，防止 WA_TranslucentBackground 导致全透明"""
+        from PyQt6.QtGui import QPainter, QBrush, QColor, QPen
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        if self.is_hovered:
+            # 鼠标悬停状态：高反差显示暗黑蓝背景 (#111224, 230) 和亮青边框 (#00f0ff)
+            painter.setBrush(QBrush(QColor(17, 18, 36, 230)))
+            painter.setPen(QPen(QColor("#00f0ff"), 1))
+        else:
+            # 平时状态：采用跟原TextItem一样的 rgba(0, 0, 0, 180) 半透明黑，无边框
+            painter.setBrush(QBrush(QColor(0, 0, 0, 180)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            
+        # 绘制圆角矩形
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        painter.drawRoundedRect(rect, 4, 4)
+
+
+    def _on_hover_timeout(self):
+        self.is_hovered = True
+        self.handle_bar.setVisible(True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._update_stylesheets()
+        self.adjustSize()
+
+    def enterEvent(self, event):
+        # 鼠标进入时，启动 3 秒静止停留计时器，不立即激活 hover 状态
+        if not self.is_hovered:
+            self.hover_timer.start(3000)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        # 鼠标离开，取消计时，如果是 hover 状态则恢复普通状态
+        self.hover_timer.stop()
+        if self.is_hovered:
+            self.is_hovered = False
+            self.handle_bar.setVisible(False)
+            self.unsetCursor()
+            self._update_stylesheets()
+            self.adjustSize()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        # 只有在已激活 hover 状态时才允许拖动，双保险
+        if self.is_hovered and event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = True
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 3 秒计时
+        if not self.is_hovered:
+            self.hover_timer.start(3000)
+            
+            # === 🚀 核心事件穿透：将未激活状态下的鼠标移动事件转发给底层 K 线图 ===
+            if self.main_window and hasattr(self.main_window, 'kline_plot'):
+                try:
+                    global_pos = event.globalPosition().toPoint()
+                    local_pos = self.main_window.kline_plot.mapFromGlobal(global_pos)
+                    scene_pos = self.main_window.kline_plot.mapToScene(local_pos)
+                    # 确保坐标位置在 kline_plot 矩形区域内才触发转发
+                    if self.main_window.kline_plot.rect().contains(local_pos):
+                        self.main_window._on_kline_mouse_moved(scene_pos)
+                except Exception:
+                    pass
+            
+        if event.buttons() == Qt.MouseButton.LeftButton and self.is_dragging:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = False
+            self.is_custom_positioned = True
+            if self.main_window:
+                self.main_window.save_detail_window_position()
+            event.accept()
+
+
 class MainWindow(QMainWindow, WindowMixin):
     def __init__(self, stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
         super().__init__()
@@ -3110,6 +3304,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.kline_plot.addItem(self.hline, ignoreBounds=True)
         self.kline_plot.addItem(self.crosshair_label, ignoreBounds=True)
 
+        # 创建可手动拖拽和复用的 K 线悬浮详情窗
+        self.kline_detail_win = KLineDetailWindow(self)
+
         # 连接鼠标移动事件
         self.kline_plot.scene().sigMouseMoved.connect(self._on_kline_mouse_moved)
 
@@ -3327,6 +3524,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self._window_pos_loaded = True
             self.load_window_position_qt(
                 self, "trade_visualizer", default_width=1400, default_height=900)
+            
+            # 加载悬浮详情窗的位置
+            if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+                width, height, x, y = self.load_window_position_qt(
+                    self.kline_detail_win, "kline_detail_window", default_width=200, default_height=240)
+                if x is not None and y is not None:
+                    self.kline_detail_win.is_custom_positioned = True
+                else:
+                    self.kline_detail_win.is_custom_positioned = False
             
             # ⭐ [SYNC] 重启后主动向主 TK 请求全量同步，确保数据第一时间到位
             QtCore.QTimer.singleShot(2000, self._request_full_sync)
@@ -6517,6 +6723,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.vline.setVisible(False)
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            self.kline_detail_win.hide()
         self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
 
     def _update_ma_legend(self, idx=None):
@@ -6682,23 +6890,23 @@ class MainWindow(QMainWindow, WindowMixin):
         ma5_v, ma10_v, ma20_v, ma60_v = row.get('ma5', 0), row.get('ma10', 0), row.get('ma20', 0), row.get('ma60', 0)
 
         text = f"""
-        <table style='font-family:monospace; border-collapse:collapse; width:100%;'>
+        <table style='font-family:monospace; border-collapse:collapse; width:100%; white-space:nowrap;'>
         <tr><td style='color:{WHITE}'>开:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>收:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
         <tr><td style='color:{WHITE}'>低:</td><td style='text-align:right;color:{low_color}'>{low_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>高:</td><td style='text-align:right;color:{high_color}'>{high_p:.2f}</td></tr>
         </table>
-        <div style='color:#FFFFFF; font-family:monospace;'>成交:{volume_yi:6.2f}亿</div>
-        <div style='font-family:monospace;'>
+        <div style='color:#FFFFFF; font-family:monospace; white-space:nowrap;'>成交:{volume_yi:6.2f}亿</div>
+        <div style='font-family:monospace; white-space:nowrap;'>
             <span style='color:{WHITE}'>涨:</span><span style='color:{ratio_color}'>{ratio:+.2f}%</span>
             <span style='color:{WHITE}; padding-left:8px;'>振:</span><span style='color:{amplitude_color}'>{amplitude:6.2f}%</span>
         </div>
         <hr style='margin:2px 0;'>
-        <div style='font-family:monospace;'>
+        <div style='font-family:monospace; white-space:nowrap;'>
             <span style='color:{C_MA5}'>M5:{ma5_v:.2f}</span>
             <span style='color:{C_MA10}; padding-left:8px;'>M10:{ma10_v:.2f}</span><br>
             <span style='color:{C_MA20}'>M20:{ma20_v:.2f}</span>
             <span style='color:{C_MA60}; padding-left:8px;'>M60:{ma60_v:.2f}</span>
         </div>
-        <div style='color:#FFFFFF; font-family:monospace; margin-top:2px;'>{date_str}</div>
+        <div style='color:#FFFFFF; font-family:monospace; margin-top:2px; white-space:nowrap;'>{date_str}</div>
         """
         
         # 1.3: 检查是否有信号透视信息
@@ -6706,40 +6914,42 @@ class MainWindow(QMainWindow, WindowMixin):
         if signal:
             text += f"""
             <hr>
-            <div style='color:#FFD700; font-family:monospace;'><b>动作:</b> {signal.signal_type.value}</div>
-            <div style='color:#FFD700; font-family:monospace;'><b>理由:</b> {signal.reason}</div>
+            <div style='color:#FFD700; font-family:monospace; white-space:nowrap;'><b>动作:</b> {signal.signal_type.value}</div>
+            <div style='color:#FFD700; font-family:monospace; white-space:normal; word-break:break-all;'><b>理由:</b> {signal.reason}</div>
             """
             
         self.crosshair_label.setHtml(text)
 
-        # 自动调整浮窗位置，防止右边缘遮挡
+        # 自动调整原浮窗属性 (保留兼容，但不显示)
         view_range = self.kline_plot.viewRange()
         x_range, y_range = view_range[0], view_range[1]
-
-        # 阈值：如果索引接近右边缘 (最后 25% 区域)
         boundary_x_right = x_range[0] + (x_range[1] - x_range[0]) * 0.75
         boundary_x_left = x_range[0] + (x_range[1] - x_range[0]) * 0.10
-        
-        anchor_x, anchor_y = 0.0, 1.1 # 默认左下角对齐鼠标 (显示在右上方)
-
+        anchor_x, anchor_y = 0.0, 1.1
         if idx > boundary_x_right:
-            # 靠右：显示在左侧
             anchor_x = 1.1
         elif idx < boundary_x_left:
-            # 靠左：显示在右侧
             anchor_x = -0.1
         else:
-            anchor_x = -0.05 # 微调
-            
-        # Y 轴避让：如果鼠标太靠上 (顶部 20% 区域)
+            anchor_x = -0.05
         if y_price > y_range[0] + (y_range[1] - y_range[0]) * 0.75:
-            anchor_y = -0.1 # 显示在鼠标下方
+            anchor_y = -0.1
         else:
-            anchor_y = 1.1 # 显示在鼠标上方
+            anchor_y = 1.1
 
         self.crosshair_label.setAnchor((anchor_x, anchor_y))
         self.crosshair_label.setPos(idx, y_price)
-        self.crosshair_label.setVisible(True)
+        self.crosshair_label.setVisible(False)
+
+        # 渲染并显示独立的可手动拖拽和复用的 K 线悬浮详情窗
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            self.kline_detail_win.label.setText(text)
+            self.kline_detail_win.adjustSize()
+            if not self.kline_detail_win.is_custom_positioned:
+                # 默认显示在 K 线图左侧内部（距离 K 线图左边缘 40px, 顶边缘 10px）
+                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
+                self.kline_detail_win.move(plot_pos)
+            self.kline_detail_win.show()
 
         # ⚡ [NEW] 十字光标移动时，动态更新 K 线顶部 MA/布林等指标值
         self._update_ma_legend(idx)
@@ -6767,7 +6977,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 确保十字线在移动后可见（如果原先被隐藏了）
             self.vline.setVisible(True)
             self.hline.setVisible(True)
-            self.crosshair_label.setVisible(True)
+            self.crosshair_label.setVisible(False)
             
             # 自动调整视图范围，确保当前焦点可见
             self._ensure_idx_visible(new_idx)
@@ -13543,6 +13753,28 @@ class MainWindow(QMainWindow, WindowMixin):
             if t.is_alive():
                 logger.warning(f"[STILL ALIVE] {t.name} - will be terminated by OS")
 
+    def save_detail_window_position(self):
+        """保存 K 线悬浮详情窗的位置"""
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            try:
+                self.save_window_position_qt_visual(self.kline_detail_win, "kline_detail_window")
+            except Exception as e:
+                logger.error(f"Failed to save detail window position: {e}")
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win and self.kline_detail_win.isVisible():
+            if not self.kline_detail_win.is_custom_positioned:
+                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
+                self.kline_detail_win.move(plot_pos)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win and self.kline_detail_win.isVisible():
+            if not self.kline_detail_win.is_custom_positioned:
+                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
+                self.kline_detail_win.move(plot_pos)
+
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
@@ -13625,6 +13857,15 @@ class MainWindow(QMainWindow, WindowMixin):
         # 保存分割器状态
         self.save_splitter_state()
         
+        # 显式保存并关闭可手动拖拽和复用的 K 线悬浮详情窗
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            try:
+                self.save_window_position_qt(self.kline_detail_win, "kline_detail_window")
+                self.kline_detail_win.close()
+                self.kline_detail_win.deleteLater()
+            except Exception as e:
+                logger.error(f"Failed to close/save kline_detail_win: {e}")
+
         try:
             self.save_window_position_qt_visual(self, "trade_visualizer")
         except Exception as e:
