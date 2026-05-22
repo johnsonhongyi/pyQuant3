@@ -1,7 +1,14 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 20:45  
+> 最后更新：2026-05-22 21:05  
+
+## 2026-05-22 21:05
+- [x] **完美解决策略选股原生白底与局部暗黑表格共存，并修复分割窗格自愈的语法错误 (Perfectly Coexisted White-Grid Styling with Segmented Dark.Treeview & Fixed Sash Restore Indentation Error)**：
+    - [x] **恢复历史上最亮丽的策略选股高反差高亮色彩**：彻底拆除了 Tab 1 "策略选股" 对 Custom 样式的强制绑定，使其 100% 回归 Windows 系统最经典大方的白底原生状态。为系统默认的 `"Treeview"` 样式精准注入 `fixed_map` 穿透解锁映射，完美突破了 Windows 默认主题对自定义行背景色的过滤限制，完美恢复了选中（浅绿 `#dcedc8`）、忽略（浅红 `#ffcdd2`）和待复核（纯白 `#ffffff`）行的高反差前背景色彩，让视觉信息辨识度拉满。
+    - [x] **实现暗黑局部表格同色融合与白框消融**：为“板块聚焦”与“实时决策”的五大核心表格定制了局部专属的 `Dark.Treeview` 与 `Dark.Treeview.Heading` 样式（背景为极客暗蓝 `#0c101b`、文本为纯白），并为其注入专属的 `fixed_map` 穿透映射。这彻底消除了 Windows 主题下无数据空白区域呈白斑大色块的视觉瑕疵，实现了数据区域与下方空白填充区的 100% 同色浑然一体。
+    - [x] **根治分割窗格跨会话还原的缩进语法错误 (Fixed Sash Geometry Restore Indentation)**：手术刀式修复了 `_restore_sash_positions` 方法中由于拼写/多余空格导致的 Python 缩进语法错误，实现了开机延时 250ms 后板块聚焦 `self._sector_paned` 与实时决策 `self._decision_paned` 分割线位置的 100% 自动精准还原，极大提升了用户界面的跨会话一致性。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_2105_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/aa87f3a2-56c9-4de2-b5a8-a3ac82e9a224/20260522_2105_task.md)。
 
 ## 2026-05-22 20:45
 - [x] **100%原汁原味重置还原策略选股表格昨天之前最原始原生白底配色与穿透显示 (Reverted Selection Grid to Pre-Yesterday Original Styling & Enabled Default Treeview Tag-Coloring)**：
