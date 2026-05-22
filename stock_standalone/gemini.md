@@ -1,7 +1,27 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-21 23:57  
+> 最后更新：2026-05-22 09:59  
+
+## 2026-05-22 09:59
+- [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
+    - [x] **补全分层线程池关闭逻辑**：在 `instock_MonitorTK.py` 的 `on_close` 方法中补齐了对 `pump_executor` 和 `compute_executor` 的显式 `shutdown()` 调用。这彻底解决了退出时由于 `ThreadPoolExecutor` 默认创建非守护线程导致的 `[STILL ALIVE] pump_0` 错误警告，确保了应用能够更优雅、快速地完成资源回收。
+    - [x] **根治 PyInstaller 临时目录占用 (Fixed _MEI Directory Lock)**：
+        - [x] **补齐联动进程关闭**：在 `on_close` 中增加了 `link_manager.stop()` 调用，确保 Linkage 子进程被显式回收，释放了对共享 DLL 文件的占用。
+        - [x] **实施全量进程兜底清理**：引入了 `multiprocessing.active_children()` 全力扫描机制，在主进程退出物理切断前，强制终止所有遗留的子进程（包含 `SyncManager` 遗留句柄）。
+        - [x] **优化退出步进延时**：通过延长 `join(timeout)` 以及增加最终物理退出前的 `time.sleep(0.3)` 缓冲，给予 OS 充足的时间回收文件描述符，解决了 `[PYI-WARNING] Failed to remove temporary directory` 的报错。
+    - [x] **增强退出可靠性**：通过对所有分层线程池（Pump/Compute/Main）的循环遍历关闭，消除了高频行情驱动下可能存在的指令堆积，配合原有的 15s 强退保险（Failsafe Timer），进一步提升了系统在极端负载下的退出稳定性。
+    - [x] **彻底根治退出卡死 25 秒与跨线程 Timer 销毁死锁 (Eradicated Exit Stall & QTimer Cross-Thread Destruction Error)**：
+        - [x] **补全 `BiddingMomentumDetector` 的 `stop()` 接口**：重构并补齐了打分器 `stop` 接口，在退出时主动取消正在等待的打分 Timer 线程 `_chunk_timer` 并重置打分状态机，彻底斩断了退出期后台线程“春风吹又生”的永无止境递归创建，确保了 Python 解释器在退出阶段没有任何未决非守护线程阻塞。
+        - [x] **落地 GUI 资源“主线程托管构建模式” (Delegated GUI Construction)**：查明在盘后 15:30 自动归档任务中，原先直接在后台普通线程内创建 PyQt6 板块面板，导致退出时主 GUI 线程尝试停止和销毁属于后台线程的 QTimer，从而抛出致命的 `Timers cannot be stopped from another thread`。重构为利用 `tk_dispatch_queue` 跨线程安全派发到主线程进行安全实例化，配合 `threading.Event` 事件高可靠同步，完美遵循了 GUI 的线程亲和性，彻底消除了退出期的 Timer 销毁假死。
+        - [x] **加固 `SectorBiddingPanel.closeEvent` 销毁链路**：在面板真正关闭事件中补齐了对 `self.detector.stop()` 的显式调用，保证在窗口关闭的瞬间，后台的计算循环已被完全掐断。
+        - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_0959_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_0959_task.md)。
+
+## 2026-05-22 01:50
+- [x] **终极解决竞价板块面板开盘与冷启动“数据皆空/白屏”逻辑死锁 (Fixed Sector Board Cold-Start Blank & Incremental Selection Deadlock)**：
+    - [x] **根治个股评分持久化与板块计算的高门槛过滤限制 (Relaxed Aggressive Filter Gate)**：查明在 `BiddingMomentumDetector._aggregate_sectors` 板块聚合核心方法中，此前使用了过于严苛的评分过滤器（`score_threshold = 3.6`）用于向活跃个股持久池（`_sector_active_stocks_persistent`）写入以及参与板块合力。这导致在早盘刚开盘或冷启动的“萌芽期”，绝大多数动量评分尚未发酵充足的个股（例如 1.0、2.0 左右的分数）被高门槛粗暴过滤和从池中剔除，导致活跃个股持久池在开盘初段处于真空，使板块的各项群体合力数据无法累加，UI 面板没有任何板块可供呈现。已将此阈值统一调降至基础活跃电位 **0.5**。这保证了平稳及微涨个股的贡献被敏锐捕获，早盘萌芽板块能在第一时间成功发掘并登屏展示。
+    - [x] **根治增量评分收集与空板块白屏的恶性闭环逻辑死锁 (Incremental Selection Deadlock Root-Fix)**：定位并破解了增量收集模式下的隐藏逻辑闭环。系统在增量更新收集股票时，只收集处于 `essential`（由已识别的活跃板块龙头与跟随者组成）以及大涨大跌（`pct > 1.5%` 或 `vol_ratio > 2.0`）的股票进行本轮评分。当冷启动或昨日收盘次日初始化时，活跃板块列表 `active_sectors` 为空，导致 `essential` 为空。同时在开盘前期的大部分平稳股票因为没有达到阈值，完全不被评分（评分为默认的 0），这导致它们的分数永远无法突破 0.5 进入持久池，导致 `active_sectors` 无法产生，形成了“无板块 -> 无 essential 更新 -> 评分一直为 0 -> 永远算不出板块”的恶性死锁！已在增量收集阶段引入**自愈式强制全量扫描**。当系统检测到活跃板块 `self.active_sectors` 长度为空时（即冷启动或开盘初始化白屏状态），强制把本轮设为全量扫描（`scan_all = True`）。这确保了在数秒内算出并呈现出首批活跃板块，瞬间打破死锁。首批板块一旦发掘出来，系统又将自动平滑退回到 60 轮一次的高性能增量模式，完美兼顾了灵敏度与性能。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_0150_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_0150_task.md)。
 
 ## 2026-05-21 23:57
 - [x] **极致精简 Nuitka 编译链路与物理加速构建 (Optimized Nuitka Build Exclusions & Accelerators)**：
