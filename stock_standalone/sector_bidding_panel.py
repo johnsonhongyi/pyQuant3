@@ -186,7 +186,10 @@ class TrendDelegate(QStyledItemDelegate):
         
         display_prices = list(prices)
         if not display_prices:
-            now_p = pdata.get('now_price', last_close)
+            now_p = pdata.get('now_price', 0)
+            if now_p <= 0:
+                now_p = last_close
+            
             if now_p > 0:
                 display_prices = [now_p, now_p]
             else:
@@ -3566,6 +3569,41 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         target_row = -1
         for i, r in enumerate(rows):
+            # [HOT-FIX] 多级自愈行情补齐：若个股处于冷启动或增量不活跃状态导致现价为0或数据不全，强制从 detector 全局内存或 tick_series 中拉取最新高频行情进行覆盖补齐
+            if (r.get('price', 0) <= 0 or not r.get('klines') or r.get('last_close', 0) <= 0) and hasattr(self, 'detector') and self.detector:
+                code = r['code']
+                snap_data = self.detector._global_snap_cache.get(code)
+                if snap_data:
+                    if r.get('price', 0) <= 0 and snap_data.get('price', 0) > 0:
+                        r['price'] = snap_data['price']
+                    if r.get('last_close', 0) <= 0 and snap_data.get('last_close', 0) > 0:
+                        r['last_close'] = snap_data['last_close']
+                    if not r.get('klines') and snap_data.get('klines'):
+                        r['klines'] = snap_data['klines']
+                        r['k_cache'] = {
+                            'prices': [float(k.get('close', r['price'])) for k in r['klines']],
+                            'volumes': [float(k.get('volume', k.get('vol', 0))) for k in r['klines']]
+                        }
+                    if r.get('last_close', 0) > 0 and r.get('price', 0) > 0:
+                        r['pct'] = (r['price'] - r['last_close']) / r['last_close'] * 100
+                
+                # 第二级补齐：TickSeries
+                if r.get('price', 0) <= 0 or not r.get('klines') or r.get('last_close', 0) <= 0:
+                    ts_obj = self.detector._tick_series.get(code)
+                    if ts_obj:
+                        if r.get('price', 0) <= 0 and ts_obj.current_price > 0:
+                            r['price'] = ts_obj.current_price
+                        if r.get('last_close', 0) <= 0 and ts_obj.last_close > 0:
+                            r['last_close'] = ts_obj.last_close
+                        if not r.get('klines') and ts_obj.klines:
+                            r['klines'] = list(ts_obj.klines)
+                            r['k_cache'] = {
+                                'prices': [float(k.get('close', r['price'])) for k in r['klines']],
+                                'volumes': [float(k.get('volume', k.get('vol', 0))) for k in r['klines']]
+                            }
+                        if r.get('last_close', 0) > 0 and r.get('price', 0) > 0:
+                            r['pct'] = (r['price'] - r['last_close']) / r['last_close'] * 100
+
             # 1. 代码
             self._update_cell(self.stock_table, i, 0, r['code'], 
                             user_role_v1=data.get('sector', '未知'))
