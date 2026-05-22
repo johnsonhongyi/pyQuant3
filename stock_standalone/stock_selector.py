@@ -335,10 +335,10 @@ class StockSelector:
         for _, row in df_active.iterrows():
             raw_c = row.get('category', row.get('sector', '')) # 兼容 scraper 的 sector 字段
             if pd.isna(raw_c) or str(raw_c).lower() == 'nan': continue
-            cats = [c.strip() for c in str(raw_c).split(';') if c.strip() and c.strip() != '0']
+            cats = [c.strip() for c in re.split('[;|]', str(raw_c)) if c.strip() and c.strip() != '0']
             if not cats and isinstance(raw_c, str):
                 # 兼容逗号或空格分隔
-                cats = [c.strip() for c in re.split('[;, ]', raw_c) if c.strip() and c.strip() != '0']
+                cats = [c.strip() for c in re.split('[;,| ]', raw_c) if c.strip() and c.strip() != '0']
             
             pct = float(row.get('percent', row.get('change_pct', 0))) # 兼容 scraper 的 change_pct
             for c in cats:
@@ -538,7 +538,7 @@ class StockSelector:
             stock_cats = []
             raw_c_val = data.get('category', '')
             if pd.notna(raw_c_val) and str(raw_c_val).lower() != 'nan':
-                 stock_cats = [c.strip() for c in str(raw_c_val).split(';') if c.strip()]
+                 stock_cats = [c.strip() for c in re.split('[;|]', str(raw_c_val)) if c.strip()]
             
             strong_sector_hit = [c for c in stock_cats if c in top_hot_names]
             if strong_sector_hit:
@@ -861,7 +861,7 @@ class StockSelector:
                     'ma5': ma5,
                     'ma10': ma10,
                     'open': float(data.get('open', 0)),
-                    'category': "|".join(stock_cats[:3]),
+                    'category': "|".join(stock_cats),
                     'stage': stage, 
                     'resample': resample,
                     
@@ -954,7 +954,7 @@ class StockSelector:
         target_date = logical_date
 
         # # ✅ 简化 today 判断（避免重复调用）
-        is_today = (target_date == logical_date)
+        is_today = (target_date == today_str)
         
         # # 放宽 '今日' 的判定，只要是要找当天/最近交易日皆视为 today
         # is_today = (target_date == today_str or target_date == cct.get_last_trade_date())
@@ -980,15 +980,27 @@ class StockSelector:
                     if 'code' in df_history.columns:
                         df_history['code'] = df_history['code'].apply(lambda x: str(x).zfill(6))
                     
-                    # 如果记录缺失 category，且我们有实时数据且日期是今天，尝试补齐
-                    if is_today and 'category' not in df_history.columns and self.df_all_realtime is not None and not self.df_all_realtime.empty:
-                        self.logger.info("补齐今日数据中的 category 列 (From Real-time)")
-                        rt_cats = self.df_all_realtime[['category']].copy()
-                        if rt_cats.index.name != 'code':
-                             if 'code' in self.df_all_realtime.columns:
-                                 rt_cats.index = self.df_all_realtime['code'].apply(lambda x: str(x).zfill(6))
+                    # 🚀 [加固] 无论今日还是历史模式，对 category (板块概念) 进行健壮的题材重构与全覆盖更新补齐
+                    if self.df_all_realtime is not None and not self.df_all_realtime.empty:
+                        if 'category' not in df_history.columns:
+                            df_history['category'] = ''
                         
-                        df_history = pd.merge(df_history, rt_cats, left_on='code', right_index=True, how='left')
+                        rt_all = self.df_all_realtime
+                        if 'category' in rt_all.columns:
+                            # 构建一个 code -> category 的快速映射字典
+                            if rt_all.index.name == 'code' or 'code' in rt_all.index.names:
+                                code_to_cat = rt_all['category'].fillna('').astype(str).to_dict()
+                            elif 'code' in rt_all.columns:
+                                code_to_cat = dict(zip(rt_all['code'].apply(lambda x: str(x).zfill(6)), rt_all['category'].fillna('').astype(str)))
+                            else:
+                                code_to_cat = {str(k).zfill(6): str(v) for k, v in rt_all['category'].fillna('').to_dict().items()}
+                            
+                            # 无论原本是否有截断或脏数据，只要字典里有，就直接用实时最新最全题材覆盖
+                            mapped_cats = df_history['code'].map(code_to_cat)
+                            mapped_cats = mapped_cats.dropna()
+                            mapped_cats = mapped_cats[~mapped_cats.isin(['', '0', 'nan', 'NaN'])]
+                            if not mapped_cats.empty:
+                                df_history.loc[mapped_cats.index, 'category'] = mapped_cats
                     
                     self.set_candidates_cache(cache_key, df_history.copy())
                     return df_history

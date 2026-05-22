@@ -592,7 +592,7 @@ class TradingHub:
             params = []
             if status:
                 status_filter = "AND validation_status = ?"
-                params.append(status)
+                params = [status, status]
             else:
                 status_filter = "AND validation_status != 'DROPPED'"
                 
@@ -1663,16 +1663,14 @@ class TradingHub:
                     category = str(row.get('category', ''))
                     
                     if category:
-                        # 取第一个板块作为主板块
-                        sectors = category.split(';')
-                        main_sector = sectors[0] if sectors else ''
-                        
-                        if main_sector:
+                        # 💡 [修复] 保留完整板块信息，废除首字段截断，并将分号统一规范为 '|' 拼接
+                        category_clean = category.replace(';', '|').strip()
+                        if category_clean:
                             c.execute("""
                                 UPDATE hot_stock_watchlist 
                                 SET sector = ?, updated_at = ?
                                 WHERE code = ?
-                            """, (main_sector, now, code))
+                            """, (category_clean, now, code))
                             updated_count += 1
             
             conn.commit()

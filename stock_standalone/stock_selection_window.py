@@ -89,6 +89,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self._column_widths_cached = False
         self._rendering_active = False # 防止并发渲染
         self._render_token = 0         # 标识当前渲染批次
+        self._concept_detail_win = None # 🚀 [NEW] 板块大字详情窗口复用缓存
 
         # ✅ 盘中交易引擎引用
         self._focus_ctrl: Optional['SectorFocusController'] = None
@@ -157,11 +158,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         try:
             win = getattr(self, "_kernel_toast_win", None)
             if win and win.winfo_exists():
-                if getattr(self, "master", None) and hasattr(self.master, "save_window_position"):
-                    try:
-                        self.master.save_window_position(win, "kernel_toast_window")
-                    except Exception:
-                        pass
+                try:
+                    self.save_window_position(win, "kernel_toast_window")
+                except Exception:
+                    pass
                 win.destroy()
         except Exception:
             pass
@@ -297,13 +297,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 return [elm for elm in style.map(style_name, query_opt=option) if elm[:2] != ("!disabled", "!selected")]
                 
             style.map("Dark.Treeview",
-                      foreground=fixed_map("Dark.Treeview", "foreground"),
-                      background=fixed_map("Dark.Treeview", "background"))
+                      foreground=[("selected", "#55ffff")] + fixed_map("Dark.Treeview", "foreground"),
+                      background=[("selected", "#1a3a5f")] + fixed_map("Dark.Treeview", "background"))
                       
             # 对默认的 Treeview 样式进行解锁，使原生白底表格在 Windows 主题下能正确渲染 tag_configure 的行背景（浅绿/浅红），绝不退化为黑白灰
             style.map("Treeview",
-                      foreground=fixed_map("Treeview", "foreground"),
-                      background=fixed_map("Treeview", "background"))
+                      foreground=[("selected", "#ffffff")] + fixed_map("Treeview", "foreground"),
+                      background=[("selected", "#0078d7")] + fixed_map("Treeview", "background"))
         except Exception:
             pass
         
@@ -328,6 +328,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.concept_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.concept_filter_var, width=10)
         self.concept_combo['values'] = self.history
         self.concept_combo.pack(side="left", padx=2)
+        # 🚀 [NEW] 右键自动粘贴剪贴板内容并触发过滤
+        self.concept_combo.bind("<Button-3>", self._on_concept_combo_right_click)
 
         # tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3).pack(side="left", padx=1)
         # tk.Button(toolbar, text="🗑️", command=self.delete_current_history, width=2, fg="red").pack(side="left", padx=1)
@@ -611,6 +613,35 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 for col in ['昨日涨幅', '连阳涨幅', 'win', 'Rank']:
                     if col not in self.df_full_candidates.columns:
                         self.df_full_candidates[col] = 0
+
+            # 🚀 [加固] 无论今日还是历史模式，对 category (板块概念) 进行健壮的题材重构与全覆盖更新补齐
+            if 'category' not in self.df_full_candidates.columns:
+                self.df_full_candidates['category'] = ''
+            
+            # 使用实时行情 df_all_realtime 的题材板块做完全覆盖补齐
+            if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None and not self.selector.df_all_realtime.empty:
+                rt_all = self.selector.df_all_realtime
+                # 确保实时行情有 category 列
+                if 'category' in rt_all.columns:
+                    # 将 category 统一转成 string 类型并清洗
+                    self.df_full_candidates['category'] = self.df_full_candidates['category'].fillna('').astype(str).str.strip()
+                    
+                    # 构建一个 code -> category 的快速映射字典
+                    if rt_all.index.name == 'code' or 'code' in rt_all.index.names:
+                        code_to_cat = rt_all['category'].fillna('').astype(str).to_dict()
+                    elif 'code' in rt_all.columns:
+                        code_to_cat = dict(zip(rt_all['code'].apply(lambda x: str(x).zfill(6)), rt_all['category'].fillna('').astype(str)))
+                    else:
+                        code_to_cat = {str(k).zfill(6): str(v) for k, v in rt_all['category'].fillna('').to_dict().items()}
+                        
+                    # 对所有数据进行完全题材覆盖
+                    mapped_cats = self.df_full_candidates['code'].map(code_to_cat)
+                    mapped_cats = mapped_cats.dropna()
+                    mapped_cats = mapped_cats[~mapped_cats.isin(['', '0', 'nan', 'NaN'])]
+                    
+                    if not mapped_cats.empty:
+                        self.df_full_candidates.loc[mapped_cats.index, 'category'] = mapped_cats
+
             # 从全量缓存中复制，用于当前视窗的筛选/显示
             self.df_candidates = self.df_full_candidates.copy()
 
@@ -621,10 +652,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 keywords = filter_str.split()
                 for kw in keywords:
                     # Generic search: Code, Name, or Category
+                    # 🚀 [FIX] 显式设置 case=False 且 regex=False，根治带括号概念如 共封装光学(CPO) 0519 数据无法被正则识别匹配出的陈年大 Bug！
                     mask = (
-                        self.df_candidates['category'].str.contains(kw, na=False) | 
-                        self.df_candidates['code'].str.contains(kw, na=False) | 
-                        self.df_candidates['name'].str.contains(kw, na=False)
+                        self.df_candidates['category'].str.contains(kw, case=False, regex=False, na=False) | 
+                        self.df_candidates['code'].str.contains(kw, case=False, regex=False, na=False) | 
+                        self.df_candidates['name'].str.contains(kw, case=False, regex=False, na=False)
                     )
                     self.df_candidates = self.df_candidates[mask]
             
@@ -681,6 +713,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if self.df_candidates.empty:
             return
 
+        # 🚀 [加固] 确保 matched_concept tag 被正确高反差亮红配置
+        self.tree.tag_configure("matched_concept", foreground="#ff3333", font=("Microsoft YaHei", 9, "bold"))
+
         # 1. 冻结渲染 (通过隐藏所有列实现)
         all_cols = list(self.tree["columns"])
         self.tree.configure(displaycolumns=())
@@ -712,6 +747,29 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 if grade == "S": all_tags.append("grade_S")
                 elif grade == "A": all_tags.append("grade_A")
 
+                # 🚀 板块过滤标红高亮与文本强化高亮
+                category_raw = getattr(row, 'category', '')
+                short_category = self._get_short_category(category_raw)
+                
+                current_filter = self.concept_filter_var.get().strip()
+                keywords = current_filter.split() if current_filter else []
+                has_matched_concept = False
+                if keywords:
+                    has_matched_concept = any(kw in str(category_raw).lower() for kw in keywords)
+                    if has_matched_concept:
+                        all_tags.append("matched_concept")
+                        # 文本高亮
+                        cats = [c.strip() for c in re.split(r'[;|]', str(category_raw)) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                        short_cats_modified = []
+                        for c in cats[:5]:
+                            if any(kw in c.lower() for kw in keywords):
+                                short_cats_modified.append(f"★{c}")
+                            else:
+                                short_cats_modified.append(c)
+                        short_category = " | ".join(short_cats_modified)
+                        if len(cats) > 5:
+                            short_category += " ..."
+
                 # 批量插元组
                 insert_batch.append((
                     code, display_name, grade,
@@ -727,7 +785,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     getattr(row, '连阳涨幅', 0),
                     str(int(getattr(row, 'win', 0))),
                     getattr(row, 'volume', 0),
-                    getattr(row, 'category', ''),
+                    short_category,
                     getattr(row, 'reason', ''),
                     user_status,
                     user_reason,
@@ -1063,9 +1121,292 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                          # 今日实时模式：仅切换股票
                          self.master.open_visualizer(stock_code)
 
+    def _on_concept_combo_right_click(self, event):
+        """右键自动粘贴剪贴板文本并执行检索"""
+        try:
+            clipboard_text = self.clipboard_get().strip()
+        except Exception:
+            clipboard_text = ""
+            
+        if clipboard_text:
+            self.concept_filter_var.set(clipboard_text)
+            self.concept_combo.focus_set()
+            self.concept_combo.icursor('end')
+            self.concept_combo.selection_range(0, 'end')
+            
+            # 自动执行检索过滤
+            self.on_filter_search(None)
+            
+            # 状态栏闪烁回馈
+            status_lbl = getattr(self, 'status_lbl', None) or getattr(self.master, 'status_lbl', None)
+            if status_lbl:
+                try:
+                    status_lbl.config(text=f"📋 右键粘贴过滤: {clipboard_text}", fg="#44ff88")
+                    self.after(2000, lambda: status_lbl.config(text="准备就绪", fg="#ff9900"))
+                except Exception: pass
+        return "break" # 阻止系统默认菜单弹出
+
+    def _get_short_category(self, raw_cat):
+        """只保留前5个有明确实际信息的板块题材，其余通过双击详情查看"""
+        if not raw_cat or str(raw_cat) in ('nan', 'NaN', '0'):
+            return ""
+        cats = [c.strip() for c in re.split(r'[;|]', str(raw_cat)) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+        short_cat = " | ".join(cats[:5])
+        if len(cats) > 5:
+            short_cat += " ..."
+        return short_cat
+
     def on_double_click(self, event):
-        """🚀 [SIMPLIFIED] 双击现与单击逻辑对齐，复用联动逻辑"""
+        """双击板块/概念列展示独立大字面板，双击其他列默认触发联动"""
+        region = self.tree.identify("region", event.x, event.y)
+        if region == "heading":
+            return
+            
+        item_id = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not item_id:
+            return
+            
+        # "category" 对应第 16 列, #16
+        if column == "#16":
+            vals = self.tree.item(item_id, "values")
+            if vals and len(vals) > 15:
+                code = str(vals[0]).strip()
+                name = str(vals[1]).strip()
+                category_fallback = str(vals[15]).strip()
+                self.show_concept_detail_popup(code, name, category_fallback)
+                return
+        
+        # 默认触发联动
         self.on_select(event)
+
+    def show_concept_detail_popup(self, code, name, category=None, caller_win=None):
+        """弹出大字板块题材详情窗口，支持双击自动复制、Esc自动退出与尺寸大小跨会话持久化，窗口复用不闪烁"""
+        # 1. 100% 坚固的题材自愈拉取
+        full_category = ""
+        # 向上游实时行情拉取
+        if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None and not self.selector.df_all_realtime.empty:
+            rt_all = self.selector.df_all_realtime.copy()
+            if rt_all.index.name == 'code' or 'code' in rt_all.index.names:
+                rt_all.index = rt_all.index.map(lambda x: str(x).zfill(6))
+                if code in rt_all.index:
+                    full_category = str(rt_all.loc[code, 'category']) if 'category' in rt_all.columns else ""
+            elif 'code' in rt_all.columns:
+                rt_all['code_str'] = rt_all['code'].apply(lambda x: str(x).zfill(6))
+                sub_df = rt_all[rt_all['code_str'] == code]
+                if not sub_df.empty and 'category' in sub_df.columns:
+                    full_category = str(sub_df.iloc[0]['category'])
+                    
+        # 向上游自选股缓存拉取
+        if (not full_category or full_category in ['nan', 'NaN', '0']) and hasattr(self, 'df_full_candidates') and self.df_full_candidates is not None and self.df_full_candidates is not None and not self.df_full_candidates.empty:
+            cand_df = self.df_full_candidates.copy()
+            if 'code' in cand_df.columns:
+                cand_df['code_str'] = cand_df['code'].apply(lambda x: str(x).zfill(6))
+                sub_df = cand_df[cand_df['code_str'] == code]
+                if not sub_df.empty and 'category' in sub_df.columns:
+                    full_category = str(sub_df.iloc[0]['category'])
+                    
+        # 向上游当前视窗 DataFrame 缓存拉取
+        if (not full_category or full_category in ['nan', 'NaN', '0']) and hasattr(self, 'df_candidates') and self.df_candidates is not None and not self.df_candidates.empty:
+            cand_df = self.df_candidates.copy()
+            if 'code' in cand_df.columns:
+                cand_df['code_str'] = cand_df['code'].apply(lambda x: str(x).zfill(6))
+                sub_df = cand_df[cand_df['code_str'] == code]
+                if not sub_df.empty and 'category' in sub_df.columns:
+                    full_category = str(sub_df.iloc[0]['category'])
+
+        # 降级使用传入的 category (剥离 display_cat 截断标记)
+        if (not full_category or full_category in ['nan', 'NaN', '0']) and category:
+            full_category = category.replace(" ...", "").strip()
+            
+        full_category = full_category.strip() if full_category else ""
+        if not full_category or full_category in ('nan', 'NaN', '0'):
+            # 状态栏温馨提示
+            status_lbl = getattr(self, 'status_lbl', None) or getattr(self.master, 'status_lbl', None)
+            if status_lbl:
+                try:
+                    status_lbl.config(text=f"⚠️ {name} ({code}) 暂无板块题材数据", fg="#ff4444")
+                    self.after(3000, lambda: status_lbl.config(text="准备就绪", fg="#ff9900"))
+                except Exception: pass
+            return
+
+        # 2. 检查窗口复用状态
+        is_reused = False
+        popup = getattr(self, '_concept_detail_win', None)
+        if popup is not None and popup.winfo_exists():
+            # 🚀 [复用] 已有关闭，原位清空所有子组件
+            is_reused = True
+            for widget in popup.winfo_children():
+                widget.destroy()
+            popup.title(f"🔎 {code} {name} - 板块题材")
+            popup.deiconify()
+            popup.lift()
+            popup.focus_force()
+        else:
+            # 🚀 [新建] 创建新 TopLevel 窗口并进行隐蔽渲染保护
+            popup = tk.Toplevel(self)
+            popup.withdraw() # ⭐ 先行隐蔽，防止窗口坐标在完全算好前在屏幕左上角闪现
+            self._concept_detail_win = popup
+            popup.title(f"🔎 {code} {name} - 板块题材")
+            popup.configure(bg="#0c101b")
+            popup.transient(self) # 关联父窗口
+            
+            # 3. 高保真自适应居中与尺寸持久化
+            popup.update_idletasks()
+            has_position = False
+            try:
+                # 优先从持久化中载入大小和位置
+                ret = self.load_window_position(popup, "板块题材详情", default_width=380, default_height=450)
+                if ret and len(ret) >= 4 and ret[2] is not None and ret[3] is not None:
+                    # ⭐ 仅当载入的物理坐标不是 0,0 (左上角脏数据) 时，才视作有效位置，否则重新执行主视窗中心居中
+                    if ret[2] > 0 or ret[3] > 0:
+                        has_position = True
+            except Exception:
+                pass
+                
+            if not has_position:
+                # 完美的主视窗相对中心定位加屏幕边界安全限宽算法
+                w, h = 380, 450
+                main_x = self.winfo_x()
+                main_y = self.winfo_y()
+                main_w = self.winfo_width()
+                main_h = self.winfo_height()
+                xp = main_x + (main_w - w) // 2
+                yp = main_y + (main_h - h) // 2
+                
+                screen_w = popup.winfo_screenwidth()
+                screen_h = popup.winfo_screenheight()
+                xp = max(0, min(xp, screen_w - w))
+                yp = max(0, min(yp, screen_h - h))
+                popup.geometry(f"{w}x{h}+{xp}+{yp}")
+                
+            # 完全计算和设定好位置后，再 deiconify 呈现，彻底解决左上角闪现闪烁！
+            popup.deiconify()
+            popup.attributes("-topmost", True)
+            popup.focus_force()
+
+        # 4. 关闭动作封装 (退出时保存大小和坐标并清空缓存引用)
+        def on_popup_close(event=None):
+            # 🚀 完全使用系统现成的 save_window_position 成员方法，绝不自行重写写盘逻辑
+            try:
+                # 仅当窗口在屏幕正常显示范围内 (且非 0,0 边角脏数据) 时才保存位置，安全避坑
+                geom = popup.geometry()
+                parts = geom.split('+')
+                if len(parts) >= 3:
+                    x = int(parts[1])
+                    y = int(parts[2])
+                    if x > 0 or y > 0:
+                        self.save_window_position(popup, "板块题材详情")
+            except Exception as e:
+                logger.error(f"[on_popup_close] 保存板块题材位置失败: {e}")
+                
+            try:
+                popup.destroy()
+            except Exception: pass
+            self._concept_detail_win = None
+            
+        popup.protocol("WM_DELETE_WINDOW", on_popup_close)
+        popup.bind("<Escape>", lambda e: on_popup_close()) # 🚀 [NEW] 支持 Esc 键自动退出并持久化位置
+        
+        # 5. 渲染 UI 布局组件
+        title_frame = tk.Frame(popup, bg="#111726", pady=10)
+        title_frame.pack(fill="x")
+        
+        tk.Label(title_frame, text=f"📊 {name} ({code})", font=("Microsoft YaHei", 12, "bold"), fg="#ffd54f", bg="#111726").pack(anchor="w", padx=15)
+        tk.Label(title_frame, text="双击以下任意板块即可极速复制名称", font=("Microsoft YaHei", 9), fg="#88a0c0", bg="#111726").pack(anchor="w", padx=15)
+        
+        # 板块列表主容器 (带滚动条)
+        list_frame = tk.Frame(popup, bg="#0c101b")
+        list_frame.pack(fill="both", expand=True, padx=15, pady=10)
+        
+        # 滚动画布
+        canvas = tk.Canvas(list_frame, bg="#0c101b", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#0c101b")
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 状态提示区 (复制成功后闪烁提示)
+        status_lbl = tk.Label(popup, text="💡 双击板块直接复制", font=("Microsoft YaHei", 10), fg="#ffd54f", bg="#111726", bd=1, relief="groove")
+        status_lbl.pack(fill="x", side="bottom", ipady=2)
+        
+        # 绑定鼠标滚轮支持，使得在卡片中滚动极其丝滑
+        def _on_mouse_wheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            
+        popup.bind("<MouseWheel>", _on_mouse_wheel)
+        canvas.bind("<MouseWheel>", _on_mouse_wheel)
+        scrollable_frame.bind("<MouseWheel>", _on_mouse_wheel)
+
+        # 分割板块并去重
+        sub_cats = [c.strip() for c in re.split(r'[;|]', full_category) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+        
+        # 动态复制并提示的方法
+        def copy_cat(cat_name, label_widget):
+            self.clipboard_clear()
+            self.clipboard_append(cat_name)
+            self.update()
+            
+            # 视觉高亮闪烁效果（耀眼荧光绿）
+            label_widget.config(fg="#44ff88", bg="#1b3a24")
+            status_lbl.config(text=f"📋 已复制板块: {cat_name}", fg="#44ff88")
+            
+            # 恢复样式（天蓝色与暗灰底色）
+            def restore():
+                try:
+                    label_widget.config(fg="#64b5f6", bg="#1e293b")
+                except Exception: pass
+            popup.after(300, restore)
+            popup.after(2000, lambda: status_lbl.config(text="💡 双击板块直接复制", fg="#ffd54f"))
+            logger.info(f"Double-click copied concept: {cat_name}")
+
+        # 极速过滤动作
+        def apply_filter_action(cat_name):
+            self.quick_apply_concept_filter(cat_name)
+            if caller_win is not None and hasattr(caller_win, 'search_var'):
+                try:
+                    caller_win.search_var.set(cat_name)
+                except Exception: pass
+            popup.destroy()
+            self._concept_detail_win = None
+            
+        for i, cat in enumerate(sub_cats):
+            item_frame = tk.Frame(scrollable_frame, bg="#0c101b", pady=4)
+            item_frame.pack(fill="x", expand=True)
+            item_frame.bind("<MouseWheel>", _on_mouse_wheel)
+            
+            # 序号标签
+            num_lbl = tk.Label(item_frame, text=f"{i+1}.", font=("Consolas", 11, "bold"), fg="#ff9900", bg="#0c101b", width=3, anchor="w")
+            num_lbl.pack(side="left")
+            num_lbl.bind("<MouseWheel>", _on_mouse_wheel)
+            
+            # 板块名称标签
+            lbl = tk.Label(item_frame, text=cat, font=("Microsoft YaHei", 11, "bold"), fg="#64b5f6", bg="#1e293b", bd=1, relief="solid", padx=10, pady=6, cursor="hand2", anchor="w")
+            lbl.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            lbl.bind("<MouseWheel>", _on_mouse_wheel)
+            
+            # 绑定双击自动复制
+            lbl.bind("<Double-1>", lambda e, c=cat, l=lbl: copy_cat(c, l))
+            
+            # 绑定 hover 态变色
+            def on_enter(e, l=lbl): l.config(bg="#2d3748", fg="#ffd54f")
+            def on_leave(e, l=lbl): l.config(bg="#1e293b", fg="#64b5f6")
+            lbl.bind("<Enter>", on_enter)
+            lbl.bind("<Leave>", on_leave)
+            
+            # 贴心极速过滤按钮
+            btn_filter = tk.Button(item_frame, text="🔍 过滤", font=("Microsoft YaHei", 9), bg="#2d3748", fg="#ffd54f", activebackground="#ff9900", activeforeground="#ffffff", relief="flat", padx=8, command=lambda c=cat: apply_filter_action(c))
+            btn_filter.pack(side="right")
+            btn_filter.bind("<MouseWheel>", _on_mouse_wheel)
 
     # === 行选择逻辑 ===
     # def on_tree_select(self,event):
@@ -1254,12 +1595,40 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def sort_tree(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        # 尝试转为数字排序
-        try:
-            # 针对 rank 列或其他整数列，优先尝试 int，再 float
-            l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1, reverse=reverse)
-        except ValueError:
-            l.sort(reverse=reverse)
+        
+        # 🚀 [NEW] 板块过滤与有筛选条件时的前3个题材权重最高绝对优先排序算法
+        current_filter = ""
+        if hasattr(self, 'concept_filter_var'):
+            current_filter = self.concept_filter_var.get().lower().strip()
+        elif hasattr(self, 'search_var'):
+            current_filter = self.search_var.get().lower().strip()
+            
+        kws = current_filter.split() if current_filter else []
+        
+        if col == "category" and kws:
+            def get_sort_key(t):
+                val = str(t[0]).lower()
+                cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                match_idx = 999
+                for idx, cat in enumerate(cats):
+                    if any(kw in cat for kw in kws):
+                        match_idx = idx
+                        break
+                # 数学对齐：确保升序降序匹配度最高的（match_idx越小）股票永远绝对排在最前面
+                prio = match_idx if not reverse else (999 - match_idx)
+                return (prio, t[0])
+                
+            try:
+                l.sort(key=get_sort_key, reverse=reverse)
+            except Exception:
+                l.sort(reverse=reverse)
+        else:
+            # 尝试转为数字排序
+            try:
+                # 针对 rank 列或其他整数列，优先尝试 int，再 float
+                l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1, reverse=reverse)
+            except ValueError:
+                l.sort(reverse=reverse)
 
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
@@ -1298,12 +1667,69 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             command=cmd
         )
 
-        menu.add_separator()
+        # 🚀 [新增] 动态板块概念联查及快捷复制过滤 (2026-05-22)
+        category = ""
+        if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None and not self.selector.df_all_realtime.empty:
+            rt_all = self.selector.df_all_realtime
+            if rt_all.index.name == 'code' or 'code' in rt_all.index.names:
+                if code in rt_all.index:
+                    category = str(rt_all.loc[code, 'category']) if 'category' in rt_all.columns else ""
+            elif 'code' in rt_all.columns:
+                sub_df = rt_all[rt_all['code'].apply(lambda x: str(x).zfill(6)) == code]
+                if not sub_df.empty and 'category' in sub_df.columns:
+                    category = str(sub_df.iloc[0]['category'])
+                    
+        # 兜底联查自选股缓存
+        if (not category or category in ['nan', 'NaN', '0']) and hasattr(self, 'df_full_candidates') and self.df_full_candidates is not None and not self.df_full_candidates.empty:
+            sub_df = self.df_full_candidates[self.df_full_candidates['code'] == code]
+            if not sub_df.empty and 'category' in sub_df.columns:
+                category = str(sub_df.iloc[0]['category'])
+
+        category = category.strip() if category else ""
+        current_filter = self.concept_filter_var.get().strip()
+        if category and category not in ['0', 'nan', 'NaN']:
+            # 拆分子板块名称，兼容分号和竖线
+            sub_cats = [cat.strip() for cat in re.split('[;|]', category) if cat.strip()]
+            if sub_cats:
+                menu.add_separator()
+                
+                menu.add_command(
+                    label="📊 该股题材板块 (仅列出前5个):",
+                    state="disabled"
+                )
+                
+                # 🚀 板块只显示前5，且与当前板块过滤词同名或者包含则高亮标红差异化显示
+                for cat in sub_cats[:5]:
+                    is_matched = False
+                    if current_filter:
+                        is_matched = any(kw in cat.lower() for kw in current_filter.lower().split())
+                    
+                    label_str = f"  🔍 过滤板块: {cat}"
+                    fg_color = "white"
+                    if is_matched:
+                        label_str = f"  📍【匹配】🔍 过滤板块: {cat}"
+                        fg_color = "#ff3333"
+                        
+                    menu.add_command(
+                        label=label_str,
+                        foreground=fg_color,
+                        activeforeground=fg_color,
+                        command=lambda c=cat: self.quick_apply_concept_filter(c)
+                    )
         
         title_dna = f"🧬 执行 DNA 审计 ({len(sel)}只...)" if len(sel) > 1 else f"🧬 执行 DNA 审计"
         menu.add_command(label=title_dna, command=self._run_dna_audit_selected)
 
         menu.post(event.x_root, event.y_root)
+    def quick_apply_concept_filter(self, concept: str):
+        """同步将板块概念应用至顶部板块输入框，并触发过滤"""
+        self.concept_filter_var.set(concept)
+        self.on_filter_search()
+        
+        # 🚀 [同步] 如果历史追踪弹窗存在，同步其筛选词
+        if hasattr(self, '_history_track_win') and self._history_track_win.winfo_exists():
+            if self._history_track_win.search_var.get() != concept:
+                self._history_track_win.search_var.set(concept)
 
     def _get_active_tree(self):
         """🚀 [DNA-BATCH] 探测当前活跃（聚焦或页签内）的 Treeview"""
@@ -1544,6 +1970,12 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         self._worker = None
 
         self._init_ui()
+        
+        # 🚀 [NEW] 追踪中的筛选跟主界面板块过滤历史记录联动，复用过滤信息
+        if hasattr(parent, 'concept_filter_var'):
+            parent_filter = parent.concept_filter_var.get().strip()
+            if parent_filter:
+                self.search_var.set(parent_filter)
         self.after(200, lambda: self._start_analysis())
         
         # 定时检查队列数据
@@ -1573,8 +2005,13 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         
         tk.Label(toolbar, text="🔍 筛选:").pack(side="left", padx=(20, 2))
         self.search_var = tk.StringVar()
-        self.entry_search = tk.Entry(toolbar, textvariable=self.search_var, width=15)
+        self.entry_search = ttk.Combobox(toolbar, textvariable=self.search_var, width=15)
+        self.entry_search['values'] = getattr(self.parent_win, 'history', [])
         self.entry_search.pack(side="left", padx=2)
+        # 🚀 [NEW] 右键自动粘贴并过滤
+        self.entry_search.bind("<Button-3>", self._on_entry_search_right_click)
+        self.entry_search.bind("<Return>", lambda e: self._save_history(self.search_var.get()))
+        self.entry_search.bind("<<ComboboxSelected>>", lambda e: [self._save_history(self.search_var.get()), self._apply_filter()])
         self.search_var.trace_add("write", lambda *args: self._apply_filter())
         
         self.status_lbl = tk.Label(toolbar, text="准备就绪", fg="#ff9900", font=("Arial", 9, "bold"))
@@ -1613,9 +2050,168 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         self.tree.tag_configure("plus", foreground="#e91e63", font=("Arial", 9, "bold")) # 红涨
         self.tree.tag_configure("minus", foreground="#388e3c", font=("Arial", 9, "bold")) # 绿跌
         self.tree.tag_configure("high_hits", background="#13261a", foreground="#44ff88") # 高命中暗绿底色
+        self.tree.tag_configure("matched_concept", foreground="#ff3333", font=("Microsoft YaHei", 9, "bold")) # 匹配板块标红差异化显示
         
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
-        self.tree.bind("<Double-1>", lambda e: self._on_select(e, force_link=True))
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+
+    def _on_entry_search_right_click(self, event):
+        """右键自动粘贴剪贴板文本并执行过滤"""
+        try:
+            clipboard_text = self.clipboard_get().strip()
+        except Exception:
+            clipboard_text = ""
+            
+        if clipboard_text:
+            self.search_var.set(clipboard_text)
+            self.entry_search.focus_set()
+            self.entry_search.icursor('end')
+            self.entry_search.selection_range(0, 'end')
+            self._save_history(clipboard_text) # 🚀 [NEW] 右键自动粘贴并同步历史记录
+            
+            # 状态栏闪烁回馈
+            if hasattr(self, 'status_lbl') and self.status_lbl:
+                try:
+                    self.status_lbl.config(text=f"📋 右键自动粘贴并过滤: {clipboard_text}", fg="#00cc00")
+                    self.after(2000, lambda: self.status_lbl.config(text=f"✅ 完成！共追踪 {len(self._all_results)} 只个股", fg="#00cc00"))
+                except Exception: pass
+        return "break" # 阻止系统默认菜单弹出
+
+    def _save_history(self, query: str):
+        """保存搜索词并同步更新主窗口和追踪窗口的历史记录 values"""
+        query = query.strip()
+        if not query or query in ("nan", "NaN", "0"):
+            return
+        
+        # 获取主窗口的历史纪录
+        p_history = getattr(self.parent_win, 'history', [])
+        if query in p_history:
+            p_history.remove(query)
+        p_history.insert(0, query)
+        p_history = p_history[:20]
+        
+        # 写入主窗口
+        self.parent_win.history = p_history
+        if hasattr(self.parent_win, 'concept_combo'):
+            self.parent_win.concept_combo['values'] = p_history
+            
+        # 写入当前窗口
+        self.entry_search['values'] = p_history
+        
+        # 持久化到文件
+        try:
+            with open(self.parent_win.history_file, 'w', encoding='utf-8') as f:
+                json.dump(p_history, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving synced search history: {e}")
+
+    def show_context_menu(self, event):
+        """显示追踪面板的右键菜单，同步支持只显示前5、同名板块标红高亮与多端联级过滤"""
+        tree = event.widget
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        sel = tree.selection()
+        if item_id not in sel:
+            tree.selection_set(item_id)
+            sel = (item_id,)
+            
+        code = item_id
+        vals = tree.item(item_id, "values")
+        if vals:
+            c = str(vals[0]).strip()
+            c = re.sub(r'[^\d]', '', c).zfill(6)
+            if c:
+                code = c
+
+        menu = tk.Menu(self, tearoff=0, bg="#2C2C2E", fg="white", activebackground="#005BB7")
+
+        # 📂 主窗口定位
+        menu.add_command(
+            label=f"📂 定位股票代码: {code}",
+            command=lambda: getattr(self.parent_win, 'tree_scroll_to_code', None) and self.parent_win.tree_scroll_to_code(code)
+        )
+
+        # 联查板块题材
+        category = ""
+        if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None and not self.selector.df_all_realtime.empty:
+            rt_all = self.selector.df_all_realtime
+            if rt_all.index.name == 'code' or 'code' in rt_all.index.names:
+                if code in rt_all.index:
+                    category = str(rt_all.loc[code, 'category']) if 'category' in rt_all.columns else ""
+            elif 'code' in rt_all.columns:
+                sub_df = rt_all[rt_all['code'].apply(lambda x: str(x).zfill(6)) == code]
+                if not sub_df.empty and 'category' in sub_df.columns:
+                    category = str(sub_df.iloc[0]['category'])
+                    
+        if (not category or category in ['nan', 'NaN', '0']) and hasattr(self.parent_win, 'df_full_candidates') and self.parent_win.df_full_candidates is not None and not self.parent_win.df_full_candidates.empty:
+            sub_df = self.parent_win.df_full_candidates[self.parent_win.df_full_candidates['code'] == code]
+            if not sub_df.empty and 'category' in sub_df.columns:
+                category = str(sub_df.iloc[0]['category'])
+
+        category = category.strip() if category else ""
+        current_filter = self.search_var.get().strip()
+
+        if category and category not in ['0', 'nan', 'NaN']:
+            sub_cats = [cat.strip() for cat in re.split('[;|]', category) if cat.strip()]
+            if sub_cats:
+                menu.add_separator()
+                
+                menu.add_command(
+                    label="📊 该股题材板块 (仅列出前5个):",
+                    state="disabled"
+                )
+                
+                # 🚀 板块只显示前5，且与当前板块过滤词同名或者包含则高亮标红差异化显示
+                for cat in sub_cats[:5]:
+                    is_matched = False
+                    if current_filter:
+                        is_matched = any(kw in cat.lower() for kw in current_filter.lower().split())
+                    
+                    label_str = f"  🔍 过滤板块: {cat}"
+                    fg_color = "white"
+                    if is_matched:
+                        label_str = f"  📍【匹配】🔍 过滤板块: {cat}"
+                        fg_color = "#ff3333"
+                        
+                    menu.add_command(
+                        label=label_str,
+                        foreground=fg_color,
+                        activeforeground=fg_color,
+                        command=lambda c=cat: self.parent_win.quick_apply_concept_filter(c)
+                    )
+
+        menu.add_separator()
+        menu.post(event.x_root, event.y_root)
+
+    def _on_double_click(self, event):
+        """双击板块列展示独立大字面板，双击其他触发原有联动"""
+        region = self.tree.identify("region", event.x, event.y)
+        if region == "heading":
+            return
+            
+        item_id = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not item_id:
+            return
+            
+        # "sector" 对应第 4 列, #4
+        if column == "#4":
+            vals = self.tree.item(item_id, "values")
+            if vals and len(vals) > 3:
+                sector = str(vals[3]).strip()
+                code = str(vals[0]).strip()
+                name = str(vals[1]).strip()
+                if sector and sector not in ('nan', 'NaN', '0'):
+                    if hasattr(self.parent_win, 'show_concept_detail_popup'):
+                        # 🚀 [NEW] 传入 caller_win=self 实现弹窗极速过滤与追踪窗口的多端绝对级联！
+                        self.parent_win.show_concept_detail_popup(code, name, sector, caller_win=self)
+                        return
+        
+        # 默认双击触发联动
+        self._on_select(event, force_link=True)
 
     def _quick_set_days(self, days: int):
         """快捷设置天数并启动分析"""
@@ -1667,11 +2263,49 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
 
     def _apply_filter(self):
         self.tree.delete(*self.tree.get_children())
-        query = self.search_var.get().lower()
+        query_str = self.search_var.get().lower().strip()
+        
+        # 💡 [同步加固] 深度对齐主窗口的多关键字 AND 筛选逻辑，支持空格分隔
+        keywords = query_str.split() if query_str else []
         
         for item in self._all_results:
-            if query and query not in item['code'] and query not in item['name'] and query not in item['sector'].lower():
+            match_all = True
+            for kw in keywords:
+                # 每一个关键字都必须在 code, name, 或者 sector 中被匹配到
+                in_code = kw in str(item.get('code', ''))
+                in_name = kw in str(item.get('name', '')).lower()
+                in_sector = kw in str(item.get('sector', '')).lower()
+                
+                # 兼容 category 别名
+                if not in_sector and 'category' in item:
+                    in_sector = kw in str(item['category']).lower()
+                
+                if not (in_code or in_name or in_sector):
+                    match_all = False
+                    break
+            
+            if not match_all:
                 continue
+            
+            # 🚀 [NEW] 板块也只显示前5个，并支持同名/匹配板块文本强化高亮
+            raw_sector = item.get('sector', '')
+            short_sector = self.parent_win._get_short_category(raw_sector)
+            
+            has_matched_concept = False
+            if keywords:
+                has_matched_concept = any(kw in str(raw_sector).lower() for kw in keywords)
+                if has_matched_concept:
+                    # 将匹配到的子板块包裹星号高亮
+                    cats = [c.strip() for c in re.split(r'[;|]', str(raw_sector)) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                    short_cats_modified = []
+                    for c in cats[:5]:
+                        if any(kw in c.lower() for kw in keywords):
+                            short_cats_modified.append(f"★{c}")
+                        else:
+                            short_cats_modified.append(c)
+                    short_sector = " | ".join(short_cats_modified)
+                    if len(cats) > 5:
+                        short_sector += " ..."
             
             roi = item['roi']
             tag = "plus" if roi > 0 else ("minus" if roi < 0 else "")
@@ -1679,11 +2313,43 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
             all_tags = [tag]
             if item['hits'] >= 3: all_tags.append("high_hits")
             
+            # 🚀 同名板块颜色标红差异化显示出来
+            if has_matched_concept:
+                all_tags.append("matched_concept")
+            
             self.tree.insert("", "end", iid=item['code'], values=(
-                item['code'], item['name'], item['hits'], item['sector'],
+                item['code'], item['name'], item['hits'], short_sector,
                 f"{item['base_price']:.2f}", f"{item['curr_price']:.2f}",
                 f"{roi:+.2f}%", item['pattern']
             ), tags=tuple(all_tags))
+            
+        # 🚀 [NEW] 筛选过滤后，动态重新计算并实时显示统计指标（总数、上涨、下跌、平均ROI）
+        filtered_count = len(self.tree.get_children())
+        if filtered_count > 0:
+            total_roi = 0.0
+            up_count = 0
+            down_count = 0
+            for item_id in self.tree.get_children():
+                vals = self.tree.item(item_id, "values")
+                try:
+                    roi_val = float(vals[6].replace('%', '').replace('+', ''))
+                except Exception:
+                    roi_val = 0.0
+                total_roi += roi_val
+                if roi_val > 0:
+                    up_count += 1
+                elif roi_val < 0:
+                    down_count += 1
+            avg_roi = total_roi / filtered_count
+            
+            # 使用对应极客高反差红绿颜色标识强度（红涨 `#e91e63`，绿跌 `#388e3c`）
+            stat_color = "#e91e63" if avg_roi >= 0 else "#388e3c"
+            self.status_lbl.config(
+                text=f"📊 筛选: {filtered_count}只 | 📈上涨:{up_count} 📉下跌:{down_count} | 均幅:{avg_roi:+.2f}%",
+                fg=stat_color
+            )
+        else:
+            self.status_lbl.config(text="🔍 无匹配个股", fg="#888888")
 
     def _on_select(self, event, force_link=False):
         sel = self.tree.selection()
@@ -1712,10 +2378,38 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
 
     def _sort_tree(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        try:
-            l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
-        except:
-            l.sort(reverse=reverse)
+        
+        # 🚀 [NEW] 历史追踪有筛选过滤条件时的前3个题材权重最高绝对优先排序算法
+        current_filter = ""
+        if hasattr(self, 'search_var'):
+            current_filter = self.search_var.get().lower().strip()
+        elif hasattr(self.parent_win, 'concept_filter_var'):
+            current_filter = self.parent_win.concept_filter_var.get().lower().strip()
+            
+        kws = current_filter.split() if current_filter else []
+        
+        if col == "sector" and kws:
+            def get_sort_key(t):
+                val = str(t[0]).lower()
+                cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                match_idx = 999
+                for idx, cat in enumerate(cats):
+                    if any(kw in cat for kw in kws):
+                        match_idx = idx
+                        break
+                # 数学对齐：确保升序降序匹配度最高的（match_idx越小）股票永远绝对排在最前面
+                prio = match_idx if not reverse else (999 - match_idx)
+                return (prio, t[0])
+                
+            try:
+                l.sort(key=get_sort_key, reverse=reverse)
+            except Exception:
+                l.sort(reverse=reverse)
+        else:
+            try:
+                l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
+            except:
+                l.sort(reverse=reverse)
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
         self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
@@ -2150,13 +2844,15 @@ def _on_sector_selected(self, event=None):
         return
 
     try:
-        row_idx = int(sel[0]) - 1
-        hot_sectors = self._focus_ctrl.get_hot_sectors(top_n=20)
-        if row_idx < 0 or row_idx >= len(hot_sectors):
+        vals = self._sector_tree.item(sel[0], "values")
+        if not vals or len(vals) < 2:
             return
-
-        sh = hot_sectors[row_idx]
-        sector_name = sh.get('name', '')
+        sector_name = vals[1].strip()
+        
+        hot_sectors = self._focus_ctrl.get_hot_sectors(top_n=20)
+        sh = next((s for s in hot_sectors if s.get('name', '').strip() == sector_name), None)
+        if not sh:
+            return
         self._sector_detail_lbl.config(
             text=f"🔥 {sector_name}  |  龙头: {sh.get('leader_name','')}({sh.get('leader_code','')})"
         )
@@ -2568,11 +3264,10 @@ def _kernel_show_toast(self, text, kind="info", records=None):
             
             # 手动关闭看板时的统一样式保存与销毁处理
             def _on_toast_close():
-                if getattr(self, "master", None) and hasattr(self.master, "save_window_position"):
-                    try:
-                        self.master.save_window_position(win, "kernel_toast_window")
-                    except Exception:
-                        pass
+                try:
+                    self.save_window_position(win, "kernel_toast_window")
+                except Exception:
+                    pass
                 win.destroy()
             
             win.protocol("WM_DELETE_WINDOW", _on_toast_close)
@@ -2663,16 +3358,16 @@ def _kernel_show_toast(self, text, kind="info", records=None):
 
             # 优先加载已存位置大小，否则 fallback 居右放置
             has_loaded = False
-            if getattr(self, "master", None) and hasattr(self.master, "load_window_position"):
-                try:
-                    w, h, lx, ly = self.master.load_window_position(
-                        win, "kernel_toast_window", 
-                        default_width=520, default_height=350
-                    )
-                    if lx is not None and ly is not None:
+            try:
+                ret = self.load_window_position(
+                    win, "kernel_toast_window", 
+                    default_width=520, default_height=350
+                )
+                if ret and len(ret) >= 4 and ret[2] is not None and ret[3] is not None:
+                    if ret[2] > 0 or ret[3] > 0:
                         has_loaded = True
-                except Exception:
-                    pass
+            except Exception:
+                pass
             if not has_loaded:
                 self.update_idletasks()
                 x = self.winfo_rootx() + max(20, self.winfo_width() - 560)
