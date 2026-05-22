@@ -5444,15 +5444,15 @@ def get_config_value(fname, classtype, currvalue=0, limitvalue=1, xtype='limit',
                 if int(float(config[classtype][xtype])) > currvalue:
                     ratio = float(config[classtype][xtype]) / limitvalue
                     if ratio < 1.2:
-                        log.info("f_size:%s < read_limit:%s ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
+                        log.debug("f_size:%s < read_limit:%s ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
                     else:
                         config[classtype][xtype] = limitvalue
                         config.write()
-                        log.info("f_size:%s < read_limit:%s ratio < 2 ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
+                        log.debug("f_size:%s < read_limit:%s ratio < 2 ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
                         
                 else:
 
-                    log.info("file:%s f_size:%s > read_limit:%s" % (fname, currvalue, config[classtype][xtype][:5]))
+                    log.debug("file:%s f_size:%s > read_limit:%s" % (fname, currvalue, config[classtype][xtype][:5]))
                     config[classtype][xtype] = limitvalue
                     config.write()
                     return True
@@ -6903,7 +6903,7 @@ def get_col_in_columns(df, idx_value, key):
 def get_diff_dratio(mainlist, sublist):
     dif_co = list(set(mainlist) & set(sublist))
     dratio = round((float(len(sublist)) - float(len(dif_co))) / float(len(sublist)), 2)
-    log.info("dratio all:%s :%s %0.2f" % (len(sublist), len(sublist) - len(dif_co), dratio))
+    log.debug("dratio all:%s :%s %0.2f" % (len(sublist), len(sublist) - len(dif_co), dratio))
     return dratio
 
 

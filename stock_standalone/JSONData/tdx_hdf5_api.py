@@ -313,7 +313,7 @@ class SafeHDFStore(pd.HDFStore):
                 yield
             finally:
                 end = time.time()
-                self.log.info(f"[timed] {name}: {end - start:.3f}s")
+                self.log.debug(f"[timed] {name}: {end - start:.3f}s")
 
         self.fname_o = fname
         self.mode = mode
@@ -327,7 +327,7 @@ class SafeHDFStore(pd.HDFStore):
         if cct.cleanRAMdiskTemp:
             cleanup_temp_dir(self.basedir)
 
-        self.log.info(f'{self.fname_o.lower()} {self.basedir.lower()}')
+        self.log.debug(f'{self.fname_o.lower()} {self.basedir.lower()}')
         self.start_time = time.time()
         self.config_ini = os.path.join(self.basedir, 'h5config.txt')
 
@@ -343,21 +343,21 @@ class SafeHDFStore(pd.HDFStore):
             self.multiIndexsize = True
             self.fname = cct.get_run_path_tdx(self.fname_o)
             self.basedir = self.fname.split(self.fname_o)[0]
-            self.log.info(f"tdx_hd5: {self.fname}")
+            self.log.debug(f"tdx_hd5: {self.fname}")
         else:
             self.fname = cct.get_ramdisk_path(self.fname_o)
             if os.path.isabs(self.fname):
                 self.basedir = os.path.dirname(self.fname)
             else:
                 self.basedir = self.fname.split(self.fname_o)[0]
-            self.log.info(f"ramdisk_hd5: {self.fname}")
+            self.log.debug(f"ramdisk_hd5: {self.fname}")
 
         if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
             # 优先使用 global.ini 的配置 (默认 150MB)
             self.big_H5_Size_limit = SINA_MULTIINDEX_LIMIT * 1.5
         else:
             self.big_H5_Size_limit = ct.big_H5_Size_limit
-        self.log.info(f'self.big_H5_Size_limit: {self.big_H5_Size_limit}MB (Default: 150MB) multiIndexsize: {self.multiIndexsize}')
+        self.log.debug(f'self.big_H5_Size_limit: {self.big_H5_Size_limit}MB (Default: 150MB) multiIndexsize: {self.multiIndexsize}')
 
         if not os.path.exists(self.basedir):
             if RAMDISK_KEY < 1:
@@ -372,7 +372,7 @@ class SafeHDFStore(pd.HDFStore):
         self._flock = None
         self.write_status = os.path.exists(self.fname)
         self.my_pid = os.getpid()
-        self.log.info(f"self.fname: {self.fname} self.basedir:{self.basedir}")
+        self.log.debug(f"self.fname: {self.fname} self.basedir:{self.basedir}")
 
         # 确保 HDF5 文件存在
         with timed_ctx("ensure_hdf_file"):
@@ -578,7 +578,7 @@ class SafeHDFStore(pd.HDFStore):
                         # 其他进程持有锁，等待
                         retries += 1
                         if retries % 3 == 0:
-                            self.log.info(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
+                            self.log.debug(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
                         time.sleep(self.probe_interval)
 
                     else:
@@ -586,7 +586,7 @@ class SafeHDFStore(pd.HDFStore):
                         try:
                             with open(self._lock, "w") as f:
                                 f.write(f"{my_pid}|{time.time()}")
-                            self.log.info(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
+                            self.log.debug(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
                             return True
                         except Exception as e:
                             self.log.error(f"[Lock] 创建锁文件 失败: {e}")
@@ -659,7 +659,7 @@ class SafeHDFStore(pd.HDFStore):
                 total_wait = time.time() - self.start_time
                 if elapsed > self.lock_timeout: 
                     self._forced_unlock()
-                self.log.info(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
+                self.log.debug(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
                 time.sleep(self.probe_interval)
 
     def _release_lock(self):
@@ -669,7 +669,7 @@ class SafeHDFStore(pd.HDFStore):
                     pid_in_lock = int(f.read().split("|")[0])
                 if pid_in_lock == self.my_pid:
                     os.remove(self._lock)
-                    self.log.info(f"[{self.my_pid}] Lock released: {self._lock}")
+                    self.log.debug(f"[{self.my_pid}] Lock released: {self._lock}")
             except Exception as e:
                 self.log.error(f"[{self.my_pid}] Failed to release lock: {e}")
 
@@ -740,11 +740,11 @@ class SafeHDFStore(pd.HDFStore):
                             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
                             
                         read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
-                        self.log.info(f"fname: {self.fname} read_ini_limit:{read_ini_limit} h5_size: {h5_size} new_limit:{new_limit} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
+                        self.log.debug(f"fname: {self.fname} read_ini_limit:{read_ini_limit} h5_size: {h5_size} new_limit:{new_limit} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
                         # if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
                         config_status = cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit)
                         if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
-                            self.log.info(f"to temp fname: {self.fname} read_ini_limit config_status: {config_status} to {self.temp_file}") 
+                            self.log.debug(f"to temp fname: {self.fname} read_ini_limit config_status: {config_status} to {self.temp_file}") 
                             if self.mode == 'r':
                                 self._acquire_lock()
                             if os.path.exists(self.fname) and os.path.exists(self.temp_file):
@@ -758,10 +758,10 @@ class SafeHDFStore(pd.HDFStore):
                                 os.chdir(self.basedir)
                                 temp_rel = os.path.relpath(self.temp_file, self.basedir)
                                 fname_rel = os.path.relpath(self.fname, self.basedir)
-                                log.info(f'basedir: {self.basedir} rename : {self.fname} to {self.temp_file} temp_rel: {temp_rel} fname_rel: {fname_rel}')
+                                log.debug(f'basedir: {self.basedir} rename : {self.fname} to {self.temp_file} temp_rel: {temp_rel} fname_rel: {fname_rel}')
 
                                 pt_cmd = self.ptrepack_cmds % (self.complib, temp_rel, fname_rel)
-                                log.info(f'pt_cmd: {pt_cmd}')
+                                log.debug(f'pt_cmd: {pt_cmd}')
 
                                 p = subprocess.Popen(
                                     pt_cmd, shell=True,
@@ -790,7 +790,7 @@ class SafeHDFStore(pd.HDFStore):
                 time.sleep(0.1)
                 with timed_ctx("release_lock"):
                     self._release_lock()
-                self.log.info(f'clean:{self.fname}')
+                self.log.debug(f'clean:{self.fname}')
         else:
             with timed_ctx("exit close"):
                 self.close()
@@ -1933,11 +1933,11 @@ def repair_sina_multiindex_file(fname=None, table=None):
         new_cols = df.columns.tolist()
 
         if len(orig_cols) != len(new_cols):
-             log.info(f"✨ [REPAIR] Dropped columns: {list(set(orig_cols) - set(new_cols))}")
+             log.debug(f"✨ [REPAIR] Dropped columns: {list(set(orig_cols) - set(new_cols))}")
 
         # 3. 使用 rewrite=True 物理回写
         write_hdf_db(fname, df, table=t, MultiIndex=True, rewrite=True)
-        log.info(f"✅ [REPAIR] Table {t} finalized. Rows: {len(df)}")
+        log.debug(f"✅ [REPAIR] Table {t} finalized. Rows: {len(df)}")
 
     # 4. 物理裁切与压缩 (ptrepack)
     fpath = cct.get_ramdisk_path(fname)
@@ -1948,7 +1948,7 @@ def repair_sina_multiindex_file(fname=None, table=None):
             with SafeHDFStore(fname) as store:
                 store.write_status = True  # 强制标记以触发 __exit__ 中的压缩
     
-    log.info(f"✨ [REPAIR] Overall repair for {fname} complete.")
+    log.debug(f"✨ [REPAIR] Overall repair for {fname} complete.")
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False, sizelimit=None):
 
@@ -2036,9 +2036,9 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 df['timel']=time.time()
                                 log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
 
-                    log.info("read hdf time:%0.2f" % (time.time() - time_t))
+                    log.debug("read hdf time:%0.2f" % (time.time() - time_t))
                 else:
-                    log.info("h5 None hdf reindex time:%0.2f" %
+                    log.debug("h5 None hdf reindex time:%0.2f" %
                              (time.time() - time_t))
             else:
                 if not rewrite and tmpdf is not None and len(tmpdf) > 0:
