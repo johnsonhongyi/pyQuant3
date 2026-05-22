@@ -11614,6 +11614,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 import time
                 self.last_action_time = time.time()
+                self.selection_changed = False  # 是否已通过 R/上下键/滚轮修改过选中项
                 
                 self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
                 self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -11732,7 +11733,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if offset == 9:
                         hk_desc = desc.split(" ")[0]
                         break
-                help_lbl = QLabel(f"💡 连按 [{hk_desc}] 轮选 | 释放 [Alt] 键自动松手切换", self)
+                help_lbl = QLabel(f"💡 连按 [{hk_desc}] 轮选 | 回车/点击 确认切换 | 5秒无操作自动关闭", self)
                 help_lbl.setStyleSheet("color: #8b92b6; font-size: 11px; font-weight: bold; margin-top: 6px;")
                 help_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 layout.addWidget(help_lbl)
@@ -11744,7 +11745,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.resize(380, min(120 + list_height + tiles_height, 600))
                 self.center_on_screen()
                 
-                # 启动高频 GetAsyncKeyState ALT 键释放检测器与超时保护 (30ms 极速响应)
+                # 启动检测器: 30ms 高频轮询 Alt 键状态 + 5s 无操作超时兜底
                 self.detect_timer = QTimer(self)
                 self.detect_timer.timeout.connect(self.check_alt_release)
                 self.detect_timer.start(30)
@@ -11831,6 +11832,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     return
                 import time
                 self.last_action_time = time.time()
+                self.selection_changed = True  # 已主动修改选择，Alt 松开后将自动切换
                 self.curr_idx = (self.curr_idx + direction) % len(self.hwnds)
                 self.apply_highlight_to_ui()
                 
@@ -11846,28 +11848,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.trigger_switch_and_close()
 
             def check_alt_release(self):
-                """极速感应 ALT 释放松手判定与无操作超时自愈保护"""
+                """
+                智能超时检测器:
+                - 已修改选择 + Alt 松开 → 立即切换
+                - 未修改选择 + Alt 松开 → 窗口保持，等待明确确认
+                - 5秒无任何操作 → 切换当前高亮项并关闭
+                """
                 import time
                 import ctypes
                 
-                # 1. 2.5 秒无按键无操作强制超时保护
-                if time.time() - self.last_action_time > 2.5:
+                # 1. 5 秒无操作超时兜底，自动切换
+                if time.time() - self.last_action_time > 5.0:
                     self.detect_timer.stop()
-                    logger.info("[Rotator] Inactivity timeout (2.5s) reached. Closing and switching automatically.")
+                    logger.debug("[Rotator] Inactivity timeout (5s) reached. Auto-closing and switching.")
                     self.trigger_switch_and_close()
                     return
-                    
-                # 2. 物理读取 Alt 键电平状态
-                state = ctypes.windll.user32.GetAsyncKeyState(0x12) # VK_MENU
-                if not (state & 0x8000):
+                
+                # 2. 检测 Alt 键是否已松开
+                state = ctypes.windll.user32.GetAsyncKeyState(0x12)  # VK_MENU
+                alt_released = not (state & 0x8000)
+                
+                # 3. 只有已修改选择 + Alt 松开，才自动切换
+                #    未修改选择时松开 Alt（只是瞑视）→ 窗口保持，等待明确确认
+                if alt_released and self.selection_changed:
                     self.detect_timer.stop()
                     self.trigger_switch_and_close()
-                    
-                # 3. 鼠标左键已释放时（用户点击松手），也视为确认切换
-                # 场景：用户按住 Alt 后用鼠标点击列表项，松开鼠标时 on_item_clicked 已触发，
-                #        detect_timer 已被 on_item_clicked 主动 stop，此检查只做保险兜底。
 
-                    
             def trigger_switch_and_close(self):
                 """最终锁定并瞬间强力聚焦"""
                 if self.curr_idx >= 0 and self.curr_idx < len(self.hwnds):
@@ -11893,7 +11899,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.rotate_highlight(1)
                 elif event.key() == Qt.Key.Key_Up:
                     self.rotate_highlight(-1)
-                elif event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
+                elif event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space]:
                     self.detect_timer.stop()
                     self.trigger_switch_and_close()
                 elif event.key() == Qt.Key.Key_Escape:
