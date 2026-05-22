@@ -820,15 +820,10 @@ class BiddingMomentumDetector:
 
     def _load_stock_selector_data(self):
         """从数据库加载最近一个交易日的强势/反转选股结果作为种子"""
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector._load_stock_selector_data',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': ''
-            })
+            _glc.update('BiddingMomentumDetector._load_stock_selector_data')
         except Exception:
             pass
 
@@ -1071,10 +1066,10 @@ class BiddingMomentumDetector:
         - 不做 sector rebuild (通过冷启动单次 rebuild 触发)
         - 只做内存 tick_series 更新 + enqueue
         """
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector.register_codes', 'thread': __import__('threading').current_thread().name, 'args_repr': f'rows={len(df_all) if df_all is not None else 0}'})
+            _glc.update('BiddingMomentumDetector.register_codes', f'rows={len(df_all) if df_all is not None else 0}')
         except Exception:
             pass
 
@@ -1255,10 +1250,10 @@ class BiddingMomentumDetector:
         force: 是否强制全量计算（全量扫描所有 _tick_series）。
         skip_evaluate: 跳过评估阶段（兼容旧接口，直接触发 aggregate）。
         """
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector.update_scores', 'thread': __import__('threading').current_thread().name, 'args_repr': f'force={force}'})
+            _glc.update('BiddingMomentumDetector.update_scores', f'force={force}')
         except Exception:
             pass
         # [THROTTLE] 节流：防止短时间内被 Worker 疯狂调用，释放 CPU
@@ -1367,10 +1362,10 @@ class BiddingMomentumDetector:
         每次执行 _score_chunk_size 只个股的评估，然后调度下一帧。
         全程无锁执行，帧间 GIL 完全释放给 UI 线程。
         """
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
-            from tk_gil_monitor import last_call as _glc, gil_yield as _gy
-            _glc._data.update({'time': __import__('time').time(), 'func': 'BiddingMomentumDetector._score_step', 'thread': __import__('threading').current_thread().name, 'args_repr': f'idx={self._score_index}'})
+            from tk_gil_monitor import last_call as _glc
+            _glc.update('BiddingMomentumDetector._score_step', f'idx={self._score_index}')
         except Exception:
             pass
         if not self._score_active:
@@ -1441,7 +1436,7 @@ class BiddingMomentumDetector:
             _from_scheduler=True
         )
         _agg_ms = (time.perf_counter() - _t_agg) * 1000
-        if _agg_ms > 100:
+        if _agg_ms > 5000:
             logger.warning(
                 f"[ScoreChunk][SLOW] aggregate {processed_count} codes = {_agg_ms:.1f}ms "
                 f"(dirty={len(dirty_codes)}, force={force_ref})"
@@ -1733,15 +1728,10 @@ class BiddingMomentumDetector:
 
     def save_persistent_data(self, force=False):
         """最终统一版：旧版控制流 + 新版数据结构（完全行为对齐）"""
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector.save_persistent_data',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': f'force={force}'
-            })
+            _glc.update('BiddingMomentumDetector.save_persistent_data', f'force={force}')
         except Exception:
             pass
 
@@ -1926,15 +1916,10 @@ class BiddingMomentumDetector:
 
     def load_persistent_data(self):
         """从磁盘加载之前的会话数据 (3阶段无阻塞版)"""
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector.load_persistent_data',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': ''
-            })
+            _glc.update('BiddingMomentumDetector.load_persistent_data')
         except Exception:
             pass
 
@@ -2142,15 +2127,10 @@ class BiddingMomentumDetector:
         self._init_dragon_3day_tracker()
 
     def _deferred_restore_klines(self, kline_payload_new: dict):
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector._deferred_restore_klines',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': f'len={len(kline_payload_new) if kline_payload_new else 0}'
-            })
+            _glc.update('BiddingMomentumDetector._deferred_restore_klines', f'len={len(kline_payload_new) if kline_payload_new else 0}')
         except Exception:
             pass
 
@@ -2175,15 +2155,10 @@ class BiddingMomentumDetector:
         logger.info("[Detector] Deferred K-line restore (New) completed.")
 
     def _deferred_restore_klines_legacy(self, kline_payload_legacy: dict):
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector._deferred_restore_klines_legacy',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': f'len={len(kline_payload_legacy) if kline_payload_legacy else 0}'
-            })
+            _glc.update('BiddingMomentumDetector._deferred_restore_klines_legacy', f'len={len(kline_payload_legacy) if kline_payload_legacy else 0}')
         except Exception:
             pass
 
@@ -2209,15 +2184,10 @@ class BiddingMomentumDetector:
 
     def load_from_snapshot(self, filepath: str) -> bool:
         """从指定的快照文件恢复数据，用于历史复盘 (原子替换版本)"""
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector.load_from_snapshot',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': f'file={filepath}'
-            })
+            _glc.update('BiddingMomentumDetector.load_from_snapshot', f'file={filepath}')
         except Exception:
             pass
 
@@ -3453,15 +3423,10 @@ class BiddingMomentumDetector:
         active_codes: 如果提供，则只更新受这些个股影响的板块（增量模式）。
         _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
-        # ⭐ [GIL_MONITOR] 埋点
+        # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
-            _glc._data.update({
-                'time': __import__('time').time(),
-                'func': 'BiddingMomentumDetector._aggregate_sectors',
-                'thread': __import__('threading').current_thread().name,
-                'args_repr': f'active={len(active_codes) if active_codes is not None else "ALL"}'
-            })
+            _glc.update('BiddingMomentumDetector._aggregate_sectors', f'active={len(active_codes) if active_codes is not None else "ALL"}')
         except Exception:
             pass
 
