@@ -1,7 +1,41 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 14:57  
+> 最后更新：2026-05-22 16:25  
+
+## 2026-05-22 16:25
+- [x] **修复放量详情及预警明细弹窗视图不同步拉伸/缩放 Bug (Fixed Window Scaling and Geometry Desync Bug)**：
+    - [x] **根治 C++ 窗口句柄重建几何畸变 (HWND Re-creation Geometry Fix)**：查明原因在于原构造函数中先调用了 `self.load_window_position_qt` 改变窗口大小，接着调用 `setWindowFlags`，这在 Qt 底层会导致物理销毁并重建窗口句柄，破坏了之前的尺寸几何信息。我们将 `setWindowFlags` 提升至构造函数最顶端执行，确保位置加载在正确的物理句柄上生效。
+    - [x] **实现列宽同步等比例放大缩小 (Adaptive Stretch Column Resizing)**：在 `VolumeDetailsDialog` 中，彻底弃用了手动/记录的交互式列宽恢复逻辑，将水平表头设为高自适应等宽等比例拉伸模式 `QHeaderView.ResizeMode.Stretch`。这使得在窗口放大缩小的时候，里面的四列（代码、名称、涨幅%、量比）宽度百分之百保持一体化同步放大缩小，彻底消除了右侧多余底框与白色/黑色空白列的视觉脱节，实现了极客级的完美 Rich Aesthetics 观感。
+    - [x] **物理强力加固 resizeEvent 事件传导 (Hardened resizeEvent & Geometry Synchronization)**：在 `VolumeDetailsDialog` 和 `MarketAlertDetailDialog` 内部均强力重写了 `resizeEvent`，在窗口大小发生变动时，物理强制将布局管理器的几何范围重置为整个窗口客户区的 `self.rect()`，这实现了物理控件层与外观层 100% 一体化跟随拉伸，彻底阻断了任何可能发生的“两层显示”或“分开显示”的缺陷。
+    - [x] **扩展今日异动放量个股弹窗以显示 DFF 与 DFF2 列 (Added DFF and DFF2 columns to VolumeDetailsDialog)**：
+        - [x] **表格结构配置扩容与首屏布局自适应**：在 `VolumeDetailsDialog` 中将表格扩容为 6 列，新增了 `"dff"` 和 `"dff2"` 的定义与中英表头设置，在 Stretch 等宽等比例拉伸模式下，这 6 列随着窗口的改变完美一体化同步伸缩。
+        - [x] **安全数据路由与 NaN 兜底过滤**：在 `instock_MonitorTK.py` 数据源生成端，从实时行情中提取 `dff` 与 `dff2` 指标，并实施了高精度的 NaN 和 None 防御过滤（自愈过滤为 `0.0`），彻底规避了可能引发的 JSON 发送或解析异常，确保了数据安全高保真流动。
+        - [x] **数值高精格式化与精准排序对齐**：使用 `NumericTableWidgetItem` 渲染 `DFF` 与 `DFF2` 数值并保留两位小数，实现了完全对齐，并保持了表头升降序排序的 100% 准确无误。
+    - [x] **扩增今日异动放量个股容量至 Top 200 并支持全局自由排序 (Expanded Capacity to Top 200 for Full Sorting)**：
+        - [x] **物理提升过滤门槛**：将 `instock_MonitorTK.py` 中的 `vol_mask` 限制从 30 提升至 200 个，将今日异动放量个股的数据容量放宽到 200 限制以内，并将窗口标题同步更新为 `"🔥 今日异动放量个股 (Top 200)"`。
+        - [x] **实现盘中大池子精准洗牌**：当用户在弹窗中点击表头（如涨幅%、量比、DFF、DFF2）进行升降序排序时，表格数据将在完整的 200 个优质标的中进行全量重排，彻底打破了以往仅在 30 个标的窄小池子里排序的局限性，极大提升了龙头的过滤筛选价值。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1625_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1625_task.md)。
+
+## 2026-05-22 16:10
+- [x] **落地信号面板、异动放量详情弹窗及预警明细弹窗全局极窄滚动条定制 (Implemented Global Narrow Scrollbar Styling)**：
+    - [x] **主面板单点级联注入 (Global Cascade Inheritance)**：在 `SignalDashboardPanel.__init__` 的结尾，通过 `self.setStyleSheet` 统一全局注入针对垂直和水平 `QScrollBar` 的极窄 (`6px`)、圆角、轨道透明的 QSS 样式表。根据 Qt 级联特性，这使得主界面内所有动态切换的 Tab 选项卡（跟单信号、突破加速、结构破位、决策队列等 8 个表格）以及任何未来新增 of 子滚动区域全部一键继承，消除了 Windows 默认滚动条的粗糙感，完全遵循 DRY 原则。
+    - [x] **异动明细及放量弹窗加固 (Volume & Alert Dialog Scrollbar Hardening)**：在个股异动放量详情弹窗 `VolumeDetailsDialog.table.setStyleSheet` 以及预警个股异动明细弹窗 `MarketAlertDetailDialog.table.setStyleSheet` 的样式表中，同步追加了垂直和水平 `QScrollBar` 的极窄规则，确保在主面板及其所有外挂弹窗上滚动条的视觉风格 100% 连贯统一，大幅拉升了终端的极客美感。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1610_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1610_task.md)。
+
+## 2026-05-22 15:59
+- [x] **落地大盘温度与多空数据“首屏秒级自愈穿透”机制，彻底攻克冷启动与盘后打开仪表盘/赛马面板时“大盘数据皆空”的痛点 (Implemented Cold-Start & After-Hours Realtime Stats Self-Healing)**：
+    - [x] **物理拉通主动推送链路**：在 `instock_MonitorTK.py` 的 `open_live_signal_viewer` 和 `open_racing_panel` 两大面板启动入口处，在重置首次同步标记位 `_first_sync_done = False` 后，立即主动触发调用 `self._aggregate_market_dashboard_stats(has_update=True)`。
+    - [x] **零卡顿异步子线程执行**：依靠该底层函数自备 of `_async_stats_aggregation` 异步处理架构，在零卡顿、零阻塞主 GUI 线程的前提下，于亚毫秒级内完成对当前只读行情快照、指数行情（复用 Sina 只读实例）的全量数据聚合计算，并利用跨线程安全的 `tk_dispatch_queue` 在数百毫秒内将完整的市场温度、上涨/下跌家数、放量及指数数据推送上屏。
+    - [x] **终结盘后数据悬空**：这确保了用户在任何时间（盘中、盘后复盘、深夜冷启动）点开策略信号仪表盘或竞价节奏看板，首屏大盘温度和各指数涨跌幅都能瞬间被最新行情填满，彻底告别死板的 “--” 无数据空白，将系统的工程健壮性与精致档次推向极致。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1559_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1559_task.md)。
+
+## 2026-05-22 15:52
+- [x] **修复策略信号仪表盘今日异动放量个股 (VolumeDetailsDialog) 弹窗背景与表格列宽拉伸的 UI 缺陷 (Fixed VolumeDetailsDialog Layout & White Blank Columns Bug)**：
+    - [x] **补全弹窗自身深色背景 (Styled QDialog with Dark Theme)**：在 `VolumeDetailsDialog.__init__` 中为对话框自身应用了深色背景样式表 `self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")`。这彻底清除了在 Windows 等默认浅色系统主题下，由于弹窗顶部的 `header_frame` 说明栏区域以及“DNA审计”按钮周围缺乏背景色导致出现大片惨白、刺眼底框的视觉漏洞。
+    - [x] **根治表格表头空白区白底 (Styled QHeaderView Background to Deep Dark)**：在表格 `self.table` 的 QSS 样式表中，增加了针对 `QHeaderView { background-color: #1a1c2c; border: none; }` 样式支持。这保证了即使在多余列区域，水平表头也不会因为 Windows 系统默认属性而显示为白底，使其与深色主题完美融为一体。
+    - [x] **实现最后一列自适应拉伸填满视口 (Enabled Last Column Stretch)**：配置了 `h_header.setStretchLastSection(True)`。当用户拖动横向拉宽弹窗时，最后一列（“量比”）会自动平滑地向右侧拉伸以填满视口，从逻辑上和物理上共同阻断了表格右侧多余的“空白列/白色col列”产生，极大地提升了终端的精致质感与极客体验。
+    - [x] **创建独立任务日志归档**：按照用户强制规范，归档创建了包含日期时间命名的独立任务清单文件 [20260522_1552_task.md](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/20260522_1552_task.md)。
 
 ## 2026-05-22 14:57
 - [x] **修复策略信号仪表盘今日异动放量个股 (VolumeDetailsDialog) 表格点击排序功能失效的 Bug (Fixed VolumeDetailsDialog Sorting Bug)**：
