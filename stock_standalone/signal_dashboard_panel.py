@@ -55,8 +55,12 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self.setWindowTitle("📡 预警个股异动明细")
         self.setMinimumWidth(480)
         self._is_updating = False
-        self.load_window_position_qt(self, "market_alert_detail_dialog", default_width=550, default_height=500)
+        
+        # ⭐ [FIX] 先设置 WindowFlags（防范句柄重建导致 load_window_position_qt 被重置破坏）
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.Tool)
+        
+        # 加载窗口位置与大小
+        self.load_window_position_qt(self, "market_alert_detail_dialog", default_width=550, default_height=500)
         self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
         
         layout = QVBoxLayout(self)
@@ -81,7 +85,52 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        self.table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; gridline-color: #2a2d42; }")
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0d121f;
+                color: #ffffff;
+                gridline-color: #2a2d42;
+                border: none;
+            }
+            QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 100);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: rgba(180, 180, 180, 100);
+                min-width: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+        """)
         
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -111,6 +160,7 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.table)
+        self.setLayout(layout) # ⭐ [FIX] 显式绑定激活布局，确保 resize 事件在句柄销毁后依然物理传导
         
         # [NEW] 结束初始化保护延迟一点，确保 restoreState 完成后再放开 sectionResized 的保存
         QTimer.singleShot(500, lambda: setattr(self, '_is_updating', False))
@@ -345,9 +395,17 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
     def showEvent(self, event):
         """[GUI] 展现时安全恢复列宽与大小，防范 C++ 构造期 access violation"""
         super().showEvent(event)
+        if self.layout():
+            self.layout().activate() # ⭐ [FIX] 强制触发布局重算，确保加载完位置后视图尺寸同步填充
         if not getattr(self, '_columns_restored', False):
             self._restore_column_widths()
             self._columns_restored = True
+
+    def resizeEvent(self, event):
+        """[GUI] 强力重写 resizeEvent，保证窗口放大缩小时，内部布局和表格大小 100% 物理同步，不留多余空白底框"""
+        super().resizeEvent(event)
+        if self.layout():
+            self.layout().setGeometry(self.rect())
 
 
 class VolumeDetailsDialog(QDialog, WindowMixin):
@@ -356,16 +414,17 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🔥 今日异动放量个股 (Top 30)")
+        self.setWindowTitle("🔥 今日异动放量个股 (Top 200)")
         self.setMinimumWidth(380)
         self._is_updating = False # 更新标志
+        
+        # ⭐ [FIX] 先设置 WindowFlags（防范句柄重建导致 load_window_position_qt 被重置破坏）
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         
         # 加载窗口位置与大小
         self.load_window_position_qt(self, "volume_details_dialog", default_width=450, default_height=600)
         self._is_updating = True # 开启初始化保护
-        
-        # [NEW] 设置窗口标志：置顶及工具窗口样式 (工具窗口在 Windows 下有更窄的标题栏)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
         
         # 窗口内置布局 (超窄边框配置)
         layout = QVBoxLayout(self)
@@ -394,8 +453,8 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         layout.addWidget(header_frame)
         
         # 表格展示
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "涨幅%", "量比"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "涨幅%", "量比", "DFF", "DFF2"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -405,26 +464,18 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         self.table.horizontalHeader().setSortIndicatorShown(True)
         
         h_header = self.table.horizontalHeader()
-        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive) # 改为交互模式以支持持久化
+        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch) # ⭐ [MOD] 设为 Stretch 模式，让四列随窗口拉伸一体化自动等宽放大缩小，保持完美视觉一致性
         h_header.setFixedHeight(28) # 表头高度微调
         h_header.sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
-        
-        # [NEW] 持久化支持
-        self._save_timer = QTimer(self)
-        self._save_timer.setSingleShot(True)
-        self._save_timer.timeout.connect(self._save_column_widths)
-        h_header.sectionResized.connect(self._on_section_resized)
-        
-        # 默认列宽
-        self.table.setColumnWidth(0, 60)
-        self.table.setColumnWidth(1, 80)
-        self.table.setColumnWidth(2, 65)
-        self.table.setColumnWidth(3, 55)        
         self.table.setStyleSheet("""
             QTableWidget {
                 background-color: #0d121f;
                 color: #ffffff;
                 gridline-color: #2a2d42;
+                border: none;
+            }
+            QHeaderView {
+                background-color: #1a1c2c;
                 border: none;
             }
             QHeaderView::section {
@@ -438,12 +489,51 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                 background-color: #2a2d42;
                 color: #00ff88;
             }
+            QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 100);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: rgba(180, 180, 180, 100);
+                min-width: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
         """)
         
         self.table.itemClicked.connect(self._on_item_clicked)
         self.table.itemDoubleClicked.connect(self._on_item_clicked)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self.table)
+        self.setLayout(layout) # ⭐ [FIX] 显式绑定激活布局，确保 resize 事件在句柄销毁后依然物理传导
         
         # 结束初始化保护
         QTimer.singleShot(200, lambda: setattr(self, '_is_updating', False))
@@ -528,6 +618,8 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                 name = item.get("name", "")
                 change = item.get("change", 0.0)
                 ratio = item.get("ratio", 0.0)
+                dff = item.get("dff", 0.0)
+                dff2 = item.get("dff2", 0.0)
                 
                 # 代码 (亮色)
                 c_item = QTableWidgetItem(code)
@@ -554,6 +646,22 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                 r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 r_item.setForeground(QBrush(QColor("#ffff00")))
                 self.table.setItem(i, 3, r_item)
+
+                # DFF (高可靠 NumericTableWidgetItem)
+                d_item = NumericTableWidgetItem(dff)
+                d_item.setText(f"{dff:+.2f}")
+                d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if dff > 0: d_item.setForeground(QBrush(QColor("#ff4444")))
+                elif dff < 0: d_item.setForeground(QBrush(QColor("#44ff44")))
+                self.table.setItem(i, 4, d_item)
+                
+                # DFF2 (高可靠 NumericTableWidgetItem)
+                d2_item = NumericTableWidgetItem(dff2)
+                d2_item.setText(f"{dff2:+.2f}")
+                d2_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if dff2 > 0: d2_item.setForeground(QBrush(QColor("#ff4444")))
+                elif dff2 < 0: d2_item.setForeground(QBrush(QColor("#44ff44")))
+                self.table.setItem(i, 5, d2_item)
         finally:
             self.table.setSortingEnabled(True)
             self.table.horizontalHeader().setSortIndicatorShown(True) # 恢复自适应排序
@@ -606,8 +714,6 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         """关闭事件时保存位置"""
         self.save_window_position_qt_visual(self, "volume_details_dialog")
-        # 强制保存列宽
-        self._save_column_widths()
         event.accept()
 
     def hideEvent(self, event):
@@ -616,11 +722,16 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         super().hideEvent(event)
 
     def showEvent(self, event):
-        """[GUI] 展现时安全恢复列宽与大小，防范 C++ 构造期 access violation"""
+        """[GUI] 展现时安全恢复大小，防范 C++ 构造期 access violation"""
         super().showEvent(event)
-        if not getattr(self, '_columns_restored', False):
-            self._restore_column_widths()
-            self._columns_restored = True
+        if self.layout():
+            self.layout().activate() # ⭐ [FIX] 强制触发布局重算，确保加载完位置后视图尺寸同步填充
+
+    def resizeEvent(self, event):
+        """[GUI] 强力重写 resizeEvent，保证窗口放大缩小时，内部布局和表格大小 100% 物理同步，不留多余空白底框"""
+        super().resizeEvent(event)
+        if self.layout():
+            self.layout().setGeometry(self.rect())
 
 
 
@@ -844,6 +955,48 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # 监听 Tab 切换，实现“tab当前点击查看的视图的统计信息”实时更新
         self.tabs.currentChanged.connect(self._update_stats_display)
+
+        # ⭐ [NEW] 统一将主仪表盘内部的所有水平和垂直滚动条调整为极窄样式，消除厚重感
+        self.setStyleSheet("""
+            QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 100);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: rgba(180, 180, 180, 100);
+                min-width: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: rgba(220, 220, 220, 150);
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+        """)
 
     def stop(self):
         """停止所有计时器和订阅，释放资源"""

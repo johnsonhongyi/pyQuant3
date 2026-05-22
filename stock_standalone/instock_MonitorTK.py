@@ -1090,6 +1090,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
             self._signal_dashboard_win.show()
             self._dashboard_first_sync_done = False # ⚡ 强制触发立即同步数据
+            # ⭐ [NEW] 立即触发一次全盘数据（温度/上涨/下跌/指数）聚合与推送，解决冷启动/盘后打开面板无温度显示的空白痛点
+            self._aggregate_market_dashboard_stats(has_update=True)
             self._signal_dashboard_win.raise_()
             self._signal_dashboard_win.activateWindow()
 
@@ -1183,6 +1185,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._racing_panel_win.raise_()
             self._racing_panel_win.activateWindow()
             self._racing_first_sync_done = False # [NEW] ⚡ 强制触发立即同步大盘温度数据
+            # ⭐ [NEW] 立即触发一次全盘数据聚合与同步，确保赛马节奏面板首屏大盘温度和指数秒级显示
+            self._aggregate_market_dashboard_stats(has_update=True)
             toast_message(self, "🏁 竞价赛马监控已启动")
 
         except Exception as e:
@@ -4876,14 +4880,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 vol_up = int(vol_mask.sum())
                                 vol_down = int((vr < 0.8).sum())
                                 if vol_mask.any():
-                                    sub_df = df[vol_mask].head(30)
+                                    sub_df = df[vol_mask].head(200)
                                     for idx, row in sub_df.iterrows():
                                         chg = row.get('ratio', 0)
                                         if chg == 0 and 'trade' in row and 'lastp1d' in row and row['lastp1d'] != 0:
                                             chg = (row['trade'] - row['lastp1d']) / row['lastp1d'] * 100
+                                        dff_val = row.get('dff', 0.0)
+                                        dff2_val = row.get('dff2', 0.0)
+                                        dff_val = 0.0 if (dff_val is None or pd.isna(dff_val)) else float(dff_val)
+                                        dff2_val = 0.0 if (dff2_val is None or pd.isna(dff2_val)) else float(dff2_val)
+                                        
                                         vol_up_details.append({
                                             "code": str(idx), "name": str(row.get('name', '')),
-                                            "change": float(chg), "ratio": float(vr[df.index.get_loc(idx)])
+                                            "change": float(chg), "ratio": float(vr[df.index.get_loc(idx)]),
+                                            "dff": dff_val, "dff2": dff2_val
                                         })
                             
                             if 'score' in df.columns:
