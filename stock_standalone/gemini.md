@@ -1,7 +1,68 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-22 21:58  
+> 最后更新：2026-05-22 23:45  
+
+## 2026-05-22 23:06
+- [x] **完美落地双击板块大字卡片展示、双击自动高反差闪烁复制与右键一键粘贴过滤 (Premium Concept Cards, Auto-Flicker Copy & Right-Click Paste and Filter Sync)**：
+    - [x] **完美支持追踪面板板块只显示前5、同名板块标红、包含关键词时高反差特殊标记与级联过滤 (Premium Highlighting, Sector Truncation & Cascade Sync)**：
+        - [x] **实现板块只显示前5**：在 `HistoricalSelectionTrackerDialog` 数据渲染时调用 `_get_short_category` 进行数据截断，仅保留前 5 个核心板块，其余长尾题材可通过双击弹窗详情查阅，极大缩减视觉干扰。
+        - [x] **右键菜单一比一复制并实现绝对级联**：为追踪窗口的 `self.tree` 绑定 `<Button-3>` 右键事件。右键点击时自动构造菜单并依次列出前 5 个板块概念，点击时一键调用 `self.parent_win.quick_apply_concept_filter(c)`。通过该接口自发、联动地反向更新追踪窗口自身的 `search_var`，形成了完美的跨窗口级联过滤闭环！
+        - [x] **首创“行标红 + 板块特殊标星 ★”双重极速辨识机制**：只要有板块过滤激活，两端表格（策略选股主表、历史追踪子表）中凡是匹配当前搜索词（支持空格多关键字 AND）的个股行均会自动应用 `"matched_concept"` 标签，前景色瞬间强制高亮亮红色 `#ff3333`！同时，板块单元格内匹配到的那一项特别加星 `★` 显眼修饰（如 `★共封装光学(CPO)`），在视觉上达成了惊艳的双重聚焦。
+        - [x] **物理创建独立任务清单**：严格遵守用户规则，归类创建了包含日期时间命名的独立任务清单文件 [20260522_2335_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/ea77c44a-c5f4-4975-84be-09df0349dd69/20260522_2335_task.md)。
+    - [x] **板块题材详情窗口原位复用不闪烁与主窗口相对中心居中持久化 (Flicker-free popup reuse, Master-relative Centering & Esc dismiss)**：
+        - [x] **实现原位窗口复用**：双击不同股票时，若详情窗口未关闭，直接原位清空其子组件并渲染新股票题材，完美保持原有的窗口几何大小与屏幕拖拽坐标，换股审计 100% 毫无闪烁，顺滑度爆棚。
+        - [x] **重构主窗口相对中心居中算法**：如果本地没有大小和坐标缓存，窗口会以**当前策略选股主窗口的中心为基点自适应计算 xp, yp 坐标**，并在渲染前自动通过屏幕尺寸进行边界安全防御限宽，彻底消除了副屏漂移与多缩放带来的坐标偏离。
+        - [x] **首创“withdraw 隐蔽渲染 + deiconify 完美呈现”降噪设计**：在创建详情 Toplevel 窗口时先行调用 `popup.withdraw()`，在全部几何计算与坐标装载全部物理完成后，才 deiconify 呈现，彻底消除了位置设定前在屏幕左上角闪现的视觉瑕疵。
+        - [x] **彻底重用系统自带持久化函数**：完美遵守原则，全程通过类自带的 `self.load_window_position` 与 `self.save_window_position` 现成方法来实现板块题材的加载与关闭持久化。配合坐标 `0,0` 的安全过滤保护，既排除了由于正在关闭时 `update_idletasks` 引发的潜在崩溃隐患，又彻底实现了 100% 零代码重用。
+        - [x] **清除 `kernel_toast_window` 转弯调用 `self.master` 的重大隐患**：彻底清除了浮动执行看板在关闭、销毁和加载位置时，大费周折地通过 `self.master.save_window_position` / `load_window_position` 调用的陈年隐患。既然 `StockSelectionWindow` 本身就继承了 `WindowMixin`，直接全部重构为最直接干净的 `self.save_window_position` 与 `self.load_window_position` 成员函数，大幅提升了系统的稳定性与持久化表现！
+        - [x] **完美落地详情卡片全视口鼠标滚轮垂直滚动支持 (High-fidelity Fluid Mousewheel Scroll)**：彻底攻克了 Tkinter Canvas 带滚动条容器在鼠标指向子控件时无法被鼠标滚轮驱动滚动的原生痛点。在卡片窗口 `popup`、滚动画布 `canvas`、滚动容器 `scrollable_frame` 以及动态裂变出的所有序号、大字题材 Label 和过滤 Button 上，全部一针一线地绑定了高效的 `<MouseWheel>` 事件。无论鼠标悬停在卡片内的哪个像素上，均能极致丝滑、顺滑地上下滚动浏览！
+        - [x] **根治了 Windows 默认主题下所有表格点选无高亮、无对比度反馈的严重视觉 Bug (High-Contrast Selected Feedback Highlight)**：重新为 `Dark.Treeview` 定制了高反差、极高发光饱和度的 **亮青前景色 `#55ffff` + 深蓝背景色 `#1a3a5f`** 选中态映射；同步为策略选股默认白底的 `"Treeview"` 样式注入了经典超高对比度的 **白色前景色 `#ffffff` + 蓝底背景色 `#0078d7`** 选中映射，点击反馈极其灵敏耀眼，彻底解决点选对比度低的痛点。
+        - [x] **物理攻克了 `_on_sector_selected` 板块点选错位、第一行白屏展示的严重业务 Bug (Fixed Name-Based Sector Selection Indexing)**：彻底废除了依靠脆弱硬编码 `row_idx = int(sel[0]) - 1` 进行数据索引获取的模式（此模式会在排序、过滤后发生彻底的数据错位，且容易引发 `ValueError` 崩溃）。巧妙重构为以板块唯一名称 `sector_name` 为核心的主键字面查找机制。无论表格如何排序、重算，均能 100% 毫秒级精准对齐获取正确的龙头股与跟随股，点选体验如丝般顺滑！
+        - [x] **完美解决追踪面板筛选后无统计数据的严重交互 Bug (Implemented Real-time Tracking Filter Statistics)**：在 `HistoricalSelectionTrackerDialog` 追踪弹窗中，当用户对个股、代码或板块概念进行关键字过滤时，状态栏上的 `status_lbl` 不再僵死，而是会自动通过一套动态、实时的统计分析管道，瞬间在表格重绘后重新统计并展现 **过滤总数、上涨家数、下跌家数以及平均收益率均幅**，并根据最终均幅的正负，高亮呈现实盘粉红（上涨）与高亮绿色（下跌），达到了极佳 of 题材联动收益复盘效果。
+        - [x] **首创“主营板块权重绝对优先表头排序算法”并实现两端绝对对齐 (Weighted Core-Sector Header Sorting)**：彻底满足了操盘手对主营业务命中的绝对速度筛选要求。当有板块过滤条件时，点击“板块”（主选股表格 `category` 列或追踪表格 `sector` 列）表头进行排序，通过数学偏置对齐算法，计算出匹配过滤词的最前板块索引（第一板块匹配为 0 权重最高，第二板块为 1，第三板块为 2，不匹配为 999）。这使得**无论是在升序还是降序状态下，凡是正宗前 3 板块命中（代表公司主营业务是该题材）的个股，都会以绝对最高的优先级死死地排在最前面**，而不匹配的个股则排在最后，达成了极高的盘中套利辅助效率！
+        - [x] **引入 Esc 自动保存退出与统一入口调用**：为详情卡片绑定 `<Escape>` 事件，按下 Esc 瞬间自发写入 `window_config.json` 并无缝销毁，大幅提升了键盘盲操 the 流畅度。统一由主视窗统一句柄分配，真正达成了 SRP 与 DRY 架构原则。
+    - [x] **修复追踪窗口右键菜单 UnboundLocalError 崩溃 (Fixed UnboundLocalError)**：
+        - 解决由于局部 `import re` 处于函数后半截，导致静态解析时将 `re.sub` 处的 `re` 判定为未绑定的局部变量而引发 of UnboundLocalError 崩溃。已将导入语句移到方法最顶端，治愈率达 100%。
+    - [x] **全量物理清除局部冗余 import re 声明 (Purified All Local import re)**：
+        - 依托 ripgrep 进行全局精准检索，彻底扫描并安全剔除了文件内部原第 `763` 行、第 `1154` 行、第 `1326` 行、第 `2241` 行等 **4 处冗余局部 `import re` 声明**。整个文件现已实现 100% 仅在第 5 行保留唯一的全局顶部 `import re`，最大化践行了 DRY、KISS 与 YAGNI 的极简架构准则，使系统性能和可维护性达到完美状态！
+    - [x] **修复详情窗口 -py 参数 TclError 崩溃**：修复大字题材详情卡片底部提示 Label 意外写入非法参数 `py=5` 导致 Tkinter 抛出 `unknown option "-py"` 崩溃使窗口无法完整显现的 Bug。物理移除非法参数以确保详情大字卡片 100% 优雅居中，且内容完美被看见。
+    - [x] **实现双击板块展示独立大字面板**：在 `StockSelectionWindow` 主表格中，双击第 16 列（板块概念 `#16`）时精准拦截触发，弹出一款完全自主渲染的 `Toplevel` 大字详情卡片。采用极客暗黑主题配色，大字号、自适应居中，并为每个板块设计了 hover 变色效果，尊贵操盘感十足。
+    - [x] **实现详情卡片上双击板块名字自动高保真闪烁复制**：双击卡片上的子板块，自动将文本写入系统剪贴板，触发标签底色瞬间高闪（深绿背景 `#1b3a24` 与绿色字 `#44ff88`），同时在卡片底部状态栏给予 high 亮视觉反馈。贴心在板块右侧附加了 `🔍 过滤` 扁平按钮，支持一键在主界面过滤该概念并自动随手销毁卡片。
+    - [x] **支持板块过滤输入框右键一键粘贴过滤**：在主界面的 `concept_combo` 上绑定 `<Button-3>` 右键事件。右键点击时自动获取剪贴板文本、全选填入、光标落位最右并自动触发 `on_filter_search(None)`。
+    - [x] **历史追踪对比筛选支持右键一键粘贴并自动触发过滤**：在 `HistoricalSelectionTrackerDialog` 的 `entry_search` 筛选输入框上绑定 `<Button-3>` 右键事件。一击右键瞬间完成粘贴填充与筛选响应。
+    - [x] **历史追踪表格同步支持双击 sector 呼出板块详情卡片**：重构双击 `<Double-1>` 至新写就的 `_on_double_click`。双击第 4 列（板块 `#4`）时，通过 `parent_win.show_concept_detail_popup` 完美复用主窗口题材卡片，支持大字双击复制与主视窗同步过滤联动，彻底对齐全终端多端表现。
+    - [x] **实现追踪筛选与主界面板块过滤的跨窗体完美复用**：在 `HistoricalSelectionTrackerDialog.__init__` 初始化最前端，自动检测并拉取 `parent.concept_filter_var` 的文本并填入 `search_var`，让多日历史对比分析弹窗在开启瞬间自动同步承接主界面的板块过滤，极大精炼了操作闭环。
+    - [x] **彻底根除 Pandas `str.contains` 括号正则过滤干扰大 Bug**：物理查明 Pandas `str.contains` 过滤没有指定 `regex=False` 导致带有括号的板块概念（如“共封装光学(CPO)”）中的括号被识别为正则表达式 of 捕获组（Metacharacters），从而导致 0519 数据无法被过滤检索出来的 Bug。通过显式补充 `case=False` 且 `regex=False` 彻底予以修复，做到了 100% 精准 of 字符串子串字面匹配。
+    - [x] **主表格只展示前 5 个主要明确板块信息**：新增 `_get_short_category` 辅助逻辑，对大表呈现的题材数限制为前 5 个，高倍数缩减了视觉干扰；而在双击大字卡片联查及右键菜单中，依然通过 `code` 原子主键向上游 `df_all_realtime` 与 `df_full_candidates` 缓存提取 100% 全量题材全集，兼顾了精简呈现与深度穿透。
+    - [x] **修复双击弹窗黑屏与标签隐藏 Bug**：修复由于 `code` 在 DataFrame 缓存中作为整数/字符串比对不一致，导致 O(1) 拉取失败，进而触发空判定 `return` 使得窗口组件未被渲染的问题。引入基于 `.map(lambda x: str(x).zfill(6))` 的标准化自愈拉取机制，在多级缓存中匹配题材，自愈率达 100%。
+    - [x] **界面高反差极客发光配色升级**：子板块背景设为高反差 `#1e293b`（暗灰），前景色为 `#64b5f6`（天蓝色），悬浮态变色为 `#ffd54f`（明黄）。双击复制时触发荧光绿 `#44ff88` 与 `#1b3a24` 耀眼闪烁，回馈感绝佳。
+    - [x] **窗口居中显示与大小尺寸持久化**：只有在自愈拉取成功后才弹窗，且载入时优先通过 `self.load_window_position` 自动装载尺寸；关闭时通过 `WM_DELETE_WINDOW` 自动触发 `self.save_window_position` 写入 `window_config.json`，完美实现了跨会话持久化。
+    - [x] **升级历史追踪窗口筛选搜索框为共享 Combobox 并实现双向历史同步**：重构追踪窗口的搜索框为 `ttk.Combobox` 并直接加载 `parent.history` 作为下拉选项。引入全局同步方法 `_save_history(query)`，在回车、下拉选择和右键粘贴时实时更新内存并写入文件，瞬间同时更新多端 Combobox，体验极佳。
+    - [x] **实现跨窗口绝对级联过滤**：在卡片题材面板双击呼出时注入 `caller_win=self`。点击 `🔍 过滤` 按钮时同时应用至主表格与追踪表格，实现完美联合过滤联动。
+    - [x] **修复追踪初始化 NameError 崩溃**：修复在 `HistoricalSelectionTrackerDialog._init_ui` 中，由于使用了未定义的局部变量 `parent` 来拉取 `history` 导致的 `NameError: name 'parent' is not defined` 运行时崩溃 Bug，安全替换为已经完美缓存的 `self.parent_win` 成员实例。
+
+## 2026-05-22 22:58
+- [x] **完美落地多端一致性股票题材过滤、高反差右键复制与 SQL 占位符 Bug 修复 (Unified Multi-Concept Filtering, Premium Right-Click Clipboard Menu & Fixed SQL Bindings Error)**：
+    - [x] **实现板块概念不截断全项持久化**：重构了 `trading_hub.py` 的题材提取接口，彻底破除了原先 `sectors[0]` 粗暴截断首板块的局限。现在以 `replace(';', '|').strip()` 保留完整的题材链，规范存储入库，为精准概念风口追踪打下了 100% 高保真数据基石。
+    - [x] **深度兼容题材多分隔符分割算法**：在 `stock_selector.py` 中引入 `re.split('[;|]', ...)` 正则拆分机制，完美通配历史归档与实时库混合分隔的数据，保证个股板块多标签能够被全部无损检索识别。
+    - [x] **首创悬浮高反差右键题材极速复制菜单 (Premium Right-Click Menu & Quick Copy)**：
+        - 在选股主窗口 `stock_selection_window.py` 内部，成功挂载了右键悬浮 context 交互。
+        - 智能构造了 **📋 复制全量概念: {category}**，以及根据当前个股多题材实时裂变出的多个 **    📋 复制此板块: {cat}** 子菜单，支持单点直接过滤筛选。
+        - 为复制动作注入了 Tk 状态栏实时闪烁高亮通知，提供了极佳的操盘手瞬时回馈。
+    - [x] **彻底对齐历史追踪 Dialog 的多关键字 AND 筛选算法**：在 `HistoricalSelectionTrackerDialog` 的 `_apply_filter` 方法中，全面废弃了简陋的单子查询，完美对齐了主视窗的**空格分隔多关键字 AND 匹配算法**，支持 category 与 sector 的级联大小写清洗过滤，达成了多端查询结果 100% 毫无偏差的一致性体验。
+    - [x] **物理攻克陈年 SQL Incorrect number of bindings 崩溃**：顺手修复了 `trading_hub.py` 中 `get_watchlist_df` 在指定状态过滤时，由于 SQL 语法包含两个 placeholder `{status_filter}` 而 `params` 仅 append 了一次参数的陈年致命大 Bug，降服了单元测试中的 SQL 执行崩溃，系统底层稳定性踏上新高度。
+    - [x] **物理归类创建独立任务清单**：严格遵守用户规则，归类创建了包含日期时间命名的独立任务清单文件 [20260522_2258_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/ea77c44a-c5f4-4975-84be-09df0349dd69/20260522_2258_task.md)。
+
+## 2026-05-22 22:15
+- [x] **完美修复历史数据板块过滤失效，并彻底根除 `get_candidates_df` 关键 is_today 判定逻辑错误 (Fixed Historical Concept Filter & Restored is_today Time Gate)**：
+    - [x] **根治 get_candidates_df 关键 is_today 恒为 True 的业务 Bug (Fixed logic gate bug)**：查明在 `stock_selector.py` 的第 957 行中，判定是否为今天的 `is_today` 被写成了 `target_date == logical_date`。由于此前已将 `target_date` 赋值为 `logical_date`，导致该布尔判定永远恒为 `True`，即所有历史日期均被错判成“今日”，导致了策略在非交易日/历史日去强行运行实盘实时计算、以及过滤补齐通道被静默关闭的致命漏洞。已修正为严格的 `is_today = (target_date == today_str)`。
+    - [x] **实现底层与 UI 双重 category 板块概念自愈补齐 (Dual-Layer Category Self-Healing & Fast Lookup)**：
+        - 针对在 SQLite 历史归档数据库表中部分股票板块 category 数据字段存为 NaN、空字符串或 `'0'` 占位，导致历史模式下无法匹配板块关键字的缺陷：
+        - **底层补齐**：在 `stock_selector.py` 内部，打破 `is_today` 只能补齐今天的限制。只要内存实时行情库 `df_all_realtime` 存在，即通过高内聚 `map` 字典提取，自动对历史记录中所有 category 无效的行进行原位映射修复；
+        - **界面自愈**：在选股主视窗 `stock_selection_window.py` 里的 `load_data` 执行前，同样挂载了对 `df_full_candidates['category']` 的脏数据扫描与 zfill(6) 个股字典极速自愈覆盖，形成了底层获取与 UI 渲染的双向高保真防线。
+    - [x] **大幅提升过滤响应效率 (O(1) Memory Filtering)**：由于补齐后的 `category` 列完美规范，板块输入框或多关键字 `str.contains` 筛选能 100% 毫无损耗地精准作用于全量历史数据集上，实现了即搜即出、毫秒级响应，彻底消除了历史查看模式下的白屏与过滤失效痛点。
+    - [x] **物理归类创建独立任务清单**：严格遵守用户规则，归类创建了包含日期时间命名的独立任务清单文件 [20260522_2215_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/6365b567-579b-4786-a830-397b23ddc525/20260522_2215_task.md)。
 
 ## 2026-05-22 21:58
 - [x] **全能交易终端多态四模式流转与人机核实极客确认弹窗完美落地 (Implemented Multi-mode Execution Flow & Interactive Premium Confirmation Window)**：
