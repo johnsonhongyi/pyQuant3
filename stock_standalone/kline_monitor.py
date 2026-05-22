@@ -43,7 +43,7 @@ class KLineMonitor(tk.Toplevel):
         self.df_cache = None
 
         self.title("K线趋势实时监控")
-        self.geometry("760x460")
+        self.geometry("860x460")
         self._ui_update_pending = False
         # ---- 状态栏 ----
         self.status_frame = tk.Frame(self, bg="#eee")
@@ -91,7 +91,7 @@ class KLineMonitor(tk.Toplevel):
 
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("code", "name", "now", "percent", "volume", "signal", "Rank", "score", "red", "emotion"),
+            columns=("code", "name", "now", "percent", "volume", "dff", "dff2", "signal", "Rank", "score", "red", "emotion"),
             show="headings",
             height=20
         )
@@ -110,8 +110,10 @@ class KLineMonitor(tk.Toplevel):
             ("code", "代码", 40),
             ("name", "名称", 60),
             ("now", "当前价", 30),
-            ("percent", "涨幅",30),
+            ("percent", "涨幅", 30),
             ("volume", "量比", 30),
+            ("dff", "DFF", 35),
+            ("dff2", "DFF2", 35),
             ("signal", "信号", 60),
             ("Rank", "Rank", 30),
             ("score", "评分", 30),
@@ -184,7 +186,7 @@ class KLineMonitor(tk.Toplevel):
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=860, default_height=560)
         except Exception:
-            self.geometry("760x460")
+            self.geometry("860x460")
 
     def _do_dna_audit(self) -> None:
         """🚀 [SMART-ROUTING] 智能选区路由算法：对齐全局审计逻辑"""
@@ -572,6 +574,8 @@ class KLineMonitor(tk.Toplevel):
         has_percent = "percent" in df_cols
         has_per1d = "per1d" in df_cols
         has_volume = "volume" in df_cols
+        has_dff = "dff" in df_cols
+        has_dff2 = "dff2" in df_cols
         has_Rank = "Rank" in df_cols
         has_score = "score" in df_cols
         has_red = "red" in df_cols
@@ -633,6 +637,8 @@ class KLineMonitor(tk.Toplevel):
                 "now": now_price,
                 "percent": r["percent"] if has_percent else (r["per1d"] if has_per1d else 0),
                 "volume": r["volume"] if has_volume else 0,
+                "dff": r["dff"] if has_dff else 0,
+                "dff2": r["dff2"] if has_dff2 else 0,
                 "display_signal": display_signal,
                 "Rank": r["Rank"] if has_Rank else 0,
                 "score": r["score"] if has_score else 0,
@@ -654,6 +660,16 @@ class KLineMonitor(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
 
         for row in processed_data:
+            try:
+                dff_val = float(row["dff"]) if row["dff"] not in (None, "", "nan") else 0.0
+            except (ValueError, TypeError):
+                dff_val = 0.0
+
+            try:
+                dff2_val = float(row["dff2"]) if row["dff2"] not in (None, "", "nan") else 0.0
+            except (ValueError, TypeError):
+                dff2_val = 0.0
+
             self.tree.insert(
                 "", tk.END,
                 values=(
@@ -662,6 +678,8 @@ class KLineMonitor(tk.Toplevel):
                     f"{row['now']:.2f}",
                     f"{row['percent']:.2f}",
                     f"{row['volume']:.1f}",
+                    f"{dff_val:.2f}",
+                    f"{dff2_val:.2f}",
                     row["display_signal"],
                     f"{row['Rank']}",
                     f"{row['score']}",
@@ -767,7 +785,7 @@ class KLineMonitor(tk.Toplevel):
                     final_query = ensure_parentheses_balanced(final_query)
                     query_engine = 'python' if any('index.' in c.lower() for c in valid_conditions) else 'numexpr'
 
-                    for col in ["score", "percent", "volume", "now", "Rank"]:
+                    for col in ["score", "percent", "volume", "now", "Rank", "dff", "dff2"]:
                         if col in df.columns:
                             df[col] = pd.to_numeric(df[col], errors="coerce")
 
