@@ -369,14 +369,14 @@ class Sina:
             # 但不加入 `suspended_codes` 全局黑名单，给“晚开盘/冷门票”留出观察时间。
             # 09:45 之后仍无任何报价成交的票，才视为确实停牌，永久加入黑名单以节省后续 IO。
             if now_int > 945:
-                log.info(f"检测到停牌股: {len(new_suspended)} 只, 加入 Session 禁刷列表")
+                log.debug(f"检测到停牌股: {len(new_suspended)} 只, 加入 Session 禁刷列表")
                 excluded = cct.GlobalValues().getkey('suspended_codes') or []
                 excluded.extend(new_suspended)
                 cct.GlobalValues().setkey('suspended_codes', list(set(excluded)))
             else:
                 # 集合竞价期间(09:15-09:25)通常不剔除，除非完全没数据
                 # 这里我们选择在 09:45 前只做临时剔除
-                log.info(f"活跃保护期（09:45前）: 暂时过滤 {len(new_suspended)} 只无成交/无报价股票，不加入黑名单")
+                log.debug(f"活跃保护期（09:45前）: 暂时过滤 {len(new_suspended)} 只无成交/无报价股票，不加入黑名单")
             
             df = df.drop(new_suspended)
             
@@ -438,7 +438,7 @@ class Sina:
             # 核心修正：如果请求包含关键指数（999999），但载入的缓存中缺失该代码，则强制执行实时抓取以同步 HDF5
             if h5 is not None and len(h5) > 0:
                 if '999999' not in h5.index.tolist():
-                    log.info("Sina.all: Cache missing index 999999, forcing live refresh to sync HDF5.")
+                    log.debug("Sina.all: Cache missing index 999999, forcing live refresh to sync HDF5.")
                     h5 = None
 
             if h5 is not None and len(h5) > 0:
@@ -485,21 +485,21 @@ class Sina:
                             today_str = now_dt.strftime('%Y-%m-%d')
                             today_ratio = (h5['dt'] == today_str).mean()
                             if today_ratio < 0.96:
-                                 log.info(f"Sina.all: Cache freshness uneven (Today ratio: {today_ratio:.2%}), forcing full refresh.")
+                                 log.debug(f"Sina.all: Cache freshness uneven (Today ratio: {today_ratio:.2%}), forcing full refresh.")
                                  is_today_data = False
 
                         normal_return_hdf = (not work_time_now) or (is_trade_day and l_time < sina_limit_time_int and is_today_data)
                         return_hdf_status = pre_open_force_hdf or pre_open_lock or normal_return_hdf
                         
                         if ((auction_time and l_time < sina_limit_time_int) or (not auction_time and return_hdf_status)):
-                            log.info("Return HDF5 data early (recent:%s)" % self.format_age(l_time))
+                            log.debug("Return HDF5 data early (recent:%s)" % self.format_age(l_time))
                             if self.agg_cache.getkey('agg_metrics') is None or self.agg_cache.getkey('agg_metrics').empty:
                                 self.agg_cache.setkey('agg_metrics', h5.copy())
                             return self._sanitize_indicators(self.combine_lastbuy(h5))
 
-                log.info(f"HDF5 exists but not recent enough or quality poor, continuing to fetch...")
+                log.debug(f"HDF5 exists but not recent enough or quality poor, continuing to fetch...")
             else:
-                log.info("HDF5 data missing or empty in unified cache")
+                log.debug("HDF5 data missing or empty in unified cache")
 
             # 2. 从网络获取最新数据
             self.stock_with_exchange_list = [cct.code_to_symbol(code) for code in self.stock_codes]
@@ -537,7 +537,7 @@ class Sina:
                 
                 h5_hist = self._load_hdf_hist_unified(debug=False)
                 if cache_needs_rebuild:
-                    log.info("Rebuilding aggregator cache metrics from MultiIndex HDF5...")
+                    log.debug("Rebuilding aggregator cache metrics from MultiIndex HDF5...")
                     df_final = self._rebuild_agg_cache(h5_hist, df)
                 else:
                     self._update_agg_cache(df, h5_hist)
@@ -557,7 +557,7 @@ class Sina:
                 if 'ticktime' in df_final.columns:
                     df_final.loc[:, 'ticktime'] = df_final['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
 
-                log.info("Sina.all consolidated finalized.")
+                log.debug("Sina.all consolidated finalized.")
                 df = df_final
             else:
                 df = self._filter_suspended(df) if df is not None else pd.DataFrame()
@@ -595,7 +595,7 @@ class Sina:
                         mi_df = mi_df.set_index(['code', 'ticktime'])
                         h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
                         self.agg_cache.setkey('last_mi_save_time', now_time)
-                        log.info("Saved MultiIndex history (sync) to %s (len: %d)" % (h5_mi_fname, len(mi_df)))
+                        log.debug("Saved MultiIndex history (sync) to %s (len: %d)" % (h5_mi_fname, len(mi_df)))
 
             # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存
             if not self.readonly:
@@ -631,7 +631,7 @@ class Sina:
             new_agg['nlow'] = new_agg[['nlow', 'open']].min(axis=1)
             new_agg['nhigh'] = new_agg[['nhigh', 'open']].max(axis=1)
             self.agg_cache.setkey('agg_metrics', new_agg)
-            log.info("Initialized AggregatorCache with %d codes (OpenGuard included)" % len(new_agg))
+            log.debug("Initialized AggregatorCache with %d codes (OpenGuard included)" % len(new_agg))
             return
             
         if not agg_metrics.index.dtype == object:
@@ -682,7 +682,7 @@ class Sina:
             if col in df_latest.columns:
                 agg_metrics.loc[common_codes, col] = df_latest.loc[common_codes, col].fillna(agg_metrics.loc[common_codes, col])
 
-        log.info(f'update_agg_cache df_latest sync done, duration:{time.time()-time_h5_hist:.1f}')
+        log.debug(f'update_agg_cache df_latest sync done, duration:{time.time()-time_h5_hist:.1f}')
 
         new_codes = stats.index.difference(agg_metrics.index)
         if len(new_codes) > 0:
@@ -747,7 +747,7 @@ class Sina:
             # cct.print_timing_summary()
             # agg_df['nclose'] = self._calc_intraday_vwap(h5_hist, agg_df, startime, endtime)
 
-            log.info(f'get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
+            log.debug(f'get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
         else:
             agg_df = pd.DataFrame(columns=['nlow', 'nhigh', 'nclose', 'nstd'])
 
@@ -839,7 +839,7 @@ class Sina:
         mask_nclose_fix = rebuild_df['nclose'].fillna(0) <= 0
         if mask_nclose_fix.any():
             fix_codes = rebuild_df.index[mask_nclose_fix].tolist()
-            log.info(f"Targeting {len(fix_codes)} codes for nclose web-backfill...")
+            log.debug(f"Targeting {len(fix_codes)} codes for nclose web-backfill...")
             for i, code in enumerate(fix_codes):
                 if i > 50: break # 防止重启延迟过高
                 web_vwap = self._fetch_sina_intraday_kline(code)
@@ -859,7 +859,7 @@ class Sina:
              rebuild_df['nstd'] = np.nan
 
         self.agg_cache.setkey('agg_metrics', rebuild_df)
-        log.info("Rebuild agg cache. size:%s time:%.2f" % (len(rebuild_df), time.time() - time_s))
+        log.debug("Rebuild agg cache. size:%s time:%.2f" % (len(rebuild_df), time.time() - time_s))
         return cct.combine_dataFrame(df_current, rebuild_df)
 
     def _fetch_sina_intraday_kline(self, code: str, target_time: str = '10:30:00') -> Optional[float]:
@@ -954,11 +954,11 @@ class Sina:
                 c_time = cached_item.get('time', 0)
                 if c_df is not None and not c_df.empty:
                     if not cct.get_work_time() or (time.time() - c_time < sina_limit_time_int):
-                        log.info(f"Sina.market({market}): Returning class-level shared cache (Age: {time.time()-c_time:.1f}s)")
+                        log.debug(f"Sina.market({market}): Returning class-level shared cache (Age: {time.time()-c_time:.1f}s)")
                         return c_df
 
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=sina_limit_time_int)
-            log.info("h5a market: %s stocksTime:%0.2f" % (market, time.time() - time_s))
+            log.debug("h5a market: %s stocksTime:%0.2f" % (market, time.time() - time_s))
 
             if h5 is not None and not h5.empty:
                 # 获取第一个非零 ticktime 逻辑保持不变
@@ -1001,7 +1001,7 @@ class Sina:
                                 today_ratio = (h5['dt'] == today_str).mean()
                                 if today_ratio < 0.99:
                                     valid_date = False
-                                    log.info(f"Sina.market({market}): Stale date detected in cache (Ratio: {today_ratio:.2%}), ignoring HDF.")
+                                    log.debug(f"Sina.market({market}): Stale date detected in cache (Ratio: {today_ratio:.2%}), ignoring HDF.")
                         
                         if valid_date and ((o_time_int >= 1500 and ticktime >= 1500) or (o_time_int < 1500 and ticktime < 1500)):
                             h5 = self.combine_lastbuy(h5)
@@ -1071,7 +1071,7 @@ class Sina:
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
         now_int = cct.get_now_time_int()
         if cache_needs_rebuild or (self.market_type == 'all' and 925 < now_int <= 1030):
-            log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
+            log.debug("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
             h5_mi_table = 'all_' + str(l_limit_time)
@@ -1124,7 +1124,7 @@ class Sina:
                 if df_final is not None and not df_final.empty:
                     df_final.loc[:, 'ticktime'] = df_final['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
 
-        log.info("Sina.all (optimized) total time:%0.2f" % (time.time() - time_s))
+        log.debug("Sina.all (optimized) total time:%0.2f" % (time.time() - time_s))
         if df_final is None or df_final.empty:
              return pd.DataFrame()
              
@@ -1175,7 +1175,7 @@ class Sina:
                     if self.market_type is not None and self.market_type == 'all' and not self.readonly:
                         h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
                         self.agg_cache.setkey('last_mi_save_time', now_time)
-                        log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
+                        log.debug("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
 
         return df_final
 

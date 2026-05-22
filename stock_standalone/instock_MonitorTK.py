@@ -896,20 +896,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #     #     self._schedule_after(30000, lambda: self.open_visualizer(target_code))
         #     self._schedule_after(45000, lambda: self.open_visualizer('000001'))
             
-        # ⭐ [GIL_MONITOR] 安装 Tk GIL 呼吸器（UI心跳 + Watchdog 卡死自动诊断）
-        # 一次接入，卡死时自动 dump 线程栈 + 队列压力，无需手动 F12
-        try:
-            from tk_gil_monitor import install as _install_gil_monitor
-            self._gil_monitor = _install_gil_monitor(
-                root=self,
-                app=self,
-                freeze_threshold=3.0,   # >3s 无心跳 = FROZEN，自动 dump
-                enabled=True,
-            )
-            logger.info("✅ [GilMonitor] Tk GIL 呼吸器已启动 (freeze_threshold=3s)")
-        except Exception as _e:
-            logger.warning(f"[GilMonitor] 安装失败（无影响主流程）: {_e}")
-            self._gil_monitor = None
+        # ⭐ [NEW] 前置开关保护：仅在 cct.CFG.gil_monitor 开启时，才拉起 Tk 呼吸心跳与 Watchdog 线程，做到真正零空转开销
+        self._gil_monitor = None
+        if getattr(cct, 'CFG', None) and getattr(cct.CFG, 'gil_monitor', 0) > 0:
+            try:
+                from tk_gil_monitor import install as _install_gil_monitor
+                self._gil_monitor = _install_gil_monitor(
+                    root=self,
+                    app=self,
+                    freeze_threshold=3.0,   # >3s 无心跳 = FROZEN，自动 dump
+                    enabled=True,
+                )
+                logger.info("✅ [GilMonitor] Tk GIL 呼吸器已启动 (freeze_threshold=3s)")
+            except Exception as _e:
+                logger.warning(f"[GilMonitor] 安装失败（无影响主流程）: {_e}")
+        else:
+            logger.debug("[GilMonitor] CFG.gil_monitor 未开启，跳过呼吸器及后台 Watchdog 线程加载")
 
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
