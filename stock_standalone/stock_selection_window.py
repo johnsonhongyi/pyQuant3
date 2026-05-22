@@ -11,6 +11,7 @@ from typing import Optional, Any, TYPE_CHECKING
 from collections import Counter
 import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 import logging
 from JohnsonUtil import commonTips as cct
 logger = logging.getLogger(__name__)
@@ -131,9 +132,38 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # 绑定关闭事件以保存位置
         self.protocol("WM_DELETE_WINDOW", lambda: self._on_close(window_id))
+        
+        # 🚀 [NEW] 延时 250ms 等待 UI 充分绘制渲染完毕后，高保真恢复板块聚焦与决策队列 sash 窗格分割高度
+        self.after(250, self._restore_sash_positions)
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        # 🚀 [NEW] 保存板块聚焦和实时决策的 sash 窗格分割高度位置
+        try:
+            self._save_sash_positions()
+        except Exception as e:
+            logger.error(f"[sash_positions] Save failed: {e}")
+        # [NEW] 关闭并保存浮动交易看板
+        try:
+            win = getattr(self, "_kernel_toast_win", None)
+            if win and win.winfo_exists():
+                if getattr(self, "master", None) and hasattr(self.master, "save_window_position"):
+                    try:
+                        self.master.save_window_position(win, "kernel_toast_window")
+                    except Exception:
+                        pass
+                win.destroy()
+        except Exception:
+            pass
+
+        # [NEW] 停止高亮行慢闪烁呼吸定时器
+        try:
+            blink_id = getattr(self, "_kernel_blink_id", None)
+            if blink_id:
+                self.after_cancel(blink_id)
+        except Exception:
+            pass
+
         # ✅ [FIX] 清除主窗口中的引用，防止对象已销毁但引用依然存在的异常
         if hasattr(self.master, '_stock_selection_win'):
             self.master._stock_selection_win = None
@@ -168,6 +198,71 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self.tree.selection_set(selection)
             except: pass
 
+    def _save_sash_positions(self):
+        """保存板块聚焦和实时决策的 sash 垂直高度分割坐标（按 DPI 比例还原）"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            # 复用 window_mixin.py 中导入的 WINDOW_CONFIG_FILE 配置文件常量
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
+            sash_pos = {}
+            if hasattr(self, '_sector_paned'):
+                try:
+                    sash_pos['sector_y'] = int(self._sector_paned.sash_coord(0)[1] / scale)
+                except Exception:
+                    pass
+            if hasattr(self, '_decision_paned'):
+                try:
+                    sash_pos['decision_y'] = int(self._decision_paned.sash_coord(0)[1] / scale)
+                except Exception:
+                    pass
+            
+            data = {}
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            
+            data['sash_positions'] = sash_pos
+            
+            tmp_file = config_file_path + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp_file, config_file_path)
+            logger.debug(f"[sash_positions] Saved: {sash_pos}")
+        except Exception as e:
+            logger.error(f"[sash_positions] Save failed: {e}")
+
+    def _restore_sash_positions(self):
+        """从配置文件加载并高保真还原板块聚焦和实时决策的 sash 分割线位置（自适应 DPI）"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                sash_pos = data.get('sash_positions', {})
+                if 'sector_y' in sash_pos and hasattr(self, '_sector_paned'):
+                    try:
+                        y = int(sash_pos['sector_y'] * scale)
+                        x = self._sector_paned.sash_coord(0)[0]
+                        self._sector_paned.sash_place(0, x, y)
+                        logger.debug(f"[sash_positions] Sector restored to y={y}")
+                    except Exception as e:
+                        logger.debug(f"[sash_positions] Sector restore fail: {e}")
+                        
+                if 'decision_y' in sash_pos and hasattr(self, '_decision_paned'):
+                    try:
+                        y = int(sash_pos['decision_y'] * scale)
+                        x = self._decision_paned.sash_coord(0)[0]
+                        self._decision_paned.sash_place(0, x, y)
+                        logger.debug(f"[sash_positions] Decision restored to y={y}")
+                    except Exception as e:
+                        logger.debug(f"[sash_positions] Decision restore fail: {e}")
+        except Exception as e:
+            logger.error(f"[sash_positions] Restore failed: {e}")
+
     def _center_window(self):
         self.update_idletasks()
         width = self.winfo_width()
@@ -182,7 +277,26 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # 减小滚动条宽度 (12 像素比较适中)
         style.configure("Small.Vertical.TScrollbar", width=12)
         style.configure("Small.Horizontal.TScrollbar", width=12)
-
+        
+        # 针对 Windows 默认主题下 Treeview 的原生缺陷进行精准修复，专门解锁默认 Treeview 与 Dark.Treeview 的 tag_configure 背景渲染且不改变全局主题
+        try:
+            # 极客暗黑夜色样式
+            style.configure("Dark.Treeview", background="#0c101b", fieldbackground="#0c101b", foreground="#ffffff")
+            
+            def fixed_map(style_name, option):
+                return [elm for elm in style.map(style_name, query_opt=option) if elm[:2] != ("!disabled", "!selected")]
+                
+            style.map("Dark.Treeview",
+                      foreground=fixed_map("Dark.Treeview", "foreground"),
+                      background=fixed_map("Dark.Treeview", "background"))
+                      
+            # 对默认的 Treeview 样式进行解锁，使原生白底表格在 Windows 主题下能正确渲染 tag_configure 的行背景（浅绿/浅红），绝不退化为黑白灰
+            style.map("Treeview",
+                      foreground=fixed_map("Treeview", "foreground"),
+                      background=fixed_map("Treeview", "background"))
+        except Exception:
+            pass
+        
         # --- Toolbar ---
         toolbar = tk.Frame(self, bd=1, relief="raised")
         toolbar.pack(fill="x", padx=5, pady=5)
@@ -194,8 +308,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.hotspots_frame.pack(side="left")
         # Initial update handled in load_data or explicit call if needed (load_data is called at end of init)
         
+        # 🔍 Multi-day Tracking Button
+        tk.Button(toolbar, text="🔍 追踪", command=self.on_history_track_clicked, bg="#2a3a4a", fg="#ff9900", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
+
         # Concept Filter
-        tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
+        tk.Label(toolbar, text="板块", font=("Arial", 10)).pack(side="left", padx=2)
         tk.Button(toolbar, text="🧹", command=self.clear_filter, width=2).pack(side="left", padx=1)
         self.concept_filter_var: tk.StringVar = tk.StringVar()
         self.concept_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.concept_filter_var, width=10)
@@ -244,8 +361,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
 
-        # 🔍 Multi-day Tracking Button
-        tk.Button(toolbar, text="🔍 追踪", command=self.on_history_track_clicked, bg="#2a3a4a", fg="#ff9900", font=("Arial", 10, "bold")).pack(side="left", padx=5, pady=5)
+
 
 
         tk.Button(toolbar, text="✅[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=1)
@@ -1464,7 +1580,7 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="Custom.Treeview")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
@@ -1486,7 +1602,7 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         # Tags
         self.tree.tag_configure("plus", foreground="#e91e63", font=("Arial", 9, "bold")) # 红涨
         self.tree.tag_configure("minus", foreground="#388e3c", font=("Arial", 9, "bold")) # 绿跌
-        self.tree.tag_configure("high_hits", background="#e8f5e9") # 高命中背景
+        self.tree.tag_configure("high_hits", background="#13261a", foreground="#44ff88") # 高命中暗绿底色
         
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self._on_select(e, force_link=True))
@@ -1627,14 +1743,14 @@ def _init_sector_tab(self, parent: tk.Frame):
     ).pack(side="right", padx=8)
 
     # ── 板块热力排行（上半区）────────────────────────────────────────────────
-    paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
-    paned.pack(fill="both", expand=True)
+    self._sector_paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
+    self._sector_paned.pack(fill="both", expand=True)
 
-    top_frame = tk.Frame(paned, bg="#0e1621")
-    paned.add(top_frame, height=300)
+    top_frame = tk.Frame(self._sector_paned, bg="#0e1621")
+    self._sector_paned.add(top_frame, height=300)
 
     sector_cols = ("rank", "name", "heat", "bid_score", "zt_count", "leader_code", "leader_name", "leader_pct", "followers")
-    self._sector_tree = ttk.Treeview(top_frame, columns=sector_cols, show="headings", height=8)
+    self._sector_tree = ttk.Treeview(top_frame, columns=sector_cols, show="headings", height=8, style="Dark.Treeview")
 
     sec_headers = {
         "rank": "排名", "name": "板块名称", "heat": "热力分",
@@ -1665,8 +1781,8 @@ def _init_sector_tab(self, parent: tk.Frame):
     self._sector_tree.bind("<<TreeviewSelect>>", self._on_sector_selected)
 
     # ── 成员股详情（下半区）──────────────────────────────────────────────────
-    bottom_frame = tk.Frame(paned, bg="#0e1621")
-    paned.add(bottom_frame, height=200)
+    bottom_frame = tk.Frame(self._sector_paned, bg="#0e1621")
+    self._sector_paned.add(bottom_frame, height=200)
 
     self._sector_detail_lbl = tk.Label(
         bottom_frame, text="← 点击板块查看成员股",
@@ -1676,7 +1792,7 @@ def _init_sector_tab(self, parent: tk.Frame):
     self._sector_detail_lbl.pack(fill="x", padx=5, pady=2)
 
     member_cols = ("code", "name", "role", "percent", "bid_score", "vol_ratio", "pullback_signal")
-    self._member_tree = ttk.Treeview(bottom_frame, columns=member_cols, show="headings", height=5)
+    self._member_tree = ttk.Treeview(bottom_frame, columns=member_cols, show="headings", height=5, style="Dark.Treeview")
 
     mem_headers = {
         "code": "代码", "name": "名称", "role": "角色",
@@ -1720,6 +1836,11 @@ def _init_decision_tab(self, parent: tk.Frame):
         bg="#1a0010", fg="#aaaaaa", font=("Arial", 9, "bold")
     )
     self._risk_status_lbl.pack(side="left", padx=8)
+    self._kernel_status_lbl = tk.Label(
+        risk_bar, text="Kernel: idle",
+        bg="#1a0010", fg="#55ffff", font=("Arial", 9, "bold")
+    )
+    self._kernel_status_lbl.pack(side="left", padx=12)
 
     btn_frame = tk.Frame(risk_bar, bg="#1a0010")
     btn_frame.pack(side="right", padx=5)
@@ -1731,18 +1852,18 @@ def _init_decision_tab(self, parent: tk.Frame):
               command=self._sell_all_positions).pack(side="left", padx=2)
 
     # ── 主体分栏 ─────────────────────────────────────────────────────────────
-    paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
-    paned.pack(fill="both", expand=True)
+    self._decision_paned = tk.PanedWindow(parent, orient="vertical", sashrelief="raised", sashwidth=5)
+    self._decision_paned.pack(fill="both", expand=True)
 
     # 上半：决策信号队列
-    signal_frame = tk.LabelFrame(paned, text="  🎯 实时买点决策队列（按优先级排序）  ",
+    signal_frame = tk.LabelFrame(self._decision_paned, text="  🎯 实时买点决策队列（按优先级排序）  ",
                                   bg="#0a0f1a", fg="#00cc88", font=("Arial", 9, "bold"))
-    paned.add(signal_frame, height=300)
+    self._decision_paned.add(signal_frame, height=300)
 
     sig_cols = ("time", "priority", "kernel_action", "kernel_size", "kernel_conf", "kernel_risk",
                 "code", "name", "sector", "signal_type", "suggest_price",
                 "current_price", "change_pct", "sector_heat", "hits", "reason", "status")
-    self._signal_tree = ttk.Treeview(signal_frame, columns=sig_cols, show="headings", height=7)
+    self._signal_tree = ttk.Treeview(signal_frame, columns=sig_cols, show="headings", height=7, style="Dark.Treeview")
 
     sig_headers = {
         "time": "时间", "priority": "优先级", "code": "代码", "name": "名称",
@@ -1775,6 +1896,10 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._signal_tree.tag_configure("medium", background="#001a2a", foreground="#44aaff") # 中
     self._signal_tree.tag_configure("done", background="#1a1a1a", foreground="#555555")   # 已完结
 
+    self._signal_tree.tag_configure("kernel_exec", background="#003a24", foreground="#66ffcc")
+    self._signal_tree.tag_configure("kernel_block", background="#3a2600", foreground="#ffcc66")
+    self._signal_tree.tag_configure("kernel_error", background="#3a0000", foreground="#ff7777")
+
     sig_vsb = ttk.Scrollbar(signal_frame, orient="vertical", command=self._signal_tree.yview)
     self._signal_tree.configure(yscroll=sig_vsb.set)
     self._signal_tree.grid(row=0, column=0, sticky="nsew")
@@ -1788,6 +1913,12 @@ def _init_decision_tab(self, parent: tk.Frame):
     tk.Button(btn_row, text="📈 模拟买入（选中）", bg="#003a00", fg="#44ff88",
               font=("Arial", 9, "bold"), relief="flat", pady=2,
               command=self._mock_buy_selected).pack(side="left", padx=5)
+    tk.Button(btn_row, text="Kernel自动模拟执行", bg="#004040", fg="#55ffff",
+              font=("Arial", 9, "bold"), relief="flat", pady=2,
+              command=self._kernel_auto_execute_once).pack(side="left", padx=5)
+    tk.Button(btn_row, text="刷新持仓/止损", bg="#1f2a3a", fg="#99ccff",
+              font=("Arial", 9), relief="flat", pady=2,
+              command=self._kernel_refresh_positions).pack(side="left", padx=3)
     tk.Button(btn_row, text="🚫 忽略（选中）", bg="#2a2a2a", fg="#888888",
               font=("Arial", 9), relief="flat", pady=2,
               command=self._ignore_selected_signal).pack(side="left", padx=3)
@@ -1849,8 +1980,8 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._signal_tree.bind("<Leave>", hide_sig_tooltip)
 
     # 下半：持仓 + 流水分栏
-    bottom_nb = ttk.Notebook(paned)
-    paned.add(bottom_nb, height=200)
+    bottom_nb = ttk.Notebook(self._decision_paned)
+    self._decision_paned.add(bottom_nb, height=200)
 
     # 持仓 Tab
     pos_frame = tk.Frame(bottom_nb, bg="#0a0f1a")
@@ -1858,7 +1989,7 @@ def _init_decision_tab(self, parent: tk.Frame):
 
     pos_cols = ("code", "name", "sector", "entry_price", "current_price",
                 "pnl_pct", "pnl_value", "shares", "stop_loss", "entry_time")
-    self._pos_tree = ttk.Treeview(pos_frame, columns=pos_cols, show="headings", height=5)
+    self._pos_tree = ttk.Treeview(pos_frame, columns=pos_cols, show="headings", height=5, style="Dark.Treeview")
     pos_headers = {
         "code":"代码","name":"名称","sector":"板块",
         "entry_price":"入场价","current_price":"现价",
@@ -1889,7 +2020,7 @@ def _init_decision_tab(self, parent: tk.Frame):
     bottom_nb.add(log_frame, text="📜 今日流水")
 
     log_cols = ("time", "action", "code", "name", "price", "shares", "amount", "pnl_pct", "reason")
-    self._log_tree = ttk.Treeview(log_frame, columns=log_cols, show="headings", height=5)
+    self._log_tree = ttk.Treeview(log_frame, columns=log_cols, show="headings", height=5, style="Dark.Treeview")
     log_headers = {
         "time":"时间","action":"操作","code":"代码","name":"名称",
         "price":"价格","shares":"股数","amount":"金额",
@@ -1907,6 +2038,13 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._log_tree.configure(yscroll=log_vsb.set)
     self._log_tree.pack(side="left", fill="both", expand=True)
     log_vsb.pack(side="right", fill="y")
+
+    # 绑定持仓与流水表格的单元格单选选中联动事件
+    self._pos_tree.bind("<<TreeviewSelect>>", self._on_pos_selected)
+    self._log_tree.bind("<<TreeviewSelect>>", self._on_log_selected)
+
+    # [NEW] 启动决策树行慢闪烁呼吸灯定时器
+    self._schedule_kernel_blink()
 
 
 def _schedule_focus_refresh(self):
@@ -2139,6 +2277,14 @@ def _refresh_decision_tab(self):
                     s.get('reason', ''),
                     s.get('status', ''),
                 )
+                # [FIX] 如果在 marked 集合中，覆盖为 kernel 执行状态的高亮 tag，实现高亮刷新不消失
+                if getattr(self, '_kernel_marked_exec', None) and code in self._kernel_marked_exec:
+                    tag = "kernel_exec"
+                elif getattr(self, '_kernel_marked_block', None) and code in self._kernel_marked_block:
+                    tag = "kernel_block"
+                elif getattr(self, '_kernel_marked_error', None) and code in self._kernel_marked_error:
+                    tag = "kernel_error"
+
                 if code in existing:
                     self._signal_tree.item(existing[code], values=values, tags=(tag,))
                 else:
@@ -2281,6 +2427,444 @@ def _mock_sell_selected(self):
         messagebox.showwarning("卖出失败", msg)
 
 
+def _get_realtime_price_map(self):
+    """Build {code: price} from the current realtime DataFrame if available."""
+    price_map = {}
+    df_rt = None
+    if self.selector and hasattr(self.selector, 'df_all_realtime'):
+        df_rt = self.selector.df_all_realtime
+    if df_rt is None and self.master and hasattr(self.master, 'df_all'):
+        df_rt = self.master.df_all
+    if df_rt is None:
+        return price_map
+    try:
+        for code in getattr(df_rt, 'index', []):
+            row = df_rt.loc[code]
+            price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
+            if price > 0:
+                price_map[str(code).zfill(6)] = price
+    except Exception:
+        pass
+    return price_map
+
+
+def _kernel_set_status(self, text, kind="info"):
+    """Update the non-blocking kernel status strip."""
+    color_map = {
+        "ok": "#66ffcc",
+        "warn": "#ffcc66",
+        "error": "#ff7777",
+        "info": "#55ffff",
+    }
+    try:
+        if hasattr(self, "_kernel_status_lbl"):
+            self._kernel_status_lbl.config(text=f"Kernel: {text}", fg=color_map.get(kind, "#55ffff"))
+    except Exception:
+        pass
+
+
+def _kernel_mark_signal_rows(self, executed=None, blocked=None, errors=None):
+    """Highlight and scroll to the latest kernel-related signal rows."""
+    executed = executed or []
+    blocked = blocked or []
+    errors = errors or []
+    
+    if not hasattr(self, '_kernel_marked_exec'):
+        self._kernel_marked_exec = set()
+    if not hasattr(self, '_kernel_marked_block'):
+        self._kernel_marked_block = set()
+    if not hasattr(self, '_kernel_marked_error'):
+        self._kernel_marked_error = set()
+        
+    for c in executed:
+        self._kernel_marked_exec.add(c)
+        self._kernel_marked_block.discard(c)
+        self._kernel_marked_error.discard(c)
+    for c in blocked:
+        self._kernel_marked_block.add(c)
+        self._kernel_marked_exec.discard(c)
+        self._kernel_marked_error.discard(c)
+    for c in errors:
+        self._kernel_marked_error.add(c)
+        self._kernel_marked_exec.discard(c)
+        self._kernel_marked_block.discard(c)
+        
+    try:
+        first = None
+        for code in executed:
+            if self._signal_tree.exists(code):
+                self._signal_tree.item(code, tags=("kernel_exec",))
+                first = first or code
+        for code in blocked:
+            if self._signal_tree.exists(code):
+                self._signal_tree.item(code, tags=("kernel_block",))
+                first = first or code
+        for code in errors:
+            if self._signal_tree.exists(code):
+                self._signal_tree.item(code, tags=("kernel_error",))
+                first = first or code
+        if first:
+            self._signal_tree.selection_set(first)
+            self._signal_tree.focus(first)
+            self._signal_tree.see(first)
+    except Exception:
+        pass
+
+
+def _kernel_show_toast(self, text, kind="info", records=None):
+    """显示或更新悬浮的 Kernel 自动交易执行看板，支持 Treeview 列表和实时代码联动。"""
+    records = records or []
+    try:
+        win = getattr(self, "_kernel_toast_win", None)
+        # 如果窗口不存在或已被销毁，则新建一个
+        if not win or not win.winfo_exists():
+            win = tk.Toplevel(self)
+            self._kernel_toast_win = win
+            win.title("📡 Kernel 自动交易执行看板")
+            win.geometry("520x350")
+            win.configure(bg="#0c101b")
+            
+            # 初始化置顶状态控制变量 (当前选股窗口运行期保持状态，默认置顶)
+            if not hasattr(self, "_kernel_toast_topmost_var"):
+                self._kernel_toast_topmost_var = tk.BooleanVar(value=False)
+            
+            win.attributes("-topmost", self._kernel_toast_topmost_var.get())
+            
+            # 手动关闭看板时的统一样式保存与销毁处理
+            def _on_toast_close():
+                if getattr(self, "master", None) and hasattr(self.master, "save_window_position"):
+                    try:
+                        self.master.save_window_position(win, "kernel_toast_window")
+                    except Exception:
+                        pass
+                win.destroy()
+            
+            win.protocol("WM_DELETE_WINDOW", _on_toast_close)
+            
+            # 顶部信息栏
+            top_frame = tk.Frame(win, bg="#111726", pady=4)
+            top_frame.pack(fill="x")
+            
+            self._kernel_toast_msg_lbl = tk.Label(
+                top_frame, text=text, bg="#111726", fg="#55ffff",
+                font=("Arial", 10, "bold")
+            )
+            self._kernel_toast_msg_lbl.pack(side="left", padx=10)
+            
+            # 关闭按钮
+            tk.Button(
+                top_frame, text="✕ 关闭", bg="#3a1a1a", fg="#ff5555",
+                font=("Arial", 9), relief="flat", padx=5,
+                command=_on_toast_close
+            ).pack(side="right", padx=10)
+            
+            # 置顶切换回调
+            def _toggle_topmost():
+                is_top = self._kernel_toast_topmost_var.get()
+                win.attributes("-topmost", is_top)
+            
+            # 置顶复选框 (置顶在关闭左侧)
+            cb_topmost = tk.Checkbutton(
+                top_frame, text="📌 置顶", variable=self._kernel_toast_topmost_var,
+                command=_toggle_topmost, bg="#111726", fg="#ffffff", selectcolor="#0c101b",
+                activebackground="#111726", activeforeground="#ffffff",
+                font=("Arial", 9), bd=0, highlightthickness=0
+            )
+            cb_topmost.pack(side="right", padx=5)
+            
+            # 创建 Treeview
+            tree_frame = tk.Frame(win, bg="#0c101b")
+            tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            cols = ("code", "name", "action", "status", "detail")
+            self._kernel_toast_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
+            
+            headers = {"code": "代码", "name": "名称", "action": "指令", "status": "结果", "detail": "详情"}
+            for col, title in headers.items():
+                self._kernel_toast_tree.heading(col, text=title)
+                self._kernel_toast_tree.column(col, anchor="center", width=75)
+            self._kernel_toast_tree.column("detail", width=180, anchor="w", stretch=True)
+            self._kernel_toast_tree.column("action", width=60)
+            self._kernel_toast_tree.column("status", width=75)
+            
+            # 样式
+            self._kernel_toast_tree.tag_configure("exec", background="#0c1d1a", foreground="#55ffaa")
+            self._kernel_toast_tree.tag_configure("block", background="#1d170c", foreground="#ffb833")
+            self._kernel_toast_tree.tag_configure("error", background="#1d0c0c", foreground="#ff5555")
+            
+            vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._kernel_toast_tree.yview)
+            self._kernel_toast_tree.configure(yscroll=vsb.set)
+            self._kernel_toast_tree.pack(side="left", fill="both", expand=True)
+            vsb.pack(side="right", fill="y")
+            
+            # 点击或选择联动事件
+            def on_toast_select(event):
+                sel = self._kernel_toast_tree.selection()
+                if not sel:
+                    return
+                item_id = sel[0]
+                values = self._kernel_toast_tree.item(item_id, "values")
+                if not values:
+                    return
+                code = values[0]
+                if code and code != "ERROR" and code != "代码":
+                    code = str(code).zfill(6)
+                    # 联动主界面 K 线图 (通过 sender 发送)
+                    if hasattr(self, 'sender') and self.sender:
+                        try:
+                            self.sender.send(code)
+                        except Exception:
+                            pass
+                    # 联动可视化视口
+                    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+                        if hasattr(self.master, 'open_visualizer'):
+                            self.master.open_visualizer(code)
+            
+            self._kernel_toast_tree.bind("<<TreeviewSelect>>", on_toast_select)
+            self._kernel_toast_tree.bind("<Double-1>", on_toast_select)
+            
+
+
+            # 优先加载已存位置大小，否则 fallback 居右放置
+            has_loaded = False
+            if getattr(self, "master", None) and hasattr(self.master, "load_window_position"):
+                try:
+                    w, h, lx, ly = self.master.load_window_position(
+                        win, "kernel_toast_window", 
+                        default_width=520, default_height=350
+                    )
+                    if lx is not None and ly is not None:
+                        has_loaded = True
+                except Exception:
+                    pass
+            if not has_loaded:
+                self.update_idletasks()
+                x = self.winfo_rootx() + max(20, self.winfo_width() - 560)
+                y = self.winfo_rooty() + 60
+                win.geometry(f"520x350+{x}+{y}")
+        else:
+            # 窗口已经存在，更新信息
+            self._kernel_toast_msg_lbl.config(text=text)
+            
+        # 清空并填充最新数据
+        self._kernel_toast_tree.delete(*self._kernel_toast_tree.get_children())
+        for r in records:
+            status = r.get("status", "")
+            tag = "exec" if "执行" in status else ("error" if "异常" in status or "错误" in status else "block")
+            self._kernel_toast_tree.insert("", "end", values=(
+                r.get("code", ""),
+                r.get("name", ""),
+                r.get("action", ""),
+                status,
+                r.get("detail", "")
+            ), tags=(tag,))
+            
+    except Exception as e:
+        logger.debug(f"[_kernel_show_toast] error: {e}")
+
+
+def _schedule_kernel_blink(self):
+    """使 kernel_exec/kernel_block/kernel_error 等高亮行慢闪烁"""
+    if not hasattr(self, '_signal_tree') or not self._signal_tree.winfo_exists():
+        return
+    try:
+        if not hasattr(self, '_kernel_blink_state'):
+            self._kernel_blink_state = True
+        
+        self._kernel_blink_state = not self._kernel_blink_state
+        
+        if self._kernel_blink_state:
+            # 状态 1：明亮高亮
+            self._signal_tree.tag_configure("kernel_exec", background="#003a24", foreground="#66ffcc")
+            self._signal_tree.tag_configure("kernel_block", background="#3a2600", foreground="#ffcc66")
+            self._signal_tree.tag_configure("kernel_error", background="#3a0000", foreground="#ff7777")
+        else:
+            # 状态 2：暗色呼吸
+            self._signal_tree.tag_configure("kernel_exec", background="#0a0f1a", foreground="#44ffaa")
+            self._signal_tree.tag_configure("kernel_block", background="#0a0f1a", foreground="#e6b800")
+            self._signal_tree.tag_configure("kernel_error", background="#0a0f1a", foreground="#ff5555")
+            
+        self._kernel_blink_id = self.after(1500, self._schedule_kernel_blink)
+    except Exception:
+        pass
+
+
+def _kernel_refresh_positions(self, show_message=True):
+    """Refresh simulated positions from realtime prices and run stop-loss checks."""
+    if not self._trade_gw:
+        return
+    price_map = self._get_realtime_price_map()
+    if price_map:
+        self._trade_gw.update_prices(price_map)
+    self._trade_gw.check_stop_loss()
+    self._refresh_decision_tab()
+    if show_message:
+        self._kernel_set_status(f"refreshed positions, prices={len(price_map)}", "info")
+
+
+def _kernel_auto_execute_once(self):
+    """Execute approved kernel BUY/SELL decisions once through the existing mock gateway."""
+    if not self._trade_gw:
+        messagebox.showwarning("Kernel", "模拟交易网关未初始化")
+        return
+    if not self._focus_ctrl:
+        messagebox.showwarning("Kernel", "决策引擎未初始化")
+        return
+
+    self._kernel_refresh_positions(show_message=False)
+    executed = []
+    blocked = []
+    errors = []
+    executed_codes = []
+    blocked_codes = []
+    error_codes = []
+    records = []
+    try:
+        signals = self._focus_ctrl.get_decision_queue()
+        positions = {p['code']: p for p in self._trade_gw.get_positions()}
+        price_map = self._get_realtime_price_map()
+
+        for sig in signals:
+            code = str(sig.get('code', '')).zfill(6)
+            action = str(sig.get('kernel_action', '') or '').upper()
+            allowed = bool(sig.get('kernel_allowed'))
+            if action in ("HOLD", "", "BLOCK", "ERROR"):
+                continue
+            if not allowed:
+                reject_code = sig.get('kernel_reject_code', 'BLOCK')
+                blocked.append(f"{code}:{reject_code}")
+                blocked_codes.append(code)
+                records.append({
+                    "code": code,
+                    "name": sig.get('name', ''),
+                    "action": action,
+                    "status": "拦截",
+                    "detail": reject_code
+                })
+                continue
+
+            price = float(sig.get('suggest_price') or sig.get('current_price') or price_map.get(code, 0) or 0)
+            if price <= 0:
+                blocked.append(f"{code}:NO_PRICE")
+                blocked_codes.append(code)
+                records.append({
+                    "code": code,
+                    "name": sig.get('name', ''),
+                    "action": action,
+                    "status": "拦截",
+                    "detail": "无实时价格"
+                })
+                continue
+
+            if action in ("BUY", "ADD"):
+                if code in positions:
+                    blocked.append(f"{code}:ALREADY_POSITION")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拦截",
+                        "detail": "已有持仓"
+                    })
+                    continue
+                ok, msg = self._trade_gw.submit_buy(
+                    code=code,
+                    name=sig.get('name', ''),
+                    sector=sig.get('sector', ''),
+                    price=price,
+                    strategy_tag=f"Kernel:{sig.get('signal_type', '')}",
+                    reason=(
+                        f"Kernel {action} size={float(sig.get('kernel_size_pct', 0) or 0):.0%} "
+                        f"conf={float(sig.get('kernel_confidence', 0) or 0):.2f} "
+                        f"trace={sig.get('kernel_trace_id', '')}"
+                    ),
+                )
+                if ok:
+                    executed.append(f"{action} {code}")
+                    executed_codes.append(code)
+                    self._focus_ctrl.decision_queue.update_status(code, "已提交")
+                    positions[code] = {"code": code}
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "已执行(买)",
+                        "detail": msg
+                    })
+                else:
+                    blocked.append(f"{code}:{msg}")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拒绝",
+                        "detail": msg
+                    })
+            elif action in ("SELL", "REDUCE"):
+                if code not in positions:
+                    blocked.append(f"{code}:NO_POSITION")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拦截",
+                        "detail": "当前无此持仓"
+                    })
+                    continue
+                sell_price = float(price_map.get(code, price) or price)
+                ok, msg = self._trade_gw.submit_sell(
+                    code=code,
+                    price=sell_price,
+                    reason=f"Kernel {action} conf={float(sig.get('kernel_confidence', 0) or 0):.2f} trace={sig.get('kernel_trace_id', '')}",
+                )
+                if ok:
+                    executed.append(f"{action} {code}")
+                    executed_codes.append(code)
+                    self._focus_ctrl.decision_queue.update_status(code, "已成交")
+                    positions.pop(code, None)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "已执行(卖)",
+                        "detail": msg
+                    })
+                else:
+                    blocked.append(f"{code}:{msg}")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拒绝",
+                        "detail": msg
+                    })
+    except Exception as e:
+        errors.append(str(e))
+        error_codes.extend(blocked_codes[-1:])
+        records.append({
+            "code": "ERROR",
+            "name": "系统异常",
+            "action": "EXEC",
+            "status": "异常",
+            "detail": str(e)
+        })
+
+    self._refresh_decision_tab()
+    msg = f"执行={len(executed)} 拦截={len(blocked)} 错误={len(errors)}"
+    kind = "ok" if executed else ("error" if errors else "warn")
+    
+    # 状态栏单行摘要化，不包含大文本 detail
+    self._kernel_set_status(msg, kind)
+    self._kernel_mark_signal_rows(executed_codes, blocked_codes, error_codes)
+    
+    # 将结构化记录传入强大的联动悬浮 Tree 窗口
+    self._kernel_show_toast(msg, kind, records=records)
+
+
 def _ignore_selected_signal(self):
     """忽略选中的决策信号"""
     sel = self._signal_tree.selection()
@@ -2379,6 +2963,20 @@ def _sort_signal_tree(self, col: str):
         logger.debug(f"_sort_signal_tree: {e}")
 
 
+def show_decision_tab(self):
+    """切换当前 Notebook 到 🎯 实时决策 选项卡"""
+    try:
+        if hasattr(self, '_notebook'):
+            for tab_id in self._notebook.tabs():
+                tab_text = self._notebook.tab(tab_id, "text")
+                if "实时决策" in tab_text:
+                    self._notebook.select(tab_id)
+                    logger.info("📡 选股窗口已自动切换到 🎯 实时决策 选项卡")
+                    break
+    except Exception as e:
+        logger.warning(f"切换到实时决策选项卡失败: {e}")
+
+
 # 将新方法 monkey-patch 绑定到 StockSelectionWindow 类
 StockSelectionWindow._init_sector_tab       = _init_sector_tab
 StockSelectionWindow._init_decision_tab     = _init_decision_tab
@@ -2392,10 +2990,66 @@ StockSelectionWindow._sort_sector_tree      = _sort_sector_tree
 StockSelectionWindow._refresh_decision_tab  = _refresh_decision_tab
 StockSelectionWindow._mock_buy_selected     = _mock_buy_selected
 StockSelectionWindow._mock_sell_selected    = _mock_sell_selected
+StockSelectionWindow._get_realtime_price_map = _get_realtime_price_map
+StockSelectionWindow._kernel_refresh_positions = _kernel_refresh_positions
+StockSelectionWindow._kernel_auto_execute_once = _kernel_auto_execute_once
+StockSelectionWindow._kernel_set_status = _kernel_set_status
+StockSelectionWindow._kernel_mark_signal_rows = _kernel_mark_signal_rows
+StockSelectionWindow._kernel_show_toast = _kernel_show_toast
+StockSelectionWindow._schedule_kernel_blink = _schedule_kernel_blink
 StockSelectionWindow._ignore_selected_signal = _ignore_selected_signal
 StockSelectionWindow._clear_done_signals    = _clear_done_signals
 StockSelectionWindow._sell_all_positions    = _sell_all_positions
 StockSelectionWindow._on_signal_double_click = _on_signal_double_click
 StockSelectionWindow._on_signal_selected     = _on_signal_selected
 StockSelectionWindow._sort_signal_tree       = _sort_signal_tree
+StockSelectionWindow.show_decision_tab       = show_decision_tab
+
+
+# ── 实时决策下半区持仓与流水表格个股联动方法 ───────────────────────────────────────────
+
+def _on_pos_selected(self, event=None):
+    """当前持仓行选中联动主图与 K 线可视化"""
+    try:
+        sel = self._pos_tree.selection()
+        if not sel:
+            return
+        code = str(sel[0]).zfill(6)  # iid 就是个股代码本身
+        if hasattr(self, 'sender') and self.sender:
+            try:
+                self.sender.send(code)
+            except Exception:
+                pass
+        if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+            if hasattr(self.master, 'open_visualizer'):
+                self.master.open_visualizer(code)
+    except Exception as e:
+        logger.debug(f"[on_pos_selected] error: {e}")
+
+
+def _on_log_selected(self, event=None):
+    """今日流水行选中联动主图与 K 线可视化"""
+    try:
+        sel = self._log_tree.selection()
+        if not sel:
+            return
+        item = self._log_tree.item(sel[0])
+        vals = item.get('values', [])
+        if len(vals) > 2:
+            code = str(vals[2]).zfill(6)  # values[2] 是个股代码
+            if hasattr(self, 'sender') and self.sender:
+                try:
+                    self.sender.send(code)
+                except Exception:
+                    pass
+            if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+                if hasattr(self.master, 'open_visualizer'):
+                    self.master.open_visualizer(code)
+    except Exception as e:
+        logger.debug(f"[on_log_selected] error: {e}")
+
+
+StockSelectionWindow._on_pos_selected       = _on_pos_selected
+StockSelectionWindow._on_log_selected       = _on_log_selected
+
 
