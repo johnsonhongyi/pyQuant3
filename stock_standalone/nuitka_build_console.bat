@@ -3,6 +3,14 @@ title Nuitka Smart Compiler Assistant - Console Mode
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
+:: =========================================
+:: START TIME RECORDING
+:: =========================================
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "START_TIME=%%i"
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "START_TIME_STR=%%i"
+echo [INFO] Build started at: %START_TIME_STR%
+echo.
+
 echo ==========================================
 echo Nuitka Smart Compiler Assistant (Console Mode)
 echo ==========================================
@@ -158,6 +166,18 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
+    --noinclude-dlls=Qt6WebEngineWidgets.dll ^
+    --noinclude-dlls=Qt6Pdf.dll ^
+    --noinclude-dlls=Qt6Quick.dll ^
+    --noinclude-dlls=Qt6Qml.dll ^
+    --noinclude-dlls=Qt6VirtualKeyboard.dll ^
+    --noinclude-dlls=Qt6Multimedia.dll ^
+    --noinclude-dlls=Qt6Bluetooth.dll ^
+    --noinclude-dlls=Qt6Network.dll ^
+    --noinclude-dlls=Qt6Svg.dll ^
+    --noinclude-dlls=Qt6Sql.dll ^
+    --noinclude-dlls=Qt6Test.dll ^
+    --noinclude-dlls=Qt6Xml.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
@@ -167,15 +187,20 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
-    --include-data-dir=datacsv=datacsv ^
-    --include-package=JSONData ^
-    --include-package=JohnsonUtil ^
-    --include-package-data=JSONData ^
-    --include-package-data=JohnsonUtil ^
-    --include-module=a_trade_calendar ^
+    --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
+    --include-data-file=datacsv\minute_kline_viewer_history.json=datacsv\minute_kline_viewer_history.json ^
+    --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
+    --include-data-file=JSONData\count.ini=JSONData\count.ini ^
+    --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
+    --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
+    --include-package=a_trade_calendar ^
     --include-package=pyttsx3 ^
     --include-package=tables ^
     --include-package=tk_gui_modules ^
+    --include-module=JSONData.tdx_hdf5_api ^
+    --include-module=JSONData.wencaiData ^
+    --include-module=JSONData.sina_data ^
+    --include-module=JohnsonUtil.johnson_cons ^
     --include-module=configobj ^
     --include-module=tushare ^
     --include-module=pandas_ta ^
@@ -211,11 +236,14 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-module=signal_bus ^
     --include-module=keyboard ^
     --include-module=tkcalendar ^
-    --include-module=psutil
+    --include-module=psutil ^
+    --include-module=tk_gil_monitor
 
 
 :: ===== Execute compilation =====
+echo ==========================================
 echo [INFO] Executing Nuitka compilation...
+echo ==========================================
 echo !CMD!
 echo.
 call !CMD!
@@ -228,6 +256,29 @@ if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\instock_MonitorTK.exe" (
 ) else (
     echo [ERROR] Compilation failed. Please check the error logs.
 )
+
+:: ===== Calculate and Record Elapsed Time =====
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "END_TIME=%%i"
+for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "END_TIME_STR=%%i"
+
+for /f "usebackq delims=" %%i in (`python -c "import time; elapsed = %END_TIME% - %START_TIME%; m, s = divmod(elapsed, 60); h, m = divmod(m, 60); print('{:02d}:{:02d}:{:02d} ({:.2f}s)'.format(int(h), int(m), int(s), elapsed))"`) do set "ELAPSED_TIME=%%i"
+
+echo ==========================================
+echo 🕒 Build Time Summary:
+echo Start Time:    %START_TIME_STR%
+echo End Time:      %END_TIME_STR%
+echo Elapsed Time:  %ELAPSED_TIME%
+echo ==========================================
+
+:: Persist to time.txt
+(
+echo ==========================================
+echo Build Date:    %START_TIME_STR%
+echo Start Time:    %START_TIME_STR%
+echo End Time:      %END_TIME_STR%
+echo Elapsed Time:  %ELAPSED_TIME%
+echo ==========================================
+) >> "%~dp0time.txt"
 
 :: 6. Restore original PATH
 set "PATH=%OLD_PATH%"

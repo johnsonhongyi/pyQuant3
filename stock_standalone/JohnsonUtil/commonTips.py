@@ -43,7 +43,7 @@ from tqdm.contrib.concurrent import process_map
 # import numpy as np
 import subprocess
 # print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after subprocess")
-# import a_trade_calendar
+import a_trade_calendar
 # import a_trade_calendar
 # from py_mini_racer import py_mini_racer
 
@@ -123,7 +123,7 @@ class LazyClass:
 
 pd = LazyModule('pandas')
 np = LazyModule('numpy')
-a_trade_calendar = LazyModule('a_trade_calendar')
+# a_trade_calendar = LazyModule('a_trade_calendar')
 ct = LazyModule('JohnsonUtil.johnson_cons')
 # print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after LazyModules")
 ConfigObj = LazyClass('configobj', 'ConfigObj')

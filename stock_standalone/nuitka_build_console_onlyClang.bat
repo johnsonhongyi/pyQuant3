@@ -263,14 +263,14 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-file=JSONData\count.ini=JSONData\count.ini ^
     --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
     --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
-    --include-package=JSONData ^
-    --include-package=JohnsonUtil ^
-    --include-package-data=JSONData ^
-    --include-package-data=JohnsonUtil ^
-    --include-module=a_trade_calendar ^
+    --include-package=a_trade_calendar ^
     --include-package=pyttsx3 ^
     --include-package=tables ^
     --include-package=tk_gui_modules ^
+    --include-module=JSONData.tdx_hdf5_api ^
+    --include-module=JSONData.wencaiData ^
+    --include-module=JSONData.sina_data ^
+    --include-module=JohnsonUtil.johnson_cons ^
     --include-module=configobj ^
     --include-module=tushare ^
     --include-module=pandas_ta ^
