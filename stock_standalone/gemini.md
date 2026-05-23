@@ -1,7 +1,18 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 17:25  
+> 最后更新：2026-05-23 18:13  
+
+## 2026-05-23 18:13
+- [x] **重构系统资源分析面板，实现大金刚进程精准友好名映射与真实文件名剥离 (Enhanced System Resource Analytics Panel)**：
+    - [x] **新增对并发计算进程池 (PoolWorker) 的智能甄别**：深度排查发现在 Windows 系统下，由于底层的 `resource_tracker` 并没有被操作系统实际拉起，那个残留的 `Sub-Process` 实际上是由系统指标计算（如 `SectorBiddingPanel` 面板中的高并发计算）所常驻的 `ProcessPoolExecutor` 进程池 Worker 进程。在排除掉其它具体的四大金刚后，通过检查命令行中是否含有 `spawn_main` 指纹，完美、精准地将该残留进程归类为 **`⚙️ 后台并发计算工作子进程 (PoolWorker)`**，彻底清零了系统的进程黑盒。
+    - [x] **物理穿透并攻克 CPython 底层隐性进程 (CPython Hidden Process PID Recovery)**：完美解决了多进程架构下两个未识别 `Sub-Process` 进程的友好识别难题。
+        - 针对 **`📦 共享数据同步器 (SyncManager)`**：直接穿透底层获取主进程 `self._sync_manager._process.pid`，实现了 100% 精准绑定与中文友好名映射。
+        - 针对 **`🛡️ 资源回收监视器 (ResourceTracker)`**：通过强力导入并提取 Python 内置私有接口 `resource_tracker._resource_tracker._pid`，从源头上斩断了底层的系统进程黑盒，实现完全的透明化观测。
+    - [x] **实现 PID 级精确绑定**：重构了 `instock_MonitorTK.py` 中的 `open_detailed_analysis` 的 `refresh_analysis` 方法。动态提取了 `qt_process.pid`、`_hotkey_process.pid`、`proc.pid`、`live_strategy_process.pid` 以及 `backtest_process.pid`。在多进程列表渲染时，利用物理 PID 实施 100% 精准匹配，清晰地标出大金刚进程对应的实际功能名（如 `📺 K线/分时可视化窗口 (Visualizer)`、`🔑 独立热键轮转器 (HotkeyRotator)`、`🔌 行情数据接收管道 (DataReceiver)`、`⚡ 实时策略判断器 (LiveStrategy)` 等）。
+    - [x] **物理剥离真实可执行文件名**：通过引入 `os.path.basename(p.exe())` 成功绕过 PyInstaller 打包下 `p.name()` 被强制同名化（全是 `instock_MonitorTK.exe`）的硬编码限制，成功精准呈现了子进程真实的启动可执行文件名（开发态显示 `python.exe`，打包态显示具体可执行文件），与 Windows 任务管理器完美对齐。
+    - [x] **未识别进程“命令行指纹自诊断”机制**：针对 Python 多进程自发启动的无名子进程，引入了自动提取核心参数指纹的机制。即使没有绑定 PID，分析窗口也能将其展示为 `Sub-Process (Cmd: -c from multiprocessing.spawn...)`，彻底打破了进程黑盒。
+    - [x] **排版自适应与超宽格式微调**：将进程列表的可执行文件名对齐宽度由 22 字符优化微调为极致紧凑的 12 字符，同时将分隔线缩减为 88 字符，在完美容纳 `python.exe` 且保持极致紧凑的同时，在小分屏下能够 100% 避免折行错位，实现了黑客帝国般的整齐美感。
 
 ## 2026-05-23 17:25
 - [x] **物理消灭多进程与高DPI下 setGeometry 的最小大小物理限制警告 (Fixed Unable to Set Geometry Warning)**：

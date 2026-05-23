@@ -16755,18 +16755,87 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 report = [
                     f"=== System Resource Report ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===",
                     f"OS: {sys.platform} | Main PID: {current_process.pid}",
-                    "-" * 60
+                    "-" * 88
                 ]
                 
+                # 动态提取已知大金刚子进程的 PID 进行精准绑定
+                qt_pid = getattr(self, 'qt_process', None)
+                if qt_pid and hasattr(qt_pid, 'pid'): qt_pid = qt_pid.pid
+                
+                hk_pid = getattr(self, '_hotkey_process', None)
+                if hk_pid and hasattr(hk_pid, 'pid'): hk_pid = hk_pid.pid
+                
+                proc_pid = getattr(self, 'proc', None)
+                if proc_pid and hasattr(proc_pid, 'pid'): proc_pid = proc_pid.pid
+                
+                live_strategy_pid = getattr(self, 'live_strategy_process', None)
+                if live_strategy_pid and hasattr(live_strategy_pid, 'pid'): live_strategy_pid = live_strategy_pid.pid
+                
+                backtest_pid = getattr(self, 'backtest_process', None)
+                if backtest_pid and hasattr(backtest_pid, 'pid'): backtest_pid = backtest_pid.pid
+                
+                # 动态提取 Python 内置 ResourceTracker 进程的 PID 进行精准绑定
+                resource_tracker_pid = None
+                try:
+                    from multiprocessing import resource_tracker
+                    if hasattr(resource_tracker, '_resource_tracker') and resource_tracker._resource_tracker:
+                        resource_tracker_pid = resource_tracker._resource_tracker._pid
+                except: pass
+                
+                # 动态提取 SyncManager 进程的 PID 进行精准绑定
+                sync_mgr_pid = getattr(self, '_sync_manager', None)
+                if sync_mgr_pid and hasattr(sync_mgr_pid, '_process') and sync_mgr_pid._process:
+                    sync_mgr_pid = sync_mgr_pid._process.pid
+                
                 # Process breakdown
-                procs = [(current_process, "Main UI Window")]
+                procs = [(current_process, "💻 主控制台 (MainConsole)")]
                 for c in children:
                     try:
                         cmdline = " ".join(c.cmdline())
                         role = "Sub-Process"
-                        if "resource_tracker" in cmdline: role = "Resource Tracker"
-                        elif "multiprocessing.managers" in cmdline: role = "SyncManager (Proxy Server)"
-                        elif "fetch_and_process" in cmdline or any("data_utils" in arg for arg in c.cmdline()): role = "Data Fetcher Process"
+                        
+                        # 1. 优先通过精确 PID 判定四大核心功能进程及系统隐性进程
+                        if c.pid == qt_pid:
+                            role = "📺 K线/分时可视化窗口 (Visualizer)"
+                        elif c.pid == hk_pid:
+                            role = "🔑 独立热键轮转器 (HotkeyRotator)"
+                        elif c.pid == proc_pid:
+                            role = "🔌 行情数据接收管道 (DataReceiver)"
+                        elif c.pid == live_strategy_pid:
+                            role = "⚡ 实时策略判断器 (LiveStrategy)"
+                        elif c.pid == backtest_pid:
+                            role = "🏁 历史回测与复盘器 (BacktestReplay)"
+                        elif c.pid == sync_mgr_pid:
+                            role = "📦 共享数据同步器 (SyncManager)"
+                        elif c.pid == resource_tracker_pid:
+                            role = "🛡️ 资源回收监视器 (ResourceTracker)"
+                        # 2. 如果 PID 未匹配，则降级进行命令行指纹匹配
+                        elif "resource_tracker" in cmdline:
+                            role = "🛡️ 资源回收监视器 (ResourceTracker)"
+                        elif "multiprocessing.managers" in cmdline:
+                            role = "📦 共享数据同步器 (SyncManager)"
+                        elif "fetch_and_process" in cmdline or any("data_utils" in arg for arg in c.cmdline()):
+                            role = "📥 实盘行情抓取器 (DataFetcher)"
+                        elif "bidding_racing_panel" in cmdline:
+                            role = "🏁 竞价赛马看板 (RacingPanel)"
+                        elif "sector_bidding" in cmdline:
+                            role = "⚡ 板块竞价/尾盘联动 (SectorBidding)"
+                        
+                        # 3. 兜底策略：如果是未知子进程，则智能判定是否为并发计算进程池，或附加命令行指纹快照
+                        if role == "Sub-Process":
+                            if "spawn_main" in cmdline:
+                                role = "⚙️ 后台并发计算工作子进程 (PoolWorker)"
+                            else:
+                                args = c.cmdline()
+                                useful_args = [arg for arg in args if not arg.endswith("python.exe") and not "python" in arg.lower()]
+                                if useful_args:
+                                    brief = " ".join(useful_args[:3])
+                                    if len(brief) > 42:
+                                        brief = brief[:39] + "..."
+                                    role = f"Sub-Process ({brief})"
+                                else:
+                                    role = f"Sub-Process (PID: {c.pid})"
+                            
                         procs.append((c, role))
                     except: continue
                     
@@ -16782,19 +16851,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         commit = full_info.private / 1024 / 1024
                         
                         cpu = p.cpu_percent(interval=None)
-                        p_name = p.name()
-                        report.append(f"PID: {p.pid:<6} | {p_name:<10} | {uss:>6.1f} MB (RAM) | {rss:>6.1f} MB (Shared) | {cpu:>4.1f}% | {role:<20}")
+                        
+                        # 智能提取真实的进程可执行程序文件名本身，而不全都是包装的通用名
+                        try:
+                            p_name = os.path.basename(p.exe())
+                        except:
+                            p_name = p.name()
+                            
+                        report.append(f"PID: {p.pid:<6} | {p_name:<12} | {uss:>6.1f} MB (RAM) | {rss:>6.1f} MB (Shared) | {cpu:>4.1f}% | {role}")
                         total_rss += rss
                         total_uss += uss
                         total_commit += commit
                     except: report.append(f"PID: {p.pid:<6} | Failed to read process info")
                 
-                report.append("-" * 75)
+                report.append("-" * 88)
                 report.append(f"TASK MANAGER ESTIMATE (ACTIVE RAM): {total_uss:.1f} MB")
                 report.append(f"TOTAL PHYSICAL RESIDENT (RSS):     {total_rss:.1f} MB")
                 report.append(f"SYSTEM COMMIT MEMORY (REQUESTED):  {total_commit:.1f} MB")
                 report.append("\nℹ️ Note: 'RAM' is primary memory. 'Requested' (~1.5GB) is virtual reserved space.")
-                report.append("=" * 75)
+                report.append("=" * 88)
                 
                 # Service Statistics
                 if hasattr(self, 'realtime_service') and self.realtime_service:
