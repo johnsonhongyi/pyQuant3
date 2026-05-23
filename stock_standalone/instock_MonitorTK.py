@@ -1188,6 +1188,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not QtWidgets.QApplication.instance():
                     self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
+                # 初始化跨线程人工确认调度器
+                from tk_gui_modules.confirm_bubble import init_confirm_dispatcher
+                init_confirm_dispatcher()
+                
                 from tk_gui_modules.decision_flow_panel import DecisionFlowPanel
                 
                 self._decision_flow_win = DecisionFlowPanel(parent=self)

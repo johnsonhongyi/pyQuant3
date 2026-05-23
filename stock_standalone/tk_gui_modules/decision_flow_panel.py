@@ -39,6 +39,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # 1. 初始化 UI 与组件布局 (Cyberpunk Dark Mode)
         self._init_ui()
         
+        # 1.5 初始化防抖过滤计时器
+        self._filter_timer = QtCore.QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self._filter_table)
+        
         # 2. 载入窗口历史尺寸与位置
         self.load_window_position_qt(self, "DecisionFlowPanel", default_width=1100, default_height=550)
         
@@ -119,7 +124,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.search_input = QtWidgets.QLineEdit()
         self.search_input.setPlaceholderText(" 输入股票代码/名称/动作进行过滤...")
         self.search_input.setFixedWidth(220)
-        self.search_input.textChanged.connect(self._filter_table)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
         top_bar.addWidget(self.search_input)
 
         top_bar.addStretch()
@@ -152,6 +157,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
+        
+        # 启用右键菜单支持
+        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         
         # 表头拉伸策略
         header = self.table.horizontalHeader()
@@ -269,90 +278,138 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             logger.error(f"Error in incremental records check: {e}")
 
     def _append_record_to_table(self, rec: dict):
-        """核心解析函数：从 `JsonlJournal` 的多级 nested 结构中精准提炼出扁平的 UI 字段并渲染"""
-        # 1. 字段解包
-        trace = rec.get("trace", {})
-        sig = rec.get("signal", {})
-        intent = rec.get("intent", {})
-        risk = rec.get("risk", {})
+        """核心解析函数：从 `JsonlJournal` 的多级 nested 结构或人工确认审计日志中精准提炼出扁平 of UI 字段并渲染"""
+        # 判断是否为人工确认审计记录 (Phase 7: Human Confirmation Audit)
+        is_audit = (rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT")
         
-        # 2. 字段映射提取
-        # 时间 (提取 HH:MM:SS)
-        ts_str = rec.get("journal_ts", "") or trace.get("timestamp", "")
-        if ts_str:
-            try:
-                # 比如 2026-05-23T19:52:02 -> 19:52:02
-                if "T" in ts_str:
-                    time_part = ts_str.split("T")[1]
-                    timestamp = time_part[:8]
-                else:
-                    timestamp = ts_str[-8:]
-            except Exception:
-                timestamp = ts_str
-        else:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-
-        code = sig.get("code", "")
-        name = sig.get("name", "")
-        
-        # 状态 (前置状态)
-        state = rec.get("kernel_state", "") or trace.get("state", "FLAT")
-        
-        # 动作 (BUY, SELL 等)
-        action = rec.get("kernel_action", "") or risk.get("final_action", "")
-        
-        # 拟仓位比率
-        size_val = rec.get("kernel_size_pct", 0.0) or risk.get("final_size_pct", 0.0)
-        size_pct = f"{float(size_val):.1f}%" if size_val is not None else "0.0%"
-        
-        # 决策打分/信心
-        confidence = str(rec.get("kernel_confidence", "") or intent.get("confidence", ""))
-        
-        # 风控评估结果 (Allowed/Blocked)
-        allowed_val = risk.get("allowed", True)
-        risk_allowed = "Allowed" if allowed_val else "Blocked"
-        
-        # 风控阻断码
-        reject_code = rec.get("kernel_reject_code", "")
-        if not reject_code and not allowed_val:
-            reject_code = risk.get("reject_context", {}).get("code", "RISK_REJECT")
-        
-        # 移动止损价
-        stop_price_val = rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
-        stop_price = f"{float(stop_price_val):.2f}" if stop_price_val else "0.00"
-        
-        # Trace ID (截取 8 位作为防伪展示)
-        trace_id = trace.get("trace_id", "") or rec.get("kernel_trace_id", "")
-        short_trace_id = trace_id[:8] if trace_id else "N/A"
-        
-        # 决策理由摘要 (合并 is_leader / Hits / raw_reason 提取有用信息)
-        reason_summary = ""
-        features = sig.get("features", {})
-        is_leader = features.get("is_leader", False)
-        priority = features.get("priority", 0.0)
-        raw_reason = features.get("raw_reason", "")
-        
-        reason_parts = []
-        if is_leader:
-            reason_parts.append("⭐龙头领涨")
-        if priority and priority > 0:
-            reason_parts.append(f"强度:{priority}")
-        
-        # 融合 kernel_reason 里面的子项
-        kernel_reason = rec.get("kernel_reason", {})
-        for r_k, r_v in kernel_reason.items():
-            if r_v and str(r_v).strip().lower() != "false":
-                reason_parts.append(f"{r_k}={r_v}")
-        
-        if raw_reason:
-            reason_parts.append(raw_reason)
+        if is_audit:
+            orig_order = rec.get("original_order", {})
+            confirmed = rec.get("confirmed", False)
+            reason = rec.get("override_reason", "")
+            meta = rec.get("override_metadata", {})
             
-        reason_summary = " | ".join(reason_parts) if reason_parts else "常规扫描决策"
-
+            # 提取时间 (防弹 Fallback)
+            ts_str = rec.get("timestamp", "")
+            if ts_str:
+                try:
+                    ts_str_clean = str(ts_str).strip()
+                    if "T" in ts_str_clean:
+                        time_part = ts_str_clean.split("T")[1]
+                        timestamp = time_part[:8]
+                    elif " " in ts_str_clean:
+                        time_part = ts_str_clean.split(" ")[1]
+                        timestamp = time_part[:8]
+                    elif len(ts_str_clean) >= 8:
+                        timestamp = ts_str_clean[-8:]
+                    else:
+                        timestamp = ts_str_clean
+                except Exception:
+                    timestamp = str(ts_str)
+            else:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            code = orig_order.get("code", "")
+            name = "人工确认"
+            state = "AUDIT"
+            
+            # 下单占比微调渲染
+            orig_size = float(orig_order.get("size_pct", 0.0)) * 100.0
+            if meta.get("size_changed"):
+                act_size = float(meta.get("actual_size_pct", 0.0)) * 100.0
+                size_pct = f"{orig_size:.1f}% ➔ {act_size:.1f}%"
+                action = "✍️ 覆盖"
+            else:
+                size_pct = f"{orig_size:.1f}%"
+                action = "👤 确认" if confirmed else "❌ 拒绝"
+                
+            confidence = "N/A"
+            risk_allowed = "Confirmed" if confirmed else "Rejected"
+            reject_code = "TRADER_REJECT" if not confirmed else ""
+            stop_price = "N/A"
+            trace_id = "AUDIT"
+            short_trace_id = "AUDIT"
+            
+            # 合并理由
+            reason_summary = f"👤 操盘手干预 | {reason}"
+            if meta.get("size_changed"):
+                reason_summary += f" | 占比微调: {orig_size:.0f}% ➔ {act_size:.0f}%"
+                
+        else:
+            # 1. 字段解包 (常规决策 trace)
+            trace = rec.get("trace", {})
+            sig = rec.get("signal", {})
+            intent = rec.get("intent", {})
+            risk = rec.get("risk", {})
+            
+            # 2. 字段映射提取 (防弹 Fallback)
+            ts_str = rec.get("journal_ts", "") or trace.get("timestamp", "")
+            if ts_str:
+                try:
+                    ts_str_clean = str(ts_str).strip()
+                    if "T" in ts_str_clean:
+                        time_part = ts_str_clean.split("T")[1]
+                        timestamp = time_part[:8]
+                    elif " " in ts_str_clean:
+                        time_part = ts_str_clean.split(" ")[1]
+                        timestamp = time_part[:8]
+                    elif len(ts_str_clean) >= 8:
+                        timestamp = ts_str_clean[-8:]
+                    else:
+                        timestamp = ts_str_clean
+                except Exception:
+                    timestamp = str(ts_str)
+            else:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+    
+            code = sig.get("code", "")
+            name = sig.get("name", "")
+            state = rec.get("kernel_state", "") or trace.get("state", "FLAT")
+            action = rec.get("kernel_action", "") or risk.get("final_action", "")
+            
+            size_val = rec.get("kernel_size_pct", 0.0) or risk.get("final_size_pct", 0.0)
+            size_pct = f"{float(size_val):.1f}%" if size_val is not None else "0.0%"
+            
+            confidence = str(rec.get("kernel_confidence", "") or intent.get("confidence", ""))
+            
+            allowed_val = risk.get("allowed", True)
+            risk_allowed = "Allowed" if allowed_val else "Blocked"
+            
+            reject_code = rec.get("kernel_reject_code", "")
+            if not reject_code and not allowed_val:
+                reject_code = risk.get("reject_context", {}).get("code", "RISK_REJECT")
+            
+            stop_price_val = rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
+            stop_price = f"{float(stop_price_val):.2f}" if stop_price_val else "0.00"
+            
+            trace_id = trace.get("trace_id", "") or rec.get("kernel_trace_id", "")
+            short_trace_id = trace_id[:8] if trace_id else "N/A"
+            
+            reason_parts = []
+            features = sig.get("features", {})
+            is_leader = features.get("is_leader", False)
+            priority = features.get("priority", 0.0)
+            raw_reason = features.get("raw_reason", "")
+            
+            if is_leader:
+                reason_parts.append("⭐龙头领涨")
+            if priority and priority > 0:
+                reason_parts.append(f"强度:{priority}")
+            
+            kernel_reason = rec.get("kernel_reason", {})
+            if isinstance(kernel_reason, dict):
+                for r_k, r_v in kernel_reason.items():
+                    if r_v and str(r_v).strip().lower() != "false":
+                        reason_parts.append(f"{r_k}={r_v}")
+            
+            if raw_reason:
+                reason_parts.append(raw_reason)
+                
+            reason_summary = " | ".join(reason_parts) if reason_parts else "常规扫描决策"
+ 
         # 3. 动态追加物理表格行
         row_idx = self.table.rowCount()
         self.table.insertRow(row_idx)
-
+ 
         # 4. 卡片着色与项目填充
         items_data = [
             (timestamp, None),
@@ -392,10 +449,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 if act_upper in action_colors:
                     cell_item.setForeground(QtGui.QColor(action_colors[act_upper]))
                     cell_item.setFont(QtGui.QFont("Microsoft YaHei", 10, QtGui.QFont.Weight.Bold))
-            elif col_idx == 5 and action in ("BUY", "ADD"): # Pct
+            elif col_idx == 5 and action in ("BUY", "ADD", "✍️ 覆盖", "👤 确认"): # Pct / Confirmation
                 cell_item.setForeground(QtGui.QColor("#00E676"))
-            elif col_idx == 7: # Risk Allowed
-                if text == "Allowed":
+            elif col_idx == 7: # Risk Allowed / Confirmation status
+                if text in ("Allowed", "Confirmed"):
                     cell_item.setForeground(QtGui.QColor("#00E676"))
                     cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
                 else:
@@ -421,6 +478,70 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     match = True
                     break
             self.table.setRowHidden(row, not match)
+
+    def _on_search_text_changed(self):
+        """输入内容变动时防抖 150ms，规避高频重绘，提升流畅度"""
+        self._filter_timer.start(150)
+
+    def _show_context_menu(self, pos):
+        """为表格行提供精美的右键快捷菜单，支持 Trace ID/代码/理由复制"""
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+            
+        row = index.row()
+        menu = QtWidgets.QMenu(self)
+        
+        # 扁平精致暗黑菜单风格
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1E1E24;
+                color: #E2E2E6;
+                border: 1px solid #2E2E35;
+            }
+            QMenu::item {
+                padding: 4px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #00E676;
+                color: #121214;
+            }
+        """)
+        
+        # 获取各单元格的值
+        code_item = self.table.item(row, 1)
+        trace_item = self.table.item(row, 10)
+        reason_item = self.table.item(row, 11)
+        
+        trace_id = trace_item.toolTip().replace("防伪全量签名 ID: ", "") if trace_item else ""
+        if not trace_id and trace_item:
+            trace_id = trace_item.text()
+            
+        code = code_item.text().strip() if code_item else ""
+        reason = reason_item.text().strip() if reason_item else ""
+        
+        # 动作一：复制 Trace ID
+        if trace_id and trace_id != "N/A" and trace_id != "AUDIT":
+            action_copy_trace = menu.addAction("📋 复制完整 Trace ID")
+            action_copy_trace.triggered.connect(lambda: self._copy_to_clipboard(trace_id, "Trace ID"))
+            
+        # 动作二：复制股票代码
+        if code:
+            action_copy_code = menu.addAction(f"📋 复制股票代码 ({code})")
+            action_copy_code.triggered.connect(lambda: self._copy_to_clipboard(code, "股票代码"))
+            
+        # 动作三：复制完整决策理由
+        if reason:
+            action_copy_reason = menu.addAction("📋 复制决策理由")
+            action_copy_reason.triggered.connect(lambda: self._copy_to_clipboard(reason, "决策理由"))
+            
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+        
+    def _copy_to_clipboard(self, text: str, label: str):
+        """将文本安全复制到剪贴板，并弹出 Toast 提示"""
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(text)
+        toast_message(self.parent_app, f"已复制 {label}")
 
     def _force_reload(self):
         """强制清空重载 (自愈修复时一键恢复)"""
