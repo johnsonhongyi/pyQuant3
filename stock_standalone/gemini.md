@@ -1,7 +1,24 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 18:13  
+> 最后更新：2026-05-23 19:40  
+
+## 2026-05-23 19:40
+- [x] **推进 Trading Kernel 核心骨架，交付 Phase 5 风控网关防线加固 (Delivered Trading Kernel Phase 5: Risk Hardening)**：
+    - [x] **超强硬核风控网关 (RiskLimits & evaluate)**：在 `trading_kernel/engine/risk_gate.py` 中完美实现 10 大硬性风控决策卡口。包含：非交易时段拦截、个股黑名单拦截、过期信号拦截（支持多格式 datetime 时差计算）、连亏冷却保护机制、日内累计最大亏损保护、高位追高不追拦截、个股最大持仓占比限制、行业/概念板块最大暴露限制、账户总体已用仓位限额及单笔止损带出。
+    - [x] **智能动态仓位缩容 (Sizing Adjustments)**：精细重构了持仓比例比对逻辑，当单股、板块或全局总持仓未超限但拟加/开仓折算将超额时，系统不再直接“粗暴阻断”，而是自发执行科学缩容，将本次交易占比自动扣减为刚好填满仓位限额的值，在规避敞口风险的同时追求极高信息增熵。
+    - [x] **回归硬化测试套件 (Hardened Test Suite)**：
+        - 编写了 `test_risk_hardening.py` 精确覆盖 10 大硬性风控逻辑与缩容微调机制。
+        - 物理执行 pytest，18 个测试全部通过 (18 passed in 0.96s)，执行时间由 1.16 秒极限优化缩至 0.96 秒，完美守住决策与风控层无状态无漏红线。
+
+## 2026-05-23 19:30
+- [x] **推进 Trading Kernel 核心骨架，交付 Phase 3 与 Phase 4 (Delivered Trading Kernel Phase 3 & Phase 4)**：
+    - [x] **实现确定性回放引擎 (ReplayRunner)**：在 `trading_kernel/observability/replay.py` 中实现了回放机制。支持反序列化 StrategySignal，自动重建无状态 StateManager 行为锁、纯决定引擎决策、及 RiskGate 风控评估，通过重新计算 stable_hash 与历史 trace 散列进行 100% 幂等校验与精准篡改检测。
+    - [x] **实现确定性模拟交易执行器 (PaperExecutionAdapter)**：在 `trading_kernel/execution/paper_adapter.py` 中实现了 Paper Trading 适配器。采用基类 `ExecutionAdapter` 接口倒置设计；建立内存 Position（仓位）与 AccountSnapshot（账户资产/浮动盈亏）高保真账簿，支持平滑、安全的 `BUY -> ADD -> REDUCE -> SELL` 撮合与均价加仓浮亏模拟，规避穿仓风险。
+    - [x] **扩展测试硬化套件 (Hardened Test Suite)**：
+        - 编写了 `test_replay_equivalence.py` 用以校验常规幂等回放流与故意哈希篡改检测。
+        - 编写了 `test_paper_trading.py` 用以检验持仓与模拟资金变现的全套生命周期。
+        - 物理执行 pytest，目前 8 个测试全部通过 (8 passed in 1.16s)，全面守住无状态、单向流红线。
 
 ## 2026-05-23 18:13
 - [x] **重构系统资源分析面板，实现大金刚进程精准友好名映射与真实文件名剥离 (Enhanced System Resource Analytics Panel)**：
