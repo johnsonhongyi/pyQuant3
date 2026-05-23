@@ -47,6 +47,27 @@ def load_risk_limits_from_config() -> RiskLimits:
     return RiskLimits()
 
 
+def load_trading_mode_from_config() -> str:
+    """从本地 window_config.json 物理配置文件中安全加载保存的交易运行模式"""
+    try:
+        import os
+        import json
+        from sys_utils import get_base_path
+        base_dir = get_base_path()
+        for filename in ("window_config.json", "scale2_window_config.json"):
+            config_file = os.path.join(base_dir, filename)
+            if os.path.exists(config_file):
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "DecisionFlowPanel" in data and "trading_mode" in data["DecisionFlowPanel"]:
+                    mode = data["DecisionFlowPanel"]["trading_mode"]
+                    if mode in {"OBSERVE", "PAPER", "CONFIRM", "LIVE_AUTO"}:
+                        return mode
+    except Exception:
+        pass
+    return "OBSERVE"
+
+
 class TradingKernelService:
     # 算法内核版本锁死指纹 (Phase 9: Precondition)
     KERNEL_VERSION = "2026.05.23.01"
@@ -90,13 +111,13 @@ class TradingKernelService:
             kill_switch=self.kill_switch,
         )
         
-        # 默认降级并运行在 OBSERVE (纯观察旁路记账) 模式
-        self._mode = "OBSERVE"
         # 动态绑定当前物理执行适配器 (默认为 None，Observe 下不投递物理订单)
         self.executor: Any = None
         
-        # 状态重置
-        self.set_trading_mode("OBSERVE")
+        # 从本地配置文件中安全加载保存的交易模式并初始化生效
+        saved_mode = load_trading_mode_from_config()
+        self._mode = "OBSERVE"
+        self.set_trading_mode(saved_mode)
 
     @property
     def mode(self) -> str:

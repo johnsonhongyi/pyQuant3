@@ -2552,6 +2552,7 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.label.setObjectName("ContentLabel")
         self.label.setStyleSheet("font-family: monospace; font-size: 12px; line-height: 1.3;")
         self.label.setWordWrap(True)  # 开启自动换行，结合 HTML style 控制特定部分不换行
+        self.label.setMinimumWidth(200)  # 限制最小宽度，防止文字过窄导致高度无限拉长和setGeometry报错
         self.label.setMaximumWidth(280)  # 限制最大宽度，防止理由文字过长时无限横向延伸，强制折行
         self.content_layout.addWidget(self.label)
         
@@ -2574,6 +2575,8 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.hover_timer.timeout.connect(self._on_hover_timeout)
         
         # 限制 KLineDetailWindow 自身最大宽度为 300，配合 label.setMaximumWidth(280)，实现彻底自动折行
+        self.setMinimumWidth(220)
+        self.setMinimumHeight(150)
         self.setMaximumWidth(300)
 
     def _update_stylesheets(self):
@@ -2979,7 +2982,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- 决策面板 (第 7 阶段) ---
         self.decision_panel = QFrame()
-        self.decision_panel.setFixedHeight(40)
+        self.decision_panel.setMinimumHeight(40)  # 允许高度随内容自动拉伸
         self.decision_panel.setObjectName("DecisionPanel")
         self.decision_panel.setStyleSheet("""
             #DecisionPanel {
@@ -3008,7 +3011,7 @@ class MainWindow(QMainWindow, WindowMixin):
             }
         """)
         self.decision_layout = QHBoxLayout(self.decision_panel)
-        self.decision_layout.setContentsMargins(15, 0, 15, 0)
+        self.decision_layout.setContentsMargins(15, 4, 15, 4)  # 增加上下内边距以支撑折行后的呼吸感
 
         # --- 策略选择器 (Phase 25) ---
         from PyQt6.QtWidgets import QComboBox
@@ -3024,6 +3027,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.decision_label = QLabel("实时决策中心: 等待策略信号...")
         self.decision_label.setStyleSheet("color: #00FF00; font-weight: bold;")
+        self.decision_label.setWordWrap(True)  # 开启自动换行，支持理由文本超长时自动向下折行
+        self.decision_label.setMaximumWidth(550)  # 限制最大宽度，防止折行时横向过度延伸
         self.decision_layout.addWidget(self.decision_label)
 
         self.supervision_label = QLabel("🛡️ 流程监理: 就绪")
@@ -6958,7 +6963,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 渲染并显示独立的可手动拖拽和复用的 K 线悬浮详情窗
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
             self.kline_detail_win.label.setText(text)
-            self.kline_detail_win.adjustSize()
+            self.kline_detail_win.label.adjustSize()  # 强行触发子标签尺寸重算
+            self.kline_detail_win.adjustSize()        # 强行触发父窗口自适应缩放
             if not self.kline_detail_win.is_custom_positioned:
                 # 默认位置是鼠标位置，跟随鼠标的历史版本最初的设计
                 cursor_pos = QtGui.QCursor.pos()
@@ -12006,7 +12012,19 @@ class MainWindow(QMainWindow, WindowMixin):
         # ----------------- 6. 更新实时决策面板 (Phase 7) -----------------
         if is_realtime_active and 'shadow_decision' in locals() and shadow_decision:
             action = shadow_decision.get('action', '无')
-            reason = shadow_decision.get('reason', '运行中')
+            reason = str(shadow_decision.get('reason', '运行中'))
+
+            # 超过30个字符自动物理裁切，保留省略号
+            if len(reason) > 30:
+                reason = reason[:27] + "..."
+
+            # 每8个字自动物理插入换行符 <br/> 强制换行
+            reason_wrapped = ""
+            for i in range(0, len(reason), 8):
+                if i > 0:
+                    reason_wrapped += "<br/>"
+                reason_wrapped += reason[i:i+8]
+            reason = reason_wrapped
 
             # 颜色逻辑
             color_hex = "#00FF00" if "买" in action or "ADD" in action else "#FF4444" if ("卖" in action or "止" in action) else "#CCCCCC"
