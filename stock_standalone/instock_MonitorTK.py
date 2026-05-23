@@ -946,6 +946,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
         self.bind("<Alt-k>", lambda event: self.open_market_pulse())
         self.bind("<Alt-l>", lambda event: self.open_live_signal_viewer())
+        self.bind("<Alt-j>", lambda event: self.open_decision_flow_panel())
         self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
         self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
         # 启动周期检测 RDP DPI 变化
@@ -1178,6 +1179,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"打开实时信号仪表盘失败: {e}\n{traceback.format_exc()}")
             messagebox.showerror("Error", f"Failed to open Signal Dashboard: {e}")
+
+    def open_decision_flow_panel(self):
+        """打开交易内核决策流水分析面板 (Alt+J)"""
+        try:
+            if not hasattr(self, "_decision_flow_win") or self._decision_flow_win is None:
+                from PyQt6 import QtWidgets
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                
+                from tk_gui_modules.decision_flow_panel import DecisionFlowPanel
+                
+                self._decision_flow_win = DecisionFlowPanel(parent=self)
+                self._decision_flow_win.code_clicked.connect(
+                    lambda c, n: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+                )
+                
+            self._decision_flow_win.show()
+            self._decision_flow_win.raise_()
+            self._decision_flow_win.activateWindow()
+            if hasattr(self, '_register_hwnd_to_mru'):
+                self._register_hwnd_to_mru(int(self._decision_flow_win.winId()))
+
+            toast_message(self, "决策流水分析已启动")
+        except Exception as e:
+            logger.error(f"打开决策流水面板失败: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("Error", f"Failed to open Decision Flow Panel: {e}")
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
@@ -11530,6 +11557,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     h = int(self._signal_dashboard_win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "🛡️ 策略信号仪表盘 (SignalDashboard)"
+            except Exception:
+                pass
+
+        # 6.1. 交易内核决策流水监控 (PyQt6 - DecisionFlowPanel)
+        if hasattr(self, '_decision_flow_win') and self._decision_flow_win is not None:
+            try:
+                if self._decision_flow_win.isVisible():
+                    h = int(self._decision_flow_win.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = "⚡ 交易内核决策流水监控 (DecisionFlowPanel)"
             except Exception:
                 pass
                 

@@ -18,12 +18,37 @@ class PanelManager:
         # 窗口引用缓存
         self._pulse_win = None
         self._signal_dashboard_win = None
+        self._decision_flow_win = None
         self._live_signal_viewer = None
         self._detailed_analysis_win = None
         self._stock_selection_win = None
         self._strategy_report_win = None
         self._voice_monitor_win = None
         self._indicator_help_win = None
+
+    def open_decision_flow_panel(self):
+        """打开交易内核决策流水分析面板 (PyQt6)"""
+        try:
+            if not self._decision_flow_win:
+                from PyQt6 import QtWidgets
+                if not QtWidgets.QApplication.instance():
+                    self.app._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                
+                from tk_gui_modules.decision_flow_panel import DecisionFlowPanel
+                self._decision_flow_win = DecisionFlowPanel(parent=self.app)
+                
+                # 双击行跳转联动
+                self._decision_flow_win.code_clicked.connect(
+                    lambda c, n: self.app.tk_dispatch_queue.put(lambda: self.app.on_code_click(c))
+                )
+                
+            self._decision_flow_win.show()
+            self._decision_flow_win.raise_()
+            self._decision_flow_win.activateWindow()
+            toast_message(self.app, "决策流水面板已启动")
+        except Exception as e:
+            logger.error(f"Failed to open DecisionFlowPanel: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("错误", f"启动决策流水面板失败: {e}")
 
     def open_market_pulse(self):
         """打开每日复盘面板"""
