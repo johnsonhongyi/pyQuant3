@@ -11407,33 +11407,52 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
             
         # 🌟 动态记录操盘手手动点击/查看的窗口顺序
-        # 读取 Windows 物理前台焦点窗口。如果它是我们的可见交易窗口之一，
-        # 则说明操盘手此前正在查看它。我们必须在 MRU 中把它放到最前面，使其真正符合切换查看顺序。
+        # 读取 Windows 物理前台焦点窗口
         import ctypes
         current_fore = ctypes.windll.user32.GetForegroundWindow()
-        if current_fore in current_visible_hwnds:
+        
+        # 区分常规可见窗口与磁贴窗口 (包含 MonitorWindow_ 的为磁贴)
+        normal_visible = []
+        tile_visible = []
+        for h in current_visible_hwnds:
+            name = name_map.get(h, "")
+            if "MonitorWindow_" in name:
+                tile_visible.append(h)
+            else:
+                normal_visible.append(h)
+                
+        # 🌟 仅常规程序窗口使用 MRU 冒泡排序
+        if current_fore in normal_visible:
             if current_fore in self._window_mru_list:
                 self._window_mru_list.remove(current_fore)
             self._window_mru_list.insert(0, current_fore)
             
-        # 2. 根据 MRU 历史列表对当前可见窗口进行排序
-        # 已经在 MRU 中的，按 MRU 顺序排在前面；不在 MRU 中的可见窗口，追加到最后
-        sorted_hwnds = []
+        # 根据 MRU 历史列表对常规可见窗口进行排序
+        sorted_normal = []
         for mru_hwnd in self._window_mru_list:
-            if mru_hwnd in current_visible_hwnds:
-                sorted_hwnds.append(mru_hwnd)
+            if mru_hwnd in normal_visible:
+                sorted_normal.append(mru_hwnd)
                 
-        # 将不在 MRU 中的可见窗口也加入，并同步登记进 MRU 列表
-        for v_hwnd in current_visible_hwnds:
-            if v_hwnd not in sorted_hwnds:
-                sorted_hwnds.append(v_hwnd)
-                self._window_mru_list.append(v_hwnd)
+        # 将不在 MRU 中的常规可见窗口追加到后面并登记
+        for h in normal_visible:
+            if h not in sorted_normal:
+                sorted_normal.append(h)
+                if h not in self._window_mru_list:
+                    self._window_mru_list.append(h)
+                    
+        # 🌟 磁贴窗口保持自然发现/显示顺序不变动，不参与 MRU 冒泡重排
+        for h in tile_visible:
+            if h not in self._window_mru_list:
+                self._window_mru_list.append(h)
                 
+        # 最终合并返回：常规排前（MRU 冒泡），磁贴排后（固定显示顺序）
+        final_hwnds = sorted_normal + tile_visible
+        
         # 输出当前的活跃窗口列表日志
-        details = [name_map.get(h, f"Unknown({h})") for h in sorted_hwnds]
-        logger.debug(f"[Rotator] Detected active windows registry (MRU Sorted): {', '.join(details)}")
+        details = [name_map.get(h, f"Unknown({h})") for h in final_hwnds]
+        logger.debug(f"[Rotator] Detected active windows registry (Grouped: Normal MRU, Tiles Fixed): {', '.join(details)}")
         self._rotator_window_names = name_map
-        return sorted_hwnds
+        return final_hwnds
 
     def _force_focus_hwnd(self, hwnd):
         """100% 强力穿透并聚焦置顶窗口 (AttachThreadInput 底层穿透技术 + GUI原生双保险)"""
@@ -11534,7 +11553,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 检查底层窗口句柄是否依然存活，isVisible()
                 # 如果对象已被销毁，isVisible() 可能会抛出 RuntimeError
                 if self._rotator_dialog_instance.isVisible():
-                    self._rotator_dialog_instance.rotate_highlight(direction)
+                    self._rotator_dialog_instance.rotate_highlight(direction, is_hotkey=True)
                     return
                 else:
                     self._rotator_dialog_instance.close()
@@ -11615,6 +11634,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 import time
                 self.last_action_time = time.time()
                 self.selection_changed = False  # 是否已通过 R/上下键/滚轮修改过选中项
+                self.has_interacted = False     # 是否有任何鼠标或按键交互
                 
                 self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
                 self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -11658,7 +11678,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 列表容器
                 self.list_widget = QListWidget(self)
-                self.list_widget.wheelEvent = self.wheelEvent
                 self.list_widget.itemClicked.connect(self.on_item_clicked)
                 layout.addWidget(self.list_widget)
                 
@@ -11745,6 +11764,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.resize(380, min(120 + list_height + tiles_height, 600))
                 self.center_on_screen()
                 
+                # 注册为全局 QApplication 事件过滤器，以 100% 穿透捕获所有子控件上的键盘、鼠标与滚轮交互
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.installEventFilter(self)
+                
                 # 启动检测器: 30ms 高频轮询 Alt 键状态 + 5s 无操作超时兜底
                 self.detect_timer = QTimer(self)
                 self.detect_timer.timeout.connect(self.check_alt_release)
@@ -11826,13 +11851,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     for h, btn in self.tile_buttons.items():
                         btn.setStyleSheet(self._get_tile_style(selected=(h == target_hwnd)))
                     
-            def rotate_highlight(self, direction):
-                """外部连点快捷键时顺次切高亮"""
+            def rotate_highlight(self, direction, is_hotkey=False):
+                """连点快捷键、键盘上下键或鼠标滚轮顺次切高亮"""
                 if not self.hwnds:
                     return
                 import time
                 self.last_action_time = time.time()
-                self.selection_changed = True  # 已主动修改选择，Alt 松开后将自动切换
+                self.has_interacted = True  # 只要轮选，说明已开始交互，防超时自动退场
+                if is_hotkey:
+                    self.selection_changed = True  # 只有连按Alt+R才判定为需要Alt松手自动切换
                 self.curr_idx = (self.curr_idx + direction) % len(self.hwnds)
                 self.apply_highlight_to_ui()
                 
@@ -11847,20 +11874,83 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.detect_timer.stop()
                 self.trigger_switch_and_close()
 
+            def eventFilter(self, watched, event):
+                from PyQt6.QtCore import QEvent, Qt
+                
+                # 由于是挂载在 QApplication 上的全局事件过滤器，我们需要过滤出仅发往我们 Dialog 及其子控件的事件
+                is_our_window = False
+                if watched == self:
+                    is_our_window = True
+                elif hasattr(watched, 'window') and watched.window() == self:
+                    is_our_window = True
+                    
+                if not is_our_window:
+                    return super().eventFilter(watched, event)
+                
+                # 兼容不同PyQt6版本下event.type()返回枚举对象或底层整数值的情况
+                evt_type = event.type()
+                if hasattr(evt_type, 'value'):
+                    evt_type = evt_type.value
+                    
+                # 1. 捕获所有键盘、鼠标、滚轮交互以重置计时器，并激活 5s 交互模式超时自愈
+                if evt_type in [
+                    QEvent.Type.KeyPress.value,
+                    QEvent.Type.KeyRelease.value,
+                    QEvent.Type.MouseButtonPress.value,
+                    QEvent.Type.MouseButtonRelease.value,
+                    QEvent.Type.MouseMove.value,
+                    QEvent.Type.Wheel.value
+                ]:
+                    import time
+                    self.last_action_time = time.time()
+                    self.has_interacted = True
+                
+                # 2. 特殊拦截：键盘按键
+                if evt_type == QEvent.Type.KeyPress.value:
+                    evt_key = event.key()
+                    if hasattr(evt_key, 'value'):
+                        evt_key = evt_key.value
+                        
+                    if evt_key == Qt.Key.Key_Space.value:
+                        # 拦截空格键，直接确认并关闭
+                        if hasattr(self, 'detect_timer') and self.detect_timer.isActive():
+                            self.detect_timer.stop()
+                        self.trigger_switch_and_close()
+                        return True  # 消费事件，阻止其向下传递给子控件
+                    elif evt_key == Qt.Key.Key_Down.value:
+                        self.rotate_highlight(1, is_hotkey=False)
+                        return True  # 消费事件，阻止向下分发，保证切换顺序绝对与显示/滚轮一致
+                    elif evt_key == Qt.Key.Key_Up.value:
+                        self.rotate_highlight(-1, is_hotkey=False)
+                        return True  # 消费事件，阻止向下分发，保证切换顺序绝对与显示/滚轮一致
+                
+                # 3. 特殊拦截：鼠标滚轮
+                if evt_type == QEvent.Type.Wheel.value:
+                    delta = event.angleDelta().y()
+                    if delta > 0:
+                        self.rotate_highlight(-1, is_hotkey=False)
+                    elif delta < 0:
+                        self.rotate_highlight(1, is_hotkey=False)
+                    return True  # 消费事件，阻止列表框自身滚动及由于 Alt 松开导致的意外触发
+                    
+                return super().eventFilter(watched, event)
+
             def check_alt_release(self):
                 """
                 智能超时检测器:
                 - 已修改选择 + Alt 松开 → 立即切换
                 - 未修改选择 + Alt 松开 → 窗口保持，等待明确确认
-                - 5秒无任何操作 → 切换当前高亮项并关闭
+                - 未交互状态下：1.5秒无操作自动关闭
+                - 交互状态下：5秒无操作自动关闭
                 """
                 import time
                 import ctypes
                 
-                # 1. 5 秒无操作超时兜底，自动切换
-                if time.time() - self.last_action_time > 5.0:
+                # 1. 根据是否发生过鼠标或按键交互，决定超时时长 (未交互 1.5s，已交互 5.0s)
+                timeout_limit = 5.0 if self.has_interacted else 1.5
+                if time.time() - self.last_action_time > timeout_limit:
                     self.detect_timer.stop()
-                    logger.debug("[Rotator] Inactivity timeout (5s) reached. Auto-closing and switching.")
+                    logger.debug(f"[Rotator] Inactivity timeout ({timeout_limit}s) reached. Auto-closing and switching.")
                     self.trigger_switch_and_close()
                     return
                 
@@ -11895,10 +11985,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 """支持键盘上下键与回车 Esc 纯盲操"""
                 import time
                 self.last_action_time = time.time()
+                self.has_interacted = True  # 键盘按下视为主动交互
                 if event.key() == Qt.Key.Key_Down:
-                    self.rotate_highlight(1)
+                    self.rotate_highlight(1, is_hotkey=False)
                 elif event.key() == Qt.Key.Key_Up:
-                    self.rotate_highlight(-1)
+                    self.rotate_highlight(-1, is_hotkey=False)
                 elif event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space]:
                     self.detect_timer.stop()
                     self.trigger_switch_and_close()
@@ -11912,15 +12003,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 """支持鼠标滚轮在窗口任意位置滚动以顺次轮转列表高亮项，并防止超时自动关闭"""
                 import time
                 self.last_action_time = time.time()
+                self.has_interacted = True  # 鼠标滚轮滚动视为主动交互
                 
                 # 获取滚轮滚动的垂直增量
                 delta = event.angleDelta().y()
                 if delta > 0:
                     # 向上滚动，高亮项向上移
-                    self.rotate_highlight(-1)
+                    self.rotate_highlight(-1, is_hotkey=False)
                 elif delta < 0:
                     # 向下滚动，高亮项向下移
-                    self.rotate_highlight(1)
+                    self.rotate_highlight(1, is_hotkey=False)
                 
                 event.accept()
 
@@ -11928,6 +12020,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 """关闭事件兜底清理"""
                 if hasattr(self, 'detect_timer') and self.detect_timer.isActive():
                     self.detect_timer.stop()
+                
+                # 安全注销全局 QApplication 事件过滤器
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    try:
+                        app.removeEventFilter(self)
+                    except Exception:
+                        pass
+                        
                 self.main_app._rotator_active = False
                 self.main_app._rotator_dialog_instance = None
                 WindowRotatorDialog._instance = None

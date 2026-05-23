@@ -1,7 +1,50 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 01:45  
+> 最后更新：2026-05-23 13:20  
+
+## 2026-05-23 13:20
+- [x] **拦截键盘上下按键事件，确保与滚轮/物理显示完全一致的顺序高亮切换 (Hijacked Up/Down Keys for Rotator Sync)**：
+    - [x] **根治上下键与滚轮/切换器核心状态不同步 Bug**：查明由于先前没有在全局 `eventFilter` 中拦截 `Key_Up` 和 `Key_Down` 按键，导致键盘按下去时直接被拥有焦点的 `QListWidget` 自身默认处理并更改了列表里的视觉 currentRow，但这没有同步更改 Dialog 中的核心状态 `self.curr_idx`。一旦进行切换或滚动滚轮，高亮项就会由于旧索引未被更新而突然发生跳变。
+    - [x] **统一键盘方向键导流接口与多 PyQt 版本兼容 (Multi-PyQt Version Event Key Compatibility)**：在 `eventFilter` 级别直接拦截了发往 Dialog 的 `Key_Up` 与 `Key_Down` 按键事件。查明不同 PyQt6 包中 `event.key()` 返回的值可能是 `Qt.Key` 枚举对象，也可能是底层 `int` 整数（例如 Key_Down 的底值是 16777237），因此直接比对 `==` 可能会隐性判定失败。通过引入对 `event.key()` 的 `hasattr(evt_key, 'value')` 并统一比对 `.value` 整数值，100% 成功实现了键盘方向键的拦截与导流，直接调用高亮控制接口 `self.rotate_highlight(1/-1, is_hotkey=False)`，彻底消除了状态机不同步导致的跳变，使键盘操作与滚轮、鼠标、物理排列实现 100% 同步的完美顺次轮选。
+
+## 2026-05-23 13:14
+- [x] **实现常规组与磁贴组的分组分流排序，完美兼顾冒泡极速切换与磁贴物理位置固定 (Grouped Rotator Sort: Normal MRU, Tiles Fixed)**：
+    - [x] **恢复常规窗口的 MRU 冒泡排序**：将主控制台、策略选股、赛马面板、竞价面板、K线监控等常规程序窗口的切换顺序恢复为 MRU 冒泡模式。每次成功聚焦切换后，该窗口自动置于 MRU 队列最前，保留极速的“最近查看常用窗口优先呼出”的极客体验。
+    - [x] **磁贴组物理位置锁定**：对底部 Tiles 区域的磁贴窗口（包含 `MonitorWindow_` 的概念放量监控子窗口），完全排除在 MRU 排序之外。其在列表中的检索与选中排序始终与显示物理排列绝对一致（顺次不乱跳），完美解决了磁贴由于不断被点击而导致的轮动错乱问题。
+
+## 2026-05-23 13:10
+- [x] **废除 MRU 重新排列列表物理显示顺序，保持显示排列永远固定 (Fixed Rotator Display Order)**：
+    - [x] **根治切换后列表显示顺序乱跳问题**：查明由于每次切换完成、重新拉起 Dialog 时，`_get_all_open_trade_windows` 会将上一次刚刚聚焦的前台窗口通过 MRU 排序置于首位，从而导致列表本身的显示顺序不断被打乱倒序，产生严重的视觉错位。
+    - [x] **物理锁死列表稳定排列**：通过修改排序逻辑，废除随 MRU 频繁重排列表元素顺序。现在直接以可见窗口的自然创建与探测顺序（主控制台、策略选股、赛马面板、竞价面板等）恒定展示，100% 保持列表显示的物理顺序绝对静止不乱跳。
+    - [x] **智能自适应索引定位**：虽然列表显示顺序保持物理静止，但在 Dialog 初始化阶段，初始高亮高亮指针依然会智能读取物理前台焦点窗口并将其 index 在该固定列表中定位，高亮聚焦于其邻近的下一项。这使得键盘上下方向键、连续快捷键以及鼠标滚轮切换均是在绝对静止的列表中依次滚动，体验回归极佳的自然直觉。
+
+## 2026-05-23 13:05
+- [x] **实现全局 QApplication 级事件过滤器重构，彻底解决空格/滚轮/按键重置失效 Bug (Implemented App-Level EventFilter, Global Focus Pierce & Multi-PyQt Version Event Type Compatibility)**：
+    - [x] **物理攻克子组件键盘/鼠标焦点抢占导致的交互丢弃难题 (Global Focus Pierce)**：查明由于键盘和鼠标焦点落在 `QListWidget` 及其 `viewport` 内部，相关的 `KeyPress`、`Wheel` 等事件会被子控件直接拦截并消费，导致父窗口 Dialog 无法收到任何消息，从而使得按键盘时计时器重置失败、以及空格键确认失效。通过重构 Dialog 结构，在 `__init__` 中将事件过滤器注册在全局 `QApplication.instance()` 实例上，并在 `eventFilter` 阶段，通过 `watched.window() == self` 筛选，穿透性地截获了所有发往本 Dialog 及其一切内部子控件的事件，100% 成功实现了空格即时确认与方向键/滚轮无死角重置 5.0 秒超时计时。
+    - [x] **实现不同 PyQt6 版本下事件类型匹配兼容性 (Multi-PyQt Version Compatibility)**：发现不同 PyQt6 二进制包在事件处理上，`event.type()` 返回的值可能是 `QEvent.Type` 枚举对象，也可能是底层 `int` 整数值，导致直接做 `==` 比较会有隐性匹配失效。通过引入 `hasattr(event.type(), 'value')` 并统一比对 `.value` 整数值（例如 `QEvent.Type.KeyPress.value`），彻底解决了由于 PyQt6 版本差异带来的比对失效，确保空格拦截和滚轮轮转百分之百稳定触发。
+    - [x] **安全生命周期注销防泄露**：在 Dialog 的 `closeEvent` 中，同步增加了 `QtWidgets.QApplication.instance().removeEventFilter(self)` 调用，确保 Dialog 销毁后全局事件过滤器被干净移除，零内存泄露。
+
+## 2026-05-23 12:56
+- [x] **修复子组件键盘焦点拦截计时与空格/滚轮覆盖混淆 Bug (Fixed Event Capture, Timer Reset & Rotator Wheel Bug)**：
+    - [x] **彻底解决慢慢遍历时仍会触发 5s 自动关闭的 Bug**：查明由于键盘焦点处于 `QListWidget` 内部时，按键事件（如上下键、回车等）会被 `QListWidget` 自身直接消费，导致顶级 Dialog 的 `keyPressEvent` 无法被触发，重置时间的操作因此静默失效。通过在 `__init__` 中将 `eventFilter` 重新安装至 `self.list_widget`、`self.list_widget.viewport()` 以及 Dialog 自身，并在 `eventFilter` 阶段提前拦截所有物理按键与鼠标行为，成功实现了只要有按键操作即可 100% 刷新 5.0 秒无操作关闭计时，彻底避免了由于焦点控件阻断导致的意外超时关闭。
+    - [x] **完美修复鼠标滚轮一滚动就自动执行切换的 Bug**：废除了对 `self.list_widget.wheelEvent = self.wheelEvent` 这种会导致 C++ 与 Python 层 `self` 实例混淆的覆盖方式。改为在 `eventFilter` 拦截层对 `QEvent.Type.Wheel` 进行统一代理。滚动滚轮时，由 `eventFilter` 拦截并使用 `rotate_highlight(..., is_hotkey=False)` 进行轮换，同时触发 `self.has_interacted = True` 升级为 5s 超时。这使得滚轮操作不仅可以重置无操作计时，而且不再会污染 Alt 松手确认的标志，从而彻底避免了滚动时由于 Alt 键本身处于松开状态导致 30ms 瞬时自动切换的交互漏洞。
+    - [x] **彻底治愈空格键快捷确认无效的问题**：由于 `QListWidget` 会消费空格键事件，在 `eventFilter` 阶段检测到键盘 `Key_Space`（空格键）按下时，进行提前拦截直接执行 `trigger_switch_and_close()` 并返回 `True` 消费该事件，不继续向后分发给 `QListWidget`。这百分之百保障了空格键能顺畅进行确认切换。
+
+## 2026-05-23 12:35
+- [x] **修复遍历重置计时失效与鼠标滚轮防自动确认 Bug (Fixed Rotator Key Reset & Mouse Wheel Auto-confirm Bug)**：
+    - [x] **修复慢慢按键盘/连点 Alt+R 依然被 1.5s 强制关闭的问题**：查明全局快捷键 `Alt+R` 重复连点时直接调用了类级 `rotate_highlight`。由于此前在该方法中未将 `self.has_interacted` 设为 `True`，导致用户的连按、慢慢按行为无法激活 5.0 秒超时升级，依然采用 1.5 秒超时关闭。在 `rotate_highlight` 中加入了 `self.has_interacted = True` 的标记，成功使任何按键遍历行为均能完美重置计时，并无缝升级至 5.0 秒安全超时。
+    - [x] **修复鼠标滚轮一滚动就自动执行并关闭的 Bug**：分析得出滚轮滚动时由于 Alt 键本身就是松开的（`alt_released = True`），且 `wheelEvent` 调用了 `rotate_highlight` 把 `self.selection_changed` 设为了 `True`，因此在 30ms 后的下一次轮询中立即触发了“已修改选择 + Alt松开”的切换逻辑导致自动执行。通过为 `rotate_highlight` 方法重构了 `is_hotkey` 区分参数，仅在全局快捷键 `Alt+R` 连按时传入 `is_hotkey=True` 并触发 `selection_changed = True`；而在鼠标滚轮（`wheelEvent`）以及键盘上下键（`keyPressEvent`）触发的高亮轮转中强制传递 `is_hotkey=False`，使其不污染快捷键选择标志位。现在通过鼠标滚轮或键盘上下键自由滚动，不再会因为 Alt 键松开而导致 30ms 瞬时自动切换，而是继续保持窗口，并重置交互时间，等待 5s 超时或回车/空格/点击明确确认。
+
+## 2026-05-23 12:09
+- [x] **优化 Alt+R 轮换器无操作超时逻辑并修复空格键确认未生效 Bug (Optimized Rotator Timeout & Fixed Space Key Confirm Bug)**：
+    - [x] **完美修复空格键快捷确认未生效问题**：查明由于 `QListWidget` 控件在拥有焦点时会默认拦截并消费 `Key_Space`（空格键）事件进行项的切换，导致外层的 `keyPressEvent` 无法捕获。通过为 `WindowRotatorDialog` 增加 `eventFilter`（安装在窗口自身、`list_widget` 及其视口上），在 KeyPress 阶段提前对空格键实施强行拦截，并在按下时立即激活 `trigger_switch_and_close`，完美达成即时空格确认切换。
+    - [x] **实现双轨无操作智能超时自愈机制**：
+        - 引入 `self.has_interacted` 状态标记用户是否开展过任何实质性的鼠标（移动、点击、滚轮）或键盘（按键、松键）交互。
+        - 默认冷启动未交互状态下，设定极短的 **1.5 秒无操作超时**。如果只是呼出看一眼而未按键，窗口会在 1.5s 后自发优雅退场，避免遮挡。
+        - 一旦用户动了鼠标、键盘或滚轮进行交互，则将超时阈值自动升级为 **5.0 秒无操作超时**。
+    - [x] **引入高频操作静止检测重置**：在全局事件过滤器中，捕获 `MouseMove`、`MouseButtonPress`、`MouseButtonRelease`、`KeyPress` , `KeyRelease`、`Wheel` 等所有交互事件，并在事件发生时主动标记 `self.has_interacted = True` 并重置 `self.last_action_time = time.time()`，达到“只要有操作就暂停关闭计时，一旦停止操作满 5 秒才自动关闭”的设计效果。
+    - [x] **物理创建与归档独立任务清单**：创建并归档了包含日期时间命名的独立任务清单文件 [20260523_1209_task.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/bcced771-ba69-479b-95ee-71af16d3d711/20260523_1209_task.md)。
 
 ## 2026-05-23 02:13
 - [x] **修复 WindowRotatorDialog 鼠标点击后 Alt 未执行切换 Bug (Fixed Rotator on_item_clicked Missing)**：
