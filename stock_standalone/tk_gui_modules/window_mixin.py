@@ -274,7 +274,25 @@ class WindowMixin:
                         if aw.x() == x and aw.y() == y:
                             x += offset_step
                             y += offset_step
-            # logger.debug(f"[load_window_position_qt] config_file_path: {config_file_path}")
+
+            # [SAFE-GUARD] 避免因设定尺寸小于窗口物理最小尺寸(MinimumSizeHint/MinimumSize)导致的 Qt 警告与高频 setGeometry 刷屏
+            try:
+                if hasattr(win, "minimumSizeHint"):
+                    min_hint = win.minimumSizeHint()
+                    if min_hint.isValid():
+                        if min_hint.width() > 0:
+                            width = max(width, min_hint.width())
+                        if min_hint.height() > 0:
+                            height = max(height, min_hint.height())
+                if hasattr(win, "minimumSize"):
+                    min_size = win.minimumSize()
+                    if min_size.width() > 0:
+                        width = max(width, min_size.width())
+                    if min_size.height() > 0:
+                        height = max(height, min_size.height())
+            except Exception as ex:
+                logger.debug(f"[load_window_position_qt] 最小尺寸防御检查忽略: {ex}")
+
             win.setGeometry(x, y, width, height)
             return width, height, x, y
         except Exception as e:

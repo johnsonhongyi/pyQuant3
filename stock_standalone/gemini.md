@@ -1,13 +1,28 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 14:52  
+> 最后更新：2026-05-23 17:25  
+
+## 2026-05-23 17:25
+- [x] **物理消灭多进程与高DPI下 setGeometry 的最小大小物理限制警告 (Fixed Unable to Set Geometry Warning)**：
+    - [x] **实现 WindowMixin 最小尺寸物理防御 (MinimumSize Guard)**：在 `tk_gui_modules/window_mixin.py` 的 `load_window_position_qt` 核心尺寸恢复函数中，加入了针对 `minimumSizeHint()` 与 `minimumSize()` 的安全 max 过滤器。这确保了在恢复窗口大小（包括 DPI 缩放换算）时，尝试设定的几何高度和宽度永远不小于窗口内部布局计算出的物理下限，从源头上完美消除了高频滑动光标或重置窗口时，在 Windows 控制台疯狂刷屏的 `Unable to set geometry` 警告。
+    - [x] **对齐初始默认高度**：将 `trade_visualizer_qt6.py` 中 `kline_detail_win` 加载时的 `default_height` 参数由 `240` 升为更为宽裕的 `270`，完美适配详情窗内容的多行文本渲染，提升了高 DPI 屏下的首屏渲染流畅度。
+
+## 2026-05-23 15:08
+- [x] **实施评审安全加固与多进程自愈体系 (Implemented Review Code Hardening & Multi-process Healing)**：
+    - [x] **实现独立的 Port Conflict 端口自愈防御**：在 `hotkey_rotator.py` 的 `WindowSyncServer.run` 中加入了 `OSError` (WSAEADDRINUSE) 拦截，当 26669 端口被占用时，子进程能平滑退出，并发送 Named Pipe 自愈通知。
+    - [x] **加固大盘/概念高采样数据半包/粘包排查日志**：在 `WindowSyncServer` 的 `recv` 逻辑与 `json.loads` 解析中加入了详细的异常捕获与格式化 `print` 输出，告别静默失败。
+    - [x] **高醒目浮空 Toast 弹窗联动 (High-visibility Floating Toast)**：在 `instock_MonitorTK.py` 的 Named Pipe 消息回调 `STATUS_MSG` 接收分支中，全面升级为 5秒高醒目悬浮弹窗 `toast_message` 联动，确保操盘手在冷启动第一秒即能看清“Alt+R被占用已降级”等核心提醒，无需从状态栏里眯眼细读。
+    - [x] **参数化 K线详情窗口激活时延 (Parameterized Detail Window Hover Delay)**：将 `trade_visualizer_qt6.py` 中 `KLineDetailWindow` 原硬编码的 2 秒（`2000ms`）延时完美抽象为类级属性 `self.hover_activation_delay`，利于后期一键按键习惯配置化。
 
 ## 2026-05-23 14:52
 - [x] **加固自动弹出板块竞价面板的交易日判定 (Hardened Auto-open Bidding Panel with Trading Day Gate)**：
     - [x] 在 `instock_MonitorTK.py` 的 `is_auto_window` 时间窗口与防抖计算逻辑中，加入了 `cct.get_trade_date_status()` 判定。这确保了只在实际交易日且处于活跃交易时间段（09:15-15:05）时才自动触发面板拉起，避免非交易日（如周末、节假日）后台加载测试或冷启动时产生无意义的面板自动弹出。
 - [x] **修复 _update_crosshair_ui 内部 mapToGlobal 的 AttributeError 崩溃 (Fixed mapToGlobal AttributeError in _update_crosshair_ui)**：
-    - [x] 查明在十字光标移动的回调 `_update_crosshair_ui` 中，计算 K 线悬浮详情窗（`kline_detail_win`）默认摆放坐标时仍然调用了不具备 `mapToGlobal` 属性的 `self.kline_plot` (PlotItem)。将其更正为物理绘图组件 `self.kline_widget`，彻底消除了十字光标移动到 K 线图上触发 UI 更新时的崩溃隐患。
+    - [x] 查明在十字光标移动的回调 `_update_crosshair_ui` 中，计算 K 线悬浮详情窗（`kline_detail_win`）默认摆放坐标时仍然调用了不具备 `mapToGlobal` 属性 of `self.kline_plot` (PlotItem)。将其更正为物理绘图组件 `self.kline_widget`，彻底消除了十字光标移动到 K 线图上触发 UI 更新时的崩溃隐患。
+- [x] **恢复 KLineDetailWindow 默认跟随鼠标光标移动的经典交互 (Restored Detail Window Mouse-Following Default Position)**：
+    - [x] 重构了 `trade_visualizer_qt6.py` 中 `kline_detail_win` 在未进行手动拖拽（`not is_custom_positioned`）时的默认定位算法。摒弃了固定摆放在 K 线图左上角/左下角的局部映射逻辑，恢复历史最初设计——直接通过 `QtGui.QCursor.pos()` 提取屏幕全局鼠标坐标并向右下角微偏置（+15px），实现丝滑的随鼠悬动效果。
+    - [x] 同步改造了 `showEvent`、`moveEvent` 和 `resizeEvent` 等状态管理模块，在未手动定制位置时彻底绕过固定座标映射与重设逻辑，在规避潜在 `AttributeError` 崩溃风险的同时，完全遵循“不手动拖拽，就不调整也不记录定制标记”的纯净设计原则。
 
 ## 2026-05-23 14:50
 - [x] **拦截独立热键子进程的 KeyboardInterrupt 崩溃痕迹 (Suppressed Hotkey Subprocess KeyboardInterrupt Traceback)**：

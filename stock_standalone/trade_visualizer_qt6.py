@@ -2508,6 +2508,8 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.main_window = parent
         self.is_custom_positioned = False
         self.is_hovered = False
+        self.hover_activation_delay = 2000
+        
         
         # 窗口属性：工具窗口（不占任务栏）、无边框、置顶
         self.setWindowFlags(
@@ -2642,7 +2644,7 @@ class KLineDetailWindow(QtWidgets.QFrame):
     def enterEvent(self, event):
         # 鼠标进入时，启动 2 秒静止停留计时器，不立即激活 hover 状态
         if not self.is_hovered:
-            self.hover_timer.start(2000)
+            self.hover_timer.start(self.hover_activation_delay)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -2666,7 +2668,7 @@ class KLineDetailWindow(QtWidgets.QFrame):
     def mouseMoveEvent(self, event):
         # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 2 秒计时
         if not self.is_hovered:
-            self.hover_timer.start(2000)
+            self.hover_timer.start(self.hover_activation_delay)
             
             # === 🚀 核心事件穿透：将未激活状态下的鼠标移动事件转发给底层 K 线图 ===
             if self.main_window and hasattr(self.main_window, 'kline_plot'):
@@ -3528,7 +3530,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 加载悬浮详情窗的位置
             if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
                 detail_w, detail_h, detail_x, detail_y = self.load_window_position_qt(
-                    self.kline_detail_win, "kline_detail_window", default_width=200, default_height=240)
+                    self.kline_detail_win, "kline_detail_window", default_width=200, default_height=270)
                 
                 # 判定是否在同一个屏幕上
                 if main_x is not None and main_y is not None and detail_x is not None and detail_y is not None:

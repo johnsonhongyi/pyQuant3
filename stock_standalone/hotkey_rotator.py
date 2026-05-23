@@ -454,6 +454,14 @@ class WindowSyncServer(threading.Thread):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('127.0.0.1', 26669))
+        except OSError as e:
+            err_msg = f"⚠️ 轮转同步端口26669被占用 ({e})，热键进程启动受限，请重启系统！"
+            print(f"[SyncServer] Bind failed: {err_msg}")
+            send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": err_msg})
+            s.close()
+            return
+            
+        try:
             s.listen(5)
             print("[SyncServer] Listening on 127.0.0.1:26669")
             while True:
@@ -469,14 +477,17 @@ class WindowSyncServer(threading.Thread):
                     if payload:
                         obj = json.loads(payload)
                         self.data_signal.emit(obj)
+                except json.JSONDecodeError as je:
+                    print(f"[SyncServer] JSON Decode Error: {je}")
                 except Exception as e:
-                    pass
+                    print(f"[SyncServer] Connection handler error: {e}")
                 finally:
                     conn.close()
         except Exception as e:
             print(f"[SyncServer] Server crashed: {e}")
         finally:
             s.close()
+
 
 
 class HotkeyListener(threading.Thread):
