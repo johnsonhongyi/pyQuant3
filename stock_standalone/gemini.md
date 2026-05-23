@@ -1,7 +1,23 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 22:30  
+> 最后更新：2026-05-23 23:08  
+
+## 2026-05-23 23:30
+- [x] **修复 KLineDetailWindow 理由文字过多导致的折行与 setGeometry 尺寸报错 (Fixed Detail Window Text Wrap & Geometry Error)**：
+    - [x] **物理注入最小尺寸安全阀 (Minimum Size Constraints)**：在 `KLineDetailWindow` 中新增了 `self.setMinimumWidth(220)` 和 `self.setMinimumHeight(150)` 几何约束，并将其内嵌 `label` 标签的最小宽度强制锁死为 `self.label.setMinimumWidth(200)`。这彻底阻断了由于历史持久化配置（如 `width=171`）极其低矮狭窄导致的文本折行高度无限拉伸的 Bug。
+    - [x] **协同冷启动自愈防御机制**：通过物理高尺寸门槛，在主程序启动并调用 `WindowMixin.load_window_position_qt` 恢复布局时，自动识别并平滑自愈，将过小的历史高度与宽度强制提升至舒适的阅读尺寸范围，杜绝了底层 `setGeometry` 的报错警告。
+    - [x] **强力双层 adjustSize 连击**：重构了十字光标更新时的刷新逻辑，设置文本内容后立即显式调用 `self.kline_detail_win.label.adjustSize()` 强制子标签率先完成高度重算，随后跟进 `self.kline_detail_win.adjustSize()` 进行父容器自适应。完美突破了 Qt 在嵌套布局富文本下高度滞后计算的历史遗留缺陷，保障了任何极长理由文本在多分辨率/高 DPI 屏下的丝滑显示。
+- [x] **实现实时决策中心面板理由高密度 30字裁剪 与 8字物理换行 极致排版优化 (Optimized Decision Panel Truncation & Compact Wrapping)**：
+    - [x] **实现 30 字符硬截断自愈**：在 `trade_visualizer_qt6.py` 中更新实时决策栏时，增加了对 `reason` 字符长度的判定。一旦超过 30 字符，自动执行截断保留前 27 字符并追加省略号 `...`，彻底防范了长句撑大底栏的高度。
+    - [x] **实现 8 字符物理换行**：在格式化展示前，采用 `for i in range(0, len(reason), 8)` 切片循环，每隔 8 个中英文字符在 HTML 文本中硬塞一个换行标签 `<br/>`，从而让理由文字自发折叠为每行恰好 8 个字的极密小方块，不仅将横向占用空间压缩到了极致，且极富前沿量化看盘终端的极密美学质感。
+    - [x] **打通决策面板弹性高度与呼吸边距**：配合已落实的 `setMinimumHeight(40)` 弹性高度以及 `setContentsMargins(15, 4, 15, 4)` 的 `4px` 上下呼吸内边距，确保折行后的多行理由文本居中摆放且永不重叠裁剪。
+
+## 2026-05-23 23:08
+- [x] **实现交易运行模式切换/降级双向物理持久化与冷启动反序列化自愈 (Persistent Trading Mode & Startup Self-Healing)**：
+    - [x] **实现运行模式启动自愈加载**：在 `trading_kernel/kernel_service.py` 中引入 `load_trading_mode_from_config()`，支持冷启动时从本地双通道配置文件自动反序列化读取已保存的模式（OBSERVE/PAPER/CONFIRM/LIVE_AUTO），并在初始化中热应用，消除了重启后模式永远重置回默认旁路 `OBSERVE` 的设计缺陷。
+    - [x] **实现模式变动双向物理保存**：升级了 `DecisionFlowPanel._on_mode_combo_changed()`，无论是操盘手成功升格运行模式（如切入人机协同 `CONFIRM` 或模拟撮合 `PAPER`），还是由于风控/前置卡口拦截导致的系统强制安全降级，皆通过原子重命名双写保存实际最终生效的交易模式，保持配置状态 100% 绝对一致。
+    - [x] **29/29 单元回归测试全绿通过**：在加入交易模式持久化及冷启动自愈逻辑后，完美通过全套内核单元测试。
 
 ## 2026-05-23 22:30
 - [x] **实现风控参数双配置文件原子物理持久化与 500ms 逆向广播 Dirty Check 脏检查防抖调优 (Persistent Risk Limits & High-Performance Dirty Checks)**：

@@ -923,6 +923,32 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 return
                 
             success = service.set_trading_mode(target_mode)
+            
+            # 物理持久化实际生效的交易运行模式至本地配置文件（双写防抖）
+            try:
+                from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+                for filepath in (WINDOW_CONFIG_FILE, WINDOW_CONFIG_FILE.replace("window_config.json", "scale2_window_config.json")):
+                    data = {}
+                    if os.path.exists(filepath):
+                        try:
+                            with open(filepath, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                        except Exception:
+                            data = {}
+                            
+                    if "DecisionFlowPanel" not in data:
+                        data["DecisionFlowPanel"] = {}
+                        
+                    data["DecisionFlowPanel"]["trading_mode"] = service.mode
+                    
+                    tmp_file = filepath + ".tmp"
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    os.replace(tmp_file, filepath)
+                logger.info(f"Persistent trading mode '{service.mode}' saved successfully.")
+            except Exception as ex:
+                logger.error(f"Failed to save persistent trading mode: {ex}")
+
             if success:
                 self.lbl_preconditions_warn.setVisible(False)
                 toast_message(self.parent_app, f"交易模式已成功切换为 {target_mode}")
