@@ -2640,9 +2640,9 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.adjustSize()
 
     def enterEvent(self, event):
-        # 鼠标进入时，启动 3 秒静止停留计时器，不立即激活 hover 状态
+        # 鼠标进入时，启动 2 秒静止停留计时器，不立即激活 hover 状态
         if not self.is_hovered:
-            self.hover_timer.start(3000)
+            self.hover_timer.start(2000)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -2664,9 +2664,9 @@ class KLineDetailWindow(QtWidgets.QFrame):
             event.accept()
 
     def mouseMoveEvent(self, event):
-        # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 3 秒计时
+        # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 2 秒计时
         if not self.is_hovered:
-            self.hover_timer.start(3000)
+            self.hover_timer.start(2000)
             
             # === 🚀 核心事件穿透：将未激活状态下的鼠标移动事件转发给底层 K 线图 ===
             if self.main_window and hasattr(self.main_window, 'kline_plot'):
@@ -3522,15 +3522,27 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if not self._window_pos_loaded:
             self._window_pos_loaded = True
-            self.load_window_position_qt(
+            main_w, main_h, main_x, main_y = self.load_window_position_qt(
                 self, "trade_visualizer", default_width=1400, default_height=900)
             
             # 加载悬浮详情窗的位置
             if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
-                width, height, x, y = self.load_window_position_qt(
+                detail_w, detail_h, detail_x, detail_y = self.load_window_position_qt(
                     self.kline_detail_win, "kline_detail_window", default_width=200, default_height=240)
-                if x is not None and y is not None:
-                    self.kline_detail_win.is_custom_positioned = True
+                
+                # 判定是否在同一个屏幕上
+                if main_x is not None and main_y is not None and detail_x is not None and detail_y is not None:
+                    from PyQt6.QtGui import QGuiApplication
+                    from PyQt6.QtCore import QPoint
+                    main_screen = QGuiApplication.screenAt(QPoint(main_x, main_y))
+                    detail_screen = QGuiApplication.screenAt(QPoint(detail_x, detail_y))
+                    
+                    if main_screen is not None and detail_screen is not None and main_screen == detail_screen:
+                        self.kline_detail_win.is_custom_positioned = True
+                        logger.info("kline_detail_win is on the same screen as MainWindow. Custom position enabled.")
+                    else:
+                        self.kline_detail_win.is_custom_positioned = False
+                        logger.info("kline_detail_win is on a different screen. Reverted to default positioning (follow mouse).")
                 else:
                     self.kline_detail_win.is_custom_positioned = False
             
@@ -6946,9 +6958,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.kline_detail_win.label.setText(text)
             self.kline_detail_win.adjustSize()
             if not self.kline_detail_win.is_custom_positioned:
-                # 默认显示在 K 线图左侧内部（距离 K 线图左边缘 40px, 顶边缘 10px）
-                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
-                self.kline_detail_win.move(plot_pos)
+                # 默认位置是鼠标位置，跟随鼠标的历史版本最初的设计
+                cursor_pos = QtGui.QCursor.pos()
+                self.kline_detail_win.move(cursor_pos.x() + 15, cursor_pos.y() + 15)
             self.kline_detail_win.show()
 
         # ⚡ [NEW] 十字光标移动时，动态更新 K 线顶部 MA/布林等指标值
@@ -13765,15 +13777,15 @@ class MainWindow(QMainWindow, WindowMixin):
         super().moveEvent(event)
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win and self.kline_detail_win.isVisible():
             if not self.kline_detail_win.is_custom_positioned:
-                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
-                self.kline_detail_win.move(plot_pos)
+                # 默认跟随鼠标，在 moveEvent 中不做固定位置强移，以防冲突与 AttributeError
+                pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win and self.kline_detail_win.isVisible():
             if not self.kline_detail_win.is_custom_positioned:
-                plot_pos = self.kline_plot.mapToGlobal(QPoint(40, 10))
-                self.kline_detail_win.move(plot_pos)
+                # 默认跟随鼠标，在 resizeEvent 中不做固定位置强移，以防冲突与 AttributeError
+                pass
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
