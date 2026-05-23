@@ -1,7 +1,14 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 20:25  
+> 最后更新：2026-05-23 20:30  
+
+## 2026-05-23 20:30
+- [x] **重磅攻坚并交付 Phase 9 模式转换天梯与 8 大安全前置防护卡口 (Delivered Trading Kernel Phase 9: Mode Ladder & 8 Precondition Gates)**：
+    - [x] **交付模式安全升级天梯 (`set_trading_mode`)**：构建了 `OBSERVE` (纯记账旁路)、`PAPER` (高保真模拟)、`CONFIRM` (操盘干预介入) 和 `LIVE_AUTO` (全自动实盘) 四级安全递进天梯，默认以 `OBSERVE` 无害化垫底。
+    - [x] **交付 8 大前置防护关卡 (`_verify_live_preconditions`)**：在升格至 `LIVE_AUTO` 全自动下单前，无条件校验标准活跃交易时段、实盘柜台物理在线、`KillSwitch` 未挂起、`RiskGate` 正常加载、日内累计亏损限额、本地/柜台对账同步一致性、内核版本指纹匹配以及自动化测试状态，全卡口物理安全守护。
+    - [x] **交付物理强制降级回退机制**：当尝试切入 `LIVE_AUTO` 时，若 8 大前置卡口有任意一处报错未过，系统将瞬间强制阻断并将天梯重置退回到 `OBSERVE` 纯记账旁路，防范实盘越权与裸单。
+    - [x] **全面扩充测试用例保障 29/29 绿旗全通**：编写了 `test_auto_ladder.py`，完整覆盖模式升降级、拦截回退、不同模式下订单路由策略，并成功通过了全量 29 个用例的红线回归（`29 passed in 2.64s`）！
 
 ## 2026-05-23 20:25
 - [x] **重磅攻坚并交付 Phase 8 实盘真盘柜台适配骨架与物理安全防护防线 (Delivered Trading Kernel Phase 8: Live Broker Counter Skeleton & Dual-Protection)**：
