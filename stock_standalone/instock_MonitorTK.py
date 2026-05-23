@@ -2115,7 +2115,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             msg_str = obj.get("msg")
                             logger.info(f"[Pipe] Recv STATUS_MSG: {msg_str}")
                             if msg_str and hasattr(self, 'status_var'):
-                                self.tk_dispatch_queue.put(lambda m=msg_str: self.status_var.set(m))
+                                def update_status_and_toast(m=msg_str):
+                                    self.status_var.set(m)
+                                    if "已降级" in m or "被占用" in m or "启动受限" in m:
+                                        try:
+                                            toast_message(self, m, duration=5000)
+                                        except Exception:
+                                            pass
+                                self.tk_dispatch_queue.put(update_status_and_toast)
                             continue
 
                         # ================== 原有逻辑：完全保留 ==================
