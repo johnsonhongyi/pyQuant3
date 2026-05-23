@@ -65,8 +65,9 @@ class JsonlJournal:
     def append(self, record: dict[str, Any]) -> None:
         payload = dict(record)
         
-        # 支持审计类日志（HUMAN_CONFIRMATION_AUDIT）直接写入而不受 code 过滤与去重限制
-        if payload.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT":
+        # 支持审计类日志（如 HUMAN_CONFIRMATION_AUDIT, POSITION_SYNC_AUDIT）直接写入而不受 code 过滤与去重限制
+        jtype = payload.get("journal_type")
+        if jtype is not None and "AUDIT" in str(jtype):
             now_dt = datetime.now()
             payload["trade_date"] = now_dt.strftime("%Y-%m-%d")
             payload.setdefault("journal_ts", now_dt.isoformat(timespec="seconds"))
