@@ -17,6 +17,29 @@ class TradingKernelService:
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl"):
         self.state_manager = StateManager()
         self.journal = JsonlJournal(journal_path)
+        
+        # Phase 4 & Phase 7: 初始化纸单模拟适配器并包装 Confirm 确认执行器
+        from trading_kernel.execution.paper_adapter import PaperExecutionAdapter
+        from trading_kernel.execution.confirm_adapter import ConfirmExecutionAdapter
+        self.paper_adapter = PaperExecutionAdapter()
+        self.executor = ConfirmExecutionAdapter(
+            underlying_adapter=self.paper_adapter,
+            journal=self.journal,
+            mode="CONFIRM"
+        )
+        
+        # 挂载 confirm 弹窗回调（Lazy import 避免无头回测环境导入 PyQt6 报错）
+        try:
+            from tk_gui_modules.confirm_bubble import show_confirmation_bubble_sync
+            self.executor.set_confirm_callback(show_confirmation_bubble_sync)
+        except ImportError:
+            def headless_fallback_confirm(ord):
+                return {
+                    "confirmed": False,
+                    "size_pct_override": None,
+                    "override_reason": "Headless environment bypass rejection",
+                }
+            self.executor.set_confirm_callback(headless_fallback_confirm)
 
     def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True) -> dict[str, Any]:
         raw_hash = stable_hash(dict(item))
@@ -50,7 +73,21 @@ class TradingKernelService:
             "kernel_trace_id": trace.trace_id,
             "kernel_reason": asdict(intent.reason),
             "kernel_order_id": risk.order.order_id if risk.order else "",
+            "kernel_executed": False,
         }
+
+        # Phase 7 & Phase 4: 如果风控允许，则进入执行层投递订单
+        if risk.allowed and risk.order:
+            executed = self.executor.submit_order(risk.order)
+            result["kernel_executed"] = executed
+            
+            # 如果确认执行交易成功，同步更新 StateManager 状态
+            if executed:
+                if risk.final_action in {"BUY", "ADD"}:
+                    self.state_manager.set(signal.code, "IN_TRADE")
+                elif risk.final_action == "SELL":
+                    self.state_manager.set(signal.code, "FLAT")
+
         if write_journal:
             self.journal.append(
                 {

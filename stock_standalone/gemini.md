@@ -1,7 +1,16 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 20:05  
+> 最后更新：2026-05-23 20:15  
+
+## 2026-05-23 20:15
+- [x] **完美攻克并交付 Phase 7 人工确认干预模式与决策流水审计联动 (Delivered Trading Kernel Phase 7: Human Confirmation Mode & Audit Linkage)**：
+    - [x] **交付人工确认执行装饰器 (`ConfirmExecutionAdapter`)**：设计并实现了基于装饰器模式的 `ConfirmExecutionAdapter`，无缝包装任意 `ExecutionAdapter`（如 `PaperExecutionAdapter`）。支持在 `CONFIRM` 和 `AUTO` 下单模式间无缝切换，并对委托做超时自毁与放行/干预决策拦截。
+    - [x] **交付 Cyberpunk 暗黑科技风 PyQt6 确认气泡 (`OrderConfirmationBubble`)**：精心雕琢出一款高拟真、圆角发光玻璃拟态的无边框置顶悬浮弹窗。支持 15 秒物理倒计时自动拒绝、仓位比率微调滑块 (`Override Size`)，以及防跨屏分裂的主窗口相对居中摆放逻辑。
+    - [x] **构建跨线程安全信号调度桥件 (`ConfirmDispatcher`)**：在 `tk_gui_modules/confirm_bubble.py` 中实现了基于 PyQt `pyqtSignal` 的 `ConfirmDispatcher`。支持多进程/多线程交易内核在后台计算触发 ApprovedOrder 时，以完全非阻塞的方式安全投递至主 GUI 线程唤醒气泡弹窗，彻底规避了主进程 GIL 锁死与 UI 粘滞。
+    - [x] **重构内核服务支持干预决策链 (`TradingKernelService`)**：重构了 `evaluate_decision_item`，将风控审核通过的 ApprovedOrder 自动交由确认适配器处理。若操盘手同意，则进入模拟交易撮合并追加物理 `HUMAN_CONFIRMATION_AUDIT` 审计账簿日志；若拒绝，则标记状态机回退，实现 100% 幂等追溯。
+    - [x] **决策面板增量解析完美呈现操盘干预 (`DecisionFlowPanel`)**：升级了 `decision_flow_panel.py` 的增量行解析器。当增量捕获到 `HUMAN_CONFIRMATION_AUDIT` 时，高反差卡片式高亮渲染为 `✍️ 覆盖` (微调下单比率如 `15% ➔ 5%`) 或者是 `❌ 拒绝`、`👤 确认`，并把理由醒目呈现，极大拉升了操盘掌控感。
+    - [x] **补充回归测试 100% 绿旗通过**：编写了 `test_confirm_mode.py`，模拟人工应答放行、超时自毁拒绝、仓位Override微调，并通过 pytest 回归核验。全套 22 个测试用例全部一次性 100% 绿旗通过 (`22 passed in 2.21s`)！
 
 ## 2026-05-23 20:05
 - [x] **推进 Trading Kernel 核心可观测性，交付 Phase 7 交易内核决策流水监控面板 (Delivered Trading Kernel Phase 7: DecisionFlowPanel & Data Contract)**：
