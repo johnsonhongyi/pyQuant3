@@ -1,8 +1,8 @@
 # 🎯 Trading Kernel 实施进度跟踪文档
 
-> **最后更新时间**：2026-05-23 20:15  
-> **当前状态**：🏆 已成功完成 Phase 0 至 Phase 7 核心骨架、确定性回放、模拟交易账簿、风控硬防、多进程行为自愈锁加固、交易内核决策流水分析面板（DecisionFlowPanel），以及全新的**人工确认委托与干预审计模式 (Human Confirmation Mode)** 闭环！  
-> **当前测试通过率**：`22 / 22 Passed (100%)`
+> **最后更新时间**：2026-05-23 20:22  
+> **当前状态**：🏆 已成功完成 Phase 0 至 Phase 8 核心骨架、确定性回放、模拟交易账簿、风控硬防、多进程行为自愈锁加固、交易内核决策流水分析面板（DecisionFlowPanel）、人工确认干预审计、以及全新的**实盘真盘柜台适配集成与物理防线 (Live Broker Counter Integration)**！  
+> **当前测试通过率**：`26 / 26 Passed (100%)`
 
 ---
 
@@ -18,7 +18,7 @@
 | **Phase 5** | **风控限额与硬防** | 引入日内最大回撤、个股持仓上限与板块敞口硬阻断。 | 🟢 已交付 | 100% | `risk_gate.py`<br>`test_risk_hardening.py` |
 | **Phase 6** | **多线程安全状态** | 引入 `StateManager` 分级互斥锁与跨线程自愈防护。 | 🟢 已交付 | 100% | `state_manager.py`<br>`test_state_concurrency.py` |
 | **Phase 7** | **人工确认与干预审计** | 提供 Cyberpunk 暗黑科技风确认弹窗及 Override 占比微调与增量 Journal 审计。| 🟢 已交付 | 100% | `confirm_adapter.py`<br>`confirm_bubble.py`<br>`test_confirm_mode.py` |
-| **Phase 8** | **真盘柜台适配集成** | 基于 `ExecutionAdapter` 抽象层实现真实券商接口无缝对接。 | 🟡 待启动 | 0% | `broker_adapter.py` |
+| **Phase 8** | **真盘柜台适配集成** | 基于 `ExecutionAdapter` 抽象层支持 KillSwitch、幂等去重防双发、仓位比对自愈并为 CTP/QMT 实盘通道垫底。 | 🟢 已交付 | 100% | `broker_adapter.py`<br>`test_broker_adapter.py` |
 
 ---
 
@@ -51,6 +51,7 @@
 - 📝 [execution/execution_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/execution/execution_adapter.py) —— 接口倒置交易执行抽象基类。
 - 📝 [execution/paper_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/execution/paper_adapter.py) —— 基于 PositionBook 的模拟盘高保真撮合执行器。
 - 📝 [execution/confirm_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/execution/confirm_adapter.py) —— 人明确认与 Override 干预账簿审计适配器 (ConfirmExecutionAdapter)。
+- 📝 [execution/broker_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/execution/broker_adapter.py) —— 实盘真盘对接适配器骨架支持紧急断电、幂等防重及仓位自愈。
 
 ### 🧪 自动化红线回归测试集 (Test Suite)
 - 📝 [tests/test_import_boundaries.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_import_boundaries.py) —— AST 静态边界导入硬红线测试。
@@ -62,6 +63,7 @@
 - 📝 [tests/test_state_concurrency.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_state_concurrency.py) —— Windows 多进程下状态读写原子竞争与死锁超时秒级自愈测试。
 - 📝 [tests/test_journal_contract.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_journal_contract.py) —— 决策追加与扁平解包数据契约测试。
 - 📝 [tests/test_confirm_mode.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_confirm_mode.py) —— 人明确认放行、手动占比Override、拒绝以及超时自毁 Journal 审计测试。
+- 📝 [tests/test_broker_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_broker_adapter.py) —— 实盘适配器双开关断电阻断、幂等防重去重及持仓飘移对账审计测试。
 
 ---
 
@@ -81,10 +83,11 @@
 
 ```mermaid
 graph TD
-    A[Phase 7: Human Confirmation Delivered] -->|Start Phase 8| B(Headless Real Broker Adapter)
-    B -->|Broker integration| B1(CTP Counter Connection)
-    B -->|Broker integration| B2(QMT Mini-QMT Order Pipeline)
+    A[Phase 8: Live Broker Adapter Delivered] -->|Start Phase 9| B(Phase 9: Full Auto Mode)
+    B -->|Automatic trading ladder| B1(OBSERVE -> PAPER -> CONFIRM -> LIVE_AUTO)
+    B -->|Precondition Gates| B2(Counter connection check & Daily loss gates)
 ```
 
-### 1. 战术攻坚 Phase 8 (真盘柜台适配集成)
-- 基于 `ExecutionAdapter` 抽象层实现真实券商接口无缝对接，如 CTP 柜台或者是迅投 QMT / Mini-QMT 极速下单通道，打通整个实盘的物理指令派发与成交状态自愈。
+### 1. 战术攻坚 Phase 9 (全自动交易阶梯与防线 Auto Mode)
+- 规划实现从 `OBSERVE` (只记录不执行)、`PAPER` (高保真模拟撮合)、`CONFIRM` (人工干预介入下单) 至 `LIVE_AUTO` (全自动高频执行) 的安全平滑升级阶梯。
+- 织入硬性实盘前置保护（如账户同步、柜台网络心跳探测、每日最大亏损物理触发强力阻断）及一键切断物理降级机制。
