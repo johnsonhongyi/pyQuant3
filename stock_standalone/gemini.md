@@ -1,7 +1,49 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 13:20  
+> 最后更新：2026-05-23 14:52  
+
+## 2026-05-23 14:52
+- [x] **加固自动弹出板块竞价面板的交易日判定 (Hardened Auto-open Bidding Panel with Trading Day Gate)**：
+    - [x] 在 `instock_MonitorTK.py` 的 `is_auto_window` 时间窗口与防抖计算逻辑中，加入了 `cct.get_trade_date_status()` 判定。这确保了只在实际交易日且处于活跃交易时间段（09:15-15:05）时才自动触发面板拉起，避免非交易日（如周末、节假日）后台加载测试或冷启动时产生无意义的面板自动弹出。
+- [x] **修复 _update_crosshair_ui 内部 mapToGlobal 的 AttributeError 崩溃 (Fixed mapToGlobal AttributeError in _update_crosshair_ui)**：
+    - [x] 查明在十字光标移动的回调 `_update_crosshair_ui` 中，计算 K 线悬浮详情窗（`kline_detail_win`）默认摆放坐标时仍然调用了不具备 `mapToGlobal` 属性的 `self.kline_plot` (PlotItem)。将其更正为物理绘图组件 `self.kline_widget`，彻底消除了十字光标移动到 K 线图上触发 UI 更新时的崩溃隐患。
+
+## 2026-05-23 14:50
+- [x] **拦截独立热键子进程的 KeyboardInterrupt 崩溃痕迹 (Suppressed Hotkey Subprocess KeyboardInterrupt Traceback)**：
+    - [x] 为 `hotkey_rotator.py` 中的 `on_windows_synced` 核心 Socket 同步数据接收回调包裹了完整的 `KeyboardInterrupt` 异常保护。
+    - [x] 在 `main` 入口函数的消息轮询外层增加了 `KeyboardInterrupt` 信号捕捉，确保操盘手在终端连点 `Ctrl+C` 强退回收时，独立子进程在静默自毁前不会向标准错误输出（stderr）投递无关的 Traceback 报错，大幅提升了多进程关闭扫尾日志的清爽度。
+
+## 2026-05-23 14:45
+- [x] **实现启动屏幕一致性校验，防详情窗跨屏分裂 (Fixed Detail Window Multimonitor Screen Alignment)**：
+    - [x] 在 `showEvent` 流程中一次性载入主窗口与详情浮窗位置。使用 `QGuiApplication.screenAt` 动态判定两窗口加载坐标所在的物理屏幕（桌面）。
+    - [x] **如果两窗口不在同一个显示器上（跨屏分裂），则抛弃自定义位置（重置 `is_custom_positioned = False`），并利用 `mapToGlobal` 自动移动至当前主窗口所在屏幕 of 默认贴近坐标，实现了干净、简单的一步式防错回退。**
+    - [x] **修复 mapToGlobal 调用属性错误 (Fixed mapToGlobal AttributeError)**：修复了屏幕不一致回退逻辑里，对没有 `mapToGlobal` 属性的 `PlotItem` 容器错误调用的 bug，更正为物理绘图组件 `self.kline_widget.mapToGlobal`，消除了冷启动时的崩溃隐患。
+
+
+## 2026-05-23 14:38
+- [x] **缩短 KLineDetailWindow 悬停把手激活延时 (Shortened Detail Window Hover Delay)**：
+    - [x] 将 `KLineDetailWindow` 鼠标静止悬停等待激活把手和高亮边框的计时器从 3 秒 (`3000ms`) 缩短至 2 秒 (`2000ms`)。
+    - [x] 同步更新了 `enterEvent` 和 `mouseMoveEvent` 的防抖重置阈值，使拖拽交互的唤醒响应速度大幅提升，更切合频繁查看的实操节奏。
+
+## 2026-05-23 14:00
+- [x] **实现强制退出 (Ctrl+C) 与紧急回收机制，消除多进程僵尸驻留与端口占用 (Robust Signal Handlers & Clean Shutdown Guarantee)**：
+    - [x] **定义 `emergency_cleanup_subprocesses`**：在 `instock_MonitorTK.py` 中引入了全局变量 `_global_app_instance`，用以跟踪正在运行的应用程序对象。声明了紧急清理函数，在由于 Ctrl+C 或其他非正常信号导致 `os._exit(0)` 被调用前，会强行且顺次通过 `.terminate()` -> `.join(timeout=0.2)` -> `.kill()` 对 `qt_process`（可视化子进程）、`_hotkey_process` (独立热键子进程) 和 `proc` (数据接收子进程) 进行强力杀死。
+    - [x] **扫尾所有活泼子进程**：通过 `multiprocessing.active_children()` 全量扫尾，并在强制退出物理切断前，给操作系统预留 `time.sleep(0.3)` 缓冲，确保释放 Named Pipe 和共享句柄，彻底终结了强制退出后可视化进程残留及 Named Pipe `\\.\pipe\instock_tk_pipe` 等通道在后台假死、进而影响下一次正常冷启动的痛点。
+    - [x] **对齐三处 Ctrl+C 关键强退路径**：将紧急清理机制同步织入到 `_native_ctrl_handler` 线程、CLI 命令行下的键盘中断分支以及 `app.mainloop()` 捕获的顶级退出逻辑，确保全路径下进程完美自愈。
+- [x] **修复独立热键切换器显示列表中的中文 Emoji 友好名字丢失 (Restored Window Rotator Friendly Names)**：
+    - [x] **根本性友好化名称生成**：直接在 `_get_all_open_trade_windows` 内的 `name_map` 构造逻辑中赋予每个 HWND 最精美、原本的 Emoji 中文友好名称（例如 `💻 主控制台`、`🏁 竞价赛马看板`、`⚡ 板块竞价/尾盘联动` 等），取代原先传出的简版英文名，使独立多进程切换器读取时 100% 呈现精美的界面文本。
+    - [x] **支持磁贴分类匹配**：在概念放量监控子窗口（Tile 磁贴）的名字中追加 `[MonitorWindow_win_id]` 后缀，不仅展示了带有板块与代码的友好中文，也兼容了原有通过判断 `"MonitorWindow_" in name` 来分类常规组与磁贴组的逻辑。
+
+## 2026-05-23 13:30
+- [x] **实现全局快捷键与窗口轮询切换器彻底多进程解耦 (Decoupled Global Hotkeys & Window Rotator to Independent Process)**：
+    - [x] **解耦主 Tk 线程 GIL 阻塞**：将 `WindowRotatorDialog` 界面及 `RegisterHotKey` Win32 消息循环从主 Tkinter GUI 线程彻底剥离，交由完全独立的 Python PyQt6 子进程 `HotkeyRotatorProcess` 进行托管。即使主进程在行情的极速冲击下发生卡顿或 GC，全局热键轮转与切换界面依然以 0 延迟秒级响应。
+    - [x] **构建高频双通道 IPC 管道 (Named Pipe + TCP Socket IPC Bridge)**：
+        - 增设了 TCP Socket 异步广播服务 (`127.0.0.1:26669`)：主进程将最新的可见窗口句柄列表 (HWND) 及 MRU 指针以非阻塞方式极速单向广播至热键子进程缓存，避免了多线程/进程下的锁竞争。
+        - 增设了 Named Pipe 通信服务 (`\\.\pipe\instock_tk_pipe`)：用于热键进程向主 Tk 进程投递功能指令（如打开策略选股、关闭/开启警报，以及物理切换焦点窗口的请求）。
+    - [x] **多维穿透式物理强力聚焦**：在热键子进程中确认切换时，不仅立刻在本地调用 `AttachThreadInput` + `SetForegroundWindow` 底层 Win32 API 强制夺取系统前台焦点，还同步向主进程发送 `FOCUS` 管道指令。由主进程在 Tk 消息分发泵中双保险聚焦，彻底解决了 OS 级前台窗口切换限制。
+    - [x] **高保真自适应联动同步**：在主进程的 `_register_hwnd_to_mru` (窗口聚焦与注册) 以及 `_on_racing_panel_closed` (赛马面板关闭) 等核心生命周期回调中加入 `sync_rotator_windows` 主动推送机制。当任何交易窗口被拉起、聚焦或销毁时，数据会在毫秒级内自动同步到热键独立进程的本地缓存中，消除了跨进程状态机不一致的问题。
+    - [x] **健全降级自愈与资源回收安全垫**：在主进程中引入自愈保护。如独立子进程意外未能启动，系统将自动降级为 legacy 线程模式拦截热键，不影响终端使用。在 `on_close` 中，补齐对子进程的强力物理注销和清理，严防进程残留及端口占用。
 
 ## 2026-05-23 13:20
 - [x] **拦截键盘上下按键事件，确保与滚轮/物理显示完全一致的顺序高亮切换 (Hijacked Up/Down Keys for Rotator Sync)**：

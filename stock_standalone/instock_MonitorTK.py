@@ -98,6 +98,7 @@ from tk_gui_modules.gui_config import (
 )
 from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
+import hotkey_rotator
 from ext_data_viewer import ExtDataViewer
 from sys_utils import get_base_path
 from stock_handbook import StockHandbook
@@ -440,8 +441,75 @@ def send_with_visualizer(func):
 
 
 
+_global_app_instance = None
+
+def emergency_cleanup_subprocesses():
+    """紧急回收所有子进程，用于 os._exit 强退前的最后清理"""
+    print("\n⏳ [Emergency] 正在紧急回收所有子进程与资源...")
+    
+    # 1. 尝试通过全局实例进行精确清理
+    global _global_app_instance
+    if _global_app_instance:
+        # 可视化进程
+        qt_proc = getattr(_global_app_instance, 'qt_process', None)
+        if qt_proc and qt_proc.is_alive():
+            try:
+                print("正在杀死可视化进程...")
+                qt_proc.terminate()
+                qt_proc.join(timeout=0.2)
+                qt_proc.kill()
+            except Exception:
+                pass
+                
+        # 热键进程
+        hk_proc = getattr(_global_app_instance, '_hotkey_process', None)
+        if hk_proc and hk_proc.is_alive():
+            try:
+                print("正在杀死独立热键进程...")
+                hk_proc.terminate()
+                hk_proc.join(timeout=0.2)
+                hk_proc.kill()
+            except Exception:
+                pass
+                
+        # 数据更新进程
+        data_proc = getattr(_global_app_instance, 'proc', None)
+        if data_proc and data_proc.is_alive():
+            try:
+                print("正在杀死数据接收进程...")
+                data_proc.terminate()
+                data_proc.join(timeout=0.2)
+                data_proc.kill()
+            except Exception:
+                pass
+
+    # 2. 通过 multiprocessing.active_children() 强力扫尾，防止任何孤儿进程残留
+    try:
+        import multiprocessing as mp
+        active = mp.active_children()
+        if active:
+            print(f"正在强行终止 {len(active)} 个遗留子进程...")
+            for p in active:
+                try:
+                    if p.is_alive():
+                        p.terminate()
+                        p.join(timeout=0.1)
+                        p.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    
+    # 3. 稍加物理延迟，给操作系统时间释放文件句柄与管道资源
+    time.sleep(0.3)
+    print("✅ [Emergency] 子进程紧急回收完成。")
+
+
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
+        global _global_app_instance
+        _global_app_instance = self
+        
         # 🛡️ [RECOVERY] 提升 Windows 定时器精度，减少线程切换时的调度抖动 (解决 0x18 访问冲突的先决条件)
         if sys.platform.startswith('win'):
             try:
@@ -1218,6 +1286,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个，等待 OS 释放资源 (10s)
         self._last_racing_backtest_unified_t = time.time()
         logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (10s)")
+        self.sync_rotator_windows()
 
 
 
@@ -1648,6 +1717,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if _exit_ctrl_c_count >= 3:
                 print("\n[Native] 检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                emergency_cleanup_subprocesses()
                 os._exit(0)
             else:
                 if getattr(self, '_exit_dialog_active', False):
@@ -1758,10 +1828,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         注册快捷键。
         mode: "GLOBAL" (Win32 系统级) 或 "LOCAL" (仅本窗口有效)
         """
-        self._hotkey_stop_event = threading.Event()
-
-        # 1. 彻底清理旧钩子/线程
+        # 1. 彻底清理旧钩子/线程/子进程
         self._shutdown_global_hotkeys()
+        
+        self._hotkey_stop_event = threading.Event()
         
         # 2. 准备回调逻辑
         hotkey_callbacks = {
@@ -1780,81 +1850,51 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._hotkey_callbacks = hotkey_callbacks
 
         if mode == "GLOBAL":
-            # --- Win32 系统级全局热键模式 ---
-            self._hotkey_stop_event = threading.Event()
-
-            def _hotkey_thread_func():
-                import ctypes
-                from ctypes import wintypes
-                user32 = ctypes.windll.user32
+            # --- 独立 HotkeyRotatorProcess 进程模式 ---
+            try:
+                import hotkey_rotator
                 
-                registered_ids = []
-                for offset, (mod, vk, desc) in list(self._HOTKEY_MAP.items()):
-                    hk_id = self._HOTKEY_ID_BASE + offset
-                    if user32.RegisterHotKey(None, hk_id, mod, vk):
-                        registered_ids.append(hk_id)
-                        logger.info(f"✅ [Hotkey] Win32 全局热键已激活: {desc}")
-                    else:
-                        logger.warning(f"⚠️ [Hotkey] Win32 注册 {desc} 失败，可能已被占用")
-                        if offset in [9, 10]:
-                            # 🚀 [自愈降级与智能诊断机制]
-                            # 9 -> Alt+R 降级为 Alt+Q; 10 -> Alt+Shift+R 降级为 Alt+Shift+Q
-                            fallback_char = "Q"
-                            fallback_vk = 0x51  # Q 键码
-                            
-                            # 执行进程冲突诊断
-                            diag_msg = self._diagnose_hotkey_conflict(desc)
-                            logger.error(diag_msg)
-                            
-                            if offset == 9:
-                                new_desc = f"Alt+{fallback_char} (已自愈降级)"
-                                self._HOTKEY_MAP[9] = (mod, fallback_vk, new_desc)
-                                if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
-                                    registered_ids.append(hk_id)
-                                    logger.info(f"🚀 [Hotkey] Win32 全局热键已自愈降级注册备用键: {new_desc}")
-                                    self._schedule_after(1000, lambda: self.status_var.set(f"⚠️ Alt+R被占用，已降级为 Alt+Q 轮转窗口！"))
-                                else:
-                                    logger.error(f"❌ [Hotkey] 备用热键 {new_desc} 依然注册失败！")
-                            elif offset == 10:
-                                new_desc = f"Alt+Shift+{fallback_char} (已自愈降级)"
-                                self._HOTKEY_MAP[10] = (mod, fallback_vk, new_desc)
-                                if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
-                                    registered_ids.append(hk_id)
-                                    logger.info(f"🚀 [Hotkey] Win32 全局热键已自愈降级注册备用键: {new_desc}")
-                                else:
-                                    logger.error(f"❌ [Hotkey] 备用热键 {new_desc} 依然注册失败！")
+                # 启动独立热键进程
+                # 尽量获取最准确的 log_level 字符串，默认 "INFO"
+                import logging
+                level_val = "INFO"
+                if hasattr(self, 'log_level') and self.log_level is not None:
+                    try:
+                        val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
+                        if isinstance(val, int):
+                            level_val = logging.getLevelName(val)
+                        elif isinstance(val, str):
+                            level_val = val
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        level_val = logging.getLevelName(logger.level)
+                    except Exception:
+                        pass
+                if not isinstance(level_val, str):
+                    level_val = "INFO"
 
-                try:
-                    msg = wintypes.MSG()
-                    while not self._hotkey_stop_event.is_set():
-                        if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
-                            if msg.message == 0x0312:  # WM_HOTKEY
-                                hk_id = msg.wParam
-                                offset = hk_id - self._HOTKEY_ID_BASE
-                                cb = self._hotkey_callbacks.get(offset)
-                                if cb:
-                                    logger.debug(f"🔥 [Hotkey] Win32 Hotkey Triggered: ID={hk_id}")
-                                    cb()
-                            user32.TranslateMessage(ctypes.byref(msg))
-                            user32.DispatchMessageW(ctypes.byref(msg))
-                        else:
-                            time.sleep(0.05)
-                except Exception as e:
-                    logger.error(f"❌ [Hotkey] Win32 线程异常: {e}")
-                finally:
-                    for hk_id in registered_ids:
-                        user32.UnregisterHotKey(None, hk_id)
-                    logger.info("[Hotkey] Win32 热键已注销，线程退出")
-
-            self._hotkey_thread = threading.Thread(
-                target=_hotkey_thread_func,
-                name="GlobalHotkeyThreadWin32",
-                daemon=True
-            )
-            self._hotkey_thread.start()
+                self._hotkey_process = mp.Process(
+                    target=hotkey_rotator.main,
+                    args=(level_val,),
+                    name="HotkeyRotatorProcess",
+                    daemon=True
+                )
+                self._hotkey_process.start()
+                self._hotkey_process_started = True
+                logger.info("🚀 [Rotator] Independent HotkeyRotatorProcess launched successfully.")
+                
+                # 延迟一下立即同步一次窗口数据
+                self.after(500, self.sync_rotator_windows)
+            except Exception as ex:
+                logger.error(f"❌ [Rotator] Failed to launch independent hotkey process: {ex}")
+                # 降级：退回到遗留线程模式
+                self._hotkey_process_started = False
+                self._launch_legacy_hotkey_thread()
+                
             if show_toast:
-                toast_message(self, "✅ 全局快捷键已重置为系统级 (System-wide)")
-        
+                toast_message(self, "✅ 全局快捷键已重置为独立进程模式 (Zero GIL lag)")
         else:
             # --- Tkinter 本地窗口快捷键模式 (降级模式) ---
             logger.info("⚡ [Hotkey] 切换到本地窗口快捷键模式...")
@@ -1862,8 +1902,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 cb = hotkey_callbacks.get(offset)
                 if not cb: continue
                 
-                # 将 Alt+X 转换为 Tk 合法格式 (注意：Alt 首字母必须大写，且字母推荐小写)
-                # 例如: "Alt+V" -> "<Alt-v>"
                 key_part = desc.split('+')[-1].lower()
                 tk_key = f"<Alt-{key_part}>"
                 try:
@@ -1879,35 +1917,95 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             hotkey_list = "/".join([v[2] for v in self._HOTKEY_MAP.values()])
             self.status_var.set(f"✅ 快捷键已重置: {hotkey_list}")
 
+    def _launch_legacy_hotkey_thread(self):
+        """[降级垫] 启动原先的全局快捷键监听线程"""
+        logger.info("⚠️ [Hotkey] 启动备用全局快捷键监听线程...")
+        def _hotkey_thread_func():
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            
+            registered_ids = []
+            for offset, (mod, vk, desc) in list(self._HOTKEY_MAP.items()):
+                hk_id = self._HOTKEY_ID_BASE + offset
+                if user32.RegisterHotKey(None, hk_id, mod, vk):
+                    registered_ids.append(hk_id)
+                    logger.info(f"✅ [Hotkey] 备用全局热键激活: {desc}")
+                else:
+                    logger.warning(f"⚠️ [Hotkey] 备用注册 {desc} 失败")
+                    if offset in [9, 10]:
+                        fallback_vk = 0x51
+                        if offset == 9:
+                            new_desc = "Alt+Q (已降级)"
+                            self._HOTKEY_MAP[9] = (mod, fallback_vk, new_desc)
+                            if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
+                                registered_ids.append(hk_id)
+                                self._schedule_after(1000, lambda: self.status_var.set(f"⚠️ Alt+R被占用，已降级为 Alt+Q 轮转窗口！"))
+                        elif offset == 10:
+                            new_desc = "Alt+Shift+Q (已降级)"
+                            self._HOTKEY_MAP[10] = (mod, fallback_vk, new_desc)
+                            if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
+                                registered_ids.append(hk_id)
+
+            try:
+                msg = wintypes.MSG()
+                while not self._hotkey_stop_event.is_set():
+                    if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                        if msg.message == 0x0312:
+                            hk_id = msg.wParam
+                            offset = hk_id - self._HOTKEY_ID_BASE
+                            cb = self._hotkey_callbacks.get(offset)
+                            if cb:
+                                logger.debug(f"🔥 [Hotkey] 备用热键触发: ID={hk_id}")
+                                cb()
+                        user32.TranslateMessage(ctypes.byref(msg))
+                        user32.DispatchMessageW(ctypes.byref(msg))
+                    else:
+                        time.sleep(0.05)
+            except Exception as e:
+                logger.error(f"❌ [Hotkey] 备用线程异常: {e}")
+            finally:
+                for hk_id in registered_ids:
+                    user32.UnregisterHotKey(None, hk_id)
+                logger.info("[Hotkey] 备用热键已注销")
+
+        self._hotkey_thread = threading.Thread(
+            target=_hotkey_thread_func,
+            name="LegacyHotkeyThreadWin32",
+            daemon=True
+        )
+        self._hotkey_thread.start()
 
     def _shutdown_global_hotkeys(self):
-        """
-        安全关闭热键线程，并在 join 后统一执行 keyboard.unhook_all()。
+        """安全注销全局快捷键线程与独立 Rotator 进程"""
+        # 1. 物理终止独立热键进程
+        if hasattr(self, '_hotkey_process') and self._hotkey_process:
+            try:
+                if self._hotkey_process.is_alive():
+                    self._hotkey_process.terminate()
+                    self._hotkey_process.join(timeout=1.0)
+                    if self._hotkey_process.is_alive():
+                        self._hotkey_process.kill()
+                    logger.info("[Hotkey] Independent HotkeyRotatorProcess terminated.")
+            except Exception as e:
+                logger.error(f"[Hotkey] Error terminating hotkey process: {e}")
+            self._hotkey_process = None
+            self._hotkey_process_started = False
 
-        关键时序（保证无竞态）：
-        1. set stop_event → 旧线程从 wait() 中返回并退出（不调用 unhook）
-        2. join 等旧线程彻底死亡
-        3. 在本线程（调用方）执行 keyboard.unhook_all()，状态确定干净
-        4. 调用方随后可安全启动新线程并 add_hotkey
-        """
+        # 2. 线程与 keyboard 钩子清理
         if hasattr(self, '_hotkey_stop_event') and self._hotkey_stop_event:
             self._hotkey_stop_event.set()
 
-        # 等待旧线程彻底退出（旧线程不调用 unhook，join 后状态确定）
         if hasattr(self, '_hotkey_thread') and self._hotkey_thread and self._hotkey_thread.is_alive():
-            self._hotkey_thread.join(timeout=3.0)
+            self._hotkey_thread.join(timeout=2.0)
 
-        # join 完成后，在调用方统一清理 keyboard 钩子（串行，无竞态）
         try:
             import keyboard
             keyboard.unhook_all()
-            logger.debug("[Hotkey] keyboard.unhook_all() 完成（调用方线程）")
-        except ImportError:
+        except Exception:
             pass
-        except Exception as e:
-            logger.debug("[Hotkey] keyboard.unhook_all 失败 (可忽略): %s", e)
 
-        self._hotkey_thread_id = None
+        self._hotkey_thread = None
         self._hotkey_stop_event = None
     # === [REMOVED] 已切换至原生 RegisterHotKey 模式，不再需要单独的备用实现 ===
     # =========================================================================
@@ -1997,6 +2095,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             obj = json.loads(msg)
                         except Exception:
                             obj = None
+
+                        # ================== 独立热键进程指令解析 ==================
+                        if obj and obj.get("cmd") == "HOTKEY_TRIGGERED":
+                            offset = obj.get("offset")
+                            logger.info(f"[Pipe] Recv HOTKEY_TRIGGERED offset: {offset}")
+                            if hasattr(self, '_hotkey_callbacks'):
+                                cb = self._hotkey_callbacks.get(offset)
+                                if cb:
+                                    self.tk_dispatch_queue.put(cb)
+                            continue
+                        elif obj and obj.get("cmd") == "FOCUS_HWND":
+                            hwnd = obj.get("hwnd")
+                            logger.debug(f"[Pipe] Recv FOCUS_HWND hwnd: {hwnd}")
+                            if hwnd:
+                                self.tk_dispatch_queue.put(lambda h=hwnd: self._force_focus_hwnd(h))
+                            continue
+                        elif obj and obj.get("cmd") == "STATUS_MSG":
+                            msg_str = obj.get("msg")
+                            logger.info(f"[Pipe] Recv STATUS_MSG: {msg_str}")
+                            if msg_str and hasattr(self, 'status_var'):
+                                self.tk_dispatch_queue.put(lambda m=msg_str: self.status_var.set(m))
+                            continue
 
                         # ================== 原有逻辑：完全保留 ==================
 
@@ -4868,7 +4988,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 🚀 [MERGED] 整合并扩展自动开启逻辑
                     # 1. 判定时间窗口：09:10 (竞价前夕) 到 15:05 (收盘整理期)
                     # 2. 判定启动防抖：程序运行需超过 20 秒，避免启动初期瞬间弹出导致的卡顿
-                    is_auto_window = (915 <= now_hm <= 1505)
+                    is_auto_window = cct.get_trade_date_status() and (915 <= now_hm <= 1505)
                     is_ready_auto = (time.time() - self._init_start_time > 20)
                     
                     if is_auto_window and is_ready_auto and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
@@ -5249,9 +5369,53 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._last_ui_heartbeat = time.time()
             self._heartbeat_scheduled = False
             if not getattr(self, "_is_closing", False):
+                # 每1秒（约10次心跳）将当前窗口同步给热键进程
+                sync_cnt = getattr(self, '_rotator_sync_counter', 0)
+                sync_cnt += 1
+                if sync_cnt >= 10:
+                    self._rotator_sync_counter = 0
+                    self.sync_rotator_windows()
+                else:
+                    self._rotator_sync_counter = sync_cnt
                 self._ui_heartbeat()
                 
         self.after(100, _beat)
+
+    def sync_rotator_windows(self):
+        """同步窗口信息到独立的全局快捷键/轮换器进程"""
+        if not getattr(self, '_hotkey_process_started', False):
+            return
+            
+        try:
+            # 1. 搜集所有可见交易窗口 (必须在 UI 主线程进行)
+            hwnds = self._get_all_open_trade_windows()
+            name_map = getattr(self, '_rotator_window_names', {})
+            
+            # 读取 Windows 物理前台焦点窗口
+            import ctypes
+            current_fore = ctypes.windll.user32.GetForegroundWindow()
+            
+            # 2. 构造同步载荷
+            data = {
+                "cmd": "SYNC_WINDOWS",
+                "hwnds": hwnds,
+                "name_map": name_map,
+                "current_fore": current_fore
+            }
+            
+            # 3. 异步发送至热键进程端口 26669 (保证 0.3s 极短超时)
+            def _async_send():
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.3)
+                        s.connect(('127.0.0.1', 26669))
+                        s.sendall(json.dumps(data).encode('utf-8'))
+                except Exception:
+                    pass
+                    
+            threading.Thread(target=_async_send, daemon=True, name="SyncRotatorWindows").start()
+        except Exception as e:
+            logger.error(f"[Rotator] sync_rotator_windows error: {e}")
 
     def _start_watchdog(self):
         """[CORRECTION 2] 独立守护线程检测 UI 假死"""
@@ -11293,6 +11457,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._window_mru_list.remove(hwnd)
         self._window_mru_list.insert(0, hwnd)
         logger.debug(f"[Rotator] Registered HWND {hwnd} to MRU list. Current list: {self._window_mru_list}")
+        self.sync_rotator_windows()
 
     def _get_all_open_trade_windows(self):
         """动态搜集并结合 MRU 列表排序的所有打开且可见的交易窗口 HWND 列表"""
@@ -11307,7 +11472,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 h = self.winfo_id()
                 current_visible_hwnds.append(h)
-                name_map[h] = f"MainConsole({h})"
+                name_map[h] = "💻 主控制台 (MainConsole)"
             except Exception as e:
                 pass
                 
@@ -11317,7 +11482,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self._stock_selection_win.winfo_exists():
                     h = self._stock_selection_win.winfo_id()
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"StockSelection({h})"
+                    name_map[h] = "📊 策略选股与人工复核 (StockSelection)"
             except Exception:
                 pass
                 
@@ -11327,7 +11492,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self._racing_panel_win.isVisible():
                     h = int(self._racing_panel_win.winId())
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"RacingPanel({h})"
+                    name_map[h] = "🏁 竞价赛马看板 (RacingPanel)"
             except Exception:
                 pass
                 
@@ -11337,7 +11502,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self.sector_bidding_panel.isVisible():
                     h = int(self.sector_bidding_panel.winId())
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"SectorBiddingPanel({h})"
+                    name_map[h] = "⚡ 板块竞价/尾盘联动 (SectorBidding)"
             except Exception:
                 pass
                 
@@ -11347,7 +11512,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self._live_signal_viewer.isVisible():
                     h = int(self._live_signal_viewer.winId())
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"LiveSignalViewer({h})"
+                    name_map[h] = "📡 实时行情信号监控 (LiveSignalViewer)"
             except Exception:
                 pass
 
@@ -11357,7 +11522,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self._signal_dashboard_win.isVisible():
                     h = int(self._signal_dashboard_win.winId())
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"SignalDashboard({h})"
+                    name_map[h] = "🛡️ 策略信号仪表盘 (SignalDashboard)"
             except Exception:
                 pass
                 
@@ -11369,7 +11534,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 确保窗口句柄在 Windows 中真实存在且可见，从而允许跨进程 Socket 或残留连接切换
                 if ctypes.windll.user32.IsWindow(vis_hwnd) and ctypes.windll.user32.IsWindowVisible(vis_hwnd):
                     current_visible_hwnds.append(vis_hwnd)
-                    name_map[vis_hwnd] = f"Visualizer({vis_hwnd})"
+                    name_map[vis_hwnd] = "📺 K线/分时可视化窗口 (Visualizer)"
         except Exception:
             pass
 
@@ -11379,7 +11544,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self.kline_monitor.winfo_exists():
                     h = self.kline_monitor.winfo_id()
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"KLineMonitor({h})"
+                    name_map[h] = "📈 传统K线监控 (KLineMonitor)"
             except Exception:
                 pass
 
@@ -11389,7 +11554,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if self._concept_win.winfo_exists():
                     h = self._concept_win.winfo_id()
                     current_visible_hwnds.append(h)
-                    name_map[h] = f"ConceptDetail({h})"
+                    name_map[h] = "💡 概念异动详情 (ConceptDetail)"
             except Exception:
                 pass
 
@@ -11402,7 +11567,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         h = w.winfo_id()
                         if h not in current_visible_hwnds:
                             current_visible_hwnds.append(h)
-                            name_map[h] = f"MonitorWindow_{win_id}({h})"
+                            name_map[h] = f"🔍 概念前10监控 ({win_id}) [MonitorWindow_{win_id}]"
                 except Exception:
                     pass
             
@@ -17984,6 +18149,7 @@ if __name__ == "__main__":
 
                     if _exit_ctrl_c_count >= 3:
                         print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                        emergency_cleanup_subprocesses()
                         os._exit(0)
                     else:
                         print(f"\nKeyboardInterrupt ({_exit_ctrl_c_count}/3), 输入 'quit' 退出")
@@ -18035,6 +18201,7 @@ if __name__ == "__main__":
 
             if _exit_ctrl_c_count >= 3:
                 print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                emergency_cleanup_subprocesses()
                 os._exit(0)
             else:
                 app.ask_exit()
