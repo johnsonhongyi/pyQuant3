@@ -1,7 +1,32 @@
 # 全能交易终端开发跟踪
 
 > 创建时间：2026-01-20 18:24  
-> 最后更新：2026-05-23 21:44  
+> 最后更新：2026-05-23 22:30  
+
+## 2026-05-23 22:30
+- [x] **实现风控参数双配置文件原子物理持久化与 500ms 逆向广播 Dirty Check 脏检查防抖调优 (Persistent Risk Limits & High-Performance Dirty Checks)**：
+    - [x] **实现启动配置自愈加载**：在 `trading_kernel/kernel_service.py` 中引入 `load_risk_limits_from_config()` 工具，支持冷启动时自动读取并解析本地 `window_config.json` 与 `scale2_window_config.json` 中的风控调优参数，彻底解决重启客户端时参数重置的问题。
+    - [x] **实现双通道原子物理保存**：升级了 `DecisionFlowPanel._save_and_apply_risk_limits()`，当操盘手调整并保存 7 大量化风控参数时，采用原子替换机制将参数双向写入 `window_config.json` 和 `scale2_window_config.json`，确保多分辨率下数据强一致性。
+    - [x] **引入 500ms 刷新 Dirty Check 脏检查**：在定时器驱动的逆向广播更新 `_sync_control_tab_ui()` 与 `_update_top_status_badges()` 中，全面植入对数值、文本、模式及熔断状态的脏检查过滤。仅在内核状态真实改变时才调用 PyQt 属性与样式更新，彻底免除高频刷新导致的微卡与输入框焦点震颤。
+    - [x] **高速零误差回归测试通过**：完美通过 `$env:PYTHONPATH="."; pytest trading_kernel/tests/` 专项回归校验，29 个交易内核单元测试全部以 100% 绿旗红线标准极速通过！
+
+## 2026-05-23 22:24
+- [x] **实现操作说明与参数说明信息内置化及 Cyberpunk 视觉排版调优 (Inlined Parameters Guide & Typography Tuning)**：
+    - [x] **废除外部文件物理依赖**：重构了 `SystemWorkflowDialog`。彻底斩断了原本对物理文件 `TRADING_KERNEL_IMPLEMENTATION_PLAN.md` 的读取路径，保证了系统在独立打包与脱离环境运行时的 100% 健壮性，防止丢失文档引起的空白报错。
+    - [x] **内置高密度极客说明手册**：以高对比度、暗黑科技感的 HTML 语法在 Python 代码中直接嵌入手册。内容全方位解析系统定位、人机副驾驶操盘协同、四大天梯交易模式细节。
+    - [x] **落地 7 大核心量化风控参数权威指南**：采用精美边框表格与卡片式高反差渐变布局，将“pct_diff 防冲高、min_confidence 打分底线、 exposure 暴露敞口限额以及日内亏损、连亏冷静期”的作用与防冲防滑防雷的核心机制进行深度图表化直观呈现。
+    - [x] **物理扩大对话框高像素占比**：将默认视窗尺寸拓宽调整为 `800 x 580` 像素，完美融合多列复杂风控表格与模式发光卡片，清除一切中英文字元裁剪或省略号遮挡。
+    - [x] **无损通过 29 / 29 绿旗回归测试**：跑通全套 pytest 测试，29 个核心测试全部顺利通过，系统稳健性与可观测性跃上全新台阶！
+
+## 2026-05-23 22:15
+- [x] **重磅落地交易内核控制台交互风控调优、安全通道一键熔断与操盘 Checklist 对话框 (Delivered Trading Kernel Interactive Control Center, KillSwitch & Operator Checklist)**：
+    - [x] **实现 ⚙️ 内核控制与风控 Tab 控制面板**：在 `DecisionFlowPanel` 主界面新增专门的控制 Tab，完美融入四大模式天梯下拉框、高反差状态指示灯以及 7 大量化风控参数实时编辑控件，实时与后台 `TradingKernelService` 互锁。
+    - [x] **实现交易模式安全升级天梯与 8 大前置防护自动降级自愈**：当操盘手尝试切入 `LIVE_AUTO` 全自动实盘时，系统自发对 8 大前置条件（如活跃时段、真盘对账、柜台在线等）进行物理拦截校验。若校验未过，则强制降级安全回退至无害的 `OBSERVE` 旁路模式，阻断意外下单风险。
+    - [x] **实现 10 大硬性风控参数一键应用与保存**：打通 UI 编辑控件与内存 `RiskLimits` 实例 1:1 动态对照，允许运行时动态调优个股暴露、行业敞口、总仓位限额及日内累计亏损，一键保存实时物理写入。
+    - [x] **实现 OperatorChecklistDialog 操盘前置检查**：将 8 大物理前置防护设计成优雅的 Cyberpunk 勾选 Checklist 交互弹窗，操盘手需要手动全部确认通过方可进行高风险实盘交互，完美建立标准日内操盘纪律防线。
+    - [x] **实现 SystemWorkflowDialog 拓扑规划一键查阅**：提供独立 Markdown 拓扑展示视窗，一键弹出 `TRADING_KERNEL_IMPLEMENTATION_PLAN.md` 完整极客蓝图，支持盘中高压力环境下毫秒级极速系统规划追溯。
+    - [x] **高频 500ms 逆向广播自愈同步**：在 `_check_and_update_records` 增量定时扫描中，强行加入顶部 Badges 以及控制面板的自动同步逻辑，保证不论是物理文件更改、多进程外部介入还是 UI 手动控制，两端状态始终 100% 绝对契合。
+    - [x] **全量 29 / 29 绿旗通过回归测试**：通过 pytest 彻底跑通模式转换天梯校验、实盘柜台熔断拦截、Paper Trading 等在内的全套 29 个测试，用时 2.46 秒一次性 100% 完美绿色通过！
 
 ## 2026-05-23 21:44
 - [x] **完美注入决策流水面板审查修复，彻底根治列宽遮挡与早期Null异常 (Delivered DecisionFlowPanel Code Review Patch & Column Expansion)**：

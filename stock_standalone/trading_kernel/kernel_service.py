@@ -17,6 +17,36 @@ from trading_kernel.observability.trace_hasher import stable_hash
 logger = LoggerFactory.getLogger("instock_TK.KernelService")
 
 
+def load_risk_limits_from_config() -> RiskLimits:
+    """从本地 window_config.json 物理配置文件中安全加载保存的风控极限阈值"""
+    try:
+        import os
+        import json
+        from sys_utils import get_base_path
+        base_dir = get_base_path()
+        # 尝试两个 DPI 主配置文件
+        for filename in ("window_config.json", "scale2_window_config.json"):
+            config_file = os.path.join(base_dir, filename)
+            if os.path.exists(config_file):
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "DecisionFlowPanel" in data and "risk_limits" in data["DecisionFlowPanel"]:
+                    limits_data = data["DecisionFlowPanel"]["risk_limits"]
+                    logger.info(f"Loaded persistent RiskLimits from config: {limits_data}")
+                    return RiskLimits(
+                        min_confidence=float(limits_data.get("min_confidence", 0.55)),
+                        max_pct_diff=float(limits_data.get("max_pct_diff", 6.0)),
+                        max_single_stock_position_pct=float(limits_data.get("max_single_stock_position_pct", 0.30)),
+                        max_single_sector_exposure_pct=float(limits_data.get("max_single_sector_exposure_pct", 0.50)),
+                        total_exposure_cap_pct=float(limits_data.get("total_exposure_cap_pct", 0.80)),
+                        daily_loss_limit_amount=float(limits_data.get("daily_loss_limit_amount", 50000.0)),
+                        max_consecutive_losses=int(limits_data.get("max_consecutive_losses", 3))
+                    )
+    except Exception as e:
+        logger.error(f"Failed to load RiskLimits from config: {e}")
+    return RiskLimits()
+
+
 class TradingKernelService:
     # 算法内核版本锁死指纹 (Phase 9: Precondition)
     KERNEL_VERSION = "2026.05.23.01"
@@ -24,6 +54,7 @@ class TradingKernelService:
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl"):
         self.state_manager = StateManager()
         self.journal = JsonlJournal(journal_path)
+        self.limits = load_risk_limits_from_config()
         
         # 初始化执行层各物理适配器 (里氏替换原则)
         from trading_kernel.execution.paper_adapter import PaperExecutionAdapter
@@ -111,7 +142,7 @@ class TradingKernelService:
         signal = canonicalize_decision_queue_item(item)
         state = self.state_manager.get(signal.code)
         intent = decide(signal, state)
-        risk = evaluate(intent, signal, state, RiskLimits())
+        risk = evaluate(intent, signal, state, self.limits)
 
         signal_hash = stable_hash(signal)
         intent_hash = stable_hash(intent)
