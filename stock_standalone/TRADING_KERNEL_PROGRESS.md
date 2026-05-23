@@ -1,8 +1,8 @@
 # 🎯 Trading Kernel 实施进度跟踪文档
 
-> **最后更新时间**：2026-05-23 20:22  
-> **当前状态**：🏆 已成功完成 Phase 0 至 Phase 8 核心骨架、确定性回放、模拟交易账簿、风控硬防、多进程行为自愈锁加固、交易内核决策流水分析面板（DecisionFlowPanel）、人工确认干预审计、以及全新的**实盘真盘柜台适配集成与物理防线 (Live Broker Counter Integration)**！  
-> **当前测试通过率**：`26 / 26 Passed (100%)`
+> **最后更新时间**：2026-05-23 20:28  
+> **当前状态**：🏆 已成功完成 Phase 0 至 Phase 9 核心骨架、确定性回放、模拟交易账簿、风控硬防、多进程行为自愈锁加固、交易内核决策流水分析面板（DecisionFlowPanel）、人工确认干预审计、实盘真盘柜台适配物理防线，以及全新的**模式转换天梯与 8 大安全前置防护卡口 (Mode Ladder & Precondition Gates)**！  
+> **当前测试通过率**：`29 / 29 Passed (100%)`
 
 ---
 
@@ -19,6 +19,7 @@
 | **Phase 6** | **多线程安全状态** | 引入 `StateManager` 分级互斥锁与跨线程自愈防护。 | 🟢 已交付 | 100% | `state_manager.py`<br>`test_state_concurrency.py` |
 | **Phase 7** | **人工确认与干预审计** | 提供 Cyberpunk 暗黑科技风确认弹窗及 Override 占比微调与增量 Journal 审计。| 🟢 已交付 | 100% | `confirm_adapter.py`<br>`confirm_bubble.py`<br>`test_confirm_mode.py` |
 | **Phase 8** | **真盘柜台适配集成** | 基于 `ExecutionAdapter` 抽象层支持 KillSwitch、幂等去重防双发、仓位比对自愈并为 CTP/QMT 实盘通道垫底。 | 🟢 已交付 | 100% | `broker_adapter.py`<br>`test_broker_adapter.py` |
+| **Phase 9** | **全自动交易与防线** | 支持 OBSERVE/PAPER/CONFIRM/LIVE_AUTO 天梯，并且强力校验 8 大安全卡口。 | 🟢 已交付 | 100% | `kernel_service.py`<br>`test_auto_ladder.py` |
 
 ---
 
@@ -64,6 +65,7 @@
 - 📝 [tests/test_journal_contract.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_journal_contract.py) —— 决策追加与扁平解包数据契约测试。
 - 📝 [tests/test_confirm_mode.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_confirm_mode.py) —— 人明确认放行、手动占比Override、拒绝以及超时自毁 Journal 审计测试。
 - 📝 [tests/test_broker_adapter.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_broker_adapter.py) —— 实盘适配器双开关断电阻断、幂等防重去重及持仓飘移对账审计测试。
+- 📝 [tests/test_auto_ladder.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/trading_kernel/tests/test_auto_ladder.py) —— 全自动交易天梯转换、8大前置风控卡口校验及安全降级测试。
 
 ---
 
@@ -83,11 +85,11 @@
 
 ```mermaid
 graph TD
-    A[Phase 8: Live Broker Adapter Delivered] -->|Start Phase 9| B(Phase 9: Full Auto Mode)
-    B -->|Automatic trading ladder| B1(OBSERVE -> PAPER -> CONFIRM -> LIVE_AUTO)
-    B -->|Precondition Gates| B2(Counter connection check & Daily loss gates)
+    A[Phase 9: Full Auto Mode Delivered] -->|Start Phase 10| B(Phase 10: Production Sandbox Rehearsal)
+    B -->|Sandboxed Trading| B1(Simulated multi-day hot trading flows)
+    B -->|Exit Scan| B2(Verify process memory and lock recycling)
 ```
 
-### 1. 战术攻坚 Phase 9 (全自动交易阶梯与防线 Auto Mode)
-- 规划实现从 `OBSERVE` (只记录不执行)、`PAPER` (高保真模拟撮合)、`CONFIRM` (人工干预介入下单) 至 `LIVE_AUTO` (全自动高频执行) 的安全平滑升级阶梯。
-- 织入硬性实盘前置保护（如账户同步、柜台网络心跳探测、每日最大亏损物理触发强力阻断）及一键切断物理降级机制。
+### 1. 战术攻坚 Phase 10 (沙盒全链路实战演练与生产上线扫尾)
+- 开启跨越数日的仿真极端行情模拟测试，重点验证在连续高频行情冲击下，内存占用、日志磁盘物理 I/O 开销、以及 multi-process 文件锁自愈能力的稳定性。
+- 完成对全量 29 个红线自动化测试用例的最终集成与底盘版本锚定，编写生产上线物理指引，宣布 Trading Kernel 全线生产可用！
