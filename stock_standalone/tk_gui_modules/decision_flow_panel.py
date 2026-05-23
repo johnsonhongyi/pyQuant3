@@ -47,6 +47,12 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # 2. 载入窗口历史尺寸与位置
         self.load_window_position_qt(self, "DecisionFlowPanel", default_width=1100, default_height=550)
         
+        # 2.5 恢复列宽与表头状态
+        has_restored = self._restore_header_state()
+        if not has_restored:
+            # 仅在无历史保存的手动调整配置时，才去执行默认的极致初始列宽自适应
+            self._adjust_column_widths()
+        
         # 3. 首次全量扫描载入 (最多 200 条，防冷启动白屏)
         self._load_initial_records()
         
@@ -77,10 +83,33 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             QHeaderView::section {
                 background-color: #1E1E24;
                 color: #A0A0A5;
-                padding: 5px;
+                padding: 1px 2px;
                 border: none;
                 border-bottom: 2px solid #282830;
                 font-weight: bold;
+            }
+            QTableWidget::item {
+                padding: 0px 1px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #232328;
+                background-color: #121214;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #1E1E24;
+                color: #A0A0A5;
+                border: 1px solid #2E2E35;
+                padding: 6px 16px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-weight: bold;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected, QTabBar::tab:hover {
+                background-color: #16161A;
+                color: #00E676;
+                border-bottom-color: #16161A;
             }
             QPushButton {
                 background-color: #1E1E24;
@@ -109,13 +138,23 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             }
         """)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+
+        # 引入 QTabWidget 进行多维决策分类
+        self.tabs = QtWidgets.QTabWidget()
+        
+        # ==========================================
+        # 1. ⚡ 决策流水监控 页签
+        # ==========================================
+        flow_widget = QtWidgets.QWidget()
+        flow_layout = QtWidgets.QVBoxLayout(flow_widget)
+        flow_layout.setContentsMargins(6, 6, 6, 6)
+        flow_layout.setSpacing(6)
 
         # 头部控制栏 (扁平紧凑)
         top_bar = QtWidgets.QHBoxLayout()
-        
         title_label = QtWidgets.QLabel("🎯 决策流水监控:")
         title_label.setStyleSheet("font-weight: bold; color: #00E676; font-size: 12px;")
         top_bar.addWidget(title_label)
@@ -138,13 +177,13 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         clear_btn.clicked.connect(self._clear_view)
         top_bar.addWidget(clear_btn)
 
-        layout.addLayout(top_bar)
+        flow_layout.addLayout(top_bar)
 
         # 主数据表格 (只读)
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(12)
         headers = [
-            "时间", "代码", "名称", "前态", "动作", 
+            "日期时间", "代码", "名称", "前态", "动作", 
             "拟仓位", "打分", "风控结果", "阻断码", 
             "止损价", "Trace ID", "决策理由摘要"
         ]
@@ -156,7 +195,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.verticalHeader().setDefaultSectionSize(18)
         
         # 启用右键菜单支持
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -169,19 +208,93 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         
         # 绑定双击行进行代码联动
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        flow_layout.addWidget(self.table)
         
-        layout.addWidget(self.table)
+        self.tabs.addTab(flow_widget, "⚡ 决策流水监控 (Decision Flow)")
+
+        # ==========================================
+        # 2. 💼 内核实时持仓 页签
+        # ==========================================
+        pos_widget = QtWidgets.QWidget()
+        pos_layout = QtWidgets.QVBoxLayout(pos_widget)
+        pos_layout.setContentsMargins(6, 6, 6, 6)
+        pos_layout.setSpacing(6)
+
+        # 持仓数据表格 (只读)
+        self.pos_table = QtWidgets.QTableWidget()
+        self.pos_table.setColumnCount(8)
+        pos_headers = ["代码", "名称", "持仓股数", "买入均价", "当前市价", "持仓市值", "浮动盈亏", "盈亏比例"]
+        self.pos_table.setHorizontalHeaderLabels(pos_headers)
+        
+        self.pos_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.pos_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.pos_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.pos_table.setAlternatingRowColors(True)
+        self.pos_table.verticalHeader().setVisible(False)
+        self.pos_table.verticalHeader().setDefaultSectionSize(18)
+        
+        # 绑定双击持仓代码跳转
+        self.pos_table.cellDoubleClicked.connect(self._on_pos_cell_double_clicked)
+        
+        pos_header = self.pos_table.horizontalHeader()
+        pos_header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        pos_header.setStretchLastSection(True)
+        pos_layout.addWidget(self.pos_table)
+
+        # 底部发光大卡片栏 (Summary metrics cards)
+        summary_layout = QtWidgets.QHBoxLayout()
+        summary_layout.setSpacing(8)
+        
+        self.cards = {}
+        card_metrics = [
+            ("cash", "💰 可用现金", "#E2E2E6"),
+            ("equity", "📊 账户总资产", "#00E5FF"),
+            ("market_value", "💼 持仓总市值", "#00E676"),
+            ("total_pnl", "📈 账户总盈亏", "#FF1744"),
+            ("ratio", "⚖️ 仓位使用率", "#FF9100")
+        ]
+        
+        for key, name, color in card_metrics:
+            card = QtWidgets.QFrame()
+            card.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #16161A;
+                    border: 1px solid #232328;
+                    border-radius: 5px;
+                    padding: 4px;
+                }
+            """)
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setSpacing(1)
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            
+            lbl = QtWidgets.QLabel(name)
+            lbl.setStyleSheet("font-size: 9px; color: #88888D;")
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+            
+            val = QtWidgets.QLabel("¥ 0.00")
+            val.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {color};")
+            val.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+            
+            card_layout.addWidget(lbl)
+            card_layout.addWidget(val)
+            summary_layout.addWidget(card)
+            self.cards[key] = val
+            
+        pos_layout.addLayout(summary_layout)
+        self.tabs.addTab(pos_widget, "💼 内核实时持仓 (Kernel Positions & PnL)")
+
+        main_layout.addWidget(self.tabs)
 
         # 底部状态栏
         bottom_bar = QtWidgets.QHBoxLayout()
-        self.status_label = QtWidgets.QLabel("初始化完成。正在监听交易内核流水...")
+        self.status_label = QtWidgets.QLabel("初始化完成。正在监听交易内核流水与持仓...")
         bottom_bar.addWidget(self.status_label)
-        layout.addLayout(bottom_bar)
+        main_layout.addLayout(bottom_bar)
 
-        # 默认列宽微调 (适应 1100 初始宽度)
-        widths = [75, 65, 75, 60, 60, 60, 50, 75, 80, 65, 75, 300]
-        for idx, w in enumerate(widths):
-            self.table.setColumnWidth(idx, int(w * self.scale_factor))
+        # 应用自适应列宽分配
+        self._adjust_column_widths()
 
     def _on_cell_double_clicked(self, row, column):
         """双击表格行，提取股票代码并向主进程派发跳转联动"""
@@ -226,6 +339,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             self.status_label.setText(f"✅ 成功载入历史 {len(records)} 条决策，实时监听中...")
             # 自动滚动到最新一行
             self.table.scrollToBottom()
+            
+            # 首次载入同步加载实时持仓明细页
+            self._refresh_positions_tab()
         except Exception as e:
             logger.error(f"Failed to load initial records: {e}\n{traceback.format_exc()}")
             self.status_label.setText(f"❌ 载入历史流水失败: {e}")
@@ -274,8 +390,34 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 self.table.scrollToBottom()
                 # 重新应用过滤
                 self._filter_table()
+                
+            # 同步刷新实时持仓与盈亏标签页
+            self._refresh_positions_tab()
         except Exception as e:
             logger.error(f"Error in incremental records check: {e}")
+
+    def _parse_timestamp(self, ts_str: Any) -> str:
+        """防弹自愈时间戳解析器：统一格式化为 MM-DD HH:MM:SS"""
+        if not ts_str:
+            return datetime.now().strftime("%m-%d %H:%M:%S")
+        try:
+            ts_str_clean = str(ts_str).strip()
+            if "T" in ts_str_clean:
+                parts = ts_str_clean.split("T")
+                date_part = parts[0][5:] # "05-23"
+                time_part = parts[1][:8] # "20:30:15"
+                return f"{date_part} {time_part}"
+            elif " " in ts_str_clean:
+                parts = ts_str_clean.split(" ")
+                date_part = parts[0][5:]
+                time_part = parts[1][:8]
+                return f"{date_part} {time_part}"
+            elif len(ts_str_clean) >= 8:
+                return ts_str_clean[-8:]
+            else:
+                return ts_str_clean
+        except Exception:
+            return str(ts_str)
 
     def _append_record_to_table(self, rec: dict):
         """核心解析函数：从 `JsonlJournal` 的多级 nested 结构或人工确认审计日志中精准提炼出扁平 of UI 字段并渲染"""
@@ -289,24 +431,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             meta = rec.get("override_metadata", {})
             
             # 提取时间 (防弹 Fallback)
-            ts_str = rec.get("timestamp", "")
-            if ts_str:
-                try:
-                    ts_str_clean = str(ts_str).strip()
-                    if "T" in ts_str_clean:
-                        time_part = ts_str_clean.split("T")[1]
-                        timestamp = time_part[:8]
-                    elif " " in ts_str_clean:
-                        time_part = ts_str_clean.split(" ")[1]
-                        timestamp = time_part[:8]
-                    elif len(ts_str_clean) >= 8:
-                        timestamp = ts_str_clean[-8:]
-                    else:
-                        timestamp = ts_str_clean
-                except Exception:
-                    timestamp = str(ts_str)
-            else:
-                timestamp = datetime.now().strftime("%H:%M:%S")
+            timestamp = self._parse_timestamp(rec.get("timestamp", ""))
             
             code = orig_order.get("code", "")
             name = "人工确认"
@@ -342,24 +467,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             risk = rec.get("risk", {})
             
             # 2. 字段映射提取 (防弹 Fallback)
-            ts_str = rec.get("journal_ts", "") or trace.get("timestamp", "")
-            if ts_str:
-                try:
-                    ts_str_clean = str(ts_str).strip()
-                    if "T" in ts_str_clean:
-                        time_part = ts_str_clean.split("T")[1]
-                        timestamp = time_part[:8]
-                    elif " " in ts_str_clean:
-                        time_part = ts_str_clean.split(" ")[1]
-                        timestamp = time_part[:8]
-                    elif len(ts_str_clean) >= 8:
-                        timestamp = ts_str_clean[-8:]
-                    else:
-                        timestamp = ts_str_clean
-                except Exception:
-                    timestamp = str(ts_str)
-            else:
-                timestamp = datetime.now().strftime("%H:%M:%S")
+            timestamp = self._parse_timestamp(rec.get("journal_ts", "") or trace.get("timestamp", ""))
     
             code = sig.get("code", "")
             name = sig.get("name", "")
@@ -556,12 +664,45 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         toast_message(self.parent_app, "表格显示已清空")
 
     def closeEvent(self, event):
-        """窗口关闭时自动注销并保存位置参数"""
+        """窗口关闭时自动注销并保存位置及列宽参数"""
         try:
+            # 1. 保存窗口尺寸
             self.save_window_position_qt_visual(self, "DecisionFlowPanel")
-            logger.info("DecisionFlowPanel position state saved successfully.")
+            
+            # 2. 精准保存列宽与表头布局状态 (Hex 格式)
+            header_state = self.table.horizontalHeader().saveState().toHex().data().decode("utf-8")
+            
+            # 读取现有 window_config.json 并更新
+            scale = self._get_dpi_scale_factor()
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config_file = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            
+            data = {}
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+                    
+            if "DecisionFlowPanel" not in data:
+                data["DecisionFlowPanel"] = {}
+            data["DecisionFlowPanel"]["header_state"] = header_state
+            
+            # 精准保存持仓表格列宽表头状态
+            if hasattr(self, "pos_table"):
+                pos_header_state = self.pos_table.horizontalHeader().saveState().toHex().data().decode("utf-8")
+                data["DecisionFlowPanel"]["pos_header_state"] = pos_header_state
+            
+            # 原子写入
+            tmp_file = config_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp_file, config_file)
+            
+            logger.info("DecisionFlowPanel position and header states saved successfully.")
         except Exception as e:
-            logger.error(f"Failed to save window state: {e}")
+            logger.error(f"Failed to save window state: {e}\n{traceback.format_exc()}")
         
         # 从父窗口引用中抹除，有利于 GC 回收
         if self.parent_app and hasattr(self.parent_app, "panel_manager"):
@@ -569,7 +710,182 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             
         event.accept()
 
+    def _restore_header_state(self):
+        """恢复用户手动调整的列宽与排序状态"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config_file = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            if os.path.exists(config_file):
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                restored_any = False
+                if "DecisionFlowPanel" in data:
+                    panel_cfg = data["DecisionFlowPanel"]
+                    if "header_state" in panel_cfg:
+                        hex_state = panel_cfg["header_state"]
+                        byte_state = QtCore.QByteArray.fromHex(hex_state.encode("utf-8"))
+                        self.table.horizontalHeader().restoreState(byte_state)
+                        restored_any = True
+                    if "pos_header_state" in panel_cfg and hasattr(self, "pos_table"):
+                        pos_hex_state = panel_cfg["pos_header_state"]
+                        pos_byte_state = QtCore.QByteArray.fromHex(pos_hex_state.encode("utf-8"))
+                        self.pos_table.horizontalHeader().restoreState(pos_byte_state)
+                        restored_any = True
+                        
+                if restored_any:
+                    logger.info("DecisionFlowPanel header states restored successfully.")
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to restore DecisionFlowPanel header states: {e}")
+        return False
+
     def showEvent(self, event):
         """展现时自适应"""
         super().showEvent(event)
         self.table.scrollToBottom()
+
+    def _on_pos_cell_double_clicked(self, row, column):
+        """双击持仓表格行，提取持仓个股代码并向主进程派发跳转联动"""
+        code_item = self.pos_table.item(row, 0)
+        name_item = self.pos_table.item(row, 1)
+        if code_item and code_item.text():
+            code = code_item.text().strip()
+            name = name_item.text().strip() if name_item else ""
+            logger.info(f"Double clicked on KernelPosition: {code} ({name}), linking...")
+            self.code_clicked.emit(code, name)
+
+    def _refresh_positions_tab(self):
+        """核心无摩擦刷新：每 500ms 直接从 `get_kernel_service()` 单例物理提取内存中最新持仓与浮盈状态"""
+        try:
+            from trading_kernel.kernel_service import get_kernel_service
+            service = get_kernel_service()
+            if not service:
+                logger.warning("Kernel service not available yet.")
+                return
+                
+            mode = service.mode
+            executor = service.executor
+            
+            # 物理对账数据源切换自愈：如果是 LIVE_AUTO 则拉取实盘真柜台数据，否则高保真拉取模拟盘
+            adapter = executor if (executor is not None and mode == "LIVE_AUTO") else service.paper_adapter
+            if not adapter:
+                logger.warning("Active execution adapter not found.")
+                return
+            
+            positions = adapter.get_positions()
+            account = adapter.get_account_snapshot()
+        except Exception as ex:
+            logger.error(f"Failed to fetch real-time kernel positions for rendering: {ex}")
+            return
+
+        self.pos_table.setRowCount(0)
+        total_market_val = 0.0
+        
+        # 依次填充持仓行
+        for code, pos in positions.items():
+            row_idx = self.pos_table.rowCount()
+            self.pos_table.insertRow(row_idx)
+            
+            entry_price = float(pos.get("entry_price", 0.0))
+            volume = float(pos.get("volume", 0.0))
+            curr_price = float(pos.get("current_price", 0.0))
+            market_val = volume * curr_price
+            total_market_val += market_val
+            
+            pnl = float(pos.get("pnl", 0.0))
+            pnl_pct = float(pos.get("pnl_pct", 0.0))
+            
+            # 精密名称补齐：尝试从父窗口的实时数据集中查找，降级为默认
+            stock_name = ""
+            if self.parent_app and hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None:
+                df = self.parent_app.current_df
+                if code in df.index:
+                    stock_name = str(df.loc[code].get("name", ""))
+            if not stock_name:
+                stock_name = "已持仓"
+                
+            # 盈亏柔和色彩管理 (亮盈绿 vs 猩红)
+            pnl_color = "#00E676" if pnl >= 0 else "#FF1744"
+            pnl_sign = "+" if pnl >= 0 else ""
+            
+            items = [
+                (code, "#FFFFFF"),
+                (stock_name, "#C2C2C6"),
+                (f"{volume:.0f}", "#B0BEC5"),
+                (f"{entry_price:.2f}", "#B0BEC5"),
+                (f"{curr_price:.2f}", "#FFFFFF"),
+                (f"¥ {market_val:,.2f}", "#00E5FF"),
+                (f"{pnl_sign}¥ {pnl:,.2f}", pnl_color),
+                (f"{pnl_sign}{pnl_pct:.2f}%", pnl_color)
+            ]
+            
+            for col_idx, (text, color_hex) in enumerate(items):
+                cell_item = QtWidgets.QTableWidgetItem(str(text))
+                cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                if color_hex:
+                    cell_item.setForeground(QtGui.QColor(color_hex))
+                if col_idx in {6, 7}:
+                    cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
+                self.pos_table.setItem(row_idx, col_idx, cell_item)
+
+        # 刷新大卡片统计数据
+        cash = float(account.get("cash", 0.0))
+        equity = float(account.get("total_equity", 0.0))
+        total_pnl = float(account.get("total_pnl", 0.0))
+        total_pnl_pct = float(account.get("total_pnl_pct", 0.0))
+        ratio = (total_market_val / equity * 100.0) if equity > 0 else 0.0
+        
+        self.cards["cash"].setText(f"¥ {cash:,.2f}")
+        self.cards["equity"].setText(f"¥ {equity:,.2f}")
+        self.cards["market_value"].setText(f"¥ {total_market_val:,.2f}")
+        
+        # 盈亏卡片动态变色与柔和发光渲染
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        self.cards["total_pnl"].setText(f"{pnl_sign}¥ {total_pnl:,.2f} ({total_pnl_pct:.2f}%)")
+        if total_pnl >= 0:
+            self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+        else:
+            self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #FF1744;")
+            
+        self.cards["ratio"].setText(f"{ratio:.1f}%")
+
+    def resizeEvent(self, event):
+        """拖动放大窗口时不要自动_adjust_column_widths，由主窗体布局进行自适应弹性拉伸"""
+        super().resizeEvent(event)
+
+    def _adjust_column_widths(self):
+        """极致模式自适应：按照可视化左侧列的紧凑显示方式，强行重设并压实列宽参数"""
+        if hasattr(self, "table") and self.table.columnCount() == 12:
+            total_w = self.table.viewport().width()
+            if total_w > 100:
+                # 0.日期时间, 1.代码, 2.名称, 3.前态, 4.动作, 5.拟仓, 6.打分, 7.风控, 8.阻断, 9.止损, 10.Trace ID, 11.决策理由摘要
+                static_widths = [110, 65, 75, 45, 52, 48, 45, 55, 70, 52, 55]
+                scaled_total = int(sum(static_widths) * self.scale_factor)
+                
+                # 强行设置互动模式，确保完全压实宽度并不受历史配置死锁阻碍
+                headers = self.table.horizontalHeader()
+                for idx, w in enumerate(static_widths):
+                    headers.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeMode.Interactive)
+                    self.table.setColumnWidth(idx, int(w * self.scale_factor))
+                
+                # 最后一列“决策理由摘要”自适应 Stretch
+                reason_width = max(250, total_w - scaled_total)
+                self.table.setColumnWidth(11, reason_width)
+                
+        if hasattr(self, "pos_table") and self.pos_table.columnCount() == 8:
+            total_pos_w = self.pos_table.viewport().width()
+            if total_pos_w > 100:
+                # 0.代码, 1.名称, 2.数量, 3.买均, 4.现价, 5.市值, 6.盈亏, 7.盈亏比例
+                static_pos_widths = [65, 75, 60, 60, 60, 85, 90]
+                scaled_pos_total = int(sum(static_pos_widths) * self.scale_factor)
+                
+                pos_headers = self.pos_table.horizontalHeader()
+                for idx, w in enumerate(static_pos_widths):
+                    pos_headers.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeMode.Interactive)
+                    self.pos_table.setColumnWidth(idx, int(w * self.scale_factor))
+                
+                # 最后一列“盈亏比例”自适应 Stretch
+                pct_width = max(80, total_pos_w - scaled_pos_total)
+                self.pos_table.setColumnWidth(7, pct_width)
