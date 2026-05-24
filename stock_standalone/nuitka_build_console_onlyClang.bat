@@ -17,6 +17,44 @@ echo ==========================================
 echo.
 
 :: =========================================
+:: STANDALONE OR ONEFILE SELECTOR
+:: =========================================
+set "BUILD_MODE=onefile"
+set "BUILD_MODE_ARG=%~1"
+
+if /I "%BUILD_MODE_ARG%"=="onefile" (
+    set "BUILD_MODE=onefile"
+    echo [INFO] Detected command-line argument: FORCE ONEFILE BUILD.
+    echo.
+) else if /I "%BUILD_MODE_ARG%"=="standalone" (
+    set "BUILD_MODE=standalone"
+    echo [INFO] Detected command-line argument: FORCE STANDALONE BUILD.
+    echo.
+) else (
+    echo Choose Build Target:
+    echo [1] Standalone Folder (highly recommended for debugging/development)
+    echo [2] Onefile Executable (Default, Single file distribution, packaging all assets)
+    echo.
+    
+    choice /C 12 /T 5 /D 2 /M "Enter your choice (auto-select [2] in 5 seconds): "
+    if errorlevel 2 (
+        set "BUILD_MODE=onefile"
+    ) else (
+        set "BUILD_MODE=standalone"
+    )
+    echo.
+)
+
+if "%BUILD_MODE%"=="onefile" (
+    echo [MODE] Building ONEFILE executable...
+    set "NUITKA_MODE_OPT=--onefile"
+) else (
+    echo [MODE] Building STANDALONE folder...
+    set "NUITKA_MODE_OPT=--standalone"
+)
+echo.
+
+:: =========================================
 :: 0. Activate Visual Studio Native Environment for full MSVC+Clang-CL
 :: =========================================
 set "VS_VARS=D:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
@@ -195,7 +233,8 @@ if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
 
 :: ===== Build Nuitka command =====
-set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
+    --output-filename="%OUTPUT_NAME%" ^
     !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
     --enable-plugin=tk-inter ^
@@ -209,6 +248,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --lto=no ^
     --no-pyi-file ^
+    --lto=yes ^
     --jobs=8 ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^
@@ -255,6 +295,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
+    --include-data-file=voice_alert_config.json=voice_alert_config.json ^
+    --include-data-file=macro_trends.json=macro_trends.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
     --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
@@ -331,15 +373,25 @@ echo [INFO] Executing REAL Nuitka compilation...
 echo ==========================================
 echo !CMD!
 echo.
-call !CMD!
+!CMD!
 
 :: ===== Verification =====
-if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\instock_MonitorTK.exe" (
-    echo.
-    echo [SUCCESS] Compilation completed successfully!
-    echo [SUCCESS] Output directory: %OUTPUT_DIR%\instock_MonitorTK.dist
+if "%BUILD_MODE%"=="onefile" (
+    if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
+        echo.
+        echo [SUCCESS] Onefile compilation completed successfully!
+        echo [SUCCESS] Output executable: %OUTPUT_DIR%\%OUTPUT_NAME%
+    ) else (
+        echo [ERROR] Onefile compilation failed. Please check the error logs.
+    )
 ) else (
-    echo [ERROR] Compilation failed. Please check the error logs.
+    if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\%OUTPUT_NAME%" (
+        echo.
+        echo [SUCCESS] Standalone compilation completed successfully!
+        echo [SUCCESS] Output directory: %OUTPUT_DIR%\instock_MonitorTK.dist
+    ) else (
+        echo [ERROR] Standalone compilation failed. Please check the error logs.
+    )
 )
 
 :: ===== Calculate and Record Elapsed Time =====
