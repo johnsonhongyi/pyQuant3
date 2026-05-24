@@ -2296,7 +2296,7 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         event.accept()
 
 
-class ScrollableMsgBox(QtWidgets.QDialog):
+class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
 
     """可滚动的详细信息弹窗，用于显示高密度决策日志"""
     def __init__(self, title, content, parent=None):
@@ -2304,6 +2304,15 @@ class ScrollableMsgBox(QtWidgets.QDialog):
         self.setWindowTitle(title)
         self.setMinimumSize(500, 400)
         self.resize(600, 500)
+
+        # WindowMixin requirement
+        self.scale_factor = get_windows_dpi_scale_factor()
+        self.is_briefing = "综合简报" in title or "实战简报" in title or "briefing" in title.lower()
+        if self.is_briefing:
+            try:
+                self.load_window_position_qt(self, "comprehensive_briefing_dialog")
+            except Exception as e:
+                print(f"Failed to load comprehensive briefing position: {e}")
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -2325,6 +2334,9 @@ class ScrollableMsgBox(QtWidgets.QDialog):
         scroll.setWidget(content_widget)
 
         layout.addWidget(scroll)
+        
+        # 补全别名引用，防止外部更新 content_label 时 AttributeError
+        self.content_label = self.label
 
         # 按钮
         btn_box = QtWidgets.QHBoxLayout()
@@ -2333,6 +2345,15 @@ class ScrollableMsgBox(QtWidgets.QDialog):
         btn_box.addStretch()
         btn_box.addWidget(close_btn)
         layout.addLayout(btn_box)
+
+    def closeEvent(self, event):
+        """关闭时自动持久化综合简报的位置与大小"""
+        if getattr(self, 'is_briefing', False):
+            try:
+                self.save_window_position_qt_visual(self, "comprehensive_briefing_dialog")
+            except Exception as e:
+                print(f"Failed to save comprehensive briefing position: {e}")
+        event.accept()
 
 class GlobalInputFilter(QtCore.QObject):
     """
@@ -2381,7 +2402,17 @@ class GlobalInputFilter(QtCore.QObject):
         elif event.type() == QtCore.QEvent.Type.KeyPress:
             # ⭐ 安全防护：仅当主窗口是当前激活窗口时，才拦截处理其定义的全局快捷键
             # 否则会干扰其他独立窗口（如 TradingGUI、SignalBox）的正常输入
-            if not self.main_window.isActiveWindow():
+            # 特例：若当前活动窗口是综合简报窗口，需允许拦截以响应空格键关闭
+            active_win = QtWidgets.QApplication.activeWindow()
+            is_briefing_active = False
+            if hasattr(self.main_window, '_briefing_dlg') and self.main_window._briefing_dlg is not None:
+                try:
+                    if self.main_window._briefing_dlg.isVisible() and self.main_window._briefing_dlg == active_win:
+                        is_briefing_active = True
+                except RuntimeError:
+                    pass
+
+            if not self.main_window.isActiveWindow() and not is_briefing_active:
                 return False
 
             # ⭐ 避开组合键(Alt/Ctrl)，交给 QShortcut 或系统处理，防止重复响应
@@ -2982,7 +3013,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- 决策面板 (第 7 阶段) ---
         self.decision_panel = QFrame()
-        self.decision_panel.setMinimumHeight(40)  # 允许高度随内容自动拉伸
+        self.decision_panel.setFixedHeight(40)  # 恢复为固定高度40，只有一行
         self.decision_panel.setObjectName("DecisionPanel")
         self.decision_panel.setStyleSheet("""
             #DecisionPanel {
@@ -3011,7 +3042,7 @@ class MainWindow(QMainWindow, WindowMixin):
             }
         """)
         self.decision_layout = QHBoxLayout(self.decision_panel)
-        self.decision_layout.setContentsMargins(15, 4, 15, 4)  # 增加上下内边距以支撑折行后的呼吸感
+        self.decision_layout.setContentsMargins(15, 0, 15, 0)  # 恢复边距
 
         # --- 策略选择器 (Phase 25) ---
         from PyQt6.QtWidgets import QComboBox
@@ -3027,8 +3058,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.decision_label = QLabel("实时决策中心: 等待策略信号...")
         self.decision_label.setStyleSheet("color: #00FF00; font-weight: bold;")
-        self.decision_label.setWordWrap(True)  # 开启自动换行，支持理由文本超长时自动向下折行
-        self.decision_label.setMaximumWidth(550)  # 限制最大宽度，防止折行时横向过度延伸
         self.decision_layout.addWidget(self.decision_label)
 
         self.supervision_label = QLabel("🛡️ 流程监理: 就绪")
@@ -5950,15 +5979,20 @@ class MainWindow(QMainWindow, WindowMixin):
         """[⭐极限弹窗] 一键显示综合研报信息 (复用模式)"""
         if not self.current_code: return
 
-        # 窗口复用逻辑
+        # 窗口复用与空格键关闭逻辑
         if hasattr(self, '_briefing_dlg') and self._briefing_dlg is not None:
             try:
                 if self._briefing_dlg.isVisible():
-                    self._briefing_dlg.raise_()
-                    self._briefing_dlg.activateWindow()
-                    # 更新内容
-                    self._update_briefing_content(self._briefing_dlg)
-                    return
+                    # 如果当前可见且是同一只股票，则关闭它（实现空格键开关Toggle）
+                    if self.current_code in self._briefing_dlg.windowTitle():
+                        self._briefing_dlg.close()
+                        return
+                    else:
+                        # 换了股票，则更新内容并置顶
+                        self._briefing_dlg.raise_()
+                        self._briefing_dlg.activateWindow()
+                        self._update_briefing_content(self._briefing_dlg)
+                        return
             except RuntimeError:
                 pass  # 窗口已被删除
 
@@ -5977,18 +6011,89 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _generate_briefing_html(self):
         """生成简报HTML内容"""
-        # 1. 基础个股信息
+        # 1. 基础个股信息并用 df_all 补齐
         info = self.code_info_map.get(self.current_code)
         if info is None and len(self.current_code) > 6:
             info = self.code_info_map.get(self.current_code[-6:])
-        info = info or {}
+        info = dict(info or {})
+
+        # 从 df_all 寻找对应个股数据行进行补全对齐
+        crow = None
+        if not self.df_all.empty:
+            search_code = self.current_code
+            if search_code in self.df_all.index:
+                crow = self.df_all.loc[search_code]
+            else:
+                sc = search_code[-6:] if len(search_code) > 6 else search_code
+                if sc in self.df_all.index:
+                    crow = self.df_all.loc[sc]
+                elif 'code' in self.df_all.columns:
+                    mask = self.df_all['code'] == sc
+                    if mask.any():
+                        crow = self.df_all[mask].iloc[0]
+
+        if crow is not None:
+            # 补全股票名称
+            if 'name' in crow and pd.notna(crow['name']) and not info.get('name'):
+                info['name'] = str(crow['name'])
+            # 补全全场排名
+            for rank_k in ['Rank', 'rank', '排名']:
+                if rank_k in crow and pd.notna(crow[rank_k]):
+                    info['Rank'] = str(crow[rank_k])
+                    break
+            # 补全昨日胜率
+            for win_k in ['win', 'win_rate', '胜率']:
+                if win_k in crow and pd.notna(crow[win_k]):
+                    info['win'] = str(crow[win_k])
+                    break
+            # 补全涨幅 (percent)
+            for pct_k in ['percent', 'pct', '涨幅', 'change_percent']:
+                if pct_k in crow and pd.notna(crow[pct_k]):
+                    try:
+                        info['percent'] = f"{float(crow[pct_k]):.2f}"
+                    except ValueError:
+                        info['percent'] = str(crow[pct_k])
+                    break
+
+        # 进一步地，如果 percent 未能获得或为0，可通过 day_df/tick_df 计算当日实时涨幅
+        if 'percent' not in info or not info['percent'] or info['percent'] == '0.00':
+            last_price = None
+            pre_close = None
+            if hasattr(self, 'tick_df') and self.tick_df is not None and not self.tick_df.empty:
+                last_price = float(self.tick_df['close'].iloc[-1])
+                if 'llastp' in self.tick_df.columns and self.tick_df['llastp'].iloc[-1] > 0:
+                    pre_close = self.tick_df['llastp'].iloc[-1]
+                elif 'pre_close' in self.tick_df.columns and self.tick_df['pre_close'].iloc[-1] > 0:
+                    pre_close = self.tick_df['pre_close'].iloc[-1]
+            
+            if pre_close is None and hasattr(self, 'day_df') and self.day_df is not None and len(self.day_df) >= 2:
+                pre_close = float(self.day_df['close'].iloc[-2])
+            
+            if last_price is None and hasattr(self, 'day_df') and self.day_df is not None and not self.day_df.empty:
+                last_price = float(self.day_df['close'].iloc[-1])
+                
+            if last_price is not None and pre_close is not None and pre_close > 0:
+                pct = (last_price - pre_close) / pre_close * 100
+                info['percent'] = f"{pct:.2f}"
+
+        # 确定涨幅百分比颜色和格式
+        pct_str = "0.00"
+        pct_color = "white"
+        if 'percent' in info and info['percent'] != 'N/A':
+            try:
+                pct_float = float(info['percent'])
+                pct_str = f"{pct_float:+.2f}"
+                pct_color = '#FF4444' if pct_float > 0 else ('#00FF00' if pct_float < 0 else 'white')
+            except ValueError:
+                pct_str = str(info['percent'])
+                pct_color = 'white'
 
         # 2. 策略监理信息
         sup = getattr(self, 'current_supervision_data', {})
 
-        # 3. 影子决策 (即时计算)
-        shadow = None
-        if hasattr(self, 'day_df') and hasattr(self, 'tick_df'):
+        # 3. 影子决策 (优先使用已缓存的最新决策，其次即时计算)
+        shadow = getattr(self, 'last_shadow_decision', None)
+        if shadow is None and hasattr(self, 'day_df') and hasattr(self, 'tick_df') and self.tick_df is not None and not self.tick_df.empty:
             shadow = self._run_realtime_strategy(self.current_code, self.day_df, self.tick_df)
 
         mwr = sup.get('market_win_rate', 0)
@@ -6004,8 +6109,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     <td><b>全场排名:</b> <span style='color: yellow;'>{info.get('Rank','N/A')}</span></td>
                 </tr>
                 <tr>
-                    <td><b>当日涨幅:</b> <span style='color: {'red' if info.get('percent',0)>0 else 'green'};'>{info.get('percent','0.00')}%</span></td>
-                    <td><b>昨日胜率:</b> {info.get('win','N/A')}</td>
+                    <td><b>当日涨幅:</b> <span style='color: {pct_color}; font-weight: bold;'>{pct_str}%</span></td>
+                    <td><b>昨日胜率:</b> <span style='color: yellow;'>{info.get('win','N/A')}</span></td>
                 </tr>
             </table>
 
@@ -6019,8 +6124,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if shadow:
             briefing += f"""
-            <p><b>影子动作:</b> <span style='color: cyan; font-size: 14pt;'>{shadow.get('action', '持仓待定')}</span></p>
-            <p><b>逻辑考量:</b> {shadow.get('reason', '无明确触发')}</p>
+            <p><b>影子动作:</b> <span style='color: red; font-size: 14pt; font-weight: bold;'>{shadow.get('action', '持仓待定')}</span></p>
+            <p><b>逻辑考量:</b> <span style='color: red;'>{shadow.get('reason', '无明确触发')}</span></p>
             <div style='background: #333; padding: 5px; border-radius: 3px;'>
                 <b>核心指标快照:</b><br>
                 {" ".join([f"• {k}: {v if not isinstance(v,float) else f'{v:.2f}'}" for k,v in shadow.get('debug',{}).items() if k!='indicators'])}
@@ -10768,6 +10873,9 @@ class MainWindow(QMainWindow, WindowMixin):
         # 同步归一化后的数据
         self.day_df = day_df
         self._last_rendered_code = code
+        self.tick_df = tick_df
+        if is_new_stock:
+            self.last_shadow_decision = None
 
         # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
         last_resample = getattr(self, "_last_resample", None)
@@ -11534,19 +11642,20 @@ class MainWindow(QMainWindow, WindowMixin):
         if is_realtime_active:
             with timed_ctx("_run_realtime_strategy", warn_ms=300):
                 shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
-                if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-                    # 优先使用 close, 其次 trade, 最后 price
-                    price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
-                    y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
-                    # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
-                    kline_signals.append(SignalPoint(
-                        code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
-                        signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
-                        source=SignalSource.SHADOW_ENGINE,
-                        reason=shadow_decision['reason'],
-                        debug_info=shadow_decision.get('debug', {})
-                    ))
-                    self.last_shadow_decision = shadow_decision # 存储供简报使用
+                if shadow_decision:
+                    self.last_shadow_decision = shadow_decision  # 无论什么动作都存储供简报使用，保证两端绝对对齐
+                    if shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                        # 优先使用 close, 其次 trade, 最后 price
+                        price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+                        y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
+                        # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
+                        kline_signals.append(SignalPoint(
+                            code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
+                            signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
+                            source=SignalSource.SHADOW_ENGINE,
+                            reason=shadow_decision['reason'],
+                            debug_info=shadow_decision.get('debug', {})
+                        ))
 
         # 4. Follow Queue Signals (Integrated)
         follow_signals = self._get_follow_signals(code, day_df)
@@ -12028,18 +12137,25 @@ class MainWindow(QMainWindow, WindowMixin):
         if is_realtime_active and 'shadow_decision' in locals() and shadow_decision:
             action = shadow_decision.get('action', '无')
             reason = str(shadow_decision.get('reason', '运行中'))
-
-            # 超过30个字符自动物理裁切，保留省略号
-            if len(reason) > 30:
-                reason = reason[:27] + "..."
-
-            # 每8个字自动物理插入换行符 <br/> 强制换行
-            reason_wrapped = ""
-            for i in range(0, len(reason), 8):
-                if i > 0:
-                    reason_wrapped += "<br/>"
-                reason_wrapped += reason[i:i+8]
-            reason = reason_wrapped
+            # 缩写替换字典，为了省空间，将冗长的策略名替换为超短的缩写
+            abbrev_map = {
+                "pullback_ma5": "MA5",
+                "decision_engine": "DE",
+                "SuddenLaunchStrategy": "Sudden",
+                "StrongConsolidationStrategy": "Consol",
+                "StrongPullbackMA5Strategy": "MA5",
+                "strong_consolidation_strategy": "Consol",
+                "supervisor": "SV"
+            }
+            for full_name, abbrev in abbrev_map.items():
+                reason = reason.replace(full_name, abbrev)
+            
+            # 移除任何可能存在的换行符，确保只有一行
+            reason = reason.replace("<br/>", " ").replace("\n", " ").replace("\r", "")
+            
+            # 限制最终的 reason 长度，如果还是超长则截断，且不允许换行
+            if len(reason) > 50:
+                reason = reason[:47] + "..."
 
             # 颜色逻辑
             color_hex = "#00FF00" if "买" in action or "ADD" in action else "#FF4444" if ("卖" in action or "止" in action) else "#CCCCCC"
@@ -12067,6 +12183,14 @@ class MainWindow(QMainWindow, WindowMixin):
             
         # ----------------- 7. 更新顶部 MA / BOLL / REV 指标显示 -----------------
         self._update_ma_legend()
+
+        # 联动更新综合简报窗口内容（如果打开的话）
+        if hasattr(self, '_briefing_dlg') and self._briefing_dlg is not None:
+            try:
+                if self._briefing_dlg.isVisible():
+                    self._update_briefing_content(self._briefing_dlg)
+            except RuntimeError:
+                pass
         
     def _update_plot_title(self, code, day_df, tick_df):
         """仅更新 K 线图基础信息（代码、名称、排名、板块等） - 极限性能版"""
