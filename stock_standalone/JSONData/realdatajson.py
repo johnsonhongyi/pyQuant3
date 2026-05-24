@@ -332,11 +332,11 @@ def get_conf_path(fname):
     """
     # 1. 判定是否为 Onefile 物理独立打包模式
     is_onefile = False
-    if getattr(sys, "frozen", False):
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
+    elif getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             is_onefile = (sys._MEIPASS != BASE_DIR)
-        elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-            is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
 
     # 2. 根据 Onefile 还是 Onedir/开发环境，动态拼接对应的物理磁盘相对路径
     if is_onefile:

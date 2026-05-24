@@ -321,6 +321,10 @@ def get_base_path() -> str:
     # 检查是否为 Python 解释器运行
     is_interpreter: bool = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
     
+    # 🚀 Nuitka 专属定制局部修复：如果是由 Nuitka 打包编译，强行将 is_interpreter 设为 False，避免误入脚本模式
+    if "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        is_interpreter = False
+        
     # 1. 普通 Python 脚本模式
     if is_interpreter and not getattr(sys, "frozen", False):
         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
@@ -585,10 +589,25 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
     if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
         base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
         
+    # 🚀 Nuitka/PyInstaller 多进程包内自愈：如果在子进程下环境变量丢失，导致 base 指向了外部目录而不是临时解压目录
+    # （检测外部 exe 目录下既没有 JohnsonUtil/global.ini 也没有 global.ini），则利用 __file__ 物理定位包内根目录
+    if not os.path.exists(os.path.join(base, "JohnsonUtil", "global.ini")) and not os.path.exists(os.path.join(base, "global.ini")):
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.basename(this_dir) == "JohnsonUtil":
+            pkg_base = os.path.dirname(this_dir)
+        else:
+            pkg_base = this_dir
+        
+        # 如果通过代码定位的根目录下确实有 global.ini 模板
+        if os.path.exists(os.path.join(pkg_base, "JohnsonUtil", "global.ini")) or os.path.exists(os.path.join(pkg_base, "global.ini")):
+            base = pkg_base
+            os.environ["NUITKA_ONEFILE_DIRECTORY"] = pkg_base
+            log.info(f"[自愈] 子进程检测到环境变量丢失，已通过物理代码路径锁定临时资源根并还原环境变量: {base}")
+        
     src = os.path.join(base, rel_path)
 
     # 🚀 Nuitka 专属定制局部修复：如果 src 在包内找不到，进行常见位置探测
-    if not os.path.exists(src) and "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+    if not os.path.exists(src):
         nuitka_candidates = [
             os.path.join(base, "JohnsonUtil", rel_path),
             os.path.join(base, "JSONData", rel_path),

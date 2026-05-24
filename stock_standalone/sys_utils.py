@@ -133,12 +133,13 @@ def get_conf_path(fname, base_dir=None):
     
     # 1. 判定是否为 Onefile 物理独立打包模式
     is_onefile = False
-    if getattr(sys, "frozen", False):
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        # Nuitka Onefile 打包模式
+        is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != base_dir)
+    elif getattr(sys, "frozen", False):
+        # PyInstaller Onefile 打包模式
         if hasattr(sys, "_MEIPASS"):
-            # 如果解压临时文件夹不同于程序所在的真实 EXE 物理根目录，则是 Onefile 模式
             is_onefile = (sys._MEIPASS != base_dir)
-        elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-            is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != base_dir)
             
     # 2. 查找映射字典
     mapping = RESOURCE_MAP.get(key)
@@ -192,6 +193,21 @@ def get_conf_path(fname, base_dir=None):
         # 如果是 JohnsonUtil 子文件夹，往上退一级作为源码根
         if os.path.basename(base) == 'JohnsonUtil':
             base = os.path.dirname(base)
+
+    # 🚀 Nuitka/PyInstaller 多进程包内自愈：如果在子进程下环境变量丢失，导致 base 指向了外部目录而不是临时解压目录
+    # （检测外部 exe 目录下既没有 JohnsonUtil/global.ini 也没有 global.ini），则利用 __file__ 物理定位包内根目录
+    if not os.path.exists(os.path.join(base, "JohnsonUtil", "global.ini")) and not os.path.exists(os.path.join(base, "global.ini")):
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.basename(this_dir) == "JohnsonUtil":
+            pkg_base = os.path.dirname(this_dir)
+        else:
+            pkg_base = this_dir
+        
+        # 如果通过代码定位的根目录下确实有 global.ini 模板
+        if os.path.exists(os.path.join(pkg_base, "JohnsonUtil", "global.ini")) or os.path.exists(os.path.join(pkg_base, "global.ini")):
+            base = pkg_base
+            os.environ["NUITKA_ONEFILE_DIRECTORY"] = pkg_base
+            logger.info(f"[自愈] 子进程检测到环境变量丢失，已通过物理代码路径锁定临时资源根并还原环境变量: {base}")
 
     # 拼接包内的源文件绝对路径
     src = os.path.join(base, src_rel)
@@ -297,3 +313,13 @@ def save_display_config(config_file, config):
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
+
+def ensure_all_configs_released():
+    """在主程序最早期抢占式预加载并释放所有注册的核心配置文件，建立全物理自愈安全屏障"""
+    logger.info("📡 正在启动核心配置文件抢占式预加载自愈释放...")
+    for fname in RESOURCE_MAP:
+        try:
+            get_conf_path(fname)
+        except Exception as e:
+            logger.error(f"预加载释放 {fname} 异常: {e}")
+    logger.info("✅ 抢占式预加载自愈释放完成，全物理安全屏障已建立。")

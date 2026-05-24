@@ -108,11 +108,11 @@ def get_stock_code_path() -> Optional[str]:
     """
     # 1. 判定是否为 Onefile 物理独立打包模式
     is_onefile = False
-    if getattr(sys, "frozen", False):
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
+    elif getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             is_onefile = (sys._MEIPASS != BASE_DIR)
-        elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-            is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
 
     # 2. 根据 Onefile 还是 Onedir/开发环境，动态拼接对应的物理磁盘相对路径
     if is_onefile:
@@ -182,6 +182,8 @@ class StockCode:
         self.STOCK_CODE_PATH = get_stock_code_path()
         if not self.STOCK_CODE_PATH:
             log.error("stock_codes.conf 加载失败，程序无法继续运行")
+            # 🚀 物理兜底，防止 get_stock_code_path 为 None 导致 os.path.join 报 NoneType 错误而引发子进程直接 Crash
+            self.STOCK_CODE_PATH = "stock_codes.conf"
 
         self.encoding = 'gbk'
         self.stock_code_path = self.get_stock_code_path_func()
