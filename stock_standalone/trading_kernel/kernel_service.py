@@ -34,13 +34,14 @@ def load_risk_limits_from_config() -> RiskLimits:
                     limits_data = data["DecisionFlowPanel"]["risk_limits"]
                     logger.info(f"Loaded persistent RiskLimits from config: {limits_data}")
                     return RiskLimits(
-                        min_confidence=float(limits_data.get("min_confidence", 0.55)),
+                        min_confidence=float(limits_data.get("min_confidence", 0.70)),
                         max_pct_diff=float(limits_data.get("max_pct_diff", 6.0)),
                         max_single_stock_position_pct=float(limits_data.get("max_single_stock_position_pct", 0.30)),
                         max_single_sector_exposure_pct=float(limits_data.get("max_single_sector_exposure_pct", 0.50)),
                         total_exposure_cap_pct=float(limits_data.get("total_exposure_cap_pct", 0.80)),
                         daily_loss_limit_amount=float(limits_data.get("daily_loss_limit_amount", 50000.0)),
-                        max_consecutive_losses=int(limits_data.get("max_consecutive_losses", 3))
+                        max_consecutive_losses=int(limits_data.get("max_consecutive_losses", 3)),
+                        min_volume=float(limits_data.get("min_volume", 1.0))
                     )
     except Exception as e:
         logger.error(f"Failed to load RiskLimits from config: {e}")

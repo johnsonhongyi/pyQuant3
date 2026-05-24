@@ -13,7 +13,7 @@ from trading_kernel.observability.trace_hasher import stable_hash
 @dataclass(frozen=True)
 class RiskLimits:
     max_single_size_pct: float = 0.40
-    min_confidence: float = 0.55
+    min_confidence: float = 0.55  # Retain 0.55 for headless tests alignment, override by physical configuration
     allow_buy: bool = True
     allow_sell: bool = True
     
@@ -26,6 +26,9 @@ class RiskLimits:
     
     # High extension no-chase block
     max_pct_diff: float = 6.0  # limit up / chase limit
+    
+    # Low volume filter card
+    min_volume: float = 1.0  # standard volume threshold
     
     # Blacklist block
     blacklist: tuple[str, ...] = ()
@@ -111,6 +114,20 @@ def evaluate(
                 "limit": limits.max_pct_diff,
                 "severity": "HARD_BLOCK",
             }
+            
+        # 6.5 Low volume block (volume filter)
+        else:
+            try:
+                sig_vol = float(signal.features.get("volume", 1.0))
+            except (ValueError, TypeError):
+                sig_vol = 1.0
+            if sig_vol < limits.min_volume:
+                reject = {
+                    "code": "LOW_VOLUME_BLOCKED",
+                    "volume": sig_vol,
+                    "limit": limits.min_volume,
+                    "severity": "HARD_BLOCK",
+                }
 
     # Core Action Evaluation
     if not reject:

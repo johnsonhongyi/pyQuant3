@@ -1817,6 +1817,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T - 策略选股与人工复核
         9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R - 切换下一个窗口
         10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R - 切换上一个窗口
+        11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J - 交易内核决策流水分析
     }
     def _diagnose_hotkey_conflict(self, desc):
         """当热键注册失败时，自动通过系统进程快照扫描潜在的冲突来源进程"""
@@ -1877,6 +1878,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             8: lambda: self._schedule_after(0, self.open_stock_selection_window),
             9: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(1)),
             10: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(-1)),
+            11: lambda: self._schedule_after(0, self.open_decision_flow_panel),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
