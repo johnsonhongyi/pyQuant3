@@ -34,6 +34,7 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         "raw_reason": str(item.get("reason", "") or ""),
         "status": str(item.get("status", "") or ""),
         "hits": _float(item.get("hits", 1), 1.0),
+        "volume": _float(item.get("volume"), 1.0),
     }
     return StrategySignal(
         code=str(item.get("code", "") or ""),
