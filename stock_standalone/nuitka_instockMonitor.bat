@@ -123,6 +123,10 @@ set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
+    --include-data-file=visualizer_layout.json=visualizer_layout.json ^
+    --include-data-file=voice_alert_config.json=voice_alert_config.json ^
+    --include-data-file=macro_trends.json=macro_trends.json ^
+    --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
     --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
@@ -175,7 +179,7 @@ rem     --remove-output
 echo 🏗️ 正在执行 Nuitka 编译...
 echo !CMD!
 echo.
-call !CMD!
+!CMD!
 
 :: ===== 完成检查 =====
 if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
