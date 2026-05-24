@@ -32,7 +32,10 @@ def get_base_path():
     
     if is_interpreter and not getattr(sys, "frozen", False):
         try:
-            return os.path.dirname(os.path.abspath(__file__))
+            path = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(path) == 'JohnsonUtil':
+                path = os.path.dirname(path)
+            return path
         except NameError:
             pass
             
@@ -50,12 +53,6 @@ def get_base_path():
         return os.path.dirname(os.path.abspath(sys.executable))
 
     return os.path.dirname(os.path.abspath(sys.argv[0]))
-    # base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
-    # # 💥 [New] 优先检查 dist 目录作为数据根目录
-    # dist_path = os.path.join(base_path, 'dist')
-    # if os.path.exists(dist_path) and os.path.exists(os.path.join(dist_path, 'trading_signals.db')):
-    #     return dist_path
-    # return base_path
     
 RESOURCE_MAP = {
     "MonitorTK.ico": {
@@ -78,9 +75,13 @@ RESOURCE_MAP = {
         "src": "visualizer_layout.json",
         "dst": "visualizer_layout.json"
     },
-    "strategy_config.json": {
-        "src": "strategy_config.json",
-        "dst": "strategy_config.json"
+    "global.ini": {
+        "src": "JohnsonUtil/global.ini",
+        "dst": "global.ini"
+    },
+    "stock_codes.conf": {
+        "src": "JSONData/stock_codes.conf",
+        "dst": "stock_codes.conf"
     },
     "voice_alert_config.json": {
         "src": "voice_alert_config.json",
@@ -90,13 +91,17 @@ RESOURCE_MAP = {
         "src": "macro_trends.json",
         "dst": "macro_trends.json"
     },
-    "display_cols.json": {
-        "src": "display_cols.json",
-        "dst": "display_cols.json"
-    },
     "intraday_pattern_config.json": {
         "src": "intraday_pattern_config.json",
         "dst": "intraday_pattern_config.json"
+    },
+    "strategy_config.json": {
+        "src": "strategy_config.json",
+        "dst": "strategy_config.json"
+    },
+    "display_cols.json": {
+        "src": "display_cols.json",
+        "dst": "display_cols.json"
     },
     "search_history.json": {
         "src": "search_history.json",
@@ -106,17 +111,9 @@ RESOURCE_MAP = {
         "src": "minute_kline_viewer_history.json",
         "dst": "datacsv/minute_kline_viewer_history.json"
     },
-    "stock_codes.conf": {
-        "src": "JSONData/stock_codes.conf",
-        "dst": "stock_codes.conf"
-    },
     "count.ini": {
         "src": "JSONData/count.ini",
         "dst": "count.ini"
-    },
-    "global.ini": {
-        "src": "JohnsonUtil/global.ini",
-        "dst": "global.ini"
     },
     "同花顺板块行业.xlsx": {
         "src": "JohnsonUtil/wencai/同花顺板块行业.xlsx",
@@ -144,6 +141,11 @@ def get_conf_path(fname, base_dir=None):
     # 2. 查找映射字典
     mapping = RESOURCE_MAP.get(key)
     if mapping:
+        # 🛡️ 优先探测物理根目录（dst）下的现有配置文件，避免在已有用户配置时通过备份文件（src）进行不必要的自愈/恢复或路径分流
+        root_path = os.path.join(base_dir, mapping["dst"])
+        if os.path.exists(root_path) and os.path.getsize(root_path) > 0:
+            return root_path
+            
         src_rel = mapping["src"]
         # Onefile 模式下平铺在根目录（dst）；Onedir 或开发环境下维持在默认子目录（src）
         if is_onefile:

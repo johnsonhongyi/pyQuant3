@@ -60,6 +60,8 @@ def get_base_path():
         try:
             # 此时 __file__ 是可靠的
             path = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(path) == 'JohnsonUtil':
+                path = os.path.dirname(path)
             # print(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
             return path
         except NameError:
@@ -204,8 +206,9 @@ def get_conf_path(fname):
             print("配置文件存在但为空，将尝试重新释放")
 
     # --- 2. 释放默认资源 ---
+    rel_path = f"JSONData/{fname}" if fname == "stock_codes.conf" else f"JohnsonUtil/{fname}"
     cfg_file = get_resource_file(
-        rel_path=f"JohnsonUtil/{fname}",
+        rel_path=rel_path,
         out_name=fname,
         BASE_DIR=BASE_DIR
     )

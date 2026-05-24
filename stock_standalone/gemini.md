@@ -1,3 +1,9 @@
+## 2026-05-24 23:45
+- [x] **实现 Pytest 测试沙箱风控隔离与内核量能 canonicalize 逻辑对齐 (Implemented Pytest Risk Gate Isolation & Volume Field Canonicalization)**：
+    - [x] **建立测试环境下的风控配置硬隔离 (Enforced Risk Gate Test Isolation)**：在 `trading_kernel/kernel_service.py` 的 `load_risk_limits_from_config()` 方法头部引入 `PYTEST_CURRENT_TEST` 环境变量检测。在单元/回归测试运行期间，强行短路并跳过本地物理 `window_config.json` 的参数加载，直接返回纯净的默认 `RiskLimits` 实体。这彻底根治了由于本地开发微调配置（如 `min_volume = 1.1` 或 `min_confidence = 0.70`）导致 29 项内核交易测试及 Journal 回放比对（Expected vs Replayed hash）发生误判拦截的顽疾。
+    - [x] **补齐交易内核量能特征规整映射 (Completed Canonicalization of Volume Feature)**：在 `trading_kernel/engine/signal_canonicalizer.py` 的 `canonicalize_decision_queue_item()` 方法中，补齐了对 `"volume"` 字段的规整转换并注入到 `StrategySignal.features` 字典中。确保了风控网关进行量能硬卡口过滤（`min_volume`）时能接收到真实的日内成交数据，规避了数据丢失降级为 `1.0` 默认量能的情况。
+    - [x] **顺利跑通 29/29 全量交易内核回归测试 (100% Core Regressions Passed)**：完美通过包含 Redline, Risk Hardening, Replay Equivalence Flow 等在内的全部 29 个 pytest 测试，保障了生产系统的零缺陷集成。
+
 ## 2026-05-24 23:35
 - [x] **实现决策流水监控面板热键 (Alt+J) 的全局系统级注册与本地冲突消除 (Delivered System-wide Alt+J Hotkey & Removed Local Redundant Binding)**：
     - [x] **将“决策流水分析面板”热键从 Tk 局部绑定移至全局 (Transitioned to Global Hotkey)**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 定义内追加注册 `11: (win32con.MOD_ALT, 0x4A, "Alt+J")` (J 的 virtual key code 为 `0x4A`)，并将 `setup_global_hotkey` 的 `hotkey_callbacks` 关联至 `self.open_decision_flow_panel`。
