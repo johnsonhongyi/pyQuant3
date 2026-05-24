@@ -51,6 +51,8 @@ def load_trading_mode_from_config() -> str:
     """从本地 window_config.json 物理配置文件中安全加载保存的交易运行模式"""
     try:
         import os
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return "OBSERVE"
         import json
         from sys_utils import get_base_path
         base_dir = get_base_path()

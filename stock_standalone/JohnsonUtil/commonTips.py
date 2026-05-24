@@ -85,22 +85,6 @@ class LazyModule:
     def __call__(self, *args, **kwargs):
         return self.module(*args, **kwargs)
 
-# class LazyClass:
-#     def __init__(self, module_path, class_name):
-#         self.module_path = module_path
-#         self.class_name = class_name
-#         self._cls = None
-
-#     @property
-#     def cls(self):
-#         if self._cls is None:
-#             import importlib
-#             module = importlib.import_module(self.module_path)
-#             self._cls = getattr(module, self.class_name)
-#         return self._cls
-
-#     def __call__(self, *args, **kwargs):
-#         return self.cls(*args, **kwargs)
 
 class LazyClass:
     def __init__(self, module_path, class_name):
@@ -114,6 +98,10 @@ class LazyClass:
             meipass = getattr(sys, '_MEIPASS', None)
             if meipass and meipass not in sys.path:
                 sys.path.insert(0, meipass)
+            if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+                nuitka_temp = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+                if nuitka_temp and nuitka_temp not in sys.path:
+                    sys.path.insert(0, nuitka_temp)
             module = importlib.import_module(self.module_path)
             self._cls = getattr(module, self.class_name)
         return self._cls
@@ -378,18 +366,18 @@ def get_base_path() -> str:
     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
-def get_base_path_simple() -> str:
-    """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本 (简化版)"""
-    if getattr(sys, "frozen", False):
-        # PyInstaller
-        if hasattr(sys, "_MEIPASS"):
-            return os.path.dirname(sys.executable)
-        else:
-            # Nuitka 或其他冻结工具
-            return os.path.dirname(sys.executable)
-    else:
-        # 普通脚本
-        return os.path.dirname(os.path.abspath(__file__))
+# def get_base_path_simple() -> str:
+#     """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本 (简化版)"""
+#     if getattr(sys, "frozen", False):
+#         # PyInstaller
+#         if hasattr(sys, "_MEIPASS"):
+#             return os.path.dirname(sys.executable)
+#         else:
+#             # Nuitka 或其他冻结工具
+#             return os.path.dirname(sys.executable)
+#     else:
+#         # 普通脚本
+#         return os.path.dirname(os.path.abspath(__file__))
 
 
 
@@ -594,7 +582,25 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
 
     # 从 MEIPASS 复制
     base = getattr(sys, "_MEIPASS", ".") if getattr(sys, "frozen", False) else os.path.abspath(".")
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+        
     src = os.path.join(base, rel_path)
+
+    # 🚀 Nuitka 专属定制局部修复：如果 src 在包内找不到，进行常见位置探测
+    if not os.path.exists(src) and "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        nuitka_candidates = [
+            os.path.join(base, "JohnsonUtil", rel_path),
+            os.path.join(base, "JSONData", rel_path),
+            os.path.join(base, "JohnsonUtil", "wencai", rel_path),
+            os.path.join(base, "datacsv", rel_path),
+            os.path.join(base, "JohnsonUtil", os.path.basename(rel_path)),
+            os.path.join(base, "JSONData", os.path.basename(rel_path))
+        ]
+        for cand in nuitka_candidates:
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                src = cand
+                break
 
     if not os.path.exists(src):
         src = os.path.join(BASE_DIR, rel_path)
@@ -622,79 +628,7 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
 # --------------------------------------
 BASE_DIR = get_base_path()
 
-def get_conf_path(fname: str, rel_path: Optional[str] = None) -> Optional[str]:
-    """
-    获取并验证 stock_codes.conf
-
-    逻辑：
-      1. 优先使用 BASE_DIR/stock_codes.conf
-      2. 不存在 → 从 JSONData/stock_codes.conf 释放
-      3. 校验文件
-    """
-    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
-    default_path = os.path.join(BASE_DIR, fname)
-
-    # --- 1. 直接存在 ---
-    if os.path.exists(default_path):
-        if os.path.getsize(default_path) > 0:
-            log.info(f"使用本地配置: {default_path}")
-            return default_path
-        else:
-            log.warning("配置文件存在但为空，将尝试重新释放")
-
-    if rel_path is None:
-        rel_path = f"JohnsonUtil{os.sep}{fname}"
-    # --- 2. 释放默认资源 ---
-    cfg_file = get_resource_file(
-        rel_path=rel_path,
-        out_name=fname,
-        BASE_DIR=BASE_DIR
-    )
-
-    # --- 3. 校验释放结果 ---
-    if not cfg_file:
-        log.error(f"获取 {fname} 失败（释放阶段）")
-        return None
-
-    if not os.path.exists(cfg_file):
-        log.error(f"释放后文件仍不存在: {cfg_file}")
-        return None
-
-    if os.path.getsize(cfg_file) == 0:
-        log.error(f"配置文件为空: {cfg_file}")
-        return None
-
-    log.info(f"使用内置释放配置: {cfg_file}")
-    return cfg_file
-
-def get_resource_file1(rel_path, out_name=None):
-    """
-    将打包资源从 _MEIPASS 释放到 EXE 目录
-    优先读取 EXE 外部版本
-    """
-
-    # exe 运行目录
-    exe_dir = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath("."))
-
-    if out_name is None:
-        out_name = os.path.basename(rel_path)
-
-    target = os.path.join(exe_dir, out_name)
-
-    # 已存在 ⇒ 直接用（支持用户更新）
-    if os.path.exists(target):
-        return target
-
-    # 不存在 ⇒ 从 _MEIPASS 复制
-    base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.abspath(".")
-    bundled = os.path.join(base, rel_path)
-
-    if not os.path.exists(bundled):
-        raise RuntimeError(f"内置资源缺失: {bundled}")
-
-    shutil.copy(bundled, target)
-
-    return target
+get_conf_path = LoggerFactory.get_conf_path
 
 
 _global_dict = {}
@@ -725,61 +659,7 @@ _global_dict = {}
 
 import configparser
 import os
-# from config.loader import GlobalConfig
 
-# class GlobalConfigOnly_read:
-#     def __init__(self, cfg_file=None):
-#         if not cfg_file:
-#             cfg_file = Path(__file__).parent / "global.ini"
-
-#         self.cfg_file = Path(cfg_file)
-
-#         # 禁用 % 插值
-#         # self.cfg = configparser.ConfigParser(interpolation=None)
-#         self.cfg = configparser.ConfigParser(
-#             interpolation=None,
-#             inline_comment_prefixes=("#", ";")
-#         )
-
-#         self.cfg.read(self.cfg_file, encoding="utf-8")
-
-#         self.init_value = self.cfg.getint("general", "initGlobalValue")
-#         self.marketInit = self.cfg.get("general", "marketInit")
-#         self.marketblk = self.cfg.get("general", "marketblk")
-#         self.scale_offset = self.cfg.get("general", "scale_offset")
-#         self.resampleInit = self.cfg.get("general", "resampleInit")
-#         self.write_all_day_date = self.cfg.get("general", "write_all_day_date")
-#         self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time")
-
-#         # 处理 saved_width_height
-#         try:
-#             if "x" in saved_wh_str:
-#                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
-#             elif "," in saved_wh_str:
-#                 self.saved_width, self.saved_height = map(int, saved_wh_str.split(","))
-#             else:
-#                 self.saved_width, self.saved_height = 260, 180
-#         except Exception:
-#             self.saved_width, self.saved_height = 260, 180
-
-#         self.clean_terminal = self._split(
-#             self.cfg.get("terminal", "clean_terminal", fallback="")
-#         )
-
-#         self.expressions = dict(self.cfg.items("expressions"))
-#         self.paths = dict(self.cfg.items("path"))
-
-#     def _split(self, s):
-#         return [x.strip() for x in s.split(",") if x.strip()]
-
-#     def get_expr(self, name):
-#         return self.expressions.get(name)
-
-#     def get_path(self, key):
-#         return self.paths.get(key)
-
-#     def __repr__(self):
-#         return f"<GlobalConfig {self.cfg_file}>"
 
 def safe_load_json(raw):
     import json
@@ -814,7 +694,7 @@ class GlobalConfig:
         self.resampleInit = self.get_with_writeback("general", "resampleInit", fallback="d")
         self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
-        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=120, value_type="int")
+        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=180, value_type="int")
         self.livestrategy_max_workers = self.get_with_writeback("general", "livestrategy_max_workers", fallback=6, value_type="int")
         self.live_MAX_FETCH = self.get_with_writeback("general", "live_MAX_FETCH", fallback=20, value_type="int")
         self.stock_select_limit = self.get_with_writeback("general", "stock_select_limit", fallback=300, value_type="int")
@@ -2193,53 +2073,6 @@ def get_run_path_stock(fp=None):
     return path
 
 
-# def get_run_path_tdx(fp=None):
-#     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
-#     # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
-#     path = getcwd()
-#     log.debug(f'tdx_all_df_path {path}')
-#     alist = path.split('stock')
-#     # if len(alist) > 0:
-#     if len(alist) > 0 and path.find('stock') >=0:
-#         path = alist[0]
-#         # os_sep=get_os_path_sep()
-#         if fp is not None:
-#             # path = path + fp + '.h5'
-#             path  =  os.path.join(path, fp + '.h5')
-#             if not check_file_exist(path):
-#                 log.error(f'path not find : {path}')
-#                 # path = tdx_all_df_path + os.sep + fp + '.h5'
-#                 path = os.path.join(tdx_all_df_path, fp + '.h5')
-#                 log.debug(f'tdx_all_df_path: {tdx_all_df_path} os.sep: {os.sep} path: {path}')
-#                 if not check_file_exist(path):
-#                     log.error(f'path not find tdx_all_df_path : {path} os.sep:{os.sep}')
-#                 else:
-#                     log.info(f'path find in tdx_all_df_path : {path} os.sep:{os.sep}')
-
-#         log.debug("info:%s getcwd:%s"%(alist[0],path))
-#     else:
-#         if isMac():
-#             # path  = root_path[1].split('stock')[0] + fp + '.h5'
-#             path  =  os.path.join(root_path[1].split('stock')[0], fp + '.h5')
-
-#             if not check_file_exist(path):
-#                 log.error(f'path not find : {path}')
-#         else:
-#             # path  = root_path[0].split('stock')[0] + fp + '.h5'
-#             path  =  os.path.join(root_path[0].split('stock')[0], fp + '.h5')
-#             if not check_file_exist(path):
-#                 log.error(f'path not find1 : {path}')
-#                 # path = tdx_all_df_path + os.sep + fp + '.h5'
-#                 path = os.path.join(tdx_all_df_path, fp + '.h5')
-#                 log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
-#                 if not check_file_exist(path):
-#                     log.error(f'path not find tdx_all_df_path : {path}')
-#                 else:
-#                     log.info(f'path find in tdx_all_df_path : {path}')
-#         log.debug("error:%s cwd:%s"%(alist[0],path))
-#     return path
-
-
 def get_run_path_tdx_Path(name):
     from pathlib import Path
     ramdisk = get_ramdisk_dir()
@@ -2254,40 +2087,37 @@ def get_run_path_tdx_Path(name):
 
 
 def get_run_path_tdx(fp=None):
-
-    cwd = os.getcwd()
-    log.debug(f'tdx_all_df_path {cwd}')
-
-    base = cwd
-
-    # 找到 pyQuant3 根目录
-    if 'pyQuant3' in cwd:
-        base = cwd[:cwd.find('pyQuant3') + len('pyQuant3')]
-    else:
-        log.error(f'pyQuant3 not found in cwd: {cwd}')
-
+    # 1. 优先尝试从 global.ini 中配置的 tdx_all_df_path 读取
+    base = tdx_all_df_path
     if fp is not None:
         path = os.path.join(base, fp + '.h5')
-
-        if not check_file_exist(path):
-            log.error(f'path not find : {path}')
-
-            # fallback 到 tdx_all_df_path
-            path = os.path.join(tdx_all_df_path, fp + '.h5')
-            log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
-
-            if not check_file_exist(path):
-                log.error(f'path not find tdx_all_df_path : {path}')
-            else:
-                log.info(f'path find in tdx_all_df_path : {path}')
-
-        log.debug(f'info:{base} getcwd:{path}')
+        if os.path.exists(path):
+            return path
+            
+        # 2. 如果未找到，尝试在配置路径下的 pyQuant3 子目录寻找
+        alt_path = os.path.join(base, 'pyQuant3', fp + '.h5')
+        if os.path.exists(alt_path):
+            return alt_path
+            
+        # 3. 兜底：使用当前文件物理回溯 parents[2]（即 pyQuant3 目录）寻找
+        from pathlib import Path
+        try:
+            base_fallback = str(Path(__file__).resolve().parents[2])
+            fallback_path = os.path.join(base_fallback, fp + '.h5')
+            if os.path.exists(fallback_path):
+                return fallback_path
+        except Exception:
+            pass
+            
+        # 4. 极端兜底：如果全部没有找到，输出错误日志并返回默认路径
+        log.error(f'path not find : {path}')
         return path
-
+    else:
+        log.warn(f'fp is None base : {base}')
     return base
 
 tdx_hd5_name = r'tdx_all_df_%s' % (300)
-tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
+# tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
 
 # win10_ramdisk_root = r'R:'
 # mac_ramdisk_root = r'/Volumes/RamDisk'

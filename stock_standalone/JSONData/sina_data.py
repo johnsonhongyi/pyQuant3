@@ -49,6 +49,10 @@ def get_base_path() -> str:
     # 检查是否为 Python 解释器运行
     is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
     
+    # 🚀 Nuitka 专属定制局部修复：如果是由 Nuitka 打包编译，强行将 is_interpreter 设为 False，避免误入脚本模式
+    if "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        is_interpreter = False
+    
     # 1. 普通 Python 脚本模式
     if is_interpreter and not getattr(sys, "frozen", False):
         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
@@ -101,13 +105,28 @@ BASE_DIR = get_base_path()
 def get_stock_code_path() -> Optional[str]:
     """
     获取并验证 stock_codes.conf
-
-    逻辑：
-      1. 优先使用 BASE_DIR/stock_codes.conf
-      2. 不存在 → 从 JSONData/stock_codes.conf 释放
-      3. 校验文件
     """
-    default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    # 1. 判定是否为 Onefile 物理独立打包模式
+    is_onefile = False
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            is_onefile = (sys._MEIPASS != BASE_DIR)
+        elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+            is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
+
+    # 2. 根据 Onefile 还是 Onedir/开发环境，动态拼接对应的物理磁盘相对路径
+    if is_onefile:
+        default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    else:
+        default_path = os.path.join(BASE_DIR, "JSONData", "stock_codes.conf")
+
+    # 自动确保物理目标根目录存在
+    target_dir = os.path.dirname(default_path)
+    if not os.path.exists(target_dir):
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except:
+            pass
 
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
@@ -123,6 +142,15 @@ def get_stock_code_path() -> Optional[str]:
         out_name="stock_codes.conf",
         BASE_DIR=BASE_DIR
     )
+
+    # 🚀 物理磁盘目标与释放出来的 cfg_file 重合，无需任何额外复制归位
+    if cfg_file and os.path.exists(cfg_file) and cfg_file != default_path:
+        try:
+            import shutil
+            shutil.copy(cfg_file, default_path)
+            cfg_file = default_path
+        except:
+            pass
 
     # --- 3. 校验释放结果 ---
     if not cfg_file:

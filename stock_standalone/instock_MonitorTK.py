@@ -17992,10 +17992,8 @@ if __name__ == "__main__":
         # mp.freeze_support()  # <-- 必须
 
     if mp.current_process().name != "MainProcess" and mp.parent_process() is not None:
-        # 子进程，什么都不做，直接结束主模块加载，让 multiprocessing 接管
-        print(f'mp.current_process().name: {mp.current_process().name} != MainProcess')
-        print("PID:", os.getpid(), "Process:", mp.current_process().name)
-        sys.exit(0)
+        # 子进程只需正常导入模块以执行后台任务，绝不可在顶级模块加载阶段自杀
+        pass
     else:
         # 主进程，执行主程序启动
         print(f'mp.current_process().name: {mp.current_process().name} == MainProcess')

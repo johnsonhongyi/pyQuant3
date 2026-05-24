@@ -972,7 +972,7 @@ class BiddingMomentumDetector:
                 future = executor.submit(
                     _build_detector_state_process,
                     self.simulation_mode,
-                    os.getcwd()
+                    cct.get_base_path()
                 )
 
                 def _done(fut):
