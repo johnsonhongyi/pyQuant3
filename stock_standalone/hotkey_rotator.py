@@ -512,6 +512,7 @@ class HotkeyListener(threading.Thread):
             8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T
             9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R
             10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R
+            11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J
         }
         self.registered_ids = []
 

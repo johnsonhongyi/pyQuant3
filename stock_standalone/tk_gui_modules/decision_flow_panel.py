@@ -799,6 +799,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.spin_min_conf.setRange(0.0, 1.0)
         self.spin_min_conf.setSingleStep(0.05)
         self.spin_min_conf.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_min_conf.setValue(0.70)
         limits_lay.addWidget(self.spin_min_conf, 0, 3)
         
         # 3. 单股持仓限制 (max_single_stock_position_pct)
@@ -844,8 +845,18 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.spin_losses.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
         limits_lay.addWidget(self.spin_losses, 3, 1)
         
+        # 8. 最低触发量能比 (min_volume)
+        limits_lay.addWidget(QtWidgets.QLabel("最低触发量能比:"), 3, 2)
+        self.spin_min_volume = QtWidgets.QDoubleSpinBox()
+        self.spin_min_volume.setRange(0.0, 10.0)
+        self.spin_min_volume.setSingleStep(0.1)
+        self.spin_min_volume.setSuffix(" 倍")
+        self.spin_min_volume.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_min_volume.setValue(1.0)
+        limits_lay.addWidget(self.spin_min_volume, 3, 3)
+        
         # 按钮区
-        save_btn = QtWidgets.QPushButton("💾 保存并即时应用风控参数")
+        save_btn = QtWidgets.QPushButton("💾 保存并即时应用风控与策略信号参数")
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #00E5FF;
@@ -860,13 +871,14 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             }
         """)
         save_btn.clicked.connect(self._save_and_apply_risk_limits)
-        limits_lay.addWidget(save_btn, 3, 2, 1, 2)
+        limits_lay.addWidget(save_btn, 4, 0, 1, 4)
         
         ctrl_layout.addWidget(limits_group)
         ctrl_layout.addStretch()
         
-        self.tabs.addTab(ctrl_widget, "⚙️ 内核控制与风控 (Kernel Controls)")
+        self.tabs.addTab(ctrl_widget, "⚙️ 策略信号调整与风控 (Signal Tuning)")
 
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         main_layout.addWidget(self.tabs)
 
         # 底部状态栏
@@ -897,6 +909,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         """弹出操盘手 Checklist 流程化窗口"""
         dlg = OperatorChecklistDialog(self)
         dlg.exec()
+
+    def _on_tab_changed(self, index):
+        """当标签页切换时触发的回调，若切换到风控调优 Tab 则强制同步一次最新值"""
+        if index == 2:  # ⚙️ 策略信号调整与风控 (Signal Tuning)
+            self._sync_control_tab_ui(force=True)
 
     def _on_mode_combo_changed(self, index):
         """运行模式下拉框变动回调"""
@@ -1019,7 +1036,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 max_single_sector_exposure_pct=self.spin_max_sector.value() / 100.0,
                 total_exposure_cap_pct=self.spin_total_exp.value() / 100.0,
                 daily_loss_limit_amount=float(self.spin_daily_loss.value()),
-                max_consecutive_losses=self.spin_losses.value()
+                max_consecutive_losses=self.spin_losses.value(),
+                min_volume=self.spin_min_volume.value()
             )
             
             # A. 内存级单例热应用
@@ -1049,7 +1067,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         "max_single_sector_exposure_pct": limits.max_single_sector_exposure_pct,
                         "total_exposure_cap_pct": limits.total_exposure_cap_pct,
                         "daily_loss_limit_amount": limits.daily_loss_limit_amount,
-                        "max_consecutive_losses": limits.max_consecutive_losses
+                        "max_consecutive_losses": limits.max_consecutive_losses,
+                        "min_volume": limits.min_volume
                     }
                     
                     # 原子替换写入
@@ -1068,7 +1087,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             logger.error(f"Failed to apply new risk limits: {e}")
             toast_message(self.parent_app, "❌ 保存风控参数失败！")
 
-    def _sync_control_tab_ui(self):
+    def _sync_control_tab_ui(self, force: bool = False):
         """将内核实时值反向同步至控制面板 UI 控件中（带高能脏检测机制）"""
         try:
             from trading_kernel.kernel_service import get_kernel_service
@@ -1125,47 +1144,56 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     """)
                 
             # C. 同步风控各极限阈值控件 (脏检查防抖震颤)
-            v_min_conf = service.limits.min_confidence
-            if abs(self.spin_min_conf.value() - v_min_conf) > 1e-4:
-                self.spin_min_conf.blockSignals(True)
-                self.spin_min_conf.setValue(v_min_conf)
-                self.spin_min_conf.blockSignals(False)
+            # 当用户处于“⚙️ 策略信号调整与风控”Tab 页时，为了不打断/重写用户的手动输入/调整过程，
+            # 除非显式指定 force=True (如刚刚切换到此 Tab 或者是初次加载)，否则跳过对输入框阈值的强制同步。
+            if force or self.tabs.currentIndex() != 2:
+                v_min_conf = service.limits.min_confidence
+                if abs(self.spin_min_conf.value() - v_min_conf) > 1e-4:
+                    self.spin_min_conf.blockSignals(True)
+                    self.spin_min_conf.setValue(v_min_conf)
+                    self.spin_min_conf.blockSignals(False)
     
-            v_max_diff = service.limits.max_pct_diff
-            if abs(self.spin_max_diff.value() - v_max_diff) > 1e-4:
-                self.spin_max_diff.blockSignals(True)
-                self.spin_max_diff.setValue(v_max_diff)
-                self.spin_max_diff.blockSignals(False)
+                v_max_diff = service.limits.max_pct_diff
+                if abs(self.spin_max_diff.value() - v_max_diff) > 1e-4:
+                    self.spin_max_diff.blockSignals(True)
+                    self.spin_max_diff.setValue(v_max_diff)
+                    self.spin_max_diff.blockSignals(False)
     
-            v_max_stock = service.limits.max_single_stock_position_pct * 100.0
-            if abs(self.spin_max_stock.value() - v_max_stock) > 1e-4:
-                self.spin_max_stock.blockSignals(True)
-                self.spin_max_stock.setValue(v_max_stock)
-                self.spin_max_stock.blockSignals(False)
+                v_max_stock = service.limits.max_single_stock_position_pct * 100.0
+                if abs(self.spin_max_stock.value() - v_max_stock) > 1e-4:
+                    self.spin_max_stock.blockSignals(True)
+                    self.spin_max_stock.setValue(v_max_stock)
+                    self.spin_max_stock.blockSignals(False)
     
-            v_max_sector = service.limits.max_single_sector_exposure_pct * 100.0
-            if abs(self.spin_max_sector.value() - v_max_sector) > 1e-4:
-                self.spin_max_sector.blockSignals(True)
-                self.spin_max_sector.setValue(v_max_sector)
-                self.spin_max_sector.blockSignals(False)
+                v_max_sector = service.limits.max_single_sector_exposure_pct * 100.0
+                if abs(self.spin_max_sector.value() - v_max_sector) > 1e-4:
+                    self.spin_max_sector.blockSignals(True)
+                    self.spin_max_sector.setValue(v_max_sector)
+                    self.spin_max_sector.blockSignals(False)
     
-            v_total_exp = service.limits.total_exposure_cap_pct * 100.0
-            if abs(self.spin_total_exp.value() - v_total_exp) > 1e-4:
-                self.spin_total_exp.blockSignals(True)
-                self.spin_total_exp.setValue(v_total_exp)
-                self.spin_total_exp.blockSignals(False)
+                v_total_exp = service.limits.total_exposure_cap_pct * 100.0
+                if abs(self.spin_total_exp.value() - v_total_exp) > 1e-4:
+                    self.spin_total_exp.blockSignals(True)
+                    self.spin_total_exp.setValue(v_total_exp)
+                    self.spin_total_exp.blockSignals(False)
     
-            v_daily_loss = int(service.limits.daily_loss_limit_amount)
-            if self.spin_daily_loss.value() != v_daily_loss:
-                self.spin_daily_loss.blockSignals(True)
-                self.spin_daily_loss.setValue(v_daily_loss)
-                self.spin_daily_loss.blockSignals(False)
+                v_daily_loss = int(service.limits.daily_loss_limit_amount)
+                if self.spin_daily_loss.value() != v_daily_loss:
+                    self.spin_daily_loss.blockSignals(True)
+                    self.spin_daily_loss.setValue(v_daily_loss)
+                    self.spin_daily_loss.blockSignals(False)
     
-            v_losses = service.limits.max_consecutive_losses
-            if self.spin_losses.value() != v_losses:
-                self.spin_losses.blockSignals(True)
-                self.spin_losses.setValue(v_losses)
-                self.spin_losses.blockSignals(False)
+                v_losses = service.limits.max_consecutive_losses
+                if self.spin_losses.value() != v_losses:
+                    self.spin_losses.blockSignals(True)
+                    self.spin_losses.setValue(v_losses)
+                    self.spin_losses.blockSignals(False)
+
+                v_min_volume = service.limits.min_volume
+                if abs(self.spin_min_volume.value() - v_min_volume) > 1e-4:
+                    self.spin_min_volume.blockSignals(True)
+                    self.spin_min_volume.setValue(v_min_volume)
+                    self.spin_min_volume.blockSignals(False)
             
         except Exception as e:
             logger.error(f"Error syncing Control Tab UI: {e}")
