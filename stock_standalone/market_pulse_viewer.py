@@ -442,7 +442,8 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         # Fallback: If monitored is empty, try to load from config file directly
         if not monitored:
             try:
-                config_path = "voice_alert_config.json"
+                from sys_utils import get_conf_path
+                config_path = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"
                 if os.path.exists(config_path):
                     with open(config_path, 'r', encoding='utf-8') as f:
                         monitored = json.load(f)

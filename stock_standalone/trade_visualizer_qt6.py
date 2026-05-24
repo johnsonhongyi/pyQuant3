@@ -82,10 +82,10 @@ from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 import sbc_core
 from stock_visual_utils import PercentAxisItem
-from sys_utils import get_base_path
+from sys_utils import get_base_path, get_conf_path
 BASE_DIR = get_base_path()
-visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
-intraday_pattern_config = cct.get_resource_file("intraday_pattern_config.json",BASE_DIR=BASE_DIR)
+visualizer_config = get_conf_path("visualizer_layout.json", base_dir=BASE_DIR)
+intraday_pattern_config = get_conf_path("intraday_pattern_config.json", base_dir=BASE_DIR)
 from data_utils import (
     calc_cycle_stage_vect
 )
@@ -6965,6 +6965,21 @@ class MainWindow(QMainWindow, WindowMixin):
             self.kline_detail_win.label.setText(text)
             self.kline_detail_win.label.adjustSize()  # 强行触发子标签尺寸重算
             self.kline_detail_win.adjustSize()        # 强行触发父窗口自适应缩放
+            
+            if self.kline_detail_win.is_custom_positioned:
+                # 校验持久化/拖拽后的自定义位置是否在 K 线图绘制物理区域内
+                try:
+                    plot_top_left = self.kline_plot.mapToGlobal(QtCore.QPoint(0, 0))
+                    kline_plot_global_rect = QtCore.QRect(plot_top_left, self.kline_plot.size())
+                    detail_geom = self.kline_detail_win.geometry()
+                    
+                    # 若详情窗几何中心点不在 K 线图物理区域内，判定为游离，重置为跟随鼠标默认方式
+                    if not kline_plot_global_rect.contains(detail_geom.center()):
+                        self.kline_detail_win.is_custom_positioned = False
+                        logger.info("[KLineDetail] Custom position is outside the KLine plot region. Reverting to default positioning.")
+                except Exception as e:
+                    pass
+
             if not self.kline_detail_win.is_custom_positioned:
                 # 默认位置是鼠标位置，跟随鼠标的历史版本最初的设计
                 cursor_pos = QtGui.QCursor.pos()

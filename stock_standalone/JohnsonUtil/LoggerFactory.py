@@ -126,7 +126,25 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
 
     # 从 MEIPASS 复制
     base = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+        
     src = os.path.join(base, rel_path)
+
+    # 🚀 Nuitka 专属定制局部修复：如果 src 在包内找不到，进行常见位置探测
+    if not os.path.exists(src) and "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        nuitka_candidates = [
+            os.path.join(base, "JohnsonUtil", rel_path),
+            os.path.join(base, "JSONData", rel_path),
+            os.path.join(base, "JohnsonUtil", "wencai", rel_path),
+            os.path.join(base, "datacsv", rel_path),
+            os.path.join(base, "JohnsonUtil", os.path.basename(rel_path)),
+            os.path.join(base, "JSONData", os.path.basename(rel_path))
+        ]
+        for cand in nuitka_candidates:
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                src = cand
+                break
 
     if not os.path.exists(src):
         print(f"内置资源缺失: {src}")

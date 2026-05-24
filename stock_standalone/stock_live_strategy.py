@@ -451,7 +451,8 @@ class StockLiveStrategy:
         self._is_stopping: bool = False
         self._needs_monitor_save: bool = False # [NEW] Flag for batch saving
 
-        self.config_file = "voice_alert_config.json"
+        from sys_utils import get_conf_path
+        self.config_file = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"
         
         # 🚀 [NEW] K线抓取配置与状态 (Stable v2)
         self.max_fetch_kline = cct.live_MAX_FETCH     #30  每轮最大抓取数量

@@ -31,7 +31,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
     5. 单股验证与手动交易
     """
     
-    CONFIG_FILE: str = "strategy_config.json"
+    from sys_utils import get_conf_path
+    CONFIG_FILE: str = get_conf_path("strategy_config.json") or "strategy_config.json"
     
     def __init__(self, master: Any, live_strategy: Any, realtime_service: Any = None, query_manager: Any = None):
         super().__init__(master)

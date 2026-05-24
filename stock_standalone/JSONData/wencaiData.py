@@ -1246,6 +1246,10 @@ def get_base_path():
     # 检查是否为 Python 解释器运行
     is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
     
+    # 🚀 Nuitka 专属定制局部修复：如果是由 Nuitka 打包编译，强行将 is_interpreter 设为 False，避免误入脚本模式
+    if "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        is_interpreter = False
+    
     # 1. 普通 Python 脚本模式
     if is_interpreter and not getattr(sys, "frozen", False):
         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
@@ -1297,19 +1301,14 @@ BASE_DIR = get_base_path()
 
 def get_conf_path(fname,BASE_DIR=None,spec=''):
     """
-    获取并验证 stock_codes.conf
-
-    逻辑：
-      1. 优先使用 BASE_DIR/stock_codes.conf
-      2. 不存在 → 从 JSONData/stock_codes.conf 释放
-      3. 校验文件
+    获取并验证 stock_codes.conf / 同花顺板块行业.xlsx 等。
+    统一扁平化放置在 BASE_DIR 根目录下！
     """
-    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
-
     if BASE_DIR is None:
         BASE_DIR = get_base_path()
-    spec_name=f'{spec}{os.sep}{fname}'
-    default_path = os.path.join(BASE_DIR, spec_name)
+
+    # 统一平铺在根目录下
+    default_path = os.path.join(BASE_DIR, fname)
     
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
@@ -1320,9 +1319,6 @@ def get_conf_path(fname,BASE_DIR=None,spec=''):
             log.warning("配置文件存在但为空，将尝试重新释放")
 
     # --- 2. 释放默认资源 ---
-        # rel_path=f"JohnsonUtil/wencai/{fname}",
-        # rel_path=f"JohnsonUtil{os.sep}{spec}{os.sep}{fname}",
-        # rel_path=f"{spec}{os.sep}{fname}",
     cfg_file = cct.get_resource_file(
         rel_path=f"JohnsonUtil/wencai/{fname}",
         out_name=fname,
