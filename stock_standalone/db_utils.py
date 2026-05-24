@@ -7,7 +7,6 @@ import traceback
 from datetime import datetime
 import numpy as np
 import pandas as pd
-from JohnsonUtil import inStockDb as inDb
 from JohnsonUtil import LoggerFactory
 
 # 获取或创建日志记录器
@@ -118,6 +117,9 @@ class SQLiteConnectionManager:
 
 def get_indb_df(days=10):
     """从本地数据库获取最后几天的股票数据统计"""
+    from JohnsonUtil import commonTips as cct
+    # from JohnsonUtil import inStockDb as inDb
+    inDb = cct.LazyModule('JohnsonUtil.inStockDb')
     indf = inDb.showcount(inDb.selectlastDays(days), sort_date=True)
     if len(indf) == 0:
         indf = inDb.showcount(inDb.selectlastDays(days + 5), sort_date=True)
