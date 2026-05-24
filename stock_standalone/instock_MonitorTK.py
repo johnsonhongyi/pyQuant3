@@ -17998,6 +17998,11 @@ if __name__ == "__main__":
         # 主进程，执行主程序启动
         print(f'mp.current_process().name: {mp.current_process().name} == MainProcess')
         print("PID:", os.getpid(), "Process:", mp.current_process().name)
+        
+        # 🚀 全量配置文件抢占式自愈释放安全屏障
+        import sys_utils
+        sys_utils.ensure_all_configs_released()
+        
         main_SIGBREAK()
 
         args = parse_args()  # 解析命令行参数
