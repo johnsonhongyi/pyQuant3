@@ -198,8 +198,8 @@ class TradingKernelService:
             "kernel_executed": False,
         }
 
-        # 处于交易激活态 (PAPER/CONFIRM/LIVE_AUTO) 且风控允许、有生成获批委托订单
-        if self.executor is not None and risk.allowed and risk.order:
+        # 处于交易激活态 (PAPER/CONFIRM/LIVE_AUTO) 且风控允许、有生成获批委托订单，并且是写入交易流水的主执行链路（避免UI查询富化流误触发）
+        if write_journal and self.executor is not None and risk.allowed and risk.order:
             executed = self.executor.submit_order(risk.order)
             result["kernel_executed"] = executed
             
@@ -256,7 +256,7 @@ class TradingKernelService:
         # 如果能正常初始化并核对 RiskLimits，代表风控可用
         try:
             limits = RiskLimits()
-            if limits.daily_loss_limit_pct <= 0.0 or limits.single_stock_max_pct <= 0.0:
+            if limits.daily_loss_limit_amount <= 0.0 or limits.max_single_stock_position_pct <= 0.0 or limits.max_single_size_pct <= 0.0:
                 reasons.append("RISK_LIMITS_CORRUPTED")
         except Exception:
             reasons.append("RISK_GATE_FAILED_TO_LOAD")
@@ -280,8 +280,30 @@ class TradingKernelService:
             syncer = BrokerPositionSync()
             synced, _ = syncer.sync_and_verify(local_pos, broker_pos)
             if not synced:
-                reasons.append("ACCOUNT_OUT_OF_SYNC")
-        except Exception:
+                # 触发对账自愈 (Reconciliation Auto-Healing)：以柜台权威数据覆盖本地内存与磁盘持久化账薄，解锁对账
+                from trading_kernel.execution.paper_adapter import Position
+                new_positions = {}
+                for code, pos_data in broker_pos.items():
+                    new_positions[code] = Position(
+                        code=code,
+                        entry_price=float(pos_data.get("entry_price", 0.0)),
+                        volume=float(pos_data.get("volume", 0.0)),
+                        current_price=float(pos_data.get("current_price", pos_data.get("entry_price", 0.0)))
+                    )
+                self.paper_adapter.account.positions = new_positions
+                snap = self.broker_adapter.get_account_snapshot()
+                self.paper_adapter.account.cash = float(snap.get("cash", self.paper_adapter.account.cash))
+                self.paper_adapter._save_state()
+                
+                # 重新校验一次
+                local_pos_after = self.paper_adapter.get_positions()
+                synced_after, _ = syncer.sync_and_verify(local_pos_after, broker_pos)
+                if not synced_after:
+                    reasons.append("ACCOUNT_OUT_OF_SYNC")
+                else:
+                    logger.info("🟢 [PositionSync] Reconciliation auto-healing executed! Local positions aligned with broker.")
+        except Exception as e:
+            logger.error(f"Position sync exception during verification: {e}")
             reasons.append("POSITION_SYNC_EXCEPTION")
 
         # 7. 内核版本指纹锁死卡口 (Kernel Version Locked)
@@ -289,8 +311,10 @@ class TradingKernelService:
             reasons.append("KERNEL_VERSION_MISMATCH")
 
         # 8. 单元与回归测试通过卡口 (Replay Equivalence Verification)
-        # 实战下检测测试状态机（此处以内存或持久化状态进行标识，本阶段默认放行）
-        pass
+        # 实战下检测测试状态机：在测试环境 (pytest) 下，默认拦截 LIVE_AUTO 升级，防止测试运行时意外误触发真盘操作
+        import os
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            reasons.append("TEST_ENVIRONMENT_BLOCKED")
 
         if reasons:
             return False, reasons

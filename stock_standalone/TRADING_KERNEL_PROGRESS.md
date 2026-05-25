@@ -14,12 +14,14 @@
 | **Phase 1** | **确定性决策核心** | 定义无状态 `DecisionEngine` 与纯粹 the StateManager 锁。 | 🟢 已交付 | 100% | `decision_engine.py`<br>`state_manager.py` |
 | **Phase 2** | **信号规范化与旁路** | 实现 `StrategySignal` 统一数据管道并集成于选股窗口中。 | 🟢 已交付 | 100% | `signal_canonicalizer.py`<br>`kernel_service.py` |
 | **Phase 3** | **确定性回放引擎** | 实现 `ReplayRunner` 支持反序列化 trace 并 100% 幂等校验。 | 🟢 已交付 | 100% | `replay.py`<br>`test_replay_equivalence.py` |
-| **Phase 4** | **模拟交易适配器** | 建立 `PositionBook` 与 `AccountSnapshot` 实现平滑模拟交易。 | 🟢 已交付 | 100% | `execution_adapter.py`<br>`paper_adapter.py`<br>`test_paper_trading.py` |
+| **Phase 4** | **模拟交易适配器** | 建立 `PositionBook` 与 `AccountSnapshot` 实现模拟交易及本地 JSON 物理持久化跨重启自愈恢复。 | 🟢 已交付 | 100% | `execution_adapter.py`<br>`paper_adapter.py`<br>`test_paper_trading.py` |
 | **Phase 5** | **风控限额与硬防** | 引入日内最大回撤、个股持仓上限与板块敞口硬阻断。 | 🟢 已交付 | 100% | `risk_gate.py`<br>`test_risk_hardening.py` |
 | **Phase 6** | **多线程安全状态** | 引入 `StateManager` 分级互斥锁与跨线程自愈防护。 | 🟢 已交付 | 100% | `state_manager.py`<br>`test_state_concurrency.py` |
 | **Phase 7** | **人工确认与干预审计** | 提供 Cyberpunk 暗黑科技风确认弹窗及 Override 占比微调与增量 Journal 审计。| 🟢 已交付 | 100% | `confirm_adapter.py`<br>`confirm_bubble.py`<br>`test_confirm_mode.py` |
 | **Phase 8** | **真盘柜台适配集成** | 基于 `ExecutionAdapter` 抽象层支持 KillSwitch、幂等去重防双发、仓位比对自愈并为 CTP/QMT 实盘通道垫底。 | 🟢 已交付 | 100% | `broker_adapter.py`<br>`test_broker_adapter.py` |
 | **Phase 9** | **全自动交易与防线** | 支持 OBSERVE/PAPER/CONFIRM/LIVE_AUTO 天梯，并且强力校验 8 大安全卡口。 | 🟢 已交付 | 100% | `kernel_service.py`<br>`test_auto_ladder.py` |
+| **Phase 10** | **实质交易策略优化** | 实现近二个月交易日志与买入信号远期收益率 (1, 3, 5, 10日) 高维数据追踪并生成优化决策。 | 🟢 已交付 | 100% | `analyze_trades_depth.py`<br>`TRADING_SIGNAL_ANALYSIS_REPORT.md` |
+| **Phase 11** | **实质交易风控参数热调优部署** | 基于 Phase 10 高维数学证据，设计策略信号调整 Tab，在 UI 与风控网关层热部署 `min_confidence=0.70` 与量能前置过滤 `min_volume=1.0`。 | 🟢 已交付 | 100% | `risk_gate.py`<br>`kernel_service.py`<br>`decision_flow_panel.py` |
 
 ---
 
@@ -85,11 +87,12 @@
 
 ```mermaid
 graph TD
-    A[Phase 9: Full Auto Mode Delivered] -->|Start Phase 10| B(Phase 10: Production Sandbox Rehearsal)
-    B -->|Sandboxed Trading| B1(Simulated multi-day hot trading flows)
-    B -->|Exit Scan| B2(Verify process memory and lock recycling)
+    A[Phase 10: Depth Analysis Delivered] --> B(Phase 11: Real Trade Hot Parameter Deployment)
+    B -->|Completed| C(Phase 12: Production Packaging & Self-Healing Verification)
+    C -->|Next Stage| C1(Onefile Compilation & Packaged State Alignment)
 ```
 
-### 1. 战术攻坚 Phase 10 (沙盒全链路实战演练与生产上线扫尾)
-- 开启跨越数日的仿真极端行情模拟测试，重点验证在连续高频行情冲击下，内存占用、日志磁盘物理 I/O 开销、以及 multi-process 文件锁自愈能力的稳定性。
-- 完成对全量 29 个红线自动化测试用例的最终集成与底盘版本锚定，编写生产上线物理指引，宣布 Trading Kernel 全线生产可用！
+### 1. 下阶段攻坚 Phase 12 (生产单文件打包与多进程自愈核验)
+- **编译发布**：验证 Nuitka / PyInstaller 打包流程，保证新部署的 `min_confidence=0.70` 与量能前置过滤在 Onefile/Onedir 单文件封包环境中的自愈稳定性。
+- **运行核验**：在物理生产环境下启动高频真盘模拟/人工确认流，确认主子进程在拉起、崩溃与冷启动自愈状态下的零故障运行。
+

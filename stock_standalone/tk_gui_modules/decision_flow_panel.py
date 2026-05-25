@@ -1021,6 +1021,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 self.lbl_mode_desc.setText(descriptions[0])
                 self._update_top_status_badges()
                 toast_message(self.parent_app, "模式升格失败！已降级至 OBSERVE")
+            
+            # 切换模式后，立即强制刷新一次持仓与资产看板以保证显示即时对齐
+            self._refresh_positions_tab()
         except Exception as e:
             logger.error(f"Failed to change trading mode: {e}")
 
@@ -1801,44 +1804,58 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             mode = service.mode
             executor = service.executor
             
-            # 物理对账数据源切换自愈：如果是 LIVE_AUTO 则拉取实盘真柜台数据，否则高保真拉取模拟盘
-            adapter = executor if (executor is not None and mode == "LIVE_AUTO") else service.paper_adapter
-            if not adapter:
-                logger.warning("Active execution adapter not found.")
-                return
+            # 物理对账数据源切换自愈：选择哪种模式显示哪种模式的持仓记录
+            if mode == "LIVE_AUTO":
+                adapter = service.broker_adapter
+            elif mode == "CONFIRM":
+                adapter = service.confirm_adapter
+            elif mode == "PAPER":
+                adapter = service.paper_adapter
+            else:
+                adapter = None
             
             # 1. 尝试从 df_all / current_df 更新最新市场价
-            temp_positions = adapter.get_positions()
-            if hasattr(adapter, "update_market_price") and self.parent_app:
-                df = None
-                if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None and not self.parent_app.df_all.empty:
-                    df = self.parent_app.df_all
-                elif hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None and not self.parent_app.current_df.empty:
-                    df = self.parent_app.current_df
-                
-                if df is not None:
-                    for code in temp_positions.keys():
-                        if code in df.index:
-                            now_price = None
-                            for col in ["now", "close", "price", "trade"]:
-                                if col in df.columns:
-                                    val = df.loc[code].get(col)
-                                    try:
-                                        if val is not None:
-                                            if hasattr(val, "values"):
-                                                val = val.values[0]
-                                            float_val = float(val)
-                                            if float_val > 0:
-                                                now_price = float_val
-                                                break
-                                    except (ValueError, TypeError, IndexError):
-                                        pass
-                            if now_price is not None:
-                                adapter.update_market_price(code, now_price)
+            if adapter is not None:
+                temp_positions = adapter.get_positions()
+                if hasattr(adapter, "update_market_price") and self.parent_app:
+                    df = None
+                    if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None and not self.parent_app.df_all.empty:
+                        df = self.parent_app.df_all
+                    elif hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None and not self.parent_app.current_df.empty:
+                        df = self.parent_app.current_df
+                    
+                    if df is not None:
+                        for code in temp_positions.keys():
+                            if code in df.index:
+                                now_price = None
+                                for col in ["now", "close", "price", "trade"]:
+                                    if col in df.columns:
+                                        val = df.loc[code].get(col)
+                                        try:
+                                            if val is not None:
+                                                if hasattr(val, "values"):
+                                                    val = val.values[0]
+                                                float_val = float(val)
+                                                if float_val > 0:
+                                                    now_price = float_val
+                                                    break
+                                        except (ValueError, TypeError, IndexError):
+                                            pass
+                                if now_price is not None:
+                                    adapter.update_market_price(code, now_price)
 
             # 2. 重新获取最新的持仓与资产快照
-            positions = adapter.get_positions()
-            account = adapter.get_account_snapshot()
+            if adapter is not None:
+                positions = adapter.get_positions()
+                account = adapter.get_account_snapshot()
+            else:
+                positions = {}
+                account = {
+                    "cash": 0.0,
+                    "total_equity": 0.0,
+                    "total_pnl": 0.0,
+                    "total_pnl_pct": 0.0,
+                }
             
             total_market_val = 0.0
             
