@@ -2230,7 +2230,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if e.winerror in (winerror.ERROR_BROKEN_PIPE,
                                       winerror.ERROR_NO_DATA,
                                       winerror.ERROR_INVALID_HANDLE):
-                        break
+                        time.sleep(0.1)
+                        continue
                     logger.debug(f"[Pipe] listener error: {e}")
                     time.sleep(1)
 
@@ -5426,6 +5427,52 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not getattr(self, '_hotkey_process_started', False):
             return
             
+        # 🛡️ [自愈防线] 实时监测热键子进程存活状态，若发生崩溃或死亡，自动拉起重置
+        hp = getattr(self, '_hotkey_process', None)
+        if hp is None or not hp.is_alive():
+            logger.warning("🚨 [Rotator] Independent HotkeyRotatorProcess is dead! Attempting self-healing restart...")
+            try:
+                # 确保清理残留句柄
+                if hp:
+                    try:
+                        hp.terminate()
+                        hp.join(timeout=0.5)
+                    except: pass
+                
+                import hotkey_rotator
+                import logging
+                level_val = "INFO"
+                if hasattr(self, 'log_level') and self.log_level is not None:
+                    try:
+                        val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
+                        if isinstance(val, int):
+                            level_val = logging.getLevelName(val)
+                        elif isinstance(val, str):
+                            level_val = val
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        level_val = logging.getLevelName(logger.level)
+                    except Exception:
+                        pass
+                if not isinstance(level_val, str):
+                    level_val = "INFO"
+
+                self._hotkey_process = mp.Process(
+                    target=hotkey_rotator.main,
+                    args=(level_val,),
+                    name="HotkeyRotatorProcess",
+                    daemon=True
+                )
+                self._hotkey_process.start()
+                self._hotkey_process_started = True
+                logger.info("🚀 [Rotator] HotkeyRotatorProcess restarted and self-healed successfully.")
+                self.after(500, self.sync_rotator_windows)
+                return
+            except Exception as rex:
+                logger.error(f"❌ [Rotator] Restart self-healed failed: {rex}")
+
         try:
             # 1. 搜集所有可见交易窗口 (必须在 UI 主线程进行)
             hwnds = self._get_all_open_trade_windows()
