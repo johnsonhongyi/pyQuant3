@@ -50,6 +50,36 @@ logger = LoggerFactory.getLogger(__name__)
 from sys_utils import get_conf_path
 
 
+def is_a_share_zt(code: str, pct: float, name: str = "") -> bool:
+    """
+    极度严密的 A 股个股精准涨停（Limit-Up）判定规则
+    ────────────────────────────────────────────
+    考虑到 A 股的四舍五入特征，各板块的绝对涨停幅度如下：
+    1. ST/*ST/S*ST 股涨停幅度为 5%，涨幅 >= 4.95% (通过名称中含 ST/st 判定)
+    2. 科创板 (688...)、创业板 (300..., 301...) 涨停幅度为 20%，涨幅 >= 19.95%
+    3. 北交所 (83..., 87..., 88..., 43..., 920...) 涨停幅度为 30%，涨幅 >= 29.95%
+    4. 沪深主板 (60..., 00...) 涨停幅度为 10%，涨幅 >= 9.95%
+    """
+    if not code:
+        return False
+    code_str = str(code).strip()
+    
+    # 优先判定 ST 股票 (5%)
+    if name and any(st_word in str(name).upper() for st_word in ["ST", "*ST", "SST", "S*ST"]):
+        return pct >= 4.95
+        
+    # 科创/创业板 (20%)
+    if code_str.startswith(("300", "301", "688")):
+        return pct >= 19.95
+        
+    # 北交所 (30%)
+    if code_str.startswith(("83", "87", "88", "43", "920")):
+        return pct >= 29.95
+        
+    # 沪深主板 (10%)
+    return pct >= 9.95
+
+
 class TimeoutLock:
     """[NEW] 具备超时报警与慢锁诊断功能的包装锁"""
     def __init__(self, name="EngineLock", timeout=3.0):
@@ -687,8 +717,8 @@ class SectorFocusMap:
 
                 # 涨停家数（从 top0 统计）
                 zt_count = sum(1 for f in followers if f.get('is_untradable') is False
-                               and float(f.get('pct', 0)) >= 9.5)
-                if leader_pct >= 9.5:
+                               and is_a_share_zt(f.get('code', ''), float(f.get('pct', 0)), f.get('name', '')))
+                if is_a_share_zt(leader_code, leader_pct, leader_name):
                     zt_count += 1
 
                 # 合并 ext_df 的主力数据
@@ -776,7 +806,7 @@ class SectorFocusMap:
         df['_bid_score'] = df['code'].map(
             {c: s.get('score', 0.0) for c, s in det_snap.items()}
         ).fillna(df['code'].map(bidding).fillna(0.0))
-        df['_is_zt'] = df['percent'] >= 9.5
+        df['_is_zt'] = df.apply(lambda r: is_a_share_zt(r['code'], r['percent'], r.get('name', '')), axis=1)
         df['_vol_ratio'] = df.get('ratio', pd.Series(1.0, index=df.index)).fillna(1.0)
 
         # 主力净占比
@@ -938,7 +968,7 @@ class SectorFocusMap:
         sec_df['_bid'] = sec_df['code'].map(
             {c: s.get('score', 0.0) for c, s in det_snap.items()}
         ).fillna(sec_df['code'].map(bidding).fillna(0.0))
-        sec_df['_zt'] = sec_df['percent'] >= 9.5
+        sec_df['_zt'] = sec_df.apply(lambda r: is_a_share_zt(r['code'], r['percent'], r.get('name', '')), axis=1)
 
         # [D] dff 主力资金流向（正值=主力净流入，优先识别悄悄建仓的潜力股）
         sec_df['_dff'] = sec_df['code'].map(
