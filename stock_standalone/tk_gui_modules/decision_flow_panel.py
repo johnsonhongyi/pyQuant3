@@ -405,6 +405,12 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._last_is_killed = None
         self._last_top_mode = None
         self._last_top_killed = None
+        self._last_linked_code = None
+        
+        # 昨持仓平仓成本追溯与高频遍历优化缓存
+        self._position_cost_cache = {}
+        self._last_orders_len = -1
+        self._cached_code_trade_info = {}
         
         self.setWindowFlags(QtCore.Qt.WindowType.Window | QtCore.Qt.WindowType.WindowMinMaxButtonsHint | QtCore.Qt.WindowType.WindowCloseButtonHint)
         self.setWindowTitle("⚡ 交易内核决策流水分析 (Trading Kernel Decision Flow)")
@@ -606,6 +612,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         
         # 绑定双击行进行代码联动
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # 绑定键盘/鼠标切换当前行进行自动联动
+        self.table.currentCellChanged.connect(self._on_table_cell_changed)
         flow_layout.addWidget(self.table)
         
         self.tabs.addTab(flow_widget, "⚡ 决策流水监控 (Decision Flow)")
@@ -620,8 +628,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
         # 持仓数据表格 (只读)
         self.pos_table = QtWidgets.QTableWidget()
-        self.pos_table.setColumnCount(8)
-        pos_headers = ["代码", "名称", "持仓股数", "买入均价", "当前市价", "持仓市值", "浮动盈亏", "盈亏比例"]
+        self.pos_table.setColumnCount(10)
+        pos_headers = ["代码", "名称", "持仓股数", "买入均价", "当前市价", "持仓市值", "浮动盈亏", "盈亏比例", "开仓时间", "平仓时间"]
         self.pos_table.setHorizontalHeaderLabels(pos_headers)
         
         self.pos_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -633,6 +641,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         
         # 绑定双击持仓代码跳转
         self.pos_table.cellDoubleClicked.connect(self._on_pos_cell_double_clicked)
+        # 绑定键盘/鼠标切换当前行进行自动联动
+        self.pos_table.currentCellChanged.connect(self._on_pos_table_cell_changed)
         
         pos_header = self.pos_table.horizontalHeader()
         pos_header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
@@ -897,8 +907,25 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         if code_item and code_item.text():
             code = code_item.text().strip()
             name = name_item.text().strip() if name_item else ""
+            self._last_linked_code = code
             logger.info(f"Double clicked on DecisionFlow: {code} ({name}), linking...")
             self.code_clicked.emit(code, name)
+
+    def _on_table_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
+        """当键盘或鼠标切换决策表格的当前行时，自动联动"""
+        if currentRow < 0 or currentRow >= self.table.rowCount():
+            return
+        if self.table.hasFocus():
+            code_item = self.table.item(currentRow, 1)
+            name_item = self.table.item(currentRow, 2)
+            if code_item and code_item.text():
+                code = code_item.text().strip()
+                if code == self._last_linked_code:
+                    return
+                self._last_linked_code = code
+                name = name_item.text().strip() if name_item else ""
+                logger.info(f"Navigation cell changed linkage on DecisionFlowTable: {code} ({name})")
+                self.code_clicked.emit(code, name)
 
     def _show_system_workflow_dialog(self):
         """弹出系统操作指南与风控参数详解窗口"""
@@ -1285,6 +1312,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # 每 500ms 自动核对并刷新控制面板与顶部状态徽章，保障多进程状态完美同步
         self._update_top_status_badges()
         self._sync_control_tab_ui()
+        self._refresh_positions_tab()
 
         if not os.path.exists(self.journal_path):
             return
@@ -1329,8 +1357,6 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 # 重新应用过滤
                 self._filter_table()
                 
-            # 同步刷新实时持仓与盈亏标签页
-            self._refresh_positions_tab()
         except Exception as e:
             logger.error(f"Error in incremental records check: {e}")
 
@@ -1691,11 +1717,40 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         if code_item and code_item.text():
             code = code_item.text().strip()
             name = name_item.text().strip() if name_item else ""
+            self._last_linked_code = code
             logger.info(f"Double clicked on KernelPosition: {code} ({name}), linking...")
             self.code_clicked.emit(code, name)
 
+    def _on_pos_table_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
+        """当键盘或鼠标切换持仓表格的当前行时，自动联动"""
+        if currentRow < 0 or currentRow >= self.pos_table.rowCount():
+            return
+        if self.pos_table.hasFocus():
+            code_item = self.pos_table.item(currentRow, 0)
+            name_item = self.pos_table.item(currentRow, 1)
+            if code_item and code_item.text():
+                code = code_item.text().strip()
+                if code == self._last_linked_code:
+                    return
+                self._last_linked_code = code
+                name = name_item.text().strip() if name_item else ""
+                logger.info(f"Navigation cell changed linkage on KernelPositionsTable: {code} ({name})")
+                self.code_clicked.emit(code, name)
+
     def _refresh_positions_tab(self):
         """核心无摩擦刷新：每 500ms 直接从 `get_kernel_service()` 单例物理提取内存中最新持仓与浮盈状态"""
+        selected_code = None
+        try:
+            # 记录当前选中的股票代码，以备在刷新后恢复选中态，防止高频刷新丢失选中行与闪烁
+            curr_row = self.pos_table.currentRow()
+            if curr_row >= 0:
+                item = self.pos_table.item(curr_row, 0)
+                if item:
+                    selected_code = item.text().strip()
+        except Exception:
+            pass
+
+        self.pos_table.blockSignals(True)
         try:
             from trading_kernel.kernel_service import get_kernel_service
             service = get_kernel_service()
@@ -1712,82 +1767,249 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 logger.warning("Active execution adapter not found.")
                 return
             
+            # 1. 尝试从 df_all / current_df 更新最新市场价
+            temp_positions = adapter.get_positions()
+            if hasattr(adapter, "update_market_price") and self.parent_app:
+                df = None
+                if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None and not self.parent_app.df_all.empty:
+                    df = self.parent_app.df_all
+                elif hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None and not self.parent_app.current_df.empty:
+                    df = self.parent_app.current_df
+                
+                if df is not None:
+                    for code in temp_positions.keys():
+                        if code in df.index:
+                            now_price = None
+                            for col in ["now", "close", "price", "trade"]:
+                                if col in df.columns:
+                                    val = df.loc[code].get(col)
+                                    try:
+                                        if val is not None:
+                                            if hasattr(val, "values"):
+                                                val = val.values[0]
+                                            float_val = float(val)
+                                            if float_val > 0:
+                                                now_price = float_val
+                                                break
+                                    except (ValueError, TypeError, IndexError):
+                                        pass
+                            if now_price is not None:
+                                adapter.update_market_price(code, now_price)
+
+            # 2. 重新获取最新的持仓与资产快照
             positions = adapter.get_positions()
             account = adapter.get_account_snapshot()
-        except Exception as ex:
-            logger.error(f"Failed to fetch real-time kernel positions for rendering: {ex}")
-            return
+            
+            total_market_val = 0.0
+            
+            # 3. 收集所有的交易时间与订单记录 (O(N) 遍历优化与缓存机制)
+            current_orders = getattr(adapter, "orders", [])
+            orders_len = len(current_orders)
+            
+            if orders_len != self._last_orders_len:
+                # 只有订单数有变化时才重新全量解析以释放高频 CPU 负荷
+                self._last_orders_len = orders_len
+                code_trade_info = {}
+                if current_orders:
+                    for o in current_orders:
+                        c = o.get("code")
+                        if not c:
+                            continue
+                        act = o.get("action", "").upper()
+                        ts = o.get("timestamp", "")
+                        price = float(o.get("price", 0.0))
+                        vol = float(o.get("volume", 0.0))
+                        
+                        if c not in code_trade_info:
+                            code_trade_info[c] = {
+                                "open_time": "N/A",
+                                "close_time": "N/A",
+                                "buys": [],
+                                "sells": [],
+                            }
+                        
+                        # 调用统一的高防弹时间戳解析器 (DRY)
+                        formatted_ts = self._parse_timestamp(ts)
+                        
+                        if act in {"BUY", "ADD"}:
+                            if code_trade_info[c]["open_time"] == "N/A":
+                                code_trade_info[c]["open_time"] = formatted_ts
+                            code_trade_info[c]["buys"].append((price, vol, formatted_ts))
+                        elif act in {"SELL", "REDUCE"}:
+                            code_trade_info[c]["close_time"] = formatted_ts
+                            code_trade_info[c]["sells"].append((price, vol, formatted_ts))
+                self._cached_code_trade_info = code_trade_info
+            else:
+                code_trade_info = self._cached_code_trade_info
 
-        self.pos_table.setRowCount(0)
-        total_market_val = 0.0
-        
-        # 依次填充持仓行
-        for code, pos in positions.items():
-            row_idx = self.pos_table.rowCount()
-            self.pos_table.insertRow(row_idx)
+            # 4. 整合活持仓与今天已平仓的个股
+            display_positions = []
             
-            entry_price = float(pos.get("entry_price", 0.0))
-            volume = float(pos.get("volume", 0.0))
-            curr_price = float(pos.get("current_price", 0.0))
-            market_val = volume * curr_price
-            total_market_val += market_val
-            
-            pnl = float(pos.get("pnl", 0.0))
-            pnl_pct = float(pos.get("pnl_pct", 0.0))
-            
-            # 精密名称补齐：尝试从父窗口的实时数据集中查找，降级为默认
-            stock_name = ""
-            if self.parent_app and hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None:
-                df = self.parent_app.current_df
-                if code in df.index:
-                    stock_name = str(df.loc[code].get("name", ""))
-            if not stock_name:
-                stock_name = "已持仓"
+            # 活着持仓的个股
+            for code, pos in positions.items():
+                entry_price = float(pos.get("entry_price", 0.0))
+                volume = float(pos.get("volume", 0.0))
+                curr_price = float(pos.get("current_price", 0.0))
+                market_val = volume * curr_price
+                total_market_val += market_val
+                pnl = float(pos.get("pnl", 0.0))
+                pnl_pct = float(pos.get("pnl_pct", 0.0))
                 
-            # 盈亏柔和色彩管理 (亮盈绿 vs 猩红)
-            pnl_color = "#00E676" if pnl >= 0 else "#FF1744"
-            pnl_sign = "+" if pnl >= 0 else ""
-            
-            items = [
-                (code, "#FFFFFF"),
-                (stock_name, "#C2C2C6"),
-                (f"{volume:.0f}", "#B0BEC5"),
-                (f"{entry_price:.2f}", "#B0BEC5"),
-                (f"{curr_price:.2f}", "#FFFFFF"),
-                (f"¥ {market_val:,.2f}", "#00E5FF"),
-                (f"{pnl_sign}¥ {pnl:,.2f}", pnl_color),
-                (f"{pnl_sign}{pnl_pct:.2f}%", pnl_color)
-            ]
-            
-            for col_idx, (text, color_hex) in enumerate(items):
-                cell_item = QtWidgets.QTableWidgetItem(str(text))
-                cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if color_hex:
-                    cell_item.setForeground(QtGui.QColor(color_hex))
-                if col_idx in {6, 7}:
-                    cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
-                self.pos_table.setItem(row_idx, col_idx, cell_item)
+                # 将活持仓的成本缓存进内存，以解决昨持平仓成本追溯问题
+                if entry_price > 0:
+                    self._position_cost_cache[code] = entry_price
+                
+                open_time = "N/A"
+                close_time = "N/A"
+                if code in code_trade_info:
+                    open_time = code_trade_info[code]["open_time"]
+                    
+                display_positions.append({
+                    "code": code,
+                    "volume": volume,
+                    "entry_price": entry_price,
+                    "current_price": curr_price,
+                    "market_val": market_val,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                    "open_time": open_time,
+                    "close_time": close_time,
+                })
+                
+            # 今日已平仓的个股
+            for code, info in code_trade_info.items():
+                if code not in positions:
+                    buys = info["buys"]
+                    sells = info["sells"]
+                    
+                    total_buy_vol = sum(b[1] for b in buys)
+                    if total_buy_vol > 0:
+                        entry_price = sum(b[0] * b[1] for b in buys) / total_buy_vol
+                    else:
+                        # 昨持平仓：尝试从内存成本缓存中追溯昨持的成本均价
+                        entry_price = self._position_cost_cache.get(code, 0.0)
+                    
+                    curr_price = sells[-1][0] if sells else entry_price
+                    volume = 0.0
+                    market_val = 0.0
+                    
+                    total_sell_vol = sum(s[1] for s in sells)
+                    total_sell_val = sum(s[0] * s[1] for s in sells)
+                    total_buy_val = entry_price * total_sell_vol
+                    pnl = total_sell_val - total_buy_val
+                    pnl_pct = (pnl / total_buy_val * 100.0) if total_buy_val > 0 else 0.0
+                    
+                    display_positions.append({
+                        "code": code,
+                        "volume": volume,
+                        "entry_price": entry_price,
+                        "current_price": curr_price,
+                        "market_val": market_val,
+                        "pnl": pnl,
+                        "pnl_pct": pnl_pct,
+                        "open_time": info["open_time"],
+                        "close_time": info["close_time"],
+                    })
 
-        # 刷新大卡片统计数据
-        cash = float(account.get("cash", 0.0))
-        equity = float(account.get("total_equity", 0.0))
-        total_pnl = float(account.get("total_pnl", 0.0))
-        total_pnl_pct = float(account.get("total_pnl_pct", 0.0))
-        ratio = (total_market_val / equity * 100.0) if equity > 0 else 0.0
-        
-        self.cards["cash"].setText(f"¥ {cash:,.2f}")
-        self.cards["equity"].setText(f"¥ {equity:,.2f}")
-        self.cards["market_value"].setText(f"¥ {total_market_val:,.2f}")
-        
-        # 盈亏卡片动态变色与柔和发光渲染
-        pnl_sign = "+" if total_pnl >= 0 else ""
-        self.cards["total_pnl"].setText(f"{pnl_sign}¥ {total_pnl:,.2f} ({total_pnl_pct:.2f}%)")
-        if total_pnl >= 0:
-            self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
-        else:
-            self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #FF1744;")
+            # 5. 渲染至 Qt 表格，采用行复用与脏检查防闪烁机制
+            target_row_count = len(display_positions)
+            self.pos_table.setRowCount(target_row_count)
             
-        self.cards["ratio"].setText(f"{ratio:.1f}%")
+            for row_idx, pos_data in enumerate(display_positions):
+                code = pos_data["code"]
+                volume = pos_data["volume"]
+                entry_price = pos_data["entry_price"]
+                curr_price = pos_data["current_price"]
+                market_val = pos_data["market_val"]
+                pnl = pos_data["pnl"]
+                pnl_pct = pos_data["pnl_pct"]
+                open_time = pos_data["open_time"]
+                close_time = pos_data["close_time"]
+                
+                # 精密名称补齐：优先从父窗口的全局df_all查找以确保包含全量股票，降级为当前显示数据集current_df
+                stock_name = ""
+                if self.parent_app:
+                    if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
+                        df_all = self.parent_app.df_all
+                        if code in df_all.index:
+                            stock_name = str(df_all.loc[code].get("name", ""))
+                    if not stock_name and hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None:
+                        df = self.parent_app.current_df
+                        if code in df.index:
+                            stock_name = str(df.loc[code].get("name", ""))
+                if not stock_name:
+                    stock_name = "已平仓" if volume == 0 else "持仓中"
+                    
+                # 盈亏柔和色彩管理 (亮盈绿 vs 猩红)
+                pnl_color = "#00E676" if pnl >= 0 else "#FF1744"
+                pnl_sign = "+" if pnl >= 0 else ""
+                
+                items = [
+                    (code, "#FFFFFF"),
+                    (stock_name, "#C2C2C6"),
+                    (f"{volume:.0f}", "#B0BEC5"),
+                    (f"{entry_price:.2f}", "#B0BEC5"),
+                    (f"{curr_price:.2f}", "#FFFFFF"),
+                    (f"¥ {market_val:,.2f}", "#00E5FF"),
+                    (f"{pnl_sign}¥ {pnl:,.2f}", pnl_color),
+                    (f"{pnl_sign}{pnl_pct:.2f}%", pnl_color),
+                    (open_time, "#B0BEC5"),
+                    (close_time, "#B0BEC5")
+                ]
+                
+                for col_idx, (text, color_hex) in enumerate(items):
+                    cell_item = self.pos_table.item(row_idx, col_idx)
+                    if not cell_item:
+                        cell_item = QtWidgets.QTableWidgetItem()
+                        cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                        if col_idx in {6, 7}:
+                            cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
+                        self.pos_table.setItem(row_idx, col_idx, cell_item)
+                    
+                    if cell_item.text() != str(text):
+                        cell_item.setText(str(text))
+                    
+                    if color_hex:
+                        new_color = QtGui.QColor(color_hex)
+                        if cell_item.foreground().color() != new_color:
+                            cell_item.setForeground(new_color)
+
+            # 6. 恢复之前的选中状态，确保位置对齐且不会因为刷新丢失焦点或乱跳
+            restored = False
+            if selected_code:
+                for r in range(self.pos_table.rowCount()):
+                    item = self.pos_table.item(r, 0)
+                    if item and item.text().strip() == selected_code:
+                        self.pos_table.setCurrentCell(r, 0)
+                        restored = True
+                        break
+            if not restored and selected_code and self.pos_table.rowCount() > 0:
+                self.pos_table.setCurrentCell(0, 0)
+
+            # 7. 刷新大卡片统计数据
+            cash = float(account.get("cash", 0.0))
+            equity = float(account.get("total_equity", 0.0))
+            total_pnl = float(account.get("total_pnl", 0.0))
+            total_pnl_pct = float(account.get("total_pnl_pct", 0.0))
+            ratio = (total_market_val / equity * 100.0) if equity > 0 else 0.0
+            
+            self.cards["cash"].setText(f"¥ {cash:,.2f}")
+            self.cards["equity"].setText(f"¥ {equity:,.2f}")
+            self.cards["market_value"].setText(f"¥ {total_market_val:,.2f}")
+            
+            # 盈亏卡片动态变色与柔和发光渲染
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            self.cards["total_pnl"].setText(f"{pnl_sign}¥ {total_pnl:,.2f} ({total_pnl_pct:.2f}%)")
+            if total_pnl >= 0:
+                self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+            else:
+                self.cards["total_pnl"].setStyleSheet("font-size: 13px; font-weight: bold; color: #FF1744;")
+                
+            self.cards["ratio"].setText(f"{ratio:.1f}%")
+        except Exception as ex:
+            logger.error(f"Failed to fetch/render real-time kernel positions: {ex}\n{traceback.format_exc()}")
+        finally:
+            self.pos_table.blockSignals(False)
 
     def resizeEvent(self, event):
         """拖动放大窗口时不要自动_adjust_column_widths，由主窗体布局进行自适应弹性拉伸"""
@@ -1812,11 +2034,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 reason_width = max(250, total_w - scaled_total)
                 self.table.setColumnWidth(11, reason_width)
                 
-        if hasattr(self, "pos_table") and self.pos_table.columnCount() == 8:
+        if hasattr(self, "pos_table") and self.pos_table.columnCount() == 10:
             total_pos_w = self.pos_table.viewport().width()
             if total_pos_w > 100:
-                # 0.代码, 1.名称, 2.数量, 3.买均, 4.现价, 5.市值, 6.盈亏, 7.盈亏比例
-                static_pos_widths = [65, 75, 60, 60, 60, 85, 90]
+                # 0.代码, 1.名称, 2.持仓股数, 3.买入均价, 4.当前市价, 5.持仓市值, 6.浮动盈亏, 7.盈亏比例, 8.开仓时间, 9.平仓时间
+                static_pos_widths = [65, 75, 60, 60, 60, 85, 90, 80, 110]
                 scaled_pos_total = int(sum(static_pos_widths) * self.scale_factor)
                 
                 pos_headers = self.pos_table.horizontalHeader()
@@ -1824,6 +2046,6 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     pos_headers.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeMode.Interactive)
                     self.pos_table.setColumnWidth(idx, int(w * self.scale_factor))
                 
-                # 最后一列“盈亏比例”自适应 Stretch
-                pct_width = max(80, total_pos_w - scaled_pos_total)
-                self.pos_table.setColumnWidth(7, pct_width)
+                # 最后一列“平仓时间”自适应 Stretch
+                pct_width = max(110, total_pos_w - scaled_pos_total)
+                self.pos_table.setColumnWidth(9, pct_width)
