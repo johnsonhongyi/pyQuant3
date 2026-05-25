@@ -1271,9 +1271,16 @@ class StockLiveStrategy:
 
         # ----------------- Throttling -----------------
         now = time.time()
-        # 🛡️ 快速检查锁状态 (按周期隔离保护)，防止并发重入
+        # 🛡️ 快速检查锁状态 (按周期隔离保护)，防止并发重入，但增加 120 秒超时自愈保护以防死锁
         if resample in self._is_checking_resamples:
-            return
+            last_start = getattr(self, '_resample_start_time', {}).get(resample, 0)
+            if now - last_start > 120:
+                logger.warning(f"⚠️ [LockSelfHealing] Detected locked resample '{resample}' for >120s. Forcing unlock.")
+                with self._lock:
+                    if resample in self._is_checking_resamples:
+                        self._is_checking_resamples.remove(resample)
+            else:
+                return
             
         if now - getattr(self, '_last_process_time', 0.0) < 1.0: # 稍微提高频率到 1s
             return
@@ -1348,10 +1355,20 @@ class StockLiveStrategy:
                  target_codes = list(self._monitored_stocks.keys())
                  
              if target_codes:
-                 # 🛡️ [PERF OPTIMIZE] 延迟到 _check_strategies 内部进行 index 转换和 intersection
+                 if not hasattr(self, '_resample_start_time'):
+                     self._resample_start_time = {}
+                 self._resample_start_time[resample] = now
+                 
+                 # 🛡️ [PERF OPTIMIZE] 延迟到 _check_strategies 内部进行 index 转换 and intersection
                  # 这里只提交任务，最大限度减少主线程/刷新线程的停顿
                  logger.debug(f"⏳ [DEBUG_LOCK] [Strategy] Submitting _check_strategies for {len(target_codes)} codes...")
-                 self.executor.submit(self._check_strategies, df_internal, target_codes, resample=resample)
+                 try:
+                     self.executor.submit(self._check_strategies, df_internal, target_codes, resample=resample)
+                 except Exception as e_submit:
+                     logger.error(f"Failed to submit _check_strategies: {e_submit}")
+                     with self._lock:
+                         if resample in self._is_checking_resamples:
+                             self._is_checking_resamples.remove(resample)
              else:
                  with self._lock:
                      if resample in self._is_checking_resamples:

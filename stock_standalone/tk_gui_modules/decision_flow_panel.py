@@ -1314,6 +1314,46 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._sync_control_tab_ui()
         self._refresh_positions_tab()
 
+        # 🌟 [GUI Watchdog] 检查日志流水文件更新状态，如果长时间没写入进行黄色警告
+        try:
+            now = time.time()
+            try:
+                from JohnsonUtil import commonTips as cct
+            except ImportError:
+                try:
+                    import commonTips as cct
+                except ImportError:
+                    import common as cct
+            
+            is_trade_day = cct.get_trade_date_status()
+            now_dt = datetime.now()
+            now_time_int = now_dt.hour * 100 + now_dt.minute
+            is_active_trading = is_trade_day and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
+            
+            if not hasattr(self, '_last_growth_time'):
+                self._last_growth_time = now
+                
+            if is_active_trading:
+                if os.path.exists(self.journal_path):
+                    current_size = os.path.getsize(self.journal_path)
+                    if not hasattr(self, '_last_tracked_size'):
+                        self._last_tracked_size = current_size
+                    if current_size > self._last_tracked_size:
+                        self._last_growth_time = now
+                        self._last_tracked_size = current_size
+                
+                inactive_duration = now - self._last_growth_time
+                if inactive_duration > 300: # 5分钟没有更新
+                    minutes = inactive_duration / 60
+                    self.status_label.setText(f"⚠️ [FlowWatchdog] 决策流已停滞超过 {minutes:.1f} 分钟！请检查后台策略与行情")
+                    self.status_label.setStyleSheet("color: #FFCC00; font-weight: bold;")
+                else:
+                    self.status_label.setStyleSheet("")
+            else:
+                self.status_label.setStyleSheet("")
+        except Exception as e_watch:
+            logger.warning(f"Error in DecisionFlowPanel FlowWatchdog: {e_watch}")
+
         if not os.path.exists(self.journal_path):
             return
 

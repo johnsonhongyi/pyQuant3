@@ -2162,12 +2162,13 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         # 合并新旧数据并去重裁切
                         if hist_df is not None and not hist_df.empty:
                             # --- 1. 合并 + 强制规范 ---
+                            idx_names = list(hist_df.index.names)
                             full_df = (
                                 pd.concat([hist_df, df])
-                                .sort_index(level=['code', 'ticktime'])
+                                .sort_index(level=idx_names)
                                 .reset_index()
-                                .drop_duplicates(subset=['code', 'ticktime'], keep='last')
-                                .set_index(['code', 'ticktime'])
+                                .drop_duplicates(subset=idx_names, keep='last')
+                                .set_index(idx_names)
                                 .sort_index()
                             )
 
@@ -2180,12 +2181,10 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             shrink_ratio = 0.8       # 保留80%
                             min_rows = 50            # 每个code最少保留
 
-                            if num_codes > 1000:
-                                # 动态推算：总容量(bytes) / 平均单行大小(85 bytes) / 总股数
-                                calculated_safe = int(sizelimit * 1024 * 1024 / 85 / num_codes)
-                                safe_rows = max(min_rows, calculated_safe)
-                            else:
-                                safe_rows = 3000
+                            # 动态推算：总容量(bytes) / 平均单行大小(85 bytes) / 总股数
+                            calculated_safe = int(sizelimit * 1024 * 1024 / 85 / num_codes) if num_codes > 0 else 3000
+                            # 若限额极大，为了防止个股过量增长，设置 3000 行上限
+                            safe_rows = min(3000, max(min_rows, calculated_safe))
 
                             # --- 4. 判断是否需要裁切（按code，而不是全局）---
                             if (group_sizes > safe_rows * trigger_ratio).any():
@@ -2205,7 +2204,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
                                 truncated_df = (
                                     pd.concat(result)
-                                    .sort_index(level=['code', 'ticktime'])
+                                    .sort_index(level=idx_names)
                                 )
 
                                 # --- 5. 写入 ---

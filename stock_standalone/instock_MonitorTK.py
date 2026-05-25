@@ -4196,11 +4196,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df_snapshot = full_df
 
             if hasattr(self, 'executor') and self.executor:
-                # [THROTTLE] 增加分发节流保护，防止前一个分析任务由于卡顿未返回时持续堆积
+                # [THROTTLE] 增加分发节流保护，防止前一个分析任务由于卡顿未返回时持续堆积。增加 2 分钟超时自愈保护，防卡死
                 if getattr(self, '_is_strategy_running', False):
-                    logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: skipped because _is_strategy_running is True")
-                    return
+                    last_submit = getattr(self, '_last_strategy_submit_time', 0.0)
+                    if time.time() - last_submit > 120:
+                        logger.warning("⚠️ [MainWatchdog] Detected _is_strategy_running stuck for >120s. Forcing reset to False.")
+                        self._is_strategy_running = False
+                    else:
+                        logger.debug("⏳ [DEBUG_LOCK] [Main] _run_live_strategy_process: skipped because _is_strategy_running is True")
+                        return
+                
                 self._is_strategy_running = True
+                self._last_strategy_submit_time = time.time()
                 
                 def _wrap_process():
                     try:
@@ -4212,7 +4219,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 投递到线程池，立即返回，释放 UI 指令
                 logger.debug("⏳ [DEBUG_LOCK] [Main] Submitting _wrap_process to executor pool...")
-                self.executor.submit(_wrap_process)
+                try:
+                    self.executor.submit(_wrap_process)
+                except Exception as e_pool:
+                    logger.error(f"Failed to submit strategy wrap process to pool: {e_pool}")
+                    self._is_strategy_running = False
                 logger.debug("⏳ [DEBUG_LOCK] [Main] Submitting _wrap_process to executor pool DONE.")
             else:
                 # 兜底方案 (不推荐)
@@ -4411,6 +4422,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     if full_df is not None:
                         self.market_bus.publish(full_df, df_filtered)
+                        self._last_snapshot_recv_time = time.time()  # 🌟 成功收到并发布快照，更新时间戳
                         # logger.debug("📡 [Bus] Published latest snapshot.")
                 
                 time.sleep(0.05) # 20Hz 刷新率足够
@@ -4462,6 +4474,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         try:
             if self.refresh_enabled:
+                # 🌟 [DIAGNOSTIC LOGGING] 每 15 秒打一次详细的诊断日志，监控交易状态与子进程健康
+                now_t = time.time()
+                if now_t - getattr(self, '_last_diagnostic_log_time', 0.0) > 15.0:
+                    self._last_diagnostic_log_time = now_t
+                    try:
+                        work_time = cct.get_work_time()
+                        init_done = self.global_values.getkey("tdx.init.done")
+                        proc_alive = self.proc.is_alive() if hasattr(self, 'proc') and self.proc else False
+                        ref_enabled = self.refresh_enabled
+                        logger.info(f"📊 [Diag] work_time={work_time}, tdx.init={init_done}, proc_alive={proc_alive}, refresh={ref_enabled}")
+                    except Exception:
+                        pass
                 
                 # [WATCHDOG] 增强版 Watchdog：区分后台计算与 UI 同步
                 is_bg_busy = getattr(self, '_is_processing_tree_data', False)
@@ -4558,6 +4582,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if not self.proc.is_alive():
                             logger.error("🛑 Subprocess fetch_and_process is DEAD. Attempting to restart...")
                             self._start_process()
+                        else:
+                            # 🌟 [PROACTIVE WATCHDOG] 子进程虽然存活，但在活跃交易时间内如果已经超过 5 分钟没有新数据包进来，判定为行情卡死，强制拉起自愈
+                            now_time = time.time()
+                            now_dt = datetime.now()
+                            now_time_int = now_dt.hour * 100 + now_dt.minute
+                            is_active_trading = cct.get_trade_date_status() and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
+                            
+                            last_recv = getattr(self, '_last_snapshot_recv_time', now_time)
+                            if is_active_trading and (now_time - last_recv > 300): # 超过 5 分钟
+                                logger.error(f"🛑 [DataWatchdog] Subprocess alive but no data received for {now_time - last_recv:.0f}s. Forcing restart of fetch_and_process...")
+                                try:
+                                    self.proc.terminate()
+                                    self.proc.join(timeout=3)
+                                except Exception as e_term:
+                                    logger.warning(f"Failed to terminate stale subprocess: {e_term}")
+                                self._last_snapshot_recv_time = now_time # 重置时间戳，防止频繁重启
+                                self._start_process()
 
         except Exception as e:
             logger.error(f"Error starting tree update: {e}", exc_info=True)
