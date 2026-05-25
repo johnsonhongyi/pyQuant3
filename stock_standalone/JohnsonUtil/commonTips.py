@@ -753,6 +753,8 @@ class GlobalConfig:
         self.sector_write_blk = self.get_with_writeback("general", "sector_write_blk", fallback='098.blk', value_type="str")
         self.multiprocessingQueue = self.get_with_writeback("general", "multiprocessingQueue", fallback=300, value_type="int")
         self.gil_monitor = self.get_with_writeback("general", "gil_monitor", fallback=0, value_type="int")
+        self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")
+        self.hud_global_suppression = self.get_with_writeback("general", "hud_global_suppression", fallback=90, value_type="int")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",
@@ -1053,6 +1055,8 @@ vis_column_map: Dict[str] = CFG.vis_column_map
 sector_write_blk: Dict[str] = CFG.sector_write_blk
 multiprocessingQueue: int = CFG.multiprocessingQueue
 concept_top10_window_col: List[str] = CFG.concept_top10_window_col
+hud_sector_cooldown: int = CFG.hud_sector_cooldown
+hud_global_suppression: int = CFG.hud_global_suppression
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

@@ -2896,6 +2896,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     leader_code = d.get('leader')
                     if leader_code:
                         self._link_code(leader_code, focus_widget=self.sector_table)
+                
+                # 同步更新 HUD 状态
+                if hasattr(self.main_window, 'spatial_follow_hud') and self.main_window.spatial_follow_hud is not None:
+                    if self.main_window.spatial_follow_hud.isVisible():
+                        try:
+                            self.main_window.spatial_follow_hud.update_hud_data(sn)
+                        except Exception as e:
+                            logger.error(f"[HUD Sync] Failed to update HUD for sector {sn}: {e}")
                 return
 
     def _on_sector_table_cell_clicked(self, row, col):

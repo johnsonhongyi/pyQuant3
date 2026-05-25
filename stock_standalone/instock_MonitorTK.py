@@ -601,6 +601,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._open_column_manager_job = None
 
         self._last_visualizer_code = None
+        self.spatial_follow_hud = None
         
         # ---------------------------------------------------------
         # 🚀 [ROOT-FIX] 核心稳定性：UI心跳、诊断看门狗、多进程联动中心
@@ -949,6 +950,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-j>", lambda event: self.open_decision_flow_panel())
         self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
         self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
+        self.bind("<space>", lambda event: self.toggle_spatial_follow_hud())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
         self._schedule_after(3000, self._check_dpi_change)
@@ -5013,6 +5015,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if has_update and (lt_now - _fc_last >= duration_sleep_time):
                                 from sector_focus_engine import get_focus_controller
                                 fc = get_focus_controller()
+                                if not getattr(fc, 'hud_callback', None):
+                                    fc.hud_callback = self.open_spatial_follow_hud
 
                                 # ① 注入基础行情表 (确保扫描引擎始终有底层数据支持)
                                 fc.inject_realtime(full_df)
@@ -5420,17 +5424,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             name="OpenVisWorker"
         ).start()
 
-        # 异步探测并注册可视化窗口的 HWND 至 MRU 列表中
-        def _register_vis_hwnd_async():
-            import time
-            for _ in range(30): # 轮询探测 3 秒
+        # 🌟 终极防线：采用 Tkinter 主线程定时轮询代替多线程异步 Thread，彻底消灭所有 GIL/ctypes 跨线程时序崩溃！
+        def _poll_vis_hwnd_main_thread(count=0):
+            try:
                 vis_hwnd = self._find_visualizer_hwnd()
                 if vis_hwnd:
                     if hasattr(self, '_register_hwnd_to_mru'):
                         self._register_hwnd_to_mru(vis_hwnd)
-                    break
-                time.sleep(0.1)
-        threading.Thread(target=_register_vis_hwnd_async, daemon=True, name="RegisterVisHwnd").start()
+                    return
+            except Exception:
+                pass
+            if count < 30: # 每 100ms 探测一次，最多持续 3 秒
+                self.after(100, lambda: _poll_vis_hwnd_main_thread(count + 1))
+                
+        # 立即启动主线程延时安全探测
+        self.after(100, lambda: _poll_vis_hwnd_main_thread(0))
 
         # UI 状态提示
         try:
@@ -5910,6 +5918,75 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         t = threading.Thread(target=_build_panel_worker, name="SectorBiddingBuild", daemon=True)
         t.start()
         logger.warning(f"⏱️ [SectorBidding] 后台构建线程已启动，主线程立即返回 (total {(time.time()-t_start)*1000:.1f}ms)")
+
+    def open_spatial_follow_hud(self, sector_name: str, signal_item: Optional[Any] = None) -> None:
+        """打开或更新置顶跟单指挥所 SpatialFollowHUD (Thread-safe)"""
+        import threading
+        
+        app = QtWidgets.QApplication.instance()
+        is_main_thread = False
+        if app:
+            is_main_thread = (QtCore.QThread.currentThread() == app.thread())
+            
+        if not is_main_thread:
+            logger.debug(f"[HUD] Called from background thread, routing to main thread for sector: {sector_name}")
+            if hasattr(self, 'tk_dispatch_queue'):
+                self.tk_dispatch_queue.put(lambda: self.open_spatial_follow_hud(sector_name, signal_item))
+            return
+
+        try:
+            from tk_gui_modules.spatial_follow_hud import SpatialFollowHUD
+            if self.spatial_follow_hud is None:
+                logger.info("🛸 [HUD] 首次构建跟单指挥所 SpatialFollowHUD...")
+                self.spatial_follow_hud = SpatialFollowHUD(parent=None, main_app=self)
+                self.spatial_follow_hud.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+            
+            self.spatial_follow_hud.update_hud_data(sector_name, signal_item)
+            
+            if not self.spatial_follow_hud.isVisible():
+                self.spatial_follow_hud.show()
+                
+            self.spatial_follow_hud.raise_()
+            self.spatial_follow_hud.activateWindow()
+            
+            if hasattr(self, '_register_hwnd_to_mru'):
+                self._register_hwnd_to_mru(int(self.spatial_follow_hud.winId()))
+                
+            logger.info(f"🛸 [HUD] 板块跟单指挥所已拉起/更新: {sector_name}")
+        except Exception as e:
+            logger.error(f"[HUD] 打开/更新跟单指挥所失败: {e}", exc_info=True)
+
+    def toggle_spatial_follow_hud(self) -> None:
+        """空格键触发：唤醒/聚焦/显示 板块跟单指挥所 SpatialFollowHUD"""
+        # 如果当前焦点在输入框中，不要拦截空格键，正常输入空格
+        focused = self.focus_get()
+        if focused is not None:
+            f_str = str(focused).lower()
+            if "entry" in f_str or "text" in f_str:
+                return
+
+        now = time.time()
+        last_action = getattr(self, '_last_hud_toggle_t', 0.0)
+        if now - last_action < 0.25:
+            return
+        self._last_hud_toggle_t = now
+
+        try:
+            from sector_focus_engine import get_focus_controller
+            fc = get_focus_controller()
+            if not fc:
+                return
+                
+            hot_sectors = fc.get_hot_sectors(top_n=1)
+            if not hot_sectors:
+                # 没有任何板块突破，友好提示
+                toast_message(self, "📡 暂无板块爆发信号，监听中...")
+                return
+                
+            sector_name = hot_sectors[0]['name']
+            self.open_spatial_follow_hud(sector_name)
+        except Exception as e:
+            logger.error(f"[HUD] toggle_spatial_follow_hud 异常: {e}", exc_info=True)
 
     def open_strategy_scan(self):
         """一键打开策略扫描"""
@@ -11548,7 +11625,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
     # 🚀 [NEW] 跨框架多窗口轮询快捷键系统 (Unified Window Rotator System)
     def _find_visualizer_hwnd(self):
-        """利用 EnumWindows 跨进程枚举可视化窗口 HWND"""
+        """利用 EnumWindows 跨进程枚举可视化窗口 HWND (防 GC 与 GIL 加固版)"""
         import ctypes
         user32 = ctypes.windll.user32
         found_hwnd = [0]
@@ -11556,18 +11633,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         
         def enum_callback(hwnd, lParam):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value
-                # 模糊匹配可视化看板标题
-                if any(kw in title for kw in ["分时可视化", "TradeVisualizer", "K线可视化", "量价异动详情", "PyQuant Stock Visualizer", "Stock Visualizer", "Visualizer"]):
-                    found_hwnd[0] = hwnd
-                    return False  # 停止枚举
+            try:
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    title = buf.value
+                    # 模糊匹配可视化看板标题
+                    if any(kw in title for kw in ["分时可视化", "TradeVisualizer", "K线可视化", "量价异动详情", "PyQuant Stock Visualizer", "Stock Visualizer", "Visualizer"]):
+                        found_hwnd[0] = hwnd
+                        return False  # 停止枚举
+            except Exception:
+                pass
             return True
             
-        user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+        # 🌟 核心加固：强行声明局部变量持有 WNDENUMPROC，防止在 C 回调执行中途被 Python GC 释放
+        callback_ptr = WNDENUMPROC(enum_callback)
+        user32.EnumWindows(callback_ptr, 0)
         return found_hwnd[0]
 
     def _register_hwnd_to_mru(self, hwnd):
@@ -11661,6 +11743,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     h = int(self._decision_flow_win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "⚡ 交易内核决策流水监控 (DecisionFlowPanel)"
+            except Exception:
+                pass
+                
+        # 6.2. 实时板块突破跟单指挥所 (PyQt6 - SpatialFollowHUD)
+        if hasattr(self, 'spatial_follow_hud') and self.spatial_follow_hud is not None:
+            try:
+                if self.spatial_follow_hud.isVisible():
+                    h = int(self.spatial_follow_hud.winId())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = "🛸 实时板块突破跟单指挥所 (SpatialFollowHUD)"
             except Exception:
                 pass
                 
