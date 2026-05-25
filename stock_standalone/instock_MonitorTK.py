@@ -4483,7 +4483,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         init_done = self.global_values.getkey("tdx.init.done")
                         proc_alive = self.proc.is_alive() if hasattr(self, 'proc') and self.proc else False
                         ref_enabled = self.refresh_enabled
-                        logger.info(f"📊 [Diag] work_time={work_time}, tdx.init={init_done}, proc_alive={proc_alive}, refresh={ref_enabled}")
+                        logger.debug(f"📊 [Diag] work_time={work_time}, tdx.init={init_done}, proc_alive={proc_alive}, refresh={ref_enabled}")
                     except Exception:
                         pass
                 

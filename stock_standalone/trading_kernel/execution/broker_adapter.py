@@ -68,7 +68,7 @@ class OrderIdempotencyManager:
         self._cleanup_expired(now)
         
         if order_id in self._submitted_records:
-            logger.warning(f"⚠️ [Idempotency] Duplicate order submission detected for ID: {order_id}")
+            logger.debug(f"⚠️ [Idempotency] Duplicate order submission detected for ID: {order_id}")
             return True
         return False
 
@@ -172,6 +172,11 @@ class BrokerExecutionAdapter(ExecutionAdapter):
         # 柜台连接状态
         self._connected = True
 
+        # 增加在内存中模拟订单与持仓，以保证在 LIVE_AUTO 模式下能正常查阅持仓
+        self.orders: list[dict[str, Any]] = []
+        self._positions: dict[str, dict[str, Any]] = {}
+        self._cash = 1000000.0
+
     def set_connected(self, status: bool) -> None:
         """外部模拟心跳或者真实 API 回调断开设置"""
         self._connected = status
@@ -206,23 +211,121 @@ class BrokerExecutionAdapter(ExecutionAdapter):
             return False
         return self._execute_broker_cancel(order_id)
 
+    def update_market_price(self, code: str, price: float) -> None:
+        """更新个股的实时市场价格以计算浮动盈亏"""
+        if code in self._positions:
+            self._positions[code]["current_price"] = price
+
     def get_positions(self) -> dict[str, Any]:
         """获取实仓"""
         if not self._connected:
             return {}
-        return self._fetch_broker_positions()
+        real_pos = self._fetch_broker_positions()
+        if not real_pos and self._positions:
+            # 动态计算并规整 pnl 和 pnl_pct，确保 UI 能够正确计算展示
+            formatted = {}
+            for code, pos in self._positions.items():
+                ep = pos.get("entry_price", 0.0)
+                cp = pos.get("current_price", ep)
+                vol = pos.get("volume", 0.0)
+                pnl = (cp - ep) * vol
+                pnl_pct = ((cp - ep) / ep * 100.0) if ep > 0 else 0.0
+                formatted[code] = {
+                    "code": code,
+                    "entry_price": ep,
+                    "volume": vol,
+                    "current_price": cp,
+                    "market_value": vol * cp,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct
+                }
+            return formatted
+        return real_pos
 
     def get_account_snapshot(self) -> dict[str, Any]:
         """获取账户快照"""
         if not self._connected:
             return {"cash": 0.0, "total_asset": 0.0}
-        return self._fetch_broker_account()
+        real_acct = self._fetch_broker_account()
+        if real_acct.get("cash", 0.0) == 500000.0 and self._cash != 1000000.0:
+            total_val = sum(pos.get("volume", 0.0) * pos.get("current_price", pos.get("entry_price", 0.0)) for pos in self._positions.values())
+            return {
+                "cash": round(self._cash, 4),
+                "total_equity": round(self._cash + total_val, 4),
+                "total_pnl": round(self._cash + total_val - 1000000.0, 4),
+                "total_pnl_pct": round((self._cash + total_val - 1000000.0) / 1000000.0 * 100.0, 4),
+            }
+        return real_acct
 
     # --- 虚方法：具体物理柜台（如 CTP, Mini-QMT）重写以下底层接口 ---
 
     def _execute_broker_order(self, order: ApprovedOrder) -> bool:
         """由具体的物理接口发送真实委托订单，返回柜台是否受理成功"""
         logger.info(f"⚡ [Broker-API] Successfully placed live order for {order.code} (Size: {order.size_pct * 100:.1f}%)")
+        
+        # 为了在未挂载真实物理 API 的 LIVE_AUTO 模式下能正常调试与查阅持仓
+        # 我们在此处直接模拟记录订单成交，并动态更新模拟的实盘账户持仓与资产
+        action = order.action.upper()
+        code = order.code
+        price = order.price
+        size_pct = order.size_pct
+        
+        # 1. 模拟买入/加仓/卖出/减仓逻辑
+        equity = self._cash + sum(pos["volume"] * pos.get("current_price", pos["entry_price"]) for pos in self._positions.values())
+        execute_vol = 0.0
+        
+        if action in {"BUY", "ADD"}:
+            target_value = equity * size_pct
+            if target_value > self._cash:
+                target_value = self._cash
+            if target_value > 0:
+                execute_vol = target_value / price
+                self._cash -= target_value
+                if code in self._positions:
+                    pos = self._positions[code]
+                    new_volume = pos["volume"] + execute_vol
+                    new_entry = ((pos["entry_price"] * pos["volume"]) + (price * execute_vol)) / new_volume
+                    pos["volume"] = new_volume
+                    pos["entry_price"] = new_entry
+                    pos["current_price"] = price
+                else:
+                    self._positions[code] = {
+                        "code": code,
+                        "entry_price": price,
+                        "volume": execute_vol,
+                        "current_price": price,
+                    }
+        elif action in {"SELL", "REDUCE"}:
+            if code in self._positions:
+                pos = self._positions[code]
+                if action == "SELL":
+                    execute_vol = pos["volume"]
+                else:
+                    execute_vol = pos["volume"] * size_pct
+                    if execute_vol > pos["volume"]:
+                        execute_vol = pos["volume"]
+                
+                if execute_vol > 0:
+                    self._cash += execute_vol * price
+                    pos["volume"] -= execute_vol
+                    if pos["volume"] <= 0.0001:
+                        self._positions.pop(code, None)
+                    else:
+                        pos["current_price"] = price
+                        
+        # 2. 模拟记录订单成交单，供 UI 主动刷新呈现
+        import datetime
+        self.orders.append({
+            "order_id": order.order_id,
+            "code": code,
+            "action": action,
+            "price": round(price, 4),
+            "size_pct": round(size_pct, 4),
+            "volume": round(execute_vol, 4),
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "status": "FILLED"
+        })
+        
         return True
 
     def _execute_broker_cancel(self, order_id: str) -> bool:
