@@ -140,6 +140,8 @@ class SectorHeat:
     leader_vwap: float         = 0.0  # 龙头均价线
     leader_klines: List[dict]  = field(default_factory=list)  # 龙头分时K线
     score_diff: float          = 0.0  # 板块强度周期内变化
+    score_accel: float         = 0.0  # 板块爆发加速度
+    surge_density: int         = 0    # 板块瞬时共振密度
     follow_ratio: float        = 0.0  # 板块跟涨比例
     sector_type: str           = ""   # 🔥强攻/♨️蓄势/🔄反转/📈跟随
     tags: str                  = ""   # 标签串
@@ -170,6 +172,8 @@ class SectorHeat:
             'leader_dff': round(self.leader_dff, 2),
             'leader_vwap': round(self.leader_vwap, 3),
             'score_diff': round(self.score_diff, 2),
+            'score_accel': round(self.score_accel, 2),
+            'surge_density': self.surge_density,
             'follow_ratio': round(self.follow_ratio, 2),
             'sector_type': self.sector_type or "📈 跟随", # [MOD] 提供默认类型
             'tags': self.tags,
@@ -178,6 +182,121 @@ class SectorHeat:
             'race_candidates': self.race_candidates, # [NEW] 竞赛明细
             'updated_at': self.updated_at.strftime('%H:%M:%S'),
         }
+
+
+class CentralizedFollowMiner:
+    """
+    板块跟单挖掘中枢 (Centralized Follower Mining Center)
+    核心职责：
+      1. 计算板块瞬时爆发加速度 (Score Acceleration)
+      2. 统计板块内瞬时爆发共振密度 (Surging Density)
+      3. 计算板块跟风股传导系数 (T-Factor) 并筛选 Top 3
+    """
+    def __init__(self, sector_map):
+        self._sector_map = sector_map
+        # {sector_name: [(timestamp, score)]} 用于计算 2 分钟变化率
+        self._score_history = defaultdict(list)
+        # {sector_name: [(timestamp, code, dff, pct_diff)]} 3分钟内的爆发记录
+        self._surge_history = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def update_and_evaluate(self, active_sectors: List[dict], stock_snap: Dict[str, dict]):
+        """
+        在 SectorFocusMap 注入数据时调用，动态更新瞬时爆发和共振密度，
+        并计算跟风股的传导系数 (T-Factor)。
+        """
+        now = time.time()
+        with self._lock:
+            # 1. 滚动清理超过 3 分钟的爆发历史 (180s)
+            for sec_name, history in list(self._surge_history.items()):
+                self._surge_history[sec_name] = [item for item in history if now - item[0] <= 180.0]
+
+            # 2. 遍历板块
+            for sec in active_sectors:
+                sec_name = sec.get('sector', '')
+                if not sec_name:
+                    continue
+
+                board_score = float(sec.get('score', 0.0))
+                
+                # 记录得分历史用于计算 2分钟变化率 (120s)
+                sec_scores = self._score_history[sec_name]
+                sec_scores.append((now, board_score))
+                # 只保留最近 150 秒的历史
+                self._score_history[sec_name] = [s for s in sec_scores if now - s[0] <= 150.0]
+
+                # 计算 Score Acceleration (A_score)
+                a_score = 0.0
+                valid_scores = self._score_history[sec_name]
+                if len(valid_scores) >= 2:
+                    oldest_score = None
+                    for t, s in valid_scores:
+                        if 100.0 <= now - t <= 140.0:
+                            oldest_score = s
+                            break
+                    if oldest_score is None:
+                        oldest_score = valid_scores[0][1]
+                    a_score = board_score - oldest_score
+
+                # 3. 统计跟风股共振密度 (Surging Density)
+                followers = sec.get('followers', [])
+                for f in followers:
+                    code = f.get('code', '')
+                    if not code:
+                        continue
+                    snap = stock_snap.get(code, {})
+                    dff = float(snap.get('dff', f.get('dff', 0.0)))
+                    pct_diff = float(snap.get('pct_diff', f.get('pct_diff', 0.0)))
+                    
+                    # 强资金爆量流入判定：dff >= 1.2 且 pct_diff >= 0.8%
+                    if dff >= 1.2 and pct_diff >= 0.8:
+                        sec_surges = self._surge_history[sec_name]
+                        if not any(item[1] == code and now - item[0] < 5.0 for item in sec_surges):
+                            sec_surges.append((now, code, dff, pct_diff))
+
+                # 共振密度为 180s 内的个股计数
+                surge_density = len(set(item[1] for item in self._surge_history[sec_name]))
+
+                # 4. 计算跟风股的传导系数 (T-Factor) 并筛选 Top 3
+                follower_t_factors = []
+                for f in followers:
+                    code = f.get('code', '')
+                    if not code:
+                        continue
+                    snap = stock_snap.get(code, {})
+                    dff = float(snap.get('dff', f.get('dff', 0.0)))
+                    price = float(snap.get('price', f.get('price', 0.0)))
+                    vwap = float(snap.get('vwap', f.get('vwap', price)))
+                    if vwap <= 0:
+                        vwap = price
+                    
+                    # Dist_to_VWAP
+                    dist_to_vwap = abs(price - vwap) / vwap if vwap > 0 else 0.0
+                    
+                    # Ranks
+                    zhuli_rank, hot_rank = self._sector_map.get_stock_ranks(code)
+                    
+                    # 计算传导系数三个分项
+                    w_dff = dff
+                    w_vwap = 1.0 - min(dist_to_vwap * 10.0, 1.0)
+                    w_rank = 1.0 - min(hot_rank / 300.0, 1.0)
+                    
+                    t_factor = 0.4 * w_dff + 0.4 * w_vwap + 0.2 * w_rank
+                    follower_t_factors.append((t_factor, f))
+
+                # 按 T-Factor 从大到小排序
+                follower_t_factors.sort(key=lambda x: x[0], reverse=True)
+                top_followers = [item[1] for item in follower_t_factors[:MAX_FOLLOWERS_PER_SECTOR]]
+
+                # 将 T-Factor 传导系数回填进 followers 的元数据中
+                for t_val, f in follower_t_factors:
+                    f['t_factor'] = round(t_val, 4)
+
+                # 将共振指标回填到板块字典中
+                sec['surge_density'] = surge_density
+                sec['score_accel'] = round(a_score, 4)
+                sec['followers'] = top_followers
+
 
 
 @dataclass
@@ -409,6 +528,7 @@ class SectorFocusMap:
         self._last_update: Optional[datetime] = None
         # v2: 来自 detector 的完整个股快照 {code: snap_dict}
         self._detector_stock_snap: Dict[str, dict] = {}
+        self._follow_miner = CentralizedFollowMiner(self)
 
     # ── 旧接口兼容 ────────────────────────────────────────────────────────────
 
@@ -479,6 +599,7 @@ class SectorFocusMap:
         if not active_sectors:
             return
         try:
+            self._follow_miner.update_and_evaluate(active_sectors, stock_snap)
             new_map: Dict[str, SectorHeat] = {}
             new_code_sector: Dict[str, str] = {}
 
@@ -561,6 +682,7 @@ class SectorFocusMap:
                         'klines': f.get('klines', []),
                         'last_close': float(f.get('last_close', 0.0)),
                         'pattern_hint': str(f.get('pattern_hint', '')),
+                        't_factor': float(f.get('t_factor', 0.0)),
                     })
 
                 # 涨停家数（从 top0 统计）
@@ -597,6 +719,8 @@ class SectorFocusMap:
                     leader_vwap=leader_vwap,
                     leader_klines=leader_klines,
                     score_diff=score_diff,
+                    score_accel=float(sec.get('score_accel', 0.0)),
+                    surge_density=int(sec.get('surge_density', 0)),
                     follow_ratio=follow_ratio,
                     sector_type=sector_type,
                     tags=tags,
@@ -1654,6 +1778,32 @@ class IntradayPullbackDetector:
             logger.debug(f"[Pullback] {code} 被拦截: 板块热度({sector_heat:.1f}) < 阈值({self.MIN_SECTOR_HEAT})")
             return None
 
+        # Follower Risk Gates
+        is_king = (code == leader_code)
+        if not is_king:
+            # 1. Leader confirmed and active
+            if not leader_code or not self._star_engine.is_leader_strong(leader_code):
+                logger.debug(f"[Follower Gate] {code} blocked: leader {leader_code} not confirmed or weakened")
+                return None
+            # 2. Sector heat >= 45
+            if sector_heat < 45.0:
+                logger.debug(f"[Follower Gate] {code} blocked: sector heat {sector_heat:.1f} < 45.0")
+                return None
+            # 3. Top 3 followers
+            if not sh or code not in sh.follower_codes:
+                logger.debug(f"[Follower Gate] {code} blocked: not Top 3 follower in sector")
+                return None
+            # 4. T-Factor >= 0.5
+            t_val = 0.0
+            if sh:
+                for f_det in sh.follower_detail:
+                    if f_det.get('code') == code:
+                        t_val = float(f_det.get('t_factor', 0.0))
+                        break
+            if t_val < 0.5:
+                logger.debug(f"[Follower Gate] {code} blocked: T-Factor {t_val:.2f} < 0.5")
+                return None
+
         drop_from_high = (price - day_high) / day_high if day_high > 0 else 0.0
         diff_from_vwap = (price - vwap) / vwap if vwap > 0 else 0.0
 
@@ -1826,6 +1976,12 @@ class DecisionQueue:
             
             if len(self._signals) > self.MAX_QUEUE_SIZE:
                 self._evict_lowest()
+
+        if getattr(self, 'on_push', None):
+            try:
+                self.on_push(signal)
+            except Exception as e:
+                logger.debug(f"[DecisionQueue] on_push callback failed: {e}")
 
     def _evict_lowest(self):
         if not self._signals:
@@ -2186,6 +2342,12 @@ class SectorFocusController:
         self.star_engine       = StarFollowEngine(self.sector_map)
         self.pullback_detector = IntradayPullbackDetector(self.sector_map, self.star_engine)
         self.decision_queue    = DecisionQueue()
+        self.decision_queue.on_push = self.trigger_hud_for_signal
+        
+        self.hud_callback = None
+        self._hud_sector_cooldown: Dict[str, float] = {}
+        self._hud_global_last_trigger_time: float = 0.0
+
         self.exit_monitor      = ExitMonitor(self.sector_map)
         self.dragon_tracker    = DragonLeaderTracker()  # [Dragon] 龙头跨日持续跟踪器
         self.strategic_tracker = StrategicTrendTracker(self.sector_map) # [NEW] 战略趋势跟踪器
@@ -2214,6 +2376,37 @@ class SectorFocusController:
         # [NEW] 零锁只读快照初始化，UI 线程将以零锁、零 GC 压力、O(1) 性能读取这些缓存，彻底消除 ABBA 锁嵌套与假死
         self._dragon_snapshot: List[dict] = []
         self._dragon_count_snapshot: dict = {'candidate': 0, 'dragon': 0, 'warning': 0, 'total': 0}
+
+    def trigger_hud_for_signal(self, signal: DecisionSignal) -> None:
+        """
+        [CORE] 板块突破/跟风决策信号触发 HUD 自愈拉起与数据刷新
+        - 15分钟板块级防刷屏冷却 (15-min per-sector cooldown)
+        - 90秒全局静默保护门槛 (90-sec global suppression)
+        """
+        now = time.time()
+        sector_name = signal.sector
+        if not sector_name:
+            return
+
+        # 1. 15分钟板块级防刷屏冷却
+        last_t = self._hud_sector_cooldown.get(sector_name, 0.0)
+        if now - last_t < float(getattr(cct, 'hud_sector_cooldown', 900)):
+            return
+
+        # 2. 90秒全局静默保护门槛
+        if now - self._hud_global_last_trigger_time < float(getattr(cct, 'hud_global_suppression', 90)):
+            return
+
+        # 3. 更新冷却时间戳
+        self._hud_sector_cooldown[sector_name] = now
+        self._hud_global_last_trigger_time = now
+
+        # 4. 执行回调拉起 HUD
+        if self.hud_callback:
+            try:
+                self.hud_callback(sector_name, signal)
+            except Exception as e:
+                logger.error(f"[HUD] trigger_hud_for_signal invoke callback failed: {e}")
         self._update_snapshots()
 
     def _update_snapshots(self):

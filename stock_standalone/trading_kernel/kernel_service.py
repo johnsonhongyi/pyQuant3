@@ -242,7 +242,8 @@ class TradingKernelService:
         # 正常活跃时段：09:15-11:30, 13:00-15:05
         is_active = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
         if not is_active:
-            reasons.append("NON_TRADING_SESSION")
+            logger.warning("⚠️ [Preconditions] Currently NON_TRADING_SESSION, but allowing LIVE_AUTO mode pre-set. Orders will remain blocked until the session starts.")
+
 
         # 2. 柜台连接卡口
         if not self.broker_adapter._connected:
