@@ -13,15 +13,27 @@ import ctypes
 from ctypes import wintypes
 import win32con
 import win32file
+import traceback
 
 try:
-    from PyQt6 import QtWidgets, QtCore, QtGui
+    from PyQt6 import QtWidgets, QtCore, QtGui, sip
     from PyQt6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QFrame, QWidget, QGridLayout, QPushButton, QApplication
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QPainter, QBrush, QColor, QPen
 except ImportError as e:
     print(f"[HotkeyRotator] Failed to import PyQt6: {e}")
     sys.exit(1)
+
+# 全局异常处理器，防御 unhandled exception 导致 PyQt 闪退
+def global_excepthook(exctype, value, tb):
+    err_msg = "".join(traceback.format_exception(exctype, value, tb))
+    print(f"🚨 [Rotator Unhandled Exception]: {err_msg}")
+    try:
+        send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": f"🚨 快捷键进程发生异常: {str(value)[:60]}"})
+    except:
+        pass
+
+sys.excepthook = global_excepthook
 
 # 全局变量
 _app_instance = None
@@ -54,6 +66,15 @@ def force_focus_hwnd(hwnd):
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     
+    # 🧬 [加固] 强力判断 HWND 是否仍然是有效的窗口句柄，防止 ctypes Access Violation 底层闪退
+    try:
+        if not user32.IsWindow(hwnd):
+            print(f"[Rotator] HWND {hwnd} is no longer a valid window.")
+            return
+    except Exception as e:
+        print(f"[Rotator] IsWindow check failed: {e}")
+        return
+
     fore_hwnd = user32.GetForegroundWindow()
     fore_thread = user32.GetWindowThreadProcessId(fore_hwnd, None) if fore_hwnd else 0
     current_thread = kernel32.GetCurrentThreadId()
@@ -391,25 +412,39 @@ class WindowRotatorDialog(QDialog):
             self.trigger_switch_and_close()
 
     def trigger_switch_and_close(self):
-        if self.curr_idx >= 0 and self.curr_idx < len(self.hwnds):
-            target_hwnd = self.hwnds[self.curr_idx]
-            target_name = self.name_map.get(str(target_hwnd), self.name_map.get(target_hwnd, "未知窗口"))
-            
-            # 更新本地 MRU 列表
-            global _app_instance
-            if _app_instance and target_hwnd in _app_instance.mru_list:
-                _app_instance.mru_list.remove(target_hwnd)
-            if _app_instance:
-                _app_instance.mru_list.insert(0, target_hwnd)
+        # 加上重入保护，防止多次点击或热键触发重入导致底层 C++ 状态冲突闪退
+        if getattr(self, "_is_switching", False):
+            return
+        self._is_switching = True
+        
+        try:
+            if self.curr_idx >= 0 and self.curr_idx < len(self.hwnds):
+                target_hwnd = self.hwnds[self.curr_idx]
+                target_name = self.name_map.get(str(target_hwnd), self.name_map.get(target_hwnd, "未知窗口"))
                 
-            # 强力置顶
-            force_focus_hwnd(target_hwnd)
-            
-            # 异步发送聚焦通知到 Tk 进程以防双保险
-            send_to_tk_pipe({"cmd": "FOCUS_HWND", "hwnd": target_hwnd})
-            print(f"[Rotator] Switched focus to HWND {target_hwnd} [{target_name}]")
-            
-        self.close()
+                # 更新本地 MRU 列表
+                global _app_instance
+                if _app_instance and target_hwnd in _app_instance.mru_list:
+                    try:
+                        _app_instance.mru_list.remove(target_hwnd)
+                    except ValueError:
+                        pass
+                if _app_instance:
+                    _app_instance.mru_list.insert(0, target_hwnd)
+                    
+                # 强力置顶
+                force_focus_hwnd(target_hwnd)
+                
+                # 异步发送聚焦通知到 Tk 进程以防双保险
+                send_to_tk_pipe({"cmd": "FOCUS_HWND", "hwnd": target_hwnd})
+                print(f"[Rotator] Switched focus to HWND {target_hwnd} [{target_name}]")
+        except Exception as e:
+            print(f"[Rotator] Error in trigger_switch_and_close: {e}")
+        finally:
+            try:
+                self.close()
+            except Exception:
+                pass
 
     def keyPressEvent(self, event):
         self.last_action_time = time.time()
@@ -452,14 +487,22 @@ class WindowSyncServer(threading.Thread):
     def run(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(('127.0.0.1', 26669))
-        except OSError as e:
-            err_msg = f"⚠️ 轮转同步端口26669被占用 ({e})，热键进程启动受限，请重启系统！"
-            print(f"[SyncServer] Bind failed: {err_msg}")
-            send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": err_msg})
-            s.close()
-            return
+        
+        # 尝试多次绑定端口，防止旧进程刚退出时操作系统尚未释放端口
+        bound = False
+        for attempt in range(5):
+            try:
+                s.bind(('127.0.0.1', 26669))
+                bound = True
+                break
+            except OSError as e:
+                if attempt == 4:
+                    err_msg = f"⚠️ 轮转同步端口26669被占用 ({e})，热键进程启动受限，请重启系统！"
+                    print(f"[SyncServer] Bind failed after 5 attempts: {err_msg}")
+                    send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": err_msg})
+                    s.close()
+                    return
+                time.sleep(0.5)
             
         try:
             s.listen(5)
@@ -604,11 +647,19 @@ class HotkeyRotatorApp(QtCore.QObject):
                     
             # 更新物理 MRU 焦点
             global _active_dialog
-            self_hwnd = int(_active_dialog.winId()) if (_active_dialog and _active_dialog.isVisible()) else 0
+            self_hwnd = 0
+            if _active_dialog is not None and not sip.isdeleted(_active_dialog):
+                try:
+                    self_hwnd = int(_active_dialog.winId()) if _active_dialog.isVisible() else 0
+                except Exception:
+                    pass
             
             if current_fore and current_fore in self.hwnds and current_fore != self_hwnd:
                 if current_fore in self.mru_list:
-                    self.mru_list.remove(current_fore)
+                    try:
+                        self.mru_list.remove(current_fore)
+                    except ValueError:
+                        pass
                 self.mru_list.insert(0, current_fore)
         except KeyboardInterrupt:
             pass
@@ -643,16 +694,16 @@ class HotkeyRotatorApp(QtCore.QObject):
             direction = 1 if offset == 9 else -1
             
             global _active_dialog
-            if _active_dialog is not None:
+            if _active_dialog is not None and not sip.isdeleted(_active_dialog):
                 try:
                     if _active_dialog.isVisible():
                         _active_dialog.rotate_highlight(direction, is_hotkey=True)
                         return
                     else:
                         _active_dialog.close()
-                except RuntimeError:
+                except Exception:
                     pass
-                _active_dialog = None
+            _active_dialog = None
 
             # 实例化 Dialog 呈现
             hk_desc = "Alt+Q" if self.fallback_active else "Alt+R"
