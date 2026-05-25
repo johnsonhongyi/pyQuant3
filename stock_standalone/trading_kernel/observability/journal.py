@@ -71,9 +71,16 @@ class JsonlJournal:
             now_dt = datetime.now()
             payload["trade_date"] = now_dt.strftime("%Y-%m-%d")
             payload.setdefault("journal_ts", now_dt.isoformat(timespec="seconds"))
-            with self._lock:
-                with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+            try:
+                with self._lock:
+                    with open(self.path, "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+            except Exception as e:
+                try:
+                    import logging
+                    logging.getLogger().error(f"❌ [JsonlJournal] Failed to append AUDIT record: {e}")
+                except Exception:
+                    pass
             return
 
         sig = payload.get("signal", {})
@@ -130,9 +137,16 @@ class JsonlJournal:
         payload["trade_date"] = today_str
         payload.setdefault("journal_ts", now_dt.isoformat(timespec="seconds"))
         
-        with self._lock:
-            with open(self.path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+        try:
+            with self._lock:
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception as e:
+            try:
+                import logging
+                logging.getLogger().error(f"❌ [JsonlJournal] Failed to append record: {e}")
+            except Exception:
+                pass
 
 
 def _to_plain(value: Any) -> Any:
