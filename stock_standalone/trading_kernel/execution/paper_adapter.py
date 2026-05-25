@@ -82,6 +82,73 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self.initial_capital = initial_capital
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
+        
+        # 探测测试环境与物理持久化路径
+        import os
+        self._is_test = "PYTEST_CURRENT_TEST" in os.environ
+        try:
+            from sys_utils import get_base_path
+            base_dir = get_base_path()
+        except ImportError:
+            base_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        self._state_file = os.path.join(base_dir, "logs", "paper_account_state.json")
+        
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if self._is_test:
+            return
+        import os
+        import json
+        if os.path.exists(self._state_file) and os.path.getsize(self._state_file) > 0:
+            try:
+                with open(self._state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.initial_capital = float(data.get("initial_capital", self.initial_capital))
+                cash = float(data.get("cash", self.initial_capital))
+                
+                positions = {}
+                for code, pos_data in data.get("positions", {}).items():
+                    entry_p = float(pos_data.get("entry_price", 0.0))
+                    positions[code] = Position(
+                        code=pos_data.get("code", code),
+                        entry_price=entry_p,
+                        volume=float(pos_data.get("volume", 0.0)),
+                        current_price=float(pos_data.get("current_price", entry_p))
+                    )
+                self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
+                self.orders = list(data.get("orders", []))
+            except Exception:
+                pass
+
+    def _save_state(self) -> None:
+        if self._is_test:
+            return
+        import os
+        import json
+        try:
+            directory = os.path.dirname(self._state_file)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            positions_data = {
+                code: {
+                    "code": pos.code,
+                    "entry_price": pos.entry_price,
+                    "volume": pos.volume,
+                    "current_price": pos.current_price
+                }
+                for code, pos in self.account.positions.items()
+            }
+            data = {
+                "initial_capital": self.initial_capital,
+                "cash": self.account.cash,
+                "positions": positions_data,
+                "orders": self.orders
+            }
+            with open(self._state_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
 
     def submit_order(self, order: ApprovedOrder) -> bool:
         if order.size_pct <= 0 or order.price <= 0:
@@ -162,6 +229,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
             "volume": round(sell_volume if action in {"SELL", "REDUCE"} else volume, 4),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         })
+        self._save_state()
         return True
 
     def cancel_order(self, order_id: str) -> bool:

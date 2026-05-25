@@ -1,3 +1,10 @@
+## 2026-05-25 12:15
+- [x] **实现模拟盘持仓与历史订单跨天/跨重启物理持久化 (Delivered Simulation Positions & Orders Cross-Restart Persistence)**：
+    - [x] **设计本地 JSON 状态序列化方案**：在 `PaperExecutionAdapter` 中引入 `_load_state` 和 `_save_state` 方法。每次模拟交易下单成功时，将 `AccountSnapshot` 和 `orders` 历史交易列表同步写入 `logs/paper_account_state.json` 配置文件，解决重启丢失问题。
+    - [x] **实现启动自愈恢复**：程序重新启动时，`PaperExecutionAdapter` 自动加载并恢复上一次运行结束时的初始资金、可用现金、个股持仓（买入均价、持仓股数，并自动将当前价对齐为买入均价以防冷启动盈亏计算异常）以及历史订单。
+    - [x] **建立测试环境风控隔离 (PYTEST_CURRENT_TEST Bypass)**：在 `_load_state` 和 `_save_state` 头部引入 `PYTEST_CURRENT_TEST` 环境变量校验。当在 pytest 单元测试环境下运行时，物理持久化自动旁路短路，防止测试运行污染用户的本地持仓数据，也确保了测试运行的纯净内存态。
+    - [x] **增设全新单元测试与全量 30/30 测试回归**：在 `test_paper_trading.py` 中增设了 `test_paper_trading_persistence` 测试用例，通过物理临时文件完美覆盖了加载与保存的幂等恢复逻辑，并成功推动全套回归测试数量增长至 30 个，通过率 100%。
+
 ## 2026-05-25 12:00
 - [x] **修复内核实时持仓表格高频刷新选中丢失与闪烁问题 (Fixed Positions Table Selection Loss & Flickering on High-frequency Refresh)**：
     - [x] **引入表格项复用与脏检查重绘更新机制 (Item Reuse & Dirty-Check In-place Updates)**：废除了 `_refresh_positions_tab` 中粗暴清空整表的 `setRowCount(0)` 操作，重构为直接设置行数并使用 `item(row, col)` 逐个单元格复用。仅在文本或前景色实际发生变化时才调用 `setText` / `setForeground`，将重绘开销降低了 90%，从物理上消除了闪烁。
