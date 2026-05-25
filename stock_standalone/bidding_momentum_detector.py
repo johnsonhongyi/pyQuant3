@@ -153,6 +153,29 @@ def get_limit_up_threshold(code: str) -> float:
     elif code_str.startswith(('43', '83', '87', '92')):
         return 29.5
     return 9.5
+
+def get_effective_trade_date(current_dt: Optional[datetime.datetime] = None) -> str:
+    """
+    [DRY] 获取当前有效的交易日日期字符串 (YYYY-MM-DD)。
+    包含智能开盘前降级策略：如果是交易日，但还没到今天的竞价时间 (09:15之前)，退避使用前一交易日数据。
+    """
+    if current_dt is None:
+        current_dt = datetime.datetime.now()
+    
+    is_before_market = False
+    if cct.get_trade_date_status():
+        if current_dt.hour * 100 + current_dt.minute < 915:
+            is_before_market = True
+
+    if cct.get_trade_date_status() and not is_before_market:
+        today_str = current_dt.strftime('%Y-%m-%d')
+    else:
+        today_str = cct.get_last_trade_date()
+        
+    # 确保格式为 YYYY-MM-DD
+    if today_str and '-' not in today_str and len(today_str) == 8:
+        today_str = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}"
+    return today_str
     
 SECTOR_BLACKLIST = {
     '深股通', '沪股通', '融资融券', '标普概念', 'MSCI中国', '剔除纳斯', 
@@ -455,18 +478,20 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                 file_date_str = data.get('data_date', '')
                 result['data_date'] = file_date_str
                 
-                if cct.get_trade_date_status():
-                    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-                else:
-                    today_str = cct.get_last_trade_date()
-                    if today_str and '-' not in today_str and len(today_str) == 8:
-                        today_str = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}"
+                today_str = get_effective_trade_date()
                 
                 if '-' in today_str:
                     now_dt = datetime.datetime.strptime(today_str, '%Y-%m-%d')
                 else:
                     now_dt = datetime.datetime.strptime(today_str, '%Y%m%d')
                 is_cross_day = (file_date_str != today_str)
+                
+                # [HEALING-SHIELD] 盘前/凌晨智能会话防御
+                # 如果当前时间未到今日竞价开盘时间 (09:15之前)，我们阻断跨日重置判定，强行保留昨日盘后分析成果！
+                if is_cross_day:
+                    now_dt_temp = datetime.datetime.now()
+                    if now_dt_temp.hour * 100 + now_dt_temp.minute < 915:
+                        is_cross_day = False
 
                 result['active_sectors'] = data.get('sector_data', {})
                 result['sector_anchors'] = data.get('sector_anchors', {})
@@ -596,10 +621,7 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                 except: continue
             dates.sort(reverse=True)
             
-            if cct.get_trade_date_status():
-                today_str = datetime.datetime.now().strftime('%Y%m%d')
-            else:
-                today_str = cct.get_last_trade_date().replace('-', '')
+            today_str = get_effective_trade_date().replace('-', '')
             
             past_dates = [d for d in dates if d < today_str]
             history = []
@@ -868,14 +890,18 @@ class BiddingMomentumDetector:
                     self._global_snap_cache = snap_cache
 
                 # 日期逻辑（纯计算）
-                if cct.get_trade_date_status():
-                    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-                else:
-                    today_str = cct.get_last_trade_date()
+                today_str = get_effective_trade_date()
 
                 is_cross_day = (
                     state_dict.get('data_date') and state_dict['data_date'] != today_str
                 )
+                
+                # [HEALING-SHIELD] 盘前/凌晨智能会话防御
+                # 如果当前时间未到今日竞价开盘时间 (09:15之前)，我们阻断跨日重置判定，强行保留昨日盘后分析成果！
+                if is_cross_day:
+                    now_dt_temp = datetime.datetime.now()
+                    if now_dt_temp.hour * 100 + now_dt_temp.minute < 915:
+                        is_cross_day = False
 
                 self.active_sectors = state_dict.get('active_sectors', {}) if not is_cross_day else {}
                 self.sector_anchors = state_dict.get('sector_anchors', {}) if not is_cross_day else {}
@@ -2018,12 +2044,16 @@ class BiddingMomentumDetector:
             time.sleep(0)
             
             file_date_str = data.get('data_date', '')
-            if cct.get_trade_date_status():
-                today_str = _datetime.now().strftime('%Y-%m-%d')
-            else:
-                today_str = cct.get_last_trade_date()
+            today_str = get_effective_trade_date()
             now_dt = datetime.datetime.strptime(today_str,"%Y-%m-%d")
             is_cross_day = (file_date_str != today_str)
+            
+            # [HEALING-SHIELD] 盘前/凌晨智能会话防御
+            # 如果当前时间未到今日竞价开盘时间 (09:15之前)，我们阻断跨日重置判定，强行保留昨日盘后分析成果！
+            if is_cross_day:
+                now_dt_temp = datetime.datetime.now()
+                if now_dt_temp.hour * 100 + now_dt_temp.minute < 915:
+                    is_cross_day = False
 
             # Phase-1: 锁外预构建临时容器
             new_tick_series = {}
@@ -2817,7 +2847,7 @@ class BiddingMomentumDetector:
         pct = s.get('pct', 0.0)
         if s['code'] == leader_code:
             return "🏆 龙头"
-        elif pct >= 9.5:
+        elif pct >= get_limit_up_threshold(s['code']):
             return "核心🐲" 
         elif pct >= 7.0 or leader_score > 35:
             return "确核🐲" 
@@ -2954,6 +2984,14 @@ class BiddingMomentumDetector:
         info['leader_pct'] = candidates[0].get('pct', 0.0)
         info['leader_price'] = candidates[0].get('price', 0.0)
         info['leader_klines'] = candidates[0].get('klines', [])
+        
+        # 2.5 计算板块今日真实涨停家数并物理注入 (与 HUD 完美闭环)
+        zt_count = 0
+        for s in candidates:
+            pct = s.get('pct', 0.0)
+            if pct >= get_limit_up_threshold(s['code']):
+                zt_count += 1
+        info['zt_count'] = zt_count
         
         # 3. 重建角色名单 (仅在模式开启时执行)
         race_candidates = []

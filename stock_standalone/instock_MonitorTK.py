@@ -2681,6 +2681,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as ex:
                 logger.warning(f"Failed to shutdown global hotkeys: {ex}")
 
+            # 🚀 [NEW] 显式提前、优雅关闭 PyQt6 - SpatialFollowHUD，在第一阶段完美安全地将列宽存入磁盘
+            if hasattr(self, 'spatial_follow_hud') and self.spatial_follow_hud is not None:
+                try:
+                    self.spatial_follow_hud.close()
+                except Exception as ex:
+                    logger.warning(f"Failed to close spatial_follow_hud gracefully: {ex}")
+
             logger.info("🛑 [on_close] Phase 1: Shutdown initiated (Stop Refresh & Flags)")
 
             # =========================================================

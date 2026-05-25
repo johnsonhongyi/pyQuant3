@@ -1452,8 +1452,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             except Exception as e:
                 logger.warning(f"Failed to set log level dynamically: {e}")
         rs = getattr(main_window, 'realtime_service', None)
-        # [ROOT-FIX] 开启懒加载模式，确保 UI 瞬间启动，不被 IO 阻塞
-        self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
+        # [ROOT-FIX] 优先使用主窗口已经构建的全局统一 racing_detector，确保全系统数据一致性
+        main_detector = getattr(main_window, 'racing_detector', None)
+        if main_detector:
+            logger.info("📡 [SectorPanel] Using unified global BiddingMomentumDetector from main_window.")
+            self.detector = main_detector
+        else:
+            logger.warning("📡 [SectorPanel] No global racing_detector found on main_window. Instantiating local fallback.")
+            self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
+
         if getattr(self, '_log_level_debug', False):
             try:
                 import logging
@@ -2638,6 +2645,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if should_refresh:
                 logger.debug("⏱️ [SectorPanel][DEBUG] Calling _refresh_sector_list (delayed)...")
                 QTimer.singleShot(0, self._refresh_sector_list)
+                
+                # 🚀 [NEW] 在竞价计算完毕更新 UI 后，同步强力驱策已打开的跟单 HUD 刷新
+                if hasattr(self, 'main_window') and self.main_window and hasattr(self.main_window, 'spatial_follow_hud'):
+                    hud = self.main_window.spatial_follow_hud
+                    if hud and hud.isVisible():
+                        logger.warning("📡 [SectorPanel-to-HUD] Triggering synchronous HUD refresh following successful bidding calculation.")
+                        # 延迟 100ms 调度，给板块表格渲染以充足的时间
+                        QTimer.singleShot(100, lambda: hud.update_hud_data(hud.sector_name))
                 logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list scheduled.")
                 self._last_refresh_ts = now
                 with self._update_lock:

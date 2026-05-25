@@ -15,6 +15,102 @@ from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("instock_TK.SpatialFollowHUD")
 
+class DictWrapper:
+    """
+    零拷贝 O(1) 字典包装器：将 detector 返回的原始 dict 无缝包装为对象，
+    无损复用 HUD 中已有的 `.property` 渲染逻辑。
+    支持可选的 fallback 备用对象以自动融合主力净占、共振密度等全量极客指标。
+    """
+    def __init__(self, data: dict, fallback_obj: Any = None):
+        self._data = data
+        self._fallback = fallback_obj
+
+    def __getattr__(self, name: str) -> Any:
+        # 特殊字段物理映射对齐
+        if name == 'name':
+            return self._data.get('sector', '') or (self._fallback.name if self._fallback else '')
+        if name == 'heat_score':
+            return self._data.get('score', 0.0) or (self._fallback.heat_score if self._fallback else 0.0)
+        if name == 'volume_ratio':
+            return self._data.get('volume_ratio', 1.0) or (self._fallback.volume_ratio if self._fallback else 1.0)
+        if name == 'follower_detail':
+            # 物理映射转换：将 detector 返回的原始 'followers' 字典列表，映射并包装为 follower_detail
+            return self._data.get('followers', []) or (self._fallback.follower_detail if self._fallback else [])
+        if name == 'leader_code':
+            # 🚀 [ROOT-FIX] 关键映射对齐：竞价探测器底层的龙头代码字段是 'leader'，在此无缝映射并对准
+            return self._data.get('leader', '') or (self._fallback.leader_code if self._fallback else '')
+        if name == 'leader_name':
+            return self._data.get('leader_name', '') or (self._fallback.leader_name if self._fallback else '')
+        if name == 'leader_change_pct':
+            return self._data.get('leader_pct', 0.0) or (self._fallback.leader_change_pct if self._fallback else 0.0)
+        if name == 'leader_vwap':
+            # 在 active_sectors 里面，它的当前价格存在 'leader_price' 键中
+            return self._data.get('leader_price', 0.0) or (self._fallback.leader_vwap if self._fallback else 0.0)
+        if name == 'leader_pct_diff':
+            return self._data.get('leader_pct_diff', 0.0) or (self._fallback.leader_pct_diff if self._fallback else 0.0)
+        if name == 'zt_count':
+            val = self._data.get('zt_count', None)
+            if val is None or val == 0:
+                # ⚡ [HEALING-SHIELD] 二次自愈防护：从跟随股和龙头列表中动态数出今日真实涨停数！
+                try:
+                    from bidding_momentum_detector import get_limit_up_threshold
+                    zt_count = 0
+                    
+                    # 1. 检查龙头是否涨停
+                    leader_code = self._data.get('leader', '')
+                    leader_pct = self._data.get('leader_pct', 0.0)
+                    if leader_code and leader_pct >= get_limit_up_threshold(leader_code):
+                        zt_count += 1
+                        
+                    # 2. 检查跟随个股是否涨停
+                    followers = self._data.get('followers', [])
+                    for f in followers:
+                        f_code = f.get('code')
+                        f_pct = f.get('pct', 0.0)
+                        if f_code and f_pct >= get_limit_up_threshold(f_code):
+                            zt_count += 1
+                    
+                    val = zt_count
+                except Exception:
+                    val = 0
+            
+            return val or (self._fallback.zt_count if self._fallback else 0)
+        if name == 'score_accel':
+            # 🚀 [Tactical Alignment] 把 score_accel 爆发加速映射为最敏感的“板块当下涨跌热度”数据！
+            return self.heat_score
+        
+        # 兼容属性读取
+        val = self._data.get(name, None)
+        
+        # 🚀 [NEW] 纵深融合：如果 detector 原始数据中没有该字段或值为 0/0.0，尝试从 fallback 补齐
+        if (val is None or val == 0 or val == 0.0) and self._fallback:
+            try:
+                f_val = getattr(self._fallback, name, None)
+                if f_val is not None and f_val != 0 and f_val != 0.0:
+                    val = f_val
+            except Exception:
+                pass
+                
+        if val is None:
+            # 兜底返回 0 或是对应默认值，防止外部渲染 float 报错
+            if name in ['bidding_score', 'score_accel', 'zhuli_ratio', 'follow_ratio', 
+                        'leader_change_pct', 'leader_pct_diff', 'leader_dff', 'leader_vwap']:
+                return 0.0
+            if name in ['surge_density', 'zt_count']:
+                return 0
+            if name in ['leader_name', 'leader_code']:
+                return "--"
+        return val
+
+    def __getitem__(self, key: str) -> Any:
+        val = self._data.get(key, None)
+        if val is None and self._fallback:
+            try:
+                val = self._fallback[key]
+            except:
+                pass
+        return val
+
 class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     """
     SpatialFollowHUD - 盘中实时板块跟单可视化微型指挥所 (Persistent Glassmorphism HUD)
@@ -26,6 +122,50 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     """
     
     order_submitted = pyqtSignal(str, str, float)  # (代码, 动作, 比例)
+
+    def _get_active_detector(self) -> Optional[Any]:
+        """[SSOT] 获取主窗口当前活跃运行且真正有打分数据的 BiddingMomentumDetector 实例"""
+        if not self.main_app:
+            return None
+            
+        # 1. 尝试从已开启的竞价面板实例中提取真正跑打分计算的权威 detector
+        panel = getattr(self.main_app, 'sector_bidding_panel', None)
+        panel_detector = None
+        if panel and hasattr(panel, 'detector') and panel.detector:
+            panel_detector = panel.detector
+            
+        # 2. 尝试直接从主窗口属性获取
+        main_detector = getattr(self.main_app, 'racing_detector', None)
+        
+        # 3. 比对并挑选真正有计算数据的活跃实例
+        if panel_detector and main_detector:
+            # 如果两个都有，优先挑选有打分数据的（即 active_sectors 字典不为空的）
+            try:
+                with panel_detector._lock:
+                    panel_has_data = len(panel_detector.active_sectors) > 0
+            except:
+                panel_has_data = False
+                
+            try:
+                with main_detector._lock:
+                    main_has_data = len(main_detector.active_sectors) > 0
+            except:
+                main_has_data = False
+                
+            if panel_has_data and not main_has_data:
+                return panel_detector
+            if main_has_data and not panel_has_data:
+                return main_detector
+            # 如果都有数据，优先返回 panel_detector，因为竞价面板是前台活跃计算体
+            return panel_detector
+            
+        if panel_detector:
+            return panel_detector
+            
+        if main_detector:
+            return main_detector
+            
+        return None
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, main_app: Any = None, on_code_callback: Any = None) -> None:
         super().__init__(parent)
@@ -52,10 +192,25 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self._drag_pos = QtCore.QPoint()
         
         self._init_ui()
+        
+        # 💾 [PERSISTENCE] 从物理持久化文件中自动加载并高精度还原上次手动拉扯保存的黄金列宽配置
+        self._load_column_widths()
+        
         self._setup_timer()
+        
+        # 🚀 [NEW] 设置强焦点策略以完美捕获键盘方向键按键切换事件
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         # 恢复上次窗口坐标与尺寸 (Persist window state)
         self.load_window_position_qt(self, "SpatialFollowHUD", default_width=500, default_height=520)
+        
+        # 🚀 [NEW] 物理初始化置顶半透明状态与亮度滑块显隐，一启动便瞬间对齐
+        self._apply_opacity_ui_state()
+        
+        # 🛡️ [BOOT-LOCK] 引入开机防抖锁，冷启动 1.5 秒内，正是排版引擎自适应重绘与首次 show 动荡期。
+        # 此期间禁止一切被动 resize 触发存盘，彻底秒杀首次显示时由于 Layout 自适应导致列宽文件被覆盖损毁的大 Bug！
+        self._boot_locked = True
+        QtCore.QTimer.singleShot(1500, lambda: setattr(self, '_boot_locked', False))
 
     def _load_stays_on_top(self) -> bool:
         """从 window_config.json 加载置顶状态"""
@@ -120,19 +275,27 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
     def _toggle_stays_on_top(self) -> None:
         """切换置顶状态"""
-        self.stays_on_top = not self.stays_on_top
-        self._save_stays_on_top(self.stays_on_top)
-        self._update_pin_button_style()
-        
-        # 动态切换 stays-on-top 标志并重绘激活
-        flags = self.windowFlags()
-        if self.stays_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
-        logger.info(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
+        self._switching_flags = True  # ⭐ [SILENT-LOCK] 开启切换置顶静默锁，阻断隐式 hideEvent 误触发存盘覆盖！
+        try:
+            self.stays_on_top = not self.stays_on_top
+            self._save_stays_on_top(self.stays_on_top)
+            self._update_pin_button_style()
+            
+            # 动态切换 stays-on-top 标志并重绘激活
+            flags = self.windowFlags()
+            if self.stays_on_top:
+                flags |= Qt.WindowType.WindowStaysOnTopHint
+            else:
+                flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(flags)
+            self.show()
+            
+            # 🚀 [NEW] 物理切换半透明状态并同步滑块显隐
+            self._apply_opacity_ui_state()
+            
+            logger.info(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
+        finally:
+            self._switching_flags = False  # ⭐ [SILENT-LOCK] 确保置顶修改后解除静默锁
 
     def _update_pin_button_style(self) -> None:
         """根据置顶状态更新 Pin 按钮外观"""
@@ -200,10 +363,10 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             for i, btn in enumerate(self.hot_btns):
                 btn.setChecked(i == idx)
                 
-            if hasattr(self, '_current_top3_sectors') and idx < len(self._current_top3_sectors):
-                sname = self._current_top3_sectors[idx]
+            if hasattr(self, '_current_top5_sectors') and idx < len(self._current_top5_sectors):
+                sname = self._current_top5_sectors[idx]
                 if sname:
-                    logger.info(f"👉 [HUD Hot Selector Click] 手动切换查看 Top {idx+1} 板块: {sname}")
+                    logger.debug(f"👉 [HUD Hot Selector Click] 手动切换查看 Top {idx+1} 板块: {sname}")
                     # 手动点击时，暂时切为手动锁定模式以提供流畅操作，不再用自动追踪覆盖
                     if hasattr(self, 'chk_auto_track') and self.chk_auto_track.isChecked():
                         self.chk_auto_track.setChecked(False)
@@ -292,6 +455,26 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self.btn_pin.clicked.connect(self._toggle_stays_on_top)
         self._update_pin_button_style()
         
+        # 精致的“🔄 刷新”按钮
+        self.btn_sync = QtWidgets.QPushButton("🔄 刷新", self)
+        self.btn_sync.setFixedSize(48, 20)
+        self.btn_sync.setToolTip("强制与竞价面板进行物理数据同步与深度自愈诊断")
+        self.btn_sync.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #00f0ff;
+                border: 1px solid rgba(0, 240, 255, 0.4);
+                border-radius: 10px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 240, 255, 0.25);
+                border-color: #00f0ff;
+            }
+        """)
+        self.btn_sync.clicked.connect(self._on_sync_clicked)
+        
         # 精致关闭按钮
         self.btn_close = QtWidgets.QPushButton("✕", self)
         self.btn_close.setFixedSize(20, 20)
@@ -312,9 +495,57 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         """)
         self.btn_close.clicked.connect(self.hide)
         
+        # 🚀 [NEW] 精致不透明度滑块调节容器 (仅在 stays_on_top 开启时动态展现，可极客自定义透明亮度)
+        self.opacity_container = QtWidgets.QWidget(self)
+        opacity_layout = QtWidgets.QHBoxLayout(self.opacity_container)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.setSpacing(2)
+        
+        lbl_opacity_hint = QtWidgets.QLabel("👻亮度:", self)
+        lbl_opacity_hint.setStyleSheet("color: rgba(0, 240, 255, 0.65); font-size: 9px; font-weight: bold;")
+        
+        self.slider_opacity = QtWidgets.QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_opacity.setRange(30, 100)
+        self.slider_opacity.setFixedWidth(50)
+        self.slider_opacity.setFixedHeight(12)
+        self.slider_opacity.setToolTip("开启置顶时，调节 HUD 的半透明比例 (30% - 100%)\n方便您盲操时隔窗观察下层分时走势图！")
+        self.slider_opacity.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid rgba(0, 240, 255, 0.2);
+                height: 3px;
+                background: rgba(30, 41, 59, 0.6);
+                border-radius: 1px;
+            }
+            QSlider::handle:horizontal {
+                background: #00f0ff;
+                width: 6px;
+                height: 6px;
+                margin: -2px 0;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #39ff14;
+            }
+        """)
+        
+        self.lbl_opacity_val = QtWidgets.QLabel("100%", self)
+        self.lbl_opacity_val.setStyleSheet("color: #00f0ff; font-size: 9px; font-weight: bold; min-width: 22px;")
+        
+        opacity_layout.addWidget(lbl_opacity_hint)
+        opacity_layout.addWidget(self.slider_opacity)
+        opacity_layout.addWidget(self.lbl_opacity_val)
+        
+        # 恢复持久化不透明度值
+        self.opacity_pct = self._load_opacity_config()
+        self.slider_opacity.setValue(self.opacity_pct)
+        self.lbl_opacity_val.setText(f"{self.opacity_pct}%")
+        self.slider_opacity.valueChanged.connect(self._on_opacity_slider_changed)
+        
         title_layout.addWidget(self.lbl_title)
         title_layout.addStretch()
         title_layout.addWidget(self.lbl_drag_hint)
+        title_layout.addWidget(self.btn_sync)
+        title_layout.addWidget(self.opacity_container)
         title_layout.addWidget(self.btn_pin)
         title_layout.addWidget(self.btn_close)
         layout.addLayout(title_layout)
@@ -386,9 +617,9 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         header_layout.addWidget(self.lbl_update_time)
         pano_layout.addLayout(header_layout)
         
-        # [NEW] 热门风口候选导航栏 (Top 3 Hot Sectors Shortcut)
+        # [NEW] 热门风口候选导航栏 (Top 5 Hot Sectors Shortcut)
         self.hot_btns = []
-        self._current_top3_sectors = []
+        self._current_top5_sectors = []
         self._is_switching_btn = False  # 防止信号重入
         
         hot_layout = QtWidgets.QHBoxLayout()
@@ -399,7 +630,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         lbl_hint.setStyleSheet("color: rgba(0, 240, 255, 0.75); font-size: 10px; font-weight: bold;")
         hot_layout.addWidget(lbl_hint)
         
-        for idx in range(3):
+        for idx in range(5):
             btn = QtWidgets.QPushButton("⏳ 等待行情...", self)
             btn.setCheckable(True)
             btn.setProperty("sector_index", idx)
@@ -519,10 +750,21 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         f_title.setStyleSheet("font-weight: bold; color: #ff007f; font-size: 10px;")
         f_layout.addWidget(f_title)
         
-        # 允许纵向扩展并且有滚动条的表格展示跟风股
-        self.table = QtWidgets.QTableWidget(0, 6, self)
-        self.table.setHorizontalHeaderLabels(["代码/名称", "现价(涨幅)", "周期变幅", "跟涨T值", "背离DFF", "形态特征"])
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # 允许纵向扩展并且有滚动条的表格展示跟风股 (拆分为 7 列，现价与涨幅分开)
+        self.table = QtWidgets.QTableWidget(0, 7, self)
+        self.table.setHorizontalHeaderLabels(["代码/名称", "现价", "涨幅", "周期变幅", "跟涨T值", "背离DFF", "形态特征"])
+        
+        # 优化列宽模式：前六列分配自适应精准宽度，最后一列形态特征使用 Stretch 占满剩余空间
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch) # 形态特征拉伸
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked) # 连接表头综合排序
+        
+        # 🚀 [ROOT-FIX] 绑定列宽变动即时保存信号，拉拽后微秒级自动物理写盘，防异常强退丢失
+        self.table.horizontalHeader().sectionResized.connect(self._on_section_resized)
+        
+        # 恢复物理持久化列宽
+        self._load_column_widths()
+        
         self.table.horizontalHeader().setFixedHeight(22)
         self.table.verticalHeader().setVisible(False)
         self.table.setMinimumHeight(100)
@@ -650,7 +892,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.sizegrip.move(self.width() - self.sizegrip.width() - 4, self.height() - self.sizegrip.height() - 4)
 
     def _setup_timer(self) -> None:
-        """主界面的定时脏刷新计时器（自适应对齐 cct.duration_sleep_time）"""
+        """主界面的定时脏刷新计时器（高灵敏度 1.0s 封顶）"""
         self.timer = QtCore.QTimer(self)
         
         try:
@@ -664,12 +906,12 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         except Exception:
             sleep_time = 5.0
             
-        # 至少 500ms，防止极端配制下的零或负值导致 UI 线程卡死
-        interval_ms = max(500, int(sleep_time * 1000))
+        # [HIGH-FREQUENCY DECOUPLE] 限制最高 1000ms 刷新率，防止被 180s 养老周期冻结
+        interval_ms = max(500, min(1000, int(sleep_time * 1000)))
         self.timer.setInterval(interval_ms)
         self.timer.timeout.connect(self._on_timer_refresh)
         self.timer.start()
-        logger.info(f"🛸 [HUD] 脏刷新定时器已对齐 cct.duration_sleep_time: {interval_ms} ms")
+        logger.info(f"🛸 [HUD] 脏刷新定时器高频启动: {interval_ms} ms (对齐 CFG/Capped at 1.0s)")
 
     def _on_slider_changed(self, val: int) -> None:
         self.lbl_size_val.setText(f"跟单仓位: <b>{val}%</b>")
@@ -730,17 +972,93 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
         self.lbl_update_time.setText(datetime.now().strftime("%H:%M:%S"))
         
-        # 1. 获取全局引擎单例
-        from sector_focus_engine import get_focus_controller
-        fc = get_focus_controller()
-        if not fc:
-            return
+        # 🚀 [NEW] 空风口输入时，自动执行冷启动自愈寻址定位
+        if not sector_name:
+            detector = self._get_active_detector()
+            if detector:
+                try:
+                    active_list = detector.get_active_sectors()
+                    if active_list:
+                        sector_name = active_list[0].get('sector', '')
+                except Exception:
+                    pass
+            if not sector_name:
+                try:
+                    from sector_focus_engine import get_focus_controller
+                    fc_init = get_focus_controller()
+                    if fc_init:
+                        hot_sectors_init = fc_init.sector_map.get_hot_sectors(1)
+                        if hot_sectors_init:
+                            sector_name = hot_sectors_init[0].name
+                except Exception:
+                    pass
 
-        # 🚀 [NEW] 实时捕获当前综合热度前 3 的核心活跃风口
-        hot_sectors = fc.sector_map.get_hot_sectors(3)
-        self._current_top3_sectors = [s.name for s in hot_sectors]
+        # 🚀 [NEW] 板块切换状态感知与竞技追踪自动降级自愈 (防止手动/外部切换板块时自动追踪强行拉回覆盖)
+        if sector_name and self.sector_name and sector_name != self.sector_name:
+            if hasattr(self, 'chk_auto_track') and self.chk_auto_track.isChecked():
+                logger.info(f"🔄 [HUD State Align] 外部/手动主动切换板块 {self.sector_name} -> {sector_name}，自动暂停 🏇 竞技追踪状态")
+                self.chk_auto_track.setChecked(False)
+
+        # 1. [SSOT] 获取主窗口当前活跃运行的 BiddingMomentumDetector 实例
+        detector = self._get_active_detector()
         
-        # 实时更新 3 个热门风口候选导航按钮的字样与可视度
+        # 🚀 [NEW] 无效静态板块自愈重定位逻辑：
+        # 如果当前传入的 sector_name 不在竞价探测器的活跃风口中，且竞价探测器已经有活跃打分结果，
+        # 我们自动将 sector_name 重定位为当前最强的活跃风口，物理根治“冷启动白屏/静态过期数据”的痛点！
+        if detector:
+            try:
+                with detector._lock:
+                    has_active = len(detector.active_sectors) > 0
+                    is_valid = sector_name in detector.active_sectors if sector_name else False
+                
+                if has_active and (not sector_name or not is_valid):
+                    active_list = detector.get_active_sectors()
+                    if active_list:
+                        old_name = sector_name
+                        sector_name = active_list[0].get('sector', '')
+                        logger.info(f"🔮 [HUD Self-Healing] Sector '{old_name}' not active in Bidding Detector. Auto self-healed and locked to strongest active wind: '{sector_name}'")
+            except Exception as e:
+                logger.warning(f"⚠️ [HUD Self-Healing] Failed to perform sector self-healing: {e}")
+
+        hot_sectors = []
+
+        if detector:
+            try:
+                # 从权威 Bidding 探测器中直接获取最鲜活的活跃风口
+                active_list = detector.get_active_sectors()
+                if active_list:
+                    # 🚀 [NEW] 提前拉取 FocusController 备用字典以补齐这 5 个板块的属性
+                    fc_loader = None
+                    try:
+                        from sector_focus_engine import get_focus_controller
+                        fc_loader = get_focus_controller()
+                    except:
+                        pass
+                    
+                    # 使用 DictWrapper 零拷贝包装为对象，并自动融合 FocusController 备用属性，保留前 5 个最强风口
+                    hot_sectors = []
+                    for d in active_list[:5]:
+                        sec_name = d.get('sector', '')
+                        fc_sec = fc_loader.sector_map.get_sector_heat(sec_name) if (fc_loader and sec_name) else None
+                        hot_sectors.append(DictWrapper(d, fallback_obj=fc_sec))
+                        
+                    logger.debug(f"📡 [HUD SSOT] Successfully read {len(hot_sectors)} sectors from active BiddingMomentumDetector.")
+            except Exception as e:
+                logger.warning(f"⚠️ [HUD SSOT] Failed to read from detector: {e}")
+
+        # Fallback to Focus Controller
+        if not hot_sectors:
+            from sector_focus_engine import get_focus_controller
+            fc = get_focus_controller()
+            if fc:
+                try:
+                    hot_sectors = fc.sector_map.get_hot_sectors(5)
+                except Exception as e:
+                    logger.warning(f"Failed to get hot sectors from FocusController: {e}")
+
+        self._current_top5_sectors = [s.name for s in hot_sectors]
+        
+        # 实时更新 5 个热门风口候选导航按钮的字样与可视度
         self._is_switching_btn = True
         try:
             for i, btn in enumerate(self.hot_btns):
@@ -759,7 +1077,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             sector_name = force_render_sector
             self._is_switching_btn = True
             try:
-                for i, s_name in enumerate(self._current_top3_sectors):
+                for i, s_name in enumerate(self._current_top5_sectors):
                     self.hot_btns[i].setChecked(s_name == sector_name)
             finally:
                 self._is_switching_btn = False
@@ -786,14 +1104,70 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 # 🔒 手动锁定模式：根据所选名称同步高亮候选按钮
                 self._is_switching_btn = True
                 try:
-                    for i, s_name in enumerate(self._current_top3_sectors):
+                    for i, s_name in enumerate(self._current_top5_sectors):
                         self.hot_btns[i].setChecked(s_name == sector_name)
                 finally:
                     self._is_switching_btn = False
 
         self.sector_name = sector_name
             
-        sh = fc.sector_map.get_sector_heat(sector_name)
+        # 🚀 [NEW] 数据纵深融合：拉取 FocusController 中关于该板块的全量极客指标作为备用
+        fc_detail = None
+        try:
+            from sector_focus_engine import get_focus_controller
+            fc = get_focus_controller()
+            if fc:
+                fc_detail = fc.sector_map.get_sector_heat(sector_name)
+        except Exception as e:
+            logger.warning(f"⚠️ [HUD Data Fusion] Failed to load detail from FocusController: {e}")
+
+        sh = None
+        if detector:
+            try:
+                with detector._lock:
+                    raw_dict = detector.active_sectors.get(sector_name)
+                if raw_dict:
+                    sh = DictWrapper(raw_dict, fallback_obj=fc_detail)
+            except Exception as e:
+                logger.warning(f"⚠️ [HUD SSOT] Failed to read sector {sector_name} from detector: {e}")
+
+        # Fallback to Focus Controller
+        if not sh:
+            from sector_focus_engine import get_focus_controller
+            fc = get_focus_controller()
+            if fc:
+                try:
+                    sh = fc.sector_map.get_sector_heat(sector_name)
+                except Exception as e:
+                    logger.warning(f"Failed to get sector heat for {sector_name}: {e}")
+
+        # 🚀 [NEW] 终极冷启动与非活跃板块自愈实体构建器
+        if not sh:
+            logger.info(f"🔮 [HUD Self-Healing] Sector '{sector_name}' has no active heatmap data. Generating zero-lock self-healing wrapper...")
+            dummy_data = {
+                'sector': sector_name if sector_name else "板块观察",
+                'score': 0.0,
+                'volume_ratio': 1.0,
+                'followers': [],
+                'leader': '--',
+                'leader_name': '等待推送',
+                'leader_pct': 0.0,
+                'leader_price': 0.0,
+                'leader_pct_diff': 0.0,
+                'zt_count': 0
+            }
+            # 如果存在最后联动股票，自动自愈抓取并填充为今日统治龙头！
+            if hasattr(self, '_last_linkage_code') and self._last_linkage_code:
+                dummy_data['leader'] = self._last_linkage_code
+                dummy_data['leader_name'] = '联动锁定'
+                from sector_focus_engine import get_focus_controller
+                fc = get_focus_controller()
+                if fc and fc._df_realtime is not None and self._last_linkage_code in fc._df_realtime.index:
+                    dummy_data['leader_name'] = str(fc._df_realtime.loc[self._last_linkage_code, 'name'])
+                    dummy_data['leader_pct'] = float(fc._df_realtime.loc[self._last_linkage_code, 'percent'])
+                    dummy_data['leader_price'] = float(fc._df_realtime.loc[self._last_linkage_code, 'price'])
+            sh = DictWrapper(dummy_data, fallback_obj=fc_detail)
+
         if not sh:
             self.lbl_sector_name.setText(f"📡 监听: {sector_name}")
             return
@@ -830,34 +1204,151 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self.lbl_follow.setText(f"👥 跟涨比例: <b>{sh.follow_ratio * 100:.0f}%</b>")
 
         # ── 维度 2: 龙头表现 ──
-        leader_pct_color = "#39ff14" if sh.leader_change_pct >= 0 else "#ff073a"
-        self.lbl_leader_name.setText(f"🐉 {sh.leader_name} ({sh.leader_code})")
-        self.lbl_leader_pct.setText(f"{sh.leader_change_pct:+.2f}%")
-        self.lbl_leader_pct_diff.setText(f"变动: <span style='color:{leader_pct_color};'>{sh.leader_pct_diff:+.2f}%</span>")
-        self.lbl_leader_dff.setText(f"背离: <b>{sh.leader_dff:+.2f}</b>")
-        self.lbl_leader_vwap.setText(f"均线: <b>{sh.leader_vwap:.2f}</b>")
+        leader_code = sh.leader_code
+        leader_name = sh.leader_name
+        leader_change_pct = float(sh.leader_change_pct or 0.0)
+        leader_pct_diff = float(sh.leader_pct_diff or 0.0)
+        leader_dff = float(sh.leader_dff or 0.0)
+        leader_vwap = float(sh.leader_vwap or 0.0)
+        leader_now_price = 0.0
+        
+        if detector and hasattr(detector, 'tick_series') and leader_code:
+            with detector._lock:
+                ts = detector.tick_series.get(leader_code)
+                if ts:
+                    leader_now_price = getattr(ts, 'now_price', 0.0)
+                    # 1. 物理计算当日实盘最真实的涨幅百分比
+                    if getattr(ts, 'last_close', 0.0) > 0:
+                        leader_change_pct = ((leader_now_price - ts.last_close) / ts.last_close) * 100.0
+                    # 2. 直读起点以来的变动幅度
+                    leader_pct_diff = getattr(ts, 'pct_diff', 0.0) or 0.0
+                    # 3. 直读最新背离值
+                    leader_dff = getattr(ts, 'dff', 0.0) or 0.0
+                    # 4. 直读均线表现 (优先 20日均价线，以其作为战术回踩与支撑均线依据)
+                    leader_vwap = getattr(ts, 'ma20', 0.0) or leader_now_price
+
+        # 动态对齐百分比颜色
+        leader_pct_color = "#39ff14" if leader_change_pct >= 0 else "#ff073a"
+        self.lbl_leader_name.setText(f"🐉 {leader_name} ({leader_code})")
+        self.lbl_leader_pct.setText(f"{leader_change_pct:+.2f}%")
+        self.lbl_leader_pct_diff.setText(f"变动: <span style='color:{leader_pct_color};'>{leader_pct_diff:+.2f}%</span>")
+        self.lbl_leader_dff.setText(f"背离: <b>{leader_dff:+.2f}</b>")
+        self.lbl_leader_vwap.setText(f"均线: <b>{leader_vwap:.2f}</b>")
 
         # ── 维度 3: 跟风明细 ──
         self.candidate_stocks.clear()
         
-        # 0号位永远预留给龙头
+        # 0号位永远预留给最强统治龙头
         self.candidate_stocks.append({
-            "code": sh.leader_code,
-            "name": sh.leader_name,
-            "price": sh.leader_vwap, # 默认为最新价
-            "pct": sh.leader_change_pct,
-            "pct_diff": sh.leader_pct_diff,
-            "dff": sh.leader_dff,
-            "t_factor": 10.0, # 默认最高强度
-            "reason": "最强统治地位龙头股",
+            "code": leader_code,
+            "name": leader_name,
+            "price": leader_now_price if leader_now_price > 0 else leader_vwap, # 优先使用最新的 Tick 现价
+            "pct": leader_change_pct,
+            "pct_diff": leader_pct_diff,
+            "dff": leader_dff,
+            "t_factor": 10.0, # 最强统治级别
+            "reason": "🚀 最强统治龙头股 (AES 99分)",
             "is_leader": True
         })
         
-        # 1-3号位跟风股
-        followers = sh.follower_detail[:3]
-        self.table.setRowCount(len(followers))
+        # 1-3号位跟风股 -> 升级为基于阿尔法爆发因子的多维智能优选筛选器！
+        raw_followers = sh.follower_detail if hasattr(sh, 'follower_detail') and sh.follower_detail else []
         
-        for idx, f in enumerate(followers):
+        # 过滤掉和龙头相同的股票，避免重复
+        valid_followers = [f for f in raw_followers if f.get('code') != sh.leader_code]
+        
+        # 📡 [SSOT] 获取当前权威活体打分器以拉取每个跟风股最新的 Tick 级量能与资金异动指标
+        detector = self._get_active_detector()
+
+        # 结合实盘物理打分器的高维度有价值强势股智能评估筛选器 (AES)
+        def compute_alpha_explosion_score(f):
+            code = f.get('code', '')
+            
+            # 1. 提取基础因子
+            t_val = float(f.get('t_factor', 0.0) or 0.0)
+            diff_val = float(f.get('pct_diff', 0.0) or 0.0)
+            dff_val = abs(float(f.get('dff', 0.0) or 0.0))
+            pct_val = float(f.get('pct', 0.0) or 0.0)
+            
+            # 2. 从全局唯一的权威打分器中直接直读获取个股最新的 Tick 级实盘量能与抢筹指标
+            now_score = 0.0
+            momentum_score = 0.0
+            accel = 0.0
+            vol_ratio = 1.0
+            zhuli = 0.0
+            
+            if detector and hasattr(detector, 'tick_series'):
+                with detector._lock:
+                    ts = detector.tick_series.get(code, None)
+                    if ts:
+                        now_score = getattr(ts, 'score', 0.0) or 0.0
+                        momentum_score = getattr(ts, 'momentum_score', 0.0) or 0.0
+                        accel = getattr(ts, 'score_accel', 0.0) or 0.0
+                        vol_ratio = getattr(ts, 'volume_ratio', 1.0) or 1.0
+                        zhuli = getattr(ts, 'zhuli_ratio', 0.0) or 0.0
+
+            # 3. 强势股阿尔法爆发评估得分 (Alpha Explosion Score, AES) 算法核心
+            # A. 个股当下爆发核心得分权重 - 满分 35 分
+            score_part = min(35.0, now_score * 0.35)
+            
+            # B. 动能得分与抢筹加速度权重 - 满分 15 分
+            accel_bonus = max(0.0, accel * 8.0)  # 正加速强力加成
+            m_part = min(15.0, (momentum_score * 0.1) + accel_bonus)
+            
+            # C. 爆发跟涨共振强度 (T值) - 满分 20 分
+            t_part = min(20.0, t_val * 2.0)
+            
+            # D. 主力大单流向与净占比 - 满分 10 分
+            zhuli_part = min(10.0, max(-15.0, zhuli * 15.0))
+            
+            # E. 爆量突破加成 (量能异动) - 满分 10 分
+            vol_part = 0.0
+            if vol_ratio >= 2.2:
+                vol_part = 10.0
+            elif vol_ratio >= 1.5:
+                vol_part = 6.0
+            elif vol_ratio >= 1.1:
+                vol_part = 3.0
+                
+            # F. 黄金买入介入区间加成 (控阈：防止封死涨停买不进，或者没动无价值) - 满分 15 分
+            zone_part = 0.0
+            # 开盘/重置点以来变幅在 [1.5%, 7.5%] 之间，是散户和操盘手最易介入套利的黄金加速期！
+            if 1.5 <= diff_val <= 7.5:
+                zone_part = 15.0
+            elif 0.5 <= diff_val < 1.5:
+                zone_part = 7.0
+            elif diff_val > 9.5 or pct_val > 9.7:
+                # 已经封板或者快涨停了，保留折中加分
+                zone_part = 5.0
+            elif diff_val < -1.5:
+                # 跟风大跌，极大概率趋势走坏，扣分防御
+                zone_part = -10.0
+
+            # G. 形态学模式匹配强加成
+            pattern_bonus = 0.0
+            hint = str(f.get('pattern_hint', '') or '').lower()
+            if any(k in hint for k in ["突破", "共振", "起爆", "强势", "主升", "冲锋", "封板"]):
+                pattern_bonus = 5.0
+            elif "准备" in hint or "新高" in hint:
+                pattern_bonus = 2.0
+
+            # 综合 AES 总得分计算
+            aes = score_part + m_part + t_part + zhuli_part + vol_part + zone_part + pattern_bonus
+            
+            # 挂载计算好的指标回 dict 中，方便渲染时读取展示有深度的数据
+            f['_aes'] = aes
+            f['_now_score'] = now_score
+            f['_accel'] = accel
+            f['_vol_ratio'] = vol_ratio
+            f['_zhuli'] = zhuli
+            
+            return aes
+            
+        # 根据科学量化的 AES 爆发强度进行降序排列并筛选出前 4 只最具确定性的优质排头兵个股
+        valid_followers.sort(key=compute_alpha_explosion_score, reverse=True)
+        selected_followers = valid_followers[:4]
+        
+        for f in selected_followers:
             code = f.get('code', '')
             name = f.get('name', '跟风兵')
             price = f.get('price', 0.0)
@@ -867,6 +1358,27 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             dff = f.get('dff', 0.0)
             hint = f.get('pattern_hint', '突破确认')
             
+            # 提取真实量化评估指标
+            now_score = f.get('_now_score', 0.0)
+            accel = f.get('_accel', 0.0)
+            vol_ratio = f.get('_vol_ratio', 1.0)
+            zhuli = f.get('_zhuli', 0.0)
+            
+            # 动态根据实盘量化指标生成极具分析说服力的强势爆发诊断标签
+            diag_tag = hint
+            if accel > 0.25 and vol_ratio >= 1.5:
+                diag_tag = f"🚀 爆量抢筹加速 ({now_score:.0f}分)"
+            elif now_score >= 80 and zhuli >= 0.2:
+                diag_tag = f"💰 资金抱团主升 ({now_score:.0f}分)"
+            elif 1.8 <= pct_diff <= 6.8 and accel > 0.08:
+                diag_tag = f"🎯 黄金介入区间 (量比{vol_ratio:.1f})"
+            elif vol_ratio >= 2.0:
+                diag_tag = f"📊 资金暴风突破 (加速{accel:+.2f})"
+            elif pct >= 9.6:
+                diag_tag = f"🐉 封板临界冲锋 ({now_score:.0f}分)"
+            elif now_score >= 85:
+                diag_tag = f"⚡ 核心超能爆发 ({now_score:.0f}分)"
+                
             self.candidate_stocks.append({
                 "code": code,
                 "name": name,
@@ -875,41 +1387,32 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 "pct_diff": pct_diff,
                 "dff": dff,
                 "t_factor": t_factor,
-                "reason": hint,
+                "reason": diag_tag,
                 "is_leader": False
             })
             
-            # 渲染表格行
-            item_name = QtWidgets.QTableWidgetItem(f"{name}\n({code})")
-            item_name.setData(Qt.ItemDataRole.UserRole, code)
-            item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            pct_color = "#39ff14" if pct >= 0 else "#ff073a"
-            item_pct = QtWidgets.QTableWidgetItem(f"{price:.2f}\n({pct:+.1f}%)")
-            item_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_pct.setForeground(QtGui.QColor(pct_color))
-            
-            diff_color = "#39ff14" if pct_diff >= 0 else "#ff073a"
-            item_diff = QtWidgets.QTableWidgetItem(f"{pct_diff:+.2f}%")
-            item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_diff.setForeground(QtGui.QColor(diff_color))
-            
-            item_t = QtWidgets.QTableWidgetItem(f"{t_factor:.1f}")
-            item_t.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            item_dff = QtWidgets.QTableWidgetItem(f"{dff:+.2f}")
-            item_dff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            item_hint = QtWidgets.QTableWidgetItem(hint)
-            item_hint.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_hint.setForeground(QtGui.QColor("#ff007f" if "突破" in hint else "#00f0ff"))
-            
-            self.table.setItem(idx, 0, item_name)
-            self.table.setItem(idx, 1, item_pct)
-            self.table.setItem(idx, 2, item_diff)
-            self.table.setItem(idx, 3, item_t)
-            self.table.setItem(idx, 4, item_dff)
-            self.table.setItem(idx, 5, item_hint)
+        # 🚀 [ROOT-FIX] 自动重应用用户当前的排序状态，杜绝高频刷新时排序闪退变回默认状态
+        sort_col = getattr(self, '_sort_column', -1)
+        if sort_col != -1:
+            key_map = {
+                0: lambda x: x["code"],
+                1: lambda x: x["price"],
+                2: lambda x: x["pct"],
+                3: lambda x: x["pct_diff"],
+                4: lambda x: x["t_factor"],
+                5: lambda x: x["dff"],
+                6: lambda x: x["reason"]
+            }
+            sort_key = key_map.get(sort_col, None)
+            if sort_key and len(self.candidate_stocks) > 2:
+                leader = self.candidate_stocks[0]
+                followers = self.candidate_stocks[1:]
+                is_reverse = (getattr(self, '_sort_order', 'desc') == 'desc')
+                followers.sort(key=sort_key, reverse=is_reverse)
+                self.candidate_stocks = [leader] + followers
+
+        # 物理局部渲染表格内容 (现价与涨幅拆分为 2 列)
+        self._render_table_only()
 
         # ── 维度 4: 指令控制中枢 ──
         # 同步交易内核的运行模式及 HSL 色度徽章
@@ -997,8 +1500,34 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
     def _on_timer_refresh(self) -> None:
         """主窗口定时脏重绘"""
-        if self.isVisible() and self.sector_name:
-            self.update_hud_data(self.sector_name)
+        if not self.isVisible():
+            return
+            
+        target_sector = self.sector_name
+        if not target_sector:
+            # [COLD-START AUTO-LOCK] 冷启动或空状态下，尝试锁定当前强度第 1 的风口
+            detector = self._get_active_detector()
+            if detector:
+                try:
+                    active_list = detector.get_active_sectors()
+                    if active_list:
+                        target_sector = active_list[0].get('sector', '')
+                except Exception as e:
+                    logger.warning(f"⚠️ [HUD Timer Auto-Lock] Failed to resolve active sectors: {e}")
+            
+            if not target_sector:
+                try:
+                    from sector_focus_engine import get_focus_controller
+                    fc = get_focus_controller()
+                    if fc:
+                        hot_sectors = fc.sector_map.get_hot_sectors(1)
+                        if hot_sectors:
+                            target_sector = hot_sectors[0].name
+                except Exception as e:
+                    logger.warning(f"⚠️ [HUD Timer Auto-Lock] Failed fallback resolver: {e}")
+                        
+        if target_sector:
+            self.update_hud_data(target_sector)
 
     def _on_submit_clicked(self) -> None:
         """物理触发下单跟单"""
@@ -1130,11 +1659,388 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        """支持键盘上下左右方向键循环切换 5 个候选板块"""
+        # 1. 判定是否有候选板块数据
+        if not hasattr(self, '_current_top5_sectors') or not self._current_top5_sectors:
+            super().keyPressEvent(event)
+            return
+
+        # 2. 找到当前选中的候选板块索引
+        curr_idx = 0
+        for i, btn in enumerate(self.hot_btns):
+            if btn.isChecked():
+                curr_idx = i
+                break
+                
+        # 3. 根据按键计算新的候选索引
+        key = event.key()
+        new_idx = curr_idx
+        
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+            new_idx = (curr_idx - 1) % len(self._current_top5_sectors)
+            event.accept()
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+            new_idx = (curr_idx + 1) % len(self._current_top5_sectors)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+            return
+            
+        # 4. 触发物理按钮模拟点击切换，完美复用业务规则
+        if new_idx != curr_idx and new_idx < len(self.hot_btns):
+            btn = self.hot_btns[new_idx]
+            if btn.isVisible():
+                logger.info(f"⌨️ [HUD Keyboard Select] Key {key} pressed -> Cycle Select Candidate Hot {new_idx+1}")
+                btn.click()
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        """支持鼠标滚轮滚动循环切换 5 个候选板块，同时精准隔离跟风个股明细表防冲突"""
+        # 1. 判定是否有候选板块数据
+        if not hasattr(self, '_current_top5_sectors') or not self._current_top5_sectors:
+            super().wheelEvent(event)
+            return
+
+        # 🚀 [ROOT-FIX] 滚轮焦点物理防冲突：如果在跟风表格 (self.table) 上滚动，将事件原封不动分发给表格，拒绝误触板块轮动！
+        child = self.childAt(event.position().toPoint())
+        if child:
+            p = child
+            is_in_table = False
+            while p:
+                if p == self.table:
+                    is_in_table = True
+                    break
+                p = p.parent()
+            if is_in_table:
+                # 处于表格内部，流转回 Qt 事件默认路由，让表格自然垂直滚动
+                super().wheelEvent(event)
+                return
+
+        # 2. 找到当前选中的候选板块索引
+        curr_idx = 0
+        for i, btn in enumerate(self.hot_btns):
+            if btn.isChecked():
+                curr_idx = i
+                break
+
+        # 3. 获取滚动增量判定方向
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+
+        # 滚轮向上滚动 -> 切换到前一个候选板块；滚轮向下滚动 -> 切换到后一个
+        if delta > 0:
+            new_idx = (curr_idx - 1) % len(self._current_top5_sectors)
+        else:
+            new_idx = (curr_idx + 1) % len(self._current_top5_sectors)
+
+        event.accept()
+
+        # 4. 触发物理按钮模拟点击切换，达成物理闭环
+        if new_idx != curr_idx and new_idx < len(self.hot_btns):
+            btn = self.hot_btns[new_idx]
+            if btn.isVisible():
+                logger.debug(f"🖱️ [HUD Wheel Select] Wheel scrolled -> Cycle Select Candidate Hot {new_idx+1}")
+                btn.click()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        # 在退出/隐藏时持久化当前窗口坐标 (DPI-aware save)
+        # 在退出/隐藏时物理持久化列宽和窗口坐标
+        self._save_column_widths()
         self.save_window_position_qt_visual(self, "SpatialFollowHUD")
         super().closeEvent(event)
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._save_column_widths()
         self.save_window_position_qt_visual(self, "SpatialFollowHUD")
         super().hideEvent(event)
+
+    def _on_sync_clicked(self) -> None:
+        """物理强制同步与深度自愈诊断入口"""
+        logger.info("🔄 [HUD Sync] User physically triggered custom sync button.")
+        
+        # 1. 物理诊断探测器链
+        detector = self._get_active_detector()
+        panel = getattr(self.main_app, 'sector_bidding_panel', None)
+        main_det = getattr(self.main_app, 'racing_detector', None)
+        
+        logger.info(f"🔍 [HUD Diagnostics] MainApp: {type(self.main_app)}")
+        logger.info(f"🔍 [HUD Diagnostics] MainApp.racing_detector: {main_det} (active_sectors len: {len(main_det.active_sectors) if main_det and hasattr(main_det, 'active_sectors') else 'N/A'})")
+        logger.info(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel: {panel}")
+        logger.info(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel.detector: {panel.detector if panel and hasattr(panel, 'detector') else None} (active_sectors len: {len(panel.detector.active_sectors) if panel and hasattr(panel, 'detector') and panel.detector and hasattr(panel.detector, 'active_sectors') else 'N/A'})")
+        logger.info(f"🔍 [HUD Diagnostics] SSOT Resolved Detector: {detector}")
+        
+        # 2. 强力刷新数据
+        self.update_hud_data(self.sector_name, force_render_sector=self.sector_name if self.sector_name else None)
+        
+        # 3. 弹出精致 Toast 提示
+        try:
+            from tk_gui_modules.gui_utils import toast_message
+            if self.sector_name:
+                toast_message(self.main_app, f"🔄 HUD 数据同步成功: 📍{self.sector_name}")
+            else:
+                toast_message(self.main_app, "🔄 HUD 数据同步成功，监听中")
+        except:
+            pass
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        """重写开启显示事件：每次打开 HUD 时自动执行深度物理数据同步与自愈"""
+        super().showEvent(event)
+        logger.info("🛸 [HUD ShowEvent] HUD window opened, forcing active sector data synchronization...")
+        self.update_hud_data(self.sector_name)
+        
+        # 🚀 [ROOT-FIX] 强力恢复并应用置顶配置，采用防递归安全标记，彻底抵御任何外来重置干扰
+        current_flags = self.windowFlags()
+        has_stays_on_top = bool(current_flags & Qt.WindowType.WindowStaysOnTopHint)
+        if has_stays_on_top != getattr(self, 'stays_on_top', True):
+            logger.warning(f"🛸 [HUD ShowEvent] StaysOnTop mismatch detected (actual: {has_stays_on_top}, expected: {self.stays_on_top}). Force correcting flags...")
+            if self.stays_on_top:
+                current_flags |= Qt.WindowType.WindowStaysOnTopHint
+            else:
+                current_flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(current_flags)
+            self.show()
+            
+        # 🚀 [NEW] 在显示时物理校准半透明比例
+        self._apply_opacity_ui_state()
+
+    def _on_section_resized(self, logical_index: int, old_size: int, new_size: int) -> None:
+        """用户手动拖拽列宽释放后的即时存盘槽 (升级为 10 秒防抖延迟模式)"""
+        # 忽略 Stretch 最后一列的自动重算，防无限信号循环
+        if logical_index == 6:
+            return
+        if getattr(self, '_loading_widths', False) or getattr(self, '_switching_flags', False) or getattr(self, '_boot_locked', True):
+            return
+        if not self.isVisible():
+            return
+            
+        # ⭐ [DEBOUNCE] 手动拖拽调整后延迟 10 秒写入，防抖并彻底避免各种内部排版信号高频乱写入损坏文件
+        if not hasattr(self, '_save_timer') or self._save_timer is None:
+            self._save_timer = QtCore.QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.timeout.connect(self._save_column_widths)
+        else:
+            self._save_timer.stop()
+            
+        self._save_timer.start(10000)  # 10,000 毫秒 = 10 秒延迟
+
+    def _save_column_widths(self) -> None:
+        """物理持久化排头兵表格当前列宽数据"""
+        if getattr(self, '_loading_widths', False) or getattr(self, '_switching_flags', False) or getattr(self, '_boot_locked', True):
+            return
+            
+        # ⭐ [DEBOUNCE] 强制关闭定时器，确保一次写盘周期完成，不重复执行
+        if hasattr(self, '_save_timer') and self._save_timer is not None:
+            self._save_timer.stop()
+            
+        try:
+            import json
+            import os
+            # 获取 7 列的当前宽度
+            widths = [self.table.columnWidth(i) for i in range(7)]
+            
+            # ⭐ [QUIET-GATE] 纵深高阶物理数据校验：
+            # 如果有任何一列宽度为 0 或者是负数，或者总长度不为7，这说明表格当前处于隐式销毁、重建、隐藏或未渲染状态。
+            # 这时的列宽是由于底层窗口变化引起的虚假数据，我们微秒级直接阻断拦截，杜绝写入损坏的列宽文件！
+            if len(widths) != 7 or any(w <= 0 for w in widths):
+                logger.warning(f"⚠️ [HUD Column Persistence] Gated abnormal column widths (saving blocked): {widths}")
+                return
+                
+            # 确保 logs 目录存在
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/hud_column_widths.json", "w", encoding="utf-8") as f:
+                json.dump({"widths": widths}, f, indent=4)
+            logger.info(f"💾 [HUD Column Persistence] Saved column widths: {widths}")
+        except Exception as e:
+            logger.warning(f"⚠️ [HUD Column Persistence] Failed to save column widths: {e}")
+
+    def _load_column_widths(self) -> None:
+        """从物理持久化文件中自动加载并还原表格列宽，支持新旧版本长度自愈兼容与超紧凑保护"""
+        self._loading_widths = True  # ⭐ [SILENT-LOCK] 开启加载静默锁，阻断反向触发 resized 的自动存盘覆盖！
+        
+        # 🚀 [Tactical Layout] 预设超紧凑、无滚动条的黄金比例默认与上限边界
+        default_compact = [86, 53, 64, 60, 46, 57]
+        max_bounds = [90, 60, 70, 70, 60, 65]
+        
+        try:
+            import json
+            import os
+            path = "logs/hud_column_widths.json"
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                widths = data.get("widths", [])
+                if widths:
+                    limit_len = min(len(widths), 7)
+                    for i in range(limit_len):
+                        # 如果是最后一列，我们仍保持为 Stretch 填充，跳过手动设置以防破环拉伸
+                        if i == 6:
+                            continue
+                        # ⚡ [QUIET-GATE] 上限门槛保护：确保还原列宽时自发对齐至超紧凑黄金上限，防止撑破 UI 挤出滚动条
+                        target_w = min(int(widths[i]), max_bounds[i])
+                        self.table.setColumnWidth(i, target_w)
+                    logger.info(f"💾 [HUD Column Persistence] Successfully restored column widths with compact guard up to {limit_len} columns: {widths[:limit_len]}")
+                    return
+        except Exception as e:
+            logger.warning(f"⚠️ [HUD Column Persistence] Failed to load column widths: {e}")
+        finally:
+            self._loading_widths = False  # ⭐ [SILENT-LOCK] 无论如何确保解除静默锁
+            
+        # 7 列兜底默认初始超紧凑黄金宽度比例
+        self.table.setColumnWidth(0, default_compact[0])  # 代码/名称
+        self.table.setColumnWidth(1, default_compact[1])  # 现价
+        self.table.setColumnWidth(2, default_compact[2])  # 涨幅
+        self.table.setColumnWidth(3, default_compact[3])  # 周期变幅
+        self.table.setColumnWidth(4, default_compact[4])  # 跟涨T值
+        self.table.setColumnWidth(5, default_compact[5])  # 背离DFF
+
+    def _render_table_only(self) -> None:
+        """物理局部渲染跟风表格，纯 Python 驱动，支持无抖动重绘"""
+        # candidate_stocks[0] 是龙头股，跟风股表格只渲染 candidate_stocks[1:]
+        followers = self.candidate_stocks[1:]
+        self.table.setRowCount(len(followers))
+        
+        for idx, f in enumerate(followers):
+            code = f["code"]
+            name = f["name"]
+            price = f["price"]
+            pct = f["pct"]
+            pct_diff = f["pct_diff"]
+            t_factor = f["t_factor"]
+            dff = f["dff"]
+            hint = f["reason"]
+            
+            # 0. 代码/名称
+            item_name = QtWidgets.QTableWidgetItem(f"{name}\n({code})")
+            item_name.setData(Qt.ItemDataRole.UserRole, code)
+            item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # 1. 现价
+            item_price = QtWidgets.QTableWidgetItem(f"{price:.2f}")
+            item_price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # 2. 涨幅
+            pct_color = "#39ff14" if pct >= 0 else "#ff073a"
+            item_pct = QtWidgets.QTableWidgetItem(f"{pct:+.2f}%")
+            item_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_pct.setForeground(QtGui.QColor(pct_color))
+            
+            # 3. 周期变幅
+            diff_color = "#39ff14" if pct_diff >= 0 else "#ff073a"
+            item_diff = QtWidgets.QTableWidgetItem(f"{pct_diff:+.2f}%")
+            item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_diff.setForeground(QtGui.QColor(diff_color))
+            
+            # 4. 跟涨T值
+            item_t = QtWidgets.QTableWidgetItem(f"{t_factor:.1f}")
+            item_t.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # 5. 背离DFF
+            item_dff = QtWidgets.QTableWidgetItem(f"{dff:+.2f}")
+            item_dff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # 6. 形态特征
+            item_hint = QtWidgets.QTableWidgetItem(hint)
+            item_hint.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_hint.setForeground(QtGui.QColor("#ff007f" if "突破" in hint else "#00f0ff"))
+            
+            self.table.setItem(idx, 0, item_name)
+            self.table.setItem(idx, 1, item_price)
+            self.table.setItem(idx, 2, item_pct)
+            self.table.setItem(idx, 3, item_diff)
+            self.table.setItem(idx, 4, item_t)
+            self.table.setItem(idx, 5, item_dff)
+            self.table.setItem(idx, 6, item_hint)
+
+    def _on_header_clicked(self, logical_index: int) -> None:
+        """纯 Python 驱动的高灵敏度表头综合排序"""
+        if not hasattr(self, '_sort_column'):
+            self._sort_column = -1
+            self._sort_order = 'desc' # 默认降序
+            
+        # 翻转排序方向
+        if self._sort_column == logical_index:
+            self._sort_order = 'asc' if self._sort_order == 'desc' else 'desc'
+        else:
+            self._sort_column = logical_index
+            self._sort_order = 'desc' # 新列默认降序
+            
+        # 根据 logical_index 选择排序键
+        key_map = {
+            0: lambda x: x["code"],
+            1: lambda x: x["price"],
+            2: lambda x: x["pct"],
+            3: lambda x: x["pct_diff"],
+            4: lambda x: x["t_factor"],
+            5: lambda x: x["dff"],
+            6: lambda x: x["reason"]
+        }
+        
+        sort_key = key_map.get(logical_index, None)
+        if not sort_key or len(self.candidate_stocks) <= 2:
+            return # 无法排序或无活跃跟风股
+            
+        # 物理隔离龙头股 (0号位固定不动)，只对后面的跟风股进行综合排序
+        leader = self.candidate_stocks[0]
+        followers = self.candidate_stocks[1:]
+        
+        is_reverse = (self._sort_order == 'desc')
+        followers.sort(key=sort_key, reverse=is_reverse)
+        
+        # 重新拼接并刷新渲染表格
+        self.candidate_stocks = [leader] + followers
+        self._render_table_only()
+
+    def _load_opacity_config(self) -> int:
+        """从 window_config.json 读取不透明度百分比，默认置顶时为 75%"""
+        import os
+        import json
+        from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get("SpatialFollowHUD_opacity", 75)
+        except Exception as e:
+            logger.error(f"Failed to load opacity config: {e}")
+        return 75
+
+    def _save_opacity_config(self, opacity: int) -> None:
+        """保存不透明度百分比至 window_config.json"""
+        import os
+        import json
+        from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+        try:
+            data = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data["SpatialFollowHUD_opacity"] = opacity
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save opacity config: {e}")
+
+    def _on_opacity_slider_changed(self, value: int) -> None:
+        """不透明度滑块拖拽响应"""
+        self.opacity_pct = value
+        self.lbl_opacity_val.setText(f"{value}%")
+        self._save_opacity_config(value)
+        
+        # 只有在开启置顶模式下才让半透明生效，非置顶一律强行恢复 1.0 (100%)
+        if self.stays_on_top:
+            self.setWindowOpacity(value / 100.0)
+            logger.debug(f"👻 [HUD Opacity] Set opacity to: {value}%")
+
+    def _apply_opacity_ui_state(self) -> None:
+        """物理根据置顶状态应用半透明状态机与容器显隐"""
+        if not hasattr(self, 'opacity_container'):
+            return
+        if self.stays_on_top:
+            # 开启置顶 -> 自动展现亮度滑块，并物理应用半透明
+            self.opacity_container.setVisible(True)
+            self.setWindowOpacity(self.opacity_pct / 100.0)
+        else:
+            # 关闭置顶 -> 自动隐藏亮度滑块，并物理恢复全不透明
+            self.opacity_container.setVisible(False)
+            self.setWindowOpacity(1.0)
