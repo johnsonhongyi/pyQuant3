@@ -3836,6 +3836,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
 
         # 绑定选股窗口打开/复用快捷键 Alt+t (支持大小写)

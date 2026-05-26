@@ -6445,6 +6445,16 @@ def get_tdx_exp_low_or_high_power(
     latest['open'] = dtemp.open
     latest['lowvol'] = dtemp.vol
     latest['last6vol'] = lastvol
+
+    # ========= 获取旧的历史最低价 =========
+    if ptype == 'high':
+        old_lowdate = dz.close.idxmax()
+    else:
+        old_lowdate = dz.close.idxmin()
+    dtemp_old = df.loc[old_lowdate]
+    latest['minlow'] = dtemp_old.low if not isinstance(dtemp_old, pd.DataFrame) else dtemp_old.low.iloc[0]
+    latest['minclose'] = dtemp_old.close if not isinstance(dtemp_old, pd.DataFrame) else dtemp_old.close.iloc[0]
+    latest['minvol'] = dtemp_old.vol if not isinstance(dtemp_old, pd.DataFrame) else dtemp_old.vol.iloc[0]
     
     # ✅ 完美对齐：仅对齐平台顶价格 ptop 和平台底价格 pbottom 到历史支撑日，pbreak 和 pdays 保持盘中最新状态
     if 'ptop' in dtemp:
@@ -6515,20 +6525,13 @@ def get_tdx_exp_low_or_high_power_src(
     lastvol = round(vols.mean(), 1) if vols.size else 0
 
     # ========= 输出 =========
-    latest = df.iloc[0].copy()
+    latest = pd.Series([], dtype='float64')
+    if 'code' in df.columns:
+        latest['code'] = df.iloc[0]['code']
     latest['date'] = lowdate
-    latest['high'] = dtemp.high
-    latest['low'] = dtemp.low
-    latest['close'] = dtemp.close
-    latest['open'] = dtemp.open
-    latest['lowvol'] = dtemp.vol
-    latest['last6vol'] = lastvol
-    
-    # ✅ 完美对齐：仅对齐平台顶价格 ptop 和平台底价格 pbottom 到历史支撑日，pbreak 和 pdays 保持盘中最新状态
-    if 'ptop' in dtemp:
-        latest['ptop'] = dtemp.ptop
-    if 'pbottom' in dtemp:
-        latest['pbottom'] = dtemp.pbottom
+    latest['minlow'] = dtemp.low if not isinstance(dtemp, pd.DataFrame) else dtemp.low.iloc[0]
+    latest['minclose'] = dtemp.close if not isinstance(dtemp, pd.DataFrame) else dtemp.close.iloc[0]
+    latest['minvol'] = dtemp.vol if not isinstance(dtemp, pd.DataFrame) else dtemp.vol.iloc[0]
     return latest
 
 
