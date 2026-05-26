@@ -454,8 +454,10 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         layout.addWidget(header_frame)
         
         # 表格展示
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "涨幅%", "量比", "DFF", "DFF2"])
+        import JohnsonUtil.commonTips as cct
+        cols = cct.vol_up_details_col
+        self.table = QTableWidget(0, len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -613,56 +615,62 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
             if not details_list: 
                 return
             
+            import JohnsonUtil.commonTips as cct
+            cols = cct.vol_up_details_col
+            self.table.setColumnCount(len(cols))
+            self.table.setHorizontalHeaderLabels(cols)
+            
             self.table.setRowCount(len(details_list))
             for i, item in enumerate(details_list):
-                code = item.get("code", "")
-                name = item.get("name", "")
-                change = item.get("change", 0.0)
-                ratio = item.get("ratio", 0.0)
-                dff = item.get("dff", 0.0)
-                dff2 = item.get("dff2", 0.0)
-                
-                # 代码 (亮色)
-                c_item = QTableWidgetItem(code)
-                c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
-                c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(i, 0, c_item)
-                
-                # 名称
-                n_item = QTableWidgetItem(name)
-                n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(i, 1, n_item)
-                
-                # 涨幅 (注意：NumericTableWidgetItem 会处理排序，展示带格式文字)
-                ch_item = NumericTableWidgetItem(change)
-                ch_item.setText(f"{change:+.2f}%")
-                ch_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if change > 0: ch_item.setForeground(QBrush(QColor("#ff4444")))
-                elif change < 0: ch_item.setForeground(QBrush(QColor("#44ff44")))
-                self.table.setItem(i, 2, ch_item)
-                
-                # 量比 (亮黄)
-                r_item = NumericTableWidgetItem(ratio)
-                r_item.setText(f"{ratio:.2f}")
-                r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                r_item.setForeground(QBrush(QColor("#ffff00")))
-                self.table.setItem(i, 3, r_item)
-
-                # DFF (高可靠 NumericTableWidgetItem)
-                d_item = NumericTableWidgetItem(dff)
-                d_item.setText(f"{dff:+.2f}")
-                d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if dff > 0: d_item.setForeground(QBrush(QColor("#ff4444")))
-                elif dff < 0: d_item.setForeground(QBrush(QColor("#44ff44")))
-                self.table.setItem(i, 4, d_item)
-                
-                # DFF2 (高可靠 NumericTableWidgetItem)
-                d2_item = NumericTableWidgetItem(dff2)
-                d2_item.setText(f"{dff2:+.2f}")
-                d2_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if dff2 > 0: d2_item.setForeground(QBrush(QColor("#ff4444")))
-                elif dff2 < 0: d2_item.setForeground(QBrush(QColor("#44ff44")))
-                self.table.setItem(i, 5, d2_item)
+                for col_idx, col_name in enumerate(cols):
+                    # 根据列名匹配 item 中的键名
+                    val_key = col_name
+                    if col_name == "代码": val_key = "code"
+                    elif col_name == "名称": val_key = "name"
+                    elif col_name == "涨幅%": val_key = "change"
+                    elif col_name == "量比": val_key = "ratio"
+                    else: val_key = col_name.lower()
+                    
+                    val = item.get(val_key, "")
+                    
+                    if val_key == "code":
+                        code_str = str(val)
+                        c_item = QTableWidgetItem(code_str)
+                        c_item.setForeground(QBrush(QColor("#00ff00" if code_str.startswith(('60', '00')) else "#00bfff")))
+                        c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table.setItem(i, col_idx, c_item)
+                    elif val_key == "name":
+                        n_item = QTableWidgetItem(str(val))
+                        n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table.setItem(i, col_idx, n_item)
+                    elif val_key == "change":
+                        change_val = float(val) if val is not None else 0.0
+                        ch_item = NumericTableWidgetItem(change_val)
+                        ch_item.setText(f"{change_val:+.2f}%")
+                        ch_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        if change_val > 0: ch_item.setForeground(QBrush(QColor("#ff4444")))
+                        elif change_val < 0: ch_item.setForeground(QBrush(QColor("#44ff44")))
+                        self.table.setItem(i, col_idx, ch_item)
+                    elif val_key == "ratio":
+                        ratio_val = float(val) if val is not None else 0.0
+                        r_item = NumericTableWidgetItem(ratio_val)
+                        r_item.setText(f"{ratio_val:.2f}")
+                        r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        r_item.setForeground(QBrush(QColor("#ffff00")))
+                        self.table.setItem(i, col_idx, r_item)
+                    else:
+                        # 其它定制数值列 (如 dff, dff2, dff3)
+                        try:
+                            num_val = float(val) if val is not None else 0.0
+                            cell_item = NumericTableWidgetItem(num_val)
+                            cell_item.setText(f"{num_val:+.2f}")
+                            cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            if num_val > 0: cell_item.setForeground(QBrush(QColor("#ff4444")))
+                            elif num_val < 0: cell_item.setForeground(QBrush(QColor("#44ff44")))
+                        except Exception:
+                            cell_item = QTableWidgetItem(str(val))
+                            cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table.setItem(i, col_idx, cell_item)
         finally:
             self.table.setSortingEnabled(True)
             self.table.horizontalHeader().setSortIndicatorShown(True) # 恢复自适应排序
