@@ -13487,6 +13487,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df_sorted = self.current_df.reset_index(drop=True).sort_values(
                 by=col, key=lambda s: s.astype(str), ascending=not reverse)
 
+        elif col == 'MainU':
+            # ✅ MainU 极限性能排序（采用静态 LUT O(N) 矢量化映射）
+            from mainu_sort import compute_mainu_sort_column
+            sort_keys = compute_mainu_sort_column(self.current_df['MainU'])
+            df_sorted = self.current_df.loc[sort_keys.sort_values(ascending=not reverse).index]
+
         elif pd.api.types.is_numeric_dtype(self.current_df[col]):
             df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
         elif col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
