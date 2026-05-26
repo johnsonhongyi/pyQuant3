@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any, Callable
 from trading_kernel.core.risk import ApprovedOrder
 from trading_kernel.execution.execution_adapter import ExecutionAdapter
@@ -136,7 +137,7 @@ class ConfirmExecutionAdapter(ExecutionAdapter):
 
         audit_record = {
             "journal_type": "HUMAN_CONFIRMATION_AUDIT",
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
             "original_order": {
                 "order_id": original_order.order_id,
                 "code": original_order.code,

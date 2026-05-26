@@ -185,6 +185,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         self.sector_name: str = ""
         self.selected_index: int = 0  # 0: 龙头, 1: 跟风1, 2: 跟风2, 3: 跟风3
+        self._nav_direction: Optional[str] = None  # 🚀 [NEW] 键盘方向键瀑布流导航方向标记 ('up' 或 'down')
         self.candidate_stocks: List[Dict[str, Any]] = []  # 缓存当前的备选股票列表
         self.sector_heat_value: float = 50.0
         
@@ -204,8 +205,14 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         # 恢复上次窗口坐标与尺寸 (Persist window state)
         self.load_window_position_qt(self, "SpatialFollowHUD", default_width=500, default_height=520)
         
-        # 🚀 [NEW] 物理初始化置顶半透明状态与亮度滑块显隐，一启动便瞬间对齐
-        self._apply_opacity_ui_state()
+        # 🚀 [NEW] DWM 防抖不透明度应用定时器，彻底根除高频刷新及句柄重建时的 UpdateLayeredWindowIndirect 报错
+        self._opacity_debounce_timer = QtCore.QTimer(self)
+        self._opacity_debounce_timer.setSingleShot(True)
+        self._opacity_debounce_timer.timeout.connect(self._execute_opacity_apply)
+        self._target_opacity: float = 1.0
+        
+        # 🚀 [NEW] 物理初始化置顶半透明状态与亮度滑块显隐，一启动便延时 100ms 对齐，防句柄未就绪警告
+        QtCore.QTimer.singleShot(100, self._apply_opacity_ui_state)
         
         # 🛡️ [BOOT-LOCK] 引入开机防抖锁，冷启动 1.5 秒内，正是排版引擎自适应重绘与首次 show 动荡期。
         # 此期间禁止一切被动 resize 触发存盘，彻底秒杀首次显示时由于 Layout 自适应导致列宽文件被覆盖损毁的大 Bug！
@@ -290,8 +297,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(flags)
             self.show()
             
-            # 🚀 [NEW] 物理切换半透明状态并同步滑块显隐
-            self._apply_opacity_ui_state()
+            # 🚀 [NEW] 延时 50ms 异步应用透明度状态，给 OS Win32 句柄与 High-DPI 重建留出稳定时间，根除 UpdateLayeredWindow 警告
+            QtCore.QTimer.singleShot(50, self._apply_opacity_ui_state)
             
             logger.info(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
         finally:
@@ -866,7 +873,6 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             QPushButton:hover {
                 background-color: rgba(57, 255, 20, 0.35);
                 border-color: #00FF66;
-                box-shadow: 0 0 10px #39ff14;
             }
             QPushButton:pressed {
                 background-color: rgba(57, 255, 20, 0.5);
@@ -1443,9 +1449,30 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                     self.selected_index = s_idx
                     break
         else:
-            # 否则默认锁定龙头
-            if self.selected_index >= len(self.candidate_stocks):
+            # 🚀 [NAV-EXPLORATION] 根据键盘翻页方向决定候选个股高亮位置，达成无缝的瀑布流盯盘体验
+            nav_dir = getattr(self, '_nav_direction', None)
+            if nav_dir == "down":
+                # 下翻：自动选中跟风排头兵的第一行 (即 candidate_stocks 中的 index 1，对应 table row 0)
+                if len(self.candidate_stocks) > 1:
+                    self.selected_index = 1
+                else:
+                    self.selected_index = 0
+                # 强力锁定表格焦点，支持连续键盘盲操
+                self.table.setFocus()
+            elif nav_dir == "up":
+                # 上翻：自动从跟风排头兵的最后一行开始 (即 candidate_stocks 中的最后一个元素，对应 table 的最后一行)
+                if len(self.candidate_stocks) > 1:
+                    self.selected_index = len(self.candidate_stocks) - 1
+                else:
+                    self.selected_index = 0
+                # 强力锁定表格焦点，支持连续键盘盲操
+                self.table.setFocus()
+            else:
+                # 其它鼠标点击/定时刷新等情况，默认锁定第 0 列（龙头）
                 self.selected_index = 0
+            
+            # 立即重置导航方向，防后续刷新干扰
+            self._nav_direction = None
 
         self._update_highlight_border()
 
@@ -1602,50 +1629,92 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             logger.error(f"[SpatialHUD] submit follow order failed: {e}")
             QtWidgets.QMessageBox.critical(self, "💥 系统异常", f"跟单提交失败，内核异常: {e}")
 
-    # ── 强健的键盘驱动盲操设计 (Up/Down/Return/Esc) ──
+    # ── 强健的键盘驱动盲操设计 (Up/Down/Left/Right/Return/Esc) ──
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        """
+        统一高精度键盘事件接管：
+        1. Esc / Space: 隐藏窗口
+        2. Return / Enter: 一键委托下单
+        3. Left / Right / Up / Down: 自适应瀑布流板块切换与个股轮动
+        """
         key = event.key()
         
-        # Up 键向上移动循环锁定目标
-        if key == Qt.Key.Key_Up:
-            if self.candidate_stocks:
-                self.selected_index = (self.selected_index - 1) % len(self.candidate_stocks)
-                self._update_highlight_border()
-                # [LINKAGE] 联动切换主窗口/K线可视化图表
-                selected = self.candidate_stocks[self.selected_index]
-                self._trigger_linkage(selected["code"])
+        # 1. 盲操快捷功能键
+        if key in (Qt.Key.Key_Escape, Qt.Key.Key_Space):
+            self.hide()
             event.accept()
             return
             
-        # Down 键向下移动循环锁定目标
-        elif key == Qt.Key.Key_Down:
-            if self.candidate_stocks:
-                self.selected_index = (self.selected_index + 1) % len(self.candidate_stocks)
-                self._update_highlight_border()
-                # [LINKAGE] 联动切换主窗口/K线可视化图表
-                selected = self.candidate_stocks[self.selected_index]
-                self._trigger_linkage(selected["code"])
-            event.accept()
-            return
-            
-        # Return / Enter 键一键触发跟单
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._on_submit_clicked()
             event.accept()
             return
             
-        # Esc 键隐藏/隐藏
-        elif key == Qt.Key.Key_Escape:
-            self.hide()
+        # 2. 板块/跟风瀑布流轮动逻辑
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            # 判定是否有候选板块数据
+            if not hasattr(self, '_current_top5_sectors') or not self._current_top5_sectors:
+                super().keyPressEvent(event)
+                return
+
+            # 找到当前选中的候选板块索引
+            curr_idx = 0
+            for i, btn in enumerate(self.hot_btns):
+                if btn.isChecked():
+                    curr_idx = i
+                    break
+
+            # 处理 Up/Down 对跟风明细表边界触发判定
+            new_idx = curr_idx
+            if key == Qt.Key.Key_Up:
+                if self.table.hasFocus():
+                    # 如果表格有焦点，只有在首行（currentRow == 0）按 Up 时，才触发上翻前一板块
+                    if self.table.rowCount() > 0 and self.table.currentRow() > 0:
+                        # 尚有行可上移，交还给基类/表格原生滚动处理
+                        super().keyPressEvent(event)
+                        return
+                    # 触及顶端边界，设定上翻标记并执行板块切换
+                    self._nav_direction = "up"
+                else:
+                    # 表格未获焦点，默认直接上翻上一板块并落入新板块的首行
+                    self._nav_direction = "down"
+
+                new_idx = (curr_idx - 1) % len(self._current_top5_sectors)
+
+            elif key == Qt.Key.Key_Down:
+                if self.table.hasFocus():
+                    # 如果表格有焦点，只有在尾行（currentRow == rowCount - 1）按 Down 时，才触发下翻后一板块
+                    if self.table.rowCount() > 0 and self.table.currentRow() < self.table.rowCount() - 1:
+                        # 尚有行可下移，交还给基类/表格原生滚动处理
+                        super().keyPressEvent(event)
+                        return
+                    # 触及底端边界，设定下翻标记并执行板块切换
+                    self._nav_direction = "down"
+                else:
+                    # 表格未获焦点，默认下翻下一板块并落入新板块的首行
+                    self._nav_direction = "down"
+
+                new_idx = (curr_idx + 1) % len(self._current_top5_sectors)
+
+            elif key == Qt.Key.Key_Left:
+                # 键盘向左：强力切换至前一板块，并默认落入新板块的第一行
+                self._nav_direction = "down"
+                new_idx = (curr_idx - 1) % len(self._current_top5_sectors)
+
+            elif key == Qt.Key.Key_Right:
+                # 键盘向右：强力切换至后一板块，并默认落入新板块的第一行
+                self._nav_direction = "down"
+                new_idx = (curr_idx + 1) % len(self._current_top5_sectors)
+
+            # 执行板块切换
+            if new_idx != curr_idx and new_idx < len(self.hot_btns):
+                btn = self.hot_btns[new_idx]
+                if btn.isVisible():
+                    logger.info(f"⌨️ [HUD Keyboard Select] Key {key} pressed -> Waterfall Cycle Select Sector Hot {new_idx+1} ({self._nav_direction})")
+                    btn.click()
             event.accept()
             return
-            
-        # 空格键：在 HUD 获得焦点时，允许隐藏 (和主窗 toggle 一致)
-        elif key == Qt.Key.Key_Space:
-            self.hide()
-            event.accept()
-            return
-            
+
         super().keyPressEvent(event)
 
     # ── 无边框精致拖拽支持 (Standard Smooth Win32 Dragging) ──
@@ -1658,41 +1727,6 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         if event.buttons() == Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
-
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        """支持键盘上下左右方向键循环切换 5 个候选板块"""
-        # 1. 判定是否有候选板块数据
-        if not hasattr(self, '_current_top5_sectors') or not self._current_top5_sectors:
-            super().keyPressEvent(event)
-            return
-
-        # 2. 找到当前选中的候选板块索引
-        curr_idx = 0
-        for i, btn in enumerate(self.hot_btns):
-            if btn.isChecked():
-                curr_idx = i
-                break
-                
-        # 3. 根据按键计算新的候选索引
-        key = event.key()
-        new_idx = curr_idx
-        
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
-            new_idx = (curr_idx - 1) % len(self._current_top5_sectors)
-            event.accept()
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
-            new_idx = (curr_idx + 1) % len(self._current_top5_sectors)
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-            return
-            
-        # 4. 触发物理按钮模拟点击切换，完美复用业务规则
-        if new_idx != curr_idx and new_idx < len(self.hot_btns):
-            btn = self.hot_btns[new_idx]
-            if btn.isVisible():
-                logger.info(f"⌨️ [HUD Keyboard Select] Key {key} pressed -> Cycle Select Candidate Hot {new_idx+1}")
-                btn.click()
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         """支持鼠标滚轮滚动循环切换 5 个候选板块，同时精准隔离跟风个股明细表防冲突"""
@@ -1801,8 +1835,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(current_flags)
             self.show()
             
-        # 🚀 [NEW] 在显示时物理校准半透明比例
-        self._apply_opacity_ui_state()
+        # 🚀 [NEW] 在显示时延时 50ms 异步物理校准半透明比例，防止 DWM 图层重构时出现 Win32 参数错误警告
+        QtCore.QTimer.singleShot(50, self._apply_opacity_ui_state)
 
     def _on_section_resized(self, logical_index: int, old_size: int, new_size: int) -> None:
         """用户手动拖拽列宽释放后的即时存盘槽 (升级为 10 秒防抖延迟模式)"""
@@ -2021,6 +2055,21 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         except Exception as e:
             logger.error(f"Failed to save opacity config: {e}")
 
+    def _safe_set_opacity(self, opacity: float) -> None:
+        """安全修改目标不透明度，并触发 50ms 防抖倒计时以杜绝 DWM 刷新冲突"""
+        self._target_opacity = opacity
+        self._opacity_debounce_timer.start(50)
+
+    def _execute_opacity_apply(self) -> None:
+        """物理执行不透明度设置，由防抖定时器统一调用，绝对句柄平滑对齐，彻底消噪"""
+        if not self.isVisible():
+            return
+        try:
+            self.setWindowOpacity(self._target_opacity)
+            logger.debug(f"👻 [DWM-OPACITY] Applied physical window opacity: {self._target_opacity:.2%}")
+        except Exception as e:
+            logger.error(f"Failed to set window opacity: {e}")
+
     def _on_opacity_slider_changed(self, value: int) -> None:
         """不透明度滑块拖拽响应"""
         self.opacity_pct = value
@@ -2029,8 +2078,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         # 只有在开启置顶模式下才让半透明生效，非置顶一律强行恢复 1.0 (100%)
         if self.stays_on_top:
-            self.setWindowOpacity(value / 100.0)
-            logger.debug(f"👻 [HUD Opacity] Set opacity to: {value}%")
+            self._safe_set_opacity(value / 100.0)
+            logger.debug(f"👻 [HUD Opacity] Requested opacity change: {value}%")
 
     def _apply_opacity_ui_state(self) -> None:
         """物理根据置顶状态应用半透明状态机与容器显隐"""
@@ -2039,8 +2088,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         if self.stays_on_top:
             # 开启置顶 -> 自动展现亮度滑块，并物理应用半透明
             self.opacity_container.setVisible(True)
-            self.setWindowOpacity(self.opacity_pct / 100.0)
+            self._safe_set_opacity(self.opacity_pct / 100.0)
         else:
             # 关闭置顶 -> 自动隐藏亮度滑块，并物理恢复全不透明
             self.opacity_container.setVisible(False)
-            self.setWindowOpacity(1.0)
+            self._safe_set_opacity(1.0)

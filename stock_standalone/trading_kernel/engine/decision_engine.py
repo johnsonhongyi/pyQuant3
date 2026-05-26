@@ -23,6 +23,32 @@ def _confidence(priority: float, sector_heat: float, pct_diff: float, dff: float
 
 
 def decide(signal: StrategySignal, state: str) -> DecisionIntent:
+    # ── 手工干预或强制平仓逻辑，直接走绿色通道无条件执行 ──
+    raw_action = str(signal.features.get("action", "")).upper()
+    if raw_action == "SELL" or signal.signal_type == "手工平仓" or "手工平仓" in str(signal.features.get("raw_reason", "")):
+        reason = DecisionReason(
+            regime="MANUAL_OVERRIDE",
+            setup="手工平仓",
+            sector_heat=0.0,
+            sector_rank=None,
+            is_leader=False,
+            breakout=False,
+            volume_ratio=1.0,
+            dff=0.0,
+            dff_positive=False,
+            price_above_vwap=True,
+            confidence_inputs=(),
+        )
+        return DecisionIntent(
+            code=signal.code,
+            action="SELL",
+            size_pct=1.0,
+            stop_price=None,
+            confidence=1.0,
+            reason=reason,
+            expires_at=signal.ts,
+        )
+
     priority = _num(signal, "priority")
     sector_heat = _num(signal, "sector_heat")
     pct_diff = _num(signal, "pct_diff")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from typing import Any, Mapping
 from JohnsonUtil import LoggerFactory
 from trading_kernel.core.risk import ApprovedOrder
@@ -145,7 +146,7 @@ class BrokerPositionSync:
         
         audit_record = {
             "journal_type": "POSITION_SYNC_AUDIT",
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
             "drift_report": report,
             "repaired": True  # 实盘对接下自动由柜台权威数据覆盖
         }
