@@ -20,6 +20,7 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
     price = _float(item.get("current_price") or item.get("suggest_price"))
     ts = str(item.get("created_at") or datetime.now().isoformat(timespec="seconds"))
     features = {
+        "action": str(item.get("action", "") or ""),
         "priority": _float(item.get("priority")),
         "suggest_price": _float(item.get("suggest_price")),
         "current_price": price,

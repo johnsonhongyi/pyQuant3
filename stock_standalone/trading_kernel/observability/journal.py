@@ -25,6 +25,11 @@ def _safe_get(obj: Any, key: str, default: Any = None) -> Any:
 
 class JsonlJournal:
     def __init__(self, path: str = "logs/trading_kernel_trace.jsonl"):
+        # 🛡️ 强制绝对路径化，保证多进程/打包环境下所有账簿消费者与生产者物理定位完全对齐
+        import os
+        from sys_utils import get_base_path
+        if not os.path.isabs(path):
+            path = os.path.join(get_base_path(), path)
         self.path = path
         self._lock = threading.Lock()
         directory = os.path.dirname(path)
@@ -53,10 +58,15 @@ class JsonlJournal:
                                 action = data.get("kernel_result", {}).get("kernel_action", "")
                                 if code:
                                     is_sim = data.get("is_simulation", False)
+                                    c_price = data.get("kernel_result", {}).get("kernel_stop_price") or sig.get("price") or 0.0
+                                    try:
+                                        c_price = float(c_price)
+                                    except Exception:
+                                        c_price = 0.0
                                     if is_sim:
-                                        self._written_records.add((code, "SIMULATION"))
+                                        self._written_records.add((code, "SIMULATION", c_price))
                                     elif sig_type:
-                                        self._written_records.add((code, sig_type, action))
+                                        self._written_records.add((code, sig_type, action, c_price))
                         except Exception:
                             continue
             except Exception:
@@ -65,12 +75,26 @@ class JsonlJournal:
     def append(self, record: dict[str, Any]) -> None:
         payload = dict(record)
         
+        now_dt = datetime.now()
+        today_str = now_dt.strftime("%Y-%m-%d")
+        iso_ts = now_dt.isoformat(timespec="seconds")
+        
+        # 统一写入/补全 top-level 关键字段，保障数据 schema 一致性与可追溯性
+        payload["trade_date"] = today_str
+        payload.setdefault("journal_ts", iso_ts)
+        payload.setdefault("timestamp", iso_ts)
+        
+        # 强制将所有传入的时间戳/流水时间规范化为 YYYY-MM-DDTHH:MM:SS 格式，彻底消除空格与毫秒级别的格式不一致
+        for key in ["journal_ts", "timestamp"]:
+            if key in payload and isinstance(payload[key], str):
+                val = payload[key].replace(" ", "T")
+                if len(val) > 19 and "." in val:
+                    val = val.split(".")[0]
+                payload[key] = val
+
         # 支持审计类日志（如 HUMAN_CONFIRMATION_AUDIT, POSITION_SYNC_AUDIT）直接写入而不受 code 过滤与去重限制
         jtype = payload.get("journal_type")
         if jtype is not None and "AUDIT" in str(jtype):
-            now_dt = datetime.now()
-            payload["trade_date"] = now_dt.strftime("%Y-%m-%d")
-            payload.setdefault("journal_ts", now_dt.isoformat(timespec="seconds"))
             try:
                 with self._lock:
                     with open(self.path, "a", encoding="utf-8") as fh:
@@ -103,10 +127,15 @@ class JsonlJournal:
 
         # 计算当前是否在交易活跃期 (交易日且 09:15-11:30 或 13:00-15:05)
         is_trade_day = cct.get_trade_date_status()
-        now_dt = datetime.now()
         now_time = now_dt.hour * 100 + now_dt.minute
         is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
-        today_str = now_dt.strftime("%Y-%m-%d")
+
+        # 提取当前最新价格 (用于细粒度防重，放行有实质价格或止损价格波动的真实数据更新)
+        current_price = _safe_get(payload.get("kernel_result", {}), "kernel_stop_price") or _safe_get(sig, "price") or 0.0
+        try:
+            current_price = float(current_price)
+        except Exception:
+            current_price = 0.0
 
         if not is_active_trading:
             # 其余时间执行都是模拟信号，标注 simulation 属性
@@ -117,34 +146,84 @@ class JsonlJournal:
                     if "kernel_reason" in payload["kernel_result"] and isinstance(payload["kernel_result"]["kernel_reason"], dict):
                         payload["kernel_result"]["kernel_reason"]["simulation"] = True
 
-            # 模拟时段去重：同一个 code，只允许记录一次模拟信号
-            key = (code, "SIMULATION")
+            # 模拟时段去重：同一个 code 且价格完全一致时，才过滤 (限制无用冗余，放行有效现价变化)
+            key = (code, "SIMULATION", current_price)
             with self._lock:
                 if key in self._written_records:
                     return
                 self._written_records.add(key)
         else:
-            # 交易活跃期去重：同一个 code，同一个信号类型，同一种动作，只允许记录一次
+            # 交易活跃期去重：同一个 code，同一个信号类型，同一种动作，同一种价格，只允许记录一次
             if not sig_type:
                 return
-            key = (code, sig_type, action)
+            key = (code, sig_type, action, current_price)
             with self._lock:
                 if key in self._written_records:
                     return
                 self._written_records.add(key)
 
-        # 显式加入交易日 trade_date 字段和 journal_ts 字段，保障数据一致性与可追溯性
-        payload["trade_date"] = today_str
-        payload.setdefault("journal_ts", now_dt.isoformat(timespec="seconds"))
-        
         try:
             with self._lock:
                 with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+                
+                # 每次物理追加新记录后，自动触发高性能日志体积安全监控与压缩归档
+                self._check_and_compress_journal()
         except Exception as e:
             try:
                 import logging
                 logging.getLogger().error(f"❌ [JsonlJournal] Failed to append record: {e}")
+            except Exception:
+                pass
+
+    def _check_and_compress_journal(self) -> None:
+        """高性能无损日志自动压缩归档引擎：若日志文件超过 5MB，自动将旧记录打包压缩归档，保留最新 1000 行以确保 UI 稳定"""
+        try:
+            if not os.path.exists(self.path):
+                return
+            file_size = os.path.getsize(self.path)
+            # 设定 5MB 为阈值 (5 * 1024 * 1024)
+            if file_size < 5 * 1024 * 1024:
+                return
+
+            import gzip
+            
+            # 1. 物理读取全部行
+            with open(self.path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                
+            if len(lines) <= 1500:
+                return
+                
+            # 保留最近 1000 行作为活流水，确保 UI 载入不白屏
+            keep_lines = lines[-1000:]
+            archive_lines = lines[:-1000]
+            
+            # 2. 导出归档历史并生成高压 gzip 文件
+            archive_dir = os.path.dirname(self.path)
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_filename = f"trading_kernel_trace_{timestamp_str}.jsonl.gz"
+            archive_path = os.path.join(archive_dir, archive_filename)
+            
+            with gzip.open(archive_path, "wt", encoding="utf-8") as gz:
+                gz.writelines(archive_lines)
+                
+            # 3. 原子覆写原主日志文件，释放物理磁盘空间，实现完美零损耗压缩
+            temp_path = self.path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as tmp:
+                tmp.writelines(keep_lines)
+                
+            os.replace(temp_path, self.path)
+            
+            try:
+                import logging
+                logging.getLogger().info(f"⚡ [JsonlJournal] Compression success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines.")
+            except Exception:
+                pass
+        except Exception as e_comp:
+            try:
+                import logging
+                logging.getLogger().warning(f"⚠️ [JsonlJournal] Failed to compress journal file: {e_comp}")
             except Exception:
                 pass
 

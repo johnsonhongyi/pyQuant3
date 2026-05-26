@@ -159,7 +159,10 @@ def evaluate(
         )
 
     # Core Position Exposure Check & Size Reduction (Sizing Adjustments)
-    final_size = min(intent.size_pct, limits.max_single_size_pct)
+    if action in {"BUY", "ADD"}:
+        final_size = min(intent.size_pct, limits.max_single_size_pct)
+    else:
+        final_size = intent.size_pct
     
     if action in {"BUY", "ADD"} and final_size > 0:
         # 7. Single stock max position check & sizing limit

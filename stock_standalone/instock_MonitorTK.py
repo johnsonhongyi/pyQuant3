@@ -1918,6 +1918,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 )
                 self._hotkey_process.start()
                 self._hotkey_process_started = True
+                self._last_rotator_spawn_t = time.time()
+                self._rotator_fail_count = 0
+                self._rotator_restarting_flag = False
                 logger.info("🚀 [Rotator] Independent HotkeyRotatorProcess launched successfully.")
                 
                 # 延迟一下立即同步一次窗口数据
@@ -5016,7 +5019,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             except Exception as e:
                                 logger.error(f"Panel sync failed: {e}")
 
-                        # ✅ [盘中交易引擎 v2] 直接从 BiddingMomentumDetector 完整注入
+                        # ✅ 决策队列[盘中交易引擎 v2] 直接从 BiddingMomentumDetector 完整注入
                         try:
                             _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
                             # [THROTTLE] 交易引擎注入间隔限制在 30s，且仅在快照更新时执行
@@ -5480,55 +5483,111 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.after(100, _beat)
 
     def sync_rotator_windows(self):
-        """同步窗口信息到独立的全局快捷键/轮换器进程"""
+        """同步窗口信息到独立的全局快捷键/轮换器进程 (100% 异步非阻塞 + 自愈防抖 + 冷却锁版)"""
         if not getattr(self, '_hotkey_process_started', False):
             return
             
-        # 🛡️ [自愈防线] 实时监测热键子进程存活状态，若发生崩溃或死亡，自动拉起重置
+        # 1. 监测热键子进程存活状态 (引入多重防抖与冷却保护门锁)
         hp = getattr(self, '_hotkey_process', None)
-        if hp is None or not hp.is_alive():
-            logger.warning("🚨 [Rotator] Independent HotkeyRotatorProcess is dead! Attempting self-healing restart...")
-            try:
-                # 确保清理残留句柄
-                if hp:
-                    try:
-                        hp.terminate()
-                        hp.join(timeout=0.5)
-                    except: pass
-                
-                import hotkey_rotator
-                import logging
-                level_val = "INFO"
-                if hasattr(self, 'log_level') and self.log_level is not None:
-                    try:
-                        val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
-                        if isinstance(val, int):
-                            level_val = logging.getLevelName(val)
-                        elif isinstance(val, str):
-                            level_val = val
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        level_val = logging.getLevelName(logger.level)
-                    except Exception:
-                        pass
-                if not isinstance(level_val, str):
-                    level_val = "INFO"
+        is_alive = False
+        try:
+            if hp is not None and hp.is_alive():
+                is_alive = True
+        except Exception:
+            pass
 
-                self._hotkey_process = mp.Process(
-                    target=hotkey_rotator.main,
-                    args=(level_val,),
-                    name="HotkeyRotatorProcess",
-                    daemon=True
-                )
-                self._hotkey_process.start()
-                self._hotkey_process_started = True
-                logger.info("🚀 [Rotator] HotkeyRotatorProcess restarted and self-healed successfully.")
-                self.after(500, self.sync_rotator_windows)
+        # 初始化相关控制变量 (如果不存在)
+        if not hasattr(self, '_rotator_fail_count'):
+            self._rotator_fail_count = 0
+        if not hasattr(self, '_last_rotator_spawn_t'):
+            self._last_rotator_spawn_t = 0
+        if not hasattr(self, '_rotator_restarting_flag'):
+            self._rotator_restarting_flag = False
+
+        if not is_alive:
+            self._rotator_fail_count += 1
+            # 只有当连续 3 次检测到不存活，或者第一次就是 None 且没有处于重启状态时，才触发自愈
+            if self._rotator_fail_count >= 3 or hp is None:
+                self._rotator_fail_count = 0 # 重置计数
+                
+                # 冷却保护校验：至少间隔 15 秒才能再次尝试拉起子进程，防止疯狂 spawn 锁死系统
+                now = time.time()
+                if now - self._last_rotator_spawn_t < 15.0:
+                    return
+                
+                # 重启状态门锁，防止启动多个后台线程并发重启
+                if self._rotator_restarting_flag:
+                    return
+                self._rotator_restarting_flag = True
+                self._last_rotator_spawn_t = now
+
+                logger.warning("🚨 [Rotator] Independent HotkeyRotatorProcess is dead! Dispatching async self-healing task...")
+                
+                def _async_restart_worker():
+                    try:
+                        # A. 物理安全清理残留句柄
+                        old_hp = getattr(self, '_hotkey_process', None)
+                        if old_hp:
+                            try:
+                                old_hp.terminate()
+                                old_hp.join(timeout=1.0)
+                                if old_hp.is_alive():
+                                    old_hp.kill()
+                            except Exception:
+                                pass
+                        
+                        # B. 灌入日志级别
+                        import hotkey_rotator
+                        import logging
+                        level_val = "INFO"
+                        if hasattr(self, 'log_level') and self.log_level is not None:
+                            try:
+                                val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
+                                if isinstance(val, int):
+                                    level_val = logging.getLevelName(val)
+                                elif isinstance(val, str):
+                                    level_val = val
+                            except Exception: pass
+                        else:
+                            try:
+                                level_val = logging.getLevelName(logger.level)
+                            except Exception: pass
+                        if not isinstance(level_val, str):
+                            level_val = "INFO"
+
+                        # C. 新建多进程
+                        new_hp = mp.Process(
+                            target=hotkey_rotator.main,
+                            args=(level_val,),
+                            name="HotkeyRotatorProcess",
+                            daemon=True
+                        )
+                        new_hp.start()
+                        
+                        # D. 回调至主线程挂载
+                        def _update_in_main():
+                            self._hotkey_process = new_hp
+                            self._hotkey_process_started = True
+                            self._rotator_restarting_flag = False
+                            logger.info("🚀 [Rotator] HotkeyRotatorProcess restarted and self-healed successfully in background.")
+                            # 自愈成功后，延迟 1 秒触发一次同步以对齐窗口
+                            self.after(1000, self.sync_rotator_windows)
+                        
+                        self.after(0, _update_in_main)
+                        
+                    except Exception as rex:
+                        logger.error(f"❌ [Rotator] Async restart self-healed failed: {rex}")
+                        self._rotator_restarting_flag = False
+                
+                # 抛向后台守护线程，0 毫秒卡顿！
+                t = threading.Thread(target=_async_restart_worker, name="AsyncRotatorSpawner", daemon=True)
+                t.start()
                 return
-            except Exception as rex:
-                logger.error(f"❌ [Rotator] Restart self-healed failed: {rex}")
+            else:
+                # 未达防抖门槛，跳过本次自愈
+                return
+        else:
+            self._rotator_fail_count = 0 # 存活时清空失败计数
 
         try:
             # 1. 搜集所有可见交易窗口 (必须在 UI 主线程进行)

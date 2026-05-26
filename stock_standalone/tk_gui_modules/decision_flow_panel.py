@@ -397,7 +397,14 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
     def __init__(self, parent=None, journal_path: str = "logs/trading_kernel_trace.jsonl"):
         super().__init__()
         self.parent_app = parent
+        
+        # 🛡️ 强制在最早对齐并标准化为物理绝对路径，扼杀多进程/打包环境下的工作目录飘移硬伤
+        import os
+        from sys_utils import get_base_path
+        if not os.path.isabs(journal_path):
+            journal_path = os.path.join(get_base_path(), journal_path)
         self.journal_path = journal_path
+        
         self._last_file_size = 0
         self._last_modified_time = 0.0
         
@@ -411,6 +418,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._position_cost_cache = {}
         self._last_orders_len = -1
         self._cached_code_trade_info = {}
+        self._last_rendered_state = None
+        self._hidden_closed_codes = set()
         
         self.setWindowFlags(QtCore.Qt.WindowType.Window | QtCore.Qt.WindowType.WindowMinMaxButtonsHint | QtCore.Qt.WindowType.WindowCloseButtonHint)
         self.setWindowTitle("⚡ 交易内核决策流水分析 (Trading Kernel Decision Flow)")
@@ -442,10 +451,15 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._update_top_status_badges()
         self._sync_control_tab_ui()
         
-        # 4. 启动定时器：每 500ms 增量扫描更新，实现真正的零 CPU 负荷监控
+        # 4. 启动高频定时器：每 500ms 增量扫描更新决策流水日志，实现高精增量追溯
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._check_and_update_records)
         self.timer.start(500)
+
+        # 5. 启动低频定时器：每 2000ms 执行状态徽章同步、控制页同步、持仓刷新与决策流停滞监控，释放主线程 CPU 开销
+        self.slow_timer = QtCore.QTimer(self)
+        self.slow_timer.timeout.connect(self._slow_update_cycle)
+        self.slow_timer.start(2000)
 
     def _init_ui(self):
         """初始化极富科技感、暗黑渐变之美的决策监控界面 (Premium Dark Mode)"""
@@ -643,6 +657,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.pos_table.cellDoubleClicked.connect(self._on_pos_cell_double_clicked)
         # 绑定键盘/鼠标切换当前行进行自动联动
         self.pos_table.currentCellChanged.connect(self._on_pos_table_cell_changed)
+        
+        # 启用持仓表格右键快捷菜单支持
+        self.pos_table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.pos_table.customContextMenuRequested.connect(self._show_pos_context_menu)
         
         pos_header = self.pos_table.horizontalHeader()
         pos_header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
@@ -939,7 +957,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _on_tab_changed(self, index):
         """当标签页切换时触发的回调，若切换到风控调优 Tab 则强制同步一次最新值"""
-        if index == 2:  # ⚙️ 策略信号调整与风控 (Signal Tuning)
+        if index == 1:  # 💼 内核实时持仓 (Kernel Positions & PnL)
+            self._refresh_positions_tab()
+        elif index == 2:  # ⚙️ 策略信号调整与风控 (Signal Tuning)
             self._sync_control_tab_ui(force=True)
 
     def _on_mode_combo_changed(self, index):
@@ -1272,6 +1292,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _load_initial_records(self):
         """冷启动时快速扫描读取 JSONL 末尾最多 200 条决策，规避白屏"""
+        self._last_rendered_state = None
         if not os.path.exists(self.journal_path):
             self.status_label.setText("⚠️ 未检测到交易流水日志文件 logs/trading_kernel_trace.jsonl")
             return
@@ -1311,52 +1332,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             self.status_label.setText(f"❌ 载入历史流水失败: {e}")
 
     def _check_and_update_records(self):
-        """定时扫描函数：比对文件大小与修改时间，以绝对零开销增量追溯最新决策"""
-        # 每 500ms 自动核对并刷新控制面板与顶部状态徽章，保障多进程状态完美同步
-        self._update_top_status_badges()
-        self._sync_control_tab_ui()
-        self._refresh_positions_tab()
-
-        # 🌟 [GUI Watchdog] 检查日志流水文件更新状态，如果长时间没写入进行黄色警告
-        try:
-            now = time.time()
-            try:
-                from JohnsonUtil import commonTips as cct
-            except ImportError:
-                try:
-                    import commonTips as cct
-                except ImportError:
-                    import common as cct
-            
-            is_trade_day = cct.get_trade_date_status()
-            now_dt = datetime.now()
-            now_time_int = now_dt.hour * 100 + now_dt.minute
-            is_active_trading = is_trade_day and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
-            
-            if not hasattr(self, '_last_growth_time'):
-                self._last_growth_time = now
-                
-            if is_active_trading:
-                if os.path.exists(self.journal_path):
-                    current_size = os.path.getsize(self.journal_path)
-                    if not hasattr(self, '_last_tracked_size'):
-                        self._last_tracked_size = current_size
-                    if current_size > self._last_tracked_size:
-                        self._last_growth_time = now
-                        self._last_tracked_size = current_size
-                
-                inactive_duration = now - self._last_growth_time
-                if inactive_duration > 300: # 5分钟没有更新
-                    minutes = inactive_duration / 60
-                    self.status_label.setText(f"⚠️ [FlowWatchdog] 决策流已停滞超过 {minutes:.1f} 分钟！请检查后台策略与行情")
-                    self.status_label.setStyleSheet("color: #FFCC00; font-weight: bold;")
-                else:
-                    self.status_label.setStyleSheet("")
-            else:
-                self.status_label.setStyleSheet("")
-        except Exception as e_watch:
-            logger.warning(f"Error in DecisionFlowPanel FlowWatchdog: {e_watch}")
-
+        """定时扫描函数：仅执行极其高效 of 增量日志文件追溯以确保主线程 20ms 的 UI 调度预算"""
         if not os.path.exists(self.journal_path):
             return
 
@@ -1400,8 +1376,69 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 # 重新应用过滤
                 self._filter_table()
                 
+                # 🌟 增量捕获后，立即触发一次实时持仓刷新，确保仓位变动能瞬间对齐
+                self._refresh_positions_tab()
+                
         except Exception as e:
             logger.error(f"Error in incremental records check: {e}")
+
+    def _slow_update_cycle(self):
+        """低频轮询周期：执行状态徽章同步、控制页同步、持仓刷新与决策流停滞监控，释放主线程 CPU 开销"""
+        # A. 同步顶部运行模式与熔断徽章
+        self._update_top_status_badges()
+        
+        # B. 同步控制与风控参数 UI 状态
+        self._sync_control_tab_ui()
+        
+        # C. 刷新实时持仓与浮盈数据
+        self._refresh_positions_tab()
+        
+        # D. 执行 [GUI Watchdog] 日志流更新停滞状态审计
+        try:
+            now = time.time()
+            try:
+                from JohnsonUtil import commonTips as cct
+            except ImportError:
+                try:
+                    import commonTips as cct
+                except ImportError:
+                    import common as cct
+            
+            is_trade_day = cct.get_trade_date_status()
+            now_dt = datetime.now()
+            now_time_int = now_dt.hour * 100 + now_dt.minute
+            is_active_trading = is_trade_day and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
+            
+            if not hasattr(self, '_last_growth_time'):
+                self._last_growth_time = now
+                
+            if is_active_trading:
+                # 磁盘 I/O 节流：仅在低频周期检查文件大小更新，避免高频系统调用
+                if os.path.exists(self.journal_path):
+                    current_size = os.path.getsize(self.journal_path)
+                    if not hasattr(self, '_last_tracked_size'):
+                        self._last_tracked_size = current_size
+                    if current_size > self._last_tracked_size:
+                        self._last_growth_time = now
+                        self._last_tracked_size = current_size
+                
+                inactive_duration = now - self._last_growth_time
+                if inactive_duration > 300: # 5分钟没有更新
+                    minutes = inactive_duration / 60
+                    self.status_label.setText(f"⚠️ [FlowWatchdog] 决策流已停滞超过 {minutes:.1f} 分钟！请检查后台策略与行情")
+                    self.status_label.setStyleSheet("color: #FFCC00; font-weight: bold;")
+                else:
+                    text = self.status_label.text()
+                    if "[FlowWatchdog]" in text:
+                        self.status_label.setText("⚡ 决策流正常，监听中...")
+                        self.status_label.setStyleSheet("")
+            else:
+                text = self.status_label.text()
+                if "[FlowWatchdog]" in text:
+                    self.status_label.setText("⚡ 盘外/休市时段，监听暂停。")
+                    self.status_label.setStyleSheet("")
+        except Exception as e_watch:
+            logger.warning(f"Error in DecisionFlowPanel FlowWatchdog slow cycle: {e_watch}")
 
     def _parse_timestamp(self, ts_str: Any) -> str:
         """防弹自愈时间戳解析器：统一格式化为 MM-DD HH:MM:SS"""
@@ -1781,7 +1818,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 self.code_clicked.emit(code, name)
 
     def _refresh_positions_tab(self):
-        """核心无摩擦刷新：每 500ms 直接从 `get_kernel_service()` 单例物理提取内存中最新持仓与浮盈状态"""
+        """核心无摩擦刷新：直接从 `get_kernel_service()` 单例物理提取内存中最新持仓与浮盈状态"""
         selected_code = None
         try:
             # 记录当前选中的股票代码，以备在刷新后恢复选中态，防止高频刷新丢失选中行与闪烁
@@ -1799,12 +1836,13 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             service = get_kernel_service()
             if not service:
                 logger.warning("Kernel service not available yet.")
+                self.pos_table.blockSignals(False)
                 return
                 
             mode = service.mode
             executor = service.executor
             
-            # 物理对账数据源切换自愈：选择哪种模式显示哪种模式的持仓记录
+            # 物理对账数据源切换自愈：选择哪种模式显示哪种模式 of 持仓记录
             if mode == "LIVE_AUTO":
                 adapter = service.broker_adapter
             elif mode == "CONFIRM":
@@ -1824,13 +1862,31 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     elif hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None and not self.parent_app.current_df.empty:
                         df = self.parent_app.current_df
                     
-                    if df is not None:
+                    if df is not None and not df.empty:
+                        # ── 预先构建 {pure_code: raw_index_key} 字典，实现 O(1) 物理防线，消除 str/int/后缀 不一致 ──
+                        index_map = {}
+                        for idx_val in df.index:
+                            idx_str = str(idx_val)
+                            # 提取纯数字代码作为键
+                            pure = "".join(filter(str.isdigit, idx_str))[:6]
+                            if len(pure) == 6:
+                                index_map[pure] = idx_val
+                                
                         for code in temp_positions.keys():
-                            if code in df.index:
+                            idx_val = index_map.get(code)
+                            if idx_val is not None:
+                                target_row = df.loc[idx_val]
                                 now_price = None
+                                
+                                # 支持 Series 或 DataFrame 处理（重复行防御）
+                                if hasattr(target_row, "ndim") and target_row.ndim > 1:
+                                    row_item = target_row.iloc[0]
+                                else:
+                                    row_item = target_row
+                                    
                                 for col in ["now", "close", "price", "trade"]:
                                     if col in df.columns:
-                                        val = df.loc[code].get(col)
+                                        val = row_item.get(col)
                                         try:
                                             if val is not None:
                                                 if hasattr(val, "values"):
@@ -1844,6 +1900,110 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                 if now_price is not None:
                                     adapter.update_market_price(code, now_price)
 
+            # ── 物理对账与双向对账同步 (Auto-Heal Bridge for Paper Adapter) ──
+            if service.paper_adapter is not None:
+                try:
+                    from trade_gateway import get_trade_gateway, Position as LegacyPosition
+                    from trading_kernel.execution.paper_adapter import Position as PaperPosition
+                    
+                    trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+                    if trade_gw is not None:
+                        # 1) Bridge-Anti-Reverse: 将新内核的持久化持仓反向还原给老柜台内存
+                        for p_code_pure, pos_obj in list(service.paper_adapter.account.positions.items()):
+                            vol = float(pos_obj.volume)
+                            if vol > 0:
+                                found_in_old = False
+                                with trade_gw._lock:
+                                    for old_key in list(trade_gw._positions.keys()):
+                                        old_pure = "".join(filter(str.isdigit, str(old_key)))[:6]
+                                        if old_pure == p_code_pure:
+                                            found_in_old = True
+                                            leg_pos = trade_gw._positions[old_key]
+                                            leg_pos.shares = int(vol)
+                                            break
+                                    if not found_in_old:
+                                        name_val = "内核持仓"
+                                        sector_val = ""
+                                        try:
+                                            df_rt = None
+                                            if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
+                                                df_rt = self.parent_app.df_all
+                                            if df_rt is not None:
+                                                for idx in df_rt.index:
+                                                    idx_str = str(idx)
+                                                    idx_pure = "".join(filter(str.isdigit, idx_str))[:6]
+                                                    if idx_pure == p_code_pure:
+                                                        row = df_rt.loc[idx]
+                                                        if hasattr(row, "ndim") and row.ndim > 1:
+                                                            row = row.iloc[0]
+                                                        name_val = row.get("name", "内核持仓")
+                                                        sector_val = row.get("sector", row.get("sector_name", ""))
+                                                        break
+                                        except Exception:
+                                            pass
+                                        entry_p = float(pos_obj.entry_price)
+                                        curr_p = float(pos_obj.current_price)
+                                        leg_pos = LegacyPosition(
+                                            code=p_code_pure,
+                                            name=name_val,
+                                            sector=sector_val,
+                                            entry_price=entry_p,
+                                            entry_time=datetime.now(),
+                                            shares=int(vol),
+                                            position_value=entry_p * vol,
+                                            strategy_tag="内核反哺",
+                                            stop_loss=entry_p * 0.98,
+                                            current_price=curr_p if curr_p > 0 else entry_p,
+                                            pnl_pct=pos_obj.pnl_pct,
+                                            pnl_value=pos_obj.pnl,
+                                            day_high=curr_p if curr_p > 0 else entry_p,
+                                        )
+                                        trade_gw._positions[p_code_pure] = leg_pos
+                                        logger.info(f"[Bridge-Anti-Reverse] Restored legacy position: {p_code_pure} ({name_val})")
+                        
+                        # 2) 执行双向对账同步
+                        old_positions = trade_gw.get_positions()
+                        old_code_set = set()
+                        for old_pos in old_positions:
+                            o_code = old_pos.get("code")
+                            if o_code:
+                                o_code_pure = "".join(filter(str.isdigit, str(o_code)))[:6]
+                                if len(o_code_pure) == 6:
+                                    old_code_set.add(o_code_pure)
+                                    vol = float(old_pos.get("shares", 0))
+                                    entry_p = float(old_pos.get("entry_price", 0.0))
+                                    curr_p = float(old_pos.get("current_price", entry_p))
+                                    if o_code_pure not in service.paper_adapter.account.positions:
+                                        service.paper_adapter.account.positions[o_code_pure] = PaperPosition(
+                                            code=o_code_pure,
+                                            entry_price=entry_p,
+                                            volume=vol,
+                                            current_price=curr_p,
+                                        )
+                                    else:
+                                        pos_obj = service.paper_adapter.account.positions[o_code_pure]
+                                        pos_obj.volume = vol
+                                        pos_obj.entry_price = entry_p
+                                        if curr_p > 0:
+                                            pos_obj.current_price = curr_p
+                                            
+                        # 清洗已平仓
+                        for active_c in list(service.paper_adapter.account.positions.keys()):
+                            if active_c not in old_code_set:
+                                service.paper_adapter.account.positions.pop(active_c, None)
+                                
+                        # 同步可用现金与初始资金
+                        total_cap = getattr(trade_gw.risk_manager, "total_capital", 1000000.0)
+                        pos_value = sum(p.market_value for p in service.paper_adapter.account.positions.values())
+                        service.paper_adapter.account.cash = max(0.0, total_cap - pos_value)
+                        service.paper_adapter.account.initial_capital = total_cap
+                        
+                        # 保存状态
+                        if hasattr(service.paper_adapter, "_save_state"):
+                            service.paper_adapter._save_state()
+                except Exception as e_bridge:
+                    logger.warning(f"Error bridging/syncing positions in DecisionFlowPanel: {e_bridge}")
+
             # 2. 重新获取最新的持仓与资产快照
             if adapter is not None:
                 positions = adapter.get_positions()
@@ -1856,6 +2016,37 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     "total_pnl": 0.0,
                     "total_pnl_pct": 0.0,
                 }
+            
+            # 3. 收集所有的交易时间与订单记录 (O(N) 遍历优化与缓存机制)
+            current_orders = getattr(adapter, "orders", [])
+            orders_len = len(current_orders)
+
+            # ── 渲染门槛 (Rendering Gate Check)：仅在数据内容或长度实际变化时才渲染，阻断无意义重绘 ──
+            state_rep = {
+                "positions": {
+                    code: {
+                        "volume": float(pos.get("volume", 0.0)),
+                        "entry_price": float(pos.get("entry_price", 0.0)),
+                        "current_price": float(pos.get("current_price", 0.0)),
+                        "pnl": float(pos.get("pnl", 0.0)),
+                        "pnl_pct": float(pos.get("pnl_pct", 0.0)),
+                    } for code, pos in positions.items()
+                },
+                "account": {
+                    "cash": float(account.get("cash", 0.0)),
+                    "total_equity": float(account.get("total_equity", 0.0)),
+                    "total_pnl": float(account.get("total_pnl", 0.0)),
+                    "total_pnl_pct": float(account.get("total_pnl_pct", 0.0)),
+                },
+                "orders_len": orders_len,
+                "hidden_closed_codes": sorted(list(self._hidden_closed_codes)) if hasattr(self, "_hidden_closed_codes") else [],
+            }
+            import json
+            state_str = json.dumps(state_rep, sort_keys=True)
+            if hasattr(self, "_last_rendered_state") and self._last_rendered_state == state_str:
+                self.pos_table.blockSignals(False)
+                return
+            self._last_rendered_state = state_str
             
             total_market_val = 0.0
             
@@ -1904,8 +2095,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             
             # 活着持仓的个股
             for code, pos in positions.items():
-                entry_price = float(pos.get("entry_price", 0.0))
                 volume = float(pos.get("volume", 0.0))
+                if volume <= 0:
+                    # 双重保险：股数小于等于 0 的不属于活着持仓，直接跳过，防止渲染幽灵 0 股持仓行
+                    continue
+                entry_price = float(pos.get("entry_price", 0.0))
                 curr_price = float(pos.get("current_price", 0.0))
                 market_val = volume * curr_price
                 total_market_val += market_val
@@ -1936,6 +2130,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             # 今日已平仓的个股
             for code, info in code_trade_info.items():
                 if code not in positions:
+                    if hasattr(self, "_hidden_closed_codes") and code in self._hidden_closed_codes:
+                        continue
                     buys = info["buys"]
                     sells = info["sells"]
                     
@@ -2106,3 +2302,207 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 # 最后一列“平仓时间”自适应 Stretch
                 pct_width = max(110, total_pos_w - scaled_pos_total)
                 self.pos_table.setColumnWidth(9, pct_width)
+
+    def _show_pos_context_menu(self, pos):
+        """内核实时持仓表格右键快捷菜单：支持手动平仓、一键全平、代码复制"""
+        index = self.pos_table.indexAt(pos)
+        if not index.isValid():
+            return
+            
+        row = index.row()
+        menu = QtWidgets.QMenu(self)
+        
+        # 扁平精致暗黑菜单风格
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1E1E24;
+                color: #E2E2E6;
+                border: 1px solid #2E2E35;
+            }
+            QMenu::item {
+                padding: 4px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #00E676;
+                color: #121214;
+            }
+        """)
+        
+        code_item = self.pos_table.item(row, 0)
+        name_item = self.pos_table.item(row, 1)
+        vol_item = self.pos_table.item(row, 2)
+        code = code_item.text().strip() if code_item else ""
+        name = name_item.text().strip() if name_item else ""
+        
+        try:
+            volume = float(vol_item.text().strip()) if vol_item else 0.0
+        except ValueError:
+            volume = 0.0
+        
+        if code:
+            if volume > 0:
+                # 动作一：手动平仓
+                action_sell = menu.addAction(f"🚨 手动平仓此股 ({code})")
+                action_sell.triggered.connect(lambda: self._manual_sell_position(code, name))
+            else:
+                # 针对已平仓(0股)记录，提供“移除记录”功能
+                action_remove = menu.addAction(f"🗑️ 移除此已平仓记录 ({code})")
+                action_remove.triggered.connect(lambda c=code: self._remove_closed_record(c))
+            
+            menu.addSeparator()
+            
+            # 动作二：复制股票代码
+            action_copy_code = menu.addAction("📋 复制股票代码")
+            action_copy_code.triggered.connect(lambda: self._copy_to_clipboard(code, "股票代码"))
+            
+            # 动作三：复制股票名称
+            if name:
+                action_copy_name = menu.addAction("📋 复制股票名称")
+                action_copy_name.triggered.connect(lambda: self._copy_to_clipboard(name, "股票名称"))
+                
+            menu.addSeparator()
+            
+        # 动作四：一键全平
+        action_sell_all = menu.addAction("⚠️ 一键全平所有持仓")
+        action_sell_all.triggered.connect(self._manual_sell_all_positions)
+        
+        # 动作五：清除所有已平仓记录
+        has_closed = False
+        for r in range(self.pos_table.rowCount()):
+            v_item = self.pos_table.item(r, 2)
+            try:
+                if v_item and float(v_item.text().strip()) == 0.0:
+                    has_closed = True
+                    break
+            except Exception:
+                pass
+        if has_closed:
+            action_clear_closed = menu.addAction("🗑️ 清除所有已平仓记录")
+            action_clear_closed.triggered.connect(self._clear_all_closed_records)
+        
+        menu.exec(self.pos_table.viewport().mapToGlobal(pos))
+
+    def _remove_closed_record(self, code: str):
+        """将已平仓的个股代码加入隐藏集合，从而在列表中删除该已平仓行的显示"""
+        if not hasattr(self, "_hidden_closed_codes"):
+            self._hidden_closed_codes = set()
+        self._hidden_closed_codes.add(code)
+        self._refresh_positions_tab()
+
+    def _clear_all_closed_records(self):
+        """将当前表格中所有股数为0的已平仓个股全部加入隐藏集合"""
+        if not hasattr(self, "_hidden_closed_codes"):
+            self._hidden_closed_codes = set()
+        for r in range(self.pos_table.rowCount()):
+            c_item = self.pos_table.item(r, 0)
+            v_item = self.pos_table.item(r, 2)
+            if c_item and v_item:
+                try:
+                    if float(v_item.text().strip()) == 0.0:
+                        self._hidden_closed_codes.add(c_item.text().strip())
+                except Exception:
+                    pass
+        self._refresh_positions_tab()
+
+    def _manual_sell_position(self, code: str, name: str, show_message: bool = True):
+        """手动平仓单只个股（同步桥接老网关和平仓新交易内核，完美记账）"""
+        try:
+            from trade_gateway import get_trade_gateway
+            trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+            if not trade_gw:
+                QtWidgets.QMessageBox.warning(self, "警告", "交易网关未就绪，无法手动平仓")
+                return
+                
+            if show_message:
+                if not QtWidgets.QMessageBox.question(self, "确认", f"是否手工平仓所持股票 {name} ({code})？", 
+                                                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No) == QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+
+            # 1. 物理计算平仓价格 (最新价优先)
+            price = 0.0
+            if self.parent_app and hasattr(self.parent_app, "selector") and self.parent_app.selector is not None:
+                df_rt = getattr(self.parent_app.selector, 'df_all_realtime', None)
+                if df_rt is not None and code in df_rt.index:
+                    price = float(df_rt.loc[code].get('trade', 0) or 0)
+            
+            if price <= 0:
+                # Fallback 从 pos_table 或 adapter 获取
+                try:
+                    from trading_kernel.kernel_service import get_kernel_service
+                    service = get_kernel_service()
+                    if service and service.paper_adapter:
+                        pos = service.paper_adapter.account.positions.get(code)
+                        if pos:
+                            price = float(pos.current_price or pos.entry_price)
+                except Exception:
+                    pass
+            if price <= 0:
+                price = 1.0  # 安全低保底
+
+            # 2. 物理调用老版模拟网关执行平仓卖出，实现原有的平仓逻辑不变！
+            trade_gw.submit_sell(code, price, reason="内核面板上手工平仓")
+
+            # 3. 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+            sig_sell = {
+                "code": code,
+                "name": name,
+                "signal_type": "手工平仓",
+                "action": "SELL",
+                "price": price,
+                "reason": "内核面板上手工平仓",
+                "journal_ts": datetime.now().isoformat(),
+            }
+            try:
+                from trading_kernel.observability.journal import enrich_decision_item
+                enrich_decision_item(sig_sell, write_journal=True)
+            except Exception as e_journal:
+                logger.warning(f"Error enriching sell journal: {e_journal}")
+
+            # 4. 强制物理保存 paper_adapter 最新空状态
+            try:
+                from trading_kernel.kernel_service import get_kernel_service
+                service = get_kernel_service()
+                if service and service.paper_adapter:
+                    if hasattr(service.paper_adapter, "_save_state"):
+                        service.paper_adapter._save_state()
+            except Exception:
+                pass
+
+            # 5. 立即局部主动触发表格重新渲染
+            self._refresh_positions_tab()
+            
+            if show_message:
+                toast_message(self.parent_app, f"手工平仓成功: {name} ({code})")
+        except Exception as e:
+            logger.error(f"Error in manual_sell_position: {e}")
+
+    def _manual_sell_all_positions(self):
+        """右键一键全平所有内核实时持仓（含桥接旧持仓）"""
+        try:
+            from trading_kernel.kernel_service import get_kernel_service
+            service = get_kernel_service()
+            if not service or not service.paper_adapter:
+                QtWidgets.QMessageBox.warning(self, "警告", "模拟交易内核未就绪，无法一键平仓")
+                return
+                
+            positions = service.paper_adapter.get_positions()
+            if not positions:
+                QtWidgets.QMessageBox.information(self, "提示", "当前无持仓")
+                return
+                
+            if not QtWidgets.QMessageBox.question(self, "确认", f"是否手工一键全平当前全部 {len(positions)} 只持仓？", 
+                                                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No) == QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+                
+            # 批量执行平仓
+            for code, pos_dict in list(positions.items()):
+                name = ""
+                # 尝试查找股票名称
+                if self.parent_app and hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
+                    if code in self.parent_app.df_all.index:
+                        name = str(self.parent_app.df_all.loc[code].get("name", ""))
+                self._manual_sell_position(code, name, show_message=False)
+                
+            QtWidgets.QMessageBox.information(self, "完成", "已执行一键平仓所有持仓！")
+        except Exception as e:
+            logger.error(f"Error in manual_sell_all_positions: {e}")
