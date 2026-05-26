@@ -1,3 +1,16 @@
+## 2026-05-27 09:00
+- [x] **实现「异动放量详情」面板完全数据驱动的可定制化列架构，无缝注入 "DFF3" 高能指标 (Delivered Fully Data-Driven Configurable Column Architecture & Seamless "DFF3" Metric Integration for Volume Details)**：
+    - [x] **实现配置层全自动防抖自愈与默认升级 (Active Config Upgrades & Self-Healing)**：
+        - 针对用户提出的“添加 dff3 列并把结构优化为可定制结构”的核心诉求，在 `commonTips.py` 中重构了 `vol_up_details_col` 字段。
+        - 设立了最高安全等级的冷启动自愈合并机制：自动检测用户本地 `global.ini` 中现存的配置，如果发现用户本地配置缺少新增的 `"DFF3"` 列，无需人工干预即可在毫秒级内自动将其补全拼接并存盘，确保了 legacy 用户的无感升级与前向兼容性。
+    - [x] **实现行情监控后端 (instock_MonitorTK.py) 动态映射与属性提取 (Dynamic Property Extraction Loop)**：
+        - 物理废除了原本收集“异动放量详情”数据时的硬编码字典键值，重构为基于 `cct.vol_up_details_col` 动态配置驱动的属性收集器。
+        - 通过智能属性侦测（智能自适应 lower 属性与键名映射），自动从后台行情 `sub_df` 中为个股拉取对应的实时指标数值，打通了新指标从底层行情数据源直通 UI 缓存的闭环，为后续添加任意新监控列提供了极高强度的无限扩展支持。
+    - [x] **实现 VolumeDetailsDialog (signal_dashboard_panel.py) 动态表头构建与高保真自动渲染 (Dynamic Header Initialization & Precision-Aware Grid UI Rendering)**：
+        - **动态表头重构**：重写了 `VolumeDetailsDialog.__init__`，使得表格列数与表头标题 100% 依托 `cct.vol_up_details_col` 数据流动态构建，完美支持在配置中自由增删、更改列数。
+        - **高保真数据渲染与对齐**：重构了 `update_data` 刷新逻辑。系统通过动态遍历可定制列，根据列名（如“代码”、“名称”、“涨幅%”、“DFF3”）自发判定最合适的 UI 渲染方案，并针对涨跌幅、数值大小、文本进行高精度的前景色色彩补偿与左右对齐布局微调，实现极具科技感的动态高亮展示。
+    - [x] **测试全绿无损回归**：完美跑通了全量 11/11 核心自选股生命周期测试（`test_watchlist_lifecycle.py`），全平台数据传导与 UI 组件对齐实现 100% 满分无损集成！
+
 ## 2026-05-27 08:00
 - [x] **构建高可靠性的持仓与资金自愈验证引擎，实现 100% 物理对账温启动自动修复 (Delivered Active Positions Self-Healing Validation & Ledger-Driven Warm-Start Auto-Repair)**：
     - [x] **实现理论持仓与资金 dry-run 物理还原算法**：

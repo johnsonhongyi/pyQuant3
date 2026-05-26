@@ -5196,16 +5196,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         chg = row.get('ratio', 0)
                                         if chg == 0 and 'trade' in row and 'lastp1d' in row and row['lastp1d'] != 0:
                                             chg = (row['trade'] - row['lastp1d']) / row['lastp1d'] * 100
-                                        dff_val = row.get('dff', 0.0)
-                                        dff2_val = row.get('dff2', 0.0)
-                                        dff_val = 0.0 if (dff_val is None or pd.isna(dff_val)) else float(dff_val)
-                                        dff2_val = 0.0 if (dff2_val is None or pd.isna(dff2_val)) else float(dff2_val)
                                         
-                                        vol_up_details.append({
-                                            "code": str(idx), "name": str(row.get('name', '')),
-                                            "change": float(chg), "ratio": float(vr[df.index.get_loc(idx)]),
-                                            "dff": dff_val, "dff2": dff2_val
-                                        })
+                                        item_data = {
+                                            "code": str(idx),
+                                            "name": str(row.get('name', '')),
+                                            "change": float(chg),
+                                            "ratio": float(vr[df.index.get_loc(idx)])
+                                        }
+                                        
+                                        # 自动从 vol_up_details_col 中读取其它定制 col 并从 sub_df 提取
+                                        for col_name in cct.vol_up_details_col:
+                                            if col_name in ["代码", "名称", "涨幅%", "量比"]:
+                                                continue
+                                            col_key = col_name.lower()
+                                            val = row.get(col_key, 0.0)
+                                            val = 0.0 if (val is None or pd.isna(val)) else float(val)
+                                            item_data[col_key] = val
+                                            
+                                        vol_up_details.append(item_data)
                             
                             if 'score' in df.columns:
                                 scanned_df = df[df['score'] > 0]
