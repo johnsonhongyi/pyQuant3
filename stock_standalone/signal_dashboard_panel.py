@@ -1156,18 +1156,46 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
                 state_key = f'table_state_{clean_name}'
                 if state_key in ui_state:
-                    table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
+                    ok = table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
+                    if ok:
+                        table._has_restored_state = True  # 标记已成功恢复自定义列宽，后续刷新不得擅自破坏与覆盖它
             # [PERF] 最稳方案：延迟一个 event-loop 再采集快照
             # 确保 restoreState() 引引发的异步布局事件全部稳定后再建立基准，防止启动即触发 save_ui
             QTimer.singleShot(0, lambda: setattr(self, '_last_saved_ui_state', self._collect_ui_state()))
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
 
+    def _compute_data_signature(self, data_list) -> str:
+        """[PERF] 极速数据指纹：微秒级提取长度与核心内容特征，阻断一切冗余表格重绘与假死"""
+        if not data_list:
+            return "empty"
+        try:
+            parts = [str(len(data_list))]
+            for d in data_list[:100]:
+                if isinstance(d, dict):
+                    code = d.get('code', '')
+                    status = d.get('status', '')
+                    ts = d.get('created_at', d.get('time', ''))
+                    val = d.get('percent', d.get('pct_diff', d.get('score', '')))
+                    parts.append(f"{code}_{status}_{ts}_{val}")
+                elif isinstance(d, (list, tuple)):
+                    parts.append(str(d))
+                else:
+                    parts.append(repr(d))
+            return "|".join(parts)
+        except Exception:
+            return str(len(data_list))
+
     def _limit_table_column_widths(self, table: QTableWidget):
         """
-        [🚀 极致性能] 节流版的列宽限制。
-        强制对特定列施加最大宽度限制，防止自适应伸缩导致 UI 崩溃。
+        [🚀 极致性能与极度尊重布局] 节流且智能的列宽限制/首屏精致自适应。
+        1. 若用户已经手动拉伸并成功加载了自定义持久化状态，100% 绝对不去干扰裁剪它。
+        2. 若为首次加载或无配置，则自动施加精致大气的默认推荐列宽，让界面高端通透。
         """
+        if getattr(table, '_has_restored_state', False):
+            # 100% 绝对尊重专业交易员的手动自定义宽度，绝不粗暴裁剪覆盖
+            return
+
         # [NEW] 节流保护：如果 2 秒内刚限制过，则跳过，减少高频刷新时的布局重算
         last_limit = getattr(table, '_last_limit_ts', 0)
         curr_ts = time.time()
@@ -1176,28 +1204,26 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table._last_limit_ts = curr_ts
 
         header = table.horizontalHeader()
-        # 先触发一次自适应 (如果当前是自适应模式)
-        # table.resizeColumnsToContents() # 慎用，可能会导致死循环或性能抖动
-        
         column_count = table.columnCount()
         for i in range(column_count):
             h_text = table.horizontalHeaderItem(i).text() if table.horizontalHeaderItem(i) else ""
-            curr_width = table.columnWidth(i)
             
-            # 设定限制规则
-            max_w = 150 # 默认上限
-            if h_text in ["所属板块", "板块名称"]:
-                max_w = 120
-            elif h_text in ["形态/信号", "形态详情", "详情", "捕捉理由", "跟风明细", "标签"]:
-                max_w = 250
-            elif h_text in ["代码", "时间", "评级"]:
-                max_w = 80
+            # 首屏/无配置时的精致推荐宽度设计
+            rec_w = 120 # 默认适中宽度
+            if h_text in ["时间", "更新时间"]:
+                rec_w = 95
+            elif h_text in ["所属板块", "板块名称"]:
+                rec_w = 135
+            elif h_text in ["详情", "捕捉理由", "跟风明细", "理由", "核心理由", "形态详情", "形态/信号", "标签"]:
+                rec_w = 280  # 默认加宽，让最关键的信息一览无余
+            elif h_text in ["名称", "龙头名称"]:
+                rec_w = 85
+            elif h_text in ["代码", "状态", "风控", "评级", "阶段", "现价", "建议价"]:
+                rec_w = 75
             
-            if curr_width > max_w:
-                # 如果超过限制，将模式改为 Interactive（允许手动调整）或 Fixed 
-                # 这里设为 Interactive 并强制指定宽度
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-                table.setColumnWidth(i, max_w)
+            # 设置为可自由交互，并赋予极佳的初始推荐宽度
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+            table.setColumnWidth(i, rec_w)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -2115,7 +2141,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 # 否则回退到 engine 查询（兜底）
                 trends = getattr(self, '_cached_strategic_trends', None)
                 if trends is None:
-                    trends = self._engine_ctrl.get_strategic_trends()
+                    with timed_ctx("engine_get_strategic_trends", warn_ms=300):
+                        trends = self._engine_ctrl.get_strategic_trends()
                 self._refresh_strategic_table(trends)
             except Exception as e:
                 logger.error(f"❌ [DASHBOARD] Refresh strategic table failed: {e}")
@@ -2350,11 +2377,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table = self.tables.get("🌟 决策队列")
         if not table: return
         
+        # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
+        sig = self._compute_data_signature(decisions)
+        if getattr(table, '_last_sig', None) == sig:
+            return
+        table._last_sig = sig
+        
         # [PERF] 阶段2：版本号脏检查
         if getattr(self, '_engine_ctrl', None):
-            if getattr(table, '_render_version', -1) == self._engine_ctrl._decision_render_version:
-                return
-            table._render_version = self._engine_ctrl._decision_render_version
+            table._render_version = getattr(self._engine_ctrl, '_decision_render_version', 0)
 
         current_selection = None
         sel_items = table.selectedItems()
@@ -2389,6 +2420,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         was_sorting = table.isSortingEnabled()
         table.setSortingEnabled(False)
         table.setUpdatesEnabled(False)
+        table.viewport().setUpdatesEnabled(False)  # [FIX] viewport 也在 setRowCount 前冻结
         table.setProperty("uniformItemSizes", True)
         table.setProperty("layoutAboutToBeChanged", True)
         table.blockSignals(True)
@@ -2413,7 +2445,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     table.viewport().setUpdatesEnabled(True)
                 return  # Task cancelled
                 
-            CHUNK_SIZE = 50
+            CHUNK_SIZE = 30  # [FIX] 减小块，更细粒度让出事件循环
             end_idx = min(start_idx + CHUNK_SIZE, len(decisions))
             
             table.setUpdatesEnabled(False)
@@ -2486,22 +2518,26 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.blockSignals(False)
                 table.setProperty("layoutAboutToBeChanged", False)
 
-        # 启动分块渲染流
-        render_chunk(0)
+        # [KEY FIX] 第一块也 QTimer 化，_refresh_decision_table 立即返回不阻塞主线程
+        QTimer.singleShot(0, lambda: render_chunk(0))
 
     def _refresh_dragon_table(self, dragons: List[dict]):
         table = self.tables.get("🐉 龙头追踪")
         if not table: return
         
+        # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
+        sig = self._compute_data_signature(dragons)
+        if getattr(table, '_last_sig', None) == sig:
+            return
+        table._last_sig = sig
+        
         # [PERF] 强制显示上限
         dragons = dragons[:200]
 
         # [PERF] 性能分析上下文
-        with timed_ctx("_refresh_dragon_table", warn_ms=300):
+        with timed_ctx("engine_refresh_dragon_table", warn_ms=300):
             if getattr(self, '_engine_ctrl', None):
-                if getattr(table, '_render_version', -1) == self._engine_ctrl._dragon_render_version:
-                    return
-                table._render_version = self._engine_ctrl._dragon_render_version
+                table._render_version = getattr(self._engine_ctrl, '_dragon_render_version', 0)
 
             current_selection = None
             sel_items = table.selectedItems()
@@ -2529,9 +2565,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
             dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
 
-            # [PERF] 极致锁定：停止一切布局重绘
+            # [FIX] setUpdatesEnabled BEFORE setRowCount，防止行创建触发 O(N) 布局重绘
             was_sorting = table.isSortingEnabled()
             table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.viewport().setUpdatesEnabled(False)
             table.blockSignals(True)
 
             if table.rowCount() != len(dragons):
@@ -2556,7 +2594,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         table.viewport().setUpdatesEnabled(True)
                     return  # Task cancelled by a newer render pass
                 
-                CHUNK_SIZE = 50
+                CHUNK_SIZE = 30  # [FIX] 减小块大小，更细粒度让出事件循环
                 end_idx = min(start_idx + CHUNK_SIZE, len(dragons))
                 
                 table.setUpdatesEnabled(False)
@@ -2616,21 +2654,28 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         table.selectRow(target_row)
                     table.setSortingEnabled(was_sorting)
                     table.blockSignals(False)
+                    table.viewport().update()  # [FIX] 触发一次性刷新
 
-            # 启动分块渲染流
-            render_chunk(0)
+            # [KEY FIX] 第一块也通过 QTimer.singleShot(0) 投递，让本函数立即返回。
+            # 0ms = "事件循环空闲后立即执行"，彻底切断 timed_ctx 与渲染的绑定，
+            # 杜绝 Tkinter+Qt 共享事件循环时所有块被同步串行执行的 17s 卡死。
+            QTimer.singleShot(0, lambda: render_chunk(0))
 
     def _refresh_sector_table(self, sectors: List[dict]):
         table = self.tables.get("🔥 板块热力")
         if not table: return
         
+        # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
+        sig = self._compute_data_signature(sectors)
+        if getattr(table, '_last_sig', None) == sig:
+            return
+        table._last_sig = sig
+        
         # [PERF] 强制显示上限
         sectors = sectors[:100]
         
         if getattr(self, '_engine_ctrl', None):
-            if getattr(table, '_render_version', -1) == self._engine_ctrl._sector_render_version:
-                return
-            table._render_version = self._engine_ctrl._sector_render_version
+            table._render_version = getattr(self._engine_ctrl, '_sector_render_version', 0)
 
         current_selection = None
         sel_items = table.selectedItems()
@@ -2715,6 +2760,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _refresh_strategic_table(self, trends: List[dict]):
         table = self.tables.get("🌐 战略趋势")
         if not table: return
+        
+        # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
+        sig = self._compute_data_signature(trends)
+        if getattr(table, '_last_sig', None) == sig:
+            return
+        table._last_sig = sig
 
         # [PERF] 强制显示上限，防止数据爆炸导致 GUI 卡死
         trends = trends[:100]
@@ -2722,9 +2773,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] 性能分析上下文
         with timed_ctx("_refresh_strategic_table", warn_ms=300):
             if getattr(self, '_engine_ctrl', None):
-                if getattr(table, '_render_version', -1) == self._engine_ctrl._strategic_render_version:
-                    return
-                table._render_version = self._engine_ctrl._strategic_render_version
+                table._render_version = getattr(self._engine_ctrl, '_strategic_render_version', 0)
 
             current_selection = None
             sel_items = table.selectedItems()

@@ -719,6 +719,7 @@ class HotkeyRotatorApp(QtCore.QObject):
 def main(log_level="DEBUG"):
     try:
         app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)  # 物理根治：关闭轮选 Dialog 时防止整个 QApplication 事件循环退出闪退
         
         # 启用独立高 DPI 适配
         try:

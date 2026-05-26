@@ -297,8 +297,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(flags)
             self.show()
             
-            # 🚀 [NEW] 延时 50ms 异步应用透明度状态，给 OS Win32 句柄与 High-DPI 重建留出稳定时间，根除 UpdateLayeredWindow 警告
-            QtCore.QTimer.singleShot(50, self._apply_opacity_ui_state)
+            # 🚀 [NEW] 延时 250ms 异步应用透明度状态，给 OS Win32 句柄与 High-DPI 重建留出稳定时间，根除 UpdateLayeredWindow 警告
+            QtCore.QTimer.singleShot(250, self._apply_opacity_ui_state)
             
             logger.info(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
         finally:
@@ -1162,7 +1162,6 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 'leader_pct_diff': 0.0,
                 'zt_count': 0
             }
-            # 如果存在最后联动股票，自动自愈抓取并填充为今日统治龙头！
             if hasattr(self, '_last_linkage_code') and self._last_linkage_code:
                 dummy_data['leader'] = self._last_linkage_code
                 dummy_data['leader_name'] = '联动锁定'
@@ -1185,7 +1184,6 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         stype = sh.sector_type or "📊 跟踪"
         self.lbl_sector_badge.setText(stype)
-        # 根据板块类型动态着色
         badge_style = "font-weight: bold; padding: 1px 6px; border-radius: 4px; font-size: 10px; "
         if "强攻" in stype or "🔥" in stype:
             badge_style += "border: 1px solid #ff007f; color: #ff007f; background-color: rgba(255, 0, 127, 0.1);"
@@ -1218,20 +1216,53 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         leader_vwap = float(sh.leader_vwap or 0.0)
         leader_now_price = 0.0
         
-        if detector and hasattr(detector, 'tick_series') and leader_code:
-            with detector._lock:
-                ts = detector.tick_series.get(leader_code)
-                if ts:
-                    leader_now_price = getattr(ts, 'now_price', 0.0)
-                    # 1. 物理计算当日实盘最真实的涨幅百分比
-                    if getattr(ts, 'last_close', 0.0) > 0:
-                        leader_change_pct = ((leader_now_price - ts.last_close) / ts.last_close) * 100.0
-                    # 2. 直读起点以来的变动幅度
-                    leader_pct_diff = getattr(ts, 'pct_diff', 0.0) or 0.0
-                    # 3. 直读最新背离值
-                    leader_dff = getattr(ts, 'dff', 0.0) or 0.0
-                    # 4. 直读均线表现 (优先 20日均价线，以其作为战术回踩与支撑均线依据)
-                    leader_vwap = getattr(ts, 'ma20', 0.0) or leader_now_price
+        # 1-3号位跟风股 -> 升级为基于阿尔法爆发因子的多维智能优选筛选器！
+        raw_followers = sh.follower_detail if hasattr(sh, 'follower_detail') and sh.follower_detail else []
+        
+        # 过滤掉和龙头相同的股票，避免重复
+        valid_followers = [f for f in raw_followers if f.get('code') != sh.leader_code]
+
+        # [🚀 OPTIMIZE] 完美消灭 GUI 线程锁等待！在排序前仅一次性进锁，把龙头和所有跟风个股需要的 Tick 快照批量提取出来
+        tick_snaps = {}
+        leader_snap = {}
+        if detector and hasattr(detector, 'tick_series'):
+            try:
+                # 收集所有需要提取的跟风股代码
+                extract_codes = [f.get('code', '') for f in valid_followers if f.get('code')]
+                with detector._lock:
+                    # 1. 批量提取跟风股数据
+                    for ec in extract_codes:
+                        ts = detector.tick_series.get(ec)
+                        if ts:
+                            tick_snaps[ec] = {
+                                'score': float(getattr(ts, 'score', 0.0) or 0.0),
+                                'momentum_score': float(getattr(ts, 'momentum_score', 0.0) or 0.0),
+                                'score_accel': float(getattr(ts, 'score_accel', 0.0) or 0.0),
+                                'volume_ratio': float(getattr(ts, 'volume_ratio', 1.0) or 1.0),
+                                'zhuli_ratio': float(getattr(ts, 'zhuli_ratio', 0.0) or 0.0),
+                            }
+                    # 2. 提取最强龙头数据
+                    if leader_code:
+                        ts = detector.tick_series.get(leader_code)
+                        if ts:
+                            leader_snap = {
+                                'now_price': float(getattr(ts, 'now_price', 0.0) or 0.0),
+                                'last_close': float(getattr(ts, 'last_close', 0.0) or 0.0),
+                                'pct_diff': float(getattr(ts, 'pct_diff', 0.0) or 0.0),
+                                'dff': float(getattr(ts, 'dff', 0.0) or 0.0),
+                                'ma20': float(getattr(ts, 'ma20', 0.0) or 0.0),
+                            }
+            except Exception as e:
+                logger.error(f"[HUD] Failed to snapshot tick data: {e}")
+
+        # 使用已提取的龙头快照
+        if leader_snap:
+            leader_now_price = leader_snap['now_price']
+            if leader_snap['last_close'] > 0:
+                leader_change_pct = ((leader_now_price - leader_snap['last_close']) / leader_snap['last_close']) * 100.0
+            leader_pct_diff = leader_snap['pct_diff']
+            leader_dff = leader_snap['dff']
+            leader_vwap = leader_snap['ma20'] or leader_now_price
 
         # 动态对齐百分比颜色
         leader_pct_color = "#39ff14" if leader_change_pct >= 0 else "#ff073a"
@@ -1276,22 +1307,13 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             dff_val = abs(float(f.get('dff', 0.0) or 0.0))
             pct_val = float(f.get('pct', 0.0) or 0.0)
             
-            # 2. 从全局唯一的权威打分器中直接直读获取个股最新的 Tick 级实盘量能与抢筹指标
-            now_score = 0.0
-            momentum_score = 0.0
-            accel = 0.0
-            vol_ratio = 1.0
-            zhuli = 0.0
-            
-            if detector and hasattr(detector, 'tick_series'):
-                with detector._lock:
-                    ts = detector.tick_series.get(code, None)
-                    if ts:
-                        now_score = getattr(ts, 'score', 0.0) or 0.0
-                        momentum_score = getattr(ts, 'momentum_score', 0.0) or 0.0
-                        accel = getattr(ts, 'score_accel', 0.0) or 0.0
-                        vol_ratio = getattr(ts, 'volume_ratio', 1.0) or 1.0
-                        zhuli = getattr(ts, 'zhuli_ratio', 0.0) or 0.0
+            # 2. [🚀 ZERO-LOCK] 从本地浅拷贝快照中直读指标，完全零锁、零阻塞！
+            ts_snap = tick_snaps.get(code, {})
+            now_score = ts_snap.get('score', 0.0)
+            momentum_score = ts_snap.get('momentum_score', 0.0)
+            accel = ts_snap.get('score_accel', 0.0)
+            vol_ratio = ts_snap.get('volume_ratio', 1.0)
+            zhuli = ts_snap.get('zhuli_ratio', 0.0)
 
             # 3. 强势股阿尔法爆发评估得分 (Alpha Explosion Score, AES) 算法核心
             # A. 个股当下爆发核心得分权重 - 满分 35 分
@@ -1329,7 +1351,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             elif diff_val < -1.5:
                 # 跟风大跌，极大概率趋势走坏，扣分防御
                 zone_part = -10.0
-
+ 
             # G. 形态学模式匹配强加成
             pattern_bonus = 0.0
             hint = str(f.get('pattern_hint', '') or '').lower()
@@ -1337,7 +1359,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 pattern_bonus = 5.0
             elif "准备" in hint or "新高" in hint:
                 pattern_bonus = 2.0
-
+ 
             # 综合 AES 总得分计算
             aes = score_part + m_part + t_part + zhuli_part + vol_part + zone_part + pattern_bonus
             
@@ -1851,8 +1873,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(current_flags)
             self.show()
             
-        # 🚀 [NEW] 在显示时延时 50ms 异步物理校准半透明比例，防止 DWM 图层重构时出现 Win32 参数错误警告
-        QtCore.QTimer.singleShot(50, self._apply_opacity_ui_state)
+        # 🚀 [NEW] 在显示时延时 250ms 异步物理校准半透明比例，防止 DWM 图层重构时出现 Win32 参数错误警告
+        QtCore.QTimer.singleShot(250, self._apply_opacity_ui_state)
 
     def _on_section_resized(self, logical_index: int, old_size: int, new_size: int) -> None:
         """用户手动拖拽列宽释放后的即时存盘槽 (升级为 10 秒防抖延迟模式)"""
@@ -2072,9 +2094,9 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             logger.error(f"Failed to save opacity config: {e}")
 
     def _safe_set_opacity(self, opacity: float) -> None:
-        """安全修改目标不透明度，并触发 50ms 防抖倒计时以杜绝 DWM 刷新冲突"""
+        """安全修改目标不透明度，并触发 250ms 防抖倒计时以杜绝 DWM 刷新冲突"""
         self._target_opacity = opacity
-        self._opacity_debounce_timer.start(50)
+        self._opacity_debounce_timer.start(250)
 
     def _execute_opacity_apply(self) -> None:
         """物理执行不透明度设置，由防抖定时器统一调用，绝对句柄平滑对齐，彻底消噪"""
