@@ -116,8 +116,77 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         volume=float(pos_data.get("volume", 0.0)),
                         current_price=float(pos_data.get("current_price", entry_p))
                     )
-                self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
                 self.orders = list(data.get("orders", []))
+                
+                # 自愈与热启动机制：从 orders 历史流水中干跑还原出一份“理论持仓”以自动修复任何数据异常
+                recon_positions = {}
+                recon_cash = self.initial_capital
+                if self.orders:
+                    try:
+                        sorted_orders = sorted(self.orders, key=lambda x: x.get("timestamp", ""))
+                        for o in sorted_orders:
+                            c = o.get("code")
+                            act = o.get("action", "").upper()
+                            p = float(o.get("price", 0.0))
+                            vol = float(o.get("volume", 0.0))
+                            if not c or p <= 0 or vol <= 0:
+                                continue
+                            
+                            if act in {"BUY", "ADD"}:
+                                recon_cash -= p * vol
+                                if c in recon_positions:
+                                    pos = recon_positions[c]
+                                    new_vol = pos.volume + vol
+                                    new_entry = ((pos.entry_price * pos.volume) + (p * vol)) / new_vol
+                                    pos.volume = new_vol
+                                    pos.entry_price = new_entry
+                                    pos.current_price = p
+                                else:
+                                    recon_positions[c] = Position(
+                                        code=c,
+                                        entry_price=p,
+                                        volume=vol,
+                                        current_price=p
+                                    )
+                            elif act in {"SELL", "REDUCE"}:
+                                recon_cash += p * vol
+                                if c in recon_positions:
+                                    pos = recon_positions[c]
+                                    if act == "SELL" or vol >= pos.volume:
+                                        recon_positions.pop(c, None)
+                                    else:
+                                        pos.volume -= vol
+                                        pos.current_price = p
+                    except Exception:
+                        pass
+                
+                # 数据异常自动检测与自愈修复：
+                # 如果 1) 载入的 positions 为空但理论持仓不为空
+                # 或 2) 载入的 positions 数量/代码与理论持仓不一致
+                # 我们自动用理论持仓及现金进行覆盖修复，确保数据绝对一致！
+                need_heal = False
+                if not positions and recon_positions:
+                    need_heal = True
+                elif len(positions) != len(recon_positions):
+                    need_heal = True
+                else:
+                    for c_code in recon_positions:
+                        if c_code not in positions:
+                            need_heal = True
+                            break
+                        if abs(positions[c_code].volume - recon_positions[c_code].volume) > 0.1:
+                            need_heal = True
+                            break
+                
+                if need_heal:
+                    positions = recon_positions
+                    if recon_cash > 0:
+                        cash = recon_cash
+                    import logging
+                    logger = logging.getLogger("PaperExecutionAdapter")
+                    logger.info(f"[Self-Healing] Automatically repaired {len(positions)} abnormal positions from orders ledger.")
+                
+                self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
             except Exception:
                 pass
 
