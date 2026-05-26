@@ -835,6 +835,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     sig_bus_event = pyqtSignal(object)
     sig_heartbeat = pyqtSignal(object) # [NEW] 专门用于心跳与统计更新的信号
     sig_show_banner = pyqtSignal(str)  # [NEW] 专门用于置顶滚动预警的信号
+    sig_manual_run_done = pyqtSignal(bool, str) # [NEW] 用于后台重算完成后的主线程回调
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -931,6 +932,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # ⭐ [FIX] 显式指定 QueuedConnection，确保跨线程信号在 GUI 线程处理
         self.sig_bus_event.connect(self._safe_process_event, Qt.ConnectionType.QueuedConnection)
         self.sig_heartbeat.connect(self._on_heartbeat_received_gui, Qt.ConnectionType.QueuedConnection)
+        self.sig_manual_run_done.connect(self._on_manual_run_done, Qt.ConnectionType.QueuedConnection)
         
         # [NEW] 核心渲染调度器：彻底解决心跳堆积引发的“无限刷新”与卡死
         self._render_scheduler = QTimer(self)
@@ -2390,74 +2392,102 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setProperty("uniformItemSizes", True)
         table.setProperty("layoutAboutToBeChanged", True)
         table.blockSignals(True)
-        table.verticalHeader().setUpdatesEnabled(False)
-        table.horizontalHeader().setUpdatesEnabled(False)
-        vp = table.viewport()
-        vp.setUpdatesEnabled(False)
 
-        try:
-            if table.rowCount() != len(decisions):
-                table.setRowCount(len(decisions))
+        if table.rowCount() != len(decisions):
+            table.setRowCount(len(decisions))
+            
+        # [NEW] Chunked Deferred Rendering: 消除主线程饱和
+        table._render_task_id = getattr(table, '_render_task_id', 0) + 1
+        current_task_id = table._render_task_id
+        table._chunked_rendering = True  # [FIX] 标记渲染中，防止 Tab 切换触发 blockSignals 冲突
+        
+        def render_chunk(start_idx: int = 0):
+            # [FIX] 任务被取消时，必须释放 blockSignals 锁，否则表格永久无响应
+            if getattr(table, '_render_task_id', 0) != current_task_id:
+                table._chunked_rendering = False
+                # 确保信号和更新已恢复（防止泄漏）
+                if table.signalsBlocked():
+                    table.blockSignals(False)
+                if not table.updatesEnabled():
+                    table.setUpdatesEnabled(True)
+                    table.viewport().setUpdatesEnabled(True)
+                return  # Task cancelled
+                
+            CHUNK_SIZE = 50
+            end_idx = min(start_idx + CHUNK_SIZE, len(decisions))
+            
+            table.setUpdatesEnabled(False)
+            table.viewport().setUpdatesEnabled(False)
+            
+            try:
+                for i in range(start_idx, end_idx):
+                    d = decisions[i]
+                    self._fast_update_cell(table, i, 0, d.get('created_at', ''))
+                    
+                    prio = d.get('priority', 0)
+                    p_color = "#ff0000" if prio >= 75 else ("#ffaa00" if prio >= 60 else "#ffffff")
+                    self._fast_update_cell(table, i, 1, prio, color_key=p_color, numeric_val=prio)
+                    kernel_action = d.get('kernel_action', '')
+                    k_color = "#00ff88" if d.get('kernel_allowed') else "#ff8844"
+                    self._fast_update_cell(table, i, 2, kernel_action, color_key=k_color, bold=True)
+                    self._fast_update_cell(table, i, 3, f"{float(d.get('kernel_size_pct', 0) or 0):.0%}", numeric_val=d.get('kernel_size_pct', 0.0))
+                    self._fast_update_cell(table, i, 4, f"{float(d.get('kernel_confidence', 0) or 0):.2f}", numeric_val=d.get('kernel_confidence', 0.0))
+                    self._fast_update_cell(table, i, 5, "OK" if d.get('kernel_allowed') else (d.get('kernel_reject_code') or "BLOCK"), color_key=k_color)
+                    
+                    st_text = d.get('status', '待处理')
+                    st_color = "#00ff88" if '成交' in st_text else "#ffffff"
+                    self._fast_update_cell(table, i, 6, st_text, color_key=st_color)
+                    
+                    code = d.get('code', '')
+                    c_color = "#ffff00" if code.startswith('30') else "#00ffff"
+                    self._fast_update_cell(table, i, 7, code, color_key=c_color, bold=True)
+                    
+                    self._fast_update_cell(table, i, 8, d.get('name', ''))
+                    self._fast_update_cell(table, i, 9, d.get('signal_type', ''))
+                    self._fast_update_cell(table, i, 10, d.get('sector', ''))
+                    self._fast_update_cell(table, i, 11, d.get('current_price', 0.0), numeric_val=d.get('current_price', 0.0))
+                    self._fast_update_cell(table, i, 12, d.get('suggest_price', 0.0), numeric_val=d.get('suggest_price', 0.0))
+                    
+                    pd_val = d.get('pct_diff', 0.0)
+                    pd_color = "#ff4444" if pd_val > 0 else ("#44ff44" if pd_val < 0 else "#ffffff")
+                    self._fast_update_cell(table, i, 13, f"{pd_val:+.2f}%", color_key=pd_color, numeric_val=pd_val)
+                    self._fast_update_cell(table, i, 14, d.get('dff', 0.0), numeric_val=d.get('dff', 0.0))
+                    self._fast_update_cell(table, i, 15, d.get('reason', ''))
 
-            for i, d in enumerate(decisions):
-                self._fast_update_cell(table, i, 0, d.get('created_at', ''))
-                
-                prio = d.get('priority', 0)
-                p_color = "#ff0000" if prio >= 75 else ("#ffaa00" if prio >= 60 else "#ffffff")
-                self._fast_update_cell(table, i, 1, prio, color_key=p_color, numeric_val=prio)
-                kernel_action = d.get('kernel_action', '')
-                k_color = "#00ff88" if d.get('kernel_allowed') else "#ff8844"
-                self._fast_update_cell(table, i, 2, kernel_action, color_key=k_color, bold=True)
-                self._fast_update_cell(table, i, 3, f"{float(d.get('kernel_size_pct', 0) or 0):.0%}", numeric_val=d.get('kernel_size_pct', 0.0))
-                self._fast_update_cell(table, i, 4, f"{float(d.get('kernel_confidence', 0) or 0):.2f}", numeric_val=d.get('kernel_confidence', 0.0))
-                self._fast_update_cell(table, i, 5, "OK" if d.get('kernel_allowed') else (d.get('kernel_reject_code') or "BLOCK"), color_key=k_color)
-                
-                st_text = d.get('status', '待处理')
-                st_color = "#00ff88" if '成交' in st_text else "#ffffff"
-                self._fast_update_cell(table, i, 6, st_text, color_key=st_color)
-                
-                code = d.get('code', '')
-                c_color = "#ffff00" if code.startswith('30') else "#00ffff"
-                self._fast_update_cell(table, i, 7, code, color_key=c_color, bold=True)
-                
-                self._fast_update_cell(table, i, 8, d.get('name', ''))
-                self._fast_update_cell(table, i, 9, d.get('signal_type', ''))
-                self._fast_update_cell(table, i, 10, d.get('sector', ''))
-                self._fast_update_cell(table, i, 11, d.get('current_price', 0.0), numeric_val=d.get('current_price', 0.0))
-                self._fast_update_cell(table, i, 12, d.get('suggest_price', 0.0), numeric_val=d.get('suggest_price', 0.0))
-                
-                pd_val = d.get('pct_diff', 0.0)
-                pd_color = "#ff4444" if pd_val > 0 else ("#44ff44" if pd_val < 0 else "#ffffff")
-                self._fast_update_cell(table, i, 13, f"{pd_val:+.2f}%", color_key=pd_color, numeric_val=pd_val)
-                self._fast_update_cell(table, i, 14, d.get('dff', 0.0), numeric_val=d.get('dff', 0.0))
-                self._fast_update_cell(table, i, 15, d.get('reason', ''))
+                    if '🐉' in d.get('reason', ''):
+                        for col in range(table.columnCount()):
+                            it_col = table.item(i, col)
+                            if it_col is None:
+                                continue  # 防止未初始化列崩溃
+                            self._fast_update_cell(
+                                table, i, col,
+                                it_col.data(self._ROLE_TEXT) or '',
+                                bg_key="gold_bg",
+                                numeric_val=it_col.data(self._ROLE_NUMERIC)
+                            )
 
-                if '🐉' in d.get('reason', ''):
-                    for col in range(table.columnCount()):
-                        it_col = table.item(i, col)
-                        if it_col is None:
-                            continue  # 防止未初始化列崩溃
-                        self._fast_update_cell(
-                            table, i, col,
-                            it_col.data(self._ROLE_TEXT) or '',
-                            bg_key="gold_bg",
-                            numeric_val=it_col.data(self._ROLE_NUMERIC)
-                        )
+            except Exception as e:
+                logger.warning(f"[DECISION_CHUNK] render error at chunk {start_idx}: {e}")
 
-            if current_selection:
-                for r in range(table.rowCount()):
-                    it = table.item(r, 3)
-                    if it and it.data(self._ROLE_TEXT) == current_selection:
-                        table.selectRow(r)
-                        break
-        finally:
-            table.setSortingEnabled(was_sorting)
-            table.blockSignals(False)
-            table.setProperty("layoutAboutToBeChanged", False)
-            table.verticalHeader().setUpdatesEnabled(True)
-            table.horizontalHeader().setUpdatesEnabled(True)
-            vp.setUpdatesEnabled(True)
-            table.setUpdatesEnabled(True)
+            if end_idx < len(decisions):
+                QTimer.singleShot(8, lambda: render_chunk(end_idx))
+            else:
+                # 渲染完成，全量恢复
+                table._chunked_rendering = False
+                table.viewport().setUpdatesEnabled(True)
+                table.setUpdatesEnabled(True)
+                if current_selection:
+                    for r in range(table.rowCount()):
+                        it = table.item(r, 7)
+                        if it and it.data(self._ROLE_TEXT) == current_selection:
+                            table.selectRow(r)
+                            break
+                table.setSortingEnabled(was_sorting)
+                table.blockSignals(False)
+                table.setProperty("layoutAboutToBeChanged", False)
+
+        # 启动分块渲染流
+        render_chunk(0)
 
     def _refresh_dragon_table(self, dragons: List[dict]):
         table = self.tables.get("🐉 龙头追踪")
@@ -2502,71 +2532,93 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # [PERF] 极致锁定：停止一切布局重绘
             was_sorting = table.isSortingEnabled()
             table.setSortingEnabled(False)
-            table.setUpdatesEnabled(False)
             table.blockSignals(True)
-            table.verticalHeader().setUpdatesEnabled(False)
-            table.horizontalHeader().setUpdatesEnabled(False)
-            vp = table.viewport()
-            vp.setUpdatesEnabled(False)
 
-            try:
-                if table.rowCount() != len(dragons):
-                    table.setRowCount(len(dragons))
-                    
-                # [PERF] 建立代码到行号的快速索引，用于 selection 恢复
-                code_to_row = {}
+            if table.rowCount() != len(dragons):
+                table.setRowCount(len(dragons))
                 
-                for i, d in enumerate(dragons):
-                    st_lbl = d.get('status_label', '')
-                    st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
-                    self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
-                    
-                    code = d.get('code', '')
-                    code_to_row[code] = i 
-                    
-                    c_color = "#ffff00" if code.startswith('30') else "#00ffff"
-                    self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
-                    self._fast_update_cell(table, i, 2, d.get('name', ''), bold=('龙' in st_lbl))
-                    self._fast_update_cell(table, i, 3, d.get('sector', ''))
-                    
-                    c_pct = d.get('current_pct', 0.0)
-                    cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
-                    self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
-                    
-                    cum_pct = d.get('cum_pct', 0.0)
-                    cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
-                    self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
-                    
-                    self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
-                    
-                    nh_days = d.get('consecutive_new_highs', 0)
-                    nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
-                    self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
-                    
-                    dff = d.get('dff', 0.0)
-                    dff_color = "#00ff88" if dff > 0 else "#ffffff"
-                    self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
-                    self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
-                    
-                    up_time = d.get('last_update', '')
-                    if len(up_time) > 19: up_time = up_time[11:19]
-                    self._fast_update_cell(table, i, 10, up_time)
-                    self._fast_update_cell(table, i, 11, d.get('tags', ''))
-
-                # [PERF] O(1) 快速恢复选中态
-                if current_selection and current_selection in code_to_row:
-                    target_row = code_to_row[current_selection]
-                    table.selectRow(target_row)
+            # [PERF] 建立代码到行号的快速索引，用于 selection 恢复
+            code_to_row = {}
+            
+            # [NEW] Chunked Deferred Rendering: 消除主线程饱和
+            table._render_task_id = getattr(table, '_render_task_id', 0) + 1
+            current_task_id = table._render_task_id
+            table._chunked_rendering = True  # [FIX] 标记渲染中
+            
+            def render_chunk(start_idx: int = 0):
+                # [FIX] 任务取消时必须释放 blockSignals 锁
+                if getattr(table, '_render_task_id', 0) != current_task_id:
+                    table._chunked_rendering = False
+                    if table.signalsBlocked():
+                        table.blockSignals(False)
+                    if not table.updatesEnabled():
+                        table.setUpdatesEnabled(True)
+                        table.viewport().setUpdatesEnabled(True)
+                    return  # Task cancelled by a newer render pass
+                
+                CHUNK_SIZE = 50
+                end_idx = min(start_idx + CHUNK_SIZE, len(dragons))
+                
+                table.setUpdatesEnabled(False)
+                table.viewport().setUpdatesEnabled(False)
+                
+                try:
+                    for i in range(start_idx, end_idx):
+                        d = dragons[i]
+                        st_lbl = d.get('status_label', '')
+                        st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
+                        self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
                         
-            finally:
-                # [PERF] 恢复布局并触发一次性刷新
-                vp.setUpdatesEnabled(True)
-                table.verticalHeader().setUpdatesEnabled(True)
-                table.horizontalHeader().setUpdatesEnabled(True)
-                table.setSortingEnabled(was_sorting)
-                table.blockSignals(False)
-                table.setUpdatesEnabled(True)
-                table.viewport().update()
+                        code = d.get('code', '')
+                        code_to_row[code] = i 
+                        
+                        c_color = "#ffff00" if code.startswith('30') else "#00ffff"
+                        self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
+                        self._fast_update_cell(table, i, 2, d.get('name', ''), bold=('龙' in st_lbl))
+                        self._fast_update_cell(table, i, 3, d.get('sector', ''))
+                        
+                        c_pct = d.get('current_pct', 0.0)
+                        cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
+                        self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
+                        
+                        cum_pct = d.get('cum_pct', 0.0)
+                        cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
+                        self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
+                        
+                        self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
+                        
+                        nh_days = d.get('consecutive_new_highs', 0)
+                        nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
+                        self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
+                        
+                        dff = d.get('dff', 0.0)
+                        dff_color = "#00ff88" if dff > 0 else "#ffffff"
+                        self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
+                        self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
+                        
+                        up_time = d.get('last_update', '')
+                        if len(up_time) > 19: up_time = up_time[11:19]
+                        self._fast_update_cell(table, i, 10, up_time)
+                        self._fast_update_cell(table, i, 11, d.get('tags', ''))
+
+                except Exception as e:
+                    logger.warning(f"[DRAGON_CHUNK] render error at chunk {start_idx}: {e}")
+                
+                if end_idx < len(dragons):
+                    QTimer.singleShot(8, lambda: render_chunk(end_idx))
+                else:
+                    # [PERF] 最终结束：统一恢复 UpdatesEnabled，彻底消除高频重绘卡顿
+                    table._chunked_rendering = False
+                    table.viewport().setUpdatesEnabled(True)
+                    table.setUpdatesEnabled(True)
+                    if current_selection and current_selection in code_to_row:
+                        target_row = code_to_row[current_selection]
+                        table.selectRow(target_row)
+                    table.setSortingEnabled(was_sorting)
+                    table.blockSignals(False)
+
+            # 启动分块渲染流
+            render_chunk(0)
 
     def _refresh_sector_table(self, sectors: List[dict]):
         table = self.tables.get("🔥 板块热力")
@@ -3427,11 +3479,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 d_counts = self._engine_ctrl.get_dragon_count()
                 d_total = d_counts.get('dragon', 0)
                 c_total = d_counts.get('candidate', 0)
-                self.cards["dragon"].setText(str(d_total + c_total))
+                w_total = d_counts.get('warning', 0)
+                self.cards["dragon"].setText(str(d_total + c_total + w_total))
                 
                 # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
                 self._carousel_messages = [
-                    f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total}",
+                    f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total} | 预警 {w_total}",
                     f"🔥 市场信号: F:{get_row_count('跟单信号')} | B:{get_row_count('突破加速')} | T:{get_row_count('尾盘诱多')} | R:{get_row_count('卖点预警')} | S:{get_row_count('结构破位')}",
                     f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
                 ]
@@ -3479,7 +3532,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if "🐉 龙头追踪" in current_tab_name:
                 if self._engine_ctrl:
                     d_counts = self._engine_ctrl.get_dragon_count()
-                    tab_stat_info = f"🐉 真龙:{d_counts.get('dragon', 0)} 候选:{d_counts.get('candidate', 0)}"
+                    tab_stat_info = f"🐉 真龙:{d_counts.get('dragon', 0)} 候选:{d_counts.get('candidate', 0)} 预警:{d_counts.get('warning', 0)}"
             else:
                 table = self.tabs.currentWidget()
                 if isinstance(table, QTableWidget):
@@ -3987,8 +4040,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._apply_filter() # 先根据搜索框内容过滤
         table = self.tabs.widget(index)
         if isinstance(table, QTableWidget):
-            # [STEP-2 FIX] 如果该页签之前在后台累积了信号但未排序，现在补做
-            if getattr(table, '_needs_sort', False):
+            # [GUARD] 仅在无分块渲染进行中时做补排序，避免 blockSignals 冲突
+            if getattr(table, '_needs_sort', False) and not getattr(table, '_chunked_rendering', False):
                 sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
                 sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
                 self._sort_table_python(table, sort_col, sort_order)
@@ -3996,8 +4049,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 
             table.verticalScrollBar().setValue(0) # 回到顶部
             
-        # [🚀 性能优化] 切换 Tab 时主动刷新当前页，实现可见性门控的即时响应
-        self._update_engine_views()
+        # [🚀 防抖门控] 复用类成员单例 Timer，每次切 Tab 都 restart(300ms)。
+        # 频繁切换时中间所有触发均被丢弃，只有用户停在某个 Tab 超过 300ms 后才真正刷新，
+        # 彻底防止多条分块渲染定时器链并发导致的主线程雪崩。
+        if not hasattr(self, '_tab_debounce_timer') or self._tab_debounce_timer is None:
+            self._tab_debounce_timer = QTimer(self)
+            self._tab_debounce_timer.setSingleShot(True)
+            self._tab_debounce_timer.timeout.connect(self._update_engine_views)
+        self._tab_debounce_timer.start(300)  # restart 会自动取消上次未到期的计时
 
     def _on_search_context_menu(self, pos):
         """合并版：支持粘贴、清除、及测试信号"""
@@ -4091,29 +4150,30 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     }
                 )
 
-                # 4. 立即更新 UI 视图
-                def _success():
-                    self._update_engine_views()
-                    self.status_label.setText("✅ 引擎重算与预警激活完成")
-                    logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新与预警播报演示")
-                    QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
-                    
-                QTimer.singleShot(0, _success)
+                # 4. [FIX] 摒弃在后台线程调用 QTimer 的危险操作，改用跨线程信号回调主 UI
+                self.sig_manual_run_done.emit(True, "")
                 
             except Exception as e:
-                err_msg = f"❌ 重算失败: {e}"
                 logger.error(f"📡 [UI] Manual run FAILED: {e}")
                 import traceback
                 traceback.print_exc()
                 
-                def _fail():
-                    self.status_label.setText(err_msg)
-                    QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
-                    
-                QTimer.singleShot(0, _fail)
+                self.sig_manual_run_done.emit(False, str(e))
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_manual_run_done(self, success: bool, msg: str):
+        """[GUI THREAD] 手动重算完成后的 UI 恢复逻辑"""
+        if success:
+            self._update_engine_views(force=True)
+            self.status_label.setText("✅ 引擎重算与预警激活完成")
+            logger.info("📡 [UI] 仪表盘已通过手动触发完成引擎数据刷新与预警播报演示")
+        else:
+            self.status_label.setText(f"❌ 重算失败: {msg}")
+            
+        QTimer.singleShot(1500, lambda: self.manual_run_btn.setEnabled(True))
+
 
     def _get_next_scan_time(self):
         """[Dragon] 计算下一个 30 分钟扫描节点"""
