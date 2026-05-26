@@ -23,12 +23,16 @@ def _confidence(priority: float, sector_heat: float, pct_diff: float, dff: float
 
 
 def decide(signal: StrategySignal, state: str) -> DecisionIntent:
-    # ── 手工干预或强制平仓逻辑，直接走绿色通道无条件执行 ──
+    # ── 手工干预或强制平仓与买入逻辑，直接走绿色通道无条件执行 ──
     raw_action = str(signal.features.get("action", "")).upper()
-    if raw_action == "SELL" or signal.signal_type == "手工平仓" or "手工平仓" in str(signal.features.get("raw_reason", "")):
+    is_manual_sell = (raw_action == "SELL" or signal.signal_type == "手工平仓" or "手工平仓" in str(signal.features.get("raw_reason", "")))
+    is_manual_buy = (raw_action in {"BUY", "ADD"} and (signal.signal_type == "手动买入" or "手动买入" in str(signal.features.get("raw_reason", "")) or "Confirm:" in str(signal.features.get("raw_reason", ""))))
+    
+    if is_manual_sell or is_manual_buy:
+        action = "BUY" if is_manual_buy else "SELL"
         reason = DecisionReason(
             regime="MANUAL_OVERRIDE",
-            setup="手工平仓",
+            setup="手动交易" if is_manual_buy else "手工平仓",
             sector_heat=0.0,
             sector_rank=None,
             is_leader=False,
@@ -41,9 +45,9 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         )
         return DecisionIntent(
             code=signal.code,
-            action="SELL",
-            size_pct=1.0,
-            stop_price=None,
+            action=action,
+            size_pct=0.30 if action == "BUY" else 1.0,  # 手工买入默认为30%仓位，卖出100%全平
+            stop_price=round(signal.price * 0.98, 3) if action == "BUY" and signal.price > 0 else None,
             confidence=1.0,
             reason=reason,
             expires_at=signal.ts,

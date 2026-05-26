@@ -3113,6 +3113,25 @@ def _mock_buy_selected(self):
         )
 
         if ok:
+            # 构造虚拟 BUY 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行开仓！
+            sig_buy = dict(sig)
+            sig_buy.update({
+                "action": "BUY",
+                "price": price,
+                "current_price": price,
+                "suggest_price": price,
+                "signal_type": sig.get('signal_type') or "手动买入",
+                "reason": sig.get('reason') or "手动买入",
+                "journal_ts": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
+            })
+            try:
+                from datetime import datetime
+                from trading_kernel.kernel_service import enrich_decision_item
+                enrich_decision_item(sig_buy, write_journal=True)
+            except Exception as e_journal:
+                logger.warning(f"Error enriching buy journal in stock_selection_window: {e_journal}")
+
             # 更新信号状态
             if self._focus_ctrl:
                 self._focus_ctrl.decision_queue.update_status(code, "已提交")
@@ -3135,10 +3154,12 @@ def _mock_sell_selected(self):
 
     # 获取当前价（从实时行情）
     price = 0.0
+    name_val = "手动卖出"
     if self.selector and hasattr(self.selector, 'df_all_realtime'):
         df = self.selector.df_all_realtime
         if code in df.index:
             price = float(df.loc[code].get('trade', df.loc[code].get('price', 0)) or 0)
+            name_val = df.loc[code].get('name', '手动卖出')
 
     if price <= 0:
         ans = messagebox.askstring("手动输入价格", f"无法获取 {code} 实时价，请手动输入卖出价格：")
@@ -3153,6 +3174,26 @@ def _mock_sell_selected(self):
 
     ok, msg = self._trade_gw.submit_sell(code, price, reason="手动卖出")
     if ok:
+        # 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+        sig_sell = {
+            "code": code,
+            "name": name_val,
+            "signal_type": "手动卖出",
+            "action": "SELL",
+            "price": price,
+            "current_price": price,
+            "suggest_price": price,
+            "reason": "手动卖出",
+            "journal_ts": datetime.now().isoformat(),
+            "created_at": datetime.now().isoformat(),
+        }
+        try:
+            from datetime import datetime
+            from trading_kernel.kernel_service import enrich_decision_item
+            enrich_decision_item(sig_sell, write_journal=True)
+        except Exception as e_journal:
+            logger.warning(f"Error enriching sell journal in stock_selection_window: {e_journal}")
+
         self._refresh_decision_tab()
         messagebox.showinfo("模拟卖出", msg)
     else:
@@ -3803,11 +3844,34 @@ def _sell_all_positions(self):
     for p in positions:
         code = p['code']
         price = p['current_price']
+        name_val = p.get('name', '一键清仓')
         if df_rt is not None and code in df_rt.index:
             rt_price = float(df_rt.loc[code].get('trade', 0) or 0)
             if rt_price > 0:
                 price = rt_price
-        self._trade_gw.submit_sell(code, price, reason="一键清仓")
+            name_val = df_rt.loc[code].get('name', name_val)
+        
+        ok = self._trade_gw.submit_sell(code, price, reason="一键清仓")
+        if ok:
+            # 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+            sig_sell = {
+                "code": code,
+                "name": name_val,
+                "signal_type": "一键清仓",
+                "action": "SELL",
+                "price": price,
+                "current_price": price,
+                "suggest_price": price,
+                "reason": "一键清仓",
+                "journal_ts": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
+            }
+            try:
+                from datetime import datetime
+                from trading_kernel.kernel_service import enrich_decision_item
+                enrich_decision_item(sig_sell, write_journal=True)
+            except Exception as e_journal:
+                logger.warning(f"Error enriching sell journal in stock_selection_window: {e_journal}")
 
     self._refresh_decision_tab()
     messagebox.showinfo("完成", "已执行模拟卖出全部持仓")
@@ -4100,6 +4164,27 @@ def _show_kernel_confirm_dialog(self, sig, action, price):
             )
             
         if ok:
+            # 构造虚拟/实际 信号写入交易流水，并同步让新交易内核执行！
+            sig_action = dict(sig) if isinstance(sig, dict) else {}
+            sig_action.update({
+                "code": code,
+                "name": name,
+                "signal_type": signal_type,
+                "action": action,
+                "price": price,
+                "current_price": price,
+                "suggest_price": price,
+                "reason": sig.get('reason', f"Confirm:{signal_type}") if isinstance(sig, dict) else f"Confirm:{signal_type}",
+                "journal_ts": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
+            })
+            try:
+                from datetime import datetime
+                from trading_kernel.kernel_service import enrich_decision_item
+                enrich_decision_item(sig_action, write_journal=True)
+            except Exception as e_journal:
+                logger.warning(f"Error enriching journal in on_confirm: {e_journal}")
+
             if self._focus_ctrl:
                 self._focus_ctrl.decision_queue.update_status(code, "已提交" if action in ("BUY", "ADD") else "已成交")
             self._kernel_mark_signal_rows(executed=[code])

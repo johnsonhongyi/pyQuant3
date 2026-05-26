@@ -1850,7 +1850,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             elif mode == "PAPER":
                 adapter = service.paper_adapter
             else:
-                adapter = None
+                # 旁路记账 (OBSERVE) 模式下，自动降级展示高真模拟 (PAPER) 的持仓以保障两边数据一致性与可视化对齐！
+                adapter = service.paper_adapter
             
             # 1. 尝试从 df_all / current_df 更新最新市场价
             if adapter is not None:
@@ -2039,7 +2040,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     "total_pnl_pct": float(account.get("total_pnl_pct", 0.0)),
                 },
                 "orders_len": orders_len,
-                "hidden_closed_codes": sorted(list(self._hidden_closed_codes)) if hasattr(self, "_hidden_closed_codes") else [],
+                "hidden_closed_codes": sorted(list(x for x in self._hidden_closed_codes if isinstance(x, str))) if hasattr(self, "_hidden_closed_codes") else [],
             }
             import json
             state_str = json.dumps(state_rep, sort_keys=True)
@@ -2347,7 +2348,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             else:
                 # 针对已平仓(0股)记录，提供“移除记录”功能
                 action_remove = menu.addAction(f"🗑️ 移除此已平仓记录 ({code})")
-                action_remove.triggered.connect(lambda c=code: self._remove_closed_record(c))
+                action_remove.triggered.connect(lambda: self._remove_closed_record(code))
             
             menu.addSeparator()
             
@@ -2386,7 +2387,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         """将已平仓的个股代码加入隐藏集合，从而在列表中删除该已平仓行的显示"""
         if not hasattr(self, "_hidden_closed_codes"):
             self._hidden_closed_codes = set()
-        self._hidden_closed_codes.add(code)
+        if isinstance(code, str) and code:
+            self._hidden_closed_codes.add(code)
         self._refresh_positions_tab()
 
     def _clear_all_closed_records(self):
@@ -2399,7 +2401,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             if c_item and v_item:
                 try:
                     if float(v_item.text().strip()) == 0.0:
-                        self._hidden_closed_codes.add(c_item.text().strip())
+                        code = c_item.text().strip()
+                        if isinstance(code, str) and code:
+                            self._hidden_closed_codes.add(code)
                 except Exception:
                     pass
         self._refresh_positions_tab()

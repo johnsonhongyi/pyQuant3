@@ -61,6 +61,25 @@ def evaluate(
     action = intent.action
     reject = {}
 
+    # 手动交易绿色通道：直接放行并构造 ApprovedOrder，绕过所有风控硬性卡口与开仓限制
+    if intent.reason and intent.reason.regime == "MANUAL_OVERRIDE" and action in {"BUY", "ADD", "SELL", "REDUCE"}:
+        final_size = intent.size_pct
+        order = ApprovedOrder(
+            order_id=stable_hash((signal.code, signal.ts, action, final_size))[:24],
+            code=signal.code,
+            action=action,
+            size_pct=round(final_size, 4),
+            price=signal.price,
+            stop_price=intent.stop_price,
+        )
+        return RiskDecision(
+            allowed=True,
+            final_action=action,
+            final_size_pct=round(final_size, 4),
+            reject_context={},
+            order=order,
+        )
+
     # 1. Non-trading session block
     time_part = signal.ts.split()[-1] if " " in signal.ts else signal.ts.split("T")[-1]
     try:
