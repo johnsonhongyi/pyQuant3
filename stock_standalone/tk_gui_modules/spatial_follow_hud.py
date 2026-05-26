@@ -1568,10 +1568,26 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         price = selected.get("price", 0.0)
         if price <= 0.0:
             # 尝试通过 get_focus_controller 补齐价格
-            from sector_focus_engine import get_focus_controller
-            fc = get_focus_controller()
-            if fc and fc._df_realtime is not None and code in fc._df_realtime.index:
-                price = float(fc._df_realtime.loc[code, 'price'])
+            try:
+                import pandas as pd
+                from sector_focus_engine import get_focus_controller
+                fc = get_focus_controller()
+                if fc and fc._df_realtime is not None and code in fc._df_realtime.index:
+                    row = fc._df_realtime.loc[code]
+                    # 极其健壮：支持 trade, price, nclose, last_close 容错并防止 nan
+                    for col in ['trade', 'price', 'nclose', 'last_close']:
+                        if col in fc._df_realtime.columns:
+                            val = row[col]
+                            if not pd.isna(val):
+                                try:
+                                    f_val = float(val)
+                                    if f_val > 0.0:
+                                        price = f_val
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+            except Exception as e:
+                logger.warning(f"⚠️ [SpatialHUD] 补齐价格时捕获意外异常: {e}")
                 
         # 1. 弹出消息闪屏气泡或者状态提示
         logger.warning(f"🛒 [SpatialHUD] 触发一键跟单动作: {name}({code}) size_pct={size_pct:.2%}")

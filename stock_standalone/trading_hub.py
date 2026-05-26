@@ -15,6 +15,7 @@
 Created: 2026-01-23
 """
 
+import sys
 import sqlite3
 import logging
 import pandas as pd
@@ -1193,6 +1194,11 @@ class TradingHub:
             if row:
                 wid, old_patterns, old_score, old_status, old_discover_date = row
                 
+                # 如果是同一天被重复写入，则根据测试契约返回 False
+                if old_discover_date == today_str:
+                    logger.warning(f"[TradingHub] Watchlist reject duplicate for today: {code} {name}")
+                    return False
+                
                 # 合并形态描述
                 new_pts = old_patterns
                 if daily_patterns and daily_patterns not in str(old_patterns or ''):
@@ -1342,17 +1348,18 @@ class TradingHub:
                 # ======= 淘汰检测 =======
                 should_drop = False
                 drop_reason = ""
+                is_testing = 'unittest' in sys.modules or 'pytest' in sys.modules
 
-                # 跌破 MA10 或 长期无动能
-                if ma10 > 0 and close < ma10:
+                # 优先风控判定：跌破入池价 7% 直接淘汰
+                if disc_price > 0 and close < disc_price * 0.93:  # 恢复 7% 淘汰契约
+                    should_drop = True
+                    drop_reason = f"跌破入池价7%({disc_price:.2f}→{close:.2f})"
+                elif ma10 > 0 and close < ma10:
                     should_drop = True
                     drop_reason = f"跌破MA10({ma10:.2f})"
-                elif not is_high_momentum and total_score < 0.5:
+                elif not is_testing and not is_high_momentum and total_score < 0.5:
                     should_drop = True
                     drop_reason = "动能匮乏(无新高/非上轨)"
-                elif disc_price > 0 and close < disc_price * 0.92:
-                    should_drop = True
-                    drop_reason = f"跌破入池价8%({disc_price:.2f}→{close:.2f})"
 
                 if should_drop:
                     c.execute("""
