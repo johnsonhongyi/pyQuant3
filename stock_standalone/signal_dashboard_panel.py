@@ -24,6 +24,7 @@ import threading
 import time
 from PyQt6.QtGui import QColor, QFont, QBrush
 from JohnsonUtil.commonTips import timed_ctx
+from JohnsonUtil import commonTips as cct
 try:
     from sector_focus_engine import get_focus_controller
 except ImportError:
@@ -855,7 +856,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._banner_timer.setSingleShot(True)
         self._banner_timer.timeout.connect(lambda: self.alert_banner.setVisible(False))
         
-        self.sig_show_banner.connect(self._show_alert_banner)
+        # [THREAD-SAFETY] 显式指定 QueuedConnection 确保滚动横幅及语音提示必定在 GUI 线程内消费
+        self.sig_show_banner.connect(self._show_alert_banner, Qt.ConnectionType.QueuedConnection)
         
         self._stock_stats: Dict[str, Dict] = {} 
         self._sector_heat: Dict[str, int] = {}  
@@ -1000,6 +1002,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def stop(self):
         """停止所有计时器和订阅，释放资源"""
+        try:
+            if hasattr(self, '_alert_save_timer') and self._alert_save_timer:
+                self._alert_save_timer.stop()
+            # [RAM-PERSIST] 退出阶段，强制立即同步将内存预警落盘到 SSD 物理固态硬盘，保障持久化数据安全
+            logger.info("💾 [Dashboard] Exit detected, flushing alert history to SSD...")
+            self._save_alert_history(force_ssd=True)
+        except Exception as stop_save_err:
+            logger.error(f"❌ [Dashboard] Failed to save alert history during stop: {stop_save_err}")
+
         try:
             if hasattr(self, '_stats_timer') and self._stats_timer: 
                 self._stats_timer.stop()
@@ -2743,71 +2754,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.viewport().update()
 
     def _on_signal_received(self, event: BusEvent):
-        """[BACKGROUND THREAD] 仅发射信号，不触碰任何 Qt 对象"""
+        """[BACKGROUND THREAD] 仅发射信号，绝对不触碰任何 Qt 控件及 GUI 定时器"""
         if not event or not event.payload: 
             return # 🛡️ 防御空事件
         
         # [DEBUG] 打印信号流入快照 (仅在 Debug 或高频时查看)
         logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
-
-        if event.event_type == SignalBus.EVENT_MARKET_ALERT:
-            payload = event.payload
-            content = payload.get('content') or payload.get('message', '')
-            metadata = payload.get('metadata', {})
-            codes = sorted(metadata.get('codes', []))
-            
-            # [NEW] 聚合去重逻辑：如果“内容”和“个股名单”完全一致，则剔除旧的，只保留最新的（置顶）
-            # 时间不参与比较，确保同一板块同一动作在列表中全局唯一
-            idx_to_remove = -1
-            for i, old in enumerate(self._hub_alerts):
-                if (old.get('content') or old.get('message', '')) == content:
-                    old_metadata = old.get('metadata', {})
-                    # 只有当个股清单也完全一致时才触发去重（忽略顺序）
-                    old_codes = sorted(old_metadata.get('codes', []) or [])
-                    if old_codes == codes:
-                        idx_to_remove = i
-                        break
-            
-            if idx_to_remove != -1:
-                self._hub_alerts.pop(idx_to_remove)
-
-            self._hub_alerts.insert(0, payload)
-            if len(self._hub_alerts) > 100: self._hub_alerts.pop()
-            
-            # 驱动横幅播报
-            content = payload.get('content') or payload.get('message', '')
-            grade = payload.get('grade', 'B')
-            
-            logger.info(f"🔔 [DASHBOARD] Received Market Alert: {content} (Grade={grade})")
-            
-            if grade in ['S', 'A'] and content:
-                self.sig_show_banner.emit(str(content))
-            
-            # [NEW] 记录历史 (使用 QTimer 1.5s 防抖节流定时器进行合并写入，防范高频 IO 冲突与无效写盘)
-            self._alert_save_timer.start(1500)
-
-            # [NEW] 联动全部：将预警消息转化为“虚拟信号”注入主表
-            # 使用标准的 dict 构建方式，避免 class 实例化问题
-            metadata = payload.get('metadata', {})
-            codes = metadata.get('codes', [])
-            codes_str = f" | {','.join(codes)}" if codes else ""
-            
-            virtual_payload = {
-                "code": "MARKET",
-                "name": "📊 市场预警",
-                "price": payload.get('temp', 0.0),
-                "action": grade,
-                "pattern": str(content),
-                "grade": grade,
-                "detail": f"Type: {payload.get('type', 'HUB')}{codes_str}"
-            }
-            # 物理重新发布到 UI 队列，确保出现在“全部信号”表中
-            self.sig_bus_event.emit(BusEvent(
-                event_type=SignalBus.EVENT_PATTERN,
-                timestamp=datetime.now(),
-                source="MarketHub",
-                payload=virtual_payload
-            ))
 
         self.sig_bus_event.emit(event)
 
@@ -2876,8 +2828,65 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             QTimer.singleShot(100, self._refresh_type_filter_items)
 
     def _safe_process_event(self, event: BusEvent):
-        """线程安全地接管总线事件，先更新内存统计，再将 UI 更新推入缓冲"""
+        """[GUI THREAD] 线程安全地接管总线事件，先更新内存统计，再将 UI 更新推入缓冲"""
         try:
+            # [GUI THREAD] 处理市场预警事件的所有 UI 逻辑、数据去重及定时器，彻底消除跨线程 QTimer 冲突与数据竞争
+            if event.event_type == SignalBus.EVENT_MARKET_ALERT:
+                payload = event.payload
+                content = payload.get('content') or payload.get('message', '')
+                metadata = payload.get('metadata', {})
+                codes = sorted(metadata.get('codes', []))
+                
+                # 聚合去重逻辑：如果“内容”和“个股名单”完全一致，则剔除旧的，只保留最新的（置顶）
+                idx_to_remove = -1
+                for i, old in enumerate(self._hub_alerts):
+                    if (old.get('content') or old.get('message', '')) == content:
+                        old_metadata = old.get('metadata', {})
+                        old_codes = sorted(old_metadata.get('codes', []) or [])
+                        if old_codes == codes:
+                            idx_to_remove = i
+                            break
+                
+                if idx_to_remove != -1:
+                    self._hub_alerts.pop(idx_to_remove)
+
+                self._hub_alerts.insert(0, payload)
+                if len(self._hub_alerts) > 100: 
+                    self._hub_alerts.pop()
+                
+                # 驱动横幅播报
+                grade = payload.get('grade', 'B')
+                logger.info(f"🔔 [DASHBOARD] Received Market Alert: {content} (Grade={grade})")
+                
+                if grade in ['S', 'A'] and content:
+                    self.sig_show_banner.emit(str(content))
+                
+                # 记录历史 (使用 QTimer 1.5s 防抖节流定时器进行合并写入，防范高频 IO 冲突与无效写盘)
+                self._alert_save_timer.start(1500)
+
+                # 如果当前就驻留在“📡 市场预警”标签页，则立即刷新该表实现秒级即时反馈
+                if self.tabs.tabText(self.tabs.currentIndex()) == "📡 市场预警":
+                    self._refresh_alert_hub_table()
+
+                # 联动全部：将预警消息转化为“虚拟信号”注入主表
+                codes_str = f" | {','.join(codes)}" if codes else ""
+                virtual_payload = {
+                    "code": "MARKET",
+                    "name": "📊 市场预警",
+                    "price": payload.get('temp', 0.0),
+                    "action": grade,
+                    "pattern": str(content),
+                    "grade": grade,
+                    "detail": f"Type: {payload.get('type', 'HUB')}{codes_str}"
+                }
+                # 物理重新发布到 UI 队列，确保出现在“全部信号”表中
+                self.sig_bus_event.emit(BusEvent(
+                    event_type=SignalBus.EVENT_PATTERN,
+                    timestamp=datetime.now(),
+                    source="MarketHub",
+                    payload=virtual_payload
+                ))
+
             # 1. 立即更新内存统计与计数 (满足实时性)
             self._process_event(event, update_ui=False)
             
@@ -4133,9 +4142,26 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         return os.path.join(config_dir, "market_alerts_history.json")
 
     def _load_alert_history(self):
-        """[DATA] 从磁盘加载历史预警"""
-        path = self._get_history_file_path()
-        if not os.path.exists(path): return
+        """[DATA] 从磁盘加载历史预警 (优先从 RAMDisk 加载，若无则从物理 SSD 加载并同步到 RAMDisk)"""
+        ram_path = cct.get_ramdisk_path("market_alerts_history.json")
+        path = None
+        
+        # 1. 优先尝试 RAMDisk
+        if ram_path:
+            ram_path_abs = os.path.abspath(ram_path)
+            if os.path.exists(ram_path_abs):
+                path = ram_path_abs
+                logger.info(f"💾 [Dashboard] Found alert history in RAMDisk: {path}")
+                
+        # 2. 如果 RAMDisk 没有，fallback 到物理 SSD 路径
+        if not path:
+            ssd_path = self._get_history_file_path()
+            if os.path.exists(ssd_path):
+                path = ssd_path
+                logger.info(f"💾 [Dashboard] Falling back to SSD for alert history: {path}")
+                
+        if not path or not os.path.exists(path):
+            return
         
         try:
             # 🚀 [ROBUST] 优先尝试 utf-8，失败则尝试 gbk (兼容 Windows 可能存在的历史遗留编码)
@@ -4194,13 +4220,45 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     self._last_saved_hash = hash(loaded_fingerprint)
                     
                     logger.info(f"✅ [Dashboard] Loaded {len(self._hub_alerts)} unique alert history records.")
+                    
+                    # 如果是从 SSD 加载的，且 RAMDisk 可用，同步一份到 RAMDisk 以便实盘写入
+                    if path == self._get_history_file_path() and ram_path:
+                        try:
+                            ram_path_abs = os.path.abspath(ram_path)
+                            ram_dir = os.path.dirname(ram_path_abs)
+                            if not os.path.exists(ram_dir):
+                                os.makedirs(ram_dir, exist_ok=True)
+                            import shutil
+                            if os.path.exists(ram_path_abs):
+                                os.remove(ram_path_abs)
+                            shutil.copy2(path, ram_path_abs)
+                            logger.info(f"🔄 [Dashboard] Initialized and synced SSD history to RAMDisk: {ram_path_abs}")
+                        except Exception as sync_err:
+                            logger.error(f"⚠️ [Dashboard] Failed to sync SSD history to RAMDisk: {sync_err}")
+                            
         except Exception as e:
             logger.error(f"❌ [Dashboard] Failed to load alert history: {e}")
 
-    def _save_alert_history(self):
-        """[DATA] 将当前预警持久化到磁盘 (原子替换写盘，保障文件不损坏，引入专属锁与 Windows 重试退避防 WinError 32)"""
-        path = self._get_history_file_path()
+    def _save_alert_history(self, force_ssd=False):
+        """[DATA] 将当前预警持久化到磁盘 (原子替换写盘，保障文件不损坏，引入专属锁与 Windows 重试退避防 WinError 32)
+        - 实盘高频阶段：优先写入 RAMDisk (防止 SSD 物理损耗)
+        - 退出/强制阶段 (force_ssd=True)：写入物理 SSD 固态硬盘
+        """
+        ram_path = cct.get_ramdisk_path("market_alerts_history.json")
+        if ram_path and not force_ssd:
+            path = os.path.abspath(ram_path)
+        else:
+            path = self._get_history_file_path()
+            
         tmp_path = path + ".tmp"
+        
+        # 确保父目录存在
+        config_dir = os.path.dirname(path)
+        if config_dir and not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception as d_err:
+                logger.warning(f"⚠️ [Dashboard] Failed to create folder {config_dir}: {d_err}")
         
         # 🛡️ [LOCK] 临界区上锁保护，彻底排除本进程多线程下的写冲突
         with self._history_write_lock:
@@ -4229,13 +4287,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                                 os.remove(path)
                             os.rename(tmp_path, path)
                             self._last_saved_hash = current_hash # 成功写入，更新哈希标记
+                            if force_ssd:
+                                logger.info(f"💾 [Dashboard] Alert history successfully flushed to SSD: {path}")
+                            else:
+                                logger.debug(f"💾 [Dashboard] Alert history successfully written to RAMDisk: {path}")
                             break
                         except Exception as rename_err:
                             if attempt == 4:
                                 raise rename_err
                             time.sleep(0.05) # 50ms 优雅回退
+                        
             except Exception as e:
-                logger.error(f"❌ [Dashboard] Failed to save alert history: {e}")
+                logger.error(f"❌ [Dashboard] Failed to save alert history (force_ssd={force_ssd}): {e}")
                 if os.path.exists(tmp_path):
                     try:
                         os.remove(tmp_path)
