@@ -1598,6 +1598,14 @@ class BiddingMomentumDetector:
         if self._last_data_date == today_str:
             return
 
+        # [ANTI-REVERSE] 🛡️ 阻断反向日期切换 (未来的日期退回到过去的日期)
+        # 如果新数据的日期比我们当前记录的日期更旧（通常是系统在今日开盘冷启动后，接收到了昨日残留的旧 tick），
+        # 我们绝对不能执行重置，防止昨日的旧 tick 将今日已经加载好的最新会话日期拉回到昨日，
+        # 并引发后续二次重置或破坏内存状态。
+        if self._last_data_date and today_str < self._last_data_date:
+            logger.warning(f"⚠️ [Detector] 忽略反向日期切换 ({self._last_data_date} -> {today_str})，防止旧数据腐蚀今日状态。")
+            return
+
         is_work_day = cct.is_trade_date(current_dt)
         is_fresh_start = (not self._last_data_date)
 
@@ -3065,8 +3073,24 @@ class BiddingMomentumDetector:
         ma20 = ts_obj.ma20
         ma60 = ts_obj.ma60
 
-        if klines_len == 0 or last_close <= 0:
+        if last_close <= 0:
             return
+
+        if klines_len == 0:
+            # 物理织入 [ANTI-BLANK] 虚拟 K 线兜底机制：在竞价期或开盘前几分钟，
+            # 制造一个单根 K 线，参数全部对齐当前 Tick 价格或开盘价
+            virtual_kline = {
+                'close': ts_obj.now_price or ts_obj.open_price or last_close,
+                'open': ts_obj.open_price or last_close,
+                'high': ts_obj.high_day or ts_obj.now_price or last_close,
+                'low': ts_obj.low_day or ts_obj.now_price or last_close,
+                'volume': ts_obj.total_vol,
+                'amount': ts_obj.total_amount,
+                'ticktime': ts_obj.first_breakout_ts or self.last_data_ts or time.time()
+            }
+            # 用虚拟列表替代空 _klines 队列，以保障后续所有的读取能够平稳无缝运行
+            _klines = [virtual_kline]
+            klines_len = 1
 
         latest = _klines[-1]
         # [FIX] 核心修正：严禁优先使用 first_breakout_ts 更新时钟，必须使用当前 K 线时间
