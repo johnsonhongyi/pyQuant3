@@ -5986,45 +5986,49 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         t.start()
         logger.warning(f"⏱️ [SectorBidding] 后台构建线程已启动，主线程立即返回 (total {(time.time()-t_start)*1000:.1f}ms)")
 
-    def open_spatial_follow_hud(self, sector_name: str, signal_item: Optional[Any] = None) -> None:
+    def open_spatial_follow_hud(self, sector_name: str, signal_item: Optional[Any] = None, auto_popup: bool = False) -> None:
         """打开或更新置顶跟单指挥所 SpatialFollowHUD (Thread-safe)"""
         import threading
+        is_main_thread = (threading.current_thread() == threading.main_thread())
         
-        app = QtWidgets.QApplication.instance()
-        is_main_thread = False
-        if app:
-            is_main_thread = (QtCore.QThread.currentThread() == app.thread())
-            
         if not is_main_thread:
             logger.debug(f"[HUD] Called from background thread, routing to main thread for sector: {sector_name}")
             if hasattr(self, 'tk_dispatch_queue'):
-                self.tk_dispatch_queue.put(lambda: self.open_spatial_follow_hud(sector_name, signal_item))
+                self.tk_dispatch_queue.put(lambda: self.open_spatial_follow_hud(sector_name, signal_item, auto_popup))
             return
 
         try:
             from tk_gui_modules.spatial_follow_hud import SpatialFollowHUD
             if self.spatial_follow_hud is None:
+                # 🚀 [YAGNI-PERF] 如果是后台引擎自动触发更新，且 HUD 尚未被创建，微秒级直接静默返回，杜绝无谓的内存与句柄分配！
+                if not auto_popup:
+                    return
                 logger.info("🛸 [HUD] 首次构建跟单指挥所 SpatialFollowHUD...")
                 self.spatial_follow_hud = SpatialFollowHUD(parent=None, main_app=self)
                 self.spatial_follow_hud.on_code_callback = lambda c: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
             
+            # 🚀 [YAGNI-PERF] 如果 HUD 当前正处于隐藏状态，且不是手动弹出命令，直接退出，避免在不可见窗口上做排版重绘！
+            if not self.spatial_follow_hud.isVisible() and not auto_popup:
+                return
+
             self.spatial_follow_hud.update_hud_data(sector_name, signal_item)
             
-            if not self.spatial_follow_hud.isVisible():
+            if not self.spatial_follow_hud.isVisible() and auto_popup:
                 self.spatial_follow_hud.show()
                 
-            self.spatial_follow_hud.raise_()
-            self.spatial_follow_hud.activateWindow()
+            if auto_popup:
+                self.spatial_follow_hud.raise_()
+                self.spatial_follow_hud.activateWindow()
             
             if hasattr(self, '_register_hwnd_to_mru'):
                 self._register_hwnd_to_mru(int(self.spatial_follow_hud.winId()))
                 
-            logger.info(f"🛸 [HUD] 板块跟单指挥所已拉起/更新: {sector_name}")
+            logger.info(f"🛸 [HUD] 板块跟单指挥所已更新: {sector_name} (auto_popup={auto_popup})")
         except Exception as e:
             logger.error(f"[HUD] 打开/更新跟单指挥所失败: {e}", exc_info=True)
 
     def toggle_spatial_follow_hud(self) -> None:
-        """空格键触发：唤醒/聚焦/显示 板块跟单指挥所 SpatialFollowHUD"""
+        """空格键触发：唤醒/聚焦/显示/隐藏 板块跟单指挥所 SpatialFollowHUD"""
         # 如果当前焦点在输入框中，不要拦截空格键，正常输入空格
         focused = self.focus_get()
         if focused is not None:
@@ -6039,6 +6043,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_hud_toggle_t = now
 
         try:
+            # 🚀 [NEW] 如果已拉起并且处于显示状态，再次按下空格键时执行自动隐藏，闭环交互！
+            if getattr(self, 'spatial_follow_hud', None) is not None and self.spatial_follow_hud.isVisible():
+                logger.info("🛸 [HUD] 检测到跟单指挥所已处于显示状态，空格键触发自动隐藏...")
+                self.spatial_follow_hud.hide()
+                return
+
             from sector_focus_engine import get_focus_controller
             fc = get_focus_controller()
             if not fc:
@@ -6051,7 +6061,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
                 
             sector_name = hot_sectors[0]['name']
-            self.open_spatial_follow_hud(sector_name)
+            self.open_spatial_follow_hud(sector_name, auto_popup=True)
         except Exception as e:
             logger.error(f"[HUD] toggle_spatial_follow_hud 异常: {e}", exc_info=True)
 
