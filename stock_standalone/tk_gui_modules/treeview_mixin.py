@@ -146,6 +146,10 @@ class TreeviewMixin:
                 fm = getattr(self, 'feature_marker')
                 # 返回 (权重分数, 原始文本) 二元组进行复合排序
                 l.sort(key=lambda t: (fm.get_priority_score(t[0]), t[0]), reverse=reverse)
+            elif col == 'MainU':
+                # ⚡ [PERF] 针对 MainU 列，采用静态 LUT 进行 O(1) 高性能打分排序
+                from mainu_sort import mainu_sort_score
+                l.sort(key=lambda t: mainu_sort_score(t[0]), reverse=reverse)
             else:
                 l.sort(key=lambda t: float(t[0].replace('%', '').replace('+', '')), reverse=reverse)
         except (ValueError, TypeError):
