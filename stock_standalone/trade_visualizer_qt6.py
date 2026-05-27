@@ -1640,7 +1640,6 @@ class NumericTreeWidgetItem(QtWidgets.QTreeWidgetItem):
 
 # ----------------- 信号消息盒子 -----------------
 from typing import List
-from datetime import datetime
 SIGNAL_QUEUE_AVAILABLE = True
 
 class NumericTableWidgetItem(QtWidgets.QTableWidgetItem):
@@ -3897,7 +3896,6 @@ class MainWindow(QMainWindow, WindowMixin):
         add_time = None
         if not self.day_df.empty:
             try:
-                from datetime import datetime
                 last_dt = str(self.day_df.index[-1]).strip()
                 if len(last_dt) == 10:
                     add_time = f"{last_dt} {datetime.now().strftime('%H:%M:%S')}"
@@ -3988,7 +3986,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self._signal_dedup_cache[dedup_key] = now
             
             # ⚡ [FIX] 详细日志显示
-            from datetime import datetime
             timestamp = datetime.now().strftime('%H:%M:%S')
 
             # 信号名称中文映射
@@ -14230,7 +14227,6 @@ class MainWindow(QMainWindow, WindowMixin):
         add_time = None
         if not self.day_df.empty:
             try:
-                from datetime import datetime
                 last_dt = str(self.day_df.index[-1]).strip()
                 if len(last_dt) == 10:
                     add_time = f"{last_dt} {datetime.now().strftime('%H:%M:%S')}"
@@ -14317,7 +14313,6 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 2. 更新信号日志面板 (详尽信息模式)
             if hasattr(self, 'signal_log_panel'):
-                from datetime import datetime
                 timestamp = datetime.now().strftime('%H:%M:%S')
                 name = self.code_name_map.get(code, code)
                 pattern = 'ALERT'
