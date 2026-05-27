@@ -2457,13 +2457,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后通过 SignalBridge 触发首次刷新，绝对防范跨线程 Timer 崩溃"""
         logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh via SignalBridge.")
-        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready START: sending data_updated signal")
         with self._update_lock:
             self._force_update_requested = True
         
         if hasattr(self, '_worker') and self._worker is not None:
             self._worker.data_updated.emit(None)
-        logger.debug("⏱️ [SectorPanel][DEBUG] _on_detector_ready END")
 
     def _on_sbc_test_finished(self, data: dict):
         """SBC 测试完成回调"""
@@ -2626,7 +2624,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
             
         try:
-            logger.debug("⏱️ [SectorPanel][DEBUG] _on_worker_finished START.")
             now = time.time()
             
             # [REFINED] 统一使用数据更新周期 (cct.duration_sleep_time) 控制 UI 渲染节奏
@@ -2641,9 +2638,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
                 should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
             
-            logger.debug(f"⏱️ [SectorPanel][DEBUG] _on_worker_finished: should_refresh={should_refresh}")
             if should_refresh:
-                logger.debug("⏱️ [SectorPanel][DEBUG] Calling _refresh_sector_list (delayed)...")
                 QTimer.singleShot(0, self._refresh_sector_list)
                 
                 # 🚀 [NEW] 在竞价计算完毕更新 UI 后，同步强力驱策已打开的跟单 HUD 刷新
@@ -2653,7 +2648,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         logger.warning("📡 [SectorPanel-to-HUD] Triggering synchronous HUD refresh following successful bidding calculation.")
                         # 延迟 100ms 调度，给板块表格渲染以充足的时间
                         QTimer.singleShot(100, lambda: hud.update_hud_data(hud.sector_name))
-                logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list scheduled.")
                 self._last_refresh_ts = now
                 with self._update_lock:
                     self._force_update_requested = False
@@ -2676,10 +2670,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # ⭐ [GIL_MONITOR] 埋点：记录进入时刻，Watchdog 可识别"UI 渲染中"
         try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._refresh_sector_list', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
         except Exception: pass
-        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list START.")
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
-            logger.debug("⏱️ [SectorPanel][DEBUG] _worker is None, return.")
             return
 
         # 2. 状态判断：不再直接访问 Queue（关键修复）
@@ -2736,7 +2728,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif col == 2: sectors.sort(key=lambda x: x.get('score_diff', 0), reverse=not asc)
         elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
 
-        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: rendering table...")
         # 6. 表格渲染 (Dirty Check Update)
         self._ui_refreshing = True
         self.sector_table.setUpdatesEnabled(False)
@@ -2801,7 +2792,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.sector_table.blockSignals(False)
         self._ui_refreshing = False
 
-        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: table rendered. Updating selection...")
         # 8. 默认选中
         if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
@@ -2829,9 +2819,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 )
 
         # 11. 重点表刷新
-        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list: Calling _populate_watchlist...")
         self._populate_watchlist()
-        logger.debug("⏱️ [SectorPanel][DEBUG] _refresh_sector_list END.")
 
     def _on_dragon_3d_clicked(self):
         """切换龙头追踪模式 (循环：普通 -> 三日 -> 五日 -> 七日 -> 十日)"""
@@ -3837,7 +3825,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
         """填充底部当日重点表/龙头三日跟踪表"""
-        logger.debug("⏱️ [SectorPanel][DEBUG] _populate_watchlist START.")
         mode = getattr(self, '_watchlist_mode', "NORMAL")
         
         if mode in ["DRAGON_3D", "DRAGON_5D", "DRAGON_7D", "DRAGON_10D"]:

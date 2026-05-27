@@ -1479,8 +1479,6 @@ class BiddingMomentumDetector:
         if not self._score_active:
             return
 
-        t0 = time.perf_counter()
-
         start_idx = self._score_index
         end_idx = min(start_idx + self._score_chunk_size, len(self._score_codes))
         chunk = self._score_codes[start_idx:end_idx]
@@ -1489,35 +1487,17 @@ class BiddingMomentumDetector:
             self._finish_score()
             return
 
-        t1 = time.perf_counter()
-
         try:
             for code in chunk:
                 self._evaluate_code_unlocked(code, anchor_930=self._score_anchor_930)
         except Exception as e:
             logger.warning(f"[ScoreChunk] error: {e}")
 
-        t2 = time.perf_counter()
-
         self._score_index = end_idx
         # [STREAMING] 标记本帧已评估的 codes 为舄（dirty），供 aggregate 增量定位受影响的 sector
         self._sector_dirty_codes.update(chunk)
 
         self._schedule_score_step()
-
-        t3 = time.perf_counter()
-
-        logger.debug(
-            f"[PROFILE] slice={t1-t0:.4f}s "
-            f"eval={t2-t1:.4f}s "
-            f"schedule={t3-t2:.4f}s "
-            f"chunk={len(chunk)}"
-        )
-        if (t2 - t1) > 0.030:
-            logger.warning(
-                f"[ScoreChunk][SLOW] chunk eval {len(chunk)} codes = {(t2-t1)*1000:.1f}ms "
-                f"idx={start_idx}-{end_idx}  thread={threading.current_thread().name}"
-            )
 
     def _finish_score(self):
         """
@@ -1542,8 +1522,6 @@ class BiddingMomentumDetector:
         self._async_sector_agg_queue.put(
             (dirty_codes if (dirty_codes and not force_ref) else None, True)
         )
-
-        logger.debug(f"[ScoreChunk] ✅ 评估分片完毕 {processed_count} 只，已派发异步板块聚合，dirty={len(dirty_codes)}, v={self.data_version}")
 
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
@@ -4126,20 +4104,6 @@ class BiddingMomentumDetector:
             # 当外部直接调用（skip_evaluate 或其他路径）时才递增。
             if not _from_scheduler:
                 self.data_version += 1
-            
-        # [DEBUG] 打印高评分但被过滤的板块（辅助诊断为何板块缺失）
-        if logger.isEnabledFor(LoggerFactory.DEBUG) and skipped_reasons:
-            interesting = {s: r for s, r in skipped_reasons.items() if "low_board_score" in r and float(r.split('(')[1].split(' ')[0]) > 3.0}
-            if interesting:
-                logger.debug(f"ℹ️ [Detector] Potential High-score Sectors filtered: {interesting}")
-
-        # 🔬 [Detector-Diag] 最终生成的活跃板块列表诊断
-        logger.debug(
-            f"🔬 [Detector-Diag-End] Final Active Sectors: {len(self.active_sectors)} | "
-            f"Active Sector Names: {list(self.active_sectors.keys())[:10]} | "
-            f"Skipped Sectors count: {len(skipped_reasons)} | "
-            f"Skipped Sample: {list(skipped_reasons.items())[:5]}"
-        )
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""

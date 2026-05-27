@@ -2811,7 +2811,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             return # 🛡️ 防御空事件
         
         # [DEBUG] 打印信号流入快照 (仅在 Debug 或高频时查看)
-        logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
+        # logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
 
         self.sig_bus_event.emit(event)
 

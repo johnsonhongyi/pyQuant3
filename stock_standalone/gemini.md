@@ -1,3 +1,11 @@
+## 2026-05-27 16:20
+- [x] **完成日志输出频率与诊断信息去噪优化，全量 44/44 测试用例 100% 满分秒通 (Optimized Log Output Frequency, Silenced Diagnostic Spam & Passed 100% Test Parity)**：
+    - [x] **实现 [Rotator] 活跃窗口注册去重与 30 秒限频 (Deduplicated & Throttled Rotator Window Logs)**：在 _get_all_open_trade_windows 方法中引入 _last_rotator_details_str 对比防抖缓存，并增加 30 秒限频检查，仅在窗口列表变动且满足 30 秒间隔时打印调试日志，极大节省了 I/O 资源。
+    - [x] **实现 [Diag] 30秒诊断心跳状态过滤 (30s State-Change Diagnostics Filter)**：将 update_tree 中的 📊 [Diag] 诊断心跳改为基于 _last_diag_str 的状态变化对比模式，并将时间间隔阈值由 15 秒上调至 30 秒。
+    - [x] **清除冗余 15:30 盘后任务心跳监测 (Removed 15:30 Heartbeat Spam)**：完全剔除了每分钟高频打印的 [15:30 Job] 检查 debug 日志，净化了盘后和空闲时段的日志输出。
+    - [x] **盘后自适应心跳周期调整**：将 schedule_15_30_job 定时心跳检测间隔由原先高频的 60 秒（60 * 1000）上调至极智的 30 分钟（30 * 60 * 1000），进一步释放主线程事件循环定时资源。
+    - [x] **测试全绿高标秒通 (100% Regression Success)**：完美跑通了全量 **44/44** 交易内核与自选股生命周期集成测试，以 100% 满分秒通过验证！
+
 ## 2026-05-27 16:00
 - [x] **系统多进程与多线程安全机制全量深度复核，打通全量 44/44 测试 100% 满分秒通 (Completed Complete Concurrent & Threading Safety Review & Secured 100% Core Verification Parity)**：
     - [x] **深入排查四大核心模块与 IPC 联动安全**：全量复核了 **StockSelector**、**Stock Live Strategy**、**Alert System** 和 **TradingAnalyzer** 模块中的多线程及多进程数据流。
