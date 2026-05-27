@@ -1,3 +1,16 @@
+## 2026-05-27 10:35
+- [x] **优化 Nuitka 打包后触发热键打印堆栈闪退问题，彻底根治 CRT Abort/Access Violation 崩溃 (Fixed Nuitka Stack Trace Dump Crash & Access Violation)**：
+    - [x] **物理拆除 unsafe stdout/stderr 输出 (Eliminated direct stdout/stderr printing & faulthandler.dump_traceback direct output to stderr)**：
+        - 彻底废除了在 `dump_all` 临界路径中可能导致崩溃的 `print(...)` 和 `faulthandler.dump_traceback(all_threads=True)` 行为。在 Nuitka onefile 独立打包 GUI 模式下，底层 `sys.stderr` 与 `sys.stdout` 的 C/Windows 文件句柄极易处于 detach/invalid 状态，此时直接向 `sys.stderr` 打印堆栈或直接调用 Python `print` 会瞬间导致 C 运行时崩溃（CRT Abort/Access Violation）。
+    - [x] **物理隔离 logger 重入死锁风险 (Eliminated critical-path logger usage)**：
+        - 从 `dump_all` 堆栈转储主路径中完全剥离了 `logger.warning(...)` 的同步调用。由于 `logging` 模块内部存在全局 GIL 锁、IO 队列及各类 Flush Handler，如果主线程在高频行情或 CPU 饥饿下发生挂起/死锁，在诊断转储路径中再次调用 logger 会发生二次死锁。通过将其剔除，实现了绝对安全的物理静默。
+    - [x] **实现 100% 物理文件落盘堆栈转储 (Guaranteed 100% robust file-only stack dump)**：
+        - 重新设计了 `dump_all()`。现在诊断堆栈**严格且仅**转储到本地硬盘的 `instock_dump.log` 物理文件，在 `with open(..., "a", encoding="utf-8")` 安全上下文管理器中进行写入与 Flush，彻底消除了对控制台句柄的依赖。
+    - [x] **完整保留非阻塞 Windows 原生 Toast 提示守护线程 (Maintained safe non-blocking MessageBoxTimeoutW Daemon Thread)**：
+        - 将原生 Windows `ctypes.windll.user32.MessageBoxTimeoutW` 提示移至完全独立的后台守护线程 `threading.Thread(name="Dump_Toast_Thread", daemon=True)` 中执行。即使 Tkinter 或 PyQt6 主线程因为某种极端原因死锁，该原生 Windows API 仍能在秒级弹出并提示转储成功，且绝不阻塞任何事件循环，提供极高保真的人机交互体验。
+    - [x] **新增控制台安全打印机制 (Added Safe Console Log Path Output)**：
+        - 在 `dump_all` 成功导出堆栈后，引入了强防护性 `sys.stdout is not None` 判定，并使用带独立 `try-except` 异常屏蔽的 `sys.stdout.write` 物理打印转储文件的全路径，保证了在控制台交互调试时的可读性，且在 Nuitka detached 模式下完全不发生崩溃。
+
 ## 2026-05-27 09:00
 - [x] **实现「异动放量详情」面板完全数据驱动的可定制化列架构，无缝注入 "DFF3" 高能指标 (Delivered Fully Data-Driven Configurable Column Architecture & Seamless "DFF3" Metric Integration for Volume Details)**：
     - [x] **实现配置层全自动防抖自愈与默认升级 (Active Config Upgrades & Self-Healing)**：
