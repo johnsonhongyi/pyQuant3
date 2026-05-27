@@ -1083,6 +1083,12 @@ Usage Examples:
     else:
         user_log_level = args.log if args.log is not None else LoggerFactory.WARNING
 
+    # --- [LOG-LEVEL-ALIGN] 强力将全局单例 Logger 的级别设定为用户 CLI 所求的 user_log_level ---
+    try:
+        LoggerFactory.getLogger().setLevel(user_log_level)
+    except Exception as e:
+        print(f"Failed to set global log level: {e}")
+
     logger.info("Initializing Sector Bidding Slice Backtest Tool...")
     # 默认观测点
     slice_stops = []

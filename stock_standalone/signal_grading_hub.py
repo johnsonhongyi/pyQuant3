@@ -185,6 +185,13 @@ class SignalGradingHub:
         else:
             self._sim_time = None
             logger.info("📡 [HUB] 预警中枢回归【实盘模式】。")
+            
+        # 联动禁用/启用警报器，避免回测时语音播报堆积
+        try:
+            from alert_manager import get_alert_manager
+            get_alert_manager().set_simulation_mode(mode)
+        except Exception as e:
+            logger.debug(f"Failed to sync AlertManager simulation mode: {e}")
 
     def update_metadata(self, code_to_sectors: dict):
         """[DATA] 更新个股与板块/概念的映射表，用于精准预警"""
@@ -330,12 +337,14 @@ class SignalGradingHub:
 
     def _publish_alert(self, alert_type, grade, content, metadata=None):
         """发布市场级预警信号"""
-        # [NEW] 物理发布去重：30秒内相同内容不再重复发布
+        # [NEW] 物理发布去重：30秒内相同内容模板不再重复发布 (使用正则剥离所有数字进行泛化去重)
+        import re
         now_time = time.time()
-        if content in self._published_cache:
-            if now_time - self._published_cache[content] < 30:
+        dedup_key = re.sub(r'\d+', '', content)
+        if dedup_key in self._published_cache:
+            if now_time - self._published_cache[dedup_key] < 30:
                 return
-        self._published_cache[content] = now_time
+        self._published_cache[dedup_key] = now_time
         
         # [MOD] 统一时间戳
         ts_str = self._sim_time if (self._simulation_mode and self._sim_time) else datetime.now().strftime("%H:%M:%S")
@@ -351,8 +360,14 @@ class SignalGradingHub:
         # [🔮 DEBUG] 模拟模式下输出更明显的日志
         prefix = "🔮 [SIM] " if self._simulation_mode else "📢 "
         msg = f"{prefix}Publishing Alert: {content} ({grade})"
-        # logger.debug(msg) # 强制控制台输出
-        logger.warning(msg) # 提升至 WARNING 确保可见
+        
+        # 如果处于模拟/回测模式，我们不把警报发送到总线，只打印日志，以防止高频回测把 UI 搞垮
+        if self._simulation_mode:
+            logger.info(f"{msg} (Suppressed in GUI)")
+            return
+            
+        logger.debug(msg) # 强制控制台输出
+        # logger.warning(msg) # 提升至 WARNING 确保可见
         
         get_signal_bus().publish(
             SignalBus.EVENT_MARKET_ALERT,
@@ -377,6 +392,23 @@ class SignalGradingHub:
         logger.warning(msg)
         self._publish_alert("MANUAL_CHECK", "A", "📊 预警中枢运行中：全系统链路巡检正常")
 
-def get_signal_grading_hub():
+_global_grading_hub = None
+_global_grading_hub_lock = threading.Lock()
+
+def get_signal_grading_hub(force_new=False):
     """获取信号分级中枢单例接口"""
-    return SignalGradingHub()
+    global _global_grading_hub
+    if force_new:
+        with _global_grading_hub_lock:
+            if _global_grading_hub is not None:
+                try:
+                    get_signal_bus().unsubscribe(SignalBus.EVENT_PATTERN, _global_grading_hub._on_bus_event)
+                except Exception:
+                    pass
+            _global_grading_hub = SignalGradingHub()
+    elif _global_grading_hub is None:
+        with _global_grading_hub_lock:
+            if _global_grading_hub is None:
+                _global_grading_hub = SignalGradingHub()
+    return _global_grading_hub
+

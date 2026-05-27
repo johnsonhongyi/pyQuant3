@@ -1530,7 +1530,18 @@ class IntradayEmotionTracker:
                                         self._signal_start_price[code_str] = price
                                         # 强势个股给予评分奖励，提升其在决策队列的权重
                                         scores_dict[code_str] += 15 if (is_day_strong or is_struct_strong) else 10
-                                        logger.warning(f"{sig_text} [SBC] {code_str}{name_display} {r_time_str} 价:{price:.2f} %:{float(row.get('percent',0)):+.1f} 量比:{vol_r:.1f} 评分:{scores_dict[code_str]:.0f}")
+                                        # [SIM-LOG-CONTROL] 根据中枢的模拟模式状态，控制日志等级，避免高频回测时控制台警告泛滥
+                                        try:
+                                            from signal_grading_hub import get_signal_grading_hub
+                                            is_sim = get_signal_grading_hub()._simulation_mode
+                                        except Exception:
+                                            is_sim = False
+                                        
+                                        log_msg = f"{sig_text} [SBC] {code_str}{name_display} {r_time_str} 价:{price:.2f} %:{float(row.get('percent',0)):+.1f} 量比:{vol_r:.1f} 评分:{scores_dict[code_str]:.0f}"
+                                        if is_sim:
+                                            logger.info(log_msg)
+                                        else:
+                                            logger.warning(log_msg)
                                     else:
                                         # 记录破位详情，用于 Tick 结尾的聚合输出
                                         self.breakdown_details.append(f"{code_str:<7} {name_display:<8} | {sig_text}")
@@ -1599,7 +1610,18 @@ class IntradayEmotionTracker:
             if self.breakdown_details:
                 count = len(self.breakdown_details)
                 summary = "\n".join(self.breakdown_details[:5])
-                logger.warning(f"⚠️ [SBC-Breakdown] 发现风险({count}只):\n{summary}" + ("\n..." if count > 5 else ""))
+                # [SIM-LOG-CONTROL] 根据中枢的模拟模式状态，控制日志等级，避免高频回测时控制台警告泛滥
+                try:
+                    from signal_grading_hub import get_signal_grading_hub
+                    is_sim = get_signal_grading_hub()._simulation_mode
+                except Exception:
+                    is_sim = False
+                
+                log_msg = f"⚠️ [SBC-Breakdown] 发现风险({count}只):\n{summary}" + ("\n..." if count > 5 else "")
+                if is_sim:
+                    logger.info(log_msg)
+                else:
+                    logger.warning(log_msg)
         except Exception as e:
             import traceback
             traceback.print_exc()

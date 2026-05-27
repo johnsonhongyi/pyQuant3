@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
     QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
-    QProgressBar, QGridLayout, QComboBox, QMenu
+    QProgressBar, QGridLayout, QComboBox, QMenu, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QModelIndex
 import threading
@@ -415,12 +415,21 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True) # ⭐ [NEW] 关闭即物理销毁，不残留后台
         self.setWindowTitle("🔥 今日异动放量个股 (Top 200)")
         self.setMinimumWidth(380)
         self._is_updating = False # 更新标志
         
+        # 1. 加载持久化置顶参数
+        self.stays_on_top = self._load_stays_on_top()
+        
         # ⭐ [FIX] 先设置 WindowFlags（防范句柄重建导致 load_window_position_qt 被重置破坏）
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        flags = self.windowFlags() | Qt.WindowType.Tool
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         
         # 加载窗口位置与大小
         self.load_window_position_qt(self, "volume_details_dialog", default_width=450, default_height=600)
@@ -442,6 +451,18 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
         header_lay.addWidget(header)
         
         header_lay.addStretch()
+        
+        # 置顶选择
+        self.chk_on_top = QCheckBox("置顶")
+        self.chk_on_top.setStyleSheet("""
+            QCheckBox { color: #ffa500; font-size: 9pt; font-weight: bold; }
+            QCheckBox::indicator { width: 12px; height: 12px; }
+        """)
+        self.chk_on_top.setChecked(self.stays_on_top)
+        self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
+        header_lay.addWidget(self.chk_on_top)
+        header_lay.addSpacing(10)
+        
         self.btn_dna_audit_vol = QPushButton("🧬 DNA审计")
         self.btn_dna_audit_vol.setFixedWidth(85)
         self.btn_dna_audit_vol.setStyleSheet("""
@@ -720,14 +741,87 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
             else:
                 logger.error("No access to main monitor app for DNA audit.")
 
+    def _load_stays_on_top(self) -> bool:
+        """从 window_config.json 加载置顶状态 (优先从 volume_details_dialog 中提取)"""
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        dialog_config = data.get("volume_details_dialog", {})
+                        if "stays_on_top" in dialog_config:
+                            return dialog_config["stays_on_top"]
+                        return data.get("volume_details_stays_on_top", False) # 兼容历史扁平配置
+        except Exception as e:
+            logger.error(f"Failed to load volume_details stays_on_top config: {e}")
+        return False
+
+    def _save_window_states(self) -> None:
+        """合并保存窗口位置、大小以及置顶状态至 window_config.json (无防抖，确保关闭时完整落盘)"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            geom = self.geometry()
+            width = int(geom.width() / scale)
+            height = int(geom.height() / scale)
+            
+            pos = {
+                "x": int(geom.x() / scale),
+                "y": int(geom.y() / scale),
+                "width": width,
+                "height": height,
+                "stays_on_top": self.stays_on_top
+            }
+            
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    try:
+                        with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except:
+                        pass
+                
+                data["volume_details_dialog"] = pos
+                
+                # 兼容 header 列宽保存
+                if hasattr(self, 'table'):
+                    header_state = self.table.horizontalHeader().saveState().toHex().data().decode()
+                    data["volume_details_header_v1"] = header_state
+                
+                # 清除可能残留的历史扁平键名，统一收紧至字典中
+                data.pop("volume_details_stays_on_top", None)
+                
+                tmp = WINDOW_CONFIG_FILE + f".tmp_vol_states_{id(self)}"
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp, WINDOW_CONFIG_FILE)
+            logger.info("📌 [VolumeDetailsDialog] Window position, size, and stays_on_top saved together successfully.")
+        except Exception as e:
+            logger.error(f"Failed to save volume_details window states: {e}")
+
+    def _on_stays_on_top_toggled(self, state):
+        self.stays_on_top = self.chk_on_top.isChecked()
+        
+        # 动态改变窗口标志
+        flags = self.windowFlags()
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        
+        # 改变 flags 后需要重新 show，因为会重建窗口句柄
+        self.show()
+        logger.info(f"📌 [VolumeDetailsDialog stays-on-top] Changed to: {self.stays_on_top}")
+
     def closeEvent(self, event):
-        """关闭事件时保存位置"""
-        self.save_window_position_qt_visual(self, "volume_details_dialog")
+        """关闭事件时保存位置与置顶状态"""
+        self._save_window_states()
         event.accept()
 
     def hideEvent(self, event):
-        """隐藏事件时保存位置 (用于该 Dialog 频繁 hide/show 的场景)"""
-        self.save_window_position_qt_visual(self, "volume_details_dialog")
+        """隐藏事件时保存位置与置顶状态"""
+        self._save_window_states()
         super().hideEvent(event)
 
     def showEvent(self, event):
@@ -917,7 +1011,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._engine_ctrl = None
         
         # --- 2. 组件与窗口初始化 ---
-        self._vol_dialog = VolumeDetailsDialog(self)
+        self._vol_dialog = VolumeDetailsDialog(None)
+        # [MOD] 不与信号面板绑定生命周期 (parent为None)，但保持代码点击联动
         self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
         self.setWindowFlags(Qt.WindowType.Window)
         
@@ -2908,7 +3003,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 
                 # 驱动横幅播报
                 grade = payload.get('grade', 'B')
-                logger.info(f"🔔 [DASHBOARD] Received Market Alert: {content} (Grade={grade})")
+                # logger.info(f"🔔 [DASHBOARD] Received Market Alert: {content} (Grade={grade})")
                 
                 if grade in ['S', 'A'] and content:
                     self.sig_show_banner.emit(str(content))
@@ -3623,7 +3718,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # if app: app.processEvents() # ⚡ [MINIMAL HEARTBEAT] 每次接收统计时驱动一次循环，确保 UI 活跃
             
             self._market_stats.update(stats)
-            if hasattr(self, '_vol_dialog') and self._vol_dialog.isVisible(): self._vol_dialog.update_data(stats.get("vol_details", []))
+            try:
+                if getattr(self, '_vol_dialog', None) and self._vol_dialog.isVisible():
+                    self._vol_dialog.update_data(stats.get("vol_details", []))
+            except RuntimeError:
+                self._vol_dialog = None
             self.market_breadth_label.setText(f"📊 上涨:{stats.get('up', 0)} 下跌:{stats.get('down', 0)}")
             self.vol_stat_label.setText(f"🚀 放量:{stats.get('vol_up', 0)}")
             
@@ -3665,8 +3764,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.search_input.clear()
 
     def _on_market_breadth_clicked(self, event):
+        # ⭐ [FIX] 物理销毁 C++ 句柄检测与激活置顶
+        try:
+            if getattr(self, '_vol_dialog', None):
+                self._vol_dialog.isVisible()
+        except RuntimeError:
+            self._vol_dialog = None
+
+        if self._vol_dialog is None:
+            self._vol_dialog = VolumeDetailsDialog(None)
+            self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)
+
         self._vol_dialog.update_data(self._market_stats.get("vol_details", []))
         self._vol_dialog.show()
+        self._vol_dialog.raise_()
+        self._vol_dialog.activateWindow()
 
     def _on_market_temp_clicked(self, event):
         """点击温度计弹出专业复盘详情窗口 - 异步稳定版"""
