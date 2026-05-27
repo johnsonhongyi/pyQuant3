@@ -4252,7 +4252,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
             # 1. 信号推送命令: SIGNAL|{json_str}
             content = content.strip()
-            logger.debug(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
+            # logger.debug(f"[IPC RAW] process_ipc_command content: {content[:50]}...")
             if content.startswith("SIGNAL|"):
                 json_start = time.perf_counter()
                 try:
@@ -4275,8 +4275,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 200ms 防抖，批量处理密集信号
                     self._ipc_signal_timer.start(self._ipc_signal_debounce_ms)
                     
-                    total_dur = (time.perf_counter() - start_t) * 1000 if 'start_t' in locals() else 0
-                    logger.debug(f"📩 [IPC_RECV] Received signal for {code} - JSON:{json_dur:.1f} ms, WaitDebounce: {self._ipc_signal_debounce_ms}ms")
+                    # total_dur = (time.perf_counter() - start_t) * 1000 if 'start_t' in locals() else 0
+                    # logger.debug(f"📩 [IPC_RECV] Received signal for {code} - JSON:{json_dur:.1f} ms, WaitDebounce: {self._ipc_signal_debounce_ms}ms")
                     
                 except Exception as e:
                     logger.error(f"Failed to parse IPC SIGNAL: {e}")

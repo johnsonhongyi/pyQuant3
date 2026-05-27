@@ -167,7 +167,6 @@ def _ipc_sender_worker():
 def send_signal_to_visualizer_ipc(data: dict):
     """ Standardized signals for IPC and SignalBus """
     global _ipc_sender_thread
-    start_t = time.perf_counter()
     
     # ⭐ [THROTTLE] 内部节流：防止同一秒内对同一只股票发送过多重复的 IPC 信号 (震荡导致)
     now = time.time()
@@ -188,7 +187,6 @@ def send_signal_to_visualizer_ipc(data: dict):
             _ipc_sender_thread.start()
 
         # 2. ---------- IPC (Queue it for Async worker) ----------
-        queue_start = time.perf_counter()
         if ipc_queue:
             # ⭐ [DEBUG] 监测队列是否发生挤压
             q_size = ipc_queue.qsize()
@@ -196,10 +194,6 @@ def send_signal_to_visualizer_ipc(data: dict):
                 logger.warning(f"🚨 [IPC_QUEUE] Congestion detected! Current queue size: {q_size}")
             
             ipc_queue.put(data, block=False) # Non-blocking put
-            
-            queue_dur = (time.perf_counter() - queue_start) * 1000
-            total_dur = (time.perf_counter() - start_t) * 1000
-            logger.debug(f"✨ [IPC_SEND] {code} - Queue:{queue_dur:.1f}ms, Total:{total_dur:.1f}ms (Q={q_size})")
         else:
              logger.warning(f"[IPC_SEND] ipc_queue is None, signal {code} skipped.")
              

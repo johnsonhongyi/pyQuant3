@@ -2741,10 +2741,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 name="EOD_15_30_Task",
                 daemon=True
             ).start()
-        else:
-            logger.debug(f'[15:30 Job] Check: now={now.strftime("%H:%M:%S")}, 1530_passed={now >= today_1530}, last_run={self._last_run_date}')
 
-        self._schedule_after(60*1000, self.schedule_15_30_job)
+        self._schedule_after(30 * 60 * 1000, self.schedule_15_30_job)
 
     def run_15_30_task(self):
         """盘后自动任务：包含离线行情存档与所有子面板的持久化。
@@ -4927,16 +4925,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         try:
             if self.refresh_enabled:
-                # 🌟 [DIAGNOSTIC LOGGING] 每 15 秒打一次详细的诊断日志，监控交易状态与子进程健康
+                # 🌟 [DIAGNOSTIC LOGGING] 每 15 秒且当状态变化时打一次详细的诊断日志，监控交易状态与子进程健康
                 now_t = time.time()
-                if now_t - getattr(self, '_last_diagnostic_log_time', 0.0) > 15.0:
+                if now_t - getattr(self, '_last_diagnostic_log_time', 0.0) > 30.0:
                     self._last_diagnostic_log_time = now_t
                     try:
                         work_time = cct.get_work_time()
                         init_done = self.global_values.getkey("tdx.init.done")
                         proc_alive = self.proc.is_alive() if hasattr(self, 'proc') and self.proc else False
                         ref_enabled = self.refresh_enabled
-                        logger.debug(f"📊 [Diag] work_time={work_time}, tdx.init={init_done}, proc_alive={proc_alive}, refresh={ref_enabled}")
+                        diag_str = f"work_time={work_time}, tdx.init={init_done}, proc_alive={proc_alive}, refresh={ref_enabled}"
+                        if not hasattr(self, '_last_diag_str') or self._last_diag_str != diag_str:
+                            self._last_diag_str = diag_str
+                            logger.debug(f"📊 [Diag] {diag_str}")
                     except Exception:
                         pass
                 
@@ -5726,7 +5727,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, 'vis_var') and not self.vis_var.get():
             return
             
-        logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
+        # logger.debug(f"🚀 [Visualizer] Request: {code} (Linkage: {timestamp is not None})")
         if code != getattr(self, 'select_code', None):
             self.select_code = code
         # =========================
@@ -9577,7 +9578,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 1. 快速判断拦截
         alert_var = getattr(self, 'alert_popup_var', None)
         if not alert_var or not alert_var.get():
-            logger.debug(f"Alert popup suppressed for {code} ({name}) by user setting.")
+            # logger.debug(f"Alert popup suppressed for {code} ({name}) by user setting.")
             return # 仅在 INFO 级别以上才记录，减少 IO 开销
 
         # 2. 执行弹窗 (此处已在主线程)
@@ -12349,9 +12350,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 最终合并返回：常规排前（MRU 冒泡），磁贴排后（固定显示顺序）
         final_hwnds = sorted_normal + tile_visible
         
-        # 输出当前的活跃窗口列表日志
+        # 输出当前的活跃窗口列表日志 (去重与防抖优化，只在列表变更且每30秒时输出)
         details = [name_map.get(h, f"Unknown({h})") for h in final_hwnds]
-        logger.debug(f"[Rotator] Detected active windows registry (Grouped: Normal MRU, Tiles Fixed): {', '.join(details)}")
+        details_str = ', '.join(details)
+        now_t = time.time()
+        if now_t - getattr(self, '_last_rotator_log_time', 0.0) > 30.0:
+            if not hasattr(self, '_last_rotator_details_str') or self._last_rotator_details_str != details_str:
+                self._last_rotator_details_str = details_str
+                self._last_rotator_log_time = now_t
+                logger.debug(f"[Rotator] Detected active windows registry (Grouped: Normal MRU, Tiles Fixed): {details_str}")
         self._rotator_window_names = name_map
         return final_hwnds
 
