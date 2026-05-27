@@ -755,6 +755,15 @@ class RacingPieWidget(QWidget):
         self._timer.timeout.connect(self._update_animation)
         self._timer.start(200) 
         
+    def closeEvent(self, event):
+        if hasattr(self, '_timer') and self._timer:
+            try:
+                self._timer.stop()
+                self._timer.deleteLater()
+                self._timer = None
+            except: pass
+        super().closeEvent(event) 
+        
     def _update_animation(self):
         if self.data.get("静默", 0) >= 99 or self.selected_category:
              return
@@ -1598,6 +1607,12 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.refresh_data()
 
     def closeEvent(self, event):
+        if hasattr(self, 'timer') and self.timer:
+            try:
+                self.timer.stop()
+                self.timer.deleteLater()
+                self.timer = None
+            except: pass
         # [统一管理] 不再独立存档，由主面板 closeEvent 统一调用状态导出
         self._save_header_state()
         # self.save_window_position_qt_visual(self, "SectorDetail_Unified")
@@ -2196,6 +2211,12 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.refresh_data()
 
     def closeEvent(self, event):
+        if hasattr(self, 'timer') and self.timer:
+            try:
+                self.timer.stop()
+                self.timer.deleteLater()
+                self.timer = None
+            except: pass
         # [统一管理] 不再独立存档
         self._save_header_state()
         super().closeEvent(event)
@@ -4302,13 +4323,34 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             logger.info("📡 Racing Panel: Background Linkage AUTHORIZED.")
 
     def closeEvent(self, event):
-        """[⭐ 统一管理] 退出时执行原子联行保存"""
+        """[⭐ 统一管理] 退出时执行所有定时器彻底注销与原子联行保存"""
         # [⭐ 新增] 退出前安全暂停后台回测工作，释放算力
         worker = getattr(self, 'replay_worker', None)
         if worker and getattr(worker, 'is_running', False) and not getattr(worker, 'is_paused', True):
             logger.info("⏸ 窗口关闭前自动暂停回测/回放工作...")
             worker.is_paused = True
             time.sleep(0.05) # 短暂休眠让底层循环停下
+            
+        # 彻底关闭并销毁自身及子组件的定时器，杜绝 Win32 USER 句柄残留
+        if hasattr(self, 'refresh_timer') and self.refresh_timer:
+            try:
+                self.refresh_timer.stop()
+                self.refresh_timer.deleteLater()
+                self.refresh_timer = None
+            except: pass
+        if hasattr(self, '_save_ui_timer') and self._save_ui_timer:
+            try:
+                self._save_ui_timer.stop()
+                self._save_ui_timer.deleteLater()
+                self._save_ui_timer = None
+            except: pass
+        if hasattr(self, 'pie_widget') and self.pie_widget:
+            if hasattr(self.pie_widget, '_timer') and self.pie_widget._timer:
+                try:
+                    self.pie_widget._timer.stop()
+                    self.pie_widget._timer.deleteLater()
+                    self.pie_widget._timer = None
+                except: pass
             
         # 1. 强制执行一次安全的原子持久化
         try:

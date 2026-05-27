@@ -972,6 +972,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
         self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
+        self._incoming_event_queue: List[BusEvent] = []
+        self._incoming_lock = threading.Lock()
+        
+        # [NEW] 集中化事件消费定时器：代替高频 QTimer 注册，10FPS (100ms) 批量拉取消费，彻底去噪
+        self._event_consume_timer = QTimer(self)
+        self._event_consume_timer.setInterval(100)
+        self._event_consume_timer.timeout.connect(self._consume_incoming_events)
+        self._event_consume_timer.start()
+
         self._row_cache = {} # {table_obj: {code: table_item_at_col2}} 用于 O(1) 查找现有行
         
         # [NEW] 极速渲染所需常量与预分配对象
@@ -1131,6 +1140,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             if hasattr(self, '_search_timer') and self._search_timer: 
                 self._search_timer.stop()
+        except Exception: pass
+
+        try:
+            if hasattr(self, '_event_consume_timer') and self._event_consume_timer:
+                self._event_consume_timer.stop()
+        except Exception: pass
+
+        try:
+            if hasattr(self, '_render_scheduler') and self._render_scheduler:
+                self._render_scheduler.stop()
         except Exception: pass
         
         try:
@@ -2901,14 +2920,26 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.viewport().update()
 
     def _on_signal_received(self, event: BusEvent):
-        """[BACKGROUND THREAD] 仅发射信号，绝对不触碰任何 Qt 控件及 GUI 定时器"""
+        """[BACKGROUND THREAD] 仅加入待处理队列，由主线程消费定时器定时批量拉取处理，避免饱和攻击"""
         if not event or not event.payload: 
             return # 🛡️ 防御空事件
         
-        # [DEBUG] 打印信号流入快照 (仅在 Debug 或高频时查看)
-        # logger.debug(f"📡 [DASHBOARD_BUS] Received {event.event_type} from {event.source}: {event.payload.get('code')}")
+        with self._incoming_lock:
+            self._incoming_event_queue.append(event)
 
-        self.sig_bus_event.emit(event)
+    def _consume_incoming_events(self):
+        """[GUI THREAD] 从背景队列中取出所有事件并批量处理，彻底降频并消除句柄溢出"""
+        with self._incoming_lock:
+            if not self._incoming_event_queue:
+                return
+            events = self._incoming_event_queue[:]
+            self._incoming_event_queue.clear()
+            
+        for event in events:
+            try:
+                self._safe_process_event(event)
+            except Exception as e:
+                logger.error(f"Error consuming event in dashboard: {e}")
 
 
     def _show_alert_banner(self, msg):
@@ -3026,8 +3057,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     "grade": grade,
                     "detail": f"Type: {payload.get('type', 'HUB')}{codes_str}"
                 }
-                # 物理重新发布到 UI 队列，确保出现在“全部信号”表中
-                self.sig_bus_event.emit(BusEvent(
+                # 物理重新发布到 UI 队列，确保出现在“全部信号”表中 (直接同步处理)
+                self._safe_process_event(BusEvent(
                     event_type=SignalBus.EVENT_PATTERN,
                     timestamp=datetime.now(),
                     source="MarketHub",
@@ -3819,8 +3850,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """处理异动放量窗口代码点击联动"""
         # 1. 触发仪表盘对外的主联动信号 (代码与名称)
         self.code_clicked.emit(code, name)
-        # 2. 发送内部总线事件，以便总线相关组件也能同步
-        self.sig_bus_event.emit(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": code, "name": name}))
+        # 2. 发送内部总线事件，直接在 GUI 线程同步处理
+        self._safe_process_event(BusEvent(SignalBus.EVENT_PATTERN, datetime.now(), "VolDialog", {"code": code, "name": name}))
 
     def _emit_test_signal(self):
         """[SELF-TEST] 发送一个模拟的 Fast-Track 信号用于自检"""

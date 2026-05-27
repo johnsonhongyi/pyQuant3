@@ -4517,12 +4517,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         def _launch_task():
             try:
-                # [NEW] 注入退出同步事件与跨进程总线桥接队列
+                # [NEW] 注入退出同步事件与跨进程总线桥接队列 (限制队列大小为 2000 以配合背压机制)
                 self._backtest_quit_event = mp.Event()
-                self._bus_bridge_queue = mp.Queue()
+                self._bus_bridge_queue = mp.Queue(maxsize=2000)
                 
                 # [NEW] 启动跨进程总线监听桥
                 def monitor_bus_bridge(q, quit_event):
+                    import time
                     from signal_bus import get_signal_bus, BusEvent
                     bus = get_signal_bus()
                     logger.info("📡 [Backtest][IPC] SignalBus Bridge Listener started.")
@@ -4530,6 +4531,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     while not quit_event.is_set():
                         if getattr(self, '_is_closing', False):
                             break
+                        
+                        # [背压检测] 检查仪表盘 UI 队列深度，若积压过多则暂停从 IPC 队列拉取，迫使子进程阻塞
+                        dashboard = getattr(self, '_signal_dashboard_win', None)
+                        if dashboard and dashboard.isVisible() and hasattr(dashboard, '_incoming_event_queue'):
+                            # 限制 UI 待处理缓冲在 1000 以内，防止 message pump 积压
+                            while len(dashboard._incoming_event_queue) > 1000 and not quit_event.is_set():
+                                if getattr(self, '_is_closing', False):
+                                    break
+                                time.sleep(0.05)
+
                         try:
                             # 阻塞式读取，超时设短一点以便响应退出
                             data = q.get(timeout=1.0)
