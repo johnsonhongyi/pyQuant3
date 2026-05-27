@@ -344,6 +344,12 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         """向主窗口 / 可视化终端投递联动信号 (使用官方最规范现成联动通道与 tk_dispatch_queue 派发)"""
         if not code:
             return
+            
+        # ⭐ [DIRTY-CHECK] 强脏检查阻断：如果当前联动的股票与上次完全相同，直接拦截返回，杜绝定时刷新和列表重绘导致的高频重复联动与界面闪烁！
+        if getattr(self, '_last_linkage_code', None) == code:
+            return
+        self._last_linkage_code = code
+
         if self.main_app and self.on_code_callback:
             try:
                 if hasattr(self.main_app, 'tk_dispatch_queue'):
@@ -946,6 +952,11 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         """表格键盘/鼠标行切换响应，即时向主窗口投递联动信号"""
         if currentRow < 0:
             return
+            
+        # ⭐ [SILENT-LOCK] 物理静默防抖：如果正在重绘表格或正在切换列宽状态，强力拦截选择变更事件，杜绝非用户主观触发的重复刷新！
+        if getattr(self, '_rendering_table', False) or getattr(self, '_loading_widths', False) or getattr(self, '_switching_flags', False):
+            return
+
         self.selected_index = currentRow + 1
         self._update_highlight_border()
         
@@ -978,6 +989,11 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
         self.lbl_update_time.setText(datetime.now().strftime("%H:%M:%S"))
         
+        # ⭐ [STATE-MEMORY] 记录刷新前被锁定的股票代码，以便在刷新后智能恢复选择状态，彻底杜绝无谓的重置为龙头bug！
+        prev_locked_code = None
+        if hasattr(self, 'candidate_stocks') and self.candidate_stocks and 0 <= self.selected_index < len(self.candidate_stocks):
+            prev_locked_code = self.candidate_stocks[self.selected_index]["code"]
+
         # 🚀 [NEW] 空风口输入时，自动执行冷启动自愈寻址定位
         if not sector_name:
             detector = self._get_active_detector()
@@ -1463,38 +1479,47 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             mode_style += "border: 1px solid #888; color: #A0A0A5; background-color: #1A1A1F;"
         self.lbl_mode_badge.setStyleSheet(mode_style)
         
-        # 默认选中锁定设置
-        if signal_item and hasattr(signal_item, 'code'):
-            # 如果是具体信号触发，优先高亮匹配的个股代码
+        # 优先恢复用户前一次手动锁定/浏览的股票代码，保持选择状态
+        found_prev = False
+        if prev_locked_code:
             for s_idx, cand in enumerate(self.candidate_stocks):
-                if cand["code"] == signal_item.code:
+                if cand["code"] == prev_locked_code:
                     self.selected_index = s_idx
+                    found_prev = True
                     break
-        else:
-            # 🚀 [NAV-EXPLORATION] 根据键盘翻页方向决定候选个股高亮位置，达成无缝的瀑布流盯盘体验
-            nav_dir = getattr(self, '_nav_direction', None)
-            if nav_dir == "down":
-                # 下翻：自动选中跟风排头兵的第一行 (即 candidate_stocks 中的 index 1，对应 table row 0)
-                if len(self.candidate_stocks) > 1:
-                    self.selected_index = 1
-                else:
-                    self.selected_index = 0
-                # 强力锁定表格焦点，支持连续键盘盲操
-                self.table.setFocus()
-            elif nav_dir == "up":
-                # 上翻：自动从跟风排头兵的最后一行开始 (即 candidate_stocks 中的最后一个元素，对应 table 的最后一行)
-                if len(self.candidate_stocks) > 1:
-                    self.selected_index = len(self.candidate_stocks) - 1
-                else:
-                    self.selected_index = 0
-                # 强力锁定表格焦点，支持连续键盘盲操
-                self.table.setFocus()
+
+        if not found_prev:
+            if signal_item and hasattr(signal_item, 'code'):
+                # 如果是具体信号触发，优先高亮匹配的个股代码
+                for s_idx, cand in enumerate(self.candidate_stocks):
+                    if cand["code"] == signal_item.code:
+                        self.selected_index = s_idx
+                        break
             else:
-                # 其它鼠标点击/定时刷新等情况，默认锁定第 0 列（龙头）
-                self.selected_index = 0
-            
-            # 立即重置导航方向，防后续刷新干扰
-            self._nav_direction = None
+                # 🚀 [NAV-EXPLORATION] 根据键盘翻页方向决定候选个股高亮位置，达成无缝的瀑布流盯盘体验
+                nav_dir = getattr(self, '_nav_direction', None)
+                if nav_dir == "down":
+                    # 下翻：自动选中跟风排头兵的第一行 (即 candidate_stocks 中的 index 1，对应 table row 0)
+                    if len(self.candidate_stocks) > 1:
+                        self.selected_index = 1
+                    else:
+                        self.selected_index = 0
+                    # 强力锁定表格焦点，支持连续键盘盲操
+                    self.table.setFocus()
+                elif nav_dir == "up":
+                    # 上翻：自动从跟风排头兵的最后一行开始 (即 candidate_stocks 中的最后一个元素，对应 table 的最后一行)
+                    if len(self.candidate_stocks) > 1:
+                        self.selected_index = len(self.candidate_stocks) - 1
+                    else:
+                        self.selected_index = 0
+                    # 强力锁定表格焦点，支持连续键盘盲操
+                    self.table.setFocus()
+                else:
+                    # 其它鼠标点击/定时刷新等情况，默认锁定第 0 列（龙头）
+                    self.selected_index = 0
+                
+                # 立即重置导航方向，防后续刷新干扰
+                self._nav_direction = None
 
         self._update_highlight_border()
 
@@ -1968,61 +1993,65 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
     def _render_table_only(self) -> None:
         """物理局部渲染跟风表格，纯 Python 驱动，支持无抖动重绘"""
-        # candidate_stocks[0] 是龙头股，跟风股表格只渲染 candidate_stocks[1:]
-        followers = self.candidate_stocks[1:]
-        self.table.setRowCount(len(followers))
-        
-        for idx, f in enumerate(followers):
-            code = f["code"]
-            name = f["name"]
-            price = f["price"]
-            pct = f["pct"]
-            pct_diff = f["pct_diff"]
-            t_factor = f["t_factor"]
-            dff = f["dff"]
-            hint = f["reason"]
+        self._rendering_table = True
+        try:
+            # candidate_stocks[0] 是龙头股，跟风股表格只渲染 candidate_stocks[1:]
+            followers = self.candidate_stocks[1:]
+            self.table.setRowCount(len(followers))
             
-            # 0. 代码/名称
-            item_name = QtWidgets.QTableWidgetItem(f"{name}\n({code})")
-            item_name.setData(Qt.ItemDataRole.UserRole, code)
-            item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            # 1. 现价
-            item_price = QtWidgets.QTableWidgetItem(f"{price:.2f}")
-            item_price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            # 2. 涨幅
-            pct_color = "#39ff14" if pct >= 0 else "#ff073a"
-            item_pct = QtWidgets.QTableWidgetItem(f"{pct:+.2f}%")
-            item_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_pct.setForeground(QtGui.QColor(pct_color))
-            
-            # 3. 周期变幅
-            diff_color = "#39ff14" if pct_diff >= 0 else "#ff073a"
-            item_diff = QtWidgets.QTableWidgetItem(f"{pct_diff:+.2f}%")
-            item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_diff.setForeground(QtGui.QColor(diff_color))
-            
-            # 4. 跟涨T值
-            item_t = QtWidgets.QTableWidgetItem(f"{t_factor:.1f}")
-            item_t.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            # 5. 背离DFF
-            item_dff = QtWidgets.QTableWidgetItem(f"{dff:+.2f}")
-            item_dff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            # 6. 形态特征
-            item_hint = QtWidgets.QTableWidgetItem(hint)
-            item_hint.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_hint.setForeground(QtGui.QColor("#ff007f" if "突破" in hint else "#00f0ff"))
-            
-            self.table.setItem(idx, 0, item_name)
-            self.table.setItem(idx, 1, item_price)
-            self.table.setItem(idx, 2, item_pct)
-            self.table.setItem(idx, 3, item_diff)
-            self.table.setItem(idx, 4, item_t)
-            self.table.setItem(idx, 5, item_dff)
-            self.table.setItem(idx, 6, item_hint)
+            for idx, f in enumerate(followers):
+                code = f["code"]
+                name = f["name"]
+                price = f["price"]
+                pct = f["pct"]
+                pct_diff = f["pct_diff"]
+                t_factor = f["t_factor"]
+                dff = f["dff"]
+                hint = f["reason"]
+                
+                # 0. 代码/名称
+                item_name = QtWidgets.QTableWidgetItem(f"{name}\n({code})")
+                item_name.setData(Qt.ItemDataRole.UserRole, code)
+                item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # 1. 现价
+                item_price = QtWidgets.QTableWidgetItem(f"{price:.2f}")
+                item_price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # 2. 涨幅
+                pct_color = "#39ff14" if pct >= 0 else "#ff073a"
+                item_pct = QtWidgets.QTableWidgetItem(f"{pct:+.2f}%")
+                item_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item_pct.setForeground(QtGui.QColor(pct_color))
+                
+                # 3. 周期变幅
+                diff_color = "#39ff14" if pct_diff >= 0 else "#ff073a"
+                item_diff = QtWidgets.QTableWidgetItem(f"{pct_diff:+.2f}%")
+                item_diff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item_diff.setForeground(QtGui.QColor(diff_color))
+                
+                # 4. 跟涨T值
+                item_t = QtWidgets.QTableWidgetItem(f"{t_factor:.1f}")
+                item_t.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # 5. 背离DFF
+                item_dff = QtWidgets.QTableWidgetItem(f"{dff:+.2f}")
+                item_dff.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # 6. 形态特征
+                item_hint = QtWidgets.QTableWidgetItem(hint)
+                item_hint.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item_hint.setForeground(QtGui.QColor("#ff007f" if "突破" in hint else "#00f0ff"))
+                
+                self.table.setItem(idx, 0, item_name)
+                self.table.setItem(idx, 1, item_price)
+                self.table.setItem(idx, 2, item_pct)
+                self.table.setItem(idx, 3, item_diff)
+                self.table.setItem(idx, 4, item_t)
+                self.table.setItem(idx, 5, item_dff)
+                self.table.setItem(idx, 6, item_hint)
+        finally:
+            self._rendering_table = False
 
     def _on_header_clicked(self, logical_index: int) -> None:
         """纯 Python 驱动的高灵敏度表头综合排序"""

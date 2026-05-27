@@ -153,8 +153,11 @@ if sys.platform.startswith('win'):
 import faulthandler
 import signal
 
-if sys.stderr is not None:
-    faulthandler.enable()
+try:
+    if sys.stderr is not None:
+        faulthandler.enable()
+except Exception:
+    pass
 
 def init_manager_process():
     import signal
@@ -170,31 +173,43 @@ def init_manager_process():
         pass
 
 def dump_all():
-    try:
-        dump_file_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "instock_dump.log"
-        )
-
-        with open(dump_file_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"\n==== STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ====\n"
-            )
-            faulthandler.dump_traceback(
-                file=f,
-                all_threads=True
-            )
-            f.flush()
-
-        # 在控制台安全打印日志路径，以防 Nuitka onefile 独立打包 detached GUI 环境下 sys.stdout 为 None 导致崩溃
+    # 建立安全打印层，防御 sys.stdout/sys.stderr 为 None 导致的崩溃
+    def safe_print(msg):
         if sys.stdout is not None:
             try:
-                sys.stdout.write(f"\n✅ [Stack Trace Dumped] Log path: {dump_file_path}\n")
-                sys.stdout.flush()
+                print(msg, flush=True)
             except Exception:
                 pass
+        try:
+            logger.warning(msg)
+        except Exception:
+            pass
 
-        # 极速系统级物理反馈：在独立的守护线程中弹出一个 Windows 系统原生、非阻塞的 MessageBox 提示！
+    safe_print("\n🔥 ================= STACK TRACE DUMP TRIGGERED ================= 🔥\n")
+
+    # 1. 尝试使用 logger 写入日志，以便用户在日志文件中也有清晰的可追溯记录
+    try:
+        logger.warning("🔥 [Dump] 快捷键/诊断信号已被捕获，开始转储线程堆栈...")
+    except Exception:
+        pass
+
+    # 2. 强力加固：将当前堆栈转储直接物理存盘至独立文件，即便控制台不可见，也能一键追溯
+    try:
+        dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
+        with open(dump_file_path, "a", encoding="utf-8") as f:
+            f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
+            try:
+                faulthandler.dump_traceback(file=f, all_threads=True)
+            except Exception as fe:
+                f.write(f"faulthandler failed to dump: {fe}\n")
+            f.flush()
+        safe_print(f"✅ Stack trace successfully dumped to: {dump_file_path}")
+        try:
+            logger.warning(f"✅ [Dump] 堆栈信息已成功写入: {dump_file_path}")
+        except Exception:
+            pass
+
+        # 3. 极速系统级物理反馈：在独立的守护线程中弹出一个 Windows 系统原生、非阻塞的 MessageBox 提示！
         # 即使 Tkinter / PyQt 发生死锁挂起，该守护线程弹窗依然能秒级展现，给予用户 100% 极具冲击力的视觉反馈！
         def show_native_toast():
             try:
@@ -214,8 +229,8 @@ def dump_all():
 
         t = threading.Thread(target=show_native_toast, daemon=True, name="Dump_Toast_Thread")
         t.start()
-    except Exception:
-        pass
+    except Exception as e:
+        safe_print(f"⚠️ Failed to dump stack to file: {e}")
 
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
@@ -6075,12 +6090,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
             
         try:
-            import faulthandler
-            import io
-            # [🚀 NEW] 尝试捕获到缓冲区而非直接 stderr，降低对 C 层 IO 的直接冲击
-            output = io.StringIO()
-            faulthandler.dump_traceback(file=output)
-            logger.warning(f"🧵 [ThreadDump] Detected UI Block Stack:\n{output.getvalue()}")
+            import traceback
+            import sys
+            import threading
+            # 🛡️ [HIGH-SECURITY] 使用 100% 纯 Python traceback 机制安全提取主线程堆栈，
+            # 彻底杜绝 faulthandler.dump_traceback 向无 fileno 的内存流写入时触发的底层 C 级别 Access Violation 闪退
+            main_frame = sys._current_frames().get(threading.main_thread().ident)
+            if main_frame:
+                stack_list = traceback.format_stack(main_frame)
+                stack_str = "".join(stack_list)
+                logger.warning(f"🧵 [ThreadDump] Detected UI Block Stack:\n{stack_str}")
+            else:
+                logger.warning("🧵 [ThreadDump] Main thread frame not found for UI Block detection.")
         except Exception as e:
             logger.error(f"[DumpStack] Failed to dump stack safety: {e}")
 
@@ -18526,36 +18547,72 @@ def main_SIGBREAK():
     if IS_MAIN_PROCESS and IS_MAIN_THREAD:
         
         # ---------------------------------------------------------------------
-        # 强力重构：统一使用 C 级别的 faulthandler.register 接管 SIGBREAK (Ctrl+Break)
-        # 彻底废除 Python 层的 signal.signal 及 SetConsoleCtrlHandler 异步线程回调。
-        # 这样在触发时完全无需竞争 Python GIL，直接由 C 运行时在亚毫秒级内以极限性能
-        # 将全量线程堆栈瞬间写入标准错误流，彻底根除一行行卡顿输出和 Windows 超时强退崩溃！
+        # 终极重构：结合标准 Python signal.signal 与 Windows SetConsoleCtrlHandler
+        # 1. 使用 Python signal.signal 挂载 SIGBREAK 拦截，常规状态下 100% 平稳且不退进程；
+        # 2. 同时使用 Win32 API 注册一个底层控制台线程回调。即便 Python 主线程由于 GUI 死锁挂起，
+        #    底层的 Windows 控制台线程依然会在毫秒级内被内核唤醒，瞬间执行 dump_all()；
+        # 3. 关键加固：在 win_console_ctrl_handler 中显式返回 True，吞没操作系统的强杀指令，
+        #    彻底解决 faulthandler.register 无法拦截进程退出导致的触发即闪退顽疾，达成 100% 金牌级稳定性！
         # ---------------------------------------------------------------------
         if (
             sys.platform.startswith("win")
             and hasattr(signal, "SIGBREAK")
         ):
             try:
-                # 确定输出目标：优先标准错误流，如果打包且无控制台则重定向到本地独立日志文件
-                target_file = sys.stderr if sys.stderr is not None else sys.stdout
-                
-                if target_file is None:
-                    dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
-                    # 保持文件句柄全局引用，防止被垃圾回收导致底层 C 写入失效
-                    global _faulthandler_file_ref
-                    _faulthandler_file_ref = open(dump_file_path, "a", encoding="utf-8")
-                    target_file = _faulthandler_file_ref
-                
-                # C 级高能注册，100% 防死锁，极速流畅，绝对不重入崩溃
-                faulthandler.register(signal.SIGBREAK, file=target_file, all_threads=True, chain=False)
-                
-                logger.info(f"✅ SIGBREAK (C-level) registered via faulthandler. Output: {getattr(target_file, 'name', 'sys.stderr')}")
+                # 1. 注册 Python 标准 SIGBREAK 信号接管，这是最安全、最平稳吞没信号且绝不闪退的手段
+                signal.signal(
+                    signal.SIGBREAK,
+                    lambda s, f: dump_all()
+                )
+                logger.info("✅ SIGBREAK (Python-level) registered successfully")
                 if sys.stdout is not None:
-                    print(f"✅ SIGBREAK (C-level) registered via faulthandler. Output: {getattr(target_file, 'name', 'sys.stderr')}", flush=True)
+                    try:
+                        print("✅ SIGBREAK (Python-level) registered successfully", flush=True)
+                    except Exception:
+                        pass
+
+                # 2. 强力加固：使用 Windows 底层 SetConsoleCtrlHandler 注册控制台 Ctrl 事件
+                # 这样即使 Python 主线程死锁，独立的 Windows 控制台线程也有机会触发诊断，
+                # 并且通过返回 True 吞没信号，100% 物理保证有控制台触发时程序绝不闪退崩溃！
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+
+                    CTRL_BREAK_EVENT = 1
+                    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+                    def win_console_ctrl_handler(ctrl_type):
+                        if ctrl_type == CTRL_BREAK_EVENT:
+                            try:
+                                dump_all()
+                            except Exception:
+                                pass
+                            return True  # 返回 True 吞没整个信号，100% 物理拦截 Windows 默认 the 强制杀进程终止退出！
+                        return False
+
+                    # 保持强引用，防止被 C 垃圾回收
+                    global _win_ctrl_handler_ref
+                    _win_ctrl_handler_ref = PHANDLER_ROUTINE(win_console_ctrl_handler)
+                    
+                    SetConsoleCtrlHandler = ctypes.windll.kernel32.SetConsoleCtrlHandler
+                    SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wintypes.BOOL]
+                    SetConsoleCtrlHandler.restype = wintypes.BOOL
+                    
+                    if SetConsoleCtrlHandler(_win_ctrl_handler_ref, True):
+                        logger.info("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)")
+                        if sys.stdout is not None:
+                            try:
+                                print("✅ Windows Console Ctrl Handler registered (Ctrl+Break Protection Enabled)", flush=True)
+                            except Exception:
+                                pass
+                    else:
+                        logger.warning("⚠️ Windows Console Ctrl Handler registration failed.")
+                except Exception as e_ctrl:
+                    logger.warning(f"⚠️ Failed to register Win32 Console Ctrl Handler: {e_ctrl}")
 
             except Exception as e:
                 logger.warning(
-                    f"⚠️ SIGBREAK C-register failed: {e}"
+                    f"⚠️ SIGBREAK registration failed: {e}"
                 )
 
         # -------------------------
