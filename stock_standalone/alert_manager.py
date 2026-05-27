@@ -469,6 +469,22 @@ class AlertManager:
         except:
             pass
 
+    def set_simulation_mode(self, mode: bool):
+        """设置模拟/回测模式，自动开启/关闭警报及清空语音队列"""
+        self.enabled = not mode
+        if mode:
+            self.stop_current_speech()
+            try:
+                while not self.voice_queue.empty():
+                    try: self.voice_queue.get_nowait()
+                    except: break
+                self.cancel_queue.put("__CLEAR__")
+            except:
+                pass
+            logger.info("⚠️ AlertManager: 已进入模拟/回测模式，警报静默且已清理语音队列")
+        else:
+            logger.info("📡 AlertManager: 已返回实盘模式")
+
     def stop(self):
         """系统完全退出"""
         self.stop_event.set()
@@ -604,7 +620,7 @@ class AlertManager:
             
             # if logging.WARNING >= config_level_num:
             #     logger.warning(f"{prefix} [Alert] {message}")
-            logger.warning(f"{prefix} [Alert] {message}")
+            # logger.warning(f"{prefix} [Alert] {message}")
         # 3. 语音队列分放
         if self.voice_enabled and self.process and self.process.is_alive():
             try:

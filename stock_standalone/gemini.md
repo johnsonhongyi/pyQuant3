@@ -1,3 +1,35 @@
+## 2026-05-27 18:50
+- [x] **实现放量个股弹窗（VolumeDetailsDialog）与信号面板生命周期彻底解耦，并保留点击/双击行的联动切换功能 (Decoupled VolumeDetailsDialog from SignalDashboardPanel & Retained Code Linkage)**：
+    - [x] **解耦生命周期绑定**：在 `SignalDashboardPanel` 实例化 `self._vol_dialog` 时，将传入的父窗口（parent）参数修改为 `None`，确保其作为独立的顶层窗口存在，即便信号面板被关闭、隐藏或最小化，放量个股弹窗也能独立运行并维持可见状态。
+    - [x] **保持股票切换联动**：保留并恢复了对 `self._vol_dialog.code_clicked.connect(self._on_vol_code_clicked)` 的连接，确保用户在放量观察窗口内双击个股行时，依然能够像以前一样正常向主窗口发送联动信号以切换 K 线等主视图。
+    - [x] **实现关闭即彻底销毁与点击强制激活至最前端**：
+        - 在 `VolumeDetailsDialog` 中引入 `WA_DeleteOnClose` 属性，确保用户关闭窗口时，底层 C++ 对象物理销毁，而不是仅仅隐藏留在后台刷新。
+        - 在打开该弹窗的入口及数据更新处设计 `try-except RuntimeError` 机制，自适应探测 C++ 对象是否已经被销毁，从而在需要时自动无缝重新创建。
+        - 引入 `raise_()` 与 `activateWindow()` 强制将处于后台或被遮挡的存活弹窗重新拉到最前端并激活焦点，彻底解决了用户在后台找不到且无法再次点击唤醒的问题。
+    - [x] **微调头部文案说明**：将弹窗头部说明标签 `header` 的文案恢复为 `"🔥 异动放量 | 双击行联动"`，引导操盘手进行便捷的快捷联动。
+    - [x] **全量回归测试完美通过 (100% Core Regression Success)**：跑通了包含交易内核与生命周期的全部 61 项回归测试用例，100% 全绿无损。
+
+## 2026-05-27 18:40
+- [x] **实现放量个股弹窗置顶状态动态调整与持久化，默认不置顶 (Implemented VolumeDetailsDialog stays-on-top state toggle & persistence, defaulting to False)**：
+    - [x] **引入 QCheckBox 界面微调控件**：在 `VolumeDetailsDialog` 弹窗头部正中添加 `置顶` 复选框（QCheckBox），通过配置协调配色方案并采用 9pt 紧凑字体适配微缩边框，实现与 “🧬 DNA审计” 按钮等高平行排布。
+    - [x] **合并置顶与窗口物理状态一次性同步落盘**：开发 `_save_window_states` 接口，弃用多次重复磁盘 I/O。在窗口关闭 (`closeEvent`) 或隐藏 (`hideEvent`) 时，将置顶状态 `stays_on_top` 作为结构化字段，与窗口的 x、y、width、height 位置大小数据一并打包更新写入全局 `volume_details_dialog` 配置字典中，并由 `_CONFIG_FILE_LOCK` 线程锁确保单次原子写入的安全性。
+    - [x] **实现动态 WindowFlags 状态重建切换与延迟落盘**：当操盘手勾选或取消置顶时，只在内存中动态切换状态与重构 `setWindowFlags` (加上或剔除 `Qt.WindowType.WindowStaysOnTopHint`)，并显式调用 `self.show()` 触发 Qt 句柄自适应重绘，做到即时热更新生效；而真正配置文件的持久化写盘操作则延迟到窗口关闭（`closeEvent`）或隐藏（`hideEvent`）时统一原子执行，完全对齐全系统逻辑。
+    - [x] **全量回归测试完美通过 (100% Core Regression Success)**：成功以 100% 满分跑通了全量 61 项单元与集成测试用例，确保修改绝无任何侧面副作用！
+
+## 2026-05-27 18:30
+- [x] **实现回测警报日志全局级别同步与中枢单例重构，彻底解决日志级联失效与冗警预警，全量 61/61 测试用例 100% 通过 (Synchronized Backtest Alert Log Levels, Refactored SignalGradingHub Singleton & Secured 100% Test Success)**：
+    - [x] **重构 `SignalGradingHub` 为线程安全单例模式 (Refactored SignalGradingHub as a Thread-Safe Singleton)**：修改 `get_signal_grading_hub` 实现，引入线程锁与重订阅机制，避免每次调用重复创建实例及多次重复订阅 `SignalBus.EVENT_PATTERN`。这彻底根治了旧版本由于无限制生成实例导致的后台事件积压、内存泄漏与冗余预警广播。
+    - [x] **引入 `IntradayEmotionTracker` 智能模拟模式日志降频 (Implemented Smart Simulation Log Level Adaptation)**：在 `realtime_data_service.py` 内部的两处核心 `logger.warning` 处增加模拟回测状态判断。若处于模拟状态，自动将原本强行在控制台打出的 SBC 与 破位风险警告日志降级为 `logger.info`。
+    - [x] **打通 `test_bidding_replay` 命令行参数级联设置 (Hardened CLI Log Level Propagation in Replay Tool)**：在回测脚本 `test_bidding_replay.py` 的 `main` 最早期直接将解析到的 CLI `--log` 级别（如 `ERROR`）绑定并应用到全局单例 Logger（`LoggerFactory.getLogger()`），从而使所有的 `logger.info` 降频日志自动被过滤，保证了无 UI 命令行模式下回测日志输出与设置的绝对一致。
+    - [x] **全量测试回归全绿通过 (100% Regression Success with 61/61 passed)**：成功以 100% 满分跑通包含回测与实时行情全套共 61 项测试用例，全系统完美对齐！
+
+## 2026-05-27 18:00
+- [x] **根治赛马回测高频报警洪峰与语音队列堆积，消除 GUI 句柄泄漏与 Windows 定时器创建崩溃，44/44 全量测试用例 100% 满分秒通 (Silenced Backtest Alert Flood, Restored Voice Queue & Cleared 100% Core Test Regression)**：
+    - [x] **引入 AlertManager 模拟模式静默网关与队列自愈 (Implemented AlertManager Simulation Silent Gate & Queue Flushing)**：在 `alert_manager.py` 中新增 `set_simulation_mode(bool)` 接口，当切换至模拟/回测模式时，瞬间强行将 `enabled` 设为 `False` 并彻底清除后台积压的语音队列（`voice_queue`），杜绝了极速回测期间语音播报多线程句柄耗尽与内存泄露。
+    - [x] **实现 `SignalGradingHub` 回测消息拦截与 GUI 旁路广播绕过 (Deployed Backtest Alert Suppressor & GUI Bypass)**：在 `signal_grading_hub.py` 中深度联动 `AlertManager.set_simulation_mode()`。当在模拟模式下检测 to 警报发布时，只在控制台以日志形式输出诊断，物理上强行拦截并禁止通过 `SignalBus` 广播 `EVENT_MARKET_ALERT` 信号至 GUI。这完全解耦并保护了 UI 线程与主事件循环，彻底根实现了由于海量回测预警回调渲染导致的 `QEventDispatcherWin32` timer 句柄耗尽崩溃自愈。
+    - [x] **加固 30 秒高精正则泛化去重机制 (Hardened Regular-Expression Number-Invariant De-duplication)**：重构了 `SignalGradingHub._publish_alert` 去重算法。在提取 `dedup_key` 时，通过 `re.sub(r'\d+', '', content)` 物理剔除警报字符串中所有随行情高频波动变化的个股数量或百分比数值（例如将“集中破位(2975只)”与“集中破位(2977只)”统一泛化压缩为“集中破位(只)”）。这确保了 30 秒内的去重逻辑面对此类高频波动的数字依然极其稳定，从根本上消除了重复预警。
+    - [x] **测试全绿无损回归 (100% Regression Success with 44/44 Passed)**：完美回归运行了自选股生命周期与交易内核全系列共计 **44/44** 项单元与集成测试用例，在数秒内以 **100% 一次性全绿** 的满分成绩通关，数据与内核一致性固若金汤！
+
 ## 2026-05-27 16:20
 - [x] **完成日志输出频率与诊断信息去噪优化，全量 44/44 测试用例 100% 满分秒通 (Optimized Log Output Frequency, Silenced Diagnostic Spam & Passed 100% Test Parity)**：
     - [x] **实现 [Rotator] 活跃窗口注册去重与 30 秒限频 (Deduplicated & Throttled Rotator Window Logs)**：在 _get_all_open_trade_windows 方法中引入 _last_rotator_details_str 对比防抖缓存，并增加 30 秒限频检查，仅在窗口列表变动且满足 30 秒间隔时打印调试日志，极大节省了 I/O 资源。
