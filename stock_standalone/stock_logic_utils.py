@@ -908,11 +908,13 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # 尽量避免全量 copy，除非确实需要修改原 df 结构
+    # 🌟 强行进行防身独立拷贝，阻断并发对全局共享内存的原位修改，彻底根治 Access Violation 闪退
+    df = df.copy()
+
     if "code" not in df.columns:
         df["code"] = df.index.astype(str).str.zfill(6)
 
-    # 这里的 df 已经在后面通过 signal_manager 修改，不再需要额外的 copy
+    # 这里的 df 已经是一个安全的本地拷贝副本，可以安全地在底层进行各种属性与信号填充
     df = signal_manager.update_signals(df)
 
     df["emotion"] = "中性"

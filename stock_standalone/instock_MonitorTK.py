@@ -17244,7 +17244,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #     logger.info("监控已在运行中。")
         # logger.info("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=duration_sleep_time,history3=lambda: self.search_history3,logger=logger)
+            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=cct.duration_sleep_time,history3=lambda: self.search_history3,logger=logger)
             if hasattr(self, '_register_hwnd_to_mru') and self.kline_monitor and self.kline_monitor.winfo_exists():
                 self._register_hwnd_to_mru(self.kline_monitor.winfo_id())
             # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)

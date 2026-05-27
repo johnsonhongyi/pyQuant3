@@ -1,3 +1,18 @@
+## 2026-05-27 16:00
+- [x] **系统多进程与多线程安全机制全量深度复核，打通全量 44/44 测试 100% 满分秒通 (Completed Complete Concurrent & Threading Safety Review & Secured 100% Core Verification Parity)**：
+    - [x] **深入排查四大核心模块与 IPC 联动安全**：全量复核了 **StockSelector**、**Stock Live Strategy**、**Alert System** 和 **TradingAnalyzer** 模块中的多线程及多进程数据流。
+    - [x] **确认 DataFrame 只读共享与浅/深拷贝契约**：验证了 `StockSelector` 与主窗口同步线程 `send_df` 针对 `df_all` 的多线程访问架构。`StockSelector.load_data()` 在结合实时指标时，通过主动执行 `self.df_all_realtime.copy()` 完美实现了写污染隔离。
+    - [x] **证实 MarketStateBus 发布-订阅与增量 compare() 设计的优越性**：`send_df` 同步线程完全摒弃了在全局共享 DataFrame 上的锁竞争，全面采用 `MarketStateBus` 的版本发布订阅与 `df.compare` 差异分发机制，彻底杜绝了多进程间的内存死锁与高频 GUI 渲染风暴。
+    - [x] **完成并发布工业级《系统并发与内存安全审查报告》Artifact**：整理并导出了位于 `artifacts/analysis_results.md` 的高阶审查报告，对已解决的 5 大内存闪退死角及 3 大持续防范最佳实践红线进行了体系化提炼，为系统的高可用打包运行保驾护航！
+
+## 2026-05-27 15:35
+- [x] **彻底根治 Nuitka 打包多线程环境下 `detect_signals` 对共享全局行情数据 `df_all` 执行原地篡改引发的 Access Violation 闪退，打通全量 44/44 个核心测试 (Fixed Threading Access Violation Crash in Nuitka Packaged Environments & Secured Read-Only Shared Data Contract)**：
+    - [x] **确诊多线程共享 DataFrame 原地写冲突 (Diagnosed Concurrent In-place Writing to Shared DataFrame)**：排查出 `kline_monitor.py` 在其独立的后台守护线程 `refresh_loop` 中，直接获取了全局共享的实时行情大图谱数据引用 `df = self.get_df_func()`（即 `self.df_all`），并在没有拷贝保护的情况下直接传给 `detect_signals(df)` 执行信号填充。由于 `detect_signals` 内部以及下游的 `RealtimeSignalManager` 会对传入的 `df` 执行原地（in-place）写属性和新增列，这导致后台计算线程与主线程的 UI 渲染及其他定时任务之间发生高频的读写冲突。在 Nuitka 编译为 C/C++ 机器码的高性能多线程运行下，极易瞬间触发 Windows 底层的 Access Violation (0xc0000005) 段错误从而导致程序静默闪退。
+    - [x] **引入 `detect_signals` 顶级防身拷贝与绝对物理隔离 (Deployed DataFrame copy() Protection)**：在 `stock_logic_utils.py` 内部 `detect_signals` 函数入口处，强行注入了 `df = df.copy()` 浅/深隔离防护机制。使得该计算函数及其内部的 SignalManager 只能操作独立的本地副本，完全剥离并阻断了对主线程共享 `df_all` 数据块的写污染，从底层物理掐断了多线程内存越界崩溃的根源。
+    - [x] **极速全量 44/44 个单元与集成测试 100% 秒通 (100% Verification Parity)**：完美跑通了包括 watchlist 整个生命周期与交易内核全系列共计 44 项测试用例，在数秒内以 **100% 一次性全绿** 的满分成绩秒通，印证了数据契约与内核底层的一致性与稳定性！
+- [x] **消除 KLineMonitor_init 中 `duration_sleep_time` 变量未定义 (NameError) 的隐藏崩溃死角 (Fixed NameError Scope Bug for duration_sleep_time)**：
+    - [x] **定位并修复作用域错误**：排查出主窗口 `instock_MonitorTK.py` 中的 `KLineMonitor_init` 成员方法在拉起 K 线监控窗口时，直接使用了裸变量 `duration_sleep_time`，而顶层实际上仅导入了 `commonTips as cct`，并未将该变量注入当前全局作用域。将其精准修正为 `cct.duration_sleep_time`，彻底消除了此处未定义的隐藏致命崩溃死角。
+
 ## 2026-05-27 15:15
 - [x] **根治 SpatialFollowHUD 局部重绘缩进引起的 IndentationError，打通 44/44 个测试 100% 满分秒通 (Fixed IndentationError in spatial_follow_hud.py Table Rendering & Restored 100% Regression Success)**：
     - [x] **确诊表格重绘函数内部循环体缩进残缺 (Diagnosed missing indentation in _render_table_only)**：排查出 `tk_gui_modules/spatial_follow_hud.py` 里面的 `_render_table_only` 物理局部重绘方法在执行到 `for idx, f in enumerate(followers):` 时，下方的局部循环体代码块（获取 `code`/`name`、生成 `QTableWidgetItem` 并设置单元格对齐与色彩补偿等逻辑）缺失了向右缩进的 4 个空格。这直接导致 Python 解释器在编译加载模块时抛出 `IndentationError: expected an indented block` 的致命错误，进而导致 `instock_MonitorTK.py` 中的 `open_spatial_follow_hud` 调用以导入失败告终。

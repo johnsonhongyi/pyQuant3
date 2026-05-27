@@ -134,7 +134,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         self._build_panes()
         
         # Init Load
-        self.refresh_report()
+        self.after(50, self.refresh_report)
         
         # Bindings
         self.bind("<Escape>", lambda e: self.on_close())
