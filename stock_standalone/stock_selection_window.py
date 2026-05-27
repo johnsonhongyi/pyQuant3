@@ -2788,6 +2788,10 @@ def _schedule_focus_refresh(self):
 
 def _refresh_focus_tabs(self):
     """刷新板块聚焦 + 实时决策 Tab 的数据"""
+    try:
+        self._kernel_refresh_positions(show_message=False)
+    except Exception as e:
+        logger.debug(f"[refresh_focus_tabs] refresh positions error: {e}")
     self._refresh_sector_tab()
     self._refresh_decision_tab()
 

@@ -2600,8 +2600,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 except Empty:
                     break
 
-            # 推入最新数据（纵深防御：即使调用者忘记 copy，此处兜底）
-            self._worker.add_data(df_all.copy())  # [THREAD-SAFETY] 防御性 copy
+            # 推入最新数据
+            self._worker.add_data(df_all)  # [THREAD-SAFETY] 外部调用点 (instock_MonitorTK.py) 已确保是不可变快照，物理移除深拷贝以减少 50ms 主线程阻塞
 
             with self._update_lock:
                 self._force_update_requested = force_update

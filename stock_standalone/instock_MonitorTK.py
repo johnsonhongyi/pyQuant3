@@ -1317,7 +1317,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (10s)")
         self.sync_rotator_windows()
 
-
+    def _inject_focus_engine(self, full_df):
+        """[ASYNC] 将焦点引擎注入操作100%卸载至后台线程"""
+        def _do_inject():
+            try:
+                from sector_focus_engine import get_focus_controller
+                fc = get_focus_controller()
+                if not getattr(fc, 'hud_callback', None):
+                    fc.hud_callback = self.open_spatial_follow_hud
+                
+                fc.inject_realtime(full_df)
+                
+                _sbp = getattr(self, 'sector_bidding_panel', None)
+                _detector = getattr(_sbp, 'detector', None) if _sbp else None
+                if _detector is not None:
+                    fc.inject_from_detector(_detector)
+                
+                try:
+                    from scraper_55188 import get_cache_df as _55188_cache
+                    _ext_df = _55188_cache()
+                    if _ext_df is not None and not _ext_df.empty:
+                        fc.inject_ext_data(_ext_df)
+                except Exception: pass
+                
+                fc.tick()  # tick 也一并在后台执行
+            except Exception as _fe:
+                logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
+        
+        self.executor.submit(_do_inject)
 
 
     def _put_deduped_task(self, key, task_fn):
@@ -2362,7 +2389,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if panel is not None:
                     # [THREAD-SAFE] on_realtime_data_arrived 是线程安全入队接口，直接在后台线程调用
                     logger.warning("[15:30 Task] STEP 1b ▶ Feeding df to panel (thread-safe queue)...")
-                    panel.on_realtime_data_arrived(df_feed.copy(), force_update=False)
+                    panel.on_realtime_data_arrived(df_feed, force_update=False)
 
                     # 等待面板内部 _worker 处理完毕（score 填充 >= 90%）
                     detector = getattr(panel, 'detector', None)
@@ -4995,62 +5022,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 虽然不刷表格，也要更新状态条，代表“数据已到达内存”
                     pass
                 
-                # 将排行榜、板块联动面板、概念统计等非核心/非实时任务放入低频异步调度器
-                def _low_freq_sync_tasks():
-                    lt_now = time.time()
-                    # ⭐ 异步任务同步频次限制在 1.5s 以上
-                    if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
-                        self.update_all_top10_windows()
-                        
-                        # [OPTIMIZE] 将耗时的概念列表统计移至此处异步处理
-                        if ui_df is not None and not ui_df.empty:
-                            self.update_category_result(ui_df)
+                # 1. 独立调度：Top10 窗口
+                lt_now = time.time()
+                if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
+                    self._put_deduped_task("lf_top10", lambda: self.update_all_top10_windows())
+                    
+                    # 2. 独立调度：概念列表统计与详情更新
+                    if ui_df is not None and not ui_df.empty:
+                        def _do_cat_update(d=ui_df):
+                            self.update_category_result(d)
                             if hasattr(self, '_concept_detail_win') and self._concept_detail_win.winfo_exists():
-                                 self._concept_detail_win.update_data(ui_df)
+                                self._concept_detail_win.update_data(d)
+                        self._put_deduped_task("lf_category", _do_cat_update)
 
-                        panel = getattr(self, "sector_bidding_panel", None)
-                        if panel and panel.isVisible():
+                    # 3. 独立调度：竞价面板的数据推送
+                    _panel = getattr(self, "sector_bidding_panel", None)
+                    if _panel and _panel.isVisible():
+                        def _do_panel_sync(p=_panel, d=full_df):
                             try:
-                                panel.on_realtime_data_arrived(full_df)  # [THREAD-SAFETY] 移除了 copy() 因为 full_df 已是独立的不可变快照
+                                p.on_realtime_data_arrived(d) # full_df 已是独立快照，调用端负责 copy 隔离
                             except Exception as e:
                                 logger.error(f"Panel sync failed: {e}")
+                        self._put_deduped_task("lf_panel_feed", _do_panel_sync)
 
-                        # ✅ 决策队列[盘中交易引擎 v2] 直接从 BiddingMomentumDetector 完整注入
-                        try:
-                            _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
-                            # [THROTTLE] 交易引擎注入间隔限制在 30s，且仅在快照更新时执行
-                            if has_update and (lt_now - _fc_last >= duration_sleep_time):
-                                from sector_focus_engine import get_focus_controller
-                                fc = get_focus_controller()
-                                if not getattr(fc, 'hud_callback', None):
-                                    fc.hud_callback = self.open_spatial_follow_hud
+                    # 4. 独立调度：后台注入决策引擎
+                    _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
+                    if has_update and (lt_now - _fc_last >= duration_sleep_time):
+                        self._put_deduped_task("lf_engine_inject", lambda d=full_df: self._inject_focus_engine(d))
+                        self._focus_ctrl_last_inject = lt_now
 
-                                # ① 注入基础行情表 (确保扫描引擎始终有底层数据支持)
-                                fc.inject_realtime(full_df)
-
-                                # ② 专家通道：从 BiddingMomentumDetector 注入分析结果 (零拷贝逻辑)
-                                _sbp = getattr(self, 'sector_bidding_panel', None)
-                                _detector = getattr(_sbp, 'detector', None) if _sbp else None
-                                if _detector is not None:
-                                    fc.inject_from_detector(_detector)
-
-                                # ② 55188 外部数据（主力/题材/人气）
-                                try:
-                                    from scraper_55188 import get_cache_df as _55188_cache
-                                    _ext_df = _55188_cache()
-                                    if _ext_df is not None and not _ext_df.empty:
-                                        fc.inject_ext_data(_ext_df)
-                                except Exception: pass
-
-                                # ③ 后台 Tick（板块热力确认+买点扫描+决策队列更新）
-                                self.executor.submit(fc.tick)
-                                self._focus_ctrl_last_inject = lt_now
-                        except Exception as _fe:
-                            logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
-
-                        self._last_low_freq_ts = lt_now
-
-                self._put_deduped_task("low_freq_ui_sync", _low_freq_sync_tasks)
+                    self._last_low_freq_ts = lt_now
 
 
                 # ⭐ 交易 GUI 同步 (轻量级)
@@ -5921,7 +5922,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 推一次行情数据（仅做 queue.put，不 copy 大 DataFrame）
                 if hasattr(self, 'df_all') and not self.df_all.empty:
                     t0 = time.time()
-                    self.sector_bidding_panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                    self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
                     logger.warning(f"⏱️ [SectorBidding][REOPEN] on_realtime_data_arrived cost {(time.time()-t0)*1000:.1f}ms")
             except Exception as e:
                 logger.error(f"打开已有竞价面板失败: {e}")
@@ -5967,8 +5968,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         def _push_initial_data():
                             if hasattr(self, 'df_all') and not self.df_all.empty:
                                 t3 = time.time()
-                                logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 4: df_all.copy() + on_realtime_data_arrived ...")
-                                panel.on_realtime_data_arrived(self.df_all.copy(), force_update=True)
+                                logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 4: df_all + on_realtime_data_arrived ...")
+                                panel.on_realtime_data_arrived(self.df_all, force_update=True)
                                 logger.warning(f"⏱️ [SectorBidding][BUILD-Main] Step 4 Done: 数据推送耗时 {(time.time()-t3)*1000:.1f}ms")
                             logger.warning(f"⏱️ [SectorBidding][BUILD-Main] 🎉 全程总耗时: {(time.time()-t_start)*1000:.1f}ms")
 
@@ -6516,9 +6517,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             header = struct.pack("!I", len(payload))
 
                             # 2️⃣ socket 单独计时
-                            with timed_ctx("viz_IPC_send", warn_ms=10000):
+                            with timed_ctx("viz_IPC_send", warn_ms=1000):
                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                    s.settimeout(0.4) # 缩短超时到 400ms
+                                    s.settimeout(0.2) # 极限压缩至 200ms，减少 GIL 竞争窗口同时保障可靠性
                                     s.connect((ipc_host, ipc_port))
                                     s.sendall(b"DATA" + header + payload)
 

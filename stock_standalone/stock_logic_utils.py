@@ -783,7 +783,7 @@ class RealtimeSignalManager:
         # 信号逻辑
         prev_signal_arr = safe_prev_signal_array(df)
         score += prev_signal_arr
-
+        score = np.round(score, 2).astype(np.float32)
         df['signal_strength'] = score
         
         signal_col = np.full(len(df), '', dtype=object)
