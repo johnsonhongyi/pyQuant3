@@ -2457,7 +2457,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 "journal_ts": datetime.now().isoformat(),
             }
             try:
-                from trading_kernel.observability.journal import enrich_decision_item
+                from trading_kernel.kernel_service import enrich_decision_item
                 enrich_decision_item(sig_sell, write_journal=True)
             except Exception as e_journal:
                 logger.warning(f"Error enriching sell journal: {e_journal}")

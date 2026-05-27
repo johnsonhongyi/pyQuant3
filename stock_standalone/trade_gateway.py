@@ -390,10 +390,29 @@ class MockTradeGateway:
         with self._lock:
             for code, pos in self._positions.items():
                 if pos.current_price > 0 and pos.current_price <= pos.stop_loss:
-                    to_sell.append((code, pos.current_price, "触发止损线"))
+                    to_sell.append((code, pos.current_price, "触发止损线", pos.name, pos.sector, pos.strategy_tag))
 
-        for code, price, reason in to_sell:
-            self.submit_sell(code, price, reason)
+        for code, price, reason, name, sector, strategy_tag in to_sell:
+            ok, msg = self.submit_sell(code, price, reason)
+            if ok:
+                # 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+                sig_sell = {
+                    "code": code,
+                    "name": name,
+                    "signal_type": "止损出场",
+                    "action": "SELL",
+                    "price": price,
+                    "current_price": price,
+                    "suggest_price": price,
+                    "reason": reason,
+                    "journal_ts": datetime.now().isoformat(),
+                    "created_at": datetime.now().isoformat(),
+                }
+                try:
+                    from trading_kernel.kernel_service import enrich_decision_item
+                    enrich_decision_item(sig_sell, write_journal=True)
+                except Exception as e_journal:
+                    logger.warning(f"Error enriching stop-loss sell journal: {e_journal}")
 
     # ── 流水记录持久化 ────────────────────────────────────────────────────────
 

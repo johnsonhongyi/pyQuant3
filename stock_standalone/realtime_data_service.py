@@ -2469,25 +2469,8 @@ class DataPublisher:
                 
                 self._last_batch_fp = batch_fp
                 
-                # 🔌 [REFINED] Backend-driven Signal Detection & Data Hub Publishing
-                # Logic moved from GUI to backend for multi-process awareness
-                enriched_df = df.copy()
-                if 'code' in enriched_df.columns:
-                    enriched_df = enriched_df.drop_duplicates(subset=['code'])
-                
-                try:
-                    from stock_logic_utils import detect_signals
-                    # detect_signals handles scores and signal types (BUY_N, BUY_S, etc.)
-                    enriched_df = detect_signals(enriched_df)
-                except Exception as sig_err:
-                    logger.error(f"[Backend] Signal detection failed: {sig_err}")
-
                 # [REMOVED] DataHubService publishing block (service removed from system)
-                # try:
-                #     from data_hub_service import DataHubService
-                #     DataHubService.get_instance().publish_df_all(enriched_df)
-                # except Exception as dh_err:
-                #     logger.error(f"[DataHub] Failed to publish enriched df_all: {dh_err}")
+                # Legacy code for enriched_df and detect_signals has been safely removed to prevent synchronous deep copy overhead.
 
                 # [REFINED] 强化间隙检测 (仅在实盘模式运行)
                 if not self.simulation_mode:

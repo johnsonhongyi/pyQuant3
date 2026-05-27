@@ -956,8 +956,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._stats_timer.start(2000)
         
         self._batch_timer = QTimer(self)
+        self._batch_timer.setSingleShot(True)
         self._batch_timer.timeout.connect(self._process_batch_signals)
-        self._batch_timer.start(3000)
 
         # [FIX] 废弃原有的定时器机制，改为监听 MonitorTK 发出的心跳信号触发 _update_engine_views
         # 这确保了 UI 刷新能够 100% 对齐数据聚合周期，避免无数据更新时的空转或脏检查开销
@@ -2946,8 +2946,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             with self._data_lock: # ⭐ [FIX] 使用锁保护缓冲区写入
                 self._table_update_buffer.append(event)
             
-            # 3. 如果是高优信号，缩短批次等待，尽快显示 (可选)
-            # if event.payload.get('is_high_priority'): QTimer.singleShot(500, self._process_batch_signals)
+            # 3. 动态触发 200ms 微批处理，切断大量信号堆积导致的 3s 卡顿
+            if not getattr(self, '_batch_timer', None) or not self._batch_timer.isActive():
+                self._batch_timer.start(200)
         except Exception as e:
             logger.error(f"Error in _safe_process_event: {e}")
 

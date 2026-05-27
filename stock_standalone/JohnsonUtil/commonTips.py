@@ -3026,6 +3026,7 @@ def filepath_datetime(path_to_file):
 
 
 if not isMac():
+    import pywintypes
     import win32api,win32gui
 import _thread
 
