@@ -640,6 +640,43 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         pos_layout.setContentsMargins(6, 6, 6, 6)
         pos_layout.setSpacing(6)
 
+        # 持仓控制面板
+        pos_ctrl_layout = QtWidgets.QHBoxLayout()
+        pos_ctrl_layout.setContentsMargins(2, 2, 2, 2)
+        
+        pos_title_lbl = QtWidgets.QLabel("💼 实时模拟持仓与资金监控")
+        pos_title_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #E2E2E6;")
+        pos_ctrl_layout.addWidget(pos_title_lbl)
+        
+        pos_ctrl_layout.addStretch()
+        
+        # 一键数据自愈修复按钮
+        self.btn_heal = QtWidgets.QPushButton("🔧 一键数据自愈修复")
+        self.btn_heal.setToolTip("智能校正初始资金、剔除已平仓(0股)幽灵持仓行、并自愈对账可用现金和资产盈亏")
+        self.btn_heal.setStyleSheet("""
+            QPushButton {
+                background-color: #1E293B;
+                color: #00E5FF;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                color: #FFFFFF;
+                border-color: #00E5FF;
+            }
+            QPushButton:pressed {
+                background-color: #0F172A;
+            }
+        """)
+        self.btn_heal.clicked.connect(self._on_one_key_self_heal)
+        pos_ctrl_layout.addWidget(self.btn_heal)
+        
+        pos_layout.addLayout(pos_ctrl_layout)
+
         # 持仓数据表格 (只读)
         self.pos_table = QtWidgets.QTableWidget()
         self.pos_table.setColumnCount(10)
@@ -2453,8 +2490,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 "signal_type": "手工平仓",
                 "action": "SELL",
                 "price": price,
+                "current_price": price,
+                "suggest_price": price,
                 "reason": "内核面板上手工平仓",
                 "journal_ts": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
             }
             try:
                 from trading_kernel.kernel_service import enrich_decision_item
@@ -2510,3 +2550,101 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             QtWidgets.QMessageBox.information(self, "完成", "已执行一键平仓所有持仓！")
         except Exception as e:
             logger.error(f"Error in manual_sell_all_positions: {e}")
+
+    def _on_one_key_self_heal(self):
+        """一键自适应数据自愈修复：智能调整资金规模、清理 0 股幽灵持仓、并物理同步适配器与柜台数据"""
+        try:
+            from trading_kernel.kernel_service import get_kernel_service
+            from trade_gateway import get_trade_gateway
+            
+            service = get_kernel_service()
+            if not service or not service.paper_adapter:
+                QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易内核服务未就绪")
+                return
+                
+            trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+            if not trade_gw:
+                QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易网关未就绪")
+                return
+                
+            # 1. 物理清理所有 volume/shares <= 0 的幽灵/已平仓持仓，防范 float 盈亏计算干扰
+            removed_ghosts = []
+            
+            # 清理 paper_adapter 内存持仓
+            for c_code, p_obj in list(service.paper_adapter.account.positions.items()):
+                if p_obj.volume <= 0:
+                    service.paper_adapter.account.positions.pop(c_code, None)
+                    removed_ghosts.append(c_code)
+                    
+            # 清理 legacy 柜台持仓
+            with trade_gw._lock:
+                for c_code in list(trade_gw._positions.keys()):
+                    leg_pos = trade_gw._positions[c_code]
+                    if leg_pos.shares <= 0:
+                        trade_gw._positions.pop(c_code, None)
+                        removed_ghosts.append(c_code)
+            
+            # 2. 统计当前活跃持仓的买入成本和最新市值
+            active_positions = service.paper_adapter.account.positions
+            entry_cost_sum = 0.0
+            market_val_sum = 0.0
+            
+            for code_key, pos_obj in active_positions.items():
+                vol = float(pos_obj.volume)
+                entry_cost_sum += float(pos_obj.entry_price) * vol
+                market_val_sum += float(pos_obj.current_price) * vol
+                
+            # 3. 智能计算合理、健康的资金规模
+            # 默认至少 1,000,000.0，如果持仓成本已超出，则自动上浮 1.5 倍并向上取整至 100,000.0 的整数倍
+            min_cap = max(1000000.0, entry_cost_sum * 1.5)
+            target_cap = float((int(min_cap) // 100000) * 100000)
+            if target_cap < min_cap:
+                target_cap += 100000.0
+                
+            new_cash = max(0.0, target_cap - entry_cost_sum)
+            
+            # 4. 同步可用现金与初始资金到纸盘适配器和老柜台风控
+            service.paper_adapter.initial_capital = target_cap
+            service.paper_adapter.account.initial_capital = target_cap
+            service.paper_adapter.account.cash = new_cash
+            
+            trade_gw.total_capital = target_cap
+            if hasattr(trade_gw, "risk_manager") and trade_gw.risk_manager:
+                trade_gw.risk_manager.total_capital = target_cap
+                
+            # 5. 强行将新数据做物理落盘持久化
+            if hasattr(service.paper_adapter, "_save_state"):
+                service.paper_adapter._save_state()
+                
+            # 6. 清除 UI 缓存指纹，强制触发 Qt 刷新
+            if hasattr(self, "_last_rendered_state"):
+                delattr(self, "_last_rendered_state")
+                
+            self._refresh_positions_tab()
+            
+            # 7. 显示成功对话框
+            pnl_val = market_val_sum - entry_cost_sum
+            pnl_pct = (pnl_val / entry_cost_sum * 100.0) if entry_cost_sum > 0 else 0.0
+            
+            msg_text = (
+                f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
+                f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
+                f"2️⃣ <b>重调初始资金</b>：已自适应扩容至 <b>¥ {target_cap:,.2f}</b>。<br>"
+                f"3️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
+                f"4️⃣ <b>资产盈亏重算</b>：<br>"
+                f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
+                f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
+                f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
+                f"<i>* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！</i>"
+            )
+            
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+            box.setWindowTitle("一键数据自愈修复")
+            box.setText(msg_text)
+            box.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            box.exec()
+            
+        except Exception as e:
+            logger.error(f"Error in One-Key Self-Heal: {e}")
+            QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈执行时抛出异常: {e}")

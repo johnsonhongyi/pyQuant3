@@ -2649,6 +2649,9 @@ def _init_decision_tab(self, parent: tk.Frame):
     tk.Button(btn_row, text="刷新持仓/止损", bg="#1f2a3a", fg="#99ccff",
               font=("Arial", 9), relief="flat", pady=2,
               command=self._kernel_refresh_positions).pack(side="left", padx=3)
+    tk.Button(btn_row, text="🔧 数据自愈修复", bg="#2a1f3d", fg="#d199ff",
+              font=("Arial", 9, "bold"), relief="flat", pady=2,
+              command=self._on_one_key_self_heal).pack(side="left", padx=3)
     tk.Button(btn_row, text="🚫 忽略（选中）", bg="#2a2a2a", fg="#888888",
               font=("Arial", 9), relief="flat", pady=2,
               command=self._ignore_selected_signal).pack(side="left", padx=3)
@@ -2792,6 +2795,10 @@ def _refresh_focus_tabs(self):
         self._kernel_refresh_positions(show_message=False)
     except Exception as e:
         logger.debug(f"[refresh_focus_tabs] refresh positions error: {e}")
+    try:
+        self._kernel_auto_execute_once(auto_mode=True)
+    except Exception as e:
+        logger.debug(f"[refresh_focus_tabs] auto execute once error: {e}")
     self._refresh_sector_tab()
     self._refresh_decision_tab()
 
@@ -3130,7 +3137,6 @@ def _mock_buy_selected(self):
                 "created_at": datetime.now().isoformat(),
             })
             try:
-                from datetime import datetime
                 from trading_kernel.kernel_service import enrich_decision_item
                 enrich_decision_item(sig_buy, write_journal=True)
             except Exception as e_journal:
@@ -3192,7 +3198,6 @@ def _mock_sell_selected(self):
             "created_at": datetime.now().isoformat(),
         }
         try:
-            from datetime import datetime
             from trading_kernel.kernel_service import enrich_decision_item
             enrich_decision_item(sig_sell, write_journal=True)
         except Exception as e_journal:
@@ -3204,7 +3209,7 @@ def _mock_sell_selected(self):
         messagebox.showwarning("卖出失败", msg)
 
 
-def _get_realtime_price_map(self):
+def _get_realtime_price_map(self, codes=None):
     """Build {code: price} from the current realtime DataFrame if available."""
     price_map = {}
     df_rt = None
@@ -3212,16 +3217,47 @@ def _get_realtime_price_map(self):
         df_rt = self.selector.df_all_realtime
     if df_rt is None and self.master and hasattr(self.master, 'df_all'):
         df_rt = self.master.df_all
-    if df_rt is None:
+    if df_rt is None or getattr(df_rt, 'empty', True):
         return price_map
     try:
-        for code in getattr(df_rt, 'index', []):
-            row = df_rt.loc[code]
-            price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
-            if price > 0:
-                price_map[str(code).zfill(6)] = price
-    except Exception:
-        pass
+        if codes is not None:
+            # Targeted fast lookup for specified codes
+            for code in codes:
+                code_str = str(code).zfill(6)
+                row = None
+                if code_str in df_rt.index:
+                    row = df_rt.loc[code_str]
+                else:
+                    try:
+                        code_int = int(code_str)
+                        if code_int in df_rt.index:
+                            row = df_rt.loc[code_int]
+                    except ValueError:
+                        pass
+                if row is not None:
+                    price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
+                    if price > 0:
+                        price_map[code_str] = price
+        else:
+            # Vectorized fast pandas extraction of entire price map
+            cols = ['trade', 'price', 'close']
+            available_cols = [c for c in cols if c in df_rt.columns]
+            if available_cols:
+                series = None
+                for c in available_cols:
+                    s_val = df_rt[c]
+                    if series is None:
+                        series = s_val
+                    else:
+                        series = series.fillna(s_val)
+                if series is not None:
+                    series = pd.to_numeric(series, errors='coerce').fillna(0)
+                    series = series[series > 0]
+                    # Map index to padded strings
+                    idx_mapped = [str(x).zfill(6) for x in series.index]
+                    price_map = dict(zip(idx_mapped, series.values))
+    except Exception as e:
+        logger.warning(f"Error in _get_realtime_price_map: {e}")
     return price_map
 
 
@@ -3424,16 +3460,25 @@ def _kernel_show_toast(self, text, kind="info", records=None):
             
         # 清空并填充最新数据
         self._kernel_toast_tree.delete(*self._kernel_toast_tree.get_children())
-        for r in records:
-            status = r.get("status", "")
-            tag = "exec" if "执行" in status else ("error" if "异常" in status or "错误" in status else "block")
+        if not records:
             self._kernel_toast_tree.insert("", "end", values=(
-                r.get("code", ""),
-                r.get("name", ""),
-                r.get("action", ""),
-                status,
-                r.get("detail", "")
-            ), tags=(tag,))
+                "-",
+                "无待执行信号",
+                "IDLE",
+                "等待中",
+                "今日无新增可执行买卖决策或已被去重过滤"
+            ), tags=("block",))
+        else:
+            for r in records:
+                status = r.get("status", "")
+                tag = "exec" if "执行" in status else ("error" if "异常" in status or "错误" in status else "block")
+                self._kernel_toast_tree.insert("", "end", values=(
+                    r.get("code", ""),
+                    r.get("name", ""),
+                    r.get("action", ""),
+                    status,
+                    r.get("detail", "")
+                ), tags=(tag,))
             
     except Exception as e:
         logger.debug(f"[_kernel_show_toast] error: {e}")
@@ -3478,14 +3523,18 @@ def _kernel_refresh_positions(self, show_message=True):
         self._kernel_set_status(f"refreshed positions, prices={len(price_map)}", "info")
 
 
-def _kernel_auto_execute_once(self):
+def _kernel_auto_execute_once(self, auto_mode=False):
     """Execute approved kernel BUY/SELL decisions once through the existing mock gateway."""
-    if not self._trade_gw:
-        messagebox.showwarning("Kernel", "模拟交易网关未初始化")
-        return
-    if not self._focus_ctrl:
-        messagebox.showwarning("Kernel", "决策引擎未初始化")
-        return
+    if auto_mode:
+        if not self._trade_gw or not self._focus_ctrl:
+            return
+    else:
+        if not self._trade_gw:
+            messagebox.showwarning("Kernel", "模拟交易网关未初始化")
+            return
+        if not self._focus_ctrl:
+            messagebox.showwarning("Kernel", "决策引擎未初始化")
+            return
 
     is_trade_day = cct.get_trade_date_status()
     now_dt = datetime.now()
@@ -3524,7 +3573,6 @@ def _kernel_auto_execute_once(self):
             except Exception:
                 pass
 
-    self._kernel_refresh_positions(show_message=False)
     executed = []
     blocked = []
     errors = []
@@ -3546,7 +3594,10 @@ def _kernel_auto_execute_once(self):
     try:
         signals = self._focus_ctrl.get_decision_queue()
         positions = {p['code']: p for p in self._trade_gw.get_positions()}
-        price_map = self._get_realtime_price_map()
+        
+        # 仅针对活跃持仓与待决策个股执行极速针对性价格提取，避开对数千只股票的O(N)大循环
+        target_codes = list(positions.keys()) + [str(sig.get('code', '')).zfill(6) for sig in signals]
+        price_map = self._get_realtime_price_map(codes=target_codes)
 
         from trading_kernel.kernel_service import enrich_decision_item
 
@@ -3575,6 +3626,7 @@ def _kernel_auto_execute_once(self):
 
             price = float(sig.get('suggest_price') or sig.get('current_price') or price_map.get(code, 0) or 0)
             if price <= 0:
+                logger.warning(f"[Kernel] 交易决策 {code}({sig.get('name', '')}) 缺少实时价格数据，已拦截。建议价={sig.get('suggest_price')}, 当前价={sig.get('current_price')}")
                 blocked.append(f"{code}:NO_PRICE")
                 blocked_codes.append(code)
                 records.append({
@@ -3809,7 +3861,8 @@ def _kernel_auto_execute_once(self):
     self._kernel_mark_signal_rows(executed_codes, blocked_codes, error_codes)
     
     # 将结构化记录传入强大的联动悬浮 Tree 窗口
-    self._kernel_show_toast(msg, kind, records=records)
+    if not auto_mode or len(executed) > 0 or len(errors) > 0 or (hasattr(self, "_kernel_toast_win") and self._kernel_toast_win and self._kernel_toast_win.winfo_exists()):
+        self._kernel_show_toast(msg, kind, records=records)
 
 
 def _ignore_selected_signal(self):
@@ -3871,7 +3924,6 @@ def _sell_all_positions(self):
                 "created_at": datetime.now().isoformat(),
             }
             try:
-                from datetime import datetime
                 from trading_kernel.kernel_service import enrich_decision_item
                 enrich_decision_item(sig_sell, write_journal=True)
             except Exception as e_journal:
@@ -3973,7 +4025,96 @@ StockSelectionWindow._sell_all_positions    = _sell_all_positions
 StockSelectionWindow._on_signal_double_click = _on_signal_double_click
 StockSelectionWindow._on_signal_selected     = _on_signal_selected
 StockSelectionWindow._sort_signal_tree       = _sort_signal_tree
+def _on_one_key_self_heal(self):
+    """一键自适应数据自愈修复：智能调整资金规模、清理 0 股幽灵持仓、并物理同步适配器与柜台数据"""
+    try:
+        from trading_kernel.kernel_service import get_kernel_service
+        from trade_gateway import get_trade_gateway
+        
+        service = get_kernel_service()
+        if not service or not service.paper_adapter:
+            messagebox.showwarning("数据自愈", "模拟交易内核服务未就绪")
+            return
+            
+        trade_gw = getattr(self, "_trade_gw", None) or get_trade_gateway()
+        if not trade_gw:
+            messagebox.showwarning("数据自愈", "模拟交易网关未就绪")
+            return
+            
+        # 1. 物理清理所有 volume/shares <= 0 的幽灵/已平仓持仓，防范 float 盈亏计算干扰
+        removed_ghosts = []
+        
+        # 清理 paper_adapter 内存持仓
+        for c_code, p_obj in list(service.paper_adapter.account.positions.items()):
+            if p_obj.volume <= 0:
+                service.paper_adapter.account.positions.pop(c_code, None)
+                removed_ghosts.append(c_code)
+                
+        # 清理 legacy 柜台持仓
+        with trade_gw._lock:
+            for c_code in list(trade_gw._positions.keys()):
+                leg_pos = trade_gw._positions[c_code]
+                if leg_pos.shares <= 0:
+                    trade_gw._positions.pop(c_code, None)
+                    removed_ghosts.append(c_code)
+        
+        # 2. 统计当前活跃持仓的买入成本和最新市值
+        active_positions = service.paper_adapter.account.positions
+        entry_cost_sum = 0.0
+        market_val_sum = 0.0
+        
+        for code_key, pos_obj in active_positions.items():
+            vol = float(pos_obj.volume)
+            entry_cost_sum += float(pos_obj.entry_price) * vol
+            market_val_sum += float(pos_obj.current_price) * vol
+            
+        # 3. 智能计算合理、健康的资金规模
+        min_cap = max(1000000.0, entry_cost_sum * 1.5)
+        target_cap = float((int(min_cap) // 100000) * 100000)
+        if target_cap < min_cap:
+            target_cap += 100000.0
+            
+        new_cash = max(0.0, target_cap - entry_cost_sum)
+        
+        # 4. 同步可用现金与初始资金到纸盘适配器和老柜台风控
+        service.paper_adapter.initial_capital = target_cap
+        service.paper_adapter.account.initial_capital = target_cap
+        service.paper_adapter.account.cash = new_cash
+        
+        trade_gw.total_capital = target_cap
+        if hasattr(trade_gw, "risk_manager") and trade_gw.risk_manager:
+            trade_gw.risk_manager.total_capital = target_cap
+            
+        # 5. 强行将新数据做物理落盘持久化
+        if hasattr(service.paper_adapter, "_save_state"):
+            service.paper_adapter._save_state()
+            
+        # 6. 重新刷新持仓与数据展示
+        self._kernel_refresh_positions(show_message=False)
+        
+        # 7. 显示成功对话框
+        pnl_val = market_val_sum - entry_cost_sum
+        pnl_pct = (pnl_val / entry_cost_sum * 100.0) if entry_cost_sum > 0 else 0.0
+        
+        msg_text = (
+            f"🎉 一键账户资产与资金自愈成功！\n\n"
+            f"1️⃣ 清理幽灵持仓：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。\n"
+            f"2️⃣ 重调初始资金：已自适应扩容至 ¥ {target_cap:,.2f}。\n"
+            f"3️⃣ 可用现金对账：已精准修正为 ¥ {new_cash:,.2f} (账户保持健康购买力)。\n"
+            f"4️⃣ 资产盈亏重算：\n"
+            f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}\n"
+            f"   - 持仓最新市值：¥ {market_val_sum:,.2f}\n"
+            f"   - 浮动总盈亏：¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)\n\n"
+            f"* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！"
+        )
+        messagebox.showinfo("数据自愈成功", msg_text, parent=self)
+    except Exception as e:
+        logger.error(f"Error in _on_one_key_self_heal: {e}")
+        messagebox.showerror("自愈失败", f"执行自愈时发生异常: {e}", parent=self)
+
+
 StockSelectionWindow.show_decision_tab       = show_decision_tab
+StockSelectionWindow._on_one_key_self_heal   = _on_one_key_self_heal
 
 
 # ── 实时决策下半区持仓与流水表格个股联动方法 ───────────────────────────────────────────
@@ -4183,7 +4324,6 @@ def _show_kernel_confirm_dialog(self, sig, action, price):
                 "created_at": datetime.now().isoformat(),
             })
             try:
-                from datetime import datetime
                 from trading_kernel.kernel_service import enrich_decision_item
                 enrich_decision_item(sig_action, write_journal=True)
             except Exception as e_journal:

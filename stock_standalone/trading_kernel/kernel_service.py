@@ -199,8 +199,13 @@ class TradingKernelService:
         }
 
         # 处于交易激活态 (PAPER/CONFIRM/LIVE_AUTO) 且风控允许、有生成获批委托订单，并且是写入交易流水的主执行链路（避免UI查询富化流误触发）
-        if write_journal and self.executor is not None and risk.allowed and risk.order:
-            executed = self.executor.submit_order(risk.order)
+        executor_to_use = self.executor
+        is_manual = bool(intent.reason and intent.reason.regime == "MANUAL_OVERRIDE")
+        if executor_to_use is None and is_manual:
+            executor_to_use = self.paper_adapter
+
+        if write_journal and executor_to_use is not None and risk.allowed and risk.order:
+            executed = executor_to_use.submit_order(risk.order)
             result["kernel_executed"] = executed
             
             # 如果物理执行交易成功，同步更新 StateManager 状态
