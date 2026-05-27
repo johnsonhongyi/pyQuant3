@@ -11,8 +11,11 @@ import os
 import traceback
 import sys
 import faulthandler
-if sys.stderr is not None:
-    faulthandler.enable()
+try:
+    if sys.stderr is not None:
+        faulthandler.enable()
+except Exception:
+    pass
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 # [ROOT-FIX] 设置标记，防止本进程内部调用 StockSender 时再次通过 Proxy 转发导致无限递归
