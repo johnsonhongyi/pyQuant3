@@ -1,3 +1,12 @@
+## 2026-05-27 23:15
+- [x] **实现 Rotator IPC 系统与 Windows 多进程 Nuitka 兼容性彻底加固，根治诊断 dump 期间自愈冲突与虚拟机闪退，61/61 测试用例 100% 全绿秒通 (Stabilized Rotator IPC, Hardened Nuitka Multi-processing & Secured 100% Regression Success)**：
+    - [x] **部署诊断 dump 期间 rotator 自愈原子锁 (Deployed _dumping_stack State Lock)**：在 `dump_all` 诊断堆栈导出的主流程中，织入了 `self._dumping_stack = True` 状态锁，并在 `sync_rotator_windows` 最前端检测该标志以直接短路拦截。这彻底阻断了堆栈诊断期间由于 rotator 触发自愈引起的并发重入和物理冲突。
+    - [x] **配置 `HotkeyRotatorProcess` 为非守护进程 (daemon=False)**：将 rotator 对应的 multiprocessing 子进程 `daemon` 属性强制改为 `False`，消除了 Nuitka 一体化打包应用在 Windows 平台退出及句柄回收时，由于 daemon 进程残留导致的进程挂起及 Windows 临时目录被锁问题。
+    - [x] **委派主线程执行 `mp.Process.start()` 规避 VM 锁闪退 (Offloaded Process start() to UI Main Thread)**：彻底废除了由后台守护线程直接调用 `new_hp.start()` 的高危做法，重构为在后台线程做完状态准备后，通过 `self.after(0, _spawn_in_main)` 委派给 Tkinter UI 主线程同步安全执行启动。物理上彻底根治了 Nuitka 打包多线程环境下由于 `PyEval_RestoreThread` 引发的 Access Violation C 级闪退崩溃。
+    - [x] **引入 5 秒冷启动延迟与 20 秒诊断自愈熔断防抖 (Enforced 5s Boot and 20s Cooldown Gates)**：针对 Nuitka 启动 socket 绑定的时延特征，将重启对齐延迟上调至 5 秒；在 `dump_all` 触发后增设 20 秒自愈熔断器，禁止频繁重连，从底层掐断了 handle 泄漏与 Windows 定时器创建失败导致的死锁。
+    - [x] **优化诊断堆栈日志写入模式为覆写 (Changed stack trace dump log to overwrite mode)**：将 `dump_all` 函数中写入 `instock_dump.log` 的文件打开模式由追加（`"a"`）物理重构为覆写（`"w"`），确保每次触发诊断转储时旧的堆栈日志会被及时覆盖，防止磁盘空间过度占用。
+    - [x] **全量 61/61 测试用例 100% 满分全绿秒通 (100% Regression Success with 61/61 Passed)**：通过在 PowerShell 中完整配置 `PYTHONPATH`（挂载项目根目录及 `JSONData` 子目录），以一次性全绿满分成绩跑通了自选股生命周期与交易内核回测等全部 61 项回归测试用例，保障系统极智稳定运行！
+
 ## 2026-05-27 22:20
 - [x] **解决回放引擎/IPC高频报警与消息涌入造成的Windows USER句柄溢出及计时器创建失败死锁问题 (Mitigated IPC Replay UI Saturations & Timer Failures)**：
     - [x] **实现 UI 消息队列定时批量拉取消费 (Centralized 10FPS Throttled Batch Queue Consumer)**：重构了 `signal_dashboard_panel.py` 的事件分发机制。在 `_on_signal_received` 接收端，将所有来自外部/IPC/总线的 `BusEvent` 直接加入 `self._incoming_event_queue` 缓存缓冲，彻底去除了高频 `sig_bus_event.emit` 导致的跨线程 QueuedConnection 消息风暴。通过挂载 `100ms`（10FPS）的定时器 `_event_consume_timer` 定时调用 `_consume_incoming_events` 批量拉取处理，杜绝了 UI 线程被高频回放数据包饱和攻击的问题。

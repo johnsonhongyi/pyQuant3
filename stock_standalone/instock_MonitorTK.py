@@ -185,52 +185,61 @@ def dump_all():
         except Exception:
             pass
 
-    safe_print("\n🔥 ================= STACK TRACE DUMP TRIGGERED ================= 🔥\n")
+    global _global_app_instance
+    if _global_app_instance:
+        _global_app_instance._dumping_stack = True
+        _global_app_instance._last_dump_t = time.time()
 
-    # 1. 尝试使用 logger 写入日志，以便用户在日志文件中也有清晰的可追溯记录
     try:
-        logger.warning("🔥 [Dump] 快捷键/诊断信号已被捕获，开始转储线程堆栈...")
-    except Exception:
-        pass
+        safe_print("\n🔥 ================= STACK TRACE DUMP TRIGGERED ================= 🔥\n")
 
-    # 2. 强力加固：将当前堆栈转储直接物理存盘至独立文件，即便控制台不可见，也能一键追溯
-    try:
-        dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
-        with open(dump_file_path, "a", encoding="utf-8") as f:
-            f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
-            try:
-                faulthandler.dump_traceback(file=f, all_threads=True)
-            except Exception as fe:
-                f.write(f"faulthandler failed to dump: {fe}\n")
-            f.flush()
-        safe_print(f"✅ Stack trace successfully dumped to: {dump_file_path}")
+        # 1. 尝试使用 logger 写入日志，以便用户在日志文件中也有清晰的可追溯记录
         try:
-            logger.warning(f"✅ [Dump] 堆栈信息已成功写入: {dump_file_path}")
+            logger.warning("🔥 [Dump] 快捷键/诊断信号已被捕获，开始转储线程堆栈...")
         except Exception:
             pass
 
-        # 3. 极速系统级物理反馈：在独立的守护线程中弹出一个 Windows 系统原生、非阻塞的 MessageBox 提示！
-        # 即使 Tkinter / PyQt 发生死锁挂起，该守护线程弹窗依然能秒级展现，给予用户 100% 极具冲击力的视觉反馈！
-        def show_native_toast():
+        # 2. 强力加固：将当前堆栈转储直接物理存盘至独立文件，即便控制台不可见，也能一键追溯
+        try:
+            dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
+            with open(dump_file_path, "w", encoding="utf-8") as f:
+                f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
+                try:
+                    faulthandler.dump_traceback(file=f, all_threads=True)
+                except Exception as fe:
+                    f.write(f"faulthandler failed to dump: {fe}\n")
+                f.flush()
+            safe_print(f"✅ Stack trace successfully dumped to: {dump_file_path}")
             try:
-                import ctypes
-                # 使用 MessageBoxTimeoutW 实现自动关闭功能 (Windows 隐藏 API)
-                # 参数: 0, 内容, 标题, 类型, 语言ID, 超时时间(ms)
-                ctypes.windll.user32.MessageBoxTimeoutW(
-                    0, 
-                    f"程序当前运行堆栈已成功转储至日志文件！\n\n转储路径:\n{dump_file_path}", 
-                    "诊断信号触发成功 (Stack Trace Dump)", 
-                    0x40 | 0x1000,  # MB_OK | MB_SYSTEMMODAL
-                    0,              # Language ID
-                    3000            # 3000ms (3秒) 自动关闭
-                )
+                logger.warning(f"✅ [Dump] 堆栈信息已成功写入: {dump_file_path}")
             except Exception:
                 pass
 
-        t = threading.Thread(target=show_native_toast, daemon=True, name="Dump_Toast_Thread")
-        t.start()
-    except Exception as e:
-        safe_print(f"⚠️ Failed to dump stack to file: {e}")
+            # # 3. 极速系统级物理反馈：在独立的守护线程中弹出一个 Windows 系统原生、非阻塞的 MessageBox 提示！
+            # # 即使 Tkinter / PyQt 发生死锁挂起，该守护线程弹窗依然能秒级展现，给予用户 100% 极具冲击力的视觉反馈！
+            # def show_native_toast():
+            #     try:
+            #         import ctypes
+            #         # 使用 MessageBoxTimeoutW 实现自动关闭功能 (Windows 隐藏 API)
+            #         # 参数: 0, 内容, 标题, 类型, 语言ID, 超时时间(ms)
+            #         ctypes.windll.user32.MessageBoxTimeoutW(
+            #             0, 
+            #             f"程序当前运行堆栈已成功转储至日志文件！\n\n转储路径:\n{dump_file_path}", 
+            #             "诊断信号触发成功 (Stack Trace Dump)", 
+            #             0x40 | 0x1000,  # MB_OK | MB_SYSTEMMODAL
+            #             0,              # Language ID
+            #             3000            # 3000ms (3秒) 自动关闭
+            #         )
+            #     except Exception:
+            #         pass
+
+            # t = threading.Thread(target=show_native_toast, daemon=True, name="Dump_Toast_Thread")
+            # t.start()
+        except Exception as e:
+            safe_print(f"⚠️ Failed to dump stack to file: {e}")
+    finally:
+        if _global_app_instance:
+            _global_app_instance._dumping_stack = False
 
 
 # from PyQt6 import QtWidgets, QtCore, QtGui  # ⚡ 移至局部作用域
@@ -568,6 +577,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_dispatch_kick = 0  
         self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
         self._is_ui_sync_pending = False # 🛡️ [NEW] UI 同步任务待处理标志位
+
+        # [NEW] 初始化同步 Rotator 窗口的专用队列和单 worker 后台长驻发送线程，根治 Window 管理器句柄耗尽崩溃
+        import queue
+        self._rotator_send_queue = queue.Queue()
+        self._start_rotator_sender_worker()
         
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
         self.main_window = self   
@@ -4523,7 +4537,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # [NEW] 启动跨进程总线监听桥
                 def monitor_bus_bridge(q, quit_event):
-                    import time
                     from signal_bus import get_signal_bus, BusEvent
                     bus = get_signal_bus()
                     logger.info("📡 [Backtest][IPC] SignalBus Bridge Listener started.")
@@ -5917,8 +5930,55 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
         self.after(100, _beat)
 
+    def _start_rotator_sender_worker(self):
+        """启动长驻后台线程，单 worker 消费发送队列中的窗口数据，防止频繁创建 Thread 耗尽句柄 (KISS/DRY 原则)"""
+        import queue
+        import socket
+        import json
+        
+        def _sender_loop():
+            logger.info("📡 Rotator Sender background worker started.")
+            while not getattr(self, "_is_closing", False):
+                try:
+                    # 阻塞式获取任务，超时设为 1.0 秒以支持退出检查
+                    try:
+                        data = self._rotator_send_queue.get(timeout=1.0)
+                    except queue.Empty:
+                        continue
+                        
+                    # 诊断模式熔断：转储堆栈后 20 秒内，不执行发送
+                    last_dump_t = getattr(self, '_last_dump_t', 0)
+                    if time.time() - last_dump_t < 20.0:
+                        self._rotator_send_queue.task_done()
+                        continue
+                        
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.settimeout(0.3)
+                            s.connect(('127.0.0.1', 26669))
+                            s.sendall(json.dumps(data).encode('utf-8'))
+                    except Exception:
+                        pass
+                    finally:
+                        self._rotator_send_queue.task_done()
+                except Exception as ex:
+                    logger.error(f"[RotatorWorker] Unexpected error: {ex}")
+                    time.sleep(0.5)
+            logger.info("📡 Rotator Sender background worker exited.")
+            
+        t = threading.Thread(target=_sender_loop, daemon=True, name="RotatorSenderWorker")
+        t.start()
+
     def sync_rotator_windows(self):
         """同步窗口信息到独立的全局快捷键/轮换器进程 (100% 异步非阻塞 + 自愈防抖 + 冷却锁版)"""
+        # 1. dump期间与诊断熔断期间禁止 rotator 自愈及同步
+        if getattr(self, '_dumping_stack', False):
+            return
+        
+        last_dump_t = getattr(self, '_last_dump_t', 0)
+        if time.time() - last_dump_t < 20.0:
+            return
+
         if not getattr(self, '_hotkey_process_started', False):
             return
             
@@ -5990,31 +6050,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if not isinstance(level_val, str):
                             level_val = "INFO"
 
-                        # C. 新建多进程
+                        # C. 新建多进程 (禁止 daemon=True，Nuitka Windows GUI multiprocess 必须为 False)
                         new_hp = mp.Process(
                             target=hotkey_rotator.main,
                             args=(level_val,),
                             name="HotkeyRotatorProcess",
-                            daemon=True
+                            daemon=False
                         )
-                        new_hp.start()
                         
-                        # D. 回调至主线程挂载
-                        def _update_in_main():
-                            self._hotkey_process = new_hp
-                            self._hotkey_process_started = True
-                            self._rotator_restarting_flag = False
-                            logger.info("🚀 [Rotator] HotkeyRotatorProcess restarted and self-healed successfully in background.")
-                            # 自愈成功后，延迟 1 秒触发一次同步以对齐窗口
-                            self.after(1000, self.sync_rotator_windows)
+                        # D. 回调至主线程启动与挂载 (多进程 start 属于 GUI 环境高危操作，必须调度回主线程执行)
+                        def _spawn_in_main():
+                            try:
+                                new_hp.start()
+                                self._hotkey_process = new_hp
+                                self._hotkey_process_started = True
+                                self._rotator_restarting_flag = False
+                                logger.info("🚀 [Rotator] HotkeyRotatorProcess restarted and self-healed successfully in background.")
+                                # 自愈成功后，延迟 5 秒触发一次同步以对齐窗口 (冷启动等待，适应 Nuitka onefile 缓慢引导)
+                                self.after(5000, self.sync_rotator_windows)
+                            except Exception as spawn_ex:
+                                logger.error(f"❌ [Rotator] Failed to start HotkeyRotatorProcess in main thread: {spawn_ex}")
+                                self._rotator_restarting_flag = False
                         
-                        self.after(0, _update_in_main)
+                        self.after(0, _spawn_in_main)
                         
                     except Exception as rex:
                         logger.error(f"❌ [Rotator] Async restart self-healed failed: {rex}")
                         self._rotator_restarting_flag = False
                 
-                # 抛向后台守护线程，0 毫秒卡顿！
+                # 抛向后台准备线程
                 t = threading.Thread(target=_async_restart_worker, name="AsyncRotatorSpawner", daemon=True)
                 t.start()
                 return
@@ -6041,17 +6105,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "current_fore": current_fore
             }
             
-            # 3. 异步发送至热键进程端口 26669 (保证 0.3s 极短超时)
-            def _async_send():
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.3)
-                        s.connect(('127.0.0.1', 26669))
-                        s.sendall(json.dumps(data).encode('utf-8'))
-                except Exception:
-                    pass
-                    
-            threading.Thread(target=_async_send, daemon=True, name="SyncRotatorWindows").start()
+            # 3. 异步发送至队列，由单例长驻后台线程完成 socket 投递
+            if hasattr(self, '_rotator_send_queue'):
+                # 队列限流：如积压过多（可能端口被占或目标挂掉），先排空以防内存泄露
+                if self._rotator_send_queue.qsize() > 5:
+                    try:
+                        while not self._rotator_send_queue.empty():
+                            self._rotator_send_queue.get_nowait()
+                            self._rotator_send_queue.task_done()
+                    except Exception:
+                        pass
+                self._rotator_send_queue.put(data)
         except Exception as e:
             logger.error(f"[Rotator] sync_rotator_windows error: {e}")
 
@@ -6101,6 +6165,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not getattr(self, "_debug_mode", False) or not os.environ.get("APP_DEBUG_FULL"):
             return
             
+        self._dumping_stack = True
+        self._last_dump_t = time.time()
         try:
             import traceback
             import sys
@@ -6116,6 +6182,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.warning("🧵 [ThreadDump] Main thread frame not found for UI Block detection.")
         except Exception as e:
             logger.error(f"[DumpStack] Failed to dump stack safety: {e}")
+        finally:
+            self._dumping_stack = False
 
     def push_stock_info(self,stock_code, row):
         """
