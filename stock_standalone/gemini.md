@@ -1,3 +1,12 @@
+## 2026-05-27 22:20
+- [x] **解决回放引擎/IPC高频报警与消息涌入造成的Windows USER句柄溢出及计时器创建失败死锁问题 (Mitigated IPC Replay UI Saturations & Timer Failures)**：
+    - [x] **实现 UI 消息队列定时批量拉取消费 (Centralized 10FPS Throttled Batch Queue Consumer)**：重构了 `signal_dashboard_panel.py` 的事件分发机制。在 `_on_signal_received` 接收端，将所有来自外部/IPC/总线的 `BusEvent` 直接加入 `self._incoming_event_queue` 缓存缓冲，彻底去除了高频 `sig_bus_event.emit` 导致的跨线程 QueuedConnection 消息风暴。通过挂载 `100ms`（10FPS）的定时器 `_event_consume_timer` 定时调用 `_consume_incoming_events` 批量拉取处理，杜绝了 UI 线程被高频回放数据包饱和攻击的问题。
+    - [x] **打通 `_safe_process_event` 物理同步执行 (Direct Synchronous Processing)**：对“市场预警虚拟信号”以及“放量个股代码点击”等 UI 联动广播事件，废除了原先的 `sig_bus_event.emit` 广播机制，重载并修正为直接同步调用主线程 `self._safe_process_event(BusEvent(...))`，物理上彻底剥离了不必要的跨线程投递开销，杜绝了高频 timer/event 句柄积压。
+    - [x] **强化 UI 窗口组件生命周期自愈与 QTimer 彻底注销 (Restored Explicit Widget QTimer Destructors)**：
+        - 针对 `VolumeDetailsDialog` 及 `SignalDashboardPanel` 面板关闭时，在 `stop` 与 `closeEvent` 中补齐了对 `_event_consume_timer`、`_render_scheduler` 的显式 `.stop()` 与注销。
+        - 针对 `bidding_racing_panel.py` 中的 `RacingPieWidget`、`SectorDetailDialog`、`CategoryDetailDialog` 及主控制台 `BiddingRacingRhythmPanel`，全面补齐了其 `closeEvent` 中对所有活跃动画定时器及刷新定时器（`_timer`, `timer`, `refresh_timer`, `_save_ui_timer`）的显式 `.stop()`、`.deleteLater()` 物理注销和置空，确保在窗口关闭时底层的 C++ 定时器句柄物理销毁，Windows USER 句柄完美释放。
+    - [x] **测试全量回归一次性全绿 (100% Regression Success with 61/61 Passed)**：本地以 `python -m pytest` 全量跑通包括自选股生命周期、交易内核回测、风控及 API 模拟全套 **61/61** 个核心测试用例，100% 一次性通过，保障了底盘的高吞吐稳定性！
+
 ## 2026-05-27 18:50
 - [x] **实现放量个股弹窗（VolumeDetailsDialog）与信号面板生命周期彻底解耦，并保留点击/双击行的联动切换功能 (Decoupled VolumeDetailsDialog from SignalDashboardPanel & Retained Code Linkage)**：
     - [x] **解耦生命周期绑定**：在 `SignalDashboardPanel` 实例化 `self._vol_dialog` 时，将传入的父窗口（parent）参数修改为 `None`，确保其作为独立的顶层窗口存在，即便信号面板被关闭、隐藏或最小化，放量个股弹窗也能独立运行并维持可见状态。

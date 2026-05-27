@@ -145,14 +145,13 @@ class SignalBus:
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
             
-            # ⭐ [NEW] 如果设置了外部中转队列，则同时推送到队列
-            if self._external_queue:
-                try:
-                    # 将 event 序列化为 dict 或保持对象 (如果是 mp.Queue 支持的对象)
-                    # 为了安全，通常建议推送到 Queue 的是简单对象或 dataclass
-                    self._external_queue.put(event, block=False)
-                except Exception as e:
-                    logger.error(f"SignalBus: Failed to push to external queue: {e}")
+        # ⭐ [NEW] 如果设置了外部中转队列，则同时推送到队列（在锁外部进行，支持背压阻塞）
+        if self._external_queue:
+            try:
+                # 使用 block=True 且带超时以支持背压，并在 UI 卡死或退出时防死锁
+                self._external_queue.put(event, block=True, timeout=1.0)
+            except Exception as e:
+                logger.error(f"SignalBus: Failed to push to external queue: {e}")
         
         handlers = self._subscribers.get(event_type, [])
         # 🛡️ 降级日志等级，避免 ERROR 洪泛
