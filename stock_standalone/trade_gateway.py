@@ -125,6 +125,43 @@ class RiskManager:
         self._lock = threading.Lock()
         self._locked = False  # 日亏损上限触发时全局锁仓
 
+        # 动态加载并持久化风控参数，提供自愈与首创默认值
+        try:
+            from JohnsonUtil import commonTips as cct
+            self.MAX_POSITIONS = cct.CFG.get_with_writeback("general", "risk_max_positions", fallback=10, value_type="int")
+            self.MAX_POS_PCT = cct.CFG.get_with_writeback("general", "risk_max_pos_pct", fallback=0.05, value_type="float")
+            self.MAX_DAILY_LOSS = cct.CFG.get_with_writeback("general", "risk_max_daily_loss", fallback=0.02, value_type="float")
+            self.STOP_LOSS_PCT = cct.CFG.get_with_writeback("general", "risk_stop_loss_pct", fallback=0.02, value_type="float")
+        except Exception as e:
+            logger.warning(f"[RiskManager] Failed to load parameters from config, fallback to default: {e}")
+            self.MAX_POSITIONS = 10
+            self.MAX_POS_PCT = 0.05
+            self.MAX_DAILY_LOSS = 0.02
+            self.STOP_LOSS_PCT = 0.02
+
+    def update_params(self, max_positions: int, max_pos_pct: float, max_daily_loss: float, stop_loss_pct: float):
+        """即时更新风控参数并进行物理持久化写入 global.ini"""
+        with self._lock:
+            self.MAX_POSITIONS = max_positions
+            self.MAX_POS_PCT = max_pos_pct
+            self.MAX_DAILY_LOSS = max_daily_loss
+            self.STOP_LOSS_PCT = stop_loss_pct
+
+            try:
+                from JohnsonUtil import commonTips as cct
+                cct.CFG.set_value("general", "risk_max_positions", max_positions)
+                cct.CFG.set_value("general", "risk_max_pos_pct", max_pos_pct)
+                cct.CFG.set_value("general", "risk_max_daily_loss", max_daily_loss)
+                cct.CFG.set_value("general", "risk_stop_loss_pct", stop_loss_pct)
+                cct.CFG.save()
+                logger.info(
+                    f"[RiskManager] 风控参数已即时调整并持久化: "
+                    f"MAX_POSITIONS={max_positions}, MAX_POS_PCT={max_pos_pct*100:.1f}%, "
+                    f"MAX_DAILY_LOSS={max_daily_loss*100:.1f}%, STOP_LOSS_PCT={stop_loss_pct*100:.1f}%"
+                )
+            except Exception as e:
+                logger.error(f"[RiskManager] Failed to persist adjusted parameters: {e}")
+
     # ── 买入前检查 ────────────────────────────────────────────────────────────
 
     def can_buy(

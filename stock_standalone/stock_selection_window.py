@@ -3523,8 +3523,27 @@ def _kernel_refresh_positions(self, show_message=True):
         self._kernel_set_status(f"refreshed positions, prices={len(price_map)}", "info")
 
 
+def _bg_sync_ui_from_kernel(self, msg, kind, records, executed_codes, blocked_codes, error_codes):
+    """主界面被动接受后台交易引擎推送的 UI 刷新指令"""
+    try:
+        self._kernel_set_status(msg, kind)
+        self._kernel_mark_signal_rows(executed_codes, blocked_codes, error_codes)
+        self._refresh_decision_tab()
+        
+        # 如果 toast 窗口是开着的，或者有执行/错误，更新 toast 列表
+        if executed_codes or error_codes or (hasattr(self, "_kernel_toast_win") and self._kernel_toast_win and self._kernel_toast_win.winfo_exists()):
+            self._kernel_show_toast(msg, kind, records=records)
+    except Exception as e:
+        logger.debug(f"[_bg_sync_ui_from_kernel] error: {e}")
+
+
 def _kernel_auto_execute_once(self, auto_mode=False):
     """Execute approved kernel BUY/SELL decisions once through the existing mock gateway."""
+    if hasattr(self.master, "bg_kernel_auto_execute_once"):
+        # Delegate to the central background executor on the master window
+        self.master.bg_kernel_auto_execute_once(auto_mode=auto_mode)
+        return
+
     if auto_mode:
         if not self._trade_gw or not self._focus_ctrl:
             return
@@ -4014,6 +4033,7 @@ StockSelectionWindow._mock_buy_selected     = _mock_buy_selected
 StockSelectionWindow._mock_sell_selected    = _mock_sell_selected
 StockSelectionWindow._get_realtime_price_map = _get_realtime_price_map
 StockSelectionWindow._kernel_refresh_positions = _kernel_refresh_positions
+StockSelectionWindow._bg_sync_ui_from_kernel = _bg_sync_ui_from_kernel
 StockSelectionWindow._kernel_auto_execute_once = _kernel_auto_execute_once
 StockSelectionWindow._kernel_set_status = _kernel_set_status
 StockSelectionWindow._kernel_mark_signal_rows = _kernel_mark_signal_rows

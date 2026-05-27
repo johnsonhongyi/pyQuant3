@@ -920,6 +920,44 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.spin_min_volume.setValue(1.0)
         limits_lay.addWidget(self.spin_min_volume, 3, 3)
         
+        # 9. 网关最大持仓数量 (RiskManager MAX_POSITIONS)
+        limits_lay.addWidget(QtWidgets.QLabel("网关最大持仓数量 (RiskManager):"), 4, 0)
+        self.spin_rm_max_pos = QtWidgets.QSpinBox()
+        self.spin_rm_max_pos.setRange(1, 100)
+        self.spin_rm_max_pos.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_rm_max_pos.setValue(10)
+        limits_lay.addWidget(self.spin_rm_max_pos, 4, 1)
+        
+        # 10. 网关单笔持仓占比 (RiskManager MAX_POS_PCT)
+        limits_lay.addWidget(QtWidgets.QLabel("网关单笔仓位上限 (RiskManager):"), 4, 2)
+        self.spin_rm_max_pos_pct = QtWidgets.QDoubleSpinBox()
+        self.spin_rm_max_pos_pct.setRange(0.1, 100.0)
+        self.spin_rm_max_pos_pct.setSingleStep(0.5)
+        self.spin_rm_max_pos_pct.setSuffix("%")
+        self.spin_rm_max_pos_pct.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_rm_max_pos_pct.setValue(5.0)
+        limits_lay.addWidget(self.spin_rm_max_pos_pct, 4, 3)
+        
+        # 11. 网关日内亏损比例 (RiskManager MAX_DAILY_LOSS)
+        limits_lay.addWidget(QtWidgets.QLabel("网关日亏损锁仓上限 (RiskManager):"), 5, 0)
+        self.spin_rm_max_daily_loss = QtWidgets.QDoubleSpinBox()
+        self.spin_rm_max_daily_loss.setRange(0.1, 100.0)
+        self.spin_rm_max_daily_loss.setSingleStep(0.5)
+        self.spin_rm_max_daily_loss.setSuffix("%")
+        self.spin_rm_max_daily_loss.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_rm_max_daily_loss.setValue(2.0)
+        limits_lay.addWidget(self.spin_rm_max_daily_loss, 5, 1)
+        
+        # 12. 网关个股止损比例 (RiskManager STOP_LOSS_PCT)
+        limits_lay.addWidget(QtWidgets.QLabel("网关个股默认止损 (RiskManager):"), 5, 2)
+        self.spin_rm_stop_loss_pct = QtWidgets.QDoubleSpinBox()
+        self.spin_rm_stop_loss_pct.setRange(0.1, 100.0)
+        self.spin_rm_stop_loss_pct.setSingleStep(0.5)
+        self.spin_rm_stop_loss_pct.setSuffix("%")
+        self.spin_rm_stop_loss_pct.setStyleSheet("background-color: #16161A; border: 1px solid #232328; padding: 2px; color: #FFF;")
+        self.spin_rm_stop_loss_pct.setValue(2.0)
+        limits_lay.addWidget(self.spin_rm_stop_loss_pct, 5, 3)
+        
         # 按钮区
         save_btn = QtWidgets.QPushButton("💾 保存并即时应用风控与策略信号参数")
         save_btn.setStyleSheet("""
@@ -936,7 +974,15 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             }
         """)
         save_btn.clicked.connect(self._save_and_apply_risk_limits)
-        limits_lay.addWidget(save_btn, 4, 0, 1, 4)
+        limits_lay.addWidget(save_btn, 6, 0, 1, 4)
+
+        # 连接所有风控与网关参数微调控件的改变信号，实现完全自动持久化与即时热生效
+        for spin in [
+            self.spin_max_diff, self.spin_min_conf, self.spin_max_stock, self.spin_max_sector,
+            self.spin_total_exp, self.spin_daily_loss, self.spin_losses, self.spin_min_volume,
+            self.spin_rm_max_pos, self.spin_rm_max_pos_pct, self.spin_rm_max_daily_loss, self.spin_rm_stop_loss_pct
+        ]:
+            spin.valueChanged.connect(self._auto_save_and_apply)
         
         ctrl_layout.addWidget(limits_group)
         ctrl_layout.addStretch()
@@ -1108,7 +1154,15 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             logger.error(f"Failed to toggle kill switch: {e}")
 
     def _save_and_apply_risk_limits(self):
-        """从 UI 读值并重新生成 RiskLimits 实例应用于内核，并物理持久化写入本地配置文件"""
+        """从 UI 读值并重新生成 RiskLimits 实例应用于内核，并物理持久化写入本地配置文件（主动保存带弹窗提示）"""
+        self._execute_save_and_apply(show_toast=True)
+
+    def _auto_save_and_apply(self):
+        """控件变更触发的后台静默自动保存与应用"""
+        self._execute_save_and_apply(show_toast=False)
+
+    def _execute_save_and_apply(self, show_toast: bool):
+        """实际执行从 UI 读值、应用于内核和网关并物理持久化的核心逻辑"""
         try:
             from trading_kernel.kernel_service import get_kernel_service
             from trading_kernel.engine.risk_gate import RiskLimits
@@ -1130,7 +1184,21 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             # A. 内存级单例热应用
             service.limits = limits
             
-            # B. 物理持久化至本地 JSON 配置文件（双写以兼容高DPI/缩放配置环境）
+            # B. 应用到网关 RiskManager 风控管理器参数
+            try:
+                from trade_gateway import get_trade_gateway
+                trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+                if trade_gw and trade_gw.risk_manager:
+                    trade_gw.risk_manager.update_params(
+                        max_positions=self.spin_rm_max_pos.value(),
+                        max_pos_pct=self.spin_rm_max_pos_pct.value() / 100.0,
+                        max_daily_loss=self.spin_rm_max_daily_loss.value() / 100.0,
+                        stop_loss_pct=self.spin_rm_stop_loss_pct.value() / 100.0
+                    )
+            except Exception as e_rm:
+                logger.error(f"Failed to apply RiskManager parameters: {e_rm}")
+
+            # C. 物理持久化至本地 JSON 配置文件（双写以兼容高DPI/缩放配置环境）
             try:
                 scale = self._get_dpi_scale_factor()
                 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
@@ -1158,21 +1226,30 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         "min_volume": limits.min_volume
                     }
                     
+                    data["DecisionFlowPanel"]["risk_manager"] = {
+                        "max_positions": self.spin_rm_max_pos.value(),
+                        "max_pos_pct": self.spin_rm_max_pos_pct.value() / 100.0,
+                        "max_daily_loss": self.spin_rm_max_daily_loss.value() / 100.0,
+                        "stop_loss_pct": self.spin_rm_stop_loss_pct.value() / 100.0
+                    }
+                    
                     # 原子替换写入
                     tmp_file = filepath + ".tmp"
                     with open(tmp_file, "w", encoding="utf-8") as f:
                         json.dump(data, f, ensure_ascii=False, indent=4)
                     os.replace(tmp_file, filepath)
                     
-                logger.info("Persistent RiskLimits saved to local config files successfully.")
+                logger.info("Persistent RiskLimits and RiskManager parameters saved to local config files successfully.")
             except Exception as ex:
-                logger.error(f"Failed to save persistent RiskLimits to config file: {ex}")
+                logger.error(f"Failed to save persistent configurations to config file: {ex}")
             
-            toast_message(self.parent_app, "✅ 风控参数已成功实时生效并保存！")
+            if show_toast:
+                toast_message(self.parent_app, "✅ 风控与网关参数已成功实时生效并保存！")
             logger.info(f"New RiskLimits applied: {limits}")
         except Exception as e:
             logger.error(f"Failed to apply new risk limits: {e}")
-            toast_message(self.parent_app, "❌ 保存风控参数失败！")
+            if show_toast:
+                toast_message(self.parent_app, "❌ 保存风控参数失败！")
 
     def _sync_control_tab_ui(self, force: bool = False):
         """将内核实时值反向同步至控制面板 UI 控件中（带高能脏检测机制）"""
@@ -1281,6 +1358,39 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     self.spin_min_volume.blockSignals(True)
                     self.spin_min_volume.setValue(v_min_volume)
                     self.spin_min_volume.blockSignals(False)
+                    
+                # ── 同步 RiskManager 参数 ──
+                try:
+                    from trade_gateway import get_trade_gateway
+                    trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+                    if trade_gw and trade_gw.risk_manager:
+                        rm = trade_gw.risk_manager
+                        
+                        v_rm_max_pos = rm.MAX_POSITIONS
+                        if self.spin_rm_max_pos.value() != v_rm_max_pos:
+                            self.spin_rm_max_pos.blockSignals(True)
+                            self.spin_rm_max_pos.setValue(v_rm_max_pos)
+                            self.spin_rm_max_pos.blockSignals(False)
+
+                        v_rm_max_pos_pct = rm.MAX_POS_PCT * 100.0
+                        if abs(self.spin_rm_max_pos_pct.value() - v_rm_max_pos_pct) > 1e-4:
+                            self.spin_rm_max_pos_pct.blockSignals(True)
+                            self.spin_rm_max_pos_pct.setValue(v_rm_max_pos_pct)
+                            self.spin_rm_max_pos_pct.blockSignals(False)
+
+                        v_rm_max_daily_loss = rm.MAX_DAILY_LOSS * 100.0
+                        if abs(self.spin_rm_max_daily_loss.value() - v_rm_max_daily_loss) > 1e-4:
+                            self.spin_rm_max_daily_loss.blockSignals(True)
+                            self.spin_rm_max_daily_loss.setValue(v_rm_max_daily_loss)
+                            self.spin_rm_max_daily_loss.blockSignals(False)
+
+                        v_rm_stop_loss_pct = rm.STOP_LOSS_PCT * 100.0
+                        if abs(self.spin_rm_stop_loss_pct.value() - v_rm_stop_loss_pct) > 1e-4:
+                            self.spin_rm_stop_loss_pct.blockSignals(True)
+                            self.spin_rm_stop_loss_pct.setValue(v_rm_stop_loss_pct)
+                            self.spin_rm_stop_loss_pct.blockSignals(False)
+                except Exception as e_rm_sync:
+                    logger.error(f"Error syncing RiskManager UI parameters: {e_rm_sync}")
             
         except Exception as e:
             logger.error(f"Error syncing Control Tab UI: {e}")

@@ -1341,10 +1341,412 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception: pass
                 
                 fc.tick()  # tick 也一并在后台执行
+                
+                # [DECOUPLE] 后台实时自动决策与买卖执行
+                try:
+                    self.bg_kernel_auto_execute_once(auto_mode=True)
+                except Exception as _bg_exec:
+                    logger.debug(f"[BgKernel] real-time auto execution failed: {_bg_exec}")
             except Exception as _fe:
                 logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
         
         self.executor.submit(_do_inject)
+
+
+    def _bg_get_realtime_price_map(self, codes=None):
+        """Build {code: price} from the current realtime DataFrame if available."""
+        import pandas as pd
+        price_map = {}
+        df_rt = getattr(self, 'df_all', None)
+        if df_rt is None or getattr(df_rt, 'empty', True):
+            return price_map
+        try:
+            if codes is not None:
+                # Targeted fast lookup for specified codes
+                for code in codes:
+                    code_str = str(code).zfill(6)
+                    row = None
+                    if code_str in df_rt.index:
+                        row = df_rt.loc[code_str]
+                    else:
+                        try:
+                            code_int = int(code_str)
+                            if code_int in df_rt.index:
+                                row = df_rt.loc[code_int]
+                        except ValueError:
+                            pass
+                    if row is not None:
+                        price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
+                        if price > 0:
+                            price_map[code_str] = price
+            else:
+                # Vectorized fast pandas extraction of entire price map
+                cols = ['trade', 'price', 'close']
+                available_cols = [c for c in cols if c in df_rt.columns]
+                if available_cols:
+                    series = None
+                    for c in available_cols:
+                        s_val = df_rt[c]
+                        if series is None:
+                            series = s_val
+                        else:
+                            series = series.fillna(s_val)
+                    if series is not None:
+                        series = pd.to_numeric(series, errors='coerce').fillna(0)
+                        series = series[series > 0]
+                        # Map index to padded strings
+                        idx_mapped = [str(x).zfill(6) for x in series.index]
+                        price_map = dict(zip(idx_mapped, series.values))
+        except Exception as e:
+            logger.warning(f"Error in _bg_get_realtime_price_map: {e}")
+        return price_map
+
+
+    def bg_kernel_auto_execute_once(self, auto_mode=True):
+        """Execute approved kernel BUY/SELL decisions once through the existing mock gateway in background."""
+        if getattr(self, '_bg_kernel_executing', False):
+            return
+        self._bg_kernel_executing = True
+        try:
+            import os
+            import json
+            import pandas as pd
+            from datetime import datetime
+            from trade_gateway import get_trade_gateway
+            from sector_focus_engine import get_focus_controller
+            from trading_kernel.kernel_service import enrich_decision_item
+
+            trade_gw = get_trade_gateway()
+            focus_ctrl = get_focus_controller()
+
+            if not trade_gw or not focus_ctrl:
+                return
+
+            # 动态初始化今日去重缓存，挂载在持久单例 MonitorTK 实例上
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if not hasattr(self, "_bg_kernel_last_trade_date") or self._bg_kernel_last_trade_date != today_str:
+                self._bg_kernel_last_trade_date = today_str
+                self._bg_kernel_today_buys = set()
+                self._bg_kernel_today_sells = set()
+                self._bg_kernel_today_mocks = set()
+                self._bg_kernel_today_confirmed = set()
+                self._bg_kernel_today_ignored = set()
+                # 从历史日志中恢复跨会话去重标记
+                if os.path.exists("logs/trading_kernel_trace.jsonl"):
+                    try:
+                        with open("logs/trading_kernel_trace.jsonl", "r", encoding="utf-8") as f:
+                            lines = f.readlines()[-2000:]
+                            for line in lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    data = json.loads(line)
+                                    ts = data.get("trade_date", "") or data.get("journal_ts", "")
+                                    if ts and ts.startswith(today_str):
+                                        if data.get("is_simulation", False):
+                                            sig = data.get("signal", {})
+                                            c_val = sig.get("code") if isinstance(sig, dict) else getattr(sig, "code", None)
+                                            if c_val:
+                                                self._bg_kernel_today_mocks.add(str(c_val).zfill(6))
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+
+            # 刷新模拟持仓的实时价格，并进行止损触发监测
+            price_map = self._bg_get_realtime_price_map()
+            if price_map:
+                trade_gw.update_prices(price_map)
+            trade_gw.check_stop_loss()
+
+            is_trade_day = cct.get_trade_date_status()
+            now_dt = datetime.now()
+            now_time = now_dt.hour * 100 + now_dt.minute
+            is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
+
+            executed = []
+            blocked = []
+            errors = []
+            executed_codes = []
+            blocked_codes = []
+            error_codes = []
+            records = []
+
+            # 决定当前运行模式：如选股面板打开则同步其所选模式，否则默认 PAPER 模拟
+            mode = "PAPER"
+            win = getattr(self, "_stock_selection_win", None)
+            if win and win.winfo_exists() and hasattr(win, "_kernel_mode_var"):
+                mode_text = win._kernel_mode_var.get()
+            else:
+                mode_text = getattr(self, "_bg_kernel_mode", "PAPER 模拟")
+
+            if "OBSERVE" in mode_text:
+                mode = "OBSERVE"
+            elif "CONFIRM" in mode_text:
+                mode = "CONFIRM"
+            elif "LIVE_AUTO" in mode_text:
+                mode = "LIVE_AUTO"
+
+            signals = focus_ctrl.get_decision_queue()
+            positions = {p['code']: p for p in trade_gw.get_positions()}
+
+            target_codes = list(positions.keys()) + [str(sig.get('code', '')).zfill(6) for sig in signals]
+            targeted_price_map = self._bg_get_realtime_price_map(codes=target_codes)
+
+            for sig in signals:
+                code = str(sig.get('code', '')).zfill(6)
+                action = str(sig.get('kernel_action', '') or '').upper()
+                allowed = bool(sig.get('kernel_allowed'))
+                if action in ("HOLD", "", "BLOCK", "ERROR"):
+                    continue
+
+                if not allowed:
+                    reject_code = sig.get('kernel_reject_code', 'BLOCK')
+                    blocked.append(f"{code}:{reject_code}")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拦截",
+                        "detail": reject_code
+                    })
+                    enrich_decision_item(sig, write_journal=True)
+                    continue
+
+                price = float(sig.get('suggest_price') or sig.get('current_price') or targeted_price_map.get(code, 0) or 0)
+                if price <= 0:
+                    logger.warning(f"[BgKernel] 交易决策 {code}({sig.get('name', '')}) 缺少实时价格数据，已拦截。")
+                    blocked.append(f"{code}:NO_PRICE")
+                    blocked_codes.append(code)
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "拦截",
+                        "detail": "无实时价格"
+                    })
+                    enrich_decision_item(sig, write_journal=True)
+                    continue
+
+                # A. OBSERVE (观察模式)
+                if mode == "OBSERVE":
+                    executed.append(f"OBS_{action} {code}")
+                    executed_codes.append(code)
+                    focus_ctrl.decision_queue.update_status(code, "已观察")
+                    records.append({
+                        "code": code,
+                        "name": sig.get('name', ''),
+                        "action": action,
+                        "status": "观察中",
+                        "detail": f"OBSERVE 放行信号 [建议价 {price:.2f}]"
+                    })
+                    enrich_decision_item(sig, write_journal=True)
+                    continue
+
+                # B. CONFIRM (弹窗确认模式)
+                elif mode == "CONFIRM":
+                    if code in self._bg_kernel_today_confirmed:
+                        continue
+                    if code in self._bg_kernel_today_ignored:
+                        continue
+
+                    if action in ("BUY", "ADD") and code in positions:
+                        blocked.append(f"{code}:ALREADY_POS")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "已有持仓"
+                        })
+                        continue
+                    if action in ("SELL", "REDUCE") and code not in positions:
+                        blocked.append(f"{code}:NO_POS")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "无此持仓"
+                        })
+                        continue
+
+                    if win and win.winfo_exists():
+                        self._schedule_after(0, lambda s=sig, a=action, p=price: win._show_kernel_confirm_dialog(s, a, p))
+                        executed.append(f"PEND_{action} {code}")
+                        executed_codes.append(code)
+                        records.append({
+                            "code": code,
+                            "name": sig.get('name', ''),
+                            "action": action,
+                            "status": "等待确认",
+                            "detail": "已发送至选股面板核实确认..."
+                        })
+                    else:
+                        logger.warning(f"[BgKernel] CONFIRM 模式决策 {code}({sig.get('name', '')}) {action} 拦截：选股面板未打开，无法进行确认。")
+                    continue
+
+                # C. PAPER (模拟成交模式) / LIVE_AUTO (自动交易)
+                is_live = (mode == "LIVE_AUTO" and is_active_trading)
+
+                if action in ("BUY", "ADD"):
+                    if code in positions:
+                        blocked.append(f"{code}:ALREADY_POS")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "已有持仓"
+                        })
+                        continue
+
+                    if is_live:
+                        if code in self._bg_kernel_today_buys:
+                            blocked.append(f"{code}:TODAY_BOUGHT")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拦截", "detail": "今日已买入过"
+                            })
+                            continue
+
+                        ok, msg = trade_gw.submit_buy(
+                            code=code,
+                            name=sig.get('name', ''),
+                            sector=sig.get('sector', ''),
+                            price=price,
+                            strategy_tag=f"Live:{sig.get('signal_type', '')}",
+                            reason=sig.get('reason', ''),
+                        )
+                        if ok:
+                            self._bg_kernel_today_buys.add(code)
+                            executed.append(f"LIVE_{action} {code}")
+                            executed_codes.append(code)
+                            focus_ctrl.decision_queue.update_status(code, "已提交")
+                            positions[code] = {"code": code}
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "自动已执行(买)", "detail": msg
+                            })
+                            sig["kernel_order_id"] = msg
+                            enrich_decision_item(sig, write_journal=True)
+                        else:
+                            blocked.append(f"{code}:{msg}")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拒绝", "detail": msg
+                            })
+                            enrich_decision_item(sig, write_journal=True)
+                    else:
+                        if code in self._bg_kernel_today_mocks:
+                            continue
+                        self._bg_kernel_today_mocks.add(code)
+
+                        ok, msg = trade_gw.submit_buy(
+                            code=code,
+                            name=sig.get('name', ''),
+                            sector=sig.get('sector', ''),
+                            price=price,
+                            strategy_tag=f"Mock:{sig.get('signal_type', '')}",
+                            reason=sig.get('reason', ''),
+                        )
+
+                        executed.append(f"MOCK_{action} {code}")
+                        executed_codes.append(code)
+                        focus_ctrl.decision_queue.update_status(code, "已提交")
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
+                        })
+                        enrich_decision_item(sig, write_journal=True)
+
+                elif action in ("SELL", "REDUCE"):
+                    if code not in positions:
+                        blocked.append(f"{code}:NO_POS")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "当前无此持仓"
+                        })
+                        continue
+
+                    if is_live:
+                        if code in self._bg_kernel_today_sells:
+                            blocked.append(f"{code}:TODAY_SOLD")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拦截", "detail": "今日已卖出过"
+                            })
+                            continue
+
+                        sell_price = float(price_map.get(code, price) or price)
+                        ok, msg = trade_gw.submit_sell(
+                            code=code,
+                            price=sell_price,
+                            reason=f"LiveSell conf={float(sig.get('kernel_confidence', 0) or 0):.2f}",
+                        )
+                        if ok:
+                            self._bg_kernel_today_sells.add(code)
+                            executed.append(f"LIVE_{action} {code}")
+                            executed_codes.append(code)
+                            focus_ctrl.decision_queue.update_status(code, "已成交")
+                            positions.pop(code, None)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "自动已执行(卖)", "detail": msg
+                            })
+                            sig["kernel_order_id"] = msg
+                            enrich_decision_item(sig, write_journal=True)
+                        else:
+                            blocked.append(f"{code}:{msg}")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拒绝", "detail": msg
+                            })
+                            enrich_decision_item(sig, write_journal=True)
+                    else:
+                        if code in self._bg_kernel_today_mocks:
+                            continue
+                        self._bg_kernel_today_mocks.add(code)
+
+                        sell_price = float(price_map.get(code, price) or price)
+                        ok, msg = trade_gw.submit_sell(
+                            code=code,
+                            price=sell_price,
+                            reason="MockSell",
+                        )
+
+                        executed.append(f"MOCK_{action} {code}")
+                        executed_codes.append(code)
+                        focus_ctrl.decision_queue.update_status(code, "已成交")
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
+                        })
+                        enrich_decision_item(sig, write_journal=True)
+
+            msg = f"后台执行={len(executed)} 拦截={len(blocked)} 错误={len(errors)}"
+            if executed or errors:
+                logger.info(f"⚡ [BgKernel] {msg}")
+
+            if win and win.winfo_exists():
+                self._schedule_after(0, lambda m=msg, k="ok" if executed else ("error" if errors else "warn"), rc=records: win._bg_sync_ui_from_kernel(m, k, rc, executed_codes, blocked_codes, error_codes))
+
+        except Exception as e:
+            logger.warning(f"Error in bg_kernel_auto_execute_once: {e}")
+        finally:
+            self._bg_kernel_executing = False
+
+
+    def _bg_kernel_heartbeat(self):
+        """后台轮询：每 15 秒在后台线程中执行一次交易内核决策"""
+        if getattr(self, '_is_closing', False):
+            return
+        try:
+            self.executor.submit(self.bg_kernel_auto_execute_once, True)
+        except Exception as e:
+            logger.debug(f"[BgKernel] heartbeat submit failed: {e}")
+        self._schedule_after(15000, self._bg_kernel_heartbeat)
 
 
     def _put_deduped_task(self, key, task_fn):
@@ -5127,6 +5529,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """[OPTIMIZE] 集中处理后台常驻任务的初始化，减少主线程计时器碎片"""
         self.restore_all_monitor_windows()
         self._schedule_after(3000, self._start_feedback_listener)
+        self._schedule_after(5000, self._bg_kernel_heartbeat)
         self._schedule_after(8000, self._check_ext_data_update)
         self._schedule_after(28000, self.KLineMonitor_init)
         self._schedule_after(58000, self.schedule_15_30_job)
