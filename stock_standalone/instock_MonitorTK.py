@@ -12210,33 +12210,101 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", f"启动信号查询窗口失败: {e}")
             
     # 🚀 [NEW] 跨框架多窗口轮询快捷键系统 (Unified Window Rotator System)
-    def _find_visualizer_hwnd(self):
-        """利用 EnumWindows 跨进程枚举可视化窗口 HWND (防 GC 与 GIL 加固版)"""
+    def _scan_windows_cached(self, force=False):
+        """利用 EnumWindows 扫描并定位外部窗口，提供 500ms 缓存、活性校验与 Soft Invalid 机制保护 (生产级封顶版)"""
+        import time
         import ctypes
+
         user32 = ctypes.windll.user32
-        found_hwnd = [0]
-        
+        now = time.time()
+
+        if not hasattr(self, "_win_cache"):
+            self._win_cache = {"visualizer": 0, "stock_monitor": 0}
+            self._win_cache_t = 0
+            self._win_cache_valid = False
+
+        # -----------------------------
+        # 1. TTL + valid 双重控制过滤 (全命中缓存才享受 TTL 保护，防脏状态漂移)
+        # -----------------------------
+        if not force and (now - self._win_cache_t < 0.5) and self._win_cache_valid:
+            return self._win_cache
+
+        result = {
+            "visualizer": 0,
+            "stock_monitor": 0
+        }
+
+        def is_valid_hwnd(hwnd):
+            try:
+                return hwnd and user32.IsWindow(hwnd)
+            except Exception:
+                return False
+
+        # -----------------------------
+        # 2. 活性复用（如果上一次全命中的句柄在 OS 层依然有效，则无需耗时扫描）
+        # -----------------------------
+        if not force:
+            if is_valid_hwnd(self._win_cache.get("visualizer", 0)) and \
+               is_valid_hwnd(self._win_cache.get("stock_monitor", 0)):
+                self._win_cache_valid = True
+                return self._win_cache
+
+        # -----------------------------
+        # 3. EnumWindows Callback 扫描
+        # -----------------------------
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-        
+
         def enum_callback(hwnd, lParam):
             try:
                 length = user32.GetWindowTextLengthW(hwnd)
-                if length > 0:
-                    buf = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buf, length + 1)
-                    title = buf.value
-                    # 模糊匹配可视化看板标题
-                    if any(kw in title for kw in ["分时可视化", "TradeVisualizer", "K线可视化", "量价异动详情", "PyQuant Stock Visualizer", "Stock Visualizer", "Visualizer"]):
-                        found_hwnd[0] = hwnd
-                        return False  # 停止枚举
+                if length <= 0:
+                    return True
+
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+
+                if result["visualizer"] == 0 and any(k in title for k in (
+                    "分时可视化", "TradeVisualizer", "K线可视化",
+                    "量价异动详情", "Visualizer", "Stock Visualizer"
+                )):
+                    result["visualizer"] = hwnd
+
+                if result["stock_monitor"] == 0 and ("股票异动数据监控" in title or "股票异动" in title):
+                    result["stock_monitor"] = hwnd
+
+                if result["visualizer"] != 0 and result["stock_monitor"] != 0:
+                    return False
+
             except Exception:
                 pass
+
             return True
-            
-        # 🌟 核心加固：强行声明局部变量持有 WNDENUMPROC，防止在 C 回调执行中途被 Python GC 释放
+
+        # -----------------------------
+        # 4. 强引用绑定（防 GC / Nuitka 偶发闪退）
+        # -----------------------------
         callback_ptr = WNDENUMPROC(enum_callback)
+        self._win_enum_callback_ref = callback_ptr
+
         user32.EnumWindows(callback_ptr, 0)
-        return found_hwnd[0]
+
+        # -----------------------------
+        # 5. 写回缓存与全局 Valid 标记同步
+        # -----------------------------
+        self._win_cache = result
+        self._win_cache_t = now
+        self._win_cache_valid = (result["visualizer"] != 0 and result["stock_monitor"] != 0)
+
+        return result
+
+    def _find_visualizer_hwnd(self):
+        """兼容接口：获取可视化窗口句柄 (已接入 500ms 缓存保护)"""
+        return self._scan_windows_cached().get("visualizer", 0)
+
+    def _find_stock_changes_monitor_hwnd(self):
+        """兼容接口：获取股票异动监控窗口句柄 (已接入 500ms 缓存保护)"""
+        return self._scan_windows_cached().get("stock_monitor", 0)
 
     def _register_hwnd_to_mru(self, hwnd):
         """将有效的 HWND 注册到 MRU 窗口切换列表中，如果已存在则移动到最前"""
@@ -12342,15 +12410,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
                 
-        # 7. K线可视化窗口 (PyQt6 独立进程)
+        # 7. 外部独立进程窗口定位 (一次性 EnumWindows 扫描以提高性能并规避 Nuitka 重入风险)
         try:
-            vis_hwnd = self._find_visualizer_hwnd()
+            ext_wins = self._scan_windows_cached()
+            
+            # 7.1. K线可视化窗口 (PyQt6 独立进程)
+            vis_hwnd = ext_wins.get("visualizer", 0)
             if vis_hwnd:
                 import ctypes
                 # 确保窗口句柄在 Windows 中真实存在且可见，从而允许跨进程 Socket 或残留连接切换
                 if ctypes.windll.user32.IsWindow(vis_hwnd) and ctypes.windll.user32.IsWindowVisible(vis_hwnd):
                     current_visible_hwnds.append(vis_hwnd)
                     name_map[vis_hwnd] = "📺 K线/分时可视化窗口 (Visualizer)"
+                    
+            # 7.2. 股票异动数据监控窗口 (独立进程)
+            changes_hwnd = ext_wins.get("stock_monitor", 0)
+            if changes_hwnd:
+                import ctypes
+                # 确保窗口句柄在 Windows 中真实存在且可见
+                if ctypes.windll.user32.IsWindow(changes_hwnd) and ctypes.windll.user32.IsWindowVisible(changes_hwnd):
+                    if changes_hwnd not in current_visible_hwnds:
+                        current_visible_hwnds.append(changes_hwnd)
+                        name_map[changes_hwnd] = "⚡ 股票异动数据监控 (StockChangesMonitor)"
         except Exception:
             pass
 

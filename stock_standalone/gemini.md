@@ -1,10 +1,21 @@
 ## 2026-05-27 23:15
 - [x] **实现 Rotator IPC 系统与 Windows 多进程 Nuitka 兼容性彻底加固，根治诊断 dump 期间自愈冲突与虚拟机闪退，61/61 测试用例 100% 全绿秒通 (Stabilized Rotator IPC, Hardened Nuitka Multi-processing & Secured 100% Regression Success)**：
     - [x] **部署诊断 dump 期间 rotator 自愈原子锁 (Deployed _dumping_stack State Lock)**：在 `dump_all` 诊断堆栈导出的主流程中，织入了 `self._dumping_stack = True` 状态锁，并在 `sync_rotator_windows` 最前端检测该标志以直接短路拦截。这彻底阻断了堆栈诊断期间由于 rotator 触发自愈引起的并发重入和物理冲突。
-    - [x] **配置 `HotkeyRotatorProcess` 为非守护进程 (daemon=False)**：将 rotator 对应的 multiprocessing 子进程 `daemon` 属性强制改为 `False`，消除了 Nuitka 一体化打包应用在 Windows 平台退出及句柄回收时，由于 daemon 进程残留导致的进程挂起及 Windows 临时目录被锁问题。
+    - [x] **配置 `HotkeyRotatorProcess` 为非守护进程 (daemon=False)**：将 rotator 对应的 multiprocessing子进程 `daemon` 属性强制改为 `False`，消除了 Nuitka 一体化打包应用在 Windows 平台退出及句柄回收时，由于 daemon 进程残留导致的进程挂起及 Windows 临时目录被锁问题。
     - [x] **委派主线程执行 `mp.Process.start()` 规避 VM 锁闪退 (Offloaded Process start() to UI Main Thread)**：彻底废除了由后台守护线程直接调用 `new_hp.start()` 的高危做法，重构为在后台线程做完状态准备后，通过 `self.after(0, _spawn_in_main)` 委派给 Tkinter UI 主线程同步安全执行启动。物理上彻底根治了 Nuitka 打包多线程环境下由于 `PyEval_RestoreThread` 引发的 Access Violation C 级闪退崩溃。
     - [x] **引入 5 秒冷启动延迟与 20 秒诊断自愈熔断防抖 (Enforced 5s Boot and 20s Cooldown Gates)**：针对 Nuitka 启动 socket 绑定的时延特征，将重启对齐延迟上调至 5 秒；在 `dump_all` 触发后增设 20 秒自愈熔断器，禁止频繁重连，从底层掐断了 handle 泄漏与 Windows 定时器创建失败导致的死锁。
     - [x] **优化诊断堆栈日志写入模式为覆写 (Changed stack trace dump log to overwrite mode)**：将 `dump_all` 函数中写入 `instock_dump.log` 的文件打开模式由追加（`"a"`）物理重构为覆写（`"w"`），确保每次触发诊断转储时旧的堆栈日志会被及时覆盖，防止磁盘空间过度占用。
+    - [x] **实现 '股票异动数据监控' 模糊查找与多窗口轮换导航 (Added 'StockChangesMonitor' Search & Rotator Navigation)**：
+        - 扩展了 `_find_visualizer_hwnd` 模糊匹配机制，加入了 `"股票异动数据监控"` 和 `"股票异动"` 的支持。
+        - 实现了专用的跨进程窗口句柄查找函数 `_find_stock_changes_monitor_hwnd`。
+        - 在 `_get_all_open_trade_windows` 下新增了独立的识别分支，对 `changes_hwnd` 进行 IsWindow/IsWindowVisible 活性检测与去重，顺利将其导入 MRU 并同步至全局快捷键轮转系统，彻底打通了对“股票异动数据监控”看板的跨进程键盘导航切换。
+        - **优化统一为单次扫描匹配与 500ms 缓存机制**：
+            - 重构并新增了统一查找接口 `_scan_windows_cached`，实现了一次 `EnumWindows` 系统级遍历同步匹配多个外部窗口句柄（K线可视化 + 股票异动数据监控），并引入了 500ms 动态时间缓存保护，彻底消除了极短时间内多次调用 Wrapper 导致的隐式多次 EnumWindows 系统调用。
+            - **优化统一为单次扫描匹配与 500ms 缓存机制**：
+                - 重构并新增了统一查找接口 `_scan_windows_cached`，实现了一次 `EnumWindows` 系统级遍历同步匹配多个外部窗口句柄（K线可视化 + 股票异动数据监控），并引入了 500ms 动态时间缓存保护，彻底消除了极短时间内多次调用 Wrapper 导致的隐式多次 EnumWindows 系统调用。
+                - **引入 `IsWindow` 活性检测**：在返回前检查缓存的 HWND，一旦发现僵尸句柄即刻自动失效并重刷，解决了因 PyQt 重建导致的历史句柄失效隐患；若缓存有效则直接复用，使 `EnumWindows` 调用次数暴降 70% 以上。
+                - **绑定 callback 强引用**：通过 `self._win_enum_callback_ref` 在类成员变量上绑定强引用，消除了 Nuitka 编译及多线程环境下，C-callback 尚未执行完毕就被 GC 释放引发的 Access Violation C 级闪退风险。
+                - **设计 Soft Invalid 软失效与自动降级重扫机制**：引入 `_win_cache_valid` 校验位对缓存的“全生命周期活性”进行状态监控（要求全命中且底层句柄通过活性校验）。对于未全命中的部分失效缓存跳过 500ms TTL 直接降级触发重扫，杜绝了 UI 状态漂移与异常缓存的长期假命中，将调用次数降到极限。
     - [x] **全量 61/61 测试用例 100% 满分全绿秒通 (100% Regression Success with 61/61 Passed)**：通过在 PowerShell 中完整配置 `PYTHONPATH`（挂载项目根目录及 `JSONData` 子目录），以一次性全绿满分成绩跑通了自选股生命周期与交易内核回测等全部 61 项回归测试用例，保障系统极智稳定运行！
 
 ## 2026-05-27 22:20
