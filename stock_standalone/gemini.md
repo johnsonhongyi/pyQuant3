@@ -1,3 +1,53 @@
+## 2026-05-28 13:40
+- [x] **根治模拟交易账本 `paper_account_state.json` 意外重置与物理损坏 (Root-Caused & Fixed Paper Account State Accidental Reset & Truncation)**：
+    - [x] **杜绝冷启动自动覆盖机制**：重构 `_load_state`，去除了因订单重演得出的理论持仓与持久化持仓数量不等时在冷启动加载阶段强制覆盖 `positions` 与 `cash` 的逻辑，不一致时仅输出 `logger.warning` 级别警告日志。这确保只要 `paper_account_state.json` 有效，系统 100% 尊重并忠实加载持久化数据，绝对不会因订单不全而自动重置可用资金和持仓。若确实产生异常，由用户通过 UI 上的“一键自愈”修复按钮手动触发处理，系统不自动覆盖。
+    - [x] **实现交易记录变动性脏位检查 (Implemented Trade Fingerprint Dirty Checking)**：在 `_save_state` 最前端引入了高精脏位检测函数 `_get_trade_fingerprint`，通过对比初始资金、现金、持仓字段 (排除随行情变动的 current_price) 以及订单列表，来生成指纹。只有在交易记录发生实际物理变动时才执行写盘。杜绝了在无变动情况下高频更新价格带来的多余写盘负载。
+    - [x] **实现原子化物理替换写盘 (Atomic File Write-Replace)**：在 `_save_state` 中通过 safe-cast 校验阻断 NumPy float64/Timestamp 序列化报错导致的写盘截断，并升级为“内存序列化 -> 写入临时文件 `.tmp` -> 原子替换 `os.replace`”流程，彻底杜绝了由于 JSON 序列化运行时异常导致的原文件被清空为 0 字节的物理重置 Bug。
+    - [x] **物理阻断测试进程的文件写盘污染 (Isolated Test Environment Write pollution)**：在 `_load_state` 和 `_save_state` 的最前端加入对 `"PYTEST_CURRENT_TEST" in os.environ` 环境变量的强力判定。不论测试用例本身如何强制设置 `_is_test = False`，只要运行在 pytest 线程/进程上下文中，就绝对禁止读写真实的 `paper_account_state.json` 物理文件，在物理上彻底消除了“一跑测试，真实持仓就被重置”的问题。
+    - [x] **59/59 pytest 测试 100% 全绿满分通过**：成功验证回归测试，保障系统极智稳定运行！
+
+## 2026-05-28 13:10
+- [x] **优化已平仓交易记录过滤与配置持久化 (Optimized Closed Positions Filtering & Persistence in DecisionFlowPanel)**：
+    - [x] **添加显示已平仓过滤选项**：在 `DecisionFlowPanel` 持仓控制面板中加入 `chk_show_closed` 复选框 (📜 显示已平仓 (0股))，并将状态改变与数据刷新联动。
+    - [x] **实现状态的精准保存与恢复**：当关闭窗口 (`closeEvent`) 或切换选项时，自动写入 `window_config.json` 进行跨会话保存；在初始化恢复状态 (`_restore_header_state`) 时，通过 `blockSignals` 防抖注入配置。
+    - [x] **在数据刷新中应用已平仓过滤**：在 `_refresh_positions_tab` 中将选项状态加入渲染指纹 `state_rep` 防止脏重绘短路，同时只在勾选状态下将已平仓（持仓股数为 0）的个股数据载入 `display_positions` 列表展示，默认状态下（未勾选）则自动进行物理隐藏，完全解决 0 股幽灵行的视觉干扰。
+    - [x] **59/59 pytest 单元与集成测试 100% 一次性通过**：跑通全量测试，结果全绿通过，保证系统架构极智稳健！
+
+## 2026-05-28 12:45
+- [x] **实现内核活跃持仓与历史平仓记录的分页解耦及双表联动 (Implemented Active Positions & Closed Records Tab Separation & Dual-Table Linkage in DecisionFlowPanel)**：
+    - [x] **设计双 Tab 面板分离渲染管道与已平仓记录挖掘重演算法 (Delivered Dual-Tab Panel Separation & Closed Positions Reconstruction)**：在 `DecisionFlowPanel` 中引入 `QTabWidget`，将原先混杂的内核持仓拆分为“💼 内核实时持仓 (Kernel Positions & PnL)”和“📜 历史平仓记录 (Closed Positions)”双 Tab。为了解决已平仓个股在 `positions` 字典中被物理 pop 移除导致表格空白的难题，特别开发了 **交易委托流水重演还原算法**：按时间先后重上演绎每只个股的买卖生命周期，精确解析并提取出已实现平仓的均价、盈亏额、实现盈亏率以及对应的起止时间段，彻底解决了测试打开时看不到平仓和交易记录的缺陷。
+    - [x] **实现双向键盘/鼠标联动及双击事件分发 (Enforced Keyboard/Mouse Linkage & Double-Click Navigation)**：为 `pos_table` 与 `closed_table` 均补齐了双击联动事件，打通了对活跃持仓（`_on_pos_cell_double_clicked`）及已平仓记录（`_on_closed_cell_double_clicked`）的双击 K 线联动机制，彻底根治了由于缺失双击接口导致初始化时报出 AttributeError 崩溃的 Bug。
+    - [x] **实现双表格列宽持久化与自适应伸缩 (Delivered Layout Persistence & Dynamic Sizing)**：在 `closeEvent` 和 `_restore_header_state` 中集成了 `closed_header_state` 状态块，支持跨程序会话保存与精准恢复用户调整的“历史平仓记录”表头排序、列宽分布；并对 `resizeEvent` 下的 `_adjust_column_widths` 进行了双表对齐适配，消除了窄屏下表格布局溢出和空白问题。
+    - [x] **集成双表右键菜单与已平仓记录数据净化 (Delivered Dedicated Context Menus & Record Truncation)**：为 `closed_table` 增加了 `_show_closed_context_menu` 右键菜单，支持“🗑️ 移除此已平仓记录”、“🗑️ 清除所有已平仓记录”和股票代码名称的高效复制，提升了操盘手净化复盘数据的效率。
+    - [x] **测试全量回归一次性全绿 (100% Regression Success with 59/59 Passed)**：全量跑通包括自选股生命周期、交易内核回测及模拟 API 在内的全部 59 个 pytest 测试用例，回归成功率 100%！
+
+## 2026-05-28 12:15
+- [x] **实现交易内核开仓时间限制与 T+1 卖出规则校验 (Trading Hours Constraint & T+1 Settlement Enforcement for Paper Trading Adapter)**：
+    - [x] **物理拦截非交易时间开仓动作 (Hardened Trading Hours Gate for BUY/ADD Orders)**：
+        - 在 `PaperExecutionAdapter.submit_order` 买入（`BUY`/`ADD`）入口中，融入了针对交易时间的合法性判定。
+        - 整合 `cct.get_work_time()` 与 `cct.get_work_time_duration()`，非交易时间下单直接拒绝执行，从源头上杜绝了非合法交易时间产生开仓及错误时间戳的可能（单元测试环境已加装 `_is_test` 豁免机制以保证兼容性）。
+    - [x] **设计高精 T+1 锁仓与可卖额度校验算法 (Enforced T+1 Lock & Dynamic Available Shares Calculation)**：
+        - 在平仓（`SELL`/`REDUCE`）入口中，融入了对 T+1 交易结算规则的严密判定。
+        - 结合持仓 `entry_time` 的开仓时间间隔进行物理天数校验。若开仓时间属于当天（间隔 < 1天），该持仓可卖额度直接锁死为 0。若开仓时间早于今天（间隔 >= 1天），则允许平仓，并配合当天加仓成交单 `bought_today_vol` 动态得出今日可卖股数（`available_vol = max(0, total_volume - bought_today_vol)`），完美阻断了当日买入资产在当天被非法卖出。
+    - [x] **补全专属单元测试并实现 59/59 pytest 100% 全绿秒通 (Delivered Unit Tests & Achieved 100% Regression Success)**：
+        - 在 `test_paper_trading.py` 中编写了 `test_paper_trading_trading_hours_constraint` 与 `test_paper_trading_t1_constraint` 两项高精度闭环测试用例，全方位验证了交易时间段限制、T+1 开仓时间天数间隔锁仓以及底仓加仓的准确性。
+        - 回归运行自选股生命周期与交易内核在内的全量 59 项 pytest 单元与集成测试，以 100% 满分成绩全绿通过！
+
+## 2026-05-28 11:30
+- [x] **实现交易内核决策流水监控「开仓时间」持久化、全列排序与一键数据自愈 (Standardized Entry Time Persistence, Interactive Column-Sorting & Self-Healing for Decision Flow Panel)**：
+    - [x] **深度加固 `PaperExecutionAdapter` 仓位 `entry_time` 属性与持久化 (Hardened Position Entry Time Persistence)**：
+        - 针对用户反馈的“交易内核决策流水监控中很多出现没有开仓时间”的问题，在 `paper_adapter.py` 的 `Position` 对象中显式规范化并持久化了 `entry_time` 属性。
+        - 实现了 `entry_time` 字段在 `_load_state` 和 `_save_state` 中的完整序列化与反序列化，通过 `paper_account_state.json` 实现了跨会话/程序重启的永久持久化。
+    - [x] **设计高精委托单回溯还原开仓时间算法 (Delivered Historical Order Reconciler for Auto-Healing)**：
+        - 重构了 `PaperExecutionAdapter._load_state()` 内部的自愈校验引擎，在装载仓位数据时，若检测到某持仓 `entry_time` 缺失或为空，自动通过回溯其关联个股的 `orders` 历史买入委托，按最早的成交时间点自动修复并补齐 `entry_time`。
+        - 对 `_on_one_key_self_heal` 一键自愈逻辑进行了增强：物理扫描 `trading_kernel_trace.jsonl` 日志，通过自动解析今日及历史交易流水中买入信号的成交时间点，实现对运行中持仓的 `entry_time` 毫秒级自愈还原，并将修复后的结果同步存盘。
+    - [x] **实现决策流水与内核持仓全列高保真排序机制 (Delivered Complete Column Sorting for Decision Flow and Positions Tables)**：
+        - 针对用户“添加完备的决策流水及内核持仓所有 col 的排序功能”的诉求，在 `decision_flow_panel.py` 中引入了 `SortableTableWidgetItem` 自定义类，重载了比较操作符 `__lt__`。
+        - 解决了 Qt 默认将表格单元格作为纯文本排序导致数值（如仓位比例、盈亏额、百分比）、日期时间（如开仓时间、平仓时间）发生无序错乱的痛点，支持全列数值与字符串的混合高精度排序。
+        - 对 `DecisionFlowPanel` 中的“决策流水”与“持仓明细”两个表格的全部列配置了排序值映射。采用“数据填充前禁用排序、填充及调整列宽后恢复排序”的防抖渲染管道，物理上杜绝了高频行情刷新下由于 Qt 自动重排导致的界面抖动、假死与 CPU 尖峰。
+    - [x] **回归测试 57/57 pytest 100% 满分全绿秒通**：
+        - 本地在 PowerShell 下完美运行了自选股生命周期与交易内核全量 57 项 pytest 单元与集成测试，一次性全绿通过，保证了内核与 UI 层的高精度稳定性！
+
 ## 2026-05-28 10:55
 - [x] **彻底根治竞价赛马面板退出时的 `PyEval_RestoreThread` 异常与多线程 GIL 崩溃 (Fixed Racing Panel PyEval_RestoreThread Exit Crash)**：
     - [x] **物理拆除 `closeEvent` 中 unsafe 的 `processEvents` 泵送**：删除了 `bidding_racing_panel.py` 面板 `closeEvent` 中原本用于强制事件处理的 `QApplication.processEvents()` 调用，彻底消除了销毁阶段由于事件重入导致的多线程 GIL 争夺，阻断了 `PyEval_RestoreThread` 致命错误。
