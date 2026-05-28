@@ -15,6 +15,7 @@ class Position:
     entry_price: float
     volume: float = 0.0
     current_price: float = 0.0
+    entry_time: str = "N/A"
 
     @property
     def market_value(self) -> float:
@@ -41,6 +42,7 @@ class Position:
             "market_value": round(self.market_value, 4),
             "pnl": round(self.pnl, 4),
             "pnl_pct": round(self.pnl_pct, 4),
+            "entry_time": self.entry_time,
         }
 
 
@@ -82,6 +84,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self.initial_capital = initial_capital
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
+        self._last_saved_fingerprint = ""
         
         # 探测测试环境与物理持久化路径
         import os
@@ -94,59 +97,131 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._state_file = os.path.join(base_dir, "logs", "paper_account_state.json")
         
         self._load_state()
+        self._last_saved_fingerprint = self._get_trade_fingerprint()
+
+    def _get_trade_fingerprint(self) -> str:
+        positions_data = {}
+        positions_dict = {}
+        if hasattr(self, "account") and self.account and getattr(self.account, "positions", None) is not None:
+            positions_dict = self.account.positions
+            
+        for code, pos in positions_dict.items():
+            if hasattr(pos, "entry_price"):
+                entry_p = float(pos.entry_price or 0.0)
+                vol = float(pos.volume or 0.0)
+                e_time = str(getattr(pos, "entry_time", "N/A"))
+            elif isinstance(pos, dict):
+                entry_p = float(pos.get("entry_price") or 0.0)
+                vol = float(pos.get("volume") or 0.0)
+                e_time = str(pos.get("entry_time") or "N/A")
+            else:
+                continue
+            positions_data[code] = (round(entry_p, 4), round(vol, 4), e_time)
+            
+        import json
+        orders_list = []
+        if hasattr(self, "orders") and isinstance(self.orders, list):
+            orders_list = self.orders
+            
+        fingerprint_data = {
+            "initial_capital": round(float(getattr(self, "initial_capital", 1000000.0) or 0.0), 4),
+            "cash": round(float((self.account.cash if (hasattr(self, "account") and self.account) else 1000000.0) or 0.0), 4),
+            "positions": positions_data,
+            "orders": orders_list
+        }
+        try:
+            return json.dumps(fingerprint_data, sort_keys=True)
+        except Exception:
+            return str(fingerprint_data)
 
     def _load_state(self) -> None:
-        if self._is_test:
-            return
         import os
+        if self._is_test or "PYTEST_CURRENT_TEST" in os.environ:
+            return
         import json
+        
+        def safe_float(val: Any, default: float = 0.0) -> float:
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
         if os.path.exists(self._state_file) and os.path.getsize(self._state_file) > 0:
             try:
                 with open(self._state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.initial_capital = float(data.get("initial_capital", self.initial_capital))
-                cash = float(data.get("cash", self.initial_capital))
+                
+                self.initial_capital = safe_float(data.get("initial_capital"), self.initial_capital)
+                cash = safe_float(data.get("cash"), self.initial_capital)
                 
                 positions = {}
                 for code, pos_data in data.get("positions", {}).items():
-                    entry_p = float(pos_data.get("entry_price", 0.0))
+                    if not isinstance(pos_data, dict):
+                        continue
+                    entry_p = safe_float(pos_data.get("entry_price"), 0.0)
                     positions[code] = Position(
-                        code=pos_data.get("code", code),
+                        code=str(pos_data.get("code") or code),
                         entry_price=entry_p,
-                        volume=float(pos_data.get("volume", 0.0)),
-                        current_price=float(pos_data.get("current_price", entry_p))
+                        volume=safe_float(pos_data.get("volume"), 0.0),
+                        current_price=safe_float(pos_data.get("current_price"), entry_p),
+                        entry_time=str(pos_data.get("entry_time") or "N/A")
                     )
                 self.orders = list(data.get("orders", []))
                 
-                # 自愈与热启动机制：从 orders 历史流水中干跑还原出一份“理论持仓”以自动修复任何数据异常
+                # 自愈与热启动机制：从 orders 历史流水中干跑还原出一份“理论持仓”
                 recon_positions = {}
                 recon_cash = self.initial_capital
                 if self.orders:
                     try:
-                        sorted_orders = sorted(self.orders, key=lambda x: x.get("timestamp", ""))
+                        sorted_orders = sorted(
+                            [o for o in self.orders if isinstance(o, dict)],
+                            key=lambda x: str(x.get("timestamp") or "")
+                        )
                         for o in sorted_orders:
                             c = o.get("code")
-                            act = o.get("action", "").upper()
-                            p = float(o.get("price", 0.0))
-                            vol = float(o.get("volume", 0.0))
+                            act = str(o.get("action") or "").upper()
+                            p = safe_float(o.get("price"), 0.0)
+                            vol = safe_float(o.get("volume"), 0.0)
+                            ts = o.get("timestamp")
+                            ts_str = str(ts) if ts is not None else ""
                             if not c or p <= 0 or vol <= 0:
                                 continue
+                            
+                            try:
+                                if ts_str:
+                                    if "T" in ts_str:
+                                        parts = ts_str.split("T")
+                                        formatted_ts = f"{parts[0][5:]} {parts[1][:8]}"
+                                    else:
+                                        formatted_ts = ts_str
+                                else:
+                                    formatted_ts = "N/A"
+                            except Exception:
+                                formatted_ts = "N/A"
                             
                             if act in {"BUY", "ADD"}:
                                 recon_cash -= p * vol
                                 if c in recon_positions:
                                     pos = recon_positions[c]
                                     new_vol = pos.volume + vol
-                                    new_entry = ((pos.entry_price * pos.volume) + (p * vol)) / new_vol
+                                    if new_vol > 0:
+                                        new_entry = ((pos.entry_price * pos.volume) + (p * vol)) / new_vol
+                                    else:
+                                        new_entry = p
                                     pos.volume = new_vol
                                     pos.entry_price = new_entry
                                     pos.current_price = p
+                                    if pos.entry_time == "N/A":
+                                        pos.entry_time = formatted_ts
                                 else:
                                     recon_positions[c] = Position(
                                         code=c,
                                         entry_price=p,
                                         volume=vol,
-                                        current_price=p
+                                        current_price=p,
+                                        entry_time=formatted_ts
                                     )
                             elif act in {"SELL", "REDUCE"}:
                                 recon_cash += p * vol
@@ -160,64 +235,116 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     except Exception:
                         pass
                 
-                # 数据异常自动检测与自愈修复：
-                # 如果 1) 载入的 positions 为空但理论持仓不为空
-                # 或 2) 载入的 positions 数量/代码与理论持仓不一致
-                # 我们自动用理论持仓及现金进行覆盖修复，确保数据绝对一致！
-                need_heal = False
-                if not positions and recon_positions:
-                    need_heal = True
-                elif len(positions) != len(recon_positions):
-                    need_heal = True
-                else:
-                    for c_code in recon_positions:
-                        if c_code not in positions:
-                            need_heal = True
-                            break
-                        if abs(positions[c_code].volume - recon_positions[c_code].volume) > 0.1:
-                            need_heal = True
-                            break
-                
-                if need_heal:
-                    positions = recon_positions
-                    if recon_cash > 0:
-                        cash = recon_cash
-                    import logging
-                    logger = logging.getLogger("PaperExecutionAdapter")
-                    logger.info(f"[Self-Healing] Automatically repaired {len(positions)} abnormal positions from orders ledger.")
+                # 仅在日志中对理论持仓进行校验预警，不再在冷启动时强行覆盖持久化账本，防止历史记录和持仓被意外重置！
+                if recon_positions or self.orders:
+                    mismatch = False
+                    if len(positions) != len(recon_positions):
+                        mismatch = True
+                    else:
+                        for c_code in recon_positions:
+                            if c_code not in positions or abs(positions[c_code].volume - recon_positions[c_code].volume) > 0.1:
+                                mismatch = True
+                                break
+                    if mismatch:
+                        import logging
+                        logger = logging.getLogger("PaperExecutionAdapter")
+                        logger.warning(
+                            f"[State-Check] Loaded positions ({len(positions)} holdings) differ from order ledger derivation ({len(recon_positions)} holdings). "
+                            f"Preserving persistent snapshot to prevent accidental reset. Use manual self-heal if necessary."
+                        )
                 
                 self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logger = logging.getLogger("PaperExecutionAdapter")
+                logger.error(f"[State-Loading] Critical error loading state: {e}. Fallback to default state.")
+                if 'positions' not in locals():
+                    positions = {}
+                if 'cash' not in locals():
+                    cash = self.initial_capital
+                self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
 
     def _save_state(self) -> None:
-        if self._is_test:
-            return
         import os
+        if self._is_test or "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        
+        current_fp = self._get_trade_fingerprint()
+        if hasattr(self, "_last_saved_fingerprint") and current_fp == self._last_saved_fingerprint:
+            return
+            
         import json
+        
+        def safe_json_float(val: Any) -> float:
+            if val is None:
+                return 0.0
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
         try:
             directory = os.path.dirname(self._state_file)
             if directory:
                 os.makedirs(directory, exist_ok=True)
-            positions_data = {
-                code: {
-                    "code": pos.code,
-                    "entry_price": pos.entry_price,
-                    "volume": pos.volume,
-                    "current_price": pos.current_price
+            
+            positions_data = {}
+            for code, pos in self.account.positions.items():
+                if hasattr(pos, "entry_price"):
+                    entry_p = safe_json_float(pos.entry_price)
+                    vol = safe_json_float(pos.volume)
+                    curr_p = safe_json_float(pos.current_price)
+                    e_time = str(getattr(pos, "entry_time", "N/A"))
+                    c_code = str(getattr(pos, "code", code))
+                elif isinstance(pos, dict):
+                    entry_p = safe_json_float(pos.get("entry_price"))
+                    vol = safe_json_float(pos.get("volume"))
+                    curr_p = safe_json_float(pos.get("current_price"))
+                    e_time = str(pos.get("entry_time") or "N/A")
+                    c_code = str(pos.get("code") or code)
+                else:
+                    continue
+                    
+                positions_data[code] = {
+                    "code": c_code,
+                    "entry_price": entry_p,
+                    "volume": vol,
+                    "current_price": curr_p,
+                    "entry_time": e_time
                 }
-                for code, pos in self.account.positions.items()
-            }
+                
+            clean_orders = []
+            for o in self.orders:
+                if isinstance(o, dict):
+                    clean_orders.append({
+                        "order_id": str(o.get("order_id") or ""),
+                        "code": str(o.get("code") or ""),
+                        "action": str(o.get("action") or ""),
+                        "price": safe_json_float(o.get("price")),
+                        "size_pct": safe_json_float(o.get("size_pct")),
+                        "volume": safe_json_float(o.get("volume")),
+                        "timestamp": str(o.get("timestamp") or "")
+                    })
+
             data = {
-                "initial_capital": self.initial_capital,
-                "cash": self.account.cash,
+                "initial_capital": safe_json_float(self.initial_capital),
+                "cash": safe_json_float(self.account.cash),
                 "positions": positions_data,
-                "orders": self.orders
+                "orders": clean_orders
             }
-            with open(self._state_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-        except Exception:
-            pass
+            
+            json_str = json.dumps(data, ensure_ascii=False, indent=4)
+            tmp_file = self._state_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                f.write(json_str)
+            
+            if os.path.exists(tmp_file):
+                os.replace(tmp_file, self._state_file)
+                self._last_saved_fingerprint = current_fp
+        except Exception as e:
+            import logging
+            logger = logging.getLogger("PaperExecutionAdapter")
+            logger.error(f"[State-Saving] Critical error saving state: {e}")
 
     def submit_order(self, order: ApprovedOrder) -> bool:
         if order.size_pct <= 0 or order.price <= 0:
@@ -231,6 +358,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
         equity = self.account.total_equity
 
         if action in {"BUY", "ADD"}:
+            # 校验是否为交易日交易时间（测试环境豁免）
+            if not self._is_test:
+                import JohnsonUtil.commonTips as cct
+                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
+                if not is_trading_hour:
+                    import logging
+                    logger = logging.getLogger("PaperExecutionAdapter")
+                    logger.warning(f"[Trade Gate] Rejected BUY/ADD order for {code} because current time is not within standard trading hours.")
+                    return False
+
             # 计算开仓金额
             target_value = equity * order.size_pct
             # 如果可用现金不足，进行最大可用资金扣减 (防止穿仓)
@@ -258,6 +395,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     entry_price=price,
                     volume=volume,
                     current_price=price,
+                    entry_time=datetime.now().strftime("%m-%d %H:%M:%S")
                 )
 
         elif action in {"SELL", "REDUCE"}:
@@ -274,6 +412,42 @@ class PaperExecutionAdapter(ExecutionAdapter):
 
             if sell_volume <= 0:
                 return False
+
+            # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境豁免）
+            if not self._is_test:
+                is_today_bought = False
+                if pos.entry_time and pos.entry_time != "N/A":
+                    try:
+                        time_part = pos.entry_time.replace("T", " ")
+                        date_str = time_part.split()[0]
+                        today_md = datetime.now().strftime("%m-%d")
+                        today_ymd = datetime.now().strftime("%Y-%m-%d")
+                        if date_str == today_ymd or date_str == today_md:
+                            is_today_bought = True
+                    except Exception:
+                        pass
+
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                bought_today_vol = 0.0
+                for o in self.orders:
+                    o_ts = o.get("timestamp", "")
+                    if o_ts.startswith(today_str) and o.get("code") == code and o.get("action") in {"BUY", "ADD"}:
+                        bought_today_vol += float(o.get("volume", 0.0))
+                
+                if is_today_bought:
+                    available_vol = 0.0
+                else:
+                    available_vol = max(0.0, pos.volume - bought_today_vol)
+
+                if sell_volume > available_vol:
+                    import logging
+                    logger = logging.getLogger("PaperExecutionAdapter")
+                    logger.warning(
+                        f"[T+1 Rule Gate] Rejected {action} order for {code}. "
+                        f"Entry time: {pos.entry_time}, total volume: {pos.volume:.4f}, "
+                        f"bought today: {bought_today_vol:.4f}, available to sell: {available_vol:.4f}, requested: {sell_volume:.4f}."
+                    )
+                    return False
 
             cash_returned = sell_volume * price
             self.account.cash += cash_returned

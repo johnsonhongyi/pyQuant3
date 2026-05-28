@@ -14,6 +14,26 @@ from stock_logic_utils import toast_message
 
 logger = LoggerFactory.getLogger("instock_TK.DecisionFlowPanel")
 
+class SortableTableWidgetItem(QtWidgets.QTableWidgetItem):
+    def __init__(self, text: str, value: Any = None):
+        super().__init__(str(text))
+        self.value = value
+
+    def __lt__(self, other):
+        if not isinstance(other, SortableTableWidgetItem):
+            return super().__lt__(other)
+        v1 = self.value
+        v2 = other.value
+        if v1 is None:
+            return True
+        if v2 is None:
+            return False
+        try:
+            return float(v1) < float(v2)
+        except (ValueError, TypeError):
+            pass
+        return str(v1) < str(v2)
+
 class SystemWorkflowDialog(QtWidgets.QDialog):
     """🚀 交易系统操作指南与风控参数详解 (Operation Guide & Risk Limits Guide)"""
     def __init__(self, parent=None):
@@ -614,6 +634,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(18)
+        self.table.setSortingEnabled(True)
         
         # 启用右键菜单支持
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -623,6 +644,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
+        header.sortIndicatorChanged.connect(lambda: self.table.scrollToTop())
         
         # 绑定双击行进行代码联动
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -650,6 +672,31 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         
         pos_ctrl_layout.addStretch()
         
+        # 选项：显示已平仓持仓
+        self.chk_show_closed = QtWidgets.QCheckBox("📜 显示已平仓 (0股)")
+        self.chk_show_closed.setToolTip("开启此选项即可显示今日已平仓(持仓为0)的个股记录，默认不显示")
+        self.chk_show_closed.setStyleSheet("""
+            QCheckBox {
+                color: #C2C2C6;
+                font-size: 10px;
+                margin-right: 12px;
+            }
+            QCheckBox::indicator {
+                width: 12px;
+                height: 12px;
+                background-color: #16161A;
+                border: 1px solid #2E2E35;
+                border-radius: 2px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #00E676;
+                border-color: #00E676;
+            }
+        """)
+        self.chk_show_closed.setChecked(False)
+        self.chk_show_closed.toggled.connect(self._on_show_closed_toggled)
+        pos_ctrl_layout.addWidget(self.chk_show_closed)
+
         # 一键数据自愈修复按钮
         self.btn_heal = QtWidgets.QPushButton("🔧 一键数据自愈修复")
         self.btn_heal.setToolTip("智能校正初始资金、剔除已平仓(0股)幽灵持仓行、并自愈对账可用现金和资产盈亏")
@@ -689,6 +736,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.pos_table.setAlternatingRowColors(True)
         self.pos_table.verticalHeader().setVisible(False)
         self.pos_table.verticalHeader().setDefaultSectionSize(18)
+        self.pos_table.setSortingEnabled(True)
         
         # 绑定双击持仓代码跳转
         self.pos_table.cellDoubleClicked.connect(self._on_pos_cell_double_clicked)
@@ -702,6 +750,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         pos_header = self.pos_table.horizontalHeader()
         pos_header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         pos_header.setStretchLastSection(True)
+        pos_header.sortIndicatorChanged.connect(lambda: self.pos_table.scrollToTop())
         pos_layout.addWidget(self.pos_table)
 
         # 底部发光大卡片栏 (Summary metrics cards)
@@ -1516,8 +1565,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
             # 增量追加至表格
             if new_records:
+                self.table.setSortingEnabled(False)
                 for rec in new_records:
                     self._append_record_to_table(rec)
+                self.table.setSortingEnabled(True)
                 self.status_label.setText(f"⚡ 增量更新完成，新捕获 {len(new_records)} 条决策信号 (最新更新: {time.strftime('%H:%M:%S')})")
                 self.table.scrollToBottom()
                 # 重新应用过滤
@@ -1735,7 +1786,24 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         }
 
         for col_idx, (text, color_hex) in enumerate(items_data):
-            cell_item = QtWidgets.QTableWidgetItem(str(text))
+            sort_val = text
+            if col_idx == 5:
+                # 拟仓位
+                sort_val = size_val if ('size_val' in locals() and size_val is not None) else 0.0
+            elif col_idx == 6:
+                # 打分
+                try:
+                    sort_val = float(confidence) if (confidence and confidence != "N/A") else -1.0
+                except ValueError:
+                    sort_val = -1.0
+            elif col_idx == 9:
+                # 止损价
+                try:
+                    sort_val = float(stop_price_val) if ('stop_price_val' in locals() and stop_price_val) else 0.0
+                except ValueError:
+                    sort_val = 0.0
+
+            cell_item = SortableTableWidgetItem(str(text), sort_val)
             cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             
             # 设置默认前景色
@@ -1885,6 +1953,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 pos_header_state = self.pos_table.horizontalHeader().saveState().toHex().data().decode("utf-8")
                 data["DecisionFlowPanel"]["pos_header_state"] = pos_header_state
             
+            if hasattr(self, "chk_show_closed"):
+                data["DecisionFlowPanel"]["show_closed"] = self.chk_show_closed.isChecked()
+            
             # 原子写入
             tmp_file = config_file + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
@@ -1924,6 +1995,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         pos_byte_state = QtCore.QByteArray.fromHex(pos_hex_state.encode("utf-8"))
                         self.pos_table.horizontalHeader().restoreState(pos_byte_state)
                         restored_any = True
+                    if "show_closed" in panel_cfg and hasattr(self, "chk_show_closed"):
+                        self.chk_show_closed.blockSignals(True)
+                        self.chk_show_closed.setChecked(bool(panel_cfg["show_closed"]))
+                        self.chk_show_closed.blockSignals(False)
                         
                 if restored_any:
                     logger.info("DecisionFlowPanel header states restored successfully.")
@@ -1936,6 +2011,36 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         """展现时自适应"""
         super().showEvent(event)
         self.table.scrollToBottom()
+
+    def _on_show_closed_toggled(self, checked):
+        """显示/隐藏已平仓选项勾选变更回调"""
+        try:
+            scale = self._get_dpi_scale_factor()
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config_file = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            data = {}
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            if "DecisionFlowPanel" not in data:
+                data["DecisionFlowPanel"] = {}
+            data["DecisionFlowPanel"]["show_closed"] = checked
+            
+            # 原子写入
+            tmp_file = config_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp_file, config_file)
+        except Exception as e:
+            logger.error(f"Failed to save show_closed state on toggled: {e}")
+
+        # 强制清除渲染指纹以触发重新渲染
+        if hasattr(self, "_last_rendered_state"):
+            delattr(self, "_last_rendered_state")
+        self._refresh_positions_tab()
 
     def _on_pos_cell_double_clicked(self, row, column):
         """双击持仓表格行，提取持仓个股代码并向主进程派发跳转联动"""
@@ -2091,12 +2196,23 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                             pass
                                         entry_p = float(pos_obj.entry_price)
                                         curr_p = float(pos_obj.current_price)
+                                        
+                                        # 解析并还原正确的 entry_time
+                                        entry_time_dt = datetime.now()
+                                        p_entry_time = getattr(pos_obj, "entry_time", "N/A")
+                                        if p_entry_time and p_entry_time != "N/A":
+                                            try:
+                                                this_year = datetime.now().year
+                                                entry_time_dt = datetime.strptime(f"{this_year}-{p_entry_time}", "%Y-%m-%d %H:%M:%S")
+                                            except Exception:
+                                                pass
+                                                
                                         leg_pos = LegacyPosition(
                                             code=p_code_pure,
                                             name=name_val,
                                             sector=sector_val,
                                             entry_price=entry_p,
-                                            entry_time=datetime.now(),
+                                            entry_time=entry_time_dt,
                                             shares=int(vol),
                                             position_value=entry_p * vol,
                                             strategy_tag="内核反哺",
@@ -2107,7 +2223,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                             day_high=curr_p if curr_p > 0 else entry_p,
                                         )
                                         trade_gw._positions[p_code_pure] = leg_pos
-                                        logger.info(f"[Bridge-Anti-Reverse] Restored legacy position: {p_code_pure} ({name_val})")
+                                        logger.info(f"[Bridge-Anti-Reverse] Restored legacy position: {p_code_pure} ({name_val}) with entry_time {entry_time_dt}")
                         
                         # 2) 执行双向对账同步
                         old_positions = trade_gw.get_positions()
@@ -2188,6 +2304,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 },
                 "orders_len": orders_len,
                 "hidden_closed_codes": sorted(list(x for x in self._hidden_closed_codes if isinstance(x, str))) if hasattr(self, "_hidden_closed_codes") else [],
+                "show_closed": self.chk_show_closed.isChecked() if hasattr(self, "chk_show_closed") else False,
             }
             import json
             state_str = json.dumps(state_rep, sort_keys=True)
@@ -2258,10 +2375,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 if entry_price > 0:
                     self._position_cost_cache[code] = entry_price
                 
-                open_time = "N/A"
-                close_time = "N/A"
-                if code in code_trade_info:
+                open_time = pos.get("entry_time", "N/A")
+                if open_time == "N/A" and code in code_trade_info:
                     open_time = code_trade_info[code]["open_time"]
+                close_time = "N/A"
                     
                 display_positions.append({
                     "code": code,
@@ -2276,45 +2393,47 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 })
                 
             # 今日已平仓的个股
-            for code, info in code_trade_info.items():
-                if code not in positions:
-                    if hasattr(self, "_hidden_closed_codes") and code in self._hidden_closed_codes:
-                        continue
-                    buys = info["buys"]
-                    sells = info["sells"]
-                    
-                    total_buy_vol = sum(b[1] for b in buys)
-                    if total_buy_vol > 0:
-                        entry_price = sum(b[0] * b[1] for b in buys) / total_buy_vol
-                    else:
-                        # 昨持平仓：尝试从内存成本缓存中追溯昨持的成本均价
-                        entry_price = self._position_cost_cache.get(code, 0.0)
-                    
-                    curr_price = sells[-1][0] if sells else entry_price
-                    volume = 0.0
-                    market_val = 0.0
-                    
-                    total_sell_vol = sum(s[1] for s in sells)
-                    total_sell_val = sum(s[0] * s[1] for s in sells)
-                    total_buy_val = entry_price * total_sell_vol
-                    pnl = total_sell_val - total_buy_val
-                    pnl_pct = (pnl / total_buy_val * 100.0) if total_buy_val > 0 else 0.0
-                    
-                    display_positions.append({
-                        "code": code,
-                        "volume": volume,
-                        "entry_price": entry_price,
-                        "current_price": curr_price,
-                        "market_val": market_val,
-                        "pnl": pnl,
-                        "pnl_pct": pnl_pct,
-                        "open_time": info["open_time"],
-                        "close_time": info["close_time"],
-                    })
+            if hasattr(self, "chk_show_closed") and self.chk_show_closed.isChecked():
+                for code, info in code_trade_info.items():
+                    if code not in positions:
+                        if hasattr(self, "_hidden_closed_codes") and code in self._hidden_closed_codes:
+                            continue
+                        buys = info["buys"]
+                        sells = info["sells"]
+                        
+                        total_buy_vol = sum(b[1] for b in buys)
+                        if total_buy_vol > 0:
+                            entry_price = sum(b[0] * b[1] for b in buys) / total_buy_vol
+                        else:
+                            # 昨持平仓：尝试从内存成本缓存中追溯昨持的成本均价
+                            entry_price = self._position_cost_cache.get(code, 0.0)
+                        
+                        curr_price = sells[-1][0] if sells else entry_price
+                        volume = 0.0
+                        market_val = 0.0
+                        
+                        total_sell_vol = sum(s[1] for s in sells)
+                        total_sell_val = sum(s[0] * s[1] for s in sells)
+                        total_buy_val = entry_price * total_sell_vol
+                        pnl = total_sell_val - total_buy_val
+                        pnl_pct = (pnl / total_buy_val * 100.0) if total_buy_val > 0 else 0.0
+                        
+                        display_positions.append({
+                            "code": code,
+                            "volume": volume,
+                            "entry_price": entry_price,
+                            "current_price": curr_price,
+                            "market_val": market_val,
+                            "pnl": pnl,
+                            "pnl_pct": pnl_pct,
+                            "open_time": info["open_time"],
+                            "close_time": info["close_time"],
+                        })
 
             # 5. 渲染至 Qt 表格，采用行复用与脏检查防闪烁机制
             target_row_count = len(display_positions)
             self.pos_table.setRowCount(target_row_count)
+            self.pos_table.setSortingEnabled(False)
             
             for row_idx, pos_data in enumerate(display_positions):
                 code = pos_data["code"]
@@ -2346,22 +2465,22 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 pnl_sign = "+" if pnl >= 0 else ""
                 
                 items = [
-                    (code, "#FFFFFF"),
-                    (stock_name, "#C2C2C6"),
-                    (f"{volume:.0f}", "#B0BEC5"),
-                    (f"{entry_price:.2f}", "#B0BEC5"),
-                    (f"{curr_price:.2f}", "#FFFFFF"),
-                    (f"¥ {market_val:,.2f}", "#00E5FF"),
-                    (f"{pnl_sign}¥ {pnl:,.2f}", pnl_color),
-                    (f"{pnl_sign}{pnl_pct:.2f}%", pnl_color),
-                    (open_time, "#B0BEC5"),
-                    (close_time, "#B0BEC5")
+                    (code, "#FFFFFF", code),
+                    (stock_name, "#C2C2C6", stock_name),
+                    (f"{volume:.0f}", "#B0BEC5", volume),
+                    (f"{entry_price:.2f}", "#B0BEC5", entry_price),
+                    (f"{curr_price:.2f}", "#FFFFFF", curr_price),
+                    (f"¥ {market_val:,.2f}", "#00E5FF", market_val),
+                    (f"{pnl_sign}¥ {pnl:,.2f}", pnl_color, pnl),
+                    (f"{pnl_sign}{pnl_pct:.2f}%", pnl_color, pnl_pct),
+                    (open_time, "#B0BEC5", open_time),
+                    (close_time, "#B0BEC5", close_time)
                 ]
                 
-                for col_idx, (text, color_hex) in enumerate(items):
+                for col_idx, (text, color_hex, sort_val) in enumerate(items):
                     cell_item = self.pos_table.item(row_idx, col_idx)
                     if not cell_item:
-                        cell_item = QtWidgets.QTableWidgetItem()
+                        cell_item = SortableTableWidgetItem(str(text), sort_val)
                         cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                         if col_idx in {6, 7}:
                             cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
@@ -2369,6 +2488,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     
                     if cell_item.text() != str(text):
                         cell_item.setText(str(text))
+                    
+                    # 更新 sort_value
+                    if isinstance(cell_item, SortableTableWidgetItem):
+                        cell_item.value = sort_val
                     
                     if color_hex:
                         new_color = QtGui.QColor(color_hex)
@@ -2386,6 +2509,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         break
             if not restored and selected_code and self.pos_table.rowCount() > 0:
                 self.pos_table.setCurrentCell(0, 0)
+            
+            self.pos_table.setSortingEnabled(True)
 
             # 7. 刷新大卡片统计数据
             cash = float(account.get("cash", 0.0))
@@ -2693,6 +2818,84 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     if leg_pos.shares <= 0:
                         trade_gw._positions.pop(c_code, None)
                         removed_ghosts.append(c_code)
+
+            # 1.1 从决策流水日志中自愈修复缺失的开仓时间
+            journal_path = self.journal_path
+            code_times = {}
+            if os.path.exists(journal_path):
+                try:
+                    with open(journal_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                rec = json.loads(line)
+                            except Exception:
+                                continue
+                            
+                            is_audit = (rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT")
+                            if is_audit:
+                                orig_order = rec.get("original_order", {})
+                                code = orig_order.get("code", "")
+                                confirmed = rec.get("confirmed", False)
+                                action = orig_order.get("action", "").upper()
+                                if not confirmed:
+                                    continue
+                                ts = rec.get("timestamp", "")
+                            else:
+                                sig = rec.get("signal", {})
+                                code = sig.get("code", "")
+                                action = rec.get("kernel_action", "") or rec.get("action", "")
+                                if not action:
+                                    risk = rec.get("risk", {})
+                                    action = risk.get("final_action", "")
+                                action = action.upper()
+                                ts = rec.get("journal_ts", "") or rec.get("trace", {}).get("timestamp", "")
+                            
+                            if not code or not action or not ts:
+                                continue
+                            
+                            code = "".join(filter(str.isdigit, str(code)))[:6]
+                            if len(code) != 6:
+                                continue
+                                
+                            formatted_ts = self._parse_timestamp(ts)
+                            
+                            if code not in code_times:
+                                code_times[code] = {"open_time": "N/A", "close_time": "N/A"}
+                            
+                            if action in {"BUY", "ADD"}:
+                                if code_times[code]["open_time"] == "N/A":
+                                    code_times[code]["open_time"] = formatted_ts
+                            elif action in {"SELL", "REDUCE"}:
+                                code_times[code]["close_time"] = formatted_ts
+                except Exception as ex:
+                    logger.error(f"Error scanning journal file for self-heal: {ex}")
+            
+            # 对 positions 里的 entry_time 进行自愈修复
+            healed_times_count = 0
+            for c_code, pos_obj in service.paper_adapter.account.positions.items():
+                current_entry_time = getattr(pos_obj, "entry_time", "N/A")
+                if current_entry_time == "N/A" or current_entry_time == "":
+                    if c_code in code_times and code_times[c_code]["open_time"] != "N/A":
+                        pos_obj.entry_time = code_times[c_code]["open_time"]
+                        healed_times_count += 1
+                        logger.info(f"[Self-Healing] Restored open time for {c_code} from journal: {pos_obj.entry_time}")
+            
+            # 同时自愈老版柜台的持仓
+            with trade_gw._lock:
+                for c_code in list(trade_gw._positions.keys()):
+                    leg_pos = trade_gw._positions[c_code]
+                    leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
+                    if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
+                        try:
+                            ts_str = code_times[leg_pure]["open_time"]
+                            this_year = datetime.now().year
+                            dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
+                            leg_pos.entry_time = dt
+                        except Exception:
+                            pass
             
             # 2. 统计当前活跃持仓的买入成本和最新市值
             active_positions = service.paper_adapter.account.positions
@@ -2739,9 +2942,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             msg_text = (
                 f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
                 f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
-                f"2️⃣ <b>重调初始资金</b>：已自适应扩容至 <b>¥ {target_cap:,.2f}</b>。<br>"
-                f"3️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
-                f"4️⃣ <b>资产盈亏重算</b>：<br>"
+                f"2️⃣ <b>自愈开仓时间</b>：从决策流水日志中自愈修复了 <b>{healed_times_count}</b> 个持仓的开仓时间。<br>"
+                f"3️⃣ <b>重调初始资金</b>：已自适应扩容至 <b>¥ {target_cap:,.2f}</b>。<br>"
+                f"4️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
+                f"5️⃣ <b>资产盈亏重算</b>：<br>"
                 f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
                 f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
                 f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
