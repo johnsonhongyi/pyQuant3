@@ -975,6 +975,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-j>", lambda event: self.open_decision_flow_panel())
         self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
         self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
+        self.bind("<Alt-x>", self._on_shortcut_reentry_backtest)
+        self.bind("<Alt-X>", self._on_shortcut_reentry_backtest)
         self.bind("<space>", lambda event: self.toggle_spatial_follow_hud())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
@@ -8435,6 +8437,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win.txt_widget.delete('1.0', 'end')
                 win.txt_widget.insert('1.0', report_text)
                 win.txt_widget.config(state='disabled')
+                win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(1.0))
                 win.report_text = report_text # 更新复制引用的文本
                 return
             else:
@@ -8475,6 +8478,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         win.txt_widget.insert('1.0', report_text)
         win.txt_widget.config(state='disabled')
+        win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(1.0))
         
         # 底部按钮
         btn_frame = tk.Frame(win)
@@ -8699,47 +8703,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Copy Info Error: {e}")
             messagebox.showerror("错误", f"提取信息失败: {e}")
     def _on_run_reentry_backtest_menu(self, code: str, name: str):
-        """右键菜单触发 Re-entry 模拟交易回测，并使用精美独立弹窗非阻塞展示结论"""
+        """右键菜单触发 Re-entry 模拟交易回测，与 Alt+X 快捷键一致，不弹出计算提示窗口，直接后台异步运行并在精美独立弹窗中非阻塞展示结论"""
         try:
             import threading
             from scratch.test_reentry_backtest import run_backtest_and_get_report
             from JohnsonUtil.commonTips import timed_ctx
             
-            progress_win = tk.Toplevel(self)
-            progress_win.title("📡 正在计算")
-            progress_win.geometry("300x120")
-            progress_win.configure(bg="#0c101b")
-            progress_win.resizable(False, False)
-            progress_win.attributes("-topmost", True)
+            # 物理清理股票代码中的所有非 ASCII 字符（表情符等）
+            code_clean = code.strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                code_clean = code_clean.replace(icon, '').strip()
+                
+            logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测...")
             
-            progress_win.update_idletasks()
-            w = 300
-            h = 120
-            x = self.winfo_x() + (self.winfo_width() - w) // 2
-            y = self.winfo_y() + (self.winfo_height() - h) // 2
-            progress_win.geometry(f"{w}x{h}+{x}+{y}")
-            
-            tk.Label(
-                progress_win, 
-                text=f"正在对 【{name} ({code})】\n进行 Re-entry 历史回测分析...",
-                bg="#0c101b", fg="#55ffff", font=("Arial", 11, "bold"), pady=15
-            ).pack()
-            
-            lbl_status = tk.Label(
-                progress_win, text="请稍候，抓取通达信历史数据并计算特征...",
-                bg="#0c101b", fg="#888888", font=("Arial", 9)
-            )
-            lbl_status.pack()
-
             def run_task():
                 try:
                     # 仅获取整体总结报告结果，并利用 timed_ctx 进行性能审计
-                    with timed_ctx(f"Re-entry Backtest {code}", warn_ms=300):
-                        report = run_backtest_and_get_report(code, name, only_report=True)
-                    self.after(0, lambda: [progress_win.destroy(), self._show_backtest_report_window(code, name, report)])
+                    with timed_ctx(f"Re-entry Backtest {code_clean}", warn_ms=300):
+                        report = run_backtest_and_get_report(code_clean, name, only_report=True)
+                    self.after(0, lambda: self._show_backtest_report_window(code_clean, name, report))
                 except Exception as ex:
                     logger.error(f"Error running backtest: {ex}")
-                    self.after(0, lambda: [progress_win.destroy(), messagebox.showerror("计算失败", f"回测计算发生异常: {ex}")])
+                    import traceback
+                    err_msg = f"Re-entry 回测执行失败: {ex}\n{traceback.format_exc()}"
+                    self.after(0, lambda: self._show_backtest_report_window(code_clean, name, err_msg))
                     
             threading.Thread(target=run_task, daemon=True).start()
             
@@ -11482,6 +11469,52 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 messagebox.showerror("错误", "阈值必须是数字")
 
         tk.Button(dlg, text="确定添加", command=on_confirm, bg="#ccffcc").pack(pady=15)
+
+    def _on_shortcut_reentry_backtest(self, event=None):
+        """Alt+X 一键触发 Re-entry 历史回测 (大屏 Tkinter 端)"""
+        import threading
+        
+        # 1. 优先从当前 Treeview 焦点行中提取最纯净的代码和名字
+        item = self.tree.focus()
+        code, name = None, None
+        if item:
+            values = self.tree.item(item, 'values')
+            if values and len(values) >= 2:
+                code, name = str(values[0]), str(values[1])
+                
+        # 2. 如果 Treeview 没焦点，退守到 select_code
+        if not code:
+            if hasattr(self, 'select_code') and self.select_code:
+                code = self.select_code
+                name = code
+                if hasattr(self, 'df_all') and self.df_all is not None and not self.df_all.empty:
+                    if code in self.df_all.index:
+                        name = self.df_all.loc[code].get('name', code)
+            else:
+                logger.info("⚠️ 未选择股票，无法执行回测")
+                return
+                
+        # 3. 物理清理股票代码中的所有非 ASCII 字符（表情符等）
+        code_clean = code.strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            code_clean = code_clean.replace(icon, '').strip()
+            
+        logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测...")
+        
+        # 4. 后台守护线程异步运行，保证主线程绝对不假死
+        def run_thread():
+            try:
+                from scratch.test_reentry_backtest import run_backtest_and_get_report
+                # [UX] 1. 采用 only_report=True 提炼精简报告模式
+                report = run_backtest_and_get_report(code_clean, name, only_report=True)
+                # [UX] 2. 使用 after 回流主线程，并调用统一精美的独立弹窗非阻塞展示结论
+                self.after(0, lambda: self._show_backtest_report_window(code_clean, name, report))
+            except Exception as e:
+                import traceback
+                err_msg = f"Re-entry 回测执行失败: {e}\n{traceback.format_exc()}"
+                self.after(0, lambda: self._show_backtest_report_window(code_clean, name, err_msg))
+                
+        threading.Thread(target=run_thread, daemon=True).start()
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口 (支持窗口复用)"""

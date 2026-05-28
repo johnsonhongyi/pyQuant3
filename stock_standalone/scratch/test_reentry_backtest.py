@@ -19,8 +19,28 @@ from trading_kernel.engine.reentry_tracker import reentry_tracker
 from trading_kernel.engine.decision_engine import decide
 from trading_kernel.core.signal import StrategySignal
 
+_last_backtest_signals = {}
+_last_backtest_best_branch = {}
+
+def get_last_backtest_signals(code: str) -> list:
+    code_clean = code.strip()
+    for icon in ['🔴', '🟢', '📊', '⚠️']:
+        code_clean = code_clean.replace(icon, '').strip()
+    return _last_backtest_signals.get(code_clean, [])
+
+def get_last_backtest_best_branch(code: str) -> str:
+    code_clean = code.strip()
+    for icon in ['🔴', '🟢', '📊', '⚠️']:
+        code_clean = code_clean.replace(icon, '').strip()
+    return _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
+
 def run_backtest_and_get_report(code: str, name: str, only_report: bool = False) -> str:
     """运行指定个股 of Re-entry 历史回测，并以字符串形式返回完整的日志及整体总结报告。"""
+    code_clean = code.strip()
+    for icon in ['🔴', '🟢', '📊', '⚠️']:
+        code_clean = code_clean.replace(icon, '').strip()
+    _last_backtest_signals[code_clean] = []
+    _last_backtest_best_branch[code_clean] = "SuperTrendMA5Branch"
     # ── 从 global.ini 动态灌入 StrategyRouter 静态路由表 ──
     try:
         import configparser
@@ -413,6 +433,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                         trade_events.append(
                             f"二次大止盈：{current_date} 暴拉至 {close:.2f} 元最高位时再次触发 70% 大止盈锁定超级利润。 [分支策略: {active_branch_name}]"
                         )
+                    
+                    _last_backtest_signals[code_clean].append({
+                        "date": str(current_date),
+                        "action": "SELL",
+                        "price": float(close),
+                        "branch": str(active_branch_name),
+                        "desc": "大止盈减仓"
+                    })
                 continue
 
             # 💡 黄金低吸与主升浪回补仓位判定 (Re-entry Add Back 70%)：
@@ -453,6 +481,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                     trade_events.append(
                         f"回补：{current_date} 回踩洗盘 {fill_price:.2f} 元且成交量量缩，精准触发 [ADD-BACK] 补回 70% 筹码，加权拉平成本至 {entry_price:.2f} 元。 [分支策略: {active_branch_name}]"
                     )
+                
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "BUY",
+                    "price": float(fill_price),
+                    "branch": str(active_branch_name),
+                    "desc": f"黄金加仓回补({setup_name})"
+                })
                 continue
 
             # B. T+2时间不及预期风控出局 ── 100% 平仓
@@ -470,6 +506,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                 trade_events.append(
                     f"清仓平仓：{current_date} 触发 T+2 时间保护，不及预期冲高就走平仓退场，平仓价 {close:.2f} 元，综合盈亏率: {final_pnl:+.2f}%。 [分支策略: {active_branch_name}]"
                 )
+                
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "SELL",
+                    "price": float(close),
+                    "branch": str(active_branch_name),
+                    "desc": "T+2时间平仓"
+                })
                 
                 has_position = False
                 tp_triggered = False
@@ -494,6 +538,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                 trade_events.append(
                     f"止损平仓：{current_date} 跌破防守线 {trigger_stop_val:.2f} 元，触发物理清仓出局，平仓价 {close:.2f} 元，最终盈亏率: {final_pnl:+.2f}%。 [分支策略: {active_branch_name}]"
                 )
+                
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "SELL",
+                    "price": float(close),
+                    "branch": str(active_branch_name),
+                    "desc": "防守止损平仓"
+                })
                 
                 has_position = False
                 tp_triggered = False
@@ -584,6 +636,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                 trade_events.append(
                     f"建仓：{current_date} 识别到缩量踩工作线，触发买入 {close:.2f} 元。 [分支策略: {active_branch_name}]"
                 )
+                
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "BUY",
+                    "price": float(close),
+                    "branch": str(active_branch_name),
+                    "desc": "支撑低吸建仓"
+                })
             else:
                 log(f"[RE-ENTRY ALERT TRIGGERED SUCCESS!] | 👑 激活分支策略: {active_branch_name}")
                 log(f"-> 触发个股: {name} ({code})")
@@ -593,6 +653,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
                 trade_events.append(
                     f"建仓：{current_date} 满足 Re-entry 右侧突破信号，触发买入 {close:.2f} 元。 [分支策略: {active_branch_name}]"
                 )
+                
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "BUY",
+                    "price": float(close),
+                    "branch": str(active_branch_name),
+                    "desc": "Re-entry突破开仓"
+                })
             log(f"-> 决策动作: {intent.action} | 阶梯底仓仓位分配: {intent.size_pct * 100:.1f}%")
             log(f"-> 动态止损价设定: {intent.stop_price:.2f} 元")
             log(f"-> 最终共振置信度: {intent.confidence:.4f}")
@@ -619,6 +687,25 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
         log(f"\nℹ️ 标的 {code} 在观察期内行情尚未确立，继续在池中保持观察洗盘深度。\n")
         trade_events.append(f"观察：在观察期内行情尚未确立，继续在池中保持观察洗盘深度。")
 
+    # 👑 动态记录当前最推荐的超级策略分支
+    if 'active_branch_name' in locals() and active_branch_name and active_branch_name != "UnknownBranch":
+        _last_backtest_best_branch[code_clean] = active_branch_name
+
+    # 👑 识别倒数第一个确实属于买卖交易动作的行（建仓/回补/减仓/平仓/止损），进行极度显眼的标识
+    last_trade_idx = -1
+    for idx in range(len(trade_events) - 1, -1, -1):
+        ev = trade_events[idx]
+        if any(keyword in ev for keyword in ["建仓", "回补", "减仓", "二次大止盈", "平仓", "止损"]):
+            last_trade_idx = idx
+            break
+
+    if last_trade_idx != -1:
+        ev = trade_events[last_trade_idx]
+        if any(kw in ev for kw in ["建仓", "回补"]):
+            trade_events[last_trade_idx] = "🟢【最新买卖点决策】 " + ev
+        else:
+            trade_events[last_trade_idx] = "🔴【最新买卖点决策】 " + ev
+
     # 👑 生成最后的“整体报告”
     log("\n" + "=" * 80, is_detail=False)
     log(f"👑 【Re-entry 历史回测整体报告】 - {name} ({code})", is_detail=False)
@@ -628,6 +715,18 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = False)
             log(f"{idx}. {ev}", is_detail=False)
     else:
         log("（未触发任何实质交易动作）", is_detail=False)
+    log("=" * 80, is_detail=False)
+
+    # 👑 动态增加当前战术状态与活跃分支策略的极速透传展示区块
+    current_branch = _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
+    log("👑 【当前战术状态与活跃分支策略】", is_detail=False)
+    log("-" * 80, is_detail=False)
+    if has_position:
+        log(f"▶ 战术状态: 💼 正在持仓中 (筹码做T滚动持股中)", is_detail=False)
+        log(f"▶ 活跃分支: 🧡 {current_branch} (当前主图策略推荐分支)", is_detail=False)
+    else:
+        log(f"▶ 战术状态: 📊 保持空仓观察 (KEEP OBSERVING)", is_detail=False)
+        log(f"▶ 观察队列: ⏳ 正在对齐主力 12日防踏空右侧抢回防线", is_detail=False)
     log("=" * 80 + "\n", is_detail=False)
 
     return output.getvalue()
