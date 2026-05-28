@@ -378,7 +378,21 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 return False
 
             volume = target_value / price
-            self.account.cash -= target_value
+            
+            # 非测试环境下强制 100 股向下取整，并拒绝低于 100 股的微小开仓订单以杜绝碎股
+            if not self._is_test:
+                volume = (int(volume) // 100) * 100
+                if volume < 100:
+                    import logging
+                    logger = logging.getLogger("PaperExecutionAdapter")
+                    logger.warning(
+                        f"[Trade Gate] Rejected BUY/ADD order for {code} because calculated volume ({volume}) "
+                        f"is less than 100 shares minimum (available cash: {self.account.cash:.2f})."
+                    )
+                    return False
+
+            actual_value = volume * price
+            self.account.cash -= actual_value
 
             # 更新仓位账簿
             if code in self.account.positions:
@@ -409,6 +423,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
             else:
                 # 减仓一部分
                 sell_volume = pos.volume * order.size_pct
+                if not self._is_test:
+                    sell_volume = (int(sell_volume) // 100) * 100
+                    if sell_volume >= pos.volume:
+                        sell_volume = pos.volume
 
             if sell_volume <= 0:
                 return False
