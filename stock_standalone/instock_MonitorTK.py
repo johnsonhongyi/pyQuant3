@@ -7844,6 +7844,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=lambda: self.copy_stock_info(stock_code)
         )
 
+        menu.add_command(
+            label="🔍 运行 Re-entry 历史回测",
+            command=lambda: self._on_run_reentry_backtest_menu(stock_code, stock_name)
+        )
+
         menu.add_separator()
 
         # —— 策略相关 ——
@@ -8693,6 +8698,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Copy Info Error: {e}")
             messagebox.showerror("错误", f"提取信息失败: {e}")
+    def _on_run_reentry_backtest_menu(self, code: str, name: str):
+        """右键菜单触发 Re-entry 模拟交易回测，并使用精美独立弹窗非阻塞展示结论"""
+        try:
+            import threading
+            from scratch.test_reentry_backtest import run_backtest_and_get_report
+            from JohnsonUtil.commonTips import timed_ctx
+            
+            progress_win = tk.Toplevel(self)
+            progress_win.title("📡 正在计算")
+            progress_win.geometry("300x120")
+            progress_win.configure(bg="#0c101b")
+            progress_win.resizable(False, False)
+            progress_win.attributes("-topmost", True)
+            
+            progress_win.update_idletasks()
+            w = 300
+            h = 120
+            x = self.winfo_x() + (self.winfo_width() - w) // 2
+            y = self.winfo_y() + (self.winfo_height() - h) // 2
+            progress_win.geometry(f"{w}x{h}+{x}+{y}")
+            
+            tk.Label(
+                progress_win, 
+                text=f"正在对 【{name} ({code})】\n进行 Re-entry 历史回测分析...",
+                bg="#0c101b", fg="#55ffff", font=("Arial", 11, "bold"), pady=15
+            ).pack()
+            
+            lbl_status = tk.Label(
+                progress_win, text="请稍候，抓取通达信历史数据并计算特征...",
+                bg="#0c101b", fg="#888888", font=("Arial", 9)
+            )
+            lbl_status.pack()
+
+            def run_task():
+                try:
+                    # 仅获取整体总结报告结果，并利用 timed_ctx 进行性能审计
+                    with timed_ctx(f"Re-entry Backtest {code}", warn_ms=300):
+                        report = run_backtest_and_get_report(code, name, only_report=True)
+                    self.after(0, lambda: [progress_win.destroy(), self._show_backtest_report_window(code, name, report)])
+                except Exception as ex:
+                    logger.error(f"Error running backtest: {ex}")
+                    self.after(0, lambda: [progress_win.destroy(), messagebox.showerror("计算失败", f"回测计算发生异常: {ex}")])
+                    
+            threading.Thread(target=run_task, daemon=True).start()
+            
+        except Exception as e:
+            logger.error(f"Error in _on_run_reentry_backtest_menu: {e}")
+
+    def _show_backtest_report_window(self, code: str, name: str, report: str):
+        """显示并复用精美的 Re-entry 模拟交易回测报告窗口"""
+        try:
+            from stock_selection_window import BacktestReportDialog
+            if hasattr(self, '_backtest_dialog') and self._backtest_dialog and self._backtest_dialog.winfo_exists():
+                self._backtest_dialog.update_report(code, name, report)
+                self._backtest_dialog.deiconify()
+                self._backtest_dialog.focus_force()
+            else:
+                self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+        except Exception as e:
+            logger.error(f"Error showing backtest report window: {e}")
 
     def _run_sbc_test_from_tk(self, stock_code, use_live=False, event=None):
         """从 TK 界面触发 SBC 信号验证"""

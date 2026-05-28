@@ -171,19 +171,95 @@ class TradingKernelService:
         tp_triggered = False
         max_pnl_since_entry = 0.0
         code = str(item.get("code") or "")
-        if code and hasattr(self, "paper_adapter") and self.paper_adapter and self.paper_adapter.account:
-            pos = self.paper_adapter.account.positions.get(code)
+        
+        # 动态匹配当前执行的柜台实例以读取仓位
+        active_executor = getattr(self, "executor", None)
+        if not active_executor:
+            active_executor = getattr(self, "paper_adapter", None) or getattr(self, "broker_adapter", None)
+            
+        if code and active_executor and getattr(active_executor, "account", None):
+            pos = active_executor.account.positions.get(code)
             if pos:
-                is_swing_low_mode = (pos.regime == "SWING_LOW_BUY")
-                tp_triggered = pos.tp_triggered
-                max_pnl_since_entry = pos.pnl_pct
-                if hasattr(pos, "max_high") and pos.max_high > 0.0 and pos.entry_price > 0.0:
+                is_swing_low_mode = (getattr(pos, "regime", "") == "SWING_LOW_BUY")
+                tp_triggered = getattr(pos, "tp_triggered", False)
+                max_pnl_since_entry = getattr(pos, "pnl_pct", 0.0)
+                if hasattr(pos, "max_high") and pos.max_high > 0.0 and getattr(pos, "entry_price", 0.0) > 0.0:
                     max_pnl_since_entry = (pos.max_high - pos.entry_price) / pos.entry_price * 100.0
 
         item_dict = dict(item)
         item_dict["is_swing_low_mode"] = is_swing_low_mode
         item_dict["tp_triggered"] = tp_triggered
         item_dict["max_pnl_since_entry"] = max_pnl_since_entry
+
+        # 实盘/模拟盘下，为防止 UI 传来的 sig 缺少多周期核心技术指标，我们在此处自动抓取本地数据进行补全！
+        if code and (item_dict.get("sws") is None or item_dict.get("ma10d") is None):
+            try:
+                from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
+                from trading_kernel.core.perf_monitor import timed_ctx
+                with timed_ctx(f"LiveIndicatorEnrich_{code}", warn_ms=100):
+                    df_hist = get_tdx_Exp_day_to_df(code, dl=30)
+                    if df_hist is not None and not df_hist.empty:
+                        df_hist = df_hist.sort_index()
+                        row_last = df_hist.iloc[-1]
+                        close_series = df_hist['close']
+                        ma10_series = close_series.rolling(10).mean()
+                        ma5_series = close_series.rolling(5).mean()
+                        
+                        # 优先从行中提取 ma10d，否则 fallback 到 rolling 计算值
+                        ma10_val = float(row_last.get("ma10d", 0.0))
+                        if ma10_val <= 0.0:
+                            ma10_val = float(ma10_series.iloc[-1]) if len(ma10_series) >= 10 else float(row_last.get("close", 0))
+                            
+                        # 优先从行中提取 ma5d
+                        ma5_val = float(row_last.get("ma5d", 0.0))
+                        if ma5_val <= 0.0:
+                            ma5_val = float(ma5_series.iloc[-1]) if len(ma5_series) >= 5 else float(row_last.get("close", 0))
+                        
+                        swl_val = float(row_last.get("SWL", 0.0))
+                        close_val = float(row_last.get("close", 0.0))
+                        if swl_val <= 0 or swl_val < close_val * 0.85 or swl_val > close_val * 1.15:
+                            swl_val = ma5_val
+                        
+                        # 匹配 SWS 支撑工作线
+                        sws_val = float(row_last.get("SWS", 0.0))
+                        if sws_val <= 0 or sws_val < close_val * 0.85 or sws_val > close_val * 1.15:
+                            sws_val = ma10_val
+                        
+                        # 获取 5 天前的 SWS 用于 SWS 趋势爬升
+                        if len(df_hist) >= 6:
+                            row_prev5 = df_hist.iloc[-6]
+                            close_prev5 = float(row_prev5.get("close", 0.0))
+                            sws_prev5_val = float(row_prev5.get("SWS", 0.0))
+                            if sws_prev5_val <= 0 or sws_prev5_val < close_prev5 * 0.85 or sws_prev5_val > close_prev5 * 1.15:
+                                sws_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else sws_val
+                            
+                            ma10_prev5_val = float(row_prev5.get("ma10d", 0.0))
+                            if ma10_prev5_val <= 0.0:
+                                ma10_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else ma10_val
+                        else:
+                            sws_prev5_val = sws_val
+                            ma10_prev5_val = ma10_val
+
+                        item_dict["sws"] = sws_val
+                        item_dict["sws_prev5"] = sws_prev5_val
+                        item_dict["swl"] = swl_val
+                        item_dict["ma10d"] = ma10_val
+                        item_dict["ma10d_prev5"] = ma10_prev5_val
+                        item_dict["ma5d"] = ma5_val
+                        
+                        # 补充高维的 high4, hmax, low60, pbreak, ptop 等
+                        item_dict["high4"] = float(row_last.get("high4", 0.0))
+                        item_dict["hmax"] = float(row_last.get("hmax", 0.0))
+                        item_dict["low60"] = float(row_last.get("low60", 0.0))
+                        item_dict["pbreak"] = int(row_last.get("pbreak", 0.0))
+                        item_dict["ptop"] = float(row_last.get("ptop", 0.0))
+                        
+                        vol_col = 'volume' if 'volume' in df_hist.columns else ('vol' if 'vol' in df_hist.columns else '')
+                        if vol_col:
+                            vol_ma5_series = df_hist[vol_col].rolling(5).mean()
+                            item_dict["vol_ma5"] = float(vol_ma5_series.iloc[-1]) if len(vol_ma5_series) >= 5 else float(row_last.get(vol_col, 0))
+            except Exception as e:
+                logger.error(f"[BgKernel] Failed to auto-enrich live indicators for {code}: {e}")
 
         signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)

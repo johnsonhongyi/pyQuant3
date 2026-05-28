@@ -56,6 +56,13 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         "is_doji": bool(item.get("is_doji", False)),
         "upper": _float(item.get("upper")),
         "max_pnl_since_entry": _float(item.get("max_pnl_since_entry", 0.0)),
+        "sws_prev5": _float(item.get("sws_prev5")),
+        "ma10d": _float(item.get("ma10d")),
+        "ma10d_prev5": _float(item.get("ma10d_prev5")),
+        "ma5d": _float(item.get("ma5d")),
+        "tp_triggered": bool(item.get("tp_triggered", False)),
+        "is_swing_low_mode": bool(item.get("is_swing_low_mode", False)),
+        "regime": str(item.get("regime", "") or ""),
     }
     return StrategySignal(
         code=str(item.get("code", "") or ""),
