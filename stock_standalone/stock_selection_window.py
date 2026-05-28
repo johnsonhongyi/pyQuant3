@@ -4046,10 +4046,25 @@ StockSelectionWindow._on_signal_double_click = _on_signal_double_click
 StockSelectionWindow._on_signal_selected     = _on_signal_selected
 StockSelectionWindow._sort_signal_tree       = _sort_signal_tree
 def _on_one_key_self_heal(self):
-    """一键自适应数据自愈修复：智能调整资金规模、清理 0 股幽灵持仓、并物理同步适配器与柜台数据"""
+    """一键自适应数据自愈修复：智能调整资金规模、修复个股缺失价格、清理 0 股幽灵持仓、并物理同步适配器与柜台数据"""
     try:
         from trading_kernel.kernel_service import get_kernel_service
         from trade_gateway import get_trade_gateway
+        import numpy as np
+        import math
+        
+        def safe_float(v, fallback=0.0):
+            if v is None:
+                return fallback
+            try:
+                if isinstance(v, (np.floating, np.integer)):
+                    return float(v)
+            except Exception:
+                pass
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return fallback
         
         service = get_kernel_service()
         if not service or not service.paper_adapter:
@@ -4078,6 +4093,115 @@ def _on_one_key_self_heal(self):
                     trade_gw._positions.pop(c_code, None)
                     removed_ghosts.append(c_code)
         
+        # 1.1 价格自愈：物理修复价格数据 (entry_price / current_price) 缺失、0 或为 NaN 的情况
+        def is_invalid_price(p):
+            if p is None:
+                return True
+            try:
+                fp = float(p)
+                return fp <= 0 or math.isnan(fp) or math.isinf(fp)
+            except Exception:
+                return True
+        
+        df_all = getattr(self, "df_all", None)
+        rt_price_map = {}
+        if df_all is not None:
+            try:
+                for idx, row in df_all.iterrows():
+                    raw_c = str(idx)
+                    pure_c = "".join(filter(str.isdigit, raw_c))[:6]
+                    if pure_c:
+                        price_val = safe_float(row.get("close") or row.get("price") or row.get("last_close") or row.get("open"), 0.0)
+                        if price_val > 0:
+                            rt_price_map[pure_c] = price_val
+            except Exception as ex:
+                logger.error(f"Error mapping rt_price_map: {ex}")
+        
+        # 从 orders 流水中回溯计算所有个股的买入均价
+        order_entry_prices = {}
+        if service.paper_adapter.orders:
+            try:
+                sorted_orders = sorted(
+                    [o for o in service.paper_adapter.orders if isinstance(o, dict)],
+                    key=lambda x: str(x.get("timestamp") or "")
+                )
+                temp_volumes = {}
+                temp_costs = {}
+                for o in sorted_orders:
+                    c = o.get("code")
+                    if not c:
+                        continue
+                    pure_c = "".join(filter(str.isdigit, str(c)))[:6]
+                    act = str(o.get("action") or "").upper()
+                    p = safe_float(o.get("price"), 0.0)
+                    vol = safe_float(o.get("volume"), 0.0)
+                    if p <= 0 or vol <= 0:
+                        continue
+                    if act in {"BUY", "ADD"}:
+                        temp_volumes[pure_c] = temp_volumes.get(pure_c, 0.0) + vol
+                        temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) + (p * vol)
+                    elif act in {"SELL", "REDUCE"}:
+                        rem_vol = max(0.0, temp_volumes.get(pure_c, 0.0) - vol)
+                        if rem_vol <= 0:
+                            temp_volumes.pop(pure_c, None)
+                            temp_costs.pop(pure_c, None)
+                        else:
+                            ratio = rem_vol / temp_volumes[pure_c]
+                            temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) * ratio
+                            temp_volumes[pure_c] = rem_vol
+                
+                for pure_c, tot_vol in temp_volumes.items():
+                    if tot_vol > 0:
+                        avg_p = temp_costs.get(pure_c, 0.0) / tot_vol
+                        if avg_p > 0:
+                            order_entry_prices[pure_c] = avg_p
+            except Exception as ex:
+                logger.error(f"Error computing order_entry_prices: {ex}")
+
+        # 遍历并自愈修复持仓的价格
+        healed_prices_count = 0
+        for c_code, pos_obj in list(service.paper_adapter.account.positions.items()):
+            pure_c = "".join(filter(str.isdigit, str(c_code)))[:6]
+            
+            # 修复 current_price
+            rt_p = rt_price_map.get(pure_c, 0.0)
+            if is_invalid_price(pos_obj.current_price):
+                if rt_p > 0:
+                    pos_obj.current_price = rt_p
+                    healed_prices_count += 1
+                    logger.info(f"[Self-Healing] Repaired current_price for {c_code} with real-time price: {rt_p}")
+                elif not is_invalid_price(pos_obj.entry_price):
+                    pos_obj.current_price = pos_obj.entry_price
+                    healed_prices_count += 1
+                    logger.info(f"[Self-Healing] Repaired current_price for {c_code} fallback to entry_price: {pos_obj.entry_price}")
+            
+            # 修复 entry_price
+            if is_invalid_price(pos_obj.entry_price):
+                if pure_c in order_entry_prices:
+                    pos_obj.entry_price = order_entry_prices[pure_c]
+                    healed_prices_count += 1
+                    logger.info(f"[Self-Healing] Repaired entry_price for {c_code} from order ledger: {pos_obj.entry_price}")
+                elif rt_p > 0:
+                    pos_obj.entry_price = rt_p
+                    healed_prices_count += 1
+                    logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with real-time price fallback: {rt_p}")
+                elif not is_invalid_price(pos_obj.current_price):
+                    pos_obj.entry_price = pos_obj.current_price
+                    healed_prices_count += 1
+                    logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with current_price fallback: {pos_obj.current_price}")
+
+        # 同时自愈老版柜台的持仓价格与同步
+        with trade_gw._lock:
+            for c_code in list(trade_gw._positions.keys()):
+                leg_pos = trade_gw._positions[c_code]
+                leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
+                
+                # 价格与成本同步
+                paper_pos = service.paper_adapter.account.positions.get(leg_pure)
+                if paper_pos:
+                    leg_pos.price = paper_pos.entry_price
+                    leg_pos.current_price = paper_pos.current_price
+
         # 2. 统计当前活跃持仓的买入成本和最新市值
         active_positions = service.paper_adapter.account.positions
         entry_cost_sum = 0.0
@@ -4088,11 +4212,18 @@ def _on_one_key_self_heal(self):
             entry_cost_sum += float(pos_obj.entry_price) * vol
             market_val_sum += float(pos_obj.current_price) * vol
             
-        # 3. 智能计算合理、健康的资金规模
-        min_cap = max(1000000.0, entry_cost_sum * 1.5)
-        target_cap = float((int(min_cap) // 100000) * 100000)
-        if target_cap < min_cap:
-            target_cap += 100000.0
+        # 3. 智能计算合理、健康的资金规模 (尊重现有总资产，保持一致性)
+        current_initial = float(getattr(service.paper_adapter, "initial_capital", 0.0) or 0.0)
+        if current_initial >= entry_cost_sum and current_initial > 0:
+            target_cap = current_initial
+            logger.info(f"[Self-Healing] Respecting current initial capital: {target_cap}")
+        else:
+            # 只有原资金无效或不足以覆盖持仓时，才自愈重调资金规模 (默认至少 1,000,000.0)
+            min_cap = max(1000000.0, entry_cost_sum * 1.5)
+            target_cap = float((int(min_cap) // 100000) * 100000)
+            if target_cap < min_cap:
+                target_cap += 100000.0
+            logger.info(f"[Self-Healing] Auto-expanded initial capital to: {target_cap} (cost: {entry_cost_sum})")
             
         new_cash = max(0.0, target_cap - entry_cost_sum)
         
@@ -4119,9 +4250,10 @@ def _on_one_key_self_heal(self):
         msg_text = (
             f"🎉 一键账户资产与资金自愈成功！\n\n"
             f"1️⃣ 清理幽灵持仓：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。\n"
-            f"2️⃣ 重调初始资金：已自适应扩容至 ¥ {target_cap:,.2f}。\n"
-            f"3️⃣ 可用现金对账：已精准修正为 ¥ {new_cash:,.2f} (账户保持健康购买力)。\n"
-            f"4️⃣ 资产盈亏重算：\n"
+            f"2️⃣ 自愈价格数据：修复补齐了 {healed_prices_count} 处无效/缺失的价格指标。\n"
+            f"3️⃣ 对齐初始资金：已完美尊重并对齐初始资产为 ¥ {target_cap:,.2f} (与总资金量一致)。\n"
+            f"4️⃣ 可用现金对账：已精准修正为 ¥ {new_cash:,.2f} (账户保持健康购买力)。\n"
+            f"5️⃣ 资产盈亏重算：\n"
             f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}\n"
             f"   - 持仓最新市值：¥ {market_val_sum:,.2f}\n"
             f"   - 浮动总盈亏：¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)\n\n"
