@@ -82,6 +82,27 @@ class TradingKernelService:
         self.journal = JsonlJournal(journal_path)
         self.limits = load_risk_limits_from_config()
         
+        # 从 global.ini 加载静态强路由配置并注入策略决策大脑 StrategyRouter
+        try:
+            import configparser
+            import os
+            from sys_utils import get_base_path
+            base_dir = get_base_path()
+            ini_path = os.path.join(base_dir, "global.ini")
+            if os.path.exists(ini_path):
+                config = configparser.ConfigParser()
+                config.read(ini_path, encoding="utf-8")
+                if "strategy_routing" in config.sections():
+                    rmap = {}
+                    for key in config["strategy_routing"]:
+                        val = config["strategy_routing"][key]
+                        rmap[key] = [c.strip() for c in val.split(",") if c.strip()]
+                    from trading_kernel.engine.decision_engine import StrategyRouter
+                    StrategyRouter.register_static_routes(rmap)
+                    logger.info(f"Successfully loaded and registered static strategy routing overrides from global.ini: {rmap}")
+        except Exception as e:
+            logger.error(f"Failed to inject static strategy routing overrides from config: {e}")
+            
         # 初始化执行层各物理适配器 (里氏替换原则)
         from trading_kernel.execution.paper_adapter import PaperExecutionAdapter
         from trading_kernel.execution.confirm_adapter import ConfirmExecutionAdapter
@@ -197,7 +218,7 @@ class TradingKernelService:
                 from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
                 from trading_kernel.core.perf_monitor import timed_ctx
                 with timed_ctx(f"LiveIndicatorEnrich_{code}", warn_ms=100):
-                    df_hist = get_tdx_Exp_day_to_df(code, dl=30)
+                    df_hist = get_tdx_Exp_day_to_df(code, dl=120)
                     if df_hist is not None and not df_hist.empty:
                         df_hist = df_hist.sort_index()
                         row_last = df_hist.iloc[-1]
@@ -247,6 +268,32 @@ class TradingKernelService:
                         item_dict["ma10d_prev5"] = ma10_prev5_val
                         item_dict["ma5d"] = ma5_val
                         
+                        # 获取 5 天前以及当前的 ma5d
+                        if len(df_hist) >= 6:
+                            row_prev5_ma5 = df_hist.iloc[-6]
+                            ma5d_prev5_val = float(row_prev5_ma5.get("ma5d", 0.0))
+                            if ma5d_prev5_val <= 0.0:
+                                ma5d_prev5_val = float(ma5_series.iloc[-6]) if len(ma5_series) >= 6 else ma5_val
+                            
+                            swl_prev5_val = float(row_prev5_ma5.get("SWL", 0.0))
+                            if swl_prev5_val <= 0:
+                                swl_prev5_val = ma5d_prev5_val
+                        else:
+                            ma5d_prev5_val = ma5_val
+                            swl_prev5_val = swl_val
+                            
+                        item_dict["ma5d_prev5"] = ma5d_prev5_val
+                        item_dict["swl_prev5"] = swl_prev5_val
+                        
+                        # 补充 60 日均线 (ma60d & ma60d_prev5)
+                        if len(df_hist) >= 65:
+                            ma60_series = close_series.rolling(60).mean()
+                            item_dict["ma60d"] = float(ma60_series.iloc[-1])
+                            item_dict["ma60d_prev5"] = float(ma60_series.iloc[-6])
+                        else:
+                            item_dict["ma60d"] = close_val
+                            item_dict["ma60d_prev5"] = close_val
+                        
                         # 补充高维的 high4, hmax, low60, pbreak, ptop 等
                         item_dict["high4"] = float(row_last.get("high4", 0.0))
                         item_dict["hmax"] = float(row_last.get("hmax", 0.0))
@@ -258,6 +305,19 @@ class TradingKernelService:
                         if vol_col:
                             vol_ma5_series = df_hist[vol_col].rolling(5).mean()
                             item_dict["vol_ma5"] = float(vol_ma5_series.iloc[-1]) if len(vol_ma5_series) >= 5 else float(row_last.get(vol_col, 0))
+                        
+                        # 补充昨日、前日、大前日的高/开/收价格，以及今日开盘价，用于检测高点逐步降低或低开高走未过前高的结构
+                        item_dict["open"] = float(row_last.get("open", 0.0))
+                        curr_state = self.state_manager.get(code) if hasattr(self, "state_manager") else None
+                        item_dict["setup"] = curr_state.setup if curr_state else ""
+                        
+                        if len(df_hist) >= 4:
+                            item_dict["high_prev1"] = float(df_hist.iloc[-2].get("high", 0.0))
+                            item_dict["high_prev2"] = float(df_hist.iloc[-3].get("high", 0.0))
+                            item_dict["high_prev3"] = float(df_hist.iloc[-4].get("high", 0.0))
+                            item_dict["close_prev1"] = float(df_hist.iloc[-2].get("close", 0.0))
+                            item_dict["open_prev1"] = float(df_hist.iloc[-2].get("open", 0.0))
+                            item_dict["low_prev1"] = float(df_hist.iloc[-2].get("low", 0.0))
             except Exception as e:
                 logger.error(f"[BgKernel] Failed to auto-enrich live indicators for {code}: {e}")
 
