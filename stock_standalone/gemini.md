@@ -2,14 +2,23 @@
 - [x] **实现回测报告样式对齐、跑马灯滚动防拉伸状态栏与非模态窗口复用 (Aligned Backtest Style, Implemented Marquee Status Bar & Non-Modal Window Reuse)**：
     - [x] **实现非模态独立窗口 (Non-Modal Window Separation)**：在 `trade_visualizer_qt6.py` 中将回测报告弹出方式由模态的 `dlg.exec()` 优化为非模态 of `dlg.show()`，并补齐了 `raise_()` 和 `activateWindow()`。**在实例化时将 `parent` 指向 `self`，保持与 `MainWindow` 的 Owned 父子窗体所属挂钩**。这使用户可以自由将回测窗口和主可视化窗口分开、并排或重叠摆放，在查看回测报告时毫不影响与主可视化 K 线界面的交互。
     - [x] **添加置顶复选框与打开瞬时置顶激活 (Pin Checkbox & Dynamic Focus)**：
-        - 在报告窗口左下角添加了 `QCheckBox("置顶")`，默认不勾选（不强行锁定在最前，其它普通窗口可自由遮挡）。
+        - 在报告窗口左下角添加了 `QCheckBox("置顶")`，默认不置顶。
         - 当新一轮历史回测计算完成输出报告时，即使未开启置顶，也会通过 `show()`, `raise_()` 和 `activateWindow()` 自动将其激活并提至屏幕最前方进行瞬时强曝光展示，此后不限制其遮挡关系，完美平衡了“零打扰”与“强提醒”。
         - 用户勾选“置顶”后，动态追加 `WindowStaysOnTopHint` 标记并即时应用，支持跨股票回测切换时持续钉在屏幕最上层。
+        - **置顶状态持久化**：置顶勾选状态与配色等系统其它参数一起持久化在本地配置 `visualizer_layout.json` 中，并在软件重新打开或再次加载时自动读取恢复，保持操盘手的使用习惯。
+    - [x] **实现配色选择框与实时热切换功能 (Interactive Color Theme Selector)**：
+        - 在报告窗口底部“置顶”右侧新增了 `QComboBox("配色")` 选择下拉框，预设了四组适合在暗黑背景下阅读的高对比度护眼配色方案：**“柔和银灰” (`#B8B8B8`)、`“科技淡绿” (`#8CD867`)、`“护眼浅黄” (`#F5E6C8`)、`“高对比白” (`#E0E0E0`)**。
+        - **职责分离渲染**：重构了 `ScrollableMsgBox` 渲染流水，外部不再传递包含预设颜色的富文本，改为直接传递原始纯文本 `report`，由窗口根据当前选中的主题颜色动态重新生成等宽 HTML（`<pre>`）。用户切换下拉框选项时，内容区瞬间刷新重绘，零延迟热切换。
+        - **配色持久化自愈**：切换配色时会自动将 `backtest_theme_color` 键值持久化写入 `visualizer_layout.json` 文件中，下次启动或切换个股回测时自动读取并应用上次选择的配色，保证完美的跨会话一致性。
     - [x] **实现回测窗口无缝复用 (Window Instance Reuse)**：在 `MainWindow` 实例上缓存并维护 `self._backtest_report_dlg` 句柄，并在 `ScrollableMsgBox` 中实现了 `update_content(title, content)` 复用接口。后续的每次回测结果将无缝刷新至同一窗口中，彻底解决了由于频繁回测导致桌面上堆积大量遗留报告窗口的问题。
     - [x] **报告文字样式深度融合**：
         - 物理去除了 `trade_visualizer_qt6.py` 中 `_show_backtest_result` 报告渲染文本（`<pre>`）中硬编码的 `color: #E0E0E0; background-color: #1A1A1A;`。
         - **对齐 QSS 主题样式表**：当 `parent` 为 `None` 时，窗口会自动从 `QApplication` 的主窗口中获取并应用其 `styleSheet()`，从而使回测报告在背景色、前景色及边框质感上，与“综合简报”和主窗口完全一致，完美融入黑金高对比度 QSS 主题中，解决了脱离父子链后退化为系统默认白底蓝字的问题。
-        - **全局字符字号与颜色微调**：在 HTML `<pre>` 标签的样式中，显式指定颜色为 `#E0E0E0`，并将字体系列优化为 `Consolas, "Microsoft YaHei UI", monospace`，完美对齐了主可视化界面的深色系视觉风格与字体选择，同时确保了回测数据等宽对齐排版的工整。
+        - **全局字符字号与颜色微调**：在 HTML `<pre>` 标签的样式中，显式指定颜色为 `#B8B8B8`，并将字体系列优化为 `Consolas, "Microsoft YaHei UI", monospace`，完美对齐了主可视化界面的深色系视觉风格与字体选择，同时确保了回测数据等宽对齐排版的工整。通过将文字颜色调至柔和 of 银灰色并配合 `line-height: 1.4` 行高控制，极大降低了在暗黑背景下高强度阅读时的视网膜光强刺激。` 句柄，并在 `ScrollableMsgBox` 中实现了 `update_content(title, content)` 复用接口。后续的每次回测结果将无缝刷新至同一窗口中，彻底解决了由于频繁回测导致桌面上堆积大量遗留报告窗口的问题。
+    - [x] **报告文字样式深度融合**：
+        - 物理去除了 `trade_visualizer_qt6.py` 中 `_show_backtest_result` 报告渲染文本（`<pre>`）中硬编码的 `color: #E0E0E0; background-color: #1A1A1A;`。
+        - **对齐 QSS 主题样式表**：当 `parent` 为 `None` 时，窗口会自动从 `QApplication` 的主窗口中获取并应用其 `styleSheet()`，从而使回测报告在背景色、前景色及边框质感上，与“综合简报”和主窗口完全一致，完美融入黑金高对比度 QSS 主题中，解决了脱离父子链后退化为系统默认白底蓝字的问题。
+        - **全局字符字号与颜色微调**：在 HTML `<pre>` 标签的样式中，显式指定颜色为 `#B8B8B8`，并将字体系列优化为 `Consolas, "Microsoft YaHei UI", monospace`，完美对齐了主可视化界面的深色系视觉风格与字体选择，同时确保了回测数据等宽对齐排版的工整。通过将文字颜色调至柔和的银灰色并配合 `line-height: 1.4` 行高控制，极大降低了在暗黑背景下高强度阅读时的视网膜光强刺激。
     - [x] **实现跑马灯滚动防拉伸状态栏 (Marquee Label & Layout Protection)**：
         - 编写了自定义的 `MarqueeLabel` 类，继承自 `QLabel`，支持文本长度超出可用视口宽度时自动循环横向滚动，并在短文本时自动恢复居中对齐。
         - 将 `self.center_msg_label` 实例升级为 `MarqueeLabel`，搭配 `QSizePolicy.Policy.Expanding` 以及 `minimumWidth = 50`。这彻底封锁了状态栏在输出超长指令（如回测启动状态等）时强制撑大、放宽主窗口的任何可能，确保界面几何轮廓永久稳定。
@@ -17,8 +26,8 @@
         - 简化了 `show_status_message` 与 `show_status_message_nolimit` 中的文本省略截断机制，直接透传完整信息，通过跑马灯优雅显示。
 
 ## 2026-05-29 09:20
-- [x] **实现回测及策略测试报告窗口打开时自动滚动到底部 (Implemented Auto-Scrolling to Bottom for Backtest & Strategy Reports)**：
-    - [x] **PyQt/Qt6 可视化端自适应滚动**：在 `trade_visualizer_qt6.py` 的 `ScrollableMsgBox` 初始化中添加了延迟 100ms 的 `singleShot` 计时器，自动将垂直滚动条拉到最大值。这确保了当打开回测报告或者综合简报等含有高优先级总结和策略状态的内容时，第一时间显示最新、最有价值的决策段落。
+- [x] **实现回测报告窗口打开时自动滚动到底部并保护综合简报顶部视图 (Implemented Auto-Scrolling to Bottom for Backtest Reports & Preserving Top View for Briefings)**：
+    - [x] **PyQt/Qt6 可视化端自适应滚动控制**：在 `trade_visualizer_qt6.py` 的 `ScrollableMsgBox` 的 `update_content` 逻辑中修改了条件判断。当打开回测报告或者切换回测股票时，会自动通过 100ms 的 `singleShot` 计时器将滚动条拉到最底部，展现最新的交易决策。而当用户打开“综合简报”时，则不再执行置底滚动，保留其最顶部的标题与综合概览，提升复盘可读性。
     - [x] **Tkinter 选股/主面板端完美对齐**：在 `stock_selection_window.py` 的 `BacktestReportDialog` 的 `__init__` 初始化和 `update_report` 动态刷新逻辑中，同样引入了 `.after(100, lambda: self.text_area.yview_moveto(1.0))` 异步延迟执行，成功实现了双端回测报告视图 100% 绝对一致的“置底展示”极客体验。
     - [x] **主面板策略测试报告加固**：在 `instock_MonitorTK.py` 的 `_show_strategy_report_window` 窗口创建与复用更新路径中，同步增加了对 `win.txt_widget` 文本区执行 `.after(100, lambda: win.txt_widget.yview_moveto(1.0))` 逻辑，确保运行策略测试时输出的大篇幅指标审计与交易决策详情自动置底对齐。
 
