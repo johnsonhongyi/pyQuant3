@@ -1340,11 +1340,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _on_racing_panel_closed(self):
         """赛马面板关闭回调：置空引用并刷新防抖计时器"""
-        self._racing_panel_win = None
         # 关键：关闭时刻也更新计时器，确保关闭后不能立即启动另一个，等待 OS 释放资源 (10s)
         self._last_racing_backtest_unified_t = time.time()
         logger.info("🏁 [RacingPanel] 窗口已关闭，防抖保护已激活 (10s)")
-        self.sync_rotator_windows()
+        
+        # 🚨 [GIL-FIX] 绝不能在同步信号回调中立即将 _racing_panel_win 强引用置为 None！
+        # 否则会导致 C++ closeEvent 尚未执行完毕时，Python Wrapper 被垃圾回收销毁，从而引发 PyEval_RestoreThread GIL 崩溃。
+        # 必须委派给 Tkinter 主线程在下一帧（如 100ms 后）安全地清除强引用与同步窗口状态。
+        def _safe_clear():
+            try:
+                self._racing_panel_win = None
+                self.sync_rotator_windows()
+            except Exception as e:
+                logger.error(f"❌ [RacingPanel] Safe clear failed: {e}")
+                
+        self.after(100, _safe_clear)
 
     def _inject_focus_engine(self, full_df):
         """[ASYNC] 将焦点引擎注入操作100%卸载至后台线程"""
