@@ -2357,6 +2357,12 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         # WindowMixin requirement
         self.scale_factor = get_windows_dpi_scale_factor()
         self.is_briefing = "综合简报" in title or "实战简报" in title or "briefing" in title.lower()
+        self.is_backtest = "回测" in title or "re-entry" in title.lower()
+
+        # 默认从 parent 读取持久化状态，若无 parent 则 fallback
+        self.theme_color = getattr(parent, '_backtest_theme_color', 'silver')
+        self.stay_on_top = getattr(parent, '_backtest_stay_on_top', False)
+
         if self.is_briefing:
             try:
                 self.load_window_position_qt(self, "comprehensive_briefing_dialog")
@@ -2373,9 +2379,8 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         content_widget = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_widget)
 
-        self.label = QtWidgets.QLabel(content)
+        self.label = QtWidgets.QLabel()
         self.label.setWordWrap(True)
-        # self.label.setTextFormat(Qt.TextFormat.PlainText) # 修改为 PlainText 以支持 \n 换行
         self.label.setTextFormat(Qt.TextFormat.RichText)  # [FIX] 修改为 RichText 以正确渲染 HTML 信号透视信息
         self.label.setOpenExternalLinks(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -2387,18 +2392,37 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         # 补全别名引用，防止外部更新 content_label 时 AttributeError
         self.content_label = self.label
 
-        # ⚡ [NEW] 如果是回测报告或者综合简报相关的窗口，打开时自动滚动到最底部以展现最新、最高优先级决策
-        if self.is_briefing or "回测" in title or "re-entry" in title.lower():
-            QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
+        # 缓存内容并初始渲染
+        self.raw_content = content
+        self.refresh_display()
 
-        # 按钮
+        # 按钮控制栏
         btn_box = QtWidgets.QHBoxLayout()
         
-        # [UX] 新增“置顶”复选框，默认不置顶，支持随时手动切换
+        # 1. 置顶复选框
         self.pin_cb = QtWidgets.QCheckBox("置顶")
-        self.pin_cb.setChecked(False)
+        self.pin_cb.setChecked(self.stay_on_top)
         self.pin_cb.toggled.connect(self.on_pin_toggled)
         btn_box.addWidget(self.pin_cb)
+        
+        # 2. 配色选择框 (仅限回测报告弹窗)
+        if self.is_backtest:
+            btn_box.addWidget(QtWidgets.QLabel(" 配色:"))
+            self.theme_combo = QtWidgets.QComboBox()
+            self.theme_combo.addItems(["柔和银灰", "科技淡绿", "护眼浅黄", "高对比白"])
+            
+            self.theme_map = {
+                "柔和银灰": "silver",
+                "科技淡绿": "green",
+                "护眼浅黄": "yellow",
+                "高对比白": "white"
+            }
+            self.theme_map_reverse = {v: k for k, v in self.theme_map.items()}
+            
+            combo_text = self.theme_map_reverse.get(self.theme_color, "柔和银灰")
+            self.theme_combo.setCurrentText(combo_text)
+            self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+            btn_box.addWidget(self.theme_combo)
         
         btn_box.addStretch()
         close_btn = QtWidgets.QPushButton("关闭")
@@ -2406,8 +2430,13 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         btn_box.addWidget(close_btn)
         layout.addLayout(btn_box)
 
+        # 初始应用置顶状态
+        if self.stay_on_top:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+
     def on_pin_toggled(self, checked):
-        """动态切换窗口是否置顶"""
+        """动态切换窗口是否置顶，并立即同步至持久化配置"""
+        self.stay_on_top = checked
         flags = self.windowFlags()
         if checked:
             self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
@@ -2415,11 +2444,48 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
         self.show()
 
+        # 同步回主窗口成员变量并保存
+        if self.parent():
+            self.parent()._backtest_stay_on_top = checked
+            if hasattr(self.parent(), '_save_visualizer_config'):
+                self.parent()._save_visualizer_config()
+
+    def on_theme_changed(self, text):
+        """动态切换配色，并立即重绘和持久化"""
+        theme_key = self.theme_map.get(text, "silver")
+        self.theme_color = theme_key
+        self.refresh_display()
+
+        # 同步回主窗口成员变量并保存
+        if self.parent():
+            self.parent()._backtest_theme_color = theme_key
+            if hasattr(self.parent(), '_save_visualizer_config'):
+                self.parent()._save_visualizer_config()
+
+    def refresh_display(self):
+        """根据当前配色渲染富文本内容"""
+        if not self.is_backtest:
+            self.label.setText(self.raw_content)
+            return
+
+        hex_colors = {
+            "silver": "#B8B8B8",  # 柔和银灰
+            "green": "#8CD867",   # 护眼淡绿
+            "yellow": "#F5E6C8",  # 温暖浅黄
+            "white": "#E0E0E0"    # 高对比白
+        }
+        color = hex_colors.get(self.theme_color, "#B8B8B8")
+        
+        # 将原始报告包裹在 pre 标签内，应用自适应折行和选定前景色
+        formatted = f"<pre style='font-family: Consolas, \"Microsoft YaHei UI\", monospace; color: {color}; line-height: 1.4; font-size: 14px; white-space: pre-wrap; word-wrap: break-word;'>{self.raw_content}</pre>"
+        self.label.setText(formatted)
+
     def update_content(self, title, content):
         """[UX] 更新窗口标题和内容并重新触发置底滚动以复用窗口"""
         self.setWindowTitle(title)
-        self.content_label.setText(content)
-        if self.is_briefing or "回测" in title or "re-entry" in title.lower():
+        self.raw_content = content
+        self.refresh_display()
+        if self.is_backtest:
             QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
 
     def closeEvent(self, event):
@@ -2958,6 +3024,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.custom_bg_app = None    # 用户自定义界面背景色
         self.custom_bg_chart = None  # 用户自定义图表背景色
         self.show_bollinger = True
+        # === 回测报告窗口默认配置 ===
+        self._backtest_theme_color = "silver"
+        self._backtest_stay_on_top = False
         self.tdx_enabled = True  # 保留兼容，同步到 tdx_var
         self.ths_enabled = True  # THS 开关状态
         self.show_td_sequential = True  # 神奇九转默认开启
@@ -9091,10 +9160,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # [UX] 显式命名为“综合简报”，使 ScrollableMsgBox 自动识别并完美复用“综合简报”的位置与大小设置
         title = f"👑 Re-entry 历史回测综合简报 - {name} ({code})"
         
-        # [UX] 加上 white-space: pre-wrap; 和 word-wrap: break-word; 支持完美自动换行与边界自适应，彻底防御撑爆变形！
-        # [UX] 将 font-size 从 11px 提升至 14px，完美对齐“综合简报”默认大字号，确保操盘手清晰易读
-        formatted_report = f"<pre style='font-family: Consolas, \"Microsoft YaHei UI\", monospace; color: #E0E0E0; font-size: 14px; white-space: pre-wrap; word-wrap: break-word;'>{report}</pre>"
-        
         # 1. 物理捕获回测的结构化信号和最佳策略分支
         try:
             from scratch.test_reentry_backtest import get_last_backtest_signals, get_last_backtest_best_branch
@@ -9123,7 +9188,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # [UX] 复用窗口：若窗口实例已存在，则直接更新其标题与内容并展现，实现多窗口分开与零新建
         if hasattr(self, '_backtest_report_dlg') and self._backtest_report_dlg is not None:
             try:
-                self._backtest_report_dlg.update_content(title, formatted_report)
+                self._backtest_report_dlg.update_content(title, report)
                 self._backtest_report_dlg.show()
                 self._backtest_report_dlg.raise_()
                 self._backtest_report_dlg.activateWindow()
@@ -9132,7 +9197,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 捕获 C/C++ 实例已被销毁的情况，重新实例化
                 self._backtest_report_dlg = None
 
-        self._backtest_report_dlg = ScrollableMsgBox(title, formatted_report, self)
+        self._backtest_report_dlg = ScrollableMsgBox(title, report, self)
         # [UX] 使用 show() 非模态展现，不影响用户在父窗口上查看和操作可视化图表，支持并排或分开查看
         self._backtest_report_dlg.show()
         self._backtest_report_dlg.raise_()
@@ -13878,6 +13943,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.filter_action.setChecked(is_filter_visible)
                 self.filter_action.blockSignals(False)
 
+            # --- 3.10 回测报告窗口配置 ---
+            self._backtest_theme_color = config.get('backtest_theme_color', 'silver')
+            self._backtest_stay_on_top = config.get('backtest_stay_on_top', False)
+
             # [REDUNDANT REMOVED] 3.7 & 3.9 逻辑已上移至 apply_qt_theme 之前
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
             
@@ -14026,6 +14095,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 'filter': filter_config,
                 'window': window_config,
                 'column_widths': col_widths,  # ⭐ 关键持久化：保存主表和筛选表的列宽配置
+                'backtest_theme_color': getattr(self, '_backtest_theme_color', 'silver'),
+                'backtest_stay_on_top': getattr(self, '_backtest_stay_on_top', False),
             }
 
             # --- 保存 ---
