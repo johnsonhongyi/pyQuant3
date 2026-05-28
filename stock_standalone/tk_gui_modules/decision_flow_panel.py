@@ -458,11 +458,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # 2. 载入窗口历史尺寸与位置
         self.load_window_position_qt(self, "DecisionFlowPanel", default_width=1100, default_height=550)
         
-        # 2.5 恢复列宽与表头状态
-        has_restored = self._restore_header_state()
-        if not has_restored:
-            # 仅在无历史保存的手动调整配置时，才去执行默认的极致初始列宽自适应
-            self._adjust_column_widths()
+        # 2.5 延迟 150ms 恢复列宽与表头状态，确保窗口物理尺寸已就绪
+        QtCore.QTimer.singleShot(150, self._safe_restore_and_adjust)
         
         # 3. 首次全量扫描载入 (最多 200 条，防冷启动白屏)
         self._load_initial_records()
@@ -1707,31 +1704,34 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             sig = rec.get("signal", {})
             intent = rec.get("intent", {})
             risk = rec.get("risk", {})
+            kernel_res = rec.get("kernel_result", {})
+            if not isinstance(kernel_res, dict):
+                kernel_res = {}
             
             # 2. 字段映射提取 (防弹 Fallback)
             timestamp = self._parse_timestamp(rec.get("journal_ts", "") or trace.get("timestamp", ""))
     
             code = sig.get("code", "")
             name = sig.get("name", "")
-            state = rec.get("kernel_state", "") or trace.get("state", "FLAT")
-            action = rec.get("kernel_action", "") or risk.get("final_action", "")
+            state = kernel_res.get("kernel_state", "") or rec.get("kernel_state", "") or trace.get("state", "FLAT")
+            action = kernel_res.get("kernel_action", "") or rec.get("kernel_action", "") or risk.get("final_action", "")
             
-            size_val = rec.get("kernel_size_pct", 0.0) or risk.get("final_size_pct", 0.0)
+            size_val = kernel_res.get("kernel_size_pct", 0.0) or rec.get("kernel_size_pct", 0.0) or risk.get("final_size_pct", 0.0)
             size_pct = f"{float(size_val):.1f}%" if size_val is not None else "0.0%"
             
-            confidence = str(rec.get("kernel_confidence", "") or intent.get("confidence", ""))
+            confidence = str(kernel_res.get("kernel_confidence", "") or rec.get("kernel_confidence", "") or intent.get("confidence", ""))
             
-            allowed_val = risk.get("allowed", True)
+            allowed_val = kernel_res.get("kernel_allowed", True) if "kernel_allowed" in kernel_res else risk.get("allowed", True)
             risk_allowed = "Allowed" if allowed_val else "Blocked"
             
-            reject_code = rec.get("kernel_reject_code", "")
+            reject_code = kernel_res.get("kernel_reject_code", "") or rec.get("kernel_reject_code", "")
             if not reject_code and not allowed_val:
                 reject_code = risk.get("reject_context", {}).get("code", "RISK_REJECT")
             
-            stop_price_val = rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
+            stop_price_val = kernel_res.get("kernel_stop_price", 0.0) or rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
             stop_price = f"{float(stop_price_val):.2f}" if stop_price_val else "0.00"
             
-            trace_id = trace.get("trace_id", "") or rec.get("kernel_trace_id", "")
+            trace_id = trace.get("trace_id", "") or kernel_res.get("kernel_trace_id", "") or rec.get("kernel_trace_id", "")
             short_trace_id = trace_id[:8] if trace_id else "N/A"
             
             reason_parts = []
@@ -2006,6 +2006,31 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"Failed to restore DecisionFlowPanel header states: {e}")
         return False
+
+    def _safe_restore_and_adjust(self):
+        """延迟执行的安全表头恢复与列宽异常校正，确保物理尺寸已就绪且防范 0 宽隐藏死锁"""
+        try:
+            has_restored = self._restore_header_state()
+            if not has_restored:
+                self._adjust_column_widths()
+            else:
+                # 🛡️ 异常列宽自动校正门禁：防范此前因 bug 导致的列宽被意外折叠为 0 像素的死锁
+                fit_needed = False
+                if hasattr(self, "table") and self.table.columnCount() == 12:
+                    for idx in range(self.table.columnCount()):
+                        if self.table.columnWidth(idx) < 15:
+                            fit_needed = True
+                            break
+                if not fit_needed and hasattr(self, "pos_table") and self.pos_table.columnCount() == 10:
+                    for idx in range(self.pos_table.columnCount()):
+                        if self.pos_table.columnWidth(idx) < 15:
+                            fit_needed = True
+                            break
+                if fit_needed:
+                    logger.warning("Detected abnormal column width (<15px) from saved states, triggering auto-fit self-healing.")
+                    self._adjust_column_widths()
+        except Exception as e:
+            logger.error(f"Error in _safe_restore_and_adjust: {e}")
 
     def showEvent(self, event):
         """展现时自适应"""
