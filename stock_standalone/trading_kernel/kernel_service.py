@@ -165,7 +165,27 @@ class TradingKernelService:
 
     def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True) -> dict[str, Any]:
         raw_hash = stable_hash(dict(item))
-        signal = canonicalize_decision_queue_item(item)
+        
+        # 提取内存中该个股持仓的状态并注入特征，以实现实盘/模拟盘 100% 对齐回测
+        is_swing_low_mode = False
+        tp_triggered = False
+        max_pnl_since_entry = 0.0
+        code = str(item.get("code") or "")
+        if code and hasattr(self, "paper_adapter") and self.paper_adapter and self.paper_adapter.account:
+            pos = self.paper_adapter.account.positions.get(code)
+            if pos:
+                is_swing_low_mode = (pos.regime == "SWING_LOW_BUY")
+                tp_triggered = pos.tp_triggered
+                max_pnl_since_entry = pos.pnl_pct
+                if hasattr(pos, "max_high") and pos.max_high > 0.0 and pos.entry_price > 0.0:
+                    max_pnl_since_entry = (pos.max_high - pos.entry_price) / pos.entry_price * 100.0
+
+        item_dict = dict(item)
+        item_dict["is_swing_low_mode"] = is_swing_low_mode
+        item_dict["tp_triggered"] = tp_triggered
+        item_dict["max_pnl_since_entry"] = max_pnl_since_entry
+
+        signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)
         intent = decide(signal, state)
         risk = evaluate(intent, signal, state, self.limits)
@@ -208,12 +228,30 @@ class TradingKernelService:
             executed = executor_to_use.submit_order(risk.order)
             result["kernel_executed"] = executed
             
-            # 如果物理执行交易成功，同步更新 StateManager 状态
+            # 如果物理执行交易成功，同步更新 StateManager 状态与 paper_adapter 内存属性
             if executed:
                 if risk.final_action in {"BUY", "ADD"}:
                     self.state_manager.set(signal.code, "IN_TRADE")
+                    if hasattr(self, "paper_adapter") and self.paper_adapter and self.paper_adapter.account:
+                        pos = self.paper_adapter.account.positions.get(signal.code)
+                        if pos:
+                            if risk.final_action == "BUY":
+                                pos.regime = getattr(intent.reason, "regime", "BREAKOUT_ALLOWED")
+                                pos.tp_triggered = False
+                            elif risk.final_action == "ADD":
+                                pos.tp_triggered = False
+                            self.paper_adapter._save_state()
                 elif risk.final_action == "SELL":
-                    self.state_manager.set(signal.code, "FLAT")
+                    if risk.final_size_pct >= 0.95:
+                        self.state_manager.set(signal.code, "FLAT")
+                    else:
+                        self.state_manager.set(signal.code, "IN_TRADE")
+                        if hasattr(self, "paper_adapter") and self.paper_adapter and self.paper_adapter.account:
+                            pos = self.paper_adapter.account.positions.get(signal.code)
+                            if pos:
+                                if getattr(intent.reason, "regime", "") == "TAKE_PROFIT_TRIGGERED" or risk.final_size_pct == 0.70:
+                                    pos.tp_triggered = True
+                                self.paper_adapter._save_state()
 
         if write_journal:
             self.journal.append(

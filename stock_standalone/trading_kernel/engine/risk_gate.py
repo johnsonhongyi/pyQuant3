@@ -107,8 +107,8 @@ def evaluate(
                 if diff > 300:
                     reject = {"code": "SIGNAL_EXPIRED", "diff_seconds": diff, "severity": "HARD_BLOCK"}
                     
-        # 4. Cooldown after consecutive losses
-        elif consecutive_losses >= limits.max_consecutive_losses:
+        # 4. Cooldown after consecutive losses (Bypassed if it's a reentry signal)
+        elif consecutive_losses >= limits.max_consecutive_losses and not getattr(intent, "is_reentry_signal", False):
             reject = {
                 "code": "CONSECUTIVE_LOSS_COOLDOWN",
                 "consecutive_losses": consecutive_losses,
