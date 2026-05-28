@@ -38,6 +38,8 @@ class SignalPoint:
     resample: str = 'd'  # 周期标识: 'd', '3d', 'w', 'm'
     reason: str = ""
     debug_info: dict[str, Any] = field(default_factory=dict)
+    symbol_override: str = ""
+    size_override: int = 0
     
     @property
     def color(self) -> tuple[int, int, int] | tuple[int, int, int, int]:
@@ -45,6 +47,8 @@ class SignalPoint:
 
     @property
     def symbol(self) -> str:
+        if self.symbol_override:
+            return self.symbol_override
         # 针对 SBC 信号，优先从 reason 中提取图标
         if "🔥" in self.reason: return "🔥"
         if "🚀" in self.reason: return "🚀"
@@ -52,6 +56,8 @@ class SignalPoint:
 
     @property
     def size(self) -> int:
+        if self.size_override > 0:
+            return self.size_override
         return SIGNAL_VISUAL_CONFIG.get(self.signal_type, {}).get("size", 10)
 
     def to_visual_hit(self) -> dict[str, Any]:
@@ -81,12 +87,12 @@ class SignalPoint:
 
 # 可视化配置变量映射
 SIGNAL_VISUAL_CONFIG = {
-    SignalType.BUY: {"symbol": 't1', "size": 15, "color": (255, 0, 0)},
+    SignalType.BUY: {"symbol": 't1', "size": 18, "color": (255, 0, 0)},
     SignalType.SELL: {"symbol": 't', "size": 15, "color": (0, 255, 0)},
-    SignalType.ADD: {"symbol": 'p', "size": 12, "color": (255, 100, 100)},
+    SignalType.ADD: {"symbol": 'p', "size": 14, "color": (255, 215, 0)},
     SignalType.SUB: {"symbol": 'h', "size": 12, "color": (100, 255, 100)},
-    SignalType.STOP_LOSS: {"symbol": 'x', "size": 18, "color": (0, 255, 0)},
-    SignalType.TAKE_PROFIT: {"symbol": 'star', "size": 15, "color": (255, 215, 0)},
+    SignalType.STOP_LOSS: {"symbol": 'x', "size": 25, "color": (0, 255, 0)},
+    SignalType.TAKE_PROFIT: {"symbol": 'star', "size": 22, "color": (255, 215, 0)},
     SignalType.SHADOW_BUY: {"symbol": 't1', "size": 10, "color": (200, 200, 200, 150)},
     SignalType.SHADOW_SELL: {"symbol": 't', "size": 10, "color": (150, 150, 150, 150)},
     SignalType.GAP_UP: {"symbol": 'arrow_up', "size": 12, "color": (255, 69, 0)},  # Orange Red

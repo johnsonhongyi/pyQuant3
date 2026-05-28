@@ -4355,7 +4355,17 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         self.text_area.tag_configure("highlight_sell", foreground="#ff7777", font=("Consolas", 10, "bold"))
         self.text_area.tag_configure("highlight_reentry", foreground="#55ffff", font=("Consolas", 10, "bold"))
         
+        # 👑 [NEW] 新增用于突出最新买卖点以及当前策略分支的高对比度 UI Tag 配置
+        self.text_area.tag_configure("highlight_latest_red", foreground="#ff3333", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_latest_green", foreground="#00ff66", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_strategy_title", foreground="#33ccff", font=("Consolas", 11, "bold"))
+        self.text_area.tag_configure("highlight_status_holding", foreground="#ffcc00", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_status_observing", foreground="#a8a8a8", font=("Consolas", 10, "bold"))
+        
         self._apply_highlights()
+        
+        # 👑 [NEW] 初始化完成后自动将文本滚动到最底部，便于第一时间查看最新的交易决策与策略总结
+        self.text_area.after(100, lambda: self.text_area.yview_moveto(1.0))
 
     def _apply_highlights(self):
         def highlight_pattern(pattern, tag):
@@ -4368,6 +4378,19 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
                 end_pos = f"{line}.{int(char) + len(pattern)}"
                 self.text_area.tag_add(tag, pos, end_pos)
                 start = end_pos
+                
+        # 👑 [NEW] 实现一整行的高亮，增强视觉定位效果
+        def highlight_line_pattern(pattern, tag):
+            start = "1.0"
+            while True:
+                pos = self.text_area.search(pattern, start, stopindex="end")
+                if not pos:
+                    break
+                line, char = pos.split('.')
+                line_start = f"{line}.0"
+                line_end = f"{line}.end"
+                self.text_area.tag_add(tag, line_start, line_end)
+                start = f"{line}.end + 1c"
         
         self.text_area.config(state="normal")
         highlight_pattern("BUY", "highlight_buy")
@@ -4381,6 +4404,14 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         highlight_pattern("清仓平仓：", "highlight_sell")
         highlight_pattern("止损平仓：", "highlight_sell")
         highlight_pattern("Re-entry", "highlight_reentry")
+        
+        # 👑 应用最新买卖动作与策略分支高对比度渲染
+        highlight_line_pattern("🔴【最新买卖点决策】", "highlight_latest_red")
+        highlight_line_pattern("🟢【最新买卖点决策】", "highlight_latest_green")
+        highlight_line_pattern("👑 【当前战术状态与活跃分支策略】", "highlight_strategy_title")
+        highlight_pattern("💼 正在持仓中 (筹码做T滚动持股中)", "highlight_status_holding")
+        highlight_pattern("📊 保持空仓观察 (KEEP OBSERVING)", "highlight_status_observing")
+        
         self.text_area.config(state="disabled")
 
     def update_report(self, code: str, name: str, report: str):
@@ -4398,6 +4429,9 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         self.text_area.config(state="disabled")
         
         self._apply_highlights()
+        
+        # 👑 [NEW] 更新报告后自动滚动到最底部，便于第一时间查看最新的交易决策与策略总结
+        self.text_area.after(100, lambda: self.text_area.yview_moveto(1.0))
 
     def _on_close(self):
         # 关闭时保存窗口位置大小

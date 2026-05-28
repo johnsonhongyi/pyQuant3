@@ -826,7 +826,33 @@ class SignalOverlay:
                 pens.append(pg.mkPen(None))
                 data.append(sig.to_visual_hit()['meta'])
 
-            if target != 'kline':
+            if target == 'kline':
+                label_text = None
+                text_color = (255, 255, 255)
+                
+                if sig.signal_type in (SignalType.BUY, SignalType.SHADOW_BUY):
+                    label_text = "B"
+                    text_color = (255, 0, 0)      # 极其醒目的绝对纯红色，提供高亮对比
+                elif sig.signal_type == SignalType.ADD:
+                    label_text = "A"
+                    text_color = (255, 215, 0)    # 亮金黄色，标识加仓
+                elif sig.signal_type in (SignalType.SELL, SignalType.STOP_LOSS, SignalType.TAKE_PROFIT, SignalType.SHADOW_SELL):
+                    label_text = "S"
+                    text_color = (0, 255, 0)      # 纯绿色，清晰显示卖出/止损/止盈
+                
+                if label_text:
+                    txt = self._get_text_item(target)
+                    font = QFont('Arial', 12)     # 将字号调大到 12 以提升可视度
+                    font.setBold(True)
+                    anchor = (0.5, 1.4)           # 物理位置置于点上方
+                    
+                    txt.setText(label_text)
+                    txt.setAnchor(anchor)
+                    txt.setColor(text_color)
+                    txt.setFont(font)
+                    txt.setPos(x_pos, y_pos)
+                    self.text_items[target].append(txt)
+            else:
                 is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
                 
                 if sig.signal_type == SignalType.FOLLOW:
@@ -840,9 +866,13 @@ class SignalOverlay:
                     text_color = (255, 120, 120) if is_buy else (120, 255, 120)
                 
                 txt = self._get_text_item(target)
+                font = QFont('Arial', 9)
+                font.setBold(False)
+                
                 txt.setText(f"{sig.price:.2f}")
                 txt.setAnchor(anchor)
                 txt.setColor(text_color)
+                txt.setFont(font)
                 txt.setPos(x_pos, y_pos)
                 self.text_items[target].append(txt)
 
@@ -1208,11 +1238,11 @@ class DataLoaderThread(QThread):
 
             # 3. Fetch Signal History (Historical Trades)
             signal_history_df = pd.DataFrame()
-            try:
-                # 即使 day_df/tick_df 成功，信号历史也应顺带加载，防止 UI 线程读取 CSV 导致闪烁
-                if hasattr(self, 'parent_win') and self.parent_win:
+            if hasattr(self, 'parent_win') and self.parent_win and getattr(self.parent_win, 'show_signals', False):
+                try:
+                    # 即使 day_df/tick_df 成功，信号历史也应顺带加载，防止 UI 线程读取 CSV 导致闪烁
                     signal_history_df = self.parent_win.logger.get_signal_history_df()
-            except: pass
+                except: pass
 
             self._search_code = self.code
             self._resample = self.resample
@@ -1271,6 +1301,26 @@ class SBCTestThread(QThread):
             error_msg = f"SBC 线程执行失败: {str(e)}"
             logger.error(f"{error_msg}\n{traceback.format_exc()}")
             self.error_occurred.emit(error_msg)
+
+class ReentryBacktestThread(QThread):
+    """Re-entry 历史回测后台异步线程，防止主线程假死"""
+    finished_sig = pyqtSignal(str, str) # code, report_text
+    
+    def __init__(self, code: str, name: str, parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.name = name
+        
+    def run(self):
+        try:
+            # 引入我们的历史回测主入口
+            from scratch.test_reentry_backtest import run_backtest_and_get_report
+            report = run_backtest_and_get_report(self.code, self.name)
+            self.finished_sig.emit(self.code, report)
+        except Exception as e:
+            import traceback
+            err_msg = f"Re-entry 回测执行失败: {e}\n{traceback.format_exc()}"
+            self.finished_sig.emit(self.code, err_msg)
 
 def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -2316,9 +2366,9 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         layout = QtWidgets.QVBoxLayout(self)
 
         # 滚动区域
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
         content_widget = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_widget)
@@ -2330,20 +2380,47 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         self.label.setOpenExternalLinks(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
         content_layout.addWidget(self.label)
-        scroll.setWidget(content_widget)
+        self.scroll_area.setWidget(content_widget)
 
-        layout.addWidget(scroll)
+        layout.addWidget(self.scroll_area)
         
         # 补全别名引用，防止外部更新 content_label 时 AttributeError
         self.content_label = self.label
 
+        # ⚡ [NEW] 如果是回测报告或者综合简报相关的窗口，打开时自动滚动到最底部以展现最新、最高优先级决策
+        if self.is_briefing or "回测" in title or "re-entry" in title.lower():
+            QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
+
         # 按钮
         btn_box = QtWidgets.QHBoxLayout()
+        
+        # [UX] 新增“置顶”复选框，默认不置顶，支持随时手动切换
+        self.pin_cb = QtWidgets.QCheckBox("置顶")
+        self.pin_cb.setChecked(False)
+        self.pin_cb.toggled.connect(self.on_pin_toggled)
+        btn_box.addWidget(self.pin_cb)
+        
+        btn_box.addStretch()
         close_btn = QtWidgets.QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
-        btn_box.addStretch()
         btn_box.addWidget(close_btn)
         layout.addLayout(btn_box)
+
+    def on_pin_toggled(self, checked):
+        """动态切换窗口是否置顶"""
+        flags = self.windowFlags()
+        if checked:
+            self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
+
+    def update_content(self, title, content):
+        """[UX] 更新窗口标题和内容并重新触发置底滚动以复用窗口"""
+        self.setWindowTitle(title)
+        self.content_label.setText(content)
+        if self.is_briefing or "回测" in title or "re-entry" in title.lower():
+            QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
 
     def closeEvent(self, event):
         """关闭时自动持久化综合简报的位置与大小"""
@@ -2353,6 +2430,98 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
             except Exception as e:
                 print(f"Failed to save comprehensive briefing position: {e}")
         event.accept()
+
+
+class MarqueeLabel(QLabel):
+    """
+    跑马灯滚动 QLabel 控件，防止超长状态栏文本撑开/放宽窗口。
+    当文本像素宽度大于控件本身的实际宽度时，自动循环横向滚动显示。
+    """
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._text = text
+        self._offset = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_marquee)
+        self.timer.start(50)  # 50ms 流畅定时滚动
+        
+        # 尺寸限制：允许被无限缩水压缩，永远不要撑爆 layout 宽度
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(50)
+        
+    def sizeHint(self):
+        if not self._text:
+            return QtCore.QSize(100, 20)
+        fm = self.fontMetrics()
+        text_width = fm.horizontalAdvance(self._text)
+        return QtCore.QSize(text_width + 15, 20)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(50, 20)
+        
+    def setText(self, text):
+        self._text = text
+        self._offset = 0
+        self.updateGeometry()  # 核心：通知 Qt 重新计算布局尺寸以获取足够宽度
+        self.update()
+        
+    def text(self):
+        return self._text
+        
+    def clear(self):
+        self._text = ""
+        self._offset = 0
+        self.updateGeometry()  # 核心：通知 Qt 重新计算布局尺寸
+        self.update()
+        
+    def update_marquee(self):
+        if not self.isVisible() or not self._text:
+            return
+            
+        fm = self.fontMetrics()
+        text_width = fm.horizontalAdvance(self._text)
+        widget_width = self.width()
+        
+        if text_width > widget_width:
+            self._offset -= 1
+            if abs(self._offset) > text_width + 40:
+                self._offset = widget_width
+            self.update()
+        else:
+            if self._offset != 0:
+                self._offset = 0
+                self.update()
+
+    def paintEvent(self, event):
+        if not self._text:
+            super().paintEvent(event)
+            return
+            
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        
+        # 提取当前 QLabel 样式表或 QPalette 文本前景色
+        color = self.palette().color(QtGui.QPalette.ColorRole.WindowText)
+        painter.setPen(color)
+        
+        fm = self.fontMetrics()
+        text_width = fm.horizontalAdvance(self._text)
+        widget_width = self.width()
+        
+        # 垂直居中
+        y_pos = (self.height() + fm.ascent() - fm.descent()) // 2
+        
+        if text_width > widget_width:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setClipRect(self.rect())
+            painter.drawText(self._offset, y_pos, self._text)
+        else:
+            # 居中对齐绘制
+            x_pos = (widget_width - text_width) // 2
+            painter.drawText(x_pos, y_pos, self._text)
+            
+        painter.end()
+
 
 class GlobalInputFilter(QtCore.QObject):
     """
@@ -3066,7 +3235,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.decision_layout.addStretch(1)
 
         # [NEW] 中间状态消息 (替代原 StatusBar)
-        self.center_msg_label = QLabel("")
+        self.center_msg_label = MarqueeLabel("")
         self.center_msg_label.setStyleSheet("color: #00FF00; font-weight: bold;") 
         self.decision_layout.addWidget(self.center_msg_label)
 
@@ -3597,6 +3766,7 @@ class MainWindow(QMainWindow, WindowMixin):
             ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
             ("Alt+O", "开启/关闭热点语音播报 (Voice)", self._toggle_hotlist_voice),
             ("Alt+W", "紧凑自适应列宽 (当前焦点表格)", self._on_shortcut_autofit),
+            ("Alt+X", "一键执行 Re-entry 历史回测", self._on_shortcut_reentry_backtest),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
             # [NEW] 转发到 MonitorTK 的宏命令快捷键 (Local QShortcut)
@@ -5402,7 +5572,14 @@ class MainWindow(QMainWindow, WindowMixin):
         spacer.setFixedWidth(20)
         self.toolbar.addWidget(spacer)
 
-        self.cb_show_pdays = QCheckBox("突破天数")
+        self.cb_show_signals = QCheckBox("信号")
+        self.cb_show_signals.setToolTip("显示后台交易日志的买卖信号标记")
+        self.show_signals = getattr(self, 'show_signals', False)
+        self.cb_show_signals.setChecked(self.show_signals)
+        self.cb_show_signals.stateChanged.connect(self._on_toggle_signals)
+        self.toolbar.addWidget(self.cb_show_signals)
+
+        self.cb_show_pdays = QCheckBox("突破")  #突破天数
         self.cb_show_pdays.setToolTip("显示平台突破的主升天数标记")
         self.cb_show_pdays.setChecked(getattr(self, 'show_pdays', True))
         self.cb_show_pdays.stateChanged.connect(self._on_toggle_pdays)
@@ -5417,6 +5594,29 @@ class MainWindow(QMainWindow, WindowMixin):
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_kline_view)
         self.toolbar.addWidget(reset_btn)
+
+    def _on_toggle_signals(self, state):
+        self.show_signals = self.cb_show_signals.isChecked()
+        self._save_visualizer_config()
+        if not self.show_signals:
+            if hasattr(self, 'signal_overlay'):
+                self.signal_overlay.clear(target='kline')
+                self.signal_overlay.clear(target='tick')
+        else:
+            try:
+                self._hist_df_cache = self.logger.get_signal_history_df()
+                self._hist_df_last_load = time.time()
+            except Exception as e:
+                logger.error(f"Failed to load signal history on toggle: {e}")
+                
+        if hasattr(self, 'current_code') and hasattr(self, 'day_df') and not self.day_df.empty:
+            self._capture_view_state()
+            self._force_keep_view_state = True
+            try:
+                self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', None), force=True)
+            finally:
+                if hasattr(self, '_force_keep_view_state'):
+                    delattr(self, '_force_keep_view_state')
 
     def _on_toggle_pdays(self, state):
         self.show_pdays = self.cb_show_pdays.isChecked()
@@ -6330,12 +6530,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.center_msg_label.setVisible(False)
             return
 
-        # 自动省略文本
-        fm = QFontMetrics(self.center_msg_label.font())
-        # Qt6 中 ElideRight 是 Qt.TextElideMode 枚举
-        message = fm.elidedText(message, Qt.TextElideMode.ElideRight, 600)
-
-        self.center_msg_label.setMaximumWidth(600)
         self.center_msg_label.setText(message)
         self.center_msg_label.setVisible(True)
 
@@ -6353,7 +6547,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return
             
         if not message:
-            self.center_msg_label.setText("")
+            self.center_msg_label.clear()
             self.center_msg_label.setVisible(False) # Hiding it completely if empty
             return
 
@@ -8177,7 +8371,7 @@ class MainWindow(QMainWindow, WindowMixin):
         elif not self.df_cache.empty:
             self.update_stock_table(self.df_cache)
         else:
-            # Fallback to signal history
+            # Fallback to signal history (always read once on startup/fallback to populate the code list)
             df = self.logger.get_signal_history_df()
             if not df.empty and 'code' in df.columns:
                 df['date'] = pd.to_datetime(df['date'])
@@ -8875,6 +9069,74 @@ class MainWindow(QMainWindow, WindowMixin):
         if target:
             self._resize_columns_tightly(target)
             self.show_status_message(f"Layout Optimized: {target.objectName() or 'Table'}", 2000)
+
+    def _on_shortcut_reentry_backtest(self):
+        """Alt+X 一键触发 Re-entry 历史回测"""
+        if not hasattr(self, 'current_code') or not self.current_code:
+            self.show_status_message("⚠️ 未选择股票，无法执行回测", 2000)
+            return
+            
+        code = self.current_code
+        name = self.code_name_map.get(code, code)
+        self.show_status_message(f"🚀 正在后台执行 {name} ({code}) 的 Re-entry 历史回测...", 3000)
+        
+        # 启动后台线程执行回测
+        self._backtest_thread = ReentryBacktestThread(code, name, self)
+        self._backtest_thread.finished_sig.connect(self._show_backtest_result)
+        self._backtest_thread.start()
+        
+    def _show_backtest_result(self, code, report):
+        """以 RichText 渲染等宽格式展示回测报告"""
+        name = self.code_name_map.get(code, code)
+        # [UX] 显式命名为“综合简报”，使 ScrollableMsgBox 自动识别并完美复用“综合简报”的位置与大小设置
+        title = f"👑 Re-entry 历史回测综合简报 - {name} ({code})"
+        
+        # [UX] 加上 white-space: pre-wrap; 和 word-wrap: break-word; 支持完美自动换行与边界自适应，彻底防御撑爆变形！
+        # [UX] 将 font-size 从 11px 提升至 14px，完美对齐“综合简报”默认大字号，确保操盘手清晰易读
+        formatted_report = f"<pre style='font-family: Consolas, \"Microsoft YaHei UI\", monospace; color: #E0E0E0; font-size: 14px; white-space: pre-wrap; word-wrap: break-word;'>{report}</pre>"
+        
+        # 1. 物理捕获回测的结构化信号和最佳策略分支
+        try:
+            from scratch.test_reentry_backtest import get_last_backtest_signals, get_last_backtest_best_branch
+            code_clean = code.strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                code_clean = code_clean.replace(icon, '').strip()
+                
+            signals_list = get_last_backtest_signals(code_clean)
+            best_branch = get_last_backtest_best_branch(code_clean)
+            
+            if not hasattr(self, 'reentry_backtest_signals'):
+                self.reentry_backtest_signals = {}
+            if not hasattr(self, 'reentry_backtest_best_branch'):
+                self.reentry_backtest_best_branch = {}
+                
+            self.reentry_backtest_signals[code_clean] = signals_list
+            self.reentry_backtest_best_branch[code_clean] = best_branch
+            logger.debug(f"✅ 成功加载 {code_clean} 的 {len(signals_list)} 个 Re-entry 回测信号，最佳/适合分支策略: {best_branch}")
+            
+            # 2. 物理强制触发重绘，使新标记瞬间在 K 线图上浮现！
+            self.render_charts(code_clean, self.day_df, self.tick_df, force=True)
+            self.show_status_message(f"✅ 回测完成！已将 {len(signals_list)} 个买卖点物理标记在 K 线图上，并识别出适合策略: {best_branch}", 4000)
+        except Exception as e:
+            logger.error(f"❌ 提取回测信号并重绘图表失败: {e}")
+            
+        # [UX] 复用窗口：若窗口实例已存在，则直接更新其标题与内容并展现，实现多窗口分开与零新建
+        if hasattr(self, '_backtest_report_dlg') and self._backtest_report_dlg is not None:
+            try:
+                self._backtest_report_dlg.update_content(title, formatted_report)
+                self._backtest_report_dlg.show()
+                self._backtest_report_dlg.raise_()
+                self._backtest_report_dlg.activateWindow()
+                return
+            except RuntimeError:
+                # 捕获 C/C++ 实例已被销毁的情况，重新实例化
+                self._backtest_report_dlg = None
+
+        self._backtest_report_dlg = ScrollableMsgBox(title, formatted_report, self)
+        # [UX] 使用 show() 非模态展现，不影响用户在父窗口上查看和操作可视化图表，支持并排或分开查看
+        self._backtest_report_dlg.show()
+        self._backtest_report_dlg.raise_()
+        self._backtest_report_dlg.activateWindow()
 
     def _on_column_resized_debounced(self, index, old_size, new_size):
         """列宽变动防抖保存"""
@@ -11540,11 +11802,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # if now - getattr(self, '_hist_df_last_load', 0) > 30:
         #     self._hist_df_cache = self.logger.get_signal_history_df()
         
-        # 兜底刷新当股信号缓存
-        if self._last_signals_stock_code != code:
-            self._refresh_stock_signal_cache(code)
-            
-        kline_signals.extend(self._current_stock_signals)
+        if getattr(self, 'show_signals', False):
+            # 兜底刷新当股信号缓存
+            if self._last_signals_stock_code != code:
+                self._refresh_stock_signal_cache(code)
+                
+            kline_signals.extend(self._current_stock_signals)
 
         # ----------------- 🚀 [IPC/FIXED] 恢复联动信息富文本看板展示 -----------------
         has_valid_linkage = hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code
@@ -11663,6 +11926,47 @@ class MainWindow(QMainWindow, WindowMixin):
         watch_signals = self._get_watchlist_signals(code, day_df)
         if watch_signals:
             kline_signals.extend(watch_signals)
+
+        # 5.5. ⚡ [NEW] Re-entry 历史回测信号渲染 (可视化买卖点)
+        code_clean_re = code.strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            code_clean_re = code_clean_re.replace(icon, '').strip()
+            
+        reentry_backtest_list = getattr(self, 'reentry_backtest_signals', {}).get(code_clean_re, [])
+        for sig_item in reentry_backtest_list:
+            s_date = sig_item.get("date")
+            s_action = sig_item.get("action")
+            s_price = sig_item.get("price")
+            s_branch = sig_item.get("branch", "SuperTrendMA5Branch")
+            s_desc = sig_item.get("desc", "回测交易")
+            
+            k_idx = self._find_date_index(day_df, s_date)
+            if k_idx != -1:
+                # 智能识别底层子类动作，映射到具有极客美感且不会导致视图拉伸的常规 Scatter 图符
+                is_buy = (s_action == "BUY")
+                if is_buy:
+                    if "回补" in s_desc or "加仓" in s_desc:
+                        sig_type = SignalType.ADD  # 加仓/回补：五角星 ('p')，颜色 (255, 100, 100)
+                    else:
+                        sig_type = SignalType.BUY  # 建仓：朝上三角 ('t1')，颜色 (255, 0, 0)
+                else:
+                    if "止损" in s_desc or "防守" in s_desc:
+                        sig_type = SignalType.STOP_LOSS  # 止损：绿色叉号 ('x')，颜色 (0, 255, 0)
+                    elif "止盈" in s_desc or "减仓" in s_desc:
+                        sig_type = SignalType.TAKE_PROFIT  # 止盈/减仓：金色星型 ('star')，颜色 (255, 215, 0)
+                    else:
+                        sig_type = SignalType.SELL  # 普通卖出：朝下三角 ('t')，颜色 (0, 255, 0)
+                
+                kline_signals.append(SignalPoint(
+                    code=code, 
+                    timestamp=s_date,
+                    bar_index=k_idx,
+                    price=s_price if s_price else day_df['close'].iloc[k_idx],
+                    signal_type=sig_type,
+                    reason=f"[{s_branch}] {s_desc}",
+                    source=SignalSource.STRATEGY_ENGINE,
+                    size_override=25 if sig_type == SignalType.STOP_LOSS else (22 if sig_type == SignalType.TAKE_PROFIT else 18)
+                ))
 
         # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
         self.all_today_sbc_signals = []
@@ -12251,6 +12555,21 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 4. 组合最终标题并设置
         full_title = f"{main_title}\n<span style='color: #FFCC00; font-size: 10pt;'>{category_text}</span>" if category_text else main_title
+        
+        # # 👑 动态对齐：如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在标题最显眼位置展现！
+        # code_clean_t = code.strip()
+        # for icon in ['🔴', '🟢', '📊', '⚠️']:
+        #     code_clean_t = code_clean_t.replace(icon, '').strip()
+            
+        # best_branch = getattr(self, 'reentry_backtest_best_branch', {}).get(code_clean_t)
+        # if best_branch:
+        #     branch_info = f" | <span style='color: #00FFCC; font-weight: bold;'>[{best_branch}]</span>"
+        #     if "\n" in full_title:
+        #         parts = full_title.split("\n")
+        #         parts[0] = parts[0] + branch_info
+        #         full_title = "\n".join(parts)
+        #     else:
+        #         full_title = full_title + branch_info
         
         if getattr(self, "_last_full_title", "") != full_title:
             self.kline_plot.setTitle(full_title)
@@ -13533,6 +13852,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.cb_show_pdays.setChecked(enabled)
                     self.cb_show_pdays.blockSignals(False)
 
+            # 3.5.1.2 signals 开关
+            if 'show_signals' in window_config:
+                enabled = bool(window_config.get('show_signals', False))
+                self.show_signals = enabled
+                if hasattr(self, 'cb_show_signals'):
+                    self.cb_show_signals.blockSignals(True)
+                    self.cb_show_signals.setChecked(enabled)
+                    self.cb_show_signals.blockSignals(False)
+
             # 3.5.2 show_breakout_lines 开关
             if 'show_breakout_lines' in window_config:
                 enabled = bool(window_config.get('show_breakout_lines', True))
@@ -13645,6 +13973,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
             if hasattr(self, 'show_pdays'):
                 window_config['show_pdays'] = self.show_pdays
+
+            if hasattr(self, 'show_signals'):
+                window_config['show_signals'] = self.show_signals
 
             if hasattr(self, 'show_breakout_lines'):
                 window_config['show_breakout_lines'] = self.show_breakout_lines
