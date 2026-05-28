@@ -128,7 +128,12 @@ class ReentryTracker:
         if not item or item.status != "OBSERVING":
             return False, "", 1.0
 
-        # 检查是否超出 5 天观察期，若超出则自动淘汰过期
+        price = float(features.get("close", 0.0))
+        ma5_val = float(features.get("ma5d", 0.0))
+        ma10_val = float(features.get("ma10d", 0.0))
+        upper = float(features.get("upper", 0.0))
+
+        # 检查是否超出观察期，若超出则自动淘汰过期 (超强势股动态延长至 12 天)
         try:
             def parse_dt(dt_str: str) -> datetime:
                 dt_str = dt_str.replace("T", " ")
@@ -138,15 +143,22 @@ class ReentryTracker:
 
             exit_dt = parse_dt(item.exit_time)
             curr_dt = parse_dt(current_time_str) if current_time_str else datetime.now()
-            if curr_dt - exit_dt > timedelta(days=OBSERVATION_DAYS):
+            
+            obs_days = OBSERVATION_DAYS
+            # 超强主升行情，均线呈现强多头排列，或者洗盘极浅 (离场后最低收盘价没有跌破止损价的 3%)
+            if ma5_val > 0 and ma10_val > 0 and ma5_val >= ma10_val * 0.99:
+                obs_days = 12
+            elif price > 0 and item.lowest_since_exit >= item.stop_price * 0.97:
+                obs_days = 12
+
+            if curr_dt - exit_dt > timedelta(days=obs_days):
                 item.status = "EXPIRED"
                 self._save_state()
-                logger.info(f"⏳ [ReentryTracker] {code} 超出 {OBSERVATION_DAYS} 天观察期已自动过期淘汰 (离场: {item.exit_time}, 当前: {current_time_str or 'now'})")
+                logger.info(f"⏳ [ReentryTracker] {code} 超出 {obs_days} 天观察期已自动过期淘汰 (离场: {item.exit_time}, 当前: {current_time_str or 'now'})")
                 return False, "", 1.0
         except Exception as e:
             logger.warning(f"[ReentryTracker] Expiration check failed: {e}")
 
-        price = float(features.get("close", 0.0))
         if price <= 0:
             return False, "", 1.0
 
@@ -162,6 +174,18 @@ class ReentryTracker:
         # 门禁 1: 如果现价低于止损后的洗盘最低点上浮 0.5%，直接认定多头尚未企稳
         if price < item.lowest_since_exit * 1.005:
             return False, "", 1.0
+
+        # --- [右侧模式 D] 超强势个股卖出追回机制 (STRENGTH_BUYBACK) ---
+        # 针对只踩5日线或突破上轨的极强行情：若当前收盘价突破 Bollinger 上轨，或者突破前 4 日高点且站稳 5日均线之上，且有资金流入配合
+        if ma5_val > 0:
+            is_break_upper = (upper > 0 and price >= upper * 0.985)
+            is_stand_ma5 = (price >= ma5_val * 1.005 and price >= item.lowest_since_exit * 1.02 and vol_ratio >= 1.0)
+            if (is_break_upper or is_stand_ma5) and price > item.stop_price:
+                boost = 1.30
+                reason = f"⚡ 超强势个股卖出追回：重新站稳5日线({ma5_val:.2f})或突破布林上轨({upper:.2f})重归主升浪"
+                item.status = "ACTIVATED"
+                self._save_state()
+                return True, reason, boost
 
         # --- [右侧模式 A] 突破短线枢轴高点 (快速洗盘突破) ---
         if high4 > 0 and price >= high4 and vol_ratio >= 1.15 and price > item.stop_price:
