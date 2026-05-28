@@ -2,6 +2,7 @@ import os
 import sys
 import pandas as pd
 from datetime import datetime
+import io
 
 # 保证控制台流以 UTF-8 输出，防止 Emoji 或中文字符在 Windows 环境下发生 gbk 物理编码报错
 try:
@@ -18,21 +19,29 @@ from trading_kernel.engine.reentry_tracker import reentry_tracker
 from trading_kernel.engine.decision_engine import decide
 from trading_kernel.core.signal import StrategySignal
 
-def run_backtest_for_code(code: str, name: str):
-    print("=" * 80)
-    print(f"[RE-ENTRY TEST] 开始对标的 【{name} ({code})】 进行多周期枢轴右侧 Re-entry 逐日回溯测试")
-    print("=" * 80)
+def run_backtest_and_get_report(code: str, name: str, only_report: bool = False) -> str:
+    """运行指定个股 of Re-entry 历史回测，并以字符串形式返回完整的日志及整体总结报告。"""
+    output = io.StringIO()
+    def log(msg="", is_detail=True):
+        if only_report and is_detail:
+            return
+        output.write(str(msg) + "\n")
+        
+    log("=" * 80)
+    log(f"[RE-ENTRY TEST] 开始对标的 【{name} ({code})】 进行多周期枢轴右侧 Re-entry 逐日回溯测试")
+    log("=" * 80)
 
-    # 1. 抓取完整的交易日历（拉取足够长 250 天）
-    df_calendar = get_tdx_Exp_day_to_df(code, dl=250)
-    if df_calendar is None or df_calendar.empty:
-        print(f"[ERROR] 无法加载个股 {code} 的通达信历史日线数据，请检查本地 Vipdoc 目录是否同步！")
-        return
+    # 1. 抓取完整的交易数据（拉取足够长 1200 天以防均线前置依赖缺失）
+    df_all = get_tdx_Exp_day_to_df(code, dl=1200)
+    if df_all is None or df_all.empty:
+        log(f"[ERROR] 无法加载个股 {code} 的通达信历史日线数据，请检查本地 Vipdoc 目录是否同步！", is_detail=False)
+        return output.getvalue()
 
     # 按日期排序
-    df_calendar = df_calendar.sort_index()
+    df_all = df_all.sort_index()
+    df_calendar = df_all.tail(250)
     total_days = len(df_calendar)
-    print(f"[INFO] 成功加载 {total_days} 个交易日的历史数据，日期区间: {df_calendar.index[0]} 至 {df_calendar.index[-1]}")
+    log(f"[INFO] 成功加载 {len(df_all)} 天的历史数据，测试日历区间 (250天): {df_calendar.index[0]} 至 {df_calendar.index[-1]}")
 
     # 选择倒数第 30 个交易日作为被洗盘止损点
     stop_idx = total_days - 30
@@ -42,13 +51,13 @@ def run_backtest_for_code(code: str, name: str):
     stop_date = df_calendar.index[stop_idx]
     
     # 模拟止损当天的真实收盘价 (不带未来数据)
-    df_stop = get_tdx_Exp_day_to_df(code, end=stop_date, dl=1000)
+    df_stop = df_all.loc[:stop_date]
     if df_stop.empty:
-        print(f"[ERROR] 无法加载 {stop_date} 截止的数据")
-        return
+        log(f"[ERROR] 无法加载 {stop_date} 截止的数据", is_detail=False)
+        return output.getvalue()
         
     stop_price = float(df_stop.iloc[-1]["close"])
-    print(f"[STOP-LOSS EVENT] 模拟历史事件：在 {stop_date} 标的遭遇窄幅洗盘，触发止损清仓，止损价格: {stop_price:.2f} 元")
+    log(f"[STOP-LOSS EVENT] 模拟历史事件：在 {stop_date} 标的遭遇窄幅洗盘，触发止损清仓，止损价格: {stop_price:.2f} 元")
 
     # 重置并注册进 reentry 观察池
     reentry_tracker.clear()
@@ -61,16 +70,20 @@ def run_backtest_for_code(code: str, name: str):
     max_high_since_entry = 0.0
     days_held = 0
     tp_triggered = False
+    tp_count = 0
     locked_pnl = 0.0
     is_swing_low_mode = False
+    
+    # 用于收集整理最后“整体报告”的关键事件
+    trade_events = []
 
-    # 2. 逐日推进 enddate 切换测试策略效率 (从止损后的第一天开始模拟，每日重新加载防止未来数据泄露)
+    # 2. 逐日推进 enddate
     activated_date = None
     for i in range(stop_idx + 1, total_days):
         current_date = df_calendar.index[i]
         
-        # 核心漏洞修复：每次都以 current_date 为截止点，重新计算当日绝对真实的指标特征，使用足够长(1000天)的深度
-        df_curr = get_tdx_Exp_day_to_df(code, end=current_date, dl=1000)
+        # 核心漏洞修复：每次都以 current_date 为截止点，重新计算当日指标，避免未来数据泄露
+        df_curr = df_all.loc[:current_date]
         if df_curr.empty:
             continue
             
@@ -82,37 +95,41 @@ def run_backtest_for_code(code: str, name: str):
         pbreak = int(row.get("pbreak", 0))
         ptop = float(row.get("ptop", 0.0))
         dff = float(row.get("dff", 0.0))
-        vol_ratio = 1.3 # 模拟主力温和放量突破的盘中量比
+        vol_ratio = 1.3 
 
-        # 1. 动态自愈计算 10日均线、5日均线和成交量特征 (无未来数据)
+        # 动态自愈计算 10日均线、5日均线和成交量特征
         if len(df_curr) >= 10:
             ma10_series = df_curr['close'].rolling(10).mean()
             ma5_series = df_curr['close'].rolling(5).mean()
             vol_ma5_series = df_curr['vol'].rolling(5).mean()
-            
-            ma10 = float(ma10_series.iloc[-1])
-            ma5 = float(ma5_series.iloc[-1])
+            ma10d = float(row.get("ma10d", 0.0))
+            if ma10d <= 0.0:
+                ma10d = float(ma10_series.iloc[-1])
+            ma5d = float(row.get("ma5d", 0.0))
+            if ma5d <= 0.0:
+                ma5d = float(ma5_series.iloc[-1])
             vol_ma5 = float(vol_ma5_series.iloc[-1])
             
-            # SWS & SWL & Upper 高精度提取与 100% 物理 Fallback 机制
             sws = float(row.get("SWS", 0.0))
-            swl = float(row.get("SWL", 0.0))
             if sws <= 0 or sws < close * 0.85 or sws > close * 1.15:
-                sws = ma10
+                sws = ma10d
+            swl = float(row.get("SWL", 0.0))
             if swl <= 0 or swl < close * 0.85 or swl > close * 1.15:
-                swl = ma5
+                swl = ma5d
                 
-            # 提取 5 天前的 SWS 支撑线值，进行趋势校验
             if len(df_curr) >= 15:
                 row_prev5 = df_curr.iloc[-6]
                 sws_prev5 = float(row_prev5.get("SWS", 0.0))
                 close_prev5 = float(row_prev5['close'])
                 if sws_prev5 <= 0 or sws_prev5 < close_prev5 * 0.85 or sws_prev5 > close_prev5 * 1.15:
                     sws_prev5 = float(df_curr['close'].rolling(10).mean().iloc[-6])
+                ma10d_prev5 = float(row_prev5.get("ma10d", 0.0))
+                if ma10d_prev5 <= 0.0:
+                    ma10d_prev5 = float(ma10_series.iloc[-6])
             else:
                 sws_prev5 = sws
+                ma10d_prev5 = ma10d
                 
-            # 提取 20日主力生命均线倾角特征，过滤中期趋势走平走弱的个股
             if len(df_curr) >= 25:
                 ma20_series = df_curr['close'].rolling(20).mean()
                 ma20 = float(ma20_series.iloc[-1])
@@ -121,7 +138,6 @@ def run_backtest_for_code(code: str, name: str):
                 ma20 = close
                 ma20_prev5 = close
                 
-            # 提取 12 天前及过去 12 天内最大 SWS，判断是否有强拉升盈利带
             if len(df_curr) >= 20:
                 row_prev12 = df_curr.iloc[-13]
                 sws_prev12 = float(row_prev12.get("SWS", 0.0))
@@ -129,7 +145,6 @@ def run_backtest_for_code(code: str, name: str):
                 if sws_prev12 <= 0 or sws_prev12 < close_prev12 * 0.85 or sws_prev12 > close_prev12 * 1.15:
                     sws_prev12 = float(df_curr['close'].rolling(10).mean().iloc[-13])
                 
-                # 计算过去 12 天内的最大 SWS
                 recent_12 = df_curr.tail(12)
                 sws_max12 = sws_prev12
                 for r_idx in range(len(recent_12)):
@@ -144,10 +159,8 @@ def run_backtest_for_code(code: str, name: str):
             else:
                 profit_band_growth = 0.0
                 
-            # 👑 黄金盈利上升带活性校验：主力支撑 SWS 必须有至少 4.0% 以上的上扬斜率增长，才证明有强势主力资金的盈利带！
             is_active_profit_band = (profit_band_growth >= 0.04)
             
-            # 计算过去 15 天内单日最大涨幅，过滤无大阳线脉冲的缓慢蠕动阴跌品种
             has_big_surge = False
             if len(df_curr) >= 16:
                 recent_15_df = df_curr.tail(15)
@@ -157,17 +170,15 @@ def run_backtest_for_code(code: str, name: str):
                         s_close = float(df_curr['close'].iloc[sub_len_s - 1])
                         s_prev = float(df_curr['close'].iloc[sub_len_s - 2])
                         s_pct = (s_close - s_prev) / s_prev * 100
-                        if s_pct >= 6.8:  # 包含大涨 7% 左右的大阳线
+                        if s_pct >= 6.8:
                             has_big_surge = True
                             break
             else:
                 has_big_surge = True
                 
-            # 计算前期 15 天内是否有过真金白银的突破 pbreak == 1 信号
             has_breakout_touch = False
             if len(df_curr) >= 15:
                 recent_15_df = df_curr.tail(15)
-                # 检查过去 15 天内是否有任意一天的 pbreak == 1 或者是超过前期大平台顶
                 for s_idx in range(len(recent_15_df)):
                     r_row = recent_15_df.iloc[s_idx]
                     if int(r_row.get("pbreak", 0)) == 1:
@@ -176,26 +187,6 @@ def run_backtest_for_code(code: str, name: str):
             else:
                 has_breakout_touch = True
                 
-            if code == "603533" and current_date == "2026-04-24":
-                print(f"[DEBUG SURGE DETAIL 603533]")
-                recent_15_df = df_curr.tail(15)
-                for s_idx in range(len(recent_15_df)):
-                    sub_len_s = len(df_curr) - len(recent_15_df) + s_idx + 1
-                    if sub_len_s >= 2:
-                        date_s = df_curr.index[sub_len_s - 1]
-                        s_close = float(df_curr['close'].iloc[sub_len_s - 1])
-                        s_prev = float(df_curr['close'].iloc[sub_len_s - 2])
-                        s_pct = (s_close - s_prev) / s_prev * 100
-                        print(f"   Date: {date_s}, Close: {s_close}, PrevClose: {s_prev}, Pct: {s_pct:.2f}%")
-                print(f"has_big_surge calculated as: {has_big_surge}, has_breakout_touch (pbreak_15d): {has_breakout_touch}")
-                
-            # 👑 SWS 黄金盈利上升带 + MA20 主力昂头 + 盈利带活性 + 主力线尊严 + 强庄大阳线拉升 + 前期大突破门禁：
-            # 1. SWS 支撑重心上移
-            # 2. MA20 主力生命线必须保持向上倾斜
-            # 3. 过去 12 天内有过 4.0% 以上的明确资金拉升盈利带
-            # 4. 收盘价必须死守在 20日中期主力生命线之上（close >= ma20 * 0.995）
-            # 5. 过去 15 天内必须有过至少一根大阳线（>= 6.8%）的强庄建仓启动信号
-            # 6. 过去 15 天内必须触碰或突破过 30日最高点 hmax，彻底排除无突围多头基因的阴跌品种！
             is_profit_band = (sws >= sws_prev5 * 1.002) and (ma20 >= ma20_prev5 * 1.001) and is_active_profit_band and (close >= ma20 * 0.995) and has_big_surge and has_breakout_touch
                 
             upper = float(row.get("upper", 0.0))
@@ -207,14 +198,9 @@ def run_backtest_for_code(code: str, name: str):
                 else:
                     upper = close * 1.10
             
-            # 缩量判定：当日量低于 5 日均量的 90%
             vol_curr = float(df_curr['vol'].iloc[-1])
-            vol_prev1 = float(df_curr['vol'].iloc[-2]) if len(df_curr) >= 2 else vol_curr
-            vol_prev2 = float(df_curr['vol'].iloc[-3]) if len(df_curr) >= 3 else vol_prev1
-            
             vol_shrink_3d = (vol_curr < vol_ma5 * 0.90)
             
-            # 计算十字星/均线企稳K线特征
             open_p = float(row.get("open", close))
             high_p = float(row.get("high", close))
             low_p = float(row.get("low", close))
@@ -227,14 +213,9 @@ def run_backtest_for_code(code: str, name: str):
             else:
                 is_doji = True
             
-            # 👑 SWS 支撑回踩判定：最低价踩在 SWS 支撑线附近，且收盘稳定在 SWS 之上，并具备黄金上扬盈利带
             low_price = float(df_curr['low'].iloc[-1])
             is_pullback_support = (low_price <= sws * 1.015) and (close >= sws * 0.985)
             
-            if code == "603533" and current_date in ["2026-04-24", "2026-05-12"]:
-                print(f"[DEBUG SWS CHECK FOR 603533 on {current_date}] close={close:.2f} sws={sws:.2f}, sws_prev5={sws_prev5:.2f}, is_profit_band={is_profit_band}")
-            
-            # 👑 筹码收集期判定 (第一买点特征)：过去 8 天内，至少有 2 天的收盘价或最高价非常贴近或突破布林上轨
             recent_8 = df_curr.tail(8)
             touch_upper_days = 0
             for idx in range(len(recent_8)):
@@ -255,7 +236,6 @@ def run_backtest_for_code(code: str, name: str):
                     touch_upper_days += 1
             is_collecting_stage = (touch_upper_days >= 2)
             
-            # 👑 洗盘整固期判定 (第二买点特征)：过去 15 天内有过快速上涨（最大涨幅曾 >= 12%），随后股价回落，且并未跌破 SWS
             recent_15 = df_curr.tail(15)
             min_close_15 = float(recent_15['close'].min())
             max_close_15 = float(recent_15['close'].max())
@@ -273,7 +253,6 @@ def run_backtest_for_code(code: str, name: str):
             is_doji = False
             vol_curr = 200000.0
 
-        # 实时更新 tracker 的洗盘最低价以进行低位企稳判定
         reentry_tracker.update_price(code, close)
 
         if has_position:
@@ -282,7 +261,6 @@ def run_backtest_for_code(code: str, name: str):
             pnl_pct = (close - entry_price) / entry_price * 100
             low_price = float(df_curr['low'].iloc[-1])
 
-            # 组装模拟持仓决策行情信号，用于触发大止盈或 T+2 时间保护出局
             sig = StrategySignal(
                 code=code,
                 name=name,
@@ -313,7 +291,12 @@ def run_backtest_for_code(code: str, name: str):
                     "upper": upper,
                     "max_pnl_since_entry": (max_high_since_entry - entry_price) / entry_price * 100.0 if entry_price > 0.0 else 0.0,
                     "sws": sws,
+                    "sws_prev5": sws_prev5,
+                    "swl": swl,
                     "vol_ma5": vol_ma5,
+                    "ma10d": ma10d,
+                    "ma10d_prev5": ma10d_prev5,
+                    "ma5d": ma5d,
                     "regime": "SWING_LOW_BUY" if is_swing_low_mode else "BREAKOUT_ALLOWED",
                     "tp_triggered": tp_triggered,
                     "is_swing_low_mode": is_swing_low_mode,
@@ -323,10 +306,6 @@ def run_backtest_for_code(code: str, name: str):
 
             intent = decide(sig, "IN_TRADE")
             
-            # 💡 弹性大格局防守判定：
-            # 1. 👑 如果是低吸持仓，死守 SWS 支撑线防线不变，绝对不主动上提移动止损，避免假摔洗盘！
-            # 2. 浮盈未拉开身位 (未超 8.0%) 时，保持初始止损 trailing_stop 不变；
-            # 3. 浮盈拉开身位 (>= 8.0%) 后，开启 10% 黄金洗盘宽垫防护 (max_high * 0.90)；
             if is_swing_low_mode:
                 current_stop = trailing_stop
             elif pnl_pct < 8.0:
@@ -338,38 +317,54 @@ def run_backtest_for_code(code: str, name: str):
             if intent.action == "SELL" and intent.size_pct == 0.70:
                 if not tp_triggered:
                     tp_triggered = True
+                    tp_count += 1
                     locked_pnl += pnl_pct * 0.70
-                    print(f"[DATE: {current_date}] 收盘价: {close:.2f} | 👑 [TAKE-PROFIT EVENT] 满足大周期/平台顶向上强力突破，触发逆向分批大止盈！")
-                    print(f"   -> 锁定 70% 仓位高位浮盈: +{pnl_pct:.2f}% | 剩余 30% 仓位轻仓留守大格局奔跑...")
-                else:
-                    # 已止盈过，剩余仓位只受移动止损保护
-                    pass
+                    log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 👑 [TAKE-PROFIT EVENT] 满足大周期/平台顶向上强力突破，触发逆向分批大止盈！")
+                    log(f"   -> 锁定 70% 仓位高位浮盈: +{pnl_pct:.2f}% | 剩余 30% 仓位轻仓留守大格局奔跑...")
+                    
+                    if tp_count == 1:
+                        trade_events.append(
+                            f"减仓：{current_date} 大涨且伴随成交量急剧放大（大于 5 日均量 {vol_curr/vol_ma5:.1f} 倍），精准触发 [TAKE-PROFIT EVENT] 大止盈 70% 锁定利润，价格 {close:.2f} 元。"
+                        )
+                    else:
+                        trade_events.append(
+                            f"二次大止盈：{current_date} 暴拉至 {close:.2f} 元最高位时再次触发 70% 大止盈锁定超级利润。"
+                        )
                 continue
 
             # 💡 黄金低吸回补仓位判定 (Re-entry Add Back 70%)：
             if intent.action == "ADD" and intent.size_pct == 0.70:
                 old_entry_price = entry_price
                 entry_price = (old_entry_price * 0.30 + close * 0.70)
-                tp_triggered = False  # 标志重置，持仓满仓运行！
-                locked_pnl = 0.0      # 已经重新满仓，重置锁定利润以新成本重新计算
+                tp_triggered = False
+                locked_pnl = 0.0
                 trailing_stop = intent.stop_price if intent.stop_price else (sws * 0.985)
                 current_stop = trailing_stop
                 max_high_since_entry = max(max_high_since_entry, close)
-                print(f"[DATE: {current_date}] 收盘价: {close:.2f} | 🌟 [ADD-BACK EVENT] 满足龙头回踩 SWS 支撑且缩量洗盘，大止盈的 70% 仓位补回！重新满仓运行！")
-                print(f"   -> 原持仓均价: {old_entry_price:.2f} 元 | 补回价格: {close:.2f} 元 | 加权新持仓均价: {entry_price:.2f} 元 | 新 SWS 防线: {current_stop:.2f} 元")
+                log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 🌟 [ADD-BACK EVENT] 满足龙头回踩 SWS 支撑且缩量洗盘，大止盈的 70% 仓位补回！重新满仓运行！")
+                log(f"   -> 原持仓均价: {old_entry_price:.2f} 元 | 补回价格: {close:.2f} 元 | 加权新持仓均价: {entry_price:.2f} 元 | 新 SWS 防线: {current_stop:.2f} 元")
+                
+                trade_events.append(
+                    f"回补：{current_date} 回踩洗盘 {close:.2f} 元且成交量萎缩，精准触发 [ADD-BACK] 补回 70% 筹码，加权拉平成本至 {entry_price:.2f} 元。"
+                )
                 continue
 
             # B. T+2时间不及预期风控出局 ── 100% 平仓
             elif intent.action == "SELL" and intent.reason.setup == "T+2_EXPECTATION_FAIL":
                 final_pnl = (locked_pnl + pnl_pct * 0.30) if tp_triggered else pnl_pct
-                print(f"[DATE: {current_date}] 收盘价: {close:.2f} | ⏰ [TIME-LIMIT FAILSAFE] 买入满 2 日不及预期冲高就走！触发平仓退场。")
-                print("=" * 80)
-                print(f"[RE-ENTRY POSITIONS TRANSACTION COMPLETED]")
-                print(f"-> 交易个股: {name} ({code})")
-                print(f"-> 出局日期: {current_date} (T+{days_held})")
-                print(f"-> 重新买入价格: {entry_price:.2f} 元 | 平仓价格: {close:.2f} 元")
-                print(f"-> 🎯 逆向大师策略斩获最终综合盈亏率: {final_pnl:+.2f}% (大止盈已锁定)")
-                print("=" * 80 + "\n")
+                log(f"[DATE: {current_date}] 收盘价: {close:.2f} | ⏰ [TIME-LIMIT FAILSAFE] 买入满 2 日不及预期冲高就走！触发平仓退场。")
+                log("=" * 80)
+                log(f"[RE-ENTRY POSITIONS TRANSACTION COMPLETED]")
+                log(f"-> 交易个股: {name} ({code})")
+                log(f"-> 出局日期: {current_date} (T+{days_held})")
+                log(f"-> 重新买入价格: {entry_price:.2f} 元 | 平仓价格: {close:.2f} 元")
+                log(f"-> 🎯 逆向大师策略斩获最终综合盈亏率: {final_pnl:+.2f}% (大止盈已锁定)")
+                log("=" * 80 + "\n")
+                
+                trade_events.append(
+                    f"清仓平仓：{current_date} 触发 T+2 时间保护，不及预期冲高就走平仓退场，平仓价 {close:.2f} 元，综合盈亏率: {final_pnl:+.2f}%。"
+                )
+                
                 has_position = False
                 tp_triggered = False
                 locked_pnl = 0.0
@@ -381,14 +376,19 @@ def run_backtest_for_code(code: str, name: str):
             elif close < current_stop or (intent.action == "SELL" and intent.size_pct == 1.00):
                 final_pnl = (locked_pnl + pnl_pct * 0.30) if tp_triggered else pnl_pct
                 trigger_stop_val = current_stop if close < current_stop else close
-                print(f"[DATE: {current_date}] 收盘价: {close:.2f} | 🚨 跌破防守线 {trigger_stop_val:.2f} 元或触发破位！触发物理平仓出局。")
-                print("=" * 80)
-                print(f"[RE-ENTRY POSITIONS TRANSACTION COMPLETED]")
-                print(f"-> 交易个股: {name} ({code})")
-                print(f"-> 出局日期: {current_date}")
-                print(f"-> 重新买入价格: {entry_price:.2f} 元 | 平仓价格: {close:.2f} 元")
-                print(f"-> 🎯 逆向大师策略斩获最终综合盈亏率: {final_pnl:+.2f}%")
-                print("=" * 80 + "\n")
+                log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 🚨 跌破防守线 {trigger_stop_val:.2f} 元或触发破位！触发物理平仓出局。")
+                log("=" * 80)
+                log(f"[RE-ENTRY POSITIONS TRANSACTION COMPLETED]")
+                log(f"-> 交易个股: {name} ({code})")
+                log(f"-> 出局日期: {current_date}")
+                log(f"-> 重新买入价格: {entry_price:.2f} 元 | 平仓价格: {close:.2f} 元")
+                log(f"-> 🎯 逆向大师策略斩获最终综合盈亏率: {final_pnl:+.2f}%")
+                log("=" * 80 + "\n")
+                
+                trade_events.append(
+                    f"止损平仓：{current_date} 跌破防守线 {trigger_stop_val:.2f} 元，触发物理清仓出局，平仓价 {close:.2f} 元，最终盈亏率: {final_pnl:+.2f}%。"
+                )
+                
                 has_position = False
                 tp_triggered = False
                 locked_pnl = 0.0
@@ -396,7 +396,7 @@ def run_backtest_for_code(code: str, name: str):
                 reentry_tracker.register_exit(code, close, exit_time=f"{current_date} 15:00:00")
             else:
                 current_held_pnl = (locked_pnl + pnl_pct * 0.30) if tp_triggered else pnl_pct
-                print(f"[DATE: {current_date}] 收盘价: {close:.2f} | 💼 持续持仓中，综合收益: {current_held_pnl:+.2f}% | 弹性动态止损线: {current_stop:.2f} 元")
+                log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 💼 持续持仓中，综合收益: {current_held_pnl:+.2f}% | 弹性动态止损线: {current_stop:.2f} 元")
             continue
 
         # 组装模拟盘中行情信号，进行开仓判定
@@ -429,29 +429,23 @@ def run_backtest_for_code(code: str, name: str):
                 "upper": upper,
                 "max_pnl_since_entry": 0.0,
                 "sws": sws,
+                "sws_prev5": sws_prev5,
+                "swl": swl,
                 "vol_ma5": vol_ma5,
+                "ma10d": ma10d,
+                "ma10d_prev5": ma10d_prev5,
+                "ma5d": ma5d,
                 "tp_triggered": tp_triggered,
                 "is_swing_low_mode": is_swing_low_mode,
                 "raw_reason": "逐日回溯模拟信号"
             }
         )
 
-        # 决策引擎进行判定
         intent = decide(sig, "FLAT")
 
         is_reentry_triggered = getattr(intent, "is_reentry_signal", False)
         reentry_reason_str = getattr(intent.reason, "reentry_reason", "")
-        
-        # 判断是右侧 Re-entry 激活还是左侧缩量回踩均线低吸建仓
         is_swing_low_triggered = (intent.action == "BUY" and intent.reason.regime == "SWING_LOW_BUY")
-
-        if code == "002156" and current_date in ["2026-04-27", "2026-04-28", "2026-04-29", "2026-05-06", "2026-05-18"]:
-            print(f"--- [DIAGNOSTIC 002156 on {current_date}] ---")
-            print(f"    close={close:.2f}, low={low_price:.2f}, sws={sws:.2f}, sws_prev5={sws_prev5:.2f}")
-            print(f"    vol_shrink_3d={vol_shrink_3d}, is_pullback_support={is_pullback_support}")
-            print(f"    is_profit_band={is_profit_band} (sws_up={sws >= sws_prev5 * 1.002}, ma20_up={ma20 >= ma20_prev5 * 1.001}, active_band={is_active_profit_band}, close_above_ma20={close >= ma20 * 0.995}, has_big_surge={has_big_surge}, has_breakout_touch={has_breakout_touch})")
-            print(f"    is_collecting_stage={is_collecting_stage}, is_consolidation_stage={is_consolidation_stage}")
-            print(f"    intent.action={intent.action}, intent.reason.regime={intent.reason.regime}")
 
         if is_reentry_triggered or is_swing_low_triggered:
             activated_date = current_date
@@ -464,42 +458,75 @@ def run_backtest_for_code(code: str, name: str):
             is_swing_low_mode = is_swing_low_triggered
             has_position = True
 
-            print("\n" + "*" * 80)
+            log("\n" + "*" * 80)
             if is_swing_low_triggered:
-                print(f"[SWING-LOW BUY TRIGGERED SUCCESS!]")
-                print(f"-> 触发个股: {name} ({code})")
-                print(f"-> 触发日期: {current_date}")
-                print(f"-> 激活原因: 👑 支撑低吸：{intent.reason.setup}")
+                log(f"[SWING-LOW BUY TRIGGERED SUCCESS!]")
+                log(f"-> 触发个股: {name} ({code})")
+                log(f"-> 触发日期: {current_date}")
+                log(f"-> 激活原因: 👑 支撑低吸：{intent.reason.setup}")
+                
+                trade_events.append(
+                    f"建仓：{current_date} 识别到缩量踩工作线，触发买入 {close:.2f} 元。"
+                )
             else:
-                print(f"[RE-ENTRY ALERT TRIGGERED SUCCESS!]")
-                print(f"-> 触发个股: {name} ({code})")
-                print(f"-> 触发日期: {current_date} (距离止损平仓仅 {i - stop_idx} 个交易日)")
-                print(f"-> 激活原因: {reentry_reason_str}")
-            print(f"-> 决策动作: {intent.action} | 阶梯底仓仓位分配: {intent.size_pct * 100:.1f}%")
-            print(f"-> 动态止损价设定: {intent.stop_price:.2f} 元")
-            print(f"-> 最终共振置信度: {intent.confidence:.4f}")
-            print("*" * 80 + "\n")
+                log(f"[RE-ENTRY ALERT TRIGGERED SUCCESS!]")
+                log(f"-> 触发个股: {name} ({code})")
+                log(f"-> 触发日期: {current_date} (距离止损平仓仅 {i - stop_idx} 个交易日)")
+                log(f"-> 激活原因: {reentry_reason_str}")
+                
+                trade_events.append(
+                    f"建仓：{current_date} 满足 Re-entry 右侧突破信号，触发买入 {close:.2f} 元。"
+                )
+            log(f"-> 决策动作: {intent.action} | 阶梯底仓仓位分配: {intent.size_pct * 100:.1f}%")
+            log(f"-> 动态止损价设定: {intent.stop_price:.2f} 元")
+            log(f"-> 最终共振置信度: {intent.confidence:.4f}")
+            log("*" * 80 + "\n")
         else:
-            print(f"[DATE: {current_date}] 收盘价: {close:.2f} | high4: {high4:.2f} | hmax: {hmax:.2f} | low60: {low60:.2f} | pbreak: {pbreak} | Re-entry 触发: [KEEP OBSERVING] 保持观察")
+            log(f"[DATE: {current_date}] 收盘价: {close:.2f} | high4: {high4:.2f} | hmax: {hmax:.2f} | low60: {low60:.2f} | pbreak: {pbreak} | Re-entry 触发: [KEEP OBSERVING] 保持观察")
 
     if has_position:
-        # 如果直到回测最后一天仍在持仓
         pnl_pct = (close - entry_price) / entry_price * 100
         final_pnl = (locked_pnl + pnl_pct * 0.30) if tp_triggered else pnl_pct
-        print("=" * 80)
-        print(f"[RE-ENTRY HELD UNTIL TODAY - STATUS]")
-        print(f"-> 交易个股: {name} ({code})")
-        print(f"-> 截止今天: {df_calendar.index[-1]}")
-        print(f"-> 重新买入价格: {entry_price:.2f} 元 | 今日最新收盘: {close:.2f} 元")
-        print(f"-> 🎯 依然持仓躺赢中！综合已实现+账面浮盈盈亏: {final_pnl:+.2f}%")
-        print("=" * 80 + "\n")
+        log("=" * 80)
+        log(f"[RE-ENTRY HELD UNTIL TODAY - STATUS]")
+        log(f"-> 交易个股: {name} ({code})")
+        log(f"-> 截止今天: {df_calendar.index[-1]}")
+        log(f"-> 重新买入价格: {entry_price:.2f} 元 | 今日最新收盘: {close:.2f} 元")
+        log(f"-> 🎯 依然持仓躺赢中！综合已实现+账面浮盈盈亏: {final_pnl:+.2f}%")
+        log("=" * 80 + "\n")
+        
+        trade_events.append(
+            f"持仓至今：{df_calendar.index[-1]} 最新价 {close:.2f} 元，综合已实现+账面盈亏: {final_pnl:+.2f}%。"
+        )
 
     if not activated_date:
-        print(f"\nℹ️ 标的 {code} 在观察期内行情尚未确立，继续在池中保持观察洗盘深度。\n")
+        log(f"\nℹ️ 标的 {code} 在观察期内行情尚未确立，继续在池中保持观察洗盘深度。\n")
+        trade_events.append(f"观察：在观察期内行情尚未确立，继续在池中保持观察洗盘深度。")
+
+    # 👑 生成最后的“整体报告”
+    log("\n" + "=" * 80, is_detail=False)
+    log(f"👑 【Re-entry 历史回测整体报告】 - {name} ({code})", is_detail=False)
+    log("=" * 80, is_detail=False)
+    if trade_events:
+        for idx, ev in enumerate(trade_events, 1):
+            log(f"{idx}. {ev}", is_detail=False)
+    else:
+        log("（未触发任何实质交易动作）", is_detail=False)
+    log("=" * 80 + "\n", is_detail=False)
+
+    return output.getvalue()
+
+def run_backtest_for_code(code: str, name: str):
+    """供命令行直接执行输出"""
+    from JohnsonUtil.commonTips import timed_ctx
+    with timed_ctx(f"Re-entry Backtest {code}", warn_ms=300):
+        report = run_backtest_and_get_report(code, name)
+    print(report)
 
 if __name__ == "__main__":
     # 执行测试用户指定的个股：蓝色光标 (300058)
     run_backtest_for_code("300058", "蓝色光标")
+    run_backtest_for_code("301071", "力量钻石")
     
     # 👑 同时测试通富微电 (002156)，展示筹码收集期回踩与大涨回落 SWS 整固两段大师低吸策略的极致效果
     run_backtest_for_code("002156", "通富微电")

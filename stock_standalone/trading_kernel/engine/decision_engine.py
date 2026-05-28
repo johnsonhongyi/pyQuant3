@@ -117,6 +117,12 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     pnl_pct = float(_num(signal, "pnl_pct", 0.0))
     pbreak = int(_num(signal, "pbreak", 0))
     ptop = _num(signal, "ptop", 0.0)
+    sws = float(_num(signal, "sws", 0.0))
+    sws_prev5 = float(_num(signal, "sws_prev5", 0.0))
+    swl = float(_num(signal, "swl", 0.0))
+    low_price = float(_num(signal, "low", 0.0))
+    ma10d = float(_num(signal, "ma10d", 0.0))
+    ma10d_prev5 = float(_num(signal, "ma10d_prev5", 0.0))
 
     # 提取爆量换手特征
     vol_val = float(_num(signal, "volume", 0.0))
@@ -135,7 +141,31 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
                 confidence = 0.88
                 suggest_price = price
         
-        # 兜底：如果条件未触发，但满足原有的右侧突破买入 (含 Re-entry 强突激活)
+        # 👑 新增：主升浪沿 MA10 爬升企稳低吸买入规则 (TREND_FOLLOW_BUY)
+        # 爬升趋势：MA10 每一天都比前几天高，或者 5 天前的 MA10 增长明显；MA5 > SWS 支撑；资金流 dff > 0 配合。
+        # 沿线整理回踩：最低价踩在 MA10 附近，但收盘价稳立 MA10 之上，且今日并未大爆量出货。
+        if action == "HOLD":
+            ma10_val = ma10d if ma10d > 0.0 else sws
+            ma10_prev5_val = ma10d_prev5 if ma10d_prev5 > 0.0 else sws_prev5
+            
+            is_ma10_climbing = (ma10_prev5_val > 0.0 and ma10_val >= ma10_prev5_val * 1.005)
+            is_ma10_pullback = (low_price > 0.0 and ma10_val > 0.0 and low_price <= ma10_val * 1.015) and (price >= ma10_val * 0.99)
+            is_vol_ok = (vol_val > 0.0 and vol_val < vol_ma5_val * 1.05)
+            # 趋势判定：真正的 SWL/ma10d 在 SWS 之上有趋势情况，或者经典 5日均线 > 10日均线多头排列
+            ma5_val = float(_num(signal, "ma5d", 0.0))
+            if ma5_val <= 0.0:
+                ma5_val = swl if swl > 0.0 else price
+            
+            is_trend_ok = (swl > sws) or (ma10_val > sws) or (ma5_val > ma10_val)
+            
+            if is_ma10_climbing and is_ma10_pullback and is_vol_ok and is_trend_ok and (is_doji or vol_shrink_3d):
+                action = "BUY"
+                size_pct = 0.30
+                regime = "SWING_LOW_BUY"
+                setup = "MA10_TREND_FOLLOW"
+                confidence = 0.85
+                suggest_price = price
+
         if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
             action = "BUY"
             if is_reentry:

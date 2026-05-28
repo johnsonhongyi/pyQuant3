@@ -1652,7 +1652,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         code = item_id
         vals = tree.item(item_id, "values")
         if vals:
-            c = str(vals[0]).strip()
+            if hasattr(self, '_log_tree') and tree == self._log_tree:
+                c = str(vals[2]).strip() if len(vals) > 2 else ""
+            else:
+                c = str(vals[0]).strip()
             c = re.sub(r'[^\d]', '', c).zfill(6)
             if c:
                 code = c
@@ -1719,6 +1722,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         title_dna = f"🧬 执行 DNA 审计 ({len(sel)}只...)" if len(sel) > 1 else f"🧬 执行 DNA 审计"
         menu.add_command(label=title_dna, command=self._run_dna_audit_selected)
+
+        # 🔍 新增：Re-entry 历史回测入口
+        menu.add_separator()
+        menu.add_command(
+            label=f"🔍 运行 Re-entry 历史回测 ({code})",
+            command=lambda: self._on_run_reentry_backtest_menu(code)
+        )
 
         menu.post(event.x_root, event.y_root)
     def quick_apply_concept_filter(self, concept: str):
@@ -2183,7 +2193,13 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
                         command=lambda c=cat: self.parent_win.quick_apply_concept_filter(c)
                     )
 
+        # 🔍 新增：Re-entry 历史回测入口
         menu.add_separator()
+        menu.add_command(
+            label=f"🔍 运行 Re-entry 历史回测 ({code})",
+            command=lambda: self.parent_win._on_run_reentry_backtest_menu(code)
+        )
+
         menu.post(event.x_root, event.y_root)
 
     def _on_double_click(self, event):
@@ -2772,9 +2788,11 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._log_tree.pack(side="left", fill="both", expand=True)
     log_vsb.pack(side="right", fill="y")
 
-    # 绑定持仓与流水表格的单元格单选选中联动事件
+    # 绑定持仓与流水表格的单元格单选选中联动事件与右键菜单
     self._pos_tree.bind("<<TreeviewSelect>>", self._on_pos_selected)
     self._log_tree.bind("<<TreeviewSelect>>", self._on_log_selected)
+    self._pos_tree.bind("<Button-3>", self.show_context_menu)
+    self._log_tree.bind("<Button-3>", self.show_context_menu)
 
     # [NEW] 启动决策树行慢闪烁呼吸灯定时器
     self._schedule_kernel_blink()
@@ -4267,6 +4285,196 @@ def _on_one_key_self_heal(self):
 
 StockSelectionWindow.show_decision_tab       = show_decision_tab
 StockSelectionWindow._on_one_key_self_heal   = _on_one_key_self_heal
+
+class BacktestReportDialog(tk.Toplevel, WindowMixin):
+    """Re-entry 历史回测报告详情弹窗，利用 WindowMixin 实现窗口位置和大小的跨会话持久化"""
+    def __init__(self, parent, code: str, name: str, report: str):
+        super().__init__(parent)
+        self.parent_win = parent
+        self.code = code
+        self.name = name
+        self.report = report
+        self.scale_factor = getattr(parent, 'scale_factor', 1.0)
+        
+        self.title(f"🔍 Re-entry 历史回测报告 - {name} ({code})")
+        self.configure(bg="#0c101b")
+        
+        # 加载窗口大小与位置（持久化）
+        self.load_window_position(self, "Reentry回测报告详情", default_width=780, default_height=580)
+        
+        self._init_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Escape>", lambda event: self._on_close())
+
+    def _init_ui(self):
+        # 顶部 Frame
+        self.top_frame = tk.Frame(self, bg="#111726", pady=8)
+        self.top_frame.pack(fill="x")
+        
+        self.title_label = tk.Label(
+            self.top_frame, text=f"📊 【Re-entry 历史回测整体报告】 - {self.name} ({self.code})",
+            bg="#111726", fg="#66ffcc", font=("Arial", 12, "bold")
+        )
+        self.title_label.pack(side="left", padx=15)
+        
+        tk.Button(
+            self.top_frame, text="✕ 关闭", bg="#3a1a1a", fg="#ff5555",
+            font=("Arial", 9, "bold"), relief="flat", padx=10,
+            command=self._on_close
+        ).pack(side="right", padx=15)
+        
+        text_frame = tk.Frame(self, bg="#0c101b")
+        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 极窄滚动条配置（使用标准 tk.Scrollbar 规避不同平台下 ttk 样式加载 Layout 缺失的问题）
+        scrollbar = tk.Scrollbar(
+            text_frame, 
+            width=8, 
+            borderwidth=0, 
+            highlightthickness=0, 
+            bg="#222b45", 
+            activebackground="#333f63", 
+            troughcolor="#0c101b", 
+            elementborderwidth=0
+        )
+        scrollbar.pack(side="right", fill="y")
+        
+        self.text_area = tk.Text(
+            text_frame, bg="#0c1220", fg="#eeeeee", insertbackground="white",
+            selectbackground="#005BB7", selectforeground="white",
+            font=("Consolas", 10), yscrollcommand=scrollbar.set, wrap="word", bd=0
+        )
+        self.text_area.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.text_area.yview)
+        
+        self.text_area.insert("1.0", self.report)
+        self.text_area.config(state="disabled")
+        
+        self.text_area.tag_configure("highlight_buy", foreground="#66ffcc", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_tp", foreground="#ffb833", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_sell", foreground="#ff7777", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_reentry", foreground="#55ffff", font=("Consolas", 10, "bold"))
+        
+        self._apply_highlights()
+
+    def _apply_highlights(self):
+        def highlight_pattern(pattern, tag):
+            start = "1.0"
+            while True:
+                pos = self.text_area.search(pattern, start, stopindex="end")
+                if not pos:
+                    break
+                line, char = pos.split('.')
+                end_pos = f"{line}.{int(char) + len(pattern)}"
+                self.text_area.tag_add(tag, pos, end_pos)
+                start = end_pos
+        
+        self.text_area.config(state="normal")
+        highlight_pattern("BUY", "highlight_buy")
+        highlight_pattern("建仓：", "highlight_buy")
+        highlight_pattern("回补：", "highlight_buy")
+        highlight_pattern("[ADD-BACK]", "highlight_buy")
+        highlight_pattern("SELL", "highlight_sell")
+        highlight_pattern("减仓：", "highlight_tp")
+        highlight_pattern("[TAKE-PROFIT EVENT]", "highlight_tp")
+        highlight_pattern("二次大止盈：", "highlight_tp")
+        highlight_pattern("清仓平仓：", "highlight_sell")
+        highlight_pattern("止损平仓：", "highlight_sell")
+        highlight_pattern("Re-entry", "highlight_reentry")
+        self.text_area.config(state="disabled")
+
+    def update_report(self, code: str, name: str, report: str):
+        """[新增] 支持动态刷新内容，避免重复创建多个 TopLevel 窗口"""
+        self.code = code
+        self.name = name
+        self.report = report
+        
+        self.title(f"🔍 Re-entry 历史回测报告 - {name} ({code})")
+        self.title_label.config(text=f"📊 【Re-entry 历史回测整体报告】 - {name} ({code})")
+        
+        self.text_area.config(state="normal")
+        self.text_area.delete("1.0", "end")
+        self.text_area.insert("1.0", report)
+        self.text_area.config(state="disabled")
+        
+        self._apply_highlights()
+
+    def _on_close(self):
+        # 关闭时保存窗口位置大小
+        self.save_window_position(self, "Reentry回测报告详情")
+        self.destroy()
+
+def _on_run_reentry_backtest_menu(self, code: str):
+    """[新增] 右键菜单触发 Re-entry 模拟交易回测，并使用精美独立弹窗非阻塞展示结论"""
+    try:
+        name = "未知股票"
+        if self.selector and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None:
+            rt_all = self.selector.df_all_realtime
+            if code in rt_all.index:
+                name = rt_all.loc[code].get('name', name)
+        
+        if name == "未知股票" and hasattr(self, 'df_full_candidates') and self.df_full_candidates is not None:
+            sub_df = self.df_full_candidates[self.df_full_candidates['code'] == code]
+            if not sub_df.empty:
+                name = sub_df.iloc[0].get('name', name)
+
+        import threading
+        from scratch.test_reentry_backtest import run_backtest_and_get_report
+        
+        progress_win = tk.Toplevel(self)
+        progress_win.title("📡 正在计算")
+        progress_win.geometry("300x120")
+        progress_win.configure(bg="#0c101b")
+        progress_win.resizable(False, False)
+        progress_win.attributes("-topmost", True)
+        
+        progress_win.update_idletasks()
+        w = 300
+        h = 120
+        x = self.winfo_x() + (self.winfo_width() - w) // 2
+        y = self.winfo_y() + (self.winfo_height() - h) // 2
+        progress_win.geometry(f"{w}x{h}+{x}+{y}")
+        
+        tk.Label(
+            progress_win, 
+            text=f"正在对 【{name} ({code})】\n进行 Re-entry 历史回测分析...",
+            bg="#0c101b", fg="#55ffff", font=("Arial", 11, "bold"), pady=15
+        ).pack()
+        
+        lbl_status = tk.Label(
+            progress_win, text="请稍候，抓取通达信历史数据并计算特征...",
+            bg="#0c101b", fg="#888888", font=("Arial", 9)
+        )
+        lbl_status.pack()
+
+        def run_task():
+            try:
+                # 仅获取整体总结报告结果
+                report = run_backtest_and_get_report(code, name, only_report=True)
+                self.after(0, lambda: [progress_win.destroy(), self._show_backtest_report_window(code, name, report)])
+            except Exception as ex:
+                logger.error(f"Error running backtest: {ex}")
+                self.after(0, lambda: [progress_win.destroy(), messagebox.showerror("计算失败", f"回测计算发生异常: {ex}")])
+                
+        threading.Thread(target=run_task, daemon=True).start()
+        
+    except Exception as e:
+        logger.error(f"Error in _on_run_reentry_backtest_menu: {e}")
+
+def _show_backtest_report_window(self, code: str, name: str, report: str):
+    """[新增] 显示并复用精美的 Re-entry 模拟交易回测报告窗口"""
+    try:
+        if hasattr(self, '_backtest_dialog') and self._backtest_dialog and self._backtest_dialog.winfo_exists():
+            self._backtest_dialog.update_report(code, name, report)
+            self._backtest_dialog.deiconify()
+            self._backtest_dialog.focus_force()
+        else:
+            self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+    except Exception as e:
+        logger.error(f"Error showing backtest report window: {e}")
+
+StockSelectionWindow._on_run_reentry_backtest_menu = _on_run_reentry_backtest_menu
+StockSelectionWindow._show_backtest_report_window  = _show_backtest_report_window
 
 
 # ── 实时决策下半区持仓与流水表格个股联动方法 ───────────────────────────────────────────
