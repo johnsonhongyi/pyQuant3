@@ -163,9 +163,10 @@ class JsonlJournal:
                 self._written_records.add(key)
 
         try:
+            trimmed_payload = _trim_record(payload)
             with self._lock:
                 with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+                    fh.write(json.dumps(_to_plain(trimmed_payload), ensure_ascii=False, sort_keys=True) + "\n")
                 
                 # 每次物理追加新记录后，自动触发高性能日志体积安全监控与压缩归档
                 self._check_and_compress_journal()
@@ -177,13 +178,13 @@ class JsonlJournal:
                 pass
 
     def _check_and_compress_journal(self) -> None:
-        """高性能无损日志自动压缩归档引擎：若日志文件超过 5MB，自动将旧记录打包压缩归档，保留最新 1000 行以确保 UI 稳定"""
+        """高性能无损日志自动压缩归档与滚动清理引擎：若日志文件超过 2MB，自动将旧记录打包压缩归档，保留最新 1000 行，且只保留最新的 10 个归档包以防磁盘膨胀"""
         try:
             if not os.path.exists(self.path):
                 return
             file_size = os.path.getsize(self.path)
-            # 设定 5MB 为阈值 (5 * 1024 * 1024)
-            if file_size < 5 * 1024 * 1024:
+            # 设定 2MB 为阈值 (2 * 1024 * 1024)
+            if file_size < 2 * 1024 * 1024:
                 return
 
             import gzip
@@ -200,7 +201,10 @@ class JsonlJournal:
             archive_lines = lines[:-1000]
             
             # 2. 导出归档历史并生成高压 gzip 文件
-            archive_dir = os.path.dirname(self.path)
+            parent_dir = os.path.dirname(self.path)
+            archive_dir = os.path.join(parent_dir, "archive")
+            if not os.path.exists(archive_dir):
+                os.makedirs(archive_dir, exist_ok=True)
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
             archive_filename = f"trading_kernel_trace_{timestamp_str}.jsonl.gz"
             archive_path = os.path.join(archive_dir, archive_filename)
@@ -215,9 +219,25 @@ class JsonlJournal:
                 
             os.replace(temp_path, self.path)
             
+            # 4. 自动滚动清理历史归档文件，只保留最新的 10 个压缩包
+            import glob
+            archive_pattern = os.path.join(archive_dir, "trading_kernel_trace_*.jsonl.gz")
+            archive_files = glob.glob(archive_pattern)
+            # 按修改时间从旧到新排序
+            archive_files.sort(key=lambda x: os.path.getmtime(x))
+            
+            max_archives = 10
+            if len(archive_files) > max_archives:
+                to_delete = archive_files[:-max_archives]
+                for file_to_del in to_delete:
+                    try:
+                        os.remove(file_to_del)
+                    except Exception:
+                        pass
+            
             try:
                 import logging
-                logging.getLogger().info(f"⚡ [JsonlJournal] Compression success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines.")
+                logging.getLogger().info(f"⚡ [JsonlJournal] Compression and cleanup success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines, total archives capped at {max_archives}.")
             except Exception:
                 pass
         except Exception as e_comp:
@@ -236,5 +256,52 @@ def _to_plain(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_to_plain(v) for v in value]
     return value
+
+
+def _trim_record(rec: dict[str, Any]) -> dict[str, Any]:
+    """精炼与裁剪单行交易日志数据，在不影响 UI 渲染与决策回放的前提下剔除冗余调试字段"""
+    if not isinstance(rec, dict):
+        return rec
+    if rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT":
+        return rec
+        
+    trimmed = {}
+    for k, v in rec.items():
+        if k in ("signal", "trace", "intent", "risk", "kernel_result", "kernel_reason"):
+            if isinstance(v, dict):
+                trimmed[k] = _trim_dict(v)
+            else:
+                trimmed[k] = v
+        else:
+            trimmed[k] = v
+    return trimmed
+
+
+def _trim_dict(d: dict[str, Any]) -> dict[str, Any]:
+    res = {}
+    for k, v in d.items():
+        # 1. 过滤冗余的调试字段，这些字段与 UI 渲染及回放重演无因果联系
+        if k in ("confidence_inputs",):
+            continue
+        
+        # 2. 如果是嵌套字典，递归处理
+        if isinstance(v, dict):
+            res[k] = _trim_dict(v)
+        elif isinstance(v, list):
+            # 缩减过长的列表
+            if len(v) > 10:
+                res[k] = [_trim_val(x) for x in v[:10]] + ["...truncated..."]
+            else:
+                res[k] = [_trim_val(x) for x in v]
+        else:
+            res[k] = _trim_val(v)
+    return res
+
+
+def _trim_val(v: Any) -> Any:
+    # 保留高精浮点数，但对冗长的小数进行美化和压缩 (保留 4 位有效小数)
+    if isinstance(v, float):
+        return round(v, 4)
+    return v
 
 
